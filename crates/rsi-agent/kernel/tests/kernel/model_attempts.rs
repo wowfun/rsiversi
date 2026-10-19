@@ -337,6 +337,11 @@ async fn settlement_and_live_commit_require_exact_started_identity_and_durable_s
         )
         .unwrap();
     live.publish(builder.prefix()).unwrap();
+    let large_delta = LanguageEvent::ContentDelta {
+        index: 0,
+        delta: ContentDelta::Text("x".repeat(128 * 1024)),
+    };
+    while builder.push(1, &large_delta).is_ok() {}
     builder
         .push(
             2,
@@ -383,22 +388,51 @@ async fn settlement_and_live_commit_require_exact_started_identity_and_durable_s
         }
         assert!(kernel.publish(&claim, vec![invalid]).await.is_err());
     }
-    assert!(live.committed(100).await.is_err());
     assert!(
         kernel
             .publish(&claim, vec![settlement.clone(), settlement.clone()])
             .await
             .is_err()
     );
-    let facts = kernel
+    let PublishAttempt::Published(receipt) = kernel
         .publish(&claim, vec![settlement.clone()])
         .await
         .unwrap()
-        .published();
-    let seq = facts.last().unwrap().seq();
+    else {
+        panic!("settlement fits");
+    };
+    assert!(
+        live.committed(&receipt).is_err(),
+        "acceptance is not durability"
+    );
+    let seq = receipt.facts().last().unwrap().seq();
     kernel.flush(&claim, seq).await.unwrap();
-    live.committed(seq).await.unwrap();
-    assert!(live.committed(seq).await.is_err());
+    let foreign = rsi_agent_turn_protocol::TurnClaimIssuer::new();
+    assert!(foreign.published(&claim, receipt.facts().to_vec()).is_err());
+    let foreign_claim = foreign.issue(
+        claim.executor_id().into(),
+        claim.claim_id(),
+        claim.session_id().clone(),
+        claim.turn_id().clone(),
+        Arc::new(claim.header().clone()),
+        claim.accepted_at_ms(),
+        claim.accepted_seq(),
+        claim.live_seq(),
+    );
+    let forged = foreign
+        .published(&foreign_claim, receipt.facts().to_vec())
+        .unwrap();
+    assert!(matches!(
+        live.committed(&forged),
+        Err(TurnError::StaleClaim)
+    ));
+    store.take_fact_read_cursors();
+    live.committed(&receipt).unwrap();
+    assert!(
+        store.take_fact_read_cursors().is_empty(),
+        "acknowledgement must not reread result bodies"
+    );
+    assert!(live.committed(&receipt).is_err());
     let committed = stream.next().await.unwrap().unwrap();
     assert_eq!(
         committed.as_ref().status,
@@ -418,6 +452,79 @@ async fn settlement_and_live_commit_require_exact_started_identity_and_durable_s
     assert!(kernel.publish(&claim, vec![settlement]).await.is_err());
     drop((live, preview, committed, stream, worker));
     kernel.shutdown(workers).await.unwrap();
+}
+
+#[tokio::test]
+async fn receipts_reject_other_claims_effects_purposes_and_retired_executors() {
+    for (effect, purpose) in [
+        ("other", ModelEventPurpose::Conversation),
+        ("cut", ModelEventPurpose::ContextCompaction),
+        ("cut", ModelEventPurpose::Conversation),
+    ] {
+        let kernel = kernel(Arc::new(MemoryStore::new())).await;
+        let workers = kernel.start_workers();
+        let worker = kernel.register("worker".into()).unwrap();
+        submit(&kernel, "first", "work").await;
+        let claim = kernel
+            .claim("worker", CancellationToken::new())
+            .await
+            .unwrap()
+            .unwrap();
+        let mut live = kernel
+            .reserve_model_attempt(
+                &claim,
+                EffectId::new(effect).unwrap(),
+                purpose,
+                CancellationToken::new(),
+            )
+            .await
+            .unwrap();
+        let mut bodies = source_bodies(claim.turn_id());
+        let settlement = bodies.pop().unwrap();
+        for body in bodies {
+            tool_origin::flush_bodies(&kernel, &claim, vec![body]).await;
+        }
+        let PublishAttempt::Published(receipt) =
+            kernel.publish(&claim, vec![settlement]).await.unwrap()
+        else {
+            panic!("fits");
+        };
+        kernel
+            .flush(&claim, receipt.facts().last().unwrap().seq())
+            .await
+            .unwrap();
+        if effect != "cut" || purpose != ModelEventPurpose::Conversation {
+            assert!(live.committed(&receipt).is_err());
+        }
+        submit(&kernel, "second", "work").await;
+        let other = kernel
+            .claim("worker", CancellationToken::new())
+            .await
+            .unwrap()
+            .unwrap();
+        let PublishAttempt::Published(other_receipt) = kernel
+            .publish(&other, vec![source_bodies(other.turn_id()).remove(0)])
+            .await
+            .unwrap()
+        else {
+            panic!("fits");
+        };
+        kernel
+            .flush(&other, other_receipt.facts().last().unwrap().seq())
+            .await
+            .unwrap();
+        assert!(matches!(
+            live.committed(&other_receipt),
+            Err(TurnError::StaleClaim)
+        ));
+        drop(worker);
+        assert!(matches!(
+            live.committed(&receipt),
+            Err(TurnError::StaleClaim)
+        ));
+        drop(live);
+        kernel.shutdown(workers).await.unwrap();
+    }
 }
 
 #[tokio::test(start_paused = true)]

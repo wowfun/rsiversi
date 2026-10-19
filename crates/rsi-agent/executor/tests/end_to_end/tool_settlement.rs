@@ -151,7 +151,7 @@ async fn publish(execution: &dyn TurnExecution, claim: &TurnClaim, bodies: Vec<S
         panic!("bounded fixture batch");
     };
     execution
-        .flush(claim, facts.last().unwrap().seq())
+        .flush(claim, facts.facts().last().unwrap().seq())
         .await
         .unwrap();
 }

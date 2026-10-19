@@ -107,7 +107,7 @@ pub(super) async fn publish_nonterminal_with_capacity_retry(
     config: &ExecutorConfig,
     claim: &TurnClaim,
     mut bodies: Vec<SessionFactBody>,
-) -> std::result::Result<Vec<Arc<SessionFact>>, DriveFailure> {
+) -> std::result::Result<rsi_agent_turn_protocol::PublishedFacts, DriveFailure> {
     let mut flushed = false;
     loop {
         let fallback = evidence::budget_fallback(&bodies);

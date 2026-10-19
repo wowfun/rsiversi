@@ -46,7 +46,6 @@ impl ModelLiveSnapshot {
 /// Coalesced model stream; slow readers resynchronize to a complete immutable prefix.
 pub type ModelLiveStream = Pin<Box<dyn Stream<Item = Result<ObservedModel>> + Send + 'static>>;
 /// Kernel admission retained throughout accumulation, validation and settlement.
-#[async_trait::async_trait]
 pub trait ModelAttemptLease: fmt::Debug + Send {
     /// Activates the clock after the exact `ModelStarted` has been committed.
     fn started(&mut self) -> Result<()>;
@@ -54,8 +53,12 @@ pub trait ModelAttemptLease: fmt::Debug + Send {
     fn elapsed_ms(&self) -> u64;
     /// Publishes the latest prefix, without affecting durable cursors.
     fn publish(&mut self, prefix: ModelAttemptPrefix) -> Result<()>;
-    /// Verifies the exact durable settlement before announcing completion.
-    async fn committed(&mut self, fact_seq: u64) -> Result<()>;
+    /// Verifies a sealed accepted settlement against the resident durable watermark.
+    /// Ensure the settlement sequence is durable before calling, for example by
+    /// awaiting [`TurnExecution::flush`](crate::TurnExecution::flush). This method
+    /// neither flushes nor waits; an accepted but undurable settlement is rejected
+    /// without committing the lease.
+    fn committed(&mut self, receipt: &crate::PublishedFacts) -> Result<()>;
 }
 
 /// One bounded page from a stable live snapshot.

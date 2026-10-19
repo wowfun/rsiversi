@@ -1186,6 +1186,10 @@ pub(super) fn try_publish_once(
             unpublished: facts.into_iter().map(SessionFact::into_body).collect(),
         }));
     }
+    let receipt = kernel
+        .inner
+        .claim_issuer
+        .published(claim, facts.into_iter().map(Arc::new).collect())?;
     match reserve_atomic_capacity(
         &kernel.inner.process_pending_bytes,
         added_bytes,
@@ -1194,12 +1198,16 @@ pub(super) fn try_publish_once(
         Ok(()) => {}
         Err(KernelError::Capacity(_)) => {
             return Ok(PublishAdmission::ProcessPressure(
-                facts.into_iter().map(SessionFact::into_body).collect(),
+                receipt
+                    .into_facts()
+                    .into_iter()
+                    .map(|fact| Arc::unwrap_or_clone(fact).into_body())
+                    .collect(),
             ));
         }
         Err(error) => return Err(turn_kernel_error(error)),
     }
-    let facts = facts.into_iter().map(Arc::new).collect::<Vec<_>>();
+    let facts = receipt.facts();
     if staged.terminal.is_some() {
         staged.terminal_seq = facts.last().map(|fact| fact.seq());
     }
@@ -1207,7 +1215,7 @@ pub(super) fn try_publish_once(
         .turns
         .get_mut(claim.turn_id())
         .expect("validated claim turn exists") = staged;
-    for fact in &facts {
+    for fact in facts {
         session.pending_bytes = session
             .pending_bytes
             .checked_add(fact.encoded_len())
@@ -1215,7 +1223,9 @@ pub(super) fn try_publish_once(
         session.pending.push_back(fact.clone());
     }
     publish_live_watermarks(session);
-    Ok(PublishAdmission::Complete(PublishAttempt::Published(facts)))
+    Ok(PublishAdmission::Complete(PublishAttempt::Published(
+        receipt,
+    )))
 }
 
 pub(super) fn validate_intent_price(

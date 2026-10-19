@@ -830,7 +830,7 @@ async fn fork_rebinds_the_inherited_cursor_and_only_new_human_input_invokes_skil
             panic!("bounded fixture publication");
         };
         kernel
-            .flush(&parent, facts.last().unwrap().seq())
+            .flush(&parent, facts.facts().last().unwrap().seq())
             .await
             .unwrap();
     }

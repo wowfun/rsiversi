@@ -19,6 +19,10 @@ holding Session admission. Reuse fails before live publication; completed
 identities do not accumulate in resident Turn state. The Store's uniqueness
 constraint independently protects direct append paths.
 
+Fact publication prepares its sealed receipt before reserving process capacity
+or mutating the live Session. Only complete acceptance exposes that receipt;
+capacity refusal returns the unpublished bodies without exposing a receipt.
+
 Mixed domain commits cannot append these records or terminal Facts. Rejection leaves
 all staged Facts and domain revisions unchanged. Request evidence has a 16 MiB
 per-package capacity; repeated requests do not consume a cumulative Turn budget.

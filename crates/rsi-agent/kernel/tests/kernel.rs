@@ -48,14 +48,14 @@ use std::sync::{Arc, Mutex};
 use tokio::sync::Notify;
 use tokio_util::sync::CancellationToken;
 
-trait PublishedFacts {
+trait PublishedBatch {
     fn published(self) -> Vec<Arc<SessionFact>>;
 }
 
-impl PublishedFacts for PublishAttempt {
+impl PublishedBatch for PublishAttempt {
     fn published(self) -> Vec<Arc<SessionFact>> {
         match self {
-            PublishAttempt::Published(facts) => facts,
+            PublishAttempt::Published(facts) => facts.into_facts(),
             PublishAttempt::FlushRequired { .. } => panic!("expected published Facts"),
         }
     }

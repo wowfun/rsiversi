@@ -7,7 +7,14 @@ The lease publishes immutable compact prefixes and releases capacity on drop.
 never durable cursors. Each delivered snapshot retains observation byte credits;
 slow readers receive the latest complete prefix. Snapshot pages are at most
 256 KiB including identity and framing. A committed status includes the exact
-settlement Fact sequence only after the Kernel verifies its durable identity;
+settlement Fact sequence only after the Kernel verifies its durable identity.
+Publication returns a sealed, process-local `PublishedFacts` receipt containing
+the exact claim and the accepted shared Fact batch. It proves acceptance, not
+durability. `PublishedFacts::claim` exposes the immutable issuing claim for
+settlement validation. `ModelAttemptLease::committed` first matches it to the
+lease, then synchronously validates the receipt's current claim, the exact
+effect/purpose and resident durable watermark,
+without rereading Store bodies. A flush-required result carries no receipt;
 dropping an unsettled lease publishes abandoned, never committed.
 
 Consumers admit a live prefix only after observing its exact durable
@@ -457,8 +464,9 @@ the per-Session submission admission gate with both NextTurn and NextStep claims
 
 A finalizer may return `OutcomeUnknown` when admitted effects cannot be confirmed.
 All hooks still settle; uncertainty takes precedence over other hook failures
-and completion blockers and causes an interrupted Turn, including when another
-owner requested cancellation. This category carries no provider diagnostic.
+and completion blockers. Executor proposes an interrupted Turn; the Kernel's
+[terminal policy](../docs/subsystems/turns-and-agent-trees.md) still classifies
+a durably cancelled Turn as `Cancelled`. This category carries no provider diagnostic.
 
 Workflow overview and Local detail snapshots reserve their 128 KiB and 2 MiB
 encoded ceilings before cloning canonical state. Publication measures the whole

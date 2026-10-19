@@ -804,7 +804,7 @@ impl Driver {
             )
             .await?;
         self.flush_last(claim, &intent).await?;
-        for fact in &intent {
+        for fact in intent.facts() {
             self.evidence
                 .lock()
                 .map_err(|_| fatal("evidence cache lock poisoned"))?
@@ -987,14 +987,7 @@ impl Driver {
                 )
                 .await?;
             self.flush_last(claim, &facts).await?;
-            live.committed(
-                facts
-                    .last()
-                    .ok_or_else(|| fatal("missing model settlement"))?
-                    .seq(),
-            )
-            .await
-            .map_err(fatal)?;
+            live.committed(&facts).map_err(fatal)?;
             if capacity {
                 return Err(failed(
                     "model_output.capacity",
@@ -1426,7 +1419,11 @@ impl Driver {
         self.flush_last(claim, &started).await?;
         self.track_tool(claim, composition.clone(), identity.clone());
         Ok(PreparedToolEffect {
-            intent: intent.into_iter().next().expect("one Tool intent"),
+            intent: intent
+                .into_facts()
+                .into_iter()
+                .next()
+                .expect("one Tool intent"),
             effect_id,
             identity,
             prepared,
@@ -1472,7 +1469,7 @@ impl Driver {
         self.flush_last(claim, &intents).await?;
         let prepared: Vec<_> = prepared
             .into_iter()
-            .zip(intents)
+            .zip(intents.into_facts())
             .map(
                 |((effect_id, identity, prepared), intent)| PreparedToolEffect {
                     intent,
@@ -1528,7 +1525,11 @@ impl Driver {
         let returned = if settlement.domains.is_empty() {
             let facts = self.publish_apply(claim, fold, vec![body]).await?;
             self.flush_last(claim, &facts).await?;
-            facts.into_iter().next().expect("one Tool result")
+            facts
+                .into_facts()
+                .into_iter()
+                .next()
+                .expect("one Tool result")
         } else {
             let request_id = rsi_agent_session_protocol::DomainRequestId::new(effect_id.as_str())
                 .map_err(fatal)?;
@@ -2017,14 +2018,15 @@ impl Driver {
         claim: &TurnClaim,
         fold: &mut ModelContextState,
         bodies: Vec<SessionFactBody>,
-    ) -> std::result::Result<Vec<Arc<SessionFact>>, DriveFailure> {
-        let facts = publish_nonterminal_with_capacity_retry(
+    ) -> std::result::Result<rsi_agent_turn_protocol::PublishedFacts, DriveFailure> {
+        let receipt = publish_nonterminal_with_capacity_retry(
             self.turns.as_ref(),
             &self.config,
             claim,
             bodies,
         )
         .await?;
+        let facts = receipt.facts();
         if facts
             .first()
             .is_some_and(|fact| fact.seq() != fold.position().through_seq + 1)
@@ -2038,15 +2040,16 @@ impl Driver {
             fold.ingest(ContextPage::Canonical(&facts[unapplied..]))
                 .map_err(|error| context_failure("context.incremental", &error))?;
         }
-        Ok(facts)
+        Ok(receipt)
     }
 
     pub(super) async fn flush_last(
         &self,
         claim: &TurnClaim,
-        facts: &[Arc<SessionFact>],
+        receipt: &rsi_agent_turn_protocol::PublishedFacts,
     ) -> std::result::Result<(), DriveFailure> {
-        let seq = facts
+        let seq = receipt
+            .facts()
             .last()
             .ok_or_else(|| failed("executor.empty_publish", "publication returned no Facts"))?
             .seq();

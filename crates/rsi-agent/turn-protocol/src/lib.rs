@@ -1046,6 +1046,21 @@ pub struct TurnClaimIssuer {
 }
 
 impl TurnClaimIssuer {
+    /// Prepares a receipt for this issuer's exact claim and Fact batch.
+    /// The issuing service must expose it only after accepting the entire batch.
+    pub fn published(
+        &self,
+        claim: &TurnClaim,
+        facts: Vec<Arc<SessionFact>>,
+    ) -> Result<PublishedFacts> {
+        if !self.validates(claim) {
+            return Err(TurnError::StaleClaim);
+        }
+        Ok(PublishedFacts {
+            claim: claim.clone(),
+            facts,
+        })
+    }
     /// Binds execution only on a claim sealed by this issuer.
     pub fn bind_execution(
         &self,
@@ -1207,11 +1222,34 @@ impl AgentCallerAuthority {
     }
 }
 
+/// Sealed acceptance receipt sharing the exact Facts and claim that were published.
+#[derive(Debug, PartialEq)]
+pub struct PublishedFacts {
+    claim: TurnClaim,
+    facts: Vec<Arc<SessionFact>>,
+}
+impl PublishedFacts {
+    /// Shared accepted Facts; receipt ownership adds no body copy.
+    pub fn facts(&self) -> &[Arc<SessionFact>] {
+        &self.facts
+    }
+    /// Consumes the receipt when only the accepted Facts are needed.
+    pub fn into_facts(self) -> Vec<Arc<SessionFact>> {
+        self.facts
+    }
+    /// Borrows the exact issuing claim for settlement identity validation.
+    /// The owner must match its live lease and validate the claim against current
+    /// Kernel state; this acceptance receipt alone does not prove durability.
+    pub fn claim(&self) -> &TurnClaim {
+        &self.claim
+    }
+}
+
 /// Explicit result of attempting to publish one owned body batch.
 #[derive(Debug, PartialEq)]
 pub enum PublishAttempt {
     /// The complete batch entered the live interval.
-    Published(Vec<Arc<SessionFact>>),
+    Published(PublishedFacts),
     /// Capacity requires a durable flush; no body entered the live interval.
     FlushRequired {
         /// Canonical bodies recovered from the unpublished candidate Facts.

@@ -615,7 +615,7 @@ async fn checkpoint_after_a_later_acceptance_cannot_cross_the_claim_acceptance_f
         .await
         .unwrap()
     {
-        PublishAttempt::Published(facts) => facts,
+        PublishAttempt::Published(facts) => facts.into_facts(),
         PublishAttempt::FlushRequired { .. } => panic!("terminal unexpectedly required a flush"),
     };
     execution

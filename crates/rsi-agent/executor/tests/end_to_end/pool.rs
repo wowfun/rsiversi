@@ -859,7 +859,10 @@ async fn lane_panic_releases_tracking_pins_after_all_lanes_stop() {
     else {
         panic!("terminal publication must fit");
     };
-    execution.flush(&claim, facts[0].seq()).await.unwrap();
+    execution
+        .flush(&claim, facts.facts()[0].seq())
+        .await
+        .unwrap();
     drop(stack.composition.pin.lock().unwrap().take());
     tokio::time::timeout(std::time::Duration::from_secs(1), async {
         while stack.composition.owner_drops.load(Ordering::Acquire) != 1 {

@@ -577,9 +577,12 @@ impl TurnExecution for FullBeforePublish {
             .facts
             .last()
             .map_or(1, |fact| fact.seq().saturating_add(1));
-        Ok(PublishAttempt::Published(vec![Arc::new(
-            SessionFact::new(next_seq, next_seq, bodies.into_iter().next().unwrap()).unwrap(),
-        )]))
+        Ok(PublishAttempt::Published(test_claim_issuer().published(
+            _claim,
+            vec![Arc::new(
+                SessionFact::new(next_seq, next_seq, bodies.into_iter().next().unwrap()).unwrap(),
+            )],
+        )?))
     }
 
     async fn flush(
@@ -636,7 +639,7 @@ pub(super) fn claim() -> (TurnClaim, SessionFact) {
     )
     .unwrap();
     (
-        rsi_agent_turn_protocol::TurnClaimIssuer::new().issue(
+        test_claim_issuer().issue(
             "executor".into(),
             1,
             session_id,
@@ -648,6 +651,12 @@ pub(super) fn claim() -> (TurnClaim, SessionFact) {
         ),
         accepted,
     )
+}
+
+fn test_claim_issuer() -> &'static rsi_agent_turn_protocol::TurnClaimIssuer {
+    static ISSUER: std::sync::OnceLock<rsi_agent_turn_protocol::TurnClaimIssuer> =
+        std::sync::OnceLock::new();
+    ISSUER.get_or_init(rsi_agent_turn_protocol::TurnClaimIssuer::new)
 }
 
 fn completed_turn_facts(turn_id: TurnId, text: &str) -> Vec<Arc<SessionFact>> {
@@ -840,7 +849,7 @@ async fn nonterminal_publication_flushes_the_live_tail_when_the_fold_lags() {
     .await
     .unwrap();
 
-    assert_eq!(facts.last().unwrap().seq(), 3);
+    assert_eq!(facts.facts().last().unwrap().seq(), 3);
     assert_eq!(turns.flushes.lock().unwrap().as_slice(), [2]);
 }
 
@@ -905,7 +914,7 @@ async fn evidence_fallback_is_only_for_explicit_prepublication_budget_rejection(
         if budget || after_flush {
             let result = result.unwrap();
             assert!(
-                matches!(result[0].body(),SessionFactBody::ModelIntent {effect_id,snapshot,evidence:RequestEvidence::Unavailable {reason:EvidenceUnavailable::Budget},..} if effect_id==&effect && snapshot.call_id=="one-prepare")
+                matches!(result.facts()[0].body(),SessionFactBody::ModelIntent {effect_id,snapshot,evidence:RequestEvidence::Unavailable {reason:EvidenceUnavailable::Budget},..} if effect_id==&effect && snapshot.call_id=="one-prepare")
             );
             assert_eq!(
                 turns.publish_calls.load(Ordering::SeqCst),

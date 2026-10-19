@@ -63,7 +63,6 @@ impl Lease {
         Ok(())
     }
 }
-#[async_trait]
 impl ModelAttemptLease for Lease {
     fn started(&mut self) -> TurnResult<()> {
         if self.began.is_some() {
@@ -122,21 +121,34 @@ impl ModelAttemptLease for Lease {
         self.snapshot.prefix = prefix;
         self.announce()
     }
-    async fn committed(&mut self, fact_seq: u64) -> TurnResult<()> {
-        let after = fact_seq
-            .checked_sub(1)
-            .ok_or_else(|| TurnError::Invalid("zero settlement sequence".into()))?;
-        let page = read_facts_bounded(&self.inner, self.claim.session_id(), after, 1)
-            .await
-            .map_err(turn_store_error)?;
-        let valid = page.facts.first().is_some_and(|fact| fact.seq() == fact_seq && matches!(fact.body(),
-            SessionFactBody::ModelAttemptSettled { turn_id, effect_id, purpose, .. }
-            if turn_id == self.claim.turn_id() && effect_id == &self.snapshot.effect_id && purpose == &self.snapshot.purpose));
-        if !valid || self.committed {
-            return Err(TurnError::Invalid(
-                "model completion has no exact durable settlement".into(),
-            ));
+    fn committed(&mut self, receipt: &rsi_agent_turn_protocol::PublishedFacts) -> TurnResult<()> {
+        if receipt.claim() != &self.claim {
+            return Err(TurnError::StaleClaim);
         }
+        let fact_seq = {
+            let kernel = AgentKernel {
+                inner: self.inner.clone(),
+            };
+            let state = lock_state(&self.inner);
+            // Equality binds this lease; validate the receipt's issuer and resident
+            // header identity once under the same lock as the durable watermark.
+            kernel.validate_claim(&state, receipt.claim())?;
+            let mut matches = receipt.facts().iter().filter(|fact| matches!(fact.body(),
+                SessionFactBody::ModelAttemptSettled { turn_id, effect_id, purpose, .. }
+                if turn_id == self.claim.turn_id() && effect_id == &self.snapshot.effect_id && purpose == &self.snapshot.purpose));
+            let fact = matches.next().ok_or_else(|| {
+                TurnError::Invalid("model completion has no exact settlement".into())
+            })?;
+            if self.committed
+                || matches.next().is_some()
+                || state.sessions[self.claim.session_id()].durable_seq < fact.seq()
+            {
+                return Err(TurnError::Invalid(
+                    "model completion has no exact durable settlement".into(),
+                ));
+            }
+            fact.seq()
+        };
         self.snapshot.status = ModelLiveStatus::Committed { fact_seq };
         self.snapshot.prefix = ModelAttemptPrefix::default();
         self.committed = true;

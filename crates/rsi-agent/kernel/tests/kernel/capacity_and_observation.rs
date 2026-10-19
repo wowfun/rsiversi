@@ -881,6 +881,7 @@ async fn cross_session_process_pressure_waits_for_global_durable_progress() {
         async move { kernel.flush(&first_claim, first_fact.seq()).await }
     });
     store.wait_until_append_is_blocked().await;
+    let expected_body = second_body.clone();
     let second_publish = tokio::spawn({
         let kernel = kernel.clone();
         let second_claim = second_claim.clone();
@@ -894,10 +895,13 @@ async fn cross_session_process_pressure_waits_for_global_durable_progress() {
 
     store.release_blocked_append();
     first_flush.await.unwrap().unwrap();
-    assert!(matches!(
-        second_publish.await.unwrap().unwrap(),
-        PublishAttempt::Published(_)
-    ));
+    let PublishAttempt::Published(receipt) = second_publish.await.unwrap().unwrap() else {
+        panic!("capacity retry must publish the complete original batch");
+    };
+    assert_eq!(receipt.claim(), &second_claim);
+    assert_eq!(receipt.facts().len(), 1);
+    assert_eq!(receipt.facts()[0].body(), &expected_body);
+    assert_eq!(receipt.facts()[0].seq(), 2);
     kernel.shutdown(worker).await.unwrap();
 }
 
