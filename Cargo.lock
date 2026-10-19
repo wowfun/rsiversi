@@ -6335,6 +6335,7 @@ dependencies = [
  "rsi-app-catalog",
  "rsi-application",
  "rsi-build-info",
+ "rsi-files-native-fs",
  "rsi-gui",
  "rsi-host",
  "rsi-meta",

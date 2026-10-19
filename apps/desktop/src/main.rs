@@ -1,6 +1,8 @@
 mod bridge;
+mod data;
 mod document;
 mod export;
+mod options;
 mod protocol;
 use async_trait::async_trait;
 use bridge::{Bridge, error};
@@ -79,13 +81,6 @@ impl ApplicationRun for Entry {
 }
 
 fn main() {
-    let _generation = match rsi_build_info::GenerationLease::current() {
-        Ok(lease) => lease,
-        Err(error) => {
-            eprintln!("error: cannot pin Desktop generation: {error}");
-            std::process::exit(2);
-        }
-    };
     match run() {
         Ok(code) => std::process::exit(code),
         Err(error) => {
@@ -94,10 +89,25 @@ fn main() {
         }
     }
 }
+#[allow(
+    clippy::too_many_lines,
+    reason = "Keep generation admission, event-loop ownership, and shutdown ordering together."
+)]
 fn run() -> Result<i32, String> {
-    let Some((assets, host_profile)) = options()? else {
+    let Some((assets, host_profile)) = options::parse(std::env::args_os().skip(1), || {
+        std::env::current_exe()
+            .and_then(std::fs::canonicalize)
+            .map_err(error)
+    })?
+    else {
+        println!("{}", options::HELP);
         return Ok(0);
     };
+    let _generation = rsi_build_info::GenerationLease::current()
+        .map_err(|e| format!("cannot pin Desktop generation: {e}"))?;
+    options::require_assets(&assets)?;
+    #[cfg(windows)]
+    options::require_webview(tauri::webview_version())?;
     let lifetime = Arc::new(ApplicationLifetime::default());
     let owner: Owner = Arc::default();
     let failed = Arc::new(AtomicBool::new(false));
@@ -216,36 +226,6 @@ fn request_document_close(app: &tauri::AppHandle, owner: &Owner) {
     }));
 }
 
-fn options() -> Result<Option<(PathBuf, rsi::HostProfileId)>, String> {
-    let mut args = std::env::args_os().skip(1);
-    let mut assets = None;
-    let mut host_profile = "standard".to_owned();
-    while let Some(arg) = args.next() {
-        match arg.to_str() {
-            Some("--assets") => {
-                assets = Some(PathBuf::from(
-                    args.next()
-                        .ok_or("--assets requires an absolute directory")?,
-                ));
-            }
-            Some("--host-profile") => {
-                host_profile = args
-                    .next()
-                    .and_then(|v| v.into_string().ok())
-                    .ok_or("--host-profile requires an identity")?;
-            }
-            Some("--help" | "-h") => {
-                println!("rsi-desktop --assets /absolute/bundle [--host-profile standard]");
-                return Ok(None);
-            }
-            _ => return Err("Unknown desktop argument; use --help".into()),
-        }
-    }
-    let assets = assets.ok_or("--assets is required")?;
-    let host_profile = rsi::HostProfileId::new(host_profile).map_err(error)?;
-    Ok(Some((assets, host_profile)))
-}
-
 fn bootstrap(
     assets: &std::path::Path,
     host_profile: &rsi::HostProfileId,
@@ -254,19 +234,7 @@ fn bootstrap(
     failed: &Arc<AtomicBool>,
 ) -> Result<(rsi::ApplicationComposition, ProfileProgram, PathBuf), String> {
     let paths = rsi::standard_paths().map_err(error)?;
-    let data = paths.state().join("desktop-webview");
-    std::fs::create_dir_all(&data).map_err(error)?;
-    #[cfg(unix)]
-    {
-        use std::os::unix::fs::PermissionsExt;
-        if std::fs::symlink_metadata(&data)
-            .map_err(error)?
-            .is_symlink()
-        {
-            return Err("WebView data directory cannot be a symlink".into());
-        }
-        std::fs::set_permissions(&data, std::fs::Permissions::from_mode(0o700)).map_err(error)?;
-    }
+    let data = data::prepare(paths.state())?;
     let executable = std::env::current_exe()
         .and_then(std::fs::canonicalize)
         .map_err(error)?;

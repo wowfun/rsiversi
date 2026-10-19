@@ -1,7 +1,7 @@
 # rsi
 
 RSI composes the Agent and capability products into terminal, line, Headless,
-Web and Linux Desktop applications. Its [architecture](docs/architecture.md)
+Web and Linux/Windows Desktop applications. Its [architecture](docs/architecture.md)
 defines product ownership and the shared Service Host.
 
 For ordinary use, follow [your first conversation](docs/user/first-conversation.md)
@@ -9,7 +9,7 @@ For ordinary use, follow [your first conversation](docs/user/first-conversation.
 
 Windows native Agent/ACP workspaces and private state require fixed local NTFS;
 ReFS Dev Drives, exFAT and network roots are refused by the current filesystem
-backend. Windows Web, TUI and ACP own an embedded Service with one owner per Host;
+backend. Windows Web, Desktop, TUI and ACP own an embedded Service with one owner per Host;
 stop it before another application or the offline `devices` manager uses that Host.
 Windows SQLite storage requires
 private parent directories, including pre-existing ones. See the owning
@@ -32,7 +32,7 @@ cells, geometry and acknowledged source maps.
 The [Line and Headless reference](../../apps/terminal/docs/line-application.md) owns their
 input grammar, cancellation and exit behavior. The [terminal package](../../apps/terminal/README.md)
 owns native input and cleanup, while [GUI](gui/README.md) owns shared graphical
-controllers and [Desktop](../../apps/desktop/README.md) provides the Linux native adapter.
+controllers and [Desktop](../../apps/desktop/README.md) provides the Linux and Windows native adapter.
 
 ## Local Web application
 

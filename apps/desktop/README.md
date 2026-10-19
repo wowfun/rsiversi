@@ -2,8 +2,10 @@
 
 The native build embeds the committed multi-resolution application icon from
 `icons/icon.ico`; `icons/icon.png` contains the same artwork at 256 pixels.
-These assets permit Windows resource compilation. Windows runtime support still
-requires the native transport and Service acceptance gates.
+These assets permit Windows resource compilation. Windows 11 24H2+ x64 uses
+WebView2 and embedded Host ownership; Linux uses WebKitGTK and existing Host
+attachment. A relocatable distribution still requires the platform system runtimes,
+including VC++ Runtime and WebView2 on Windows; it is not an installer.
 `icons/icon.svg` is the artwork source. Run `python icons/generate.py` with
 Pillow installed to regenerate both raster assets; the generator never runs
 during a normal build.
@@ -13,7 +15,7 @@ verified export stream into the [atomic file sink](../../crates/rsi/session-expo
 The document supplies only a filename hint and selected pane; it gains no general
 filesystem or Tauri IPC authority. Cancel and close discard incomplete files.
 
-The Linux desktop adapter composes ordinary Application-only GUI, navigation and
+The Linux and Windows desktop adapter composes ordinary Application-only GUI, navigation and
 setup and Plugins workbench plugins with the standard Service connection. It uses the shared Web
 document and `rsi-gui`; Tauri owns only the main-thread event loop, a private
 persistent WebView data directory and the native document transport. The headless
@@ -25,7 +27,23 @@ Directory selection explicitly activates the shared directory API client after
 the native connection publishes its transport, before GUI activation. An embedded
 Service and a borrowed daemon use the same client contract as the Worker.
 
-Start with `rsi-desktop --assets /absolute/bundle [--host-profile standard]`.
+Start with `rsi-desktop [--assets /absolute/assets] [--host-profile standard]`.
+Assets default to the directory beside the executable, independently of the
+working directory. A missing assets directory is rejected before creating state
+or starting a Service; the asset owner still validates the complete bundle.
+Generation lease admission precedes asset filesystem checks and WebView2 probing.
+Duplicate options are rejected. Windows checks WebView2
+availability after help and before creating state or starting a Service.
+On Windows, the state root and WebView directory are created through the native
+no-follow private-directory API and their protected ACLs are verified before
+Service startup. The verified state root handle remains the authority for creating
+or opening its WebView child; child setup does not traverse the absolute state
+path again. Each requires the canonical protected DACL: exactly SYSTEM,
+Administrators and the current token user, each with full control and object/container
+inheritance. Existing directories with any different DACL, including a narrower
+user-only ACL, are rejected with the failing path and recovery guidance. Choose a
+fresh state directory using `XDG_STATE_HOME` (the application appends `rsi`), or have the owner review and restore
+that exact ACL before retrying; the desktop entry never silently repairs existing state.
 The companion `rsi` (`rsi.exe` on Windows) beside this executable is the canonical
 coding helper. Bash selection uses the [standard product launcher](../../crates/rsi/core/README.md).
 Generation pin failures report a normal startup error with exit code 2 before
