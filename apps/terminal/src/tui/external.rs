@@ -8,6 +8,7 @@ use rsi_client::{ExternalCommand, ExternalController};
 use rsi_terminal_ui::scene::{ApplicationScene, Draft, Scene};
 #[path = "attention.rs"]
 mod attention;
+mod drafts;
 
 enum Event {
     Attention(Vec<(String, Choice)>, bool),
@@ -18,7 +19,7 @@ enum Event {
     Catalog(Vec<(String, Choice)>),
     Attached(Arc<ExternalController>, Option<String>),
     Done,
-    Submitted(String),
+    Submitted(drafts::Attempt, std::result::Result<(), String>),
     Source(rsi_conversation::ExternalSource, usize, Vec<u8>),
 }
 #[derive(Clone)]
@@ -34,10 +35,6 @@ enum Choice {
     Catalog(Option<ConversationId>),
     Source(rsi_conversation::ExternalSource, usize),
 }
-#[expect(
-    clippy::struct_excessive_bools,
-    reason = "Activity, menu visibility and submission receipts are independent UI state"
-)]
 pub(super) struct Ui {
     attention: Option<rsi_navigation_api::attention::Client>,
     attention_menu: bool,
@@ -58,14 +55,11 @@ pub(super) struct Ui {
     selected: usize,
     menu: bool,
     editor: editor::Editor,
-    draft_id: Option<ConversationId>,
-    drafts: BTreeMap<ConversationId, String>,
+    drafts: drafts::Drafts,
     detail: Option<String>,
     next_source: Option<Choice>,
     offset: usize,
     status: String,
-    uncertain: bool,
-    pending_submit: bool,
     revision: u64,
 }
 impl Ui {
@@ -88,32 +82,37 @@ impl Ui {
             items: vec![],
             selected: 0,
             menu: true,
-            editor: editor::Editor::with_text(String::new(), 128 * 1024),
-            draft_id: None,
-            drafts: BTreeMap::new(),
+            editor: external_editor(String::new()),
+            drafts: drafts::Drafts::default(),
             detail: None,
             next_source: None,
             offset: 0,
             status: String::new(),
-            uncertain: false,
-            pending_submit: false,
             revision: 0,
         }
     }
-    fn remember(&mut self) {
-        if let Some(id) = &self.draft_id {
-            self.drafts
-                .insert(id.clone(), self.editor.text().to_owned());
-        }
-        while self.drafts.len() > 16
-            || self.drafts.values().map(String::len).sum::<usize>() > 1024 * 1024
-        {
-            self.drafts.pop_first();
+    fn uncertain(&self) -> bool {
+        self.drafts
+            .bound()
+            .is_some_and(|id| self.drafts.uncertain(id))
+    }
+    fn edit(
+        &mut self,
+        operation: impl FnOnce(&mut editor::Editor) -> std::result::Result<(), &'static str>,
+    ) {
+        let Some(id) = self.drafts.bound().cloned() else {
+            return;
+        };
+        match operation(&mut self.editor) {
+            Ok(()) => self.drafts.edit(&id, self.editor.text()),
+            Err(error) => self.status = error.into(),
         }
     }
+
     pub fn open(&mut self) {
         self.active = true;
         if self.work.is_some() {
+            self.detach();
             self.deferred_open = Some(Choice::Catalog(None));
             return;
         }
@@ -123,6 +122,7 @@ impl Ui {
     pub fn open_conversation(&mut self, id: ConversationId) {
         self.active = true;
         if self.work.is_some() {
+            self.detach();
             self.deferred_open = Some(Choice::Open(id));
         } else {
             self.choose(Choice::Open(id));
@@ -133,14 +133,15 @@ impl Ui {
         if self.work.is_some() {
             return;
         }
-        let Some(service) = self.service.clone() else {
-            self.status = "External conversations unavailable on this connection".into();
-            return;
-        };
-        self.remember();
+        let service = self.service.clone();
+        let previous = self.take_controller();
         self.menu = true;
         self.detail = None;
         self.work = Some(Box::pin(async move {
+            if let Some(previous) = previous {
+                previous.retire().await;
+            }
+            let service = service.ok_or("External conversations unavailable on this connection")?;
             let mut items = Vec::new();
             for endpoint in service
                 .endpoints()
@@ -184,16 +185,22 @@ impl Ui {
             return;
         }
         if let Some(controller) = &self.controller {
-            let text = if let ExternalCommand::Submit { text } = &command {
-                Some(text.clone())
+            let attempt = if let ExternalCommand::Submit { .. } = &command {
+                let Some(attempt) = self.drafts.begin(controller.id()) else {
+                    return;
+                };
+                Some(attempt)
             } else {
                 None
             };
-            self.pending_submit = text.is_some();
             let command = controller.command(command);
             self.work = Some(Box::pin(async move {
-                command.await.map_err(|error| error.to_string())?;
-                Ok(text.map_or(Event::Done, Event::Submitted))
+                let result = command.await.map_err(|error| error.to_string());
+                if let Some(attempt) = attempt {
+                    Ok(Event::Submitted(attempt, result))
+                } else {
+                    result.map(|()| Event::Done)
+                }
             }));
         }
     }
@@ -212,22 +219,20 @@ impl Ui {
             choice @ (Choice::Open(_) | Choice::Start(..)) => {
                 self.attention_menu = false;
                 self.detail = None;
-                let Some(service) = self.service.clone() else {
-                    return;
-                };
+                let service = self.service.clone();
                 let (id, endpoint) = match choice {
                     Choice::Start(endpoint, id) => (id, Some(endpoint)),
                     Choice::Open(id) => (id, None),
                     _ => unreachable!(),
                 };
-                self.remember();
-                let old = self.controller.take();
-                self.changes = None;
+                let old = self.take_controller();
                 let execution = self.execution.clone();
                 self.work = Some(Box::pin(async move {
                     if let Some(old) = old {
                         old.retire().await;
                     }
+                    let service =
+                        service.ok_or("External conversations unavailable on this connection")?;
                     if let Some(endpoint) = endpoint {
                         service
                             .start(id.clone(), &endpoint)
@@ -317,10 +322,7 @@ impl Ui {
     }
     pub fn paste(&mut self, text: &str) {
         if !self.menu && self.detail.is_none() {
-            self.uncertain = false;
-            if let Err(error) = self.editor.insert(text) {
-                self.status = error.into();
-            }
+            self.edit(|editor| editor.insert(text));
         }
     }
     pub fn key(&mut self, key: termina::event::KeyEvent) {
@@ -334,7 +336,6 @@ impl Ui {
                 return;
             }
             self.active = false;
-            self.remember();
             self.detach();
             return;
         }
@@ -375,16 +376,13 @@ impl Ui {
             return;
         }
         if key.code == KeyCode::Enter && !key.modifiers.contains(Modifiers::SHIFT) {
-            if self.work.is_none() && !self.uncertain && !self.editor.text().trim().is_empty() {
+            if self.work.is_none() && !self.uncertain() && !self.editor.text().trim().is_empty() {
                 self.control(ExternalCommand::Submit {
                     text: self.editor.text().into(),
                 });
             }
         } else {
-            self.uncertain = false;
-            if let Err(error) = self.editor.key(key) {
-                self.status = error.into();
-            }
+            self.edit(|editor| editor.key(key));
         }
     }
     pub fn mouse(
@@ -401,14 +399,33 @@ impl Ui {
             self.selected = index;
         }
     }
-    fn detach(&mut self) {
+    fn unbind_editor(&mut self) {
         self.changes = None;
-        if self.work.is_none()
-            && let Some(controller) = self.controller.take()
-        {
+        self.drafts.unbind();
+        self.editor = external_editor(String::new());
+    }
+    fn take_controller(&mut self) -> Option<Arc<ExternalController>> {
+        self.unbind_editor();
+        self.menu = true;
+        self.items.clear();
+        self.detail = None;
+        self.next_source = None;
+        self.permission_focus = None;
+        self.controller.take()
+    }
+    fn detach(&mut self) {
+        if !self.active {
+            self.deferred_open = None;
+        }
+        if let Some(controller) = self.take_controller() {
+            let pending = self.work.take();
             self.work = Some(Box::pin(async move {
+                let result = match pending {
+                    Some(work) => work.await,
+                    None => Ok(Event::Done),
+                };
                 controller.retire().await;
-                Ok(Event::Done)
+                result
             }));
         }
     }
@@ -420,14 +437,20 @@ impl Ui {
                     Ok(Event::Attention(items, truncated))=>{self.items=items;self.selected=0;self.menu=true;self.status=if truncated {"Showing bounded active conversations; more requests may exist".into()}else{"Current owner activity; reading does not cancel tasks".into()};}
                     Ok(Event::Native(position, request))=>{if let rsi_conversation::ConversationIdentity::Native(id)=&position.conversation {self.native=Some(id.clone());self.focus=Some((position,request));self.active=false;self.detach();}}
                     Ok(Event::Catalog(items))=>{self.items=items;self.selected=0;self.menu=true;self.status=if self.items.is_empty(){"No enabled endpoints or saved external conversations".into()}else{String::new()};}
-                    Ok(Event::Attached(controller, notice))=>{if self.active{self.draft_id=Some(controller.id().clone());self.editor=editor::Editor::with_text(self.drafts.get(controller.id()).cloned().unwrap_or_default(),128*1024);self.changes=Some(controller.changes());self.controller=Some(controller);self.menu=false;self.status=notice.unwrap_or_default();self.uncertain=false;}else{controller.retire().await;}}
-                    Ok(Event::Done)=>{if !self.uncertain{self.status="Operation observed".into();}}
-                    Ok(Event::Submitted(text))=>{if self.editor.text()==text{self.editor.take();self.remember();}self.status="Prompt admitted; following local observations".into();}
-                    Ok(Event::Source(source,start,bytes))=>{let length=bytes.len().min(8000);let text=String::from_utf8_lossy(&bytes[..length]);self.detail=Some(format!("Observed source · bytes {start}–{}\n{}",start+length,text));self.next_source=(bytes.len()>length || bytes.len()==64*1024).then_some(Choice::Source(source,start+length));self.offset=0;}
-                    Err(error)=>{self.uncertain|=self.pending_submit;self.status=error;}
+                    Ok(Event::Attached(controller, notice))=>{if self.active && self.deferred_open.is_none(){
+                        let text=self.drafts.bind(controller.id().clone()).to_owned();
+                        self.editor=external_editor(text);self.changes=Some(controller.changes());self.controller=Some(controller);self.menu=false;self.status=notice.unwrap_or_default();
+                    }else{controller.retire().await;}}
+                    Ok(Event::Done)=>{if !self.uncertain(){self.status="Operation observed".into();}}
+                    Ok(Event::Submitted(attempt,result))=>{
+                        self.drafts.finish(&attempt,result.is_ok());
+                        if let Some(id)=self.drafts.bound() {let text=self.drafts.text(id);if self.editor.text()!=text{self.editor=external_editor(text.to_owned());}}
+                        self.status=result.map_or_else(|error|error,|()|"Prompt admitted; following local observations".into());
+                    }
+                    Ok(Event::Source(source,start,bytes))=>{if self.active && self.deferred_open.is_none() && self.controller.is_some() {let length=bytes.len().min(8000);let text=String::from_utf8_lossy(&bytes[..length]);self.detail=Some(format!("Observed source · bytes {start}–{}\n{}",start+length,text));self.next_source=(bytes.len()>length || bytes.len()==64*1024).then_some(Choice::Source(source,start+length));self.offset=0;}}
+                    Err(error)=>{self.status=error;}
                 }
                 if self.controller.is_some() && let Some(target) = self.permission_focus.take() {self.focus_permission(&target);}
-                self.pending_submit=false;
                 if self.active && let Some(choice)=self.deferred_open.take() {self.choose(choice);}
                 if !self.active {self.detach();}
             }
@@ -484,6 +507,15 @@ impl Ui {
             })
             .unwrap_or_default();
         let start = transcript.ceil_char_boundary(transcript.len().saturating_sub(8192));
+        let mut status = if self.uncertain() {
+            format!(
+                "Send outcome unknown; unchanged text cannot be resent. {}",
+                self.status
+            )
+        } else {
+            self.status.clone()
+        };
+        status.truncate(status.floor_char_boundary(8192));
         Ok(Scene::from(ApplicationScene {
             title,
             explanation,
@@ -505,7 +537,7 @@ impl Ui {
             selected: if self.menu { self.selected } else { 0 },
             field: (!self.menu && self.detail.is_none()).then(|| "Message".into()),
             input: Draft::capture(&self.editor)?,
-            status: self.status.clone(),
+            status,
             hint: if self.attention_menu {
                 "Enter selects request · Esc back"
             } else {
@@ -528,5 +560,200 @@ impl Ui {
             controller.retire().await;
         }
         self.changes = None;
+    }
+}
+
+fn external_editor(text: String) -> editor::Editor {
+    let mut editor = editor::Editor::with_text(text, drafts::MAXIMUM_TEXT);
+    editor.set_retention_limit(2 * drafts::MAXIMUM_TEXT);
+    editor
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[tokio::test]
+    async fn deferred_navigation_hides_editor_and_settles_submitted_revision() {
+        for destination in 0..3 {
+            let runtime = rsi_meta::Runtime::default();
+            let mut ui = Ui::new(&runtime.root());
+            let id = ConversationId::new("pending").unwrap();
+            ui.drafts.bind(id.clone());
+            ui.active = true;
+            ui.menu = false;
+            ui.paste("retained prompt");
+            let attempt = ui.drafts.begin(&id).unwrap();
+            let (send, receive) = tokio::sync::oneshot::channel();
+            ui.work = Some(Box::pin(async move {
+                receive.await.unwrap();
+                Ok(Event::Submitted(attempt, Err("unknown result".into())))
+            }));
+            match destination {
+                0 => ui.open(),
+                1 => ui.open_attention(),
+                _ => ui.open_conversation(ConversationId::new("missing").unwrap()),
+            }
+            assert!(ui.menu && ui.drafts.bound().is_none());
+            assert!(ui.editor.text().is_empty());
+            ui.paste("must not edit old conversation");
+            assert_eq!(ui.drafts.text(&id), "retained prompt");
+            let scene =
+                serde_json::from_slice::<serde_json::Value>(&ui.scene().unwrap().encode().unwrap())
+                    .unwrap();
+            assert!(!scene.to_string().contains("retained prompt"));
+            send.send(()).unwrap();
+            ui.next().await;
+            assert!(ui.drafts.uncertain(&id));
+            ui.next().await;
+            assert!(ui.menu && ui.controller.is_none() && ui.drafts.bound().is_none());
+            assert!(!ui.status.is_empty());
+            assert!(
+                !String::from_utf8(ui.scene().unwrap().encode().unwrap())
+                    .unwrap()
+                    .contains("Message")
+            );
+        }
+    }
+
+    #[tokio::test]
+    async fn failed_direct_attachment_after_escape_has_no_dead_message_field() {
+        let runtime = rsi_meta::Runtime::default();
+        let mut ui = Ui::new(&runtime.root());
+        ui.active = true;
+        ui.menu = false;
+        ui.drafts.bind(ConversationId::new("old").unwrap());
+        ui.key(termina::event::KeyEvent::new(
+            KeyCode::Escape,
+            Modifiers::empty(),
+        ));
+        ui.open_conversation(ConversationId::new("missing").unwrap());
+        ui.next().await;
+        assert!(ui.menu && ui.controller.is_none());
+        assert!(
+            !String::from_utf8(ui.scene().unwrap().encode().unwrap())
+                .unwrap()
+                .contains("Message")
+        );
+    }
+
+    #[tokio::test]
+    async fn composed_status_keeps_unknown_warning_within_scene_bound() {
+        let runtime = rsi_meta::Runtime::default();
+        let mut ui = Ui::new(&runtime.root());
+        let id = ConversationId::new("unknown-status").unwrap();
+        ui.drafts.bind(id.clone());
+        ui.menu = false;
+        ui.paste("retained");
+        let attempt = ui.drafts.begin(&id).unwrap();
+        ui.drafts.finish(&attempt, false);
+        for status in ["x".repeat(8192), "中🙂".repeat(2000)] {
+            ui.status = status;
+            let bytes = ui.scene().unwrap().encode().unwrap();
+            let scene = Scene::decode(&bytes).unwrap();
+            scene.render(42, 12).unwrap();
+            let text = String::from_utf8(bytes).unwrap();
+            assert!(text.contains("Send outcome unknown; unchanged text cannot be resent."));
+            assert!(ui.uncertain());
+            assert_eq!(ui.editor.text(), "retained");
+        }
+    }
+
+    #[tokio::test]
+    async fn leaving_external_conversation_clears_the_editor_even_when_navigation_fails() {
+        for attention in [false, true] {
+            let runtime = rsi_meta::Runtime::default();
+            let mut ui = Ui::new(&runtime.root());
+            let id = ConversationId::new("retained-unknown").unwrap();
+            ui.drafts.bind(id.clone());
+            ui.menu = false;
+            ui.paste("unconfirmed text");
+            let attempt = ui.drafts.begin(&id).unwrap();
+            ui.drafts.finish(&attempt, false);
+            if attention {
+                ui.open_attention();
+            } else {
+                ui.open();
+            }
+            if ui.work.is_some() {
+                ui.next().await;
+            }
+            assert!(ui.controller.is_none());
+            assert!(ui.drafts.bound().is_none());
+            assert!(ui.editor.text().is_empty());
+            assert!(!ui.uncertain());
+            let scene = String::from_utf8(ui.scene().unwrap().encode().unwrap()).unwrap();
+            assert!(!scene.contains("unconfirmed text"));
+            assert!(!scene.contains("Send outcome unknown"));
+            assert_eq!(ui.drafts.bind(id.clone()), "unconfirmed text");
+            assert!(ui.drafts.uncertain(&id));
+            ui.open_conversation(ConversationId::new("missing").unwrap());
+            if ui.work.is_some() {
+                ui.next().await;
+            }
+            assert!(ui.drafts.bound().is_none());
+            assert!(ui.editor.text().is_empty());
+        }
+    }
+
+    #[tokio::test]
+    async fn cursor_noop_and_rejected_insert_preserve_unknown_revision() {
+        let runtime = rsi_meta::Runtime::default();
+        let mut ui = Ui::new(&runtime.root());
+        let id = ConversationId::new("unknown-draft").unwrap();
+        ui.drafts.bind(id.clone());
+        ui.menu = false;
+        ui.paste("original");
+        let attempt = ui.drafts.begin(&id).unwrap();
+        ui.drafts.finish(&attempt, false);
+        assert!(ui.uncertain());
+        ui.edit(|editor| {
+            editor.key(termina::event::KeyEvent::new(
+                KeyCode::Left,
+                Modifiers::empty(),
+            ))
+        });
+        assert!(ui.uncertain());
+        ui.paste("");
+        assert!(ui.uncertain());
+        ui.paste("\0");
+        assert!(ui.uncertain());
+        assert_eq!(ui.editor.text(), "original");
+        ui.paste(&"x".repeat(128 * 1024));
+        assert!(ui.uncertain());
+        assert_eq!(ui.editor.text(), "original");
+        ui.paste("edit");
+        assert!(!ui.uncertain());
+        let accepted = ui.editor.text().to_owned();
+        assert_eq!(ui.drafts.text(&id), accepted);
+        ui.key(termina::event::KeyEvent::new(
+            KeyCode::Escape,
+            Modifiers::empty(),
+        ));
+        assert_eq!(ui.drafts.bind(id), accepted);
+    }
+
+    #[tokio::test]
+    async fn external_editor_bounds_journal_and_detach_clears_binding() {
+        let runtime = rsi_meta::Runtime::default();
+        let mut ui = Ui::new(&runtime.root());
+        let id = ConversationId::new("active-draft").unwrap();
+        ui.drafts.bind(id.clone());
+        ui.menu = false;
+        for i in 0..64 {
+            let text = if i % 2 == 0 { "x" } else { "y" }.repeat(drafts::MAXIMUM_TEXT);
+            ui.edit(|editor| editor.replace_text(&text));
+            assert_eq!(ui.drafts.text(&id), text);
+            assert!(ui.editor.retained_bytes() <= 2 * drafts::MAXIMUM_TEXT);
+        }
+        let attempt = ui.drafts.begin(&id).unwrap();
+        ui.drafts.finish(&attempt, false);
+        assert!(ui.uncertain());
+        ui.detach();
+        assert!(!ui.uncertain());
+        assert!(ui.drafts.bound().is_none());
+        assert!(ui.editor.text().is_empty());
+        assert_eq!(ui.drafts.bind(id.clone()).len(), drafts::MAXIMUM_TEXT);
+        assert!(ui.uncertain());
     }
 }

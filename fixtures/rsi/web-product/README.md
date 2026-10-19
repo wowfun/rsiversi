@@ -1,5 +1,13 @@
 # Web product verification
 
+The document projection checks load shipped modules through the same routed
+ES-module harness. `external-drafts-dom.mjs`, called by `dom.mjs`, exercises real
+composer controls, shared drafts, unknown outcomes and capacity recovery in
+desktop and narrow viewports. A MutationObserver checks that repeated frames and
+unchanged input do not rewrite the live alert region. Accepted edits in a sibling
+pane clear stale capacity notices. These checks provide browser rendering evidence
+without claiming ACP transport or live-provider coverage.
+
 CI runs `navigation-order.mjs` and `device-storage.mjs` alongside the Dock probes.
 The storage probe exercises real IndexedDB migration, concurrent writes, rollback,
 and principal isolation in an isolated Chromium profile.

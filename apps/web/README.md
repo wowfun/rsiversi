@@ -39,10 +39,14 @@ persist running flags or maintain its own observation poller.
 External conversation panes render the Rust controller's distinct identity,
 observations and exact permission options. They have no native Goal, preset or
 model controls. Close peer is explicit; switching panes only detaches observation.
-Unknown prompt replies retain the entered text and disable sending that same draft
-until the user edits it. The document never retries a prompt. Unsaved external
-text is retained only for the current document connection, under a 16-draft / 1 MiB
-limit; it does not enter the native durable submission ledger.
+Drafts follow the shared [retention and revision policy](../external-drafts.md),
+including Web's multiple bindings and pending-text accounting.
+A pane without a retained draft disables composition;
+it retries binding when draft availability changes, without rebuilding history.
+Capacity notices never hide an unknown send outcome.
+After a rejected edit restores admitted text, both Send and Enter can submit
+that text if no other send fence applies. Reset clears admission notices and
+disables composition until a new record is bound.
 
 IndexedDB schema 4 namespaces composer records by endpoint, real principal
 (`local` or authenticated DeviceId), stable surface key and SessionId. Upgrade

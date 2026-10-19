@@ -1,16 +1,24 @@
 import { keyboardAction } from "./composer-actions.js";
+import { externalDrafts } from "./external-drafts.js";
 // Display-only external conversations; Rust owns observation and one-shot controls.
 export function externalPaneClass({ element, button, command, perform }) {
-  const drafts = new Map();
-  function save(id, text) {
-    if (!id) return;
-    drafts.delete(id); drafts.set(id, text);
-    while (drafts.size > 16 || [...drafts.values()].reduce((bytes, value) => bytes + new TextEncoder().encode(value).length, 0) > 1024 * 1024) drafts.delete(drafts.keys().next().value);
-  }
+  const drafts = externalDrafts();
   return class ExternalPane {
     static clearDrafts() { drafts.clear(); }
     kind = "external";
     blocks = new Map();
+    changed = () => {
+      if(this.record && (this.record.revision!==this.capacityRevision || !drafts.current(this.record)))this.capacity=false;
+      const text = this.record?.text;
+      if (text !== undefined && this.input.value !== text) {
+        const {selectionStart,selectionEnd} = this.input;
+        this.input.value = text;
+        this.input.setSelectionRange?.(Math.min(selectionStart,text.length),Math.min(selectionEnd,text.length));
+      }
+      this.renderComposer();
+    };
+    get uncertain() { return !!this.record && this.record.unknownRevision === this.record.revision; }
+    get submitting() { return !!this.record?.pending; }
     constructor(index) {
       this.index = index;
       this.node = element("section", "pane external-pane");
@@ -34,7 +42,7 @@ export function externalPaneClass({ element, button, command, perform }) {
       this.notice = element("p", "settings-error");this.notice.setAttribute("role","alert");
       this.composer = element("form", "composer external-composer");
       this.input = element("textarea");this.input.rows=3;this.input.maxLength=131072;this.input.placeholder="Send a message to this external agent";this.input.setAttribute("aria-label","External message");
-      this.input.addEventListener("input",()=>{this.uncertain=false;save(this.id,this.input.value);this.renderComposer();});
+      this.input.addEventListener("input",()=>this.save());
       this.input.addEventListener("keydown",event=>{if(keyboardAction(event,this.submitKey??"enter")){event.preventDefault();perform(()=>this.submit());}});
       this.composer.addEventListener("submit",event=>{event.preventDefault();perform(()=>this.submit());});
       this.send=button("Send ↗",()=>this.submit(),"primary");
@@ -45,34 +53,48 @@ export function externalPaneClass({ element, button, command, perform }) {
       this.node.append(header,this.controls,this.permissions,this.transcript,this.source,this.notice,this.composer);
       document.getElementById("panes").append(this.node);
     }
-    async flush() { save(this.id,this.input.value); }
-    reset() {save(this.id,this.input.value);this.id=undefined;this.input.value="";this.generation=undefined;this.data=undefined;}
+    save() {
+      const accepted=drafts.edit(this.record,this.input.value);
+      if(!accepted) {this.capacity=true;this.capacityRevision=this.record?.revision;this.changed();}
+      return accepted;
+    }
+    async flush() { if(this.id) this.save(); }
+    reset() {if(this.id)this.save();drafts.unbind(this.record,this.changed);this.record=null;this.id=undefined;this.input.value="";this.generation=undefined;this.data=undefined;this.capacity=false;this.bindingVersion=undefined;this.renderComposer();}
     action(fields) {return command({pane:this.index,generation:this.generation,...fields});}
     async control(value) {await this.action({action:"external_control",command:value});}
     async submit() {
-      if (this.switching || this.submitting || this.uncertain || !this.input.value.trim() || !this.data?.capabilities.submit) return;
-      const text=this.input.value;this.submitting=true;this.renderComposer();
-      try {await this.control({kind:"submit",text});if(this.input.value===text){this.input.value="";save(this.id,"");}}
-      catch(error) {this.uncertain=true;throw error;}
-      finally {this.submitting=false;this.renderComposer();}
+      if (this.switching || this.submitting || !this.data?.capabilities.submit || this.data?.busy || !this.save() || this.uncertain || !this.input.value.trim()) return;
+      const attempt=drafts.begin(this.record);if(!attempt)return;
+      try {await this.control({kind:"submit",text:attempt.text});drafts.finish(attempt,true);}
+      catch(error) {drafts.finish(attempt,false);throw error;}
     }
     renderComposer() {
-      this.input.disabled=!!this.switching;
-      this.send.disabled=!!(this.switching||this.submitting||this.uncertain||this.data?.busy||!this.data?.capabilities.submit||!this.input.value.trim());
+      this.input.disabled=!!this.switching||!drafts.current(this.record);
+      this.send.disabled=!!(this.switching||this.submitting||this.uncertain||!drafts.current(this.record)||this.data?.busy||!this.data?.capabilities.submit||!this.input.value.trim());
       this.cancel.disabled=!!(this.data?.busy||!this.data?.observed.connected||this.data?.observed.snapshot.status!=="running");
+      const notice=[this.uncertain?"The send outcome is unknown. Your text is retained. Check the conversation before writing another prompt.":"",this.capacity?(this.record?"External draft capacity is full. Existing text is retained.":"External draft capacity is full. Close another pane to enable composition."):""].filter(Boolean).join(" ")||this.data?.diagnostic||"";
+      if(this.notice.textContent!==notice)this.notice.textContent=notice;
+      if(this.notice.hidden!==!notice)this.notice.hidden=!notice;
     }
     render(data) {
       if(!data?.external)return;
       const state=data.external, observed=state.observed, snapshot=observed.snapshot;
-      if(this.generation!==data.generation){save(this.id,this.input.value);this.generation=data.generation;this.id=snapshot.id;this.input.value=drafts.get(this.id)??"";this.uncertain=false;this.switching=false;this.blocks.clear();this.transcript.replaceChildren();}
+      if(this.generation!==data.generation || this.id!==snapshot.id || (this.record && !drafts.current(this.record))){
+        if(this.id && drafts.current(this.record))this.save();drafts.unbind(this.record,this.changed);
+        this.generation=data.generation;this.id=snapshot.id;this.record=drafts.bind(this.id,this.changed);this.capacity=!this.record;
+        this.bindingVersion=drafts.version();
+        this.input.value=this.record?.text??"";this.switching=false;this.blocks.clear();this.transcript.replaceChildren();
+      }
+      if(!this.record && this.bindingVersion!==drafts.version()) {
+        this.record=drafts.bind(this.id,this.changed);this.capacity=!this.record;this.bindingVersion=drafts.version();
+        if(this.record)this.input.value=this.record.text;
+      }
       this.data=state;
       this.name.textContent=`${snapshot.endpoint} · External agent`;
       this.path.textContent=`${snapshot.cwd} · ${snapshot.id}`;
       const status=observed.connected?snapshot.status:(snapshot.status==="closed"?"Closed":"Unknown · disconnected");
       this.status.textContent=`${status}${snapshot.completion?` · ${snapshot.completion.replaceAll("_"," ")}`:""} · Local observations`;
       this.status.dataset.connected=String(observed.connected);
-      this.notice.textContent=this.uncertain?"The send outcome is unknown. Your text is retained. Check the conversation before writing another prompt.":state.diagnostic??"";
-      this.notice.hidden=!this.notice.textContent;
       for(const control of this.controls.children)control.disabled=state.busy;
       this.next.disabled=state.busy||!state.more;
       this.live.disabled=state.busy||state.following;

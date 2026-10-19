@@ -1,3 +1,4 @@
+import {documentModules} from './document-modules.mjs';
 import { createHash } from "node:crypto";
 import assert from "node:assert/strict";
 import { readFile, writeFile } from "node:fs/promises";
@@ -5,32 +6,25 @@ import { join } from "node:path";
 import { verifyFrameDom } from "./frames.mjs";
 import { verifyImageDom } from "./images-dom.mjs";
 import { verifyComposer } from "./composer.mjs";
+import { verifyExternalDraftDom } from "./external-drafts-dom.mjs";
 
 // DOM projection only: no Worker, provider, device or network lifecycle claims.
 export async function verifyDom(browser, root, report, name) {
+  await verifyExternalDraftDom(browser, root, report, name);
   const page = await browser.newPage();
   const errors = []; page.on("pageerror", error => errors.push(error.message));
   try {
     const document = await readFile(join(root, "fixtures/rsi/web-product/document-island.html"), "utf8");
     const standard = await readFile(join(root, "apps/web/standard.js"), "utf8");
-    await page.route("http://rsi-dom.invalid/**", route => route.fulfill({ contentType: route.request().url().endsWith("standard.js") ? "text/javascript" : "text/html", body: route.request().url().endsWith("standard.js") ? standard : document.replace(/<script[^>]*>[\s\S]*?<\/script>/g, "") }));
-    const admissionSource = await readFile(join(root, "apps/web/admission.js"), "utf8");
-    await page.route("http://rsi-dom.invalid/admission.js", route => route.fulfill({ contentType: "text/javascript", body: admissionSource }));
-    await page.goto("http://rsi-dom.invalid/");
+    await documentModules(page,root,"http://rsi-dom.invalid",document.replace(/<script[^>]*>[\s\S]*?<\/script>/g,""),["standard.js", "admission.js", "mounts.js", "drafts.js", "settings-form.js", "file-picker.js", "external-pane.js", "external-drafts.js", "document-mode.js", "turn-presentation.js", "composer-actions.js", "document-connection.js"]);
     await page.evaluate(async () => { Object.assign(globalThis, await import("/admission.js")); });
+    await page.route('http://rsi-dom.invalid/rsi-renderers/*/standard.js',route=>route.fulfill({contentType:'text/javascript',body:standard}));
     const offer = { revision: "a".repeat(64), catalog: { format: 1, renderers: [{ id: "rsi.standard", abi: 1, entry: "standard.js", files: [{ name: "standard.js", sha256: createHash("sha256").update(standard).digest("hex") }], schemas: [{ name: "rsi.standard.view", version: 1 }], capabilities: ["invoke", "focus"], surfaces: ["dialog"] }] } };
     await page.evaluate(offer => { window.testRendererOffer = offer; }, offer);
     await page.addStyleTag({ path: join(root, "apps/web/styles.css") });
-    // Classic exposure is confined to this document-only fixture; production uses ESM.
-    await page.addScriptTag({ content: `(() => { ${(await readFile(join(root, "apps/web/mounts.js"), "utf8")).replaceAll("export class ", "class ").replaceAll("export async function ", "async function ").replaceAll("export function ", "function ")} Object.assign(globalThis,{MountTable,writeClipboard,setClipboardWriter}); })();` });
-    await page.addScriptTag({ content: `(() => { ${(await readFile(join(root, "apps/web/drafts.js"), "utf8")).replaceAll("export class ", "class ").replaceAll("export function ", "function ")} Object.assign(globalThis, {DraftStore, DraftEditor, validateEditor}); })();` });
-    await page.addScriptTag({ content: `(() => { ${(await readFile(join(root, "apps/web/settings-form.js"), "utf8")).replaceAll("export function ", "function ")} Object.assign(globalThis, {settingsForm, canUseSettingsForm}); })();` });
-    await page.addScriptTag({ content: `(() => { ${(await readFile(join(root, "apps/web/file-picker.js"), "utf8")).replace("export function ", "function ")} globalThis.openFilePicker = openFilePicker; })();` });
-    await page.addScriptTag({ content: `(() => { ${(await readFile(join(root, "apps/web/external-pane.js"), "utf8")).replace(/^import .*;\n/gm, "").replace("export function ", "function ")} globalThis.externalPaneClass = externalPaneClass; })();` });
-    for(const [file,names] of [['document-mode.js','isNativeDocument'],['turn-presentation.js','TurnPresentation,readingPosition,readingAnchor,restoreAnchor'],['composer-actions.js','keyboardAction']]) {
-      await page.addScriptTag({content:`(()=>{${(await readFile(join(root,'apps/web',file),'utf8')).replaceAll('export class ','class ').replaceAll('export function ','function ')}Object.assign(globalThis,{${names}});})();`});
-    }
-    await page.addScriptTag({ content: `(() => { ${(await readFile(join(root, "apps/web/document-connection.js"), "utf8")).replace(/^import .*;\n/gm, "").replace("export class ", "class ")} globalThis.DocumentConnection = DocumentConnection; })();` });
+    await page.evaluate(async()=>{
+      for(const file of ["mounts.js", "drafts.js", "settings-form.js", "file-picker.js", "external-pane.js", "external-drafts.js", "document-mode.js", "turn-presentation.js", "composer-actions.js", "document-connection.js"]) Object.assign(globalThis,await import("/"+file));
+    });
     await page.addScriptTag({ content: 'let fixtureMounts; function createDocumentTransport(){return new Worker("/worker.js",{type:"module"})} const resourceHosts=new Map();function publishResources(){}function clearResources(){resourceHosts.clear()}function renderDetailAtFixture(value){return renderDetail(value,modalTarget)}function renderUiDetailAtFixture(value){return renderUiDetail(value,modalTarget)}const presentationIdentity = {set(){}};function presentationKey(){return "fixture"} function publish() {} let fixtureActions; function installActions(actions) {fixtureActions=actions} function selectSurface() {}\n' + (await readFile(join(root, "apps/web/app.js"), "utf8")).replace(/^import .*;\n/gm, "").replace('export function initialize() {\n', '').replace(/\n}\s*$/, '') });
     assert.deepEqual(errors, [], "document bootstrap has no uncaught errors");
     await page.evaluate(async () => {

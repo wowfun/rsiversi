@@ -4,23 +4,20 @@ impl Ui {
     pub fn open_attention(&mut self) {
         self.active = true;
         if self.work.is_some() {
+            self.detach();
             self.deferred_open = Some(Choice::Attention);
             return;
         }
         self.attention_menu = true;
         self.menu = true;
         self.detail = None;
-        let Some(client) = self.attention.clone() else {
-            self.status = "Attention navigation unavailable".into();
-            return;
-        };
-        self.remember();
-        let previous = self.controller.take();
-        self.changes = None;
+        let client = self.attention.clone();
+        let previous = self.take_controller();
         self.work = Some(Box::pin(async move {
             if let Some(previous) = previous {
                 previous.retire().await;
             }
+            let client = client.ok_or("Attention navigation unavailable")?;
             let page = client.read().await.map_err(|error| error.to_string())?;
             let mut items = vec![("Refresh activity".into(), Choice::Attention)];
             for row in page.entries {
@@ -72,21 +69,19 @@ impl Ui {
                 ));
             }
             rsi_conversation::ConversationIdentity::External(id) => {
-                let (Some(service), Some(client)) = (self.service.clone(), self.attention.clone())
-                else {
-                    return;
-                };
+                let (service, client) = (self.service.clone(), self.attention.clone());
                 let id = id.clone();
                 let execution = self.execution.clone();
-                let old = self.controller.take();
-                self.changes = None;
+                let old = self.take_controller();
                 self.attention_menu = false;
-                self.remember();
                 self.permission_focus = target;
                 self.work = Some(Box::pin(async move {
                     if let Some(old) = old {
                         old.retire().await;
                     }
+                    let service =
+                        service.ok_or("External conversations unavailable on this connection")?;
+                    let client = client.ok_or("Attention navigation unavailable")?;
                     let controller = ExternalController::attach(service, execution, id)
                         .await
                         .map_err(|error| error.to_string())?;

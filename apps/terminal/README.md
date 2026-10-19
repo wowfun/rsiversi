@@ -110,6 +110,19 @@ revision. Source windows advance by raw bytes, including UTF-8 boundaries. The H
 the peer. Only Close peer ends that connection. Native model, Goal and preset
 controls remain with the native Session view.
 
+External drafts follow the shared [retention and revision policy](../external-drafts.md),
+including the TUI's single-editor and pending-command limits.
+The editor mutates in place.
+Each accepted text change updates the draft record; navigation and exit retain
+that record without a second write.
+Leaving a conversation for a catalog, attention navigation or another attachment
+unbinds and clears its active editor before asynchronous retirement or opening.
+Deferred navigation also hides the old controller immediately, while admitted
+work settles before that controller retires. Failed attachment retains a menu
+without a message field; a late attachment cannot reopen a departed view.
+An unsuccessful opening leaves no retired conversation's text or warning on the
+new view; returning to that conversation restores its retained draft and fence.
+
 The resident input loop captures a bounded typed Scene. The linked renderer
 validates its semantics, lays out and renders cells in one blocking worker.
 Only the Portable adapter encodes JSON, bounding bytes during serialization after
