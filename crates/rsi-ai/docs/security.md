@@ -42,8 +42,9 @@ searched across hundreds of MiB of already authenticated bodies.
 
 Dropping or cancelling the final waiter for a queued prepared-call media
 admission removes its semaphore position. A successful complete-weight permit
-is retained only with that prepared call's resolved media and is released when
-the cache or context drops.
+follows that prepared call's resolved media, including queued or running blocking
+checksum work. Dropping the cache, context or final async waiter cannot release
+the permit while a checksum worker still owns the bytes.
 
 Retry safety is an orchestration rule, not a transport convenience. Dispatched
 or dispatch-uncertain effects require a frozen, capability-specific regeneration

@@ -198,8 +198,7 @@ impl MediaResolutions {
             let future: AdapterFuture<Result<ValidatedMedia, AiError>> = Box::pin(async move {
                 let admission = admitted.future.clone().await?;
                 let bytes = media.read(resolver_descriptor, AbortSignal::new()).await?;
-                let bytes = validate_resolved_media_blocking(descriptor, bytes).await?;
-                Ok(ValidatedMedia { bytes, admission })
+                validate_resolved_media_blocking(descriptor, bytes, admission).await
             });
             MediaResolutionEntry::Pending {
                 flight: Arc::new(MediaResolutionFlight {
@@ -338,10 +337,11 @@ fn validate_resolved_media(descriptor: &MediaDescriptor, bytes: &[u8]) -> Result
 async fn validate_resolved_media_blocking(
     descriptor: MediaDescriptor,
     bytes: bytes::Bytes,
-) -> Result<bytes::Bytes, AiError> {
+    admission: Arc<tokio::sync::OwnedSemaphorePermit>,
+) -> Result<ValidatedMedia, AiError> {
     tokio::task::spawn_blocking(move || {
         validate_resolved_media(&descriptor, &bytes)?;
-        Ok(bytes)
+        Ok(ValidatedMedia { bytes, admission })
     })
     .await
     .map_err(|_| {
@@ -1105,6 +1105,86 @@ fn validate_id(field: &str, value: &str) -> Result<(), ProviderSdkError> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn cancelled_last_waiter_keeps_queued_checksum_bytes_admitted() {
+        #[derive(Debug)]
+        struct Resolver(std::sync::atomic::AtomicUsize);
+        impl MediaResolver for Resolver {
+            fn read(
+                &self,
+                _: MediaDescriptor,
+                _: AbortSignal,
+            ) -> AdapterFuture<Result<bytes::Bytes, AiError>> {
+                self.0.fetch_add(1, Ordering::SeqCst);
+                Box::pin(async { Ok(bytes::Bytes::from_static(b"media")) })
+            }
+        }
+        let runtime = tokio::runtime::Builder::new_current_thread()
+            .enable_all()
+            .max_blocking_threads(1)
+            .build()
+            .unwrap();
+        runtime.block_on(async {
+            let (release, wait) = std::sync::mpsc::channel();
+            let (entered, entry) = tokio::sync::oneshot::channel();
+            let blocker = tokio::task::spawn_blocking(move || {
+                entered.send(()).unwrap();
+                wait.recv().unwrap();
+            });
+            entry.await.unwrap();
+            let semaphore = Arc::new(tokio::sync::Semaphore::new(1));
+            let descriptor = MediaDescriptor::new(
+                rsi_ai_protocol::MediaKind::Image,
+                "image/png",
+                5,
+                hex::encode(Sha256::digest(b"media")),
+            )
+            .unwrap();
+            let resolver = Arc::new(Resolver(std::sync::atomic::AtomicUsize::new(0)));
+            let first =
+                Arc::new(MediaResolutions::new_with_semaphore(5, semaphore.clone()).unwrap());
+            let MediaResolution::Pending(waiter) =
+                first.for_descriptor(&descriptor, resolver.clone())
+            else {
+                panic!("pending")
+            };
+            let mut future = Box::pin(waiter.flight.future.clone());
+            assert!(futures_util::poll!(future.as_mut()).is_pending());
+            assert_eq!(resolver.0.load(Ordering::SeqCst), 1);
+            drop(future);
+            drop(waiter);
+            drop(first);
+
+            let second =
+                Arc::new(MediaResolutions::new_with_semaphore(5, semaphore.clone()).unwrap());
+            let MediaResolution::Pending(waiter) =
+                second.for_descriptor(&descriptor, resolver.clone())
+            else {
+                panic!("pending")
+            };
+            let mut future = Box::pin(waiter.flight.future.clone());
+            assert!(futures_util::poll!(future.as_mut()).is_pending());
+            let calls_while_queued = resolver.0.load(Ordering::SeqCst);
+            let capacity_while_queued = semaphore.available_permits();
+            release.send(()).unwrap();
+            blocker.await.unwrap();
+            let result = tokio::time::timeout(std::time::Duration::from_secs(2), future)
+                .await
+                .unwrap()
+                .unwrap();
+            assert_eq!(
+                calls_while_queued, 1,
+                "second resolver must wait for the detached checksum"
+            );
+            assert_eq!(capacity_while_queued, 0);
+            assert_eq!(result.bytes.as_ref(), b"media");
+            drop(result);
+            drop(waiter);
+            drop(second);
+            assert_eq!(semaphore.available_permits(), 1);
+        });
+    }
 
     #[tokio::test]
     async fn media_admission_waits_for_the_complete_request_weight() {

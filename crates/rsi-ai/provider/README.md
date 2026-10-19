@@ -38,6 +38,9 @@ with the prepared call's resolved media.
 Construction revalidates the public prepared-call snapshot once, so provider
 adapters may trust its digest and identity invariants in-process.
 Resolved-body digest verification runs behind fixed blocking-work admission.
+The checksum worker owns the complete request's resident-memory permit together
+with its bytes, including while queued and after its last async waiter cancels.
+The validated result retains both until consumed or dropped.
 Resolved bytes preserve the Media body's immutable allocation owner through
 provider framing and streaming, including any API receive lease.
 An adapter that retains the context for a later control plane releases its
