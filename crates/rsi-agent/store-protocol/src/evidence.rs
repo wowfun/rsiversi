@@ -39,7 +39,7 @@ impl EvidenceDigests {
     }
 }
 
-/// One original with descriptors for admission and borrowed text for paging.
+/// One original with descriptors for admission and borrowed or owned section text.
 #[derive(Debug)]
 pub struct EvidenceOriginal {
     fact: SessionFact,
@@ -90,6 +90,22 @@ impl EvidenceOriginal {
             unreachable!("validated original")
         };
         let Some(EvidencePart::Inline { text, .. }) = evidence.part(section) else {
+            unreachable!("validated inline binding")
+        };
+        Ok(text)
+    }
+    /// Transfers original text after the shared binding check, releasing other sections.
+    pub fn into_text(
+        self,
+        section: EvidenceSection,
+        sha256: &str,
+        bytes: u32,
+    ) -> Result<String, EvidenceResolveError> {
+        self.digests.validate(section, sha256, bytes)?;
+        let SessionFactBody::ModelIntent { evidence, .. } = self.fact.into_body() else {
+            unreachable!("validated original")
+        };
+        let Some(EvidencePart::Inline { text, .. }) = evidence.into_part(section) else {
             unreachable!("validated inline binding")
         };
         Ok(text)

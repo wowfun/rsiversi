@@ -77,6 +77,7 @@ pub struct LocalSessionService {
     projection_retention: rsi_session_protocol::ProjectionRetention,
     projection_stopped: tokio_util::sync::CancellationToken,
     metrics: Arc<metrics::MetricsCache>,
+    evidence: Arc<evidence::EvidenceReader>,
     execution: rsi_meta::Execution,
     turns: Arc<dyn TurnService>,
     commands: Arc<dyn rsi_agent_turn_protocol::SessionCommands>,
@@ -226,6 +227,7 @@ impl LocalSessionService {
             projection_retention: rsi_session_protocol::ProjectionRetention::default(),
             projection_stopped: tokio_util::sync::CancellationToken::new(),
             metrics: Arc::new(metrics::MetricsCache::default()),
+            evidence: Arc::new(evidence::EvidenceReader::default()),
             execution: execution.clone(),
             turns,
             commands,
@@ -311,6 +313,7 @@ impl LocalSessionService {
             projection_retention: self.projection_retention.clone(),
             projection_stopped: self.projection_stopped.clone(),
             metrics: self.metrics.clone(),
+            evidence: self.evidence.clone(),
             execution: self.execution.clone(),
             projection_changes: Arc::new(tokio::sync::watch::channel(()).0),
             session_id: state
@@ -364,13 +367,19 @@ impl LocalSessionService {
     /// Stops draft admission and waits for service-owned preparation and sweeping.
     pub async fn stop(&self) -> Result<()> {
         self.projection_stopped.cancel();
+        // Close read admission before awaiting terminal retirement.
+        self.evidence.close();
         let terminals = if let Some(terminals) = &self.terminals {
             terminals.stop().await
         } else {
             Ok(())
         };
-        let (commands, ()) = tokio::join!(self.draft_commands.stop(), self.drafts.stop());
-        terminals.and(commands)
+        let (commands, (), evidence) = tokio::join!(
+            self.draft_commands.stop(),
+            self.drafts.stop(),
+            self.evidence.stop()
+        );
+        terminals.and(commands).and(evidence)
     }
 
     async fn prepare_draft(
@@ -557,6 +566,7 @@ struct LocalSessionHandle {
     projection_retention: rsi_session_protocol::ProjectionRetention,
     projection_stopped: tokio_util::sync::CancellationToken,
     metrics: Arc<metrics::MetricsCache>,
+    evidence: Arc<evidence::EvidenceReader>,
     execution: rsi_meta::Execution,
     projection_changes: Arc<tokio::sync::watch::Sender<()>>,
     session_id: SessionId,
@@ -922,11 +932,13 @@ impl SessionHandle for LocalSessionHandle {
         let _admission = self.admit()?;
         request.validate()?;
         let _activity = self.begin_activity()?;
-        self.reconcile_fresh_read().await?;
+        if !self.reconcile_fresh_read().await? {
+            return Err(SessionError::NotFound(self.session_id().to_string()));
+        }
         tokio::select! {
             biased;
             () = self.projection_stopped.cancelled() => Err(SessionError::ShuttingDown),
-            result = evidence::read(self.store.as_ref(), &self.session_id, &request) => result,
+            result = self.evidence.read(self.store.clone(), self.session_id.clone(), &request, (_admission, _activity)) => result,
         }
     }
     async fn read_jobs(

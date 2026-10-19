@@ -426,6 +426,27 @@ async fn hung_preparation_expires_its_waiters_and_releases_device_capacity() {
     assert_eq!(preparation.leases.load(Ordering::SeqCst), 0);
 }
 
+async fn assert_fresh_evidence_avoids_fact_reads(handle: &dyn SessionHandle, store: &MemoryStore) {
+    store.take_fact_read_cursors();
+    for _ in 0..5 {
+        assert!(matches!(
+            handle
+                .evidence(rsi_session_protocol::EvidenceRead {
+                    intent_seq: 1,
+                    section: rsi_agent_session_protocol::EvidenceSection::System,
+                    offset: 0,
+                    maximum_bytes: 1024,
+                })
+                .await,
+            Err(SessionError::NotFound(_))
+        ));
+    }
+    assert!(
+        store.take_fact_read_cursors().is_empty(),
+        "Fresh evidence reads must not enter the cold loader"
+    );
+}
+
 #[tokio::test]
 async fn fresh_reads_reconcile_competing_publications_without_submitting() {
     for conflicting in [false, true] {
@@ -461,6 +482,7 @@ async fn fresh_reads_reconcile_competing_publications_without_submitting() {
                     .facts
                     .is_empty()
             );
+            assert_fresh_evidence_avoids_fact_reads(handle.as_ref(), store.as_ref()).await;
             let durable = publish_competing(store.as_ref(), &draft, conflicting).await;
             match first_read {
                 "header" => {

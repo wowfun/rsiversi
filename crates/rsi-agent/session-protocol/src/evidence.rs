@@ -222,6 +222,22 @@ impl RequestEvidence {
             .find(|(kind, _)| *kind == section)
             .map(|(_, part)| part)
     }
+    /// Transfers one section, releasing all other evidence without cloning text.
+    pub fn into_part(self, section: EvidenceSection) -> Option<EvidencePart> {
+        match self {
+            Self::Available {
+                configuration,
+                system,
+                tools,
+                ..
+            } => Some(match section {
+                EvidenceSection::Configuration => configuration,
+                EvidenceSection::System => system,
+                EvidenceSection::Tools => tools,
+            }),
+            Self::Unavailable { .. } => None,
+        }
+    }
     /// Mutable section access for metadata-only deduplication before publication.
     pub fn part_mut(&mut self, section: EvidenceSection) -> Option<&mut EvidencePart> {
         match self {
@@ -336,6 +352,9 @@ mod tests {
         };
         assert_eq!(evidence.inline_bytes(), 4);
         assert!(evidence.validate(Some(2)).is_err());
+        let mut wire = serde_json::to_value(&evidence).unwrap();
+        wire["system"]["bytes"] = serde_json::json!(MAXIMUM_REQUEST_EVIDENCE_BYTES + 1);
+        assert!(serde_json::from_value::<RequestEvidence>(wire).is_err());
         if let RequestEvidence::Available { manifest, .. } = &mut evidence {
             manifest.push(EvidenceContentCount {
                 kind: EvidenceContentKind::Text,
@@ -344,5 +363,33 @@ mod tests {
             });
         }
         assert!(evidence.validate(Some(2)).is_err());
+    }
+
+    #[test]
+    fn selected_section_transfers_its_owned_allocation() {
+        for section in [
+            EvidenceSection::Configuration,
+            EvidenceSection::System,
+            EvidenceSection::Tools,
+        ] {
+            let evidence = available();
+            let EvidencePart::Inline { text, .. } = evidence.part(section).unwrap() else {
+                panic!("inline");
+            };
+            let allocation = text.as_ptr();
+            let expected = text.clone();
+            let EvidencePart::Inline { text, .. } = evidence.into_part(section).unwrap() else {
+                panic!("inline");
+            };
+            assert_eq!(text, expected);
+            assert_eq!(text.as_ptr(), allocation);
+        }
+        assert!(
+            RequestEvidence::Unavailable {
+                reason: EvidenceUnavailable::NotCaptured
+            }
+            .into_part(EvidenceSection::System)
+            .is_none()
+        );
     }
 }

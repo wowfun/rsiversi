@@ -60,6 +60,8 @@ section, digest and byte length; reference chains are rejected. Consumers may
 cache the resulting digest descriptors within the owning Store lifetime, bounded
 independently of history size. Descriptors retain no evidence text. Fact decoding
 still validates the original bytes at the durable boundary.
+Consumers retaining one selected source can transfer its owned String after
+the same binding check, releasing the other sections without copying that text.
 
 Stores implement only the current `AGENT_STORE_SCHEMA_VERSION` defined in
 [src/lib.rs](src/lib.rs). Earlier versions are rejected before recovery or writes; there is no implicit

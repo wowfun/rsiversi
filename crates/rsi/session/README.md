@@ -16,6 +16,37 @@ The Session owner resolves one direct original-inline reference per selected
 section, checks its digest/length and returns at most 256 KiB aligned UTF-8 bytes.
 Reads neither reconstruct context nor acquire execution authority. The API client
 validates the echoed identity, page bounds and unavailable state.
+The service generation retains only selected section text, digest and binding:
+64 entries / 64 MiB, with four concurrent cold loads shared by all Sessions and
+handles on the service. There is no cold-load queue: a new distinct load returns
+retryable `Capacity` when no worker or retention capacity is available. Cache
+hits and coalesced requests do not acquire another worker. Each cold load reserves
+16 MiB before Store I/O, then shrinks to the selected UTF-8 text length. The
+maximum simultaneous reservations fit the byte pool; admission uses that pool's
+actual limit. With three cold loads still reserved, admitting the fourth can
+evict every idle text entry even when the eventual sections are small. This preserves
+the worst-case selected-text bound before the Store reveals section sizes. Idle
+entries are evicted least recently used for both entry and byte capacity; pinned
+entries and in-flight loads cannot be evicted. An unavailable result uses an
+entry but no text bytes, and yields only for entry-count pressure. Unpublished
+Fresh handles return `NotFound` without evidence cache admission or Store fact I/O.
+Page readers retain admission and activity through response materialization.
+Ready results stay pinned while a page reader or
+completion-channel waiter owns them; with all 64 entries pinned, a distinct
+request fails even if bytes are free. One pinned entry does not prevent eviction
+of other idle entries. Equal section requests coalesce.
+Admission plans the required idle evictions before applying them; a rejected
+cold load preserves the warm cache. Selected text moves out of the owned Fact
+instead of being cloned from a borrow. Shrinking its allocation to the retained
+text length may relocate bytes; this is not an allocator-level zero-copy promise.
+Errors are not cached. Every hit still passes handle authorization and draft
+reconciliation. The retained-text budget does not include transient Store
+materialization, which remains governed by the Store's own bounds.
+Service-owned loads retain their admission and activity through actual completion
+after caller cancellation. Shutdown closes admission, clears retained entries,
+wakes waiters and joins loads for up to 30 seconds alongside draft-command cleanup.
+A stuck Store read yields a cleanup error while its task and reservations remain
+owned; shutdown never detaches byte accounting or allows a late cache insertion.
 
 Goal control revision and identity conflicts remain typed command conflicts,
 bound to the original request ID, across Session API. Live-owner contention

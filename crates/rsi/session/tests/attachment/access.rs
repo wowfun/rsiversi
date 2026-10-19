@@ -123,7 +123,7 @@ async fn remote_session_reads_are_offline_caller_bound_and_live_streams_recheck_
         Arc::new(UnavailableCommands),
         Arc::new(UnavailableProjections),
         Arc::new(UnavailableTurns::default()),
-        store,
+        store.clone(),
         rsi_agent_context::ContextBudget::default(),
         Arc::new(UnavailableComposition),
         Arc::new(UnavailableWorkspace),
@@ -169,6 +169,56 @@ async fn remote_session_reads_are_offline_caller_bound_and_live_streams_recheck_
     let handle = scoped.attach(remote).await.unwrap();
     assert_eq!(handle.header().await.unwrap(), headers[1]);
     assert_eq!(handle.history_before(None, 8).await.unwrap().facts.len(), 1);
+    store
+        .append(AppendBatch {
+            session_id: remote.clone(),
+            expected_seq: 1,
+            header: None,
+            facts: vec![
+                SessionFact::new(
+                    2,
+                    2,
+                    SessionFactBody::ModelIntent {
+                        turn_id: TurnId::new("accepted").unwrap(),
+                        effect_id: rsi_agent_session_protocol::EffectId::new("request").unwrap(),
+                        purpose: rsi_agent_session_protocol::ModelPurpose::Conversation,
+                        price_quote: None,
+                        snapshot: rsi_ai_protocol::PreparedCallSnapshot {
+                            call_id: "call".into(),
+                            deployment_id: "fixture".into(),
+                            provider_family: "fixture".into(),
+                            capability: rsi_ai_protocol::AiCapability::Language,
+                            model: "model".into(),
+                            protocol: "fixture".into(),
+                            transport: "local".into(),
+                            endpoint_fingerprint: "fixture".into(),
+                            config_generation: 1,
+                            credential_source: None,
+                            retry_policy: rsi_ai_protocol::RetryPolicy::default(),
+                            request_sha256: "0".repeat(64),
+                            language_settings: None,
+                        },
+                        evidence: rsi_agent_session_protocol::RequestEvidence::Unavailable {
+                            reason: rsi_agent_session_protocol::EvidenceUnavailable::Budget,
+                        },
+                    },
+                )
+                .unwrap()
+                .into(),
+            ],
+        })
+        .await
+        .unwrap();
+    let evidence = rsi_session_protocol::EvidenceRead {
+        intent_seq: 2,
+        section: rsi_agent_session_protocol::EvidenceSection::System,
+        offset: 0,
+        maximum_bytes: 128,
+    };
+    assert!(matches!(
+        handle.evidence(evidence.clone()).await.unwrap().content,
+        rsi_session_protocol::EvidencePageContent::Unavailable { .. }
+    ));
     let mut stream = handle
         .export(rsi_session_protocol::export::ExportOptions::default())
         .await
@@ -181,6 +231,13 @@ async fn remote_session_reads_are_offline_caller_bound_and_live_streams_recheck_
     );
     assert!(scoped.read_header(headers[0].session_id()).await.is_ok());
     access.granted.store(false, Ordering::SeqCst);
+    assert!(
+        matches!(
+            handle.evidence(evidence).await,
+            Err(SessionError::Api(ApiError::Unauthorized))
+        ),
+        "a cached section cannot bypass current Use admission"
+    );
     assert!(matches!(
         rsi_session_protocol::SessionReads::acquire(&service, origin, &target).await,
         Err(SessionError::Api(ApiError::Unauthorized))

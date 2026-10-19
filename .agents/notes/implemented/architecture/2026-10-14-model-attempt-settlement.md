@@ -58,6 +58,11 @@ Decoded full-log caches would introduce another long-lived evidence owner and
 retention budget. Contiguous payload copying improves decoding without adding
 that ownership or relaxing external canonical validation.
 
+Settlement acknowledgement instead carries an issuer-bound publication receipt
+and checks the resident durable watermark, avoiding a result-body reread.
+Independent paging retention follows the
+[Session-owned evidence decision](2026-10-18-evidence-section-retention.md).
+
 ## Consequences
 
 There is no cumulative Turn provider-call ceiling or automatic Turn wall-clock
