@@ -7,8 +7,10 @@ license.workspace = true
 publish = false
 
 [dependencies]
+rsi-dev-control = { path = "../dev-control" }
+tokio-util.workspace = true
 tempfile.workspace = true
-tokio = { workspace = true, features = ["rt-multi-thread", "process", "signal", "time", "fs"] }
+tokio = { workspace = true, features = ["rt-multi-thread", "process", "signal", "time", "fs", "io-util", "sync"] }
 serde_json.workspace = true
 sha2.workspace = true
 toml.workspace = true
@@ -24,7 +26,10 @@ nix = { version = "0.29", features = ["signal", "term"] }
 nix = { version = "0.29", features = ["fs"] }
 
 [dev-dependencies]
-tokio = { workspace = true, features = ["test-util"] }
+tokio = { workspace = true, features = ["test-util", "io-std"] }
 
 [lints]
 workspace = true
+
+[target.'cfg(windows)'.dependencies]
+rsi-process-native = { path = "../../crates/rsi-process/native" }

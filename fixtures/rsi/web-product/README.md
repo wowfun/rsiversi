@@ -642,3 +642,9 @@ checks the current History dialog in Chromium with controlled replies. Query and
 range edits retire old pagination controls; continuation and subsequent paging
 use the current workspace and query. This keyless document check does not claim
 History authority or live-provider evidence.
+
+`development.mjs DIRECTORY ORIGIN NEW_REPORT` exercises the explicit Linux/WSL
+`cargo run --locked -p rsi-app-tools -- fixture-dev web --directory ABSOLUTE_NEW_DIRECTORY`
+environment. It retains the generated fixture Profile, deterministic provider,
+manual device receipt and explicit local-HTTP login. Ordinary `pnpm dev` uses
+standard product login and caller state instead.

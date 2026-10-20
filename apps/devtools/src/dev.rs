@@ -1,1424 +1,645 @@
-//! Explicit isolated development, with the product owning runtime and addon staging.
-use serde_json::{Value, json};
+//! Ordinary product development. Fixture state belongs to `fixture-dev`.
+#[cfg(unix)]
+use crate::supervision::Foreground;
+use crate::supervision::{Child, Signals, application_interrupted, application_succeeded};
+use rsi_dev_control::{Frame, Message, PROXY_TIMEOUT, STARTUP_TIMEOUT};
+use sha2::{Digest as _, Sha256};
 use std::{
+    collections::BTreeSet,
+    ffi::OsString,
     path::{Path, PathBuf},
     process::Stdio,
-    time::Duration,
+    sync::{
+        Arc,
+        atomic::{AtomicBool, Ordering},
+    },
 };
+use tokio::{io::BufReader, process::Command, task::JoinSet};
+use tokio_util::sync::CancellationToken;
 
+const HELP: &str = "usage: rsi-app-tools dev tui [-- --cwd ABSOLUTE | --resume SESSION | --session-id SESSION]\n       rsi-app-tools dev web [--port 0..65535] [--no-open] [--no-watch]\nStart through scripts/rsiversi.sh dev tui|web or scripts/rsiversi.ps1 dev tui|web.\nUses ordinary product state and credentials. For keyless isolated development use fixture-dev.";
+const INTERRUPTED: &str = "development interrupted";
+#[cfg(all(test, any(target_os = "linux", windows)))]
+mod lifecycle_tests;
 #[derive(Debug)]
 struct Options {
     surface: String,
-    directory: Option<PathBuf>,
-    prepare: bool,
-    smoke: bool,
-    watch: bool,
+    arguments: Vec<OsString>,
     port: u16,
+    open: bool,
+    watch: bool,
 }
 impl Options {
     fn parse(args: &[String]) -> Result<Self, String> {
-        let Some(surface) = args
+        let surface = args
             .first()
-            .filter(|value| matches!(value.as_str(), "tui" | "web"))
-        else {
-            return Err("dev requires tui or web".into());
-        };
-        let mut value = Self {
+            .filter(|arg| matches!(arg.as_str(), "tui" | "web"))
+            .ok_or(HELP)?;
+        let mut options = Self {
             surface: surface.clone(),
-            directory: None,
-            prepare: false,
-            smoke: false,
-            watch: true,
+            arguments: Vec::new(),
             port: 8787,
+            open: true,
+            watch: true,
         };
+        if surface == "tui" {
+            if args.len() > 1 {
+                if args[1] != "--" {
+                    return Err(HELP.into());
+                }
+                options.arguments = args[2..].iter().map(OsString::from).collect();
+                rsi_dev_control::validate_tui_arguments(&options.arguments).map_err(|_| HELP)?;
+            }
+            return Ok(options);
+        }
+        let mut seen = BTreeSet::new();
         let mut args = args[1..].iter();
-        let mut seen = std::collections::BTreeSet::new();
-        while let Some(option) = args.next() {
-            if !seen.insert(option) {
-                return Err(format!("duplicate dev option {option}"));
+        while let Some(argument) = args.next() {
+            if !seen.insert(argument) {
+                return Err("duplicate development option".into());
             }
-            match option.as_str() {
-                "--directory" => {
-                    let path = PathBuf::from(
-                        args.next()
-                            .ok_or("--directory needs an absolute new path")?,
-                    );
-                    if !path.is_absolute() {
-                        return Err("development directory must be absolute".into());
-                    }
-                    value.directory = Some(path);
-                }
-                "--prepare-only" => value.prepare = true,
-                "--smoke" => value.smoke = true,
-                "--no-watch" => value.watch = false,
+            match argument.as_str() {
                 "--port" => {
-                    if value.surface != "web" {
-                        return Err("--port requires dev web".into());
+                    let value = args.next().ok_or("--port requires 0..65535")?;
+                    if value.is_empty() || !value.bytes().all(|byte| byte.is_ascii_digit()) {
+                        return Err("--port requires 0..65535".into());
                     }
-                    value.port = args
-                        .next()
-                        .ok_or("--port requires a port")?
-                        .parse::<u16>()
-                        .ok()
-                        .filter(|port| *port != 0)
-                        .ok_or("invalid development port")?;
+                    options.port = value.parse().map_err(|_| "--port requires 0..65535")?;
                 }
-                _ => return Err(format!("unknown dev option {option}")),
+                "--no-open" => options.open = false,
+                "--no-watch" => options.watch = false,
+                _ => return Err(HELP.into()),
             }
         }
-        if value.prepare && value.smoke {
-            return Err("select either --prepare-only or --smoke".into());
-        }
-        Ok(value)
+        Ok(options)
     }
 }
-pub fn run(args: &[String]) -> Result<(), String> {
-    let options = Options::parse(args)?;
-    let root = std::env::current_dir().map_err(problem)?;
-    super::require_repository_root(&root)?;
-    if !cfg!(target_os = "linux") {
-        return Err(
-            "the isolated product development launcher currently requires Linux or WSL".into(),
-        );
+fn problem(error: impl std::fmt::Display) -> String {
+    error.to_string()
+}
+pub(crate) fn run(arguments: &[String]) -> Result<(), String> {
+    if arguments
+        .iter()
+        .any(|arg| matches!(arg.as_str(), "--help" | "-h"))
+    {
+        println!("{HELP}");
+        return Ok(());
+    }
+    let options = Options::parse(arguments)?;
+    if std::env::var_os("CARGO_MANIFEST_DIR").is_some()
+        || std::env::var_os("CARGO_PKG_NAME").is_some()
+    {
+        return Err("ordinary dev must start outside cargo run; use scripts/rsiversi.sh dev tui|web or scripts/rsiversi.ps1 dev tui|web".into());
+    }
+    let root = crate::dist::command_path(
+        std::env::current_dir()
+            .and_then(|path| path.canonicalize())
+            .map_err(problem)?,
+    );
+    crate::require_repository_root(&root)?;
+    #[cfg(windows)]
+    if std::env::current_exe()
+        .and_then(|path| path.canonicalize())
+        .map(crate::dist::command_path)
+        .map_err(problem)?
+        .parent()
+        .is_some_and(|path| {
+            path == root.join("target/debug") || path == root.join("target/release")
+        })
+    {
+        return Err("use scripts/rsiversi.ps1 dev tui|web so the shared development tool can be relinked while dev runs".into());
+    }
+    if !cfg!(any(target_os = "linux", windows)) {
+        return Err("ordinary development requires Linux/WSL or native Windows".into());
+    }
+    let caller = std::env::var_os("RSI_DEV_CALLER_CWD").map_or_else(|| root.clone(), PathBuf::from);
+    if !caller.is_absolute() || caller.as_os_str().len() > 16 * 1024 {
+        return Err("development caller directory must be absolute and bounded".into());
     }
     tokio::runtime::Builder::new_multi_thread()
         .enable_all()
         .build()
         .map_err(problem)?
-        .block_on(start(root, options))
+        .block_on(start(root, caller, options))
 }
-fn problem(error: impl std::fmt::Display) -> String {
-    error.to_string()
-}
-fn temporary_environment(preferred: &Path, fallback: &Path) -> Result<tempfile::TempDir, String> {
-    tempfile::Builder::new()
-        .prefix("rsi-dev-")
-        .tempdir_in(preferred)
-        .or_else(|_| {
-            tempfile::Builder::new()
-                .prefix("rsi-dev-")
-                .tempdir_in(fallback)
-        })
-        .map_err(problem)
-}
-#[derive(Debug)]
-struct Development {
-    root: PathBuf,
-    directory: PathBuf,
-    binary: PathBuf,
-    log: PathBuf,
-    runtime_directory: PathBuf,
-}
-impl Development {
-    fn create(root: PathBuf, options: &Options) -> Result<Self, String> {
-        let directory = if let Some(directory) = &options.directory {
-            std::fs::create_dir(directory).map_err(problem)?;
-            directory.clone()
-        } else {
-            let parent = root.join("target/rsi-app/dev");
-            std::fs::create_dir_all(&parent).map_err(problem)?;
-            temporary_environment(&parent, &parent)?.keep()
-        };
-        #[cfg(unix)]
-        {
-            use std::os::unix::fs::PermissionsExt as _;
-            std::fs::set_permissions(&directory, std::fs::Permissions::from_mode(0o700))
-                .map_err(problem)?;
-        }
-        for path in ["home", "config/rsi", "state", "cache", "workspace", "logs"] {
-            std::fs::create_dir_all(directory.join(path)).map_err(problem)?;
-        }
-        let runtime = tempfile::Builder::new()
-            .prefix("ri-")
-            .tempdir_in("/tmp")
-            .map_err(problem)?;
-        std::fs::write(
-            directory.join("runtime-path"),
-            runtime.path().as_os_str().as_encoded_bytes(),
-        )
-        .map_err(problem)?;
-        let runtime_directory = runtime.keep();
-        Ok(Self {
-            root,
-            binary: directory.join("rsi"),
-            log: directory.join("logs/build.log"),
-            directory,
-            runtime_directory,
-        })
+async fn start(root: PathBuf, caller: PathBuf, options: Options) -> Result<(), String> {
+    if options.surface == "web" && options.watch {
+        repository_pnpm(&root)?;
     }
-    fn environment(&self) -> Vec<(&'static str, std::ffi::OsString)> {
-        let mut values = ["PATH", "LANG", "LC_ALL", "TERM", "COLORTERM", "SHELL"]
-            .into_iter()
-            .filter_map(|name| std::env::var_os(name).map(|value| (name, value)))
-            .collect::<Vec<_>>();
-        values.push((
-            "DBUS_SESSION_BUS_ADDRESS",
-            format!(
-                "unix:path={}/absent-session-bus",
-                self.runtime_directory.display()
-            )
-            .into(),
-        ));
-        for (name, path) in [
-            ("HOME", "home"),
-            ("XDG_CONFIG_HOME", "config"),
-            ("XDG_STATE_HOME", "state"),
-            ("XDG_CACHE_HOME", "cache"),
-        ] {
-            values.push((name, self.directory.join(path).into_os_string()));
-        }
-        values.push((
-            "XDG_RUNTIME_DIR",
-            self.runtime_directory.clone().into_os_string(),
-        ));
-        values
-    }
-    fn command(&self, args: &[&str]) -> tokio::process::Command {
-        let mut command = tokio::process::Command::new(&self.binary);
-        command
-            .env_clear()
-            .envs(self.environment())
-            .args(args)
-            .current_dir(self.directory.join("workspace"));
-        command
-    }
-    fn write(&self, path: &str, value: impl AsRef<[u8]>) -> Result<(), String> {
-        let path = self.directory.join(path);
-        std::fs::create_dir_all(path.parent().ok_or("missing parent")?).map_err(problem)?;
-        std::fs::write(path, value).map_err(problem)
-    }
-    fn toml(&self, path: &str, value: &Value) -> Result<(), String> {
-        self.write(path, toml::to_string(&toml_value(value)?).map_err(problem)?)
-    }
-    fn profile(&self, name: &str, application: bool, steps: Vec<Value>) -> Result<(), String> {
-        let role = if application { "application" } else { "host" };
-        let mut profile = json!({"format":1});
-        profile["steps"] = Value::Array(steps);
-        self.toml(
-            &format!("config/rsi/{role}-profiles/{name}/{role}.profile.toml"),
-            &profile,
-        )
-    }
-    fn web_family(&self) -> Result<String, String> {
-        let receipt: Value = serde_json::from_slice(
-            &std::fs::read(
-                self.directory
-                    .join("publication/bundle/assets/rsi-build.json"),
-            )
-            .map_err(problem)?,
-        )
-        .map_err(problem)?;
-        receipt["family_sha256"]
-            .as_str()
-            .map(str::to_owned)
-            .ok_or_else(|| "paired dev receipt has no family".into())
-    }
-    fn native_target(&self) -> String {
-        self.root
-            .join("target/dev-native/cache")
-            .to_string_lossy()
-            .into_owned()
-    }
-    fn native_output(&self) -> String {
-        use sha2::{Digest as _, Sha256};
-        format!(
-            "target/dev-native/artifacts/{:x}",
-            Sha256::digest(self.directory.as_os_str().as_encoded_bytes())
-        )
-    }
-    fn build_environment(&self) -> Vec<(&'static str, std::ffi::OsString)> {
-        let mut environment = self.environment();
-        for (name, directory) in [("CARGO_HOME", ".cargo"), ("RUSTUP_HOME", ".rustup")] {
-            if let Some(value) = std::env::var_os(name).or_else(|| {
-                std::env::var_os("HOME")
-                    .map(|home| PathBuf::from(home).join(directory).into_os_string())
-            }) {
-                environment.push((name, value));
-            }
-        }
-        for (name, directory) in [
-            ("npm_config_store_dir", "pnpm-store"),
-            ("COREPACK_HOME", "corepack"),
-            ("XDG_CACHE_HOME", "tool-cache"),
-        ] {
-            environment.push((
-                name,
-                self.root
-                    .join("target/rsi-app")
-                    .join(directory)
-                    .into_os_string(),
-            ));
-        }
-        for name in [
-            "RSI_WASM_BINDGEN",
-            "CARGO_BUILD_JOBS",
-            "CARGO_INCREMENTAL",
-            "CARGO_PROFILE_DEV_DEBUG",
-            "CARGO_PROFILE_TEST_DEBUG",
-        ] {
-            if let Some(value) = std::env::var_os(name) {
-                environment.push((name, value));
-            }
-        }
-        environment
-    }
-    fn native_builder(
-        &self,
-        manifest: &str,
-        library: &str,
-        environment: &[(&str, std::ffi::OsString)],
-    ) -> Result<PathBuf, String> {
-        use std::os::unix::fs::PermissionsExt as _;
-        let outputs = self.root.join(self.native_output());
-        std::fs::create_dir_all(&outputs).map_err(problem)?;
-        self.write("native-output-path", outputs.as_os_str().as_encoded_bytes())?;
-        let artifact = format!(
-            "{}{library}{}",
-            std::env::consts::DLL_PREFIX,
-            std::env::consts::DLL_SUFFIX
-        );
-        let destination = outputs.join(&artifact);
-        let temporary = outputs.join(format!("{artifact}.tmp"));
-        let quote = |path: &Path| -> Result<String, String> {
-            Ok(shell_argument(
-                path.to_str().ok_or("non-UTF-8 development path")?,
-            ))
-        };
-        let body = format!(
-            "set -eu\ncd {}\ncargo build --locked --manifest-path {} --target-dir {} --target {}\ncp {} {}\nmv {} {}\n",
-            quote(&self.root)?,
-            shell_argument(manifest),
-            shell_argument(&self.native_target()),
-            shell_argument(env!("RSI_APP_TARGET")),
-            quote(
-                &PathBuf::from(self.native_target())
-                    .join(env!("RSI_APP_TARGET"))
-                    .join("debug")
-                    .join(artifact)
-            )?,
-            quote(&temporary)?,
-            quote(&temporary)?,
-            quote(&destination)?
-        );
-        let script = format!(
-            "#!/bin/sh\nexec env -i {} flock --exclusive {} /bin/sh -c {}\n",
-            shell_environment(environment)?,
-            quote(&self.root.join("target/dev-native/build.lock"))?,
-            shell_argument(&body)
-        );
-        let name = format!("build-{library}");
-        self.write(&name, script)?;
-        let path = self.directory.join(name);
-        std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o700)).map_err(problem)?;
-        Ok(path)
-    }
-    fn remove(&self) -> Result<(), String> {
-        for path in [
-            self.root.join(self.native_output()),
-            self.runtime_directory.clone(),
-            self.directory.clone(),
-        ] {
-            if path.exists() {
-                std::fs::remove_dir_all(path).map_err(problem)?;
-            }
-        }
-        Ok(())
-    }
-    async fn addon(&self, manifest: &str, id: &str, signals: &mut Signals) -> Result<(), String> {
-        logged(
-            self.command(&[
-                "addon",
-                "install",
-                self.directory
-                    .join(manifest)
-                    .to_str()
-                    .ok_or("non-UTF-8 development path")?,
-            ]),
-            &self.log,
-            signals,
-        )
-        .await?;
-        logged(self.command(&["addon", "enable", id]), &self.log, signals).await
-    }
-}
-fn toml_value(value: &Value) -> Result<toml::Value, String> {
-    Ok(match value {
-        Value::Null => return Err("null has no TOML representation".into()),
-        Value::Bool(value) => toml::Value::Boolean(*value),
-        Value::String(value) => toml::Value::String(value.clone()),
-        Value::Number(value) => toml::Value::Integer(
-            value
-                .as_i64()
-                .ok_or("generated Profile integer exceeds TOML bounds")?,
-        ),
-        Value::Array(values) => {
-            toml::Value::Array(values.iter().map(toml_value).collect::<Result<_, _>>()?)
-        }
-        Value::Object(values) => toml::Value::Table(
-            values
-                .iter()
-                .map(|(key, value)| Ok((key.clone(), toml_value(value)?)))
-                .collect::<Result<_, String>>()?,
-        ),
-    })
-}
-fn step(id: &str, plugin: &str, config: Option<Value>) -> Value {
-    let mut value = json!({"kind":"plugin","id":id,"plugin":plugin});
-    if let Some(config) = config {
-        value["config"] = config;
-    }
-    value
-}
-async fn start(root: PathBuf, options: Options) -> Result<(), String> {
     let mut signals = Signals::new().map_err(problem)?;
-    let dev = Development::create(root, &options)?;
-    let result = start_development(&dev, &options, &mut signals).await;
-    if result.is_ok() && options.directory.is_none() && !options.prepare {
-        dev.remove()?;
+    let parent = root.join("target/rsi-dev");
+    std::fs::create_dir_all(&parent).map_err(problem)?;
+    let directory = tempfile::Builder::new()
+        .prefix("run-")
+        .tempdir_in(&parent)
+        .map_err(problem)?
+        .keep()
+        .canonicalize()
+        .map_err(problem)?;
+    let run_id = format!(
+        "{:x}",
+        Sha256::digest(directory.as_os_str().as_encoded_bytes())
+    )[..32]
+        .to_owned();
+    eprintln!("Development output: {}", directory.display());
+    let cancelled = Arc::new(AtomicBool::new(false));
+    let build_cancel = cancelled.clone();
+    let build_root = root.clone();
+    let surface = options.surface.clone();
+    let output = directory.join("publication");
+    let mut build = tokio::task::spawn_blocking(move || {
+        crate::dist::development(&build_root, &surface, output, build_cancel)
+    });
+    let artifact = tokio::select! { biased;
+        () = signals.interrupted() => { cancelled.store(true, Ordering::SeqCst); let _ = build.await.map_err(problem)?; return Err(format!("build interrupted; retained {}", directory.display())); },
+        result = &mut build => result.map_err(problem)?.map_err(|error| format!("{error}; retained {}", directory.display()))?,
+    };
+    let result = if options.surface == "tui" {
+        tui(&artifact, &caller, &options, &mut signals).await
+    } else {
+        web(
+            &root,
+            &caller,
+            &directory,
+            &run_id,
+            &artifact,
+            &options,
+            &mut signals,
+        )
+        .await
+    };
+    match result {
+        Ok(()) => {
+            drop(artifact);
+            remove_owned_run(&parent, &directory)?;
+            Ok(())
+        }
+        Err(error) => Err(format!("{error}; retained {}", directory.display())),
     }
-    result
 }
-async fn start_development(
-    dev: &Development,
+fn remove_owned_run(parent: &Path, directory: &Path) -> Result<(), String> {
+    let parent = parent.canonicalize().map_err(problem)?;
+    let resolved = directory.canonicalize().map_err(problem)?;
+    if resolved.parent() != Some(parent.as_path())
+        || std::fs::symlink_metadata(directory)
+            .map_err(problem)?
+            .file_type()
+            .is_symlink()
+    {
+        return Err("refusing to remove an unowned development path".into());
+    }
+    std::fs::remove_dir_all(resolved).map_err(problem)
+}
+fn binary(artifact: &crate::dist::BuiltApplication) -> PathBuf {
+    artifact
+        .bundle
+        .join(if cfg!(windows) { "rsi.exe" } else { "rsi" })
+}
+fn product(artifact: &crate::dist::BuiltApplication, caller: &Path) -> Command {
+    let mut command = Command::new(binary(artifact));
+    command.current_dir(caller).env_remove("RSI_DEV_CALLER_CWD");
+    command
+}
+async fn tui(
+    artifact: &crate::dist::BuiltApplication,
+    caller: &Path,
     options: &Options,
     signals: &mut Signals,
 ) -> Result<(), String> {
-    eprintln!(
-        "Preparing {} development in {}. Build log: {}",
-        options.surface,
-        dev.directory.display(),
-        dev.log.display()
-    );
-    if options.surface == "web" {
-        let mut build = tokio::process::Command::new(std::env::current_exe().map_err(problem)?);
-        build
-            .env_clear()
-            .envs(dev.build_environment())
-            .current_dir(&dev.root)
-            .arg("dist")
-            .arg("web")
-            .arg(dev.directory.join("publication"))
-            .arg("--debug");
-        logged(build, &dev.log, signals).await?;
-        std::os::unix::fs::symlink(dev.directory.join("publication/bundle/rsi"), &dev.binary)
-            .map_err(problem)?;
-        dev.write("development.json", serde_json::to_vec_pretty(&json!({"mode":"development-source-overlay", "native_worker":"paired", "document":"mutable-vite-source", "rust_worker_changes":"rebuild and restart"})).map_err(problem)?)?;
-    } else {
-        let mut build = tokio::process::Command::new("cargo");
-        build
-            .env_clear()
-            .envs(dev.build_environment())
-            .current_dir(&dev.root)
-            .args(["build", "--locked", "-p", "rsi-cli", "--target-dir"])
-            .arg(dev.root.join("target"))
-            .args(["--target", env!("RSI_APP_TARGET")]);
-        logged(build, &dev.log, signals).await?;
-        std::fs::copy(
-            dev.root
-                .join("target")
-                .join(env!("RSI_APP_TARGET"))
-                .join("debug/rsi"),
-            &dev.binary,
+    #[cfg(windows)]
+    if std::env::var_os("WT_SESSION").is_none() {
+        return Err("interactive development TUI requires Windows Terminal".into());
+    }
+    let mut command = product(artifact, caller);
+    command.args(["__dev", "tui"]).args(&options.arguments);
+    let mut child = Child::spawn_development(command).await?;
+    #[cfg(unix)]
+    let _foreground = match Foreground::acquire(&child) {
+        Ok(foreground) => foreground,
+        Err(error) => {
+            child.stop().await?;
+            return Err(error);
+        }
+    };
+    let outcome = tokio::select! { biased;
+        () = signals.interrupted() => Ok(()),
+        status = child.wait() => status.map_err(problem).and_then(|status| if application_succeeded(status) { Ok(()) } else { Err(format!("development TUI failed: {status}")) }),
+    };
+    child.stop().await?;
+    outcome
+}
+
+struct Peer {
+    input: tokio::process::ChildStdin,
+    output: BufReader<tokio::process::ChildStdout>,
+    run_id: String,
+}
+impl Peer {
+    async fn send(&mut self, message: Message) -> Result<(), String> {
+        let frame = Frame::new(&self.run_id, message).map_err(problem)?;
+        tokio::time::timeout(
+            PROXY_TIMEOUT,
+            rsi_dev_control::write(&mut self.input, &frame),
         )
-        .map_err(problem)?;
-        #[cfg(unix)]
-        {
-            use std::os::unix::fs::PermissionsExt as _;
-            std::fs::set_permissions(&dev.binary, std::fs::Permissions::from_mode(0o700))
-                .map_err(problem)?;
+        .await
+        .map_err(|_| "control write timeout")?
+        .map_err(problem)
+    }
+    async fn read(&mut self, timeout: std::time::Duration) -> Result<Message, String> {
+        tokio::time::timeout(timeout, rsi_dev_control::read(&mut self.output))
+            .await
+            .map_err(|_| "development readiness timeout")?
+            .map_err(problem)?
+            .into_message(&self.run_id)
+            .map_err(problem)
+    }
+}
+struct Session {
+    stop: CancellationToken,
+    children: JoinSet<Result<(String, Option<std::process::ExitStatus>), String>>,
+    watcher_inputs: Vec<tokio::process::ChildStdin>,
+    interrupted: Arc<AtomicBool>,
+}
+impl Session {
+    fn new() -> Self {
+        Self {
+            stop: CancellationToken::new(),
+            children: JoinSet::new(),
+            watcher_inputs: Vec::new(),
+            interrupted: Arc::new(AtomicBool::new(false)),
         }
     }
-    write_launcher(dev)?;
-    prepare(dev, options, signals).await?;
-    println!(
-        "{}",
-        json!({"event":"dev-prepared","directory":dev.directory,"binary":dev.binary,"profile":format!("dev-{}",options.surface),"build_log":dev.log})
-    );
-    if options.prepare {
-        return Ok(());
+    fn own(&mut self, mut child: Child, role: &str) {
+        let stop = self.stop.clone();
+        let role = role.to_owned();
+        let interrupted = self.interrupted.clone();
+        self.children.spawn(async move {
+            let status = tokio::select! { biased;
+                () = stop.cancelled() => child.stop_after_eof().await?,
+                status = child.wait() => status.map_err(problem)?,
+            };
+            if application_interrupted(status) {
+                interrupted.store(true, Ordering::SeqCst);
+            }
+            Ok((role, Some(status)))
+        });
     }
-    if options.smoke {
-        logged(
-            dev.command(&[
-                "--profile",
-                "dev-headless",
-                "local development smoke",
-                "--output",
-                "jsonl",
-            ]),
-            &dev.directory.join("logs/smoke.jsonl"),
+    async fn peer(
+        &mut self,
+        mut command: Command,
+        role: &str,
+        run_id: &str,
+    ) -> Result<Peer, String> {
+        command.stdin(Stdio::piped()).stdout(Stdio::piped());
+        let mut child = Child::spawn_development(command).await?;
+        let input = child
+            .process
+            .stdin
+            .take()
+            .ok_or("missing child control input")?;
+        let output = BufReader::new(
+            child
+                .process
+                .stdout
+                .take()
+                .ok_or("missing child control output")?,
+        );
+        self.own(child, role);
+        Ok(Peer {
+            input,
+            output,
+            run_id: run_id.into(),
+        })
+    }
+    async fn guard<T>(
+        &mut self,
+        future: impl std::future::Future<Output = Result<T, String>>,
+        signals: &mut Signals,
+    ) -> Result<T, String> {
+        tokio::select! { biased;
+            () = signals.interrupted() => Err(INTERRUPTED.into()),
+            result = self.children.join_next() => {
+                let (role, status) = result.ok_or("no supervised development children")?.map_err(problem)??;
+                if status.is_some_and(application_interrupted) {
+                    Err(INTERRUPTED.into())
+                } else { Err(format!("{role} stopped unexpectedly: {status:?}")) }
+            }
+            result = future => result,
+        }
+    }
+    async fn shutdown(&mut self) -> Result<(), String> {
+        self.watcher_inputs.clear();
+        self.stop.cancel();
+        let mut failure = None;
+        while let Some(result) = self.children.join_next().await {
+            if let Err(error) = result.map_err(problem).and_then(|result| result) {
+                failure.get_or_insert(error);
+            }
+        }
+        failure.map_or(Ok(()), Err)
+    }
+}
+async fn web(
+    root: &Path,
+    caller: &Path,
+    directory: &Path,
+    run_id: &str,
+    artifact: &crate::dist::BuiltApplication,
+    options: &Options,
+    signals: &mut Signals,
+) -> Result<(), String> {
+    let mut session = Session::new();
+    let result = web_session(
+        root,
+        caller,
+        directory,
+        run_id,
+        artifact,
+        options,
+        signals,
+        &mut session,
+    )
+    .await;
+    let cleanup = session.shutdown().await;
+    cleanup?;
+    match result {
+        Err(error) if error == INTERRUPTED || session.interrupted.load(Ordering::SeqCst) => Ok(()),
+        other => other,
+    }
+}
+#[allow(clippy::too_many_arguments)]
+async fn web_session(
+    root: &Path,
+    caller: &Path,
+    directory: &Path,
+    run_id: &str,
+    artifact: &crate::dist::BuiltApplication,
+    options: &Options,
+    signals: &mut Signals,
+    session: &mut Session,
+) -> Result<(), String> {
+    let mut frontend = None;
+    let mut origin = None;
+    let mut assets = artifact.bundle.join("assets");
+    let environment = crate::dist::development_environment(root)?;
+    if options.watch {
+        prepare_frontend(root, directory, &environment, signals).await?;
+        assets = directory.join("assets");
+        copy_assets(&artifact.bundle.join("assets"), &assets)?;
+        let mut command = Command::new("node");
+        command
+            .arg(root.join("apps/web/development-server.mjs"))
+            .current_dir(root.join("apps/web"))
+            .env_clear()
+            .envs(&environment)
+            .stderr(log(directory, "vite.log")?);
+        let mut peer = session.peer(command, "Vite", run_id).await?;
+        peer.send(Message::StartFrontend {
+            port: options.port,
+            family: artifact.family.clone(),
+        })
+        .await?;
+        let Message::FrontendBound { origin: reported } =
+            session.guard(peer.read(STARTUP_TIMEOUT), signals).await?
+        else {
+            return Err("expected frontend socket ownership".into());
+        };
+        let address = rsi_dev_control::loopback_address(&reported).map_err(problem)?;
+        if options.port != 0 && address.port() != options.port {
+            return Err("frontend reported a different port".into());
+        }
+        eprintln!("Development frontend: {reported}");
+        origin = Some(reported);
+        frontend = Some(peer);
+        start_renderer_watcher(session, root, directory, &assets, &environment).await?;
+    }
+    let mut native = product(artifact, caller);
+    native.args(["__dev", "web"]);
+    let mut backend = session.peer(native, "native Web", run_id).await?;
+    backend
+        .send(Message::StartBackend {
+            port: if options.watch { 0 } else { options.port },
+            assets: assets
+                .to_str()
+                .ok_or("non-UTF-8 development assets path")?
+                .into(),
+            watch: options.watch,
+            frontend_origin: origin.clone(),
+        })
+        .await?;
+    let Message::BackendReady { address } = session
+        .guard(backend.read(STARTUP_TIMEOUT), signals)
+        .await?
+    else {
+        return Err("expected backend socket ownership".into());
+    };
+    session
+        .guard(
+            release_launch(&mut frontend, &mut backend, &address),
             signals,
         )
         .await?;
-        return validate_smoke(&dev.directory.join("logs/smoke.jsonl"));
-    }
-    launch(dev, options, signals).await
-}
-fn validate_smoke(path: &Path) -> Result<(), String> {
-    if std::fs::metadata(path).map_err(problem)?.len() > 1024 * 1024 {
-        return Err("development smoke output exceeds 1 MiB".into());
-    }
-    let source = std::fs::read_to_string(path).map_err(problem)?;
-    let records = source
-        .lines()
-        .map(|line| serde_json::from_str::<Value>(line).map_err(problem))
-        .collect::<Result<Vec<_>, _>>()?;
-    let outcome = records
-        .last()
-        .ok_or("development smoke returned no records")?;
-    if outcome["type"] != "outcome" || outcome["outcome"]["status"] != "completed" {
-        return Err("development smoke has no completed outcome".into());
-    }
-    let matching = |record: &&Value| {
-        record["session_id"] == outcome["session_id"]
-            && record["fact"]["turn_id"] == outcome["turn_id"]
+    let Message::LaunchReady { url, open_browser } =
+        session.guard(backend.read(PROXY_TIMEOUT), signals).await?
+    else {
+        return Err("expected Web launch readiness".into());
     };
-    let selected = records.iter().filter(matching).collect::<Vec<_>>();
-    if !selected
-        .iter()
-        .any(|record| smoke_provider_answer(&record["fact"]))
-        || !selected.iter().any(|record| {
-            record["fact"]["type"] == "turn_terminal"
-                && record["fact"]["outcome"]["status"] == "completed"
-        })
-    {
-        return Err(
-            "development smoke lacks its native-provider or durable-terminal evidence".into(),
-        );
+    let expected = origin.unwrap_or_else(|| {
+        rsi_dev_control::loopback_origin(address.parse().expect("validated address"))
+    });
+    if url.split_once('#').map(|(origin, _)| origin) != Some(expected.as_str()) {
+        return Err("launch link differs from owned frontend".into());
     }
+    println!("rsi web: {url}");
+    if options.open && open_browser {
+        let opening = async { Ok(open_browser_link(artifact, caller, run_id, &url).await) };
+        if session.guard(opening, signals).await?.is_err() {
+            eprintln!("Could not open the browser; use the launch link printed above.");
+        }
+    }
+    session
+        .guard(std::future::pending::<Result<(), String>>(), signals)
+        .await
+}
+async fn release_launch(
+    frontend: &mut Option<Peer>,
+    backend: &mut Peer,
+    address: &str,
+) -> Result<(), String> {
+    tokio::time::timeout(PROXY_TIMEOUT, async {
+        if let Some(frontend) = frontend {
+            frontend
+                .send(Message::ConfigureProxy {
+                    upstream: format!("http://{address}"),
+                })
+                .await?;
+            if !matches!(frontend.read(PROXY_TIMEOUT).await?, Message::ProxyReady {}) {
+                return Err("expected proxy readiness".into());
+            }
+        }
+        backend.send(Message::ReleaseLaunch {}).await
+    })
+    .await
+    .map_err(|_| "proxy readiness timeout".to_owned())?
+}
+async fn start_renderer_watcher(
+    session: &mut Session,
+    root: &Path,
+    directory: &Path,
+    assets: &Path,
+    environment: &std::collections::BTreeMap<OsString, OsString>,
+) -> Result<(), String> {
+    let mut watcher = Command::new("node");
+    watcher
+        .args([
+            root.join("apps/web/renderers.mjs").into_os_string(),
+            assets.as_os_str().to_owned(),
+            "--watch".into(),
+            "--supervised".into(),
+        ])
+        .current_dir(root)
+        .env_clear()
+        .envs(environment)
+        .stdin(Stdio::piped())
+        .stdout(log(directory, "renderers.log")?)
+        .stderr(log(directory, "renderers-error.log")?);
+    let mut watcher = Child::spawn_development(watcher).await?;
+    session.watcher_inputs.push(
+        watcher
+            .process
+            .stdin
+            .take()
+            .ok_or("renderer watcher stdin missing")?,
+    );
+    session.own(watcher, "renderer watcher");
     Ok(())
 }
-fn smoke_provider_answer(value: &Value) -> bool {
-    use rsi_agent_session_protocol::{ModelEventPurpose, SessionFact, SessionFactBody};
-    use rsi_ai_protocol::{ContentDelta, LanguageEvent};
-    let Ok(fact) = serde_json::from_value::<SessionFact>(value.clone()) else {
-        return false;
-    };
-    let SessionFactBody::ModelAttemptSettled {
-        purpose: ModelEventPurpose::Conversation,
-        attempt,
-        ..
-    } = fact.body()
-    else {
-        return false;
-    };
-    let mut answer = String::new();
-    for event in attempt.events() {
-        match event {
-            Ok((
-                _,
-                LanguageEvent::ContentDelta {
-                    delta: ContentDelta::Text(text),
-                    ..
-                },
-            )) => answer.push_str(&text),
-            Ok(_) => {}
-            Err(_) => return false,
-        }
-    }
-    answer == "dev: native Language"
-}
-fn shell_argument(value: &str) -> String {
-    format!("'{}'", value.replace('\'', "'\\''"))
-}
-fn shell_environment(environment: &[(&str, std::ffi::OsString)]) -> Result<String, String> {
-    environment
-        .iter()
-        .map(|(name, value)| {
-            Ok(shell_argument(&format!(
-                "{name}={}",
-                value.to_str().ok_or("non-UTF-8 development environment")?
-            )))
-        })
-        .collect::<Result<Vec<_>, String>>()
-        .map(|values| values.join(" "))
-}
-fn write_launcher(dev: &Development) -> Result<(), String> {
-    use sha2::{Digest as _, Sha256};
-    use std::io::Read as _;
-    use std::os::unix::fs::PermissionsExt as _;
-    let mut binary = std::fs::File::open(&dev.binary).map_err(problem)?;
-    let mut digest = Sha256::new();
-    let mut chunk = vec![0; 64 * 1024];
-    loop {
-        let length = binary.read(&mut chunk).map_err(problem)?;
-        if length == 0 {
-            break;
-        }
-        digest.update(&chunk[..length]);
-    }
-    dev.write("binary.sha256", format!("{:x}  rsi\n", digest.finalize()))?;
-    let mut script = format!(
-        "#!/bin/sh\ncd {} || exit 1\nexec env -i",
-        shell_argument(
-            dev.directory
-                .join("workspace")
-                .to_str()
-                .ok_or("non-UTF-8 development path")?
-        )
-    );
-    for (name, value) in dev.environment() {
-        script.push(' ');
-        script.push_str(&shell_argument(&format!(
-            "{name}={}",
-            value.to_str().ok_or("non-UTF-8 development environment")?
-        )));
-    }
-    script.push(' ');
-    script.push_str(&shell_argument(
-        dev.binary.to_str().ok_or("non-UTF-8 development path")?,
-    ));
-    script.push_str(" \"$@\"\n");
-    dev.write("run", script)?;
-    std::fs::set_permissions(
-        dev.directory.join("run"),
-        std::fs::Permissions::from_mode(0o700),
-    )
-    .map_err(problem)
-}
-async fn prepare(
-    dev: &Development,
-    options: &Options,
+async fn prepare_frontend(
+    root: &Path,
+    directory: &Path,
+    environment: &std::collections::BTreeMap<OsString, OsString>,
     signals: &mut Signals,
 ) -> Result<(), String> {
-    let builder = dev.native_builder(
-        "fixtures/rsi/native-addon/Cargo.toml",
-        "rsi_fixture_native_addon",
-        &dev.build_environment(),
-    )?;
-    let mut command = tokio::process::Command::new(builder);
-    command.env_clear().envs(dev.environment());
-    logged(command, &dev.log, signals).await?;
-    let artifact = format!(
-        "{}/{}rsi_fixture_native_addon{}",
-        dev.native_output(),
-        std::env::consts::DLL_PREFIX,
-        std::env::consts::DLL_SUFFIX
-    );
-    let target = format!("{}-{}", std::env::consts::OS, std::env::consts::ARCH);
-    dev.toml("provider.toml",&json!({"format":2,"scope":"service","id":"dev.provider","plugin":"fixture.native-addon","target":target,"artifact":artifact,"source_root":dev.root}))?;
-    dev.addon("provider.toml", "dev.provider", signals).await?;
-    dev.write(
-        "config/rsi/settings.json",
-        serde_json::to_vec(
-            &json!({"rsi.agent":{"default_model":{"deployment":"native","model":"native-text"}}}),
-        )
-        .map_err(problem)?,
-    )?;
-    dev.profile("dev",false,vec![step("provider","fixture.native-addon",Some(json!({"label":"dev","tools":false,"ai":true}))),step("adapter","rsi.ai.portable",Some(json!({"service":"fixture.native.ai","deployment":"native","provider_family":"fixture","protocol":"fixture-v1","endpoint_fingerprint":"local-fixture","language":true,"image":false})))])?;
-    dev.profile(
-        "dev-headless",
-        true,
-        vec![
-            step(
-                "connection",
-                "rsi.application.connection",
-                Some(json!({"host_profile":"dev"})),
-            ),
-            step("application", "rsi.application.headless", None),
-        ],
-    )?;
-    if options.surface == "tui" {
-        prepare_tui(dev, &target, signals).await
-    } else {
-        prepare_web(dev, options.watch, signals).await
-    }
-}
-async fn prepare_tui(dev: &Development, target: &str, signals: &mut Signals) -> Result<(), String> {
-    let builder = dev.native_builder(
-        "crates/rsi/terminal-native/Cargo.toml",
-        "rsi_terminal_native",
-        &dev.build_environment(),
-    )?;
-    let mut command = tokio::process::Command::new(&builder);
-    command.env_clear().envs(dev.environment());
-    logged(command, &dev.log, signals).await?;
-    dev.toml("terminal.toml",&json!({"format":2,"scope":"application","id":"dev.terminal","plugin":"rsi.terminal.native","target":target,"artifact":format!("{}/{}rsi_terminal_native{}",dev.native_output(),std::env::consts::DLL_PREFIX,std::env::consts::DLL_SUFFIX),"source_root":dev.root,"build":{"command":[builder],"watch":["Cargo.toml","Cargo.lock","crates/rsi/terminal-native/src","crates/rsi/terminal-native/Cargo.toml","crates/rsi/terminal-native/Cargo.lock","crates/rsi/terminal-ui","crates/rsi/ui-protocol","crates/rsi-meta/native"],"timeout_seconds":600}}))?;
-    dev.addon("terminal.toml", "dev.terminal", signals).await?;
-    dev.profile("dev-tui",true,vec![step("connection","rsi.application.connection",Some(json!({"host_profile":"dev"}))),step("ui","rsi.ui",None),step("target","rsi.ui.target",Some(json!("application"))),step("session-ui","rsi.session.ui",None),step("tree-ui","rsi.session.tree.ui",None),step("files-ui","rsi.session.files.ui",None),step("application","rsi.application.tui",Some(json!({"presentation":[{"id":"native","plugin":"rsi.terminal.native"},{"id":"adapter","plugin":"rsi.terminal.portable"}]})))])
-}
-async fn prepare_web(dev: &Development, watch: bool, signals: &mut Signals) -> Result<(), String> {
-    let assets = dev.directory.join("publication/bundle/assets");
-    eprintln!(
-        "Development source overlay: Vite serves mutable document source; native and Worker remain paired. Rust/Worker changes require rebuilding and restarting pnpm dev."
-    );
-    let mut install = tokio::process::Command::new("pnpm");
-    install
-        .env_clear()
-        .envs(dev.build_environment())
-        .current_dir(dev.root.join("apps/web"))
+    let pnpm = repository_pnpm(root)?;
+    let output = log(directory, "frontend-install.log")?;
+    let mut command = Command::new("node");
+    command
+        .arg(pnpm)
         .args([
             "install",
             "--frozen-lockfile",
             "--ignore-scripts",
             "--store-dir",
         ])
-        .arg(dev.root.join("target/rsi-app/pnpm-store"));
-    logged(install, &dev.log, signals).await?;
-    dev.profile(
-        "dev-web",
-        true,
-        vec![
-            step(
-                "service",
-                "rsi.application.service",
-                Some(json!({"host_profile":"dev"})),
-            ),
-            step(
-                "assets",
-                "rsi.web.assets",
-                Some(json!({"directory":assets,"watch":watch})),
-            ),
-            step("http", "rsi.application.serve-web", None),
-        ],
-    )
-}
-async fn launch(dev: &Development, options: &Options, signals: &mut Signals) -> Result<(), String> {
-    let mut watcher = if options.watch {
-        let mut command = if options.surface == "tui" {
-            dev.command(&[
-                "addon",
-                "watch",
-                dev.directory
-                    .join("terminal.toml")
-                    .to_str()
-                    .ok_or("non-UTF-8 path")?,
-                "--enable",
-            ])
-        } else {
-            let mut command = tokio::process::Command::new("node");
-            command
-                .env_clear()
-                .envs(dev.build_environment())
-                .current_dir(&dev.root)
-                .arg("apps/web/renderers.mjs")
-                .arg(dev.directory.join("publication/bundle/assets"))
-                .arg("--watch");
-            command
-        };
-        redirect(&mut command, &dev.directory.join("logs/watch.log"))?;
-        Some(Child::spawn(command, true)?)
-    } else {
-        None
-    };
-    let mut frontend = None;
-    let mut command = dev.command(&["--profile", &format!("dev-{}", options.surface)]);
-    if options.surface == "web" {
-        let origin = format!("http://127.0.0.1:{}", options.port);
-        let bind = if options.watch {
-            let reserved = std::net::TcpListener::bind(("127.0.0.1", 0)).map_err(problem)?;
-            let address = reserved.local_addr().map_err(problem)?;
-            let upstream = format!("http://{address}");
-            let mut vite = tokio::process::Command::new("pnpm");
-            vite.env_clear()
-                .envs(dev.build_environment())
-                .env("RSI_DEV_UPSTREAM", upstream)
-                .env("RSI_DEV_BUILD_FAMILY", dev.web_family()?)
-                .current_dir(dev.root.join("apps/web"))
-                .args(["exec", "vite"])
-                .args(["--host", "127.0.0.1", "--port", &options.port.to_string()]);
-            redirect(&mut vite, &dev.directory.join("logs/vite.log"))?;
-            frontend = Some(Child::spawn(vite, true)?);
-            address.to_string()
-        } else {
-            format!("127.0.0.1:{}", options.port)
-        };
-        command.args(["--bind", &bind, "--origin", &origin, "--dev-http"]);
-        eprintln!(
-            "Open {origin}. In another terminal, run {} --profile devices register dev-web and paste the receipt into the sign-in form. Select 'Allow local HTTP for development' before connecting.",
-            shell_argument(
-                dev.directory
-                    .join("run")
-                    .to_str()
-                    .ok_or("non-UTF-8 development path")?
-            )
-        );
-    }
-    let mut application = Child::spawn(command, true)?;
-    let _foreground = if options.surface == "tui" {
-        Foreground::acquire(&application)?
-    } else {
-        None
-    };
-    let result = tokio::select! {biased;
-        ()=signals.interrupted()=>{application.stop().await?;true},
-        result=application.wait()=>application_succeeded(result.map_err(problem)?),
-        stopped=async{match &mut watcher{Some(watcher)=>watcher.wait().await,None=>std::future::pending().await}}=>{stopped.map_err(problem)?;application.stop().await?;return Err("frontend source watcher stopped; inspect logs/watch.log".into());},
-        stopped=async{match &mut frontend{Some(frontend)=>frontend.wait().await,None=>std::future::pending().await}}=>{stopped.map_err(problem)?;application.stop().await?;return Err("Vite stopped; inspect logs/vite.log".into());},
-    };
-    if let Some(frontend) = &mut frontend {
-        frontend.stop().await?;
-    }
-    if let Some(watcher) = &mut watcher {
-        watcher.stop().await?;
-    }
-    if result {
-        Ok(())
-    } else {
-        Err(format!(
-            "development application failed; inspect {}",
-            dev.directory.display()
-        ))
-    }
-}
-fn redirect(command: &mut tokio::process::Command, path: &Path) -> Result<(), String> {
-    let log = std::fs::OpenOptions::new()
-        .create(true)
-        .append(true)
-        .open(path)
-        .map_err(problem)?;
-    command
+        .arg(root.join("target/rsi-app/pnpm-store"))
+        .current_dir(root.join("apps/web"))
+        .env_clear()
+        .envs(environment)
         .stdin(Stdio::null())
-        .stdout(log.try_clone().map_err(problem)?)
-        .stderr(log);
+        .stdout(output.try_clone().map_err(problem)?)
+        .stderr(output);
+    let mut child = Child::spawn_development(command).await?;
+    let result = tokio::select! { biased;
+        () = signals.interrupted() => Err(INTERRUPTED.into()),
+        status = child.wait() => status.map_err(problem).and_then(|status| if status.success() { Ok(()) } else { Err("frontend dependency preparation failed; inspect frontend-install.log".into()) }),
+    };
+    child.stop().await?;
+    result
+}
+fn repository_pnpm(root: &Path) -> Result<PathBuf, String> {
+    let pnpm = root.join("target/rsi-tools/pnpm/node_modules/pnpm/bin/pnpm.mjs");
+    if !pnpm.is_file() {
+        return Err("repository pnpm is missing; run the source entrypoint's setup web".into());
+    }
+    Ok(pnpm)
+}
+async fn open_browser_link(
+    artifact: &crate::dist::BuiltApplication,
+    caller: &Path,
+    run_id: &str,
+    url: &str,
+) -> Result<(), String> {
+    // This bounded OS handoff deliberately stays outside application Jobs/groups.
+    // It invokes the same frozen CLI opener and never starts a product Host.
+    let mut command = product(artifact, caller);
+    command
+        .args(["__dev", "open-browser"])
+        .stdin(Stdio::piped())
+        .stdout(Stdio::null())
+        .stderr(Stdio::null())
+        .kill_on_drop(true);
+    let mut child = command.spawn().map_err(problem)?;
+    let mut input = child.stdin.take().ok_or("opener input missing")?;
+    rsi_dev_control::write(
+        &mut input,
+        &Frame::new(run_id, Message::OpenBrowser { url: url.into() }).map_err(problem)?,
+    )
+    .await
+    .map_err(problem)?;
+    drop(input);
+    match tokio::time::timeout(std::time::Duration::from_secs(6), child.wait()).await {
+        Ok(Ok(status)) if status.success() => Ok(()),
+        _ => {
+            let _ = child.kill().await;
+            let _ = child.wait().await;
+            Err("browser opener unavailable or timed out".into())
+        }
+    }
+}
+fn log(directory: &Path, name: &str) -> Result<std::fs::File, String> {
+    std::fs::File::create(directory.join(name)).map_err(problem)
+}
+fn copy_assets(source: &Path, destination: &Path) -> Result<(), String> {
+    std::fs::create_dir(destination).map_err(problem)?;
+    for entry in std::fs::read_dir(source).map_err(problem)? {
+        let entry = entry.map_err(problem)?;
+        if !entry.file_type().map_err(problem)?.is_file() {
+            return Err("development assets require flat ordinary files".into());
+        }
+        std::fs::copy(entry.path(), destination.join(entry.file_name())).map_err(problem)?;
+    }
     Ok(())
-}
-async fn logged(
-    mut command: tokio::process::Command,
-    path: &Path,
-    signals: &mut Signals,
-) -> Result<(), String> {
-    redirect(&mut command, path)?;
-    let mut child = Child::spawn(command, true)?;
-    let status = tokio::select! {biased; ()=signals.interrupted()=>{child.stop().await?;return Err(format!("development preparation interrupted; log: {}",path.display()));}, status=child.wait()=>status.map_err(problem)?};
-    if status.success() {
-        Ok(())
-    } else {
-        Err(format!(
-            "development command failed ({status}); log: {}",
-            path.display()
-        ))
-    }
-}
-struct Signals {
-    interrupt: tokio::signal::unix::Signal,
-    terminate: tokio::signal::unix::Signal,
-    hangup: tokio::signal::unix::Signal,
-    quit: tokio::signal::unix::Signal,
-    stopped: bool,
-}
-impl Signals {
-    fn new() -> std::io::Result<Self> {
-        use tokio::signal::unix::{SignalKind, signal};
-        Ok(Self {
-            interrupt: signal(SignalKind::interrupt())?,
-            terminate: signal(SignalKind::terminate())?,
-            hangup: signal(SignalKind::hangup())?,
-            quit: signal(SignalKind::quit())?,
-            stopped: false,
-        })
-    }
-    async fn interrupted(&mut self) {
-        if !self.stopped {
-            tokio::select! {
-                _ = self.interrupt.recv() => {},
-                _ = self.terminate.recv() => {},
-                _ = self.hangup.recv() => {},
-                _ = self.quit.recv() => {},
-            }
-            self.stopped = true;
-        }
-    }
-}
-fn application_succeeded(status: std::process::ExitStatus) -> bool {
-    use std::os::unix::process::ExitStatusExt as _;
-    status.success()
-        || status.code() == Some(130)
-        || status.signal() == Some(rustix::process::Signal::INT.as_raw())
-}
-struct Child {
-    name: String,
-    process: tokio::process::Child,
-    group: Option<rustix::process::Pid>,
-}
-struct Foreground(nix::unistd::Pid);
-impl Foreground {
-    fn acquire(child: &Child) -> Result<Option<Self>, String> {
-        use std::io::IsTerminal as _;
-        if !std::io::stdin().is_terminal() {
-            return Ok(None);
-        }
-        let previous = nix::unistd::tcgetpgrp(std::io::stdin()).map_err(problem)?;
-        let group = child.group.ok_or("TUI child has no process group")?;
-        Self::set(nix::unistd::Pid::from_raw(group.as_raw_nonzero().get())).map_err(problem)?;
-        // A child that read stdin before the handoff may have received SIGTTIN.
-        child.signal(rustix::process::Signal::CONT);
-        Ok(Some(Self(previous)))
-    }
-    fn set(group: nix::unistd::Pid) -> nix::Result<()> {
-        use nix::sys::signal::{SigSet, SigmaskHow, Signal, pthread_sigmask};
-        let mut blocked = SigSet::empty();
-        blocked.add(Signal::SIGTTOU);
-        let mut previous = SigSet::empty();
-        pthread_sigmask(SigmaskHow::SIG_BLOCK, Some(&blocked), Some(&mut previous))?;
-        // Synchronous: the mask is restored on this same OS thread before returning.
-        let result = nix::unistd::tcsetpgrp(std::io::stdin(), group);
-        let restored = pthread_sigmask(SigmaskHow::SIG_SETMASK, Some(&previous), None);
-        result.and(restored)
-    }
-}
-impl Drop for Foreground {
-    fn drop(&mut self) {
-        let _ = Self::set(self.0);
-    }
-}
-impl Child {
-    fn spawn(mut command: tokio::process::Command, group: bool) -> Result<Self, String> {
-        #[cfg(unix)]
-        if group {
-            command.process_group(0);
-        }
-        command.kill_on_drop(true);
-        let name = command
-            .as_std()
-            .get_program()
-            .to_string_lossy()
-            .into_owned();
-        let child = command.spawn().map_err(problem)?;
-        let group = if group {
-            child
-                .id()
-                .and_then(|pid| i32::try_from(pid).ok())
-                .and_then(rustix::process::Pid::from_raw)
-        } else {
-            None
-        };
-        Ok(Self {
-            name,
-            process: child,
-            group,
-        })
-    }
-    fn signal(&self, signal: rustix::process::Signal) {
-        if let Some(group) = self.group {
-            let _ = rustix::process::kill_process_group(group, signal);
-        } else if let Some(pid) = self
-            .process
-            .id()
-            .and_then(|pid| i32::try_from(pid).ok())
-            .and_then(rustix::process::Pid::from_raw)
-        {
-            let _ = rustix::process::kill_process(pid, signal);
-        }
-    }
-    async fn stop(&mut self) -> Result<(), String> {
-        self.stop_with_timeout(Duration::from_secs(15)).await
-    }
-    async fn exited(&self) -> std::io::Result<()> {
-        use rustix::process::{WaitIdOptions, waitid};
-        let Some(group) = self.group else {
-            return Ok(());
-        };
-        loop {
-            match waitid(
-                rustix::process::WaitId::Pid(group),
-                WaitIdOptions::EXITED | WaitIdOptions::NOWAIT | WaitIdOptions::NOHANG,
-            ) {
-                Ok(Some(_)) => return Ok(()),
-                Ok(None) | Err(rustix::io::Errno::INTR) => {
-                    tokio::time::sleep(Duration::from_millis(10)).await;
-                }
-                Err(error) => return Err(error.into()),
-            }
-        }
-    }
-    async fn wait(&mut self) -> std::io::Result<std::process::ExitStatus> {
-        self.exited().await?;
-        // WNOWAIT pins the group ID until every signal has been sent. Never retain
-        // a numeric group ID after reaping: it could then belong to another owner.
-        self.signal(rustix::process::Signal::KILL);
-        self.group = None;
-        self.process.wait().await
-    }
-    async fn stop_with_timeout(&mut self, timeout: Duration) -> Result<(), String> {
-        self.signal(rustix::process::Signal::TERM);
-        if let Ok(result) = tokio::time::timeout(timeout, self.wait()).await {
-            result.map_err(problem)?;
-            Ok(())
-        } else {
-            self.signal(rustix::process::Signal::KILL);
-            let name = format!("{} (PID {:?})", self.name, self.process.id());
-            kill_completion(self.wait(), &name).await
-        }
-    }
-}
-async fn kill_completion(
-    wait: impl std::future::Future<Output = std::io::Result<std::process::ExitStatus>>,
-    name: &str,
-) -> Result<(), String> {
-    match tokio::time::timeout(Duration::from_secs(2), wait).await {
-        Ok(result) => {
-            result.map_err(problem)?;
-            Err(format!(
-                "development child {name} exceeded cleanup deadline; killed"
-            ))
-        }
-        Err(_) => Err(format!(
-            "development child {name} did not exit within 2 seconds after KILL; cleanup incomplete"
-        )),
-    }
-}
-impl Drop for Child {
-    fn drop(&mut self) {
-        self.signal(rustix::process::Signal::KILL);
-    }
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
-    #[tokio::test(start_paused = true)]
-    async fn unresponsive_killed_child_reports_a_bounded_incomplete_cleanup() {
-        let start = tokio::time::Instant::now();
-        let error = kill_completion(std::future::pending(), "fixture PID 123")
-            .await
-            .unwrap_err();
-        assert_eq!(start.elapsed(), Duration::from_secs(2));
-        assert!(error.contains("fixture PID 123"));
-        assert!(error.contains("cleanup incomplete"));
+    fn parse(args: &[&str]) -> Result<Options, String> {
+        Options::parse(&args.iter().map(|arg| (*arg).into()).collect::<Vec<_>>())
     }
     #[test]
-    fn temporary_environment_falls_back_when_preferred_location_is_unusable() {
-        let parent = tempfile::tempdir().unwrap();
-        let blocked = parent.path().join("file");
-        std::fs::write(&blocked, b"not a directory").unwrap();
-        let environment = temporary_environment(&blocked, parent.path()).unwrap();
-        assert_eq!(environment.path().parent(), Some(parent.path()));
-        assert!(Options::parse(&["tui".into(), "--port".into(), "9000".into()]).is_err());
-        assert_eq!(
-            Options::parse(&["web".into(), "--port".into(), "9000".into()])
-                .unwrap()
-                .port,
-            9000
-        );
-    }
-    #[test]
-    fn generated_profile_numbers_remain_toml_integers_and_credentials_are_absent() {
-        let value = json!({"format":2,"build":{"timeout_seconds":600},"language":true});
-        let encoded = toml::to_string(&toml_value(&value).unwrap()).unwrap();
-        let parsed: toml::Value = toml::from_str(&encoded).unwrap();
-        assert_eq!(parsed["format"].as_integer(), Some(2));
-        assert_eq!(parsed["build"]["timeout_seconds"].as_integer(), Some(600));
-        assert!(!encoded.contains("private::Number"));
-        assert!(toml_value(&json!(u64::MAX)).is_err());
-        assert!(toml_value(&Value::Null).is_err());
-    }
-    #[test]
-    fn launcher_preserves_literal_arguments_and_excludes_ambient_secrets() {
-        use std::os::unix::fs::PermissionsExt as _;
-        let parent = tempfile::tempdir().unwrap();
-        let directory = parent.path().join("dev 'quote' $(not-a-command)");
-        let options = Options::parse(&[
-            "tui".into(),
-            "--directory".into(),
-            directory.to_str().unwrap().into(),
-            "--prepare-only".into(),
-        ])
-        .unwrap();
-        let dev = Development::create(parent.path().to_owned(), &options).unwrap();
-        assert!(dev.runtime_directory.as_os_str().len() < 24);
-        assert_eq!(
-            std::fs::read_to_string(directory.join("runtime-path")).unwrap(),
-            dev.runtime_directory.to_str().unwrap()
-        );
-        std::fs::write(&dev.binary, "#!/usr/bin/python3\nimport os,json,sys\nprint(json.dumps({'args':sys.argv[1:], 'home':os.getenv('HOME'), 'private':os.getenv('RSI_TEST_SECRET'), 'cwd':os.getcwd(), 'cargo':os.getenv('CARGO_HOME')}))\n").unwrap();
-        std::fs::set_permissions(&dev.binary, std::fs::Permissions::from_mode(0o700)).unwrap();
-        write_launcher(&dev).unwrap();
-        let argument = "literal `not-a-command` $(not-a-command) 'quote'\nsecond line";
-        let output = std::process::Command::new(directory.join("run"))
-            .arg(argument)
-            .env("RSI_TEST_SECRET", "fixture-only")
-            .output()
-            .unwrap();
-        assert!(output.status.success());
-        let output: Value = serde_json::from_slice(&output.stdout).unwrap();
-        assert_eq!(output["args"], json!([argument]));
-        assert_eq!(output["home"], json!(directory.join("home")));
-        assert_eq!(
-            output["cwd"],
-            json!(directory.join("workspace").canonicalize().unwrap())
-        );
-        assert!(output["private"].is_null());
-        assert!(
-            output["cargo"].is_null(),
-            "product must not inherit build credentials"
-        );
-        assert_eq!(
-            std::fs::metadata(directory.join("run"))
-                .unwrap()
-                .permissions()
-                .mode()
-                & 0o777,
-            0o700
-        );
-        std::fs::remove_dir_all(&dev.runtime_directory).unwrap();
-    }
-    #[test]
-    fn build_options_are_inherited_without_reaching_product_children() {
-        const PROBE: &str = "RSI_BUILD_ENVIRONMENT_PROBE";
-        let settings = [
-            ("CARGO_INCREMENTAL", "0"),
-            ("CARGO_BUILD_JOBS", "2"),
-            ("CARGO_PROFILE_DEV_DEBUG", "line-tables-only"),
-            ("CARGO_PROFILE_TEST_DEBUG", "line-tables-only"),
-        ];
-        if std::env::var_os(PROBE).is_none() {
-            let status = std::process::Command::new(std::env::current_exe().unwrap())
-                .args([
-                    "--exact",
-                    "dev::tests::build_options_are_inherited_without_reaching_product_children",
-                ])
-                .env(PROBE, "1")
-                .envs(settings)
-                .status()
-                .unwrap();
-            assert!(status.success());
-            return;
-        }
-        let root = tempfile::tempdir().unwrap();
-        let options = Options::parse(&["tui".into()]).unwrap();
-        let dev = Development::create(root.path().into(), &options).unwrap();
-        let build = dev.build_environment();
-        let product = dev.environment();
-        for (name, value) in settings {
-            assert!(
-                build
-                    .iter()
-                    .any(|(key, actual)| *key == name && actual == value)
-            );
-            assert!(!product.iter().any(|(key, _)| *key == name));
-        }
-        assert!(!build.iter().any(|(key, _)| *key == PROBE));
-        std::fs::remove_dir_all(&dev.runtime_directory).unwrap();
-    }
-
-    #[test]
-    fn smoke_requires_matching_provider_text_and_durable_completion() {
-        use rsi_agent_session_protocol::{
-            EffectId, ModelAttemptLog, ModelEventPurpose, SessionFact, SessionFactBody, TurnId,
-        };
-        use rsi_ai_protocol::{ContentDelta, ContentStart, FinishReason, LanguageEvent};
-        let temp = tempfile::tempdir().unwrap();
-        let path = temp.path().join("smoke.jsonl");
-        let attempt = ModelAttemptLog::from_events(
-            [
-                LanguageEvent::ContentStarted {
-                    index: 0,
-                    content: ContentStart::Text,
-                },
-                LanguageEvent::ContentDelta {
-                    index: 0,
-                    delta: ContentDelta::Text("dev: ".into()),
-                },
-                LanguageEvent::ContentDelta {
-                    index: 0,
-                    delta: ContentDelta::Text("native Language".into()),
-                },
-                LanguageEvent::ContentFinished { index: 0 },
-                LanguageEvent::Finished {
-                    reason: FinishReason::Stop,
-                    replay: None,
-                },
-            ]
-            .into_iter()
-            .map(|event| (0, event)),
-            true,
-        )
-        .unwrap();
-        let fact = SessionFact::new(
-            1,
-            1,
-            SessionFactBody::ModelAttemptSettled {
-                turn_id: TurnId::new("t").unwrap(),
-                effect_id: EffectId::new("e").unwrap(),
-                purpose: ModelEventPurpose::Conversation,
-                attempt,
-            },
-        )
-        .unwrap();
-        let mut records = vec![
-            json!({"session_id":"s","fact":fact}),
-            json!({"session_id":"s","fact":{"turn_id":"t","type":"turn_terminal","outcome":{"status":"completed"}}}),
-            json!({"type":"outcome","session_id":"s","turn_id":"t","outcome":{"status":"completed"}}),
-        ];
-        let write = |records: &[Value]| {
-            std::fs::write(
-                &path,
-                records
-                    .iter()
-                    .map(ToString::to_string)
-                    .collect::<Vec<_>>()
-                    .join("\n"),
-            )
-            .unwrap();
-        };
-        write(&records);
-        assert!(validate_smoke(&path).is_ok());
-        records[0]["session_id"] = json!("foreign");
-        write(&records);
-        assert!(validate_smoke(&path).is_err());
-        records[0]["session_id"] = json!("s");
-        records[1]["fact"]["outcome"]["status"] = json!("failed");
-        write(&records);
-        assert!(validate_smoke(&path).is_err());
-    }
-
-    #[test]
-    fn native_compilation_cache_is_reused_across_development_directories() {
-        let root = tempfile::tempdir().unwrap();
-        let first = Development::create(
-            root.path().into(),
-            &Options::parse(&["tui".into()]).unwrap(),
-        )
-        .unwrap();
-        let second = Development::create(
-            root.path().into(),
-            &Options::parse(&["tui".into()]).unwrap(),
-        )
-        .unwrap();
-        let targets = (first.native_target(), second.native_target());
-        for dev in [first, second] {
-            std::fs::remove_dir_all(dev.directory).unwrap();
-            std::fs::remove_dir_all(dev.runtime_directory).unwrap();
-        }
-        assert_eq!(
-            targets.0, targets.1,
-            "random state directories must not duplicate the compilation cache"
-        );
-    }
-
-    #[cfg(target_os = "linux")]
-    #[tokio::test]
-    async fn shared_build_cache_copies_each_concurrent_build_before_unlocking() {
-        use std::os::unix::fs::PermissionsExt as _;
-        let root = tempfile::tempdir().unwrap();
-        let bin = root.path().join("bin");
-        std::fs::create_dir(&bin).unwrap();
-        let cargo = bin.join("cargo");
-        // Competing builds write the same Cargo output. A lock over compilation
-        // alone would allow the second build to replace the first one's copy.
-        let artifact = format!(
-            "{}fixture{}",
-            std::env::consts::DLL_PREFIX,
-            std::env::consts::DLL_SUFFIX
-        );
-        std::fs::write(&cargo, "#!/bin/sh\nset -eu\nwhile [ $# -gt 0 ]; do case $1 in --manifest-path) shift; label=$1;; --target-dir) shift; target=$1;; --target) shift; triple=$1;; esac; shift; done\nmkdir -p \"$target/$triple/debug\"\nprintf '%s' \"$label\" > \"$target/$triple/debug/libfixture.so\"\nsleep 0.1\n".replace("libfixture.so", &artifact)).unwrap();
-        std::fs::set_permissions(cargo, std::fs::Permissions::from_mode(0o700)).unwrap();
-        let options = Options::parse(&["tui".into()]).unwrap();
-        let first = Development::create(root.path().into(), &options).unwrap();
-        let second = Development::create(root.path().into(), &options).unwrap();
-        let environment = [("PATH", format!("{}:/usr/bin:/bin", bin.display()).into())];
-        let a = first
-            .native_builder("first ' literal", "fixture", &environment)
-            .unwrap();
-        let b = second
-            .native_builder("second $(literal)", "fixture", &environment)
-            .unwrap();
-        let (a, b) = tokio::join!(
-            tokio::process::Command::new(a).status(),
-            tokio::process::Command::new(b).status()
-        );
-        assert!(a.unwrap().success() && b.unwrap().success());
-        for (dev, expected) in [(&first, "first ' literal"), (&second, "second $(literal)")] {
-            assert_eq!(
-                std::fs::read_to_string(root.path().join(dev.native_output()).join(&artifact))
-                    .unwrap(),
-                expected
-            );
-            assert_eq!(
-                std::fs::read_to_string(dev.directory.join("native-output-path")).unwrap(),
-                root.path().join(dev.native_output()).to_str().unwrap()
-            );
-        }
-        first.remove().unwrap();
-        assert!(second.directory.exists());
-        assert!(root.path().join(second.native_output()).exists());
-        assert!(Path::new(&first.native_target()).exists());
-        second.remove().unwrap();
-        assert!(!first.directory.exists() && !first.runtime_directory.exists());
-        assert!(!second.directory.exists() && !second.runtime_directory.exists());
-    }
-    #[test]
-    fn invalid_dev_arguments_do_not_create_the_requested_directory() {
-        let parent = tempfile::tempdir().unwrap();
-        let directory = parent.path().join("must-not-exist");
-        let args = [
-            "tui".to_owned(),
-            "--directory".into(),
-            directory.to_str().unwrap().into(),
-            "--unknown".into(),
-        ];
-        assert!(super::run(&args).is_err());
-        assert!(!directory.exists());
+    fn ordinary_development_has_no_fixture_or_reset_authority() {
         for args in [
-            vec!["tui", "--prepare-only", "--smoke"],
-            vec!["web", "--port", "0"],
-            vec!["tui", "--directory", "relative"],
-            vec!["tui", "--no-watch", "--no-watch"],
+            vec!["tui", "--smoke"],
+            vec!["tui", "--", "--reset-state"],
+            vec!["web", "--assets", "x"],
+            vec!["web", "--", "--port", "42"],
+            vec!["web", "--prepare-only"],
+            vec!["web", "--port", "42", "--port", "43"],
+            vec!["web", "--port", "-1"],
         ] {
-            assert!(
-                Options::parse(&args.into_iter().map(str::to_owned).collect::<Vec<_>>()).is_err()
-            );
+            assert!(parse(&args).is_err(), "{args:?}");
         }
+        let options = parse(&["web", "--port", "0", "--no-watch", "--no-open"]).unwrap();
+        assert_eq!(options.port, 0);
+        assert!(!options.watch && !options.open);
+        assert!(parse(&["tui"]).is_ok());
     }
-    #[cfg(target_os = "linux")]
-    fn running(pid: u32) -> bool {
-        std::fs::read_to_string(format!("/proc/{pid}/stat"))
-            .is_ok_and(|stat| !stat.split_once(") ").unwrap().1.starts_with('Z'))
-    }
-    #[cfg(target_os = "linux")]
-    #[tokio::test]
-    async fn process_group_cleanup_reaches_descendants_after_the_leader_exits() {
-        let temp = tempfile::tempdir().unwrap();
-        let path = temp.path().join("pid");
-        let mut command = tokio::process::Command::new("/bin/sh");
-        command
-            .args(["-c", "sleep 60 & printf '%s' $! > \"$1\"", "fixture"])
-            .arg(&path)
-            .stdout(Stdio::null())
-            .stderr(Stdio::null());
-        let child = Child::spawn(command, true).unwrap();
-        child.exited().await.unwrap();
-        let pid = std::fs::read_to_string(&path).unwrap().parse().unwrap();
-        assert!(running(pid));
-        drop(child);
-        tokio::time::timeout(Duration::from_secs(2), async {
-            while running(pid) {
-                tokio::time::sleep(Duration::from_millis(10)).await;
-            }
-        })
-        .await
-        .unwrap();
-    }
-
-    #[cfg(target_os = "linux")]
-    #[tokio::test]
-    async fn explicit_stop_kills_term_ignoring_descendants_before_reaping_leader() {
-        let temp = tempfile::tempdir().unwrap();
-        let path = temp.path().join("pid");
-        let mut command = tokio::process::Command::new("/bin/sh");
-        command.args(["-c", "(trap '' TERM; printf '%s' ready > \"$1.ready\"; exec sleep 60) & printf '%s' $! > \"$1\"; while [ ! -f \"$1.ready\" ]; do sleep 0.01; done", "fixture"]).arg(&path);
-        let mut child = Child::spawn(command, true).unwrap();
-        child.exited().await.unwrap();
-        let pid = std::fs::read_to_string(path).unwrap().parse().unwrap();
-        assert!(running(pid));
-        child
-            .stop_with_timeout(Duration::from_millis(100))
-            .await
-            .unwrap();
-        tokio::time::timeout(Duration::from_secs(2), async {
-            while running(pid) {
-                tokio::time::sleep(Duration::from_millis(10)).await;
-            }
-        })
-        .await
-        .expect("explicit stop must finish cleanup while Child remains alive");
-        drop(child);
-    }
-
-    // Process-global signal handlers are exercised only in this isolated child.
-    #[cfg(target_os = "linux")]
-    #[tokio::test]
-    async fn signal_fixture() {
-        use std::os::unix::fs::PermissionsExt as _;
-        let Some(directory) = std::env::var_os("RSI_DEV_SIGNAL_FIXTURE") else {
-            return;
-        };
-        let parent = PathBuf::from(directory);
-        let options = Options::parse(&[
-            std::env::var("RSI_DEV_SIGNAL_SURFACE").unwrap_or("web".into()),
-            "--directory".into(),
-            parent.join("dev").to_str().unwrap().into(),
-            "--no-watch".into(),
-        ])
-        .unwrap();
-        let dev = Development::create(parent.clone(), &options).unwrap();
-        let source = format!(
-            "#!/bin/sh\ntrap 'exit 0' TERM\nsleep 60 &\nprintf '%s %s' $$ $! > {}\nwait\n",
-            shell_argument(parent.join("ready").to_str().unwrap())
-        );
-        std::fs::write(&dev.binary, source).unwrap();
-        std::fs::set_permissions(&dev.binary, std::fs::Permissions::from_mode(0o700)).unwrap();
-        let mut signals = Signals::new().unwrap();
-        if std::env::var_os("RSI_DEV_SIGNAL_PREPARATION").is_some() {
-            let error = logged(dev.command(&[]), &dev.log, &mut signals)
-                .await
-                .unwrap_err();
-            assert!(error.contains("preparation interrupted"));
-        } else {
-            launch(&dev, &options, &mut signals).await.unwrap();
-        }
-        dev.remove().unwrap();
-    }
-
-    #[cfg(target_os = "linux")]
-    #[tokio::test]
-    async fn signals_stop_application_and_preparation_groups() {
-        use rustix::process::Signal;
-        for surface in ["tui", "web"] {
-            for preparation in [false, true] {
-                for signal in [Signal::INT, Signal::TERM, Signal::HUP, Signal::QUIT] {
-                    let temp = tempfile::tempdir().unwrap();
-                    let mut command =
-                        tokio::process::Command::new(std::env::current_exe().unwrap());
-                    command
-                        .args(["--exact", "dev::tests::signal_fixture", "--nocapture"])
-                        .env("RSI_DEV_SIGNAL_FIXTURE", temp.path())
-                        .env("RSI_DEV_SIGNAL_SURFACE", surface)
-                        .stdin(Stdio::null())
-                        .stdout(Stdio::null())
-                        .stderr(Stdio::null());
-                    if preparation {
-                        command.env("RSI_DEV_SIGNAL_PREPARATION", "1");
-                    }
-                    let mut fixture = Child::spawn(command, true).unwrap();
-                    let pids = tokio::time::timeout(Duration::from_secs(5), async {
-                        loop {
-                            if let Ok(source) = std::fs::read_to_string(temp.path().join("ready")) {
-                                let pids = source
-                                    .split_whitespace()
-                                    .map(str::parse::<u32>)
-                                    .collect::<Result<Vec<_>, _>>()
-                                    .unwrap();
-                                if pids.len() == 2 {
-                                    break pids;
-                                }
-                            }
-                            tokio::time::sleep(Duration::from_millis(10)).await;
-                        }
-                    })
-                    .await
-                    .unwrap();
-                    rustix::process::kill_process(fixture.group.unwrap(), signal).unwrap();
-                    assert!(
-                        tokio::time::timeout(Duration::from_secs(5), fixture.wait())
-                            .await
-                            .unwrap()
-                            .unwrap()
-                            .success(),
-                        "{signal:?}, preparation={preparation}"
-                    );
-                    tokio::time::timeout(Duration::from_secs(2), async {
-                        while pids.iter().any(|pid| running(*pid)) {
-                            tokio::time::sleep(Duration::from_millis(10)).await;
-                        }
-                    })
-                    .await
-                    .expect("supervised group survived launcher shutdown");
-                }
-            }
-        }
-    }
-
     #[test]
-    fn interrupt_exit_is_success_even_if_child_wait_wins_the_signal_race() {
-        use std::os::unix::process::ExitStatusExt as _;
-        assert!(application_succeeded(std::process::ExitStatus::from_raw(2)));
-        assert!(application_succeeded(std::process::ExitStatus::from_raw(
-            130 << 8
-        )));
-        assert!(!application_succeeded(std::process::ExitStatus::from_raw(
-            1 << 8
-        )));
+    fn writable_renderer_copy_preserves_frozen_input_and_cleanup_is_owned() {
+        let root = tempfile::tempdir().unwrap();
+        let source = root.path().join("frozen");
+        std::fs::create_dir(&source).unwrap();
+        std::fs::write(source.join("standard.js"), "initial").unwrap();
+        let run = root.path().join("run");
+        copy_assets(&source, &run).unwrap();
+        std::fs::write(run.join("standard.js"), "updated").unwrap();
+        assert_eq!(
+            std::fs::read_to_string(source.join("standard.js")).unwrap(),
+            "initial"
+        );
+        assert!(remove_owned_run(&run, &source).is_err());
+        remove_owned_run(root.path(), &run).unwrap();
+        assert!(source.exists());
     }
 }

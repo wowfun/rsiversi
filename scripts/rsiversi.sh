@@ -20,6 +20,11 @@ help() {
             'Linux/WSL: /absolute/path. Git Bash also accepts Windows drive/UNC paths and converts POSIX paths.' \
             'Progress and diagnostics go to stderr; stdout contains the result JSON. --verbose mirrors the full build log.' \
             'Example: bash scripts/rsiversi.sh build desktop --debug';;
+        dev) printf '%s\n' \
+            'Usage: bash scripts/rsiversi.sh dev tui [-- TUI_OPTIONS] | dev web [--port PORT] [--no-open] [--no-watch]' \
+            'Build an external debug product using ordinary state and credentials; explicit XDG overrides are respected.' \
+            'Web keeps React HMR and renderer publication. Rust/Worker edits require restart.' \
+            'Use fixture-dev for isolated keyless layout work and smoke checks.';;
         path) printf '%s\n' \
             'Usage: bash scripts/rsiversi.sh path [tui|web|desktop] [-h|--help]' \
             'Print the selected current managed bundle directory (default: tui).' \
@@ -32,6 +37,7 @@ help() {
             '  doctor [TARGET]         Check target-specific source-build prerequisites.' \
             '  setup [TARGET]          Prepare target-specific pinned tools.' \
             '  build [TARGET] [OUTPUT] Build the selected application (release by default; --debug for debug).' \
+            '  dev tui|web [OPTIONS]   Build and supervise the standard debug product.' \
             '  path [TARGET]           Print its current managed bundle directory.' \
             '  tui [--from TARGET] [ARGS] Start TUI; TARGET may be tui, web or desktop.' \
             '  web [--from TARGET] [ARGS] Start Web; TARGET may be web or desktop.' \
@@ -55,7 +61,7 @@ help() {
 }
 case "$operation" in
     ''|-h|--help) help; exit 0;;
-    doctor|setup|build|path)
+    doctor|setup|build|path|dev)
         for argument in "$@"; do
             case "$argument" in -h|--help) help "$operation"; exit 0;; esac
         done;;
@@ -66,6 +72,39 @@ root=$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")/.." && pwd -P)
 windows=false
 case "$(uname -s)" in MINGW*|MSYS*) windows=true;; Linux*) ;; *) echo 'Source entry supports Linux/WSL and Windows Git Bash.' >&2; exit 1;; esac
 fail() { printf '%s\n' "$*" >&2; exit 1; }
+if [[ "$operation" == dev ]]; then
+    (($#)) || fail 'dev requires tui or web'
+    target=$1; shift
+    case "$target" in tui|web) ;; *) fail 'dev requires tui or web';; esac
+    caller=${RSI_DEV_CALLER_CWD:-$(pwd -P)}
+    if $windows; then
+        export MSYS2_ARG_CONV_EXCL='*'
+        exec powershell.exe -NoProfile -ExecutionPolicy Bypass -File "$(cygpath -w "$root/scripts/rsiversi.ps1")" dev "$target" "$@"
+    fi
+    cd -- "$root"
+    build_env=()
+    policy='^([A-Za-z_][A-Za-z0-9_()]*)(=([a-z0-9_-]+(/[a-z0-9_-]+)*))?$'
+    while IFS= read -r declaration; do
+        [[ "$declaration" =~ $policy ]] || fail 'Invalid build environment declaration'
+        key=${BASH_REMATCH[1]}; suffix=${BASH_REMATCH[3]:-}
+        if [[ -n "$suffix" ]]; then
+            value="$root/target/rsi-app/$suffix"; mkdir -p -- "$value"
+            build_env+=("$key=$value")
+        elif [[ "$key" =~ ^[a-zA-Z_][a-zA-Z0-9_]*$ && -v "$key" ]]; then build_env+=("$key=${!key}"); fi
+    done < "$root/apps/devtools/build-environment.txt"
+    [[ -v CARGO_HOME ]] || build_env+=("CARGO_HOME=$HOME/.cargo")
+    [[ -v RUSTUP_HOME ]] || build_env+=("RUSTUP_HOME=$HOME/.rustup")
+    build_env+=("CI=true")
+    env -i "${build_env[@]}" cargo build --locked -p rsi-app-tools --target-dir "$root/target"
+    runners="$root/target/rsi-tools/runners"; mkdir -p -- "$runners"
+    runner=$(mktemp -d "$runners/dev.XXXXXXXX")
+    cp -- "$root/target/debug/rsi-app-tools" "$runner/rsi-app-tools"
+    # Remove only the known file and its empty, freshly-created parent.
+    trap 'case "$runner" in "$runners"/dev.*) rm -f -- "$runner/rsi-app-tools"; rmdir -- "$runner" || true;; esac' EXIT
+    export RSI_DEV_CALLER_CWD="$caller"
+    "$runner/rsi-app-tools" dev "$target" "$@"
+    exit $?
+fi
 bundle() {
     local target=$1 record="$root/target/rsi-app/$1/current" id
     [[ -f "$record" && ! -L "$record" ]] || fail "No $target publication. Run scripts/rsiversi.sh setup $target, then build $target."

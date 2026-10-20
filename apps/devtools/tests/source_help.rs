@@ -98,7 +98,7 @@ fn source_help_precedes_prerequisites_and_has_no_side_effects() {
         fs::copy(source.join(name), scripts.join(name)).unwrap();
     }
     let mut cases = vec![vec![], vec!["--help"], vec!["-h"]];
-    for operation in ["doctor", "setup", "build", "path"] {
+    for operation in ["doctor", "setup", "build", "path", "dev"] {
         for flag in ["--help", "-h"] {
             cases.push(vec![operation, flag]);
         }

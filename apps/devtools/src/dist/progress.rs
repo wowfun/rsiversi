@@ -64,6 +64,12 @@ impl Drop for Stage {
 }
 
 pub(super) fn build_lock(cache: &Path) -> Result<fs::File> {
+    development_build_lock(cache, None)
+}
+pub(super) fn development_build_lock(
+    cache: &Path,
+    cancellation: Option<&std::sync::atomic::AtomicBool>,
+) -> Result<fs::File> {
     fs::create_dir_all(cache)?;
     let lock = fs::OpenOptions::new()
         .create(true)
@@ -75,7 +81,25 @@ pub(super) fn build_lock(cache: &Path) -> Result<fs::File> {
         Ok(()) => (),
         Err(std::fs::TryLockError::WouldBlock) => {
             let stage = Stage::new("Waiting for the paired build owner");
-            lock.lock()?;
+            if let Some(cancellation) = cancellation {
+                loop {
+                    if cancellation.load(std::sync::atomic::Ordering::SeqCst) {
+                        return Err(
+                            "development interrupted while waiting for the paired build owner"
+                                .into(),
+                        );
+                    }
+                    match lock.try_lock() {
+                        Ok(()) => break,
+                        Err(std::fs::TryLockError::WouldBlock) => {
+                            thread::sleep(Duration::from_millis(50));
+                        }
+                        Err(std::fs::TryLockError::Error(error)) => return Err(error.into()),
+                    }
+                }
+            } else {
+                lock.lock()?;
+            }
             stage.complete();
         }
         Err(std::fs::TryLockError::Error(error)) => return Err(error.into()),
@@ -89,6 +113,7 @@ pub(super) struct Runner {
     log: Arc<Mutex<fs::File>>,
     log_path: PathBuf,
     verbose: bool,
+    cancellation: Option<std::sync::Arc<std::sync::atomic::AtomicBool>>,
 }
 impl Runner {
     pub(super) fn new(
@@ -103,7 +128,15 @@ impl Runner {
             log: Arc::new(Mutex::new(fs::File::create(&log_path)?)),
             log_path,
             verbose,
+            cancellation: None,
         })
+    }
+    pub(super) fn with_cancellation(
+        mut self,
+        cancellation: Option<std::sync::Arc<std::sync::atomic::AtomicBool>>,
+    ) -> Self {
+        self.cancellation = cancellation;
+        self
     }
     fn command(&self, program: &str, args: &[&str]) -> Command {
         let mut command = Command::new(program);
@@ -115,18 +148,32 @@ impl Runner {
         command
     }
     pub(super) fn version(&self, program: &str, args: &[&str]) -> Result<String> {
-        let result = self
-            .command(program, args)
-            .output()
-            .map_err(|e| format!("{program}: {e}; run the source entrypoint's doctor"))?;
-        if !result.status.success() {
+        let mut command = self.command(program, args);
+        command
+            .stdin(Stdio::null())
+            .stdout(Stdio::piped())
+            .stderr(Stdio::piped());
+        let mut child =
+            crate::supervision::BuildChild::spawn(command, self.cancellation.clone())
+                .map_err(|e| format!("{program}: {e}; run the source entrypoint's doctor"))?;
+        let output = bounded_capture(child.stdout().ok_or("version stdout missing")?);
+        let errors = bounded_capture(child.stderr().ok_or("version stderr missing")?);
+        let status = child.wait()?;
+        let (output, overflow) = output
+            .join()
+            .map_err(|_| "version stdout reader panicked")??;
+        let (errors, error_overflow) = errors
+            .join()
+            .map_err(|_| "version stderr reader panicked")??;
+        if !status.success() || overflow || error_overflow {
             return Err(format!(
-                "{program} version check failed: {}",
-                String::from_utf8_lossy(&result.stderr)
+                "{program} version check failed ({status}, output overflow: {}): {}",
+                overflow || error_overflow,
+                String::from_utf8_lossy(&errors).trim()
             )
             .into());
         }
-        Ok(String::from_utf8(result.stdout)?.trim().into())
+        Ok(String::from_utf8(output)?.trim().into())
     }
     pub(super) fn run(&mut self, label: &str, program: &str, args: &[&str]) -> Result<()> {
         let stage = Stage::new(label);
@@ -140,19 +187,19 @@ impl Runner {
             writeln!(log, "\n[{label}] {program} {args:?}")?;
             start
         };
-        let mut child = self
-            .command(program, args)
+        let mut command = self.command(program, args);
+        command
             .stdin(Stdio::null())
             .stdout(Stdio::piped())
-            .stderr(Stdio::piped())
-            .spawn()?;
+            .stderr(Stdio::piped());
+        let mut child = crate::supervision::BuildChild::spawn(command, self.cancellation.clone())?;
         let output = mirror(
-            child.stdout.take().ok_or("child stdout missing")?,
+            child.stdout().ok_or("child stdout missing")?,
             self.log.clone(),
             self.verbose,
         );
         let errors = mirror(
-            child.stderr.take().ok_or("child stderr missing")?,
+            child.stderr().ok_or("child stderr missing")?,
             self.log.clone(),
             self.verbose,
         );
@@ -180,6 +227,26 @@ impl Runner {
         Ok(())
     }
 }
+fn bounded_capture(
+    mut input: impl Read + Send + 'static,
+) -> thread::JoinHandle<std::io::Result<(Vec<u8>, bool)>> {
+    thread::spawn(move || {
+        let mut output = Vec::new();
+        let mut overflow = false;
+        let mut block = [0; 8192];
+        loop {
+            let count = input.read(&mut block)?;
+            if count == 0 {
+                break;
+            }
+            let retained = count.min((64 * 1024_usize).saturating_sub(output.len()));
+            output.extend_from_slice(&block[..retained]);
+            overflow |= retained < count;
+        }
+        Ok((output, overflow))
+    })
+}
+
 fn mirror(
     mut input: impl Read + Send + 'static,
     log: Arc<Mutex<fs::File>>,
@@ -262,6 +329,35 @@ fn diagnostics(path: &Path, start: u64) -> std::io::Result<(String, String)> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn development_lock_wait_can_stop_without_changing_the_current_owner() {
+        use std::sync::atomic::{AtomicBool, Ordering};
+        let directory = tempfile::tempdir().unwrap();
+        let owner = build_lock(directory.path()).unwrap();
+        let cancelled = AtomicBool::new(false);
+        thread::scope(|scope| {
+            scope.spawn(|| {
+                thread::sleep(Duration::from_millis(100));
+                cancelled.store(true, Ordering::SeqCst);
+            });
+            let started = Instant::now();
+            let error = development_build_lock(directory.path(), Some(&cancelled)).unwrap_err();
+            assert!(error.to_string().contains("interrupted"));
+            assert!(started.elapsed() < Duration::from_secs(2));
+        });
+        let contender = fs::File::options()
+            .read(true)
+            .write(true)
+            .open(directory.path().join("build.lock"))
+            .unwrap();
+        assert!(matches!(
+            contender.try_lock(),
+            Err(std::fs::TryLockError::WouldBlock)
+        ));
+        drop(owner);
+        contender.try_lock().unwrap();
+    }
     #[test]
     fn first_error_keeps_following_context_across_read_boundaries() {
         let root = tempfile::tempdir().unwrap();

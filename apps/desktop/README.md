@@ -159,3 +159,22 @@ Clipboard writes use the native clipboard manager behind the shared document
 capability, with a 64 KiB UTF-8 limit at both document and native boundaries.
 Only a successful native receipt displays success; `rsi://` does not rely on
 Navigator clipboard support. No clipboard read capability is exposed.
+
+## Development builds
+
+For Linux, install the GTK 3 and WebKitGTK 4.1 development libraries
+(`libgtk-3-dev` and `libwebkit2gtk-4.1-dev` on Ubuntu), and the Web build tools
+described in [source installation](../../docs/user/source-install.md). From the
+repository root in a graphical session, publish a debug distribution to a new
+absolute directory and launch its Desktop executable:
+
+```bash
+cargo run --locked -p rsi-app-tools -- dist desktop /absolute/new/output --debug
+/absolute/new/output/bundle/rsi-desktop
+```
+
+On native Windows, use `scripts/rsiversi.ps1 setup desktop`,
+`scripts/rsiversi.ps1 build desktop --debug`, then `scripts/rsiversi.ps1 desktop`.
+MSVC and a Windows SDK are build prerequisites; WebView2 is checked at launch.
+The [source installation tutorial](../../docs/user/source-install.md) owns the
+PowerShell invocation, system prerequisites and managed build targets.

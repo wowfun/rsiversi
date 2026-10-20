@@ -7,9 +7,11 @@ macro_rules! diagnostic {
         let _ = writeln!(std::io::stderr().lock(), $($message)*);
     }};
 }
-#[cfg(unix)]
 mod dev;
 mod dist;
+#[cfg(unix)]
+mod fixture_dev;
+mod supervision;
 fn fixture_lease(bundle: &str) -> Result<(), String> {
     use std::io::Write as _;
     let path = Path::new(bundle);
@@ -37,7 +39,7 @@ fn require_repository_root(root: &Path) -> Result<(), String> {
         Err("rsi-app-tools must run from the repository root".into())
     }
 }
-const USAGE: &str = "usage: rsi-app-tools dev tui|web [OPTIONS] | dist tui|web|desktop [ABSOLUTE_OUTPUT] [--debug] [--with-ssh-helper] [--verbose] | dist addon-workbench ABSOLUTE_NEW_REPORT | fixture-build profile-leaf-probe ABSOLUTE_NEW_REPORT | gc [tui|web|desktop|all] | fixture-lease ABSOLUTE_BUNDLE | --help | -h";
+const USAGE: &str = "usage: rsi-app-tools dev tui|web [OPTIONS] | fixture-dev tui|web [OPTIONS] | dist tui|web|desktop [ABSOLUTE_OUTPUT] [--debug] [--with-ssh-helper] [--verbose] | dist addon-workbench ABSOLUTE_NEW_REPORT | fixture-build profile-leaf-probe ABSOLUTE_NEW_REPORT | gc [tui|web|desktop|all] | fixture-lease ABSOLUTE_BUNDLE | --help | -h";
 fn main() -> ExitCode {
     let args = std::env::args().skip(1).collect::<Vec<_>>();
     let result = match args.as_slice() {
@@ -46,10 +48,11 @@ fn main() -> ExitCode {
             Ok(())
         }
         [command, bundle] if command == "fixture-lease" => fixture_lease(bundle),
-        #[cfg(unix)]
         [command, rest @ ..] if command == "dev" => dev::run(rest),
+        #[cfg(unix)]
+        [command, rest @ ..] if command == "fixture-dev" => fixture_dev::run(rest),
         #[cfg(not(unix))]
-        [command, ..] if command == "dev" => {
+        [command, ..] if command == "fixture-dev" => {
             Err("the isolated product development launcher currently requires Linux or WSL".into())
         }
         [command, rest @ ..] if command == "dist" => dist::run(rest),

@@ -13,6 +13,41 @@ fn repository() -> &'static Path {
         .expect("xtask is nested three levels below the repository")
 }
 
+#[test]
+fn ci_executes_offline_install_policy_and_an_isolated_ordinary_runtime_smoke() {
+    let source = fs::read_to_string(repository().join(".github/workflows/ci.yml")).unwrap();
+    let workflow: yaml_serde::Value = yaml_serde::from_str(&source).unwrap();
+    let steps = workflow["jobs"]["rsi-meta-browser"]["steps"]
+        .as_sequence()
+        .unwrap();
+    let build = steps
+        .iter()
+        .find(|step| step["id"].as_str() == Some("web_build"))
+        .unwrap();
+    assert!(
+        build["run"]
+            .as_str()
+            .unwrap()
+            .contains("cargo test --locked -p rsi-app-tools --test frontend_install -- --ignored")
+    );
+    let smoke = steps
+        .iter()
+        .find(|step| step["id"].as_str() == Some("standard_dev_runtime"))
+        .unwrap();
+    assert_eq!(
+        smoke["if"].as_str(),
+        Some("${{ !cancelled() && steps.web_build.outcome == 'success' }}")
+    );
+    assert!(smoke["continue-on-error"].is_null());
+    let run = smoke["run"].as_str().unwrap();
+    assert!(run.contains(
+        "for smoke in ordinary_product_runtime_smoke ordinary_product_watched_smoke; do"
+    ));
+    assert!(run.contains("\"dev::lifecycle_tests::$smoke\" -- --ignored --exact"));
+    assert!(run.contains("trap restore_policy EXIT"));
+    assert!(!run.contains("API_KEY"));
+}
+
 fn run(cwd: &Path, arguments: &[&str]) -> Output {
     Command::new(env!("CARGO_BIN_EXE_rsi-xtask"))
         .args(arguments)
@@ -259,7 +294,12 @@ fn assert_windows_tooling_gate(workflow: &serde_json::Value) {
     let tools = &workflow["jobs"]["windows-repository-tools"];
     assert_eq!(tools["runs-on"], "windows-2025");
     assert_windows_architecture_admission(tools);
-    for package in ["rsi-xtask", "rsi-app-tools", "rsi-build-info"] {
+    for package in [
+        "rsi-xtask",
+        "rsi-app-tools",
+        "rsi-dev-control",
+        "rsi-build-info",
+    ] {
         assert!(
             tools["steps"].as_array().unwrap().iter().any(|step| {
                 let Some(command) = step["run"].as_str() else {
@@ -757,7 +797,7 @@ fn ci_frontend_smoke_retains_the_required_sandbox_policy_until_exit() {
         .iter()
         .find(|step| {
             step["run"].as_str().is_some_and(|run| {
-                run.contains("cargo run --locked -p rsi-app-tools -- dev tui --smoke")
+                run.contains("cargo run --locked -p rsi-app-tools -- fixture-dev tui --smoke")
             })
         })
         .expect("product CI exercises the actual development launcher");
@@ -774,7 +814,7 @@ fn ci_frontend_smoke_retains_the_required_sandbox_policy_until_exit() {
     }
     let run = step["run"].as_str().unwrap();
     let smoke = run
-        .find("cargo run --locked -p rsi-app-tools -- dev tui --smoke")
+        .find("cargo run --locked -p rsi-app-tools -- fixture-dev tui --smoke")
         .unwrap();
     for setup in [
         "trap restore_policy EXIT",

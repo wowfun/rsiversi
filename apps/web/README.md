@@ -1,5 +1,17 @@
 # Web document bridge
 
+The supervised development overlay uses the pinned Vite 6.4.3. Its owned HTTP
+listener preserves port zero, proxy configuration retains Vite's supplied option
+objects, and shutdown drains the version-specific dependency scan before closing.
+Each overlay uses a private optimizer cache removed after settlement. Actual
+listener/proxy and startup-cancellation tests cover these assumptions. The
+development frame corpus and deadline metadata live with
+[the control protocol](../dev-control/README.md) and are checked by Rust and JS.
+Only the supervisor's explicit configuration call admits a source server without
+an already configured upstream. Environment flags cannot enable that exception.
+The proxy preserves request authority; the native HTTP adapter fences all routes
+before dispatch and owns browser authentication and CSRF policy.
+
 The shared Web/Desktop shell displays the [product name](../../crates/rsi/README.md)
 with the canonical [logo](public/logo.svg). Its full viewBox, grayscale gradient
 and transparent background are preserved in every theme, without a background
@@ -167,6 +179,11 @@ native executable and complete asset bundle. The command reports the concrete
 bundle directory; `bash scripts/rsiversi.sh web` launches the latest managed
 publication. Omit `--debug` for release. The optional absolute output directory
 must be new and remains caller-owned.
+Dependency installation keeps lifecycle scripts disabled. The [pnpm policy](pnpm-workspace.yaml)
+explicitly denies esbuild's install script; its locked platform package supplies
+the executable. This also keeps repeated installs consistent with pnpm's recorded
+build decisions.
+
 Local compilation has no fixed per-command deadline: a cold Windows release
 build can exceed ten minutes in the Worker stage alone. CI owns its job deadlines;
 the producer waits for the compiler and publishes only a complete successful bundle.
@@ -178,13 +195,19 @@ Renderer generations remain independently replaceable through their existing
 manifest and publication controls. Pairing is an artifact consistency check,
 not distributor authentication.
 
-`pnpm -C apps/web dev` supervises an isolated paired native/Worker upstream and
-Vite's mutable document source overlay. This explicit development mode preserves
-React hot updates and does not claim immutable document pairing. Rust and Worker
-changes require rebuilding and restarting the supervisor. The Vite source root
-excludes the sibling Worker package, repository state and build artifacts.
+`pnpm -C apps/web dev` supervises the standard debug product with caller-selected
+state and credentials. Vite serves mutable document source after reporting its
+owned loopback socket through the [development control protocol](../dev-control/README.md).
+The upstream native/Worker pair remains frozen. React edits use HMR, bootstrap
+edits reload the document, and renderer edits publish from a run-owned asset copy.
+Rust, Worker and Vite server configuration changes require restart. The Vite source
+root excludes the sibling Worker package, repository state and build artifacts.
+Ordinary product login uses the printed one-use launch link. This development
+frontend is trusted application code with access to the selected real state;
+independent XDG roots are appropriate for durable-format work.
 
-Open the configured Serve Web origin and paste the JSON receipt from
+For explicit Serve deployments and isolated Web fixtures, open the configured
+origin and paste the JSON receipt from
 `rsi --profile devices -- register LABEL`. The receipt is used once and removed
 from the form; only the endpoint identity is saved for an explicit reconnect
 using the HttpOnly cookie. Sign out closes document input, flushes draft writes
@@ -599,7 +622,7 @@ characters; Windows drive and UNC paths use their own separators.
 ### Conversation layout
 
 The device layout record is version 3: navigation is expanded, rail or hidden;
-widths clamp to 264–420 px (default 280) and the rail is 56 px. Below 1024 px,
+widths clamp to 264 to 420 px (default 280) and the rail is 56 px. Below 1024 px,
 automatic rail presentation does not overwrite the stored preference; mobile
 uses a 280 px overlay. Resources start closed; their desktop width is a viewport
 fraction, default 45%, clamped by 300 px, 70% and a 400 px conversation minimum.
@@ -696,7 +719,7 @@ Docked resource tabs use the separately pinned DSH dockkit closure at
 `4878cdabd87d4041bdaff61d04c966883b9fd07a`; earlier vendored files keep their
 original revisions. Per-file provenance records source and adapted SHA-256.
 RSI owns the layout adapter, resource authorities, persistence and Session
-selection. The adapter admits two horizontal panes, a 20–80 percent split,
+selection. The adapter admits two horizontal panes, a 20 to 80 percent split,
 16 tabs and four floats per Session. Closing or moving the final tab out of a
 pane merges the empty pane as part of the same undoable intent. Explicitly
 splitting may leave an empty destination until the next move. At narrow widths,
@@ -719,7 +742,7 @@ request a resize. Hiding a retained host never resizes its remote shell.
 
 Session dock records share the layouts bucket, separately keyed by Session and
 endpoint/principal. Semantic intents apply to the latest record in one transaction.
-The adapter enforces two horizontal panes, 20–80% split, 16 tabs, four floats and
+The adapter enforces two horizontal panes, 20 to 80% split, 16 tabs, four floats and
 at most 64 undo entries within the record budget. Runtime view IDs, references and
 terminal attachments never enter this record. Close/undo/reload resolve current
 resource coordinates; terminal restore only attaches read-only. A failed save

@@ -4,10 +4,10 @@ Application development supervision and paired distribution consume the current
 working tree, including dirty and untracked source, without changing the Git index.
 Commands resolve tooling from the validated current repository root, including
 after the checkout or executable has moved.
-`dev tui` retains isolated HOME/XDG state, foreground terminal ownership and native
-renderer watching. The frontend invokes `dev web`; its Vite document source overlay
-is explicitly outside the immutable bootstrap claim, while the upstream native and
-Worker stay paired. Provider secrets are not inherited by build or default dev.
+`dev tui|web` starts ordinary debug applications with caller-selected state and
+credentials. `fixture-dev tui|web` retains deterministic isolated Linux/WSL
+layout and smoke workflows. Build and watcher subprocesses use filtered inputs;
+product subprocesses retain the caller's normal runtime environment.
 
 The source entrypoints `scripts/rsiversi.sh` and `scripts/rsiversi.ps1` own prerequisite diagnosis, explicit
 setup and direct published launch. The Rust builder owns all publication; Python
@@ -180,7 +180,62 @@ helper discovery, selection, readiness bounds and cleanup policy.
 
 ## Development supervision
 
-From the repository root, `cargo run --locked -p rsi-app-tools -- dev tui|web`
+Ordinary `dev tui|web` runs the standard product using caller-selected state and
+credentials. Source wrappers build and execute a private tool copy outside Cargo's
+runtime environment. The [build input policy](build-environment.txt) supplies the
+shared bootstrap, builder and watcher allowlist; toolchain homes may contain registry credentials. Direct `cargo run ... dev` is rejected. Debug external
+publications live under `target/rsi-dev`; they never publish managed current or
+collect managed generations. Product startup prints resolved config/state/cache
+roots. Use independent XDG roots for durable-format changes.
+
+Web accepts `--port` (0..65535, default 8787), `--no-open`, and `--no-watch`.
+Without watchers it serves the frozen product directly. Watched development
+uses bounded child-pipe readiness and exact loopback Origin admission before
+releasing the normal login ticket. Renderer writes target a private asset copy.
+TUI forwards only `--cwd`, `--resume`, and `--session-id` after `--`.
+Reset, Profile, asset and control overrides are not forwarded.
+
+The supervisor supports Linux/WSL process groups and native Windows Job Objects.
+The PowerShell development wrapper temporarily disables its script debugger while
+waiting for native work, then restores the caller's mode. Ctrl+Break reaches the
+native supervisor without leaving the wrapper paused in its debugger.
+PowerShell can still return its interrupted-pipeline status after Ctrl+Break,
+even when native cleanup succeeds.
+Waiting for another publication owner is cancellable before taking its build lock.
+Web shutdown closes control/watcher inputs and permits 15 seconds for graceful
+exit before forcing settlement for at most 10 seconds. A completed forced
+settlement succeeds; an unconfirmed exit is incomplete cleanup. Forced
+termination is reported on stderr. TUI and fixture shutdown additionally signal
+their process groups. Successful runs remove only their own output after all children
+settle; failures retain output. Browser handoff is outside those process owners.
+Existing shared Hosts are never restarted automatically.
+
+The build policy contains one ASCII declaration per line, with no blank lines or
+comments. A bare environment name passes the caller's value; `NAME=relative/path`
+selects a private directory under `target/rsi-app`. Path components contain only
+lowercase letters, digits, underscores or hyphens. This data owns the common bootstrap and
+builder cache layout. Cargo/Rustup homes default to the caller's toolchain homes
+when absent, and build children receive `CI=true`.
+
+After preparing the pinned Web tools, `cargo test --locked -p rsi-app-tools
+--test frontend_install -- --ignored` checks repeated offline installs with a
+synthetic dependency and private home/store. It verifies the Web package's
+explicit lifecycle-script denial without using real product state or services.
+Default lifecycle tests execute ordinary supervision with native std-only test
+peers on Linux/WSL and Windows, including Job/group cleanup and EOF settlement.
+With `RSI_TEST_DEV_BUNDLE` set to a paired debug Web bundle, `cargo test --locked
+-p rsi-app-tools --bin rsi-app-tools dev::lifecycle_tests::ordinary_product_runtime_smoke
+-- --ignored --exact` additionally starts the real keyless product using private
+HOME/XDG roots, checks its public document, then closes the control owner.
+The corresponding `ordinary_product_watched_smoke` also requires the pinned Web
+tools and live source dependencies. It runs real Vite and the native product,
+checks rejection before redeeming a one-use ticket, then checks cookie reuse and
+ticket replay through the proxy. Both smokes remain opt-in and keyless; Linux Web
+CI runs them against its paired debug publication.
+
+## Fixture development
+
+From the repository root, `cargo run --locked -p rsi-app-tools -- fixture-dev tui|web`
 creates a private development environment with a deterministic native provider.
 Linux/WSL is required. `--directory ABSOLUTE_NEW_DIRECTORY` selects persistent
 state and rejects an existing destination. `--prepare-only` builds/configures and
@@ -191,7 +246,9 @@ it cannot be combined with `--prepare-only`. `--no-watch` disables source watchi
 `--port PORT` selects a nonzero Web frontend port (default 8787) and is rejected
 for TUI. Unknown, missing and duplicate options fail before setup.
 
-Default development environments live below `target/rsi-app/dev`. A short private
+Default fixture environments live below `target/rsi-fixture-dev`, outside the
+managed publication cache. An explicit Web fixture directory must also be outside
+that cache. A short private
 runtime directory lives separately in `/tmp` for Unix socket limits; it contains
 runtime state, not a copied source/build tree. Successful default runs remove the
 environment, runtime directory and private native artifacts; failed runs preserve
@@ -219,7 +276,7 @@ Each supervised application/watcher owns a process group. TUI receives foregroun
 terminal ownership, and cleanup restores terminal modes and the prior foreground
 group. Shutdown signals and drains children, allowing 15 seconds after TERM and
 two seconds after KILL. A child that cannot be reaped is reported as incomplete
-cleanup and retains the environment. Builds and default runs never load provider
+cleanup and retains the environment. Fixture builds and runs never load provider
 keys from the developer's environment or `.local/dev/.env`.
 
 Paired publication requires Linux, WSL, or native Windows, the repository's pinned

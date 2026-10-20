@@ -5904,11 +5904,14 @@ dependencies = [
  "rsi-agent-session-protocol",
  "rsi-ai-protocol",
  "rsi-build-info",
+ "rsi-dev-control",
+ "rsi-process-native",
  "rustix 1.1.4",
  "serde_json",
  "sha2",
  "tempfile",
  "tokio",
+ "tokio-util",
  "toml 0.9.12+spec-1.1.0",
 ]
 
@@ -6107,6 +6110,7 @@ dependencies = [
  "rsi-configuration-api",
  "rsi-credentials-local",
  "rsi-credentials-protocol",
+ "rsi-dev-control",
  "rsi-files-native-fs",
  "rsi-host",
  "rsi-meta",

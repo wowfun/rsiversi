@@ -31,3 +31,17 @@ Only an uncertain exchange attempts a cookie recovery read, never another redemp
 Capacity, retired service, invalid response and uncertain outcome have distinct
 bounded messages that contain no backend text or credentials.
 The loopback bootstrap path supplies the HTTP opt-in without a separate checkbox.
+
+## Development
+
+To compile only this package and its WASM dependencies, run from the repository
+root with the repository toolchain and `wasm32-unknown-unknown` installed:
+
+```bash
+cargo build --locked -p rsi-web --target wasm32-unknown-unknown
+```
+
+This compiles the Worker without publishing a complete paired Web application.
+Use the [development guide](../../docs/development.md) to run the standard paired
+debug product. Rust and Worker changes require rebuilding and restarting that
+supervisor; the [Web contract](../web/README.md) owns pairing and reload behavior.

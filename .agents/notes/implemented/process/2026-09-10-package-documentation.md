@@ -11,8 +11,10 @@ only at repository and product-family roots.
 ## Decision
 
 Keep those tutorials and references in the terminal package's own `docs`
-directory, with a repository-level quick start limited to compiling and choosing
-a development surface. Apply the existing documentation taxonomy to `docs`
+directory, with a repository-level development tutorial limited to starting the
+standard debug product and selecting explicit fixture checks. Package documentation owns
+focused compilation and desktop builds; user tutorials own source installation.
+Apply the existing documentation taxonomy to `docs`
 directly below actual Cargo packages as well as product families. Nested package
 docs are not workspace members and need no workspace exclusion.
 

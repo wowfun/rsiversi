@@ -29,6 +29,100 @@ fn hex(value: &str) -> String {
 }
 
 #[test]
+fn development_bootstrap_filters_build_secrets_but_preserves_runtime_and_uses_private_runner() {
+    let temporary = tempfile::tempdir().unwrap();
+    let root = temporary.path().join("source space 中文");
+    let caller = temporary.path().join("caller space 中文");
+    fs::create_dir_all(root.join("scripts")).unwrap();
+    fs::create_dir_all(root.join("apps/devtools")).unwrap();
+    fs::create_dir(&caller).unwrap();
+    let source = Path::new(env!("CARGO_MANIFEST_DIR")).join("../..");
+    for name in [
+        "scripts/rsiversi.ps1",
+        "scripts/rsiversi.sh",
+        "apps/devtools/build-environment.txt",
+    ] {
+        fs::copy(source.join(name), root.join(name)).unwrap();
+    }
+    let helper = temporary.path().join("helper.rs");
+    fs::write(&helper, r#"
+use std::{env,fs,path::PathBuf};
+fn main() {
+    let exe=env::current_exe().unwrap();
+    if exe.file_stem().unwrap()=="cargo" {
+        assert!(env::var_os("DEEPSEEK_API_KEY").is_none());
+        assert!(env::var_os("CARGO_PKG_NAME").is_none());
+        let args:Vec<_>=env::args_os().collect();
+        let target=PathBuf::from(&args[args.iter().position(|arg|arg=="--target-dir").unwrap()+1]);
+        let policy=fs::read_to_string(target.parent().unwrap().join("apps/devtools/build-environment.txt")).unwrap();
+        for (key,suffix) in policy.lines().filter_map(|line|line.split_once('=')) {
+            assert_eq!(PathBuf::from(env::var_os(key).unwrap()),target.join("rsi-app").join(suffix),"{key}");
+        }
+        fs::create_dir_all(target.join("debug")).unwrap();
+        fs::copy(exe,target.join("debug/rsi-app-tools.exe")).unwrap();
+        fs::write(target.join("build-filtered"),b"provider key and Cargo runtime context absent").unwrap();
+    } else {
+        assert_eq!(env::var("DEEPSEEK_API_KEY").unwrap(),"synthetic-not-a-provider-key");
+        assert!(!exe.parent().unwrap().ends_with("debug"));
+        let root=env::current_dir().unwrap();
+        fs::write(root.join("runtime-caller"),env::var_os("RSI_DEV_CALLER_CWD").unwrap().to_string_lossy().as_bytes()).unwrap();
+        fs::write(root.join("private-runner"),exe.to_string_lossy().as_bytes()).unwrap();
+    }
+}
+"#).unwrap();
+    let fake_cargo = temporary.path().join("cargo.exe");
+    assert!(
+        run(Command::new("rustc").arg(helper).arg("-o").arg(&fake_cargo))
+            .status
+            .success()
+    );
+    let search = std::env::join_paths(
+        std::iter::once(temporary.path().to_path_buf())
+            .chain(std::env::split_paths(&std::env::var_os("PATH").unwrap())),
+    )
+    .unwrap();
+    let harness = temporary.path().join("debugger-harness.ps1");
+    fs::write(&harness, r"
+param([string]$Source)
+$originalDebugMode = [runspace]::DefaultRunspace.Debugger.DebugMode
+function Get-Command {
+    param($Name, $CommandType, $ErrorAction)
+    if ([runspace]::DefaultRunspace.Debugger.DebugMode -ne [System.Management.Automation.DebugModes]::None) {
+        throw 'Native work must own console break without entering the script debugger'
+    }
+    Microsoft.PowerShell.Core\Get-Command -Name $Name -CommandType $CommandType -ErrorAction $ErrorAction
+}
+. $Source dev web --no-open
+if ([runspace]::DefaultRunspace.Debugger.DebugMode -ne $originalDebugMode) { throw 'Caller debugger mode was not restored' }
+").unwrap();
+    for shell in [powershell(), PathBuf::from("pwsh.exe")] {
+        let output = run(Command::new(shell)
+            .args(["-NoProfile", "-ExecutionPolicy", "Bypass", "-File"])
+            .arg(&harness)
+            .arg(root.join("scripts/rsiversi.ps1"))
+            .current_dir(&caller)
+            .env("PATH", &search)
+            .env_remove("CARGO_MANIFEST_DIR")
+            .env_remove("CARGO_PKG_NAME")
+            .env_remove("RSI_DEV_CALLER_CWD")
+            .env("DEEPSEEK_API_KEY", "synthetic-not-a-provider-key"));
+        assert!(
+            output.status.success(),
+            "{}",
+            String::from_utf8_lossy(&output.stderr)
+        );
+        assert_eq!(
+            fs::read_to_string(root.join("runtime-caller")).unwrap(),
+            caller.to_str().unwrap()
+        );
+        assert!(root.join("target/build-filtered").exists());
+        assert!(!Path::new(&fs::read_to_string(root.join("private-runner")).unwrap()).exists());
+        // The shared executable is unlocked after the private runner exits.
+        fs::copy(&fake_cargo, root.join("target/debug/rsi-app-tools.exe")).unwrap();
+    }
+}
+
+#[test]
 fn pinned_toolchain_diagnosis_matches_whole_version_lines() {
     let root = tempfile::tempdir().unwrap();
     fs::create_dir(root.path().join("scripts")).unwrap();

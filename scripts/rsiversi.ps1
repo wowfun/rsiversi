@@ -31,6 +31,12 @@ function Show-Help([string]$Operation) {
             'Progress and diagnostics go to stderr; stdout contains the result JSON. --verbose mirrors the full build log.'
             'Example: powershell -NoProfile -ExecutionPolicy Bypass -File scripts/rsiversi.ps1 build desktop --debug'
         }
+        'dev' {
+            'Usage: scripts/rsiversi.ps1 dev tui [-- TUI_OPTIONS] | dev web [--port PORT] [--no-open] [--no-watch]'
+            'Build an external debug product using ordinary state and credentials; explicit XDG overrides are respected.'
+            'Web keeps React HMR and renderer publication. Rust/Worker edits require restart.'
+            'Use fixture-dev on Linux/WSL for isolated keyless layout work and smoke checks.'
+        }
         'path' {
             'Usage: powershell -NoProfile -ExecutionPolicy Bypass -File scripts/rsiversi.ps1 path [tui|web|desktop] [-h|--help]'
             'Print the selected current managed bundle directory (default: tui).'
@@ -44,6 +50,7 @@ function Show-Help([string]$Operation) {
             '  doctor [TARGET]         Check target-specific source-build prerequisites.'
             '  setup [TARGET]          Prepare target-specific pinned tools.'
             '  build [TARGET] [OUTPUT] Build the selected application (release by default; --debug for debug).'
+            '  dev tui|web [OPTIONS]   Build and supervise the standard debug product.'
             '  path [TARGET]           Print its current managed bundle directory.'
             '  tui [--from TARGET] [ARGS] Start TUI; TARGET may be tui, web or desktop.'
             '  web [--from TARGET] [ARGS] Start Web; TARGET may be web or desktop.'
@@ -71,7 +78,7 @@ function Quote-Native([string]$Value) {
     # Microsoft CRT argv quoting, including empty values and trailing slashes.
     return '"' + [regex]::Replace([regex]::Replace($Value, '(\\*)"', '$1$1\"'), '(\\+)$', '$1$1') + '"'
 }
-function Start-Native([string]$Program, [string[]]$Arguments, [bool]$PreserveExit = $false) {
+function Start-Native([string]$Program, [string[]]$Arguments, [bool]$PreserveExit = $false, [hashtable]$Environment = $null) {
     $command = Get-Command $Program -CommandType Application -ErrorAction Stop | Select-Object -First 1
     if ([IO.Path]::GetExtension($command.Source) -in @('.cmd', '.bat')) { throw "Native executable required: $Program" }
     $start = New-Object Diagnostics.ProcessStartInfo
@@ -79,10 +86,34 @@ function Start-Native([string]$Program, [string[]]$Arguments, [bool]$PreserveExi
     $start.Arguments = ($Arguments | ForEach-Object { Quote-Native $_ }) -join ' '
     $start.WorkingDirectory = if ($PreserveExit) { $ExecutionContext.SessionState.Path.GetUnresolvedProviderPathFromPSPath('.') } else { $script:Root }
     $start.UseShellExecute = $false
+    if ($null -ne $Environment) {
+        $start.EnvironmentVariables.Clear()
+        foreach ($key in $Environment.Keys) { $start.EnvironmentVariables[$key] = $Environment[$key] }
+    }
     $child = [Diagnostics.Process]::Start($start)
     try { $child.WaitForExit(); $code = $child.ExitCode } finally { $child.Dispose() }
     if ($PreserveExit) { exit $code }
     if ($code -ne 0) { throw "$Program exited with code $code" }
+}
+function Development-BuildEnvironment {
+    $environment = @{}
+    $cache = Join-Path $script:Root 'target/rsi-app'
+    foreach ($declaration in [IO.File]::ReadAllLines((Join-Path $script:Root 'apps/devtools/build-environment.txt'))) {
+        if ($declaration -cnotmatch '^(?<key>[A-Za-z_][A-Za-z0-9_()]*)(?:=(?<path>[a-z0-9_-]+(?:/[a-z0-9_-]+)*))?$') { throw 'Invalid build environment declaration' }
+        $key = $Matches['key']; $suffix = $Matches['path']
+        if ($suffix) {
+            $value = Join-Path $cache $suffix
+            [IO.Directory]::CreateDirectory($value) | Out-Null
+            $environment[$key] = $value
+        } else {
+            $value = [Environment]::GetEnvironmentVariable($key)
+            if ($null -ne $value) { $environment[$key] = $value }
+        }
+    }
+    if (!$environment.ContainsKey('CARGO_HOME')) { $environment['CARGO_HOME'] = Join-Path $env:USERPROFILE '.cargo' }
+    if (!$environment.ContainsKey('RUSTUP_HOME')) { $environment['RUSTUP_HOME'] = Join-Path $env:USERPROFILE '.rustup' }
+    $environment['CI'] = 'true'
+    return $environment
 }
 function Read-Versions {
     $rust = [regex]::Match([IO.File]::ReadAllText((Join-Path $script:Root 'rust-toolchain.toml')), '(?m)^\s*channel\s*=\s*"([0-9]+\.[0-9]+\.[0-9]+)"').Groups[1].Value
@@ -181,7 +212,7 @@ try {
     if (!$script:Forward.Count -or $script:Forward[0] -cin @('--help','-h')) { Show-Help ''; exit 0 }
     $operation = [string]$script:Forward[0]
     $rest = @(); if ($script:Forward.Count -gt 1) { $rest = @($script:Forward[1..($script:Forward.Count - 1)]) }
-    if ($operation -cin @('doctor','setup','build','path') -and ($rest -ccontains '--help' -or $rest -ccontains '-h')) { Show-Help $operation; exit 0 }
+    if ($operation -cin @('doctor','setup','build','path','dev') -and ($rest -ccontains '--help' -or $rest -ccontains '-h')) { Show-Help $operation; exit 0 }
     $script:Target = 'tui'
     if ($operation -cin @('doctor','setup','build','path')) {
         if ($rest.Count -and $rest[0] -cin @('tui','web','desktop')) { $script:Target = $rest[0]; $rest = @($rest | Select-Object -Skip 1) }
@@ -203,6 +234,37 @@ try {
         if ($rest.Count -and $rest[0] -ceq '--') { $rest = @($rest | Select-Object -Skip 1) }
     }
     switch -CaseSensitive ($operation) {
+        'dev' {
+            if (!$rest.Count -or $rest[0] -cnotin @('tui','web')) { throw 'dev requires tui or web' }
+            $debugger = [runspace]::DefaultRunspace.Debugger
+            $debugMode = $debugger.DebugMode
+            try {
+                # Console break belongs to native supervision, not the script debugger.
+                $debugger.SetDebugMode([System.Management.Automation.DebugModes]::None)
+                $script:Target = $rest[0]
+                $caller = if ($env:RSI_DEV_CALLER_CWD) { $env:RSI_DEV_CALLER_CWD } else { $ExecutionContext.SessionState.Path.GetUnresolvedProviderPathFromPSPath('.') }
+                Start-Native 'cargo.exe' @('build','--locked','-p','rsi-app-tools','--target-dir',(Join-Path $script:Root 'target')) $false (Development-BuildEnvironment)
+                $runners = [IO.Path]::GetFullPath((Join-Path $script:Root 'target/rsi-tools/runners'))
+                $runner = Join-Path $runners ([Guid]::NewGuid().ToString('N'))
+                [IO.Directory]::CreateDirectory($runner) | Out-Null
+                $program = Join-Path $runner 'rsi-app-tools.exe'
+                Copy-Item -LiteralPath (Join-Path $script:Root 'target/debug/rsi-app-tools.exe') -Destination $program
+                $oldCaller = $env:RSI_DEV_CALLER_CWD
+                try {
+                    $env:RSI_DEV_CALLER_CWD = $caller
+                    Start-Native $program (@('dev') + $rest)
+                } finally {
+                    $env:RSI_DEV_CALLER_CWD = $oldCaller
+                    $resolvedRunner = [IO.Path]::GetFullPath($runner)
+                    if ([IO.Path]::GetDirectoryName($resolvedRunner).Equals($runners, [StringComparison]::OrdinalIgnoreCase)) {
+                        try {
+                            Remove-Item -LiteralPath $program -Force
+                            Remove-Item -LiteralPath $resolvedRunner
+                        } catch { [Console]::Error.WriteLine('Private development runner retained: ' + $resolvedRunner) }
+                    }
+                }
+            } finally { $debugger.SetDebugMode($debugMode) }
+        }
         'doctor' { if (!(Test-Prerequisites $true)) { exit 1 }; [Console]::WriteLine('Source prerequisites are ready.'); exit 0 }
         'setup' {
             if (!(Test-Prerequisites $false)) { exit 1 }

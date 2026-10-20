@@ -34,15 +34,50 @@ fn execute(arguments: &[String]) -> Result<()> {
     if !cfg!(any(target_os = "linux", windows)) {
         return Err("paired publication requires Linux or Windows".into());
     }
+    if options.kind == Kind::AddonWorkbench {
+        let cache = root.join("target/rsi-app");
+        let lock = build_lock(&cache)?;
+        return addon::run(&root, &cache, &options, lock);
+    }
+    produce(&root, &options, None)?;
+    Ok(())
+}
+
+pub(crate) struct BuiltApplication {
+    pub(crate) bundle: PathBuf,
+    pub(crate) family: String,
+}
+pub(crate) fn development(
+    root: &Path,
+    surface: &str,
+    output: PathBuf,
+    cancellation: std::sync::Arc<std::sync::atomic::AtomicBool>,
+) -> std::result::Result<BuiltApplication, String> {
+    let options = Options {
+        kind: Kind::parse(surface).map_err(|error| error.to_string())?,
+        output: Some(output),
+        debug: true,
+        with_ssh_helper: false,
+        verbose: false,
+    };
+    produce(root, &options, Some(cancellation)).map_err(|error| error.to_string())
+}
+pub(crate) fn development_environment(
+    root: &Path,
+) -> std::result::Result<BTreeMap<OsString, OsString>, String> {
+    environment(&root.join("target/rsi-app")).map_err(|error| error.to_string())
+}
+fn produce(
+    root: &Path,
+    options: &Options,
+    cancellation: Option<std::sync::Arc<std::sync::atomic::AtomicBool>>,
+) -> Result<BuiltApplication> {
     let cache = root.join("target/rsi-app");
     let started = std::time::Instant::now();
-    describe(&options);
-    let lock = build_lock(&cache)?;
+    describe(options);
+    let _lock = progress::development_build_lock(&cache, cancellation.as_deref())?;
     if let Some(output) = &options.output {
         validate_external_output(&cache, output)?;
-    }
-    if options.kind == Kind::AddonWorkbench {
-        return addon::run(&root, &cache, &options, lock);
     }
     let publication = cache.join(options.kind.name());
     let managed = options.output.is_none();
@@ -81,8 +116,8 @@ fn execute(arguments: &[String]) -> Result<()> {
         output.display(),
         output.join("build.log").display()
     );
-    finish_build(
-        || build(&root, &cache, &output, &options, managed),
+    let family = finish_build(
+        || build(root, &cache, &output, options, managed, cancellation),
         &publication,
         &output,
         managed,
@@ -104,7 +139,10 @@ fn execute(arguments: &[String]) -> Result<()> {
             options.kind.name()
         }
     );
-    Ok(())
+    // External callers own output through settlement. Managed consumers acquire
+    // their generation lease at launch; returning from dist does not pin current.
+    let bundle = output.join("bundle");
+    Ok(BuiltApplication { bundle, family })
 }
 fn describe(options: &Options) {
     if options.kind == Kind::AddonWorkbench {
@@ -153,7 +191,7 @@ fn finish_build(
     output: &Path,
     managed: bool,
     id: &str,
-) -> Result<()> {
+) -> Result<String> {
     let result = match std::panic::catch_unwind(std::panic::AssertUnwindSafe(build)) {
         Ok(result) => result.map_err(|error| ("build", error)),
         Err(_) => Err(("panic", "paired build panicked".into())),
@@ -173,7 +211,7 @@ fn finish_build(
                 "{}",
                 json!({"event":"application-distribution-built", "bundle":output.join("bundle"), "family_sha256":family})
             );
-            Ok(())
+            Ok(family)
         }
         Err((category, error)) => {
             if let Err(evidence) = fs::write(
@@ -192,7 +230,7 @@ fn finish_build(
         }
     }
 }
-fn validate_external_output(cache: &Path, output: &Path) -> Result<()> {
+pub(crate) fn validate_external_output(cache: &Path, output: &Path) -> Result<()> {
     if output
         .components()
         .any(|part| matches!(part, std::path::Component::ParentDir))
@@ -283,7 +321,7 @@ fn collect_selected(arguments: &[String]) -> Result<()> {
 fn executable(name: &str) -> String {
     format!("{name}{}", std::env::consts::EXE_SUFFIX)
 }
-fn command_path(path: PathBuf) -> PathBuf {
+pub(crate) fn command_path(path: PathBuf) -> PathBuf {
     // Node's JS module resolver does not consistently accept verbatim Win32 paths.
     // Keep canonical identity, but use the ordinary absolute spelling at process boundaries.
     #[cfg(windows)]
@@ -321,6 +359,7 @@ fn build(
     output: &Path,
     options: &Options,
     managed: bool,
+    cancellation: Option<std::sync::Arc<std::sync::atomic::AtomicBool>>,
 ) -> Result<String> {
     let work = cache.join("build").join(options.kind.name());
     let captured = work.join("source");
@@ -346,7 +385,8 @@ fn build(
         environment(cache)?,
         output.join("build.log"),
         options.verbose,
-    )?;
+    )?
+    .with_cancellation(cancellation);
     let tools_stage = Stage::new("Validate selected toolchains");
     let rustc = runner.version("rustc", &["-vV"])?;
     let cargo = runner.version("cargo", &["-V"])?;
@@ -612,41 +652,31 @@ fn helper_target(native: &str) -> Result<Option<String>> {
 }
 fn environment(cache: &Path) -> Result<BTreeMap<OsString, OsString>> {
     let mut values = BTreeMap::new();
-    for key in [
-        "PATH",
-        "PATHEXT",
-        "SystemRoot",
-        "SystemDrive",
-        "WINDIR",
-        "ProgramFiles",
-        "ProgramFiles(x86)",
-        "ProgramW6432",
-        "ProgramData",
-        "CommonProgramFiles",
-        "CommonProgramFiles(x86)",
-        "COMSPEC",
-        "LIB",
-        "LIBPATH",
-        "INCLUDE",
-        "VCINSTALLDIR",
-        "VCToolsInstallDir",
-        "WindowsSdkDir",
-        "WindowsSDKVersion",
-        "CARGO_HOME",
-        "RUSTUP_HOME",
-        "CARGO_BUILD_JOBS",
-        "HTTP_PROXY",
-        "HTTPS_PROXY",
-        "ALL_PROXY",
-        "NO_PROXY",
-        "http_proxy",
-        "https_proxy",
-        "all_proxy",
-        "no_proxy",
-        "RUSTFLAGS",
-        "CARGO_ENCODED_RUSTFLAGS",
-    ] {
-        if let Some(value) = std::env::var_os(key) {
+    for declaration in include_str!("../build-environment.txt").lines() {
+        let (key, suffix) = declaration
+            .split_once('=')
+            .map_or((declaration, None), |(key, suffix)| (key, Some(suffix)));
+        if key.is_empty()
+            || !key.as_bytes()[0].is_ascii_alphabetic() && !key.starts_with('_')
+            || !key
+                .bytes()
+                .all(|byte| byte.is_ascii_alphanumeric() || b"_()".contains(&byte))
+        {
+            return Err("invalid build environment declaration".into());
+        }
+        if let Some(suffix) = suffix {
+            if suffix.split('/').any(|part| {
+                part.is_empty()
+                    || !part.bytes().all(|byte| {
+                        byte.is_ascii_lowercase() || byte.is_ascii_digit() || b"_-".contains(&byte)
+                    })
+            }) {
+                return Err("invalid private build directory".into());
+            }
+            let path = cache.join(suffix);
+            fs::create_dir_all(&path)?;
+            values.insert(key.into(), path.into_os_string());
+        } else if let Some(value) = std::env::var_os(key) {
             values.insert(key.into(), value);
         }
     }
@@ -656,20 +686,6 @@ fn environment(cache: &Path) -> Result<BTreeMap<OsString, OsString>> {
         values
             .entry(key.into())
             .or_insert_with(|| Path::new(&home).join(suffix).into_os_string());
-    }
-    for (key, suffix) in [
-        ("HOME", "build-home"),
-        ("USERPROFILE", "build-home"),
-        ("APPDATA", "build-home/appdata"),
-        ("LOCALAPPDATA", "build-home/local"),
-        ("TEMP", "tmp"),
-        ("TMP", "tmp"),
-        ("XDG_CACHE_HOME", "tool-cache"),
-        ("COREPACK_HOME", "corepack"),
-    ] {
-        let path = cache.join(suffix);
-        fs::create_dir_all(&path)?;
-        values.insert(key.into(), path.into_os_string());
     }
     values.insert("CI".into(), "true".into());
     Ok(values)

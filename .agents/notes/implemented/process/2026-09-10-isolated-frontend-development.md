@@ -10,6 +10,10 @@ can exceed the operating system's Unix socket pathname limit.
 
 ## Decision
 
+The [standard development decision](2026-10-19-standard-product-development.md)
+partially supersedes the default developer entry. This decision continues to
+own the explicit isolated fixture workflow.
+
 The application development supervisor builds and freezes the actual product, creates explicit
 private configuration/state/workspace directories, and launches an ordinary
 Application Profile with a deterministic native provider. It preserves logs and

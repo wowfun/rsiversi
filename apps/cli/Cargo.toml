@@ -23,6 +23,8 @@ path = "../../fixtures/rsi/profile-management/probe.rs"
 paired-web-tests = []
 
 [dependencies]
+rsi-dev-control = { path = "../dev-control" }
+async-trait.workspace = true
 rsi-build-info = { path = "../../crates/rsi/build-info" }
 rsi-app-catalog = { path = "../catalog" }
 rsi = { path = "../../crates/rsi/core" }
@@ -45,11 +47,10 @@ rsi-service-host = { path = "../../crates/rsi/service-host" }
 serde.workspace = true
 serde_json.workspace = true
 sha2.workspace = true
-tokio = { workspace = true, features = ["fs", "io-util", "macros", "net", "process", "rt-multi-thread", "signal", "sync", "time"] }
+tokio = { workspace = true, features = ["fs", "io-std", "io-util", "macros", "net", "process", "rt-multi-thread", "signal", "sync", "time"] }
 tokio-util.workspace = true
 
 [dev-dependencies]
-async-trait.workspace = true
 rsi-tools-protocol = { path = "../../crates/rsi-tools/protocol" }
 rsi-agent-plan-policy = { path = "../../crates/rsi-agent/plan-policy" }
 vt100.workspace = true

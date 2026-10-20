@@ -16,8 +16,10 @@ The repository-wide ownership and dependency rules live in
 [the architecture](docs/architecture.md). Each product owns its public contract,
 setup, security, and verification documentation below its own subtree.
 
-Start with the [developer quick start](docs/quickstart.md) to build and run an
-isolated TUI or Web environment, or a paired Linux or Windows desktop distribution.
+Follow the [development guide](docs/development.md) to run the standard debug
+product on Windows or Linux/WSL, with Web hot updates. Explicit keyless fixture
+tools are available on Linux/WSL. Build-only and Desktop workflows are covered in
+[Install from source](docs/user/source-install.md).
 
 Development builds optimize the SHA-256 dependency used to verify complete
 executable artifacts. This keeps local startup practical with full debug

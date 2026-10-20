@@ -26,10 +26,15 @@ export async function buildRenderers(output) {
   return catalog.renderers[0].files[0].sha256;
 }
 if (process.argv[1] && resolve(process.argv[1]) === fileURLToPath(import.meta.url)) {
-  const [output, watch, ...extra] = process.argv.slice(2);
-  if (!output || (watch && watch !== "--watch") || extra.length) throw new Error("Usage: renderers.mjs /absolute/bundle [--watch]");
+  const [output, watch, supervised, ...extra] = process.argv.slice(2);
+  if (!output || (watch && watch !== "--watch") || (supervised && (supervised !== "--supervised" || !watch)) || extra.length) throw new Error("Usage: renderers.mjs /absolute/bundle [--watch [--supervised]]");
   if (watch) console.log("Watching standard.js and file-preview.js; app.js, mounts.js, worker.js, styles.css, index.html and Worker Rust changes require a full bundle rebuild and application restart.");
-  let previous;
+  let previous, stopping = false;
+  if (supervised) {
+    process.stdin.on('end', () => { stopping = true; });
+    process.stdin.on('error', () => { stopping = true; });
+    process.stdin.resume();
+  }
   do {
     const bytes = await readFile(join(source, "standard.js"));
     const digest = createHash("sha256").update(bytes).update(await readFile(join(source,"file-preview.js"))).update(await readFile(join(source,"image-bounds.js"))).digest("hex");
@@ -39,5 +44,6 @@ if (process.argv[1] && resolve(process.argv[1]) === fileURLToPath(import.meta.ur
       console.log(JSON.stringify({ event: "renderers-built", directory: output, sha256: revision }));
     }
     if (watch) await delay(250);
-  } while (watch);
+  } while (watch && !stopping);
+  if (supervised) process.stdin.destroy();
 }

@@ -1,4 +1,4 @@
-// Run against an already-started, isolated pnpm -C apps/web dev environment.
+// Run against an already-started isolated rsi-app-tools fixture-dev web environment.
 import assert from 'node:assert/strict';
 import {execFileSync} from 'node:child_process';
 import {readFile,writeFile,mkdir} from 'node:fs/promises';
@@ -9,7 +9,7 @@ if(!directory||!origin||!report)throw new Error('Pass isolated development direc
 await mkdir(report,{recursive:false});
 const source=resolve('apps/web/src/navigation.tsx'), bootstrap=resolve('apps/web/app.js');
 const original=await readFile(source,'utf8'), boot=await readFile(bootstrap,'utf8');
-const updated=original.replace('<h2>Conversations</h2>','<h2>Conversations HMR verified</h2>');
+const updated=original.replace('<h2>Workspaces</h2>','<h2>Workspaces HMR verified</h2>');
 assert.notEqual(updated,original);
 const receipt=execFileSync(join(directory,'run'),['--profile','devices','register','isolated HMR'],{encoding:'utf8',timeout:30000});
 const browser=await chromium.launch(),page=await browser.newPage({viewport:{width:1440,height:980}}),errors=[];
@@ -25,7 +25,7 @@ try {
   const identity=await page.evaluate(()=>{window.fixtureDocumentId=crypto.randomUUID();window.fixtureEditor=document.querySelector('textarea[aria-label="Main message"]');return window.fixtureDocumentId});
   const session=await page.locator('.pane-session').textContent();
   changedSource=true;await writeFile(source,updated);
-  await page.getByRole('heading',{name:'Conversations HMR verified',exact:true}).waitFor();
+  await page.getByRole('heading',{name:'Workspaces HMR verified',exact:true}).waitFor();
   assert.equal(await page.evaluate(()=>window.fixtureDocumentId),identity);
   assert(await page.evaluate(()=>window.fixtureEditor===document.querySelector('textarea[aria-label="Main message"]')));
   assert.equal(await input.inputValue(),'draft survives feature HMR 中文');assert.equal(await page.locator('.pane-session').textContent(),session);
@@ -35,7 +35,7 @@ try {
   assert.equal(forbidden.status(),401);
   const missingCsrf=await page.request.post(origin+'/api/v1/connection/describe/1',{headers:{Origin:origin,'x-rsi-wire-version':'1'},data:{wire_version:1}});assert.equal(missingCsrf.status(),401);
   await page.screenshot({path:join(report,'feature-hmr.png'),fullPage:true});
-  changedSource=false;await writeFile(source,original);await page.getByRole('heading',{name:'Conversations',exact:true}).waitFor();
+  changedSource=false;await writeFile(source,original);await page.getByRole('heading',{name:'Workspaces',exact:true}).waitFor();
   const navigation=page.waitForEvent('framenavigated',frame=>frame===page.mainFrame());
   changedBootstrap=true;await writeFile(bootstrap,boot+'\n// Isolated development full-reload probe.\n');await navigation;
   await page.waitForFunction(()=>document.querySelector('#login')||document.querySelector('#workbench'));

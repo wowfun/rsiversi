@@ -65,6 +65,8 @@ fn standard_coding_tools() -> rsi::Result<Option<StandardCodingTools>> {
 mod addon_cli;
 mod application;
 mod cli;
+#[cfg(debug_assertions)]
+mod development;
 #[cfg(target_os = "linux")]
 mod host_cli;
 mod management;
@@ -107,6 +109,10 @@ fn main() -> ExitCode {
 }
 
 async fn run_main() -> u8 {
+    #[cfg(debug_assertions)]
+    if std::env::args_os().nth(1).as_deref() == Some(std::ffi::OsStr::new("__dev")) {
+        return development::run(std::env::args_os().skip(2).collect()).await;
+    }
     match cli::parse_cli(std::env::args_os().skip(1)) {
         Ok(Parse::Help(help)) => {
             print!("{help}");

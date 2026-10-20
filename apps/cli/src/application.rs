@@ -27,14 +27,26 @@ pub(super) async fn run_application(invocation: ApplicationInvocation) -> u8 {
         print!("{}", super::reset_state::HELP);
         return 0;
     }
-    match start(invocation).await {
+    match start(invocation, None, rsi::HostStartupPurpose::Ordinary).await {
         Ok(exit) => exit,
         Err(error) => report_error(&error),
     }
 }
 
-async fn start(invocation: ApplicationInvocation) -> rsi::Result<u8> {
+async fn start(
+    invocation: ApplicationInvocation,
+    development: Option<std::sync::Arc<dyn rsi_serve::WebDevelopmentHandoff>>,
+    purpose: rsi::HostStartupPurpose,
+) -> rsi::Result<u8> {
     let paths = standard_paths()?;
+    if purpose == rsi::HostStartupPurpose::Development {
+        eprintln!(
+            "Development config: {}\nDevelopment state: {}\nDevelopment cache: {}\nDebug product code can modify these roots. Use independent absolute XDG roots for durable-format work.",
+            paths.config().display(),
+            paths.state().display(),
+            paths.cache().display()
+        );
+    }
     let profile = ProfileCatalog::new(paths.clone(), rsi_app_catalog::metadata())
         .application(&invocation.profile)
         .map_err(profile_management_error)?;
@@ -54,13 +66,16 @@ async fn start(invocation: ApplicationInvocation) -> rsi::Result<u8> {
         coding,
         rsi_app_catalog::metadata(),
     )
-    .with_user_home(rsi::capture_standard_home()?)?;
+    .with_user_home(rsi::capture_standard_home()?)?
+    .with_startup_purpose(purpose);
     if let Some(reset) = &reset {
         composition = composition.with_agent_store_reset(reset.clone());
     }
+    let mut web = web_environment()?;
+    web.development = development;
     let application = rsi::ApplicationComposition::new(
         composition,
-        std::sync::Arc::new(rsi_app_catalog::Catalog::new(web_environment()?)),
+        std::sync::Arc::new(rsi_app_catalog::Catalog::new(web)),
         rsi::StandardAddonSet::default(),
     )
     .map_err(|e| RsiError::Boot(e.to_string()))?;
@@ -92,7 +107,7 @@ pub(super) fn report_error(error: &RsiError) -> u8 {
     error.exit_code()
 }
 
-fn web_environment() -> rsi::Result<rsi_serve::WebLaunchEnvironment> {
+pub(super) fn web_environment() -> rsi::Result<rsi_serve::WebLaunchEnvironment> {
     let executable = std::env::current_exe()
         .and_then(std::fs::canonicalize)
         .map_err(|error| RsiError::Boot(format!("cannot locate executable: {error}")))?;
@@ -143,4 +158,15 @@ fn web_environment() -> rsi::Result<rsi_serve::WebLaunchEnvironment> {
         })),
         development: None,
     })
+}
+
+#[cfg(debug_assertions)]
+pub(super) async fn run_development(
+    invocation: ApplicationInvocation,
+    handoff: Option<std::sync::Arc<dyn rsi_serve::WebDevelopmentHandoff>>,
+) -> u8 {
+    match start(invocation, handoff, rsi::HostStartupPurpose::Development).await {
+        Ok(code) => code,
+        Err(error) => report_error(&error),
+    }
 }

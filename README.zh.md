@@ -14,5 +14,5 @@ RSIversi 是一个预发布的 Rust 工作空间，通过普通的 `rsi-meta` �
 仓库级职责和依赖规则见[架构](docs/architecture.md)。
 各产品在自己的目录下维护公开契约、安装、安全和验证文档。
 
-开发者可阅读[开发快速开始](docs/quickstart.md)，构建并启动隔离的 TUI、Web 环境或配套的 Linux 或 Windows 桌面发行。
+开发者可阅读[开发指南](docs/development.md)，在 Windows 或 Linux/WSL 上启动标准调试产品；隔离的无密钥工具使用显式 fixture-dev 工作流。
 开发构建会优化用于验证完整可执行文件的 SHA-256 依赖，在保留完整调试信息、构建身份校验和期限约束的同时改善本地启动速度。

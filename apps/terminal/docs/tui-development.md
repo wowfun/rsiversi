@@ -3,8 +3,9 @@
 This tutorial takes you from a checkout to an isolated terminal session, a
 focused change, and reproducible evidence. Run the shell examples from the
 repository root in Bash on Linux or WSL2. Use a real terminal for interactive
-commands. Native Windows input is unsupported; macOS terminal behavior needs
-separate verification.
+commands. This manual Bash workflow requires Linux/WSL; native Windows TUI setup
+and requirements are covered in the [user tutorial](../../../docs/user/terminal.md)
+and [terminal contract](../README.md).
 
 The [interaction design](tui-design.md) owns user behavior; the
 [terminal contract](../README.md) owns controller and resource limits. The [Session contract](../../../crates/rsi/session-protocol/README.md)
@@ -12,12 +13,31 @@ owns Session operations. Workspace registration, Models and completed Process
 output are injected independently into the terminal application. Use the [debugging reference](tui-debugging.md)
 when a result differs from the expected behavior.
 
-For ordinary layout and renderer development, start with `cargo run --locked -p rsi-app-tools -- dev tui`.
-It prepares the real product with a keyless local provider and watches the native
-presentation. The [quick start](../../../docs/quickstart.md) gives the minimal
-commands; the [launcher contract](../../../crates/tools/rsi-xtask/README.md) owns isolation
-and cleanup. The manual environment below is for custom Profiles and opt-in live
-provider work.
+For ordinary product development, use the [development guide](../../../docs/development.md).
+For keyless layout and renderer watching on Linux/WSL, run
+`cargo run --locked -p rsi-app-tools -- fixture-dev tui`.
+It prepares an isolated product with a deterministic provider and watches the
+native presentation. The [launcher contract](../../devtools/README.md#fixture-development)
+owns its isolation and cleanup. The manual environment below is for custom
+Profiles and opt-in live provider work.
+
+## Focused compilation
+
+Cargo builds the selected package and its dependencies. For pure TUI layout,
+editor and frame changes, or resident controller changes, use:
+
+```bash
+# Pure TUI layout, editor and frame logic.
+cargo check --locked -p rsi-terminal-ui
+cargo test --locked -p rsi-terminal-ui
+
+# Resident terminal controller and terminal ownership.
+cargo check --locked -p rsi-terminal
+```
+
+The [independent native renderer](../../../crates/rsi/terminal-native/README.md)
+can be built without rebuilding the standard product. Its README owns that
+standalone workspace's build and verification commands.
 
 ## 1. Establish a keyless baseline
 
