@@ -6357,6 +6357,15 @@ dependencies = [
 ]
 
 [[package]]
+name = "rsi-dev-control"
+version = "0.0.1"
+dependencies = [
+ "serde",
+ "serde_json",
+ "tokio",
+]
+
+[[package]]
 name = "rsi-directory-picker"
 version = "0.0.1"
 dependencies = [

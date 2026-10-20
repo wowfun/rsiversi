@@ -1,0 +1,132 @@
+{
+  "maximum_frame_bytes": 32768,
+  "startup_timeout_ms": 60000,
+  "proxy_timeout_ms": 10000,
+  "cases": [
+    {
+      "name": "start",
+      "json": "{\"version\":1,\"run_id\":\"0123456789abcdef0123456789abcdef\",\"message\":{\"event\":\"start_frontend\",\"port\":0,\"family\":\"aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa\"}}",
+      "valid": true
+    },
+    {
+      "name": "bound",
+      "json": "{\"version\":1,\"run_id\":\"0123456789abcdef0123456789abcdef\",\"message\":{\"event\":\"frontend_bound\",\"origin\":\"http://127.0.0.1:1234\"}}",
+      "valid": true
+    },
+    {
+      "name": "default-http-port",
+      "json": "{\"version\":1,\"run_id\":\"0123456789abcdef0123456789abcdef\",\"message\":{\"event\":\"frontend_bound\",\"origin\":\"http://127.0.0.1\"}}",
+      "valid": true
+    },
+    {
+      "name": "proxy",
+      "json": "{\"version\":1,\"run_id\":\"0123456789abcdef0123456789abcdef\",\"message\":{\"event\":\"configure_proxy\",\"upstream\":\"http://127.0.0.1:1234\"}}",
+      "valid": true
+    },
+    {
+      "name": "ready",
+      "json": "{\"version\":1,\"run_id\":\"0123456789abcdef0123456789abcdef\",\"message\":{\"event\":\"proxy_ready\"}}",
+      "valid": true
+    },
+    {
+      "name": "duplicate-version",
+      "json": "{\"version\":1,\"version\":1,\"run_id\":\"0123456789abcdef0123456789abcdef\",\"message\":{\"event\":\"start_frontend\",\"port\":0,\"family\":\"aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa\"}}",
+      "valid": false
+    },
+    {
+      "name": "duplicate-port",
+      "json": "{\"version\":1,\"run_id\":\"0123456789abcdef0123456789abcdef\",\"message\":{\"event\":\"start_frontend\",\"port\":0,\"port\":1,\"family\":\"aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa\"}}",
+      "valid": false
+    },
+    {
+      "name": "array-run",
+      "json": "{\"version\":1,\"run_id\":[\"0123456789abcdef0123456789abcdef\"],\"message\":{\"event\":\"start_frontend\",\"port\":0,\"family\":\"aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa\"}}",
+      "valid": false
+    },
+    {
+      "name": "float-port",
+      "json": "{\"version\":1,\"run_id\":\"0123456789abcdef0123456789abcdef\",\"message\":{\"event\":\"start_frontend\",\"port\":1.0,\"family\":\"aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa\"}}",
+      "valid": false
+    },
+    {
+      "name": "exponent-port",
+      "json": "{\"version\":1,\"run_id\":\"0123456789abcdef0123456789abcdef\",\"message\":{\"event\":\"start_frontend\",\"port\":1e0,\"family\":\"aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa\"}}",
+      "valid": false
+    },
+    {
+      "name": "float-version",
+      "json": "{\"version\":1.0,\"run_id\":\"0123456789abcdef0123456789abcdef\",\"message\":{\"event\":\"start_frontend\",\"port\":0,\"family\":\"aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa\"}}",
+      "valid": false
+    },
+    {
+      "name": "wrong-version",
+      "json": "{\"version\":2,\"run_id\":\"0123456789abcdef0123456789abcdef\",\"message\":{\"event\":\"start_frontend\",\"port\":0,\"family\":\"aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa\"}}",
+      "valid": false
+    },
+    {
+      "name": "overflow-port",
+      "json": "{\"version\":1,\"run_id\":\"0123456789abcdef0123456789abcdef\",\"message\":{\"event\":\"start_frontend\",\"port\":65536,\"family\":\"aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa\"}}",
+      "valid": false
+    },
+    {
+      "name": "foreign",
+      "json": "{\"version\":1,\"run_id\":\"0123456789abcdef0123456789abcdef\",\"message\":{\"event\":\"configure_proxy\",\"upstream\":\"http://foreign.invalid\"}}",
+      "valid": false
+    },
+    {
+      "name": "hostname",
+      "json": "{\"version\":1,\"run_id\":\"0123456789abcdef0123456789abcdef\",\"message\":{\"event\":\"configure_proxy\",\"upstream\":\"http://localhost:1234\"}}",
+      "valid": false
+    },
+    {
+      "name": "ipv6",
+      "json": "{\"version\":1,\"run_id\":\"0123456789abcdef0123456789abcdef\",\"message\":{\"event\":\"configure_proxy\",\"upstream\":\"http://[::1]:1234\"}}",
+      "valid": false
+    },
+    {
+      "name": "default-port-spelling",
+      "json": "{\"version\":1,\"run_id\":\"0123456789abcdef0123456789abcdef\",\"message\":{\"event\":\"frontend_bound\",\"origin\":\"http://127.0.0.1:80\"}}",
+      "valid": false
+    },
+    {
+      "name": "retired-stop",
+      "json": "{\"version\":1,\"run_id\":\"0123456789abcdef0123456789abcdef\",\"message\":{\"event\":\"stop\"}}",
+      "valid": false
+    },
+    {
+      "name": "extra-field",
+      "json": "{\"version\":1,\"run_id\":\"0123456789abcdef0123456789abcdef\",\"message\":{\"event\":\"proxy_ready\",\"extra\":1}}",
+      "valid": false
+    },
+    {
+      "name": "array-upstream",
+      "json": "{\"version\":1,\"run_id\":\"0123456789abcdef0123456789abcdef\",\"message\":{\"event\":\"configure_proxy\",\"upstream\":[\"http://127.0.0.1:1234\"]}}",
+      "valid": false
+    },
+    {
+      "name": "array-origin",
+      "json": "{\"version\":1,\"run_id\":\"0123456789abcdef0123456789abcdef\",\"message\":{\"event\":\"frontend_bound\",\"origin\":[\"http://127.0.0.1:1234\"]}}",
+      "valid": false
+    },
+    {
+      "name": "prototype-constructor",
+      "json": "{\"version\":1,\"run_id\":\"aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa\",\"message\":{\"event\":\"constructor\"}}",
+      "valid": false
+    },
+    {
+      "name": "prototype-toString",
+      "json": "{\"version\":1,\"run_id\":\"aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa\",\"message\":{\"event\":\"toString\"}}",
+      "valid": false
+    },
+    {
+      "name": "prototype-__proto__",
+      "json": "{\"version\":1,\"run_id\":\"aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa\",\"message\":{\"event\":\"__proto__\"}}",
+      "valid": false
+    },
+    {
+      "name": "invalid-origin-url",
+      "json": "{\"version\":1,\"run_id\":\"aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa\",\"message\":{\"event\":\"frontend_bound\",\"origin\":\"not-a-url\"}}",
+      "valid": false
+    }
+  ]
+}
