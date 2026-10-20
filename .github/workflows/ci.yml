@@ -385,6 +385,7 @@ jobs:
           path: |
             ${{ runner.temp }}/rsi-browser-logs/web_workflow.log
             ${{ runner.temp }}/rsi-web-evidence/workflow-dock
+            !${{ runner.temp }}/rsi-web-evidence/workflow-dock/rsi
           if-no-files-found: error
 
       - name: Preserve failed Web product captures before integration probes
@@ -537,6 +538,7 @@ jobs:
             ${{ runner.temp }}/rsi-acp-browser-evidence
             ${{ runner.temp }}/rsi-profile-browser-evidence
             ${{ runner.temp }}/rsi-lsp-browser-evidence
+            !${{ runner.temp }}/rsi-web-evidence/workflow-dock/rsi
           if-no-files-found: error
       - name: Restore owned Linux user manager state
         if: ${{ always() && runner.os == 'Linux' }}
