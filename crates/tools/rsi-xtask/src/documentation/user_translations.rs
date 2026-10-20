@@ -1,6 +1,8 @@
-use super::{Diagnostic, line_number, markdown_links, parser, resolve_link_target, visit_files};
+use super::{Diagnostic, display_path, line_number, markdown_links, parser, resolve_link_target};
 use pulldown_cmark::{CodeBlockKind, Event, Tag, TagEnd};
 use std::{collections::BTreeMap, fs, path::Path};
+mod layout;
+use layout::user_paths;
 
 #[derive(Default)]
 struct Examples {
@@ -8,38 +10,35 @@ struct Examples {
     commands: BTreeMap<String, (String, String, String)>,
 }
 
-fn user_paths(repository: &Path, diagnostics: &mut Vec<Diagnostic>) -> Vec<std::path::PathBuf> {
-    let directory = repository.join("docs/user");
-    match directory.try_exists() {
-        Ok(false) => return Vec::new(),
-        Err(error) => {
-            diagnostics.push(Diagnostic::new(
-                repository,
-                &directory,
-                1,
-                error.to_string(),
-            ));
-            return Vec::new();
-        }
-        Ok(true) => {}
-    }
-    let mut paths = Vec::new();
-    visit_files(
-        repository,
-        &directory,
-        ".md",
-        false,
-        &mut paths,
-        diagnostics,
-    );
-    paths
+fn has_locale_suffix(path: &Path) -> bool {
+    path.file_stem()
+        .expect("Markdown file")
+        .to_string_lossy()
+        .rsplit_once('.')
+        .is_some_and(|(_, suffix)| {
+            suffix.eq_ignore_ascii_case(layout::LOCALE)
+                || ["zh", "zh-Hans"]
+                    .iter()
+                    .any(|alias| suffix.eq_ignore_ascii_case(alias))
+        })
 }
 
 pub(super) fn validate(repository: &Path, diagnostics: &mut Vec<Diagnostic>) {
-    let paths = user_paths(repository, diagnostics);
+    layout::validate(repository, diagnostics);
+    let english_directory = repository.join("docs/user");
+    let translated_directory = layout::translation_root(repository);
+    let mut paths = user_paths(repository, &english_directory, diagnostics)
+        .into_iter()
+        .map(|path| (true, path))
+        .collect::<Vec<_>>();
+    paths.extend(
+        user_paths(repository, &translated_directory, diagnostics)
+            .into_iter()
+            .map(|path| (false, path)),
+    );
     let mut documents = BTreeMap::new();
     let mut identities = BTreeMap::new();
-    for path in paths {
+    for (english, path) in paths {
         let contents = match fs::read_to_string(&path) {
             Ok(contents) => contents,
             Err(error) => {
@@ -52,30 +51,29 @@ pub(super) fn validate(repository: &Path, diagnostics: &mut Vec<Diagnostic>) {
                 continue;
             }
         };
-        let stem = path.file_stem().expect("Markdown file").to_string_lossy();
-        let english = !stem.ends_with(".zh");
-        let counterpart = stem
-            .strip_suffix(".zh")
-            .map_or_else(|| format!("{stem}.zh.md"), |stem| format!("{stem}.md"));
-        let paired = path.with_file_name(&counterpart);
-        if !paired.is_file() {
+        if has_locale_suffix(&path) {
             diagnostics.push(Diagnostic::new(
                 repository,
                 &path,
                 1,
-                format!("user tutorial requires its English/Chinese pair: {counterpart}"),
+                if english {
+                    "user translation must use docs/i18n/zh-CN/user/<path>/name.md"
+                } else {
+                    "user translation filename must omit the locale suffix"
+                },
             ));
-        } else if !markdown_links(&contents).iter().any(|link| {
-            !link.is_image
-                && resolve_link_target(repository, &path, &link.destination)
-                    .is_ok_and(|(target, _)| target == paired)
-        }) {
-            diagnostics.push(Diagnostic::new(
-                repository,
-                &path,
-                1,
-                format!("user tutorial must link to its translation: {counterpart}"),
-            ));
+            continue;
+        }
+        let (source_directory, paired_directory) = if english {
+            (&english_directory, &translated_directory)
+        } else {
+            (&translated_directory, &english_directory)
+        };
+        let relative = path.strip_prefix(source_directory).expect("tutorial root");
+        let paired = paired_directory.join(relative);
+        validate_pair(repository, &path, &paired, &contents, diagnostics);
+        if !english {
+            layout::localized_links(repository, &path, &paired, &contents, diagnostics);
         }
         let mut report =
             |line, message| diagnostics.push(Diagnostic::new(repository, &path, line, message));
@@ -87,7 +85,7 @@ pub(super) fn validate(repository: &Path, diagnostics: &mut Vec<Diagnostic>) {
                         *line,
                         format!(
                             "duplicate user example id: {id} (also in {})",
-                            previous.display()
+                            display_path(repository, &previous)
                         ),
                     );
                 }
@@ -121,6 +119,35 @@ pub(super) fn validate(repository: &Path, diagnostics: &mut Vec<Diagnostic>) {
                 ));
             }
         }
+    }
+}
+
+fn validate_pair(
+    repository: &Path,
+    path: &Path,
+    paired: &Path,
+    contents: &str,
+    diagnostics: &mut Vec<Diagnostic>,
+) {
+    let counterpart = display_path(repository, paired);
+    if !paired.is_file() {
+        diagnostics.push(Diagnostic::new(
+            repository,
+            path,
+            1,
+            format!("user tutorial requires its English/Simplified Chinese pair: {counterpart}"),
+        ));
+    } else if !markdown_links(contents).iter().any(|link| {
+        !link.is_image
+            && resolve_link_target(repository, path, &link.destination)
+                .is_ok_and(|(target, _)| target == paired)
+    }) {
+        diagnostics.push(Diagnostic::new(
+            repository,
+            path,
+            1,
+            format!("user tutorial must link to its translation: {counterpart}"),
+        ));
     }
 }
 
@@ -269,9 +296,11 @@ mod tests {
     fn validate_pair(original: &[u8], translated: &[u8]) -> Vec<String> {
         let root = tempfile::tempdir().unwrap();
         let directory = root.path().join("docs/user/nested");
+        let translated_directory = root.path().join("docs/i18n/zh-CN/user/nested");
         fs::create_dir_all(&directory).unwrap();
+        fs::create_dir_all(&translated_directory).unwrap();
         fs::write(directory.join("start.md"), original).unwrap();
-        fs::write(directory.join("start.zh.md"), translated).unwrap();
+        fs::write(translated_directory.join("start.md"), translated).unwrap();
         let mut diagnostics = Vec::new();
         validate(root.path(), &mut diagnostics);
         diagnostics.into_iter().map(|d| d.render()).collect()
@@ -279,19 +308,70 @@ mod tests {
 
     #[test]
     fn commonmark_links_and_fences_are_compared_semantically() {
-        let original = "[中文](./start.zh.md \"中文版\")\n\n<!-- rsi-example id=a platform=all -->\n   ~~~~BASH {.x}\n   echo ok\n   ~~~~  \n";
-        let translated = "[English][pair]\n\n[pair]: start.md\n\n<!-- rsi-example id=a platform=all -->\n````bash\necho ok\n````\n";
+        let original = "[简体中文](../../i18n/zh-CN/user/nested/./start.md \"简体中文版\")\n\n<!-- rsi-example id=a platform=all -->\n   ~~~~BASH {.x}\n   echo ok\n   ~~~~  \n";
+        let translated = "[English][pair]\n\n[pair]: ../../../../user/nested/start.md\n\n<!-- rsi-example id=a platform=all -->\n````bash\necho ok\n````\n";
         assert!(validate_pair(original.as_bytes(), translated.as_bytes()).is_empty());
         for fake in [
-            "`[中文](start.zh.md)`",
-            "![中文](start.zh.md)",
-            "```md\n[中文](start.zh.md)\n```",
+            "`[简体中文](../../i18n/zh-CN/user/nested/start.md)`",
+            "![简体中文](../../i18n/zh-CN/user/nested/start.md)",
+            "```md\n[简体中文](../../i18n/zh-CN/user/nested/start.md)\n```",
         ] {
-            let errors = validate_pair(fake.as_bytes(), b"[English](start.md)");
+            let errors = validate_pair(
+                fake.as_bytes(),
+                b"[English](../../../../user/nested/start.md)",
+            );
             assert!(
                 errors.iter().any(|e| e.contains("link to its translation")),
                 "{fake}: {errors:?}"
             );
+        }
+    }
+
+    #[test]
+    fn missing_sources_and_translations_report_the_exact_nested_counterpart() {
+        for (present, missing) in [
+            (
+                "docs/user/nested/start.md",
+                "docs/i18n/zh-CN/user/nested/start.md",
+            ),
+            (
+                "docs/i18n/zh-CN/user/nested/start.md",
+                "docs/user/nested/start.md",
+            ),
+        ] {
+            let root = tempfile::tempdir().unwrap();
+            let path = root.path().join(present);
+            fs::create_dir_all(path.parent().unwrap()).unwrap();
+            fs::write(&path, "# Tutorial\n").unwrap();
+            let mut diagnostics = Vec::new();
+            validate(root.path(), &mut diagnostics);
+            assert_eq!(diagnostics.len(), 1, "{diagnostics:?}");
+            assert!(diagnostics[0].message.ends_with(missing), "{diagnostics:?}");
+        }
+    }
+
+    #[test]
+    fn translations_require_the_locale_directory_and_locale_neutral_filenames() {
+        for (relative, expected) in [
+            ("docs/user/start.zh.md", "user translation must use"),
+            ("docs/user/start.zh-CN.md", "user translation must use"),
+            (
+                "docs/i18n/zh-CN/user/start.zh-CN.md",
+                "must omit the locale suffix",
+            ),
+            (
+                "docs/i18n/zh-CN/user/start.zh.md",
+                "must omit the locale suffix",
+            ),
+        ] {
+            let root = tempfile::tempdir().unwrap();
+            let path = root.path().join(relative);
+            fs::create_dir_all(path.parent().unwrap()).unwrap();
+            fs::write(&path, "# Misplaced translation\n").unwrap();
+            let mut diagnostics = Vec::new();
+            validate(root.path(), &mut diagnostics);
+            assert_eq!(diagnostics.len(), 1, "{diagnostics:?}");
+            assert!(diagnostics[0].message.contains(expected), "{diagnostics:?}");
         }
     }
 
@@ -331,17 +411,19 @@ mod tests {
     fn marker_errors_do_not_suppress_other_comparisons_or_id_checks() {
         let root = tempfile::tempdir().unwrap();
         let directory = root.path().join("docs/user/sub");
+        let translated_directory = root.path().join("docs/i18n/zh-CN/user/sub");
         fs::create_dir_all(&directory).unwrap();
+        fs::create_dir_all(&translated_directory).unwrap();
         let example = "<!-- rsi-example id=a platform=all -->\n```bash\necho ok\n```\n";
         fs::write(
             directory.join("start.md"),
-            format!("[中文](start.zh.md)\n\n{example}"),
+            format!("[简体中文](../../i18n/zh-CN/user/sub/start.md)\n\n{example}"),
         )
         .unwrap();
         fs::write(
-            directory.join("start.zh.md"),
+            translated_directory.join("start.md"),
             format!(
-                "[English](start.md)\n\n{}\n<!-- rsi-example broken -->\n",
+                "[English](../../../../user/sub/start.md)\n\n{}\n<!-- rsi-example broken -->\n",
                 example.replace("ok", "different")
             ),
         )
@@ -350,7 +432,7 @@ mod tests {
         let mut diagnostics = Vec::new();
         validate(root.path(), &mut diagnostics);
         for expected in [
-            "English/Chinese pair",
+            "English/Simplified Chinese pair",
             "duplicate user example id: a",
             "needs id and platform",
             "command examples differ for id `a`",
@@ -365,11 +447,20 @@ mod tests {
                 .iter()
                 .any(|d| d.line == 3 && d.message.contains("examples differ"))
         );
+        let duplicate = diagnostics
+            .iter()
+            .find(|diagnostic| diagnostic.message.contains("duplicate user example id"))
+            .unwrap();
+        assert!(
+            !duplicate
+                .message
+                .contains(&root.path().display().to_string())
+        );
     }
 
     #[test]
     fn io_errors_are_reported_without_fabricated_comparisons() {
-        let errors = validate_pair(b"\xff", b"[English](start.md)");
+        let errors = validate_pair(b"\xff", b"[English](../../../../user/nested/start.md)");
         assert!(
             errors
                 .iter()
@@ -380,16 +471,19 @@ mod tests {
                 .iter()
                 .any(|e| e.contains("examples differ") || e.contains("link to its translation"))
         );
-        let root = tempfile::tempdir().unwrap();
-        fs::create_dir_all(root.path().join("docs")).unwrap();
-        fs::write(root.path().join("docs/user"), b"not a directory").unwrap();
-        let mut diagnostics = Vec::new();
-        validate(root.path(), &mut diagnostics);
-        assert!(
-            diagnostics
-                .iter()
-                .any(|d| d.message.contains("could not read directory"))
-        );
+        for relative in ["docs/user", "docs/i18n/zh-CN/user"] {
+            let root = tempfile::tempdir().unwrap();
+            let path = root.path().join(relative);
+            fs::create_dir_all(path.parent().unwrap()).unwrap();
+            fs::write(&path, b"not a directory").unwrap();
+            let mut diagnostics = Vec::new();
+            validate(root.path(), &mut diagnostics);
+            assert!(
+                diagnostics
+                    .iter()
+                    .any(|d| d.message.contains("could not read directory"))
+            );
+        }
     }
 
     #[test]

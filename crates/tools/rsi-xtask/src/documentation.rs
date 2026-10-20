@@ -427,10 +427,10 @@ fn validate_docs_taxonomy(repository: &Path, diagnostics: &mut Vec<Diagnostic>) 
                 continue;
             };
             let name = entry.file_name();
-            if kind.is_dir()
-                && !IGNORED_DIRECTORIES.contains(&name.to_string_lossy().as_ref())
-                && !DOCS_SUBDIRECTORIES.contains(&name.to_string_lossy().as_ref())
-            {
+            let allowed_directory = IGNORED_DIRECTORIES.contains(&name.to_string_lossy().as_ref())
+                || DOCS_SUBDIRECTORIES.contains(&name.to_string_lossy().as_ref())
+                || (docs == repository.join("docs") && name == "i18n");
+            if kind.is_dir() && !allowed_directory {
                 diagnostics.push(Diagnostic::new(
                     repository,
                     &entry.path(),

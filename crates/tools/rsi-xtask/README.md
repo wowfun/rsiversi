@@ -27,6 +27,17 @@ requires the existing Native ABI and Portable boundaries.
 
 ## Documentation policy
 
+The supported translation locale is Simplified Chinese (`zh-CN`). Root
+`README.md` and `README.zh-CN.md` require reciprocal language links. The closed
+translation tree is `docs/i18n/zh-CN/user`, containing ordinary Markdown files
+paired by relative path with `docs/user`. Symlinked tutorials, other locales,
+content outside the user subtree and locale suffixes on tutorial filenames fail
+validation. Links between translated tutorials stay within their locale.
+Root README shell examples reuse the IDs and platform labels owned by
+`docs/user/source-install.md`; verification compares their commands with that
+tutorial as well as with the translated README. Product overviews link to the
+owning references rather than becoming another contract authority.
+
 `cargo xtask verify-docs` is read-only and requires the virtual workspace root.
 It checks documentation taxonomy, governance boundaries, active `AGENTS.md` word
 budgets, Cargo package README identity and minimum prose, relative Markdown links,
@@ -46,13 +57,16 @@ under `fixtures/<product>/<fixture>` in an existing product namespace and retain
 their own README. Generated outputs and installed dependencies are excluded;
 authored fixture documentation is checked.
 
-RSIversi user tutorials under `docs/user` pair `name.md` with `name.zh.md`,
-link to each other, and share executable examples verbatim. An example marker
+RSIversi user tutorials pair English `docs/user/<path>/name.md` with
+`docs/i18n/zh-CN/user/<path>/name.md`, preserving the English filename and any
+nested topic path. The directory identifies the locale; translated tutorial
+filenames omit locale suffixes. The pages link to each other and share executable
+examples verbatim. An example marker
 `<!-- rsi-example id=NAME platform=windows|linux|git-bash|all -->` immediately
-precedes its fenced block. IDs are unique across English pages; the Chinese pair
+precedes its fenced block. IDs are unique across English pages; the Simplified Chinese pair
 uses the same IDs, platforms and commands. Windows examples use `powershell`
 fences; Linux and Git Bash use `bash`. The `all` label accepts either shell.
-The whole RSI user subtree is checked. CommonMark links must resolve to the
+Both English and translated user subtrees are checked. CommonMark links must resolve to the
 paired page; images and code samples do not count as navigation. Fenced examples
 accept CommonMark indentation, quote/list containers, fence delimiters and info strings, comparing the
 normalized shell language and command body. Each malformed marker, duplicate ID,

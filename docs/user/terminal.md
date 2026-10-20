@@ -1,6 +1,6 @@
 # Use the terminal interface
 
-[中文](terminal.zh.md)
+[简体中文](../i18n/zh-CN/user/terminal.md)
 
 The TUI provides fullscreen conversations and model setup. Finish
 [source installation](source-install.md) first. On Windows, use **Windows Terminal**

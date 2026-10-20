@@ -1,6 +1,6 @@
 # Your first conversation
 
-[中文](first-conversation.zh.md)
+[简体中文](../i18n/zh-CN/user/first-conversation.md)
 
 RSIversi is a local AI workspace with a browser interface and an optional terminal
 interface. You bring a model provider account and API key. The provider may charge

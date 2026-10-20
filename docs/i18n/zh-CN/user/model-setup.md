@@ -1,10 +1,10 @@
 # 配置模型
 
-[English](model-setup.md)
+[English](../../../user/model-setup.md)
 
 本页说明 Web 的 **Settings → Models & access（设置 → 模型与访问权限）**。
 每个区域分别保存。通过本机启动链接进入，浏览器才会获得配置权限。
-如果页面显示只读，见[故障排查](troubleshooting.zh.md)。
+如果页面显示只读，见[故障排查](troubleshooting.md)。
 
 1. 在 **Credential（凭据）** 中选择服务商。首次配置可保留
    **Credential slot（凭据槽位）** 为 `default`。
@@ -30,7 +30,7 @@ DeepSeek 的接口地址通常以 `https://api.deepseek.com` 开头。
 应用服务商前，展开 **Context and output limits（上下文与输出限制）**。
 预填数字只是示例，不是自动查询到的模型容量。`context window tokens` 是总上下文容量，
 `max output reserve tokens` 是模型允许的最大输出容量。对于 DeepSeek，这个上限还须容纳
-配置的[默认请求输出量](../../crates/rsi-ai/deepseek/README.md#generation-policy)。
+配置的[默认请求输出量](../../../../crates/rsi-ai/deepseek/README.md#generation-policy)。
 调低 `default output reserve tokens` 不会改变该请求默认值。
 如果 **Apply provider** 提示 `invalid API input`，先核对这些容量，再检查密钥；
 这一步尚未向服务商发送推理请求。
@@ -42,4 +42,4 @@ OpenAI compatible（OpenAI 兼容）连接还需要 **Request path（请求路�
 应用不会自动导入仓库的 `.env` 文件。不要把密钥放入命令、截图或分享的日志中。
 
 修改默认值后，新建对话并发送一条简短文本。
-认证错误、未知模型和本地沙箱拒绝的原因不同，请按[故障排查](troubleshooting.zh.md)中的对应步骤处理。
+认证错误、未知模型和本地沙箱拒绝的原因不同，请按[故障排查](troubleshooting.md)中的对应步骤处理。

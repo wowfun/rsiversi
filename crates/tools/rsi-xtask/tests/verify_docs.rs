@@ -91,7 +91,16 @@ fn valid_repository() -> TempDir {
     ] {
         write(root, relative, "# Scope\n\nGovern this subtree.\n");
     }
-    write(root, "README.md", "# Repository\n");
+    write(
+        root,
+        "README.md",
+        "# Repository\n\n[简体中文](README.zh-CN.md)\n",
+    );
+    write(
+        root,
+        "README.zh-CN.md",
+        "# Repository\n\n[English](README.md)\n",
+    );
     write(root, "docs/architecture.md", "# Architecture\n");
     write(root, "crates/rsi-meta/README.md", "# Product\n");
     write(root, "crates/rsi-host/README.md", "# Host\n");
@@ -218,6 +227,7 @@ fn content_driven_readmes_in_all_package_locations_and_commonmark_links_are_acce
         "README.md",
         concat!(
             "# Repository\n\n",
+            "[简体中文](README.zh-CN.md)\n\n",
             "[encoded](docs/architecture.md#%C3%BCber-view)\n\n",
             "[root relative](/docs/architecture.md#über-view-1)\n\n",
             "[external](https://example.com/not-checked)\n",
@@ -568,6 +578,186 @@ fn application_docs_have_the_same_taxonomy_gate() {
     assert!(!output.status.success());
     assert!(stderr(&output).contains("apps/terminal/docs/specs"));
 }
+
+#[test]
+fn repository_translation_home_does_not_relax_product_docs_taxonomy() {
+    let repository = valid_repository();
+    for relative in [
+        "crates/rsi-meta/core/docs/i18n/translated.md",
+        "apps/terminal/docs/i18n/translated.md",
+    ] {
+        write(repository.path(), relative, "# Misplaced translation\n");
+    }
+    let output = verify(repository.path());
+    assert!(!output.status.success());
+    let errors = stderr(&output);
+    for path in ["crates/rsi-meta/core/docs/i18n", "apps/terminal/docs/i18n"] {
+        assert!(errors.contains(path), "{errors}");
+    }
+    assert!(errors.contains("unsupported docs taxonomy directory `i18n`"));
+}
+
+#[test]
+fn translation_tree_rejects_unsupported_locations_and_non_markdown_files() {
+    let repository = valid_repository();
+    for relative in [
+        "docs/i18n/fr/user/extra.md",
+        "docs/i18n/zh-CN/extra.md",
+        "docs/i18n/zh-CN/user/payload.bin",
+    ] {
+        write(repository.path(), relative, "unsupported\n");
+    }
+    let output = verify(repository.path());
+    assert!(
+        !output.status.success(),
+        "unsupported translation content was admitted"
+    );
+    let errors = stderr(&output);
+    for fragment in ["fr", "extra.md", "payload.bin"] {
+        assert!(errors.contains(fragment), "{errors}");
+    }
+}
+
+#[test]
+fn root_readme_translations_require_reciprocity_and_command_parity() {
+    let repository = valid_repository();
+    write(
+        repository.path(),
+        "README.zh-CN.md",
+        "# Translated\n\n```bash\nrsi wrong-command\n```\n",
+    );
+    let output = verify(repository.path());
+    assert!(!output.status.success(), "stale README pair was admitted");
+    let errors = stderr(&output);
+    assert!(errors.contains("README.zh-CN.md"), "{errors}");
+    assert!(errors.contains("README must link"), "{errors}");
+    write(
+        repository.path(),
+        "README.zh-CN.md",
+        "# Translated\n\n[English](README.md)\n\n```bash\nrsi wrong-command\n```\n",
+    );
+    assert!(
+        stderr(&verify(repository.path())).contains("README translated command examples differ")
+    );
+}
+
+#[test]
+fn homepage_commands_reuse_the_source_install_contract() {
+    let repository = valid_repository();
+    let example = "<!-- rsi-example id=install-bash platform=git-bash -->\n```bash\nbash scripts/rsiversi.sh setup web\n```\n";
+    for (path, link) in [
+        (
+            "docs/user/source-install.md",
+            "[简体中文](../i18n/zh-CN/user/source-install.md)",
+        ),
+        (
+            "docs/i18n/zh-CN/user/source-install.md",
+            "[English](../../../user/source-install.md)",
+        ),
+        ("README.md", "[简体中文](README.zh-CN.md)"),
+        ("README.zh-CN.md", "[English](README.md)"),
+    ] {
+        write(
+            repository.path(),
+            path,
+            &format!("# Start\n\n{link}\n\n{example}"),
+        );
+    }
+    assert!(verify(repository.path()).status.success());
+    for name in ["README.md", "README.zh-CN.md"] {
+        let link = if name == "README.md" {
+            "[简体中文](README.zh-CN.md)"
+        } else {
+            "[English](README.md)"
+        };
+        write(
+            repository.path(),
+            name,
+            &format!(
+                "# Start\n\n{link}\n\n{}",
+                example.replace("setup web", "build web")
+            ),
+        );
+    }
+    assert!(
+        stderr(&verify(repository.path())).contains("README command differs from source-install")
+    );
+    for name in ["README.md", "README.zh-CN.md"] {
+        let link = if name == "README.md" {
+            "[简体中文](README.zh-CN.md)"
+        } else {
+            "[English](README.md)"
+        };
+        let unmarked = example.lines().skip(1).collect::<Vec<_>>().join("\n");
+        write(
+            repository.path(),
+            name,
+            &format!("# Start\n\n{link}\n\n{unmarked}\n"),
+        );
+    }
+    assert!(
+        stderr(&verify(repository.path()))
+            .contains("README shell examples require source-install IDs")
+    );
+}
+
+#[test]
+fn legacy_locale_filenames_are_rejected() {
+    for relative in [
+        "README.zh.md",
+        "docs/user/topic.ZH.md",
+        "docs/i18n/zh-CN/user/topic.zh-Hans.md",
+    ] {
+        let repository = valid_repository();
+        write(repository.path(), relative, "# Legacy\n");
+        assert!(!verify(repository.path()).status.success(), "{relative}");
+    }
+}
+
+#[cfg(unix)]
+#[test]
+fn translated_tutorial_symlinks_are_rejected() {
+    let repository = valid_repository();
+    write(
+        repository.path(),
+        "docs/user/topic.md",
+        "# Topic\n\n[简体中文](../i18n/zh-CN/user/topic.md)\n",
+    );
+    let translated = repository.path().join("docs/i18n/zh-CN/user/topic.md");
+    fs::create_dir_all(translated.parent().unwrap()).unwrap();
+    std::os::unix::fs::symlink(repository.path().join("docs/user/topic.md"), translated).unwrap();
+    assert!(stderr(&verify(repository.path())).contains("symbolic links are forbidden"));
+}
+
+#[test]
+fn translated_tutorial_links_stay_in_their_locale() {
+    let repository = valid_repository();
+    for name in ["one", "two"] {
+        write(
+            repository.path(),
+            &format!("docs/user/{name}.md"),
+            &format!("# Topic\n\n[简体中文](../i18n/zh-CN/user/{name}.md)\n"),
+        );
+        write(
+            repository.path(),
+            &format!("docs/i18n/zh-CN/user/{name}.md"),
+            &format!("# Topic\n\n[English](../../../user/{name}.md)\n"),
+        );
+    }
+    write(
+        repository.path(),
+        "docs/i18n/zh-CN/user/one.md",
+        "# Topic\n\n[English](../../../user/one.md)\n\n[Other topic](../../../user/two.md)\n",
+    );
+    let output = verify(repository.path());
+    assert!(
+        !output.status.success(),
+        "translated cross-link escaped its locale"
+    );
+    assert!(stderr(&output).contains("two.md"));
+    assert!(stderr(&output).contains("one.md:5:"));
+}
+
 #[test]
 fn user_translations_require_pairs_links_and_matching_platform_commands() {
     let repository = valid_repository();
@@ -581,11 +771,15 @@ fn user_translations_require_pairs_links_and_matching_platform_commands() {
         "crates/rsi/README.md",
         "# RSI\n\nOwn the application product.\n",
     );
-    let original = "# Start\n\n[中文](start.zh.md)\n\n<!-- rsi-example id=doctor platform=windows -->\n```powershell\nscripts/rsiversi.ps1 doctor\n```\n";
-    let translated = "# 开始\n\n[English](start.md)\n\n<!-- rsi-example id=doctor platform=windows -->\n```powershell\nscripts/rsiversi.ps1 doctor\n```\n";
+    let original = "# Start\n\n[简体中文](../i18n/zh-CN/user/start.md)\n\n<!-- rsi-example id=doctor platform=windows -->\n```powershell\nscripts/rsiversi.ps1 doctor\n```\n";
+    let translated = "# 开始\n\n[English](../../../user/start.md)\n\n<!-- rsi-example id=doctor platform=windows -->\n```powershell\nscripts/rsiversi.ps1 doctor\n```\n";
     write(repository.path(), "docs/user/start.md", original);
-    assert!(stderr(&verify(repository.path())).contains("English/Chinese pair"));
-    write(repository.path(), "docs/user/start.zh.md", translated);
+    assert!(stderr(&verify(repository.path())).contains("English/Simplified Chinese pair"));
+    write(
+        repository.path(),
+        "docs/i18n/zh-CN/user/start.md",
+        translated,
+    );
     assert!(verify(repository.path()).status.success());
     for (platform, language, valid) in [
         ("windows", "bash", false),
@@ -597,10 +791,13 @@ fn user_translations_require_pairs_links_and_matching_platform_commands() {
         ("all", "bash", true),
         ("all", "powershell", true),
     ] {
-        for (name, contents) in [("start.md", original), ("start.zh.md", translated)] {
+        for (path, contents) in [
+            ("docs/user/start.md", original),
+            ("docs/i18n/zh-CN/user/start.md", translated),
+        ] {
             write(
                 repository.path(),
-                &format!("docs/user/{name}"),
+                path,
                 &contents
                     .replace("platform=windows", &format!("platform={platform}"))
                     .replace("```powershell", &format!("```{language}")),
@@ -618,14 +815,14 @@ fn user_translations_require_pairs_links_and_matching_platform_commands() {
     write(repository.path(), "docs/user/start.md", original);
     write(
         repository.path(),
-        "docs/user/start.zh.md",
+        "docs/i18n/zh-CN/user/start.md",
         &translated.replace("scripts/rsiversi.ps1 doctor", "scripts/rsiversi.ps1 setup"),
     );
     assert!(stderr(&verify(repository.path())).contains("command examples differ"));
     write(
         repository.path(),
-        "docs/user/start.zh.md",
-        &translated.replace("[English](start.md)", "English"),
+        "docs/i18n/zh-CN/user/start.md",
+        &translated.replace("[English](../../../user/start.md)", "English"),
     );
     assert!(stderr(&verify(repository.path())).contains("link to its translation"));
 }

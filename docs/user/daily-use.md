@@ -1,6 +1,6 @@
 # Daily use
 
-[中文](daily-use.zh.md)
+[简体中文](../i18n/zh-CN/user/daily-use.md)
 
 A conversation belongs to the selected workspace and keeps its own saved history.
 Choose an existing conversation to continue it, or **New conversation** for a

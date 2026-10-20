@@ -1,6 +1,6 @@
 # Troubleshooting
 
-[中文](troubleshooting.zh.md)
+[简体中文](../i18n/zh-CN/user/troubleshooting.md)
 
 This reference covers source installation and local Web/TUI/Desktop. Start with the exact
 error from the owning terminal. Include the OS, shell, revision and command when

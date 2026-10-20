@@ -101,8 +101,8 @@ standalone schemas, fixtures and examples retain their product namespaces.
 Repository verification tools live below `crates/tools/`; application development
 and distribution belong to the application layer. Current behavior is documented
 at its owning product or package rather than duplicated at root.
-RSIversi user tutorials live in `docs/user`; their links lead to those owning
-contracts for implementation details.
+English RSIversi user tutorials live in `docs/user`, with translations under
+`docs/i18n`; their links lead to those owning contracts for implementation details.
 The repository [development guide](development.md) describes ordinary debug
 workflows. Thin source entrypoints live in `scripts`,
 while application development and publication logic stays in `apps/devtools`.

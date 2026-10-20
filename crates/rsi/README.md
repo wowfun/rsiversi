@@ -10,7 +10,7 @@ names, protocol identifiers and data directories retain their own spelling.
 The [Web document](../../apps/web/README.md) owns the shared graphical brand source.
 
 For ordinary use, follow [your first conversation](../../docs/user/first-conversation.md)
-([中文](../../docs/user/first-conversation.zh.md)).
+([简体中文](../../docs/i18n/zh-CN/user/first-conversation.md)).
 
 Windows native Agent/ACP workspaces and private state require fixed local NTFS;
 ReFS Dev Drives, exFAT and network roots are refused by the current filesystem

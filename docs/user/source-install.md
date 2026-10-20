@@ -1,6 +1,6 @@
 # Install from source
 
-[中文](source-install.zh.md)
+[简体中文](../i18n/zh-CN/user/source-install.md)
 
 This tutorial prepares a Git checkout, builds the application, and opens Web.
 It does not install system components or change machine security settings.
@@ -75,6 +75,9 @@ Linux Web/Desktop include the SSH helper. Linux TUI opts in with `setup tui --wi
 
 Each target has its own current publication and compilation cache. Clients that need one Linux Service Host must use the same family: after `build web`, use `web` and `tui --from web`; after `build desktop`, use `desktop`, `web --from desktop` or `tui --from desktop`. Windows requires stopping the existing interface before opening another on the same Host. There is no fallback between targets.
 
+`dev tui` and `dev web` start the standard debug product with supervision.
+Follow the [development guide](../development.md) for state selection and hot updates.
+
 ## Check, update, and locate the application
 
 `doctor` reports missing prerequisites without installing or building anything.
@@ -82,7 +85,7 @@ Use `scripts/rsiversi.ps1 doctor web` through the PowerShell invocation above, o
 `bash scripts/rsiversi.sh doctor web`. Follow its diagnostic, then retry.
 
 Use `--help` or `-h` for an overview, or `build --help` for build options.
-Help for `doctor`, `setup`, `build` and `path` works before setup and without
+Help for `doctor`, `setup`, `build`, `path` and `dev` works before setup and without
 published artifacts. `web --help`, `tui --help` and `desktop --help` use the built application's
 help and require a successful build.
 

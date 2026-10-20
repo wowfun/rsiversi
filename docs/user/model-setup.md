@@ -1,6 +1,6 @@
 # Configure a model
 
-[中文](model-setup.zh.md)
+[简体中文](../i18n/zh-CN/user/model-setup.md)
 
 This reference describes **Settings → Models & access** in Web. Each section
 saves independently. Use the local launch link so this browser has configuration

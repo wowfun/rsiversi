@@ -1,5 +1,5 @@
-- This subtree owns repository-wide documentation and development behavior, plus RSIversi user tutorials in `user/`. Internal product architecture, subsystem contracts and package references stay with their owning products.
-- Place the ordered product map in `architecture.md`. Create `subsystems/`, `cookbook/`, or `postmortem/` only when a cross-product subject actually needs that tier. User tutorials retain paired English/Chinese pages and matching platform-labelled command examples.
+- This subtree owns repository-wide documentation and development behavior, plus RSIversi user tutorials in `user/` and their translations in `i18n/`. Internal product architecture, subsystem contracts and package references stay with their owning products.
+- Place the ordered product map in `architecture.md`. Create `subsystems/`, `cookbook/`, or `postmortem/` only when a cross-product subject actually needs that tier. User tutorials retain paired English/Simplified Chinese pages and matching platform-labelled command examples.
 - Classify prose as tutorial or reference. Tutorials lead an ordered path to an outcome; references define a lookup scope and current behavior. Split substantial mixtures.
 - Describe direct children only by responsibility and high-level behavior. Link to descendant product or package owners for lower-level detail.
 - Do not create `adr`, `rfc`, `rfcs`, or `specs` directories under a documentation tree.

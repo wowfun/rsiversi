@@ -1,6 +1,6 @@
 # 从源码安装
 
-[English](source-install.md)
+[English](../../../user/source-install.md)
 
 本教程带你获取 Git 源码、构建应用并打开 Web。
 脚本不会安装系统组件，也不会修改机器的安全设置，不支持源码 ZIP 压缩包。
@@ -71,6 +71,9 @@ Linux Web/Desktop 默认包含 SSH helper。Linux TUI 通过 `setup tui --with-s
 
 每个目标有独立的当前产物和编译缓存。需要共享 Linux Service Host 的客户端必须使用同一 family：`build web` 后用 `web` 和 `tui --from web`；`build desktop` 后用 `desktop`、`web --from desktop` 或 `tui --from desktop`。Windows 在同一 Host 上切换界面前仍需停止已有界面。入口不会自动回退到其他目标。
 
+`dev tui` 和 `dev web` 启动受监督的标准产品 debug 构建。
+状态目录选择和热更新见[开发指南（英文）](../../../development.md)。
+
 ## 检查、升级与查找产物
 
 `doctor` 只检查前置依赖，不安装、不构建。PowerShell 按上面的调用方式执行
@@ -78,7 +81,7 @@ Linux Web/Desktop 默认包含 SSH helper。Linux TUI 通过 `setup tui --with-s
 根据诊断补齐依赖后重试。
 
 使用 `--help` 或 `-h` 查看总帮助，使用 `build --help` 查看构建选项。
-`doctor`、`setup`、`build` 和 `path` 的帮助在 setup 前即可使用，无需已有产物。
+`doctor`、`setup`、`build`、`path` 和 `dev` 的帮助在 setup 前即可使用，无需已有产物。
 `web --help`、`tui --help` 和 `desktop --help` 由已构建应用提供，需要先成功构建。
 
 <!-- rsi-example id=install-help-windows platform=windows -->
@@ -100,7 +103,7 @@ bash scripts/rsiversi.sh build --help
 你可以直接给这个程序传入 `web` 启动，请保留版本目录的完整布局。
 启动和 path 命令不调用 Cargo、Node 或构建器。应用运行期间，其托管版本目录不会被回收。
 
-完整参数与发布规则见[源码入口契约](../../apps/devtools/README.md)。
+完整参数与发布规则见[源码入口契约](../../../../apps/devtools/README.md)。
 
-接下来[完成第一次对话](first-conversation.zh.md)。
-构建失败和长路径问题见[故障排查](troubleshooting.zh.md)。
+接下来[完成第一次对话](first-conversation.md)。
+构建失败和长路径问题见[故障排查](troubleshooting.md)。
