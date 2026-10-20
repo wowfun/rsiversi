@@ -57,12 +57,21 @@ its domain ownership.
 
 ## Local Web launch
 
+The debug CLI's internal development entry may supply a frozen loopback frontend
+Origin and an explicit launch handoff. It selects the same ordinary Web Profile.
+The handoff reports the actual backend socket, waits for proxy readiness, then
+releases the normal one-use launch link. Its closure stops the application.
+Ordinary `rsi web` exposes neither a proxy-Origin flag nor a control channel.
+An explicitly watched, run-owned asset copy retains the paired bootstrap/Worker
+check and the existing renderer-only publication rules.
+
 The ordinary local Web factories own `--port` (default 8787, range 0..65535),
 `--no-open`, `--assets ABSOLUTE_DIRECTORY`, and Web-only help. The launcher
 supplies frozen executable-relative assets and SSH/browser-opening inputs.
 Assets activate before the Service. Missing bundles identify the selected path
 and build command. Opening never builds assets or replaces an existing Host.
-The loopback listener derives its exact Origin from the socket it actually owns.
+The ordinary loopback listener derives its exact Origin from its own socket;
+the explicit development handoff admits the retained frontend Origin instead.
 Local listener failure reports the requested port and suggests `rsi web --port 0`
 to select a free port, including Windows reserved-port failures.
 

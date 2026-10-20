@@ -141,5 +141,6 @@ fn web_environment() -> rsi::Result<rsi_serve::WebLaunchEnvironment> {
             arguments,
             environment,
         })),
+        development: None,
     })
 }

@@ -28,6 +28,23 @@ pub trait BrowserOpener: std::fmt::Debug + Send + Sync {
     async fn open(&self, url: &str) -> Result<(), String>;
 }
 
+/// Explicit debug-launch handoff. Its owner retains the frontend socket and pipes.
+#[async_trait]
+pub trait WebDevelopmentHandoff: std::fmt::Debug + Send + Sync {
+    /// Exact frontend Origin established before bootstrap, stable for this run.
+    fn frontend_origin(&self) -> Option<rsi_api_http::LoopbackBrowserOrigin>;
+    /// Enables only the existing renderer-only asset publication watcher.
+    fn watch_renderers(&self) -> bool;
+    /// Reports the owned backend socket and waits for the proxy-ready release.
+    async fn ready(&self, address: std::net::SocketAddr) -> Result<(), String>;
+    /// Transfers the one-use launch link without putting it in application logs.
+    async fn launch(&self, url: &str, open_browser: bool) -> Result<(), String>;
+    /// Records an OS interruption so the debug CLI can preserve its exit meaning.
+    fn interrupted(&self);
+    /// Cancel-safe, repeatable wait for control-owner retirement or pipe closure.
+    async fn stopped(&self);
+}
+
 /// OS opener with a launcher-supplied, scrubbed environment.
 #[derive(Debug)]
 pub struct SystemBrowserOpener {
@@ -62,7 +79,7 @@ impl BrowserOpener for SystemBrowserOpener {
     }
 }
 
-/// Frozen application inputs; no Service launch identity or implicit environment reads.
+/// Explicit application inputs and optional live handoff; no Service identity.
 #[derive(Clone, Debug, Default)]
 pub struct WebLaunchEnvironment {
     /// Default absolute bundle path captured beside the actual executable.
@@ -71,6 +88,8 @@ pub struct WebLaunchEnvironment {
     pub ssh: bool,
     /// Optional explicit browser-opening implementation.
     pub opener: Option<Arc<dyn BrowserOpener>>,
+    /// Explicit development control, supplied only by the debug CLI entry.
+    pub development: Option<Arc<dyn WebDevelopmentHandoff>>,
 }
 
 #[derive(Clone, Debug)]
@@ -176,7 +195,7 @@ impl PluginFactory for LocalWebAssetsFactory {
         }
         let options = self.0.options().map_err(|error| self.0.failure(error))?;
         rsi_web_assets::PairedWebAssetsFactory::new(rsi_build_info::family())
-            .prepare(&serde_json::json!({"directory": options.assets}))
+            .prepare(&serde_json::json!({"directory": options.assets, "watch": self.0.environment.development.as_ref().is_some_and(|dev| dev.watch_renderers())}))
             .map_err(|error| self.0.failure(error))
     }
     async fn activate(&self, plan: ActivationPlan) -> rsi_meta::Result<()> {
@@ -259,6 +278,7 @@ mod tests {
                 assets: Some(assets("bundle")),
                 ssh,
                 opener: None,
+                development: None,
             },
         )
     }
@@ -300,10 +320,10 @@ mod tests {
         }
     }
     #[derive(Debug)]
-    #[cfg(unix)]
+    #[cfg(any(unix, windows))]
     struct HealthyService;
     #[async_trait]
-    #[cfg(unix)]
+    #[cfg(any(unix, windows))]
     impl crate::ServingService for HealthyService {
         async fn stopped(&self) -> Result<(), String> {
             std::future::pending().await
@@ -313,7 +333,7 @@ mod tests {
         }
     }
     #[async_trait]
-    #[cfg(unix)]
+    #[cfg(any(unix, windows))]
     impl rsi_api_http::HttpListener for HealthyService {
         fn address(&self) -> std::net::SocketAddr {
             ([127, 0, 0, 1], 8787).into()
@@ -325,6 +345,90 @@ mod tests {
             std::future::pending().await
         }
     }
+    #[derive(Debug, Default)]
+    struct DevelopmentHandoff {
+        ready: tokio::sync::Notify,
+        release: tokio::sync::Notify,
+        launched: tokio::sync::Notify,
+        stop: tokio_util::sync::CancellationToken,
+        link: Mutex<Option<(String, bool)>>,
+    }
+    #[async_trait]
+    impl WebDevelopmentHandoff for DevelopmentHandoff {
+        fn frontend_origin(&self) -> Option<rsi_api_http::LoopbackBrowserOrigin> {
+            Some(rsi_api_http::LoopbackBrowserOrigin::new("http://127.0.0.1:3001".into()).unwrap())
+        }
+        fn watch_renderers(&self) -> bool {
+            true
+        }
+        async fn ready(&self, address: std::net::SocketAddr) -> Result<(), String> {
+            assert_eq!(address.port(), 8787);
+            self.ready.notify_one();
+            self.release.notified().await;
+            Ok(())
+        }
+        async fn launch(&self, url: &str, open: bool) -> Result<(), String> {
+            *self.link.lock().unwrap() = Some((url.into(), open));
+            self.launched.notify_one();
+            Ok(())
+        }
+        fn interrupted(&self) {}
+        async fn stopped(&self) {
+            self.stop.cancelled().await;
+        }
+    }
+    #[cfg(any(unix, windows))]
+    async fn development_handoff_case(release: bool) {
+        let handoff = Arc::new(DevelopmentHandoff::default());
+        let runner = Arc::new(crate::Runner {
+            listener: Arc::new(HealthyService),
+            service: Arc::new(HealthyService),
+            origin: handoff.frontend_origin().unwrap().as_str().into(),
+            launch_link: Mutex::new(Some(SecretValue::new("fixture").unwrap())),
+            opener: None,
+            development: Some(handoff.clone()),
+            open_browser: true,
+            started: Mutex::new(false),
+            stop: tokio_util::sync::CancellationToken::new(),
+            tasks: tokio_util::task::TaskTracker::new(),
+            execution: rsi_meta::Execution::native(tokio::runtime::Handle::current()),
+        });
+        let serving = tokio::spawn(async move { runner.serve().await });
+        tokio::time::timeout(Duration::from_secs(5), handoff.ready.notified())
+            .await
+            .unwrap();
+        assert!(handoff.link.lock().unwrap().is_none());
+        if release {
+            handoff.release.notify_one();
+            tokio::time::timeout(Duration::from_secs(5), handoff.launched.notified())
+                .await
+                .unwrap();
+            assert_eq!(
+                *handoff.link.lock().unwrap(),
+                Some(("http://127.0.0.1:3001#rsi-launch=fixture".into(), true))
+            );
+        }
+        handoff.stop.cancel();
+        assert_eq!(
+            tokio::time::timeout(Duration::from_secs(5), serving)
+                .await
+                .unwrap()
+                .unwrap(),
+            0
+        );
+        assert_eq!(handoff.link.lock().unwrap().is_some(), release);
+    }
+    #[tokio::test]
+    #[cfg(any(unix, windows))]
+    async fn development_handoff_defers_launch_and_preserves_open_preference() {
+        development_handoff_case(true).await;
+    }
+    #[tokio::test]
+    #[cfg(any(unix, windows))]
+    async fn development_handoff_cancels_during_readiness_without_launching() {
+        development_handoff_case(false).await;
+    }
+
     #[derive(Debug, Default)]
     #[cfg(unix)]
     struct FailedOpener(tokio::sync::Notify);
@@ -347,6 +451,8 @@ mod tests {
             origin: "http://127.0.0.1:8787".into(),
             launch_link: Mutex::new(Some(SecretValue::new("fixture").unwrap())),
             opener: Some(opener.clone()),
+            development: None,
+            open_browser: true,
             started: Mutex::new(false),
             stop: tokio_util::sync::CancellationToken::new(),
             tasks: tokio_util::task::TaskTracker::new(),
