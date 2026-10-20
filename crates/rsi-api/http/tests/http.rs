@@ -1763,6 +1763,130 @@ impl rsi_api_http::BrowserBootstrap for Bootstrap {
         Ok(SecretValue::new("a".repeat(64)).unwrap())
     }
 }
+
+#[derive(Debug)]
+struct EmptyWebAssets;
+impl rsi_api_http::HttpAssets for EmptyWebAssets {
+    fn get(&self, _: &str) -> Result<Option<rsi_api_http::HttpAsset>> {
+        Ok(None)
+    }
+}
+#[async_trait]
+impl rsi_meta::PluginFactory for EmptyWebAssets {
+    fn prepare(&self, _: &serde_json::Value) -> rsi_meta::Result<rsi_meta::PreparedActivation> {
+        Ok(rsi_meta::PreparedActivation::new(serde_json::Value::Null))
+    }
+    async fn activate(&self, plan: rsi_meta::ActivationPlan) -> rsi_meta::Result<()> {
+        let supply = plan
+            .context()
+            .provide_local::<rsi_api_http::HttpAssetsContract>(Arc::new(Self))?;
+        plan.defer(
+            "withdraw fixture assets",
+            Box::new(move || {
+                Box::pin(async move {
+                    drop(supply);
+                    Ok(())
+                })
+            }),
+        )
+    }
+}
+#[tokio::test]
+async fn local_browser_factory_admits_only_the_owned_frontend_origin_and_never_rewrites_csrf() {
+    use rsi_api_http::{HttpListenerContract, LocalBrowserHttpFactory, LoopbackBrowserOrigin};
+    use rsi_meta::{ResolvedFactory, Runtime, RuntimeLimits, UpdateMode};
+    for proxied in [false, true] {
+        let frontend = TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let frontend_origin = format!("http://{}", frontend.local_addr().unwrap());
+        let runtime = Runtime::new(RuntimeLimits::default()).unwrap();
+        let linked =
+            |name, factory| ResolvedFactory::linked(name, "test", UpdateMode::Replayable, factory);
+        let factories: [(&str, Arc<dyn rsi_meta::PluginFactory>); 4] = [
+            ("api", Arc::new(rsi_api::ApiFactory)),
+            ("identity", Arc::new(EndpointDependencies)),
+            ("connection", Arc::new(rsi_api::ConnectionApiFactory)),
+            ("assets", Arc::new(EmptyWebAssets)),
+        ];
+        let mut dependencies = Vec::new();
+        for (name, factory) in factories {
+            dependencies.push(
+                runtime
+                    .root()
+                    .apply(linked(name, factory), serde_json::Value::Null)
+                    .await
+                    .unwrap(),
+            );
+        }
+        let ticket = Arc::new(Bootstrap(std::sync::atomic::AtomicBool::new(false)));
+        let mut factory = LocalBrowserHttpFactory::new(ticket.clone());
+        if proxied {
+            factory = factory
+                .with_frontend_origin(LoopbackBrowserOrigin::new(frontend_origin.clone()).unwrap());
+        }
+        let http = runtime
+            .root()
+            .apply(linked("http", Arc::new(factory)), serde_json::json!(0))
+            .await
+            .unwrap();
+        let listener = runtime
+            .root()
+            .lookup_local::<HttpListenerContract>()
+            .unwrap();
+        let backend_origin = format!("http://{}", listener.address());
+        let expected = if proxied {
+            &frontend_origin
+        } else {
+            &backend_origin
+        };
+        for (host, origin, csrf) in [
+            (
+                expected.trim_start_matches("http://"),
+                "http://foreign.invalid",
+                true,
+            ),
+            ("foreign.invalid", expected.as_str(), true),
+            (
+                expected.trim_start_matches("http://"),
+                expected.as_str(),
+                false,
+            ),
+        ] {
+            let mut request = Harness::client()
+                .post(format!("{backend_origin}/api/v1/browser-bootstrap"))
+                .header("host", host)
+                .header("origin", origin)
+                .header("x-rsi-launch-ticket", "b".repeat(64));
+            if csrf {
+                request = request.header("x-rsi-csrf", "1");
+            }
+            assert_eq!(request.send().await.unwrap().status(), 401);
+            assert!(!ticket.0.load(std::sync::atomic::Ordering::SeqCst));
+        }
+        let response = Harness::client()
+            .post(format!("{backend_origin}/api/v1/browser-bootstrap"))
+            .header("host", expected.trim_start_matches("http://"))
+            .header("origin", expected)
+            .header("x-rsi-csrf", "1")
+            .header("x-rsi-launch-ticket", "b".repeat(64))
+            .send()
+            .await
+            .unwrap();
+        assert_eq!(response.status(), 200);
+        assert!(
+            !response.headers()["set-cookie"]
+                .to_str()
+                .unwrap()
+                .to_ascii_lowercase()
+                .contains("domain=")
+        );
+        http.dispose().await;
+        listener.stopped().await.unwrap();
+        for dependency in dependencies.into_iter().rev() {
+            dependency.dispose().await;
+        }
+        runtime.shutdown().await;
+    }
+}
 #[tokio::test]
 #[allow(clippy::too_many_lines)] // One lifecycle covers fencing, consumption and authenticated recovery.
 async fn browser_bootstrap_fences_before_consumption_and_recovers_only_authenticated_cookies() {

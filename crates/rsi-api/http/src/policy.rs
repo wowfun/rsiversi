@@ -2,6 +2,36 @@ use rsi_api_protocol::{ApiError, Result};
 use serde::{Deserialize, Serialize};
 use std::{net::SocketAddr, path::PathBuf};
 
+/// Validated canonical HTTP Origin of an explicitly owned loopback frontend.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct LoopbackBrowserOrigin(String);
+impl LoopbackBrowserOrigin {
+    /// Validates an origin before the application supplies local proxy authority.
+    pub fn new(origin: String) -> Result<Self> {
+        let config = HttpConfig {
+            bind: ([127, 0, 0, 1], 0).into(),
+            public_origin: origin,
+            tls: None,
+            allow_loopback_http: true,
+        };
+        config.validate()?;
+        let uri: http::Uri = config
+            .public_origin
+            .parse()
+            .map_err(|_| ApiError::Invalid("invalid loopback origin".into()))?;
+        if uri.authority().and_then(http::uri::Authority::port_u16) == Some(0) {
+            return Err(ApiError::Invalid(
+                "frontend origin requires a bound port".into(),
+            ));
+        }
+        Ok(Self(config.public_origin))
+    }
+    /// Returns the admitted exact Origin, without accepting forwarded overrides.
+    pub fn as_str(&self) -> &str {
+        &self.0
+    }
+}
+
 /// Explicit PEM assets for production TLS; configuration contains paths, never keys.
 #[derive(Clone, Debug, Deserialize, Serialize)]
 #[serde(deny_unknown_fields)]

@@ -80,7 +80,7 @@ impl PluginFactory for HttpFactory {
         )
     }
     async fn activate(&self, plan: ActivationPlan) -> rsi_meta::Result<()> {
-        activate(plan, None, None).await
+        activate(plan, None, None, None).await
     }
 }
 
@@ -96,13 +96,14 @@ impl PluginFactory for StaticHttpFactory {
     }
     async fn activate(&self, plan: ActivationPlan) -> rsi_meta::Result<()> {
         let assets = plan.local::<crate::HttpAssetsContract>()?;
-        activate(plan, Some(assets), None).await
+        activate(plan, Some(assets), None, None).await
     }
 }
 async fn activate(
     mut plan: ActivationPlan,
     assets: Option<Arc<dyn crate::HttpAssets>>,
     bootstrap: Option<Arc<dyn crate::BrowserBootstrap>>,
+    frontend_origin: Option<crate::LoopbackBrowserOrigin>,
 ) -> rsi_meta::Result<()> {
     let mut config = plan.take_state::<HttpConfig>()?;
     let execution = plan.context().runtime().execution().clone();
@@ -125,7 +126,9 @@ async fn activate(
         config.bind = listener
             .local_addr()
             .map_err(|error| MetaError::Activation(error.to_string()))?;
-        config.public_origin = if config.bind.port() == 80 {
+        config.public_origin = if let Some(origin) = frontend_origin {
+            origin.as_str().to_owned()
+        } else if config.bind.port() == 80 {
             "http://127.0.0.1".into()
         } else {
             format!("http://{}", config.bind)
@@ -188,6 +191,7 @@ pub struct LocalBrowserHttpFactory {
     /// Application-owned launch authority; ordinary HTTP listeners never receive it.
     bootstrap: Arc<dyn crate::BrowserBootstrap>,
     diagnostic: std::sync::Mutex<Option<String>>,
+    frontend_origin: Option<crate::LoopbackBrowserOrigin>,
 }
 impl LocalBrowserHttpFactory {
     /// Freezes the explicit launch exchange without opening a listener.
@@ -195,7 +199,15 @@ impl LocalBrowserHttpFactory {
         Self {
             bootstrap,
             diagnostic: std::sync::Mutex::new(None),
+            frontend_origin: None,
         }
+    }
+    /// Supplies the exact Origin of a frontend whose socket the caller owns.
+    /// The caller must retain that ownership until this listener is retired.
+    #[must_use]
+    pub fn with_frontend_origin(mut self, origin: crate::LoopbackBrowserOrigin) -> Self {
+        self.frontend_origin = Some(origin);
+        self
     }
     /// Takes a startup diagnostic without exposing credentials.
     ///
@@ -227,11 +239,15 @@ impl PluginFactory for LocalBrowserHttpFactory {
     }
     async fn activate(&self, plan: ActivationPlan) -> rsi_meta::Result<()> {
         let assets = plan.local::<crate::HttpAssetsContract>()?;
-        activate(plan, Some(assets), Some(self.bootstrap.clone()))
-            .await
-            .inspect_err(|error| {
-                *self.diagnostic.lock().expect("HTTP diagnostic poisoned") =
-                    Some(error.to_string());
-            })
+        activate(
+            plan,
+            Some(assets),
+            Some(self.bootstrap.clone()),
+            self.frontend_origin.clone(),
+        )
+        .await
+        .inspect_err(|error| {
+            *self.diagnostic.lock().expect("HTTP diagnostic poisoned") = Some(error.to_string());
+        })
     }
 }

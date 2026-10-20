@@ -27,5 +27,5 @@ mod tls;
 pub use plugin::{
     HttpFactory, HttpListener, HttpListenerContract, LocalBrowserHttpFactory, StaticHttpFactory,
 };
-pub use policy::{HttpConfig, TlsFiles};
+pub use policy::{HttpConfig, LoopbackBrowserOrigin, TlsFiles};
 pub use server::{HttpServer, HttpServices};

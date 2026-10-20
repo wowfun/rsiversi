@@ -1,5 +1,12 @@
 # rsi-api-http
 
+`LoopbackBrowserOrigin` admits an explicit canonical loopback HTTP frontend
+Origin for a caller-owned local proxy. The supplying application must establish
+and retain that proxy's socket ownership before constructing the listener.
+`LocalBrowserHttpFactory` otherwise derives its Origin from its own socket.
+Both modes keep the same exact Host/Origin, device cookie and CSRF checks;
+forwarded headers cannot select or override the admitted Origin.
+
 Malformed Content-Type and any Content-Encoding are rejected before API lane
 admission. After admission the registered operation still checks its exact JSON
 or binary encoding. Listener connection failures include rejected connection and
