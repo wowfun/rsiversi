@@ -7098,6 +7098,7 @@ dependencies = [
  "portable-pty",
  "rsi-meta",
  "rsi-process",
+ "rsi-process-native",
  "rsi-sandbox",
  "rsi-sandbox-local",
  "rustix 1.1.4",
@@ -7106,6 +7107,13 @@ dependencies = [
  "tempfile",
  "tokio",
  "tokio-util",
+]
+
+[[package]]
+name = "rsi-process-native"
+version = "0.0.1"
+dependencies = [
+ "tokio",
 ]
 
 [[package]]

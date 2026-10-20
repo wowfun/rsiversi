@@ -1,0 +1,13 @@
+[package]
+name = "rsi-process-native"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+publish = false
+
+[target.'cfg(windows)'.dependencies]
+tokio = { workspace = true, features = ["process"] }
+
+[lints]
+workspace = true

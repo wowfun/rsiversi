@@ -70,10 +70,12 @@ unsafe extern "system" {
     fn ResumeThread(thread: RawHandle) -> u32;
 }
 
+/// Sole owner of an unnamed, non-inheritable Windows Job.
 #[derive(Debug)]
-pub(super) struct Job(OwnedHandle);
+pub struct Job(OwnedHandle);
 impl Job {
-    pub(super) fn new() -> io::Result<Self> {
+    /// Creates kill-on-close ownership before any child starts.
+    pub fn new() -> io::Result<Self> {
         // SAFETY: Null name/security create an unnamed, non-inheritable job handle.
         let handle = unsafe { CreateJobObjectW(std::ptr::null(), std::ptr::null()) };
         if handle.is_null() {
@@ -96,7 +98,7 @@ impl Job {
                 9,
                 (&raw const limits).cast(),
                 u32::try_from(std::mem::size_of::<ExtendedLimits>())
-                    .expect("fixed Win32 record size"),
+                    .map_err(|_| io::Error::other("native record exceeds Win32 size bound"))?,
             )
         } == 0
         {
@@ -104,7 +106,24 @@ impl Job {
         }
         Ok(job)
     }
-    pub(super) fn assign(&self, process: RawHandle) -> io::Result<()> {
+    /// Assigns and resumes a still-suspended synchronous child under its retained handle.
+    pub fn admit_child(&self, child: &std::process::Child) -> io::Result<()> {
+        self.assign(child.as_raw_handle())?;
+        resume_primary(child.id())
+    }
+    /// Assigns and resumes a still-suspended asynchronous child under its retained handle.
+    pub fn admit_tokio_child(&self, child: &tokio::process::Child) -> io::Result<()> {
+        let handle = child
+            .raw_handle()
+            .ok_or_else(|| io::Error::other("child handle absent"))?;
+        self.assign(handle)?;
+        resume_primary(
+            child
+                .id()
+                .ok_or_else(|| io::Error::other("child PID absent"))?,
+        )
+    }
+    fn assign(&self, process: RawHandle) -> io::Result<()> {
         // SAFETY: The caller retains the suspended Child's process handle through
         // this call. Assignment occurs before resuming its user-code thread.
         if unsafe { AssignProcessToJobObject(self.0.as_raw_handle(), process) } == 0 {
@@ -112,7 +131,8 @@ impl Job {
         }
         Ok(())
     }
-    pub(super) fn terminate(&self) -> io::Result<()> {
+    /// Terminates this exact Job and its members.
+    pub fn terminate(&self) -> io::Result<()> {
         // SAFETY: The job is owned and live; termination addresses this object,
         // never a numeric PID that could refer to a different process generation.
         if unsafe { TerminateJobObject(self.0.as_raw_handle(), 1) } == 0 {
@@ -120,7 +140,8 @@ impl Job {
         }
         Ok(())
     }
-    pub(super) fn active(&self) -> io::Result<u32> {
+    /// Reports active processes without releasing Job ownership.
+    pub fn active(&self) -> io::Result<u32> {
         let mut accounting = Accounting::default();
         // SAFETY: The job and the aligned writable accounting record remain live.
         if unsafe {
@@ -128,7 +149,8 @@ impl Job {
                 self.0.as_raw_handle(),
                 1,
                 (&raw mut accounting).cast(),
-                u32::try_from(std::mem::size_of::<Accounting>()).expect("fixed Win32 record size"),
+                u32::try_from(std::mem::size_of::<Accounting>())
+                    .map_err(|_| io::Error::other("native record exceeds Win32 size bound"))?,
                 std::ptr::null_mut(),
             )
         } == 0
@@ -139,7 +161,7 @@ impl Job {
     }
 }
 
-pub(super) fn resume_primary(pid: u32) -> io::Result<()> {
+fn resume_primary(pid: u32) -> io::Result<()> {
     // SAFETY: TH32CS_SNAPTHREAD requests a process-independent thread snapshot.
     let handle = unsafe { CreateToolhelp32Snapshot(4, 0) };
     if handle as isize == -1 {

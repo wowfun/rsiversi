@@ -15,8 +15,7 @@ use tokio::{
     sync::{Notify, OwnedSemaphorePermit, Semaphore},
 };
 mod duplex;
-#[allow(unsafe_code)]
-mod native;
+use rsi_process_native as native;
 
 #[derive(Debug)]
 pub(super) struct Service {
@@ -115,11 +114,7 @@ impl Service {
         let pid = process
             .id()
             .ok_or_else(|| ProcessError::Spawn("native child has no PID".into()))?;
-        let setup = process
-            .raw_handle()
-            .ok_or_else(|| std::io::Error::other("native process handle unavailable"))
-            .and_then(|handle| job.assign(handle))
-            .and_then(|()| native::resume_primary(pid));
+        let setup = job.admit_tokio_child(&process);
         if let Err(error) = setup {
             // Cleanup owns the still-suspended/assigned child independently of a
             // cancelled spawn waiter, and keeps its admission until actual reap.
