@@ -160,9 +160,20 @@ const SHIPPED_PRESETS: &[(&str, &[u8], &[u8])] = &[
     ),
 ];
 
+/// Launcher purpose used only to select Host-conflict recovery advice.
+#[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
+pub enum HostStartupPurpose {
+    /// Ordinary product startup and existing recovery advice.
+    #[default]
+    Ordinary,
+    /// Development preserves existing owners and recommends independent state.
+    Development,
+}
+
 /// Frozen inputs used to construct the standard linked catalog and fragments.
 #[derive(Clone, Debug)]
 pub struct StandardComposition {
+    pub(crate) startup_purpose: HostStartupPurpose,
     applications: crate::ApplicationCatalogMetadata,
     paths: HostPaths,
     user_home: Option<PathBuf>,
@@ -935,6 +946,7 @@ impl StandardComposition {
     ) -> Self {
         Self {
             applications,
+            startup_purpose: HostStartupPurpose::Ordinary,
             credential_store: Arc::new(FileSecretStore::with_trusted_root_alias(
                 paths.config().join("credentials/credentials.json"),
             )),
@@ -952,6 +964,13 @@ impl StandardComposition {
             #[cfg(unix)]
             native_catalog: None,
         }
+    }
+
+    /// Selects recovery wording without changing Host launch identity or authority.
+    #[must_use]
+    pub fn with_startup_purpose(mut self, purpose: HostStartupPurpose) -> Self {
+        self.startup_purpose = purpose;
+        self
     }
 
     /// Frozen application metadata supplied by the executable's catalog owner.
@@ -2442,6 +2461,28 @@ mod tests {
     }
 
     use super::*;
+    #[test]
+    fn development_startup_advice_does_not_change_the_host_launch_identity() {
+        let root = tempfile::tempdir().unwrap();
+        let paths = HostPaths::new(
+            root.path().join("config"),
+            root.path().join("state"),
+            root.path().join("cache"),
+        )
+        .unwrap();
+        let metadata = crate::ApplicationCatalogMetadata::default();
+        let profile = crate::ProfileCatalog::new(paths.clone(), metadata.clone())
+            .host(&crate::HostProfileId::new("standard").unwrap())
+            .unwrap();
+        let ordinary = StandardComposition::new(paths, BTreeMap::new(), None, metadata);
+        let expected = ordinary.preview_host(&profile).unwrap().launch_key;
+        let development = ordinary.with_startup_purpose(HostStartupPurpose::Development);
+        assert_eq!(
+            development.preview_host(&profile).unwrap().launch_key,
+            expected
+        );
+        assert_eq!(std::fs::read_dir(root.path()).unwrap().count(), 0);
+    }
     #[cfg(unix)]
     use rsi_meta_profile::{
         ProfileCompiler, ProfileEnvironment, ProfileLimits, ProfileProgram, ProfileResolver,

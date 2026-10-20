@@ -97,8 +97,8 @@ pub use agent_preset::{
     USER_AGENT_PRESET_DIRECTORY, user_agent_preset_root,
 };
 pub use composition::{
-    StandardCodingTools, StandardComposition, StandardHostPreview, capture_standard_environment,
-    standard_agent_preset_root,
+    HostStartupPurpose, StandardCodingTools, StandardComposition, StandardHostPreview,
+    capture_standard_environment, standard_agent_preset_root,
 };
 #[cfg(target_os = "linux")]
 pub use local_host::StandardServiceDaemon;

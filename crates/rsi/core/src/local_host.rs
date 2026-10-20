@@ -227,87 +227,119 @@ pub async fn connect_or_embed_service_host(
     }
     #[cfg(windows)]
     {
-        let lease = HostOwnerLease::try_acquire(paths).map_err(host_error)?;
+        let lease = HostOwnerLease::try_acquire(paths).map_err(|error| {
+            if matches!(error, ServiceHostError::OwnerActive) {
+                conflict_error(
+                    composition.startup_purpose,
+                    HostConflict::Occupied,
+                    error.to_string(),
+                )
+            } else {
+                host_error(error)
+            }
+        })?;
         boot_embedded(parent, composition, host_profile, launch_key, lease).await
     }
     #[cfg(not(windows))]
-    {
-        let deadline = tokio::time::Instant::now() + OWNER_DISCOVERY_TIMEOUT;
-        loop {
-            if let Some(metadata) = paths.read_metadata().map_err(host_error)? {
-                #[cfg(target_os = "linux")]
-                if owner_process_is_current(&metadata).map_err(host_error)? {
-                    if !metadata.is_compatible_with_current().map_err(host_error)? {
-                        return Err(RsiError::Boot(format!(
+    connect_unix_service_host(parent, composition, host_profile, launch_key, paths).await
+}
+
+#[cfg(not(windows))]
+async fn connect_unix_service_host(
+    parent: &rsi_meta::Context,
+    composition: StandardComposition,
+    host_profile: &HostProfileDocument,
+    launch_key: String,
+    paths: ServiceHostPaths,
+) -> crate::Result<ServiceHostConnection> {
+    let deadline = tokio::time::Instant::now() + OWNER_DISCOVERY_TIMEOUT;
+    loop {
+        if let Some(metadata) = paths.read_metadata().map_err(host_error)? {
+            #[cfg(target_os = "linux")]
+            if owner_process_is_current(&metadata).map_err(host_error)? {
+                if !metadata.is_compatible_with_current().map_err(host_error)? {
+                    return Err(conflict_error(
+                        composition.startup_purpose,
+                        HostConflict::Incompatible,
+                        format!(
                             "the active Service Host has an incompatible protocol or product build; run `rsi host restart --profile {}`",
                             host_profile.id
-                        )));
-                    }
-                    match metadata.mode {
-                        HostOwnerMode::Daemon => {
-                            if metadata.launch_key != launch_key {
-                                return Err(RsiError::Boot(format!(
+                        ),
+                    ));
+                }
+                match metadata.mode {
+                    HostOwnerMode::Daemon => {
+                        if metadata.launch_key != launch_key {
+                            return Err(conflict_error(
+                                composition.startup_purpose,
+                                HostConflict::DifferentIdentity,
+                                format!(
                                     "the active Service Host has a different launch identity; run `rsi host restart --profile {}`",
                                     host_profile.id
+                                ),
+                            ));
+                        }
+                        let remote = tokio::time::timeout_at(
+                            deadline,
+                            crate::client_composition::connect(&metadata, parent, &composition),
+                        )
+                        .await;
+                        let remote = match remote {
+                            Ok(Ok(remote)) => remote,
+                            Ok(Err(_)) if tokio::time::Instant::now() < deadline => {
+                                tokio::time::sleep(OWNER_DISCOVERY_INTERVAL).await;
+                                continue;
+                            }
+                            Ok(Err(error)) => {
+                                return Err(RsiError::Boot(format!(
+                                    "the active compatible Service Host did not become responsive within {} seconds: {error}",
+                                    OWNER_DISCOVERY_TIMEOUT.as_secs()
                                 )));
                             }
-                            let remote = tokio::time::timeout_at(
-                                deadline,
-                                crate::client_composition::connect(&metadata, parent, &composition),
-                            )
-                            .await;
-                            let remote = match remote {
-                                Ok(Ok(remote)) => remote,
-                                Ok(Err(_)) if tokio::time::Instant::now() < deadline => {
-                                    tokio::time::sleep(OWNER_DISCOVERY_INTERVAL).await;
-                                    continue;
-                                }
-                                Ok(Err(error)) => {
-                                    return Err(RsiError::Boot(format!(
-                                        "the active compatible Service Host did not become responsive within {} seconds: {error}",
-                                        OWNER_DISCOVERY_TIMEOUT.as_secs()
-                                    )));
-                                }
-                                Err(_) => {
-                                    return Err(RsiError::Boot(format!(
-                                        "the active compatible Service Host did not become responsive within {} seconds",
-                                        OWNER_DISCOVERY_TIMEOUT.as_secs()
-                                    )));
-                                }
-                            };
-                            return ServiceHostConnection::from_remote(remote).await;
-                        }
-                        HostOwnerMode::Embedded => {
-                            if tokio::time::Instant::now() >= deadline {
-                                return Err(RsiError::Boot(
-                                    "an embedded Service Host owns the standard paths".into(),
-                                ));
+                            Err(_) => {
+                                return Err(RsiError::Boot(format!(
+                                    "the active compatible Service Host did not become responsive within {} seconds",
+                                    OWNER_DISCOVERY_TIMEOUT.as_secs()
+                                )));
                             }
-                            tokio::time::sleep(OWNER_DISCOVERY_INTERVAL).await;
-                            continue;
+                        };
+                        return ServiceHostConnection::from_remote(remote).await;
+                    }
+                    HostOwnerMode::Embedded => {
+                        if tokio::time::Instant::now() >= deadline {
+                            return Err(conflict_error(
+                                composition.startup_purpose,
+                                HostConflict::Occupied,
+                                "an embedded Service Host owns the standard paths".into(),
+                            ));
                         }
+                        tokio::time::sleep(OWNER_DISCOVERY_INTERVAL).await;
+                        continue;
                     }
                 }
-                #[cfg(not(target_os = "linux"))]
-                let _ = metadata;
             }
+            #[cfg(not(target_os = "linux"))]
+            let _ = metadata;
+        }
 
-            match HostOwnerLease::try_acquire(paths.clone()) {
-                Ok(lease) => {
-                    return boot_embedded(parent, composition, host_profile, launch_key, lease)
-                        .await;
-                }
-                Err(ServiceHostError::OwnerActive) if tokio::time::Instant::now() < deadline => {
-                    tokio::time::sleep(OWNER_DISCOVERY_INTERVAL).await;
-                }
-                Err(ServiceHostError::OwnerActive) => {
-                    return Err(RsiError::Boot(format!(
+        match HostOwnerLease::try_acquire(paths.clone()) {
+            Ok(lease) => {
+                return boot_embedded(parent, composition, host_profile, launch_key, lease).await;
+            }
+            Err(ServiceHostError::OwnerActive) if tokio::time::Instant::now() < deadline => {
+                tokio::time::sleep(OWNER_DISCOVERY_INTERVAL).await;
+            }
+            Err(ServiceHostError::OwnerActive) => {
+                return Err(conflict_error(
+                    composition.startup_purpose,
+                    HostConflict::Occupied,
+                    format!(
                         "a Service Host owner is active but did not publish a usable endpoint within {} seconds",
                         OWNER_DISCOVERY_TIMEOUT.as_secs()
-                    )));
-                }
-                Err(error) => return Err(host_error(error)),
+                    ),
+                ));
             }
+            Err(error) => return Err(host_error(error)),
         }
     }
 }
@@ -599,4 +631,66 @@ impl StandardServiceDaemon {
 #[allow(clippy::needless_pass_by_value)] // Kept as a direct `map_err` adapter.
 fn host_error(error: ServiceHostError) -> RsiError {
     RsiError::Boot(error.to_string())
+}
+
+#[derive(Clone, Copy)]
+enum HostConflict {
+    Occupied,
+    #[cfg(any(target_os = "linux", test))]
+    Incompatible,
+    #[cfg(any(target_os = "linux", test))]
+    DifferentIdentity,
+}
+fn conflict_error(
+    purpose: crate::HostStartupPurpose,
+    kind: HostConflict,
+    ordinary: String,
+) -> RsiError {
+    if purpose == crate::HostStartupPurpose::Ordinary {
+        return RsiError::Boot(ordinary);
+    }
+    let reason = match kind {
+        HostConflict::Occupied => "an existing application owns this Service Host",
+        #[cfg(any(target_os = "linux", test))]
+        HostConflict::Incompatible => {
+            "the existing Service Host has an incompatible build or protocol"
+        }
+        #[cfg(any(target_os = "linux", test))]
+        HostConflict::DifferentIdentity => {
+            "the existing Service Host has a different launch identity"
+        }
+    };
+    RsiError::Boot(format!(
+        "{reason}; close the existing owner or select independent XDG_STATE_HOME for development. The development launcher does not restart the daily Host."
+    ))
+}
+#[cfg(test)]
+mod development_advice_tests {
+    use super::*;
+    #[test]
+    fn development_conflicts_never_recommend_restarting_the_daily_daemon() {
+        for kind in [
+            HostConflict::Occupied,
+            HostConflict::Incompatible,
+            HostConflict::DifferentIdentity,
+        ] {
+            let error = conflict_error(
+                crate::HostStartupPurpose::Development,
+                kind,
+                "rsi host restart --profile standard".into(),
+            )
+            .to_string();
+            assert!(error.contains("XDG_STATE_HOME"));
+            assert!(!error.contains("rsi host restart"));
+        }
+        assert_eq!(
+            conflict_error(
+                crate::HostStartupPurpose::Ordinary,
+                HostConflict::Occupied,
+                "original advice".into()
+            )
+            .to_string(),
+            RsiError::Boot("original advice".into()).to_string()
+        );
+    }
 }

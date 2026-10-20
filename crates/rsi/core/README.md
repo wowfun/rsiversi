@@ -1,5 +1,10 @@
 # rsi
 
+`HostStartupPurpose::Development` changes only Host-conflict recovery advice.
+It preserves the normal launch identity and connection/ownership rules while
+recommending an idle Host or independent XDG state instead of restarting the
+daily daemon. It grants no reset or daemon-start authority.
+
 The standard Windows Web, TUI and ACP composition exposes native Files and explicit native
 Bash tools. Full Process output caching and its `output_read` contribution are
 enabled only where the Process owner publishes the cache capability. CLI and
