@@ -6129,6 +6129,8 @@ dependencies = [
  "hex",
  "libc",
  "portable-pty",
+ "reqwest 0.12.28",
+ "ring",
  "rsi",
  "rsi-acp",
  "rsi-acp-protocol",

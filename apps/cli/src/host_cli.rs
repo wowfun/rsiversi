@@ -443,6 +443,7 @@ pub(super) async fn start_host_daemon(profile_id: &HostProfileId) -> rsi::Result
 }
 
 async fn start_host_daemon_inner(profile_id: &HostProfileId, attach: bool) -> rsi::Result<()> {
+    super::core_cli::ensure_no_pending()?;
     let paths = standard_paths()?;
     let host_paths = ServiceHostPaths::from_host_paths(&paths)
         .map_err(|error| RsiError::Boot(error.to_string()))?;
@@ -459,6 +460,7 @@ async fn start_host_daemon_inner(profile_id: &HostProfileId, attach: bool) -> rs
         }
     };
     // A caller may have waited while an upgrade was interrupted.
+    super::core_cli::ensure_no_pending()?;
     rsi::reject_pending_import(&paths)?;
     start_host_coordinated(
         profile_id,

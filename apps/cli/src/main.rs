@@ -62,12 +62,15 @@ mod addon_cli;
 mod application;
 mod cli;
 #[cfg(any(target_os = "linux", windows))]
+mod core_cli;
+#[cfg(any(target_os = "linux", windows))]
 mod host_cli;
 #[cfg(any(target_os = "linux", windows))]
 mod host_runtime;
 mod import_cli;
 mod launch;
 mod management;
+mod plugin_cli;
 #[cfg(any(target_os = "linux", windows))]
 mod source_build;
 use launch::paths as standard_paths;
@@ -131,6 +134,22 @@ async fn run_main() -> u8 {
     {
         return 0;
     }
+    #[cfg(any(target_os = "linux", windows))]
+    if parsed.is_ok()
+        && !matches!(
+            &parsed,
+            Ok(Parse::Core(_)
+                | Parse::Help(_)
+                | Parse::Version
+                | Parse::Host(HostCommand {
+                    operation: HostOperation::Stop | HostOperation::Status,
+                    ..
+                }))
+        )
+        && let Err(error) = core_cli::ensure_no_pending()
+    {
+        return report_error(&error);
+    }
     if matches!(parsed, Ok(Parse::Help(_) | Parse::Version)) {
         // Help and version remain independent of path/configuration availability.
     } else if let Err(error) = launch::initialize(options) {
@@ -176,6 +195,11 @@ async fn run_main() -> u8 {
         }
         Ok(Parse::Config(arguments)) => launch::run_config(&arguments),
         Ok(Parse::Import(arguments)) => import_cli::run(&arguments),
+        #[cfg(any(target_os = "linux", windows))]
+        Ok(Parse::Core(arguments)) => core_cli::run(&arguments).await,
+        #[cfg(not(any(target_os = "linux", windows)))]
+        Ok(Parse::Core(_)) => report_error(&RsiError::Boot("core maintenance requires Windows or Linux".into())),
+        Ok(Parse::Plugin(arguments)) => plugin_cli::run(&arguments).await,
         Ok(Parse::WebControl(stop)) => application::web_control(stop).await,
         Ok(Parse::Profile(command)) => run_profile(&command).await,
         #[cfg(any(target_os = "linux", windows))]

@@ -6,7 +6,7 @@ use super::*;
 
 #[test]
 fn maintenance_help_is_resolved_before_home_initialization() {
-    for command in ["config", "import"] {
+    for command in ["config", "core", "import", "plugin"] {
         assert!(matches!(
             cli::parse_cli([OsString::from(command), OsString::from("--help")]).unwrap(),
             Parse::Help(_)

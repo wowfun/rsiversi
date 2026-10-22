@@ -5,7 +5,9 @@ pub(super) const HELP: &str = "Usage:\n\
   rsi [GLOBAL OPTIONS] [APPLICATION | COMMAND]\n\
   rsi run PROFILE [-- APPLICATION ARGUMENTS]\n\
   rsi config <init|show|validate>\n\
+  rsi core <upgrade [--local DIRECTORY]|recover>\n\
   rsi import <--config-home OLD --state-home OLD [--dry-run]|recover>\n\
+  rsi plugin <list|install NAME...|install --local DIR...|uninstall NAME...|gc>\n\
   rsi tui [APPLICATION ARGUMENTS]\n\
   rsi web [--port PORT] [--no-open] [--assets PATH]\n\
       headless: TASK|--stdin [--cwd PATH] [--resume SESSION|--session-id SESSION]\n\
@@ -87,8 +89,10 @@ Commands:\n\
 pub(super) const BOOT_FAILURE_EXIT_CODE: u8 = 2;
 
 pub(super) enum Parse {
+    Core(Vec<OsString>),
     Import(Vec<OsString>),
     WebControl(bool),
+    Plugin(Vec<OsString>),
     Config(Vec<OsString>),
     #[cfg(unix)]
     Addon(super::addon_cli::Command),
@@ -646,7 +650,9 @@ fn set_host_flag(flag: &mut bool, name: &str) -> rsi::Result<()> {
     Ok(())
 }
 
+pub(super) const CORE_HELP: &str = "Usage: rsi core upgrade [--local PACKAGE_DIRECTORY]\n       rsi core recover\nUpgrade stops the selected Host, retains the old executable, verifies and starts the new core.\nRecovery restores the recorded executable and previous Host running state with the original homes.\n";
 pub(super) const IMPORT_HELP: &str = "Usage: rsi [GLOBAL HOMES] import --config-home OLD_CONFIG --state-home OLD_STATE [--dry-run]\n       rsi [GLOBAL HOMES] import recover\nStop both Hosts first. Preflight, stage and back up owned data; preserve unrelated files.\n";
+pub(super) const PLUGIN_HELP: &str = "Usage: rsi plugin list\n       rsi plugin install NAME [NAME ...]\n       rsi plugin install --local DIR [DIR ...]\n       rsi plugin uninstall NAME [NAME ...]\n       rsi plugin gc\nEach local directory contains package.json and its declared files.\n";
 const CONFIG_HELP: &str = "Usage: rsi config init|show|validate\nUse global home options to select the configuration and state directories.\n";
 
 pub(super) fn parse_cli(arguments: impl IntoIterator<Item = OsString>) -> rsi::Result<Parse> {
@@ -664,12 +670,14 @@ pub(super) fn parse_cli(arguments: impl IntoIterator<Item = OsString>) -> rsi::R
     if matches!(first.as_str(), "-V" | "--version") {
         return Ok(Parse::Version);
     }
-    if matches!(first.as_str(), "config" | "import") {
+    if matches!(first.as_str(), "config" | "core" | "import" | "plugin") {
         let rest: Vec<_> = arguments.collect();
         let help_requested = matches!(rest.as_slice(), [flag] if flag == "--help" || flag == "-h");
         let (help, command) = match first.as_str() {
             "config" => (CONFIG_HELP, Parse::Config(rest)),
+            "core" => (CORE_HELP, Parse::Core(rest)),
             "import" => (IMPORT_HELP, Parse::Import(rest)),
+            "plugin" => (PLUGIN_HELP, Parse::Plugin(rest)),
             _ => unreachable!("matched command"),
         };
         return Ok(if help_requested {

@@ -69,6 +69,10 @@ mod maintenance;
 pub use import::{
     ImportReceipt, import_product_homes, recover_product_import, reject_pending_import,
 };
+#[cfg(any(target_os = "linux", windows))]
+mod core_upgrade;
+#[cfg(any(target_os = "linux", windows))]
+pub use core_upgrade::CoreUpgrade;
 #[cfg(any(unix, windows))]
 mod source_inputs;
 pub use application_bootstrap::APPLICATION_TRANSITION_TIMEOUT;
