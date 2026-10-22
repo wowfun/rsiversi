@@ -6,3 +6,13 @@
 mod windows;
 #[cfg(windows)]
 pub use windows::Job;
+#[cfg(windows)]
+#[allow(unsafe_code)]
+mod identity;
+#[cfg(windows)]
+pub use identity::{ProcessHandle, ProcessIdentity};
+#[cfg(windows)]
+#[allow(unsafe_code)]
+mod inheritance;
+#[cfg(windows)]
+pub use inheritance::clear_standard_handle_inheritance;
