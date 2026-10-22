@@ -12,6 +12,56 @@ use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::{Arc, Mutex};
 
+#[cfg(unix)]
+#[tokio::test]
+async fn executable_alias_preserves_multicall_invocation_name() {
+    use std::os::unix::fs::PermissionsExt as _;
+    let root = tempfile::tempdir().unwrap();
+    let implementation = root.path().join("implementation");
+    std::fs::write(
+        &implementation,
+        "#!/bin/sh\nprintf '%s\\n' \"$(basename \"$0\")\"\n",
+    )
+    .unwrap();
+    std::fs::set_permissions(&implementation, std::fs::Permissions::from_mode(0o700)).unwrap();
+    let alias = root.path().join("cargo");
+    std::os::unix::fs::symlink("implementation", &alias).unwrap();
+    let runtime = Runtime::default();
+    runtime
+        .root()
+        .apply(
+            ResolvedFactory::linked(
+                "sandbox",
+                "test",
+                UpdateMode::Replayable,
+                Arc::new(SandboxLocalFactory::default()),
+            ),
+            json!({"bubblewrap":[],"landlock":[]}),
+        )
+        .await
+        .unwrap();
+    let sandbox = runtime.root().lookup_local::<SandboxContract>().unwrap();
+    let plan = sandbox
+        .confine(ProcessRequest {
+            program: alias.clone(),
+            arguments: vec![],
+            cwd: root.path().into(),
+            workspace: root.path().into(),
+            stdio: rsi_sandbox::ProcessStdio::Pipes,
+            mode: SandboxMode::DangerFullAccess,
+        })
+        .await
+        .unwrap();
+    assert_eq!(plan.program, alias);
+    let output = std::process::Command::new(&plan.program)
+        .args(&plan.arguments)
+        .output()
+        .unwrap();
+    assert!(output.status.success());
+    assert_eq!(output.stdout, b"cargo\n");
+    assert!(runtime.shutdown().await.is_clean());
+}
+
 #[tokio::test]
 async fn workspace_scopes_preserve_each_mode_and_exact_provider_generation() {
     let runtime = Runtime::default();

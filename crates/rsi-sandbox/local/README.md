@@ -3,6 +3,10 @@
 This ordinary plugin probes only explicit absolute candidate paths. A process request must also carry native absolute cwd and workspace paths before
 filesystem canonicalization. Portable host-path DTOs may describe another
 platform; those spellings do not grant this native effect boundary a relative path.
+Program validation checks the resolved target is a regular file, but preserves
+the caller's absolute invocation spelling in the execution plan. Multicall
+executables such as rustup and BusyBox dispatch on argv[0]; replacing that path
+with its canonical target would change the requested command.
 A bubblewrap candidate must create the same namespace and read-only-root shape
 used by restricted plans and propagate a reserved child exit code; an
 executable that merely exits successfully is not enforcement evidence.

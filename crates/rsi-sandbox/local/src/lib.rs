@@ -687,15 +687,18 @@ fn validate_request(request: &ProcessRequest) -> Result<(PathBuf, PathBuf, PathB
             "process program must be absolute".into(),
         ));
     }
-    let program = request
+    let resolved = request
         .program
         .canonicalize()
         .map_err(|error| SandboxError::InvalidInput(format!("program is unavailable: {error}")))?;
-    if !program.is_file() {
+    if !resolved.is_file() {
         return Err(SandboxError::InvalidInput(
             "process program is not a file".into(),
         ));
     }
+    // Preserve argv[0] for multicall executables; canonicalization validates
+    // availability but must not turn `cargo` into an invocation of `rustup`.
+    let program = request.program.clone();
     let cwd = canonical_directory(&request.cwd, "cwd")?;
     let workspace = canonical_directory(&request.workspace, "workspace")?;
     if request.mode != SandboxMode::DangerFullAccess {
