@@ -1,0 +1,305 @@
+[
+  {
+    "name": "ordinary profile",
+    "valid": true,
+    "manifest": {
+      "format": 1,
+      "name": "fixture",
+      "version": "1",
+      "target": "portable",
+      "dependencies": [],
+      "requires": [],
+      "files": [
+        {
+          "path": "asset",
+          "bytes": 4,
+          "digest": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+          "executable": false
+        }
+      ],
+      "exports": {
+        "main": {
+          "kind": "application_profile",
+          "path": "asset"
+        }
+      }
+    }
+  },
+  {
+    "name": "trailing identifier dot",
+    "valid": false,
+    "manifest": {
+      "format": 1,
+      "name": "fixture.",
+      "version": "1",
+      "target": "portable",
+      "dependencies": [],
+      "requires": [],
+      "files": [
+        {
+          "path": "asset",
+          "bytes": 4,
+          "digest": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+          "executable": false
+        }
+      ],
+      "exports": {
+        "main": {
+          "kind": "application_profile",
+          "path": "asset"
+        }
+      }
+    }
+  },
+  {
+    "name": "undeclared export",
+    "valid": false,
+    "manifest": {
+      "format": 1,
+      "name": "fixture",
+      "version": "1",
+      "target": "portable",
+      "dependencies": [],
+      "requires": [],
+      "files": [
+        {
+          "path": "asset",
+          "bytes": 4,
+          "digest": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+          "executable": false
+        }
+      ],
+      "exports": {
+        "main": {
+          "kind": "application_profile",
+          "path": "absent"
+        }
+      }
+    }
+  },
+  {
+    "name": "nonexecutable export",
+    "valid": false,
+    "manifest": {
+      "format": 1,
+      "name": "fixture",
+      "version": "1",
+      "target": "portable",
+      "dependencies": [],
+      "requires": [],
+      "files": [
+        {
+          "path": "asset",
+          "bytes": 4,
+          "digest": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+          "executable": false
+        }
+      ],
+      "exports": {
+        "main": {
+          "kind": "executable",
+          "path": "asset"
+        }
+      }
+    }
+  },
+  {
+    "name": "bad dependency digest",
+    "valid": false,
+    "manifest": {
+      "format": 1,
+      "name": "fixture",
+      "version": "1",
+      "target": "portable",
+      "dependencies": [
+        {
+          "name": "web",
+          "digest": "x"
+        }
+      ],
+      "requires": [],
+      "files": [
+        {
+          "path": "asset",
+          "bytes": 4,
+          "digest": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+          "executable": false
+        }
+      ],
+      "exports": {
+        "main": {
+          "kind": "application_profile",
+          "path": "asset"
+        }
+      }
+    }
+  },
+  {
+    "name": "self dependency",
+    "valid": false,
+    "manifest": {
+      "format": 1,
+      "name": "fixture",
+      "version": "1",
+      "target": "portable",
+      "dependencies": [
+        {
+          "name": "fixture",
+          "digest": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
+        }
+      ],
+      "requires": [],
+      "files": [
+        {
+          "path": "asset",
+          "bytes": 4,
+          "digest": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+          "executable": false
+        }
+      ],
+      "exports": {
+        "main": {
+          "kind": "application_profile",
+          "path": "asset"
+        }
+      }
+    }
+  },
+  {
+    "name": "zero interface version",
+    "valid": false,
+    "manifest": {
+      "format": 1,
+      "name": "fixture",
+      "version": "1",
+      "target": "portable",
+      "dependencies": [],
+      "requires": [
+        {
+          "name": "wire",
+          "version": 0,
+          "schema": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
+        }
+      ],
+      "files": [
+        {
+          "path": "asset",
+          "bytes": 4,
+          "digest": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+          "executable": false
+        }
+      ],
+      "exports": {
+        "main": {
+          "kind": "application_profile",
+          "path": "asset"
+        }
+      }
+    }
+  },
+  {
+    "name": "reserved path",
+    "valid": false,
+    "manifest": {
+      "format": 1,
+      "name": "fixture",
+      "version": "1",
+      "target": "portable",
+      "dependencies": [],
+      "requires": [],
+      "files": [
+        {
+          "path": "CONIN$",
+          "bytes": 4,
+          "digest": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+          "executable": false
+        }
+      ],
+      "exports": {
+        "main": {
+          "kind": "application_profile",
+          "path": "asset"
+        }
+      }
+    }
+  },
+  {
+    "name": "oversized component",
+    "valid": false,
+    "manifest": {
+      "format": 1,
+      "name": "fixture",
+      "version": "1",
+      "target": "portable",
+      "dependencies": [],
+      "requires": [],
+      "files": [
+        {
+          "path": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+          "bytes": 4,
+          "digest": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+          "executable": false
+        }
+      ],
+      "exports": {
+        "main": {
+          "kind": "application_profile",
+          "path": "asset"
+        }
+      }
+    }
+  },
+  {
+    "name": "unknown field",
+    "valid": false,
+    "manifest": {
+      "format": 1,
+      "name": "fixture",
+      "version": "1",
+      "target": "portable",
+      "dependencies": [],
+      "requires": [],
+      "files": [
+        {
+          "path": "asset",
+          "bytes": 4,
+          "digest": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+          "executable": false
+        }
+      ],
+      "exports": {
+        "main": {
+          "kind": "application_profile",
+          "path": "asset"
+        }
+      },
+      "extra": true
+    }
+  },
+  {
+    "name": "non boolean executable",
+    "valid": false,
+    "manifest": {
+      "format": 1,
+      "name": "fixture",
+      "version": "1",
+      "target": "portable",
+      "dependencies": [],
+      "requires": [],
+      "files": [
+        {
+          "path": "asset",
+          "bytes": 4,
+          "digest": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+          "executable": "true"
+        }
+      ],
+      "exports": {
+        "main": {
+          "kind": "application_profile",
+          "path": "asset"
+        }
+      }
+    }
+  }
+]

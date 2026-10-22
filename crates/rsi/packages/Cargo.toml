@@ -1,0 +1,27 @@
+[package]
+name = "rsi-packages"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+publish = false
+
+[dependencies]
+getrandom.workspace = true
+hex.workspace = true
+ring = "0.17.14"
+rsi-files-native-fs = { path = "../../rsi-files/native-fs" }
+rsi-api-protocol = { path = "../../rsi-api/protocol" }
+serde.workspace = true
+serde_json.workspace = true
+sha2.workspace = true
+thiserror.workspace = true
+
+[target.'cfg(unix)'.dependencies]
+rustix = { workspace = true, features = ["fs", "process"] }
+
+[dev-dependencies]
+tempfile.workspace = true
+
+[lints]
+workspace = true
