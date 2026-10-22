@@ -3,6 +3,9 @@ import ctypes as C
 import ctypes.util
 import hashlib
 import json
+import os
+from pathlib import Path
+import subprocess
 import time
 from native_window import require_private_xvfb
 
@@ -101,6 +104,13 @@ def verify(script, button, fill, until, screenshot, report, requests):
     keys = NativeKeys()
     destination = report / 'native-export.json'
     try:
+        # Use the build owner's descriptor derivation. The native boundary still
+        # validates every real request against the executable's own descriptor.
+        descriptor = json.loads(subprocess.check_output([
+            os.environ.get('RSI_TEST_NODE', 'node'), '--input-type=module', '-e',
+            "import {desktopBridgeDescriptor} from './apps/web/wire-descriptors.mjs';console.log(JSON.stringify(desktopBridgeDescriptor()))",
+        ], cwd=Path(__file__).resolve().parents[3], text=True))
+        script(r'''const protocol=arguments[0];window.fixtureBridge={};fixtureBridge.call=operation=>window.__TAURI_INTERNALS__.invoke('rsi_bridge',{payload:JSON.stringify({protocol,operation})});return true''', [descriptor])
         fill('textarea[aria-label="Main message"]', '/export "suggested.json" -f json -i h,m,lpr,last-provider-response')
         button('Send')
         until(keys.chooser)
@@ -115,40 +125,28 @@ def verify(script, button, fill, until, screenshot, report, requests):
         button('Export'); until(keys.chooser); keys.chord('Escape')
         until(lambda: script('return [...document.querySelectorAll("button")].some(e=>e.textContent==="Export")'))
         assert destination.read_bytes() == data
-        # Keep the actual save waiter observable while cancelling via the native API.
-        script(r'''window.fixtureExportFetch=window.fetch;window.fixtureExportWaiter=null;window.fixtureExportRetry=null;window.fetch=(path,options)=>{if(String(path)==='/_call/export_save'){window.fixtureExportRequest={path,options};return window.fixtureExportFetch(path,options).then(async response=>{window.fixtureExportWaiter={status:response.status,text:await response.clone().text()};return response})}return window.fixtureExportFetch(path,options)};return true''')
-        button('Export')
-        chooser = until(keys.chooser)
-        script(r'''(async()=>{const {token}=JSON.parse(window.fixtureExportRequest.options.body);window.fixtureCancelledExport=token;const cancel=await window.fixtureExportFetch('/_call/export_cancel',{method:'POST',body:JSON.stringify({token})});if(!cancel.ok)throw Error(await cancel.text());const retry=await window.fixtureExportFetch('/_call/export_open',{method:'POST',body:''});window.fixtureExportRetry={status:retry.status,text:await retry.text()}})().catch(error=>window.fixtureExportRetry={error:String(error)});return true''')
-        retry = until(lambda: script('return window.fixtureExportRetry || (window.fixtureExportWaiter && {abandoned:window.fixtureExportWaiter})'))
-        assert retry.get('status') == 409 and 'already active' in retry['text'], retry
-        assert script('return window.fixtureExportWaiter') is None, 'chooser waiter was abandoned'
-        assert keys.chooser() == chooser, 'cancelled chooser was replaced'
+        # Reuse the real UI export request to open a new Worker stream and a
+        # native chooser. Every stream event and bridge reply remains real.
+        script(r'''fixtureBridge.begin=()=>{fixtureBridge.native=null;fixtureBridge.failure=null;void(async()=>{const request=fixtureTransport.calls.filter(call=>call.method==='export_input').map(call=>JSON.parse(call.payload)).findLast(request=>request.operation.kind==='open');if(!request)throw new Error('No UI export request observed');fixtureBridge.worker=operation=>fixtureTransport.call('export_input',JSON.stringify({...request,operation}));fixtureBridge.opened=await fixtureBridge.worker(request.operation);fixtureBridge.native=await fixtureBridge.call({kind:'export_open',event:fixtureBridge.opened.event})})().catch(error=>fixtureBridge.failure=String(error))};fixtureBridge.begin();return true''')
+        until(keys.chooser)
         cancelled_destination = report / 'cancelled-export.json'
         keys.chord('Control_L', 'l'); keys.chord('Control_L','a'); keys.type(str(cancelled_destination)); keys.chord('Return')
-        cancelled = until(lambda: script('return window.fixtureExportWaiter'))
-        assert cancelled['status'] == 409 and 'Export cancelled' in cancelled['text'], cancelled
-        until(lambda: script('return [...document.querySelectorAll("button")].some(e=>e.textContent==="Export")'))
+        token = until(lambda: script("if(fixtureBridge.failure)throw new Error(fixtureBridge.failure);return fixtureBridge.native?.token"))
+        rejected = script(r'''const token=arguments[0];fixtureBridge.cancelled=token;return (async()=>{await fixtureBridge.call({kind:'export_cancel',token});const event=await fixtureBridge.worker({kind:'next',token:fixtureBridge.opened.token});try{await fixtureBridge.call({kind:'export_write',token,event});return false}catch{return true}finally{await fixtureBridge.worker({kind:'cancel',token:fixtureBridge.opened.token})}})()''', [token])
+        assert rejected, 'A write after native cancellation was admitted'
         assert not cancelled_destination.exists()
         assert destination.read_bytes() == data
-        script('window.fetch=window.fixtureExportFetch;return true')
-        # Cancelling before save claims its reservation must prevent a chooser.
-        script(r'''window.fixturePreclaim=null;(async()=>{const opened=await window.fixtureExportFetch('/_call/export_open',{method:'POST',body:''});if(!opened.ok)throw Error(await opened.text());const {token}=await opened.json();const cancel=await window.fixtureExportFetch('/_call/export_cancel',{method:'POST',body:JSON.stringify({token})});if(!cancel.ok)throw Error(await cancel.text());const source=JSON.parse(window.fixtureExportRequest.options.body).source;const saved=await window.fixtureExportFetch('/_call/export_save',{method:'POST',body:JSON.stringify({token,source})});window.fixturePreclaim={status:saved.status,text:await saved.text()}})().catch(error=>window.fixturePreclaim={error:String(error)});return true''')
-        preclaim = until(lambda: script('return window.fixturePreclaim'))
-        assert preclaim['status'] == 409 and 'reservation is unavailable' in preclaim['text'], preclaim
-        assert not keys.chooser(), 'cancelled reservation opened a chooser'
-        # A late cancel of A must not cancel B after the slot is reused.
-        button('Export'); until(keys.chooser)
-        script(r'''window.fixtureStaleCancel=null;window.fixtureExportFetch('/_call/export_cancel',{method:'POST',body:JSON.stringify({token:window.fixtureCancelledExport})}).then(async response=>window.fixtureStaleCancel={status:response.status,text:await response.text()});return true''')
-        stale = until(lambda: script('return window.fixtureStaleCancel'))
-        assert stale['status'] == 200, stale
+        # A late cancel of A must not cancel B while its chooser owns the slot.
+        script('fixtureBridge.begin();return true'); until(keys.chooser)
+        script("return fixtureBridge.call({kind:'export_cancel',token:fixtureBridge.cancelled}).then(()=>true)")
         replacement = report / 'replacement-export.md'
         keys.chord('Control_L', 'l'); keys.chord('Control_L','a'); keys.type(str(replacement)); keys.chord('Return')
+        until(lambda: script("if(fixtureBridge.failure)throw new Error(fixtureBridge.failure);return Boolean(fixtureBridge.native)"))
+        script(r'''return(async()=>{try{for(;;){const event=await fixtureBridge.worker({kind:'next',token:fixtureBridge.opened.token});if(!event)throw new Error('Missing export completion');await fixtureBridge.call({kind:'export_write',token:fixtureBridge.native.token,event});if(event.type==='complete'){if(await fixtureBridge.worker({kind:'next',token:fixtureBridge.opened.token})!==null)throw new Error('Unexpected export continuation');return await fixtureBridge.call({kind:'export_finish',token:fixtureBridge.native.token})}}}finally{await fixtureBridge.worker({kind:'cancel',token:fixtureBridge.opened.token})}})()''')
         until(replacement.is_file)
-        until(lambda: script('return [...document.querySelectorAll("button")].some(e=>e.textContent==="Export")'))
         replacement_text = replacement.read_text()
         assert replacement_text.startswith('# messages\n') and 'Desktop conversation verified' in replacement_text, replacement_text[:256]
-        (report / 'export-dialog-cancellation.json').write_text(json.dumps({'retry':retry,'cancelled':cancelled,'preclaim':preclaim,'staleCancel':stale,'callbackRetained':True,'cancelledSelectionDiscarded':not cancelled_destination.exists(),'slotReusable':True,'replacementSaved':True},indent=2))
+        (report / 'export-dialog-cancellation.json').write_text(json.dumps({'cancelledSelectionDiscarded':not cancelled_destination.exists(),'staleCancelPreservedReplacement':True,'replacementSaved':True},indent=2))
         assert len(requests) == count
         # Cancellation is a visible local outcome; it never becomes model input.
         fill('textarea[aria-label="Main message"]', '')

@@ -57,7 +57,7 @@ async fn source_cli_default_root_drives_only_the_running_managers_explicit_selec
     provider.abort();
 }
 fn status(fixture: &CliFixture) -> serde_json::Value {
-    let output = fixture.assert_success(&["--profile", "inspector", "native"]);
+    let output = fixture.assert_success(&["run", "inspector", "native"]);
     serde_json::from_slice(&output.stdout).unwrap()
 }
 async fn wait_health(fixture: &CliFixture, health: &str) -> serde_json::Value {

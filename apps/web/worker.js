@@ -3,7 +3,7 @@ import init, { build_family, connect, connect_local, command, terminal, restore_
 
 const expectedBuildFamily = "__RSI_BUILD_FAMILY__";
 const initialized = init().then(() => {
-  if (build_family() !== expectedBuildFamily) throw new Error('Web pairing: Worker family differs from its bootstrap; rebuild and reopen the paired application');
+  if (build_family() !== expectedBuildFamily) throw new Error('Web bundle: Worker identity differs from its bootstrap; rebuild and reopen the Web package');
 });
 // Keep an early initialization rejection for the first call's pairing diagnostic.
 initialized.catch(() => {});

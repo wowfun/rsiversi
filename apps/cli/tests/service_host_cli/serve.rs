@@ -27,7 +27,7 @@ async fn foreground_host_executor_reload_retains_listener_and_emits_one_final_di
     .unwrap();
     for maximum in [3, 2] {
         reload_executor_and_keep_listener(&fixture, &mut child, maximum);
-        fixture.assert_success(&["--profile", "devices", "list"]);
+        fixture.assert_success(&["run", "devices", "list"]);
     }
     fixture.assert_success(&["host", "stop"]);
     let output = tokio::time::timeout(std::time::Duration::from_secs(15), child.wait_with_output())
@@ -67,7 +67,7 @@ async fn foreground_serve_supports_local_clients_reload_and_exact_host_stop() {
     let mut child = fixture
         .tokio_command()
         .args([
-            "--profile",
+            "run",
             "test-serve",
             "--bind",
             &bind,
@@ -245,12 +245,12 @@ async fn request(
 }
 
 async fn check_device_management(fixture: &CliFixture, address: &str, origin: &str) {
-    let registered = fixture.assert_success(&["--profile", "devices", "register", "test browser"]);
+    let registered = fixture.assert_success(&["run", "devices", "register", "test browser"]);
     let registered: serde_json::Value = serde_json::from_slice(&registered.stdout).unwrap();
     let device_id = registered["id"].as_str().unwrap();
     let token = registered["token"].as_str().unwrap();
     assert_eq!(token.len(), 64);
-    let roster = fixture.assert_success(&["--profile", "devices", "list"]);
+    let roster = fixture.assert_success(&["run", "devices", "list"]);
     let roster: serde_json::Value = serde_json::from_slice(&roster.stdout).unwrap();
     assert_eq!(roster[0]["id"], device_id);
     assert!(roster[0].get("token").is_none());
@@ -293,7 +293,7 @@ async fn check_device_management(fixture: &CliFixture, address: &str, origin: &s
         );
     }
     run_remote_headless(fixture, origin, &registered).await;
-    fixture.assert_success(&["--profile", "devices", "revoke", device_id]);
+    fixture.assert_success(&["run", "devices", "revoke", device_id]);
     assert_eq!(
         request(
             address,
@@ -344,7 +344,7 @@ plugin = "rsi.application.headless"
         .env("XDG_CACHE_HOME", &remote_cache)
         .env("RSI_API_DEVICE_TOKEN", token)
         .args([
-            "--profile",
+            "run",
             "remote",
             "hello through native HTTP",
             "--session-id",

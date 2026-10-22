@@ -22,7 +22,7 @@ type AssetDirectory = File;
 type AssetDirectory = PathBuf;
 
 mod pairing;
-pub use pairing::{PairedWebAssetsFactory, pairing_receipt};
+pub use pairing::{PairedWebAssetsFactory, VerifiedWebAssetsFactory, pairing_receipt};
 mod publication;
 mod manifest {
     include!(concat!(env!("OUT_DIR"), "/bundle.rs"));
@@ -41,7 +41,7 @@ struct Config {
     #[serde(default)]
     watch: bool,
     #[serde(skip)]
-    pairing: Option<String>,
+    pairing: Option<pairing::Identity>,
 }
 fn default_files() -> Vec<String> {
     manifest::DEFAULT_FILES

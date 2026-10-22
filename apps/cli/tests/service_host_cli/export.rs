@@ -15,7 +15,7 @@ async fn cli_export_stdout_file_latest_and_interactive_are_read_only() {
     let fixture = CliFixture::new(&endpoint);
     fixture.assert_success(&["host", "start", "--profile", "fixture"]);
     fixture.assert_success(&[
-        "--profile",
+        "run",
         "test-headless",
         "export Unicode 界",
         "--session-id",
@@ -24,7 +24,7 @@ async fn cli_export_stdout_file_latest_and_interactive_are_read_only() {
     let count = requests.lock().unwrap().len();
     assert_eq!(count, 1);
     let expected = fixture.assert_success(&[
-        "--profile",
+        "run",
         "test-cli",
         "--export",
         "export-source",
@@ -38,7 +38,7 @@ async fn cli_export_stdout_file_latest_and_interactive_are_read_only() {
     assert!(value["messages"].to_string().contains("hello from daemon"));
     assert_eq!(value["last_provider_request"]["availability"], "available");
     let output = fixture.assert_success(&[
-        "--profile",
+        "run",
         "test-cli",
         "--export",
         "latest",
@@ -60,7 +60,7 @@ async fn cli_export_stdout_file_latest_and_interactive_are_read_only() {
         vec!["--list"],
         vec!["--session-id", "other"],
     ] {
-        let mut args = vec!["--profile", "test-cli", "--export", "latest"];
+        let mut args = vec!["run", "test-cli", "--export", "latest"];
         args.extend(arguments);
         assert!(!fixture.run(&args).status.success());
     }

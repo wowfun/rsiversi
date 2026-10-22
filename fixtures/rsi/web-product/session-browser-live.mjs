@@ -19,7 +19,7 @@ const fixture=spawn(process.env.RSI_TEST_BROWSER_NODE,[resolve('crates/rsi/brows
 const lines=createInterface({input:fixture.stdout});const [port]=await once(lines,'line');
 const origin=`http://127.0.0.1:${port}`;
 let live,browser,page,factsSession;const errors=[],networkFailures=[],recoveries=[],durable=new Set(),approved=new Set();let approvals=0;
-function facts(id){return live.service.run(['--profile','evidence-cli','--resume',id,'--output','jsonl'],{input:':history\n'.repeat(32)+':exit\n'}).stdout.trim().split('\n').map(line=>JSON.parse(line)).flatMap(row=>row.fact?[row.fact]:[]).sort((a,b)=>a.seq-b.seq);}
+function facts(id){return live.service.run(["run",'evidence-cli','--resume',id,'--output','jsonl'],{input:':history\n'.repeat(32)+':exit\n'}).stdout.trim().split('\n').map(line=>JSON.parse(line)).flatMap(row=>row.fact?[row.fact]:[]).sort((a,b)=>a.seq-b.seq);}
 async function recoverNetwork(id,networkStart){
   if(await page.locator('#connection-state').innerText()!=='Connection failed')return false;
   assert(networkFailures.slice(networkStart).some(failure=>failure.error==='net::ERR_NETWORK_CHANGED'),'unclassified connection loss');

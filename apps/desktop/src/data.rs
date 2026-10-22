@@ -46,7 +46,7 @@ pub(super) fn prepare(state: &Path) -> Result<PathBuf, String> {
 #[cfg(windows)]
 fn verify_private(directory: &rsi_files_native_fs::Directory, path: &Path) -> Result<(), String> {
     directory.verify_private().map_err(|error| format!(
-        "Desktop state directory {} requires the canonical protected ACL (SYSTEM, Administrators and current user; full control with object/container inheritance): {error}. Choose a fresh XDG_STATE_HOME (rsi is appended), or have the directory owner restore this ACL. Existing permissions were not changed.",
+        "Desktop state directory {} requires the canonical protected ACL (SYSTEM, Administrators and current user; full control with object/container inheritance): {error}. Choose a fresh --state-home, or have the directory owner restore this ACL. Existing permissions were not changed.",
         path.display()
     ))
 }
@@ -80,7 +80,7 @@ mod tests {
         let state = root.path().join("state");
         std::fs::create_dir(&state).unwrap();
         let error = prepare(&state).unwrap_err();
-        assert!(error.contains("canonical protected ACL") && error.contains("XDG_STATE_HOME"));
+        assert!(error.contains("canonical protected ACL") && error.contains("--state-home"));
         assert!(!state.join("desktop-webview").exists());
     }
 
@@ -122,7 +122,7 @@ if ($env:RSI_ACL_SET -eq '1') {
         };
         let before = acl(true);
         let error = prepare(&state).unwrap_err();
-        assert!(error.contains(state.to_str().unwrap()) && error.contains("XDG_STATE_HOME"));
+        assert!(error.contains(state.to_str().unwrap()) && error.contains("--state-home"));
         assert!(error.contains("Existing permissions were not changed"));
         assert_eq!(acl(false), before);
         assert_eq!(

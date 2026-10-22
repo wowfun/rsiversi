@@ -2,6 +2,9 @@
 name: Application ownership and paired Web publication
 ---
 
+Partially superseded by [the unified product decision](2026-10-20-independent-product-packages.md).
+Independent package admission supersedes native/Web whole-publication pairing and per-UI product captures. Application/core dependency direction, internally coherent Web assets, renderer generations and explicit fixture isolation remain current.
+
 ## Problem
 
 The source tree groups document assets and presets under plugins while concrete

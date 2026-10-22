@@ -4,6 +4,7 @@ import {liveFixture} from './live-fixture.mjs';
 import {verifySshMcp} from './ssh-mcp.mjs';
 import {verifySshSession} from './ssh-session-live.mjs';
 import {verifyTargetIsolation} from './ssh-contention.mjs';
+import {assemble} from '../../../apps/devtools/packages.mjs';
 import {startService,waitUntil,boundedRun} from './service.mjs';
 import {chromium,request as requests} from 'playwright';
 import {mkdir,mkdtemp,readFile,writeFile,rm} from 'node:fs/promises';
@@ -34,6 +35,9 @@ try {
   let log='';sshd.stderr.on('data',bytes=>{if(log.length<65536)log+=bytes.toString()});
   await waitUntil(async()=>{assert.equal(sshd.exitCode,null,log);return await new Promise(resolve=>{const socket=net.connect(port,'127.0.0.1');socket.once('connect',()=>{socket.destroy();resolve(true)});socket.once('error',()=>resolve(false))})},'isolated sshd');
   if(liveMode){live=await liveFixture();service=live.service;}else service=await startService({binary:paired.binary,assets:paired.assets,report});
+  const helperPackage=join(root,'helper-package');
+  await assemble('ssh-helper',helperPackage,required('RSI_TEST_HELPER_BIN'));
+  service.run(['plugin','install','--local',helperPackage]);
   const local=request=>{const result=JSON.parse(service.probe(probe,request).stdout);assert('Ok' in result,JSON.stringify(result));return result.Ok};
   browser=await chromium.launch();const context=await browser.newContext({ignoreHTTPSErrors:true,viewport:{width:1440,height:900},deviceScaleFactor:1});
   page=await context.newPage();page.setDefaultTimeout(60000);page.on('pageerror',error=>errors.push(error.message));

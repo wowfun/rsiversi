@@ -1,4 +1,4 @@
-import {isNativeDocument} from './document-mode.js';
+import {isDesktop, saveDesktopExport} from './desktop-bridge.js';
 
 async function downloadWorker() {
   if (!navigator.serviceWorker) throw new Error("Streaming downloads require a secure browser origin with Service Workers");
@@ -15,32 +15,7 @@ async function downloadWorker() {
 
 // At most one 64 KiB chunk is outstanding. Never collect or Blob the artifact.
 export async function downloadSession(call, pane, generation, args, signal) {
-  if (isNativeDocument()) {
-    const { token } = JSON.parse(await call("export_open", ""));
-    let cancellation, saved = false;
-    const cancel = () => cancellation ??= (async () => {
-      for (let attempt=0; ;attempt++) {
-        try { return await call("export_cancel", JSON.stringify({token})); }
-        catch (error) {
-          if (error.notAdmitted !== true || error.retryable !== true || attempt >= 20) throw error;
-          await new Promise(resolve=>setTimeout(resolve,25));
-        }
-      }
-    })();
-    const abort = () => { void cancel().catch(()=>{}); };
-    signal.addEventListener("abort",abort,{once:true});
-    try {
-      if (signal.aborted) { await cancel(); throw new Error("Export cancelled"); }
-      const result = JSON.parse(await call("export_save",JSON.stringify({token,source:JSON.stringify({pane,generation,arguments:args})})));
-      saved = true;
-      return result;
-    } finally {
-      signal.removeEventListener("abort",abort);
-      // Also releases an unclaimed reservation if save admission failed.
-      if (!saved) await cancel();
-      else if (cancellation) await cancellation.catch(()=>{}); // confirmed save remains authoritative
-    }
-  }
+  if (isDesktop()) return saveDesktopExport(call, pane, generation, args, signal);
   const worker = await downloadWorker();
   if (signal.aborted) throw new Error("Export cancelled");
   const invoke = operation => call("export_input",JSON.stringify({pane,generation,operation})).then(JSON.parse);

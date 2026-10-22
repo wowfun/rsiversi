@@ -1,9 +1,7 @@
 //! Local Web invocation, asset selection and browser handoff.
 use async_trait::async_trait;
-use rsi_api_protocol::ApiError;
 use rsi_credentials_protocol::SecretValue;
 use rsi_meta::{ActivationPlan, ConfigValue, MetaError, PluginFactory, PreparedActivation};
-use sha2::{Digest, Sha256};
 use std::{
     collections::BTreeMap,
     ffi::OsString,
@@ -13,36 +11,21 @@ use std::{
 };
 
 /// Pure local Web help, available without application initialization.
-pub const HELP: &str = "Usage: rsi web [--port PORT] [--no-open] [--assets ABSOLUTE_DIRECTORY]\n\
+pub const HELP: &str = "Usage: rsi [GLOBAL OPTIONS] web [--port PORT] [--no-open] [--assets ABSOLUTE_DIRECTORY]\n\
+  rsi web stop    Stop the browser listener, leaving the Host running\n\
+  rsi web status  Inspect the browser listener\n\
   --port PORT     Loopback port (default 8787; 0 selects a free port)\n\
   --no-open       Print the launch link without opening a browser\n\
-  --assets PATH   Override assets/ beside the executable\n\
+  --assets PATH   Select an explicit local bundle instead of the installed web package\n\
   --help          Show this Web help without starting the application\n\
-  --reset-state  Launcher option; place before application arguments\n\
-Equivalent: rsi --profile web [OPTIONS]\n";
+  Global reset example: rsi --reset-state web\n\
+Equivalent: rsi run web -- [OPTIONS]\n";
 
 /// Explicit OS browser handoff, injectable without opening a real browser in tests.
 #[async_trait]
 pub trait BrowserOpener: std::fmt::Debug + Send + Sync {
     /// Opens a launch URL; errors must never echo the URL or child output.
     async fn open(&self, url: &str) -> Result<(), String>;
-}
-
-/// Explicit debug-launch handoff. Its owner retains the frontend socket and pipes.
-#[async_trait]
-pub trait WebDevelopmentHandoff: std::fmt::Debug + Send + Sync {
-    /// Exact frontend Origin established before bootstrap, stable for this run.
-    fn frontend_origin(&self) -> Option<rsi_api_http::LoopbackBrowserOrigin>;
-    /// Enables only the existing renderer-only asset publication watcher.
-    fn watch_renderers(&self) -> bool;
-    /// Reports the owned backend socket and waits for the proxy-ready release.
-    async fn ready(&self, address: std::net::SocketAddr) -> Result<(), String>;
-    /// Transfers the one-use launch link without putting it in application logs.
-    async fn launch(&self, url: &str, open_browser: bool) -> Result<(), String>;
-    /// Records an OS interruption so the debug CLI can preserve its exit meaning.
-    fn interrupted(&self);
-    /// Cancel-safe, repeatable wait for control-owner retirement or pipe closure.
-    async fn stopped(&self);
 }
 
 /// OS opener with a launcher-supplied, scrubbed environment.
@@ -82,14 +65,14 @@ impl BrowserOpener for SystemBrowserOpener {
 /// Explicit application inputs and optional live handoff; no Service identity.
 #[derive(Clone, Debug, Default)]
 pub struct WebLaunchEnvironment {
+    /// Frozen caller-owned source frontend, active only under ordinary `--watch`.
+    pub frontend: Option<crate::FrontendRecipe>,
     /// Default absolute bundle path captured beside the actual executable.
     pub assets: Option<PathBuf>,
     /// Whether launch occurred through SSH.
     pub ssh: bool,
     /// Optional explicit browser-opening implementation.
     pub opener: Option<Arc<dyn BrowserOpener>>,
-    /// Explicit development control, supplied only by the debug CLI entry.
-    pub development: Option<Arc<dyn WebDevelopmentHandoff>>,
 }
 
 #[derive(Clone, Debug)]
@@ -125,13 +108,28 @@ impl WebLaunch {
             .expect("Web diagnostic poisoned")
             .take()
     }
-    fn failure(&self, error: impl std::fmt::Display) -> MetaError {
+    pub(crate) fn failure(&self, error: impl std::fmt::Display) -> MetaError {
         let message = error.to_string();
         *self.diagnostic.lock().expect("Web diagnostic poisoned") =
             Some(crate::RsiError::Boot(message.clone()));
         MetaError::InvalidInput(message)
     }
     pub(crate) fn options(&self) -> Result<Options, crate::RsiError> {
+        let (port, assets, open) = self.requested()?;
+        let assets = assets
+            .or_else(|| self.environment.assets.clone())
+            .ok_or_else(|| {
+                crate::RsiError::Boot("embedded Web requires an explicit assets directory".into())
+            })?;
+        Ok(Options {
+            port: port.unwrap_or(8787),
+            assets,
+            open,
+        })
+    }
+    pub(crate) fn requested(
+        &self,
+    ) -> Result<(Option<u16>, Option<PathBuf>, bool), crate::RsiError> {
         use rsi_application::arguments::{path_value, set_flag, set_option, string_value, utf8};
         if self.arguments.len() > 16
             || self
@@ -148,7 +146,13 @@ impl WebLaunch {
         let mut port = None;
         let mut assets = None;
         let mut no_open = false;
-        let mut args = self.arguments.iter().cloned();
+        let mut args = self
+            .arguments
+            .iter()
+            .skip(usize::from(
+                self.arguments.first().is_some_and(|arg| arg == "--"),
+            ))
+            .cloned();
         while let Some(arg) = args.next() {
             match utf8(arg)?.as_str() {
                 "--port" => {
@@ -171,14 +175,15 @@ impl WebLaunch {
                 }
             }
         }
-        let assets = assets.or_else(|| self.environment.assets.clone())
-            .filter(|p| p.is_absolute() && p.as_os_str().len() <= 16 * 1024)
-            .ok_or_else(|| crate::RsiError::Boot("Web requires an absolute --assets directory or a launcher-supplied assets directory".into()))?;
-        Ok(Options {
-            port: port.unwrap_or(8787),
-            assets,
-            open: !no_open && !self.environment.ssh,
-        })
+        if assets
+            .as_ref()
+            .is_some_and(|p| !p.is_absolute() || p.as_os_str().len() > 16 * 1024)
+        {
+            return Err(crate::RsiError::Boot(
+                "--assets requires an absolute bounded directory".into(),
+            ));
+        }
+        Ok((port, assets, !no_open && !self.environment.ssh))
     }
 }
 
@@ -194,70 +199,36 @@ impl PluginFactory for LocalWebAssetsFactory {
             ));
         }
         let options = self.0.options().map_err(|error| self.0.failure(error))?;
-        rsi_web_assets::PairedWebAssetsFactory::new(rsi_build_info::family())
-            .prepare(&serde_json::json!({"directory": options.assets, "watch": self.0.environment.development.as_ref().is_some_and(|dev| dev.watch_renderers())}))
+        rsi_web_assets::VerifiedWebAssetsFactory
+            .prepare(&serde_json::json!({"directory": options.assets, "watch": false}))
             .map_err(|error| self.0.failure(error))
     }
     async fn activate(&self, plan: ActivationPlan) -> rsi_meta::Result<()> {
-        rsi_web_assets::PairedWebAssetsFactory::new(rsi_build_info::family()).activate(plan).await.map_err(|error| {
+        rsi_web_assets::VerifiedWebAssetsFactory.activate(plan).await.map_err(|error| {
             let path = self.0.options().map(|o| o.assets.display().to_string()).unwrap_or_default();
-            self.0.failure(format!("Web bundle unavailable at {path}: {error}. Run scripts/rsiversi.sh build web, then scripts/rsiversi.sh web (Windows: scripts/rsiversi.ps1 build web, then scripts/rsiversi.ps1 web)"))
+            self.0.failure(format!("Web bundle unavailable at {path}: {error}. Install it with `rsi plugin install web`, or select a complete local bundle with `rsi web --assets ABSOLUTE_DIRECTORY`"))
         })
     }
 }
 
-pub(crate) struct Ticket {
-    value: Mutex<Option<(Vec<u8>, SecretValue)>>,
-    expires: rsi_meta::Deadline,
-}
-impl std::fmt::Debug for Ticket {
-    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        f.debug_struct("WebLaunchTicket").finish_non_exhaustive()
-    }
-}
+#[derive(Debug)]
+pub(crate) struct Ticket(crate::tickets::Tickets);
 impl Ticket {
     pub fn new(
         execution: &rsi_meta::Execution,
         token: SecretValue,
     ) -> rsi_api_protocol::Result<(Arc<Self>, SecretValue)> {
-        let mut bytes = [0; 32];
-        getrandom::fill(&mut bytes)
-            .map_err(|_| ApiError::Backend("launch entropy failed".into()))?;
-        let ticket = SecretValue::new(hex::encode(bytes))
-            .map_err(|_| ApiError::Backend("launch ticket failed".into()))?;
-        Ok((
-            Arc::new(Self {
-                value: Mutex::new(Some((
-                    Sha256::digest(ticket.expose_secret().as_bytes()).to_vec(),
-                    token,
-                ))),
-                expires: execution.deadline_after(Duration::from_mins(10)),
-            }),
-            ticket,
-        ))
+        let tickets = crate::tickets::Tickets::new(execution.clone());
+        let secret = tickets.mint(token)?;
+        Ok((Arc::new(Self(tickets)), secret))
     }
     pub fn close(&self) {
-        self.value.lock().expect("ticket poisoned").take();
+        self.0.clear();
     }
 }
 impl rsi_api_http::BrowserBootstrap for Ticket {
     fn redeem(&self, ticket: &SecretValue) -> rsi_api_protocol::Result<SecretValue> {
-        let mut value = self.value.lock().expect("ticket poisoned");
-        if self.expires.has_elapsed() {
-            value.take();
-            return Err(ApiError::Unauthorized);
-        }
-        let hash = Sha256::digest(ticket.expose_secret().as_bytes());
-        if value
-            .as_ref()
-            .is_none_or(|(expected, _)| expected.as_slice() != hash.as_slice())
-        {
-            return Err(ApiError::Unauthorized);
-        }
-        value
-            .take()
-            .map(|(_, token)| token)
-            .ok_or(ApiError::Unauthorized)
+        self.0.redeem(ticket)
     }
 }
 
@@ -275,10 +246,10 @@ mod tests {
         WebLaunch::new(
             args.iter().map(OsString::from).collect(),
             WebLaunchEnvironment {
+                frontend: None,
                 assets: Some(assets("bundle")),
                 ssh,
                 opener: None,
-                development: None,
             },
         )
     }
@@ -320,10 +291,10 @@ mod tests {
         }
     }
     #[derive(Debug)]
-    #[cfg(any(unix, windows))]
+    #[cfg(unix)]
     struct HealthyService;
     #[async_trait]
-    #[cfg(any(unix, windows))]
+    #[cfg(unix)]
     impl crate::ServingService for HealthyService {
         async fn stopped(&self) -> Result<(), String> {
             std::future::pending().await
@@ -333,7 +304,7 @@ mod tests {
         }
     }
     #[async_trait]
-    #[cfg(any(unix, windows))]
+    #[cfg(unix)]
     impl rsi_api_http::HttpListener for HealthyService {
         fn address(&self) -> std::net::SocketAddr {
             ([127, 0, 0, 1], 8787).into()
@@ -345,90 +316,6 @@ mod tests {
             std::future::pending().await
         }
     }
-    #[derive(Debug, Default)]
-    struct DevelopmentHandoff {
-        ready: tokio::sync::Notify,
-        release: tokio::sync::Notify,
-        launched: tokio::sync::Notify,
-        stop: tokio_util::sync::CancellationToken,
-        link: Mutex<Option<(String, bool)>>,
-    }
-    #[async_trait]
-    impl WebDevelopmentHandoff for DevelopmentHandoff {
-        fn frontend_origin(&self) -> Option<rsi_api_http::LoopbackBrowserOrigin> {
-            Some(rsi_api_http::LoopbackBrowserOrigin::new("http://127.0.0.1:3001".into()).unwrap())
-        }
-        fn watch_renderers(&self) -> bool {
-            true
-        }
-        async fn ready(&self, address: std::net::SocketAddr) -> Result<(), String> {
-            assert_eq!(address.port(), 8787);
-            self.ready.notify_one();
-            self.release.notified().await;
-            Ok(())
-        }
-        async fn launch(&self, url: &str, open: bool) -> Result<(), String> {
-            *self.link.lock().unwrap() = Some((url.into(), open));
-            self.launched.notify_one();
-            Ok(())
-        }
-        fn interrupted(&self) {}
-        async fn stopped(&self) {
-            self.stop.cancelled().await;
-        }
-    }
-    #[cfg(any(unix, windows))]
-    async fn development_handoff_case(release: bool) {
-        let handoff = Arc::new(DevelopmentHandoff::default());
-        let runner = Arc::new(crate::Runner {
-            listener: Arc::new(HealthyService),
-            service: Arc::new(HealthyService),
-            origin: handoff.frontend_origin().unwrap().as_str().into(),
-            launch_link: Mutex::new(Some(SecretValue::new("fixture").unwrap())),
-            opener: None,
-            development: Some(handoff.clone()),
-            open_browser: true,
-            started: Mutex::new(false),
-            stop: tokio_util::sync::CancellationToken::new(),
-            tasks: tokio_util::task::TaskTracker::new(),
-            execution: rsi_meta::Execution::native(tokio::runtime::Handle::current()),
-        });
-        let serving = tokio::spawn(async move { runner.serve().await });
-        tokio::time::timeout(Duration::from_secs(5), handoff.ready.notified())
-            .await
-            .unwrap();
-        assert!(handoff.link.lock().unwrap().is_none());
-        if release {
-            handoff.release.notify_one();
-            tokio::time::timeout(Duration::from_secs(5), handoff.launched.notified())
-                .await
-                .unwrap();
-            assert_eq!(
-                *handoff.link.lock().unwrap(),
-                Some(("http://127.0.0.1:3001#rsi-launch=fixture".into(), true))
-            );
-        }
-        handoff.stop.cancel();
-        assert_eq!(
-            tokio::time::timeout(Duration::from_secs(5), serving)
-                .await
-                .unwrap()
-                .unwrap(),
-            0
-        );
-        assert_eq!(handoff.link.lock().unwrap().is_some(), release);
-    }
-    #[tokio::test]
-    #[cfg(any(unix, windows))]
-    async fn development_handoff_defers_launch_and_preserves_open_preference() {
-        development_handoff_case(true).await;
-    }
-    #[tokio::test]
-    #[cfg(any(unix, windows))]
-    async fn development_handoff_cancels_during_readiness_without_launching() {
-        development_handoff_case(false).await;
-    }
-
     #[derive(Debug, Default)]
     #[cfg(unix)]
     struct FailedOpener(tokio::sync::Notify);
@@ -451,8 +338,6 @@ mod tests {
             origin: "http://127.0.0.1:8787".into(),
             launch_link: Mutex::new(Some(SecretValue::new("fixture").unwrap())),
             opener: Some(opener.clone()),
-            development: None,
-            open_browser: true,
             started: Mutex::new(false),
             stop: tokio_util::sync::CancellationToken::new(),
             tasks: tokio_util::task::TaskTracker::new(),

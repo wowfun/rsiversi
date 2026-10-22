@@ -4,7 +4,7 @@ use rsi_inspector::{InspectorClient, PageRequest, RuntimeRequest};
 use std::{ffi::OsString, sync::Arc};
 
 /// Finite local operator inspection grammar.
-pub const HELP: &str = "Inspector application (existing local Service Host):\n  rsi --profile inspector runtime [AFTER_FIBER]\n  rsi --profile inspector profile [OFFSET]\n  rsi --profile inspector factories [OFFSET]\n  rsi --profile inspector native\nPrints one bounded JSON page; use its next_after or next_offset for another page.\n";
+pub const HELP: &str = "Inspector application (existing local Service Host):\n  rsi run inspector runtime [AFTER_FIBER]\n  rsi run inspector profile [OFFSET]\n  rsi run inspector factories [OFFSET]\n  rsi run inspector native\nPrints one bounded JSON page; use its next_after or next_offset for another page.\n";
 #[derive(Debug)]
 pub(crate) enum Command {
     Runtime(RuntimeRequest),

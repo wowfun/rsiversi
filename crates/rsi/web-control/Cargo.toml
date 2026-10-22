@@ -1,0 +1,23 @@
+[package]
+name = "rsi-web-control"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+publish = false
+
+[dependencies]
+rsi-api-protocol = { path = "../../rsi-api/protocol" }
+rsi-api-http = { path = "../../rsi-api/http" }
+serde.workspace = true
+serde_json.workspace = true
+tokio = { workspace = true, features = ["io-util"] }
+
+[build-dependencies]
+rsi-api-schema-build = { path = "../../rsi-api/schema-build" }
+
+[dev-dependencies]
+tokio = { workspace = true, features = ["macros", "rt"] }
+
+[lints]
+workspace = true

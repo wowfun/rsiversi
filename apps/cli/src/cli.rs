@@ -2,16 +2,19 @@ use super::{AgentPresetId, ApplicationProfileId, HostProfileId, OsString, PathBu
 use rsi_application::arguments::utf8;
 
 pub(super) const HELP: &str = "Usage:\n\
-  rsi tui [--reset-state] [APPLICATION ARGUMENTS]\n\
-  rsi web [--reset-state] [--port PORT] [--no-open] [--assets PATH]\n\
-  rsi --profile PROFILE [--reset-state] [APPLICATION ARGUMENTS]\n\
+  rsi [GLOBAL OPTIONS] [APPLICATION | COMMAND]\n\
+  rsi run PROFILE [-- APPLICATION ARGUMENTS]\n\
+  rsi config <init|show|validate>\n\
+  rsi import <--config-home OLD --state-home OLD [--dry-run]|recover>\n\
+  rsi tui [APPLICATION ARGUMENTS]\n\
+  rsi web [--port PORT] [--no-open] [--assets PATH]\n\
       headless: TASK|--stdin [--cwd PATH] [--resume SESSION|--session-id SESSION]\n\
                 [--message-id MESSAGE] [-i|--image PATH]... [--agent-preset ID]\n\
                 [--deployment ID --model ID] [--sandbox MODE]\n\
                 [--output text|jsonl]\n\
       cli:  [--cwd PATH] [--resume SESSION|--history SESSION|--list|--session-id SESSION]\n\
                 [--agent-preset ID] [--output text|jsonl]\n\
-  rsi --profile cli --export SESSION|latest [-f markdown|md|json] [-i CONTENTS] [-o PATH]\n\
+  rsi cli --export SESSION|latest [-f markdown|md|json] [-i CONTENTS] [-o PATH]\n\
       tui:  [--cwd PATH] [--resume SESSION|--session-id SESSION]\n\
       serve: --bind ADDRESS --origin ORIGIN [--tls-certificate FILE --tls-key FILE|--dev-http]\n\
       devices: <register LABEL|list|revoke DEVICE_ID>\n\
@@ -23,16 +26,21 @@ pub(super) const HELP: &str = "Usage:\n\
   rsi agent-preset <COMMAND> [--output text|json]\n\
   rsi agent-store verify [--root ABSOLUTE] [--output text|json]\n\n\
 Commands:\n\
-  --profile       Run a named application plugin Profile\n\
+  run             Run a named application plugin Profile\n\
   profile         Inspect and manage Application and Host Profiles\n\
   host            Control the explicit local Service Host daemon\n\
   agent-preset    Inspect and manage local Agent presets\n\
   agent-store     Verify the durable Agent Store\n\
   addon           Manage local native source bytes and explicit selection\n\n\
 Startup option:\n\
-  --reset-state   Back up and clear Agent session state; preserve configuration and credentials\n\
-                 Place before application arguments\n\
-                 Example: rsi tui --reset-state\n";
+  --config-home DIR  Select the final configuration directory\n\
+  --state-home DIR   Select the final state directory\n\
+  --cache-home DIR   Select the final cache directory\n\
+  --watch            Observe declared configuration and source inputs\n\
+  --reset-config     Back up and restore configuration; preserve credentials\n\
+  --reset-state      Back up owned state; preserve credentials and packages\n\
+                 Place global options before the application or command\n\
+                 Example: rsi --reset-state tui\n";
 pub(super) const PROFILE_HELP: &str = "Usage:\n\
   rsi profile <application|host> list [--output text|json]\n\
   rsi profile <application|host> show ID [--output text|json]\n\
@@ -43,13 +51,13 @@ pub(super) const PROFILE_HELP: &str = "Usage:\n\
   rsi profile <application|host> preview-edit ID SOURCE_FILE [--output text|json] (Unix)\n\
   rsi profile <application|host> commit-edit ID SOURCE_FILE REVIEW_DIGEST [--output text|json] (Unix)\n";
 pub(super) const HOST_HELP: &str = "Usage:\n\
-  rsi host start [--profile HOST] [--reset-state]\n\
-  rsi host serve [--profile HOST] [--reset-state]\n\
-  rsi host restart [--profile HOST] [--force] [--reset-state]\n\
+  rsi host start [--profile HOST]\n\
+  rsi host serve [--profile HOST]\n\
+  rsi host restart [--profile HOST] [--force]\n\
   rsi host stop [--force]\n\
   rsi host status\n\
   rsi host reload\n\n\
-  --reset-state   Back up and clear Agent session state; preserve configuration and credentials\n";
+  Reset owned state before startup: rsi --reset-state host start\n";
 pub(super) const AGENT_PRESET_HELP: &str = "Usage:\n\
   rsi agent-preset list [--output text|json]\n\
   rsi agent-preset show ID [--output text|json]\n\
@@ -79,6 +87,9 @@ Commands:\n\
 pub(super) const BOOT_FAILURE_EXIT_CODE: u8 = 2;
 
 pub(super) enum Parse {
+    Import(Vec<OsString>),
+    WebControl(bool),
+    Config(Vec<OsString>),
     #[cfg(unix)]
     Addon(super::addon_cli::Command),
     #[cfg(not(unix))]
@@ -87,9 +98,9 @@ pub(super) enum Parse {
     Version,
     Application(ApplicationInvocation),
     Profile(ProfileCommand),
-    #[cfg(target_os = "linux")]
+    #[cfg(any(target_os = "linux", windows))]
     Host(HostCommand),
-    #[cfg(not(target_os = "linux"))]
+    #[cfg(not(any(target_os = "linux", windows)))]
     HostUnsupported,
     AgentPreset(AgentPresetCommand),
     AgentStore(AgentStoreCommand),
@@ -99,7 +110,6 @@ pub(super) enum Parse {
 pub(super) struct ApplicationInvocation {
     pub(super) profile: ApplicationProfileId,
     pub(super) arguments: Vec<OsString>,
-    pub(super) reset_state: bool,
 }
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -141,13 +151,12 @@ pub(super) enum HostOperation {
 }
 
 #[derive(Clone, Debug)]
-#[cfg(target_os = "linux")]
+#[cfg(any(target_os = "linux", windows))]
 pub(super) struct HostCommand {
     pub(super) operation: HostOperation,
     pub(super) profile: HostProfileId,
     pub(super) force: bool,
     pub(super) detached_child: bool,
-    pub(super) reset_state: bool,
 }
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -575,7 +584,6 @@ pub(super) fn parse_host_command(arguments: impl Iterator<Item = OsString>) -> r
     let mut profile_set = false;
     let mut force = false;
     let mut detached_child = false;
-    let mut reset_state = false;
     let mut index = 1;
     while index < arguments.len() {
         match arguments[index].as_str() {
@@ -594,7 +602,6 @@ pub(super) fn parse_host_command(arguments: impl Iterator<Item = OsString>) -> r
                 .map_err(|error| host_usage(error.to_string()))?;
             }
             "--force" => set_host_flag(&mut force, "--force")?,
-            "--reset-state" => set_host_flag(&mut reset_state, "--reset-state")?,
             "--detached-child" => set_host_flag(&mut detached_child, "--detached-child")?,
             option => return Err(host_usage(format!("unknown Host option `{option}`"))),
         }
@@ -611,34 +618,23 @@ pub(super) fn parse_host_command(arguments: impl Iterator<Item = OsString>) -> r
     if force && !matches!(operation, HostOperation::Stop | HostOperation::Restart) {
         return Err(host_usage("--force is valid only for stop or restart"));
     }
-    if reset_state
-        && !matches!(
-            operation,
-            HostOperation::Start | HostOperation::Serve | HostOperation::Restart
-        )
-    {
-        return Err(host_usage(
-            "--reset-state is valid only for start, serve or restart",
-        ));
-    }
     if detached_child && operation != HostOperation::Serve {
         return Err(host_usage(
             "--detached-child is valid only for the internal serve child",
         ));
     }
-    #[cfg(target_os = "linux")]
+    #[cfg(any(target_os = "linux", windows))]
     {
         Ok(Parse::Host(HostCommand {
             operation,
             profile,
             force,
             detached_child,
-            reset_state,
         }))
     }
-    #[cfg(not(target_os = "linux"))]
+    #[cfg(not(any(target_os = "linux", windows)))]
     {
-        let _ = (operation, profile, force, detached_child, reset_state);
+        let _ = (operation, profile, force, detached_child);
         Ok(Parse::HostUnsupported)
     }
 }
@@ -650,10 +646,16 @@ fn set_host_flag(flag: &mut bool, name: &str) -> rsi::Result<()> {
     Ok(())
 }
 
+pub(super) const IMPORT_HELP: &str = "Usage: rsi [GLOBAL HOMES] import --config-home OLD_CONFIG --state-home OLD_STATE [--dry-run]\n       rsi [GLOBAL HOMES] import recover\nStop both Hosts first. Preflight, stage and back up owned data; preserve unrelated files.\n";
+const CONFIG_HELP: &str = "Usage: rsi config init|show|validate\nUse global home options to select the configuration and state directories.\n";
+
 pub(super) fn parse_cli(arguments: impl IntoIterator<Item = OsString>) -> rsi::Result<Parse> {
     let mut arguments = arguments.into_iter();
     let Some(first) = arguments.next() else {
-        return Err(usage("missing application selection or management command"));
+        return Ok(parse_application(
+            ApplicationProfileId::new("tui").expect("builtin profile"),
+            arguments,
+        ));
     };
     let first = utf8(first)?;
     if matches!(first.as_str(), "-h" | "--help") {
@@ -662,19 +664,51 @@ pub(super) fn parse_cli(arguments: impl IntoIterator<Item = OsString>) -> rsi::R
     if matches!(first.as_str(), "-V" | "--version") {
         return Ok(Parse::Version);
     }
-    if matches!(first.as_str(), "tui" | "web") {
-        return parse_application(
+    if matches!(first.as_str(), "config" | "import") {
+        let rest: Vec<_> = arguments.collect();
+        let help_requested = matches!(rest.as_slice(), [flag] if flag == "--help" || flag == "-h");
+        let (help, command) = match first.as_str() {
+            "config" => (CONFIG_HELP, Parse::Config(rest)),
+            "import" => (IMPORT_HELP, Parse::Import(rest)),
+            _ => unreachable!("matched command"),
+        };
+        return Ok(if help_requested {
+            Parse::Help(help)
+        } else {
+            command
+        });
+    }
+    if first == "web" {
+        let rest: Vec<_> = arguments.collect();
+        if let Some(operation) = rest.first().and_then(|arg| arg.to_str())
+            && matches!(operation, "stop" | "status")
+        {
+            if rest.len() != 1 {
+                return Err(usage("web stop/status take no application arguments"));
+            }
+            return Ok(Parse::WebControl(operation == "stop"));
+        }
+        return Ok(parse_application(
+            ApplicationProfileId::new("web").expect("builtin"),
+            rest.into_iter(),
+        ));
+    }
+    if matches!(
+        first.as_str(),
+        "tui" | "cli" | "headless" | "acp" | "serve" | "devices" | "inspector" | "desktop"
+    ) {
+        return Ok(parse_application(
             ApplicationProfileId::new(first).expect("builtin profile"),
             arguments,
-        );
+        ));
     }
-    if first == "--profile" {
+    if first == "run" {
         let profile = arguments
             .next()
-            .ok_or_else(|| usage("--profile requires an Application Profile name"))?;
+            .ok_or_else(|| usage("run requires an Application Profile name"))?;
         let profile =
             ApplicationProfileId::new(utf8(profile)?).map_err(|error| usage(error.to_string()))?;
-        return parse_application(profile, arguments);
+        return Ok(parse_application(profile, arguments));
     }
     if first == "addon" {
         #[cfg(unix)]
@@ -701,33 +735,18 @@ pub(super) fn parse_cli(arguments: impl IntoIterator<Item = OsString>) -> rsi::R
         return parse_agent_store(arguments);
     }
     Err(usage(format!(
-        "unknown command `{first}`; select an Application Profile with --profile"
+        "unknown command `{first}`; select an Application Profile with rsi run NAME"
     )))
 }
 
 fn parse_application(
     profile: ApplicationProfileId,
     arguments: impl Iterator<Item = OsString>,
-) -> rsi::Result<Parse> {
-    let mut forwarded = Vec::new();
-    let mut reset_state = false;
-    let mut options = true;
-    for argument in arguments {
-        if options && argument == "--reset-state" {
-            if reset_state {
-                return Err(usage("duplicate --reset-state"));
-            }
-            reset_state = true;
-        } else {
-            options = false;
-            forwarded.push(argument);
-        }
-    }
-    Ok(Parse::Application(ApplicationInvocation {
+) -> Parse {
+    Parse::Application(ApplicationInvocation {
         profile,
-        arguments: forwarded,
-        reset_state,
-    }))
+        arguments: arguments.collect(),
+    })
 }
 
 pub(super) fn usage(message: impl Into<String>) -> RsiError {

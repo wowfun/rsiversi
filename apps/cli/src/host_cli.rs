@@ -1,22 +1,45 @@
-use super::*;
+use super::{
+    CancellationToken, DAEMON_READINESS_TIMEOUT, Duration, FORCE_HOST_STOP_TIMEOUT,
+    HOST_DIAGNOSTICS_INTERVAL, HOST_SHUTDOWN_MARGIN, HostCommand, HostOperation, HostOwnerMode,
+    HostProfileId, JoinHandle, ProfileCatalog, RsiError, SERVICE_HOST_DRAIN_TIMEOUT,
+    ServiceHostDiagnostics, ServiceHostDiagnosticsSnapshot, ServiceHostPaths,
+    StandardServiceDaemon, Stdio, Write, daemon_readiness_timeout_error, launch,
+    owner_process_is_current, prepare_standard_composition, probe_service_host,
+    profile_management_error, report_error, standard_paths,
+};
+#[cfg(unix)]
+use std::os::unix::fs::{OpenOptionsExt as _, PermissionsExt as _};
+#[cfg(target_os = "linux")]
+use std::sync::Arc;
+
+#[derive(Debug)]
+pub(super) struct ProductHostLauncher;
+#[async_trait::async_trait]
+impl rsi::LocalHostLauncher for ProductHostLauncher {
+    async fn ensure_started(&self, paths: &rsi_host::HostPaths) -> rsi::Result<()> {
+        let selected = standard_paths()?;
+        if selected.config() != paths.config() || selected.state() != paths.state() {
+            return Err(RsiError::Boot(
+                "application launcher received different home authorities".into(),
+            ));
+        }
+        start_host_daemon_inner(&HostProfileId::new("standard").expect("constant"), true).await
+    }
+}
 
 pub(super) async fn run_host(command: HostCommand) -> u8 {
+    if matches!(command.operation, HostOperation::Serve)
+        && let Err(error) = launch::maintain()
+    {
+        return report_error(&error);
+    }
     let result = match command.operation {
-        HostOperation::Serve => {
-            serve_host_daemon(
-                &command.profile,
-                command.detached_child,
-                command.reset_state,
-            )
-            .await
-        }
-        HostOperation::Start => start_host_daemon(&command.profile, command.reset_state).await,
-        HostOperation::Restart => {
-            restart_host_daemon(&command.profile, command.force, command.reset_state).await
-        }
+        HostOperation::Serve => serve_host_daemon(&command.profile, command.detached_child).await,
+        HostOperation::Start => start_host_daemon(&command.profile).await,
+        HostOperation::Restart => restart_host_daemon(&command.profile, command.force).await,
         HostOperation::Stop => stop_host_daemon(command.force).await,
         HostOperation::Status => status_host_daemon().await,
-        HostOperation::Reload => reload_host_daemon(),
+        HostOperation::Reload => reload_host_daemon().await,
     };
     result.map_or_else(|error| report_error(&error), |()| 0)
 }
@@ -39,7 +62,7 @@ pub(super) async fn wait_for_reload_task(
     }
 }
 
-#[cfg(target_os = "linux")]
+#[cfg(any(target_os = "linux", windows))]
 pub(super) async fn stop_reload_task(task: &mut Option<JoinHandle<()>>) {
     let Some(task) = task.take() else {
         return;
@@ -80,60 +103,37 @@ where
     }
 }
 
-#[cfg(target_os = "linux")]
+#[cfg(any(target_os = "linux", windows))]
 fn acquire_daemon_owner(
     paths: &rsi_host::HostPaths,
     detached_child: bool,
 ) -> rsi::Result<rsi_service_host::HostOwnerLease> {
+    #[cfg(target_os = "linux")]
     if detached_child {
         rustix::process::setsid()
             .map_err(|error| RsiError::Boot(format!("detach Service Host daemon: {error}")))?;
     }
+    #[cfg(windows)]
+    let _ = detached_child;
     let host_paths = ServiceHostPaths::from_host_paths(paths)
         .map_err(|error| RsiError::Boot(error.to_string()))?;
-    if detached_child {
-        use std::os::fd::AsFd as _;
-        let stdin = std::io::stdin();
-        rustix::io::fcntl_setfd(stdin.as_fd(), rustix::io::FdFlags::CLOEXEC)
-            .map_err(|error| RsiError::Boot(format!("fence inherited owner lease: {error}")))?;
-        let file = stdin
-            .as_fd()
-            .try_clone_to_owned()
-            .map_err(|error| RsiError::Boot(format!("inherit owner lease: {error}")))?;
-        rsi_service_host::HostOwnerLease::adopt_startup_file(host_paths, file.into())
-    } else {
-        rsi_service_host::HostOwnerLease::try_acquire(host_paths)
-    }
-    .map_err(|error| RsiError::Boot(error.to_string()))
+    let lease = rsi_service_host::HostOwnerLease::try_acquire(host_paths)
+        .map_err(|error| RsiError::Boot(error.to_string()))?;
+    rsi::reject_pending_import(paths)?;
+    Ok(lease)
 }
 
 #[cfg(target_os = "linux")]
 pub(super) async fn serve_host_daemon(
     profile_id: &HostProfileId,
     detached_child: bool,
-    reset_state: bool,
 ) -> rsi::Result<()> {
-    let receipt_pipe = if detached_child && reset_state {
-        Some(super::reset_state::inherited_pipe()?)
-    } else {
-        None
-    };
     let paths = standard_paths()?;
     let owner_lease = acquire_daemon_owner(&paths, detached_child)?;
     let [mut terminate, mut interrupt, mut reload] = daemon_signals()?;
-    let profile = ProfileCatalog::new(paths.clone(), rsi_app_catalog::metadata())
-        .host(profile_id)
-        .map_err(profile_management_error)?;
+    let profile = selected_host_profile(&paths, profile_id)?;
     let (composition, presets) = prepare_standard_composition(None, paths).await?;
-    let daemon = match start_daemon_and_report(
-        composition,
-        &profile,
-        owner_lease,
-        reset_state,
-        receipt_pipe,
-    )
-    .await
-    {
+    let daemon = match StandardServiceDaemon::start(composition, &profile, owner_lease).await {
         Ok(daemon) => daemon,
         Err(error) => {
             let _ = presets.shutdown().await;
@@ -222,56 +222,71 @@ fn daemon_signals() -> rsi::Result<[tokio::signal::unix::Signal; 3]> {
     ])
 }
 
-#[cfg(target_os = "linux")]
-async fn start_daemon_and_report(
-    mut composition: StandardComposition,
-    profile: &rsi::HostProfileDocument,
-    owner_lease: rsi_service_host::HostOwnerLease,
-    reset_state: bool,
-    receipt_pipe: Option<std::fs::File>,
-) -> rsi::Result<StandardServiceDaemon> {
-    let reset = reset_state.then(rsi_agent_store_sqlite::SqliteStoreResetRequest::new);
-    if let Some(reset) = &reset {
-        composition = composition.with_agent_store_reset(reset.clone());
-    }
-    let starting = StandardServiceDaemon::start(composition, profile, owner_lease);
-    tokio::pin!(starting);
-    let (started, published) = if let Some(reset) = &reset {
-        tokio::select! {
-            () = reset.receipt_ready() => {
-                let published = super::reset_state::publish(reset.take_receipt().as_ref(), receipt_pipe);
-                (starting.await, published)
-            }
-            started = &mut starting => {
-                let published = super::reset_state::publish(reset.take_receipt().as_ref(), receipt_pipe);
-                (started, published)
-            }
-        }
+fn selected_host_profile(
+    paths: &rsi_host::HostPaths,
+    profile_id: &HostProfileId,
+) -> rsi::Result<rsi::HostProfileDocument> {
+    let catalog = ProfileCatalog::new(paths.clone(), rsi_app_catalog::metadata());
+    if profile_id.as_str() == "standard" {
+        launch::current()?
+            .configuration()?
+            .service_profile(&catalog)
     } else {
-        (starting.await, Ok(()))
-    };
-    let failure = published.err().or_else(|| {
-        (started.is_ok()
-            && reset
-                .as_ref()
-                .is_some_and(rsi_agent_store_sqlite::SqliteStoreResetRequest::is_pending))
-        .then(|| RsiError::Boot("--reset-state requires a local SQLite Agent Store Host".into()))
-    });
-    if let Some(error) = failure {
-        match started {
-            Ok(daemon) => {
-                let stop = CancellationToken::new();
-                stop.cancel();
-                let _ = daemon.run(stop).await;
-            }
-            Err(startup) => return Err(RsiError::Boot(format!("{startup}; {error}"))),
-        }
-        return Err(error);
+        catalog.host(profile_id).map_err(profile_management_error)
     }
-    started
 }
 
-#[cfg(target_os = "linux")]
+#[cfg(windows)]
+pub(super) async fn serve_host_daemon(
+    profile_id: &HostProfileId,
+    detached_child: bool,
+) -> rsi::Result<()> {
+    let paths = standard_paths()?;
+    let lease = acquire_daemon_owner(&paths, detached_child)?;
+    let profile = selected_host_profile(&paths, profile_id)?;
+    let (composition, presets) = prepare_standard_composition(None, paths).await?;
+    let daemon = match StandardServiceDaemon::start(composition, &profile, lease).await {
+        Ok(daemon) => daemon,
+        Err(error) => {
+            presets.shutdown().await;
+            return Err(error);
+        }
+    };
+    let diagnostics_stop = CancellationToken::new();
+    let diagnostics_task = tokio::spawn(log_service_host_diagnostics(
+        daemon.diagnostics(),
+        diagnostics_stop.clone(),
+    ));
+    let stop = CancellationToken::new();
+    let mut task = tokio::spawn(daemon.run(stop.clone()));
+    let result = tokio::select! {
+        result = &mut task => result,
+        signal = tokio::signal::ctrl_c() => {
+            stop.cancel();
+            let result = task.await;
+            match signal {
+                Ok(()) => result,
+                Err(error) => Ok(Err(RsiError::Boot(format!("console control: {error}")))),
+            }
+        }
+    };
+    finish_daemon_shutdown(
+        result,
+        &mut None,
+        diagnostics_stop,
+        diagnostics_task,
+        async {
+            let cleanup = presets.shutdown().await;
+            if !cleanup.is_clean() {
+                return Err(RsiError::Boot("Agent-preset daemon cleanup failed".into()));
+            }
+            Ok(())
+        },
+    )
+    .await
+}
+
+#[cfg(any(target_os = "linux", windows))]
 pub(super) async fn finish_daemon_shutdown(
     daemon_result: std::result::Result<rsi::Result<()>, tokio::task::JoinError>,
     reload_task: &mut Option<JoinHandle<()>>,
@@ -305,7 +320,7 @@ async fn reload_host_profile(running: Arc<rsi::RunningRsi>) {
     }
 }
 
-#[cfg(target_os = "linux")]
+#[cfg(any(target_os = "linux", windows))]
 pub(super) async fn log_service_host_diagnostics(
     mut generations: tokio::sync::watch::Receiver<ServiceHostDiagnostics>,
     stop: CancellationToken,
@@ -348,7 +363,7 @@ pub(super) async fn log_service_host_diagnostics(
     }
 }
 
-#[cfg(target_os = "linux")]
+#[cfg(any(target_os = "linux", windows))]
 pub(super) fn format_service_host_diagnostics(
     delta: ServiceHostDiagnosticsSnapshot,
     final_delta: bool,
@@ -370,77 +385,158 @@ pub(super) fn format_service_host_diagnostics(
     )
 }
 
-#[cfg(target_os = "linux")]
-pub(super) async fn expected_host_launch(
-    profile_id: &HostProfileId,
-) -> rsi::Result<(rsi_host::HostPaths, String)> {
-    let paths = standard_paths()?;
-    let profile = ProfileCatalog::new(paths.clone(), rsi_app_catalog::metadata())
-        .host(profile_id)
-        .map_err(profile_management_error)?;
-    let (composition, presets) = prepare_standard_composition(None, paths.clone()).await?;
-    let preview = composition.preview_host(&profile)?;
-    let shutdown = presets.shutdown().await;
-    if !shutdown.is_clean() {
-        return Err(RsiError::Boot(
-            "Agent-preset preview shutdown was not clean".into(),
-        ));
-    }
-    Ok((paths, preview.launch_key.as_str().into()))
-}
-
-#[cfg(target_os = "linux")]
+#[cfg(any(target_os = "linux", windows))]
 fn open_daemon_log(host_paths: &ServiceHostPaths) -> rsi::Result<std::fs::File> {
-    let mut options = std::fs::OpenOptions::new();
-    options.create(true).append(true);
-    options
-        .mode(0o600)
-        .custom_flags(libc::O_CLOEXEC | libc::O_NOFOLLOW | libc::O_NONBLOCK);
-    let log = options
-        .open(host_paths.owner_log())
-        .map_err(|error| RsiError::Boot(format!("open Service Host log: {error}")))?;
-    if !log
-        .metadata()
-        .map_err(|error| RsiError::Boot(error.to_string()))?
-        .is_file()
+    #[cfg(windows)]
+    use std::io::Seek as _;
+    #[cfg(windows)]
     {
-        return Err(RsiError::Boot(
-            "Service Host log is not a regular file".into(),
-        ));
+        let directory =
+            rsi_files_native_fs::open_absolute_directory_no_follow(host_paths.owner_directory())
+                .map_err(|error| RsiError::Boot(error.to_string()))?;
+        let name = std::path::Path::new("owner.log");
+        let file =
+            match rsi_files_native_fs::create_relative_private_file_no_follow(&directory, name) {
+                Ok(file) => file,
+                Err(error) if error.kind() == std::io::ErrorKind::AlreadyExists => {
+                    rsi_files_native_fs::open_relative_file_read_write_no_follow(&directory, name)
+                        .map_err(|error| RsiError::Boot(error.to_string()))?
+                }
+                Err(error) => return Err(RsiError::Boot(error.to_string())),
+            };
+        rsi_files_native_fs::verify_private_file(&file)
+            .map_err(|error| RsiError::Boot(error.to_string()))?;
+        let mut file = file;
+        file.seek(std::io::SeekFrom::End(0))
+            .map_err(|error| RsiError::Boot(error.to_string()))?;
+        Ok(file)
     }
-    log.set_permissions(std::fs::Permissions::from_mode(0o600))
-        .map_err(|error| RsiError::Boot(format!("chmod Service Host log: {error}")))?;
-    Ok(log)
+    #[cfg(unix)]
+    {
+        let mut options = std::fs::OpenOptions::new();
+        options.create(true).append(true);
+        options
+            .mode(0o600)
+            .custom_flags(libc::O_CLOEXEC | libc::O_NOFOLLOW | libc::O_NONBLOCK);
+        let log = options
+            .open(host_paths.owner_log())
+            .map_err(|error| RsiError::Boot(format!("open Service Host log: {error}")))?;
+        if !log
+            .metadata()
+            .map_err(|error| RsiError::Boot(error.to_string()))?
+            .is_file()
+        {
+            return Err(RsiError::Boot(
+                "Service Host log is not a regular file".into(),
+            ));
+        }
+        log.set_permissions(std::fs::Permissions::from_mode(0o600))
+            .map_err(|error| RsiError::Boot(format!("chmod Service Host log: {error}")))?;
+        Ok(log)
+    }
 }
 
-#[cfg(target_os = "linux")]
-pub(super) async fn start_host_daemon(
-    profile_id: &HostProfileId,
-    reset_state: bool,
-) -> rsi::Result<()> {
-    let (paths, expected_key) = expected_host_launch(profile_id).await?;
+#[cfg(any(target_os = "linux", windows))]
+pub(super) async fn start_host_daemon(profile_id: &HostProfileId) -> rsi::Result<()> {
+    launch::maintain()?;
+    start_host_daemon_inner(profile_id, false).await
+}
+
+async fn start_host_daemon_inner(profile_id: &HostProfileId, attach: bool) -> rsi::Result<()> {
+    let paths = standard_paths()?;
     let host_paths = ServiceHostPaths::from_host_paths(&paths)
         .map_err(|error| RsiError::Boot(error.to_string()))?;
-    if let Some(metadata) = host_paths
+    let coordination_deadline = tokio::time::Instant::now() + DAEMON_READINESS_TIMEOUT;
+    let startup = loop {
+        match rsi_service_host::HostStartupLease::try_acquire(&host_paths) {
+            Ok(lease) => break lease,
+            Err(rsi_service_host::ServiceHostError::OwnerActive)
+                if attach && tokio::time::Instant::now() < coordination_deadline =>
+            {
+                tokio::time::sleep(Duration::from_millis(50)).await;
+            }
+            Err(error) => return Err(RsiError::Boot(error.to_string())),
+        }
+    };
+    // A caller may have waited while an upgrade was interrupted.
+    rsi::reject_pending_import(&paths)?;
+    start_host_coordinated(
+        profile_id,
+        attach,
+        &paths,
+        &startup,
+        None,
+        coordination_deadline,
+    )
+    .await
+}
+
+/// The caller retains the startup coordinator through native readiness.
+/// An explicitly supplied executable is an already verified upgrade artifact;
+/// its readiness uses frozen Lifecycle v1 so product schema changes are allowed.
+#[allow(clippy::too_many_lines)] // The startup coordinator spans identity checks, native spawn, readiness and failure reaping.
+pub(super) async fn start_host_coordinated(
+    profile_id: &HostProfileId,
+    attach: bool,
+    paths: &rsi_host::HostPaths,
+    _startup: &rsi_service_host::HostStartupLease,
+    source: Option<&std::path::Path>,
+    deadline: tokio::time::Instant,
+) -> rsi::Result<()> {
+    let host_paths = ServiceHostPaths::from_host_paths(paths)
+        .map_err(|error| RsiError::Boot(error.to_string()))?;
+    if source.is_some() {
+        if let Some(owner) = host_paths
+            .read_lifecycle_identity()
+            .map_err(|error| RsiError::Boot(error.to_string()))?
+            && owner
+                .is_current()
+                .map_err(|error| RsiError::Boot(error.to_string()))?
+        {
+            return Err(RsiError::Boot(
+                "a Host became active during core replacement".into(),
+            ));
+        }
+    } else if let Some(metadata) = host_paths
         .read_metadata()
         .map_err(|error| RsiError::Boot(error.to_string()))?
         && owner_process_is_current(&metadata).map_err(|error| RsiError::Boot(error.to_string()))?
     {
+        if attach && metadata.mode == HostOwnerMode::Daemon {
+            let environment_matches = tokio::time::timeout_at(deadline, async {
+                probe_service_host(&metadata).await?;
+                rsi::service_environment_matches(paths).await
+            })
+            .await
+            .map_err(|_| daemon_readiness_timeout_error())??;
+            if !environment_matches {
+                eprintln!(
+                    "warning: this Service Host retains different tool environment or credential fallbacks; restart the Host explicitly to adopt this caller's environment"
+                );
+            }
+            return Ok(());
+        }
         return Err(RsiError::Boot(format!(
             "Service Host owner is already active in {:?} mode",
             metadata.mode
         )));
     }
-    let owner_lease = rsi_service_host::HostOwnerLease::try_acquire(host_paths.clone())
-        .map_err(|error| RsiError::Boot(error.to_string()))?;
+    // Only the child opens providers. Validate source references after checking
+    // for an existing owner; later clients use its published Service selection.
+    selected_host_profile(paths, profile_id)?;
+    // The coordinator remains live through readiness. The child owns both leases;
+    // no provider is activated in this short acquisition preflight.
+    drop(
+        rsi_service_host::HostOwnerLease::try_acquire(host_paths.clone())
+            .map_err(|error| RsiError::Boot(error.to_string()))?,
+    );
     let log = open_daemon_log(&host_paths)?;
     let stderr = log
         .try_clone()
         .map_err(|error| RsiError::Boot(format!("clone Service Host log: {error}")))?;
-    let executable = std::env::current_exe()
-        .and_then(std::fs::canonicalize)
-        .map_err(|error| RsiError::Boot(format!("resolve current executable: {error}")))?;
-    let mut command = std::process::Command::new(executable);
+    let executable = super::host_runtime::publish_before(paths, source, deadline.into_std())?;
+    let mut command = std::process::Command::new(&executable);
+    launch::current()?.append_child_options(&mut command);
     command.args([
         "host",
         "serve",
@@ -448,29 +544,17 @@ pub(super) async fn start_host_daemon(
         profile_id.as_str(),
         "--detached-child",
     ]);
-    if reset_state {
-        command.arg("--reset-state");
-    }
-    let mut child = command
-        .stdin(Stdio::from(
-            owner_lease
-                .into_startup_file()
-                .map_err(|error| RsiError::Boot(error.to_string()))?,
-        ))
-        .stdout(if reset_state {
-            Stdio::piped()
-        } else {
-            Stdio::from(log)
-        })
+    #[cfg(windows)]
+    super::host_runtime::detach(&mut command)?;
+    let child = command
+        .stdin(Stdio::null())
+        .stdout(Stdio::from(log))
         .stderr(Stdio::from(stderr))
         .spawn()
-        .map_err(|error| RsiError::Boot(format!("spawn Service Host daemon: {error}")))?;
-    let receipt_pipe = child.stdout.take();
+        .map_err(|error| RsiError::Boot(format!(
+            "spawn detached Service Host: {error}; Windows launchers must permit Job breakaway; run the built rsi executable from an unrestricted terminal"
+        )))?;
     let mut child = DaemonChildGuard::new(child);
-    let deadline = tokio::time::Instant::now() + DAEMON_READINESS_TIMEOUT;
-    if let Some(pipe) = receipt_pipe {
-        report_daemon_reset(pipe, deadline, &host_paths).await?;
-    }
     loop {
         if let Some(status) = child
             .child_mut()
@@ -482,12 +566,41 @@ pub(super) async fn start_host_daemon(
                 host_paths.owner_log().display()
             )));
         }
-        if let Some(metadata) = host_paths
+        if source.is_some() {
+            if let Some(owner) = host_paths
+                .read_lifecycle_identity()
+                .map_err(|error| RsiError::Boot(error.to_string()))?
+                && owner.pid == child.id()
+                && owner.mode == HostOwnerMode::Daemon
+                && owner.socket_path.as_deref() == Some(host_paths.socket())
+                && owner
+                    .is_current()
+                    .map_err(|error| RsiError::Boot(error.to_string()))?
+            {
+                let status = tokio::time::timeout_at(
+                    deadline,
+                    rsi_service_host::request_lifecycle_identity(
+                        &owner,
+                        rsi_service_host::LifecycleOperation::Status,
+                    ),
+                )
+                .await
+                .map_err(|_| daemon_readiness_timeout_error())?
+                .map_err(|error| RsiError::Boot(error.to_string()))?;
+                if status.stopping {
+                    return Err(RsiError::Boot("new core stopped during readiness".into()));
+                }
+                child.disarm();
+                if let Err(error) = super::host_runtime::collect(paths, &executable) {
+                    eprintln!("warning: {error}");
+                }
+                return Ok(());
+            }
+        } else if let Some(metadata) = host_paths
             .read_metadata()
             .map_err(|error| RsiError::Boot(error.to_string()))?
             && metadata.pid == child.id()
             && metadata.mode == HostOwnerMode::Daemon
-            && metadata.launch_key == expected_key
             && metadata.socket_path.as_deref() == Some(host_paths.socket())
             && owner_process_is_current(&metadata)
                 .map_err(|error| RsiError::Boot(error.to_string()))?
@@ -496,8 +609,13 @@ pub(super) async fn start_host_daemon(
                 .await
                 .map_err(|_| daemon_readiness_timeout_error())?
                 .map_err(|error| RsiError::Boot(format!("daemon readiness probe: {error}")))?;
-            println!("started\t{}", child.id());
+            if !attach {
+                println!("started\t{}", child.id());
+            }
             child.disarm();
+            if let Err(error) = super::host_runtime::collect(paths, &executable) {
+                eprintln!("warning: {error}");
+            }
             return Ok(());
         }
         if tokio::time::Instant::now() >= deadline {
@@ -511,26 +629,10 @@ pub(super) async fn start_host_daemon(
     }
 }
 
-#[cfg(target_os = "linux")]
-async fn report_daemon_reset(
-    pipe: std::process::ChildStdout,
-    deadline: tokio::time::Instant,
-    paths: &ServiceHostPaths,
-) -> rsi::Result<()> {
-    let receipt = tokio::time::timeout_at(deadline, super::reset_state::read(pipe))
-        .await
-        .map_err(|_| daemon_readiness_timeout_error())?
-        .map_err(|error| {
-            RsiError::Boot(format!("{error}; inspect {}", paths.owner_log().display()))
-        })?;
-    super::reset_state::report(receipt.as_ref());
-    Ok(())
-}
-
-#[cfg(target_os = "linux")]
+#[cfg(any(target_os = "linux", windows))]
 pub(super) struct DaemonChildGuard(Option<std::process::Child>);
 
-#[cfg(target_os = "linux")]
+#[cfg(any(target_os = "linux", windows))]
 impl DaemonChildGuard {
     fn new(child: std::process::Child) -> Self {
         Self(Some(child))
@@ -549,7 +651,7 @@ impl DaemonChildGuard {
     }
 }
 
-#[cfg(target_os = "linux")]
+#[cfg(any(target_os = "linux", windows))]
 impl Drop for DaemonChildGuard {
     fn drop(&mut self) {
         if let Some(child) = &mut self.0 {
@@ -559,13 +661,13 @@ impl Drop for DaemonChildGuard {
     }
 }
 
-#[cfg(target_os = "linux")]
+#[cfg(any(target_os = "linux", windows))]
 pub(super) async fn stop_host_daemon(force: bool) -> rsi::Result<()> {
     let paths = standard_paths()?;
     let host_paths = ServiceHostPaths::from_host_paths(&paths)
         .map_err(|error| RsiError::Boot(error.to_string()))?;
     let metadata = host_paths
-        .read_metadata()
+        .read_lifecycle_identity()
         .map_err(|error| RsiError::Boot(error.to_string()))?
         .ok_or_else(|| RsiError::Boot("no Service Host owner metadata exists".into()))?;
     if metadata.mode != HostOwnerMode::Daemon {
@@ -573,19 +675,23 @@ pub(super) async fn stop_host_daemon(force: bool) -> rsi::Result<()> {
             "the active Service Host is embedded and cannot be stopped as a daemon".into(),
         ));
     }
-    signal_owner(
-        &metadata,
-        if force {
-            HostSignal::ForceStop
-        } else {
-            HostSignal::Stop
-        },
-    )
-    .map_err(|error| RsiError::Boot(error.to_string()))?;
+    if force {
+        metadata
+            .force_stop()
+            .map_err(|error| RsiError::Boot(error.to_string()))?;
+    } else {
+        rsi_service_host::request_lifecycle_identity(
+            &metadata,
+            rsi_service_host::LifecycleOperation::Stop,
+        )
+        .await
+        .map_err(|error| RsiError::Boot(error.to_string()))?;
+    }
     let wait = host_stop_timeout(force);
     let deadline = tokio::time::Instant::now() + wait;
     loop {
-        if !owner_process_is_current(&metadata)
+        if !metadata
+            .is_current()
             .map_err(|error| RsiError::Boot(error.to_string()))?
         {
             println!("stopped\t{}", metadata.pid);
@@ -601,7 +707,7 @@ pub(super) async fn stop_host_daemon(force: bool) -> rsi::Result<()> {
     }
 }
 
-#[cfg(target_os = "linux")]
+#[cfg(any(target_os = "linux", windows))]
 pub(super) fn host_stop_timeout(force: bool) -> Duration {
     if force {
         FORCE_HOST_STOP_TIMEOUT
@@ -610,21 +716,26 @@ pub(super) fn host_stop_timeout(force: bool) -> Duration {
     }
 }
 
-#[cfg(target_os = "linux")]
+#[cfg(any(target_os = "linux", windows))]
 pub(super) async fn restart_host_daemon(
     profile_id: &HostProfileId,
     force: bool,
-    reset_state: bool,
 ) -> rsi::Result<()> {
     let paths = standard_paths()?;
     let host_paths = ServiceHostPaths::from_host_paths(&paths)
         .map_err(|error| RsiError::Boot(error.to_string()))?;
-    if let Some(metadata) = host_paths
-        .read_metadata()
+    if let Some(identity) = host_paths
+        .read_lifecycle_identity()
         .map_err(|error| RsiError::Boot(error.to_string()))?
-        && owner_process_is_current(&metadata).map_err(|error| RsiError::Boot(error.to_string()))?
+        && identity
+            .is_current()
+            .map_err(|error| RsiError::Boot(error.to_string()))?
     {
-        match rsi::workflow_restart_impact(&metadata).await {
+        let impact = match host_paths.read_metadata().ok().flatten() {
+            Some(metadata) => rsi::workflow_restart_impact(&metadata).await,
+            None => Err(RsiError::Boot("product metadata differs".into())),
+        };
+        match impact {
             Ok(impact) => eprintln!(
                 "Host restart interrupts {}{} unfinished workflows; scripts are not replayed.",
                 if impact.truncated { "at least " } else { "" },
@@ -636,33 +747,41 @@ pub(super) async fn restart_host_daemon(
         }
         stop_host_daemon(force).await?;
     }
-    start_host_daemon(profile_id, reset_state).await
+    start_host_daemon(profile_id).await
 }
 
-#[cfg(target_os = "linux")]
+#[cfg(any(target_os = "linux", windows))]
 pub(super) async fn status_host_daemon() -> rsi::Result<()> {
     let paths = standard_paths()?;
     let host_paths = ServiceHostPaths::from_host_paths(&paths)
         .map_err(|error| RsiError::Boot(error.to_string()))?;
     let Some(metadata) = host_paths
-        .read_metadata()
+        .read_lifecycle_identity()
         .map_err(|error| RsiError::Boot(error.to_string()))?
     else {
         println!("stopped");
         return Ok(());
     };
-    let current =
-        owner_process_is_current(&metadata).map_err(|error| RsiError::Boot(error.to_string()))?;
-    let compatible = metadata
-        .is_compatible_with_current()
+    let current = metadata
+        .is_current()
         .map_err(|error| RsiError::Boot(error.to_string()))?;
-    let responsive = if current && compatible && metadata.mode == HostOwnerMode::Daemon {
-        probe_service_host(&metadata).await.is_ok()
+    let compatible = host_paths
+        .read_metadata()
+        .ok()
+        .flatten()
+        .is_some_and(|product| product.is_compatible_with_current().unwrap_or(false));
+    let responsive = if current && metadata.mode == HostOwnerMode::Daemon {
+        rsi_service_host::request_lifecycle_identity(
+            &metadata,
+            rsi_service_host::LifecycleOperation::Status,
+        )
+        .await
+        .is_ok()
     } else {
         false
     };
     println!(
-        "{}\tmode={:?}\tpid={}\tepoch={}\tkey={}",
+        "{}\tmode={:?}\tpid={}\tepoch={}\tproduct-compatible={}",
         if current && !compatible {
             "incompatible"
         } else if current && (metadata.mode == HostOwnerMode::Embedded || responsive) {
@@ -675,22 +794,17 @@ pub(super) async fn status_host_daemon() -> rsi::Result<()> {
         metadata.mode,
         metadata.pid,
         metadata.host_epoch.as_str(),
-        metadata.launch_key
+        compatible
     );
     Ok(())
 }
 
-#[cfg(target_os = "linux")]
-pub(super) fn reload_host_daemon() -> rsi::Result<()> {
-    let paths = standard_paths()?;
-    let host_paths = ServiceHostPaths::from_host_paths(&paths)
-        .map_err(|error| RsiError::Boot(error.to_string()))?;
-    let metadata = host_paths
-        .read_metadata()
-        .map_err(|error| RsiError::Boot(error.to_string()))?
-        .ok_or_else(|| RsiError::Boot("no Service Host owner exists".into()))?;
-    signal_owner(&metadata, HostSignal::Reload)
-        .map_err(|error| RsiError::Boot(error.to_string()))?;
-    println!("reload-requested\t{}", metadata.pid);
+#[cfg(any(target_os = "linux", windows))]
+pub(super) async fn reload_host_daemon() -> rsi::Result<()> {
+    let reply = rsi::reload_service_host(&standard_paths()?).await?;
+    println!(
+        "{}",
+        serde_json::to_string(&reply).map_err(|error| RsiError::Boot(error.to_string()))?
+    );
     Ok(())
 }

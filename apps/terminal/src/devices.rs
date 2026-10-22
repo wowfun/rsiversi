@@ -5,7 +5,7 @@ use serde::Serialize;
 use std::{ffi::OsString, sync::Arc};
 
 /// Terminal help for the Session-independent device administration application.
-pub const HELP: &str = "Devices application:\n  rsi --profile devices register LABEL\n  rsi --profile devices list\n  rsi --profile devices revoke DEVICE_ID\n  rsi --profile devices configuration list\n  rsi --profile devices configuration grant DEVICE_ID REVISION\n  rsi --profile devices configuration revoke DEVICE_ID REVISION\nRegistration prints its one-time token and grants no configuration authority.\nConfiguration changes require the revision from configuration list and execute once.\nList outputs contain only non-secret records.\n";
+pub const HELP: &str = "Devices application:\n  rsi run devices register LABEL\n  rsi run devices list\n  rsi run devices revoke DEVICE_ID\n  rsi run devices configuration list\n  rsi run devices configuration grant DEVICE_ID REVISION\n  rsi run devices configuration revoke DEVICE_ID REVISION\nRegistration prints its one-time token and grants no configuration authority.\nConfiguration changes require the revision from configuration list and execute once.\nList outputs contain only non-secret records.\n";
 
 #[derive(Debug)]
 pub(crate) enum Command {

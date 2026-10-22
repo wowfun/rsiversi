@@ -1,4 +1,5 @@
 #![cfg(unix)]
+mod support;
 use serde_json::Value;
 use std::{
     fs,
@@ -7,7 +8,7 @@ use std::{
 };
 
 fn run(root: &Path, arguments: &[&str]) -> Output {
-    Command::new(env!("CARGO_BIN_EXE_rsi"))
+    Command::new(support::product_binary())
         .env_clear()
         .env("HOME", root.parent().unwrap().join("home"))
         .current_dir(root.parent().unwrap())
@@ -25,6 +26,38 @@ fn success(root: &Path, arguments: &[&str]) -> Value {
         String::from_utf8_lossy(&output.stderr)
     );
     serde_json::from_slice(&output.stdout).unwrap()
+}
+
+#[test]
+fn source_build_scrubs_credential_fallbacks_from_the_callers_environment() {
+    let temp = tempfile::tempdir().unwrap();
+    let root = temp.path().canonicalize().unwrap();
+    fs::write(
+        root.join("build.sh"),
+        "test -z \"${DEEPSEEK_API_KEY+x}\" || exit 91\nprintf artifact > artifact.bin\n",
+    )
+    .unwrap();
+    fs::write(root.join("addon.toml"), format!(
+        "format = 2\nscope = 'agent'\nid = 'fixture.scrub'\nplugin = 'fixture.scrub'\ntarget = '{}'\nartifact = 'artifact.bin'\n[build]\ncommand = ['/bin/sh', 'build.sh']\nwatch = ['build.sh']\n",
+        rsi::native_addon_target()
+    )).unwrap();
+    let output = Command::new(support::product_binary())
+        .env_clear()
+        .env("HOME", root.join("home"))
+        .env("DEEPSEEK_API_KEY", "fixture-secret")
+        .current_dir(&root)
+        .args(["addon", "build", "addon.toml", "--output", "json", "--root"])
+        .arg(root.join("store"))
+        .output()
+        .unwrap();
+    assert!(
+        output.status.success(),
+        "{}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    let report: Value = serde_json::from_slice(&output.stdout).unwrap();
+    assert_eq!(report["status"], "succeeded");
+    assert_eq!(fs::read(root.join("artifact.bin")).unwrap(), b"artifact");
 }
 #[test]
 fn source_commands_install_without_execution_or_activation_and_keep_selection_explicit() {
@@ -129,7 +162,7 @@ fn invalid_source_grammar_is_rejected_before_opening_a_store() {
         assert!(!run(&root, &arguments).status.success());
         assert!(!root.exists());
     }
-    let help = Command::new(env!("CARGO_BIN_EXE_rsi"))
+    let help = Command::new(support::product_binary())
         .env_clear()
         .args(["addon", "--help"])
         .output()
@@ -186,7 +219,7 @@ fn explicit_build_command_reports_installation_and_opt_in_enable_separately() {
         "cp input artifact.bin\nprintf '\\033[2Jcompiler\\routput'\n",
     )
     .unwrap();
-    let text = Command::new(env!("CARGO_BIN_EXE_rsi"))
+    let text = Command::new(support::product_binary())
         .env_clear()
         .env("HOME", root.join("home"))
         .current_dir(&root)

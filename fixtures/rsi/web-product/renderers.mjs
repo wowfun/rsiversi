@@ -34,12 +34,7 @@ let phase = 'service startup';
 if (process.env.RSI_WEB_BROWSER && !["chromium", "firefox"].includes(process.env.RSI_WEB_BROWSER)) throw new Error("Unknown RSI_WEB_BROWSER");
 const browser = await (process.env.RSI_WEB_BROWSER === "firefox" ? firefox : chromium).launch({ headless: true });
 try {
-  service = await startService({ binary, assets, report, configure: async ({ config }) => {
-    const profile = join(config, "application-profiles/browser-fixture/application.profile.toml");
-    const files = ["index.html", "preview-local.html", "preview-online.html", "app.js", "worker.js", "admission.js", "download-worker.js", "download-frame.js", "styles.css", "rsi_web.js", "rsi_web_bg.wasm", "mounts.js", "drafts.js", "standard.js", "ui-renderers.json", "lazy.js"];
-    const content = await readFile(profile, "utf8");
-    await writeFile(profile, content.replace(`directory = ${JSON.stringify(assets)}`, `directory = ${JSON.stringify(assets)}, watch = true, files = ${JSON.stringify(files)}`));
-  } });
+  service = await startService({ binary, assets, report, watchAssets: true });
   const context = await browser.newContext({ ignoreHTTPSErrors: true, viewport: { width: 1440, height: 980 } });
   await context.addInitScript(() => {
     window.workerStarts = 0;
@@ -75,10 +70,8 @@ try {
   const errors = []; page.on("pageerror", error => errors.push(error.message));
   const modules = [];
   page.on("response", response => { if (response.url().includes("/rsi-renderers/") && response.url().endsWith("standard.js")) modules.push(response.url()); });
-  await page.goto(service.origin);
+  await page.goto(service.launchUrl);
   phase = 'initial connection';
-  await page.locator("#receipt").fill(JSON.stringify(service.register("renderer reload")));
-  await page.getByRole("button", { name: "Connect", exact: true }).click();
   await page.locator("#workbench").waitFor({ state: "visible" });
   await page.locator(".workspace-add summary").click();
       await page.locator("#workspace-path").fill(service.workspace);

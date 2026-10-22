@@ -59,7 +59,7 @@ The Plugins view displays the shared workbench last-update guidance separately f
 Session without submitting a message. Quoted paths are supported; the default
 file is `rsi-session-<safe-id>.md` (or `.json`) in the client working directory.
 Line mode accepts `:export` with the same arguments. Scripted export uses
-`rsi --profile cli --export SESSION|latest [-f FORMAT] [-i INCLUDE] [-o PATH]`:
+`rsi run cli --export SESSION|latest [-f FORMAT] [-i INCLUDE] [-o PATH]`:
 Each short or long export option accepts a separate value or `=VALUE`.
 without a path the artifact goes to stdout and status/errors go to stderr.
 `latest` selects the newest durable root in the selected workspace. Export is

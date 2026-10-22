@@ -2,16 +2,21 @@ import { bootstrapFiles, rendererFiles } from './bundle-contract.mjs';
 import { previewDocument } from './preview-document.mjs';
 import { buildRenderers } from "./renderers.mjs";
 import { spawnSync } from "node:child_process";
-import { mkdir, readdir, copyFile, writeFile } from "node:fs/promises";
+import { mkdir, readdir, copyFile, writeFile, readFile } from "node:fs/promises";
 import { dirname, resolve, isAbsolute, join } from "node:path";
 import { fileURLToPath } from "node:url";
 import { build } from "vite";
+import { randomBytes } from "node:crypto";
 
 const source = dirname(fileURLToPath(import.meta.url));
 const root = resolve(source, "../..");
 const output = process.argv[2];
-const family = process.env.RSI_BUILD_FAMILY_SHA256;
-if (!/^[a-f0-9]{64}$/.test(family ?? '')) throw new Error('Internal asset stage requires a paired producer; run pnpm -C apps/web build');
+// This identity closes document/Worker/WASM within this bundle. It is never a
+// compatibility requirement on a separately built native executable.
+const family = process.env.RSI_WEB_BUNDLE_ID ?? randomBytes(32).toString('hex');
+if (!/^[a-f0-9]{64}$/.test(family)) throw new Error('Invalid Web bundle identity');
+process.env.RSI_WEB_BUNDLE_ID = family;
+process.env.RSI_BUILD_FAMILY_SHA256 = family;
 const target = resolve(process.env.CARGO_TARGET_DIR ?? join(root, 'target'));
 if (!output || !isAbsolute(output)) throw new Error("Provide an absolute empty output directory");
 const options = process.argv.slice(3);
@@ -19,6 +24,13 @@ if (options.length > 1 || options.some(option => option !== "--dev")) {
   throw new Error("Usage: build.mjs /absolute/empty/directory [--dev]");
 }
 const profile = options.length ? "debug" : "release";
+const bindgen = process.env.RSI_WASM_BINDGEN ?? "wasm-bindgen";
+const lockedBindgen = (await readFile(join(root, 'Cargo.lock'), 'utf8'))
+  .match(/name = "wasm-bindgen"\r?\nversion = "([^"]+)"/)?.[1];
+const probe = spawnSync(bindgen, ['--version'], {cwd:root, encoding:'utf8'});
+if (!lockedBindgen || probe.status !== 0 || probe.stdout.trim() !== `wasm-bindgen ${lockedBindgen}`) {
+  throw new Error(`Install wasm-bindgen-cli ${lockedBindgen ?? '(version from Cargo.lock)'} or set RSI_WASM_BINDGEN to that executable before building Web. ${probe.error?.message ?? probe.stderr ?? ''}`);
+}
 await mkdir(output, { recursive: true });
 if ((await readdir(output)).length) throw new Error("Output directory must be empty");
 function run(command, args) {
@@ -28,7 +40,7 @@ function run(command, args) {
 run("cargo", ["build", "--locked", "-p", "rsi-web", "--target", "wasm32-unknown-unknown",
   "--target-dir", target,
   ...(profile === "release" ? ["--release"] : [])]);
-run(process.env.RSI_WASM_BINDGEN ?? "wasm-bindgen", [
+run(bindgen, [
   "--target", "web", "--no-typescript", "--remove-name-section", "--out-dir", output,
   ...(profile === "debug" ? ["--no-demangle"] : []),
   join(target, `wasm32-unknown-unknown/${profile}/rsi_web.wasm`),

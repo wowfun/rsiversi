@@ -1,8 +1,18 @@
 """Actual native Files sources and opaque HTML frame, with WebDriver input."""
 import json
+import hashlib
+from pathlib import Path
 from preview_policy import verify as verify_policy
 
 def verify(script, button, fill, until, screenshot, frame, workspace, report):
+    encoded = (Path(__file__).resolve().parents[3] / 'crates/rsi/desktop-bridge/wire-schema.json').read_bytes()
+    descriptor = {**json.loads(encoded)['contract'], 'schema':hashlib.sha256(encoded).hexdigest()}
+    payload = json.dumps({'protocol':descriptor,'operation':{'kind':'hello'}})
+    invocation = "window.__TAURI_INTERNALS__.invoke('rsi_bridge',{payload:" + json.dumps(payload) + "})"
+    script("window.mainBridgeProbe=null;"+invocation+".then(()=>mainBridgeProbe='accepted',()=>mainBridgeProbe='rejected');return true")
+    until(lambda: script('return mainBridgeProbe'))
+    assert script('return mainBridgeProbe') == 'accepted'
+    policy = verify_policy(script, frame, until, report)
     directory = workspace / 'previews'; directory.mkdir()
     svg = '<svg xmlns="http://www.w3.org/2000/svg" width="640" height="320"><rect width="640" height="320" fill="#0b716c"/><text x="30" y="160" font-size="36" fill="white">Linux workspace preview</text></svg>'
     (directory / 'diagram.svg').write_text(svg)
@@ -61,12 +71,19 @@ def verify(script, button, fill, until, screenshot, frame, workspace, report):
         until(lambda: script('return document.querySelector("#loaded")?.textContent==="Local script loaded"'))
         assert script('return document.querySelector("#isolated").textContent') == 'Parent isolated'
         assert script('return document.querySelector("#bridge").textContent') == 'undefined'
+        probe = script("try { parent.__TAURI_INTERNALS__.invoke('rsi_bridge',{payload:"+json.dumps(payload)+"}); return 'accepted'; } catch(error) { return error.name; }")
+        assert probe == 'SecurityError', probe
+        assert script('return typeof window.__TAURI_INTERNALS__') == 'undefined'
+        (report / 'preview-native-ipc.json').write_text(json.dumps({'main_document':'accepted','preview_parent_invoke':probe,'preview_internals':'undefined'},indent=2))
         assert script('return getComputedStyle(document.body).backgroundColor') == 'rgb(235, 247, 241)'
         until(lambda: script('return document.querySelector("#network").textContent==="Network blocked" && document.querySelector("#network").dataset.blocked==="connect-src"'))
         button('Count: 0');assert script('return document.querySelector("#count").textContent') == '1'
-        script("""window.nestedViolations=[];document.addEventListener('securitypolicyviolation',e=>nestedViolations.push({directive:e.effectiveDirective,blocked:e.blockedURI}));for(const tag of ['iframe','object','embed']){const element=document.createElement(tag),url='rsi://foreign/nested-target';if(tag==='object'){element.data=url;element.type='text/html'}else{element.src=url;if(tag==='embed')element.type='text/html'}document.body.append(element)}return true""")
-        until(lambda: script("return nestedViolations.some(v=>v.directive==='frame-src') && nestedViolations.filter(v=>v.directive==='object-src').length===2"))
-        (report / 'nested-preview-policy.json').write_text(json.dumps(script('return nestedViolations'), indent=2))
+        # Use a path admitted by native navigation so CSP owns the rejection.
+        script("""window.nestedViolations=[];document.addEventListener('securitypolicyviolation',e=>nestedViolations.push({directive:e.effectiveDirective,blocked:e.blockedURI}));for(const tag of ['iframe','object','embed']){const element=document.createElement(tag),url=location.origin+'/preview-local.html';if(tag==='object'){element.data=url;element.type='text/html'}else{element.src=url;if(tag==='embed')element.type='text/html'}document.body.append(element)}return true""")
+        try:
+            until(lambda: script("return nestedViolations.some(v=>v.directive==='frame-src') && nestedViolations.filter(v=>v.directive==='object-src').length===2"))
+        finally:
+            (report / 'nested-preview-policy.json').write_text(json.dumps(script('return nestedViolations'), indent=2))
     finally: frame(None)
     assert not script('return !!document.body.dataset.previewEscaped')
     screenshot('preview-html.png');button('Source');assert not script('return !!document.querySelector("iframe.file-html")')
@@ -75,6 +92,5 @@ def verify(script, button, fill, until, screenshot, frame, workspace, report):
     try: until(lambda: script('return document.querySelector("#count")?.textContent==="0"'))
     finally: frame(None)
     button('Close details')
-    policy = verify_policy(script, frame, until, report)
     (report / 'preview-policy.json').write_text(json.dumps(policy, indent=2))
     (report / 'previews.json').write_text(json.dumps({'status':'passed','native_bridge':True,'formats':['code','markdown','svg','html'],'local_css_import':True,'local_classic_script':True,'opaque_parent':True,'no_native_bridge':True,'explicit_refresh':True,'frame_reset':True,'connect_src_violation':True},indent=2))

@@ -1,6 +1,7 @@
 import contextlib
 import io
 import json
+import os
 from pathlib import Path
 import tempfile
 import unittest
@@ -115,6 +116,22 @@ port = int(next(arg.split('=')[1] for arg in sys.argv if arg.startswith('--port=
 HTTPServer(('127.0.0.1', port), Handler).serve_forever()
 ''')
             driver.chmod(0o700)
+            companion = root / 'rsi'
+            companion.write_text('''#!/usr/bin/env python3
+import json, os, signal, sys, time
+from pathlib import Path
+state=Path(sys.argv[sys.argv.index('--state-home')+1])
+owner=state/'owner.json'
+if sys.argv[-1]=='stop':
+    os.kill(json.loads(owner.read_text())['pid'],signal.SIGTERM)
+    sys.exit(0)
+state.mkdir(parents=True,exist_ok=True)
+owner.write_text(json.dumps({'pid':os.getpid(),'endpoint_id':'fixture','host_epoch':'fixture'}))
+while True: time.sleep(1)
+''')
+            companion.chmod(0o700)
+            (root / 'unused-binary').write_bytes(b'fixture Desktop')
+            (root / 'rsi-build.json').write_text('{}')
             env_file = root / 'env'
             env_file.write_text('DEEPSEEK_API_KEY=isolated-redaction-test-secret\n')
             report = root / 'report'
@@ -123,8 +140,9 @@ HTTPServer(('127.0.0.1', port), Handler).serve_forever()
                 '--binary', str(root / 'unused-binary'), '--assets', str(root),
                 '--driver', str(driver), '--report', str(report),
                 '--live-env-file', str(env_file), '--live-model', 'unused-model',
-            ], capture_output=True, text=True, timeout=10)
+            ], capture_output=True, text=True, timeout=10, env={**os.environ, "DEEPSEEK_CONTEXT_WINDOW_TOKENS":"32000", "DEEPSEEK_DEFAULT_OUTPUT_RESERVE_TOKENS":"4096", "DEEPSEEK_MAX_OUTPUT_RESERVE_TOKENS":"8192"})
             self.assertNotEqual(result.returncode, 0)
+            self.assertTrue((report / 'failure.json').is_file(), result.stderr)
             failure = json.loads((report / 'failure.json').read_text())
             self.assertIn('fixture primary failure', failure['error'])
             # The child wrote directly through the still-open parent's log descriptor.

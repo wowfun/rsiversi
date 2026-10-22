@@ -1,144 +1,154 @@
 use std::{ffi::OsString, path::PathBuf};
 
-pub(super) const HELP: &str = "RSIversi Desktop\nUsage: rsi-desktop [--assets ABSOLUTE_DIRECTORY] [--host-profile standard]\nAssets default to the assets directory beside this executable.\nWindows requires the Microsoft Edge WebView2 Runtime.";
-
+pub(super) const HELP: &str = "RSIversi Desktop\nLaunch with rsi desktop. Internal invocation:\nrsi-desktop --config-home DIR --state-home DIR --cache-home DIR [--assets DIR]\nAll directories must be absolute; the selected Host must already be running.";
+pub(super) struct Options {
+    pub frontend: bool,
+    pub paths: rsi_host::HostPaths,
+    pub assets: rsi_web_control::Assets,
+    package: Option<(String, String, String)>,
+}
 pub(super) fn parse(
     arguments: impl IntoIterator<Item = OsString>,
-    executable: impl FnOnce() -> Result<PathBuf, String>,
-) -> Result<Option<(PathBuf, rsi::HostProfileId)>, String> {
-    let arguments: Vec<_> = arguments.into_iter().collect();
-    if arguments
-        .iter()
-        .any(|value| value == "--help" || value == "-h")
-    {
+) -> Result<Option<Options>, String> {
+    let args: Vec<_> = arguments.into_iter().collect();
+    if args.len() == 1 && matches!(args[0].to_str(), Some("--help" | "-h")) {
         return Ok(None);
     }
-    let mut arguments = arguments.into_iter();
-    let mut assets = None;
-    let mut host_profile = None;
-    while let Some(argument) = arguments.next() {
-        match argument.to_str() {
-            Some("--assets") if assets.is_none() => {
-                let path = PathBuf::from(
-                    arguments
-                        .next()
-                        .ok_or("--assets requires an absolute directory")?,
-                );
-                if !path.is_absolute() {
-                    return Err("--assets requires an absolute directory".into());
-                }
-                assets = Some(path);
+    let mut values = std::collections::BTreeMap::new();
+    let mut package = None;
+    let mut export = None;
+    let mut digest = None;
+    let mut frontend = false;
+    let mut args = args.into_iter();
+    while let Some(key) = args.next() {
+        let key = key.into_string().map_err(|_| "Invalid Desktop option")?;
+        if key == "--frontend" {
+            if frontend {
+                return Err("Duplicate frontend mode".into());
             }
-            Some("--host-profile") if host_profile.is_none() => {
-                host_profile = Some(
-                    arguments
-                        .next()
-                        .and_then(|v| v.into_string().ok())
-                        .ok_or("--host-profile requires an identity")?,
-                );
-            }
-            _ => return Err("Unknown or duplicate desktop argument; use --help".into()),
+            frontend = true;
+            continue;
         }
+        if matches!(key.as_str(), "--package" | "--export" | "--package-digest") {
+            let selected = match key.as_str() {
+                "--package" => &mut package,
+                "--export" => &mut export,
+                _ => &mut digest,
+            };
+            if selected.is_some() {
+                return Err("Duplicate executable package option".into());
+            }
+            *selected = Some(
+                args.next()
+                    .and_then(|value| value.into_string().ok())
+                    .ok_or("Package option requires an identity")?,
+            );
+            continue;
+        }
+        if !matches!(
+            key.as_str(),
+            "--config-home" | "--state-home" | "--cache-home" | "--assets"
+        ) || values.contains_key(&key)
+        {
+            return Err("Unknown or duplicate Desktop option; use rsi desktop".into());
+        }
+        let mut path = PathBuf::from(args.next().ok_or("Desktop option requires a directory")?);
+        if key == "--assets" && !path.is_absolute() {
+            path = std::env::current_dir().map_err(crate::error)?.join(path);
+        }
+        if !path.is_absolute() {
+            return Err("Desktop requires resolved absolute directories".into());
+        }
+        values.insert(key, path);
     }
-    let assets = match assets {
-        Some(path) => path,
-        None => executable()?
-            .parent()
-            .ok_or("Desktop executable directory is absent")?
-            .join("assets"),
+    let mut required = |key| {
+        values
+            .remove(key)
+            .ok_or_else(|| format!("{key} is required; launch through rsi desktop"))
     };
-    let profile = rsi::HostProfileId::new(host_profile.unwrap_or_else(|| "standard".into()))
-        .map_err(|e| e.to_string())?;
-    Ok(Some((assets, profile)))
-}
-
-pub(super) fn require_assets(assets: &std::path::Path) -> Result<(), String> {
-    if !assets.is_dir() {
-        return Err(format!(
-            "Desktop assets directory is missing or inaccessible: {}. Use a complete Desktop publication, or --assets ABSOLUTE_DIRECTORY.",
-            assets.display()
-        ));
+    let paths = rsi_host::HostPaths::new(
+        required("--config-home")?,
+        required("--state-home")?,
+        required("--cache-home")?,
+    )
+    .map_err(crate::error)?;
+    let assets = values
+        .remove("--assets")
+        .map_or_else(rsi_web_control::Assets::default, |path| {
+            rsi_web_control::Assets::Directory { path }
+        });
+    let package = match (package, export, digest) {
+        (None, None, None) => None,
+        (Some(package), Some(export), Some(digest)) => Some((package, export, digest)),
+        _ => return Err("Executable package, digest and export must be supplied together".into()),
+    };
+    if frontend && package.is_none() {
+        return Err("Frontend mode requires a managed Desktop package".into());
     }
-    Ok(())
+    Ok(Some(Options {
+        frontend,
+        paths,
+        assets,
+        package,
+    }))
 }
-
+impl Options {
+    pub fn managed(&self) -> bool {
+        self.package.is_some()
+    }
+    pub fn pin_package(&self) -> Result<Option<rsi_packages::PackageLease>, String> {
+        let Some((package, export, digest)) = &self.package else {
+            return Ok(None);
+        };
+        let lease = rsi_packages::PackageStore::open(&self.paths.state().join("packages"))
+            .map_err(crate::error)?
+            .acquire_exact(package, digest)
+            .map_err(crate::error)?;
+        let executable = lease
+            .export(export, rsi_packages::ExportKind::Executable)
+            .map_err(crate::error)?;
+        if executable.canonicalize().map_err(crate::error)?
+            != std::env::current_exe()
+                .map_err(crate::error)?
+                .canonicalize()
+                .map_err(crate::error)?
+        {
+            return Err("Desktop executable is not the selected package export".into());
+        }
+        Ok(Some(lease))
+    }
+}
 #[cfg(any(windows, test))]
 pub(super) fn require_webview(
     version: Result<String, impl std::fmt::Display>,
 ) -> Result<(), String> {
-    version.map(|_| ()).map_err(|e| format!("Microsoft Edge WebView2 Runtime is unavailable: {e}. Install the Evergreen Runtime from https://developer.microsoft.com/microsoft-edge/webview2/ and launch RSIversi Desktop again."))
+    version.map(|_|()).map_err(|error| format!("Microsoft Edge WebView2 Runtime is unavailable: {error}. Install the Evergreen Runtime from https://developer.microsoft.com/microsoft-edge/webview2/ and launch RSIversi Desktop again."))
 }
-
 #[cfg(test)]
 mod tests {
     use super::*;
-
     #[test]
-    fn absent_or_non_directory_assets_fail_with_recovery_guidance() {
-        let root = tempfile::tempdir().unwrap();
-        let executable = || Ok(root.path().join("rsi-desktop"));
-        for as_file in [false, true] {
-            if as_file {
-                std::fs::write(root.path().join("assets"), "not a directory").unwrap();
-            }
-            for arguments in [
-                vec![],
-                vec![
-                    "--assets".into(),
-                    root.path().join("assets").into_os_string(),
-                ],
-            ] {
-                let assets = parse(arguments, executable).unwrap().unwrap().0;
-                let error = require_assets(&assets).unwrap_err();
-                assert!(error.contains("Desktop assets directory") && error.contains("--assets"));
-                assert!(error.contains(root.path().to_str().unwrap()));
-            }
-        }
-        assert!(!root.path().join("desktop-webview").exists());
-    }
-
-    #[test]
-    fn default_assets_are_executable_relative_and_overrides_are_absolute() {
-        let root = tempfile::tempdir().unwrap();
-        let directory = root.path().join("desktop options space 中文");
-        std::fs::create_dir_all(directory.join("assets")).unwrap();
-        let executable = || Ok(directory.join("rsi-desktop"));
-        assert_eq!(
-            parse([], executable).unwrap().unwrap().0,
-            directory.join("assets")
-        );
-        assert_eq!(
-            parse(
-                ["--assets".into(), directory.clone().into_os_string()],
-                executable
-            )
-            .unwrap()
-            .unwrap()
-            .0,
-            directory
-        );
-        assert!(parse(["--assets".into(), "relative".into()], executable).is_err());
-        for flag in ["--assets", "--host-profile"] {
-            let value = if flag == "--assets" {
-                directory.as_os_str().to_owned()
-            } else {
-                "standard".into()
-            };
-            assert!(parse([flag.into(), value.clone(), flag.into(), value], executable).is_err());
-        }
-    }
-
-    #[test]
-    fn help_precedes_executable_and_runtime_requirements() {
+    fn help_does_not_require_homes_and_partial_or_duplicate_homes_fail() {
+        assert!(parse(["--help".into()]).unwrap().is_none());
+        assert!(parse([]).is_err());
+        assert!(parse(["--state-home".into(), "relative".into()]).is_err());
+        let root = std::env::current_dir().unwrap();
         assert!(
-            parse(["--unknown".into(), "--help".into()], || panic!(
-                "help resolved executable"
-            ))
-            .unwrap()
-            .is_none()
+            parse([
+                "--state-home".into(),
+                root.clone().into_os_string(),
+                "--state-home".into(),
+                root.into_os_string()
+            ])
+            .is_err()
         );
-        assert!(require_webview(Ok::<_, String>("1.2.3".into())).is_ok());
-        let error = require_webview(Err::<String, _>("not installed")).unwrap_err();
-        assert!(error.contains("WebView2") && error.contains("Evergreen Runtime"));
+    }
+    #[test]
+    fn webview_failure_has_recovery_guidance() {
+        assert!(
+            require_webview(Err::<String, _>("missing"))
+                .unwrap_err()
+                .contains("Evergreen Runtime")
+        );
     }
 }

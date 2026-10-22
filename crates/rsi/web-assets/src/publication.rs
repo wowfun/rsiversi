@@ -242,12 +242,23 @@ impl WebAssetControl {
         directory: PathBuf,
         files: Vec<String>,
     ) -> AssetResult<StageTicket> {
-        let config = Config {
+        self.stage_config(Config {
             directory,
             files,
             watch: false,
             pairing: None,
-        };
+        })
+    }
+    /// Stages an independently verified product bundle with the owning default file set.
+    pub fn stage_verified(self: &Arc<Self>, directory: PathBuf) -> AssetResult<StageTicket> {
+        self.stage_config(Config {
+            directory,
+            files: super::default_files(),
+            watch: false,
+            pairing: Some(super::pairing::Identity::Internal),
+        })
+    }
+    fn stage_config(self: &Arc<Self>, config: Config) -> AssetResult<StageTicket> {
         config
             .validate()
             .map_err(|error| AssetError::Invalid(error.to_string()))?;

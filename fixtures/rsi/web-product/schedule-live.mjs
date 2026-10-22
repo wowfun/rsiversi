@@ -27,7 +27,7 @@ try {
   const transcript=await pane.locator('.transcript').innerText();await writeFile(join(report,'transcript.txt'),transcript);
   assert.equal(await pane.locator('.pane-status').innerText(),'Completed',transcript.slice(-4096));
   const session=(await pane.locator('.pane-session').innerText()).split(' · ').at(-1);
-  const records=service.run(['--profile','evidence-cli','--resume',session,'--output','jsonl'],{input:':history\n'.repeat(64)+':exit\n'}).stdout.trim().split('\n').map(line=>JSON.parse(line));
+  const records=service.run(["run",'evidence-cli','--resume',session,'--output','jsonl'],{input:':history\n'.repeat(64)+':exit\n'}).stdout.trim().split('\n').map(line=>JSON.parse(line));
   const facts=records.flatMap(record=>record.fact?[record.fact]:[]).sort((a,b)=>a.seq-b.seq);await writeFile(join(report,'facts.json'),JSON.stringify(facts,null,2));
   const creates=facts.filter(f=>f.type==='tool_intent' && f.name==='schedule_create');assert.equal(creates.length,1);
   const created=facts.find(f=>f.type==='tool_result' && f.effect_id===creates[0].effect_id);assert.equal(created?.result.value.status,'created_armed');

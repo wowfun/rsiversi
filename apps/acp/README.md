@@ -1,8 +1,8 @@
 # rsi-acp-application
 
 The native ApplicationFactory owns ACP stdio, signals and application task cleanup.
-It consumes the native Agent backend and local ServingService contracts.
-`rsi --profile acp` selects this plugin; there is no separate ACP executable.
+It consumes an ACP attachment supplied by the product connection plugin.
+`rsi run acp` selects this plugin; there is no separate ACP executable.
 
 Stdio uses nonblocking duplicated descriptors so cancelling an idle pipe read
 does not leave a blocking Tokio stdin worker behind. Redirected regular files
@@ -22,4 +22,7 @@ uninterruptible Tokio global stdin worker is created.
 Redirected disk handles use owned file I/O and drain outstanding work on close.
 Console/device stdio is refused; ACP launches use pipes or regular files. Ctrl-C
 and Ctrl-Break retire the same protocol owner. The product supplies a private
-embedded Service on Windows; Linux retains its Service Host composition.
+resident Service on Windows and Linux. Each stdio attachment proxies one
+authenticated local stream after checking the Host epoch and ACP wire descriptor.
+Its native backend lives inside the shared Host, with its own attached-session
+set and cleanup. Closing stdio closes that attachment and leaves the Host alive.

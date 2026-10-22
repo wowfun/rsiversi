@@ -4,6 +4,7 @@ const HEADLESS_PROFILE: &str = "headless";
 const TUI_PROFILE: &str = "tui";
 const SERVE_PROFILE: &str = "serve";
 const WEB_PROFILE: &str = "web";
+const DESKTOP_PROFILE: &str = "desktop";
 const ACP_PROFILE: &str = "acp";
 const DEVICES_PROFILE: &str = "devices";
 const INSPECTOR_PROFILE: &str = "inspector";
@@ -15,6 +16,7 @@ pub(super) fn builtins() -> impl Iterator<Item = (ApplicationProfileId, Vec<u8>)
         TUI_PROFILE,
         SERVE_PROFILE,
         WEB_PROFILE,
+        DESKTOP_PROFILE,
         ACP_PROFILE,
         DEVICES_PROFILE,
         INSPECTOR_PROFILE,
@@ -29,13 +31,26 @@ pub(super) fn builtins() -> impl Iterator<Item = (ApplicationProfileId, Vec<u8>)
 }
 #[allow(clippy::too_many_lines)] // Literal Profile documents stay beside their application bindings.
 fn builtin_application(id: &ApplicationProfileId) -> Option<Vec<u8>> {
-    if id.as_str() == WEB_PROFILE {
+    if id.as_str() == DESKTOP_PROFILE {
         return Some(
             br#"format = 1
 [[steps]]
 kind = "plugin"
-id = "assets"
-plugin = "rsi.application.web-assets"
+id = "service"
+plugin = "rsi.application.service"
+config = { host_profile = "standard" }
+[[steps]]
+kind = "plugin"
+id = "application"
+plugin = "rsi.application.executable"
+config = { package = "desktop", export = "desktop" }
+"#
+            .to_vec(),
+        );
+    }
+    if id.as_str() == WEB_PROFILE {
+        return Some(
+            br#"format = 1
 [[steps]]
 kind = "plugin"
 id = "service"

@@ -1,6 +1,8 @@
 # RSI desktop product fixture
 
 The Python fixtures require Python 3.11 or newer.
+The complete helper suite needs `PYTHONUTF8=1`, an absolute `RSI_TEST_NODE`
+executable, and permission to create symbolic links for its no-follow checks.
 `python3 -m unittest discover -s fixtures/rsi/desktop-product -p 'test_*.py'`
 checks readiness-before-input, no replay after ambiguous native input, and cleanup.
 With the Web fixture's Playwright packages and engines installed,
@@ -13,7 +15,7 @@ from the checkout root before starting the native application.
 `verify.py --binary /absolute/rsi-desktop --driver /absolute/WebKitWebDriver
 --assets /absolute/bundle --report /absolute/new-directory` exercises the real
 Linux Tauri window under `dbus-run-session -- xvfb-run -a`. It creates isolated
-RSI paths and an empty configuration, then uses actual WebDriver input to configure
+explicit config/state/cache homes and a launch document selecting its fixture Service, then uses actual WebDriver input to configure
 the deterministic provider, select a model, create a conversation and submit it.
 Button clicks relocate only after WebDriver explicitly reports a stale element
 before dispatch; ambiguous click failures are never replayed.
@@ -39,14 +41,13 @@ theme field before editing; reopening the dialog can temporarily retain old fiel
 Profile receipt recovery waits for the requested root catalog before opening its
 disclosure, then confirms it is open before selecting a receipt; the old leaf
 catalog can remain visible while the asynchronous read changes the layout.
-The frame-admission probe holds one real document ACK before POSTing a second
-frame request, then releases that same ACK. Request cases name their method
-explicitly; a separate GET verifies permanent pre-admission refusal. It cannot
-assume the ordinary polling loop always occupies the frame lane or consume an
-unacknowledged frame itself. Terminal
-asset checks retain completion-time read counts and wait for loaded assets and a
-live nonzero read count in one observation; polling gaps do not imply retired reads.
-Asset errors and pressure errors fail immediately, and asset requests are not replayed.
+The transport probe observes the actual shared Worker with a WebDriver-installed
+postMessage observer. Requests use a disjoint negative-ID namespace; replies and
+frame acknowledgements are real. Deliberately withholding an ACK verifies Worker
+failure, separately from the native close watchdog. Removed custom HTTP routes
+are not used as transport; negative probes require their authentication rejection.
+Native export invokes the bounded Tauri bridge with real Worker export events.
+Artifact hashes identify the core, Desktop and Web metadata used by each run.
 PTY side-effect checks wait for the exact bounded file bytes; file creation can
 precede the shell's append. Extra or duplicated bytes never satisfy readiness.
 Each
@@ -69,22 +70,20 @@ conversation, missing-ACK and document-close-deadline scenarios after the shared
 The Tool-using task scenario additionally requires the native sandbox preflight;
 missing-ACK and document-close-deadline do not depend on that preflight. CI attempts artifact upload even on failure. A scenario
 that never starts cannot produce product evidence.
-Before launching a foreign build, the fixture checks both executable SHA-256
-values and the family manifest against the supplied bundle's `receipt.json`.
-It records the assets and Host rejection stages in `foreign-family.json`, with
-separate `foreign-assets.log` and `foreign-host.log` diagnostics. CI retains these
-alongside each distribution's receipt, `build-family.json` and build log, excluding
-the native executables. The receipt identifies both paired
-executables; these hashes cannot restore the programs for binary replay.
-The export scenario exercises cancellation before a reservation is claimed and a
-late cancellation of the previous token while a replacement chooser is open. The
-replacement must still save; the cancelled chooser retains its waiter until its
-actual callback. Native lane capacity and positively classified control retries
-have separate unit coverage. The read-pressure scenario records both native Busy
-rejections and the API client's separate Subscription-capacity rejection. It
-requires native Busy with its admission flags and exact-once terminal input;
-only output polling continues after the exact API-capacity error, never mutations.
-The paired `rsi` companion must already be beside the desktop executable.
+When a fixture distribution receipt is present, the fixture verifies both
+executable hashes and its frozen input manifest. `--foreign-bundle` launches a
+second independently built Desktop/Web bundle against the same resident core
+and requires successful interface admission and an unchanged Host identity.
+A different build family alone is compatible; internal Web bundle checks and
+required wire descriptors retain their independent rejection coverage.
+The export scenario saves through the real GTK chooser, cancels one admitted
+native write and delivers its held write afterwards, then verifies a stale
+cancellation cannot cancel the replacement chooser. Pressure scenarios observe
+real Worker admission flags and exact OS terminal bytes; responses are never
+mocked. Write pressure holds four real PTYs at OS read barriers, filling the API
+client's Data calls. A UI input under that pressure must remain unconfirmed and
+must not replay after capacity returns; explicit takeover and new typing recover.
+The `rsi` used by the fixture lives beside its Desktop executable.
 By default the fixture does not access real user settings or credentials.
 An explicit `--live-env-file /authorized/file --live-model model-id` enables
 DeepSeek instead: it reads only that key into the isolated child environment,
@@ -96,23 +95,23 @@ form before Apply; the maximum reserve must accommodate the default reserve.
 The bounded credential file rejects empty or whitespace-only keys after unquoting.
 `--window-close` exercises the platform window close request and retained drain.
 `--restart` additionally reopens the same private state and checks the persisted
-conversation and unsent draft before closing it again.
-`--daemon` starts the paired headless companion first, then verifies that closing
-and reopening the desktop preserves the same daemon PID and published Host epoch.
-Its receipt checks both binary hashes and their common frozen input manifest.
+conversation and unsent draft, with the same exact document Origin, before closing
+it again.
+Every scenario starts an isolated resident Host and verifies that closing and
+reopening Desktop preserves its PID and Host epoch. Compatibility follows required wire
+interfaces; a different compiler/build family alone is not a rejection reason.
 `--save-failure` injects an IndexedDB write failure, verifies input survives a
 cancelled window close beyond its original deadline, then explicitly recovers.
-`--ack-timeout` withholds a frame ACK and requires failed-lifetime cleanup.
+`--ack-timeout` withholds a real Worker frame ACK, requires the Worker failure,
+then closes the failed document through the native window manager (the connected
+workbench controls are no longer visible). It verifies successful cleanup after
+the failed document acknowledges the native close request.
 `--close-timeout` blocks delivery of the native close event through WebDriver
 in a fully admitted paired document, then closes twice. It requires one bounded
 deadline, unsuccessful document-drain status and completed Runtime cleanup.
 This scenario starts after document admission; it does not cover a close request
 before the document installs its listener. That startup interval currently lacks
 a dedicated product fixture.
-`--foreign-bundle DIRECTORY` with `--daemon` uses another complete paired
-Desktop distribution. Mixed assets must fail the asset check; its own assets
-must pass that check and then fail Host compatibility against the running daemon.
-Both rejections preserve the original daemon identity.
 `--refresh-during-click` forces a draft input refresh during native mouse down
 on Send. It checks preserved text-node identity, exactly one real click and the
 resulting submission; this gates the WebKit draft-save/click interleaving.
@@ -187,7 +186,10 @@ It also pages a retained reference result after replacing the private source wit
 an oversized file, verifies that explicit Repeat query rejects that current file,
 then restores the original and verifies Repeat query recovers.
 
-The `--file-previews` scenario also verifies the native application frame gate and
+The `--file-previews` scenario first admits a valid main-document bridge request,
+then attempts the same invocation through the preview's parent. It records the
+actual SecurityError and absence of iframe native internals in `preview-native-ipc.json`.
+The scenario also verifies the native application frame gate and
 captures the actual application/bootstrap response bodies and CSP in
 `preview-responses.json`. The separate opt-in `csp_engine.py --responses PATH
 --report PATH` probe runs under Xvfb with system Python, PyGObject and WebKit2 4.1
@@ -242,8 +244,11 @@ queued Turn after Stop. This mode is separate from live-provider scenarios.
 five Web viewport widths with all three theme choices through Settings. Its Xvfb
 screen must be at least 1920 pixels wide; CI provides 2560×1440. Captures are
 manual comparison evidence, not screenshot baselines. `--reload` performs an
-actual WebDriver document refresh and verifies a saved draft survives observer
-replacement. This is distinct from application restart and a synthetic view refresh.
+actual WebDriver document refresh, reselects the retained Session, and verifies
+its saved draft survives observer replacement. Like restart, it does not assume
+the new Pane retains its previous in-memory selection. Document-local transport
+and trusted-input probes are reattached before later native gestures. This is distinct from
+application restart and a synthetic view refresh.
 
 `--dock --terminals` also drives native context-menu float, pointer movement and
 resize, docking, keyboard undo, redo and fullscreen on the same live terminal.
@@ -267,7 +272,7 @@ Its provider remains deterministic and keyless.
 `python3 fixtures/rsi/desktop-product/test_workflow.py` checks the isolated Host
 profile edit, including whitespace around an empty steps array, without WebKit.
 
-`--daemon --automation-fixture ABSOLUTE_PRIVATE_SEED` enables the standing-rule
+`--automation-fixture ABSOLUTE_PRIVATE_SEED` enables the standing-rule
 owner in the isolated daemon and reads the actual Automation API through the
 paired native bootstrap and Worker. The seed is prepared with the opt-in core
 `automation::prepare_visual_fixture` test and a canonical checker PNG. The
@@ -284,3 +289,9 @@ The ignored CLI PTY test
 `RSI_TUI_PTY_REPORT` to check the paired native binary from model-free Home.
 It uses isolated Host paths and real UDS API negotiation. ANSI, terminal cells
 and text captures retain projection evidence separately from provider results.
+
+`--host-loss --restart` holds a draft edit before its durable write and kills only
+the fixture-owned Host. It observes the native close request while the window
+remains alive, then releases persistence and requires failed native cleanup
+through document drain. A new Host generation and window must retain the same
+Origin, conversation and draft.

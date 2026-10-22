@@ -1,120 +1,21 @@
 import assert from 'node:assert/strict';
 import {test} from 'node:test';
-import {setImmediate} from 'node:timers/promises';
-import {NativeDocument} from '../src/native.ts';
-import {TerminalInput} from '../src/terminal-input.mjs';
-
-test('native cleanup has an abort deadline and shares its failed receipt', async t => {
-  const originalFetch = globalThis.fetch;
-  t.mock.timers.enable({apis: ['setTimeout']});
-  let signal, calls = 0;
-  globalThis.fetch = (_path, init) => {
-    calls++;
-    signal = init.signal;
-    return new Promise((resolve, reject) => {
-      signal?.addEventListener('abort', () => reject(signal.reason), {once: true});
-    });
-  };
-  try {
-    const native = new NativeDocument();
-    const first = native.terminate();
-    assert.equal(native.terminate(), first);
-    assert.ok(signal instanceof AbortSignal);
-    const failed = assert.rejects(first, {name: 'TimeoutError'});
-    t.mock.timers.tick(30_000);
-    await failed;
-    assert.equal(signal.aborted, true);
-    assert.equal(native.terminate(), first);
-    assert.equal(calls, 1);
-  } finally { globalThis.fetch = originalFetch; }
+import {desktopCall,saveDesktopExport} from '../desktop-bridge.js';
+const descriptor = {name:'rsi.desktop.bridge',version:1,schema:'a'.repeat(64)};
+test('native call sends the explicit descriptor and operation to a single product command',async()=>{
+  const calls=[],scope={__RSI_DESKTOP__:true,__TAURI_INTERNALS__:{invoke:(...args)=>{calls.push(args);return Promise.resolve(null);}}};
+  await desktopCall({kind:'clipboard',text:'hello'},scope,descriptor);
+  assert.deepEqual(calls,[['rsi_bridge',{payload:JSON.stringify({protocol:descriptor,operation:{kind:'clipboard',text:'hello'}})}]]);
+  await assert.rejects(desktopCall({kind:'hello'},{},descriptor),/unavailable/);
 });
-
-test('successful native cleanup releases its deadline', async t => {
-  const originalFetch = globalThis.fetch;
-  t.mock.timers.enable({apis: ['setTimeout']});
-  let signal;
-  globalThis.fetch = async (_path, init) => { signal = init.signal; return new Response('{}'); };
+for(const corrupt of [false,true]) test(`Desktop export ${corrupt?'rejects trailing data':'streams through verified completion'}`,async()=>{
+  const calls=[],events=[{type:'chunk',offset:'0',text:'hello'},{type:'complete',bytes:'5',sha256:'digest'},corrupt?{type:'chunk',text:'bad'}:null];
+  globalThis.__RSI_DESKTOP__=true;globalThis.__RSI_DESKTOP_BRIDGE__=descriptor;
+  globalThis.__TAURI_INTERNALS__={invoke:async(command,{payload})=>{const op=JSON.parse(payload).operation;calls.push(op);return op.kind==='export_open'?{token:'b'.repeat(64)}:op.kind==='export_finish'?{bytes:'5'}:null;}};
+  const call=async(method,input)=>{assert.equal(method,'export_input');const op=JSON.parse(input).operation;return JSON.stringify(op.kind==='open'?{token:'worker',filename:'test.md',event:{type:'start'}}:op.kind==='next'?events.shift():null);};
   try {
-    const native = new NativeDocument();
-    await native.terminate();
-    t.mock.timers.tick(30_001);
-    assert.equal(signal.aborted, false);
-  } finally { globalThis.fetch = originalFetch; }
-});
-
-test('native admission rejection preserves queued input through the reply contract', async () => {
-  const fetch = globalThis.fetch;
-  let attempts = 0;
-  const delivered = [], failures = [];
-  globalThis.fetch = async (_path, init) => {
-    if (++attempts === 1) return Response.json({code:'busy',message:'busy',notAdmitted:true,retryable:true},{status:409});
-    delivered.push(JSON.parse(init.body));
-    return new Response('ok');
-  };
-  try {
-    const native = new NativeDocument();
-    const pending = new Map(); let id = 0;
-    native.onmessage = ({data}) => {
-      const waiter = pending.get(data.id); pending.delete(data.id);
-      if (data.error) waiter.reject(Object.assign(Error(data.error),{notAdmitted:data.notAdmitted===true,retryable:data.retryable!==false}));
-      else waiter.resolve(data.result);
-    };
-    const pump = new TerminalInput(bytes => new Promise((resolve,reject) => {
-      pending.set(++id,{resolve,reject});
-      native.postMessage({kind:'call',id,method:'terminal',payload:JSON.stringify([...bytes])});
-    }), message => failures.push(message), async()=>{});
-    pump.push(Uint8Array.of(65)); pump.push(Uint8Array.of(66));
-    while(pump.working) await setImmediate();
-    assert.deepEqual(delivered.flat(),[65,66]); assert.equal(attempts,3);
-    assert.deepEqual(failures,[]); assert.equal(pump.stopped,false);
-  } finally { globalThis.fetch = fetch; }
-});
-
-test('native only trusts the exact rejection classification', async () => {
-  const fetch = globalThis.fetch;
-  try {
-    for (const [body,notAdmitted] of [
-      [{code:'closed',message:'closed',notAdmitted:true,retryable:false},true],
-      [{code:'invalid',message:'invalid',notAdmitted:true,retryable:false},true],
-      [{code:'failed',message:'uncertain',notAdmitted:false,retryable:false},false],
-      [{code:'failed',message:'uncertain',notAdmitted:true,retryable:true},false],
-      [{code:'busy',message:'busy',notAdmitted:true,retryable:false},false],
-      [{code:'other',message:'unknown',notAdmitted:true,retryable:true},false],
-      ['plain error',false],
-    ]) {
-      globalThis.fetch=async()=>Response.json(body,{status:409});
-      const native=new NativeDocument();
-      const reply=await new Promise(resolve=>{native.onmessage=({data})=>resolve(data);native.postMessage({kind:'call',id:1,method:'command',payload:'{}'});});
-      assert.equal(reply.notAdmitted===true,notAdmitted);assert.equal(reply.retryable===true,false);
-    }
-    globalThis.fetch=async()=>{throw Error('connection lost');};
-    const native=new NativeDocument();
-    const reply=await new Promise(resolve=>{native.onmessage=({data})=>resolve(data);native.postMessage({kind:'call',id:1,method:'terminal',payload:'{}'});});
-    assert.equal(reply.notAdmitted===true,false);
-  } finally { globalThis.fetch=fetch; }
-});
-
-test('native delivers decoded frames and preserves exact acknowledgement identity',async()=>{
-  const fetch=globalThis.fetch, requests=[];
-  const view={frame_id:'9007199254740993',kind:'snapshot'}, assets={revision:'a'.repeat(64),catalog:null};
-  const native=new NativeDocument();
-  let finish;const done=new Promise(resolve=>finish=resolve);
-  globalThis.fetch=async(path,init)=>{
-    requests.push([path,init.body,init.method]);
-    if(path.startsWith('/_frame'))return Response.json({view,assets});
-    if(path==='/_ack'){native.terminate();finish();}
-    return new Response('{}');
-  };
-  try {
-    native.onmessage=({data})=>{
-      if(data.kind==='view'){
-        assert.deepEqual(data.view,view);assert.deepEqual(data.assets,assets);
-        native.postMessage({kind:'ack',frame_id:view.frame_id,resync:true,renderer:{revision:assets.revision,accept:true}});
-      }
-    };
-    native.postMessage({kind:'call',id:1,method:'connect',payload:{}});
-    await done;
-    assert.equal(requests.find(([path])=>path.startsWith('/_frame'))[2],'POST');
-    assert.deepEqual(JSON.parse(requests.find(([path])=>path==='/_ack')[1]),{frame_id:view.frame_id,resync:true,renderer:{revision:assets.revision,accept:true}});
-  }finally{globalThis.fetch=fetch;}
+    const promise=saveDesktopExport(call,1,'generation',{},new AbortController().signal);
+    if(corrupt) {await assert.rejects(promise,/continued/);assert.equal(calls.at(-1).kind,'export_cancel');assert.ok(!calls.some(op=>op.kind==='export_finish'));}
+    else {assert.deepEqual(await promise,{bytes:'5'});assert.deepEqual(calls.map(op=>op.kind),['export_open','export_write','export_write','export_finish']);}
+  } finally {delete globalThis.__RSI_DESKTOP__;delete globalThis.__RSI_DESKTOP_BRIDGE__;delete globalThis.__TAURI_INTERNALS__;}
 });

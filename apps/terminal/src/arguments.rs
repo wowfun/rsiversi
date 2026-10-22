@@ -1,6 +1,6 @@
 use super::*;
 use rsi_application::arguments::string_value;
-const HELP: &str = "Use rsi --profile headless --help for application options.";
+const HELP: &str = "Use rsi run headless --help for application options.";
 
 #[derive(Clone, Debug)]
 pub(crate) struct Command {

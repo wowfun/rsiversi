@@ -7,11 +7,20 @@ license.workspace = true
 publish = false
 
 [dependencies]
-rsi-build-info = { path = "../../crates/rsi/build-info" }
+rsi-dev-control = { path = "../dev-control" }
+rsi-process = { path = "../../crates/rsi-process/core" }
+rsi-process-local = { path = "../../crates/rsi-process/local" }
+rsi-sandbox = { path = "../../crates/rsi-sandbox/core" }
+rsi-sandbox-local = { path = "../../crates/rsi-sandbox/local" }
+rsi-files-native-fs = { path = "../../crates/rsi-files/native-fs" }
 rsi = { path = "../../crates/rsi/core" }
 rsi-api = { path = "../../crates/rsi-api/core" }
 rsi-web-assets = { path = "../../crates/rsi/web-assets" }
 rsi-web-assets-api = { path = "../../crates/rsi/web-assets-api" }
+rsi-web-control = { path = "../../crates/rsi/web-control" }
+rsi-service-host = { path = "../../crates/rsi/service-host" }
+rsi-packages = { path = "../../crates/rsi/packages" }
+rsi-host = { path = "../../crates/rsi-host/core" }
 async-trait.workspace = true
 futures-util.workspace = true
 rsi-application = { path = "../../crates/rsi/application" }

@@ -7,6 +7,7 @@ use rsi::{
 };
 use rsi_meta::{PluginFactory, UpdateMode};
 use std::sync::{Arc, LazyLock};
+mod executable;
 mod profiles;
 
 /// Frozen official application catalog, with invocation-owned local Web inputs.
@@ -28,7 +29,11 @@ pub fn metadata() -> ApplicationCatalogMetadata {
                 .iter()
                 .copied()
                 .chain(APPLICATION_IDS.iter().copied())
-                .chain(["rsi.terminal.ui", "rsi.terminal.portable"])
+                .chain([
+                    "rsi.terminal.ui",
+                    "rsi.terminal.portable",
+                    "rsi.application.executable",
+                ])
                 .chain(if cfg!(any(target_os = "linux", windows)) {
                     Some("rsi.application.acp")
                 } else {
@@ -38,6 +43,8 @@ pub fn metadata() -> ApplicationCatalogMetadata {
             profiles::builtins(),
         )
         .expect("valid linked application metadata")
+        .with_protocols(rsi_serve::supported_protocols())
+        .expect("valid linked application interfaces")
     });
     METADATA.clone()
 }
@@ -55,7 +62,21 @@ impl ApplicationCatalogProvider for Catalog {
         let mut diagnostics = Vec::new();
         let mut builder = rsi::StandardAddonBuilder::new("rsi.standard.application");
         register_contracts(&mut builder)?;
+        rsi_serve::register_frontend_contracts(&mut builder).map_err(boot)?;
         register_presentations(&mut builder)?;
+        builder
+            .register_factory(
+                rsi::AddonScope::Application,
+                "rsi.application.executable",
+                env!("CARGO_PKG_VERSION"),
+                UpdateMode::RestartRequired,
+                Arc::new(executable::Factory {
+                    paths: service.paths().clone(),
+                    arguments: arguments.clone(),
+                    frontend: self.web.frontend.clone(),
+                }),
+            )
+            .map_err(boot)?;
         for (id, factory) in application_factories(arguments.clone(), web, &mut diagnostics) {
             builder
                 .register_factory(
@@ -184,20 +205,19 @@ declare_factories! { arguments, web, diagnostics;
             "rsi.session.files.ui",
             Arc::new(rsi_session_files_ui::FilesUiFactory),
         ),
-        ("rsi.application.web", diagnosed(rsi_serve::ServeFactory::local_web(web.clone()), diagnostics)),
+        ("rsi.application.web", diagnosed(rsi_serve::RemoteFactory::web(web.clone()), diagnostics)),
         (
             "rsi.application.web-assets",
             diagnosed(rsi_serve::LocalWebAssetsFactory(web.clone()), diagnostics),
         ),
-        ("rsi.application.serve-web", diagnosed(rsi_serve::ServeFactory::with_web_assets(arguments.clone()), diagnostics)),
-        ("rsi.web.assets", diagnosed(rsi_web_assets::PairedWebAssetsFactory::new(rsi_build_info::family()), diagnostics)),
+        ("rsi.web.assets", Arc::new(rsi_web_assets::VerifiedWebAssetsFactory)),
         ("rsi.application.devices", diagnosed(rsi_terminal::DevicesFactory::new(arguments.clone()), diagnostics)),
         ("rsi.application.inspector", diagnosed(rsi_terminal::InspectorFactory::new(arguments.clone()), diagnostics)),
         ("rsi.application.addons", diagnosed(rsi_terminal::NativeAddonsFactory::new(arguments.clone()), diagnostics)),
         ("rsi.application.cli", diagnosed(rsi_terminal::CliFactory::new(arguments.clone()), diagnostics)),
         ("rsi.application.headless", diagnosed(rsi_terminal::HeadlessFactory::new(arguments.clone()), diagnostics)),
         ("rsi.application.tui", diagnosed(rsi_terminal::TuiFactory::new(arguments.clone()), diagnostics)),
-        ("rsi.application.serve", diagnosed(rsi_serve::ServeFactory::new(arguments.clone()), diagnostics)),
+        ("rsi.application.serve", diagnosed(rsi_serve::RemoteFactory::serve(arguments.clone()), diagnostics)),
 }
 
 /// Selects the official catalog with no invocation-specific Web inputs or extras.

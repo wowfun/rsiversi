@@ -81,7 +81,7 @@ active. Restore terminal modes before displaying ordinary error diagnostics.
 With the tutorial's isolated setup, capture ordinary errors separately:
 
 ```bash
-tui_rsi --profile dev-tui --cwd "$tui_dev/workspace" --resume tui-dev \
+tui_rsi run dev-tui --cwd "$tui_dev/workspace" --resume tui-dev \
   2> "$tui_dev/client.stderr"
 ```
 

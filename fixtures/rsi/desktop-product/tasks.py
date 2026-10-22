@@ -70,23 +70,20 @@ def verify(script, button, fill, until, screenshot, workspace, report, provider)
     script(r'''
         window.fixtureGoal={invocations:[],errors:[]};
         const push=(list,value)=>{list.push(value);if(list.length>64)list.shift()};
-        const original=window.fetch;
-        window.fetch=(path,options)=>{
-            let entry;
-            if(String(path)==='/_call/command'&&typeof options?.body==='string'){
-                const request=JSON.parse(options.body),value=request.input?.value;
+        const tracked=new Map();
+        fixtureTransport.observers.push((kind,data)=>{
+            if(kind==='call'&&data.method==='command'){
+                const request=JSON.parse(data.payload),value=request.input?.value;
                 if(request.action==='ui_invoke'){
-                    entry={time:performance.now(),ticket:request.ticket,name:request.name,kind:value?.kind,
+                    const entry={time:performance.now(),ticket:request.ticket,name:request.name,kind:value?.kind,
                         request_id:value?.request?.request_id??value?.request,
                         expected_revision:value?.request?.expected_revision??value?.revision,reply:null};
-                    push(window.fixtureGoal.invocations,entry);
+                    tracked.set(data.id,entry);push(window.fixtureGoal.invocations,entry);
                 }
+            }else if(kind==='reply'&&tracked.has(data.id)){
+                tracked.get(data.id).reply={time:performance.now(),error:data.error,text:String(data.result??data.error).slice(0,4096)};tracked.delete(data.id);
             }
-            return original(path,options).then(response=>{
-                if(entry)void response.clone().text().then(reply=>entry.reply={time:performance.now(),status:response.status,text:reply.slice(0,4096)});
-                return response;
-            });
-        };
+        });
         new MutationObserver(()=>{
             const text=document.querySelector('.resource-content')?.textContent??'';
             if(/Goal control rejected|Goal control:|command revision conflict|Control outcome is unresolved|UI action or surface has retired/.test(text)){

@@ -42,7 +42,7 @@ async fn update(peer: &mut Peer) -> Value {
 async fn start(fixture: &CliFixture) -> (tokio::process::Child, Peer) {
     let mut child = fixture
         .tokio_command()
-        .args(["--profile", "test-acp"])
+        .args(["run", "test-acp"])
         .stdin(std::process::Stdio::piped())
         .stdout(std::process::Stdio::piped())
         .stderr(std::process::Stdio::piped())
@@ -73,8 +73,9 @@ async fn start(fixture: &CliFixture) -> (tokio::process::Child, Peer) {
                     .await;
         }
         panic!(
-            "ACP initialize failed: {initialized:?}; child status: {status:?}; stderr: {}",
-            stderr.chars().take(4096).collect::<String>()
+            "ACP initialize failed: {initialized:?}; child status: {status:?}; stderr: {}; owner log: {}",
+            stderr.chars().take(4096).collect::<String>(),
+            fixture.owner_log()
         );
     }
     (child, peer)
@@ -805,7 +806,7 @@ async fn acp_stdio_accepts_regular_file_eof_and_redirected_protocol_output() {
         Duration::from_secs(30),
         fixture
             .tokio_command()
-            .args(["--profile", "test-acp"])
+            .args(["run", "test-acp"])
             .stdin(std::fs::File::open(input).unwrap())
             .output(),
     )
@@ -821,7 +822,7 @@ async fn acp_stdio_accepts_regular_file_eof_and_redirected_protocol_output() {
     let path = fixture.temporary.path().join("protocol-output");
     let mut child = fixture
         .tokio_command()
-        .args(["--profile", "test-acp"])
+        .args(["run", "test-acp"])
         .stdin(std::process::Stdio::piped())
         .stdout(std::fs::File::create(&path).unwrap())
         .stderr(std::process::Stdio::piped())
@@ -852,4 +853,52 @@ async fn acp_stdio_accepts_regular_file_eof_and_redirected_protocol_output() {
         "{}",
         String::from_utf8_lossy(&output.stderr)
     );
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn concurrent_acp_clients_share_one_host_and_disconnect_independently() {
+    let fixture = CliFixture::new("http://127.0.0.1:1");
+    profile(&fixture);
+    let (first, first_peer) = start(&fixture).await;
+    let owner_path = fixture
+        .temporary
+        .path()
+        .join("state/rsi/session-host/owner.json");
+    let before: Value = serde_json::from_slice(&std::fs::read(&owner_path).unwrap()).unwrap();
+    let (second, second_peer) = start(&fixture).await;
+    let setup = json!({"cwd":fixture.workspace,"mcpServers":[]});
+    let first_session = request(&first_peer.handle(), "session/new", setup.clone()).await;
+    let second_session = request(&second_peer.handle(), "session/new", setup.clone()).await;
+    assert_ne!(first_session["sessionId"], second_session["sessionId"]);
+    stop(&fixture, first_peer, first).await;
+    let resumed = request(
+        &second_peer.handle(),
+        "session/resume",
+        json!({"sessionId":second_session["sessionId"],"cwd":fixture.workspace,"mcpServers":[]}),
+    )
+    .await;
+    assert!(resumed["configOptions"].is_array());
+    let devices = fixture
+        .tokio_command()
+        .args(["devices", "list"])
+        .output()
+        .await
+        .unwrap();
+    assert!(
+        devices.status.success(),
+        "{}",
+        String::from_utf8_lossy(&devices.stderr)
+    );
+    stop(&fixture, second_peer, second).await;
+    let after: Value = serde_json::from_slice(&std::fs::read(&owner_path).unwrap()).unwrap();
+    assert_eq!(before["pid"], after["pid"]);
+    assert_eq!(before["host_epoch"], after["host_epoch"]);
+    let status = fixture
+        .tokio_command()
+        .args(["host", "status"])
+        .output()
+        .await
+        .unwrap();
+    assert!(status.status.success());
+    assert!(String::from_utf8_lossy(&status.stdout).starts_with("running"));
 }

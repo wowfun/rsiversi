@@ -2,6 +2,9 @@
 name: Local Web launch with device identity and one-use browser handoff
 ---
 
+Partially superseded by [the unified product decision](2026-10-20-unified-product-launch.md).
+The shared Host retains the browser listener and credential; each explicit launch issues a fresh one-use ticket without invalidating existing browser cookies. This supersedes per-launch credential rotation. Device attribution, explicit grants, revocation and bounded handoff remain current.
+
 ## Problem
 
 Requiring a custom Profile, listener flags, a second terminal and a copied device

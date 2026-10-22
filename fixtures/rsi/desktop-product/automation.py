@@ -12,22 +12,19 @@ def configure(host, seed):
 
 def verify(script, button, click, until, screenshot, report):
     script(r'''window.fixtureAutomation={attempts:{},requests:[],frames:0,mutation:null};
-const original=window.fetch;window.fetch=(path,options)=>{
- const route=String(path);let tracked;
- if(route==='/_call/command'&&typeof options?.body==='string'){
-  const body=JSON.parse(options.body);if(body.action==='automation')tracked={route,request:body.request};
- }else if(route==='/_call/automation_artifact')tracked={route};
- if(tracked)window.fixtureAutomation.requests.push(tracked);
- return original(path,options).then(response=>{
-  if(tracked)tracked.status=response.status;
-  if(route.startsWith('/_frame'))void response.clone().json().then(frame=>{
-   const automation=frame.view?.view?.automation??frame.view?.sections?.automation;
-   if(automation){window.fixtureAutomation.frames++;
-    if(automation.attempt){window.fixtureAutomation.attempts[automation.attempt.id]=automation.attempt;window.fixtureAutomation.currentAttempt=automation.attempt;}
-    if(automation.mutation)window.fixtureAutomation.mutation=automation.mutation;
-   }
-  });return response;
- });};return true''')
+fixtureTransport.observers.push((kind,data,request)=>{
+ if(kind==='call'&&data.method==='command'){
+  const body=JSON.parse(data.payload);if(body.action==='automation')window.fixtureAutomation.requests.push({id:data.id,request:body.request});
+ }else if(kind==='call'&&data.method==='automation_artifact')window.fixtureAutomation.requests.push({id:data.id});
+ if(kind==='reply'){const tracked=window.fixtureAutomation.requests.find(item=>item.id===data.id);if(tracked)tracked.ok=!data.error;}
+ if(kind==='frame'){
+  const automation=data.view?.view?.automation??data.view?.sections?.automation;
+  if(automation){window.fixtureAutomation.frames++;
+   if(automation.attempt){window.fixtureAutomation.attempts[automation.attempt.id]=automation.attempt;window.fixtureAutomation.currentAttempt=automation.attempt;}
+   if(automation.mutation)window.fixtureAutomation.mutation=automation.mutation;
+  }
+ }
+});return true''')
     button('Deployment checks')
     until(lambda: script('return document.querySelector(".automation-panel")?.textContent.includes("assertion failed")'))
     until(lambda: script('const b=document.querySelector(".automation-row:not(:disabled)"); return !!b&&b.getBoundingClientRect().height>0'))
@@ -63,7 +60,7 @@ const original=window.fetch;window.fetch=(path,options)=>{
     assert reread['result'] == original['result']
     transport = script('return {origin:location.origin,nativeBridge:typeof window.__TAURI_INTERNALS__?.invoke==="function",...window.fixtureAutomation}')
     assert transport['nativeBridge'] and transport['frames'] > 0
-    assert all(request.get('status') == 200 for request in transport['requests'])
+    assert all(request.get('ok') is True for request in transport['requests'])
     assert any(request.get('request',{}).get('operation') == 'resume' for request in transport['requests'])
     (report / 'automation.json').write_text(json.dumps({'ok': True, 'transport': transport, 'image': image, 'mutation': receipt, 'originalAttempt': reread, 'newAttempt': current}, indent=2))
     # Close the actual modal using its button, without dispatching another mutation.

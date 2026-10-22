@@ -22,7 +22,7 @@ const html='<!doctype html><html><head><meta charset="utf-8"><style>body{font-fa
 const browserName=browserNames(process.env.RSI_WEB_BROWSER??'chromium')[0];
 const browser=await ({chromium,firefox})[browserName].launch();let service,page;const errors=[];let approvals=0;
 function facts(session) {
- const records=service.run(['--profile','evidence-cli','--resume',session,'--output','jsonl'],{input:':history\n'.repeat(32)+':exit\n'}).stdout.trim().split('\n').map(line=>JSON.parse(line));
+ const records=service.run(["run",'evidence-cli','--resume',session,'--output','jsonl'],{input:':history\n'.repeat(32)+':exit\n'}).stdout.trim().split('\n').map(line=>JSON.parse(line));
  return records.flatMap(record=>record.fact?[record.fact]:[]).sort((a,b)=>a.seq-b.seq);
 }
 async function complete(pane,input,prompt) {

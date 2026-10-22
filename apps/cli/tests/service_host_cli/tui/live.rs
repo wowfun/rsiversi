@@ -67,7 +67,7 @@ default="off"
     let mut terminal = TerminalClient::launch_environment(
         &fixture,
         &["--session-id", "live-tui-evidence"],
-        &["--profile", "test-tui"],
+        &["run", "test-tui"],
         &[("DEEPSEEK_API_KEY", Some(key.as_str()))],
     );
     terminal.capture_name = "live-deepseek".into();
@@ -162,7 +162,7 @@ default="off"
         "credential reached terminal output"
     );
     let history = fixture.assert_success(&[
-        "--profile",
+        "run",
         "test-cli",
         "--history",
         "live-tui-evidence",

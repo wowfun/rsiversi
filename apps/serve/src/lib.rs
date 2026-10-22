@@ -3,14 +3,21 @@
 #![warn(missing_docs)]
 #![allow(clippy::missing_errors_doc)]
 mod arguments;
+mod desktop_port;
 mod local_web;
 pub use local_web::HELP as WEB_HELP;
 pub use local_web::{
-    BrowserOpener, LocalWebAssetsFactory, SystemBrowserOpener, WebDevelopmentHandoff, WebLaunch,
-    WebLaunchEnvironment,
+    BrowserOpener, LocalWebAssetsFactory, SystemBrowserOpener, WebLaunch, WebLaunchEnvironment,
 };
+mod frontend;
+mod remote;
+pub use frontend::{FrontendRecipe, FrontendRuntime, FrontendSession, register_frontend_contracts};
+mod resident;
 mod service;
+mod tickets;
 mod web;
+pub use remote::{RemoteFactory, request as request_listener};
+pub use resident::{service_addons, supported_protocols};
 use rsi::application_services::{
     LocalBrowserAdministrationContract, ServingService, ServingServiceContract,
 };
@@ -35,8 +42,9 @@ use tokio::sync::oneshot;
 use tokio_util::{sync::CancellationToken, task::TaskTracker};
 
 /// Pure launcher help; displaying it never initializes an application.
-pub const HELP: &str = "Serve: --profile serve --bind ADDRESS --origin ORIGIN\n\
+pub const HELP: &str = "Serve: rsi serve --bind ADDRESS --origin ORIGIN\n\
   --tls-certificate FILE --tls-key FILE   Production TLS\n\
+  --assets ABSOLUTE_DIRECTORY            Optional authenticated Web bundle\n\
   --dev-http                            Explicit loopback HTTP development\n";
 
 /// Ordinary owner of HTTP application configuration, signals and its single entry.
@@ -180,11 +188,9 @@ impl PluginFactory for ServeFactory {
         };
         let mut launch_link = None;
         let mut opener = None;
-        let mut open_browser = false;
         let mut local_listener = None;
         let factory: Arc<dyn PluginFactory> = if let Some(web) = &self.local_web {
             let options = web.options().map_err(|error| self.failure(error))?;
-            open_browser = options.open;
             let device = plan
                 .local::<LocalBrowserAdministrationContract>()?
                 .launch()
@@ -204,18 +210,10 @@ impl PluginFactory for ServeFactory {
                 }),
             )?;
             launch_link = Some(secret);
-            if options.open && web.environment.development.is_none() {
+            if options.open {
                 opener = web.environment.opener.clone();
             }
-            let mut factory = rsi_api_http::LocalBrowserHttpFactory::new(ticket);
-            if let Some(origin) = web
-                .environment
-                .development
-                .as_ref()
-                .and_then(|dev| dev.frontend_origin())
-            {
-                factory = factory.with_frontend_origin(origin);
-            }
+            let factory = rsi_api_http::LocalBrowserHttpFactory::new(ticket);
             let factory = Arc::new(factory);
             local_listener = Some(factory.clone());
             factory
@@ -267,25 +265,12 @@ impl PluginFactory for ServeFactory {
             } else {
                 format!("http://{}", listener.address())
             };
-            if let Some(frontend) = self
-                .local_web
-                .as_ref()
-                .and_then(|web| web.environment.development.as_ref())
-                .and_then(|dev| dev.frontend_origin())
-            {
-                frontend.as_str().clone_into(&mut origin);
-            }
         }
         let runner = Arc::new(Runner {
             listener,
             origin,
             launch_link: Mutex::new(launch_link),
             opener,
-            development: self
-                .local_web
-                .as_ref()
-                .and_then(|web| web.environment.development.clone()),
-            open_browser,
             service: plan.local::<ServingServiceContract>()?,
             started: Mutex::new(false),
             stop: CancellationToken::new(),
@@ -336,8 +321,6 @@ struct Runner {
     origin: String,
     launch_link: Mutex<Option<rsi_credentials_protocol::SecretValue>>,
     opener: Option<Arc<dyn BrowserOpener>>,
-    development: Option<Arc<dyn WebDevelopmentHandoff>>,
-    open_browser: bool,
     started: Mutex<bool>,
     stop: CancellationToken,
     tasks: TaskTracker,
@@ -373,19 +356,12 @@ impl Runner {
             let mut reloading: Option<BoxFuture<'static, Result<(), String>>> = None;
             let launch = self.launch_link.lock().expect("launch link poisoned").take();
             let open = async {
-                if let Some(development) = &self.development {
-                    development.ready(self.listener.address()).await?;
-                }
                 if let Some(ticket) = launch {
                     let url = format!("{}#rsi-launch={}", self.origin, ticket.expose_secret());
-                    if let Some(development) = &self.development {
-                        development.launch(&url, self.open_browser).await?;
-                    } else {
                         writeln!(std::io::stdout(), "rsi web: {url}").map_err(|error| error.to_string())?;
                         if let Some(opener) = &self.opener && opener.open(&url).await.is_err() {
                             let _ = writeln!(std::io::stderr(), "Could not open the browser; use the launch link printed above.");
                         }
-                    }
                 } else {
                     writeln!(std::io::stdout(), "{}", serde_json::json!({"event":"serving", "origin":self.origin, "bind":self.listener.address().to_string()})).map_err(|error| error.to_string())?;
                 }
@@ -396,12 +372,10 @@ impl Runner {
             loop {
                 tokio::select! { biased;
                     () = self.stop.cancelled() => return Ok(()),
-                    () = development_stopped(self.development.as_ref()) => return Ok(()),
                     result = &mut open, if opening => { result?; opening = false; },
                     event = signals.next(reloading.is_none()) => match event {
                         #[cfg(any(unix, windows))]
                         service::SignalEvent::Stop => {
-                            if let Some(development) = &self.development { development.interrupted(); }
                             return Ok(());
                         },
                         #[cfg(unix)]
@@ -426,13 +400,6 @@ impl Runner {
                 1
             }
         }
-    }
-}
-
-async fn development_stopped(development: Option<&Arc<dyn WebDevelopmentHandoff>>) {
-    match development {
-        Some(owner) => owner.stopped().await,
-        None => std::future::pending().await,
     }
 }
 

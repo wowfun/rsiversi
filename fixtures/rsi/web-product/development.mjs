@@ -11,7 +11,7 @@ const source=resolve('apps/web/src/navigation.tsx'), bootstrap=resolve('apps/web
 const original=await readFile(source,'utf8'), boot=await readFile(bootstrap,'utf8');
 const updated=original.replace('<h2>Workspaces</h2>','<h2>Workspaces HMR verified</h2>');
 assert.notEqual(updated,original);
-const receipt=execFileSync(join(directory,'run'),['--profile','devices','register','isolated HMR'],{encoding:'utf8',timeout:30000});
+const receipt=execFileSync(join(directory,'run'),["run",'devices','register','isolated HMR'],{encoding:'utf8',timeout:30000});
 const browser=await chromium.launch(),page=await browser.newPage({viewport:{width:1440,height:980}}),errors=[];
 let changedSource=false,changedBootstrap=false;
 page.on('pageerror',error=>errors.push(error.message));

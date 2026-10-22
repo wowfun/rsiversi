@@ -48,7 +48,7 @@ try {
   assert.equal(mcp.evidence.calls, 1);
   assert.equal(live.service.provider.requests.length, 0, 'no mock model calls');
   const session = (await pane.locator('.pane-session').innerText()).split(' · ').at(-1);
-  const records = live.service.run(['--profile','evidence-cli','--resume',session,'--output','jsonl'], {input:':history\n'.repeat(8)+':exit\n'}).stdout.trim().split('\n').map(line => JSON.parse(line));
+  const records = live.service.run(["run",'evidence-cli','--resume',session,'--output','jsonl'], {input:':history\n'.repeat(8)+':exit\n'}).stdout.trim().split('\n').map(line => JSON.parse(line));
   const facts = records.flatMap(record => record.fact ? [record.fact] : []).sort((a,b) => a.seq - b.seq);
   assert(facts.length > 0 && facts[0].seq === 1);
   const echo = facts.find(fact => fact.type === 'tool_result' && fact.result?.value?.tool === 'echo');

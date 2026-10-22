@@ -10,6 +10,11 @@ impl CliFixture {
         let config = temporary.path().join("config/rsi");
         let workspace = temporary.path().join("workspace");
         std::fs::create_dir_all(&config).unwrap();
+        std::fs::write(
+            config.join("rsi.toml"),
+            "format = 1\n[service]\nkind = 'catalog'\nid = 'fixture'\n",
+        )
+        .unwrap();
         std::fs::create_dir_all(&workspace).unwrap();
         std::fs::write(
             config.join("settings.json"),
@@ -54,6 +59,23 @@ max_output_reserve_tokens = 16384
             ),
         )
         .unwrap();
+        #[cfg(windows)]
+        {
+            // Native personal discovery uses the Profile Known Folder, not HOME.
+            // Isolate this fixture through the ordinary Host Profile boundary.
+            let profile = host_directory.join("host.profile.toml");
+            let mut source = std::fs::read_to_string(&profile).unwrap();
+            let context = serde_json::json!({
+                "user_instruction_file": config.join("AGENTS.md"),
+                "user_agent_roots": [config.join("agents")],
+                "user_skill_roots": [config.join("skills")]
+            });
+            source.push_str(&format!(
+                "\n[[steps]]\nkind = 'patch'\ntarget = 'rsi-agent-workspace-context'\nconfig_json = {}\n",
+                toml::Value::String(context.to_string())
+            ));
+            std::fs::write(profile, source).unwrap();
+        }
         std::fs::write(
             application_directory.join("application.profile.toml"),
             "format = 1\n[[steps]]\nkind = \"plugin\"\nid = \"connection\"\nplugin = \"rsi.application.connection\"\nconfig = { host_profile = \"fixture\" }\n[[steps]]\nkind = \"plugin\"\nid = \"application\"\nplugin = \"rsi.application.headless\"\n",
@@ -67,7 +89,7 @@ max_output_reserve_tokens = 16384
         Self {
             temporary,
             workspace,
-            binary: env!("CARGO_BIN_EXE_rsi").into(),
+            binary: support::product_binary(),
         }
     }
 
@@ -154,7 +176,7 @@ max_output_reserve_tokens = 16384
         output
     }
 
-    #[cfg(not(target_os = "linux"))]
+    #[cfg(not(any(target_os = "linux", windows)))]
     fn owner_log(&self) -> String {
         format!(
             "embedded Session service has no daemon log (fixture: {})",
@@ -162,7 +184,7 @@ max_output_reserve_tokens = 16384
         )
     }
 
-    #[cfg(target_os = "linux")]
+    #[cfg(any(target_os = "linux", windows))]
     fn owner_log(&self) -> String {
         use std::io::Read as _;
         let mut log = String::new();
@@ -178,7 +200,7 @@ max_output_reserve_tokens = 16384
 
 impl Drop for CliFixture {
     fn drop(&mut self) {
-        #[cfg(target_os = "linux")]
+        #[cfg(any(target_os = "linux", windows))]
         let _ = self.command().args(["host", "stop", "--force"]).output();
     }
 }

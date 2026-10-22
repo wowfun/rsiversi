@@ -68,15 +68,17 @@ async fn incompatible_agent_store_reports_schema_and_preserves_existing_bytes() 
     drop(db);
     let before = std::fs::read(&path).unwrap();
     let mut terminal = TerminalClient::launch(&fixture, &[], &["tui"]);
-    terminal.until("Agent Store schema mismatch").await;
-    terminal
-        .until(&format!("expected {version}, actual {}", version - 1))
-        .await;
-    terminal.until("no automatic migration").await;
-    terminal.until("--reset-state").await;
-    let output = terminal.output.lock().unwrap();
-    assert!(String::from_utf8_lossy(&output.complete()).contains(root.to_str().unwrap()));
-    drop(output);
+    terminal.until("inspect").await;
+    let diagnostic = fixture.owner_log();
+    assert!(
+        diagnostic.contains("Agent Store schema mismatch"),
+        "{diagnostic}"
+    );
+    assert!(
+        diagnostic.contains(&format!("expected {version}, actual {}", version - 1)),
+        "{diagnostic}"
+    );
+    assert!(diagnostic.contains("--reset-state"), "{diagnostic}");
     let status = terminal.child.wait().unwrap();
     assert_eq!(status.exit_code(), 2);
     assert_eq!(std::fs::read(&path).unwrap(), before);
@@ -84,7 +86,7 @@ async fn incompatible_agent_store_reports_schema_and_preserves_existing_bytes() 
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 async fn reset_state_tui_archives_old_schema_for_both_launcher_forms() {
-    for launcher in [&["tui"][..], &["--profile", "tui"][..]] {
+    for launcher in [&["tui"][..], &["run", "tui"][..]] {
         let fixture = CliFixture::new("http://127.0.0.1:1");
         let root = fixture.temporary.path().join("state/rsi/agent");
         drop(rsi_agent_store_sqlite::SqliteStore::open(&root).unwrap());
@@ -97,13 +99,18 @@ async fn reset_state_tui_archives_old_schema_for_both_launcher_forms() {
         .unwrap();
         drop(db);
         let before = std::fs::read(root.join("sessions.sqlite3")).unwrap();
-        let mut terminal = TerminalClient::launch(&fixture, &["--reset-state"], launcher);
-        terminal.until("Enter send").await;
+        let entry = ["--reset-state"]
+            .into_iter()
+            .chain(launcher.iter().copied())
+            .collect::<Vec<_>>();
+        let mut terminal = TerminalClient::launch(&fixture, &[], &entry);
+        terminal.until("Ctrl+J adds a line").await;
+        terminal.until("fixture-model").await;
         terminal.send(b"\x04");
         terminal.finish().await;
         assert!(
             String::from_utf8_lossy(&terminal.output.lock().unwrap().complete())
-                .contains("previous state preserved at")
+                .contains("Preserved backup:")
         );
         let backups = super::super::reset::backups(&fixture);
         assert_eq!(backups.len(), 1);
@@ -111,6 +118,7 @@ async fn reset_state_tui_archives_old_schema_for_both_launcher_forms() {
             std::fs::read(backups[0].join("sessions.sqlite3")).unwrap(),
             before
         );
+        fixture.assert_success(&["host", "stop"]);
         rsi_agent_store_sqlite::SqliteStore::verify(&root).unwrap();
     }
 }
@@ -168,19 +176,30 @@ async fn unavailable_credential_store_retry_does_not_add_a_navigation_step() {
 async fn empty_configuration_is_interactive_through_both_tui_entries() {
     for (entry, missing_route) in [
         (&["tui"][..], false),
-        (&["--profile", "tui"][..], false),
+        (&["run", "tui"][..], false),
         (&["tui"][..], true),
     ] {
         let fixture = CliFixture::new("http://127.0.0.1:1");
         if !missing_route {
             std::fs::remove_file(fixture.temporary.path().join("config/rsi/settings.json"))
                 .unwrap();
+        } else {
+            std::fs::write(
+                fixture.temporary.path().join("config/rsi/settings.json"),
+                serde_json::to_vec(&serde_json::json!({
+                    "rsi.agent": {
+                        "default_model": {"deployment": "fixture", "model": "missing-model"}
+                    }
+                }))
+                .unwrap(),
+            )
+            .unwrap();
         }
         let mut terminal = TerminalClient::launch(&fixture, &[], entry);
         terminal.until("No session attached").await;
         if missing_route {
             terminal
-                .until("Default route fixture/fixture-model is unavailable")
+                .until("Default route fixture/missing-model is unavailable")
                 .await;
         }
         terminal.send(b"retained draft\r");
@@ -306,7 +325,7 @@ async fn login_discovery_default_first_message_and_restart_local_and_daemon() {
         let mut restarted = TerminalClient::launch_environment(
             &fixture,
             &["--session-id", "setup-restart"],
-            &["--profile", "tui"],
+            &["run", "tui"],
             &[("RSI_OPENAI_COMPATIBLE_API_KEY", None)],
         );
         restarted.until("Ctrl+J adds a line").await;
@@ -546,7 +565,7 @@ async fn home_clipboard_helper_does_not_block_help_input() {
     let (endpoint, provider) = provider().await;
     let fixture = CliFixture::new(&endpoint);
     fixture.assert_success(&[
-        "--profile",
+        "run",
         "test-headless",
         "seed",
         "--session-id",

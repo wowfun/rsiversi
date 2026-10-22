@@ -145,7 +145,7 @@ async fn project_and_personal_skills_and_markdown_work_through_both_tui_entries(
             .body(Body::from(body))
             .unwrap()
     }
-    for (launcher, daemon) in [(&["tui"][..], false), (&["--profile", "tui"][..], true)] {
+    for (launcher, daemon) in [(&["tui"][..], false), (&["run", "tui"][..], true)] {
         let requests = Arc::new(std::sync::Mutex::new(Vec::<serde_json::Value>::new()));
         let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
         let endpoint = format!("http://{}/v1", listener.local_addr().unwrap());

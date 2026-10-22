@@ -27,7 +27,7 @@ export async function selectPairedBundle(environment = process.env) {
   }
   bundle = resolve(bundle ?? dirname(selectedBinary));
   const name = process.platform === 'win32' ? 'rsi.exe' : 'rsi';
-  const binary = await realpath(selectedBinary ?? join(bundle, name)).catch(() => { throw new Error('Build paired artifacts first: bash scripts/rsiversi.sh build web --debug'); });
+  const binary = await realpath(selectedBinary ?? join(bundle, name)).catch(() => { throw new Error('Build paired artifacts first: cargo run --locked -p rsi-app-tools -- fixture-dist web --debug'); });
   const assets = await realpath(selectedAssets ?? join(bundle, 'assets'));
   if (environment.RSI_PAIRED_BUNDLE && selectedBinary &&
       (binary !== await realpath(join(bundle,name)) || assets !== await realpath(join(bundle,'assets')))) {

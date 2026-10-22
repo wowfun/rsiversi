@@ -312,9 +312,9 @@ fn built_binary_advertises_the_complete_management_command_tree() {
     assert!(positional_copy.stdout.is_empty());
 
     for arguments in [
-        vec!["--profile", "headless", "task", "--agent-preset", "Upper"],
+        vec!["run", "headless", "task", "--agent-preset", "Upper"],
         vec![
-            "--profile",
+            "run",
             "headless",
             "task",
             "--resume",
@@ -323,7 +323,7 @@ fn built_binary_advertises_the_complete_management_command_tree() {
             "standard",
         ],
         vec![
-            "--profile",
+            "run",
             "headless",
             "task",
             "--agent-preset",
@@ -726,7 +726,7 @@ fn built_binary_copies_deletes_and_resolves_defaults_at_run_time() {
 
     for preset_arguments in [vec!["--agent-preset", "future-agent"], Vec::<&str>::new()] {
         let mut arguments = vec![
-            "--profile",
+            "run",
             "test-headless",
             "task",
             "--cwd",
@@ -755,7 +755,7 @@ fn application_preflight_rejects_nested_config_symlinks_without_creating_a_store
     std::os::unix::fs::symlink(&fixture.xdg_config, &alias).unwrap();
     fixture.xdg_config = alias;
     let output = fixture.command(&[
-        "--profile",
+        "run",
         "test-headless",
         "task",
         "--cwd",
@@ -783,7 +783,7 @@ fn application_bootstrap_accepts_the_system_config_alias_for_preset_validation()
         assert!(fixture.xdg_config.starts_with("/var"));
     }
     let output = fixture.command(&[
-        "--profile",
+        "run",
         "test-headless",
         "task",
         "--cwd",

@@ -1,11 +1,20 @@
 #[cfg(target_os = "linux")]
-use super::host_cli::{
-    DaemonControlEvent, format_service_host_diagnostics, host_stop_timeout,
-    next_daemon_control_event, stop_reload_task,
-};
+use super::host_cli::{DaemonControlEvent, next_daemon_control_event, stop_reload_task};
+#[cfg(any(target_os = "linux", windows))]
+use super::host_cli::{format_service_host_diagnostics, host_stop_timeout};
 use super::*;
 
-#[cfg(target_os = "linux")]
+#[test]
+fn maintenance_help_is_resolved_before_home_initialization() {
+    for command in ["config", "import"] {
+        assert!(matches!(
+            cli::parse_cli([OsString::from(command), OsString::from("--help")]).unwrap(),
+            Parse::Help(_)
+        ));
+    }
+}
+
+#[cfg(any(target_os = "linux", windows))]
 #[tokio::test]
 async fn daemon_join_failure_drains_reload_diagnostics_and_presets_before_returning() {
     let daemon = tokio::spawn(async { panic!("injected daemon failure") });
@@ -45,7 +54,7 @@ async fn daemon_join_failure_drains_reload_diagnostics_and_presets_before_return
     assert!(reload.is_none() && presets_done.is_cancelled());
 }
 
-#[cfg(target_os = "linux")]
+#[cfg(any(target_os = "linux", windows))]
 #[test]
 fn service_host_diagnostics_format_has_stable_explicit_fields() {
     let formatted = format_service_host_diagnostics(
@@ -71,42 +80,31 @@ fn parse(arguments: &[&str]) -> rsi::Result<Parse> {
 }
 
 #[test]
-fn reset_state_is_a_launcher_option_and_respects_the_argument_separator() {
-    for arguments in [
-        &["tui", "--reset-state"][..],
-        &["--profile", "cli", "--reset-state"][..],
+fn global_resets_share_one_parser_and_application_arguments_remain_literal() {
+    for command in [
+        vec!["tui"],
+        vec!["run", "cli"],
+        vec!["host", "start"],
+        vec!["host", "serve"],
+        vec!["host", "restart"],
     ] {
-        let Parse::Application(application) = parse(arguments).unwrap() else {
+        let input = ["--reset-config", "--reset-state"]
+            .into_iter()
+            .chain(command)
+            .map(OsString::from);
+        let (options, arguments) = super::launch::parse(input).unwrap();
+        assert!(options.reset_config && options.reset_state);
+        assert!(super::cli::parse_cli(arguments).is_ok());
+    }
+    for tail in [vec!["--reset-state"], vec!["--", "--reset-state"]] {
+        let mut input = vec!["run", "headless"];
+        input.extend(tail.iter().copied());
+        let Parse::Application(application) = parse(&input).unwrap() else {
             panic!("application")
         };
-        assert!(application.reset_state);
-        assert!(application.arguments.is_empty());
+        assert_eq!(application.arguments, tail);
     }
-    let Parse::Application(application) =
-        parse(&["--profile", "headless", "--", "--reset-state"]).unwrap()
-    else {
-        panic!("application")
-    };
-    assert!(!application.reset_state);
-    assert_eq!(application.arguments, ["--", "--reset-state"]);
-    assert!(parse(&["tui", "--reset-state", "--reset-state"]).is_err());
-    for command in ["stop", "status", "reload"] {
-        assert!(parse(&["host", command, "--reset-state"]).is_err());
-    }
-    for command in ["profile", "agent-store", "agent-preset"] {
-        assert!(parse(&[command, "--reset-state"]).is_err());
-    }
-}
-
-#[cfg(target_os = "linux")]
-#[test]
-fn reset_state_is_available_for_all_host_start_operations() {
-    for command in ["start", "serve", "restart"] {
-        let Parse::Host(host) = parse(&["host", command, "--reset-state"]).unwrap() else {
-            panic!("host")
-        };
-        assert!(host.reset_state);
-    }
+    assert!(parse(&["host", "start", "--reset-state"]).is_err());
 }
 
 #[test]
@@ -133,14 +131,9 @@ fn agent_store_verify_has_a_strict_absolute_root_contract() {
 
 #[test]
 fn parses_named_applications_and_strict_profile_management() {
-    let Parse::Application(application) = parse(&[
-        "--profile",
-        "headless",
-        "task",
-        "--session-id",
-        "session-one",
-    ])
-    .unwrap() else {
+    let Parse::Application(application) =
+        parse(&["run", "headless", "task", "--session-id", "session-one"]).unwrap()
+    else {
         panic!("application")
     };
     assert_eq!(application.profile.as_str(), "headless");
@@ -161,7 +154,7 @@ fn parses_named_applications_and_strict_profile_management() {
 }
 
 #[test]
-#[cfg(target_os = "linux")]
+#[cfg(any(target_os = "linux", windows))]
 fn parses_explicit_host_lifecycle_without_ambiguous_targets() {
     let Parse::Host(command) =
         parse(&["host", "restart", "--profile", "custom", "--force"]).unwrap()
@@ -182,7 +175,7 @@ fn parses_explicit_host_lifecycle_without_ambiguous_targets() {
 }
 
 #[test]
-#[cfg(not(target_os = "linux"))]
+#[cfg(not(any(target_os = "linux", windows)))]
 fn host_commands_validate_syntax_but_have_no_daemon_state_on_this_platform() {
     assert!(matches!(
         parse(&["host", "start"]).unwrap(),
@@ -195,7 +188,7 @@ fn host_commands_validate_syntax_but_have_no_daemon_state_on_this_platform() {
     assert!(parse(&["host", "reload", "--force"]).is_err());
 }
 
-#[cfg(target_os = "linux")]
+#[cfg(any(target_os = "linux", windows))]
 #[test]
 fn graceful_host_stop_wait_includes_drain_and_shutdown_margin() {
     assert_eq!(
@@ -242,8 +235,16 @@ async fn daemon_stop_selection_remains_live_during_reload() {
 }
 
 #[test]
-fn removed_direct_run_is_rejected() {
-    assert!(parse(&["run", "task"]).is_err());
+fn run_selects_a_named_application_and_preserves_opaque_arguments() {
+    let Parse::Application(application) = parse(&["run", "task", "--", "--config-home"]).unwrap()
+    else {
+        panic!("application");
+    };
+    assert_eq!(application.profile.as_str(), "task");
+    assert_eq!(application.arguments, ["--", "--config-home"]);
+    assert!(parse(&["run"]).is_err());
+    assert!(parse(&["--profile", "tui"]).is_err());
+    assert!(parse(&["__dev", "web"]).is_err());
 }
 
 #[test]
@@ -251,13 +252,15 @@ fn tui_alias_preserves_application_arguments() {
     let Parse::Application(alias) = parse(&["tui", "--resume", "saved"]).unwrap() else {
         panic!("application");
     };
-    let Parse::Application(profile) = parse(&["--profile", "tui", "--resume", "saved"]).unwrap()
-    else {
+    let Parse::Application(profile) = parse(&["run", "tui", "--resume", "saved"]).unwrap() else {
         panic!("application");
     };
     assert_eq!(alias.profile, profile.profile);
     assert_eq!(alias.arguments, profile.arguments);
-    assert!(parse(&[]).is_err());
+    let Parse::Application(default) = parse(&[]).unwrap() else {
+        panic!("default application")
+    };
+    assert_eq!(default.profile.as_str(), "tui");
 }
 
 #[test]
@@ -268,18 +271,17 @@ fn application_reset_option_cannot_consume_task_or_option_values() {
         vec!["--image", "--reset-state", "task"],
         vec!["--", "--reset-state"],
     ] {
-        let mut input = vec!["--profile", "headless"];
+        let mut input = vec!["run", "headless"];
         input.extend(arguments.iter().copied());
         let Parse::Application(application) = parse(&input).unwrap() else {
             panic!("application");
         };
-        assert!(!application.reset_state, "{arguments:?}");
         assert_eq!(application.arguments, arguments);
     }
 }
 
 #[test]
-fn web_alias_preserves_application_arguments_and_reset() {
+fn web_alias_preserves_application_arguments() {
     for tail in [
         vec![],
         vec!["--help"],
@@ -288,7 +290,7 @@ fn web_alias_preserves_application_arguments_and_reset() {
     ] {
         let mut short = vec!["web"];
         short.extend(tail.iter().copied());
-        let mut long = vec!["--profile", "web"];
+        let mut long = vec!["run", "web"];
         long.extend(tail);
         let Parse::Application(alias) = parse(&short).unwrap() else {
             panic!("application")
@@ -298,6 +300,29 @@ fn web_alias_preserves_application_arguments_and_reset() {
         };
         assert_eq!(alias.profile, explicit.profile);
         assert_eq!(alias.arguments, explicit.arguments);
-        assert_eq!(alias.reset_state, explicit.reset_state);
     }
+}
+
+#[test]
+fn lifecycle_commands_reject_reset_before_home_initialization() {
+    let options = super::launch::Options {
+        reset_state: true,
+        ..Default::default()
+    };
+    for arguments in [
+        ["web", "status"],
+        ["web", "stop"],
+        ["host", "status"],
+        ["host", "stop"],
+        ["host", "reload"],
+    ] {
+        let command = parse(&arguments).unwrap();
+        #[cfg(any(target_os = "linux", windows))]
+        assert!(super::launch::validate_command(&options, &command).is_err());
+        #[cfg(not(any(target_os = "linux", windows)))]
+        if arguments[0] == "web" {
+            assert!(super::launch::validate_command(&options, &command).is_err());
+        }
+    }
+    assert!(super::launch::validate_command(&options, &parse(&["tui"]).unwrap()).is_ok());
 }

@@ -5900,7 +5900,6 @@ dependencies = [
  "rsi-api-http",
  "rsi-api-protocol",
  "rsi-application",
- "rsi-build-info",
  "rsi-client",
  "rsi-credentials-local",
  "rsi-credentials-protocol",
@@ -5909,6 +5908,7 @@ dependencies = [
  "rsi-meta-native-loader",
  "rsi-meta-scope",
  "rsi-native-addons-api",
+ "rsi-packages",
  "rsi-sandbox",
  "rsi-serve",
  "rsi-service-host",
@@ -5922,8 +5922,10 @@ dependencies = [
  "rsi-tools-protocol",
  "rsi-ui",
  "rsi-web-assets",
+ "rsi-web-control",
  "rsi-workbench-ui",
  "rsi-workspace-review-ui",
+ "serde",
  "serde_json",
  "tempfile",
  "tokio",
@@ -6146,12 +6148,13 @@ dependencies = [
  "rsi-configuration-api",
  "rsi-credentials-local",
  "rsi-credentials-protocol",
- "rsi-dev-control",
  "rsi-files-native-fs",
  "rsi-host",
  "rsi-meta",
  "rsi-meta-profile",
+ "rsi-packages",
  "rsi-process",
+ "rsi-process-native",
  "rsi-sandbox",
  "rsi-serve",
  "rsi-service-host",
@@ -6161,6 +6164,7 @@ dependencies = [
  "rsi-terminal",
  "rsi-tools-protocol",
  "rsi-user-questions-protocol",
+ "rsi-web-control",
  "rusqlite",
  "rustix 1.1.4",
  "serde",
@@ -6171,6 +6175,7 @@ dependencies = [
  "tokio-util",
  "toml 0.9.12+spec-1.1.0",
  "vt100",
+ "windows-sys 0.61.2",
 ]
 
 [[package]]
@@ -6370,23 +6375,17 @@ dependencies = [
 name = "rsi-desktop"
 version = "0.0.1"
 dependencies = [
- "async-trait",
- "futures-util",
- "rsi",
- "rsi-api-http",
- "rsi-api-protocol",
- "rsi-app-catalog",
- "rsi-application",
- "rsi-build-info",
+ "async-stream",
+ "getrandom 0.3.4",
+ "hex",
+ "rsi-desktop-bridge",
  "rsi-files-native-fs",
- "rsi-gui",
  "rsi-host",
- "rsi-meta",
+ "rsi-packages",
+ "rsi-service-host",
  "rsi-session-export",
- "rsi-ui",
- "rsi-web-assets",
- "rsi-workbench-ui",
- "serde",
+ "rsi-session-protocol",
+ "rsi-web-control",
  "serde_json",
  "tauri",
  "tauri-build",
@@ -6395,6 +6394,17 @@ dependencies = [
  "tempfile",
  "tokio",
  "tokio-util",
+]
+
+[[package]]
+name = "rsi-desktop-bridge"
+version = "0.0.1"
+dependencies = [
+ "rsi-api-protocol",
+ "rsi-api-schema-build",
+ "rsi-session-protocol",
+ "serde",
+ "serde_json",
 ]
 
 [[package]]
@@ -7360,11 +7370,20 @@ dependencies = [
  "rsi-api-http",
  "rsi-api-protocol",
  "rsi-application",
- "rsi-build-info",
  "rsi-credentials-protocol",
+ "rsi-dev-control",
+ "rsi-files-native-fs",
+ "rsi-host",
  "rsi-meta",
+ "rsi-packages",
+ "rsi-process",
+ "rsi-process-local",
+ "rsi-sandbox",
+ "rsi-sandbox-local",
+ "rsi-service-host",
  "rsi-web-assets",
  "rsi-web-assets-api",
+ "rsi-web-control",
  "serde_json",
  "sha2",
  "tokio",
@@ -8170,7 +8189,7 @@ dependencies = [
  "js-sys",
  "rsi-api-browser-client",
  "rsi-api-protocol",
- "rsi-build-info",
+ "rsi-api-schema-build",
  "rsi-client-composition",
  "rsi-credentials-protocol",
  "rsi-gui",
@@ -8236,6 +8255,18 @@ dependencies = [
  "tempfile",
  "tokio",
  "tokio-util",
+]
+
+[[package]]
+name = "rsi-web-control"
+version = "0.0.1"
+dependencies = [
+ "rsi-api-http",
+ "rsi-api-protocol",
+ "rsi-api-schema-build",
+ "serde",
+ "serde_json",
+ "tokio",
 ]
 
 [[package]]

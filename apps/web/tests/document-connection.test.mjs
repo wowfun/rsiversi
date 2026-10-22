@@ -1,7 +1,6 @@
 import test from "node:test";
 import assert from "node:assert/strict";
 import { DocumentConnection } from "../document-connection.js";
-import { NativeDocument } from "../src/native.ts";
 
 const gate = () => {
   let resolve, reject;
@@ -103,20 +102,15 @@ test("authentication storage cannot replace connection operations",async()=>{
   assert.equal(f.transport.terminated,1);assert.equal(f.mounts.closed,1);
 });
 
-for(const failure of ["response","network"]) test(`native ${failure} cleanup failure remains observable and blocks replacement`,async()=>{
-  const original=globalThis.fetch;let calls=0;
-  globalThis.fetch=async path=>{assert.equal(path,"/_failed");calls++;if(failure==="network")throw new Error("offline");return new Response("cleanup incomplete",{status:503});};
-  try {
-    const native=new NativeDocument(),f=await fixture({terminate:()=>native.terminate()});
-    const matches=failure==="network"?/offline/:/cleanup failed/;
-    await assert.rejects(f.owner.retire(),matches);
-    assert.equal(f.owner.phase,"Closed");
-    await assert.rejects(f.owner.settled(),matches);
-    await assert.rejects(f.owner.retire(),matches);
-    await assert.rejects(f.owner.request("command","{}"),error=>error.notAdmitted===true);
-    assert.equal(calls,1);assert.equal(f.mounts.closed,1);
-    assert.throws(()=>native.postMessage({kind:"call"}),/closed/);
-  } finally {globalThis.fetch=original;}
+test("transport cleanup failure remains observable and blocks replacement",async()=>{
+  let calls=0;
+  const f=await fixture({terminate:()=>{calls++;return Promise.reject(new Error("cleanup failed"));}});
+  await assert.rejects(f.owner.retire(),/cleanup failed/);
+  assert.equal(f.owner.phase,"Closed");
+  await assert.rejects(f.owner.settled(),/cleanup failed/);
+  await assert.rejects(f.owner.retire(),/cleanup failed/);
+  await assert.rejects(f.owner.request("command","{}"),error=>error.notAdmitted===true);
+  assert.equal(calls,1);assert.equal(f.mounts.closed,1);
 });
 
 test("failed save restores only the current draining owner",async()=>{
@@ -146,32 +140,6 @@ test("lane limits refuse before transport and cleanup failure remains observable
   assert.equal(f.calls.filter(call=>call.method==="command").length,8);
   f.owner.fail(new Error("lost"));await Promise.all(pending);
   await assert.rejects(f.owner.settled(),/dispose failed/);
-});
-
-test("native termination is idempotent and waits for the actual close response",async()=>{
-  const original=globalThis.fetch,closed=gate();let calls=0;
-  globalThis.fetch=async path=>{assert.equal(path,"/_failed");calls++;return closed.promise;};
-  try {
-    const native=new NativeDocument();
-    const first=native.terminate();assert.equal(native.terminate(),first);assert.equal(calls,1);
-    let settled=false;first.then(()=>{settled=true;});await Promise.resolve();assert.equal(settled,false);
-    closed.resolve({ok:true});await first;assert.equal(settled,true);
-    assert.throws(()=>native.postMessage({kind:"call"}),/closed/);
-  } finally {globalThis.fetch=original;}
-});
-
-test("transport failure while draining rejects pending replies and finishes the original owner", async () => {
-  const save = gate(), f = await fixture();
-  const pending = assert.rejects(f.owner.request("command", "{}"), /lost while draining/);
-  const closing = f.owner.disconnect(() => save.promise);
-  await f.transport.onmessage({data:{kind:"failed",error:"lost while draining"}});
-  await pending;
-  assert.equal(f.owner.phase, "Failed");
-  await f.owner.settled();
-  assert.equal(f.transport.terminated, 1);
-  save.resolve();
-  await closing;
-  assert.equal(f.calls.filter(call => call.method === "disconnect").length, 0);
 });
 
 for (const reason of ["quota exhausted", null]) test(`non-Error draft rejection ${String(reason)} keeps a useful message`, async () => {
@@ -367,4 +335,18 @@ test("lane capacity releases once for replies and rejects, including duplicate r
   await f.owner.retire();
   const settled = await Promise.all([...pending, terminal, replacement, afterFailure]);
   assert.ok(settled.slice(2).every(error => /replaced/.test(error.message)));
+});
+
+test("transport failure while draining rejects pending replies and finishes the original owner", async () => {
+  const save = gate(), f = await fixture();
+  const pending = assert.rejects(f.owner.request("command", "{}"), /lost while draining/);
+  const closing = f.owner.disconnect(() => save.promise);
+  await f.transport.onmessage({data:{kind:"failed",error:"lost while draining"}});
+  await pending;
+  assert.equal(f.owner.phase, "Failed");
+  await f.owner.settled();
+  assert.equal(f.transport.terminated, 1);
+  save.resolve();
+  await closing;
+  assert.equal(f.calls.filter(call => call.method === "disconnect").length, 0);
 });

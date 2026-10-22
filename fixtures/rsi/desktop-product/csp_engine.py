@@ -1,4 +1,4 @@
-"""Opt-in WebKitGTK custom-scheme CSP probe using captured native response bytes.
+"""Opt-in WebKitGTK HTTP CSP probe using captured native response bytes.
 
 Run with /usr/bin/python3 under Xvfb; requires PyGObject and WebKit2 4.1 GI.
 The product navigation gate excludes foreign parents, so this separate view tests
@@ -10,6 +10,8 @@ from pathlib import Path
 import re
 import time
 from urllib.parse import urlsplit
+from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
+import threading
 import gi
 
 gi.require_version('Gtk', '3.0')
@@ -23,40 +25,44 @@ parser.add_argument('--report', type=Path, required=True)
 args = parser.parse_args()
 responses = {item['path']: item for item in json.loads(args.responses.read_text())}
 context = WebKit2.WebContext.new_ephemeral()
-# Match Wry's native WebKit custom-protocol registration.
-context.get_security_manager().register_uri_scheme_as_secure('rsi')
+# Match the product loopback HTTP document transport.
 strip_ancestors = False
 allow_nested = False
 nested_requests = []
 navigation_decisions = []
 
-def serve(request):
-    address = urlsplit(request.get_uri())
-    if address.path == '/nested-target':
-        nested_requests.append(request.get_uri())
-        body, csp = '<!doctype html><p>Nested transport control</p>', None
-    elif address.path in ('/preview-local.html', '/preview-online.html', '/not-preview.html'):
-        selected = responses['/preview-online.html' if address.path == '/preview-online.html' else '/preview-local.html']
-        body, csp = selected['body'], selected['csp']
-        if allow_nested:
-            csp = csp.replace("frame-src 'none'", 'frame-src rsi:').replace("object-src 'none'", 'object-src rsi:')
-        if strip_ancestors:
-            csp = re.sub(r'(?:^|;)\s*frame-ancestors\s+[^;]*', '', csp)
-    else:
-        body = '<!doctype html><html><body>Native CSP engine probe</body></html>'
-        csp = responses['/']['csp'] if address.hostname == 'localhost' else None
-    data = body.encode()
-    response = WebKit2.URISchemeResponse.new(Gio.MemoryInputStream.new_from_bytes(GLib.Bytes.new(data)), len(data))
-    response.set_status(200, 'OK')
-    response.set_content_type('text/html; charset=utf-8')
-    headers = Soup.MessageHeaders.new(Soup.MessageHeadersType.RESPONSE)
-    headers.append('Cache-Control', 'no-store')
-    if csp:
-        headers.append('Content-Security-Policy', csp)
-    response.set_http_headers(headers)
-    request.finish_with_response(response)
+class ResponseHandler(BaseHTTPRequestHandler):
+    def log_message(self, *_args): pass
+    def do_GET(self):
+        address = urlsplit(self.path)
+        if address.path == '/nested-target':
+            nested_requests.append(self.path)
+            body, csp = '<!doctype html><p>Nested transport control</p>', None
+        elif address.path in ('/preview-local.html', '/preview-online.html', '/not-preview.html'):
+            selected = responses['/preview-online.html' if address.path == '/preview-online.html' else '/preview-local.html']
+            body, csp = selected['body'], selected['csp']
+            if allow_nested:
+                csp = csp.replace("frame-src 'none'", 'frame-src http:').replace("object-src 'none'", 'object-src http:')
+            if strip_ancestors:
+                csp = re.sub(r'(?:^|;)\s*frame-ancestors\s+[^;]*', '', csp)
+        else:
+            body = '<!doctype html><html><body>Native CSP engine probe</body></html>'
+            csp = responses['/']['csp'] if self.server is servers['localhost'] else None
+        data = body.encode()
+        self.send_response(200); self.send_header('Content-Type', 'text/html; charset=utf-8')
+        self.send_header('Content-Length', str(len(data))); self.send_header('Cache-Control', 'no-store')
+        if csp: self.send_header('Content-Security-Policy', csp)
+        self.end_headers(); self.wfile.write(data)
 
-context.register_uri_scheme('rsi', serve)
+servers = {name:ThreadingHTTPServer(('127.0.0.1',0),ResponseHandler) for name in ('localhost','foreign')}
+origins = {name:'http://127.0.0.1:'+str(server.server_port) for name,server in servers.items()}
+# Preserve every directive, rebinding only the captured ephemeral listener's
+# origin to this probe's owning HTTP server.
+captured = re.search(r"(?:^|;)\s*frame-ancestors\s+(http://127\.0\.0\.1:\d+)(?:;|$)", responses['/preview-local.html']['csp'])
+assert captured, 'Expected the product loopback HTTP ancestor policy'
+for response in responses.values():
+    response['csp'] = response['csp'].replace(captured[1], origins['localhost'])
+for server in servers.values(): threading.Thread(target=server.serve_forever,daemon=True).start()
 window = Gtk.Window()
 view = WebKit2.WebView.new_with_context(context)
 view.get_settings().set_enable_write_console_messages_to_stdout(True)
@@ -96,14 +102,14 @@ evidence = []
 try:
     for path in ('/preview-local.html', '/preview-online.html'):
         # The foreign/foreign control proves the channel and scripts work under
-        # the same custom-scheme engine; the remaining foreign cases must not run.
+        # the same HTTP engine; the remaining foreign cases must not render.
         for origin, child_origin, permissive in [('localhost', 'localhost', False), ('foreign', 'foreign', True), ('foreign', 'localhost', True), ('foreign', 'localhost', False)]:
             strip_ancestors = permissive
             loaded.clear()
             nonce = str(len(evidence))
-            view.load_uri('rsi://' + origin + '/?case=' + nonce)
+            view.load_uri(origins[origin] + '/?case=' + nonce)
             wait(lambda: bool(loaded))
-            target = json.dumps('rsi://' + child_origin + path + '?case=' + nonce)
+            target = json.dumps(origins[child_origin] + path + '?case=' + nonce)
             evaluate("""window.probe={ready:false,rendered:false,loaded:false,violations:[],origin:location.origin,childOrigin:null};document.addEventListener('securitypolicyviolation',e=>probe.violations.push(e.effectiveDirective));const f=document.createElement('iframe');window.addEventListener('message',e=>{
                 if(e.source!==f.contentWindow)return;
                 if(e.data?.type==='probe-rendered'){probe.rendered=true;return;}
@@ -112,16 +118,19 @@ try:
                 const channel=new MessageChannel();f.contentWindow.postMessage({type:'rsi-preview-connect'},'*',[channel.port2]);channel.port1.postMessage({type:'render',html:'<script>parent.postMessage({type:"probe-rendered"},"*")<\\/script>',assets:[]});channel.port1.close();
             });f.onload=()=>probe.loaded=true;f.src=""" + target + ";document.body.append(f);true")
             wait(lambda: evaluate('probe.loaded'))
-            wait(lambda: evaluate('probe.ready'))
+            if permissive or origin == child_origin:
+                wait(lambda: evaluate('probe.ready'))
             expected = origin == child_origin
             if expected:
                 wait(lambda: evaluate('probe.rendered'))
             else:
-                # The bootstrap has signalled readiness; observe the rejected
-                # channel for a full second, not merely iframe load completion.
+                # With CSP retained, the foreign ancestor must block bootstrap.
+                # Without it, bootstrap runs but its channel rejects that parent.
                 deadline = time.monotonic() + 1
                 while time.monotonic() < deadline:
                     assert not evaluate('probe.rendered'), 'foreign parent rendered through rejected channel'
+                    if not permissive:
+                        assert not evaluate('probe.ready'), 'CSP allowed a foreign ancestor'
                     time.sleep(.01)
             result = evaluate('probe')
             assert result['rendered'] == expected, (path, origin, child_origin, permissive, result)
@@ -135,18 +144,18 @@ try:
             navigation_decisions.clear()
             loaded.clear()
             nonce = f'nested-{len(nested)}'
-            view.load_uri('rsi://localhost/?case=' + nonce)
+            view.load_uri(origins['localhost']+'/?case=' + nonce)
             wait(lambda: bool(loaded))
             document = """<!doctype html><body><script>
             const violations=[];
             document.addEventListener('securitypolicyviolation',e=>{violations.push({directive:e.effectiveDirective,blocked:e.blockedURI});parent.postMessage({type:'nested-evidence',violations},'*')});
             for(const tag of ['iframe','object','embed']){
-                const element=document.createElement(tag), url='rsi://foreign/nested-target?case=CASE&tag='+tag;
+                const element=document.createElement(tag), url='FOREIGN/nested-target?case=CASE&tag='+tag;
                 if(tag==='object'){element.data=url;element.type='text/html'}else{element.src=url;if(tag==='embed')element.type='text/html'}
                 document.body.append(element);
             }
             parent.postMessage({type:'nested-started'},'*');
-            </script>""".replace('CASE', nonce)
+            </script>""".replace('CASE', nonce).replace('FOREIGN', origins['foreign'])
             evaluate("""window.nested={started:false,violations:[]};const f=document.createElement('iframe');window.addEventListener('message',e=>{
                 if(e.source!==f.contentWindow)return;
                 if(e.data?.type==='nested-started')nested.started=true;
@@ -154,7 +163,7 @@ try:
                 if(e.data?.type==='rsi-preview-ready'){
                     const channel=new MessageChannel();f.contentWindow.postMessage({type:'rsi-preview-connect'},'*',[channel.port2]);channel.port1.postMessage({type:'render',html:""" + json.dumps(document) + """,assets:[]});channel.port1.close();
                 }
-            });f.src=""" + json.dumps('rsi://localhost' + path + '?case=' + nonce) + ";document.body.append(f);true")
+            });f.src=""" + json.dumps(origins['localhost'] + path + '?case=' + nonce) + ";document.body.append(f);true")
             wait(lambda: evaluate('nested.started'))
             if permissive:
                 wait(lambda: all(any('tag=' + tag in uri for uri in nested_requests) for tag in ('iframe', 'object', 'embed')))
@@ -165,3 +174,4 @@ try:
     args.report.write_text(json.dumps({'status':'passed','engine':f'{WebKit2.get_major_version()}.{WebKit2.get_minor_version()}.{WebKit2.get_micro_version()}','cases':evidence,'nested':nested}, indent=2))
 finally:
     window.destroy()
+    for server in servers.values(): server.shutdown(); server.server_close()

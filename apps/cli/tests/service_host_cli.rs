@@ -1,5 +1,7 @@
 #![cfg(target_os = "linux")]
 
+mod support;
+
 #[path = "service_host_cli/acp.rs"]
 mod acp;
 #[path = "service_host_cli/addons.rs"]
@@ -50,12 +52,7 @@ async fn provider() -> (String, tokio::task::JoinHandle<()>) {
 fn assert_remote_interactive_session(fixture: &CliFixture) {
     let mut interactive = fixture.command();
     let mut interactive = interactive
-        .args([
-            "--profile",
-            "test-cli",
-            "--session-id",
-            "interactive-session",
-        ])
+        .args(["run", "test-cli", "--session-id", "interactive-session"])
         .stdin(std::process::Stdio::piped())
         .stdout(std::process::Stdio::piped())
         .stderr(std::process::Stdio::piped())
@@ -153,7 +150,7 @@ async fn named_headless_uses_explicit_daemon_and_lifecycle_commands() {
     fixture.assert_success(&["host", "reload"]);
 
     let first = fixture.assert_success(&[
-        "--profile",
+        "run",
         "test-headless",
         "hello",
         "--session-id",
@@ -192,7 +189,7 @@ async fn named_headless_uses_explicit_daemon_and_lifecycle_commands() {
 
     fixture.assert_success(&["host", "restart", "--profile", "fixture"]);
     let retried = fixture.assert_success(&[
-        "--profile",
+        "run",
         "test-headless",
         "hello",
         "--resume",
@@ -204,7 +201,7 @@ async fn named_headless_uses_explicit_daemon_and_lifecycle_commands() {
     ]);
     assert!(String::from_utf8_lossy(&retried.stdout).contains("\"type\":\"outcome\""));
     let conflict = fixture.run(&[
-        "--profile",
+        "run",
         "test-headless",
         "changed",
         "--resume",
@@ -258,7 +255,7 @@ async fn client_uses_the_recorded_daemon_endpoint_across_runtime_directories() {
         .command()
         .env("XDG_RUNTIME_DIR", "/tmp")
         .args([
-            "--profile",
+            "run",
             "test-headless",
             "hello",
             "--session-id",
@@ -364,7 +361,7 @@ impl JsonClient {
         use tokio::io::AsyncBufReadExt as _;
         let mut child = fixture
             .tokio_command()
-            .args(["--profile", "test-cli", "--output", "jsonl"])
+            .args(["run", "test-cli", "--output", "jsonl"])
             .args(selection)
             .stdin(std::process::Stdio::piped())
             .stdout(std::process::Stdio::piped())
@@ -603,7 +600,7 @@ async fn durable_queue_steering_cancel_and_observation_survive_client_reattachme
     assert!(!requests[2]["messages"].to_string().contains("remove me"));
     drop(requests);
     let history = fixture.assert_success(&[
-        "--profile",
+        "run",
         "test-cli",
         "--history",
         "continuous",
@@ -611,7 +608,7 @@ async fn durable_queue_steering_cancel_and_observation_survive_client_reattachme
         "jsonl",
     ]);
     assert!(String::from_utf8_lossy(&history.stdout).contains("turn_terminal"));
-    let listed = fixture.assert_success(&["--profile", "test-cli", "--list", "--output", "jsonl"]);
+    let listed = fixture.assert_success(&["run", "test-cli", "--list", "--output", "jsonl"]);
     assert!(String::from_utf8_lossy(&listed.stdout).contains("continuous"));
     task.abort();
 }

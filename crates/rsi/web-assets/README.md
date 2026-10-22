@@ -1,5 +1,10 @@
 # rsi-web-assets
 
+`VerifiedWebAssetsFactory` admits an independent bundle using its own bounded
+receipt and bootstrap hashes. It does not compare against a core build family.
+The package admission owner separately verifies distributor signatures and
+required wire interfaces; a local directory conveys no distributor provenance.
+
 WebAssetsFactory is an ordinary native provider of immutable HttpAssets. It reads
 an explicit absolute bundle directory and a closed list of flat filenames at
 activation. The compiled [bundle manifest](bundle.json) owns the fixed bootstrap set, each
@@ -37,6 +42,9 @@ the filesystem or sees subsequent file edits. The plugin remains RestartRequired
 Within that activation, `WebAssetControl` stages and compare-and-swap publishes
 renderer-only generations through the same `Arc<HttpAssets>`. A publication
 changes no listener, Worker or bootstrap bytes.
+`stage_verified` applies the same independent bundle receipt checks as initial
+product admission before offering a candidate. A source package publication
+may use it without enabling filesystem polling.
 
 `ui-renderers.json` declares the renderer ABI, exact model schemas, requested
 bound-host capabilities and SHA-256 for every entry, stylesheet, WASM file and
@@ -81,14 +89,16 @@ keeps a large unchanged Worker from consuming the overlap budget twice. Changed
 files still reserve their full new capacity before allocation; no digest or
 metadata-only equality substitutes for byte verification.
 
-## Product build pairing
+## Product bundle admission
 
-`PairedWebAssetsFactory` requires a native build family and a bounded
-`rsi-build.json` receipt inside the asset directory. At initial admission it
-checks the family and exact SHA-256 hashes of the fixed bootstrap files against
-the bytes retained for HTTP serving. The ordinary `WebAssetsFactory` remains a
-generic library provider; the official application catalog never registers it as
-an unguarded product Web entry. Custom product Profiles use the same paired owner.
-Renderer files and ui-renderers.json retain their existing validated publication
-lifecycle and may change independently. They cannot reclassify bootstrap files.
-Pairing failures expose a consuming, bounded owner diagnostic.
+The official application catalog and local Web adapter use
+`VerifiedWebAssetsFactory`, including custom application Profiles. It validates
+the bounded `rsi-build.json` receipt and exact bootstrap hashes against retained
+HTTP bytes, independently of the native executable's build family. Renderer files
+and ui-renderers.json retain their validated publication lifecycle and cannot
+reclassify bootstrap files. Package authenticity and interface compatibility
+remain with the package owner.
+
+`PairedWebAssetsFactory` additionally requires an explicit expected family for
+exact-family conformance fixtures. It is not an application catalog entry.
+The ordinary `WebAssetsFactory` remains a generic library provider.

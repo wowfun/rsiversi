@@ -1,30 +1,19 @@
 import assert from 'node:assert/strict';
 import {test} from 'node:test';
-import {isNativeDocument} from '../document-mode.js';
-import {createDocumentTransport, NativeDocument} from '../src/native.ts';
+import {isDesktop} from '../desktop-bridge.js';
+import {createDocumentTransport} from '../src/native.ts';
 
-test('exact desktop locations select native transport while browser origins construct a Worker', () => {
+test('Desktop marker never changes the Worker transport or grants native authority alone', () => {
   const original = globalThis.Worker, workers = [];
   globalThis.Worker = class { constructor(url, options) { workers.push([url, options]); } };
   try {
-    for (const href of ['rsi://localhost/', 'http://rsi.localhost/']) {
-      const location = new URL(href);
-      assert.equal(isNativeDocument(location), true);
-      assert.ok(createDocumentTransport(location) instanceof NativeDocument);
+    assert.equal(isDesktop({__RSI_DESKTOP__:true}),false);
+    assert.equal(isDesktop({__TAURI_INTERNALS__:{invoke(){}}}),false);
+    assert.equal(isDesktop({__RSI_DESKTOP__:true,__TAURI_INTERNALS__:{invoke(){}}}),true);
+    for (const desktop of [true,false]) {
+      globalThis.__RSI_DESKTOP__ = desktop;
+      assert.ok(createDocumentTransport() instanceof globalThis.Worker);
     }
-    for (const href of [
-      'http://localhost/', 'http://127.0.0.1:8787/', 'https://example.org/',
-      'https://rsi.localhost/', 'http://rsi.localhost:8787/',
-      'http://rsi.localhost.evil/', 'rsi://localhost.evil/', 'rsi://localhost:8080/',
-    ]) {
-      const location = new URL(href);
-      assert.equal(isNativeDocument(location), false, href);
-      assert.ok(!(createDocumentTransport(location) instanceof NativeDocument));
-    }
-    assert.equal(workers.length, 8);
-    for (const [url, options] of workers) {
-      assert.equal(url, '/worker.js');
-      assert.deepEqual(options, {type: 'module'});
-    }
-  } finally { globalThis.Worker = original; }
+    assert.deepEqual(workers,Array(2).fill(['/worker.js',{type:'module'}]));
+  } finally { globalThis.Worker = original; delete globalThis.__RSI_DESKTOP__; }
 });

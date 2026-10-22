@@ -16,16 +16,18 @@ export async function verifyDom(browser, root, report, name) {
   try {
     const document = await readFile(join(root, "fixtures/rsi/web-product/document-island.html"), "utf8");
     const standard = await readFile(join(root, "apps/web/standard.js"), "utf8");
-    await documentModules(page,root,"http://rsi-dom.invalid",document.replace(/<script[^>]*>[\s\S]*?<\/script>/g,""),["standard.js", "admission.js", "mounts.js", "drafts.js", "settings-form.js", "file-picker.js", "external-pane.js", "external-drafts.js", "document-mode.js", "turn-presentation.js", "composer-actions.js", "document-connection.js"]);
+    await documentModules(page,root,"http://rsi-dom.invalid",document.replace(/<script[^>]*>[\s\S]*?<\/script>/g,""),["standard.js", "admission.js", "mounts.js", "drafts.js", "settings-form.js", "file-picker.js", "external-pane.js", "external-drafts.js", "desktop-bridge.js", "turn-presentation.js", "composer-actions.js", "document-connection.js"]);
     await page.evaluate(async () => { Object.assign(globalThis, await import("/admission.js")); });
     await page.route('http://rsi-dom.invalid/rsi-renderers/*/standard.js',route=>route.fulfill({contentType:'text/javascript',body:standard}));
     const offer = { revision: "a".repeat(64), catalog: { format: 1, renderers: [{ id: "rsi.standard", abi: 1, entry: "standard.js", files: [{ name: "standard.js", sha256: createHash("sha256").update(standard).digest("hex") }], schemas: [{ name: "rsi.standard.view", version: 1 }], capabilities: ["invoke", "focus"], surfaces: ["dialog"] }] } };
     await page.evaluate(offer => { window.testRendererOffer = offer; }, offer);
     await page.addStyleTag({ path: join(root, "apps/web/styles.css") });
     await page.evaluate(async()=>{
-      for(const file of ["mounts.js", "drafts.js", "settings-form.js", "file-picker.js", "external-pane.js", "external-drafts.js", "document-mode.js", "turn-presentation.js", "composer-actions.js", "document-connection.js"]) Object.assign(globalThis,await import("/"+file));
+      for(const file of ["mounts.js", "drafts.js", "settings-form.js", "file-picker.js", "external-pane.js", "external-drafts.js", "desktop-bridge.js", "turn-presentation.js", "composer-actions.js", "document-connection.js"]) Object.assign(globalThis,await import("/"+file));
     });
-    await page.addScriptTag({ content: 'let fixtureMounts; function createDocumentTransport(){return new Worker("/worker.js",{type:"module"})} const resourceHosts=new Map();function publishResources(){}function clearResources(){resourceHosts.clear()}function renderDetailAtFixture(value){return renderDetail(value,modalTarget)}function renderUiDetailAtFixture(value){return renderUiDetail(value,modalTarget)}const presentationIdentity = {set(){}};function presentationKey(){return "fixture"} function publish() {} let fixtureActions; function installActions(actions) {fixtureActions=actions} function selectSurface() {}\n' + (await readFile(join(root, "apps/web/app.js"), "utf8")).replace(/^import .*;\n/gm, "").replace('export function initialize() {\n', '').replace(/\n}\s*$/, '') });
+    // Projection-only native adapter; the real bridge is covered by its owner.
+    await page.evaluate(() => { globalThis.fixtureNativeCalls = []; globalThis.desktopCall = async operation => {fixtureNativeCalls.push(operation);}; globalThis.setClipboardWriter = () => {}; });
+    await page.addScriptTag({ content: 'let fixtureMounts; function createDocumentTransport(){return new Worker("/worker.js",{type:"module"})} const resourceHosts=new Map();function publishResources(){}function clearResources(){resourceHosts.clear()}function renderDetailAtFixture(value){return renderDetail(value,modalTarget)}function renderUiDetailAtFixture(value){return renderUiDetail(value,modalTarget)}const presentationIdentity = {set(){}};function presentationKey(){return "fixture"} function publish() {} let fixtureActions; function installActions(actions) {fixtureActions=actions} function selectSurface() {}\n' + (await readFile(join(root, "apps/web/app.js"), "utf8")).replace(/\r\n/g, "\n").replace(/^import .*;\n/gm, "").replace("const nativeDocument = isDesktop();", "let nativeDocument = isDesktop();").replace('export function initialize() {\n', '').replace(/\n}\s*$/, '') });
     assert.deepEqual(errors, [], "document bootstrap has no uncaught errors");
     await page.evaluate(async () => {
       fixtureMounts = await MountTable.open();
@@ -541,6 +543,7 @@ export async function verifyDom(browser, root, report, name) {
     });
     assert.deepEqual(drainOrder, {beforeDrafts:[],beforeDisposal:["dispose-start"],order:["dispose-start","dispose-done","disconnect","terminate"]});
     const openingClose = await page.evaluate(async () => {
+      const wasNative = nativeDocument; nativeDocument = true;
       const savedFlushes = new Map([...panes.values()].map(pane => [pane, pane.flush]));
       try {
       await connection.retire();
@@ -556,43 +559,39 @@ export async function verifyDom(browser, root, report, name) {
       const authentication=owner.authenticate({},()=>{entered();return storage;});await opening;
       for(const pane of panes.values())pane.flush=async()=>{flushes++;};
       document.addEventListener("rsi-disconnected",received,{once:true});
-      window.dispatchEvent(new Event("rsi-native-close"));
+      fixtureNativeCalls.length=0;
+      window.dispatchEvent(new CustomEvent("rsi-native-close", {detail: 1}));
       const before={phase:owner.phase,flushes,disconnects,terminations};
       release({});await authentication;
       let deadline;
       try {await Promise.race([receipt,new Promise((_,reject)=>{deadline=setTimeout(()=>reject(new Error("Opening native-close receipt missing")),5000);})]);}
       finally {clearTimeout(deadline);document.removeEventListener("rsi-disconnected",received);}
-      return {before,phase:owner.phase,flushes,expectedFlushes:panes.size,disposals,terminations,disconnects,connected,label:$("connection-state").textContent};
-      } finally { for (const [pane, flush] of savedFlushes) pane.flush = flush; }
+      await owner.settled();
+      // The document receipt precedes its native acknowledgement microtask.
+      await Promise.resolve();
+      return {before,phase:owner.phase,flushes,expectedFlushes:panes.size,disposals,terminations,disconnects,connected,label:$("connection-state").textContent,nativeCalls:fixtureNativeCalls};
+      } finally { nativeDocument = wasNative; for (const [pane, flush] of savedFlushes) pane.flush = flush; }
     });
-    assert.deepEqual(openingClose,{before:{phase:"Opening",flushes:0,disconnects:0,terminations:0},phase:"Closed",flushes:openingClose.expectedFlushes,expectedFlushes:openingClose.expectedFlushes,disposals:1,terminations:1,disconnects:1,connected:false,label:"Disconnected"});
+    assert.deepEqual(openingClose,{before:{phase:"Opening",flushes:0,disconnects:0,terminations:0},phase:"Closed",flushes:openingClose.expectedFlushes,expectedFlushes:openingClose.expectedFlushes,disposals:1,terminations:1,disconnects:1,connected:false,label:"Disconnected",nativeCalls:[{kind:"close",attempt:1,ready:true}]});
     const closeCancellation = await page.evaluate(async () => {
-      const originalFetch=window.fetch,originalTimeout=AbortSignal.timeout,results=[];
+      const originalCall=globalThis.desktopCall,results=[];
       try {
-        for(const failure of ["network","response","deadline"]) {
+        for(const failure of ["bridge unavailable","native rejection","native deadline"]) {
           const current=await fixtureConnect(await MountTable.open(),{terminate(){}},()=>{});
-          if(failure==="deadline") AbortSignal.timeout=milliseconds=>{
-            if(milliseconds!==30_000)throw new Error("unexpected cancellation deadline");
-            const controller=new AbortController();queueMicrotask(()=>controller.abort(new Error("fixture close cancellation deadline")));return controller.signal;
-          };
-          window.fetch=async (path,options)=>{
-            if(path!=="/_close_cancel")throw new Error("unexpected native path");
-            if(failure==="deadline") {
-              if(options.signal.aborted)throw options.signal.reason;
-              return new Promise((_,reject)=>options.signal.addEventListener("abort",()=>reject(options.signal.reason),{once:true}));
-            }
-            if(failure==="network")throw new Error("fixture offline");
-            return new Response("refused",{status:503});
+          nativeCloseAttempt = 2;
+          globalThis.desktopCall=async operation=>{
+            if(operation.kind!=="close" || operation.ready!==false)throw new Error("unexpected native operation");
+            throw new Error(failure);
           };
           const accepted=await cancelNativeCloseAfterDraftFailure(current,new Error("fixture unsaved text"));
           await current.settled();
-          results.push({accepted,phase:current.phase,notice:$("notice").textContent});
+          results.push({accepted,phase:current.phase,notice:$("notice").textContent,cleared:nativeCloseAttempt===undefined});
         }
-      } finally {window.fetch=originalFetch;AbortSignal.timeout=originalTimeout;}
+      } finally {globalThis.desktopCall=originalCall;}
       return results;
     });
     for(const result of closeCancellation) {
-      assert.equal(result.accepted,false);assert.equal(result.phase,"Failed");
+      assert.equal(result.accepted,false);assert.equal(result.phase,"Failed");assert.equal(result.cleared,true);
       assert.match(result.notice,/Draft is not saved: fixture unsaved text/);
       assert.match(result.notice,/Could not cancel native close/);
       assert.match(result.notice,/Recover the draft before closing/);

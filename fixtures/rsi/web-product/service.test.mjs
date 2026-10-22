@@ -1,6 +1,6 @@
 import assert from "node:assert/strict";
 import { test } from "node:test";
-import { mkdtemp, writeFile, readFile, rm, access } from "node:fs/promises";
+import { mkdtemp, mkdir, writeFile, readFile, rm, access } from "node:fs/promises";
 import cp, { spawnSync } from "node:child_process";
 import { syncBuiltinESMExports } from "node:module";
 import { createHash } from "node:crypto";
@@ -8,6 +8,41 @@ import { join } from "node:path";
 import { tmpdir } from "node:os";
 import {pathToFileURL} from 'node:url';
 import { startService } from "./service.mjs";
+import { EventEmitter } from 'node:events';
+import { PassThrough } from 'node:stream';
+
+test("renderer watch uses ordinary Web launch and a disjoint relative package recipe", async t => {
+  const directory = await mkdtemp(join(tmpdir(), "rsi-renderer-recipe-"));
+  let service;
+  try {
+    const assets = join(directory, 'assets');
+    await mkdir(assets);
+    t.mock.method(cp, 'spawnSync', () => ({status:0, stdout:'stopped\n', stderr:''}));
+    t.mock.method(cp, 'spawn', (_program, args) => {
+      assert.deepEqual(args, ['--watch','web','--port','0','--no-open']);
+      const child = Object.assign(new EventEmitter(), {stdout:new PassThrough(), stderr:new PassThrough(),exitCode:null});
+      child.kill = () => { child.exitCode=0; child.emit('exit',0,null); };
+      setImmediate(()=>child.stdout.write('rsi web: http://127.0.0.1:43210#rsi-launch=fixture\n'));
+      return child;
+    });
+    syncBuiltinESMExports();
+    let config;
+    service = await startService({binary:'fixture', assets, report:directory, watchAssets:true,
+      configure(value) { config=value.config; }});
+    const document = await readFile(join(config,'rsi.toml'),'utf8');
+    assert.match(document, /\[sources\.web\]/);
+    assert.match(document, /inputs = \["assets\/standard.js","assets\/lazy.js","assets\/ui-renderers.json"\]/);
+    assert.match(document, /output = "web-package\/package.json"/);
+    assert.equal(service.origin,'http://127.0.0.1:43210');
+    assert.equal(new URL(service.launchUrl).hash,'#rsi-launch=fixture');
+  } finally {
+    try { await service?.close(); }
+    finally {
+      t.mock.restoreAll(); syncBuiltinESMExports();
+      await rm(directory,{recursive:true,force:true});
+    }
+  }
+});
 
 test("recovery and tasks retain leased binary identity without copying it when browser startup fails", async () => {
   const directory = await mkdtemp(join(tmpdir(), "rsi-binary-evidence-"));
@@ -45,7 +80,11 @@ test("startup preserves its bad readiness reply when child cleanup also fails", 
   const launch = cp.spawn;
   try {
     const binary = join(directory, "fixture");
-    t.mock.method(cp, 'spawnSync', program => {
+    t.mock.method(cp, 'spawnSync', (program, args) => {
+      if (program === binary) {
+        assert.deepEqual(args, ['host', 'status']);
+        return {status:0, stdout:'stopped\n', stderr:''};
+      }
       assert.equal(program, 'openssl');
       return {status:0, stdout:'', stderr:''};
     });
@@ -66,5 +105,38 @@ test("startup preserves its bad readiness reply when child cleanup also fails", 
     t.mock.restoreAll();
     syncBuiltinESMExports();
     await rm(directory, { recursive: true, force: true });
+  }
+});
+
+test("failed admission before Host creation preserves its primary error without stopping an absent owner", async t => {
+  const directory = await mkdtemp(join(tmpdir(), "rsi-service-admission-"));
+  const launch = cp.spawn;
+  const commands = [];
+  try {
+    const binary = join(directory, "fixture");
+    t.mock.method(cp, 'spawnSync', (program, args) => {
+      if (program === binary) {
+        commands.push(args);
+        assert.deepEqual(args, ['host', 'status']);
+        return {status:0, stdout:'stopped\n', stderr:''};
+      }
+      assert.equal(program, 'openssl');
+      return {status:0, stdout:'', stderr:''};
+    });
+    t.mock.method(cp, 'spawn', (program, args, options) => {
+      assert.equal(program, binary);
+      return launch(process.execPath, ['-e', "process.stderr.write('fixture admission rejected');process.exitCode=1;"], options);
+    });
+    syncBuiltinESMExports();
+    await assert.rejects(startService({binary, assets:directory, report:directory}), error => {
+      assert(!(error instanceof AggregateError), "absent Host must not create a cleanup failure");
+      assert.match(error.message, /Service exited before readiness: fixture admission rejected/);
+      return true;
+    });
+    assert.deepEqual(commands, [['host', 'status']]);
+  } finally {
+    t.mock.restoreAll();
+    syncBuiltinESMExports();
+    await rm(directory, {recursive:true, force:true});
   }
 });

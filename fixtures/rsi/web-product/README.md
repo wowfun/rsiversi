@@ -12,6 +12,9 @@ the timeout. Only deliberate asset-mutation probes
 copy assets. Pure PNG test data comes from `png.mjs` without browser dependencies.
 Startup failure also kills and reaps a noncooperating helper. Stderr is drained
 before reporting early exit; cleanup diagnostics supplement the primary error.
+If admission fails before a Host exists, cleanup observes `host status` and
+does not attempt to stop an absent owner. Other cleanup failures retain the
+isolated home authorities for diagnosis.
 The verified `paired.sha256` also supplies binary reports, avoiding a second
 full executable read within each process. Each independent child still acquires
 its own lease and verifies its artifacts.
@@ -33,6 +36,8 @@ The startup/cleanup failure test uses a real Node child with invalid readiness,
 stubbing only executable selection and certificate generation. It runs on
 Windows and Linux without a POSIX shell or OpenSSL installation.
 
+The document projection and download checks load the shipped Desktop bridge
+module; its marker selects browser/native conveniences without granting authority.
 The document projection checks load shipped modules through the same routed
 ES-module harness. `external-drafts-dom.mjs`, called by `dom.mjs`, exercises real
 composer controls, shared drafts, unknown outcomes and capacity recovery in
@@ -136,7 +141,7 @@ First install the shared document's pinned build dependencies with
 The local-launch scenario also injects classified HTTP rejections to verify that
 Worker diagnostics distinguish capacity and retired-service failures from an
 expired ticket, without cookie fallback concealing a definitive rejection.
-Build a paired publication with `pnpm -C apps/web build --debug` from the repository
+Build a paired publication with `pnpm -C apps/web build ABSOLUTE_PACKAGE_DIRECTORY --debug` from the repository
 root. Then `npm ci && npm test` consumes its Rust Worker and native executable and drives the product document and Dedicated Worker in Chromium and Firefox.
 The runner also exercises document-only reset/reopen and unresolved-submission
 button projection using the shipped JavaScript; those checks are distinct from
@@ -187,6 +192,9 @@ diagnostics retain at most 64 entries with bounded fields and count omissions.
 product scenarios in both browsers (or `RSI_WEB_BROWSER`). It omits the separate
 renderer, recovery, task, preview and plan probes and their native/Wasm fixture
 builds. The default command continues to run those probes too.
+Pairing rejection requires the listener activation diagnostic, no readiness,
+and a still-unbound requested port. A generic mention of Web or assets does not
+count as proof that malformed bundle admission was exercised.
 
 The default runner includes `tasks.mjs`, which uses the same real Worker,
 Service and provider with explicit
@@ -524,13 +532,19 @@ storage check, not a substitute for paired product or visual validation.
 
 The opt-in `ssh-targets.mjs` probe requires explicit isolated sshd/session/auth
 executables, account, fixture directory and optional shared-library path through
-`RSI_TEST_SSH*`. It uses the paired distribution and the fixture-only Local
+`RSI_TEST_SSH*`, plus `RSI_TEST_HELPER_BIN` for an independently built static
+helper. It installs that helper through the ordinary package command after the
+Host starts. It uses the paired fixture distribution and the fixture-only Local
 `profile-leaf-probe` (`RSI_PROFILE_PROBE` may select its built path). It generates
 its own keys, confirms trust through the Local API, submits candidates through
 the Web UI and verifies real musl helper connections. Exact HTTP directory requests
 prove Use denial before grant and after revocation; stale connection epochs cannot
 disconnect a replacement. Its light/dark captures check the SSH form, not remote
 Session tools, the full target picker or DSH golden alignment.
+
+The native service fixture selects its Service Profile through `rsi.toml` and
+uses the ordinary resident Host. Fixture restart and teardown explicitly stop
+that Host before changing configuration or removing its isolated homes.
 
 `RSI_SSH_LIVE=1` additionally opts the SSH probe into `live-fixture.mjs` with
 `RSI_LIVE_ENV_FILE`, `RSI_LIVE_MODEL` and matching `RSI_WEB_REPORT`/`RSI_REPORT_DIR`.
@@ -648,3 +662,20 @@ History authority or live-provider evidence.
 environment. It retains the generated fixture Profile, deterministic provider,
 manual device receipt and explicit local-HTTP login. Ordinary `pnpm dev` uses
 standard product login and caller state instead.
+
+The product service fixture runs `rsi.application.serve` against the shared Host
+and selects its independent Web bundle with `--assets`. Its foreground connection
+owns only the HTTPS listener; cleanup explicitly stops the isolated Host.
+
+Service readiness allows 210 seconds for a cold debug executable to publish its
+immutable Host image before binding. This is distinct from the fixture-lease
+helper handshake above; default-debug Linux images can include over 1 GiB of DWARF.
+
+The renderer replacement fixture uses ordinary `rsi --watch web` with a declared
+source recipe. Each edit assembles and admits an independent Web package; the
+resident listener stages renderer changes through its package publication API.
+The copied bootstrap/Worker bundle stays fixed; only the renderer manifest,
+entry and lazy module are observed source inputs. The compiled WASM artifact is
+not a source input and exceeds the source owner's per-file observation bound.
+It connects through the printed one-use browser launch URL. Cold static/broken
+renderer cases continue to use the authenticated Serve fixture.

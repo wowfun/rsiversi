@@ -127,7 +127,7 @@ export async function verifyLocalLaunch(binary, assets, engines = [['chromium', 
       await denied.goto(link);
       await denied.waitForFunction(() => document.body.textContent.includes('Restart rsi web'));
       assert.equal(await denied.locator('#workbench').isVisible(), false);
-      const receipt = JSON.parse(run(['--profile','devices','register','manual-browser']).stdout);
+      const receipt = JSON.parse(run(["run",'devices','register','manual-browser']).stdout);
       await denied.getByLabel('Device registration receipt').fill(JSON.stringify(receipt));
       await denied.locator('#dev-http').check();
       await denied.getByRole('button',{name:'Connect',exact:true}).click();
@@ -137,11 +137,11 @@ export async function verifyLocalLaunch(binary, assets, engines = [['chromium', 
       await page.getByRole('button',{name:'Plugins',exact:true}).click();
       const panel = page.getByRole('region',{name:'Plugins',exact:true});
       await panel.locator('.plugin-rows .plugin-row').first().waitFor();
-      const grants = JSON.parse(run(['--profile','devices','configuration','list']).stdout);
-      run(['--profile','devices','configuration','revoke',first.device_id,grants.revision]);
+      const grants = JSON.parse(run(["run",'devices','configuration','list']).stdout);
+      run(["run",'devices','configuration','revoke',first.device_id,grants.revision]);
       await panel.getByRole('button',{name:'Refresh plugin status',exact:true}).click();
       await panel.getByRole('alert').filter({hasText:'Plugin status unavailable'}).waitFor();
-      assert(!JSON.parse(run(['--profile','devices','configuration','list']).stdout).devices.includes(first.device_id));
+      assert(!JSON.parse(run(["run",'devices','configuration','list']).stdout).devices.includes(first.device_id));
       await tab.close();
       await page.close();
       await stop();
@@ -166,7 +166,7 @@ export async function verifyLocalLaunch(binary, assets, engines = [['chromium', 
       assert.equal(recoveries, 1);
       await context.unroute('**/api/v1/browser-bootstrap');
       assert.deepEqual(await identity(reopened), first);
-      assert(JSON.parse(run(['--profile','devices','configuration','list']).stdout).devices.includes(first.device_id));
+      assert(JSON.parse(run(["run",'devices','configuration','list']).stdout).devices.includes(first.device_id));
       assert.equal(providerCalls, 0, 'configuration must not invoke a provider');
       assert.deepEqual(errors, []);
       await context.close();

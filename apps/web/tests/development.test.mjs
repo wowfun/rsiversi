@@ -7,15 +7,15 @@ import {createHash} from 'node:crypto';
 import {once} from 'node:events';
 import {createInterface} from 'node:readline';
 import {fileURLToPath} from 'node:url';
-import {decodeFrame} from '../development-control.mjs';
+import {decodeFrame, protocol} from '../development-control.mjs';
 
 const root = fileURLToPath(new URL('../', import.meta.url));
 const run = '0123456789abcdef0123456789abcdef';
 const family = 'a'.repeat(64);
-function frame(message) { return JSON.stringify({version: 1, run_id: run, message}) + '\n'; }
-function child() {
+function frame(message) { return JSON.stringify({version: 1, interface:protocol, run_id: run, message}) + '\n'; }
+function child(overrides = {}) {
   const environment = Object.fromEntries(['PATH','Path','SystemRoot','WINDIR','TEMP','TMP','HOME','USERPROFILE','LOCALAPPDATA','APPDATA'].filter(key => process.env[key]).map(key => [key,process.env[key]]));
-  const child = spawn(process.execPath, ['development-server.mjs'], {cwd: root, env: environment, stdio: ['pipe','pipe','pipe']});
+  const child = spawn(process.execPath, ['development-server.mjs'], {cwd: root, env: {...environment,...overrides}, stdio: ['pipe','pipe','pipe']});
   const lines = createInterface({input: child.stdout}); let diagnostics = '';
   child.stderr.on('data', bytes => { diagnostics = (diagnostics + bytes).slice(-16384); });
   const iterator = lines[Symbol.asyncIterator]();
@@ -37,10 +37,10 @@ test('control rejects unknown, duplicate, non-loopback and oversized frames', ()
   const good = frame({event:'start_frontend',port:0,family});
   assert.equal(decodeFrame(Buffer.from(good)).message.port,0);
   for (const invalid of [
-    {version:1,run_id:[run],message:{event:'start_frontend',port:0,family}},
-    {version:1,run_id:run,message:{event:['start_frontend'],port:0,family}},
-    {version:1,run_id:run,message:{event:'start_frontend',port:0,family:[family]}},
-    {version:1,run_id:run,message:{event:'frontend_bound',origin:'https://foreign.invalid'}},
+    {version:1,interface:protocol,run_id:[run],message:{event:'start_frontend',port:0,family}},
+    {version:1,interface:protocol,run_id:run,message:{event:['start_frontend'],port:0,family}},
+    {version:1,interface:protocol,run_id:run,message:{event:'start_frontend',port:0,family:[family]}},
+    {version:1,interface:protocol,run_id:run,message:{event:'frontend_bound',origin:'https://foreign.invalid'}},
   ]) assert.throws(()=>decodeFrame(Buffer.from(JSON.stringify(invalid)+'\n')));
   for (const source of [good.replace('"port":0','"port":0,"port":1'), frame({event:'configure_proxy',upstream:'http://foreign.invalid'}), frame({event:'stop',extra:1}), 'x'.repeat(32769)+'\n', good.replace('"version":1','"version":1,"version":1')]) assert.throws(()=>decodeFrame(Buffer.from(source)));
 });
@@ -54,7 +54,7 @@ test('owned Vite socket gates requests then preserves HTTP and WebSocket authori
     socket.end('HTTP/1.1 101 Switching Protocols\r\nUpgrade: websocket\r\nConnection: Upgrade\r\nSec-WebSocket-Accept: '+accept+'\r\nSec-WebSocket-Protocol: '+request.headers['sec-websocket-protocol']+'\r\n\r\n');
   });
   upstream.listen(0,'127.0.0.1');await once(upstream,'listening');
-  const peer=child();
+  const peer=child({RSI_BUILD_FAMILY_SHA256:'stale-inherited-bundle'});
   try {
     peer.send({event:'start_frontend',port:0,family});const bound=await peer.next();assert.equal(bound.event,'frontend_bound');
     const origin=bound.origin;
@@ -69,6 +69,10 @@ test('owned Vite socket gates requests then preserves HTTP and WebSocket authori
     assert.equal(seen.at(-1).origin,origin);assert.equal(seen.at(-1)['sec-websocket-protocol'],'rsi-stream-v1');
     assert.equal((await get(origin,'/')).status,200);
     assert.match((await get(origin,'/@vite/client')).body,/WebSocket/);
+    const environment=await get(origin,'/@vite/env');
+    assert.equal(environment.status,200);
+    assert.ok(!environment.body.includes('stale-inherited-bundle'));
+    assert.ok(environment.body.includes(family),'document environment must use the admitted bundle identity');
   } finally {try {await peer.close();} finally {for(const socket of sockets)socket.destroy();await new Promise(resolve=>upstream.close(resolve));}}
 });
 test('occupied frontend port cannot publish readiness', {timeout:15000}, async () => {

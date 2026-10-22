@@ -177,7 +177,7 @@ async fn watch_or_build(
     stop: &CancellationToken,
 ) -> rsi::Result<u8> {
     let mut expected = selected(store.clone(), anchor.id().to_owned()).await?;
-    let environment: Vec<(OsString, OsString)> = std::env::vars_os().collect();
+    let environment: Vec<(OsString, OsString)> = rsi::scrub_child_environment(std::env::vars_os());
     let mut previous = None;
     let mut last_error = None;
     let mut ticks = tokio::time::interval(Duration::from_secs(1));

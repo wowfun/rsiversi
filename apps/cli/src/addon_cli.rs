@@ -5,7 +5,7 @@ use std::{ffi::OsString, path::PathBuf};
 #[cfg(unix)]
 mod build;
 
-pub(super) const HELP: &str = "Usage:\n  rsi addon <build|watch> MANIFEST [--root ABSOLUTE] [--enable] [--output text|json]\n  rsi addon refresh (existing local Service Host; Linux)\n  rsi addon list [--root ABSOLUTE] [--output text|json]\n  rsi addon install MANIFEST [--root ABSOLUTE] [--output text|json]\n  rsi addon <enable|disable|uninstall> ID [--root ABSOLUTE] [--output text|json]\nInstallation never executes or enables artifacts. Uninstall requires disabling first.\nSource receipts are separate from running Host staging; inspect with --profile inspector native.\n";
+pub(super) const HELP: &str = "Usage:\n  rsi addon <build|watch> MANIFEST [--root ABSOLUTE] [--enable] [--output text|json]\n  rsi addon refresh (existing local Service Host; Linux)\n  rsi addon list [--root ABSOLUTE] [--output text|json]\n  rsi addon install MANIFEST [--root ABSOLUTE] [--output text|json]\n  rsi addon <enable|disable|uninstall> ID [--root ABSOLUTE] [--output text|json]\nInstallation never executes or enables artifacts. Uninstall requires disabling first.\nSource receipts are separate from running Host staging; inspect with rsi run inspector native.\n";
 #[cfg(unix)]
 #[derive(Debug)]
 pub(super) struct Command {
@@ -44,7 +44,6 @@ pub(super) fn parse(arguments: impl Iterator<Item = OsString>) -> rsi::Result<Pa
     let mut arguments = arguments.peekable();
     if arguments.peek().is_some_and(|value| value == "refresh") {
         return Ok(Parse::Application(super::ApplicationInvocation {
-            reset_state: false,
             profile: rsi::ApplicationProfileId::new("addons")
                 .map_err(|error| RsiError::Boot(error.to_string()))?,
             arguments: arguments.collect(),

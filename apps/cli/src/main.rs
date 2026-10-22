@@ -1,50 +1,46 @@
-#[cfg(target_os = "linux")]
+#[cfg(any(target_os = "linux", windows))]
 use rsi::StandardServiceDaemon;
-#[cfg(target_os = "linux")]
+#[cfg(any(target_os = "linux", windows))]
 use rsi::probe_service_host;
 use rsi::{
     AgentPresetManager, AgentPresetSource, AgentPresetTrust, ApplicationProfileId, HostProfileId,
     ProfileCatalog, ProfileSource, RsiError, StandardComposition, capture_standard_environment,
-    maybe_run_apply_patch_helper, standard_agent_preset_root, standard_paths,
+    maybe_run_apply_patch_helper, standard_agent_preset_root,
 };
 #[cfg(any(target_os = "linux", windows))]
 use rsi::{StandardCodingTools, scrub_child_environment};
 use rsi_agent_presets::{AgentPresetHealth, AgentPresetId, AgentPresetRow, PresetError};
 use rsi_agent_store_sqlite::SqliteStore;
-#[cfg(target_os = "linux")]
+#[cfg(any(target_os = "linux", windows))]
 use rsi_service_host::{
-    HostOwnerMode, HostSignal, SERVICE_HOST_DRAIN_TIMEOUT, ServiceHostDiagnostics,
-    ServiceHostDiagnosticsSnapshot, ServiceHostPaths, owner_process_is_current, signal_owner,
+    HostOwnerMode, SERVICE_HOST_DRAIN_TIMEOUT, ServiceHostDiagnostics,
+    ServiceHostDiagnosticsSnapshot, ServiceHostPaths, owner_process_is_current,
 };
 use serde::Serialize;
 use std::collections::BTreeMap;
 use std::ffi::OsString;
 use std::io::Write;
-#[cfg(target_os = "linux")]
-use std::os::unix::fs::{OpenOptionsExt as _, PermissionsExt as _};
 use std::path::PathBuf;
 use std::process::ExitCode;
-#[cfg(target_os = "linux")]
+#[cfg(any(target_os = "linux", windows))]
 use std::process::Stdio;
-#[cfg(target_os = "linux")]
-use std::sync::Arc;
-#[cfg(target_os = "linux")]
+#[cfg(any(target_os = "linux", windows))]
 use std::time::Duration;
-#[cfg(target_os = "linux")]
+#[cfg(any(target_os = "linux", windows))]
 use tokio::task::JoinHandle;
-#[cfg(target_os = "linux")]
+#[cfg(any(target_os = "linux", windows))]
 use tokio_util::sync::CancellationToken;
 
-#[cfg(target_os = "linux")]
+#[cfg(any(target_os = "linux", windows))]
 const HOST_SHUTDOWN_MARGIN: Duration = Duration::from_secs(15);
-#[cfg(target_os = "linux")]
+#[cfg(any(target_os = "linux", windows))]
 const FORCE_HOST_STOP_TIMEOUT: Duration = Duration::from_secs(5);
-#[cfg(target_os = "linux")]
+#[cfg(any(target_os = "linux", windows))]
 const HOST_DIAGNOSTICS_INTERVAL: Duration = Duration::from_secs(5);
-#[cfg(target_os = "linux")]
-const DAEMON_READINESS_TIMEOUT: Duration = Duration::from_secs(15);
+#[cfg(any(target_os = "linux", windows))]
+const DAEMON_READINESS_TIMEOUT: Duration = rsi::APPLICATION_TRANSITION_TIMEOUT;
 
-#[cfg(target_os = "linux")]
+#[cfg(any(target_os = "linux", windows))]
 fn daemon_readiness_timeout_error() -> RsiError {
     RsiError::Boot(format!(
         "daemon readiness probe exceeded {} seconds",
@@ -65,12 +61,16 @@ fn standard_coding_tools() -> rsi::Result<Option<StandardCodingTools>> {
 mod addon_cli;
 mod application;
 mod cli;
-#[cfg(debug_assertions)]
-mod development;
-#[cfg(target_os = "linux")]
+#[cfg(any(target_os = "linux", windows))]
 mod host_cli;
+#[cfg(any(target_os = "linux", windows))]
+mod host_runtime;
+mod import_cli;
+mod launch;
 mod management;
-mod reset_state;
+#[cfg(any(target_os = "linux", windows))]
+mod source_build;
+use launch::paths as standard_paths;
 
 use application::{report_error, run_application};
 use cli::{
@@ -78,13 +78,19 @@ use cli::{
     BOOT_FAILURE_EXIT_CODE, ManagementOutput, Parse, ProfileCommand, ProfileKind,
     ProfileOperationKind,
 };
-#[cfg(target_os = "linux")]
+#[cfg(any(target_os = "linux", windows))]
 use cli::{HostCommand, HostOperation};
-#[cfg(target_os = "linux")]
+#[cfg(any(target_os = "linux", windows))]
 use host_cli::run_host;
-use management::{profile_management_error, run_agent_preset, run_agent_store, run_profile};
+#[cfg(any(target_os = "linux", windows))]
+use management::profile_management_error;
+use management::{run_agent_preset, run_agent_store, run_profile};
 
 fn main() -> ExitCode {
+    #[cfg(windows)]
+    if let Some(exit) = source_build::run_batch_helper() {
+        return ExitCode::from(exit);
+    }
     let _generation = match rsi_build_info::GenerationLease::current() {
         Ok(lease) => lease,
         Err(error) => {
@@ -109,11 +115,41 @@ fn main() -> ExitCode {
 }
 
 async fn run_main() -> u8 {
-    #[cfg(debug_assertions)]
-    if std::env::args_os().nth(1).as_deref() == Some(std::ffi::OsStr::new("__dev")) {
-        return development::run(std::env::args_os().skip(2).collect()).await;
+    let (options, arguments) = match launch::parse(std::env::args_os().skip(1)) {
+        Ok(parsed) => parsed,
+        Err(error) => return report_error(&error),
+    };
+    let default_application = arguments.is_empty();
+    let parsed = cli::parse_cli(arguments.clone());
+    if let Ok(command) = &parsed
+        && let Err(error) = launch::validate_command(&options, command)
+    {
+        return report_error(&error);
     }
-    match cli::parse_cli(std::env::args_os().skip(1)) {
+    if let Ok(Parse::Application(invocation)) = &parsed
+        && application::print_help(invocation)
+    {
+        return 0;
+    }
+    if matches!(parsed, Ok(Parse::Help(_) | Parse::Version)) {
+        // Help and version remain independent of path/configuration availability.
+    } else if let Err(error) = launch::initialize(options) {
+        return report_error(&error);
+    }
+    if matches!(
+        &parsed,
+        Ok(Parse::Profile(_) | Parse::AgentPreset(_) | Parse::AgentStore(_))
+    ) && let Err(error) = launch::maintain()
+    {
+        return report_error(&error);
+    }
+    #[cfg(unix)]
+    if matches!(&parsed, Ok(Parse::Addon(_)))
+        && let Err(error) = launch::maintain()
+    {
+        return report_error(&error);
+    }
+    match parsed {
         Ok(Parse::Help(help)) => {
             print!("{help}");
             0
@@ -122,11 +158,29 @@ async fn run_main() -> u8 {
             println!("rsi {}", env!("CARGO_PKG_VERSION"));
             0
         }
-        Ok(Parse::Application(command)) => run_application(command).await,
+        Ok(Parse::Application(mut command)) => {
+            if let Err(error) = launch::maintain() {
+                return report_error(&error);
+            }
+            let configuration = match launch::current().and_then(launch::Startup::configuration) {
+                Ok(configuration) => configuration,
+                Err(error) => return report_error(&error),
+            };
+            if default_application {
+                command.profile = match ApplicationProfileId::new(configuration.default_application) {
+                    Ok(profile) => profile,
+                    Err(error) => return report_error(&RsiError::Boot(error.to_string())),
+                };
+            }
+            run_application(command).await
+        }
+        Ok(Parse::Config(arguments)) => launch::run_config(&arguments),
+        Ok(Parse::Import(arguments)) => import_cli::run(&arguments),
+        Ok(Parse::WebControl(stop)) => application::web_control(stop).await,
         Ok(Parse::Profile(command)) => run_profile(&command).await,
-        #[cfg(target_os = "linux")]
+        #[cfg(any(target_os = "linux", windows))]
         Ok(Parse::Host(command)) => run_host(command).await,
-        #[cfg(not(target_os = "linux"))]
+        #[cfg(not(any(target_os = "linux", windows)))]
         Ok(Parse::HostUnsupported) => report_error(&RsiError::Boot(
             "Service Host daemon mode requires Linux process-generation fencing; named applications use embedded mode on this platform".into(),
         )),
@@ -140,25 +194,28 @@ async fn run_main() -> u8 {
     }
 }
 
-#[cfg(target_os = "linux")]
+#[cfg(any(target_os = "linux", windows))]
 async fn prepare_standard_composition(
     parent: Option<&rsi_meta::Context>,
     paths: rsi_host::HostPaths,
 ) -> rsi::Result<(StandardComposition, AgentPresetManager)> {
     let environment = capture_standard_environment()?;
-    #[cfg(target_os = "linux")]
+    #[cfg(any(target_os = "linux", windows))]
     let coding_tools = standard_coding_tools()?;
-    #[cfg(not(target_os = "linux"))]
+    #[cfg(not(any(target_os = "linux", windows)))]
     let coding_tools = None;
     let system_root =
         standard_agent_preset_root(&paths).map_err(|error| RsiError::Boot(error.to_string()))?;
+    let listener_addons = rsi_serve::service_addons(paths.clone())?;
     let composition = StandardComposition::new(
         paths,
         environment,
         coding_tools,
         rsi_app_catalog::metadata(),
     )
-    .with_user_home(rsi::capture_standard_home()?)?;
+    .with_user_home(rsi::capture_standard_home()?)?
+    .with_watch_policy(rsi_meta_profile::SourceWatchPolicy::leased())
+    .with_addons(listener_addons);
     let presets = if let Some(parent) = parent {
         AgentPresetManager::open_standard_in(parent, &composition, system_root).await?
     } else {

@@ -59,7 +59,7 @@ async fn headless_commands_freeze_draft_before_model_and_query_durable_receipt_a
     let fixture = CliFixture::new(&endpoint);
     fixture.assert_success(&["host", "start", "--profile", "fixture"]);
     let list = result(&fixture.assert_success(&[
-        "--profile",
+        "run",
         "test-headless",
         "--commands",
         "--session-id",
@@ -76,7 +76,7 @@ async fn headless_commands_freeze_draft_before_model_and_query_durable_receipt_a
         .unwrap();
     let on = json!({"command":descriptor["id"],"request_id":"plan-on","expected_revision":list["revision"],"arguments":"on"});
     let output = fixture.assert_success(&[
-        "--profile",
+        "run",
         "test-headless",
         "--command",
         &on.to_string(),
@@ -93,7 +93,7 @@ async fn headless_commands_freeze_draft_before_model_and_query_durable_receipt_a
     assert_eq!(model_answer(&output), "hello from daemon");
     assert_plan_request(&requests);
     let list = result(&fixture.assert_success(&[
-        "--profile",
+        "run",
         "test-headless",
         "--commands",
         "--resume",
@@ -104,7 +104,7 @@ async fn headless_commands_freeze_draft_before_model_and_query_durable_receipt_a
     assert_eq!(list["revision"]["kind"], "durable");
     let off = json!({"command":descriptor["id"],"request_id":"plan-off","expected_revision":list["revision"],"arguments":"off"});
     let receipt = result(&fixture.assert_success(&[
-        "--profile",
+        "run",
         "test-headless",
         "--command",
         &off.to_string(),
@@ -115,7 +115,7 @@ async fn headless_commands_freeze_draft_before_model_and_query_durable_receipt_a
     ]));
     assert_eq!(receipt["outcome"]["kind"], "committed");
     let again = result(&fixture.assert_success(&[
-        "--profile",
+        "run",
         "test-headless",
         "--command",
         &off.to_string(),
@@ -128,7 +128,7 @@ async fn headless_commands_freeze_draft_before_model_and_query_durable_receipt_a
     fixture.assert_success(&["host", "stop"]);
     fixture.assert_success(&["host", "start", "--profile", "fixture"]);
     let recovered = result(&fixture.assert_success(&[
-        "--profile",
+        "run",
         "test-headless",
         "--command-status",
         "plan-off",

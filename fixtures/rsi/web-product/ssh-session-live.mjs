@@ -27,7 +27,7 @@ export async function verifySshSession({page,service,report,dialog,target,checks
     return (await pane.locator('.pane-status').innerText()).includes('Completed');
   },'real DeepSeek SSH tools and settlement',180000);
   const session=(await pane.locator('.pane-session').innerText()).split(' · ').at(-1);
-  const records=service.run(['--profile','evidence-cli','--resume',session,'--output','jsonl'],{input:':history\n'.repeat(8)+':exit\n'}).stdout.trim().split('\n').map(line=>JSON.parse(line));
+  const records=service.run(["run",'evidence-cli','--resume',session,'--output','jsonl'],{input:':history\n'.repeat(8)+':exit\n'}).stdout.trim().split('\n').map(line=>JSON.parse(line));
   const facts=records.flatMap(record=>record.fact?[record.fact]:[]).sort((a,b)=>a.seq-b.seq);
   await writeFile(join(report,'ssh-session-facts.json'),JSON.stringify(facts,null,2));
   const transcript=await pane.locator('.transcript').innerText();

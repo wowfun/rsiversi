@@ -1,5 +1,6 @@
 #![cfg(windows)]
 #![allow(dead_code, unused_imports)] // Shared fixture also serves Linux service tests.
+mod support;
 
 use axum::{
     Router, body::Body, extract::State, http::StatusCode, response::Response, routing::post,

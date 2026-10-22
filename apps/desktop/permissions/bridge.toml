@@ -1,0 +1,4 @@
+[[permission]]
+identifier = "allow-rsi-bridge"
+description = "Use the bounded product native bridge from the selected main document."
+commands.allow = ["rsi_bridge"]

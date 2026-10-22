@@ -200,7 +200,7 @@ Keep the key out of these TOML/JSON files, shell arguments, and captured output.
 Submitting a task makes real API calls.
 
 ```bash
-tui_rsi --profile dev-tui --cwd "$tui_dev/workspace" --session-id tui-dev
+tui_rsi run dev-tui --cwd "$tui_dev/workspace" --session-id tui-dev
 ```
 
 For repository work, populate this directory with a small fixture that has its
@@ -216,7 +216,7 @@ the isolated daemon:
 
 ```bash
 tui_rsi host start --profile dev
-tui_rsi --profile dev-tui --cwd "$tui_dev/workspace" --resume tui-dev
+tui_rsi run dev-tui --cwd "$tui_dev/workspace" --resume tui-dev
 ```
 
 A fresh Session becomes durable after input acceptance. Resume a Session that
@@ -225,7 +225,7 @@ durable history. The line profile can inspect the same Session while a
 compatible daemon owns it, or after the embedded client has exited:
 
 ```bash
-tui_rsi --profile dev-cli --history tui-dev --output jsonl > "$tui_dev/history.jsonl"
+tui_rsi run dev-cli --history tui-dev --output jsonl > "$tui_dev/history.jsonl"
 tui_rsi host status
 ```
 

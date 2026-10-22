@@ -42,6 +42,7 @@ struct TerminalClient {
     screen: Arc<std::sync::Mutex<vt100::Parser>>,
     capture_name: String,
     capture_count: usize,
+    awaiting_first_screen: bool,
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
@@ -546,7 +547,7 @@ fn configure_independent(fixture: &mut CliFixture, binary: std::path::PathBuf) {
 }
 fn independent_headless(fixture: &CliFixture) {
     let output = fixture.assert_success(&[
-        "--profile",
+        "run",
         "test-headless",
         "--commands",
         "--session-id",
@@ -563,7 +564,7 @@ fn independent_headless(fixture: &CliFixture) {
         .unwrap();
     let command = serde_json::json!({"command":descriptor["id"],"request_id":"headless-plan-on","expected_revision":list["revision"],"arguments":"on"});
     let output = fixture.assert_success(&[
-        "--profile",
+        "run",
         "test-headless",
         "--command",
         &command.to_string(),
@@ -687,7 +688,7 @@ plugin = "rsi.application.tui"
     }
     fn start_presentation(fixture: &CliFixture, arguments: &[&str], native: bool) -> Self {
         Self::write_profile(fixture, native);
-        Self::launch(fixture, arguments, &["--profile", "test-tui"])
+        Self::launch(fixture, arguments, &["run", "test-tui"])
     }
     fn launch(fixture: &CliFixture, arguments: &[&str], entry: &[&str]) -> Self {
         Self::launch_environment(fixture, arguments, entry, &[])
@@ -762,6 +763,7 @@ plugin = "rsi.application.tui"
             screen,
             capture_name: arguments.last().unwrap_or(&"tui").replace('/', "_"),
             capture_count: 0,
+            awaiting_first_screen: true,
         }
     }
 
@@ -867,10 +869,14 @@ plugin = "rsi.application.tui"
     }
 
     async fn until_screen(&mut self, text: &str, matches: impl Fn(&str) -> bool) {
-        let deadline = Instant::now() + Duration::from_secs(20);
+        // The first view includes bounded cold runtime publication; subsequent
+        // UI interactions retain their shorter response deadline.
+        let seconds = if self.awaiting_first_screen { 210 } else { 20 };
+        let deadline = Instant::now() + Duration::from_secs(seconds);
         loop {
             let output = self.screen.lock().unwrap().screen().contents();
             if matches(&output) {
+                self.awaiting_first_screen = false;
                 self.capture();
                 return;
             }
@@ -1107,7 +1113,7 @@ async fn fullscreen_paste_submit_resize_model_menu_and_terminal_restore() {
     terminal.send(b"\x04");
     terminal.finish().await;
     let history = fixture.assert_success(&[
-        "--profile",
+        "run",
         "test-cli",
         "--history",
         "tui-paste",
@@ -1147,7 +1153,7 @@ async fn fullscreen_rejects_non_tty_before_host_boot_and_restores_after_sigterm(
     terminal.finish().await;
     let output = fixture
         .command()
-        .args(["--profile", "test-tui"])
+        .args(["run", "test-tui"])
         .output()
         .unwrap();
     assert!(!output.status.success());
@@ -1211,7 +1217,7 @@ async fn fullscreen_reviews_and_denies_a_live_prepared_approval() {
     terminal.finish().await;
     assert_eq!(state.requests.lock().unwrap().len(), 1);
     let history = fixture.assert_success(&[
-        "--profile",
+        "run",
         "test-cli",
         "--history",
         "tui-approval",
@@ -1262,7 +1268,7 @@ async fn daemon_detach_resume_reads_foreign_pending_body_and_ctrl_c_preserves_dr
     resumed.send(b"\x15\x04");
     resumed.finish().await;
     let history = fixture.assert_success(&[
-        "--profile",
+        "run",
         "test-cli",
         "--history",
         "tui-resume",

@@ -518,3 +518,61 @@ async fn retained_service_observation_does_not_keep_native_ownership_after_shutd
     ));
     drop(replacement);
 }
+
+#[tokio::test]
+async fn catalog_admits_independent_web_bundle_and_rejects_bootstrap_tampering() {
+    for corrupt in [false, true] {
+        let temporary = tempfile::tempdir().unwrap();
+        let assets = temporary.path().join("assets");
+        std::fs::create_dir(&assets).unwrap();
+        for file in rsi_web_assets::BOOTSTRAP_FILES {
+            std::fs::write(assets.join(file), file.as_bytes()).unwrap();
+        }
+        std::fs::write(
+            assets.join("rsi-build.json"),
+            rsi_web_assets::pairing_receipt(&assets, &"b".repeat(64)).unwrap(),
+        )
+        .unwrap();
+        if corrupt {
+            std::fs::write(assets.join("worker.js"), b"changed after receipt").unwrap();
+        }
+        let paths = HostPaths::new(
+            temporary.path().join("config"),
+            temporary.path().join("state"),
+            temporary.path().join("cache"),
+        )
+        .unwrap();
+        let (host, _) = standard_application_host(
+            rsi_app_catalog::compose(rsi::StandardComposition::new(
+                paths,
+                BTreeMap::new(),
+                None,
+                rsi_app_catalog::metadata(),
+            ))
+            .unwrap(),
+            vec![],
+        )
+        .unwrap();
+        let result = host
+            .start(rsi_host::Profile::new(vec![rsi_host::ProfileEntry::new(
+                "assets",
+                "rsi.web.assets",
+                serde_json::json!({"directory": assets, "files": rsi_web_assets::BOOTSTRAP_FILES}),
+            )]))
+            .await;
+        if corrupt {
+            assert!(
+                result.is_err(),
+                "catalog must reject changed bootstrap bytes"
+            );
+        } else {
+            let running = result.expect("catalog must accept an independent bundle family");
+            assert!(
+                running
+                    .lookup_local::<rsi_api_http::HttpAssetsContract>()
+                    .is_some()
+            );
+            assert!(running.shutdown().await.is_clean());
+        }
+    }
+}

@@ -4,15 +4,19 @@ import { defineConfig } from 'vite';
 import react from '@vitejs/plugin-react';
 import { fileURLToPath } from 'node:url';
 import { xtermDocumentOverride } from './xterm-document.mjs';
+import { desktopBridgeDescriptor } from './wire-descriptors.mjs';
 
 const local = path => fileURLToPath(new URL(path, import.meta.url));
 export function documentConfiguration({command}, {supervised = false} = {}) {
   const upstream = process.env.RSI_DEV_UPSTREAM;
-  if (command === 'serve' && !upstream && !supervised) throw new Error('Start product development through pnpm -C apps/web dev; isolated browser fixtures use fixture-dev web');
+  if (command === 'serve' && !upstream && !supervised) throw new Error('Start product development through rsi --watch web with a configured frontend recipe; isolated browser fixtures use fixture-dev web');
   if (upstream) loopbackAddress(upstream);
   return {
     cacheDir: local("./node_modules/.vite"),
-    define: { __RSI_BUILD_FAMILY__: JSON.stringify(process.env.RSI_BUILD_FAMILY_SHA256 ?? process.env.RSI_DEV_BUILD_FAMILY ?? "") },
+    define: {
+      __RSI_BUILD_FAMILY__: JSON.stringify(process.env.RSI_BUILD_FAMILY_SHA256 ?? process.env.RSI_DEV_BUILD_FAMILY ?? ""),
+      __RSI_DESKTOP_BRIDGE__: JSON.stringify(desktopBridgeDescriptor()),
+    },
     plugins:[xtermDocumentOverride(),react(),{name:'rsi-bootstrap-restart',handleHotUpdate(context){if(/\/(?:app\.js|worker\.js|admission\.js|drafts\.js|mounts\.js|src\/(?:main\.tsx|slots\.tsx|bridge\.ts))$/.test(context.file)){context.server.ws.send({type:'full-reload'});return []}}}],
     optimizeDeps:{exclude:['@xterm/xterm']},
     resolve:{alias:{'@rsi/dsh-slots':local('./vendor/dsh/slots/index.ts'),'@rsi/dsh-store-contract':local('./vendor/dsh/store-contract.ts')}},

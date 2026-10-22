@@ -57,8 +57,7 @@ fn standalone_product_entry_rejects_before_asset_io() {
     );
     let diagnostic = factory.take_diagnostic().unwrap().to_string();
     assert!(
-        diagnostic.contains("no build family")
-            && diagnostic.contains("scripts/rsiversi.sh build web")
+        diagnostic.contains("no build family") && diagnostic.contains("rsi plugin install web")
     );
     assert!(factory.take_diagnostic().is_none());
 }
@@ -115,7 +114,7 @@ async fn missing_malformed_oversized_and_foreign_receipts_are_rejected() {
                 .take_diagnostic()
                 .unwrap()
                 .to_string()
-                .contains("Web pairing")
+                .contains("Web bundle")
         );
     }
 }
@@ -143,6 +142,48 @@ fn files(root: &Path) -> Vec<String> {
         files.extend(["standard.js".into(), "ui-renderers.json".into()]);
     }
     files
+}
+
+#[tokio::test]
+async fn independent_bundles_keep_internal_integrity_without_core_family_equality() {
+    for corrupt in [false, true] {
+        let root = bundle();
+        // A producer's family is independent of the core that admits the package.
+        let receipt = pairing_receipt(root.path(), &"b".repeat(64)).unwrap();
+        std::fs::write(root.path().join("rsi-build.json"), receipt).unwrap();
+        if corrupt {
+            std::fs::write(root.path().join("worker.js"), b"foreign worker").unwrap();
+        }
+        let mut builder = HostBuilder::without_paths("independent-web");
+        builder
+            .register_local_contract::<HttpAssetsContract>()
+            .unwrap();
+        builder
+            .register_local_contract::<WebAssetControlContract>()
+            .unwrap();
+        builder
+            .register_linked(
+                "assets",
+                "1",
+                UpdateMode::RestartRequired,
+                Arc::new(rsi_web_assets::VerifiedWebAssetsFactory),
+            )
+            .unwrap();
+        let result = builder
+            .build()
+            .unwrap()
+            .start(Profile::new(vec![ProfileEntry::new(
+                "assets",
+                "assets",
+                serde_json::json!({"directory": root.path(), "files": files(root.path())}),
+            )]))
+            .await;
+        if corrupt {
+            assert!(result.is_err());
+        } else {
+            assert!(result.unwrap().shutdown().await.is_clean());
+        }
+    }
 }
 fn renderer(root: &Path, source: &[u8]) {
     use sha2::{Digest as _, Sha256};

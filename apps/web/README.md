@@ -1,5 +1,12 @@
 # Web document bridge
 
+`node apps/web/build.mjs ABSOLUTE_EMPTY_DIRECTORY [--dev]` builds an independent
+Web bundle. Document, Worker and WASM share one freshly generated internal
+identity and a verified closed set of file hashes. It does not build a native
+core or require a native build-family identity. The package manifest declares
+the wire interfaces needed from the Host. Desktop bridge compatibility is
+checked independently from its owning generated snapshot.
+
 The supervised development overlay uses the pinned Vite 6.4.3. Its owned HTTP
 listener preserves port zero, proxy configuration retains Vite's supplied option
 objects, and shutdown drains the version-specific dependency scan before closing.
@@ -21,13 +28,13 @@ The same SVG supplies the favicon and the source for native application icons.
 Vite serves it from `public/` and copies it unchanged into the flat production
 bundle as a fixed document-stage bootstrap asset.
 
-Native document mode uses the exact local `rsi://localhost` or
-`http://rsi.localhost` location, including its scheme and authority. The latter
-is WebView2's visible Windows origin. Transport construction, automatic native
-connection, clipboard, close-drain recovery and native export share this mode
-predicate. Other HTTP origins use the Dedicated Worker and browser connection
-flow. Mode selection does not grant native authority; Desktop owns request
-admission and document IPC permissions.
+Browser and Desktop both use the Dedicated Worker and ordinary authenticated
+loopback HTTP/WebSocket transport. Desktop adds only the
+[bounded native bridge](../../crates/rsi/desktop-bridge/README.md) for clipboard,
+streamed save-dialog export and draft-aware window closing. Its injected marker
+selects conveniences; Tauri’s exact main-document URL capability owns authority.
+The document embeds the bridge descriptor derived from its reviewed wire
+snapshot. Custom scheme locations do not select a second application runtime.
 
 The standard renderer displays an optional `data.image` by reading its explicitly
 declared PNG source in bounded 64 KiB windows. Its published renderer declares
@@ -122,18 +129,20 @@ neither lane. A failed draft flush cancels document close, keeps the current
 editor and connection available for recovery, and never reports clean disconnect.
 A completed close updates the document from its owner's Closed phase, including
 when the transport returns an empty or null disconnect receipt.
+Native close requests arriving during draining or after failure wait for that
+owner's cleanup and acknowledge the attempt. Each attempt is consumed before
+awaiting the bridge, so rejection or a later attempt cannot reuse an old identity.
 Document close waits at most 30 seconds for each authentication, draft-save,
 renderer-disposal, disconnect-receipt and transport-cleanup stage. A draft-save
 deadline restores the current editor for recovery; a late save cannot continue
 that close attempt. Cleanup deadlines remain observable failures and block
 replacement even if the underlying operation completes later. Waiting never
 asserts that native work was cancelled or that disconnect succeeded.
-Native transport cleanup aborts its own HTTP request after 30 seconds and retains
-that failed termination receipt for subsequent callers.
-Native private requests always use POST, including empty-body frame polling;
-the [Desktop adapter](../desktop/README.md) owns Origin and method admission.
+Browser and Desktop share Worker RPC and frame acknowledgement. The
+[Desktop adapter](../desktop/README.md) separately owns the bounded native bridge
+for window close, clipboard and save dialogs.
 Native close cancellation also cancels that attempt's drain deadline; a later
-close starts a new attempt after recovery. The native close-cancellation HTTP wait also expires after 30 seconds.
+close starts a new attempt after recovery. The native close attempt has a thirty-second watchdog.
 Failure to cancel native close retains the draft-save
 guidance and fails the owning connection instead of escaping as a raw fetch error. Disconnect immediately fences ordinary admission and joins admitted
 work and reply delivery before reporting clean shutdown. It does not gain capacity
@@ -172,13 +181,11 @@ cancel WebKit click activation even when the button itself remains enabled.
 The draft-status row reserves one line across ordinary save completion, so
 removing the transient saving notice does not move a pressed composer control.
 
-From the repository, run `pnpm -C apps/web install --frozen-lockfile --ignore-scripts`
-and `pnpm -C apps/web build --debug`. The producer freezes the current source,
-uses the installed wasm32 target and wasm-bindgen 0.2.127, and publishes a paired
-native executable and complete asset bundle. The command reports the concrete
-bundle directory; `bash scripts/rsiversi.sh web` launches the latest managed
-publication. Omit `--debug` for release. The optional absolute output directory
-must be new and remains caller-owned.
+Build with `node apps/devtools/build.mjs web ABSOLUTE_PACKAGE [--debug]`,
+then install using `rsi plugin install --local ABSOLUTE_PACKAGE` and launch with
+`rsi web`. The producer builds the document/Worker/WASM package independently
+from the native core. The [development guide](../../docs/development.md) explains
+ordinary `--watch` recipes and Vite supervision.
 Dependency installation keeps lifecycle scripts disabled. The [pnpm policy](pnpm-workspace.yaml)
 explicitly denies esbuild's install script; its locked platform package supplies
 the executable. This also keeps repeated installs consistent with pnpm's recorded
@@ -188,18 +195,16 @@ Local compilation has no fixed per-command deadline: a cold Windows release
 build can exceed ten minutes in the Worker stage alone. CI owns its job deadlines;
 the producer waits for the compiler and publishes only a complete successful bundle.
 
-A standalone `cargo build -p rsi-cli --bin rsi` does not have a Web build family.
-Product Web entry rejects it before starting a Service. A paired executable checks
-its assets even with `--assets`: bootstrap hashes and the Worker family must match.
-Renderer generations remain independently replaceable through their existing
-manifest and publication controls. Pairing is an artifact consistency check,
-not distributor authentication.
+A standalone `cargo build -p rsi-cli --bin rsi` accepts independently installed Web
+packages. Explicit `--assets` directories use the same internal bootstrap and
+Worker verification described by the [asset owner](../../crates/rsi/web-assets/README.md).
 
-`pnpm -C apps/web dev` supervises the standard debug product with caller-selected
-state and credentials. Vite serves mutable document source after reporting its
-owned loopback socket through the [development control protocol](../dev-control/README.md).
-The upstream native/Worker pair remains frozen. React edits use HMR, bootstrap
-edits reload the document, and renderer edits publish from a run-owned asset copy.
+`rsi --watch web` supervises the configured source recipe and optional Vite
+frontend with caller-selected homes and credentials. Vite serves mutable document
+source after reporting its owned loopback socket through the
+[development control protocol](../dev-control/README.md). The admitted bundle
+supplies Worker/WASM assets. React edits use HMR, bootstrap edits reload the
+document, and admitted renderer updates publish through the existing listener.
 Rust, Worker and Vite server configuration changes require restart. The Vite source
 root excludes the sibling Worker package, repository state and build artifacts.
 Ordinary product login uses the printed one-use launch link. This development
@@ -208,7 +213,7 @@ independent XDG roots are appropriate for durable-format work.
 
 For explicit Serve deployments and isolated Web fixtures, open the configured
 origin and paste the JSON receipt from
-`rsi --profile devices -- register LABEL`. The receipt is used once and removed
+`rsi run devices -- register LABEL`. The receipt is used once and removed
 from the form; only the endpoint identity is saved for an explicit reconnect
 using the HttpOnly cookie. Sign out closes document input, flushes draft writes
 and awaits renderer disposal before draining the Worker application and clearing
@@ -226,8 +231,8 @@ notice cannot clear it.
 Closing a browser tab cannot guarantee Rust cleanup; the service's
 transport owners still bound and clean up their disconnected work.
 
-The ordinary application Profile selects `rsi.application.service`,
-`rsi.web.assets` with an explicit directory, and `rsi.application.serve-web`.
+The ordinary Serve application Profile selects `rsi.application.service` and
+`rsi.application.serve`; `--assets ABSOLUTE_DIRECTORY` supplies the Web bundle.
 See the [Serve contract](../serve/README.md) for listener policy.
 
 Presentation frames are snapshots or patches. The document applies a patch only
@@ -286,9 +291,8 @@ another connection. Retirement does not wait for an abandoned draft flush; its
 late completion remains fenced. `settled()` waits for a live drain, or for actual
 cleanup after failure/retirement. Draft rejections retain a message even when
 storage rejects with a primitive value.
-Native transport cleanup requires a successful `/_failed` response. A rejected
-response or transport error remains a failed teardown and blocks replacement;
-the document must be restarted rather than opening a competing connection.
+Worker termination and renderer cleanup share one teardown result. A rejected
+cleanup blocks replacement until the owning document is restarted.
 Attachment replacement disables that pane's input until its new view arrives;
 typing cannot enter the retiring attachment between navigation and delivery.
 Connection replacement resets navigation fences even when attachment selection
@@ -495,9 +499,8 @@ The parent renderer is trusted same-origin application code, like other admitted
 renderer modules; hostile same-origin code is outside the iframe isolation boundary.
 A one-use MessagePort accepts only the immediate parent whose message Origin
 matches the bootstrap document URL, transfers approved bytes and closes before
-user scripts run. WebKitGTK custom-scheme responses do not reliably enforce
-frame-ancestors; native navigation and this origin check remain required even
-with the response CSP. An unauthorized embed cannot submit executable content. The
+user scripts run. Browser and Desktop load these documents over HTTP; native
+navigation and this origin check remain required alongside the response CSP. An unauthorized embed cannot submit executable content. The
 [preview boundary decision](../../.agents/notes/implemented/bug-fix/2026-09-22-preview-input-and-native-authority.md)
 records the engine evidence and native authority rationale. Frame replacement discards that frame's state and authority. Previewing uses
 no Media import. Video remains outside this preview renderer.
@@ -525,28 +528,20 @@ initiating page attests its exact frame window through its private MessagePort;
 the worker then binds the one-use response to that controlled frame client. A
 foreign page or a replayed URL cannot consume the stream.
 
-Native export cancellation carries the token returned by `export_open` and uses
-an independent eight-call control lane. Only a positively classified pre-admission
-Busy response may be retried; cancellation delivery is awaited and a failure is
-visible to the export caller unless saving already confirmed success. A late
-cancellation delivery failure cannot turn that confirmed save into a failed export.
+Native export cancellation carries the token returned by the Desktop bridge's
+`export_open` and uses its bounded native command lane. The Worker owns source
+export events; the native adapter owns the chooser, temporary file and commit.
+The [Desktop contract](../desktop/README.md) defines cancellation and shutdown.
 
 Closed human reviews display the exact request and explicit action choices.
 Terminal clients accept a choice number followed by optional feedback; Web and
 Desktop send the selected stable action and request binding. Free text cannot
 approve a review. An answer receipt confirms delivery, not durable approval.
 
-For the local product entrypoint, publish a paired generation, then launch it:
-
-```bash
-pnpm -C apps/web install --frozen-lockfile --ignore-scripts
-pnpm -C apps/web build --debug
-bash scripts/rsiversi.sh web
-```
-
-The installed layout is `rsi` beside the complete `assets/` directory. Startup
-does not build. `--assets ABSOLUTE_DIRECTORY` selects a bundle with the same
-family and verified bootstrap bytes.
+For an installed Web package, use `rsi web`. Startup never builds. An explicit
+`--assets ABSOLUTE_DIRECTORY` selects a complete verified bundle; its internal
+bootstrap identity is independent of the native core. The default installed
+package also admits its required Host interfaces before activation.
 The local launch document clears its bootstrap fragment immediately, passes its
 short-lived ticket to the Rust Worker once, and automatically connects through
 the returned cookie identity. It never saves the ticket. Cookie recovery also
@@ -770,3 +765,7 @@ The document Node tests require Node 22.18 or later for direct TypeScript import
 Document request admission counts each pending waiter once in its selected lane.
 Replies (including failures), synchronous transport rejection and connection
 retirement release that count; unknown or duplicate replies release no capacity.
+
+A native close also acknowledges settled transport failure during draft flush or
+disconnect. Cleanup must complete before that acknowledgement; a failed cleanup
+leaves the native deadline responsible for reporting unsuccessful shutdown.

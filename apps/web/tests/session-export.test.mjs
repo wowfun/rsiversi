@@ -1,51 +1,89 @@
-import {after, before, describe, test} from 'node:test';
+import {afterEach, beforeEach, test} from 'node:test';
 import assert from 'node:assert/strict';
 import {downloadSession} from '../session-export.js';
 
 const deferred = () => { let resolve; const promise = new Promise(r=>resolve=r); return {promise,resolve}; };
-for (const href of ['rsi://localhost/', 'http://rsi.localhost/']) describe(href, () => {
-  const original = globalThis.location;
-  before(() => { globalThis.location = new URL(href); });
-  after(() => { globalThis.location = original; });
-
-test('abort while reservation is pending cancels the returned token before save', async()=>{
-  const opened=deferred(), controller=new AbortController(), calls=[];
-  const result=downloadSession(async(method,body)=>{
-    calls.push([method,body]);
-    if(method==='export_open') return opened.promise;
-    assert.equal(method,'export_cancel'); assert.deepEqual(JSON.parse(body),{token:'A'});
-    return 'null';
-  },'main',7,'latest',controller.signal);
-  controller.abort(); opened.resolve('{"token":"A"}');
-  await assert.rejects(result,/Export cancelled/);
-  assert.deepEqual(calls.map(([method])=>method),['export_open','export_cancel']);
+let nativeCalls, original;
+beforeEach(() => {
+  original = Object.fromEntries(['__RSI_DESKTOP__','__RSI_DESKTOP_BRIDGE__','__TAURI_INTERNALS__'].map(key=>[key,Object.getOwnPropertyDescriptor(globalThis,key)]));
+  nativeCalls = [];
+  globalThis.__RSI_DESKTOP__ = true;
+  globalThis.__RSI_DESKTOP_BRIDGE__ = {name:'rsi.desktop.bridge',version:1,schema:'a'.repeat(64)};
+  globalThis.__TAURI_INTERNALS__ = {invoke:async (_command,{payload})=>{
+    const operation=JSON.parse(payload).operation; nativeCalls.push(operation);
+    return operation.kind==='export_open'?{token:'native'}:null;
+  }};
 });
-
-test('cancellation retries only positively classified pre-admission failures',async()=>{
-  for(const retryable of [true,false]) {
-    const saving=deferred(), controller=new AbortController(); let attempts=0;
-    const failure=Object.assign(new Error('control failed'),{notAdmitted:retryable,retryable});
-    const result=downloadSession(async(method,body)=>{
-      if(method==='export_open') return '{"token":"B"}';
-      assert.equal(JSON.parse(body).token,'B');
-      if(method==='export_save') { controller.abort(); await saving.promise; throw new Error('Export cancelled'); }
-      attempts++;
-      if(attempts===1) { if(!retryable) saving.resolve(); throw failure; }
-      saving.resolve(); return 'null';
-    },'main',3,'-f json',controller.signal);
-    await assert.rejects(result,retryable?/Export cancelled/:/control failed/);
-    assert.equal(attempts,retryable?2:1);
+afterEach(() => {
+  for (const [key,descriptor] of Object.entries(original)) {
+    if(descriptor) Object.defineProperty(globalThis,key,descriptor); else delete globalThis[key];
   }
 });
+const worker = handler => async (method, body) => {
+  assert.equal(method,'export_input');
+  const input=JSON.parse(body);
+  assert.equal(input.pane,'main');
+  assert.equal(input.generation,7);
+  return JSON.stringify(await handler(input.operation));
+};
 
-test('confirmed replacement stays successful after cancellation and failed control delivery',async()=>{
-  const controller=new AbortController();
-  const result=await downloadSession(async(method,body)=>{
-    if(method==='export_open') return '{"token":"C"}';
-    if(method==='export_cancel') throw new Error('connection closed');
-    assert.deepEqual(JSON.parse(JSON.parse(body).source),{pane:'main',generation:1,arguments:'-f json'});
-    controller.abort(); return '{"filename":"saved.json"}';
-  },'main',1,'-f json',controller.signal);
-  assert.deepEqual(result,{filename:'saved.json'});
+test('abort during Worker reservation cancels the returned token before native admission',async()=>{
+  const opened=deferred(),controller=new AbortController(),calls=[];
+  const result=downloadSession(worker(async operation=>{
+    calls.push(operation);
+    if(operation.kind==='open') return opened.promise;
+    assert.deepEqual(operation,{kind:'cancel',token:'worker'});
+    return null;
+  }),'main',7,'latest',controller.signal);
+  controller.abort(); opened.resolve({token:'worker',event:{type:'start'}});
+  await assert.rejects(result,/Export cancelled/);
+  assert.deepEqual(calls.map(operation=>operation.kind),['open','cancel']);
+  assert.deepEqual(nativeCalls,[]);
 });
+
+test('abort during the native save dialog cancels its later returned reservation',async()=>{
+  const admitted=deferred(),dialog=deferred(),controller=new AbortController(),calls=[];
+  globalThis.__TAURI_INTERNALS__.invoke=async (_command,{payload})=>{
+    const operation=JSON.parse(payload).operation;nativeCalls.push(operation);
+    if(operation.kind==='export_open') {admitted.resolve();return dialog.promise;}
+    return null;
+  };
+  const result=downloadSession(worker(async operation=>{
+    calls.push(operation);
+    if(operation.kind==='open') return {token:'worker',event:{type:'start'}};
+    assert.equal(operation.kind,'cancel');return null;
+  }),'main',7,'latest',controller.signal);
+  await admitted.promise;
+  controller.abort();dialog.resolve({token:'native'});
+  await assert.rejects(result,/Export cancelled/);
+  assert.deepEqual(nativeCalls.map(operation=>operation.kind),['export_open','export_cancel']);
+  assert.ok(calls.some(operation=>operation.kind==='cancel'));
+});
+
+test('confirmed native replacement stays successful after abort and failed Worker cleanup',async()=>{
+  const controller=new AbortController();
+  const events=[{type:'chunk',offset:'0',text:'saved'},{type:'complete',bytes:'5',sha256:'digest'},null];
+  globalThis.__TAURI_INTERNALS__.invoke=async (_command,{payload})=>{
+    const operation=JSON.parse(payload).operation;nativeCalls.push(operation);
+    if(operation.kind==='export_open') return {token:'native'};
+    if(operation.kind==='export_finish') {controller.abort();return {filename:'saved.json'};}
+    return null;
+  };
+  const result=await downloadSession(worker(async operation=>{
+    if(operation.kind==='open') return {token:'worker',event:{type:'start'}};
+    if(operation.kind==='cancel') throw new Error('Worker connection closed');
+    assert.equal(operation.kind,'next');return events.shift();
+  }),'main',7,'-f json',controller.signal);
+  assert.deepEqual(result,{filename:'saved.json'});
+  assert.equal(nativeCalls.filter(operation=>operation.kind==='export_finish').length,1);
+});
+
+test('a failed source stream cancels native staging without committing it',async()=>{
+  const controller=new AbortController();
+  await assert.rejects(downloadSession(worker(async operation=>{
+    if(operation.kind==='open') return {token:'worker',event:{type:'start'}};
+    if(operation.kind==='cancel') return null;
+    throw new Error('source stream failed');
+  }),'main',7,'latest',controller.signal),/source stream failed/);
+  assert.deepEqual(nativeCalls.map(operation=>operation.kind),['export_open','export_cancel']);
 });

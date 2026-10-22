@@ -9,8 +9,9 @@ import { DocumentConnection } from "./document-connection.js";
 import { settingsForm, canUseSettingsForm } from "./settings-form.js";
 import { publish, installActions, selectSurface } from "./src/bridge.ts";
 import { createDocumentTransport } from "./src/native.ts";
-import { isNativeDocument } from "./document-mode.js";
-const nativeDocument = isNativeDocument();
+import { isDesktop, desktopCall } from "./desktop-bridge.js";
+const nativeDocument = isDesktop();
+let nativeCloseAttempt;
 import { MountTable, writeClipboard, setClipboardWriter } from "/mounts.js";
 import { DraftStore, DraftEditor, validateEditor } from "/drafts.js";
 import { openHistoryPicker } from "./history-picker.js";
@@ -282,11 +283,15 @@ $("login-form").addEventListener("submit", event => {
 $("dev-http-label").hidden = nativeDocument || location.protocol !== "http:";
 $("reconnect").hidden = !endpoint;
 $("reconnect").addEventListener("click", () => perform(() => connectWith(JSON.stringify({ endpoint_id: endpoint }))));
+async function acknowledgeNativeClose(ready) {
+  const attempt = nativeCloseAttempt;
+  nativeCloseAttempt = undefined;
+  if (attempt !== undefined) await desktopCall({kind:"close",attempt,ready});
+}
 async function cancelNativeCloseAfterDraftFailure(current, draftError) {
   try {
-    const cancelled = await fetch("/_close_cancel", {method:"POST",body:"",signal:AbortSignal.timeout(30_000)});
+    await acknowledgeNativeClose(false);
     if (connection !== current || current.closing) return false;
-    if (!cancelled.ok) throw new Error(`Native close cancellation failed (${cancelled.status})`);
     return true;
   } catch (error) {
     if (connection === current && !current.closing) {
@@ -296,19 +301,60 @@ async function cancelNativeCloseAfterDraftFailure(current, draftError) {
   }
 }
 
+async function flushCapturedPanes(captured) {
+  const saved = await Promise.allSettled(captured.map(pane => pane.flush(true)));
+  const failed = saved.find(result => result.status === "rejected");
+  if (failed) throw failed.reason;
+}
+
 async function disconnectDocument() {
   const current = connection;
-  if (!current || current.closing) return;
+  if (!current || current.phase === "Closed") {
+    await acknowledgeNativeClose(true);
+    return;
+  }
+  if (current.phase === "Failed") {
+    // Native listener EOF and Worker failure can arrive in either order. Editors
+    // retain their local drafts after view reset; persist them before native exit.
+    try {
+      await flushCapturedPanes([...panes.values()]);
+    } catch (error) {
+      await acknowledgeNativeClose(false);
+      notify(`Draft is not saved: ${error?.message ?? error}. Keep this window open and recover the draft.`);
+      return;
+    }
+  }
+  if (current.closing) {
+    try {
+      await current.settled();
+      if (connection === current && ["Closed", "Failed"].includes(current.phase)) await acknowledgeNativeClose(true);
+    } catch (error) {
+      await acknowledgeNativeClose(false);
+      throw error;
+    }
+    return;
+  }
   $("sign-out").disabled = true;
   // Capture the actual editors before the first await, not replacement panes.
   const capturedPanes = [...panes.values()];
   try {
+    let draftFailure, draftFailed = false;
     const resources = await current.disconnect(async () => {
-      const saved = await Promise.allSettled(capturedPanes.map(pane => pane.flush(true)));
-      const failed = saved.find(result => result.status === "rejected");
-      if (failed) throw failed.reason;
+      try { await flushCapturedPanes(capturedPanes); }
+      catch (error) { draftFailed = true; draftFailure = error; throw error; }
     });
-    if (connection !== current || current.phase !== "Closed") return;
+    if (connection === current && draftFailed) {
+      await acknowledgeNativeClose(false);
+      notify(`Draft is not saved: ${draftFailure?.message ?? draftFailure}. Keep this window open and recover the draft.`);
+      return;
+    }
+    if (connection !== current) return;
+    if (current.phase === "Failed") {
+      await current.settled();
+      if (connection === current) await acknowledgeNativeClose(true);
+      return;
+    }
+    if (current.phase !== "Closed") return;
     document.dispatchEvent(new CustomEvent("rsi-disconnected", { detail: resources }));
     connected = false;
     clearView();
@@ -316,6 +362,7 @@ async function disconnectDocument() {
     $("connection-state").classList.remove("connected");
     $("workbench").hidden = true; $("login").hidden = false; $("sign-out").hidden = true;
     notify("");
+    await acknowledgeNativeClose(true);
   } catch (error) {
     if (connection !== current) return;
     if (error.draftSaveFailed && !current.closing) {
@@ -323,13 +370,17 @@ async function disconnectDocument() {
         if (!await cancelNativeCloseAfterDraftFailure(current, error)) return;
       }
       notify(`Draft is not saved: ${error.message}. Recover the draft before closing.`);
-    } else failWorker(String(error.message ?? error), current);
+    } else {
+      failWorker(String(error.message ?? error), current);
+      await current.settled();
+      if (connection === current) await acknowledgeNativeClose(true);
+    }
   } finally { if (connection === current) $("sign-out").disabled = false; }
 }
 
-$("sign-out").addEventListener("click", () => perform(disconnectDocument));
-window.addEventListener("rsi-native-close", () => perform(disconnectDocument));
-if(nativeDocument)setClipboardWriter(text=>call("clipboard_write",text));
+$("sign-out").addEventListener("click", () => perform(nativeDocument ? () => desktopCall({kind:"request_close"}) : disconnectDocument));
+window.addEventListener("rsi-native-close", event => { if (!nativeDocument || !Number.isSafeInteger(event.detail)) return; nativeCloseAttempt = event.detail; perform(disconnectDocument); });
+if(nativeDocument)setClipboardWriter(text=>desktopCall({kind:"clipboard",text}));
 
 function draftRecovery(editor, resolved = () => {}) {
   const choose = useSaved => async () => { await editor.resolve(useSaved); await resolved(); };
@@ -1567,10 +1618,10 @@ function renderUiDetail(detail, target) {
 }
 
 if (nativeDocument) {
-  $("login").hidden = true;
   $("sign-out").textContent = "Close application";
-  perform(() => connectWith("{}"));
-} else if (localLaunch !== undefined || (localBootstrap && location.protocol === "http:")) {
+  perform(() => desktopCall({kind:"hello"}));
+}
+if (localLaunch !== undefined || (localBootstrap && location.protocol === "http:")) {
   const ticket = localLaunch ?? null;
   localLaunch = undefined;
   perform(() => connectWith(undefined, ticket));

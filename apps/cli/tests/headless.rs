@@ -906,7 +906,7 @@ async fn resume_rejects_a_different_canonical_workspace() {
     let binary = env!("CARGO_BIN_EXE_rsi");
     let first = binary_command(binary, &fixture)
         .args([
-            "--profile",
+            "run",
             "test-headless",
             "first",
             "--cwd",
@@ -920,7 +920,7 @@ async fn resume_rejects_a_different_canonical_workspace() {
     assert!(first.status.success());
     let resumed = binary_command(binary, &fixture)
         .args([
-            "--profile",
+            "run",
             "test-headless",
             "second",
             "--resume",
@@ -945,7 +945,7 @@ async fn built_binary_separates_jsonl_and_model_text_from_status_feedback() {
     let binary = env!("CARGO_BIN_EXE_rsi");
     let first = binary_command(binary, &fixture)
         .args([
-            "--profile",
+            "run",
             "test-headless",
             "/status",
             "--cwd",
@@ -983,7 +983,7 @@ async fn built_binary_separates_jsonl_and_model_text_from_status_feedback() {
 
     let second = binary_command(binary, &fixture)
         .args([
-            "--profile",
+            "run",
             "test-headless",
             "again",
             "--resume",
@@ -1005,7 +1005,7 @@ async fn built_binary_separates_jsonl_and_model_text_from_status_feedback() {
 
     let mut third = binary_command(binary, &fixture)
         .args([
-            "--profile",
+            "run",
             "test-headless",
             "--stdin",
             "--cwd",
@@ -1045,7 +1045,7 @@ async fn built_binary_treats_help_after_separator_as_the_literal_task() {
     let fixture = fixture(&endpoint);
     let output = binary_command(env!("CARGO_BIN_EXE_rsi"), &fixture)
         .args([
-            "--profile",
+            "run",
             "test-headless",
             "--cwd",
             fixture.workspace.to_str().unwrap(),
@@ -1196,7 +1196,7 @@ async fn real_coding_tool_flow(read_structured_results: bool) {
     }
     let output = binary_command(env!("CARGO_BIN_EXE_rsi"), &fixture)
         .args([
-            "--profile",
+            "run",
             "test-headless",
             "exercise all coding tools",
             "--agent-preset",
@@ -1322,7 +1322,7 @@ async fn built_binary_blocks_success_when_background_work_was_not_collected() {
     let fixture = fixture(&endpoint);
     let output = binary_command(env!("CARGO_BIN_EXE_rsi"), &fixture)
         .args([
-            "--profile",
+            "run",
             "test-headless",
             "start work but forget to collect it",
             "--cwd",
@@ -1365,7 +1365,7 @@ async fn rejected_patch_evidence_is_complete_in_the_next_model_request() {
     let fixture = fixture(&endpoint);
     let output = binary_command(env!("CARGO_BIN_EXE_rsi"), &fixture)
         .args([
-            "--profile",
+            "run",
             "test-headless",
             "attempt a patch and handle rejection",
             "--cwd",
@@ -1429,7 +1429,7 @@ async fn rejected_patch_evidence_is_complete_in_the_next_model_request() {
 async fn built_binary_uses_fixed_failure_exit_classes() {
     let binary = env!("CARGO_BIN_EXE_rsi");
     let usage = tokio::process::Command::new(binary)
-        .args(["--profile", "headless", "task", "--stdin"])
+        .args(["run", "headless", "task", "--stdin"])
         .observed_output()
         .await
         .unwrap();
@@ -1441,7 +1441,7 @@ async fn built_binary_uses_fixed_failure_exit_classes() {
     std::fs::write(&missing_route.profile, "format = 1\n").unwrap();
     let boot = tokio::process::Command::new(binary)
         .args([
-            "--profile",
+            "run",
             "test-headless",
             "task",
             "--cwd",
@@ -1471,7 +1471,7 @@ async fn built_binary_uses_fixed_failure_exit_classes() {
     let fixture = fixture(&endpoint);
     let failed = tokio::process::Command::new(binary)
         .args([
-            "--profile",
+            "run",
             "test-headless",
             "fail",
             "--cwd",
@@ -1506,7 +1506,7 @@ async fn built_binary_sigint_cancels_flushes_and_exits_130() {
     let mut child = ObservedChild::spawn(
         tokio::process::Command::new(env!("CARGO_BIN_EXE_rsi"))
             .args([
-                "--profile",
+                "run",
                 "test-headless",
                 "wait",
                 "--cwd",
@@ -1631,7 +1631,7 @@ async fn built_binary_recovers_a_real_sqlite_prefix_after_sigkill() {
     let session_id = "session-sigkill-recovery";
     let mut child =
         ObservedChild::spawn(binary_command(env!("CARGO_BIN_EXE_rsi"), &fixture).args([
-            "--profile",
+            "run",
             "test-headless",
             "first",
             "--cwd",
@@ -1664,7 +1664,7 @@ async fn built_binary_recovers_a_real_sqlite_prefix_after_sigkill() {
 
     let resumed = binary_command(env!("CARGO_BIN_EXE_rsi"), &fixture)
         .args([
-            "--profile",
+            "run",
             "test-headless",
             "second",
             "--resume",
@@ -2063,7 +2063,7 @@ async fn model_reads_full_command_output_across_raw_utf8_page_boundaries() {
     let fixture = fixture(&endpoint);
     let output = binary_command(env!("CARGO_BIN_EXE_rsi"), &fixture)
         .args([
-            "--profile",
+            "run",
             "test-headless",
             "read complete output",
             "--cwd",
@@ -2163,7 +2163,7 @@ async fn child_question_is_a_model_visible_error_without_a_human_waiter() {
     let fixture = fixture(&endpoint);
     let output = binary_command(env!("CARGO_BIN_EXE_rsi"), &fixture)
         .args([
-            "--profile",
+            "run",
             "test-headless",
             "spawn a worker and wait",
             "--cwd",
@@ -2260,7 +2260,7 @@ async fn verify_undrained_stdout(deltas: Option<usize>, output: &str) {
     let fixture = fixture(&format!("http://{address}"));
     let mut child = tokio::process::Command::new(env!("CARGO_BIN_EXE_rsi"))
         .args([
-            "--profile",
+            "run",
             "test-headless",
             "wait",
             "--cwd",

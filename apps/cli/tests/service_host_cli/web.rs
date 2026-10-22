@@ -49,7 +49,7 @@ fn identity(response: &str) -> serde_json::Value {
 async fn web_alias_and_profile_serve_default_assets_with_stable_authorized_identity() {
     let mut fixture = CliFixture::new("http://127.0.0.1:1");
     let paired = std::path::PathBuf::from(
-        std::env::var_os("RSI_PAIRED_BUNDLE").expect("paired-web-tests requires RSI_PAIRED_BUNDLE: run scripts/rsiversi.sh build web --debug, then set RSI_PAIRED_BUNDLE to its bundle directory"),
+        std::env::var_os("RSI_PAIRED_BUNDLE").expect("paired-web-tests requires RSI_PAIRED_BUNDLE: run cargo run -p rsi-app-tools -- fixture-dist web --debug, then set RSI_PAIRED_BUNDLE to its bundle directory"),
     );
     let paired = paired.canonicalize().unwrap();
     let _lease = rsi_build_info::GenerationLease::open(&paired).unwrap();
@@ -57,7 +57,7 @@ async fn web_alias_and_profile_serve_default_assets_with_stable_authorized_ident
     let mut first = None;
     for args in [
         vec!["web", "--port", "0", "--no-open"],
-        vec!["--profile", "web", "--port", "0", "--no-open"],
+        vec!["run", "web", "--port", "0", "--no-open"],
     ] {
         let (child, origin, ticket) = start(&fixture, &args).await;
         let response = request(
@@ -99,7 +99,7 @@ async fn web_alias_and_profile_serve_default_assets_with_stable_authorized_ident
             .await
             .starts_with("HTTP/1.1 401")
         );
-        let grants = fixture.assert_success(&["--profile", "devices", "configuration", "list"]);
+        let grants = fixture.assert_success(&["run", "devices", "configuration", "list"]);
         assert!(
             String::from_utf8_lossy(&grants.stdout)
                 .contains(current["device_id"].as_str().unwrap())
@@ -136,7 +136,7 @@ fn web_help_and_failures_do_not_announce_readiness() {
     let message = String::from_utf8_lossy(&failure.stderr);
     assert!(message.contains("no build family"), "{message}");
     assert!(
-        message.contains("scripts/rsiversi.sh build web"),
+        message.contains("cargo run -p rsi-app-tools -- fixture-dist web"),
         "{message}"
     );
     assert!(!fixture.temporary.path().join("state").exists());

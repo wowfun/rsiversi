@@ -1,10 +1,25 @@
 # rsi-cli
 
+On Windows, persistent-Host integration tests must execute outside Cargo's child
+Job. Compile with `cargo test --no-run --message-format=json`, then execute the
+reported test artifacts from the native caller. CI does this for CLI and catalog
+targets. A launcher whose Job forbids breakaway receives an explicit startup
+error; the product never substitutes a transient embedded service.
+
+For artifact acceptance, set `RSI_TEST_PRODUCT_BINARY` to the absolute installed
+`rsi` path when running `service_host_cli`, `windows_acp`, `resident_listeners`,
+`core_upgrade` or `addon_cli`. These fixtures retain their isolated homes and deterministic
+providers while exercising those exact product bytes. Without the opt-in they
+use Cargo's binary; paired-Web cases still require their own complete publication.
+Setup fixtures select their Service explicitly; missing-route cases must name an
+unavailable model in that Service rather than depend on a different launcher default.
+
 The native RSI launcher owns command parsing, process control and Tokio setup. It
 uses the explicit application catalog for native clients and daemon startup.
 `cargo run --locked -p rsi-cli -- --help` does not activate a backend.
-Product Web startup requires a paired distribution from `pnpm -C apps/web build`;
-a plain Cargo executable remains usable for applications without Web assets.
+The native executable always includes the linked application catalog. Web and
+Desktop are installed independently with `rsi plugin install`; application
+selection uses `rsi web`, `rsi desktop` or `rsi run NAME`.
 
 For a manual native build, run from the repository root:
 
@@ -17,10 +32,10 @@ The native executable includes all of its linked backends. Application Profile
 selection changes runtime composition, not the executable's Cargo dependency
 graph. The [development guide](../../docs/development.md) starts the standard
 debug product with caller-selected state; [source installation](../../docs/user/source-install.md) owns
-managed native, Web and Desktop build targets and launch selection.
+minimal installation and independent optional package builds.
 
 Product Web integration tests are opt-in: build a complete paired publication,
-then run `RSI_PAIRED_BUNDLE="$(bash scripts/rsiversi.sh path web)" cargo test --locked -p
+then run `RSI_PAIRED_BUNDLE="$(cargo run --quiet --locked -p rsi-app-tools -- fixture-path web)" cargo test --locked -p
 rsi-cli --features paired-web-tests --test service_host_cli web::`. The directory
 must contain its paired `rsi`, `assets/` and receipt. Missing inputs fail explicitly;
 these tests never fall back to an ordinary Cargo executable and arbitrary assets.
@@ -35,8 +50,10 @@ test also waits for the complete JSONL Turn record. These bounded waits retain
 captured output on failure and reap the child. The
 [terminal contract](../terminal/README.md) owns interruption and output deadlines.
 
-The debug executable reserves internal `__dev` actions for supervised source
-development. Their bounded child-pipe contract is owned by
-[development control](../dev-control/README.md). They reuse ordinary Profile,
-path and provider resolution; ordinary Web grammar exposes no Origin override.
-The internal browser opener reuses the normal OS handoff without starting a Host.
+Debug and release use the same launch parser, final home selection and resident
+Host path. `--watch` adds connection-owned configuration/source leases; Vite and
+Desktop startup use bounded private pipes owned by ordinary Application plugins.
+There is no debug-only launch grammar or source-tree UI selector.
+The [launch maintenance contract](../../crates/rsi/core/docs/launch.md) owns
+global config/state resets, explicit import and recoverable core replacement.
+Application help is resolved before home initialization or maintenance.

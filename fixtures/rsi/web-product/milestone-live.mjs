@@ -39,7 +39,7 @@ async function complete(pane,input,prompt) {
 function facts(session) {
   // --history intentionally returns one 128-Fact page. Read the bounded prior
   // pages through the public interactive CLI before asserting early Tool calls.
-  const records=service.run(['--profile','evidence-cli','--resume',session,'--output','jsonl'],{input:':history\n'.repeat(64)+':exit\n'}).stdout.trim().split('\n').map(line=>JSON.parse(line));
+  const records=service.run(["run",'evidence-cli','--resume',session,'--output','jsonl'],{input:':history\n'.repeat(64)+':exit\n'}).stdout.trim().split('\n').map(line=>JSON.parse(line));
   const facts=records.flatMap(record=>record.fact?[record.fact]:[]).sort((a,b)=>a.seq-b.seq);
   assert(facts.length>0 && facts[0].seq===1,'bounded history did not reach the Session baseline');
   assert(new Set(facts.map(fact=>fact.seq)).size===facts.length,'history pages overlap');return facts;

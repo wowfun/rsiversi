@@ -6,9 +6,9 @@ import net from "node:net";
 import { spawn, spawnSync } from "node:child_process";
 import { once } from "node:events";
 import { createInterface } from "node:readline";
-import { mkdtemp, mkdir, writeFile, rm } from "node:fs/promises";
+import { mkdtemp, mkdir, readFile, writeFile, rm } from "node:fs/promises";
 import { tmpdir } from "node:os";
-import { join } from "node:path";
+import { join, dirname, basename } from "node:path";
 import { setTimeout as pause } from "node:timers/promises";
 
 // Playwright's waitForFunction polls synchronously; do not pass async predicates.
@@ -132,10 +132,10 @@ async function startProvider(onRequest) {
     async close() { const closed = new Promise(resolve => server.close(resolve)); for (const socket of sockets) socket.destroy(); await closed; } };
 }
 
-export async function startService({ binary, assets, report, configure, onRequest, deepseekKey }) {
+export async function startService({ binary, assets, report, configure, onRequest, deepseekKey, watchAssets = false }) {
   const temporary = await mkdtemp(join(tmpdir(), "rsi-web-"));
   const provider = await startProvider(onRequest);
-  let child; let stopped;
+  let child; let stopped; let hostStarted = false;
   let stderr = "";
   const workspace = join(temporary, "workspace");
   const inherited = Object.fromEntries(["PATH", "LANG", "RUSTUP_HOME", "CARGO_HOME"].filter(key => process.env[key]).map(key => [key, process.env[key]]));
@@ -148,14 +148,28 @@ export async function startService({ binary, assets, report, configure, onReques
     env.DEEPSEEK_API_KEY = deepseekKey;
   }
   async function stopProcess() {
-    if (child && child.exitCode === null) {
+    let failure;
+    try { if (child && child.exitCode === null) {
       child.kill("SIGTERM");
       let result;
       try { result = await deadline(stopped, "service stop", 20_000); }
       catch { child.kill("SIGKILL"); await stopped; throw new Error("Service exceeded clean shutdown deadline"); }
       const [code, signal] = result;
       if (code !== 0 || signal !== null) throw new Error(`Service cleanup failed: exit ${code}, signal ${signal}`);
+    } } catch (error) { failure = error; }
+    if (hostStarted) {
+      const stopHost = force => boundedRun(binary, ["host", "stop", ...(force ? ["--force"] : [])],
+        {cwd:workspace,env,encoding:"utf8",timeout:45_000});
+      try {
+        if (run(["host", "status"]).stdout.trim() !== "stopped") stopHost(false);
+        hostStarted = false;
+      }
+      catch (error) {
+        failure = failure ? new AggregateError([failure,error], "Fixture and Host cleanup failed") : error;
+        try { stopHost(true); hostStarted = false; } catch { /* Retain its home authorities below. */ }
+      }
     }
+    if (failure) throw failure;
   }
   async function close() {
     let failed;
@@ -164,7 +178,9 @@ export async function startService({ binary, assets, report, configure, onReques
       () => { if (failed) throw failed; },
       () => writeFile(join(report, "service.stderr.log"), stderr),
       () => provider.close(),
-      () => rm(temporary, { recursive: true, force: true }),
+      () => hostStarted
+        ? writeFile(join(report, "retained-host-home.txt"), `${temporary}\n`)
+        : rm(temporary, { recursive: true, force: true }),
     );
   }
   try {
@@ -172,31 +188,46 @@ export async function startService({ binary, assets, report, configure, onReques
     const config = join(env.XDG_CONFIG_HOME, "rsi");
     const host = join(config, "host-profiles/fixture"); const application = join(config, "application-profiles/browser-fixture");
     await mkdir(host, { recursive: true }); await mkdir(application, { recursive: true });
+    await writeFile(join(config, "rsi.toml"), "format = 1\n[service]\nkind = 'catalog'\nid = 'fixture'\n");
     await writeFile(join(config, "settings.json"), JSON.stringify({ "rsi.agent": { default_model: { deployment: "fixture", model: "fixture-model" } } }));
     await writeFile(join(host, "host.profile.toml"), `format = 1\n[[steps]]\nkind = "plugin"\nid = "provider"\nplugin = "rsi.ai.provider.openai-compatible"\n[steps.config]\ndeployment = "fixture"\nendpoint = "${provider.origin}"\npath = "/v1/chat/completions"\nallow_image_input = true\ncredential = { owner = "rsi.ai.provider.openai-compatible", slot = "default" }\n[steps.config.language_models.fixture-model]\ncontext_window_tokens = 128000\ndefault_output_reserve_tokens = 4096\nmax_output_reserve_tokens = 16384\n[steps.config.reasoning_efforts.fixture-model]\nsupported = ["low", "high"]\ndefault = "low"\n`);
-    await writeFile(join(application, "application.profile.toml"), `format = 1\n[[steps]]\nkind = "plugin"\nid = "service"\nplugin = "rsi.application.service"\nconfig = { host_profile = "fixture" }\n[[steps]]\nkind = "plugin"\nid = "assets"\nplugin = "rsi.web.assets"\nconfig = { directory = ${JSON.stringify(assets)} }\n[[steps]]\nkind = "plugin"\nid = "http"\nplugin = "rsi.application.serve-web"\n`);
+    await writeFile(join(application, "application.profile.toml"), `format = 1\n[[steps]]\nkind = "plugin"\nid = "service"\nplugin = "rsi.application.service"\nconfig = { host_profile = "fixture" }\n[[steps]]\nkind = "plugin"\nid = "http"\nplugin = "rsi.application.serve"\n`);
     await configure?.({ config, workspace, run, provider });
     const certificate = join(temporary, "certificate.pem"); const key = join(temporary, "key.pem");
     boundedRun("openssl", ["req", "-x509", "-newkey", "rsa:2048", "-nodes", "-days", "1", "-subj", "/CN=localhost", "-addext", "subjectAltName=IP:127.0.0.1,DNS:localhost", "-keyout", key, "-out", certificate]);
     const reservation = net.createServer(); reservation.listen(0, "127.0.0.1"); await once(reservation, "listening");
-    const address = `127.0.0.1:${reservation.address().port}`; const origin = `https://${address}`;
+    const address = `127.0.0.1:${reservation.address().port}`;
+    let origin = `https://${address}`, launchUrl;
     await new Promise(resolve => reservation.close(resolve));
+    if (watchAssets) {
+      const directory = dirname(assets), output = join(directory, "web-package");
+      const inputs = ['standard.js','lazy.js','ui-renderers.json'].map(name => `${basename(assets)}/${name}`);
+      await writeFile(join(config, "rsi.toml"), `${await readFile(join(config, "rsi.toml"), "utf8")}\n[sources.web]\ndirectory = ${JSON.stringify(directory)}\ncommand = ${JSON.stringify([process.execPath, join(import.meta.dirname, "source-package.mjs"), assets, output])}\ninputs = ${JSON.stringify(inputs)}\noutput = "web-package/package.json"\n`);
+    }
     const startProcess = async () => {
-    child = spawn(binary, ["--profile", "browser-fixture", "--bind", address, "--origin", origin, "--tls-certificate", certificate, "--tls-key", key], { cwd: workspace, env, stdio: ["ignore", "pipe", "pipe"] });
+    hostStarted = true;
+    const argumentsValue = watchAssets
+      ? ["--watch", "web", "--port", "0", "--no-open"]
+      : ["run", "browser-fixture", "--assets", assets, "--bind", address, "--origin", origin, "--tls-certificate", certificate, "--tls-key", key];
+    child = spawn(binary, argumentsValue, { cwd: workspace, env, stdio: ["ignore", "pipe", "pipe"] });
     stopped = once(child, "exit");
     child.stderr.on("data", chunk => { stderr += chunk.toString(); if (stderr.length > 1024 * 1024) { stderr = stderr.slice(0, 1024 * 1024); child.kill("SIGTERM"); } });
     const lines = createInterface({ input: child.stdout });
-    const [ready] = await deadline(Promise.race([once(lines, "line"), stopped.then(() => { throw new Error(`Service exited before readiness: ${stderr}`); })]), "service readiness");
-    assert.equal(JSON.parse(ready).event, "serving");
+    const [ready] = await deadline(Promise.race([once(lines, "line"), stopped.then(() => { throw new Error(`Service exited before readiness: ${stderr}`); })]), "service readiness", 210_000);
+    if (watchAssets) {
+      assert(ready.startsWith("rsi web: "));
+      launchUrl = ready.slice("rsi web: ".length);
+      origin = new URL(launchUrl).origin;
+    } else assert.equal(JSON.parse(ready).event, "serving");
     };
     await startProcess();
-    return { origin, workspace, run, provider, close, get pid() { return child.pid; },
+    return { origin, launchUrl, workspace, run, provider, close, get pid() { return child.pid; },
       probe(program, input) { return boundedRun(program, [], {cwd: workspace, env, encoding: 'utf8', input: JSON.stringify(input)}); },
       async restart(change) { await stopProcess(); await change?.(); await startProcess(); },
       register(label) {
-        const receipt = JSON.parse(run(["--profile", "devices", "register", label]).stdout);
-        const grants = JSON.parse(run(["--profile", "devices", "configuration", "list"]).stdout);
-        run(["--profile", "devices", "configuration", "grant", receipt.id, grants.revision]);
+        const receipt = JSON.parse(run(["run", "devices", "register", label]).stdout);
+        const grants = JSON.parse(run(["run", "devices", "configuration", "list"]).stdout);
+        run(["run", "devices", "configuration", "grant", receipt.id, grants.revision]);
         return receipt;
       },
     };

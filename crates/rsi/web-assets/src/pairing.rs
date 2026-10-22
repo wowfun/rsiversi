@@ -13,7 +13,34 @@ use std::{collections::BTreeMap, io::Read as _, path::Path, sync::Mutex};
 
 const RECEIPT: &str = "rsi-build.json";
 const MAXIMUM_RECEIPT_BYTES: u64 = 32 * 1024;
-const REBUILD: &str = "Build Web assets with scripts/rsiversi.sh build web (Windows: scripts/rsiversi.ps1 build web), then launch scripts/rsiversi.sh web (Windows: scripts/rsiversi.ps1 web)";
+const REBUILD: &str = "Install Web with `rsi plugin install web`, then run `rsi web`; explicitly built local bundles can be selected with `rsi web --assets ABSOLUTE_DIRECTORY`";
+
+#[derive(Clone)]
+pub(super) enum Identity {
+    Exact(String),
+    Internal,
+}
+
+/// Independent bundle admission; package authenticity belongs to its package owner.
+#[derive(Debug)]
+pub struct VerifiedWebAssetsFactory;
+#[async_trait]
+impl PluginFactory for VerifiedWebAssetsFactory {
+    fn prepare(&self, desired: &ConfigValue) -> rsi_meta::Result<PreparedActivation> {
+        let mut config: Config = serde_json::from_value(desired.clone())
+            .map_err(|_| MetaError::InvalidInput("invalid Web assets configuration".into()))?;
+        config.validate()?;
+        config.pairing = Some(Identity::Internal);
+        Ok(PreparedActivation::with_state(
+            ConfigValue::Null,
+            config,
+            32 * 1024,
+        ))
+    }
+    async fn activate(&self, plan: ActivationPlan) -> rsi_meta::Result<()> {
+        WebAssetsFactory.activate(plan).await
+    }
+}
 
 #[derive(Deserialize, Serialize)]
 #[serde(deny_unknown_fields)]
@@ -23,14 +50,14 @@ struct Receipt {
     bootstrap: BTreeMap<String, String>,
 }
 
-/// Official product asset owner; expected identity cannot come from Profile config.
+/// Exact-family fixture admission; expected identity cannot come from Profile config.
 #[derive(Debug)]
 pub struct PairedWebAssetsFactory {
     family: Option<&'static str>,
     diagnostic: Mutex<Option<RsiError>>,
 }
 impl PairedWebAssetsFactory {
-    /// Supplies the native executable's compiled family, never an operator override.
+    /// Supplies the fixture's expected family, never an operator override.
     pub const fn new(family: Option<&'static str>) -> Self {
         Self {
             family,
@@ -70,7 +97,7 @@ impl PluginFactory for PairedWebAssetsFactory {
         let mut config: Config = serde_json::from_value(desired.clone())
             .map_err(|_| self.diagnosed("invalid Web assets configuration"))?;
         config.validate().map_err(|e| self.diagnosed(e))?;
-        config.pairing = Some(family.to_owned());
+        config.pairing = Some(Identity::Exact(family.to_owned()));
         Ok(PreparedActivation::with_state(
             ConfigValue::Null,
             config,
@@ -88,14 +115,10 @@ impl PluginFactory for PairedWebAssetsFactory {
 pub(super) fn verify(
     directory: &AssetDirectory,
     path: &Path,
-    expected: &str,
+    identity: &Identity,
     files: &BTreeMap<String, HttpAsset>,
 ) -> AssetResult<()> {
-    let failure = |detail: String| {
-        AssetError::Invalid(format!(
-            "Web pairing: {detail}; expected family {expected}. {REBUILD}"
-        ))
-    };
+    let failure = |detail: String| AssetError::Invalid(format!("Web bundle: {detail}. {REBUILD}"));
     let file = open_file(directory, path, RECEIPT)
         .map_err(|_| failure(format!("missing or unreadable {RECEIPT}")))?;
     let info = file
@@ -113,7 +136,11 @@ pub(super) fn verify(
     }
     let receipt: Receipt =
         serde_json::from_slice(&bytes).map_err(|_| failure("invalid receipt JSON".into()))?;
-    if receipt.format != 1 || receipt.family_sha256 != expected {
+    if receipt.format != 1
+        || receipt.family_sha256.len() != 64
+        || !receipt.family_sha256.bytes().all(|b| b.is_ascii_hexdigit())
+        || matches!(identity, Identity::Exact(expected) if &receipt.family_sha256 != expected)
+    {
         let actual = if receipt.family_sha256.len() == 64
             && receipt.family_sha256.bytes().all(|b| b.is_ascii_hexdigit())
         {

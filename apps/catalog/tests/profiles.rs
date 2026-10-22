@@ -246,7 +246,7 @@ fn host_preview_is_pure_and_launch_key_excludes_current_profile_contents() {
 }
 
 #[test]
-fn host_preview_rejects_a_profile_path_without_an_authority_root() {
+fn host_preview_requires_absolute_authority_but_accepts_explicit_source_files() {
     let temp = tempfile::tempdir().unwrap();
     let catalog = catalog(temp.path());
     let composition = StandardComposition::new(
@@ -256,6 +256,7 @@ fn host_preview_rejects_a_profile_path_without_an_authority_root() {
         rsi_app_catalog::metadata(),
     );
     let malformed = HostProfileDocument {
+        package_lease: None,
         id: HostProfileId::new("malformed").unwrap(),
         source: ProfileSource::User,
         path: Some(std::path::PathBuf::from("host.profile.toml")),
@@ -270,12 +271,13 @@ fn host_preview_rejects_a_profile_path_without_an_authority_root() {
     std::fs::create_dir_all(wrong_directory.parent().unwrap()).unwrap();
     std::fs::write(&wrong_directory, b"format = 1\n").unwrap();
     let wrong_shape = HostProfileDocument {
+        package_lease: None,
         id: HostProfileId::new("malformed").unwrap(),
         source: ProfileSource::User,
         path: Some(wrong_directory),
         contents: b"format = 1\n".to_vec(),
     };
-    assert!(composition.preview_host(&wrong_shape).is_err());
+    assert!(composition.preview_host(&wrong_shape).is_ok());
 }
 
 #[cfg(target_os = "linux")]
@@ -361,9 +363,10 @@ fn web_is_builtin_copyable_and_non_shadowable() {
     assert_eq!(web.source, ProfileSource::Builtin);
     let source = String::from_utf8(web.contents).unwrap();
     assert!(
-        source.find("rsi.application.web-assets").unwrap()
-            < source.find("rsi.application.service").unwrap()
+        source.find("rsi.application.service").unwrap()
+            < source.find("rsi.application.web").unwrap()
     );
+    assert!(!source.contains("rsi.application.web-assets"));
     assert!(
         catalog
             .list_applications()
@@ -384,4 +387,28 @@ fn web_is_builtin_copyable_and_non_shadowable() {
         catalog.application(&id),
         Err(ProfileCatalogError::BuiltinShadowed { .. })
     ));
+}
+
+#[test]
+fn desktop_selects_an_installed_executable_through_an_ordinary_profile() {
+    let root = tempfile::tempdir().unwrap();
+    let catalog = catalog(root.path());
+    let profile = catalog
+        .application(&ApplicationProfileId::new("desktop").unwrap())
+        .unwrap();
+    let source: toml::Value =
+        toml::from_str(std::str::from_utf8(&profile.contents).unwrap()).unwrap();
+    let steps = source["steps"].as_array().unwrap();
+    assert_eq!(steps[0]["plugin"].as_str(), Some("rsi.application.service"));
+    assert_eq!(
+        steps[1]["plugin"].as_str(),
+        Some("rsi.application.executable")
+    );
+    assert_eq!(steps[1]["config"]["package"].as_str(), Some("desktop"));
+    assert_eq!(steps[1]["config"]["export"].as_str(), Some("desktop"));
+    assert!(
+        rsi_app_catalog::metadata()
+            .plugins()
+            .contains("rsi.application.executable")
+    );
 }

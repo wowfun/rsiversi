@@ -108,6 +108,28 @@ impl Drop for Watching {
     }
 }
 #[test]
+fn changing_a_valid_recipe_requires_a_new_watch_invocation() {
+    let temp = tempfile::tempdir().unwrap();
+    let root = temp.path().canonicalize().unwrap();
+    let declaration = setup(&root);
+    let mut watch = Watching::start(&root, true, &[]);
+    assert_eq!(watch.event()["status"], "succeeded");
+    fs::write(
+        root.join("changed.sh"),
+        "touch unauthorized\ncp input artifact.bin\n",
+    )
+    .unwrap();
+    fs::write(
+        root.join("addon.toml"),
+        declaration.replace("build.sh", "changed.sh"),
+    )
+    .unwrap();
+    assert!(!watch.exit().success());
+    assert!(!root.join("unauthorized").exists());
+    assert_eq!(fs::read(root.join("runs")).unwrap(), b"x");
+}
+
+#[test]
 fn watch_builds_changed_inputs_suspends_invalid_edits_and_never_undoes_external_disable() {
     let temp = tempfile::tempdir().unwrap();
     let root = temp.path().canonicalize().unwrap();

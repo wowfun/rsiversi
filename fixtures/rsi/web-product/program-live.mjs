@@ -42,7 +42,7 @@ try {
     }
     const transcript=await pane.locator('.transcript').innerText();await writeFile(join(report,`${mode}-transcript.txt`),transcript);assert.equal(await pane.locator('.pane-status').innerText(),'Completed',transcript.slice(-4096));
     const elapsed_ms=Date.now()-started,session=(await pane.locator('.pane-session').innerText()).split(' · ').at(-1);
-    const records=service.run(['--profile','evidence-cli','--resume',session,'--output','jsonl'],{input:':history\n'.repeat(128)+':exit\n'}).stdout.trim().split('\n').map(line=>JSON.parse(line));
+    const records=service.run(["run",'evidence-cli','--resume',session,'--output','jsonl'],{input:':history\n'.repeat(128)+':exit\n'}).stdout.trim().split('\n').map(line=>JSON.parse(line));
     const facts=records.flatMap(record=>record.fact?[record.fact]:[]).sort((a,b)=>a.seq-b.seq);await writeFile(join(report,`${mode}-facts.json`),JSON.stringify(facts,null,2));
     const intents=facts.filter(f=>f.type==='tool_intent'),reads=intents.filter(f=>f.name==='file_read');assert.equal(reads.length,4);
     const text=assistantText(facts);assert.match(text,/LIVE_TOTAL_46/);

@@ -1,0 +1,3 @@
+name = "rsi.web.worker"
+version = 3
+sources = ["src/worker.rs", "../web/worker.js", "../web/admission.js", "../web/src/bridge.ts"]

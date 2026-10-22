@@ -85,10 +85,10 @@ pub(super) async fn prepare(
 // Inputs come from the requiring Serve generation; its children retire before
 // those parent dependency leases. This factory publishes into an isolated slot.
 #[derive(Debug)]
-struct WebApiFactory {
-    service: Arc<dyn ApiDispatch>,
-    description: Arc<rsi_api_protocol::ConnectionDescription>,
-    assets: Arc<rsi_web_assets::WebAssetControl>,
+pub(super) struct WebApiFactory {
+    pub service: Arc<dyn ApiDispatch>,
+    pub description: Arc<rsi_api_protocol::ConnectionDescription>,
+    pub assets: Arc<rsi_web_assets::WebAssetControl>,
 }
 #[async_trait]
 impl PluginFactory for WebApiFactory {
