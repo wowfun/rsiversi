@@ -541,4 +541,4 @@ new presentation. Remote catalog pagination updates its existing view. A saved
 remote surface is selected through the current Session export scope and goes
 through the same Service selection validation as an ordinary catalog selection.
 
-Model previews use the independent coalesced model stream and never advance the durable cursor. Previews retain bounded text and an incremental event cursor, with no source references until the settlement Fact arrives. Committed history replaces the preview by exact effect and original content index; abandoned previews are discarded.
+Model preview admission, cross-stream ordering and bounded candidate retention follow the shared [conversation contract](../conversation/README.md).

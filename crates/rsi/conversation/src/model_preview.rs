@@ -114,10 +114,12 @@ pub fn model_previews(
     state
 }
 
-/// One bounded in-flight projection. The original prefix is never retained.
+/// One admitted projection and one bounded candidate awaiting its durable start.
+/// The original prefixes are never retained.
 #[derive(Clone, Debug, Default)]
 pub struct LiveModelPreview {
     current: Option<LivePreview>,
+    pending: Option<LivePreview>,
     expected: Option<rsi_agent_session_protocol::EffectId>,
     fact_seq: u64,
 }
@@ -132,11 +134,21 @@ struct LivePreview {
 }
 impl LiveModelPreview {
     /// Admits only the newest durable started attempt; history backfills are inert.
-    pub fn started(&mut self, seq: u64, effect: &rsi_agent_session_protocol::EffectId) {
+    /// Returns whether an already received candidate became visible.
+    pub fn started(&mut self, seq: u64, effect: &rsi_agent_session_protocol::EffectId) -> bool {
         if seq > self.fact_seq {
             self.fact_seq = seq;
             self.expected = Some(effect.clone());
+            if self
+                .pending
+                .as_ref()
+                .is_some_and(|pending| &pending.effect == effect)
+            {
+                self.current = self.pending.take();
+                return true;
+            }
         }
+        false
     }
     /// Incrementally applies unseen original events, including after slow-reader resynchronization.
     ///
@@ -149,21 +161,36 @@ impl LiveModelPreview {
         maximum_total: usize,
     ) -> rsi_agent_session_protocol::Result<bool> {
         use rsi_agent_turn_protocol::ModelLiveStatus;
-        if self.expected.as_ref() != Some(&snapshot.effect_id) {
-            return Ok(false);
-        }
+        let admitted = self.expected.as_ref() == Some(&snapshot.effect_id);
+        let slot = if admitted {
+            &mut self.current
+        } else {
+            &mut self.pending
+        };
         if matches!(snapshot.status, ModelLiveStatus::Abandoned) {
-            return Ok(self.current.take().is_some());
+            let removed = slot
+                .as_ref()
+                .is_some_and(|value| value.effect == snapshot.effect_id);
+            if removed {
+                *slot = None;
+            }
+            return Ok(admitted && removed);
         }
         if matches!(snapshot.status, ModelLiveStatus::Committed { .. }) {
+            if self
+                .pending
+                .as_ref()
+                .is_some_and(|value| value.effect == snapshot.effect_id)
+            {
+                self.pending = None;
+            }
             return Ok(false);
         }
-        if self
-            .current
+        if slot
             .as_ref()
             .is_none_or(|current| current.effect != snapshot.effect_id)
         {
-            self.current = Some(LivePreview {
+            *slot = Some(LivePreview {
                 turn: snapshot.turn_id.clone(),
                 effect: snapshot.effect_id.clone(),
                 purpose: snapshot.purpose,
@@ -172,7 +199,7 @@ impl LiveModelPreview {
                 state: ModelPreviewState::new(maximum_block, maximum_total),
             });
         }
-        let Some(current) = self.current.as_mut() else {
+        let Some(current) = slot.as_mut() else {
             return Ok(false);
         };
         if snapshot.revision <= current.revision {
@@ -183,7 +210,7 @@ impl LiveModelPreview {
             current.state.push(elapsed, &event);
         }
         current.revision = snapshot.revision;
-        Ok(true)
+        Ok(admitted)
     }
     /// Removes only the matching transient projection once its durable Fact is available.
     pub fn settle(&mut self, seq: u64, effect: &rsi_agent_session_protocol::EffectId) {
@@ -197,6 +224,13 @@ impl LiveModelPreview {
             .is_some_and(|current| &current.effect == effect)
         {
             self.current = None;
+        }
+        if self
+            .pending
+            .as_ref()
+            .is_some_and(|pending| &pending.effect == effect)
+        {
+            self.pending = None;
         }
     }
     /// Current transient content, with no durable provenance.
@@ -259,13 +293,54 @@ mod tests {
     }
 
     #[test]
+    fn prefix_before_started_is_visible_without_another_model_delta() {
+        let a = snapshot("a", "Waiting for native fixture release.");
+        let mut live = LiveModelPreview::default();
+        assert!(!live.update(&a, 1024, 2048).unwrap());
+        assert!(live.view().is_none());
+        live.started(2, &a.effect_id);
+        assert_eq!(
+            live.view().unwrap().3.blocks().next().unwrap().window.text,
+            "Waiting for native fixture release."
+        );
+    }
+
+    #[test]
+    fn pending_preview_is_bounded_replaced_and_retired_before_admission() {
+        let a = snapshot("a", "obsolete");
+        let mut b = snapshot("b", &"界🦀".repeat(200));
+        let mut live = LiveModelPreview::default();
+        live.update(&a, 10, 10).unwrap();
+        live.update(&b, 10, 10).unwrap();
+        assert!(!live.started(1, &a.effect_id));
+        assert!(live.view().is_none());
+        assert!(live.started(2, &b.effect_id));
+        assert_eq!(
+            live.view().unwrap().3.blocks().next().unwrap().window.text,
+            "界🦀界"
+        );
+        live.settle(3, &b.effect_id);
+        for status in [
+            ModelLiveStatus::Abandoned,
+            ModelLiveStatus::Committed { fact_seq: 6 },
+        ] {
+            let mut candidate = LiveModelPreview::default();
+            b.status = ModelLiveStatus::Streaming;
+            candidate.update(&b, 10, 10).unwrap();
+            b.status = status;
+            candidate.update(&b, 10, 10).unwrap();
+            assert!(!candidate.started(2, &b.effect_id));
+            assert!(candidate.view().is_none());
+        }
+    }
+
+    #[test]
     fn durable_admission_prevents_cross_plane_duplicates_and_history_rewinds() {
         let a = snapshot("a", "界🦀");
         let b = snapshot("b", "second");
         let mut live = LiveModelPreview::default();
         assert!(!live.update(&a, 1024, 2048).unwrap());
-        live.started(2, &a.effect_id);
-        assert!(live.update(&a, 1024, 2048).unwrap());
+        assert!(live.started(2, &a.effect_id));
         assert!(!live.update(&a, 1024, 2048).unwrap());
         live.settle(3, &a.effect_id);
         live.started(5, &b.effect_id);

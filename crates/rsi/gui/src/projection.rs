@@ -163,6 +163,9 @@ impl Transcript {
         {
             return;
         }
+        self.project_live_model();
+    }
+    fn project_live_model(&mut self) {
         let Some((turn, effect, purpose, preview)) = self.live_model.view() else {
             self.blocks
                 .retain(|block| !self.live_keys.contains(&block.key) || !block.sources.is_empty());
@@ -530,11 +533,16 @@ impl Transcript {
 
     #[allow(clippy::too_many_lines)] // One closed Fact-to-block projection preserves its common sequence fence.
     pub fn fact(&mut self, fact: &SessionFact) {
-        if let SessionFactBody::ModelStarted { effect_id, .. } = fact.body() {
-            self.live_model.started(fact.seq(), effect_id);
-        }
+        let admitted = if let SessionFactBody::ModelStarted { effect_id, .. } = fact.body() {
+            self.live_model.started(fact.seq(), effect_id)
+        } else {
+            false
+        };
         self.fact_blocks(fact);
         self.turns.observe(fact, &self.blocks);
+        if admitted {
+            self.project_live_model();
+        }
     }
     #[allow(clippy::too_many_lines)] // Closed Fact-to-block projection with one shared sequence fence.
     fn fact_blocks(&mut self, fact: &SessionFact) {
@@ -754,6 +762,63 @@ impl Transcript {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn started_fact_reveals_a_preview_that_arrived_first() {
+        use rsi_agent_session_protocol::{
+            EffectId, ModelAttemptBuilder, ModelEventPurpose, SessionId,
+        };
+        use rsi_ai_protocol::{ContentDelta, ContentStart, LanguageEvent};
+        let mut builder = ModelAttemptBuilder::new();
+        builder
+            .push(
+                0,
+                &LanguageEvent::ContentStarted {
+                    index: 0,
+                    content: ContentStart::Text,
+                },
+            )
+            .unwrap();
+        builder
+            .push(
+                1,
+                &LanguageEvent::ContentDelta {
+                    index: 0,
+                    delta: ContentDelta::Text("waiting".into()),
+                },
+            )
+            .unwrap();
+        let snapshot = rsi_agent_turn_protocol::ModelLiveSnapshot {
+            session_id: SessionId::new("session").unwrap(),
+            turn_id: TurnId::new("turn").unwrap(),
+            effect_id: EffectId::new("effect").unwrap(),
+            purpose: ModelEventPurpose::Conversation,
+            revision: 1,
+            prefix: builder.prefix(),
+            status: rsi_agent_turn_protocol::ModelLiveStatus::Streaming,
+        };
+        let mut transcript = Transcript::default();
+        transcript.model(&snapshot);
+        assert!(transcript.blocks.is_empty());
+        transcript.fact(
+            &SessionFact::new(
+                1,
+                1,
+                SessionFactBody::ModelStarted {
+                    turn_id: snapshot.turn_id,
+                    effect_id: snapshot.effect_id,
+                },
+            )
+            .unwrap(),
+        );
+        let block = transcript
+            .blocks
+            .iter()
+            .find(|block| block.role == "assistant")
+            .unwrap();
+        assert_eq!(block.text, "waiting");
+        assert!(block.sources.is_empty());
+    }
 
     #[test]
     fn trimming_releases_an_empty_allocation_larger_than_the_metadata_budget() {

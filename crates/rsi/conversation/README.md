@@ -144,4 +144,11 @@ Tool metadata retains the recorded Model or Program origin. Program calls are
 labeled explicitly in shared titles; loading only a result never invents its
 origin. Bounded provenance bytes participate in retained-memory accounting.
 
-Model previews use the independent coalesced model stream and never advance the durable cursor. Previews retain bounded text and an incremental event cursor, with no source references until the settlement Fact arrives. Committed history replaces the preview by exact effect and original content index; abandoned previews are discarded.
+Model previews use the independent coalesced model stream and never advance the
+durable cursor. Each preview retains bounded text and an incremental event cursor,
+with no source references until settlement. Because the streams can arrive in
+either order, the reducer retains at most one additional bounded candidate ahead
+of its ModelStarted Fact. That exact Fact makes the candidate visible without
+waiting for another model delta; history backfills cannot admit stale candidates.
+Committed history replaces the preview by exact effect and original content index;
+abandoned previews and candidates are discarded.

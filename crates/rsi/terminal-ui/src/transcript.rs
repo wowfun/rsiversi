@@ -500,6 +500,9 @@ impl Transcript {
         {
             return;
         }
+        self.project_live_model();
+    }
+    fn project_live_model(&mut self) {
         let Some((turn, effect, purpose, preview)) = self.live_model.view() else {
             self.blocks
                 .retain(|block| !self.live_keys.contains(&block.key) || !block.sources.is_empty());
@@ -652,11 +655,16 @@ impl Transcript {
 
     #[allow(clippy::too_many_lines)] // One exhaustive projection owns the supported Fact payload fields.
     fn project(&mut self, fact: &SessionFact) {
-        if let SessionFactBody::ModelStarted { effect_id, .. } = fact.body() {
-            self.live_model.started(fact.seq(), effect_id);
-        }
+        let admitted = if let SessionFactBody::ModelStarted { effect_id, .. } = fact.body() {
+            self.live_model.started(fact.seq(), effect_id)
+        } else {
+            false
+        };
         if !matches!(fact.body(), SessionFactBody::ModelAttemptSettled { .. }) {
             self.project_request(fact);
+        }
+        if admitted {
+            self.project_live_model();
         }
         if BlockIdentity::tool(fact).is_some() {
             self.project_tool(fact);
@@ -1337,17 +1345,6 @@ mod tests {
         let turn = TurnId::new("turn").unwrap();
         let effect = EffectId::new("model").unwrap();
         let mut transcript = Transcript::default();
-        transcript.apply(
-            &SessionFact::new(
-                1,
-                1_000_000,
-                SessionFactBody::ModelStarted {
-                    turn_id: turn.clone(),
-                    effect_id: effect.clone(),
-                },
-            )
-            .unwrap(),
-        );
         let mut builder = ModelAttemptBuilder::new();
         builder
             .push(
@@ -1377,6 +1374,18 @@ mod tests {
             status: ModelLiveStatus::Streaming,
         };
         transcript.model(&snapshot);
+        assert!(transcript.blocks.is_empty());
+        transcript.apply(
+            &SessionFact::new(
+                1,
+                1_000_000,
+                SessionFactBody::ModelStarted {
+                    turn_id: turn.clone(),
+                    effect_id: effect.clone(),
+                },
+            )
+            .unwrap(),
+        );
         let first_revision = transcript.blocks[0].layout_revision.clone();
         snapshot.revision = 2;
         transcript.model(&snapshot);
