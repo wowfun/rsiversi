@@ -14,11 +14,18 @@ components cannot redirect an operation through a symlink. Parent traversal and
 absolute paths are rejected at relative entry points. Empty relative directory
 paths clone the supplied handle. Renaming the root leaves existing handles bound
 to the original directory.
+Single-child kind lookup uses the retained directory without enumeration or link
+traversal; accumulated sibling archives cannot block a lookup by capacity.
 
 Private staging creation, single-component hard-link publication and removal use
 retained directory handles. Publication never replaces an existing destination;
 callers own content verification, synchronization order and recovery. Windows
 namespace pins support the same operations without reopening absolute names.
+Windows can also privatize one owned child directory relative to a retained
+parent. This explicit mutation returns the admitted child handle.
+Single-component empty-directory removal also uses the retained parent and
+refuses links and nonempty directories. Callers own traversal bounds and must
+release a child's namespace pin before removing its permanent guard.
 
 `Directory`, `DirectoryEntries` and `DirectoryEntry` own the native handles and
 enumeration lifetime. No public signature or dereference exposes cap-std's
@@ -104,6 +111,9 @@ DACL flag added by Windows during a later protected-DACL assignment is ignored.
 Inherited ACE flags and every actual ACE remain exact. It fails closed rather
 than accepting every semantically equivalent ACL. Parent inheritance cannot add
 ACEs to this protected DACL.
+Privatizing an existing TokenUser-owned file requires metadata and DACL authority,
+not write access to its contents. A reader or running executable may deny content
+writes while still permitting this permission change and a same-volume rename.
 Windows writable private-file acquisition uses the same retained parent and
 no-reparse checks. Creation applies a protected TokenUser/SYSTEM/Administrators
 descriptor atomically and verifies it on the returned handle; an existing file

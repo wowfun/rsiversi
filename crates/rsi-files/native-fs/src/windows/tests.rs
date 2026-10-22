@@ -9,6 +9,39 @@ use std::{
 };
 
 #[test]
+fn private_archive_does_not_require_content_write_access() {
+    let temporary = tempfile::tempdir().unwrap();
+    let path = temporary.path().join("archive");
+    let directory = create_absolute_directory_and_sync_no_follow(&path).unwrap();
+    let namespace = directory.pin_namespace().unwrap();
+    fs::write(path.join("source"), b"retained content").unwrap();
+    // Like an executing image, this reader permits reads and deletion but denies
+    // content writes. Changing a TokenUser-owned DACL needs neither write data
+    // nor append data access.
+    let mut reader = fs::OpenOptions::new()
+        .read(true)
+        .share_mode(1 | 4) // FILE_SHARE_READ | FILE_SHARE_DELETE
+        .open(path.join("source"))
+        .unwrap();
+    assert!(verify_private_file(&reader).is_err());
+    drop(set_relative_private_file_permissions_no_follow(&directory, Path::new("source")).unwrap());
+    verify_private_file(&reader).unwrap();
+    namespace
+        .publish_child(
+            Path::new("source"),
+            Path::new("saved"),
+            EntryKind::File,
+            false,
+        )
+        .unwrap();
+    let mut bytes = Vec::new();
+    reader.read_to_end(&mut bytes).unwrap();
+    assert_eq!(bytes, b"retained content");
+    assert!(!path.join("source").exists());
+    assert_eq!(fs::read(path.join("saved")).unwrap(), bytes);
+}
+
+#[test]
 fn concurrent_namespace_acquisition_shares_one_registered_pin() {
     let temporary = tempfile::tempdir().unwrap();
     let directory = std::sync::Arc::new(
@@ -220,6 +253,13 @@ fn privatization_changes_only_the_selected_owned_directory() {
         .unwrap(),
         policy
     );
+    let retained = open_absolute_directory_no_follow(temporary.path()).unwrap();
+    let child = set_relative_private_directory_permissions_no_follow(
+        &retained,
+        Path::new("ExistingOwnedDirectory"),
+    )
+    .unwrap();
+    assert_eq!(native::private_descriptor(&child.0).unwrap(), policy);
     assert!(set_private_directory_permissions_no_follow(Path::new(r"C:\")).is_err());
     fs::write(temporary.path().join("unprotected.txt"), "body").unwrap();
     let parent = open_absolute_directory_no_follow(temporary.path()).unwrap();

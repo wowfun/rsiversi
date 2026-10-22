@@ -224,12 +224,13 @@ fn acquire(
 fn acquire_with_access(
     parent: &File,
     name: &[u16],
-    directory: bool,
+    directory: impl Into<Option<bool>>,
     private: Option<&security::PrivateDescriptor>,
     access: u32,
     disposition: u32,
     sharing: u32,
 ) -> io::Result<(File, usize)> {
+    let directory = directory.into();
     let bytes =
         u16::try_from(name.len() * 2).map_err(|_| names::invalid("native name too long"))?;
     let text = UnicodeName {
@@ -254,8 +255,9 @@ fn acquire_with_access(
     // owned descriptor stays live and is applied only by FILE_CREATE. FILE_OPEN
     // cannot mutate. OBJ_DONT_REPARSE rejects reparses during name parsing;
     // FILE_OPEN_REPARSE_POINT bypasses final-component reparse processing. The
-    // owning README links both NT contracts. check_opened then rejects any
-    // returned reparse handle using FileAttributeTagInfo before exposing it.
+    // owning README links both NT contracts. Payload callers use check_opened
+    // to reject reparses; child_kind checks the exact name and classifies the
+    // retained handle's attributes without exposing it for payload access.
     let status = unsafe {
         NtCreateFile(
             &raw mut handle,
@@ -268,10 +270,10 @@ fn acquire_with_access(
             disposition,
             FILE_OPEN_REPARSE_POINT
                 | FILE_SYNCHRONOUS_IO_NONALERT
-                | if directory {
-                    FILE_DIRECTORY_FILE
-                } else {
-                    FILE_NON_DIRECTORY_FILE
+                | match directory {
+                    Some(true) => FILE_DIRECTORY_FILE,
+                    Some(false) => FILE_NON_DIRECTORY_FILE,
+                    None => 0,
                 },
             std::ptr::null(),
             0,
@@ -422,9 +424,24 @@ pub(super) fn link_child(
 }
 
 pub(super) fn remove_child(parent: &File, name: &[u16]) -> io::Result<()> {
-    let (file, _) =
-        acquire_with_access(parent, name, false, None, FILE_READ | 0x10000, FILE_OPEN, 3)?;
-    check_opened(&file, name, false)?;
+    remove_entry(parent, name, false)
+}
+
+pub(super) fn remove_empty_directory(parent: &File, name: &[u16]) -> io::Result<()> {
+    remove_entry(parent, name, true)
+}
+
+fn remove_entry(parent: &File, name: &[u16], directory: bool) -> io::Result<()> {
+    let (file, _) = acquire_with_access(
+        parent,
+        name,
+        directory,
+        None,
+        FILE_READ | 0x10000,
+        FILE_OPEN,
+        3,
+    )?;
+    check_opened(&file, name, directory)?;
     let mut status = StatusBlock::default();
     let delete = 1_u8;
     // SAFETY: FileDispositionInformation (13) reads one BOOLEAN from live storage.
@@ -468,7 +485,15 @@ fn privatize(parent: &File, name: &[u16], directory: bool) -> io::Result<File> {
         return Ok(readonly);
     }
     drop(readonly);
-    let (file, _) = acquire_with_access(parent, name, directory, None, 0x0016_019f, FILE_OPEN, 7)?;
+    // DACL replacement requires READ_CONTROL and WRITE_DAC, not file data
+    // writes. An executing image can reject the latter while permitting the
+    // metadata operation and subsequent handle-based rename.
+    let access = if directory {
+        0x0016_019f
+    } else {
+        FILE_READ | 0x40000 // WRITE_DAC
+    };
+    let (file, _) = acquire_with_access(parent, name, directory, None, access, FILE_OPEN, 7)?;
     check_opened(&file, name, directory)?;
     private.apply(&file)?;
     Ok(file)
@@ -523,6 +548,10 @@ pub(super) fn version(file: &File) -> io::Result<crate::windows::FileVersion> {
 
 fn check_opened(file: &File, name: &[u16], directory: bool) -> io::Result<()> {
     require_type(file, directory)?;
+    check_name(file, name)
+}
+
+fn check_name(file: &File, name: &[u16]) -> io::Result<()> {
     if !name.is_empty() {
         let actual = long_name(file)?;
         let final_name = actual.rsplit(|unit| *unit == 92).next().unwrap_or_default();
@@ -531,6 +560,21 @@ fn check_opened(file: &File, name: &[u16], directory: bool) -> io::Result<()> {
         }
     }
     Ok(())
+}
+
+pub(super) fn child_kind(parent: &File, name: &[u16]) -> io::Result<crate::EntryKind> {
+    // READ_ATTRIBUTES | SYNCHRONIZE observes a final no-follow handle without
+    // requesting content access or assuming whether the child is a directory.
+    let (file, _) = acquire_with_access(parent, name, None, None, 0x0010_0080, FILE_OPEN, 7)?;
+    check_name(&file, name)?;
+    let attributes = version(&file)?.attributes;
+    Ok(if attributes & 0x400 != 0 {
+        crate::EntryKind::Link
+    } else if attributes & 0x10 != 0 {
+        crate::EntryKind::Directory
+    } else {
+        crate::EntryKind::File
+    })
 }
 
 pub(super) fn create_directory(

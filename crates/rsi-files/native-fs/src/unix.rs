@@ -11,6 +11,17 @@ use std::{
 pub struct Directory(File);
 
 impl Directory {
+    /// Classify exactly one child without following links or enumerating siblings.
+    pub fn child_kind(&self, name: &Path) -> std::io::Result<EntryKind> {
+        single_name(name)?;
+        let stat = rustix::fs::statat(self, name, rustix::fs::AtFlags::SYMLINK_NOFOLLOW)?;
+        Ok(match rustix::fs::FileType::from_raw_mode(stat.st_mode) {
+            rustix::fs::FileType::RegularFile => EntryKind::File,
+            rustix::fs::FileType::Directory => EntryKind::Directory,
+            rustix::fs::FileType::Symlink => EntryKind::Link,
+            _ => EntryKind::Other,
+        })
+    }
     /// Clone the same native directory authority without reopening its path.
     pub fn try_clone(&self) -> std::io::Result<Self> {
         self.0.try_clone().map(Self)
@@ -316,6 +327,11 @@ impl Directory {
     pub fn remove_child(&self, name: &Path) -> std::io::Result<()> {
         single_name(name)?;
         rustix::fs::unlinkat(self, name, rustix::fs::AtFlags::empty()).map_err(Into::into)
+    }
+    /// Removes one empty directory without following links or reopening the parent.
+    pub fn remove_empty_directory(&self, name: &Path) -> std::io::Result<()> {
+        single_name(name)?;
+        rustix::fs::unlinkat(self, name, rustix::fs::AtFlags::REMOVEDIR).map_err(Into::into)
     }
     /// Flush this retained directory without reopening its path.
     pub fn sync_all(&self) -> std::io::Result<()> {

@@ -63,3 +63,40 @@ impl std::fmt::Display for DirectoryCreationError {
     }
 }
 impl std::error::Error for DirectoryCreationError {}
+
+#[cfg(test)]
+mod lookup_tests {
+    use super::*;
+    use std::path::Path;
+    #[test]
+    fn child_kind_is_exact_and_does_not_follow_links() {
+        let root = tempfile::tempdir().unwrap();
+        let directory = open_absolute_directory_no_follow(root.path()).unwrap();
+        std::fs::write(root.path().join("file"), b"data").unwrap();
+        std::fs::create_dir(root.path().join("directory")).unwrap();
+        assert_eq!(
+            directory.child_kind(Path::new("file")).unwrap(),
+            EntryKind::File
+        );
+        assert_eq!(
+            directory.child_kind(Path::new("directory")).unwrap(),
+            EntryKind::Directory
+        );
+        assert_eq!(
+            directory
+                .child_kind(Path::new("missing"))
+                .unwrap_err()
+                .kind(),
+            std::io::ErrorKind::NotFound
+        );
+        assert!(directory.child_kind(Path::new("../file")).is_err());
+        #[cfg(unix)]
+        {
+            std::os::unix::fs::symlink("file", root.path().join("link")).unwrap();
+            assert_eq!(
+                directory.child_kind(Path::new("link")).unwrap(),
+                EntryKind::Link
+            );
+        }
+    }
+}

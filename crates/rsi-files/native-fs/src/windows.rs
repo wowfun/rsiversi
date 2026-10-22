@@ -111,6 +111,20 @@ pub fn file_version(file: &File) -> io::Result<FileVersion> {
 }
 
 impl Directory {
+    /// Classify exactly one child without following links or enumerating siblings.
+    pub fn child_kind(&self, name: &Path) -> io::Result<EntryKind> {
+        native::child_kind(&self.0, &single_name(name)?)
+    }
+    /// Removes one regular child without following links or reopening the parent.
+    pub fn remove_child(&self, name: &Path) -> io::Result<()> {
+        native::remove_child(&self.0, &single_name(name)?)
+    }
+
+    /// Removes one empty child directory; a retained namespace pin prevents removal.
+    pub fn remove_empty_directory(&self, name: &Path) -> io::Result<()> {
+        native::remove_empty_directory(&self.0, &single_name(name)?)
+    }
+
     /// Verify the retained directory's exact `TokenUser` private policy without mutation.
     pub fn verify_private(&self) -> io::Result<()> {
         native::verify_private_directory(&self.0)
@@ -364,6 +378,14 @@ pub fn set_private_directory_permissions_no_follow(path: &Path) -> io::Result<Di
         parent = Directory(native::relative(&parent.0, &component, true)?);
     }
     native::privatize_directory(&parent.0, &name).map(Directory)
+}
+
+/// Privatize one TokenUser-owned child without reopening its retained parent.
+pub fn set_relative_private_directory_permissions_no_follow(
+    parent: &Directory,
+    name: &Path,
+) -> io::Result<Directory> {
+    native::privatize_directory(&parent.0, &single_name(name)?).map(Directory)
 }
 
 /// Flush an admitted no-follow local directory and report native failure.
