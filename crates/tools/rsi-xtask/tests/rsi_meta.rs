@@ -36,14 +36,26 @@ fn ci_executes_offline_install_policy_and_an_isolated_ordinary_runtime_smoke() {
         .unwrap();
     assert_eq!(
         smoke["if"].as_str(),
-        Some("${{ !cancelled() && steps.web_build.outcome == 'success' }}")
+        Some("${{ !cancelled() && steps.standard_dev_build.outcome == 'success' }}")
     );
+    let compile = steps
+        .iter()
+        .find(|step| step["id"].as_str() == Some("standard_dev_build"))
+        .unwrap();
+    assert!(
+        compile["run"]
+            .as_str()
+            .unwrap()
+            .contains("--test resident_listeners --no-run")
+    );
+    assert!(compile["timeout-minutes"].as_u64().unwrap() >= 20);
+    assert!(smoke["timeout-minutes"].as_u64().unwrap() >= 10);
     assert!(smoke["continue-on-error"].is_null());
     let run = smoke["run"].as_str().unwrap();
+    assert!(run.contains("--test resident_listeners ordinary_product_runtime_smoke -- --exact"));
     assert!(run.contains(
-        "for smoke in ordinary_product_runtime_smoke ordinary_product_watched_smoke; do"
+        "--test resident_listeners frontend::ordinary_product_watched_smoke -- --ignored --exact"
     ));
-    assert!(run.contains("\"dev::lifecycle_tests::$smoke\" -- --ignored --exact"));
     assert!(run.contains("trap restore_policy EXIT"));
     assert!(!run.contains("API_KEY"));
 }
@@ -54,6 +66,57 @@ fn run(cwd: &Path, arguments: &[&str]) -> Output {
         .current_dir(cwd)
         .output()
         .expect("rsi-xtask should run")
+}
+
+#[test]
+fn fixture_paths_and_minimal_installers_have_native_ci_coverage() {
+    let source = fs::read_to_string(repository().join(".github/workflows/ci.yml")).unwrap();
+    let workflow: yaml_serde::Value = yaml_serde::from_str(&source).unwrap();
+    for job in workflow["jobs"].as_mapping().unwrap().values() {
+        for step in job["steps"].as_sequence().unwrap() {
+            if step["working-directory"]
+                .as_str()
+                .is_some_and(|cwd| cwd != ".")
+                && let Some(run) = step["run"].as_str()
+            {
+                for line in run.lines().filter(|line| line.contains("-- fixture-path")) {
+                    assert!(
+                        line.contains("$(cd \"$GITHUB_WORKSPACE\" && cargo run"),
+                        "{line}"
+                    );
+                }
+            }
+        }
+    }
+    for job in ["lockfiles", "windows-repository-tools"] {
+        assert!(
+            workflow["jobs"][job]["steps"]
+                .as_sequence()
+                .unwrap()
+                .iter()
+                .any(|step| {
+                    step["run"]
+                        .as_str()
+                        .is_some_and(|run| run.contains("apps/devtools/tests/install.test.mjs"))
+                        && step["timeout-minutes"].as_u64().is_some()
+                        && step["if"]
+                            .as_str()
+                            .is_some_and(|guard| guard.contains("!cancelled()"))
+                }),
+            "{job} must run the isolated minimal installer tests"
+        );
+    }
+    let desktop = workflow["jobs"]["windows-repository-tools"]["steps"]
+        .as_sequence()
+        .unwrap()
+        .iter()
+        .find(|step| {
+            step["run"]
+                .as_str()
+                .is_some_and(|run| run.contains("-p rsi-desktop"))
+        })
+        .unwrap();
+    assert!(desktop["timeout-minutes"].as_u64().unwrap() >= 15);
 }
 
 fn stderr(output: &Output) -> String {
@@ -239,8 +302,6 @@ fn windows_compile_gate_keeps_independent_lint_and_unsupported_boundary_checks()
     );
     for package in [
         "rsi",
-        "rsi-cli",
-        "rsi-app-catalog",
         "rsi-agent-store-sqlite",
         "rsi-storage-json",
         "rsi-storage-sqlite",
@@ -256,7 +317,6 @@ fn windows_compile_gate_keeps_independent_lint_and_unsupported_boundary_checks()
         "rsi-automation",
         "rsi-terminal",
         "rsi-serve",
-        "rsi-desktop",
         "rsi-session",
     ] {
         assert!(
@@ -276,15 +336,37 @@ fn windows_compile_gate_keeps_independent_lint_and_unsupported_boundary_checks()
     assert_windows_architecture_admission(job);
     assert_native_test_budgets(job);
     assert_windows_tooling_gate(&workflow);
+    let native = job["steps"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .filter_map(|step| step["run"].as_str())
+        .find(|run| run.contains("rsi-native-tests.jsonl") && run.contains("--no-run"))
+        .expect("CLI/catalog test artifacts must execute outside Cargo's Windows Job");
+    assert!(
+        native
+            .contains("-p rsi-cli -p rsi-app-catalog --all-targets --no-run --message-format=json")
+    );
+    assert!(native.contains("if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }"));
+    assert!(native.contains("if (-not $artifacts)"));
+    assert!(native.contains("foreach ($artifact in $artifacts)"));
+    assert!(native.contains("& $artifact.executable"));
+    assert!(native.contains("if ($LASTEXITCODE -ne 0) { $failed = $true }"));
+    assert!(native.contains("if ($failed) { exit 1 }"));
     for step in job["steps"]
         .as_array()
         .unwrap()
         .iter()
         .filter(|step| step["run"].is_string() && step["id"] != "native_architecture")
     {
+        let prerequisite = if step["name"] == "Exercise ordinary Windows frontend watch" {
+            "native_cli_tests"
+        } else {
+            "native_toolchain"
+        };
         assert_eq!(
             step["if"],
-            "${{ !cancelled() && steps.native_toolchain.outcome == 'success' }}"
+            format!("${{{{ !cancelled() && steps.{prerequisite}.outcome == 'success' }}}}")
         );
         assert!(step["timeout-minutes"].as_u64().is_some());
     }
@@ -299,6 +381,7 @@ fn assert_windows_tooling_gate(workflow: &serde_json::Value) {
         "rsi-app-tools",
         "rsi-dev-control",
         "rsi-build-info",
+        "rsi-desktop",
     ] {
         assert!(
             tools["steps"].as_array().unwrap().iter().any(|step| {
@@ -317,20 +400,17 @@ fn assert_windows_tooling_gate(workflow: &serde_json::Value) {
 }
 
 fn assert_native_test_budgets(job: &serde_json::Value) {
-    for (package, minimum) in [("rsi-files-native-fs", 10), ("rsi-desktop", 15)] {
-        let selector = format!("-p {package}");
-        let native = job["steps"]
-            .as_array()
-            .unwrap()
-            .iter()
-            .find(|step| {
-                step["run"]
-                    .as_str()
-                    .is_some_and(|run| run.contains(&selector))
-            })
-            .unwrap();
-        assert!(native["timeout-minutes"].as_u64().unwrap() >= minimum);
-    }
+    let native = job["steps"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|step| {
+            step["run"]
+                .as_str()
+                .is_some_and(|run| run.contains("-p rsi-files-native-fs"))
+        })
+        .unwrap();
+    assert!(native["timeout-minutes"].as_u64().unwrap() >= 10);
 }
 
 fn assert_windows_architecture_admission(job: &serde_json::Value) {
@@ -602,6 +682,24 @@ fn ci_events_separate_pull_requests_main_pushes_and_manual_runs() {
             .unwrap();
         assert!(verify["if"].as_str().unwrap().contains("!cancelled()"));
     }
+    let protocols = documentation
+        .iter()
+        .find(|step| step["name"].as_str() == Some("Verify protocol schemas and model versions"))
+        .unwrap();
+    assert_eq!(
+        protocols["run"].as_str(),
+        Some("cargo xtask verify-protocols --base \"$RSI_PROTOCOL_BASE\"")
+    );
+    assert_eq!(
+        protocols["env"]["RSI_PROTOCOL_BASE"].as_str(),
+        Some("${{ steps.notes_base.outputs.base }}")
+    );
+    assert_eq!(protocols["timeout-minutes"].as_u64(), Some(5));
+    assert_eq!(
+        protocols["if"].as_str(),
+        Some("${{ !cancelled() && steps.notes_base.outcome == 'success' }}")
+    );
+    assert!(protocols["continue-on-error"].is_null());
     let notes = documentation
         .iter()
         .find(|step| step["name"].as_str() == Some("Verify Agent Notes"))
@@ -1074,7 +1172,7 @@ fn paired_web_consumers_have_independent_failure_domains() {
         build["run"]
             .as_str()
             .unwrap()
-            .contains("pnpm -C ../../../apps/web build")
+            .contains("cargo run --locked -p rsi-app-tools -- fixture-dist web --debug")
     );
     assert!(!build["run"].as_str().unwrap().contains("sudo sysctl"));
     let readiness = step("web_readiness");
@@ -1119,7 +1217,7 @@ fn paired_web_consumers_have_independent_failure_domains() {
         );
     }
     let probes = step("web_integrations")["run"].as_str().unwrap();
-    assert!(probes.contains("cargo run --locked -p rsi-app-tools -- dist addon-workbench"));
+    assert!(probes.contains("cargo run --locked -p rsi-app-tools -- fixture-dist addon-workbench"));
     assert!(probes.contains("--ignored --exact --list"));
     assert!(
         !step("web_product")["run"]
@@ -1707,4 +1805,103 @@ fn uds_test_support_is_checked_independently_of_base_test_outcomes() {
         "cargo test --locked -p rsi-api-uds-client --features test-support --test client"
     ));
     assert!(!run.contains("--ignored"));
+}
+
+#[test]
+fn package_release_has_bounded_topology_and_signing_authority() {
+    let source =
+        fs::read_to_string(repository().join(".github/workflows/package-repository.yml")).unwrap();
+    assert_ci_job_deadlines(&source);
+    let workflow: yaml_serde::Value = yaml_serde::from_str(&source).unwrap();
+    assert!(ci_guard_step_errors(&workflow).is_empty());
+    assert_eq!(workflow["permissions"]["contents"].as_str(), Some("read"));
+    assert_eq!(
+        workflow["concurrency"]["cancel-in-progress"].as_bool(),
+        Some(false)
+    );
+    assert_eq!(workflow["jobs"]["native"]["needs"].as_str(), Some("web"));
+    assert_eq!(
+        workflow["jobs"]["sign"]["needs"].as_sequence().unwrap(),
+        &vec![
+            yaml_serde::Value::from("web"),
+            yaml_serde::Value::from("native")
+        ]
+    );
+    assert_eq!(
+        workflow["jobs"]["sign"]["environment"].as_str(),
+        Some("package-release")
+    );
+    for (name, job) in workflow["jobs"].as_mapping().unwrap() {
+        assert!(job["continue-on-error"].is_null());
+        for step in job["steps"].as_sequence().unwrap() {
+            assert!(step["timeout-minutes"].as_u64().is_some(), "{name:?}");
+            assert!(step["continue-on-error"].is_null());
+            if !step["env"]["RSI_REPOSITORY_SIGNING_KEY"].is_null() {
+                assert_eq!(name.as_str(), Some("sign"));
+            }
+            if let Some(action) = step["uses"].as_str() {
+                let (_, pin) = action.split_once('@').unwrap();
+                assert!(pin.len() == 40 && pin.bytes().all(|b| b.is_ascii_hexdigit()));
+            }
+        }
+    }
+}
+#[test]
+fn windows_frontend_fixture_consumes_the_exact_test_producer() {
+    let source = fs::read_to_string(repository().join(".github/workflows/ci.yml")).unwrap();
+    let workflow: yaml_serde::Value = yaml_serde::from_str(&source).unwrap();
+    let steps = workflow["jobs"]
+        .as_mapping()
+        .unwrap()
+        .values()
+        .flat_map(|job| job["steps"].as_sequence().unwrap())
+        .collect::<Vec<_>>();
+    let consumer = steps
+        .iter()
+        .find(|step| step["name"].as_str() == Some("Exercise ordinary Windows frontend watch"))
+        .unwrap();
+    assert_eq!(
+        consumer["if"].as_str(),
+        Some("${{ !cancelled() && steps.native_cli_tests.outcome == 'success' }}")
+    );
+    let producer = steps
+        .iter()
+        .find(|step| step["id"].as_str() == Some("native_cli_tests"))
+        .unwrap();
+    assert!(
+        producer["run"]
+            .as_str()
+            .unwrap()
+            .contains("--no-run --message-format=json")
+    );
+}
+
+#[test]
+fn release_and_ci_tool_pins_match_their_dependency_owners() {
+    let package: serde_json::Value = serde_json::from_str(
+        &fs::read_to_string(repository().join("apps/web/package.json")).unwrap(),
+    )
+    .unwrap();
+    let pnpm = package["packageManager"].as_str().unwrap();
+    let lock: toml::Value =
+        toml::from_str(&fs::read_to_string(repository().join("Cargo.lock")).unwrap()).unwrap();
+    let bindgen = lock["package"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|p| p["name"].as_str() == Some("wasm-bindgen"))
+        .unwrap()["version"]
+        .as_str()
+        .unwrap();
+    for path in ["ci.yml", "package-repository.yml"] {
+        let source = fs::read_to_string(repository().join(".github/workflows").join(path)).unwrap();
+        for line in source.lines() {
+            if line.contains("npm install --global pnpm@") {
+                assert!(line.contains(pnpm), "{line}");
+            }
+            if line.contains("cargo install wasm-bindgen-cli") {
+                assert!(line.contains(&format!("--version {bindgen}")), "{line}");
+            }
+        }
+    }
 }

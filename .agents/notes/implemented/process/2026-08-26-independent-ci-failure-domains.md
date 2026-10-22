@@ -166,6 +166,12 @@ so adding a job without aggregation is a test failure. Behavior tests execute
 the actual aggregate script with successful, failed, cancelled, skipped and
 missing results.
 
+The manual package-repository workflow has the same deadline and unique-guard
+checks as verification CI. Its topology requires validated Web output before
+native packaging and both before signing in the protected release environment.
+Artifact consumers are guarded by the exact successful producer, not merely
+toolchain setup; a compilation failure cannot masquerade as a missing test file.
+
 ## Alternatives considered
 
 Keeping a single workspace matrix was rejected because its apparent simplicity
@@ -205,6 +211,12 @@ only exposes after the workflow exists on the default branch. Evidence archives
 identify the tested binaries but cannot restore them for exact binary replay.
 Cache and artifact timing improvements require measured runs; smaller archives
 alone do not establish an application or CI latency improvement.
+Windows Desktop adapter tests run with repository/application tooling so the
+resident-product job remains within the runner limit. CLI/catalog tests compile
+once and every emitted test artifact executes outside Cargo's Job; failures
+accumulate across artifacts. Minimal installer checks run on Windows and Linux.
+Fixture path discovery runs from the repository root even when its consuming
+browser command runs in the fixture directory.
 Job deadlines cover the sum of explicit step deadlines plus ten minutes of setup
 headroom, including conditionally selected platform steps. Every browser job
 command has an explicit step deadline; setup actions share the headroom. The repository budget
@@ -240,3 +252,7 @@ gate with bounded CI scope. The full fixture also exercises inline navigation;
 local full-scope evidence does not expand what the Dock-only CI gate proves.
 Fixture unit discovery includes the Workflow configuration helpers. Desktop
 acceptance supplies Node explicitly and preserves its separate Workflow report.
+
+Ordinary resident smoke compiles its integration executable in a separate
+twenty-minute step, then allows ten minutes for its runtime scenarios. The
+protocol gate meta-test pins its baseline, failure guard and five-minute bound.

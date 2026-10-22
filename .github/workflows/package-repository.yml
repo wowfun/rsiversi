@@ -1,0 +1,169 @@
+name: package-repository
+
+on:
+  workflow_dispatch:
+    inputs:
+      version:
+        description: Package release version
+        required: true
+        type: string
+      sequence:
+        description: Increasing repository publication sequence
+        required: true
+        type: string
+
+permissions:
+  contents: read
+concurrency:
+  group: package-repository
+  cancel-in-progress: false
+env:
+  RSI_RELEASE_VERSION: ${{ inputs.version }}
+  RSI_PACKAGE_REPOSITORY_NAME: ${{ vars.RSI_PACKAGE_REPOSITORY_NAME }}
+  RSI_PACKAGE_REPOSITORY_URL: ${{ vars.RSI_PACKAGE_REPOSITORY_URL }}
+  RSI_PACKAGE_REPOSITORY_KEY: ${{ vars.RSI_PACKAGE_REPOSITORY_KEY }}
+  CARGO_BUILD_JOBS: 2
+
+jobs:
+  web:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 160
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1
+        timeout-minutes: 10
+        with:
+          persist-credentials: false
+      - uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020
+        timeout-minutes: 10
+        with:
+          node-version: 22.23.2
+      - name: Check release identity
+        timeout-minutes: 2
+        run: |
+          node --input-type=module -e 'const e=process.env; if(!/^[a-z0-9_-][a-z0-9_.-]{0,127}$/.test(e.RSI_PACKAGE_REPOSITORY_NAME)||e.RSI_PACKAGE_REPOSITORY_NAME.endsWith(".")||!/^https:\/\//.test(e.RSI_PACKAGE_REPOSITORY_URL)||!(/^[a-f0-9]{64}$/).test(e.RSI_PACKAGE_REPOSITORY_KEY)) throw Error("Configure the real repository URL, authority and pinned public key before releasing");'
+      - uses: dtolnay/rust-toolchain@6c977a6ca4077a0ceb28ffbe03f59d46e9ac8772
+        timeout-minutes: 10
+        with:
+          toolchain: 1.97.0
+          targets: wasm32-unknown-unknown
+      - uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6
+        timeout-minutes: 10
+        with:
+          key: independent-web
+      - name: Prepare Web producer
+        timeout-minutes: 30
+        run: |
+          sudo apt-get update
+          sudo apt-get install --no-install-recommends --yes libdbus-1-dev pkg-config
+          npm install --global pnpm@12.6.0
+          cargo install wasm-bindgen-cli --locked --version 0.2.127
+          pnpm -C apps/web install --frozen-lockfile
+      - name: Validate contracts and producer
+        timeout-minutes: 20
+        run: |
+          cargo xtask verify-protocols
+          node --test apps/devtools/tests/packages.test.mjs
+      - name: Build independent Web package
+        timeout-minutes: 45
+        run: |
+          node apps/devtools/build.mjs web "$GITHUB_WORKSPACE/release/web"
+      - uses: actions/upload-artifact@bbbca2ddaa5d8feaa63e36b76fdaad77386f024f
+        timeout-minutes: 10
+        with:
+          name: package-web
+          path: release/web
+          if-no-files-found: error
+
+  native:
+    needs: web
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - os: ubuntu-24.04
+            target: linux-x86_64
+          - os: windows-2025
+            target: windows-x86_64
+    runs-on: ${{ matrix.os }}
+    timeout-minutes: 240
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1
+        timeout-minutes: 10
+        with:
+          persist-credentials: false
+      - uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020
+        timeout-minutes: 10
+        with:
+          node-version: 22.23.2
+      - uses: dtolnay/rust-toolchain@6c977a6ca4077a0ceb28ffbe03f59d46e9ac8772
+        timeout-minutes: 10
+        with:
+          toolchain: 1.97.0
+      - uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6
+        timeout-minutes: 10
+        with:
+          key: independent-native
+      - name: Install Linux native libraries
+        timeout-minutes: 15
+        if: runner.os == 'Linux'
+        run: |
+          sudo apt-get update
+          sudo apt-get install --no-install-recommends --yes libdbus-1-dev pkg-config libgtk-3-dev libwebkit2gtk-4.1-dev
+      - uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c
+        timeout-minutes: 10
+        with:
+          name: package-web
+          path: release/web
+      - name: Build independent native packages
+        timeout-minutes: 100
+        shell: bash
+        env:
+          PACKAGE_TARGET: ${{ matrix.target }}
+        run: |
+          node apps/devtools/build.mjs core "$GITHUB_WORKSPACE/release/$PACKAGE_TARGET/core"
+          node apps/devtools/build.mjs desktop "$GITHUB_WORKSPACE/release/$PACKAGE_TARGET/desktop" --web-package "$GITHUB_WORKSPACE/release/web"
+      - name: Build independent static SSH helper
+        timeout-minutes: 40
+        if: runner.os == 'Linux'
+        run: |
+          rustup target add x86_64-unknown-linux-musl
+          sudo apt-get install --no-install-recommends --yes musl-tools
+          node apps/devtools/build.mjs ssh-helper "$GITHUB_WORKSPACE/release/linux-x86_64/ssh-helper"
+      - uses: actions/upload-artifact@bbbca2ddaa5d8feaa63e36b76fdaad77386f024f
+        timeout-minutes: 10
+        with:
+          name: package-${{ matrix.target }}
+          path: release/${{ matrix.target }}
+          if-no-files-found: error
+
+  sign:
+    needs: [web, native]
+    runs-on: ubuntu-24.04
+    environment: package-release
+    timeout-minutes: 60
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1
+        timeout-minutes: 10
+        with:
+          persist-credentials: false
+      - uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020
+        timeout-minutes: 10
+        with:
+          node-version: 22.23.2
+      - uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c
+        timeout-minutes: 10
+        with:
+          pattern: package-*
+          path: repository
+      - name: Verify and sign completed artifacts
+        timeout-minutes: 5
+        env:
+          RSI_REPOSITORY_SIGNING_KEY: ${{ secrets.RSI_REPOSITORY_SIGNING_KEY }}
+          REPOSITORY_SEQUENCE: ${{ inputs.sequence }}
+        run: node apps/devtools/packages.mjs sign "$GITHUB_WORKSPACE/repository" "$RSI_PACKAGE_REPOSITORY_NAME" "$REPOSITORY_SEQUENCE"
+      - uses: actions/upload-artifact@bbbca2ddaa5d8feaa63e36b76fdaad77386f024f
+        timeout-minutes: 10
+        with:
+          name: signed-package-repository
+          path: repository
+          if-no-files-found: error
