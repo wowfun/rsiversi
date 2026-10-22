@@ -747,6 +747,7 @@ struct ActiveLeaf {
 #[derive(Debug)]
 struct Controller {
     runtime: Runtime,
+    source_watch: crate::SourceWatchPolicy,
     input: Mutex<(u64, Option<ProfileInput>)>,
     retired_snapshot: Mutex<Option<ProfileSnapshot>>,
     limits: ProfileLimits,
@@ -780,6 +781,13 @@ struct ControllerState {
 }
 
 impl Controller {
+    fn watcher_health(&self, plan: &WatchPlan) -> WatcherHealth {
+        if self.source_watch.enabled() {
+            plan.health()
+        } else {
+            WatcherHealth::Inactive
+        }
+    }
     fn new(runtime: Runtime, input: ProfileInput, initial: &ResolvedTarget) -> Self {
         let initial_status = ProfileStatus {
             revision: 0,
@@ -795,6 +803,7 @@ impl Controller {
         let (commands, receiver) = mpsc::channel(1);
         Self {
             runtime,
+            source_watch: input.program.source_watch.clone(),
             limits: input.compiler.limits.clone(),
             input: Mutex::new((1, Some(input))),
             retired_snapshot: Mutex::new(None),
@@ -829,7 +838,7 @@ impl Controller {
             .map_err(|_| {
                 ProfileError::InvalidProgram("Profile watcher task failed".to_owned())
             })??;
-        let watcher = watch_plan.health();
+        let watcher = self.watcher_health(&watch_plan);
         let mut state = self.state.lock().expect("Profile state poisoned");
         if state.is_some() {
             return Err(ProfileError::InvalidProgram(
@@ -1205,7 +1214,7 @@ impl Controller {
         state.target = target.clone();
         state.converged_target = target;
         state.watch_plan = watch_plan;
-        state.watcher = state.watch_plan.health();
+        state.watcher = self.watcher_health(&state.watch_plan);
         state.diagnostic = None;
         self.publish_locked_state(state)
     }
@@ -1223,7 +1232,7 @@ impl Controller {
         if !replacement {
             state.target = target;
             state.watch_plan = watch_plan;
-            state.watcher = state.watch_plan.health();
+            state.watcher = self.watcher_health(&state.watch_plan);
         }
         state.diagnostic = None;
         self.publish_locked_state(state)
@@ -1253,7 +1262,7 @@ impl Controller {
             state.converged_target = target;
             state.active = active;
             state.watch_plan = watch_plan;
-            state.watcher = state.watch_plan.health();
+            state.watcher = self.watcher_health(&state.watch_plan);
             state.diagnostic = None;
             self.publish_locked_state(state)
         };
@@ -1278,7 +1287,7 @@ impl Controller {
             state.active = active;
             state.diagnostic = Some(diagnostic);
             state.watch_plan = watch_plan;
-            state.watcher = state.watch_plan.health();
+            state.watcher = self.watcher_health(&state.watch_plan);
             self.publish_locked_state(state)
         };
         self.membership_changed.notify_one();
@@ -1408,14 +1417,41 @@ impl Controller {
     #[cfg(not(target_family = "wasm"))]
     async fn poll_sources(self: &Arc<Self>, mut stop: watch::Receiver<bool>) {
         let mut ticks_since_content_audit = 0_usize;
+        let mut policy = self.source_watch.subscribe();
         loop {
+            if *stop.borrow() {
+                return;
+            }
+            let enabled = *policy.borrow_and_update();
+            {
+                let mut state = self.state.lock().expect("Profile state poisoned");
+                if let Some(state) = state.as_mut() {
+                    let watcher = if enabled {
+                        if state.watcher == WatcherHealth::Inactive {
+                            state.watch_plan.health()
+                        } else {
+                            state.watcher
+                        }
+                    } else {
+                        WatcherHealth::Inactive
+                    };
+                    if state.watcher != watcher {
+                        state.watcher = watcher;
+                        self.publish_locked_state(state);
+                    }
+                }
+            }
             tokio::select! {
+                _ = policy.changed() => {
+                    ticks_since_content_audit = 0;
+                    if !self.source_watch.enabled() { self.dirty.store(false, Ordering::Release); }
+                }
                 changed = stop.changed() => {
                     if changed.is_err() || *stop.borrow() {
                         return;
                     }
                 }
-                () = self.runtime.execution().sleep(WATCH_INTERVAL) => {
+                () = self.runtime.execution().sleep(WATCH_INTERVAL), if enabled => {
                     ticks_since_content_audit = ticks_since_content_audit
                         .checked_add(1)
                         .unwrap_or(FULL_CONTENT_AUDIT_TICKS);
@@ -1480,6 +1516,9 @@ impl Controller {
         let mut consecutive_failures = 0_u32;
         loop {
             if self.dirty.swap(false, Ordering::AcqRel) {
+                if !self.source_watch.enabled() {
+                    continue;
+                }
                 if let Err(error) = self.reload_from(ProfileAttemptOrigin::Watcher).await {
                     if matches!(error, ProfileError::Busy) {
                         self.mark_dirty();

@@ -77,9 +77,11 @@ impl ProfileInput {
     fn validate_successor(&self, successor: &Self) -> Result<()> {
         if self.compiler.environment != successor.compiler.environment
             || self.compiler.limits != successor.compiler.limits
+            || self.program.source_watch != successor.program.source_watch
         {
             return Err(ProfileError::IncompatibleInput(
-                "environment and limits must remain unchanged".to_owned(),
+                "environment, limits and source observation authority must remain unchanged"
+                    .to_owned(),
             ));
         }
         self.resolver
@@ -203,6 +205,10 @@ impl Controller {
             let _reload = self.reload_lock.lock().await;
             let result = if *stop.borrow() || self.command_stop.is_cancelled() {
                 Err(ProfileError::Stopped)
+            } else if command.origin == ProfileAttemptOrigin::Watcher
+                && !self.source_watch.enabled()
+            {
+                Ok(ReloadOutcome::Unchanged(self.status()))
             } else {
                 let mut result = self.execute_command(command.replacement).await;
                 self.finish_attempt(command.origin, &mut result);

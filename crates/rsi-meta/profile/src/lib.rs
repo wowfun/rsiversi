@@ -22,7 +22,9 @@ use std::sync::atomic::{AtomicU64, Ordering};
 mod bundle;
 mod control;
 mod preview;
+mod watch_policy;
 pub use preview::{NodeChange, NodeChangeAspect, NodeChangeKind};
+pub use watch_policy::{SourceWatchLease, SourceWatchPolicy};
 #[cfg(test)]
 mod isolation_tests;
 pub use bundle::ProfileBundle;
@@ -425,6 +427,16 @@ pub struct ProfileProgram {
     root: ProgramRoot,
     linked: Vec<ProfileFragment>,
     launch_patches: Vec<ProfilePatch>,
+    source_watch: SourceWatchPolicy,
+    source_lease: Option<SourceLease>,
+}
+
+#[derive(Clone, Debug)]
+struct SourceLease(Arc<dyn std::fmt::Debug + Send + Sync>);
+impl PartialEq for SourceLease {
+    fn eq(&self, other: &Self) -> bool {
+        Arc::ptr_eq(&self.0, &other.0)
+    }
 }
 
 #[derive(Clone, Debug, PartialEq)]
@@ -443,6 +455,8 @@ impl ProfileProgram {
             root: ProgramRoot::File(path.into()),
             linked: Vec::new(),
             launch_patches: Vec::new(),
+            source_watch: true.into(),
+            source_lease: None,
         }
     }
 
@@ -452,6 +466,8 @@ impl ProfileProgram {
             root: ProgramRoot::Memory(profile),
             linked: Vec::new(),
             launch_patches: Vec::new(),
+            source_watch: true.into(),
+            source_lease: None,
         }
     }
 
@@ -461,6 +477,8 @@ impl ProfileProgram {
             root: ProgramRoot::Bundle(bundle),
             linked: Vec::new(),
             launch_patches: Vec::new(),
+            source_watch: true.into(),
+            source_lease: None,
         }
     }
 
@@ -475,6 +493,27 @@ impl ProfileProgram {
     #[must_use]
     pub fn with_launch_patches(mut self, patches: Vec<ProfilePatch>) -> Self {
         self.launch_patches = patches;
+        self
+    }
+
+    /// Controls automatic source observation without changing explicit reload or edit validation.
+    #[must_use]
+    pub fn with_source_watch(mut self, enabled: bool) -> Self {
+        self.source_watch = enabled.into();
+        self
+    }
+
+    /// Shares an embedder's live observation policy for this Profile's lifetime.
+    #[must_use]
+    pub fn with_watch_policy(mut self, policy: SourceWatchPolicy) -> Self {
+        self.source_watch = policy;
+        self
+    }
+
+    /// Retains an application-owned source publication across reloads and clones.
+    #[must_use]
+    pub fn with_source_lease(mut self, lease: Arc<dyn std::fmt::Debug + Send + Sync>) -> Self {
+        self.source_lease = Some(SourceLease(lease));
         self
     }
 }
@@ -743,7 +782,11 @@ impl ProfileCompiler {
             state.charge_step()?;
             state.execute_public_patch(patch)?;
         }
-        state.finish()
+        let mut candidate = state.finish()?;
+        if !program.source_watch.can_watch() {
+            candidate.watch_paths.clear();
+        }
+        Ok(candidate)
     }
 
     fn validate_environment(&self) -> Result<()> {

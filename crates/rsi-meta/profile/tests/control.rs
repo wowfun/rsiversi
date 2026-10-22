@@ -651,6 +651,22 @@ async fn start_in_runtime(
     Arc<dyn rsi_meta_profile::ProfileControl>,
     Arc<AtomicUsize>,
 ) {
+    start_program_in_runtime(runtime, root, mode, limits, cleanup_gate, true).await
+}
+
+async fn start_program_in_runtime(
+    runtime: Runtime,
+    root: &std::path::Path,
+    mode: UpdateMode,
+    limits: ProfileLimits,
+    cleanup_gate: Option<Arc<CleanupGate>>,
+    source_watch: impl Into<rsi_meta_profile::SourceWatchPolicy>,
+) -> (
+    Runtime,
+    rsi_meta::FiberHandle,
+    Arc<dyn rsi_meta_profile::ProfileControl>,
+    Arc<AtomicUsize>,
+) {
     let starts = Arc::new(AtomicUsize::new(0));
     let resolver = Arc::new(Resolver {
         starts: Arc::clone(&starts),
@@ -662,7 +678,7 @@ async fn start_in_runtime(
     let bootstrap = ProfileBootstrap::prepare(
         &runtime,
         resolver,
-        ProfileProgram::from_file(root.join("profile.toml")),
+        ProfileProgram::from_file(root.join("profile.toml")).with_watch_policy(source_watch.into()),
         environment(root),
         limits,
     )
@@ -930,6 +946,78 @@ async fn restart_required_publishes_digest_without_mutating_and_pending_is_usabl
         ProfileInstanceState::Pending(_)
     ));
     let _ = runtime.shutdown().await;
+}
+
+#[tokio::test]
+async fn source_watch_leases_enable_existing_profile_and_last_drop_stops_observation() {
+    async fn observed(starts: &AtomicUsize, count: usize) {
+        tokio::time::timeout(Duration::from_secs(5), async {
+            while starts.load(Ordering::SeqCst) != count {
+                tokio::time::sleep(Duration::from_millis(20)).await;
+            }
+        })
+        .await
+        .expect("leased source change must converge");
+    }
+    let temp = tempfile::tempdir().unwrap();
+    let path = temp.path().join("profile.toml");
+    write_profile(&path, "ok");
+    let policy = rsi_meta_profile::SourceWatchPolicy::leased();
+    let (runtime, _handle, control, starts) = start_program_in_runtime(
+        Runtime::default(),
+        temp.path(),
+        UpdateMode::Replayable,
+        ProfileLimits::default(),
+        None,
+        policy.clone(),
+    )
+    .await;
+    write_profile(&path, "one");
+    tokio::time::sleep(Duration::from_millis(350)).await;
+    assert_eq!(starts.load(Ordering::SeqCst), 1);
+    let first = policy.acquire().unwrap();
+    let second = policy.acquire().unwrap();
+    observed(&starts, 2).await;
+    drop(first);
+    write_profile(&path, "two");
+    observed(&starts, 3).await;
+    drop(second);
+    assert!(!policy.enabled());
+    write_profile(&path, "three");
+    tokio::time::sleep(Duration::from_millis(350)).await;
+    assert_eq!(starts.load(Ordering::SeqCst), 3);
+    let resumed = policy.acquire().unwrap();
+    observed(&starts, 4).await;
+    drop(resumed);
+    write_profile(&path, "four");
+    control.reload().await.unwrap();
+    assert_eq!(starts.load(Ordering::SeqCst), 5);
+    assert!(runtime.shutdown().await.is_complete());
+}
+
+#[tokio::test]
+async fn manual_source_policy_keeps_active_graph_until_explicit_reload() {
+    let temp = tempfile::tempdir().unwrap();
+    let path = temp.path().join("profile.toml");
+    write_profile(&path, "ok");
+    let (runtime, _handle, control, starts) = start_program_in_runtime(
+        Runtime::default(),
+        temp.path(),
+        UpdateMode::Replayable,
+        ProfileLimits::default(),
+        None,
+        false,
+    )
+    .await;
+    assert_eq!(control.status().watcher(), WatcherHealth::Inactive);
+    write_profile(&path, "new");
+    tokio::time::sleep(Duration::from_millis(350)).await;
+    assert_eq!(starts.load(Ordering::SeqCst), 1);
+    assert!(control.status().last_attempt().is_none());
+    control.reload().await.unwrap();
+    assert_eq!(starts.load(Ordering::SeqCst), 2);
+    assert_eq!(control.status().watcher(), WatcherHealth::Inactive);
+    assert!(runtime.shutdown().await.is_clean());
 }
 
 #[tokio::test]

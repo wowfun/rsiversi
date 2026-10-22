@@ -20,6 +20,50 @@ fn environment(root: &std::path::Path) -> ProfileEnvironment {
 }
 
 #[test]
+fn immutable_source_publication_survives_program_clones_and_compilation() {
+    let temp = tempfile::tempdir().unwrap();
+    let lease = std::sync::Arc::new("publication");
+    let observation = std::sync::Arc::downgrade(&lease);
+    let program = ProfileProgram::from_profile(Profile::default()).with_source_lease(lease);
+    let retained = program.clone();
+    drop(program);
+    let compiler = ProfileCompiler::new(environment(temp.path()), ProfileLimits::default());
+    compiler.compile(&retained).unwrap();
+    assert!(observation.upgrade().is_some());
+    drop(retained);
+    assert!(observation.upgrade().is_none());
+}
+
+#[test]
+fn source_observation_can_be_disabled_without_disabling_explicit_reload() {
+    let temp = tempfile::tempdir().unwrap();
+    let root = temp.path().join("root.toml");
+    let child = temp.path().join("child.toml");
+    std::fs::write(
+        &root,
+        "format=1\n[[steps]]\nkind='include'\npath='child.toml'\n",
+    )
+    .unwrap();
+    std::fs::write(&child, "format=1\n").unwrap();
+    let compiler = ProfileCompiler::new(environment(temp.path()), ProfileLimits::default());
+    let watched = ProfileProgram::from_file(&root);
+    let manual = watched.clone().with_source_watch(false);
+    let before = compiler.compile(&manual).unwrap();
+    assert!(before.watch_paths().is_empty());
+    let child_identity = std::fs::canonicalize(&child).unwrap();
+    assert!(before.source_fingerprint(&child_identity).is_some());
+    assert_eq!(compiler.compile(&watched).unwrap().watch_paths().len(), 2);
+    std::fs::write(&child, "format=1\n# explicit next source\n").unwrap();
+    let after = compiler.compile(&manual).unwrap();
+    assert_ne!(before.source_digest(), after.source_digest());
+    assert_ne!(
+        before.source_fingerprint(&child_identity),
+        after.source_fingerprint(&child_identity)
+    );
+    assert!(after.watch_paths().is_empty());
+}
+
+#[test]
 fn named_isolation_accepts_all_lanes_and_bounds_the_complete_disabled_tree() {
     use rsi_meta_profile::{IsolationLane, IsolationSpec};
     let temp = tempfile::tempdir().unwrap();

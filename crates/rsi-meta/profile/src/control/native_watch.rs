@@ -86,11 +86,21 @@ impl WatchPlan {
     }
 
     pub(super) fn establish(candidate: &ProfileCandidate, limits: &ProfileLimits) -> Result<Self> {
-        let plan = Self::capture(candidate.watch_paths(), limits)?;
+        // Source/edit admission still fences compilation races when observation is disabled.
+        let sources = candidate
+            .source_fingerprints
+            .keys()
+            .cloned()
+            .collect::<Vec<_>>();
+        let mut plan = Self::capture(&sources, limits)?;
         if plan.fingerprints != candidate.source_fingerprints {
             return Err(ProfileError::Source {
                 message: "a required source changed after Profile compilation".to_owned(),
             });
+        }
+        if candidate.watch_paths().is_empty() {
+            plan.fingerprints.clear();
+            plan.stamps.clear();
         }
         Ok(plan)
     }

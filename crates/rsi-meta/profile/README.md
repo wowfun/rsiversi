@@ -1,5 +1,10 @@
 # rsi-meta-profile
 
+An application may attach an opaque source lease to a `ProfileProgram`.
+The program retains it across clones and reloads until its owner is disposed.
+This keeps externally published source files available without giving the
+generic Profile compiler package-management policy.
+
 `rsi-meta-profile` is the only owner of executable Profile composition. It is
 an ordinary `rsi-meta` plugin constructed directly by `rsi-host`; it is not a
 Runtime registry, catalog service, or second lifecycle engine. Custom
@@ -30,6 +35,19 @@ Frozen environments may omit filesystem paths. In that case Rhai receives an
 empty `paths` map, and the absence participates in the source digest. Browser
 callers do not supply invented native directories. Immutable bundles install no
 file watcher; manual reload rechecks the same immutable program.
+
+Native embedders can select `ProfileProgram::with_source_watch(false)` to compile
+a file and its includes without installing source observation. Explicit reload
+still reads the same source program and preserves all parser/admission limits.
+Observation policy is an embedder input, not a directive accepted from a Profile.
+An embedder may instead share a `SourceWatchPolicy::leased()` with the program.
+Automatic observation runs only while at least one bounded `SourceWatchLease`
+exists. Releasing the last lease disables new automatic probes and reloads;
+explicit control operations remain available. The policy owns no threads or
+timers: the existing Profile Fiber owns observation and drain. Source membership
+and fingerprints remain available across lease gaps, so reacquisition detects
+changes made while observation was disabled. A live input replacement preserves
+the same policy authority.
 
 Nodes are declarative groups or plugin leaves. `InstanceId` is unique across
 the complete tree; one `PluginId` may appear at several leaves. Groups own
