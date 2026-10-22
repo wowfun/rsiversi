@@ -1,6 +1,6 @@
 use super::{Path, PathBuf, Result};
 
-pub(super) const USAGE: &str = "usage: rsi-app-tools dist tui|web|desktop [ABSOLUTE_OUTPUT] [--debug] [--with-ssh-helper] [--verbose] | dist addon-workbench ABSOLUTE_NEW_REPORT";
+pub(super) const USAGE: &str = "usage: rsi-app-tools fixture-dist tui|web|desktop [ABSOLUTE_OUTPUT] [--debug] [--with-ssh-helper] [--verbose] | fixture-dist addon-workbench ABSOLUTE_NEW_REPORT";
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub(super) enum Kind {

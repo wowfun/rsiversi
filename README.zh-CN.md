@@ -41,7 +41,7 @@ RSIversi 目前处于**预发布阶段**。API、插件契约和保存格式都�
 
 ## 快速开始
 
-请从 Git 工作副本构建。先安装 Git、Rustup、Node.js 22.18 或更新版本，
+请从 Git 工作副本构建。先安装 Git、Rustup，
 并按照[源码安装教程](docs/i18n/zh-CN/user/source-install.md)准备所在平台的编译依赖。
 
 <!-- rsi-example id=install-clone platform=all -->
@@ -55,22 +55,19 @@ Windows 使用 Windows 11 24H2 或更新版本的 x64 系统，
 
 <!-- rsi-example id=install-windows platform=windows -->
 ```powershell
-powershell -NoProfile -ExecutionPolicy Bypass -File .\scripts\rsiversi.ps1 setup web
-powershell -NoProfile -ExecutionPolicy Bypass -File .\scripts\rsiversi.ps1 build web
-powershell -NoProfile -ExecutionPolicy Bypass -File .\scripts\rsiversi.ps1 web
+powershell -NoProfile -ExecutionPolicy Bypass -File .\scripts\rsiversi.ps1
 ```
 
-Linux、WSL 或 Windows Git Bash：
+Linux 或 WSL：
 
-<!-- rsi-example id=install-bash platform=git-bash -->
+<!-- rsi-example id=install-bash platform=linux -->
 ```bash
-bash scripts/rsiversi.sh setup web
-bash scripts/rsiversi.sh build web
-bash scripts/rsiversi.sh web
+bash scripts/rsiversi.sh
 ```
 
-首次构建需要编译原生应用和 Web 依赖，可能耗时较长。后续启动直接使用已构建的应用。
-Web 会打开一次性登录链接；使用期间请保持启动它的终端打开。
+重新打开终端，运行 `rsi` 使用 TUI。添加 Web 时运行 `rsi plugin install web`，
+然后运行 `rsi web`；本地源码包的构建方式见源码安装教程。
+浏览器启动器打开一次性登录链接后返回，共享 Host 继续为其他界面服务。
 
 在 **Settings → Models & access** 中，先保存凭据，再配置对应的模型服务，最后选择默认模型。
 随后新建对话并选择工作目录。[完成第一次对话](docs/i18n/zh-CN/user/first-conversation.md)
@@ -78,7 +75,7 @@ Web 会打开一次性登录链接；使用期间请保持启动它的终端打�
 
 Windows 当前支持对话、模型配置、历史记录和原生文件访问。
 受限命令执行及浏览器与自动化功能（Browser/Automation）需要 Linux/WSL。
-Windows 上使用同一个 Host 时，切换界面前需先停止原界面。
+Windows 和 Linux 上的各界面共享同一个常驻 Host。
 详情见[平台限制与排障](docs/i18n/zh-CN/user/troubleshooting.md)。
 
 ## 扩展 RSIversi

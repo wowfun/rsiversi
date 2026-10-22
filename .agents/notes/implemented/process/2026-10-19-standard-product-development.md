@@ -2,6 +2,9 @@
 name: Standard product development with explicit fixture isolation
 ---
 
+Partially superseded by [the unified product decision](2026-10-20-unified-product-watch.md).
+Ordinary CLI homes and client-held source leases supersede the private product publication and launcher. Independent optional packages also remove implicit helper builds and whole-product pairing. Explicit fixture isolation, scrubbed build environments, actual-Origin admission and bounded process cleanup remain current.
+
 ## Problem
 
 The isolated frontend launcher selects a test provider and custom presentation

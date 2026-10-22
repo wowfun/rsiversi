@@ -216,12 +216,12 @@ fn invalid_distribution_arguments_report_usage_without_creating_output() {
     fs::write(root.path().join("Cargo.toml"), "").unwrap();
     fs::write(root.path().join("apps/devtools/Cargo.toml"), "").unwrap();
     let output = Command::new(env!("CARGO_BIN_EXE_rsi-app-tools"))
-        .arg("dist")
+        .arg("fixture-dist")
         .current_dir(root.path())
         .output()
         .unwrap();
     assert_eq!(output.status.code(), Some(1));
-    assert!(String::from_utf8_lossy(&output.stderr).contains("usage: rsi-app-tools dist"));
+    assert!(String::from_utf8_lossy(&output.stderr).contains("usage: rsi-app-tools fixture-dist"));
     assert!(!root.path().join("target").exists());
 }
 
@@ -261,7 +261,7 @@ fn collection_is_target_local_and_rejects_the_old_alias() {
             retained
         );
     }
-    assert!(!invoke(&["dist", "gc"]).status.success());
+    assert!(!invoke(&["fixture-dist", "gc"]).status.success());
     assert!(invoke(&["gc"]).status.success());
     for target in ["tui", "desktop"] {
         assert!(
@@ -273,63 +273,6 @@ fn collection_is_target_local_and_rejects_the_old_alias() {
                 .exists()
         );
     }
-}
-
-#[cfg(target_os = "linux")]
-#[test]
-fn minimal_tui_setup_doctor_and_build_never_require_frontend_or_musl_tools() {
-    use std::os::unix::fs::PermissionsExt;
-    let root = tempfile::tempdir().unwrap();
-    let tools = root.path().join("bin");
-    fs::create_dir_all(root.path().join("scripts")).unwrap();
-    fs::create_dir(&tools).unwrap();
-    fs::copy(
-        std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("../../scripts/rsiversi.sh"),
-        root.path().join("scripts/rsiversi.sh"),
-    )
-    .unwrap();
-    fs::write(
-        root.path().join("rust-toolchain.toml"),
-        "[toolchain]\nchannel = \"1.90.0\"\n",
-    )
-    .unwrap();
-    for tool in ["uname", "dirname", "sed"] {
-        std::os::unix::fs::symlink(format!("/usr/bin/{tool}"), tools.join(tool)).unwrap();
-    }
-    for tool in ["git", "cc", "rustup", "cargo"] {
-        fs::write(
-            tools.join(tool),
-            format!("#!/bin/sh\nprintf '%s\\n' '{tool}' \"$@\" >> \"$RSI_TEST_CALLS\"\n"),
-        )
-        .unwrap();
-        fs::set_permissions(tools.join(tool), fs::Permissions::from_mode(0o755)).unwrap();
-    }
-    let calls = root.path().join("calls");
-    for args in [
-        vec!["doctor"],
-        vec!["setup"],
-        vec!["build", "--debug"],
-        vec!["build", "tui", "--verbose"],
-    ] {
-        let output = Command::new("/bin/bash")
-            .arg(root.path().join("scripts/rsiversi.sh"))
-            .args(args)
-            .env("PATH", &tools)
-            .env("RSI_TEST_CALLS", &calls)
-            .env_remove("BASH_ENV")
-            .current_dir("/")
-            .output()
-            .unwrap();
-        assert!(
-            output.status.success(),
-            "{}",
-            String::from_utf8_lossy(&output.stderr)
-        );
-    }
-    let recorded = fs::read_to_string(calls).unwrap();
-    assert!(recorded.contains("toolchain\ninstall\n1.90.0\n--profile\nminimal"));
-    assert!(recorded.contains("dist\ntui\n--debug") && recorded.contains("dist\ntui\n--verbose"));
-    assert!(!recorded.contains("target\nadd") && !root.path().join("target").exists());
 }
 
 #[cfg(target_os = "linux")]
@@ -400,9 +343,9 @@ printf 'fixture tool stderr\n' >&2"#,
             fs::set_permissions(tools.join("musl-gcc"), fs::Permissions::from_mode(0o755)).unwrap();
         }
         let mut args = if verbose {
-            vec!["dist", "tui", "--debug", "--verbose"]
+            vec!["fixture-dist", "tui", "--debug", "--verbose"]
         } else {
-            vec!["dist", "tui"]
+            vec!["fixture-dist", "tui"]
         };
         if helper {
             args.push("--with-ssh-helper");
@@ -469,7 +412,7 @@ printf 'fixture tool stderr\n' >&2"#,
     }
     let current = fs::read(repo.join("target/rsi-app/tui/current")).unwrap();
     let capture = fs::read(repo.join("target/rsi-app/build/tui/build-family.json")).unwrap();
-    assert!(!invoke(&["dist", "web"]).status.success());
+    assert!(!invoke(&["fixture-dist", "web"]).status.success());
     assert_eq!(
         fs::read(repo.join("target/rsi-app/tui/current")).unwrap(),
         current
@@ -572,7 +515,7 @@ fn addon_report_follows_the_browser_child_result() {
         let report = root.path().join(name);
         let run = || {
             Command::new(env!("CARGO_BIN_EXE_rsi-app-tools"))
-                .args(["dist", "addon-workbench"])
+                .args(["fixture-dist", "addon-workbench"])
                 .arg(&report)
                 .current_dir(root.path())
                 .env(
@@ -617,95 +560,6 @@ fn addon_report_follows_the_browser_child_result() {
     }
 }
 
-#[cfg(target_os = "linux")]
-#[test]
-fn linux_doctor_validates_musl_target_and_version_without_desktop_tools() {
-    use std::os::unix::fs::PermissionsExt;
-    let root = tempfile::tempdir().unwrap();
-    let tools = root.path().join("bin");
-    fs::create_dir(&tools).unwrap();
-    let source = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("../..");
-    fs::create_dir(root.path().join("scripts")).unwrap();
-    fs::copy(
-        source.join("scripts/rsiversi.sh"),
-        root.path().join("scripts/rsiversi.sh"),
-    )
-    .unwrap();
-    for tool in ["uname", "dirname", "sed", "grep"] {
-        std::os::unix::fs::symlink(format!("/usr/bin/{tool}"), tools.join(tool)).unwrap();
-    }
-    for (tool, body) in [
-        ("git", "exit 0"),
-        ("cc", "exit 0"),
-        ("musl-gcc", "exit 0"),
-        ("npm", "exit 0"),
-        ("rustup", "printf '%s\\n' \"$RSI_TEST_TARGETS\""),
-        ("node", "if [ \"$1\" = -p ]; then echo linux; fi"),
-    ] {
-        fs::write(tools.join(tool), format!("#!/bin/sh\n{body}\n")).unwrap();
-        fs::set_permissions(tools.join(tool), fs::Permissions::from_mode(0o755)).unwrap();
-    }
-    for tool in [
-        "pnpm/node_modules/pnpm/bin/pnpm.mjs",
-        "wasm-bindgen/bin/wasm-bindgen",
-    ] {
-        let path = root.path().join("target/rsi-tools").join(tool);
-        fs::create_dir_all(path.parent().unwrap()).unwrap();
-        fs::write(&path, "").unwrap();
-        fs::set_permissions(path, fs::Permissions::from_mode(0o755)).unwrap();
-    }
-    let version = root.path().join("rust-toolchain.toml");
-    fs::write(&version, "[toolchain]\nchannel = \"1.90.0\"\n").unwrap();
-    let run = |targets| {
-        Command::new("/bin/bash")
-            .arg(root.path().join("scripts/rsiversi.sh"))
-            .args(["doctor", "web"])
-            .env("PATH", &tools)
-            .env("RSI_TEST_TARGETS", targets)
-            .env_remove("RSI_MUSL_CC")
-            .output()
-            .unwrap()
-    };
-    let invalid_cc = Command::new("/bin/bash")
-        .arg(root.path().join("scripts/rsiversi.sh"))
-        .args(["doctor", "web"])
-        .env("PATH", &tools)
-        .env("RSI_MUSL_CC", "musl-gcc")
-        .output()
-        .unwrap();
-    assert!(String::from_utf8_lossy(&invalid_cc.stderr).contains("RSI_MUSL_CC must be absolute"));
-    let missing = run("wasm32-unknown-unknown");
-    assert!(!missing.status.success());
-    assert!(String::from_utf8_lossy(&missing.stderr).contains("musl target missing"));
-    let targets = format!(
-        "wasm32-unknown-unknown\n{}-unknown-linux-musl",
-        std::env::consts::ARCH
-    );
-    assert!(String::from_utf8_lossy(&missing.stderr).contains("setup web"));
-    let ready = run(&targets);
-    assert!(
-        ready.status.success(),
-        "{}",
-        String::from_utf8_lossy(&ready.stderr)
-    );
-    fs::write(&version, "[toolchain]\n  channel  =  \"1.90.0\"\n").unwrap();
-    assert!(run(&targets).status.success());
-    fs::remove_file(tools.join("npm")).unwrap();
-    assert!(String::from_utf8_lossy(&run(&targets).stderr).contains("Missing npm;"));
-    fs::write(tools.join("npm"), "#!/bin/sh\nexit 0\n").unwrap();
-    fs::set_permissions(tools.join("npm"), fs::Permissions::from_mode(0o755)).unwrap();
-    fs::write(tools.join("rustup"), "#!/bin/sh\nexit 1\n").unwrap();
-    let absent = run(&targets);
-    assert!(!absent.status.success());
-    assert!(
-        String::from_utf8_lossy(&absent.stderr)
-            .contains("Cannot inspect pinned Rust 1.90.0; run bash scripts/rsiversi.sh setup web")
-    );
-    fs::write(version, "[toolchain]\nchannel = \"stable\"\n").unwrap();
-    let invalid = run(&targets);
-    assert!(!invalid.status.success());
-    assert!(String::from_utf8_lossy(&invalid.stderr).contains("Invalid repository Rust toolchain"));
-}
 #[test]
 fn management_help_needs_neither_checkout_nor_build_tools() {
     let root = tempfile::tempdir().unwrap();

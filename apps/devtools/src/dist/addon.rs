@@ -63,7 +63,7 @@ impl Capture {
     fn open(cache: &Path) -> Result<Self> {
         let published = cache.join("web");
         let id = publication::current(&published)?
-            .ok_or("build a successful Web publication first: scripts/rsiversi.sh build web")?;
+            .ok_or("build a successful Web publication first: cargo run -p rsi-app-tools -- fixture-dist web")?;
         let bundle = published.join("generations").join(&id).join("bundle");
         let pin = fs::File::open(published.join("leases").join(id))?;
         pin.try_lock_shared()?;
@@ -365,7 +365,7 @@ mod tests {
         .unwrap_err();
         assert!(
             error.to_string().contains(
-                "build a successful Web publication first: scripts/rsiversi.sh build web"
+                "build a successful Web publication first: cargo run -p rsi-app-tools -- fixture-dist web"
             )
         );
         assert!(!report.exists());

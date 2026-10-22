@@ -33,7 +33,7 @@ projection, source generation and deterministic provider contract.
 
 With a successful current paired publication from the
 [product browser fixture](../web-product/README.md), run
-`cargo run --locked -p rsi-app-tools -- dist addon-workbench /absolute/new-report`.
+`cargo run --locked -p rsi-app-tools -- fixture-dist addon-workbench /absolute/new-report`.
 The browser CI job runs this probe against its current paired publication.
 It builds the example from that exact frozen source under the shared build lock,
 checks the capture before and after compilation, and retains the publication pin

@@ -87,7 +87,7 @@ let phase = 'startup';
 const deadline = setTimeout(() => { child?.kill('SIGTERM'); }, live ? 180_000 : 90_000);
 const started = Date.now();
 try {
-  child = spawn(resolve(values.binary), ['--profile', 'test-acp'], { cwd: workspace, env: environment, stdio: ['pipe', 'pipe', 'pipe'] });
+  child = spawn(resolve(values.binary), ["run", 'test-acp'], { cwd: workspace, env: environment, stdio: ['pipe', 'pipe', 'pipe'] });
   const exit = once(child, 'exit');
   child.stderr.on('data', chunk => { if (stderr.length < 65536) stderr += chunk.toString(); });
   const updates = [];

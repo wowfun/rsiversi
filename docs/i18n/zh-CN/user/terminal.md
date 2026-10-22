@@ -5,18 +5,16 @@
 TUI 提供全屏对话和模型配置。请先[从源码安装](source-install.md)。
 Windows 上需要在 **Windows Terminal** 中运行 PowerShell 或 Git Bash，
 mintty 和经典 conhost 控制台暂不支持此 TUI。
-使用同一组 Host 数据目录前，请先停止 Web。
-
-以下示例使用源码安装教程中的 Web 配套包；单独构建 TUI 后可以省略 `--from web`。
+TUI 随核心安装，Windows 和 Linux 上都可与 Web 共享 Host。
 
 <!-- rsi-example id=tui-windows platform=windows -->
 ```powershell
-powershell -NoProfile -ExecutionPolicy Bypass -File .\scripts\rsiversi.ps1 tui --from web
+rsi tui
 ```
 
 <!-- rsi-example id=tui-bash platform=git-bash -->
 ```bash
-bash scripts/rsiversi.sh tui --from web
+rsi tui
 ```
 
 尚未配置模型时会打开首页或设置界面。

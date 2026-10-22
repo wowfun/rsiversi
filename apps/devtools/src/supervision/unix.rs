@@ -8,8 +8,6 @@ pub(crate) struct Signals {
     hangup: tokio::signal::unix::Signal,
     quit: tokio::signal::unix::Signal,
     stopped: bool,
-    #[cfg(all(test, target_os = "linux"))]
-    request: tokio_util::sync::CancellationToken,
 }
 impl Signals {
     pub(crate) fn new() -> std::io::Result<Self> {
@@ -20,24 +18,9 @@ impl Signals {
             hangup: signal(SignalKind::hangup())?,
             quit: signal(SignalKind::quit())?,
             stopped: false,
-            #[cfg(all(test, target_os = "linux"))]
-            request: tokio_util::sync::CancellationToken::new(),
         })
     }
     pub(crate) async fn interrupted(&mut self) {
-        #[cfg(all(test, target_os = "linux"))]
-        {
-            let request = self.request.clone();
-            tokio::select! { () = request.cancelled() => self.stopped = true, () = self.platform_interrupted() => {} }
-        }
-        #[cfg(not(all(test, target_os = "linux")))]
-        self.platform_interrupted().await;
-    }
-    #[cfg(all(test, target_os = "linux"))]
-    pub(crate) fn test_request(&self) -> tokio_util::sync::CancellationToken {
-        self.request.clone()
-    }
-    async fn platform_interrupted(&mut self) {
         if !self.stopped {
             tokio::select! {
                 _ = self.interrupt.recv() => {},
@@ -52,7 +35,7 @@ impl Signals {
 pub(crate) fn application_succeeded(status: std::process::ExitStatus) -> bool {
     status.success() || application_interrupted(status)
 }
-pub(crate) fn application_interrupted(status: std::process::ExitStatus) -> bool {
+fn application_interrupted(status: std::process::ExitStatus) -> bool {
     use std::os::unix::process::ExitStatusExt as _;
     status.code() == Some(130) || status.signal() == Some(rustix::process::Signal::INT.as_raw())
 }
@@ -94,15 +77,6 @@ impl Drop for Foreground {
     }
 }
 impl Child {
-    // Windows admission rollback must await reaping; callers share that interface.
-    #[allow(clippy::unused_async)]
-    pub(crate) async fn spawn_development(
-        command: tokio::process::Command,
-    ) -> Result<Self, String> {
-        let mut child = Self::spawn(command, true)?;
-        child.force_timeout = Duration::from_secs(10);
-        Ok(child)
-    }
     pub(crate) fn spawn(mut command: tokio::process::Command, group: bool) -> Result<Self, String> {
         #[cfg(unix)]
         if group {
@@ -174,16 +148,6 @@ impl Child {
     pub(crate) async fn stop_with_timeout(&mut self, timeout: Duration) -> Result<(), String> {
         self.signal(rustix::process::Signal::TERM);
         self.settle(timeout).await.map(|_| ())
-    }
-    pub(crate) async fn stop_after_eof(&mut self) -> Result<std::process::ExitStatus, String> {
-        self.stop_after_eof_with_timeout(Duration::from_secs(15))
-            .await
-    }
-    pub(crate) async fn stop_after_eof_with_timeout(
-        &mut self,
-        grace: Duration,
-    ) -> Result<std::process::ExitStatus, String> {
-        self.settle(grace).await
     }
     async fn settle(&mut self, timeout: Duration) -> Result<std::process::ExitStatus, String> {
         if let Ok(result) = tokio::time::timeout(timeout, self.wait()).await {

@@ -96,7 +96,7 @@ fn main() {
     for debug in [false, true] {
         let mut command = Command::new(env!("CARGO_BIN_EXE_rsi-app-tools"));
         command
-            .args(["dist", "desktop"])
+            .args(["fixture-dist", "desktop"])
             .current_dir(&repo)
             .env("PATH", &path)
             .env_remove("RSI_WASM_BINDGEN");

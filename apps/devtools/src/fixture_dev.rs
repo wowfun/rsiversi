@@ -132,6 +132,11 @@ impl Development {
         for path in ["home", "config/rsi", "state", "cache", "workspace", "logs"] {
             std::fs::create_dir_all(directory.join(path)).map_err(problem)?;
         }
+        std::fs::write(
+            directory.join("config/rsi/rsi.toml"),
+            "format = 1\n[service]\nkind = \"catalog\"\nid = \"dev\"\n",
+        )
+        .map_err(problem)?;
         let runtime = tempfile::Builder::new()
             .prefix("ri-")
             .tempdir_in("/tmp")
@@ -377,6 +382,21 @@ async fn start(root: PathBuf, options: Options) -> Result<(), String> {
     let mut signals = Signals::new().map_err(problem)?;
     let dev = Development::create(root, &options)?;
     let result = start_development(&dev, &options, &mut signals).await;
+    if !options.prepare
+        && dev
+            .directory
+            .join("state/rsi/session-host/owner.json")
+            .is_file()
+    {
+        // The ordinary application borrows a detached Host. Retire it before
+        // removing the homes or returning from an interrupted fixture launch.
+        if let Err(cleanup) = logged(dev.command(&["host", "stop"]), &dev.log, &mut signals).await {
+            return Err(match result {
+                Ok(()) => cleanup,
+                Err(primary) => format!("{primary}; Host cleanup also failed: {cleanup}"),
+            });
+        }
+    }
     if result.is_ok() && options.directory.is_none() && !options.prepare {
         dev.remove()?;
     }
@@ -399,7 +419,7 @@ async fn start_development(
             .env_clear()
             .envs(dev.build_environment())
             .current_dir(&dev.root)
-            .arg("dist")
+            .arg("fixture-dist")
             .arg("web")
             .arg(dev.directory.join("publication"))
             .arg("--debug");
@@ -444,7 +464,7 @@ async fn start_development(
     if options.smoke {
         logged(
             dev.command(&[
-                "--profile",
+                "run",
                 "dev-headless",
                 "local development smoke",
                 "--output",
@@ -641,8 +661,7 @@ async fn prepare_tui(dev: &Development, target: &str, signals: &mut Signals) -> 
     dev.addon("terminal.toml", "dev.terminal", signals).await?;
     dev.profile("dev-tui",true,vec![step("connection","rsi.application.connection",Some(json!({"host_profile":"dev"}))),step("ui","rsi.ui",None),step("target","rsi.ui.target",Some(json!("application"))),step("session-ui","rsi.session.ui",None),step("tree-ui","rsi.session.tree.ui",None),step("files-ui","rsi.session.files.ui",None),step("application","rsi.application.tui",Some(json!({"presentation":[{"id":"native","plugin":"rsi.terminal.native"},{"id":"adapter","plugin":"rsi.terminal.portable"}]})))])
 }
-async fn prepare_web(dev: &Development, watch: bool, signals: &mut Signals) -> Result<(), String> {
-    let assets = dev.directory.join("publication/bundle/assets");
+async fn prepare_web(dev: &Development, _watch: bool, signals: &mut Signals) -> Result<(), String> {
     eprintln!(
         "Development source overlay: Vite serves mutable document source; native and Worker remain paired. Rust/Worker changes require rebuilding and restarting pnpm dev."
     );
@@ -668,12 +687,7 @@ async fn prepare_web(dev: &Development, watch: bool, signals: &mut Signals) -> R
                 "rsi.application.service",
                 Some(json!({"host_profile":"dev"})),
             ),
-            step(
-                "assets",
-                "rsi.web.assets",
-                Some(json!({"directory":assets,"watch":watch})),
-            ),
-            step("http", "rsi.application.serve-web", None),
+            step("http", "rsi.application.serve", None),
         ],
     )
 }
@@ -706,7 +720,7 @@ async fn launch(dev: &Development, options: &Options, signals: &mut Signals) -> 
         None
     };
     let mut frontend = None;
-    let mut command = dev.command(&["--profile", &format!("dev-{}", options.surface)]);
+    let mut command = dev.command(&["run", &format!("dev-{}", options.surface)]);
     if options.surface == "web" {
         let origin = format!("http://127.0.0.1:{}", options.port);
         let bind = if options.watch {
@@ -731,8 +745,11 @@ async fn launch(dev: &Development, options: &Options, signals: &mut Signals) -> 
             format!("127.0.0.1:{}", options.port)
         };
         command.args(["--bind", &bind, "--origin", &origin, "--dev-http"]);
+        command
+            .arg("--assets")
+            .arg(dev.directory.join("publication/bundle/assets"));
         eprintln!(
-            "Open {origin}. In another terminal, run {} --profile devices register dev-web and paste the receipt into the sign-in form. Select 'Allow local HTTP for development' before connecting.",
+            "Open {origin}. In another terminal, run {} run devices register dev-web and paste the receipt into the sign-in form. Select 'Allow local HTTP for development' before connecting.",
             shell_argument(
                 dev.directory
                     .join("run")
@@ -818,6 +835,12 @@ mod tests {
         std::fs::create_dir_all(&cache).unwrap();
         let options = Options::parse(&["web".into()]).unwrap();
         let dev = Development::create(root.path().into(), &options).unwrap();
+        let launch: toml::Value = toml::from_str(
+            &std::fs::read_to_string(dev.directory.join("config/rsi/rsi.toml")).unwrap(),
+        )
+        .unwrap();
+        assert_eq!(launch["service"]["kind"].as_str(), Some("catalog"));
+        assert_eq!(launch["service"]["id"].as_str(), Some("dev"));
         let admitted =
             crate::dist::validate_external_output(&cache, &dev.directory.join("publication"));
         dev.remove().unwrap();

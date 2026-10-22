@@ -17,23 +17,26 @@ the [Web launch contract](../../apps/serve/README.md) owns this behavior.
 
 ## Stop and switch interfaces
 
-Press Ctrl+C in the launching terminal and wait for exit. Windows runs the service
-inside that process: Web and TUI cannot use the same Host directories simultaneously.
-Stop one before starting the other. Closing a terminal forcibly can shorten cleanup;
-prefer Ctrl+C when possible. See the [Host ownership contract](../../crates/rsi/core/README.md).
+Windows and Linux applications using the same config and state homes share a
+resident Host. TUI, Web and Desktop can run together. Closing an interface detaches
+that client; it does not stop the Host or cancel another client's response.
+Use Ctrl+C to leave a terminal interface and allow its cleanup to finish.
 
-To revoke a browser on Windows, stop Web first. In PowerShell:
+`rsi web` opens a new launch link and returns. `rsi web status` inspects its
+listener; `rsi web stop` stops that listener. `rsi host stop` stops the shared
+Host and disconnects all its clients. See the
+[Host ownership contract](../../crates/rsi/core/README.md).
+
+Device administration connects to the same Host. For example, in PowerShell:
 
 <!-- rsi-example id=devices-windows platform=windows -->
 ```powershell
-powershell -NoProfile -ExecutionPolicy Bypass -Command '& (Join-Path (& .\scripts\rsiversi.ps1 path web) rsi.exe) --profile devices list'
+rsi run devices -- list
 ```
 
-Then pass the listed device ID to `--profile devices revoke DEVICE_ID`.
-Use a PowerShell process started with `-ExecutionPolicy Bypass` if scripts are
-restricted, as described in [installation](source-install.md). Never paste a
-device registration receipt into a public issue; it can contain a token.
-On Linux, device administration connects to the existing Service.
+Then pass the listed device ID to `rsi run devices -- revoke DEVICE_ID`.
+Never paste a device registration receipt into a public issue; it can contain
+a token.
 
 ## Find your data
 
@@ -41,8 +44,10 @@ Windows uses the standard per-user application config/state/cache locations with
 an `rsi` directory. Linux uses the corresponding XDG locations. Explicit
 `XDG_CONFIG_HOME`, `XDG_STATE_HOME` and `XDG_CACHE_HOME` overrides must be absolute;
 RSIversi appends `rsi` beneath each of them on both platforms.
-Use the same locations when reopening history. Back up config and state while
-the application is stopped; keep credentials private. Do not delete these directories
+`--config-home`, `--state-home` and `--cache-home` select final directories without
+appending `rsi`; relative paths resolve from the calling directory. Use the same
+locations when reopening history. Stop the Host before backing up config and
+state; keep credentials private. Do not delete these directories
 to fix a build failure: build outputs live under the checkout's `target` directory.
 
 The [Host path contract](../../crates/rsi/core/README.md) owns exact path resolution.

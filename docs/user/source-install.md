@@ -2,28 +2,17 @@
 
 [简体中文](../i18n/zh-CN/user/source-install.md)
 
-This tutorial prepares a Git checkout, builds the application, and opens Web.
-It does not install system components or change machine security settings.
-A source ZIP is not supported. The first build compiles Rust and Web dependencies;
-later launches use the published application directly.
-Allow substantial time and disk space for the first release build: on a laptop
-it can take over an hour. Progress on stderr identifies the target, release/debug profile, stage, command and `build.log`; long stages emit a heartbeat every 15 seconds. `--verbose` also mirrors tool output. Stdout contains the final JSON result.
-Later builds reuse compilation caches; starting Web does not compile anything.
+Install the core once. TUI, CLI, Headless, ACP and management are linked plugins
+available through `rsi`. Web, Desktop and the SSH helper are independent packages;
+adding or replacing them does not rebuild or replace the core executable.
 
 ## Prepare your machine
 
-On Windows, use Windows 11 24H2 or newer, x64, and a short checkout path on a
-fixed local NTFS drive. Install Git for Windows, Rustup, Node.js 22.18 or newer,
-and Visual Studio Build Tools with **Desktop development with C++**, MSVC x64,
-and a Windows SDK. Open a new PowerShell after installation.
-
-On Linux or WSL, install Git, Rustup, Linux Node.js 22.18 or newer with npm,
-a C compiler and musl tools. On Ubuntu, the system packages include
-`build-essential musl-tools`. WSL must use Linux Node, not the Windows
-Node executable inherited through PATH. Native macOS is not a source-publishing
-target of this tutorial.
-
-Clone the repository:
+Use Git and the Rust toolchain pinned by this checkout. On Windows, use Windows
+11 24H2 or newer, x64, a short path on fixed local NTFS, and Visual Studio Build
+Tools with Desktop development with C++, MSVC x64 and a Windows SDK. TUI needs
+Windows Terminal. Linux/WSL needs a C toolchain; on Ubuntu install
+`build-essential pkg-config libdbus-1-dev`. These instructions do not cover native macOS.
 
 <!-- rsi-example id=install-clone platform=all -->
 ```bash
@@ -31,85 +20,118 @@ git clone https://github.com/wowfun/rsiversi.git
 cd rsiversi
 ```
 
-## Windows PowerShell 5.1 or 7
+## Install the core
 
-Run these commands in order:
+The installer builds only `rsi` in release mode and adds its `bin` directory to
+your user PATH. Open a new terminal after installation. No UI selection is needed.
 
 <!-- rsi-example id=install-windows platform=windows -->
 ```powershell
-powershell -NoProfile -ExecutionPolicy Bypass -File .\scripts\rsiversi.ps1 setup web
-powershell -NoProfile -ExecutionPolicy Bypass -File .\scripts\rsiversi.ps1 build web
-powershell -NoProfile -ExecutionPolicy Bypass -File .\scripts\rsiversi.ps1 web
+powershell -NoProfile -ExecutionPolicy Bypass -File .\scripts\rsiversi.ps1
 ```
 
-The execution-policy flag applies only to that process. Organization policy may
-still refuse it; the script does not change policy. `setup` installs the repository
-Rust toolchain and WASM target, plus repository-local pnpm and wasm-bindgen.
-It can be run again. No Python or Make is required.
-
-## Linux, WSL, or Windows Git Bash
-
-<!-- rsi-example id=install-bash platform=git-bash -->
+<!-- rsi-example id=install-bash platform=linux -->
 ```bash
-bash scripts/rsiversi.sh setup web
-bash scripts/rsiversi.sh build web
-bash scripts/rsiversi.sh web
+bash scripts/rsiversi.sh
 ```
 
-Git Bash uses native Windows tools and state. It does not enter WSL. Web works
-from mintty; the fullscreen TUI needs Git Bash inside Windows Terminal.
+<!-- rsi-example id=install-launch platform=all -->
+```bash
+rsi
+```
 
-## Choose what to build
+Use `--prefix DIR` / `-Prefix DIR` for another install root, or `--binary FILE` /
+`-Binary FILE` for an explicitly trusted existing executable. The installer
+refuses to overwrite an existing installation. `--no-path` / `-NoPath` leaves
+PATH untouched for isolated verification. It does not open config or state.
 
-`doctor`, `setup`, `build` and `path` accept `tui`, `web` or `desktop` as their first argument. Omitting it selects **tui**; the examples above explicitly select Web.
+## Add Web or Desktop
 
-| Target | Published application | Additional prerequisites |
-| --- | --- | --- |
-| `tui` | TUI, CLI, Headless, ACP, HTTP API and management in `rsi` | Rust and native compiler only; no Node, WASM or musl |
-| `web` | Native `rsi` plus paired Web assets and Worker | Node/npm, pinned pnpm and wasm-bindgen, WASM target; Linux also musl |
-| `desktop` | Web bundle plus `rsi-desktop` | Linux GTK 3 / WebKitGTK 4.1 development libraries; Windows WebView2 Runtime at launch |
+With a configured signed package repository, adding an interface uses ordinary
+product commands. Set `[repository]` in the [launch document](../../crates/rsi/core/docs/launch.md).
+The [package contract](../../crates/rsi/packages/README.md) describes release trust; a test key is not an official release key.
 
-For Desktop, run `setup desktop`, `build desktop`, then `desktop`. For native TUI, use `setup tui`, `build tui`, then `tui` in Windows Terminal or a Linux terminal. The native catalog and built-in Profiles remain complete for every target; selecting a build target does not prune dependencies by runtime Profile.
+<!-- rsi-example id=install-plugins platform=all -->
+```bash
+rsi plugin install web
+rsi web
+rsi plugin install desktop
+rsi desktop
+```
 
-Linux Web/Desktop include the SSH helper. Linux TUI opts in with `setup tui --with-ssh-helper` and `build tui --with-ssh-helper`. The helper always uses release, including for a debug application. Without it, product SSH targets are unavailable; ordinary SSH login and local TUI still work. Windows rejects the helper flag.
+For local source packages, install Node.js 22.18 or newer, the pinned pnpm version,
+the WASM target and matching wasm-bindgen. WSL must use Linux Node.
 
-Each target has its own current publication and compilation cache. Clients that need one Linux Service Host must use the same family: after `build web`, use `web` and `tui --from web`; after `build desktop`, use `desktop`, `web --from desktop` or `tui --from desktop`. Windows requires stopping the existing interface before opening another on the same Host. There is no fallback between targets.
+<!-- rsi-example id=install-web-tools platform=all -->
+```bash
+npm install --global pnpm@12.6.0
+pnpm -C apps/web install --frozen-lockfile --ignore-scripts
+rustup target add wasm32-unknown-unknown
+cargo install wasm-bindgen-cli --locked --version 0.2.127
+```
 
-`dev tui` and `dev web` start the standard debug product with supervision.
-Follow the [development guide](../development.md) for state selection and hot updates.
+Build and install the Web package into the same product homes:
 
-## Check, update, and locate the application
-
-`doctor` reports missing prerequisites without installing or building anything.
-Use `scripts/rsiversi.ps1 doctor web` through the PowerShell invocation above, or
-`bash scripts/rsiversi.sh doctor web`. Follow its diagnostic, then retry.
-
-Use `--help` or `-h` for an overview, or `build --help` for build options.
-Help for `doctor`, `setup`, `build`, `path` and `dev` works before setup and without
-published artifacts. `web --help`, `tui --help` and `desktop --help` use the built application's
-help and require a successful build.
-
-<!-- rsi-example id=install-help-windows platform=windows -->
+<!-- rsi-example id=install-web-windows platform=windows -->
 ```powershell
-powershell -NoProfile -ExecutionPolicy Bypass -File .\scripts\rsiversi.ps1 --help
+node apps/devtools/build.mjs web "$PWD/.local/packages/web"
+rsi plugin install --local "$PWD/.local/packages/web"
+rsi web
 ```
 
-<!-- rsi-example id=install-help-bash platform=git-bash -->
+<!-- rsi-example id=install-web-linux platform=linux -->
 ```bash
-bash scripts/rsiversi.sh build --help
+node apps/devtools/build.mjs web "$PWD/.local/packages/web"
+rsi plugin install --local "$PWD/.local/packages/web"
+rsi web
 ```
 
-`build` defaults to TUI release. `build web --debug` is available for Web development. An optional new absolute output directory publishes outside the managed cache; it does not change the current publication.
-A failed build keeps the previous successful publication. Exit RSIversi before updating
-source, then run setup and build again. Start Web to use the new publication.
+Desktop uses `node apps/devtools/build.mjs desktop ABSOLUTE_NEW_PACKAGE
+--web-package ABSOLUTE_WEB_PACKAGE`, followed by `rsi plugin install --local`
+for both directories. Windows needs WebView2 at launch; Linux builds also need
+`libgtk-3-dev libwebkit2gtk-4.1-dev`. The Desktop package pins its exact Web dependency.
+An SSH helper is built separately on Linux with `build.mjs ssh-helper`; prepare
+the same-CPU musl target and compiler first, then install it through `rsi`.
 
-`path web` prints the current Web bundle directory (`path` alone selects TUI). It contains `rsi.exe` on Windows
-(`rsi` on Linux), `assets`, and its build receipt. You can launch that executable
-directly with `web`; keep its generation layout intact. Launch and path do not
-invoke Cargo, Node, or the builder. Managed generation directories are retained
-while their application is running.
+Omit `--debug` for release packages. Build output directories are new by default;
+`--replace` is for an explicitly selected source output. See the
+[producer contract](../../apps/devtools/README.md) and [development guide](../development.md).
 
-Complete argument and publication rules are in the [source entrypoint contract](../../apps/devtools/README.md).
+TUI and Web share the same resident Host on Windows and Linux. Closing a UI
+detaches it. `rsi web stop` stops the browser listener, while `rsi host stop`
+stops the shared service. Continue with [your first conversation](first-conversation.md).
 
-Continue with [your first conversation](first-conversation.md).
-Build failures and long-path issues are covered in [troubleshooting](troubleshooting.md).
+## Upgrade and transfer existing data
+
+After stopping the Host, place `--reset-config`, `--reset-state`, or both before
+the usual application command. They retain backups, credentials and installed
+packages. For example, `rsi --reset-config --reset-state tui` starts TUI with
+fresh owned configuration and state. Help never performs a reset.
+
+Use `rsi core upgrade` with the repository identity pinned into the executable, or
+`rsi core upgrade --local ABSOLUTE_CORE_PACKAGE`. The command stages and probes
+the admitted executable, stops the selected Host, replaces the core and verifies
+the new Host before completing. The previous executable and receipt remain in
+the installation directory. Recover an interrupted transaction with
+`rsi core recover` and the same global home options; if `rsi` is temporarily
+absent, invoke the retained `.rsi-previous-…` executable. A configured mirror must
+keep the pinned name and key; a source build without a pinned identity requires
+`--local`. Windows upgrade requires a private current-user installation and
+preserves shared-directory ACLs by refusing the operation.
+
+For an explicit data transfer, stop both Hosts, then use global options for the
+destination and import options for the old homes:
+
+```text
+rsi --config-home NEW_CONFIG --state-home NEW_STATE import --config-home OLD_CONFIG --state-home OLD_STATE --dry-run
+rsi --config-home NEW_CONFIG --state-home NEW_STATE import --config-home OLD_CONFIG --state-home OLD_STATE
+rsi --config-home NEW_CONFIG --state-home NEW_STATE import recover
+```
+
+The dry run creates no directories or locks and leaves permissions unchanged.
+It previews the import; the actual operation repeats checks under exclusive leases.
+Import stages owned configuration and state, retains destination backups and
+does not rewrite external paths or translate database schemas. Reinstall optional
+packages separately. An unfinished import blocks ordinary startup until recovery.
+The [launch contract](../../crates/rsi/core/docs/launch.md) defines the admitted
+paths, bounds and recovery behavior.

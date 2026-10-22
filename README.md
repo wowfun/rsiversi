@@ -50,7 +50,7 @@ of model providers, Agent semantics and application policy. See the
 
 ## Get started
 
-Build from a Git checkout. Install Git, Rustup, Node.js 22.18 or newer, and the
+Build from a Git checkout. Install Git, Rustup and the
 platform compiler prerequisites described in
 [Install from source](docs/user/source-install.md).
 
@@ -65,23 +65,20 @@ on fixed local NTFS:
 
 <!-- rsi-example id=install-windows platform=windows -->
 ```powershell
-powershell -NoProfile -ExecutionPolicy Bypass -File .\scripts\rsiversi.ps1 setup web
-powershell -NoProfile -ExecutionPolicy Bypass -File .\scripts\rsiversi.ps1 build web
-powershell -NoProfile -ExecutionPolicy Bypass -File .\scripts\rsiversi.ps1 web
+powershell -NoProfile -ExecutionPolicy Bypass -File .\scripts\rsiversi.ps1
 ```
 
-On Linux, WSL or Windows Git Bash:
+On Linux or WSL:
 
-<!-- rsi-example id=install-bash platform=git-bash -->
+<!-- rsi-example id=install-bash platform=linux -->
 ```bash
-bash scripts/rsiversi.sh setup web
-bash scripts/rsiversi.sh build web
-bash scripts/rsiversi.sh web
+bash scripts/rsiversi.sh
 ```
 
-The first build compiles the native application and Web dependencies and can
-take substantial time. Later launches use the built application without rebuilding.
-Web opens a one-time sign-in link; keep the launching terminal open.
+Open a new terminal and run `rsi` for TUI. Add Web with `rsi plugin install web`,
+then run `rsi web`. For local source packages, follow the source-install guide.
+The browser launcher returns after opening its one-time sign-in link; the Host
+remains available to other interfaces.
 
 In **Settings → Models & access**, save a credential, configure its provider,
 then select a default model. Create a conversation and choose a working
@@ -90,7 +87,7 @@ through setup and returning to saved conversations.
 
 Windows currently supports conversations, model setup, saved history and native
 file access. Restricted shell execution and Browser/Automation workflows require
-Linux/WSL. On Windows, stop one interface before opening another on the same Host.
+Linux/WSL. Windows and Linux interfaces share one resident Host.
 See [platform limits and troubleshooting](docs/user/troubleshooting.md) for details.
 
 ## Extend RSIversi

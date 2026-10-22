@@ -2,6 +2,9 @@
 name: Explicit application build targets and isolated publication caches
 ---
 
+Partially superseded by [the unified product decision](../architecture/2026-10-20-independent-product-packages.md).
+Independent packages and interface compatibility supersede per-UI installations, exact native/Web build families, --from and separate product caches. Core-only onboarding, visible build diagnostics, verified SSH upload and system-runtime prerequisites remain current.
+
 ## Problem
 
 The source entry builds Web even for terminal-only servers. Hidden subprocess

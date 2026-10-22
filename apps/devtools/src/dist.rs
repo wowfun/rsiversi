@@ -20,6 +20,23 @@ type Result<T> = std::result::Result<T, Box<dyn std::error::Error>>;
 pub fn run(arguments: &[String]) -> std::result::Result<(), String> {
     execute(arguments).map_err(|error| format!("paired distribution: {error}"))
 }
+pub fn fixture_path(target: &str) -> std::result::Result<(), String> {
+    let kind = Kind::parse(target).map_err(|error| error.to_string())?;
+    if kind == Kind::AddonWorkbench {
+        return Err("fixture-path requires tui, web or desktop".into());
+    }
+    let root = std::env::current_dir().map_err(|error| error.to_string())?;
+    crate::require_repository_root(&root)?;
+    let cache = root.join("target/rsi-app").join(kind.name());
+    let id = publication::current(&cache)
+        .map_err(|error| error.to_string())?
+        .ok_or("no fixture publication")?;
+    println!(
+        "{}",
+        cache.join("generations").join(id).join("bundle").display()
+    );
+    Ok(())
+}
 fn execute(arguments: &[String]) -> Result<()> {
     let root = command_path(std::env::current_dir()?.canonicalize()?);
     crate::require_repository_root(&root)?;
@@ -43,35 +60,11 @@ fn execute(arguments: &[String]) -> Result<()> {
     Ok(())
 }
 
-pub(crate) struct BuiltApplication {
-    pub(crate) bundle: PathBuf,
-    pub(crate) family: String,
-}
-pub(crate) fn development(
-    root: &Path,
-    surface: &str,
-    output: PathBuf,
-    cancellation: std::sync::Arc<std::sync::atomic::AtomicBool>,
-) -> std::result::Result<BuiltApplication, String> {
-    let options = Options {
-        kind: Kind::parse(surface).map_err(|error| error.to_string())?,
-        output: Some(output),
-        debug: true,
-        with_ssh_helper: false,
-        verbose: false,
-    };
-    produce(root, &options, Some(cancellation)).map_err(|error| error.to_string())
-}
-pub(crate) fn development_environment(
-    root: &Path,
-) -> std::result::Result<BTreeMap<OsString, OsString>, String> {
-    environment(&root.join("target/rsi-app")).map_err(|error| error.to_string())
-}
 fn produce(
     root: &Path,
     options: &Options,
     cancellation: Option<std::sync::Arc<std::sync::atomic::AtomicBool>>,
-) -> Result<BuiltApplication> {
+) -> Result<()> {
     let cache = root.join("target/rsi-app");
     let started = std::time::Instant::now();
     describe(options);
@@ -116,7 +109,7 @@ fn produce(
         output.display(),
         output.join("build.log").display()
     );
-    let family = finish_build(
+    let _family = finish_build(
         || build(root, &cache, &output, options, managed, cancellation),
         &publication,
         &output,
@@ -141,8 +134,7 @@ fn produce(
     );
     // External callers own output through settlement. Managed consumers acquire
     // their generation lease at launch; returning from dist does not pin current.
-    let bundle = output.join("bundle");
-    Ok(BuiltApplication { bundle, family })
+    Ok(())
 }
 fn describe(options: &Options) {
     if options.kind == Kind::AddonWorkbench {
@@ -426,6 +418,13 @@ fn build(
         Value::Null
     };
     let (pnpm, tools) = if options.kind.web() {
+        let package: Value =
+            serde_json::from_slice(&fs::read(captured.join("apps/web/package.json"))?)?;
+        let expected = package["packageManager"]
+            .as_str()
+            .ok_or("missing packageManager")?
+            .strip_prefix("pnpm@")
+            .ok_or("expected pinned pnpm")?;
         let pnpm_script = root.join("target/rsi-tools/pnpm/node_modules/pnpm/bin/pnpm.mjs");
         let pnpm = if pnpm_script.is_file() {
             vec![
@@ -433,11 +432,7 @@ fn build(
                 pnpm_script.to_string_lossy().into_owned(),
             ]
         } else if cfg!(windows) {
-            return Err(format!(
-                "missing repository pnpm; run scripts/rsiversi.ps1 setup {}",
-                options.kind.name()
-            )
-            .into());
+            return Err(format!("missing repository pnpm; run npm install --prefix target/rsi-tools/pnpm pnpm@{expected}").into());
         } else {
             vec!["pnpm".into()]
         };
@@ -464,17 +459,9 @@ fn build(
                 .collect::<Vec<_>>(),
         )?;
         let bindgen_version = runner.version(&bindgen, &["--version"])?;
-        let package: Value =
-            serde_json::from_slice(&fs::read(captured.join("apps/web/package.json"))?)?;
-        let expected = package["packageManager"]
-            .as_str()
-            .ok_or("missing packageManager")?
-            .strip_prefix("pnpm@")
-            .ok_or("expected pinned pnpm")?;
         if pnpm_version != expected {
             return Err(format!(
-                "pnpm {expected} required; run setup {} (found {pnpm_version})",
-                options.kind.name()
+                "pnpm {expected} required; install pnpm@{expected} (found {pnpm_version})"
             )
             .into());
         }
@@ -489,8 +476,7 @@ fn build(
             .ok_or("missing wasm-bindgen version")?;
         if bindgen_version != format!("wasm-bindgen {expected_bindgen}") {
             return Err(format!(
-                "wasm-bindgen version differs from Cargo.lock; run setup {}",
-                options.kind.name()
+                "wasm-bindgen version differs from Cargo.lock; run cargo install wasm-bindgen-cli --version {expected_bindgen} --locked"
             )
             .into());
         }
@@ -650,29 +636,35 @@ fn helper_target(native: &str) -> Result<Option<String>> {
         Err(format!("unsupported publication target: {native}").into())
     }
 }
+fn environment_declaration(declaration: &str) -> Result<(&str, Option<&str>)> {
+    let (key, suffix) = declaration
+        .split_once('=')
+        .map_or((declaration, None), |(key, suffix)| (key, Some(suffix)));
+    if key.is_empty()
+        || !key.as_bytes()[0].is_ascii_alphabetic() && !key.starts_with('_')
+        || !key
+            .bytes()
+            .all(|byte| byte.is_ascii_alphanumeric() || b"_()".contains(&byte))
+    {
+        return Err("invalid build environment declaration".into());
+    }
+    if let Some(suffix) = suffix {
+        if suffix.split('/').any(|part| {
+            part.is_empty()
+                || !part.bytes().all(|byte| {
+                    byte.is_ascii_lowercase() || byte.is_ascii_digit() || b"_-".contains(&byte)
+                })
+        }) {
+            return Err("invalid private build directory".into());
+        }
+    }
+    Ok((key, suffix))
+}
 fn environment(cache: &Path) -> Result<BTreeMap<OsString, OsString>> {
     let mut values = BTreeMap::new();
     for declaration in include_str!("../build-environment.txt").lines() {
-        let (key, suffix) = declaration
-            .split_once('=')
-            .map_or((declaration, None), |(key, suffix)| (key, Some(suffix)));
-        if key.is_empty()
-            || !key.as_bytes()[0].is_ascii_alphabetic() && !key.starts_with('_')
-            || !key
-                .bytes()
-                .all(|byte| byte.is_ascii_alphanumeric() || b"_()".contains(&byte))
-        {
-            return Err("invalid build environment declaration".into());
-        }
+        let (key, suffix) = environment_declaration(declaration)?;
         if let Some(suffix) = suffix {
-            if suffix.split('/').any(|part| {
-                part.is_empty()
-                    || !part.bytes().all(|byte| {
-                        byte.is_ascii_lowercase() || byte.is_ascii_digit() || b"_-".contains(&byte)
-                    })
-            }) {
-                return Err("invalid private build directory".into());
-            }
             let path = cache.join(suffix);
             fs::create_dir_all(&path)?;
             values.insert(key.into(), path.into_os_string());
@@ -955,5 +947,21 @@ mod tests {
         assert!(helper_target("aarch64-pc-windows-msvc").is_err());
         assert!(Options::parse(&["web".into(), "--debug".into(), "--debug".into()]).is_err());
         assert!(Options::parse(&["gc".into(), "--debug".into()]).is_err());
+    }
+}
+
+#[cfg(test)]
+mod environment_tests {
+    #[test]
+    fn declarations_match_shared_conformance() {
+        let cases: Vec<serde_json::Value> =
+            serde_json::from_str(include_str!("../build-environment-conformance.json")).unwrap();
+        for case in cases {
+            assert_eq!(
+                super::environment_declaration(case["declaration"].as_str().unwrap()).is_ok(),
+                case["valid"].as_bool().unwrap(),
+                "{case}"
+            );
+        }
     }
 }

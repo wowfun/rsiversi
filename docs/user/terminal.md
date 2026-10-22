@@ -5,16 +5,16 @@
 The TUI provides fullscreen conversations and model setup. Finish
 [source installation](source-install.md) first. On Windows, use **Windows Terminal**
 with PowerShell or Git Bash; mintty and classic conhost cannot run this TUI.
-Stop Web before opening the same Host on Windows. These examples use the Web package from the source-install tutorial; after a separate TUI build, omit `--from web`.
+TUI is included in the core installation and shares its Host with Web on Windows and Linux.
 
 <!-- rsi-example id=tui-windows platform=windows -->
 ```powershell
-powershell -NoProfile -ExecutionPolicy Bypass -File .\scripts\rsiversi.ps1 tui --from web
+rsi tui
 ```
 
 <!-- rsi-example id=tui-bash platform=git-bash -->
 ```bash
-bash scripts/rsiversi.sh tui --from web
+rsi tui
 ```
 
 An unconfigured account opens the home/setup screen. Use `/login deepseek` to

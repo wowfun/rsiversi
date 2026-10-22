@@ -2,8 +2,8 @@
 
 `profile-leaf-probe` is a fixture-only Local API client. It reads the explicitly
 selected isolated Service Host metadata, verifies the process, and negotiates
-that exact deployment over the public Unix client. It uses the advertised build
-identity to derive the compatibility gate; same-UID transport authentication
+that exact deployment over the public Unix client. It derives the deployment
+gate through the Service Host owner's `local_compatibility_key`; same-UID transport authentication
 remains enforced by the owner. It never opens the grant database or source editor.
 Its stdin accepts one bounded catalog or grant operation and stdout returns the
 typed result. Browser tests use it to issue explicit Device leaf grants; remote

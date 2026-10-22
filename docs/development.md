@@ -1,108 +1,100 @@
 # Development guide
 
-Develop against the ordinary RSIversi product: the same application Profiles,
-provider configuration, tools and persistent sessions, built in debug mode.
-The source launcher adds process supervision and Web hot updates on Linux/WSL
-and native Windows. Run the examples from the repository root.
-
-## 1. Choose state and prepare tools
-
-Development uses your ordinary config, state and cache directories unless you
-set absolute XDG overrides. Debug code can change those files. Before working on
-Store or configuration formats, select separate roots:
+Use the ordinary `rsi` executable and application commands. Debug/release and
+`--watch` do not select different homes or a different runtime. From a checkout:
 
 ```bash
-development_root="$HOME/.local/share/rsi-dev"
-export XDG_CONFIG_HOME="$development_root/config"
-export XDG_STATE_HOME="$development_root/state"
-export XDG_CACHE_HOME="$development_root/cache"
+cargo build --locked -p rsi-cli
+target/debug/rsi --help
 ```
 
-In Windows PowerShell:
+Windows uses `target/debug/rsi.exe`. Build prerequisites and independent optional
+packages are described in [source installation](user/source-install.md).
+The installer is only needed when you want `rsi` on PATH.
 
-```powershell
-$env:XDG_CONFIG_HOME = Join-Path $PWD '.local/dev-product/config'
-$env:XDG_STATE_HOME = Join-Path $PWD '.local/dev-product/state'
-$env:XDG_CACHE_HOME = Join-Path $PWD '.local/dev-product/cache'
-```
+## Choose homes
 
-New config roots need their own provider configuration. The product prints its
-resolved roots before opening state. For path resolution, Store compatibility
-and existing Host conflicts, follow the
-[application launch contract](../apps/cli/README.md).
-
-Install the Rust/native prerequisites in
-[source installation](user/source-install.md#prepare-your-machine).
-For Web, use Node.js 22.18 or newer and prepare the pinned frontend tools:
+All three options select final directories relative to the caller's cwd. Omitted
+options retain the normal platform defaults. For an isolated development instance:
 
 ```bash
-bash scripts/rsiversi.sh setup web
+target/debug/rsi --config-home .local/dev/config --state-home .local/dev/state --cache-home .local/dev/cache config init
+target/debug/rsi --config-home .local/dev/config --state-home .local/dev/state --cache-home .local/dev/cache tui
 ```
 
-```powershell
-powershell -NoProfile -ExecutionPolicy Bypass -File scripts/rsiversi.ps1 setup web
-```
+Configure providers normally, or supply an environment credential to the caller
+that starts the Host. The Host freezes fallback environment at startup; persistent
+Credentials can be changed through Settings. Later callers get a categorical
+warning if their environment differs. Use the same selected homes on management
+commands, including `host stop`, `config show` and package installation.
 
-For TUI-only work, use `setup tui` instead. Interactive Windows TUI requires
-Windows Terminal. The source-install tutorial owns the remaining platform and
-filesystem requirements.
+`--reset-config` and `--reset-state` can be combined. They archive owned files and
+preserve credentials, installed packages and unrelated files. Stop an active Host
+first. See the [launch/reset contract](../crates/rsi/core/docs/launch.md).
 
-The first launch builds a frozen product before starting source watchers. Linux
-Web includes the release SSH helper used by ordinary remote tools. Web prepares
-dependencies in both the captured build tree and the live source tree; these
-serve different consumers. Allow time for this cold build. Later launches reuse
-compiler and package caches.
-
-## 2. Start the standard TUI
+## Observe configuration and source
 
 ```bash
-bash scripts/rsiversi.sh dev tui
+target/debug/rsi --config-home .local/dev/config --state-home .local/dev/state --cache-home .local/dev/cache --watch tui
 ```
 
-```powershell
-powershell -NoProfile -ExecutionPolicy Bypass -File scripts/rsiversi.ps1 dev tui
+`--watch` holds configuration and source-build leases while the application is
+attached. The last lease stops observation and cancels active builds. Ordinary
+runs do not poll files. Explicit settings/profile management still works without
+watching. Static core/TUI changes report that a process restart is required.
+Valid `rsi.toml` application/source changes replace the current attachment and
+source leases; malformed edits retain the current configuration. Service selection
+changes require an explicit Host restart. See the [launch contract](../crates/rsi/core/docs/launch.md).
+
+For Web, install the frontend prerequisites from the source-install guide and
+add an explicit trusted recipe to `.local/dev/config/rsi.toml`. This Windows
+example uses a checkout at `D:/Projects/rsiversi`; replace both absolute paths
+for your checkout (Linux uses `/...` paths):
+
+```toml
+[sources.web]
+directory = 'D:/Projects/rsiversi'
+command = ['node', 'apps/devtools/build.mjs', 'web', 'D:/Projects/rsiversi/.local/packages/watch-web', '--debug', '--replace']
+output = '.local/packages/watch-web/package.json'
+inputs = ['apps/web/src', 'apps/web/worker.js', 'apps/web/admission.js', 'apps/web-worker/src']
+
+[sources.web.frontend]
+command = ['node', 'apps/web/development-server.mjs']
+port = 0
 ```
 
-Configure a provider and model through the normal setup if needed, then use your
-usual workspaces and conversations. Rust changes require restarting the command.
-For native renderer watching and deterministic layout work, follow the
-[terminal development tutorial](../apps/terminal/docs/tui-development.md), which
-uses the explicit keyless fixture workflow.
-
-## 3. Start Web with hot updates
+Inputs are explicit bounded files/directories, not a whole checkout containing
+build output or `node_modules`. Add the source owners you are editing. A recipe
+freezes command arguments, inputs and the scrubbed caller environment; changing
+its authority requires restarting the client to acquire a new lease. Source
+commands use Process/Sandbox providers. They publish through ordinary package
+admission; a failed build preserves the installed good generation.
 
 ```bash
-bash scripts/rsiversi.sh dev web
+target/debug/rsi --config-home .local/dev/config --state-home .local/dev/state --cache-home .local/dev/cache --watch web --no-open
 ```
 
-```powershell
-powershell -NoProfile -ExecutionPolicy Bypass -File scripts/rsiversi.ps1 dev web
-```
+Web watch runs in the foreground. The owned Vite process reports its actual
+Origin before proxy readiness and launch. Renderer changes retain the listener;
+Worker/bootstrap changes require a new application attachment. Ctrl+C closes
+this frontend and its listener, leaving other clients and the shared Host alive.
+An installed Desktop package uses the same recipe with `--watch desktop`.
 
-Open the printed one-use launch link. The standard product signs in through its
-normal local browser handoff; no manual device receipt is needed. Configure
-credentials, a provider and a default model as described in
-[your first conversation](user/first-conversation.md).
-If pnpm is on PATH, `pnpm -C apps/web dev` invokes the same supervisor.
+Without `--watch`, `rsi web` starts or reuses the persistent browser listener,
+opens a fresh sign-in link and returns. `web status`, `web stop` and `host stop`
+control their respective lifetimes. Building and adding a UI never requires a
+second core build or an installation target switch.
 
-React feature edits use HMR. Rust and Worker edits need a new build and restart.
-Add `--no-open` to print the link without opening a browser; `--no-watch` runs the
-frozen Web product directly. Follow the [Web contract](../apps/web/README.md) for
-pairing, reload behavior and shared browser identity when using daily Web too.
+## Validate the changed boundary
 
-## 4. Stop development
-
-Exit the TUI or press Ctrl+C in the terminal running Web, then wait for cleanup.
-Successful runs clean their temporary output; failures retain evidence. The
-[launcher contract](../apps/devtools/README.md#development-supervision) owns
-process supervision, output retention and control readiness.
-
-For a keyless check on Linux/WSL, use the explicit fixture:
+Use the owning package's tests and the repository test policy. For deterministic
+fixture-only TUI checks on Linux/WSL:
 
 ```bash
 cargo run --locked -p rsi-app-tools -- fixture-dev tui --smoke
 ```
 
-This verifies the deterministic fixture provider and durable completion. It is
-separate from ordinary product development. Use the existing source build
-commands for build-only work and debug Desktop distributions.
+Ordinary runtime and watch integration live in `apps/cli/tests/resident_listeners`.
+On Windows, compile native tests with `--no-run --message-format=json` and execute
+the reported artifacts outside Cargo's child Job so persistent Host breakaway
+can be exercised. See the [CLI contract](../apps/cli/README.md).

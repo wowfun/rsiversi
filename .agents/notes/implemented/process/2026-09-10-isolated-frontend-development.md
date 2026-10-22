@@ -2,6 +2,9 @@
 name: Isolated frontend development with ordinary product ownership
 ---
 
+Partially superseded by [the unified product decision](2026-10-20-unified-product-watch.md).
+Ordinary development now uses the same product entry and explicit source leases as installed use. This note continues to own fixture-only isolation and deterministic providers; its launcher mechanics do not define ordinary product ownership. Fixture teardown explicitly stops its resident Host.
+
 ## Problem
 
 Frontend contributors need a short launch independent of personal credentials,

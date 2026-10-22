@@ -1,0 +1,62 @@
+[
+  {
+    "declaration": "PATH",
+    "valid": true
+  },
+  {
+    "declaration": "ProgramFiles(x86)",
+    "valid": true
+  },
+  {
+    "declaration": "_VAR_2",
+    "valid": true
+  },
+  {
+    "declaration": "HOME=build-home",
+    "valid": true
+  },
+  {
+    "declaration": "XDG_CACHE_HOME=cache/home_2",
+    "valid": true
+  },
+  {
+    "declaration": "HOME=BUILD-HOME",
+    "valid": false
+  },
+  {
+    "declaration": "1HOME",
+    "valid": false
+  },
+  {
+    "declaration": "HOME=",
+    "valid": false
+  },
+  {
+    "declaration": "HOME=../outside",
+    "valid": false
+  },
+  {
+    "declaration": "HOME=/absolute",
+    "valid": false
+  },
+  {
+    "declaration": "HOME=a//b",
+    "valid": false
+  },
+  {
+    "declaration": "HOME=a\\b",
+    "valid": false
+  },
+  {
+    "declaration": "HOME=a.b",
+    "valid": false
+  },
+  {
+    "declaration": " A",
+    "valid": false
+  },
+  {
+    "declaration": "",
+    "valid": false
+  }
+]

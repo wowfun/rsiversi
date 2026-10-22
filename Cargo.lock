@@ -5941,7 +5941,6 @@ dependencies = [
  "rsi-agent-session-protocol",
  "rsi-ai-protocol",
  "rsi-build-info",
- "rsi-dev-control",
  "rsi-process-native",
  "rustix 1.1.4",
  "serde_json",
