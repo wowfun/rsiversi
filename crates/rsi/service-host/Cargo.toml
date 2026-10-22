@@ -7,7 +7,6 @@ license.workspace = true
 publish = false
 
 [dependencies]
-rsi-build-info = { path = "../build-info" }
 rsi-api-http = { path = "../../rsi-api/http" }
 rsi-api-protocol = { path = "../../rsi-api/protocol" }
 rsi-session-protocol = { path = "../session-protocol" }
@@ -39,10 +38,12 @@ tokio = { workspace = true, features = ["rt-multi-thread", "time", "test-util"] 
 
 [target.'cfg(unix)'.dependencies]
 libc.workspace = true
-rustix = { workspace = true, features = ["net"] }
+rustix = { workspace = true, features = ["net", "process", "fs"] }
 
 [target.'cfg(windows)'.dependencies]
 rsi-files-native-fs = { path = "../../rsi-files/native-fs" }
+rsi-api-local-transport = { path = "../../rsi-api/local-transport" }
+rsi-process-native = { path = "../../rsi-process/native" }
 
 [lints]
 workspace = true

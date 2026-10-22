@@ -1,16 +1,26 @@
 # rsi-service-host
 
 This package owns native process ownership and local API publication for the
-standard product. One HostOwnerLease protects the canonical standard HostPaths
-for both embedded and daemon execution. The standard daemon is Linux-only,
-where exact process-generation signal fencing is implemented. Other platforms
-remain embedded-only.
+standard product. One HostOwnerLease exclusively protects both configuration and
+state homes for embedded and daemon execution. Each home retains its own
+`session-host/owner.lock`; changing only one home cannot open another writer for
+the shared home. Acquisition orders canonical directory identities and releases
+every partial acquisition on failure. Startup coordination uses distinct
+`startup.lock` files under the same two authorities. The child acquires its own
+owner leases before provider activation; no inherited standard stream acts as
+an ownership capability. Linux and Windows provide resident daemon endpoints.
+Native identity checks fence process generations; foreground embedded ownership
+remains available to library embedders.
+The local-stream API compiles on Unix and Windows; resident product daemon
+admission remains restricted to Linux and Windows.
 
-Windows embedded ownership creates a TokenUser-owned protected private directory
+Windows ownership creates a TokenUser-owned protected private directory
 through Native Files, opens its owner lock without following reparse points, and
 retains a namespace pin and exclusive file lease through provider cleanup.
-Contention reports that the other Web, TUI, ACP or offline device process must
-stop first; deleting its lock is never a recovery action.
+Contention refuses another owner; compatible clients attach to its endpoint.
+Deleting its lock is never a recovery action. Published metadata records the
+canonical config/state authority pair. A reader selecting a different pair
+cannot attach to or stop the owner merely by reusing its state home.
 Embedded metadata publication flushes its staged file before replacement and
 synchronizes the pinned private directory through Native Files on Windows.
 It does not use a plain file open for a Windows directory or ignore flush errors.
@@ -35,11 +45,12 @@ process. Initialization has an independent task owner and plugin cleanup drains
 it, including when the activation waiter disappears. EndpointId survives restarts;
 HostEpoch is generated for each running owner and is not stored in that record.
 
-`LocalApiFactory` publishes an owner-only Unix listener for the
+`LocalApiFactory` publishes an owner-only Unix socket or authenticated Windows pipe for the
 [shared API HTTP codec](../../rsi-api/http/README.md). It requires the owner lease,
 API dispatcher and connection description. Startup supplies a validated launch
-key; the product combines it with the running product compatibility build into the
-opaque LocalCompatibilityKey. The native peer UID supplies authentication.
+key, from which it derives the opaque LocalCompatibilityKey. This key is neither
+authentication nor a whole-build compatibility test. Native peer credentials
+supply authentication.
 The listener capability exposes its socket, diagnostics and stop result without
 shutdown authority. Cancelling a stop waiter does not stop serving.
 
@@ -60,25 +71,17 @@ Domain endpoints register their own DTOs and limits. The listener contains no
 Session operation switch, draft table or composition pin. The
 [API contract](../../rsi-api/README.md) owns admission and mutation supervision;
 [native UDS client](../../rsi-api/uds-client/README.md) shares the same negotiated
-connection and finite/binary/SSE decoders as the other transports. The product's
-exact build/launch gate remains stronger than remote wire negotiation.
+connection and finite/binary/SSE decoders as the other transports.
 Readiness completes the bounded description and operation-catalog exchanges,
 without creating or attaching a Session.
 
-Standalone builds identify compatibility by the running executable's SHA-256.
-Paired desktop/headless builds instead compile the digest of one frozen build
-manifest through `RSI_BUILD_FAMILY_MANIFEST`; the manifest is at most 16 MiB and
-schema 1. The build script validates each recorded file, executable bit and
-symlink against the current source root before embedding the digest, and registers
-those paths with Cargo for rebuilds. A stale manifest cannot describe modified
-recorded inputs. Runtime does not require the source checkout or manifest.
-The repository packaging owner captures actual source bytes, target,
-toolchain and controlled build inputs and builds both executables from that
-snapshot. A family digest is compatibility metadata, not authentication.
-Individual executable identity remains separately available through
-`service_host_executable_build` and the distribution's artifact hashes. A family
-identity never compares equal to a standalone executable identity. Both still
-require the protocol epoch, exact Service launch key and same-user transport.
+Executable SHA-256 is diagnostic artifact identity, available through
+`service_host_executable_build`. Transport epoch checks precede negotiation;
+owning APIs then compare generated protocol descriptors for the operations a
+client consumes. Independently built executables can attach when their required
+interfaces match. An optional Application catalog does not define home ownership.
+Accepted Service source revisions are republished after Profile convergence
+without changing the home authority, process epoch or existing attachment identity.
 
 The persistent lease, strict owner metadata and detached log live below
 `<state>/session-host/`. Owner metadata schema 2 records EndpointId, HostEpoch,
@@ -89,11 +92,10 @@ checks are separate from structural validation, so a rebuilt lifecycle client
 can still stop an older exact process generation. Linux signals open a pidfd
 and recheck the recorded process-start token before signaling that descriptor.
 
-With XDG_RUNTIME_DIR, the socket lives under the private
-`rsi/<state-root-digest>/` directory; otherwise it uses the protected owner
-directory. The published absolute endpoint remains authoritative when a client's
-runtime-directory preference differs or could not hold a bindable socket path.
-Metadata discovery therefore does not require a usable client runtime directory.
+Ordinary startup places the socket in the protected state home, so logging out
+does not remove the resident Host's endpoint. Embedders may explicitly supply a
+different runtime directory. The published absolute endpoint remains authoritative;
+metadata discovery does not require a bindable client runtime directory.
 
 The diagnostic handle combines native socket acceptance, peer identity,
 connection capacity, service/task failure and forced-drain counters with the
@@ -136,3 +138,25 @@ later message acceptance retain their separate failure semantics.
 Persisted and selected Unix socket paths must be absolute and accepted by the
 host standard library Unix address constructor, including its native length
 limit and NUL rejection. Linux address width is not assumed on other Unix hosts.
+
+The independent Lifecycle v1 listener accepts status and graceful-stop requests
+for one exact HostEpoch before product API compatibility is considered. It uses
+the same native peer-authentication boundary, a 16 KiB length-prefixed JSON frame,
+a three-second exchange deadline and at most 32 concurrent connections.
+`LifecycleFactory` is an ordinary plugin; it publishes a read-only stop-request
+signal to the process owner. Acknowledging stop precedes cancellation of the
+Service lifetime. Client disconnection does not itself request shutdown.
+Lifecycle discovery reads a fixed bounded identity projection from `owner.json`:
+PID, process start token, HostEpoch, mode, endpoint and canonical home authority.
+Owner and Lifecycle readers share the same bounded process-token grammar:
+native numeric tokens, or `process-PID` for embedded-only unsupported platforms.
+Those fallback tokens do not enable native daemon liveness or signalling.
+It ignores product fields and product metadata format revisions. The Lifecycle v1
+response contains only this identity and shutdown status; it never embeds the
+evolving product metadata schema. Product compatibility is a separate optional
+status diagnostic. Force-stop remains native process-handle control.
+
+`LocalServiceListener` lets a product plugin bind a named sibling stream while
+retaining the same owner lease. It validates the native peer before returning a
+stream; the plugin owns framing, bounded connection admission and shutdown.
+Clients use the recorded owner identity and verify the live native server.

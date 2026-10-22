@@ -10,24 +10,13 @@ use std::sync::{LazyLock, Mutex};
 use thiserror::Error;
 
 /// Service Host wire protocol epoch.
-pub const SERVICE_HOST_PROTOCOL_EPOCH: u32 = 9;
-static SERVICE_HOST_PRODUCT_BUILD: LazyLock<Result<String, String>> =
-    LazyLock::new(|| match rsi_build_info::family() {
-        Some(digest) => Ok(format!(
-            "{}+family-sha256:{digest}",
-            env!("CARGO_PKG_VERSION")
-        )),
-        None => SERVICE_HOST_EXECUTABLE_BUILD.clone(),
-    });
+pub const SERVICE_HOST_PROTOCOL_EPOCH: u32 = 10;
 static SERVICE_HOST_EXECUTABLE_BUILD: LazyLock<Result<String, String>> =
     LazyLock::new(executable_product_build);
 
-/// Returns the exact standalone executable or paired family identity used for compatibility.
+/// Returns diagnostic artifact identity; wire compatibility uses protocol descriptors.
 pub fn service_host_product_build() -> Result<&'static str, ServiceHostError> {
-    SERVICE_HOST_PRODUCT_BUILD
-        .as_ref()
-        .map(String::as_str)
-        .map_err(|error| ServiceHostError::Io(error.clone()))
+    service_host_executable_build()
 }
 
 /// Returns the exact running executable artifact identity independently of its build family.
@@ -43,6 +32,7 @@ const OWNER_LOCK_FILE: &str = "owner.lock";
 const OWNER_METADATA_FILE: &str = "owner.json";
 const OWNER_LOG_FILE: &str = "owner.log";
 const FALLBACK_RUNTIME_DIRECTORY: &str = "runtime";
+#[cfg(unix)]
 const SOCKET_FILE: &str = "host.sock";
 
 /// Active owner execution mode.
@@ -80,6 +70,12 @@ pub struct HostOwnerMetadata {
     pub mode: HostOwnerMode,
     /// Exact launch identity.
     pub launch_key: String,
+    /// Canonical config/state authority pair; absent in older lifecycle records.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub home_authority: Option<String>,
+    /// Digest of the currently accepted Service Profile sources.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub service_revision: Option<String>,
     /// Exact wire protocol epoch.
     pub protocol_epoch: u32,
     /// Exact product build identity.
@@ -102,9 +98,9 @@ impl HostOwnerMetadata {
         endpoint_id: EndpointId,
         socket_path: Option<PathBuf>,
     ) -> Result<Self, ServiceHostError> {
-        #[cfg(target_os = "linux")]
+        #[cfg(any(target_os = "linux", windows))]
         let process_start_token = current_process_start_token()?;
-        #[cfg(not(target_os = "linux"))]
+        #[cfg(not(any(target_os = "linux", windows)))]
         let process_start_token = current_process_start_token();
         let metadata = Self {
             format: 2,
@@ -112,6 +108,8 @@ impl HostOwnerMetadata {
             process_start_token,
             mode,
             launch_key: launch_key.into(),
+            home_authority: None,
+            service_revision: None,
             protocol_epoch: SERVICE_HOST_PROTOCOL_EPOCH,
             product_build: service_host_product_build()?.into(),
             host_epoch,
@@ -133,15 +131,14 @@ impl HostOwnerMetadata {
                 "unsupported Service Host owner metadata format".into(),
             ));
         }
-        if self.pid == 0
-            || self.process_start_token.is_empty()
-            || self.process_start_token.len() > 128
-        {
-            return Err(ServiceHostError::Invalid(
-                "invalid Service Host process identity".into(),
-            ));
-        }
+        validate_process_identity(self.pid, &self.process_start_token)?;
         validate_launch_key(&self.launch_key)?;
+        for digest in [&self.home_authority, &self.service_revision]
+            .into_iter()
+            .flatten()
+        {
+            validate_launch_key(digest)?;
+        }
         if self.protocol_epoch == 0 {
             return Err(ServiceHostError::Invalid(
                 "Service Host protocol epoch must be nonzero".into(),
@@ -160,14 +157,23 @@ impl HostOwnerMetadata {
         Ok(())
     }
 
-    /// Returns whether this structurally valid generation can handshake with
-    /// the current executable.
+    /// Returns whether the local transport format can be negotiated.
+    /// Required operation descriptors are checked by each client after connecting.
     pub fn is_compatible_with_current(&self) -> Result<bool, ServiceHostError> {
         self.validate()?;
-        Ok(self.format == 2
-            && self.protocol_epoch == SERVICE_HOST_PROTOCOL_EPOCH
-            && self.product_build == service_host_product_build()?)
+        Ok(self.format == 2 && self.protocol_epoch == SERVICE_HOST_PROTOCOL_EPOCH)
     }
+}
+
+pub(crate) fn validate_process_identity(pid: u32, token: &str) -> Result<(), ServiceHostError> {
+    let native = !token.is_empty()
+        && token.len() <= 20
+        && token.bytes().all(|byte| byte.is_ascii_digit())
+        && token.parse::<u64>().is_ok();
+    if pid == 0 || !(native || token == format!("process-{pid}")) {
+        return Err(ServiceHostError::Invalid("invalid process identity".into()));
+    }
+    Ok(())
 }
 
 pub(crate) fn validate_launch_key(value: &str) -> Result<(), ServiceHostError> {
@@ -209,14 +215,33 @@ fn validate_product_build(value: &str) -> Result<(), ServiceHostError> {
 
 /// Returns whether the metadata still names the same live process generation.
 pub fn owner_process_is_current(metadata: &HostOwnerMetadata) -> Result<bool, ServiceHostError> {
+    process_generation_is_current(metadata.pid, &metadata.process_start_token)
+}
+
+pub(crate) fn process_generation_is_current(
+    pid: u32,
+    process_start_token: &str,
+) -> Result<bool, ServiceHostError> {
     #[cfg(target_os = "linux")]
     {
-        Ok(live_process_start_token(metadata.pid)?
-            .is_some_and(|token| token == metadata.process_start_token))
+        Ok(live_process_start_token(pid)?.is_some_and(|token| token == process_start_token))
     }
-    #[cfg(not(target_os = "linux"))]
+    #[cfg(windows)]
     {
-        let _ = metadata;
+        let process = match rsi_process_native::ProcessHandle::open(pid) {
+            Ok(process) => process,
+            Err(error) if error.raw_os_error() == Some(87) => return Ok(false),
+            Err(error) => return Err(io_error(error)),
+        };
+        let current =
+            rsi_process_native::ProcessHandle::open(std::process::id()).map_err(io_error)?;
+        Ok(process.identity().start_token == process_start_token
+            && process.identity().user_sid == current.identity().user_sid
+            && process.is_running().map_err(io_error)?)
+    }
+    #[cfg(not(any(target_os = "linux", windows)))]
+    {
+        let _ = (pid, process_start_token);
         Err(ServiceHostError::Unsupported)
     }
 }
@@ -226,14 +251,28 @@ pub fn signal_owner(
     metadata: &HostOwnerMetadata,
     signal: HostSignal,
 ) -> Result<(), ServiceHostError> {
-    if metadata.mode != HostOwnerMode::Daemon {
+    signal_generation(
+        metadata.pid,
+        &metadata.process_start_token,
+        metadata.mode,
+        signal,
+    )
+}
+
+pub(crate) fn signal_generation(
+    pid: u32,
+    process_start_token: &str,
+    mode: HostOwnerMode,
+    signal: HostSignal,
+) -> Result<(), ServiceHostError> {
+    if mode != HostOwnerMode::Daemon {
         return Err(ServiceHostError::Invalid(
             "only a daemon owner accepts Host lifecycle signals".into(),
         ));
     }
     #[cfg(target_os = "linux")]
     {
-        let raw_pid = i32::try_from(metadata.pid)
+        let raw_pid = i32::try_from(pid)
             .ok()
             .and_then(rustix::process::Pid::from_raw)
             .ok_or_else(|| ServiceHostError::Invalid("owner PID is out of range".into()))?;
@@ -241,9 +280,7 @@ pub fn signal_owner(
             .map_err(|error| {
                 ServiceHostError::Io(format!("failed to open Service Host owner pidfd: {error}"))
             })?;
-        if live_process_start_token(metadata.pid)?
-            .is_none_or(|token| token != metadata.process_start_token)
-        {
+        if live_process_start_token(pid)?.is_none_or(|token| token != process_start_token) {
             return Err(ServiceHostError::Invalid(
                 "owner PID no longer has the recorded process start token".into(),
             ));
@@ -258,7 +295,25 @@ pub fn signal_owner(
         })?;
         Ok(())
     }
-    #[cfg(not(target_os = "linux"))]
+    #[cfg(windows)]
+    {
+        if signal != HostSignal::ForceStop {
+            return Err(ServiceHostError::Invalid(
+                "graceful control requires Lifecycle v1".into(),
+            ));
+        }
+        let current =
+            rsi_process_native::ProcessHandle::open(std::process::id()).map_err(io_error)?;
+        let expected = rsi_process_native::ProcessIdentity {
+            pid,
+            start_token: process_start_token.to_owned(),
+            user_sid: current.identity().user_sid.clone(),
+        };
+        let process =
+            rsi_process_native::ProcessHandle::for_termination(&expected).map_err(io_error)?;
+        process.terminate(1).map_err(io_error)
+    }
+    #[cfg(not(any(target_os = "linux", windows)))]
     {
         let _ = signal;
         Err(ServiceHostError::Unsupported)
@@ -268,6 +323,7 @@ pub fn signal_owner(
 /// Frozen persistent and runtime paths for one canonical standard Host identity.
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct ServiceHostPaths {
+    config_owner_directory: PathBuf,
     owner_directory: PathBuf,
     owner_lock: PathBuf,
     owner_metadata: PathBuf,
@@ -277,10 +333,25 @@ pub struct ServiceHostPaths {
 }
 
 impl ServiceHostPaths {
-    /// Resolves the environment-selected runtime path without creating files.
+    /// Stable authority of the canonical config/state pair, independent of applications.
+    /// Both homes must already exist; callers may acquire the startup coordinator first.
+    pub fn home_authority(&self) -> Result<String, ServiceHostError> {
+        let mut digest = Sha256::new();
+        digest.update(b"rsi.home-authority.v1\0");
+        for directory in [&self.config_owner_directory, &self.owner_directory] {
+            let root = directory
+                .parent()
+                .ok_or_else(|| ServiceHostError::Invalid("owner root has no home".into()))?;
+            let canonical = fs::canonicalize(root).map_err(io_error)?;
+            let bytes = canonical.as_os_str().as_encoded_bytes();
+            digest.update((bytes.len() as u64).to_be_bytes());
+            digest.update(bytes);
+        }
+        Ok(hex::encode(digest.finalize()))
+    }
+    /// Resolves persistent paths without depending on a login-session runtime directory.
     pub fn from_host_paths(paths: &HostPaths) -> Result<Self, ServiceHostError> {
-        let runtime = std::env::var_os("XDG_RUNTIME_DIR").map(PathBuf::from);
-        Self::from_host_paths_with_runtime(paths, runtime.as_deref())
+        Self::from_host_paths_with_runtime(paths, None)
     }
 
     /// Resolves paths with an explicit runtime root, primarily for deterministic hosts and tests.
@@ -293,8 +364,15 @@ impl ServiceHostPaths {
             || owner_directory.join(FALLBACK_RUNTIME_DIRECTORY),
             |root| root.join("rsi").join(state_root_digest(paths.state())),
         );
+        #[cfg(unix)]
         let socket = runtime_directory.join(SOCKET_FILE);
+        #[cfg(windows)]
+        let socket = PathBuf::from(format!(
+            r"\\.\pipe\rsi-{}",
+            state_root_digest(paths.state())
+        ));
         Ok(Self {
+            config_owner_directory: paths.config().join(OWNER_DIRECTORY),
             owner_lock: owner_directory.join(OWNER_LOCK_FILE),
             owner_metadata: owner_directory.join(OWNER_METADATA_FILE),
             owner_log: owner_directory.join(OWNER_LOG_FILE),
@@ -334,6 +412,18 @@ impl ServiceHostPaths {
         &self.socket
     }
 
+    pub(crate) fn lifecycle(&self) -> Self {
+        let mut paths = self.clone();
+        paths.socket = lifecycle_endpoint(&self.socket);
+        paths
+    }
+
+    pub(crate) fn sibling(&self, name: &str) -> Result<Self, ServiceHostError> {
+        let mut paths = self.clone();
+        paths.socket = sibling_endpoint(&self.socket, name)?;
+        Ok(paths)
+    }
+
     /// Validates that this process's preferred endpoint can be bound.
     ///
     /// Metadata readers do not need this check because a live daemon's recorded
@@ -345,14 +435,66 @@ impl ServiceHostPaths {
 
     /// Reads and strictly validates recoverable metadata when present.
     pub fn read_metadata(&self) -> Result<Option<HostOwnerMetadata>, ServiceHostError> {
-        let mut options = OpenOptions::new();
-        options.read(true);
-        #[cfg(unix)]
+        let Some(bytes) = self.read_owner_bytes()? else {
+            return Ok(None);
+        };
+        let metadata: HostOwnerMetadata = serde_json::from_slice(&bytes)
+            .map_err(|error| ServiceHostError::Invalid(error.to_string()))?;
+        metadata.validate()?;
+        self.validate_home_authority(metadata.home_authority.as_deref())?;
+        Ok(Some(metadata))
+    }
+
+    /// Reads only the frozen lifecycle identity, ignoring evolving product fields.
+    #[cfg(any(unix, windows))]
+    pub fn read_lifecycle_identity(
+        &self,
+    ) -> Result<Option<crate::LifecycleIdentity>, ServiceHostError> {
+        let Some(bytes) = self.read_owner_bytes()? else {
+            return Ok(None);
+        };
+        let identity: crate::LifecycleIdentity = serde_json::from_slice(&bytes)
+            .map_err(|error| ServiceHostError::Invalid(error.to_string()))?;
+        identity.validate()?;
+        self.validate_home_authority(identity.home_authority.as_deref())?;
+        Ok(Some(identity))
+    }
+
+    fn validate_home_authority(&self, authority: Option<&str>) -> Result<(), ServiceHostError> {
+        if let Some(authority) = authority
+            && self.home_authority()?.as_str() != authority
         {
-            use std::os::unix::fs::OpenOptionsExt as _;
-            options.custom_flags(libc::O_CLOEXEC | libc::O_NOFOLLOW);
+            return Err(ServiceHostError::Invalid(
+                "the active Service Host belongs to a different config/state home pair".into(),
+            ));
         }
-        let file = match options.open(&self.owner_metadata) {
+        Ok(())
+    }
+
+    fn read_owner_bytes(&self) -> Result<Option<Vec<u8>>, ServiceHostError> {
+        #[cfg(windows)]
+        let opened = (|| {
+            let directory =
+                rsi_files_native_fs::open_absolute_directory_no_follow(&self.owner_directory)?;
+            let file = rsi_files_native_fs::open_relative_file_no_follow(
+                &directory,
+                Path::new(OWNER_METADATA_FILE),
+            )?;
+            rsi_files_native_fs::verify_private_file(&file)?;
+            Ok::<_, io::Error>(file)
+        })();
+        #[cfg(not(windows))]
+        let opened = {
+            let mut options = OpenOptions::new();
+            options.read(true);
+            #[cfg(unix)]
+            {
+                use std::os::unix::fs::OpenOptionsExt as _;
+                options.custom_flags(libc::O_CLOEXEC | libc::O_NOFOLLOW);
+            }
+            options.open(&self.owner_metadata)
+        };
+        let file = match opened {
             Ok(file) => file,
             Err(error) if error.kind() == io::ErrorKind::NotFound => return Ok(None),
             Err(error) => return Err(io_error(error)),
@@ -367,35 +509,155 @@ impl ServiceHostPaths {
                 "owner metadata exceeds 16 KiB".into(),
             ));
         }
-        let metadata: HostOwnerMetadata = serde_json::from_slice(&bytes)
-            .map_err(|error| ServiceHostError::Invalid(error.to_string()))?;
-        metadata.validate()?;
-        Ok(Some(metadata))
+        Ok(Some(bytes))
     }
+}
+
+pub(crate) fn lifecycle_endpoint(endpoint: &Path) -> PathBuf {
+    #[cfg(unix)]
+    {
+        endpoint.with_file_name("control")
+    }
+    #[cfg(windows)]
+    {
+        let mut name = endpoint.as_os_str().to_owned();
+        name.push("-control");
+        name.into()
+    }
+}
+
+pub(crate) fn sibling_endpoint(endpoint: &Path, name: &str) -> Result<PathBuf, ServiceHostError> {
+    if name.is_empty()
+        || name.len() > 8
+        || !name.bytes().all(|byte| byte.is_ascii_lowercase())
+        || matches!(name, "control" | "host")
+    {
+        return Err(ServiceHostError::Invalid(
+            "invalid local endpoint name".into(),
+        ));
+    }
+    #[cfg(unix)]
+    let path = endpoint.with_file_name(name);
+    #[cfg(windows)]
+    let path = {
+        let mut value = endpoint.as_os_str().to_owned();
+        value.push(format!("-{name}"));
+        PathBuf::from(value)
+    };
+    validate_socket_path(&path)?;
+    Ok(path)
 }
 
 /// Exclusive owner lease shared by embedded and daemon execution.
 #[derive(Debug)]
 pub struct HostOwnerLease {
-    file: Option<File>,
-    #[cfg(windows)]
-    _namespace: rsi_files_native_fs::NamespaceLease,
+    _locks: Vec<HomeLock>,
     paths: ServiceHostPaths,
     published_epoch: Mutex<Option<HostEpoch>>,
     pub(crate) endpoint: tokio::sync::Mutex<Option<(String, rsi_api_protocol::EndpointId)>>,
 }
 
 impl HostOwnerLease {
-    /// Attempts to acquire the single owner lease without waiting.
+    /// Acquires both home authorities in canonical order without waiting.
     pub fn try_acquire(paths: ServiceHostPaths) -> Result<Self, ServiceHostError> {
-        create_private_directories(paths.owner_directory())?;
+        let locks = acquire_home_locks(&paths, OWNER_LOCK_FILE)?;
+        Ok(Self {
+            _locks: locks,
+            paths,
+            published_epoch: Mutex::new(None),
+            endpoint: tokio::sync::Mutex::new(None),
+        })
+    }
+
+    /// Returns the exact paths protected by this owner lease.
+    pub fn paths(&self) -> &ServiceHostPaths {
+        &self.paths
+    }
+
+    /// Atomically publishes recoverable metadata for this owner generation.
+    pub fn publish(&self, metadata: &HostOwnerMetadata) -> Result<(), ServiceHostError> {
+        if !metadata.is_compatible_with_current()?
+            || metadata.product_build != service_host_executable_build()?
+        {
+            return Err(ServiceHostError::Invalid(
+                "cannot publish owner metadata for an incompatible protocol or product build"
+                    .into(),
+            ));
+        }
+        let authority = self.paths.home_authority()?;
+        if metadata
+            .home_authority
+            .as_ref()
+            .is_some_and(|value| value != &authority)
+        {
+            return Err(ServiceHostError::Invalid(
+                "owner publication belongs to different homes".into(),
+            ));
+        }
+        let mut metadata = metadata.clone();
+        metadata.home_authority = Some(authority);
+        let mut published = self
+            .published_epoch
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        create_private_directories(self.paths.owner_directory())?;
+        let bytes = serde_json::to_vec(&metadata)
+            .map_err(|error| ServiceHostError::Invalid(error.to_string()))?;
+        atomic_private_write(self.paths.owner_metadata(), &bytes)?;
+        *published = Some(metadata.host_epoch.clone());
+        Ok(())
+    }
+}
+
+/// Serializes process startup and maintenance independently of the child's owner leases.
+#[derive(Debug)]
+pub struct HostStartupLease {
+    _locks: Vec<HomeLock>,
+}
+
+impl HostStartupLease {
+    /// Attempts to coordinate both homes without waiting or opening product configuration.
+    pub fn try_acquire(paths: &ServiceHostPaths) -> Result<Self, ServiceHostError> {
+        Ok(Self {
+            _locks: acquire_home_locks(paths, "startup.lock")?,
+        })
+    }
+}
+
+#[derive(Debug)]
+struct HomeLock {
+    _file: File,
+    #[cfg(windows)]
+    _namespace: rsi_files_native_fs::NamespaceLease,
+}
+
+fn acquire_home_locks(
+    paths: &ServiceHostPaths,
+    name: &str,
+) -> Result<Vec<HomeLock>, ServiceHostError> {
+    let mut ordered = std::collections::BTreeMap::new();
+    for directory in [&paths.config_owner_directory, &paths.owner_directory] {
+        create_private_directories(directory)?;
+        // Canonical identity orders aliases consistently; acquisition still uses the
+        // admitted original spelling, including Windows long-name validation.
+        let identity = fs::canonicalize(directory).map_err(io_error)?;
+        ordered.entry(identity).or_insert(directory);
+    }
+    ordered
+        .into_values()
+        .map(|directory| HomeLock::acquire(directory, name))
+        .collect()
+}
+
+impl HomeLock {
+    fn acquire(root: &Path, name: &str) -> Result<Self, ServiceHostError> {
+        let path = root.join(name);
         #[cfg(windows)]
         let directory =
-            rsi_files_native_fs::open_absolute_directory_no_follow(paths.owner_directory())
-                .map_err(io_error)?;
+            rsi_files_native_fs::open_absolute_directory_no_follow(root).map_err(io_error)?;
         #[cfg(windows)]
         let namespace = directory.pin_namespace().map_err(io_error)?;
-        reject_symlink(paths.owner_lock(), "owner lease")?;
+        reject_symlink(&path, "home lease")?;
         let mut options = OpenOptions::new();
         options.create(true).truncate(false).read(true).write(true);
         #[cfg(unix)]
@@ -406,13 +668,9 @@ impl HostOwnerLease {
                 .custom_flags(libc::O_CLOEXEC | libc::O_NOFOLLOW);
         }
         #[cfg(not(windows))]
-        let file = options.open(paths.owner_lock()).map_err(io_error)?;
+        let file = options.open(&path).map_err(io_error)?;
         #[cfg(windows)]
         let file = {
-            let name = paths
-                .owner_lock()
-                .file_name()
-                .ok_or_else(|| ServiceHostError::Invalid("owner lock has no name".into()))?;
             match rsi_files_native_fs::create_relative_private_file_no_follow(
                 &directory,
                 Path::new(name),
@@ -433,7 +691,7 @@ impl HostOwnerLease {
                 Err(e) => return Err(io_error(e)),
             }
         };
-        validate_open_regular_file(paths.owner_lock(), &file, "owner lease")?;
+        validate_open_regular_file(&path, &file, "home lease")?;
         #[cfg(unix)]
         set_file_mode(&file, 0o600)?;
         match file.try_lock() {
@@ -441,79 +699,12 @@ impl HostOwnerLease {
             Err(std::fs::TryLockError::WouldBlock) => return Err(ServiceHostError::OwnerActive),
             Err(std::fs::TryLockError::Error(error)) => return Err(io_error(error)),
         }
-        validate_open_regular_file(paths.owner_lock(), &file, "owner lease")?;
+        validate_open_regular_file(&path, &file, "home lease")?;
         Ok(Self {
-            file: Some(file),
+            _file: file,
             #[cfg(windows)]
             _namespace: namespace,
-            paths,
-            published_epoch: Mutex::new(None),
-            endpoint: tokio::sync::Mutex::new(None),
         })
-    }
-
-    /// Returns the exact paths protected by this owner lease.
-    pub fn paths(&self) -> &ServiceHostPaths {
-        &self.paths
-    }
-
-    /// Moves an unpublished Linux lease into a file suitable for child inheritance.
-    /// Closing the last inherited file releases ownership; this move never unlocks it.
-    #[cfg(target_os = "linux")]
-    pub fn into_startup_file(mut self) -> Result<File, ServiceHostError> {
-        if self
-            .published_epoch
-            .get_mut()
-            .unwrap_or_else(std::sync::PoisonError::into_inner)
-            .is_some()
-        {
-            return Err(ServiceHostError::Invalid(
-                "a published owner lease cannot be transferred".into(),
-            ));
-        }
-        self.file.take().ok_or_else(|| {
-            ServiceHostError::Invalid("owner lease has no startup file to transfer".into())
-        })
-    }
-
-    /// Adopts an inherited Linux owner file after checking its exact path and lock.
-    #[cfg(target_os = "linux")]
-    pub fn adopt_startup_file(
-        paths: ServiceHostPaths,
-        file: File,
-    ) -> Result<Self, ServiceHostError> {
-        validate_open_regular_file(paths.owner_lock(), &file, "inherited owner lease")?;
-        match file.try_lock() {
-            Ok(()) => {}
-            Err(std::fs::TryLockError::WouldBlock) => return Err(ServiceHostError::OwnerActive),
-            Err(std::fs::TryLockError::Error(error)) => return Err(io_error(error)),
-        }
-        Ok(Self {
-            file: Some(file),
-            paths,
-            published_epoch: Mutex::new(None),
-            endpoint: tokio::sync::Mutex::new(None),
-        })
-    }
-
-    /// Atomically publishes recoverable metadata for this owner generation.
-    pub fn publish(&self, metadata: &HostOwnerMetadata) -> Result<(), ServiceHostError> {
-        if !metadata.is_compatible_with_current()? {
-            return Err(ServiceHostError::Invalid(
-                "cannot publish owner metadata for an incompatible protocol or product build"
-                    .into(),
-            ));
-        }
-        let mut published = self
-            .published_epoch
-            .lock()
-            .unwrap_or_else(std::sync::PoisonError::into_inner);
-        create_private_directories(self.paths.owner_directory())?;
-        let bytes = serde_json::to_vec(metadata)
-            .map_err(|error| ServiceHostError::Invalid(error.to_string()))?;
-        atomic_private_write(self.paths.owner_metadata(), &bytes)?;
-        *published = Some(metadata.host_epoch.clone());
-        Ok(())
     }
 }
 
@@ -525,15 +716,12 @@ impl Drop for HostOwnerLease {
             .unwrap_or_else(std::sync::PoisonError::into_inner)
             && self
                 .paths
-                .read_metadata()
+                .read_lifecycle_identity()
                 .ok()
                 .flatten()
                 .is_some_and(|metadata| metadata.host_epoch == *epoch)
         {
             let _ = fs::remove_file(self.paths.owner_metadata());
-        }
-        if let Some(file) = &self.file {
-            let _ = file.unlock();
         }
     }
 }
@@ -571,7 +759,16 @@ fn current_process_start_token() -> Result<String, ServiceHostError> {
     })
 }
 
-#[cfg(not(target_os = "linux"))]
+#[cfg(windows)]
+fn current_process_start_token() -> Result<String, ServiceHostError> {
+    Ok(rsi_process_native::ProcessHandle::open(std::process::id())
+        .map_err(io_error)?
+        .identity()
+        .start_token
+        .clone())
+}
+
+#[cfg(not(any(target_os = "linux", windows)))]
 fn current_process_start_token() -> String {
     format!("process-{}", std::process::id())
 }
@@ -606,7 +803,7 @@ fn live_process_start_token(pid: u32) -> Result<Option<String>, ServiceHostError
     Ok(Some(token.into()))
 }
 
-fn validate_socket_path(path: &Path) -> Result<(), ServiceHostError> {
+pub(crate) fn validate_socket_path(path: &Path) -> Result<(), ServiceHostError> {
     if !path.is_absolute() || path.as_os_str().is_empty() {
         return Err(ServiceHostError::Invalid(
             "Service Host socket path must be absolute".into(),
@@ -620,10 +817,11 @@ fn validate_socket_path(path: &Path) -> Result<(), ServiceHostError> {
                 ServiceHostError::Invalid(format!("invalid Unix socket path: {error}"))
             })
     }
-    #[cfg(not(unix))]
+    #[cfg(windows)]
     {
-        let _ = path;
-        Ok(())
+        rsi_api_local_transport::PipeName::new(path)
+            .map(|_| ())
+            .map_err(io_error)
     }
 }
 
@@ -655,6 +853,41 @@ fn create_private_directories(path: &Path) -> Result<(), ServiceHostError> {
     }
 }
 
+#[cfg(windows)]
+fn atomic_private_write(path: &Path, bytes: &[u8]) -> Result<(), ServiceHostError> {
+    let parent = path
+        .parent()
+        .ok_or_else(|| ServiceHostError::Invalid("metadata has no parent".into()))?;
+    let name = path
+        .file_name()
+        .ok_or_else(|| ServiceHostError::Invalid("metadata has no name".into()))?;
+    let directory =
+        rsi_files_native_fs::open_absolute_directory_no_follow(parent).map_err(io_error)?;
+    let namespace = directory.pin_namespace().map_err(io_error)?;
+    let mut entropy = [0_u8; 16];
+    fill(&mut entropy).map_err(|error| ServiceHostError::Io(error.to_string()))?;
+    let temporary = format!(".metadata-{}", hex::encode(entropy));
+    let mut file = rsi_files_native_fs::create_relative_private_file_no_follow(
+        &directory,
+        Path::new(&temporary),
+    )
+    .map_err(io_error)?;
+    file.write_all(bytes)
+        .and_then(|()| file.sync_all())
+        .map_err(io_error)?;
+    drop(file);
+    namespace
+        .publish_child(
+            Path::new(&temporary),
+            Path::new(name),
+            rsi_files_native_fs::EntryKind::File,
+            true,
+        )
+        .map_err(io_error)?;
+    directory.sync_all().map_err(io_error)
+}
+
+#[cfg(not(windows))]
 fn atomic_private_write(path: &Path, bytes: &[u8]) -> Result<(), ServiceHostError> {
     let parent = path
         .parent()

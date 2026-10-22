@@ -16,7 +16,7 @@ fn embedded_metadata_publishes_replaces_and_releases_its_native_owner() {
     let paths = ServiceHostPaths::from_host_paths(&host).unwrap();
     let lease = HostOwnerLease::try_acquire(paths.clone()).unwrap();
     for _ in 0..2 {
-        let metadata = HostOwnerMetadata::current(
+        let mut metadata = HostOwnerMetadata::current(
             HostOwnerMode::Embedded,
             "a".repeat(64),
             HostEpoch::generate().unwrap(),
@@ -25,8 +25,27 @@ fn embedded_metadata_publishes_replaces_and_releases_its_native_owner() {
         )
         .unwrap();
         lease.publish(&metadata).unwrap();
+        metadata.home_authority = Some(paths.home_authority().unwrap());
         assert_eq!(paths.read_metadata().unwrap(), Some(metadata));
     }
+    let mut fallback = HostOwnerMetadata::current(
+        HostOwnerMode::Embedded,
+        "b".repeat(64),
+        HostEpoch::generate().unwrap(),
+        EndpointId::from_bytes([2; 16]),
+        None,
+    )
+    .unwrap();
+    fallback.process_start_token = format!("process-{}", fallback.pid);
+    lease.publish(&fallback).unwrap();
+    assert_eq!(
+        paths
+            .read_lifecycle_identity()
+            .unwrap()
+            .unwrap()
+            .process_start_token,
+        fallback.process_start_token
+    );
     drop(lease);
     assert!(!paths.owner_metadata().exists());
     let replacement = HostOwnerLease::try_acquire(paths).unwrap();

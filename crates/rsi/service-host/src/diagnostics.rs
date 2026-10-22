@@ -23,7 +23,7 @@ struct ServiceHostDiagnosticsInner {
 /// One point-in-time copy of the Service Host diagnostic counters.
 #[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
 pub struct ServiceHostDiagnosticsSnapshot {
-    /// Connections accepted by the Unix listener.
+    /// Connections accepted by the native listener.
     pub accepted_connections: u64,
     /// Transient listener accept failures.
     pub accept_errors: u64,
@@ -60,7 +60,7 @@ impl ServiceHostDiagnostics {
     }
 }
 
-#[cfg(any(unix, test))]
+#[cfg(any(unix, windows, test))]
 impl ServiceHostDiagnostics {
     pub(crate) fn accepted_connection(&self) {
         increment(&self.inner.accepted_connections, 1);
@@ -82,7 +82,7 @@ impl ServiceHostDiagnostics {
         increment(&self.inner.capacity_rejections, 1);
     }
 
-    #[cfg(unix)]
+    #[cfg(any(unix, windows))]
     pub(crate) fn with_api(api: rsi_api_http::HttpDiagnostics) -> Self {
         Self {
             inner: Arc::default(),
@@ -155,7 +155,7 @@ fn load(counter: &AtomicU64) -> u64 {
     counter.load(Ordering::Relaxed)
 }
 
-#[cfg(any(unix, test))]
+#[cfg(any(unix, windows, test))]
 fn increment(counter: &AtomicU64, amount: u64) {
     let _ = counter.fetch_update(Ordering::Relaxed, Ordering::Relaxed, |value| {
         Some(value.saturating_add(amount))

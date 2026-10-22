@@ -361,3 +361,29 @@ async fn publish_identity_and_devices(
         .await
         .unwrap();
 }
+
+#[test]
+fn lifecycle_and_owner_admit_the_same_bounded_process_tokens() {
+    use rsi_service_host::{HostOwnerMetadata, HostOwnerMode, LifecycleIdentity};
+    let mut owner = HostOwnerMetadata::current(
+        HostOwnerMode::Embedded,
+        "a".repeat(64),
+        HostEpoch::generate().unwrap(),
+        rsi_api_protocol::EndpointId::from_bytes([1; 16]),
+        None,
+    )
+    .unwrap();
+    for (token, valid) in [
+        ("0".to_owned(), true),
+        ("18446744073709551615".into(), true),
+        (format!("process-{}", owner.pid), true),
+        ("process-0".into(), false),
+        ("18446744073709551616".into(), false),
+        ("".into(), false),
+        ("1".repeat(129), false),
+    ] {
+        owner.process_start_token = token;
+        assert_eq!(owner.validate().is_ok(), valid);
+        assert_eq!(LifecycleIdentity::from(&owner).validate().is_ok(), valid);
+    }
+}

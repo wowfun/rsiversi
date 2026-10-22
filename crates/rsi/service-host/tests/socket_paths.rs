@@ -12,6 +12,8 @@ fn durable_owner_socket_validation_matches_the_native_address_boundary() {
         process_start_token: "fixture".into(),
         mode: HostOwnerMode::Daemon,
         launch_key: "a".repeat(64),
+        home_authority: None,
+        service_revision: None,
         protocol_epoch: 1,
         product_build: format!("fixture+sha256:{}", "b".repeat(64)),
         host_epoch: HostEpoch::generate().unwrap(),

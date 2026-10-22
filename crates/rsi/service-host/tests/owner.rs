@@ -38,7 +38,7 @@ fn artifact_identity_remains_exact_independently_of_compatibility_family() {
 }
 
 #[test]
-fn compatibility_identity_separates_family_from_executable_and_checks_epoch() {
+fn compatibility_checks_transport_epoch_independently_of_executable_identity() {
     let root = TempDir::new().unwrap();
     let paths = paths(&root);
     let mut metadata = HostOwnerMetadata::current(
@@ -50,21 +50,11 @@ fn compatibility_identity_separates_family_from_executable_and_checks_epoch() {
     )
     .unwrap();
     let exact = rsi_service_host::service_host_executable_build().unwrap();
-    match option_env!("RSI_COMPILED_BUILD_FAMILY") {
-        Some(digest) => assert_eq!(
-            metadata.product_build,
-            format!("{}+family-sha256:{digest}", env!("CARGO_PKG_VERSION"))
-        ),
-        None => assert_eq!(metadata.product_build, exact),
-    }
+    assert_eq!(metadata.product_build, exact);
     assert!(metadata.is_compatible_with_current().unwrap());
-    metadata.product_build = if metadata.product_build.contains("+family-sha256:") {
-        exact.into()
-    } else {
-        exact.replace("+sha256:", "+family-sha256:")
-    };
+    metadata.product_build = format!("independent+sha256:{}", "f".repeat(64));
     metadata.validate().unwrap();
-    assert!(!metadata.is_compatible_with_current().unwrap());
+    assert!(metadata.is_compatible_with_current().unwrap());
     metadata.product_build = product_build();
     metadata.protocol_epoch += 1;
     assert!(!metadata.is_compatible_with_current().unwrap());
@@ -89,7 +79,7 @@ fn metadata_is_strict_private_and_removed_only_by_its_generation() {
     let paths = paths(&root);
     let epoch = HostEpoch::generate().unwrap();
     let lease = HostOwnerLease::try_acquire(paths.clone()).unwrap();
-    let metadata = HostOwnerMetadata::current(
+    let mut metadata = HostOwnerMetadata::current(
         HostOwnerMode::Daemon,
         launch_key(),
         epoch.clone(),
@@ -98,6 +88,7 @@ fn metadata_is_strict_private_and_removed_only_by_its_generation() {
     )
     .unwrap();
     lease.publish(&metadata).unwrap();
+    metadata.home_authority = Some(paths.home_authority().unwrap());
     assert_eq!(paths.read_metadata().unwrap(), Some(metadata));
     assert_eq!(
         std::fs::metadata(paths.owner_directory())
@@ -292,6 +283,8 @@ fn lifecycle_signal_is_fenced_by_the_exact_process_start_token() {
         process_start_token: process_token(child.id()),
         mode: HostOwnerMode::Daemon,
         launch_key: launch_key(),
+        home_authority: None,
+        service_revision: None,
         protocol_epoch: 1,
         product_build: product_build(),
         host_epoch: HostEpoch::generate().unwrap(),
@@ -344,6 +337,8 @@ fn daemon_metadata_rejects_a_relative_socket_path() {
         process_start_token: process_token(std::process::id()),
         mode: HostOwnerMode::Daemon,
         launch_key: launch_key(),
+        home_authority: None,
+        service_revision: None,
         protocol_epoch: 1,
         product_build: product_build(),
         host_epoch: HostEpoch::generate().unwrap(),
@@ -361,6 +356,8 @@ fn a_missing_process_is_not_detected_by_localized_io_error_text() {
         process_start_token: "1".into(),
         mode: HostOwnerMode::Daemon,
         launch_key: launch_key(),
+        home_authority: None,
+        service_revision: None,
         protocol_epoch: 1,
         product_build: product_build(),
         host_epoch: HostEpoch::generate().unwrap(),
@@ -371,27 +368,20 @@ fn a_missing_process_is_not_detected_by_localized_io_error_text() {
 }
 
 #[test]
-fn startup_file_transfer_preserves_the_lease_and_rejects_a_different_inode() {
+fn startup_coordinator_is_independent_from_child_owner_leases() {
     let root = TempDir::new().unwrap();
     let paths = paths(&root);
-    let lease = HostOwnerLease::try_acquire(paths.clone()).unwrap();
-    let file = lease.into_startup_file().unwrap();
+    let coordinator = rsi_service_host::HostStartupLease::try_acquire(&paths).unwrap();
+    assert_eq!(
+        rsi_service_host::HostStartupLease::try_acquire(&paths).unwrap_err(),
+        ServiceHostError::OwnerActive
+    );
+    let child = HostOwnerLease::try_acquire(paths.clone()).unwrap();
+    drop(coordinator);
     assert_eq!(
         HostOwnerLease::try_acquire(paths.clone()).unwrap_err(),
         ServiceHostError::OwnerActive
     );
-    let inherited = file.try_clone().unwrap();
-    drop(file);
-    let adopted = HostOwnerLease::adopt_startup_file(paths.clone(), inherited).unwrap();
-    assert_eq!(
-        HostOwnerLease::try_acquire(paths.clone()).unwrap_err(),
-        ServiceHostError::OwnerActive
-    );
-    let unrelated = std::fs::File::create(root.path().join("unrelated")).unwrap();
-    assert!(matches!(
-        HostOwnerLease::adopt_startup_file(paths.clone(), unrelated),
-        Err(ServiceHostError::Invalid(_))
-    ));
-    drop(adopted);
+    drop(child);
     HostOwnerLease::try_acquire(paths).unwrap();
 }

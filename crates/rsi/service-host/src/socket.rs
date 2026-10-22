@@ -21,7 +21,11 @@ impl PublishedSocket {
         // Keep this name shorter than `host.sock`: a public path at the Unix
         // sockaddr limit must remain publishable. The owner lease serializes
         // publishers; any crash-left socket is still probed before removal.
-        let staging = paths.runtime_directory().join(".s");
+        let mut entropy = [0; 3];
+        getrandom::fill(&mut entropy).map_err(|error| ServiceHostError::Io(error.to_string()))?;
+        let staging = paths
+            .runtime_directory()
+            .join(format!(".s{}", hex::encode(entropy)));
         remove_stale_socket_after_failed_probe(&staging)?;
         let listener = UnixListener::bind(&staging).map_err(io_error)?;
         let staged_metadata = fs::symlink_metadata(&staging).map_err(io_error)?;

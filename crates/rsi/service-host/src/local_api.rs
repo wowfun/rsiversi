@@ -1,8 +1,11 @@
 use crate::owner::validate_launch_key;
+#[cfg(unix)]
 use crate::socket::PublishedSocket;
 use crate::{HostOwnerLease, ServiceHostDiagnostics, ServiceHostError, ServiceOwnerContract};
 use async_trait::async_trait;
 use rsi_api_http::LocalHttpService;
+#[cfg(windows)]
+use rsi_api_local_transport::PipeListener as NativeListener;
 use rsi_api_protocol::{ApiDispatchContract, ConnectionDescriptionContract, LocalCompatibilityKey};
 use rsi_meta::{
     ActivationPlan, ConfigValue, LocalContract, MetaError, PluginFactory, PreparedActivation,
@@ -14,8 +17,9 @@ use std::{
     sync::Arc,
     time::Duration,
 };
+#[cfg(unix)]
+use tokio::net::UnixListener as NativeListener;
 use tokio::{
-    net::UnixListener,
     sync::{Semaphore, watch},
     task::JoinSet,
 };
@@ -32,14 +36,14 @@ pub fn local_compatibility_key(
     let mut digest = Sha256::new();
     digest.update(b"rsi.local.api.v1\0");
     digest.update(launch_key.as_bytes());
-    digest.update(crate::service_host_product_build()?.as_bytes());
     Ok(LocalCompatibilityKey::from_bytes(digest.finalize().into()))
 }
 
 /// Native socket publication using the shared bounded API HTTP codec.
 #[derive(Debug)]
 pub struct LocalApiServer {
-    listener: UnixListener,
+    listener: NativeListener,
+    #[cfg(unix)]
     published: PublishedSocket,
     diagnostics: ServiceHostDiagnostics,
     service: LocalHttpService,
@@ -52,9 +56,17 @@ impl LocalApiServer {
         service: LocalHttpService,
     ) -> Result<Self, ServiceHostError> {
         owner.paths().validate_daemon_endpoint()?;
+        #[cfg(unix)]
         let (listener, published) = PublishedSocket::bind(owner.paths())?;
+        #[cfg(windows)]
+        let listener = NativeListener::bind(
+            rsi_api_local_transport::PipeName::new(owner.paths().socket())
+                .map_err(crate::owner::io_error)?,
+        )
+        .map_err(crate::owner::io_error)?;
         Ok(Self {
             listener,
+            #[cfg(unix)]
             published,
             diagnostics: ServiceHostDiagnostics::with_api(service.diagnostics()),
             service,
@@ -68,6 +80,7 @@ impl LocalApiServer {
     /// Serves until cancelled, then joins or aborts transport tasks within one minute.
     pub async fn serve(self, stop: CancellationToken) -> Result<(), ServiceHostError> {
         let permits = Arc::new(Semaphore::new(128));
+        #[cfg(unix)]
         let uid = rustix::process::geteuid().as_raw();
         let mut tasks = JoinSet::new();
         loop {
@@ -78,24 +91,39 @@ impl LocalApiServer {
                     if let Some(Err(_)) = result { self.diagnostics.connection_task_panic(); }
                     continue;
                 },
-                result = self.listener.accept() => result,
+                result = async {
+                    #[cfg(unix)]
+                    { self.listener.accept().await.map(|(stream, _)| stream) }
+                    #[cfg(windows)]
+                    { self.listener.accept().await }
+                } => result,
             };
-            let Ok((stream, _)) = accepted else {
-                self.diagnostics.accept_error();
-                tokio::select! {
-                    () = stop.cancelled() => break,
-                    () = tokio::time::sleep(Duration::from_millis(50)) => {},
+            let stream = match accepted {
+                Ok(stream) => stream,
+                Err(error) => {
+                    if error.kind() == std::io::ErrorKind::PermissionDenied {
+                        self.diagnostics.foreign_uid_rejection();
+                    } else {
+                        self.diagnostics.accept_error();
+                    }
+                    tokio::select! {
+                        () = stop.cancelled() => break,
+                        () = tokio::time::sleep(Duration::from_millis(50)) => {},
+                    }
+                    continue;
                 }
-                continue;
             };
             self.diagnostics.accepted_connection();
-            let Ok(credentials) = stream.peer_cred() else {
-                self.diagnostics.peer_credential_error();
-                continue;
-            };
-            if credentials.uid() != uid {
-                self.diagnostics.foreign_uid_rejection();
-                continue;
+            #[cfg(unix)]
+            {
+                let Ok(credentials) = stream.peer_cred() else {
+                    self.diagnostics.peer_credential_error();
+                    continue;
+                };
+                if credentials.uid() != uid {
+                    self.diagnostics.foreign_uid_rejection();
+                    continue;
+                }
             }
             let Ok(permit) = permits.clone().try_acquire_owned() else {
                 self.diagnostics.capacity_rejection();
@@ -138,6 +166,7 @@ impl LocalApiServer {
                 }
             }
         }
+        #[cfg(unix)]
         drop(self.published);
         Ok(())
     }
