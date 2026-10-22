@@ -21,6 +21,10 @@ use std::sync::Arc;
 
 /// Prepared application entry; its plugin owns work and final cleanup.
 pub trait ApplicationRun: std::fmt::Debug + Send + Sync + 'static {
+    /// Whether success means a detached surface was launched and can be retained.
+    fn returns_after_launch(&self) -> bool {
+        false
+    }
     /// Runs this generation once and returns its process/product exit status.
     fn run(self: Arc<Self>) -> BoxFuture<'static, Result<u8>>;
 }

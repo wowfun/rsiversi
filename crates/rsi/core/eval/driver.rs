@@ -228,6 +228,7 @@ async fn run() -> Result<serde_json::Value> {
     let paths = rsi::standard_paths()?;
     let profile_path = paths.config().join("host-profiles/live/host.profile.toml");
     let profile = HostProfileDocument {
+        package_lease: None,
         id: HostProfileId::new("live")?,
         source: ProfileSource::User,
         contents: std::fs::read(&profile_path)?,

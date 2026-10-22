@@ -36,7 +36,7 @@ fn metadata_is_order_independent_and_rejects_ambiguous_input() {
 }
 
 #[test]
-fn service_launch_identity_includes_profiles_and_reserved_ids() {
+fn application_profiles_and_reserved_ids_do_not_change_service_launch_identity() {
     let root = tempfile::tempdir().unwrap();
     let paths = HostPaths::new(
         root.path().join("config"),
@@ -55,11 +55,28 @@ fn service_launch_identity_includes_profiles_and_reserved_ids() {
     };
     let a = key(metadata("fixture.a", b"format = 1\n"));
     assert_eq!(a, key(metadata("fixture.a", b"format = 1\n")));
-    assert_ne!(a, key(metadata("fixture.b", b"format = 1\n")));
-    assert_ne!(a, key(metadata("fixture.a", b"format = 1\n# revised\n")));
+    assert_eq!(a, key(metadata("fixture.b", b"format = 1\n")));
+    assert_eq!(a, key(metadata("fixture.a", b"format = 1\n# revised\n")));
     assert!(
         !paths.state().exists(),
         "metadata preview must not activate a Service"
+    );
+}
+
+#[test]
+fn identical_core_offer_is_allowed_but_same_name_cannot_claim_another_version() {
+    let core = rsi::product_protocols().remove(0);
+    assert!(
+        ApplicationCatalogMetadata::default()
+            .with_protocols(vec![core.clone()])
+            .is_ok()
+    );
+    let mut conflicting = core;
+    conflicting.version += 1;
+    assert!(
+        ApplicationCatalogMetadata::default()
+            .with_protocols(vec![conflicting])
+            .is_err()
     );
 }
 

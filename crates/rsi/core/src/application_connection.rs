@@ -2,7 +2,7 @@ mod http;
 #[cfg(target_os = "linux")]
 mod operator;
 #[cfg(any(target_os = "linux", windows))]
-mod service;
+pub(crate) mod service;
 use crate::{
     AgentPresetManager, HostProfileDocument, HostProfileId, ProfileCatalog, RsiError,
     StandardComposition,
@@ -32,8 +32,13 @@ impl ConnectionFactory {
     async fn compose(
         &self,
         plan: &mut ActivationPlan,
-    ) -> rsi_meta::Result<(HostProfileDocument, StandardComposition)> {
-        let host = plan.take_state::<HostProfileDocument>()?;
+    ) -> rsi_meta::Result<(Option<HostProfileDocument>, StandardComposition)> {
+        let host = plan.take_state::<Option<HostProfileDocument>>()?;
+        if self.composition.host_launcher.is_some() {
+            return Ok((host, self.composition.clone()));
+        }
+        let host =
+            host.ok_or_else(|| self.diagnosed("embedded composition needs a Service Profile"))?;
         self.composition
             .preflight_service(crate::service_program(&host), None)
             .map_err(|error| self.diagnosed(error))?;
@@ -60,7 +65,7 @@ impl ConnectionFactory {
                 })
             }),
         )?;
-        Ok((host, composition))
+        Ok((Some(host), composition))
     }
 
     fn diagnosed(&self, error: impl std::fmt::Display) -> MetaError {
@@ -85,24 +90,37 @@ impl PluginFactory for ConnectionFactory {
     fn prepare(&self, config: &ConfigValue) -> rsi_meta::Result<PreparedActivation> {
         let config: Configuration =
             serde_json::from_value(config.clone()).map_err(|error| self.diagnosed(error))?;
-        let host = ProfileCatalog::new(
-            self.composition.paths().clone(),
-            self.composition.application_metadata().clone(),
-        )
-        .host(&config.host_profile)
-        .map_err(|error| self.diagnosed(error))?;
+        if self.composition.host_launcher.is_some() {
+            return Ok(PreparedActivation::with_state(
+                ConfigValue::Null,
+                None::<HostProfileDocument>,
+                4096,
+            ));
+        }
+        let host = match &self.composition.launch_service {
+            Some(host) => host.clone(),
+            None => ProfileCatalog::new(
+                self.composition.paths().clone(),
+                self.composition.application_metadata().clone(),
+            )
+            .host(&config.host_profile)
+            .map_err(|error| self.diagnosed(error))?,
+        };
         let retained = host.contents.len() + 4096;
         Ok(PreparedActivation::with_state(
             ConfigValue::Null,
-            host,
+            Some(host),
             retained,
         ))
     }
     async fn activate(&self, mut plan: ActivationPlan) -> rsi_meta::Result<()> {
         let (host, composition) = self.compose(&mut plan).await?;
-        let connection = crate::connect_or_embed_service_host(plan.context(), composition, &host)
-            .await
-            .map_err(|error| self.diagnosed(error))?;
+        let connection = if let Some(host) = host {
+            crate::connect_or_embed_service_host(plan.context(), composition, &host).await
+        } else {
+            crate::local_host::connect_resident_service_host(plan.context(), composition).await
+        }
+        .map_err(|error| self.diagnosed(error))?;
         let exports = self
             .composition
             .addons()
@@ -217,7 +235,8 @@ pub fn standard_application_host(
             std::env::consts::ARCH
         ))
         .map_err(boot)?;
-    let mut host = HostBuilder::new(service.paths().clone());
+    let mut host = HostBuilder::new(service.paths().clone())
+        .runtime_limits(crate::application_bootstrap::runtime_limits());
     addons
         .register_into(&mut host, crate::AddonScope::Application)
         .map_err(boot)?;
@@ -307,6 +326,12 @@ fn register_contracts(builder: &mut crate::StandardAddonBuilder) -> crate::Resul
         .map_err(boot)?;
     builder
         .register_local_contract_at::<rsi_acp_agent::AgentBackendContract>(scope)
+        .map_err(boot)?;
+    builder
+        .register_local_contract_at::<crate::application_services::AcpAttachmentContract>(scope)
+        .map_err(boot)?;
+    builder
+        .register_local_contract_at::<crate::application_services::RemoteServiceContract>(scope)
         .map_err(boot)?;
     builder
         .register_local_contract_at::<rsi_credentials_protocol::CredentialsResolveContract>(scope)

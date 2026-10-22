@@ -68,6 +68,7 @@ impl Record {
 struct Live {
     connection: Arc<ConnectedSsh>,
     provider: ExecutionProvider,
+    _package: rsi_packages::PackageLease,
 }
 struct State {
     closed: bool,
@@ -88,7 +89,7 @@ pub(crate) struct Manager {
     configuration: Arc<rsi_configuration_access::ConfigurationAccess>,
     epoch: HostEpoch,
     service: String,
-    artifact: tokio::sync::OnceCell<Option<rsi_ssh_client::HelperArtifact>>,
+    packages: std::path::PathBuf,
     state: Mutex<State>,
     writer: Arc<Semaphore>,
     target_writers: TargetWriters,
@@ -427,9 +428,10 @@ impl Manager {
         )
         .map_err(|_| ApiError::Unavailable)?;
         drop(identity);
-        let artifact = match self.artifact.get_or_try_init(artifact::installed).await {
-            Ok(Some(artifact)) => artifact,
-            Ok(None) | Err(_) => {
+        let (artifact, package) = match artifact::installed(&self.packages).await {
+            Ok(artifact) => artifact,
+            Err(artifact::Failure::Busy) => return Ok(Err(wire::Failure::Busy {})),
+            Err(artifact::Failure::Unavailable) => {
                 return Ok(Err(wire::Failure::HelperUnavailable {}));
             }
         };
@@ -449,7 +451,7 @@ impl Manager {
         let connected = match rsi_ssh_client::connect(
             prepared,
             std::path::Path::new("/usr/bin/ssh"),
-            artifact.clone(),
+            artifact,
             &self.service,
             epoch,
             target_programs(),
@@ -478,6 +480,7 @@ impl Manager {
             Live {
                 connection: connected.clone(),
                 provider,
+                _package: package,
             },
         );
         drop(state);

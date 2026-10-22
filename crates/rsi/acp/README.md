@@ -1,5 +1,11 @@
 # rsi-acp-agent
 
+Local attachments begin with this package's strict hello codec: a four-byte
+big-endian JSON byte length, then at most 4096 JSON bytes. The hello carries the
+Host epoch and this package's generated interface description; only afterward
+does ordinary ACP NDJSON begin. Both endpoints use the owning encode/decode
+functions so framing changes participate in the generated wire contract.
+
 OutputRecoveries budget exhaustion returns the stable ACP max_tokens stop
 reason after native settlement. Other budget dimensions retain max_turn_requests.
 Incomplete output is never end_turn and recovery remains native Agent policy.

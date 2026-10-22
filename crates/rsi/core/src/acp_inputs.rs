@@ -53,9 +53,54 @@ struct Binding {
 struct State {
     entries: BTreeMap<SessionId, Binding>,
     pending: BTreeMap<SessionId, CancellationToken>,
+    claims: Claims,
+}
+
+#[derive(Default)]
+struct Claims(BTreeMap<SessionId, std::sync::Weak<()>>);
+impl Claims {
+    fn claim(&mut self, id: &SessionId, owner: &Arc<()>) -> Result<(), Failure> {
+        self.0.retain(|_, owner| owner.strong_count() != 0);
+        if let Some(existing) = self.0.get(id).and_then(std::sync::Weak::upgrade) {
+            return if Arc::ptr_eq(&existing, owner) {
+                Ok(())
+            } else {
+                Err(Failure::Busy)
+            };
+        }
+        if self.0.len() >= 256 {
+            return Err(Failure::Busy);
+        }
+        self.0.insert(id.clone(), Arc::downgrade(owner));
+        Ok(())
+    }
+    fn release(&mut self, id: &SessionId, owner: &Arc<()>) {
+        if self
+            .0
+            .get(id)
+            .and_then(std::sync::Weak::upgrade)
+            .is_some_and(|existing| Arc::ptr_eq(&existing, owner))
+        {
+            self.0.remove(id);
+        }
+    }
 }
 
 impl PrivateInputs {
+    pub(crate) fn claim(&self, id: &SessionId, owner: &Arc<()>) -> Result<(), Failure> {
+        self.state
+            .lock()
+            .expect("private ACP inputs")
+            .claims
+            .claim(id, owner)
+    }
+    pub(crate) fn release_claim(&self, id: &SessionId, owner: &Arc<()>) {
+        self.state
+            .lock()
+            .expect("private ACP inputs")
+            .claims
+            .release(id, owner);
+    }
     pub(crate) fn new(
         source: Arc<crate::integration_source::SeededSource>,
         context: Context,
@@ -530,4 +575,48 @@ fn configuration(
     }
     config.validate().map_err(|_| Failure::Parameters)?;
     Ok((config, Secrets(secrets)))
+}
+
+#[cfg(test)]
+mod claim_tests {
+    use super::*;
+    #[test]
+    fn abandoned_connection_releases_all_claims_before_capacity_admission() {
+        let mut claims = Claims::default();
+        let owner = Arc::new(());
+        for index in 0..256 {
+            claims
+                .claim(&SessionId::new(format!("session-{index}")).unwrap(), &owner)
+                .unwrap();
+        }
+        drop(owner);
+        let successor = Arc::new(());
+        claims
+            .claim(&SessionId::new("new-session").unwrap(), &successor)
+            .unwrap();
+        assert_eq!(claims.0.len(), 1);
+        claims
+            .claim(&SessionId::new("session-0").unwrap(), &successor)
+            .unwrap();
+    }
+    #[test]
+    fn one_editor_cannot_take_or_release_another_editors_session_resources() {
+        let mut claims = Claims::default();
+        let session = SessionId::new("shared-session").unwrap();
+        let first = Arc::new(());
+        let second = Arc::new(());
+        claims.claim(&session, &first).unwrap();
+        claims.claim(&session, &first).unwrap();
+        assert!(matches!(
+            claims.claim(&session, &second),
+            Err(Failure::Busy)
+        ));
+        claims.release(&session, &second);
+        assert!(matches!(
+            claims.claim(&session, &second),
+            Err(Failure::Busy)
+        ));
+        claims.release(&session, &first);
+        claims.claim(&session, &second).unwrap();
+    }
 }

@@ -162,7 +162,7 @@ fn failure(value: wire::Failure) -> &'static str {
             "The confirmed identity is unavailable or changed; Local confirmation is required"
         }
         wire::Failure::HelperUnavailable {} => {
-            "The installed distribution has no matching verified SSH helper. Rebuild the Web/Desktop package, or on Linux run scripts/rsiversi.sh build tui --with-ssh-helper for TUI, then restart the application."
+            "Install the matching SSH helper with rsi plugin install ssh-helper, then reconnect this target."
         }
         wire::Failure::ConnectionFailed {} => {
             "SSH initialization failed; check target trust and runtime prerequisites"

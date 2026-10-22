@@ -4,19 +4,23 @@ use rsi_service_host::{
     ApprovalBroker, HostOwnerLease, HostOwnerMetadata, HostOwnerMode, ServiceHostError,
     ServiceHostPaths,
 };
-#[cfg(target_os = "linux")]
+#[cfg(any(target_os = "linux", windows))]
 use rsi_service_host::{LocalApiListener, ServiceHostDiagnostics, owner_process_is_current};
 use rsi_session_protocol::SessionService;
 use std::sync::Arc;
-#[cfg(not(windows))]
 use std::time::Duration;
-#[cfg(target_os = "linux")]
+#[cfg(any(target_os = "linux", windows))]
 use tokio_util::sync::CancellationToken;
 
-#[cfg(not(windows))]
 const OWNER_DISCOVERY_TIMEOUT: Duration = Duration::from_secs(15);
-#[cfg(not(windows))]
 const OWNER_DISCOVERY_INTERVAL: Duration = Duration::from_millis(50);
+
+/// Application-owned process launcher; the library never discovers an executable.
+#[async_trait::async_trait]
+pub trait LocalHostLauncher: std::fmt::Debug + Send + Sync {
+    /// Ensures one resident owner has published a responsive endpoint for these homes.
+    async fn ensure_started(&self, paths: &rsi_host::HostPaths) -> crate::Result<()>;
+}
 
 /// Selected standard Service Host ownership mode.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -52,7 +56,7 @@ impl std::fmt::Debug for ServiceHostConnection {
 }
 
 impl ServiceHostConnection {
-    #[cfg(target_os = "linux")]
+    #[cfg(any(target_os = "linux", windows))]
     async fn from_remote(host: crate::ProfileOwner) -> crate::Result<Self> {
         let result = (|| {
             Ok(Self {
@@ -204,48 +208,59 @@ impl EmbeddedServiceHost {
 ///
 /// Both connection modes mount child Profiles in the supplied application Context.
 /// The caller owns its parent lifecycle, including cancellation during bootstrap.
-/// This never starts a daemon. A live starting, embedded, incompatible, or unresponsive owner is
-/// waited for only within a fixed bound and is never bypassed by a second Host.
-/// Windows has no daemon endpoint; an occupied lease is reported immediately.
+/// A product launcher selects the persistent resident path. Without a launcher,
+/// explicit SDK composition may own an embedded service. An existing owner is
+/// never bypassed by a second Host.
 pub async fn connect_or_embed_service_host(
     parent: &rsi_meta::Context,
     composition: StandardComposition,
     host_profile: &HostProfileDocument,
 ) -> crate::Result<ServiceHostConnection> {
+    #[cfg(any(target_os = "linux", windows))]
+    if composition.host_launcher.is_some() {
+        return connect_resident_service_host(parent, composition).await;
+    }
     let preview = composition.preview_host(host_profile)?;
     let launch_key = preview.launch_key.as_str().to_owned();
     let paths = ServiceHostPaths::from_host_paths(composition.paths()).map_err(host_error)?;
-    if composition
-        .agent_store_reset
-        .as_ref()
-        .is_some_and(rsi_agent_store_sqlite::SqliteStoreResetRequest::is_pending)
-    {
-        let lease = HostOwnerLease::try_acquire(paths).map_err(|error| {
-            RsiError::Boot(format!("--reset-state requires an idle Service Host: {error}; stop the owner first or run `rsi host restart --reset-state`"))
-        })?;
-        return boot_embedded(parent, composition, host_profile, launch_key, lease).await;
-    }
-    #[cfg(windows)]
-    {
-        let lease = HostOwnerLease::try_acquire(paths).map_err(|error| {
-            if matches!(error, ServiceHostError::OwnerActive) {
-                conflict_error(
-                    composition.startup_purpose,
-                    HostConflict::Occupied,
-                    error.to_string(),
-                )
-            } else {
-                host_error(error)
-            }
-        })?;
-        boot_embedded(parent, composition, host_profile, launch_key, lease).await
-    }
-    #[cfg(not(windows))]
-    connect_unix_service_host(parent, composition, host_profile, launch_key, paths).await
+    connect_local_service_host(parent, composition, host_profile, launch_key, paths).await
 }
 
-#[cfg(not(windows))]
-async fn connect_unix_service_host(
+pub(crate) async fn connect_resident_service_host(
+    parent: &rsi_meta::Context,
+    composition: StandardComposition,
+) -> crate::Result<ServiceHostConnection> {
+    #[cfg(any(target_os = "linux", windows))]
+    {
+        let launcher = composition
+            .host_launcher
+            .as_ref()
+            .ok_or_else(|| RsiError::Boot("resident connection needs a launcher".into()))?;
+        launcher.ensure_started(composition.paths()).await?;
+        let paths = ServiceHostPaths::from_host_paths(composition.paths()).map_err(host_error)?;
+        let metadata = paths.read_metadata().map_err(host_error)?.ok_or_else(|| {
+            RsiError::Boot("resident Service Host did not publish metadata".into())
+        })?;
+        if !owner_process_is_current(&metadata).map_err(host_error)? {
+            return Err(RsiError::Boot(
+                "resident Service Host exited before attachment".into(),
+            ));
+        }
+        ServiceHostConnection::from_remote(
+            crate::client_composition::connect(&metadata, parent, &composition).await?,
+        )
+        .await
+    }
+    #[cfg(not(any(target_os = "linux", windows)))]
+    {
+        let _ = (parent, composition);
+        Err(RsiError::Boot(
+            "resident Host transport is unavailable on this platform".into(),
+        ))
+    }
+}
+
+async fn connect_local_service_host(
     parent: &rsi_meta::Context,
     composition: StandardComposition,
     host_profile: &HostProfileDocument,
@@ -255,29 +270,21 @@ async fn connect_unix_service_host(
     let deadline = tokio::time::Instant::now() + OWNER_DISCOVERY_TIMEOUT;
     loop {
         if let Some(metadata) = paths.read_metadata().map_err(host_error)? {
-            #[cfg(target_os = "linux")]
+            #[cfg(any(target_os = "linux", windows))]
             if owner_process_is_current(&metadata).map_err(host_error)? {
                 if !metadata.is_compatible_with_current().map_err(host_error)? {
-                    return Err(conflict_error(
-                        composition.startup_purpose,
-                        HostConflict::Incompatible,
-                        format!(
-                            "the active Service Host has an incompatible protocol or product build; run `rsi host restart --profile {}`",
-                            host_profile.id
-                        ),
-                    ));
+                    return Err(RsiError::Boot(format!(
+                        "the active Service Host has an incompatible protocol or product build; run `rsi host restart --profile {}`",
+                        host_profile.id
+                    )));
                 }
                 match metadata.mode {
                     HostOwnerMode::Daemon => {
                         if metadata.launch_key != launch_key {
-                            return Err(conflict_error(
-                                composition.startup_purpose,
-                                HostConflict::DifferentIdentity,
-                                format!(
-                                    "the active Service Host has a different launch identity; run `rsi host restart --profile {}`",
-                                    host_profile.id
-                                ),
-                            ));
+                            return Err(RsiError::Boot(format!(
+                                "the active Service Host has a different launch identity; run `rsi host restart --profile {}`",
+                                host_profile.id
+                            )));
                         }
                         let remote = tokio::time::timeout_at(
                             deadline,
@@ -307,9 +314,7 @@ async fn connect_unix_service_host(
                     }
                     HostOwnerMode::Embedded => {
                         if tokio::time::Instant::now() >= deadline {
-                            return Err(conflict_error(
-                                composition.startup_purpose,
-                                HostConflict::Occupied,
+                            return Err(RsiError::Boot(
                                 "an embedded Service Host owns the standard paths".into(),
                             ));
                         }
@@ -318,7 +323,7 @@ async fn connect_unix_service_host(
                     }
                 }
             }
-            #[cfg(not(target_os = "linux"))]
+            #[cfg(not(any(target_os = "linux", windows)))]
             let _ = metadata;
         }
 
@@ -330,14 +335,10 @@ async fn connect_unix_service_host(
                 tokio::time::sleep(OWNER_DISCOVERY_INTERVAL).await;
             }
             Err(ServiceHostError::OwnerActive) => {
-                return Err(conflict_error(
-                    composition.startup_purpose,
-                    HostConflict::Occupied,
-                    format!(
-                        "a Service Host owner is active but did not publish a usable endpoint within {} seconds",
-                        OWNER_DISCOVERY_TIMEOUT.as_secs()
-                    ),
-                ));
+                return Err(RsiError::Boot(format!(
+                    "a Service Host owner is active but did not publish a usable endpoint within {} seconds",
+                    OWNER_DISCOVERY_TIMEOUT.as_secs()
+                )));
             }
             Err(error) => return Err(host_error(error)),
         }
@@ -454,15 +455,15 @@ impl BootedServiceHost {
 }
 
 /// Fully booted explicit daemon generation before admission begins.
-#[cfg(target_os = "linux")]
+#[cfg(any(target_os = "linux", windows))]
 pub struct StandardServiceDaemon {
     running: Arc<RunningRsi>,
     listener: Arc<LocalApiListener>,
     diagnostics: tokio::sync::watch::Sender<ServiceHostDiagnostics>,
-    _owner_lease: Arc<HostOwnerLease>,
+    owner_lease: Arc<HostOwnerLease>,
 }
 
-#[cfg(target_os = "linux")]
+#[cfg(any(target_os = "linux", windows))]
 impl std::fmt::Debug for StandardServiceDaemon {
     fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         formatter
@@ -472,7 +473,7 @@ impl std::fmt::Debug for StandardServiceDaemon {
     }
 }
 
-#[cfg(target_os = "linux")]
+#[cfg(any(target_os = "linux", windows))]
 impl StandardServiceDaemon {
     /// Consumes the preacquired owner lease, boots the Host, and publishes its endpoint.
     pub async fn start(
@@ -522,7 +523,7 @@ impl StandardServiceDaemon {
                 return Err(error);
             }
         };
-        let metadata = match HostOwnerMetadata::current(
+        let mut metadata = match HostOwnerMetadata::current(
             HostOwnerMode::Daemon,
             launch_key,
             epoch,
@@ -535,6 +536,15 @@ impl StandardServiceDaemon {
                 return Err(host_error(error));
             }
         };
+        metadata.service_revision = Some(
+            booted
+                .running
+                .host
+                .subscribe_profile()
+                .borrow()
+                .source_digest()
+                .into(),
+        );
         if let Err(error) = owner_lease.publish(&metadata) {
             booted.shutdown().await;
             return Err(host_error(error));
@@ -543,7 +553,7 @@ impl StandardServiceDaemon {
             running: booted.running,
             diagnostics: tokio::sync::watch::channel(listener.diagnostics()).0,
             listener,
-            _owner_lease: owner_lease,
+            owner_lease,
         })
     }
 
@@ -575,6 +585,10 @@ impl StandardServiceDaemon {
     }
 
     async fn supervise(&mut self, cancellation: CancellationToken) -> crate::Result<()> {
+        let lifecycle = crate::required_local::<rsi_service_host::LifecycleControlContract>(
+            &self.running.host,
+            "lifecycle control",
+        )?;
         let mut profile = self.running.host.subscribe_profile();
         let mut listener_stopped = false;
         loop {
@@ -611,10 +625,21 @@ impl StandardServiceDaemon {
                             "local API listener stopped without a Profile replacement".into(),
                         ));
                     }
+                    if let Some(mut metadata) = self
+                        .owner_lease
+                        .paths()
+                        .read_metadata()
+                        .map_err(host_error)?
+                        && metadata.service_revision.as_deref() != Some(status.source_digest())
+                    {
+                        metadata.service_revision = Some(status.source_digest().into());
+                        self.owner_lease.publish(&metadata).map_err(host_error)?;
+                    }
                 }
             }
             tokio::select! {
                 biased;
+                () = lifecycle.stop_requested() => return Ok(()),
                 () = cancellation.cancelled() => return Ok(()),
                 result = profile.changed() => result.map_err(|_| RsiError::Boot(
                     "Service Host lost its Profile observer".into()
@@ -631,66 +656,4 @@ impl StandardServiceDaemon {
 #[allow(clippy::needless_pass_by_value)] // Kept as a direct `map_err` adapter.
 fn host_error(error: ServiceHostError) -> RsiError {
     RsiError::Boot(error.to_string())
-}
-
-#[derive(Clone, Copy)]
-enum HostConflict {
-    Occupied,
-    #[cfg(any(target_os = "linux", test))]
-    Incompatible,
-    #[cfg(any(target_os = "linux", test))]
-    DifferentIdentity,
-}
-fn conflict_error(
-    purpose: crate::HostStartupPurpose,
-    kind: HostConflict,
-    ordinary: String,
-) -> RsiError {
-    if purpose == crate::HostStartupPurpose::Ordinary {
-        return RsiError::Boot(ordinary);
-    }
-    let reason = match kind {
-        HostConflict::Occupied => "an existing application owns this Service Host",
-        #[cfg(any(target_os = "linux", test))]
-        HostConflict::Incompatible => {
-            "the existing Service Host has an incompatible build or protocol"
-        }
-        #[cfg(any(target_os = "linux", test))]
-        HostConflict::DifferentIdentity => {
-            "the existing Service Host has a different launch identity"
-        }
-    };
-    RsiError::Boot(format!(
-        "{reason}; close the existing owner or select independent XDG_STATE_HOME for development. The development launcher does not restart the daily Host."
-    ))
-}
-#[cfg(test)]
-mod development_advice_tests {
-    use super::*;
-    #[test]
-    fn development_conflicts_never_recommend_restarting_the_daily_daemon() {
-        for kind in [
-            HostConflict::Occupied,
-            HostConflict::Incompatible,
-            HostConflict::DifferentIdentity,
-        ] {
-            let error = conflict_error(
-                crate::HostStartupPurpose::Development,
-                kind,
-                "rsi host restart --profile standard".into(),
-            )
-            .to_string();
-            assert!(error.contains("XDG_STATE_HOME"));
-            assert!(!error.contains("rsi host restart"));
-        }
-        assert_eq!(
-            conflict_error(
-                crate::HostStartupPurpose::Ordinary,
-                HostConflict::Occupied,
-                "original advice".into()
-            )
-            .to_string(),
-            RsiError::Boot("original advice".into()).to_string()
-        );
-    }
 }

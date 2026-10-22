@@ -3,6 +3,30 @@ use async_trait::async_trait;
 use rsi_meta::LocalContract;
 use std::fmt;
 
+/// Active local Host metadata, without backend ownership or preset evaluation.
+#[derive(Debug)]
+pub struct RemoteServiceContract;
+impl LocalContract for RemoteServiceContract {
+    const KEY: &'static str = "rsi.service.remote";
+    type Service = rsi_service_host::HostOwnerMetadata;
+}
+
+/// One ACP attachment. Product launchers provide a remote stream; embedders may supply a backend.
+#[derive(Clone, Debug)]
+pub enum AcpAttachment {
+    /// Connected stream after native peer and descriptor admission.
+    Remote(std::sync::Arc<dyn rsi_acp::Transport>),
+    /// Explicit in-process embedding.
+    Backend(std::sync::Arc<dyn rsi_acp::server::AgentBackend>),
+}
+/// ACP application transport or explicitly embedded backend.
+#[derive(Debug)]
+pub struct AcpAttachmentContract;
+impl LocalContract for AcpAttachmentContract {
+    const KEY: &'static str = "rsi.acp.attachment";
+    type Service = AcpAttachment;
+}
+
 /// Observation and reload of the service generation selected by the composition.
 #[async_trait]
 pub trait ServingService: fmt::Debug + Send + Sync + 'static {

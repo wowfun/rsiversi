@@ -3,6 +3,9 @@ name: Product-wide local Service Host
 comment: One standard-path owner with independent domain APIs and native process control
 ---
 
+Partially superseded by [the unified product decision](2026-10-20-unified-product-launch.md).
+Ordinary auto-start, Windows ownership, dual-home exclusion, separated process/artifact/interface identities and immutable runtime copies supersede the embedded fallback, Linux-only daemon and exact-build reuse clauses. Independent domain authority and transport retirement rationale remain current.
+
 ## Problem
 
 The Agent Kernel owns durable session truth and turn control. Product clients

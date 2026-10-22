@@ -14,12 +14,12 @@ Its resident TUI keeps Session controllers and the terminal descriptor while an
 ordinary child Profile selects linked or independently built native presentation
 code. Both consume the same pure scene and cell-frame contracts.
 The [Serve application](../../../apps/serve/README.md) owns authenticated HTTP configuration and signals, consuming
-an independently composed service generation within that same Runtime.
+a connection-owned listener in the selected resident Service Host.
 The shared [GUI library](../gui/README.md) owns Rust Session controllers, projections and
 submission reconciliation. The [Web Worker](../../../apps/web-worker/README.md) runs it with Meta and Profiles in a
 Dedicated Worker; the [Web document](../../../apps/web/README.md) owns presentation and persistent editing.
-The catalog injects the expected build family into the [Web assets plugin](../web-assets/README.md),
-which supplies validated, retained resource bytes and renderer graphs to the HTTP listener.
+The [Web assets plugin](../web-assets/README.md) verifies each independent bundle
+and supplies retained resource bytes and renderer graphs to the HTTP listener.
 The Worker owns API-backed renderer generation leases;
 the document owns dynamic module mounting and disposal.
 The [UI contribution plugin](../ui/README.md) owns bounded, generation-bound

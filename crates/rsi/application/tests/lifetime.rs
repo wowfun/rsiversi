@@ -18,13 +18,18 @@ struct Entry {
     draining: CancellationToken,
     drained: CancellationToken,
     fail_cleanup: bool,
+    detached: bool,
+    exit: u8,
 }
 impl ApplicationRun for Entry {
+    fn returns_after_launch(&self) -> bool {
+        self.detached
+    }
     fn run(self: Arc<Self>) -> BoxFuture<'static, rsi_application::Result<u8>> {
         Box::pin(async move {
             self.entered.store(true, Ordering::SeqCst);
             self.complete.cancelled().await;
-            Ok(7)
+            Ok(self.exit)
         })
     }
 }
@@ -108,6 +113,7 @@ async fn normal_completion_and_cleanup_failure_use_the_same_fence() {
     for fail_cleanup in [false, true] {
         let entry = Arc::new(Entry {
             fail_cleanup,
+            exit: 7,
             ..Default::default()
         });
         let running = fixture(entry.clone()).await;
@@ -125,6 +131,32 @@ async fn normal_completion_and_cleanup_failure_use_the_same_fence() {
         } else {
             assert_eq!(result.unwrap(), 7);
         }
+        lifetime.stopped().await;
+    }
+}
+
+#[tokio::test]
+async fn retaining_detached_success_waits_for_stop_but_attached_and_failed_entries_finish() {
+    for (detached, exit) in [(true, 0), (false, 0), (true, 2)] {
+        let entry = Arc::new(Entry {
+            detached,
+            exit,
+            ..Default::default()
+        });
+        let running = fixture(entry.clone()).await;
+        let lifetime = ApplicationLifetime::default().retain_background(true);
+        entry.complete.cancel();
+        let mut run = Box::pin(lifetime.run(&running));
+        assert!(futures_util::poll!(&mut run).is_pending());
+        assert!(entry.entered.load(Ordering::SeqCst));
+        if detached && exit == 0 {
+            assert!(!entry.draining.is_cancelled());
+            lifetime.request_stop();
+            assert!(futures_util::poll!(&mut run).is_pending());
+        }
+        entry.draining.cancelled().await;
+        entry.drained.cancel();
+        assert_eq!(run.await.unwrap(), exit);
         lifetime.stopped().await;
     }
 }

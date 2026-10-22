@@ -2,13 +2,16 @@ use super::{Arc, BTreeMap, Contract, Manager, Mutex, Record, Semaphore, State, T
 use async_trait::async_trait;
 use rsi_meta::{ActivationPlan, ConfigValue, MetaError, PluginFactory, PreparedActivation};
 use rsi_storage_domain::{DomainFacilityContract, DomainSpec};
-pub(crate) fn register(builder: &mut crate::StandardAddonBuilder) -> rsi_host::Result<()> {
+pub(crate) fn register(
+    builder: &mut crate::StandardAddonBuilder,
+    paths: rsi_host::HostPaths,
+) -> rsi_host::Result<()> {
     builder.register_local_contract::<Contract>()?;
     builder.register_linked(
         "rsi.ssh-targets",
         env!("CARGO_PKG_VERSION"),
         rsi_meta::UpdateMode::RestartRequired,
-        Arc::new(Factory),
+        Arc::new(Factory(paths)),
     )?;
     builder.register_fragment(rsi_host::ProfileFragment::new(
         "rsi.standard.ssh-targets",
@@ -21,7 +24,7 @@ pub(crate) fn register(builder: &mut crate::StandardAddonBuilder) -> rsi_host::R
     Ok(())
 }
 #[derive(Debug)]
-struct Factory;
+struct Factory(rsi_host::HostPaths);
 #[async_trait]
 impl PluginFactory for Factory {
     fn prepare(&self, config: &ConfigValue) -> rsi_meta::Result<PreparedActivation> {
@@ -66,7 +69,7 @@ impl PluginFactory for Factory {
             configuration: plan.local::<rsi_configuration_access::ConfigurationAccessContract>()?,
             epoch: description.host_epoch.clone(),
             service: description.endpoint_id.as_str().into(),
-            artifact: tokio::sync::OnceCell::new(),
+            packages: self.0.state().join("packages"),
             state: Mutex::new(State {
                 closed: false,
                 records,

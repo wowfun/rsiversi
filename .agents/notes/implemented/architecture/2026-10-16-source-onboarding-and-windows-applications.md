@@ -2,6 +2,9 @@
 name: Source onboarding and native Windows applications
 ---
 
+Partially superseded by [the unified product decision](2026-10-20-unified-product-launch.md).
+The minimal core installer, independent optional packages and persistent Windows Host supersede application-specific installation and embedded ordinary ownership. Native console, WebSocket settlement, sandbox refusal and explicitly isolated fixture-publication rationale remain current. Package production is owned by the independent-package decision.
+
 ## Problem
 
 The Linux-only Python publisher and developer-oriented entry documentation do

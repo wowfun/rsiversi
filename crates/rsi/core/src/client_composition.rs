@@ -1,23 +1,23 @@
 pub(crate) const HTTP_PLUGIN: &str = "rsi.connection.http";
-#[cfg(target_os = "linux")]
+#[cfg(any(target_os = "linux", windows))]
 pub(crate) const LOCAL_PLUGIN: &str = "rsi.connection.local";
 
-#[cfg(target_os = "linux")]
+#[cfg(any(target_os = "linux", windows))]
 use crate::{Result, RsiError};
-#[cfg(target_os = "linux")]
+#[cfg(any(target_os = "linux", windows))]
 use rsi_api_uds_client::{UdsClient, UdsClientConfig, UdsClientFactory};
-#[cfg(target_os = "linux")]
+#[cfg(any(target_os = "linux", windows))]
 use rsi_host::ProfileEntry;
-#[cfg(target_os = "linux")]
+#[cfg(any(target_os = "linux", windows))]
 use rsi_host::{Profile, ProfileProgram};
-#[cfg(target_os = "linux")]
+#[cfg(any(target_os = "linux", windows))]
 use rsi_meta::UpdateMode;
-#[cfg(target_os = "linux")]
+#[cfg(any(target_os = "linux", windows))]
 use rsi_service_host::{HostOwnerMetadata, HostOwnerMode, local_compatibility_key};
-#[cfg(unix)]
+#[cfg(any(unix, windows))]
 use std::sync::Arc;
 
-#[cfg(target_os = "linux")]
+#[cfg(any(target_os = "linux", windows))]
 pub(crate) fn configuration(owner: &HostOwnerMetadata) -> Result<UdsClientConfig> {
     if !owner.is_compatible_with_current().map_err(error)? || owner.mode != HostOwnerMode::Daemon {
         return Err(RsiError::Boot(
@@ -35,10 +35,14 @@ pub(crate) fn configuration(owner: &HostOwnerMetadata) -> Result<UdsClientConfig
             .ok_or_else(|| RsiError::Boot("daemon has no deployment identity".into()))?,
         host_epoch: owner.host_epoch.clone(),
         compatibility: local_compatibility_key(&owner.launch_key).map_err(error)?,
+        #[cfg(windows)]
+        process_id: owner.pid,
+        #[cfg(windows)]
+        process_start_token: owner.process_start_token.clone(),
     })
 }
 
-#[cfg(target_os = "linux")]
+#[cfg(any(target_os = "linux", windows))]
 pub(crate) async fn connect(
     owner: &HostOwnerMetadata,
     parent: &rsi_meta::Context,
@@ -46,6 +50,7 @@ pub(crate) async fn connect(
 ) -> Result<crate::ProfileOwner> {
     let config = serde_json::to_value(configuration(owner)?).map_err(error)?;
     let program = ProfileProgram::from_profile(Profile::default());
+    #[allow(unused_mut)]
     let mut connection = crate::ProfileOwner::start_scoped(
         client_host(composition, &config).map_err(error)?,
         composition.paths().clone(),
@@ -53,6 +58,7 @@ pub(crate) async fn connect(
         program.clone(),
     )
     .await?;
+    #[cfg(unix)]
     if let Some(staging) = composition.native_staging() {
         connection.follow_catalog(
             Arc::new(ClientCatalog {
@@ -67,7 +73,7 @@ pub(crate) async fn connect(
     Ok(connection)
 }
 
-#[cfg(target_os = "linux")]
+#[cfg(any(target_os = "linux", windows))]
 fn client_host(
     composition: &crate::StandardComposition,
     config: &rsi_meta::ConfigValue,
@@ -118,7 +124,7 @@ impl rsi_application::ProfileCatalogSource for ClientCatalog {
 }
 
 /// Reads Local bounded restart impact without granting shutdown or configuration authority.
-#[cfg(target_os = "linux")]
+#[cfg(any(target_os = "linux", windows))]
 pub async fn workflow_restart_impact(
     owner: &HostOwnerMetadata,
 ) -> Result<rsi_inspector::WorkflowImpact> {
@@ -139,7 +145,7 @@ pub async fn workflow_restart_impact(
 }
 
 /// Negotiates the exact current local API and retires the short-lived readiness client.
-#[cfg(target_os = "linux")]
+#[cfg(any(target_os = "linux", windows))]
 pub async fn probe_service_host(owner: &HostOwnerMetadata) -> Result<()> {
     let client = UdsClient::connect(
         rsi_meta::Execution::native(tokio::runtime::Handle::current()),
@@ -151,7 +157,7 @@ pub async fn probe_service_host(owner: &HostOwnerMetadata) -> Result<()> {
     Ok(())
 }
 
-#[cfg(target_os = "linux")]
+#[cfg(any(target_os = "linux", windows))]
 fn error(error: impl std::fmt::Display) -> RsiError {
     RsiError::Boot(error.to_string())
 }
@@ -164,7 +170,7 @@ pub(crate) fn linked_plugins() -> rsi_host::Result<Vec<String>> {
         .map(|entry| entry.plugin().as_str().to_owned())
         .collect();
     plugins.push(HTTP_PLUGIN.into());
-    #[cfg(target_os = "linux")]
+    #[cfg(any(target_os = "linux", windows))]
     plugins.push(LOCAL_PLUGIN.into());
     Ok(plugins)
 }

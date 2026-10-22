@@ -4670,6 +4670,7 @@ dependencies = [
  "rsi-history",
  "rsi-history-api",
  "rsi-host",
+ "rsi-host-control",
  "rsi-inspector",
  "rsi-jobs",
  "rsi-jobs-local",
@@ -4689,6 +4690,7 @@ dependencies = [
  "rsi-native-addons-api",
  "rsi-navigation",
  "rsi-navigation-api",
+ "rsi-packages",
  "rsi-permission-presets",
  "rsi-process",
  "rsi-process-local",
@@ -4771,6 +4773,8 @@ dependencies = [
  "rsi-agent-session-protocol",
  "rsi-agent-turn-protocol",
  "rsi-ai-protocol",
+ "rsi-api-protocol",
+ "rsi-api-schema-build",
  "rsi-approval-protocol",
  "rsi-meta",
  "rsi-session-protocol",
@@ -6689,6 +6693,17 @@ dependencies = [
  "sha2",
  "tempfile",
  "thiserror 2.0.20",
+ "tokio",
+]
+
+[[package]]
+name = "rsi-host-control"
+version = "0.0.1"
+dependencies = [
+ "rsi-api-protocol",
+ "rsi-api-schema-build",
+ "serde",
+ "serde_json",
  "tokio",
 ]
 

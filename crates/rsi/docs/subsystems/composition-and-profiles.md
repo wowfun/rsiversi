@@ -57,7 +57,7 @@ identity. Service and Agent declarations and domain exports cannot be supplied
 as Application extras. Application composition explicitly requires its catalog
 provider; Service composition does not select an application.
 
-`rsi --profile NAME [application arguments]` selects one Application Profile.
+`rsi run NAME [application arguments]` selects one Application Profile.
 The [official catalog](../../../../apps/catalog/README.md) owns non-shadowable
 built-in selections and their Service connections. There is no implicit
 Application Profile.
@@ -236,7 +236,7 @@ opens the Loader cache, starts a Service Host or creates a Session. Source mutat
 receipts describe the atomic index publication and its directory-sync result;
 they do not claim runtime staging or Agent generation application. JSON revisions
 use canonical decimal strings. A running standard Host observes its enabled store
-through the existing native manager; `rsi --profile inspector native` reads that
+through the existing native manager; `rsi run inspector native` reads that
 manager's separate status and retained resources.
 
 Standard workspace skills use project definitions by default before the RSI config

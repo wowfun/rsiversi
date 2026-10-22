@@ -15,6 +15,8 @@ name = "session-api-eval"
 path = "eval/session.rs"
 
 [dependencies]
+rsi-host-control = { path = "../host-control" }
+rsi-packages = { path = "../packages" }
 rsi-automation = { path = "../automation" }
 rsi-automation-api = { path = "../automation-api" }
 rsi-browser = { path = "../browser" }
@@ -182,6 +184,7 @@ rustix = { workspace = true, features = ["process"] }
 dirs.workspace = true
 winreg = "0.55.0"
 rsi-files-native-fs = { path = "../../rsi-files/native-fs" }
+rsi-api-uds-client = { path = "../../rsi-api/uds-client" }
 
 [lints]
 workspace = true

@@ -24,6 +24,37 @@ impl PluginFactory for ServiceFactory {
     #[allow(clippy::too_many_lines)] // Keep capability publication and ordered owner teardown together.
     async fn activate(&self, mut plan: ActivationPlan) -> rsi_meta::Result<()> {
         let (profile, composition) = self.0.compose(&mut plan).await?;
+        if self.1 && composition.host_launcher.is_some() {
+            return crate::local_acp::attach(plan, &composition)
+                .await
+                .map_err(|error| self.0.diagnosed(error));
+        }
+        if let Some(launcher) = &composition.host_launcher {
+            launcher
+                .ensure_started(composition.paths())
+                .await
+                .map_err(|e| self.0.diagnosed(e))?;
+            let owner = rsi_service_host::ServiceHostPaths::from_host_paths(composition.paths())
+                .and_then(|paths| paths.read_metadata())
+                .map_err(|e| self.0.diagnosed(e))?
+                .ok_or_else(|| self.0.diagnosed("resident Service is unavailable"))?;
+            let supply = plan
+                .context()
+                .provide_local::<crate::application_services::RemoteServiceContract>(Arc::new(
+                    owner,
+                ))?;
+            return plan.defer(
+                "withdraw remote Service identity",
+                Box::new(move || {
+                    Box::pin(async move {
+                        drop(supply);
+                        Ok(())
+                    })
+                }),
+            );
+        }
+        let profile =
+            profile.ok_or_else(|| self.0.diagnosed("embedded service needs a Profile"))?;
         let paths = rsi_service_host::ServiceHostPaths::from_host_paths(self.0.composition.paths())
             .map_err(|error| self.0.diagnosed(error))?;
         let lease = rsi_service_host::HostOwnerLease::try_acquire(paths)
@@ -128,10 +159,12 @@ impl PluginFactory for ServiceFactory {
             context.provide_local::<ServingServiceContract>(service.clone())?,
         ];
         if self.1 {
-            let backend =
-                crate::acp_owner::backend(&running).map_err(|error| self.0.diagnosed(error))?;
-            let supply =
-                context.provide_local::<rsi_acp_agent::AgentBackendContract>(backend.clone())?;
+            let backend = crate::acp_owner::backend(running.as_ref())
+                .map_err(|error| self.0.diagnosed(error))?;
+            let supply = context
+                .provide_local::<crate::application_services::AcpAttachmentContract>(Arc::new(
+                    crate::application_services::AcpAttachment::Backend(backend.clone()),
+                ))?;
             plan.defer(
                 "close native ACP backend",
                 Box::new(move || {
@@ -340,6 +373,65 @@ async fn authorize_browser<F: std::future::Future<Output = rsi_api_protocol::Res
         return Err(error);
     }
     Ok(device)
+}
+
+#[derive(Debug)]
+pub(crate) struct BrowserAuthorityFactory;
+#[derive(Debug)]
+struct BrowserAuthority {
+    device: tokio::sync::OnceCell<RegisteredDevice>,
+    administration: Arc<dyn DeviceAdministration>,
+    configuration: Arc<rsi_configuration_access::ConfigurationAccess>,
+}
+#[async_trait]
+impl crate::application_services::LocalBrowserAdministration for BrowserAuthority {
+    async fn launch(&self) -> rsi_api_protocol::Result<RegisteredDevice> {
+        launch_once(&self.device, async {
+            let snapshot = self.configuration.snapshot().await?;
+            authorize_browser(self.administration.as_ref(), |id| async move {
+                self.configuration
+                    .set_grant(&CallOrigin::Local, id, &snapshot.revision, true)?
+                    .await
+                    .map(|_| ())
+            })
+            .await
+        })
+        .await
+    }
+}
+#[async_trait]
+impl PluginFactory for BrowserAuthorityFactory {
+    fn prepare(&self, config: &ConfigValue) -> rsi_meta::Result<PreparedActivation> {
+        if !config.is_null() {
+            return Err(rsi_meta::MetaError::InvalidInput(
+                "browser authority takes no configuration".into(),
+            ));
+        }
+        Ok(PreparedActivation::new(ConfigValue::Null)
+            .requiring_local::<rsi_api_protocol::DeviceAdministrationContract>()
+            .requiring_local::<rsi_configuration_access::ConfigurationAccessContract>())
+    }
+    async fn activate(&self, plan: ActivationPlan) -> rsi_meta::Result<()> {
+        let supply = plan
+            .context()
+            .provide_local::<crate::application_services::LocalBrowserAdministrationContract>(
+            Arc::new(BrowserAuthority {
+                device: tokio::sync::OnceCell::new(),
+                administration: plan.local::<rsi_api_protocol::DeviceAdministrationContract>()?,
+                configuration: plan
+                    .local::<rsi_configuration_access::ConfigurationAccessContract>()?,
+            }),
+        )?;
+        plan.defer(
+            "withdraw browser launch authority",
+            Box::new(move || {
+                Box::pin(async move {
+                    drop(supply);
+                    Ok(())
+                })
+            }),
+        )
+    }
 }
 
 #[cfg(test)]

@@ -166,7 +166,7 @@ async fn ssh_target_candidates_require_separate_use_manage_and_local_trust_acros
         .unwrap();
     assert_eq!(trusted.revision, "2");
     connection.selection.revision = trusted.revision.clone();
-    // This test executable has no distribution receipt, so it cannot deploy an ad hoc helper.
+    // This isolated state has no installed ssh-helper package.
     assert!(matches!(
         ssh::<Target>(&running, origin.clone(), Operation::Connect, &connection).await,
         Ok(Err(Failure::HelperUnavailable {}))

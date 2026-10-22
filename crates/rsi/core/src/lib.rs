@@ -49,7 +49,7 @@ mod application_bootstrap;
 pub use application_bootstrap::start_application;
 mod api_composition;
 mod client_composition;
-#[cfg(target_os = "linux")]
+#[cfg(any(target_os = "linux", windows))]
 pub use client_composition::{probe_service_host, workflow_restart_impact};
 #[cfg(any(target_os = "linux", windows))]
 mod acp_configuration;
@@ -58,7 +58,31 @@ mod acp_inputs;
 #[cfg(any(target_os = "linux", windows))]
 mod acp_owner;
 mod composition;
+mod import;
 mod integration_source;
+mod launch;
+#[cfg(any(target_os = "linux", windows))]
+mod local_acp;
+#[cfg(any(target_os = "linux", windows))]
+mod local_control;
+mod maintenance;
+pub use import::{
+    ImportReceipt, import_product_homes, recover_product_import, reject_pending_import,
+};
+#[cfg(any(unix, windows))]
+mod source_inputs;
+pub use application_bootstrap::APPLICATION_TRANSITION_TIMEOUT;
+pub use launch::{
+    HomeOverrides, LAUNCH_FILE, LaunchConfiguration, LaunchFrontend, LaunchProfile,
+    LaunchRepository, LaunchSource, MAXIMUM_LAUNCH_BYTES, normalize_launch_path, product_protocols,
+};
+#[cfg(any(target_os = "linux", windows))]
+pub use local_control::{
+    ConfigurationWatch, SourceBuildError, SourceBuildLease, acquire_configuration_watch,
+    acquire_source_build, reload_service_host, service_environment_matches,
+};
+pub use maintenance::{ResetReceipt, ResetSelection, maintain_product_homes};
+pub use rsi_host_control::{BuildRecipe, BuildUpdate};
 mod local_api_client;
 mod local_host;
 #[cfg(unix)]
@@ -97,13 +121,14 @@ pub use agent_preset::{
     USER_AGENT_PRESET_DIRECTORY, user_agent_preset_root,
 };
 pub use composition::{
-    HostStartupPurpose, StandardCodingTools, StandardComposition, StandardHostPreview,
-    capture_standard_environment, standard_agent_preset_root,
+    StandardCodingTools, StandardComposition, StandardHostPreview, capture_standard_environment,
+    standard_agent_preset_root,
 };
-#[cfg(target_os = "linux")]
+#[cfg(any(target_os = "linux", windows))]
 pub use local_host::StandardServiceDaemon;
 pub use local_host::{
-    ServiceHostConnection, ServiceHostConnectionMode, connect_or_embed_service_host,
+    LocalHostLauncher, ServiceHostConnection, ServiceHostConnectionMode,
+    connect_or_embed_service_host,
 };
 pub use profiles::{
     APPLICATION_PROFILE_DIRECTORY, APPLICATION_PROFILE_FILE, ApplicationProfileDocument,
@@ -123,6 +148,8 @@ use rsi_host::HostPaths;
 use std::path::{Path, PathBuf};
 
 const STARTUP_OWNERS: &[&str] = &[
+    "rsi.service.acp",
+    "rsi.service.management",
     "rsi.managed-providers",
     "rsi-history",
     "rsi.history.api",
@@ -188,7 +215,7 @@ impl RunningRsi {
         Self::start_service(composition, service_program(profile), None, Some(parent)).await
     }
 
-    #[cfg(target_os = "linux")]
+    #[cfg(any(target_os = "linux", windows))]
     pub(crate) async fn boot_daemon_profile(
         composition: StandardComposition,
         profile: &HostProfileDocument,
@@ -210,10 +237,8 @@ impl RunningRsi {
         launch_key: Option<String>,
         parent: Option<&rsi_meta::Context>,
     ) -> Result<Self> {
-        composition.agent_store_factory = composition.agent_store_reset.clone().map_or_else(
-            rsi_agent_store_sqlite::SqliteStoreFactory::default,
-            rsi_agent_store_sqlite::SqliteStoreFactory::with_reset_once,
-        );
+        let program = program.with_watch_policy(composition.source_watch.clone());
+        composition.agent_store_factory = rsi_agent_store_sqlite::SqliteStoreFactory::default();
         let store_diagnostic = composition.agent_store_factory.clone();
         let started = Box::pin(async {
             #[cfg(unix)]
@@ -226,11 +251,12 @@ impl RunningRsi {
             .await?;
             #[cfg(not(unix))]
             let owner = {
-                let _ = launch_key;
                 let paths = composition.paths().clone();
-                let host = composition
-                    .build()
-                    .map_err(|error| RsiError::Boot(error.to_string()))?;
+                let host = match launch_key.as_deref() {
+                    Some(key) => composition.build_daemon(key),
+                    None => composition.build(),
+                }
+                .map_err(|error| RsiError::Boot(error.to_string()))?;
                 match parent {
                     Some(parent) => {
                         ProfileOwner::start_scoped(host, paths, parent, program).await?
@@ -382,7 +408,7 @@ impl RunningRsi {
         )
     }
 
-    #[cfg(target_os = "linux")]
+    #[cfg(any(target_os = "linux", windows))]
     pub(crate) fn local_api_listener(
         &self,
     ) -> Result<std::sync::Arc<rsi_service_host::LocalApiListener>> {
@@ -468,10 +494,14 @@ impl RunningRsi {
 }
 
 fn service_program(profile: &HostProfileDocument) -> rsi_host::ProfileProgram {
-    profile.path.as_ref().map_or_else(
+    let program = profile.path.as_ref().map_or_else(
         || rsi_host::ProfileProgram::from_profile(rsi_host::Profile::default()),
         rsi_host::ProfileProgram::from_file,
-    )
+    );
+    match &profile.package_lease {
+        Some(lease) => program.with_source_lease(lease.clone()),
+        None => program,
+    }
 }
 
 fn required_local<C: rsi_meta::LocalContract>(

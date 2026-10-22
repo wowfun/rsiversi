@@ -13,6 +13,7 @@ use std::{
 pub struct ApplicationCatalogMetadata {
     plugins: Arc<BTreeSet<String>>,
     profiles: Arc<BTreeMap<ApplicationProfileId, Vec<u8>>>,
+    protocols: Arc<Vec<rsi_api_protocol::ProtocolDescriptor>>,
 }
 
 impl ApplicationCatalogMetadata {
@@ -59,12 +60,51 @@ impl ApplicationCatalogMetadata {
         Ok(Self {
             plugins: Arc::new(ids),
             profiles: Arc::new(documents),
+            protocols: Arc::new(Vec::new()),
         })
     }
 
     /// Reserved linked application plugin identities, without factory construction.
     pub fn plugins(&self) -> &BTreeSet<String> {
         &self.plugins
+    }
+
+    /// Adds independently negotiated interfaces; conflicting core offers are rejected.
+    pub fn with_protocols(
+        mut self,
+        protocols: Vec<rsi_api_protocol::ProtocolDescriptor>,
+    ) -> rsi_host::Result<Self> {
+        let mut names = BTreeSet::new();
+        let core = crate::product_protocols();
+        if protocols.len() > 128 {
+            return Err(rsi_host::HostError::Bootstrap(
+                "too many application interfaces".into(),
+            ));
+        }
+        for protocol in &protocols {
+            protocol
+                .validate()
+                .map_err(|e| rsi_host::HostError::Bootstrap(e.to_string()))?;
+            if !names.insert(protocol.name.clone()) {
+                return Err(rsi_host::HostError::Bootstrap(
+                    "duplicate application interface".into(),
+                ));
+            }
+            if core
+                .iter()
+                .any(|offer| offer.name == protocol.name && offer != protocol)
+            {
+                return Err(rsi_host::HostError::Bootstrap(
+                    "application interface conflicts with the linked core".into(),
+                ));
+            }
+        }
+        self.protocols = Arc::new(protocols);
+        Ok(self)
+    }
+    /// Required-only admission uses these offers in addition to core domain protocols.
+    pub fn protocols(&self) -> &[rsi_api_protocol::ProtocolDescriptor] {
+        &self.protocols
     }
 
     pub(crate) fn profiles(&self) -> &BTreeMap<ApplicationProfileId, Vec<u8>> {

@@ -2,6 +2,15 @@ use crate::{ApplicationComposition, Result, RsiError};
 use rsi_host::{ProfileProgram, RunningHost};
 use std::ffi::OsString;
 
+/// Maximum product application transition, including resident Host publication.
+pub const APPLICATION_TRANSITION_TIMEOUT: std::time::Duration = std::time::Duration::from_mins(3);
+
+pub(crate) fn runtime_limits() -> rsi_meta::RuntimeLimits {
+    let mut limits = rsi_meta::RuntimeLimits::default();
+    limits.deadlines.transition = APPLICATION_TRANSITION_TIMEOUT;
+    limits
+}
+
 /// Starts the Application Profile, including its explicitly supplied extras.
 /// Unix stages native addons in a stable bootstrap first; other platforms start directly.
 pub async fn start_application(
@@ -62,7 +71,8 @@ mod native {
             )?)
             .map_err(|error| diagnostics.take().unwrap_or_else(|| boot(error)))?;
         let diagnostic = Arc::new(std::sync::Mutex::new(None));
-        let mut builder = HostBuilder::new(composition.service.paths().clone());
+        let mut builder = HostBuilder::new(composition.service.paths().clone())
+            .runtime_limits(super::runtime_limits());
         builder
             .register_local_contract::<ApplicationRunContract>()
             .map_err(boot)?;

@@ -3,7 +3,6 @@ use rsi_service_host::SERVICE_HOST_PROTOCOL_EPOCH;
 use serde::{Deserialize, Deserializer, Serialize, Serializer};
 use sha2::{Digest as _, Sha256};
 use std::collections::BTreeSet;
-use std::ffi::OsStr;
 use std::fmt;
 use std::fs::{self, OpenOptions};
 use std::io::{Read, Write};
@@ -94,6 +93,8 @@ pub enum ProfileSource {
 /// Loaded Application Profile with resolved provenance.
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct ApplicationProfileDocument {
+    /// Pins the immutable package closure when the source is a package export.
+    pub package_lease: Option<std::sync::Arc<rsi_packages::PackageLease>>,
     /// Selected identity.
     pub id: ApplicationProfileId,
     /// Bounded ordinary Profile source; the shared compiler owns its grammar.
@@ -108,7 +109,11 @@ impl ApplicationProfileDocument {
     /// Uses native relative sources for user Profiles and an immutable bundle for builtins.
     pub fn program(&self) -> rsi_meta_profile::Result<rsi_host::ProfileProgram> {
         if let Some(path) = &self.path {
-            return Ok(rsi_host::ProfileProgram::from_file(path));
+            let program = rsi_host::ProfileProgram::from_file(path);
+            return Ok(match &self.package_lease {
+                Some(lease) => program.with_source_lease(lease.clone()),
+                None => program,
+            });
         }
         let bundle = rsi_meta_profile::ProfileBundle::new(
             APPLICATION_PROFILE_FILE,
@@ -122,6 +127,8 @@ impl ApplicationProfileDocument {
 /// Loaded Host Profile source with resolved provenance.
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct HostProfileDocument {
+    /// Pins the immutable package closure when the source is a package export.
+    pub package_lease: Option<std::sync::Arc<rsi_packages::PackageLease>>,
     /// Selected identity.
     pub id: HostProfileId,
     /// Resolved source class.
@@ -143,7 +150,6 @@ impl HostLaunchKey {
         host_profile: &HostProfileDocument,
         agent_presets: &rsi_agent_presets::AgentPresetLaunchIdentity,
         coding_tools: Option<CodingToolsLaunchIdentity<'_>>,
-        applications: &crate::ApplicationCatalogMetadata,
     ) -> Result<Self, ProfileCatalogError> {
         let mut digest = Sha256::new();
         hash_component(&mut digest, b"domain", b"rsi.session-host.launch-key.v1");
@@ -158,11 +164,6 @@ impl HostLaunchKey {
             env!("CARGO_PKG_VERSION").as_bytes(),
         );
         hash_component(&mut digest, b"composition-epoch", &2_u32.to_be_bytes());
-        hash_component(
-            &mut digest,
-            b"application-catalog",
-            applications.digest().as_bytes(),
-        );
         hash_component(
             &mut digest,
             b"host-composition",
@@ -237,33 +238,17 @@ fn hash_host_profile_root(
 ) -> Result<(), ProfileCatalogError> {
     match &host_profile.path {
         Some(path) => {
-            let profile_directory =
-                path.parent()
-                    .ok_or_else(|| ProfileCatalogError::InvalidDocument {
-                        path: path.clone(),
-                        message: "Host Profile source path has no catalog authority root".into(),
-                    })?;
-            let root =
-                profile_directory
-                    .parent()
-                    .ok_or_else(|| ProfileCatalogError::InvalidDocument {
-                        path: path.clone(),
-                        message: "Host Profile source path has no catalog authority root".into(),
-                    })?;
-            if !path.is_absolute()
-                || path.file_name() != Some(OsStr::new(HOST_PROFILE_FILE))
-                || profile_directory.file_name() != Some(OsStr::new(host_profile.id.as_str()))
-                || root.file_name() != Some(OsStr::new(HOST_PROFILE_DIRECTORY))
-            {
+            if !path.is_absolute() || path.file_name().is_none() {
                 return Err(ProfileCatalogError::InvalidDocument {
                     path: path.clone(),
-                    message: format!(
-                        "Host Profile source path must end in {HOST_PROFILE_DIRECTORY}/{}/{HOST_PROFILE_FILE}",
-                        host_profile.id.as_str()
-                    ),
+                    message: "Host Profile source must name an absolute file".into(),
                 });
             }
-            hash_path(digest, b"host-profile-root", root);
+            let parent = path.parent().expect("absolute file has parent");
+            let canonical = fs::canonicalize(parent)
+                .map_err(|error| io("resolve", parent, error))?
+                .join(path.file_name().expect("checked file name"));
+            hash_path(digest, b"host-profile-source", &canonical);
         }
         None => hash_component(digest, b"host-profile-root", b"builtin"),
     }
@@ -311,6 +296,16 @@ impl ProfileCatalog {
         &self.paths
     }
 
+    pub(crate) fn protocols(&self) -> Vec<rsi_api_protocol::ProtocolDescriptor> {
+        let mut offers = crate::product_protocols();
+        for protocol in self.applications.protocols() {
+            if !offers.contains(protocol) {
+                offers.push(protocol.clone());
+            }
+        }
+        offers
+    }
+
     /// Returns the exact user path for one Application Profile.
     pub fn application_path(&self, id: &ApplicationProfileId) -> PathBuf {
         self.paths
@@ -342,6 +337,7 @@ impl ProfileCatalog {
         if let Some(contents) = self.applications.profiles().get(id) {
             reject_shadow("Application Profile", id.as_str(), &path)?;
             return Ok(ApplicationProfileDocument {
+                package_lease: None,
                 id: id.clone(),
                 contents: contents.clone(),
                 source: ProfileSource::Builtin,
@@ -358,6 +354,7 @@ impl ProfileCatalog {
             return Err(ProfileCatalogError::LegacyApplication { path });
         }
         Ok(ApplicationProfileDocument {
+            package_lease: None,
             id: id.clone(),
             contents,
             source: ProfileSource::User,
@@ -371,6 +368,7 @@ impl ProfileCatalog {
         if id.as_str() == STANDARD_HOST_PROFILE {
             reject_shadow("Host Profile", id.as_str(), &path)?;
             return Ok(HostProfileDocument {
+                package_lease: None,
                 id: id.clone(),
                 source: ProfileSource::Builtin,
                 path: None,
@@ -379,6 +377,7 @@ impl ProfileCatalog {
         }
         let contents = read_regular_file(&path, MAXIMUM_PROFILE_DOCUMENT_BYTES)?;
         Ok(HostProfileDocument {
+            package_lease: None,
             id: id.clone(),
             source: ProfileSource::User,
             path: Some(path),
@@ -615,7 +614,10 @@ fn reject_builtin_target(
     }
 }
 
-fn read_regular_file(path: &Path, maximum: usize) -> Result<Vec<u8>, ProfileCatalogError> {
+pub(crate) fn read_regular_file(
+    path: &Path,
+    maximum: usize,
+) -> Result<Vec<u8>, ProfileCatalogError> {
     let mut options = OpenOptions::new();
     options.read(true);
     #[cfg(unix)]

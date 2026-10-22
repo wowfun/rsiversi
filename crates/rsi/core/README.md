@@ -1,9 +1,22 @@
 # rsi
 
-`HostStartupPurpose::Development` changes only Host-conflict recovery advice.
-It preserves the normal launch identity and connection/ownership rules while
-recommending an idle Host or independent XDG state instead of restarting the
-daily daemon. It grants no reset or daemon-start authority.
+Product service applications receive an active `RemoteServiceContract` after
+Host startup and native identity validation. They own their transport attachment,
+not a second service generation. The Host supplies local browser authorization
+once per generation through an ordinary plugin; additional launch tickets do not
+rotate the managed credential.
+
+Native ACP applications attach to the resident Host through the ordinary
+`rsi.service.acp` plugin. Each admitted stream checks a bounded ACP attachment
+descriptor and owns one backend; a disconnected editor retires its backend's
+attachments without taking ownership of the Host or creating another Store.
+
+The [product launch contract](docs/launch.md) owns explicit home resolution,
+launch documents and maintenance boundaries.
+
+Debug and release share launch identity, ownership and recovery rules. Explicit
+home options and leased `--watch` select the operator's intended environment;
+there is no separate development launch purpose.
 
 The standard Windows Web, TUI and ACP composition exposes native Files and explicit native
 Bash tools. Full Process output caching and its `output_read` contribution are
@@ -96,15 +109,15 @@ API responses; connection preparation copies the verified bounded file into priv
 connection-owned storage. Replacing that file requires another Local confirmation.
 
 Connection requests require target Use independently of configuration or management
-grants. The manager caches a fully verified immutable helper image or verified
-TUI helper omission for its service generation. Invalid artifacts and failed
-initialization remain retryable; service restart establishes a fresh cache.
-Installed application families remain immutable during that lifetime; changing
-the family requires a service restart. The manager verifies the helper against
-the adjacent distribution receipt before caching it. The native image, compiled
-family and immutable manifest must agree before an omission is classified.
+grants. Each new connection resolves the independently installed `ssh-helper`
+package from the selected state home. Its native target, executable export,
+exact file digest and `rsi.ssh.helper` interface must match. The connection retains
+the immutable package lease until shutdown; a later installation affects only
+new connections. Missing or invalid packages remain retryable without restarting
+the Host. No adjacent core receipt or shared build-family identity is required.
+Package-writer contention returns `Busy`, independently of helper validity.
 Both omission and invalid artifacts return `HelperUnavailable`; presentation
-owns the rebuild guidance, and the service does not write to the terminal.
+owns the installation guidance, and the service does not write to the terminal.
 Each connection uploads the complete image and publishes one new connection
 epoch after initialization. Target edits and connection
 publication share a bounded writer; a lost API waiter does not abandon accepted work.
@@ -131,9 +144,9 @@ come from rsi-terminal. Initial Profile preparation validates application argume
 before this connection plugin activates. The launcher invokes ApplicationRun and
 disposes the one enclosing Runtime.
 
-The Linux `acp` Application Profile selects `rsi.application.acp-service` and
-`rsi.application.acp`. Its Service uses the ordinary native Host owner lease;
-the Application owns only stdio and signals. Custom Application Profiles may
+The Windows and Linux `acp` Application Profile selects `rsi.application.acp-service`
+and `rsi.application.acp`. Each attachment has its own ACP backend under the
+shared Host; the Application owns stdio and signals. Custom Application Profiles may
 choose another Host Profile through the ACP Service factory's `host_profile`.
 The entry accepts no application flags and writes only ACP NDJSON to stdout.
 
@@ -151,13 +164,12 @@ submission reconciliation and observation cursor/retry policy live in
 [rsi-client](../client/README.md).
 
 The standard catalog links providers but does not select or enable a deployment.
-Windows Web, TUI and ACP use an application-owned embedded Service and the same private
-Session composition and durable backend as other native consumers. Its backend
-retires before that Service; it does not start or impersonate the Linux daemon.
-The Windows `devices` Profile explicitly opens this embedded composition for offline
-administration. A running Web or TUI must be stopped first; ownership contention
-fails without replacing or taking over the running Host. Other operator Profiles
-retain their Linux local-transport requirement.
+Windows and Linux Web, TUI, ACP and operator applications share the resident
+Service and its private Session composition and durable backend. ACP backend
+retirement releases only its attachment. `devices` uses the same operator
+connection, including while graphical and terminal clients remain attached.
+The [Host lifecycle contract](../docs/subsystems/host-lifecycle.md) owns process
+identity, shared ownership and explicit SDK embedding.
 The [ACP application](../../../apps/acp/README.md) owns stdio and signal policy.
 A missing default model is a valid unconfigured Agent defaults document. The
 defaults plugin and its Settings namespace remain active; new Session creation
@@ -239,7 +251,7 @@ listener under exact Profile convergence. It produces no listener replacement or
 intermediate final listener diagnostic; the retained listener reports its final
 diagnostics at shutdown.
 
-`rsi --profile NAME [application arguments]` selects one named Application
+`rsi run NAME [application arguments]` selects one named Application
 Profile. The built-in `headless` application accepts one positional task or
 `--stdin`; `cli` is the line-oriented interactive application. Both drive
 the same `SessionService` surface, subscribe strictly after the durable
@@ -302,7 +314,9 @@ Admission and task registration share the shutdown lock; abandoned preparation
 retains ownership until its MCP processes and composition are retired.
 Closing a preparing root cancels that exact build and awaits its cleanup. The
 ACP Session owner registers roots before preparation so connection shutdown can
-retire unpublished inputs as well as attached Sessions.
+retire unpublished inputs as well as attached Sessions. Shutdown attempts every
+owned Session even if an earlier close fails. Session claims weakly reference
+their connection owner; expired owners are pruned before admitting a new claim.
 
 The preset catalog and its Settings namespace registration belong to an ordinary
 catalog plugin. AgentPresetManager observes that capability and owns its Profile
@@ -319,37 +333,8 @@ from Profile errors. A schema mismatch reports the configured Store root, expect
 and actual versions, the absence of automatic migration, and the explicit
 `--reset-state` recovery option. Ordinary startup preserves the existing Store.
 
-The daemon publishes a reset receipt as soon as the old root has been moved to
-its backup, before initializing the replacement Store or waiting for other startup
-work, so a timeout during later startup work still leaves the caller with its backup path.
-If the daemon exits before publishing any receipt, the launcher uses its ordinary
-startup-exit diagnostic and identifies the daemon log; empty EOF is not a malformed
-receipt. A partial or malformed frame remains an explicit receipt error.
-Each Service boot owns a fresh diagnostic slot, independent of cloned compositions.
-
-`rsi tui --reset-state`, `rsi --profile NAME --reset-state`, and Linux
-`rsi host start|serve|restart --reset-state` request a one-time backup and fresh
-Agent Store, including when the existing schema is current. Only the configured
-SQLite Agent Store is reset; configuration, credentials, Media, other state and
-caches remain intact. For applications, the launcher consumes the option only
-immediately after `tui` or `--profile NAME`, before any application arguments.
-Later tokens, including option values and everything after `--`, belong to the
-application. Help never resets state. Application arguments and Profiles prepare before mutation. Remote
-HTTP and operator-only connections reject the option. Reset requires exclusive
-Host ownership instead of connecting to an existing daemon; stop that owner first
-or use `host restart --reset-state`.
-
-The request is process-local, shared across composition clones, excluded from
-launch identity, and consumed once, so Profile reload cannot reset again. The
-[SQLite backend](../../rsi-agent/store-sqlite/README.md) owns backup, locking and
-fresh Store creation. The launcher reports escaped original and backup paths on
-stderr before running the application, including after a later startup failure.
-Detached startup returns that receipt through a bounded startup pipe to its
-launcher. A successful startup must have consumed an explicit reset request;
-unconsumed requests stop the new application or daemon and report an error.
-Receipt publication failure retains any original startup error in the diagnostic.
-Missing Stores initialize without a backup. Backups are never pruned
-automatically. No confirmation prompt or automatic migration is performed.
+Product resets and explicit imports follow the [launch maintenance contract](docs/launch.md).
+The launcher completes recoverable archival before starting providers.
 
 Application startup may use the last published role catalog so linked management
 surfaces remain available after a failed native candidate. New Agent selection
@@ -569,8 +554,10 @@ dependency through worker retirement. Pure Host preview never opens the store or
 records do not enter the Host launch key. Agent composition requires the Local
 source supply, so activation and recovery cannot precede initial staging.
 
-The manager Fiber owns one worker and one Loader for its activation. The worker
-polls desired metadata once per second and attempts each enabled selection once;
+The manager Fiber owns one worker and one Loader for its activation. With an
+explicit source-watch lifetime, the worker polls desired metadata once per second
+and attempts each enabled selection once; ordinary startup stages once and
+observes subsequent publication only through explicit refresh.
 an unchanged failed native candidate is retried only through explicit refresh.
 Malformed source metadata can recover when valid metadata becomes readable again.
 `NativeAddonControlContract` supplies bounded inspection and explicit asynchronous
@@ -587,7 +574,7 @@ activation, then looks up Profile control and native management at each read;
 this avoids a parent Profile activation dependency cycle. Whole-Runtime inspection
 is a privileged local operator operation. The frozen factory holds only redacted
 immutable declaration metadata, finalized before Host build; it owns no Runtime.
-`rsi --profile inspector` connects to an existing local Service Host through the
+`rsi run inspector` connects to an existing local Service Host through the
 operator connection and never starts a service or creates a Session implicitly.
 
 The binary's [native source commands](../docs/subsystems/composition-and-profiles.md)
@@ -679,9 +666,12 @@ command remains an explicit request to select the latest installed record.
 runs one managed build and reports installation separately from optional explicit
 enable. `rsi addon watch MANIFEST` accepts the same options and polls bounded
 explicit inputs once per second, building initially and after a changed fingerprint.
+The CLI freezes the caller's scrubbed child environment; credential variables
+and shell loader overrides are not forwarded to build commands.
 It requires a nonempty watch declaration. Unchanged command failures are not
 repeated; edited inputs permit another attempt. The captured source directory
-and addon id remain fixed while manifest edits can update the build declaration.
+and complete build declaration remain fixed. Editing the manifest ends this
+authority and requires a new explicit invocation.
 An input parse/read failure suspends execution and is reported once until it
 changes; losing directory authority ends the watch. No OS watcher is installed.
 
@@ -734,8 +724,8 @@ skill discovery captures `FOLDERID_Profile` regardless of HOME and skips an
 unavailable or non-absolute result. These lookups
 do not create directories and do not consult HOME.
 They provide locations, not permission or confinement proofs.
-Windows ACP uses an embedded Service with native private stores and byte-verified
-shipped presets. Other application and provider platform limits still apply;
+Windows ACP uses the shared Host with native private stores and byte-verified
+shipped presets. Application and provider platform limits still apply;
 successful pure preview establishes catalog resolution only.
 
 On Unix, personal skill discovery skips missing, empty or relative HOME values.
@@ -810,9 +800,11 @@ contracts belong to [Agent Program](../../rsi-agent/program/README.md).
 `ApplicationCatalogMetadata` freezes reserved application plugin IDs and built-in
 Application Profile documents. `StandardComposition` and `ProfileCatalog` require
 this input; the Service daemon receives the same metadata as its native clients.
-Its deterministic digest contributes to the Service launch key. Application
-arguments, Web paths and window extras do not. Native staging reserves the frozen
-IDs without constructing application factories.
+Its deterministic digest describes the application catalog and does not
+contribute to Service connection identity. Application arguments, Web paths and
+window extras likewise remain application inputs. Native staging reserves the
+frozen IDs without constructing application factories. Interface offers are
+independently checked; a same-name offer must agree with the linked core.
 
 `ApplicationCatalogProvider` creates application declarations and bounded
 owner diagnostics against the current Service composition. `ApplicationComposition`

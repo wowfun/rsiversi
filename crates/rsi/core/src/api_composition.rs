@@ -1,3 +1,4 @@
+use crate::application_services::LocalBrowserAdministrationContract;
 use rsi_host::{ProfileEntry, ProfileFragment};
 use rsi_meta::UpdateMode;
 use serde_json::{Value, json};
@@ -20,6 +21,7 @@ pub(crate) fn register(
     builder.register_local_contract::<EndpointIdentityContract>()?;
     builder.register_local_contract::<DeviceAdministrationContract>()?;
     builder.register_local_contract::<DeviceAuthenticationContract>()?;
+    builder.register_local_contract::<LocalBrowserAdministrationContract>()?;
     builder.register_local_contract::<rsi_ui::UiContract>()?;
     builder.register_local_contract::<rsi_ui_api::UiTargetBinderContract>()?;
     builder.register_linked(
@@ -28,7 +30,7 @@ pub(crate) fn register(
         UpdateMode::Replayable,
         std::sync::Arc::new(rsi_ui_portable::PortableUiFactory),
     )?;
-    #[cfg(unix)]
+    #[cfg(any(unix, windows))]
     {
         builder.register_local_contract::<rsi_service_host::LocalApiListenerContract>()?;
         builder.register_linked(
@@ -37,8 +39,22 @@ pub(crate) fn register(
             UpdateMode::RestartRequired,
             std::sync::Arc::new(rsi_service_host::LocalApiFactory),
         )?;
+        builder.register_local_contract::<rsi_service_host::LifecycleControlContract>()?;
+        builder.register_linked(
+            "rsi.service.lifecycle",
+            env!("CARGO_PKG_VERSION"),
+            UpdateMode::RestartRequired,
+            std::sync::Arc::new(rsi_service_host::LifecycleFactory),
+        )?;
     }
     let factories = factories();
+    #[cfg(any(target_os = "linux", windows))]
+    builder.register_linked(
+        "rsi.service.acp",
+        env!("CARGO_PKG_VERSION"),
+        UpdateMode::RestartRequired,
+        std::sync::Arc::new(crate::local_acp::ListenerFactory),
+    )?;
     let mut entries = Vec::with_capacity(factories.len());
     for (id, factory) in factories {
         builder.register_linked(
@@ -92,8 +108,8 @@ pub(crate) fn register(
     Ok(())
 }
 
-fn factories() -> [(&'static str, std::sync::Arc<dyn rsi_meta::PluginFactory>); 23] {
-    [
+fn factories() -> Vec<(&'static str, std::sync::Arc<dyn rsi_meta::PluginFactory>)> {
+    vec![
         (
             "rsi.workspace-review.api",
             std::sync::Arc::new(rsi_workspace_review::WorkspaceReviewApiFactory),
@@ -176,6 +192,11 @@ fn factories() -> [(&'static str, std::sync::Arc<dyn rsi_meta::PluginFactory>); 
         (
             "rsi.session.files.api",
             std::sync::Arc::new(rsi_session_files::SessionFilesApiFactory),
+        ),
+        #[cfg(any(target_os = "linux", windows))]
+        (
+            "rsi.browser.authority",
+            std::sync::Arc::new(crate::application_connection::service::BrowserAuthorityFactory),
         ),
     ]
 }

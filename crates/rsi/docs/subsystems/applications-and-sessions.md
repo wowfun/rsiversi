@@ -4,22 +4,22 @@ Native Session artifacts use the shared [Session export contract](../../session-
 The [terminal](../../../../apps/terminal/README.md) and [GUI](../../gui/README.md) entrypoints authorize
 the selected handle and deliver the same fixed-cut Markdown or JSON stream.
 
-On Linux, `serve` composes a publishing Service Host and the independent
-[HTTP application](../../../../apps/serve/README.md) in one Runtime. Configure the standard Host's
-explicit `rsi.agent.default_model` setting and provider Profile before serving
-coding Sessions. For an isolated development listener use
-`rsi --profile serve --bind 127.0.0.1:8787 --origin http://127.0.0.1:8787 --dev-http`.
+On Windows and Linux, `rsi serve` attaches an independent authenticated
+[HTTP listener](../../../../apps/serve/README.md) to the selected resident Host.
+Configure that Host's explicit `rsi.agent.default_model` setting and provider
+Profile before serving coding Sessions. For an isolated development listener use
+`rsi serve --bind 127.0.0.1:8787 --origin http://127.0.0.1:8787 --dev-http`.
 Production instead supplies an HTTPS origin, `--tls-certificate FILE` and
-`--tls-key FILE`. HTTP always requires device authentication; the same process
-also publishes the existing same-user local endpoint. `host status`, `reload`
-and `stop` address that owner normally. `host serve` remains the foreground
-local-daemon management entry. Compose the independent [Web assets plugin](../../web-assets/README.md)
-with the HTTP application to serve the [Web application](../../../../apps/web-worker/README.md).
+`--tls-key FILE`. API calls require device authentication. Closing Serve retires
+its listener; `host status`, `reload` and `stop` address the shared owner normally.
+`host serve` remains the foreground local-daemon management entry. Pass
+`--assets ABSOLUTE_DIRECTORY` to Serve to admit an independent
+[Web bundle](../../web-assets/README.md) on the same authenticated listener.
 The [Web build and launch reference](../../../../apps/web/README.md) provides
 the application Profile and bundle command. Its Rust Worker owns shared client
 controllers and two independent panes; the document renders views and forwards input.
 
-`rsi --profile inspector runtime [AFTER_FIBER]`, `profile [OFFSET]`,
+`rsi run inspector runtime [AFTER_FIBER]`, `profile [OFFSET]`,
 `factories [OFFSET]` and `native` read one finite local operator JSON page from
 an existing Linux Service Host. The response includes its next cursor and total;
 Inspector does not create a Session or start a missing service. It shows actual
@@ -27,7 +27,7 @@ runtime ownership, redacted Profile nodes, frozen factory provenance, and native
 selection/retention. [Inspector](../../inspector/README.md) owns its wire and paging
 contract; authoring remains under the explicit Profile management commands.
 
-`rsi --profile devices register LABEL` returns one JSON receipt with EndpointId,
+`rsi run devices register LABEL` returns one JSON receipt with EndpointId,
 device id, label and its one-time token. `list` returns non-secret records;
 `revoke DEVICE_ID` revokes that exact device. These commands use the live owner's
 same-user local API and never edit its credential database independently. Keep

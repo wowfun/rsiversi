@@ -2,8 +2,13 @@
 #![deny(unsafe_code)]
 #![warn(missing_docs)]
 
+mod attachment;
 mod prompt;
 mod replay;
+pub use attachment::{
+    AttachmentHello, MAX_ATTACHMENT_HELLO, attachment_protocol, decode_attachment_hello,
+    decode_attachment_length, encode_attachment_hello,
+};
 
 /// Explicit native backend authority supplied to the stdio Application addon.
 #[derive(Debug)]

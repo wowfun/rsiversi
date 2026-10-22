@@ -7,6 +7,7 @@ license.workspace = true
 publish = false
 
 [dependencies]
+rsi-api-protocol = { path = "../../rsi-api/protocol" }
 rsi-meta = { path = "../../rsi-meta/core" }
 rsi-acp = { path = "../../rsi-acp/core" }
 rsi-acp-protocol = { path = "../../rsi-acp/protocol" }
@@ -23,6 +24,9 @@ getrandom.workspace = true
 hex.workspace = true
 tokio = { workspace = true, features = ["time", "sync", "macros"] }
 tokio-util.workspace = true
+
+[build-dependencies]
+rsi-api-schema-build = { path = "../../rsi-api/schema-build" }
 
 [lints]
 workspace = true

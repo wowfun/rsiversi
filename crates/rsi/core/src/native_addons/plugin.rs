@@ -49,6 +49,7 @@ pub(crate) struct NativeAddonFactory {
     pub(crate) require_service_owner: bool,
     /// Bootstrap stages native catalogs before the Service's integration owners exist.
     pub(crate) capture_service_inputs: bool,
+    pub(crate) source_watch: rsi_meta_profile::SourceWatchPolicy,
     pub(crate) reserved: Arc<std::sync::OnceLock<std::collections::BTreeSet<String>>>,
 }
 
@@ -325,6 +326,8 @@ async fn run(
     ready: oneshot::Sender<rsi_meta::Result<Arc<NativeAddonManager>>>,
     owner_lease: Option<Arc<rsi_service_host::HostOwnerLease>>,
 ) -> rsi_meta::Result<()> {
+    let source_policy = factory.source_watch.clone();
+    let mut source_watch = source_policy.subscribe();
     let initialized = execution
         .prepare(move || factory.open())
         .await
@@ -351,6 +354,7 @@ async fn run(
         let _initial_attempt = refresh(&execution, &manager, false).await?;
         if ready.send(Ok(manager.clone())).is_err() { return Ok(()); }
         loop {
+            let watching = *source_watch.borrow_and_update();
             tokio::select! {
                 biased;
                 () = owner.stop.cancelled() => return Ok(()),
@@ -362,7 +366,8 @@ async fn run(
                         let _ = reply.send(result);
                     }
                 }
-                () = execution.sleep(Duration::from_secs(1)) => { let _attempt = refresh(&execution, &manager, false).await?; }
+                _ = source_watch.changed() => {}
+                () = execution.sleep(Duration::from_secs(1)), if watching => { let _attempt = refresh(&execution, &manager, false).await?; }
             }
         }
     }.await;

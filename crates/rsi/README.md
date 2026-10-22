@@ -14,8 +14,8 @@ For ordinary use, follow [your first conversation](../../docs/user/first-convers
 
 Windows native Agent/ACP workspaces and private state require fixed local NTFS;
 ReFS Dev Drives, exFAT and network roots are refused by the current filesystem
-backend. Windows Web, Desktop, TUI and ACP own an embedded Service with one owner per Host;
-stop it before another application or the offline `devices` manager uses that Host.
+backend. Ordinary Windows and Linux applications attach to the same resident
+Service Host. Closing an attachment leaves the Host and other attachments alive.
 Windows SQLite storage requires
 private parent directories, including pre-existing ones. See the owning
 [filesystem contract](../rsi-files/native-fs/README.md) and
@@ -23,10 +23,9 @@ private parent directories, including pre-existing ones. See the owning
 
 ## Applications
 
-`rsi tui` (equivalently `rsi --profile tui`) selects the fullscreen text
-application. A custom Application Profile uses `rsi --profile NAME`. The launcher
-also accepts the explicit [Agent Store reset option](core/README.md), for example
-`rsi tui --reset-state`, before forwarding application arguments.
+`rsi tui` selects the fullscreen text application. A custom Application Profile
+uses `rsi run NAME`. Global home, watch and reset options precede the application;
+the [launch contract](core/docs/launch.md) defines their shared behavior.
 The [terminal package](../../apps/terminal/README.md) owns startup,
 Home, setup, input, controller lifetime and terminal cleanup. Its
 [interaction design](../../apps/terminal/docs/tui-design.md) owns terminal layout,

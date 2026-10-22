@@ -4,8 +4,6 @@ use rsi_configuration_api::leaf::{CatalogRequest, Client, SetGrant};
 #[cfg(unix)]
 use serde::Deserialize;
 #[cfg(unix)]
-use sha2::{Digest, Sha256};
-#[cfg(unix)]
 use std::{io::Read, sync::Arc};
 
 #[cfg(unix)]
@@ -49,10 +47,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     if !rsi_service_host::owner_process_is_current(&owner)? {
         return Err("stale owner".into());
     }
-    let mut key = Sha256::new();
-    key.update(b"rsi.local.api.v1\0");
-    key.update(owner.launch_key.as_bytes());
-    key.update(owner.product_build.as_bytes());
+    let compatibility = rsi_service_host::local_compatibility_key(&owner.launch_key)?;
     let api = Arc::new(
         rsi_api_uds_client::UdsClient::connect(
             rsi_meta::Execution::native(tokio::runtime::Handle::current()),
@@ -60,9 +55,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
                 socket: owner.socket_path.ok_or("missing isolated socket")?,
                 endpoint_id: owner.endpoint_id.ok_or("missing endpoint")?,
                 host_epoch: owner.host_epoch,
-                compatibility: rsi_api_protocol::LocalCompatibilityKey::from_bytes(
-                    key.finalize().into(),
-                ),
+                compatibility,
             },
         )
         .await?,

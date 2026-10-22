@@ -16,28 +16,34 @@ use std::{
     sync::{Arc, Mutex},
 };
 
-pub(crate) fn backend(running: &crate::RunningRsi) -> crate::Result<Arc<dyn AgentBackend>> {
+pub(crate) trait BackendServices {
+    fn required<C: rsi_meta::LocalContract>(&self) -> crate::Result<Arc<C::Service>>;
+}
+impl BackendServices for crate::RunningRsi {
+    fn required<C: rsi_meta::LocalContract>(&self) -> crate::Result<Arc<C::Service>> {
+        crate::required_local::<C>(&self.host, C::KEY)
+    }
+}
+impl BackendServices for rsi_meta::Context {
+    fn required<C: rsi_meta::LocalContract>(&self) -> crate::Result<Arc<C::Service>> {
+        self.lookup_local::<C>()
+            .ok_or_else(|| crate::RsiError::Boot(format!("{} is unavailable", C::KEY)))
+    }
+}
+pub(crate) fn backend(source: &impl BackendServices) -> crate::Result<Arc<dyn AgentBackend>> {
     let owner = Arc::new(Owner {
-        sessions: running.session_service()?,
-        drafts: crate::required_local::<rsi_session_protocol::SessionDraftControlContract>(
-            &running.host,
-            "draft lifetime",
-        )?,
-        workspaces: running.workspace_registry()?,
-        store: crate::required_local::<rsi_agent_store_protocol::SessionStoreContract>(
-            &running.host,
-            "Agent Store",
-        )?,
-        inputs: crate::required_local::<InputsContract>(&running.host, "ACP private inputs")?,
-        models: running.language_models()?,
+        sessions: source.required::<rsi_session_protocol::SessionContract>()?,
+        drafts: source.required::<rsi_session_protocol::SessionDraftControlContract>()?,
+        workspaces: source.required::<rsi_workspace_protocol::WorkspaceRegistryContract>()?,
+        store: source.required::<rsi_agent_store_protocol::SessionStoreContract>()?,
+        inputs: source.required::<InputsContract>()?,
+        models: source.required::<rsi_ai_protocol::LanguageModelsContract>()?,
         attached: Mutex::new(BTreeSet::new()),
+        attachment: Arc::new(()),
     });
     Ok(Arc::new(rsi_acp_agent::NativeAgent::new(
         owner,
-        crate::required_local::<rsi_agent_turn_protocol::TurnServiceContract>(
-            &running.host,
-            "Agent turns",
-        )?,
+        source.required::<rsi_agent_turn_protocol::TurnServiceContract>()?,
     )))
 }
 #[derive(Debug)]
@@ -49,6 +55,7 @@ struct Owner {
     inputs: Arc<PrivateInputs>,
     models: Arc<dyn rsi_ai_protocol::LanguageModels>,
     attached: Mutex<BTreeSet<SessionId>>,
+    attachment: Arc<()>,
 }
 #[async_trait]
 impl rsi_acp_agent::SessionOwner for Owner {
@@ -64,6 +71,7 @@ impl rsi_acp_agent::SessionOwner for Owner {
         getrandom::fill(&mut entropy).map_err(|_| Failure::Backend)?;
         let id = SessionId::new(format!("acp-{}", hex::encode(entropy)))
             .map_err(|_| Failure::Backend)?;
+        self.inputs.claim(&id, &self.attachment)?;
         self.attached
             .lock()
             .expect("ACP owned Sessions")
@@ -95,11 +103,13 @@ impl rsi_acp_agent::SessionOwner for Owner {
                 Ok(handle)
             }
             Err(error) => {
-                let _cleanup = self.inputs.close(&id).await;
-                self.attached
-                    .lock()
-                    .expect("ACP owned Sessions")
-                    .remove(&id);
+                if self.inputs.close(&id).await.is_ok() {
+                    self.inputs.release_claim(&id, &self.attachment);
+                    self.attached
+                        .lock()
+                        .expect("ACP owned Sessions")
+                        .remove(&id);
+                }
                 Err(error)
             }
         }
@@ -157,6 +167,7 @@ impl rsi_acp_agent::SessionOwner for Owner {
             }
             Err(_) => return Err(Failure::Backend),
         };
+        self.inputs.claim(&id, &self.attachment)?;
         let newly_attached = self
             .attached
             .lock()
@@ -172,8 +183,8 @@ impl rsi_acp_agent::SessionOwner for Owner {
             )
             .await;
         if let Err(error) = result {
-            if newly_attached {
-                let _cleanup = self.inputs.close(&id).await;
+            if newly_attached && self.inputs.close(&id).await.is_ok() {
+                self.inputs.release_claim(&id, &self.attachment);
                 self.attached
                     .lock()
                     .expect("ACP owned Sessions")
@@ -258,6 +269,7 @@ impl rsi_acp_agent::SessionOwner for Owner {
             return Err(Failure::Busy);
         }
         self.inputs.close(session).await?;
+        self.inputs.release_claim(session, &self.attachment);
         self.attached
             .lock()
             .expect("ACP owned Sessions")
@@ -265,13 +277,49 @@ impl rsi_acp_agent::SessionOwner for Owner {
         Ok(())
     }
     async fn shutdown(&self) -> Result<(), Failure> {
-        let sessions = std::mem::take(&mut *self.attached.lock().expect("ACP owned Sessions"));
-        for session in sessions {
-            if self.drafts.release_draft(&session) == DraftRelease::Busy {
-                return Err(Failure::Busy);
-            }
-            self.inputs.close(&session).await?;
+        let sessions = self.attached.lock().expect("ACP owned Sessions").clone();
+        close_all(
+            sessions
+                .iter()
+                .map(|session| self.close(session))
+                .collect::<Vec<_>>(),
+        )
+        .await
+    }
+}
+
+async fn close_all(
+    operations: impl IntoIterator<Item = impl std::future::Future<Output = Result<(), Failure>>>,
+) -> Result<(), Failure> {
+    let mut failure = None;
+    for operation in operations {
+        if let Err(error) = operation.await {
+            failure.get_or_insert(error);
         }
-        Ok(())
+    }
+    failure.map_or(Ok(()), Err)
+}
+#[cfg(test)]
+mod shutdown_tests {
+    use super::*;
+    #[tokio::test]
+    async fn failure_does_not_skip_later_session_cleanup() {
+        let completed = Mutex::new(Vec::new());
+        let result = close_all((0..3).map(|id| {
+            let completed = &completed;
+            async move {
+                completed.lock().unwrap().push(id);
+                if id == 0 {
+                    Err(Failure::Busy)
+                } else if id == 2 {
+                    Err(Failure::Backend)
+                } else {
+                    Ok(())
+                }
+            }
+        }))
+        .await;
+        assert!(matches!(result, Err(Failure::Busy)));
+        assert_eq!(*completed.lock().unwrap(), [0, 1, 2]);
     }
 }

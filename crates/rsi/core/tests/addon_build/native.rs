@@ -10,12 +10,15 @@ async fn managed_sdk_build_publishes_bytes_that_the_independent_loader_admits_ex
         .unwrap();
     let path = manifest(
         &root.join("source"),
-        "set -e\n\"$CARGO\" build --locked --offline --manifest-path \"$RSI_FIXTURE_MANIFEST\" --target-dir \"$CARGO_TARGET_DIR\"\ncp \"$CARGO_TARGET_DIR/debug/$RSI_LIBRARY\" artifact.bin\n",
+        "set -e\n(cd \"$(dirname \"$RSI_FIXTURE_MANIFEST\")\"; \"$CARGO\" build --locked --offline --manifest-path \"$RSI_FIXTURE_MANIFEST\" --target-dir \"$CARGO_TARGET_DIR\")\ncp \"$CARGO_TARGET_DIR/debug/$RSI_LIBRARY\" artifact.bin\n",
     );
+    // This fixture verifies exact SDK byte admission, not compiler speed.
+    // Cold offline compilation needs its own budget; deadline and cancellation
+    // behavior have small deterministic fixtures in boundaries.rs.
     let text = fs::read_to_string(&path)
         .unwrap()
         .replace("fixture.build-plugin", "fixture.native-addon")
-        .replace("timeout_seconds = 1", "timeout_seconds = 120");
+        .replace("timeout_seconds = 1", "timeout_seconds = 600");
     fs::write(&path, text).unwrap();
     let build = Arc::new(NativeAddonBuild::open(&path).unwrap());
     let store = Arc::new(NativeAddonStore::open(root.join("store")).unwrap());
@@ -57,6 +60,13 @@ async fn managed_sdk_build_publishes_bytes_that_the_independent_loader_admits_ex
         if let Some(value) = std::env::var_os(name) {
             environment.push((name.into(), value));
         }
+    }
+    // A standalone test executable lacks the environment normally inherited
+    // from Cargo's rustup shim. Keep registry build-script rustc invocations on
+    // the exact toolchain that compiled this test, even outside the repository.
+    if let Some(toolchain) = option_env!("RUSTUP_TOOLCHAIN") {
+        environment.retain(|(name, _)| name != "RUSTUP_TOOLCHAIN");
+        environment.push(("RUSTUP_TOOLCHAIN".into(), toolchain.into()));
     }
     let report = manager
         .service()

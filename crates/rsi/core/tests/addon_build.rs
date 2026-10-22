@@ -22,6 +22,25 @@ async fn manager(root: &Path) -> NativeAddonBuildManager {
     .await
     .unwrap()
 }
+
+#[test]
+fn watched_build_cannot_silently_replace_its_captured_command() {
+    let root = tempfile::tempdir().unwrap();
+    let path = manifest(root.path(), "cp input artifact.bin\n");
+    let build = NativeAddonBuild::open(&path).unwrap();
+    let original = fs::read_to_string(&path).unwrap();
+    fs::write(root.path().join("input"), b"edited source").unwrap();
+    assert!(build.reopen().is_ok());
+    fs::write(&path, original.replace("build.sh", "another-command.sh")).unwrap();
+    assert!(matches!(
+        build.reopen(),
+        Err(rsi::NativeAddonError::Conflict)
+    ));
+    assert!(
+        NativeAddonBuild::open(&path).is_ok(),
+        "a new explicit capture owns the edited recipe"
+    );
+}
 #[tokio::test]
 async fn explicit_build_installs_settled_output_without_enabling_and_failed_build_keeps_old_record()
 {

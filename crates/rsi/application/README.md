@@ -16,6 +16,10 @@ under Meta cleanup. The lifetime introduces no timeout or second Runtime.
 Its stopped notification means cleanup has completed, including failed cleanup;
 the run result remains the authority for success. A platform window can defer
 process exit until that notification while keeping its main-thread loop alive.
+An entry that returns after launching a detached surface declares that behavior
+through `returns_after_launch`. A launcher may retain that successful composition
+until a stop request, for example while it owns a watch lease. Attached entries
+and failed launches still shut down when their entry completes.
 
 RsiError owns the product entry failure classification (bootstrap exit 2,
 execution exit 1). Native launchers and application parsers share the small

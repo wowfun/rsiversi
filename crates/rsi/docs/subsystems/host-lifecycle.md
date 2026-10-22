@@ -1,21 +1,25 @@
 # Host lifecycle
 
-One owner process holds the standard Host paths at a time. A foreground daemon
-publishes a same-user Unix-domain socket; an application uses it when its exact
-protocol, product build, Host launch key, and Host epoch handshake is
-compatible. Durable metadata remains structurally readable across executable
-rebuilds so lifecycle commands can identify and signal an older exact process
-generation; compatibility is enforced during application selection and the
-handshake. The active daemon's validated metadata endpoint is authoritative,
-including when the client's runtime-directory environment differs or cannot
-itself hold a Unix socket. With
-no owner, an application may acquire the same owner lease and
-run a private embedded Host without publishing an endpoint. A starting,
-embedded, or temporarily unresponsive owner is waited for up to the same
-15-second readiness bound and is never bypassed by a second Host. The standard
-product daemon is Linux-only because its lifecycle
-signals are fenced by a pidfd plus Linux process start identity; other
-platforms support embedded mode only.
+One owner process holds both standard config and state homes. Ordinary Windows
+and Linux applications start or attach to a resident Host through a startup
+coordinator. The Host publishes a same-user endpoint: a private Windows named
+pipe or Linux Unix-domain socket. Applications negotiate the interfaces they
+use and bind to the active Host epoch. An optional package or rebuilt client
+does not redefine the running Service's identity.
+
+Validated active metadata selects the endpoint, including when a client's
+runtime-directory environment differs. Frozen Lifecycle v1 supports status and
+stop across product protocol changes. Native user, PID and process creation
+identity fence the operation. The Host executes an immutable SHA-addressed copy,
+so developers can rebuild the original binary while clients remain connected.
+Starting, embedded or unresponsive owners are never bypassed by another Host.
+Explicit SDK embedding remains available under the same exclusive leases.
+
+Closing an ordinary application releases its attachment. It does not stop the
+Host or other attachments. Reset and import require stopped home owners; core
+upgrade coordinates an explicit stop, verified replacement and start. Their
+recoverable operations and final-home options belong to the
+[launch contract](../../core/docs/launch.md).
 
 The standard preset includes the pure [Goal domain](../../../rsi-agent/goal/README.md).
 The separate Host [Goal controller](../../goal/README.md) runs only after an explicit

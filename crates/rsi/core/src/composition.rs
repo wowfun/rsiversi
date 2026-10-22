@@ -160,27 +160,18 @@ const SHIPPED_PRESETS: &[(&str, &[u8], &[u8])] = &[
     ),
 ];
 
-/// Launcher purpose used only to select Host-conflict recovery advice.
-#[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
-pub enum HostStartupPurpose {
-    /// Ordinary product startup and existing recovery advice.
-    #[default]
-    Ordinary,
-    /// Development preserves existing owners and recommends independent state.
-    Development,
-}
-
 /// Frozen inputs used to construct the standard linked catalog and fragments.
 #[derive(Clone, Debug)]
 pub struct StandardComposition {
-    pub(crate) startup_purpose: HostStartupPurpose,
+    pub(crate) launch_service: Option<HostProfileDocument>,
+    pub(crate) source_watch: rsi_meta_profile::SourceWatchPolicy,
+    pub(crate) host_launcher: Option<Arc<dyn crate::LocalHostLauncher>>,
     applications: crate::ApplicationCatalogMetadata,
     paths: HostPaths,
     user_home: Option<PathBuf>,
     captured_environment: BTreeMap<String, SecretValue>,
     credential_store: Arc<dyn SecretStore>,
     pub(crate) agent_store_factory: rsi_agent_store_sqlite::SqliteStoreFactory,
-    pub(crate) agent_store_reset: Option<rsi_agent_store_sqlite::SqliteStoreResetRequest>,
     coding_tools: Option<StandardCodingTools>,
     agent_presets: Option<(AgentPresetCatalog, String)>,
     service_owner: Option<rsi_service_host::ServiceOwnerFactory>,
@@ -831,6 +822,7 @@ impl StandardComposition {
             application_cache: !require_service_owner,
             require_service_owner,
             capture_service_inputs: false,
+            source_watch: self.source_watch.clone(),
             reserved: Arc::new(std::sync::OnceLock::from(reserved)),
         })
     }
@@ -946,12 +938,13 @@ impl StandardComposition {
     ) -> Self {
         Self {
             applications,
-            startup_purpose: HostStartupPurpose::Ordinary,
+            launch_service: None,
+            source_watch: false.into(),
+            host_launcher: None,
             credential_store: Arc::new(FileSecretStore::with_trusted_root_alias(
                 paths.config().join("credentials/credentials.json"),
             )),
             agent_store_factory: rsi_agent_store_sqlite::SqliteStoreFactory::default(),
-            agent_store_reset: None,
             user_home: None,
             paths,
             captured_environment,
@@ -966,10 +959,31 @@ impl StandardComposition {
         }
     }
 
-    /// Selects recovery wording without changing Host launch identity or authority.
+    /// Selects one product launch Service source for every local application.
     #[must_use]
-    pub fn with_startup_purpose(mut self, purpose: HostStartupPurpose) -> Self {
-        self.startup_purpose = purpose;
+    pub fn with_launch_service(mut self, profile: HostProfileDocument) -> Self {
+        self.launch_service = Some(profile);
+        self
+    }
+
+    /// Enables source observation for this owner's explicitly retained watch lifetime.
+    #[must_use]
+    pub fn with_source_watch(mut self, enabled: bool) -> Self {
+        self.source_watch = enabled.into();
+        self
+    }
+
+    /// Shares one explicit observation authority with all Service source owners.
+    #[must_use]
+    pub fn with_watch_policy(mut self, policy: rsi_meta_profile::SourceWatchPolicy) -> Self {
+        self.source_watch = policy;
+        self
+    }
+
+    /// Selects resident product ownership without embedding process launch policy.
+    #[must_use]
+    pub fn with_host_launcher(mut self, launcher: Arc<dyn crate::LocalHostLauncher>) -> Self {
+        self.host_launcher = Some(launcher);
         self
     }
 
@@ -991,17 +1005,6 @@ impl StandardComposition {
         }
         self.user_home = home;
         Ok(self)
-    }
-
-    /// Requests one explicit Agent Store backup and reset during local startup.
-    /// Clones share the one-shot authority; it is not part of the launch identity.
-    #[must_use]
-    pub fn with_agent_store_reset(
-        mut self,
-        request: rsi_agent_store_sqlite::SqliteStoreResetRequest,
-    ) -> Self {
-        self.agent_store_reset = Some(request);
-        self
     }
 
     /// Adds explicit immutable addon declarations to every standard startup and preview path.
@@ -1161,7 +1164,6 @@ impl StandardComposition {
                         .as_ref()
                         .map(ApplyPatchToolFactory::executable),
                 }),
-            &self.applications,
         )
         .map_err(|error| crate::RsiError::Boot(error.to_string()))?;
         let profile = match &profile.path {
@@ -1209,7 +1211,7 @@ impl StandardComposition {
             .map(|(host, _presets, _factories)| host)
     }
 
-    #[cfg(target_os = "linux")]
+    #[cfg(any(target_os = "linux", windows))]
     pub(crate) fn build_daemon(self, launch_key: &str) -> rsi_host::Result<Host> {
         self.build_internal(true, Some(launch_key))
             .map(|(host, _, _)| host)
@@ -1292,6 +1294,7 @@ impl StandardComposition {
                     application_cache: false,
                     require_service_owner: true,
                     capture_service_inputs: true,
+                    source_watch: self.source_watch.clone(),
                     reserved,
                 },
             )?;
@@ -1337,7 +1340,7 @@ impl StandardComposition {
             local_api.map(str::to_owned),
         )?;
         #[cfg(target_os = "linux")]
-        crate::ssh_targets::register(&mut builder)?;
+        crate::ssh_targets::register(&mut builder, paths.clone())?;
         builder.register_linked(
             "rsi.inspector.api",
             env!("CARGO_PKG_VERSION"),
@@ -1507,13 +1510,41 @@ impl StandardComposition {
         }
 
         if let Some(launch_key) = local_api {
+            #[cfg(any(target_os = "linux", windows))]
+            {
+                register(
+                    &mut builder,
+                    "rsi.service.management",
+                    UpdateMode::RestartRequired,
+                    crate::local_control::Factory::new(
+                        self.source_watch.clone(),
+                        &self.captured_environment,
+                        &paths,
+                        crate::ProfileCatalog::new(paths.clone(), self.applications.clone())
+                            .protocols(),
+                    ),
+                )?;
+            }
             builder.register_fragment(ProfileFragment::new(
                 "rsi.standard.local-api",
-                [ProfileEntry::new(
-                    "rsi.api.local",
-                    "rsi.api.local",
-                    json!({"launch_key": launch_key}),
-                )],
+                [
+                    ProfileEntry::new(
+                        "rsi.api.local",
+                        "rsi.api.local",
+                        json!({"launch_key": launch_key}),
+                    ),
+                    ProfileEntry::new(
+                        "rsi.service.lifecycle",
+                        "rsi.service.lifecycle",
+                        json!({"launch_key": launch_key}),
+                    ),
+                    ProfileEntry::new("rsi.service.acp", "rsi.service.acp", Value::Null),
+                    ProfileEntry::new(
+                        "rsi.service.management",
+                        "rsi.service.management",
+                        Value::Null,
+                    ),
+                ],
             ))?;
         }
         let service_addon = builder.build()?;
@@ -2461,28 +2492,6 @@ mod tests {
     }
 
     use super::*;
-    #[test]
-    fn development_startup_advice_does_not_change_the_host_launch_identity() {
-        let root = tempfile::tempdir().unwrap();
-        let paths = HostPaths::new(
-            root.path().join("config"),
-            root.path().join("state"),
-            root.path().join("cache"),
-        )
-        .unwrap();
-        let metadata = crate::ApplicationCatalogMetadata::default();
-        let profile = crate::ProfileCatalog::new(paths.clone(), metadata.clone())
-            .host(&crate::HostProfileId::new("standard").unwrap())
-            .unwrap();
-        let ordinary = StandardComposition::new(paths, BTreeMap::new(), None, metadata);
-        let expected = ordinary.preview_host(&profile).unwrap().launch_key;
-        let development = ordinary.with_startup_purpose(HostStartupPurpose::Development);
-        assert_eq!(
-            development.preview_host(&profile).unwrap().launch_key,
-            expected
-        );
-        assert_eq!(std::fs::read_dir(root.path()).unwrap().count(), 0);
-    }
     #[cfg(unix)]
     use rsi_meta_profile::{
         ProfileCompiler, ProfileEnvironment, ProfileLimits, ProfileProgram, ProfileResolver,

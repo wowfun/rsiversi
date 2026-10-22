@@ -6,12 +6,19 @@ use tokio_util::sync::CancellationToken;
 /// One application's entry and awaitable teardown, independent of its platform loop.
 #[derive(Debug, Default)]
 pub struct ApplicationLifetime {
+    retain_background: bool,
     started: AtomicBool,
     stop: CancellationToken,
     stopped: CancellationToken,
 }
 
 impl ApplicationLifetime {
+    /// Keeps successfully launched detached surfaces alive until explicitly stopped.
+    #[must_use]
+    pub fn retain_background(mut self, retain: bool) -> Self {
+        self.retain_background = retain;
+        self
+    }
     /// Requests the same stop path used by normal entry completion.
     pub fn request_stop(&self) {
         self.stop.cancel();
@@ -31,11 +38,16 @@ impl ApplicationLifetime {
         }
         let result = match running.lookup_local::<ApplicationRunContract>() {
             Some(entry) => {
-                tokio::select! {
+                let detached = self.retain_background && entry.returns_after_launch();
+                let result = tokio::select! {
                     biased;
                     () = self.stop.cancelled() => Ok(0),
                     result = entry.run() => result,
+                };
+                if detached && matches!(result, Ok(0)) {
+                    self.stop.cancelled().await;
                 }
+                result
             }
             None => Err(ApplicationError::MissingEntry),
         };

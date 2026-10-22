@@ -42,7 +42,14 @@ fn fingerprint_captures_missing_and_nested_inputs_and_rejects_changed_authority(
     fs::remove_file(root.join("source/missing")).unwrap();
     fs::write(&path, format!("{text}\n# revised\n")).unwrap();
     assert!(build.fingerprint().is_err());
-    assert_ne!(first, build.reopen().unwrap().fingerprint().unwrap());
+    assert!(matches!(build.reopen(), Err(NativeAddonError::Conflict)));
+    assert_ne!(
+        first,
+        NativeAddonBuild::open(&path)
+            .unwrap()
+            .fingerprint()
+            .unwrap()
+    );
     fs::write(&path, text).unwrap();
     fs::rename(root.join("source"), root.join("replaced")).unwrap();
     assert!(matches!(build.reopen(), Err(NativeAddonError::Conflict)));

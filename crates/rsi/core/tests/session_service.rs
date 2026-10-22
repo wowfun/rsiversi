@@ -192,6 +192,7 @@ fn composition(paths: HostPaths) -> StandardComposition {
 
 fn host_profile(fixture: &Fixture) -> HostProfileDocument {
     HostProfileDocument {
+        package_lease: None,
         id: HostProfileId::new("fixture").unwrap(),
         source: ProfileSource::User,
         path: Some(fixture.profile.clone()),
