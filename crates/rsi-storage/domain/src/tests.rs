@@ -371,6 +371,7 @@ async fn api_mutation_preserves_an_over_bound_domain_rejection_without_writing()
         tokio::runtime::Handle::current(),
     ));
     let operation = OperationSpec {
+        protocol: rsi_api_protocol::connection_protocol(),
         id: OperationId::new("storage", "test-write", 1).unwrap(),
         class: OperationClass::Data,
         effect: OperationEffect::Mutation,

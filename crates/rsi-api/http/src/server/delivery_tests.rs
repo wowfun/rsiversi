@@ -108,6 +108,7 @@ async fn verify() {
     let registration = registry
         .register(
             OperationSpec {
+                protocol: rsi_api_protocol::connection_protocol(),
                 id: OperationId::new("test", "large", 1).unwrap(),
                 class: OperationClass::Data,
                 effect: OperationEffect::Read,

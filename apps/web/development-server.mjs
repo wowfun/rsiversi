@@ -33,6 +33,7 @@ const signals = ['SIGINT', 'SIGTERM'].map(signal => [signal, () => { exitCode = 
 for (const [signal, handler] of signals) process.on(signal, handler);
 async function start() {
   const initial = await control.expect('start_frontend');
+  delete process.env.RSI_BUILD_FAMILY_SHA256;
   process.env.RSI_DEV_BUILD_FAMILY = initial.family;
   delete process.env.RSI_DEV_UPSTREAM;
   const config = documentConfiguration({command: 'serve', mode: 'development'}, {supervised:true});

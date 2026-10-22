@@ -25,6 +25,7 @@ impl CredentialOperation {
     /// Panics if the static operation identities are invalid.
     pub fn spec(self) -> OperationSpec {
         OperationSpec {
+            protocol: rsi_api_protocol::wire_contract!(),
             id: OperationId::new(
                 "provider-credentials",
                 match self {

@@ -140,6 +140,7 @@ pub fn operations() -> Vec<OperationSpec> {
 }
 fn spec(name: &str) -> OperationSpec {
     OperationSpec {
+        protocol: rsi_api_protocol::wire_contract!(),
         id: OperationId::new("automation", name, 2).expect("static automation operation"),
         access: OperationAccess::Authenticated,
         class: if matches!(name, "cancel" | "resume" | "set_policy") {
@@ -649,6 +650,11 @@ fn check_reply(value: &Value) -> Result<()> {
     }
     Ok(())
 }
+/// Generated descriptor for admission before using this interface.
+pub fn protocol_descriptor() -> rsi_api_protocol::ProtocolDescriptor {
+    rsi_api_protocol::wire_contract!()
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

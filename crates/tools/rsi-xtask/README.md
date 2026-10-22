@@ -27,6 +27,14 @@ requires the existing Native ABI and Portable boundaries.
 
 ## Documentation policy
 
+`cargo xtask verify-protocols` compares every owning `wire-contract.toml` with
+its generated `wire-schema.json`. `--write` deliberately updates those reviewable
+snapshots. `--base REF` additionally compares against the Git merge base and
+requires a strictly higher semantic model version for changed wire contracts.
+Each contract name must have exactly one owning crate.
+The gate is read-only by default; adding an unrelated application or changing
+executable bytes does not refresh protocol baselines.
+
 The supported translation locale is Simplified Chinese (`zh-CN`). Root
 `README.md` and `README.zh-CN.md` require reciprocal language links. The closed
 translation tree is `docs/i18n/zh-CN/user`, containing ordinary Markdown files
@@ -156,3 +164,10 @@ push predecessor SHA, or the resolved `origin/main` commit for manual dispatch.
 Missing objects are explicitly fetched and verified; only an all-zero first-push
 SHA means an empty baseline. Local verification never fetches or substitutes a
 baseline. Failed baseline preparation does not suppress other documentation checks.
+
+Protocol snapshot write mode validates every owner before writing any snapshot.
+A validation failure leaves all reviewed snapshots unchanged.
+
+Baseline comparison follows protocol identity across owner moves. A baseline
+contract cannot silently disappear; removal requires an explicit policy change
+to this gate. Unknown snapshot formats fail closed.

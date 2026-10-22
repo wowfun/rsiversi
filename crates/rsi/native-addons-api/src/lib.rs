@@ -71,6 +71,7 @@ pub trait NativeAddonAdministration: std::fmt::Debug + Send + Sync + 'static {
 struct Empty {}
 fn operation() -> OperationSpec {
     OperationSpec {
+        protocol: rsi_api_protocol::wire_contract!(),
         id: OperationId::new("native-addons", "refresh", 1).expect("constant native operation"),
         access: OperationAccess::Local,
         class: OperationClass::Data,
@@ -129,4 +130,9 @@ impl NativeAddonsClient {
     pub async fn refresh(&self) -> Result<std::result::Result<RefreshReceipt, RefreshFailure>> {
         call_json(self.0.as_ref(), &operation(), &Empty {}).await
     }
+}
+
+/// Generated descriptor for admission before using this interface.
+pub fn protocol_descriptor() -> rsi_api_protocol::ProtocolDescriptor {
+    rsi_api_protocol::wire_contract!()
 }

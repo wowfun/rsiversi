@@ -90,6 +90,7 @@ pub fn operations() -> [OperationSpec; 2] {
 }
 fn operation(commit: bool) -> OperationSpec {
     OperationSpec {
+        protocol: rsi_api_protocol::wire_contract!(),
         id: OperationId::new("web-assets", if commit { "commit" } else { "observe" }, 1)
             .expect("constant operation"),
         access: OperationAccess::Authenticated,
@@ -107,4 +108,9 @@ fn operation(commit: bool) -> OperationSpec {
         maximum_request_bytes: 1024,
         maximum_response_bytes: if commit { 16 } else { 256 * 1024 },
     }
+}
+
+/// Generated descriptor for admission before using this interface.
+pub fn protocol_descriptor() -> rsi_api_protocol::ProtocolDescriptor {
+    rsi_api_protocol::wire_contract!()
 }

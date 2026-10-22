@@ -1,6 +1,8 @@
 // Child-pipe protocol counterpart of rsi-dev-control. Never log frame payloads.
 import { TextDecoder } from 'node:util';
 import {readFileSync} from 'node:fs';
+import {wireDescriptor} from '../devtools/wire-descriptors.mjs';
+export const protocol = wireDescriptor(new URL('../dev-control/wire-schema.json', import.meta.url), 'rsi.frontend.control');
 const limits = JSON.parse(readFileSync(new URL('../dev-control/conformance.json', import.meta.url), 'utf8'));
 const maximum = limits.maximum_frame_bytes;
 const startupTimeout = limits.startup_timeout_ms;
@@ -41,7 +43,10 @@ function parseFrame(bytes) {
       current.add(key);
     }
   }
-  keys(frame, ['version', 'run_id', 'message']);
+  keys(frame, ['version', 'interface', 'run_id', 'message']);
+  keys(frame.interface, ['name', 'version', 'schema']);
+  if (frame.interface.name !== protocol.name || frame.interface.version !== protocol.version
+    || frame.interface.schema !== protocol.schema) throw failure();
   if (frame.version !== 1 || typeof frame.run_id !== 'string' || !/^[a-f0-9]{32}$/.test(frame.run_id)) throw failure();
   const message = frame.message;
   if (typeof message?.event !== 'string' || !Object.hasOwn(schemas, message.event)) throw failure();
@@ -88,7 +93,7 @@ export class DevelopmentControl {
   }
   async send(message) {
     if (this.#closed) throw failure();
-    const bytes = Buffer.from(JSON.stringify({version: 1, run_id: this.#run, message}) + '\n');
+    const bytes = Buffer.from(JSON.stringify({version: 1, interface:protocol, run_id: this.#run, message}) + '\n');
     decodeFrame(bytes);
     await new Promise((resolve, reject) => this.#output.write(bytes, error => error ? reject(failure()) : resolve()));
   }

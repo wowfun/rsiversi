@@ -445,6 +445,7 @@ pub fn operations() -> Vec<OperationSpec> {
 }
 fn operation_spec(name: &str) -> OperationSpec {
     OperationSpec {
+        protocol: rsi_api_protocol::wire_contract!(),
         id: OperationId::new("history", name, 2).expect("static history operation"),
         access: OperationAccess::Authenticated,
         class: OperationClass::Data,
@@ -785,4 +786,9 @@ fn validate_progress(progress: &QueryProgress) -> Result<()> {
         return Err(invalid("invalid aggregate coverage"));
     }
     Ok(())
+}
+
+/// Generated descriptor for admission before using this interface.
+pub fn protocol_descriptor() -> rsi_api_protocol::ProtocolDescriptor {
+    rsi_api_protocol::wire_contract!()
 }

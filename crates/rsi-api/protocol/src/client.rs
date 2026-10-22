@@ -129,6 +129,7 @@ fn connection_operation(
     maximum_response_bytes: usize,
 ) -> OperationSpec {
     OperationSpec {
+        protocol: crate::wire_contract!(),
         id: OperationId::new("connection", name, 1).expect("constant operation"),
         class,
         effect: OperationEffect::Read,

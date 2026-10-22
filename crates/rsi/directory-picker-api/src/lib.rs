@@ -232,6 +232,7 @@ impl Operation {
     /// Panics only if the static operation identifiers violate their contract.
     pub fn spec(self) -> OperationSpec {
         OperationSpec {
+            protocol: rsi_api_protocol::wire_contract!(),
             id: OperationId::new(
                 "directory-picker",
                 match self {
@@ -487,4 +488,9 @@ impl PluginFactory for ClientFactory {
             }),
         )
     }
+}
+
+/// Generated descriptor for admission before using this interface.
+pub fn protocol_descriptor() -> rsi_api_protocol::ProtocolDescriptor {
+    rsi_api_protocol::wire_contract!()
 }

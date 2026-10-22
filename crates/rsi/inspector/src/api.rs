@@ -13,6 +13,7 @@ use std::sync::Arc;
 const NAMES: [&str; 5] = ["runtime", "profile", "factories", "native", "workflows"];
 fn operation(name: &str) -> OperationSpec {
     OperationSpec {
+        protocol: rsi_api_protocol::wire_contract!(),
         id: OperationId::new("inspector", name, 1).expect("constant Inspector operation"),
         access: OperationAccess::Local,
         class: OperationClass::Data,

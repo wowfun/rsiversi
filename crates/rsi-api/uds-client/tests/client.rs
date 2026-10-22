@@ -19,6 +19,7 @@ use tokio_util::sync::CancellationToken;
 
 fn operation(name: &str) -> OperationSpec {
     OperationSpec {
+        protocol: rsi_api_protocol::connection_protocol(),
         id: OperationId::new("local", name, 1).unwrap(),
         class: match name {
             "events" => OperationClass::Subscription,

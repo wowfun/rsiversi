@@ -18,6 +18,11 @@ use sha2::{Digest, Sha256};
 /// Helper startup refused bounded cache-writer admission before bootstrap.
 pub const CACHE_CONTENTION_EXIT_CODE: u8 = 75;
 
+/// Generated helper RPC, binary framing and model identity.
+pub fn protocol_descriptor() -> rsi_api_protocol::ProtocolDescriptor {
+    rsi_api_protocol::wire_contract!()
+}
+
 /// Invalid external connection data, without echoing its contents.
 #[derive(Clone, Copy, Debug, Eq, PartialEq, thiserror::Error)]
 pub enum SshInputError {

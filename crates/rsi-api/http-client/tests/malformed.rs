@@ -124,6 +124,7 @@ async fn fixture(
 }
 fn operation(effect: OperationEffect, class: OperationClass) -> OperationSpec {
     OperationSpec {
+        protocol: rsi_api_protocol::connection_protocol(),
         id: OperationId::new("test", "operation", 1).unwrap(),
         effect,
         class,

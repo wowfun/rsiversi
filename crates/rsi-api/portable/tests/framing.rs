@@ -36,6 +36,7 @@ enum Fault {
 }
 fn operation(fault: Fault, effect: OperationEffect) -> OperationSpec {
     OperationSpec {
+        protocol: rsi_api_protocol::connection_protocol(),
         id: OperationId::new("probe", "run", 1).unwrap(),
         access: OperationAccess::Authenticated,
         class: if matches!(fault, Fault::StreamNoEnd | Fault::StreamFailedTerminal) {

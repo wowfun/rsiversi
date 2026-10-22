@@ -20,3 +20,6 @@ tokio.workspace = true
 
 [lints]
 workspace = true
+
+[build-dependencies]
+rsi-api-schema-build = { path = "../../rsi-api/schema-build" }

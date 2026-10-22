@@ -40,6 +40,8 @@ impl OperationAccess {
 #[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct OperationSpec {
+    /// Exact owning DTO, codec and semantic model contract.
+    pub protocol: crate::ProtocolDescriptor,
     /// Exact owning domain, operation name and version.
     pub id: OperationId,
     /// Caller authority required before acquiring a resource lane.
@@ -59,6 +61,7 @@ pub struct OperationSpec {
 impl OperationSpec {
     /// Rejects contradictory ownership or impossible configured reservations.
     pub fn validate(&self) -> Result<()> {
+        self.protocol.validate()?;
         if self.maximum_request_bytes > MAXIMUM_API_BYTES
             || self.maximum_response_bytes > MAXIMUM_API_BYTES
         {

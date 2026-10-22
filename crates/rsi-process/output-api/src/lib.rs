@@ -22,6 +22,7 @@ use std::sync::Arc;
 
 fn operation() -> OperationSpec {
     OperationSpec {
+        protocol: rsi_api_protocol::wire_contract!(),
         id: OperationId::new("output", "read", 1).expect("constant operation"),
         class: OperationClass::Data,
         effect: OperationEffect::Read,
@@ -195,4 +196,9 @@ fn decode_failure(bytes: &RetainedBytes) -> rsi_process::Result<ProcessError> {
         Failure::ShuttingDown => ProcessError::ShuttingDown,
         Failure::Unavailable => ProcessError::Io("remote completed output unavailable".into()),
     })
+}
+
+/// Generated descriptor for admission before using this interface.
+pub fn protocol_descriptor() -> rsi_api_protocol::ProtocolDescriptor {
+    rsi_api_protocol::wire_contract!()
 }

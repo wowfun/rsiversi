@@ -35,6 +35,7 @@ impl FilesOperation {
             Self::Release => "release",
         };
         OperationSpec {
+            protocol: rsi_api_protocol::wire_contract!(),
             id: OperationId::new("files", name, 2).expect("constant Files operation"),
             access: OperationAccess::Authenticated,
             class: OperationClass::Data,

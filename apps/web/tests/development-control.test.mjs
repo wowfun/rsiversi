@@ -7,7 +7,7 @@ import {runDevelopmentServer} from '../development-server.mjs';
 import {readFileSync} from 'node:fs';
 import {stat} from 'node:fs/promises';
 import {createServer} from 'vite';
-import {decodeFrame} from '../development-control.mjs';
+import {decodeFrame, protocol} from '../development-control.mjs';
 import configuration from '../vite.config.mjs';
 
 test('invalid control input always reports the protocol error', () => {
@@ -15,7 +15,7 @@ test('invalid control input always reports the protocol error', () => {
     ...['constructor','toString','__proto__'].map(event => ({event})),
     {event:'frontend_bound',origin:'not-a-url'},
   ]) {
-    const bytes = Buffer.from(JSON.stringify({version:1,run_id:'a'.repeat(32),message})+'\n');
+    const bytes = Buffer.from(JSON.stringify({version:1,interface:protocol,run_id:'a'.repeat(32),message})+'\n');
     assert.throws(() => decodeFrame(bytes), {message:'Invalid development control frame'});
   }
   for (const bytes of [Buffer.from('{broken\n'), Buffer.from([0xff,10])]) {
@@ -40,7 +40,7 @@ test('the frontend decoder agrees with the shared Rust corpus', () => {
   const corpus = JSON.parse(readFileSync(new URL('../../dev-control/conformance.json', import.meta.url), 'utf8'));
   for (const sample of corpus.cases) {
     let accepted = true;
-    try { decodeFrame(Buffer.from(sample.json+'\n')); } catch { accepted = false; }
+    try { decodeFrame(Buffer.from(sample.json.replace('@protocol@', JSON.stringify(protocol))+'\n')); } catch { accepted = false; }
     assert.equal(accepted, sample.valid, sample.name);
   }
 });
@@ -75,7 +75,7 @@ test('control closure during listener startup closes the eventual listener', asy
     config.plugins[0].configureServer(server);
     return server;
   }});
-  input.write(JSON.stringify({version:1,run_id:'a'.repeat(32),message:{event:'start_frontend',port:0,family:'b'.repeat(64)}})+'\n');
+  input.write(JSON.stringify({version:1,interface:protocol,run_id:'a'.repeat(32),message:{event:'start_frontend',port:0,family:'b'.repeat(64)}})+'\n');
   await listening;
   input.end();
   await new Promise(resolve => setImmediate(resolve));
@@ -87,7 +87,7 @@ test('control closure during listener startup closes the eventual listener', asy
 
 test('real Vite EOF settlement removes only its private optimizer cache', {timeout:25000}, async () => {
   const input = new PassThrough(), output = new PassThrough();
-  const send = message => input.write(JSON.stringify({version:1,run_id:'a'.repeat(32),message})+'\n');
+  const send = message => input.write(JSON.stringify({version:1,interface:protocol,run_id:'a'.repeat(32),message})+'\n');
   let directory;
   output.on('data', bytes => {
     const {message} = decodeFrame(bytes);

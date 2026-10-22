@@ -120,6 +120,7 @@ pub fn operations() -> [OperationSpec; 4] {
 }
 pub(crate) fn operation(name: &str) -> OperationSpec {
     OperationSpec {
+        protocol: rsi_api_protocol::wire_contract!(),
         id: OperationId::new("ui", name, 1).expect("constant UI operation"),
         access: OperationAccess::Authenticated,
         class: if name == "observe" {

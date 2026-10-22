@@ -13,6 +13,7 @@ mod cargo_step;
 mod code_check;
 mod documentation;
 mod lockfiles;
+mod protocols;
 mod repository_root;
 mod rsi_meta;
 
@@ -50,6 +51,8 @@ fn main() -> ExitCode {
 fn run() -> Result<(), String> {
     let arguments = env::args().skip(1).collect::<Vec<_>>();
     match arguments.as_slice() {
+        [command, rest @ ..] if command == "verify-protocols" =>
+            protocols::run(&env::current_dir().map_err(|e| e.to_string())?, rest),
         [command, rest @ ..] if command == "addon" => addon::run(rest),
         [command] if command == "verify-agent-notes" => {
             let repository = env::current_dir()

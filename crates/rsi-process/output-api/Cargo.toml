@@ -23,3 +23,6 @@ tokio = { workspace = true, features = ["rt-multi-thread", "time"] }
 
 [lints]
 workspace = true
+
+[build-dependencies]
+rsi-api-schema-build = { path = "../../rsi-api/schema-build" }

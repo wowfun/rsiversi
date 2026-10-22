@@ -16,3 +16,8 @@ pub use client::SessionClient;
 pub use plugin::{SessionApiFactory, SessionClientFactory};
 pub use server::SessionApi;
 pub use target::SessionTargetClient;
+
+/// Generated descriptor for admission before using this interface.
+pub fn protocol_descriptor() -> rsi_api_protocol::ProtocolDescriptor {
+    rsi_api_protocol::wire_contract!()
+}

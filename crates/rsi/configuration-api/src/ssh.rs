@@ -278,6 +278,7 @@ impl Operation {
     /// Static operation names satisfy the API identifier grammar.
     pub fn spec(self) -> OperationSpec {
         OperationSpec {
+            protocol: rsi_api_protocol::wire_contract!(),
             id: OperationId::new(
                 "ssh-targets",
                 match self {

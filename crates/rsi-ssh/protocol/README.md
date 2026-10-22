@@ -25,6 +25,12 @@ queues as well as byte queues. Transport owners enforce aggregate budgets, order
 message/channel sequences and reserved control scheduling; framing alone does not
 establish those lifecycle or latency guarantees.
 
+`rsi.ssh.helper` describes this interface independently of any application build.
+Its generated snapshot includes binary header types, enum discriminants, codecs,
+framing constants and the referenced request/reply models. Published helper
+packages require this exact descriptor; the product checks it again when opening
+a new connection.
+
 Reserved control payloads admit only terminate, PTY resize and Files
 release. They reject unknown operations/fields and validate nonzero identities and
 bounded dimensions at the transport boundary. This is transport admission, not

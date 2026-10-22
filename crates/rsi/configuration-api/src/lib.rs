@@ -54,6 +54,7 @@ impl ConfigurationOperation {
             ),
         };
         OperationSpec {
+            protocol: rsi_api_protocol::wire_contract!(),
             id: OperationId::new(
                 "configuration",
                 name,
@@ -205,3 +206,8 @@ pub use credentials::{CredentialOperation, CredentialReceipt, ProviderCredential
 
 mod mcp;
 pub use mcp::*;
+
+/// Generated descriptor for admission before using this interface.
+pub fn protocol_descriptor() -> rsi_api_protocol::ProtocolDescriptor {
+    rsi_api_protocol::wire_contract!()
+}

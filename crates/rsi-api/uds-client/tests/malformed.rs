@@ -15,6 +15,7 @@ use tokio::{
 
 fn operation(name: &str) -> OperationSpec {
     OperationSpec {
+        protocol: rsi_api_protocol::connection_protocol(),
         id: OperationId::new("fault", name, 1).unwrap(),
         class: if name == "events" {
             OperationClass::Subscription

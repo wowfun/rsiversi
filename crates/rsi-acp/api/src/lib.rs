@@ -13,3 +13,8 @@ pub use server::Endpoint;
 
 #[cfg(test)]
 mod tests;
+
+/// Generated descriptor for admission before using this interface.
+pub fn protocol_descriptor() -> rsi_api_protocol::ProtocolDescriptor {
+    rsi_api_protocol::wire_contract!()
+}

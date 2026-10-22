@@ -1,0 +1,3 @@
+name = "rsi.frontend.control"
+version = 3
+sources = ["src/lib.rs", "../web/development-control.mjs", "conformance.json"]

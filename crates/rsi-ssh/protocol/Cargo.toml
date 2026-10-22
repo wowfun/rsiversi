@@ -7,6 +7,7 @@ license.workspace = true
 publish = false
 
 [dependencies]
+rsi-api-protocol = { path = "../../rsi-api/protocol" }
 rsi-execution = { path = "../../rsi-execution/core" }
 base64.workspace = true
 rsi-files-protocol = { path = "../../rsi-files/protocol" }
@@ -19,6 +20,9 @@ thiserror.workspace = true
 
 [dev-dependencies]
 serde_json.workspace = true
+
+[build-dependencies]
+rsi-api-schema-build = { path = "../../rsi-api/schema-build" }
 
 [lints]
 workspace = true

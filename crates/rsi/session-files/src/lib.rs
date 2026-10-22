@@ -71,3 +71,8 @@ impl rsi_meta::LocalContract for SessionFilesContract {
     const KEY: &'static str = "rsi.session.files";
     type Service = dyn SessionFiles;
 }
+
+/// Generated descriptor for admission before using this interface.
+pub fn protocol_descriptor() -> rsi_api_protocol::ProtocolDescriptor {
+    rsi_api_protocol::wire_contract!()
+}

@@ -177,6 +177,7 @@ impl Operation {
             Self::AnswerApproval => ("answer-approval", Control, Mutation, 128 * 1024, 8192),
         };
         OperationSpec {
+            protocol: rsi_api_protocol::wire_contract!(),
             id: OperationId::new(
                 "session",
                 name,

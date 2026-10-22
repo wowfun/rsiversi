@@ -24,3 +24,6 @@ getrandom.workspace = true
 
 [lints]
 workspace = true
+
+[build-dependencies]
+rsi-api-schema-build = { path = "../schema-build" }

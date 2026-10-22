@@ -6,6 +6,14 @@ transport adapters consume registered operations and authenticated caller
 identity. The API foundation has no dependency on Session, Agent, Workspace,
 Media, Settings, standard Host paths or rendering.
 
+Each operation publishes its owning protocol name, semantic model version and
+generated wire-contract fingerprint. The
+[schema generator](schema-build/README.md) covers Serde models and custom codecs
+through the owner's source dependency closure. Clients compare descriptors for
+the operations they consume before sending domain requests. Unrelated optional
+operations and executable build hashes do not determine wire compatibility.
+Malformed descriptors are rejected during bounded catalog admission.
+
 Immutable API buffers retain their byte reservation through every clone and
 nonempty slice. Empty slices retain neither storage nor attached resource guards. Input retention, output retention and transport scratch use separate
 budgets. These are encoded-byte bounds, not process RSS measurements. JSON is

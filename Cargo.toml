@@ -101,3 +101,7 @@ all = { level = "warn", priority = -1 }
 pedantic = { level = "warn", priority = -1 }
 module_name_repetitions = { level = "allow", priority = 0 }
 must_use_candidate = { level = "allow", priority = 0 }
+
+# Source-contract parsing runs in build scripts; optimize the parser, not all dependencies.
+[profile.dev.package.syn]
+opt-level = 2

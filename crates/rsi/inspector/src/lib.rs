@@ -196,3 +196,8 @@ pub trait InspectorSource: std::fmt::Debug + Send + Sync + 'static {
     /// Captures actual native state or reports that the manager is unavailable.
     fn native(&self) -> Result<NativeObservation>;
 }
+
+/// Generated descriptor for admission before using this interface.
+pub fn protocol_descriptor() -> rsi_api_protocol::ProtocolDescriptor {
+    rsi_api_protocol::wire_contract!()
+}

@@ -319,6 +319,7 @@ pub fn path(value: &str) -> Result<()> {
 }
 fn spec(name: &str) -> OperationSpec {
     OperationSpec {
+        protocol: rsi_api_protocol::wire_contract!(),
         id: OperationId::new("workspace_review", name, 1).expect("static review operation"),
         access: OperationAccess::Authenticated,
         class: OperationClass::Data,
@@ -441,6 +442,11 @@ pub fn validate_reply(request: &Request, reply: &Reply) -> Result<()> {
         return Err(invalid("review reply exceeds limit"));
     }
     Ok(())
+}
+
+/// Generated descriptor for admission before using this interface.
+pub fn protocol_descriptor() -> rsi_api_protocol::ProtocolDescriptor {
+    rsi_api_protocol::wire_contract!()
 }
 
 #[cfg(test)]

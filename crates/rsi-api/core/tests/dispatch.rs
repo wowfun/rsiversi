@@ -20,6 +20,7 @@ fn registry() -> ApiRegistry {
 
 fn spec(name: &str, class: OperationClass, effect: OperationEffect) -> OperationSpec {
     OperationSpec {
+        protocol: rsi_api_protocol::connection_protocol(),
         id: OperationId::new("test", name, 1).unwrap(),
         class,
         effect,

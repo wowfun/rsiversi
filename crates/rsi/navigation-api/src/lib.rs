@@ -208,6 +208,7 @@ impl NavigationOperation {
     /// Panics if the static operation identities are invalid.
     pub fn spec(self) -> OperationSpec {
         OperationSpec {
+            protocol: rsi_api_protocol::wire_contract!(),
             id: OperationId::new(
                 "navigation",
                 match self {
@@ -372,3 +373,8 @@ pub fn matches_query(
 
 #[cfg(test)]
 mod validation_tests;
+
+/// Generated descriptor for admission before using this interface.
+pub fn protocol_descriptor() -> rsi_api_protocol::ProtocolDescriptor {
+    rsi_api_protocol::wire_contract!()
+}

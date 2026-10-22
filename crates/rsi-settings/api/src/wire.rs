@@ -30,6 +30,7 @@ impl Operation {
             Self::Clear => ("clear", OperationEffect::Mutation),
         };
         OperationSpec {
+            protocol: rsi_api_protocol::wire_contract!(),
             id: OperationId::new("settings", name, 1).expect("constant operation"),
             class: OperationClass::Data,
             effect,

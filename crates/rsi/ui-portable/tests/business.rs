@@ -17,6 +17,7 @@ use std::sync::{
 
 fn operation() -> OperationSpec {
     OperationSpec {
+        protocol: rsi_api_protocol::connection_protocol(),
         id: OperationId::new("fixture", "read-target", 1).unwrap(),
         access: OperationAccess::Authenticated,
         class: OperationClass::Data,

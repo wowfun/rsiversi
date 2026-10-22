@@ -120,6 +120,7 @@ impl Operation {
     #[expect(clippy::missing_panics_doc, reason = "fixed operation identity")]
     pub fn spec(self) -> OperationSpec {
         OperationSpec {
+            protocol: rsi_api_protocol::wire_contract!(),
             id: OperationId::new(
                 "mcp-configuration",
                 match self {

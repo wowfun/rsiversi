@@ -17,6 +17,7 @@ use std::{collections::BTreeSet, sync::Arc};
 
 fn operation(name: &str) -> OperationSpec {
     OperationSpec {
+        protocol: rsi_api_protocol::wire_contract!(),
         id: OperationId::new("devices", name, 1).expect("constant device operation"),
         access: OperationAccess::Local,
         class: OperationClass::Control,
@@ -227,4 +228,9 @@ impl PluginFactory for DeviceApiFactory {
             }),
         )
     }
+}
+
+/// Generated descriptor for admission before using this interface.
+pub fn protocol_descriptor() -> rsi_api_protocol::ProtocolDescriptor {
+    rsi_api_protocol::wire_contract!()
 }

@@ -33,6 +33,7 @@ impl Operation {
             ),
         };
         OperationSpec {
+            protocol: rsi_api_protocol::wire_contract!(),
             access: rsi_api_protocol::OperationAccess::Authenticated,
             id: OperationId::new(
                 "media",

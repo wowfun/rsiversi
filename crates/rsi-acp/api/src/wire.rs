@@ -54,6 +54,7 @@ impl Operation {
             Self::Window => ("window", Data, Read, 2048, 132 * 1024),
         };
         OperationSpec {
+            protocol: rsi_api_protocol::wire_contract!(),
             id: OperationId::new("external-conversation", name, 1).expect("static operation"),
             class,
             effect,

@@ -20,6 +20,7 @@ use std::sync::Arc;
 
 fn operation() -> OperationSpec {
     OperationSpec {
+        protocol: rsi_api_protocol::wire_contract!(),
         id: OperationId::new("models", "list", 1).expect("constant operation"),
         class: OperationClass::Data,
         effect: OperationEffect::Read,
@@ -31,6 +32,7 @@ fn operation() -> OperationSpec {
 }
 fn describe_operation() -> OperationSpec {
     OperationSpec {
+        protocol: rsi_api_protocol::wire_contract!(),
         id: OperationId::new("models", "describe", 1).expect("constant operation"),
         class: OperationClass::Data,
         effect: OperationEffect::Read,
@@ -239,4 +241,9 @@ impl PluginFactory for ModelsClientFactory {
             }),
         )
     }
+}
+
+/// Generated descriptor for admission before using this interface.
+pub fn protocol_descriptor() -> rsi_api_protocol::ProtocolDescriptor {
+    rsi_api_protocol::wire_contract!()
 }

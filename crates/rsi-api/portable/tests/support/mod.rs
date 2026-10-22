@@ -19,6 +19,7 @@ use tokio::sync::Semaphore;
 
 pub fn operation(name: &str) -> OperationSpec {
     OperationSpec {
+        protocol: rsi_api_protocol::connection_protocol(),
         id: OperationId::new("fixture", name, 1).unwrap(),
         access: OperationAccess::Authenticated,
         class: if name == "stream" {

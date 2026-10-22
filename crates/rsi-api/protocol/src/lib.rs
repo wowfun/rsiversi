@@ -11,6 +11,7 @@ mod client;
 mod identity;
 mod json;
 pub mod portable;
+mod schema;
 mod service;
 mod stream;
 pub use authentication::*;
@@ -21,6 +22,7 @@ pub use budget::{
 pub use client::*;
 pub use identity::{DeviceId, EndpointId, HostEpoch, LocalCompatibilityKey};
 pub use json::{call_json, json_handler};
+pub use schema::{ProtocolDescriptor, connection_protocol};
 pub use service::*;
 pub use stream::supervised_stream;
 

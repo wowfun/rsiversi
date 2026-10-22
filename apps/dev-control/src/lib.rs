@@ -4,7 +4,7 @@
 #![allow(clippy::missing_errors_doc)]
 
 use serde::{Deserialize, Serialize};
-use std::{io, net::SocketAddr, path::Path};
+use std::{io, net::SocketAddr};
 use tokio::io::{AsyncBufRead, AsyncBufReadExt as _, AsyncWrite, AsyncWriteExt as _};
 
 /// Maximum encoded line size, including LF.
@@ -14,11 +14,17 @@ pub const STARTUP_TIMEOUT: std::time::Duration = std::time::Duration::from_mins(
 /// Deadline for configuring the already-bound proxy.
 pub const PROXY_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(10);
 
+/// Exact framing/admission interface shared with the source frontend.
+pub fn protocol_descriptor() -> rsi_api_protocol::ProtocolDescriptor {
+    rsi_api_protocol::wire_contract!()
+}
+
 /// Closed, versioned session envelope. Debug deliberately excludes message data.
 #[derive(Clone, Serialize, Deserialize)]
 #[serde(try_from = "FrameInput")]
 pub struct Frame {
     version: u8,
+    interface: rsi_api_protocol::ProtocolDescriptor,
     run_id: String,
     message: Message,
 }
@@ -26,6 +32,7 @@ pub struct Frame {
 #[serde(deny_unknown_fields)]
 struct FrameInput {
     version: u8,
+    interface: rsi_api_protocol::ProtocolDescriptor,
     run_id: String,
     message: Message,
 }
@@ -34,6 +41,7 @@ impl TryFrom<FrameInput> for Frame {
     fn try_from(input: FrameInput) -> io::Result<Self> {
         let frame = Self {
             version: input.version,
+            interface: input.interface,
             run_id: input.run_id,
             message: input.message,
         };
@@ -52,34 +60,10 @@ impl std::fmt::Debug for Frame {
 #[derive(Clone, Serialize, Deserialize)]
 #[serde(tag = "event", rename_all = "snake_case", deny_unknown_fields)]
 pub enum Message {
-    StartFrontend {
-        port: u16,
-        family: String,
-    },
-    FrontendBound {
-        origin: String,
-    },
-    StartBackend {
-        port: u16,
-        assets: String,
-        watch: bool,
-        frontend_origin: Option<String>,
-    },
-    BackendReady {
-        address: String,
-    },
-    ConfigureProxy {
-        upstream: String,
-    },
+    StartFrontend { port: u16, family: String },
+    FrontendBound { origin: String },
+    ConfigureProxy { upstream: String },
     ProxyReady {},
-    ReleaseLaunch {},
-    LaunchReady {
-        url: String,
-        open_browser: bool,
-    },
-    OpenBrowser {
-        url: String,
-    },
 }
 
 impl std::fmt::Debug for Message {
@@ -105,6 +89,7 @@ impl Frame {
     pub fn new(run_id: &str, message: Message) -> io::Result<Self> {
         let frame = Self {
             version: 1,
+            interface: protocol_descriptor(),
             run_id: run_id.into(),
             message,
         };
@@ -123,41 +108,13 @@ impl Frame {
         Ok(self.message)
     }
     fn validate(&self) -> io::Result<()> {
-        if self.version != 1 || !hex(&self.run_id, 32) {
+        if self.version != 1 || self.interface != protocol_descriptor() || !hex(&self.run_id, 32) {
             return Err(invalid());
         }
         match &self.message {
             Message::StartFrontend { family, .. } if !hex(family, 64) => return Err(invalid()),
             Message::FrontendBound { origin } | Message::ConfigureProxy { upstream: origin } => {
                 loopback_address(origin)?;
-            }
-            Message::BackendReady { address } => {
-                let parsed: SocketAddr = address.parse().map_err(|_| invalid())?;
-                if parsed.ip() != std::net::Ipv4Addr::LOCALHOST
-                    || parsed.port() == 0
-                    || parsed.to_string() != *address
-                {
-                    return Err(invalid());
-                }
-            }
-            Message::StartBackend {
-                assets,
-                frontend_origin,
-                ..
-            } => {
-                if !Path::new(assets).is_absolute() || assets.len() > 16 * 1024 {
-                    return Err(invalid());
-                }
-                if let Some(origin) = frontend_origin {
-                    loopback_address(origin)?;
-                }
-            }
-            Message::LaunchReady { url, .. } | Message::OpenBrowser { url } => {
-                let (origin, ticket) = url.split_once("#rsi-launch=").ok_or_else(invalid)?;
-                loopback_address(origin)?;
-                if !hex(ticket, 64) {
-                    return Err(invalid());
-                }
             }
             _ => {}
         }
@@ -188,39 +145,6 @@ pub fn loopback_origin(address: SocketAddr) -> String {
     } else {
         format!("http://{address}")
     }
-}
-
-/// Admits only ordinary TUI workspace/session options, never launcher authority.
-pub fn validate_tui_arguments(arguments: &[std::ffi::OsString]) -> io::Result<()> {
-    if arguments.len() > 6
-        || arguments
-            .iter()
-            .map(|arg| arg.as_encoded_bytes().len())
-            .sum::<usize>()
-            > 32 * 1024
-    {
-        return Err(invalid());
-    }
-    let mut seen = std::collections::BTreeSet::new();
-    let mut args = arguments.iter();
-    while let Some(option) = args.next() {
-        let name = option.to_str().ok_or_else(invalid)?;
-        if !matches!(name, "--cwd" | "--resume" | "--session-id") || !seen.insert(name) {
-            return Err(invalid());
-        }
-        let value = args
-            .next()
-            .and_then(|arg| arg.to_str())
-            .filter(|value| !value.is_empty())
-            .ok_or_else(invalid)?;
-        if name == "--cwd" && !Path::new(value).is_absolute() {
-            return Err(invalid());
-        }
-    }
-    if seen.contains("--resume") && seen.contains("--session-id") {
-        return Err(invalid());
-    }
-    Ok(())
 }
 
 /// Reads one bounded complete frame; EOF, partial lines and oversized data fail.
@@ -310,10 +234,13 @@ mod tests {
             u64::try_from(PROXY_TIMEOUT.as_millis()).unwrap()
         );
         for sample in corpus["cases"].as_array().unwrap() {
-            let json = sample["json"].as_str().unwrap();
+            let json = sample["json"].as_str().unwrap().replace(
+                "@protocol@",
+                &serde_json::to_string(&protocol_descriptor()).unwrap(),
+            );
             let valid = sample["valid"].as_bool().unwrap();
             assert_eq!(
-                serde_json::from_str::<Frame>(json).is_ok(),
+                serde_json::from_str::<Frame>(&json).is_ok(),
                 valid,
                 "{}",
                 sample["name"]
@@ -363,7 +290,7 @@ mod tests {
         );
     }
     #[test]
-    fn origins_and_launch_links_are_closed_and_debug_is_redacted() {
+    fn origins_are_closed_and_debug_is_redacted() {
         for origin in [
             "http://localhost:123",
             "http://127.0.0.1:0",
@@ -378,8 +305,9 @@ mod tests {
         let secret = "a".repeat(64);
         let frame = Frame::new(
             RUN,
-            Message::OpenBrowser {
-                url: format!("http://127.0.0.1:123#rsi-launch={secret}"),
+            Message::StartFrontend {
+                port: 0,
+                family: secret.clone(),
             },
         )
         .unwrap();

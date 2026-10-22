@@ -33,6 +33,7 @@ impl Operation {
             Self::Delete => ("delete", OperationEffect::Mutation),
         };
         OperationSpec {
+            protocol: rsi_api_protocol::wire_contract!(),
             id: OperationId::new("workspace", name, 3).expect("constant operation"),
             class: OperationClass::Data,
             effect,

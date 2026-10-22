@@ -22,6 +22,7 @@ impl ExaOperation {
     )]
     pub fn spec(self) -> OperationSpec {
         OperationSpec {
+            protocol: rsi_api_protocol::wire_contract!(),
             id: OperationId::new(
                 "exa-credential",
                 match self {
