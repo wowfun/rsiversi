@@ -5,7 +5,7 @@ use crate::{
 use bytes::Bytes;
 use http::{Request, Response};
 use hyper::body::{Body as _, Incoming};
-#[cfg(unix)]
+#[cfg(any(unix, windows))]
 use rsi_api_protocol::LocalCompatibilityKey;
 use rsi_api_protocol::{
     ApiError, AuthenticatedDevice, CallOrigin, DeviceAuthentication, DeviceId, Result,
@@ -20,7 +20,7 @@ pub(crate) enum Access {
         policy: Policy,
         authentication: Arc<dyn DeviceAuthentication>,
     },
-    #[cfg(unix)]
+    #[cfg(any(unix, windows))]
     Local(LocalCompatibilityKey),
 }
 pub(crate) struct Caller {
@@ -29,10 +29,10 @@ pub(crate) struct Caller {
 }
 impl Access {
     #[cfg_attr(
-        not(unix),
+        not(any(unix, windows)),
         expect(
             clippy::unnecessary_wraps,
-            reason = "This shared admission gate rejects Unix Local access; only Remote access exists off Unix"
+            reason = "Only Remote access exists without a native local transport"
         )
     )]
     fn remote(&self) -> Result<(&Policy, &Arc<dyn DeviceAuthentication>)> {
@@ -41,7 +41,7 @@ impl Access {
                 policy,
                 authentication,
             } => Ok((policy, authentication)),
-            #[cfg(unix)]
+            #[cfg(any(unix, windows))]
             Self::Local(_) => Err(ApiError::Unauthorized),
         }
     }
@@ -54,7 +54,7 @@ impl Access {
                 }
                 policy.fence(headers, request.uri(), request.version())
             }
-            #[cfg(unix)]
+            #[cfg(any(unix, windows))]
             Self::Local(key) => {
                 if request.version() != http::Version::HTTP_11
                     || request.uri().authority().is_some()
@@ -79,7 +79,7 @@ impl Access {
                     origin: CallOrigin::Device(device),
                 }
             }
-            #[cfg(unix)]
+            #[cfg(any(unix, windows))]
             Self::Local(_) => Caller {
                 origin: CallOrigin::Local,
                 revoked: CancellationToken::new(),

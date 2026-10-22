@@ -3,12 +3,16 @@ use crate::{
     delivery::Delivery,
     server::{State, serve_connection},
 };
+#[cfg(windows)]
+use rsi_api_local_transport::LocalServerStream as LocalStream;
 use rsi_api_protocol::{
     ApiDispatch, ApiError, ConnectionDescription, LocalCompatibilityKey, Result,
 };
 use rsi_meta::Execution;
 use std::sync::Arc;
-use tokio::{net::UnixStream, sync::Semaphore};
+#[cfg(unix)]
+use tokio::net::UnixStream as LocalStream;
+use tokio::sync::Semaphore;
 use tokio_util::sync::CancellationToken;
 
 /// Same-UID Unix service using the shared API HTTP codec and request supervision.
@@ -17,6 +21,7 @@ use tokio_util::sync::CancellationToken;
 pub struct LocalHttpService {
     state: Arc<State>,
     connections: Arc<Semaphore>,
+    #[cfg(unix)]
     uid: u32,
 }
 impl LocalHttpService {
@@ -45,13 +50,15 @@ impl LocalHttpService {
                 socket_scratch: rsi_api_protocol::ByteBudget::default(),
             }),
             connections: Arc::new(Semaphore::new(128)),
+            #[cfg(unix)]
             uid: rustix::process::geteuid().as_raw(),
         })
     }
 
     /// Verifies the actual peer, admits one connection and serves exactly one exchange.
     /// Dropping this waiter closes transport delivery; admitted mutations retain API ownership.
-    pub async fn serve(&self, stream: UnixStream, stop: CancellationToken) -> Result<()> {
+    pub async fn serve(&self, stream: LocalStream, stop: CancellationToken) -> Result<()> {
+        #[cfg(unix)]
         if stream
             .peer_cred()
             .map_err(|_| ApiError::Unauthorized)?

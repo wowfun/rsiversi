@@ -3,11 +3,14 @@ use http_body_util::{BodyExt, Full};
 use hyper::client::conn::http1::{Connection, SendRequest};
 use hyper_util::rt::TokioIo;
 use rsi_api_client::ResponseBytes;
+#[cfg(windows)]
+use rsi_api_local_transport::LocalClientStream as LocalStream;
 use rsi_api_protocol::{ApiError, Result};
-use std::{path::Path, pin::Pin};
-use tokio::net::UnixStream;
+use std::pin::Pin;
+#[cfg(unix)]
+use tokio::net::UnixStream as LocalStream;
 
-pub(crate) struct Driver<T: hyper::rt::Read + hyper::rt::Write = TokioIo<UnixStream>>(
+pub(crate) struct Driver<T: hyper::rt::Read + hyper::rt::Write = TokioIo<LocalStream>>(
     Connection<T, Full<Bytes>>,
 );
 impl<T: hyper::rt::Read + hyper::rt::Write + Unpin> std::future::Future for Driver<T> {
@@ -25,10 +28,14 @@ fn lost() -> ApiError {
     ApiError::Backend("local API connection ended".into())
 }
 
-pub(crate) async fn connect(path: &Path) -> Result<(SendRequest<Full<Bytes>>, Driver)> {
-    let socket = UnixStream::connect(path)
+pub(crate) async fn connect(
+    config: &crate::UdsClientConfig,
+) -> Result<(SendRequest<Full<Bytes>>, Driver)> {
+    #[cfg(unix)]
+    let socket = LocalStream::connect(&config.socket)
         .await
         .map_err(|_| ApiError::Backend("local API connection failed".into()))?;
+    #[cfg(unix)]
     if socket
         .peer_cred()
         .map_err(|_| ApiError::Unauthorized)?
@@ -37,6 +44,22 @@ pub(crate) async fn connect(path: &Path) -> Result<(SendRequest<Full<Bytes>>, Dr
     {
         return Err(ApiError::Unauthorized);
     }
+    #[cfg(windows)]
+    let socket = {
+        use rsi_process_native::{ProcessHandle, ProcessIdentity};
+        let current =
+            ProcessHandle::open(std::process::id()).map_err(|_| ApiError::Unauthorized)?;
+        let expected = ProcessIdentity {
+            pid: config.process_id,
+            start_token: config.process_start_token.clone(),
+            user_sid: current.identity().user_sid.clone(),
+        };
+        let name = rsi_api_local_transport::PipeName::new(&config.socket)
+            .map_err(|_| ApiError::Unauthorized)?;
+        rsi_api_local_transport::connect(&name, &expected)
+            .await
+            .map_err(|_| ApiError::Unauthorized)?
+    };
     hyper::client::conn::http1::Builder::new()
         .max_buf_size(32 * 1024)
         .writev(true)

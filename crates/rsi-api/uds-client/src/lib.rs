@@ -3,16 +3,16 @@
 #![warn(missing_docs)]
 #![allow(clippy::missing_errors_doc)]
 
-#[cfg(unix)]
+#[cfg(any(unix, windows))]
 mod connection;
-#[cfg(unix)]
+#[cfg(any(unix, windows))]
 mod io;
-#[cfg(unix)]
+#[cfg(any(unix, windows))]
 mod transport;
-#[cfg(unix)]
+#[cfg(any(unix, windows))]
 pub use connection::{UdsClient, UdsClientConfig, UdsClientFactory};
 
-#[cfg(all(unix, feature = "test-support"))]
+#[cfg(all(any(unix, windows), feature = "test-support"))]
 mod measurement;
-#[cfg(all(unix, feature = "test-support"))]
+#[cfg(all(any(unix, windows), feature = "test-support"))]
 pub use measurement::ExchangeTiming;

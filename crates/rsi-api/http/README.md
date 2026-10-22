@@ -62,8 +62,10 @@ idempotent success even without a pin.
 This prevents an old connection from using or clearing another device's cookie.
 It does not order already-sent cookie responses across browser tabs.
 
-`LocalHttpService` reuses this codec and dispatcher for Unix streams. It checks
-same-UID peer credentials before HTTP admission, requires the exact opaque local
+`LocalHttpService` reuses this codec and dispatcher for Unix streams and authenticated
+Windows pipes. It checks same-UID Unix peer credentials before HTTP admission;
+Windows streams must come from the [local transport](../local-transport/README.md)
+and its process-identity checks. It requires the exact opaque local
 compatibility key and Host `rsi.local`, and supplies Local origin itself. It
 rejects browser/device credential headers and cookie routes. TCP listeners never
 accept local authority. The caller owns socket publication and generation
@@ -153,7 +155,8 @@ consumes them and never registers or retires them. The former negotiates wire
 version and endpoint/generation identity;
 all other domain calls require the negotiated `X-Rsi-Host-Epoch`. Operation versions
 describe wire compatibility, not executable equality. Local automatic owner reuse
-retains its independent executable/launch-key checks.
+retains its independent home authority, process identity, Host epoch and
+launch-key checks; executable build identity does not substitute for interfaces.
 
 Finite JSON replies retain exact Rust JSON bytes. Binary replies use
 `application/vnd.rsi.binary`: an eight-byte big-endian metadata length, an

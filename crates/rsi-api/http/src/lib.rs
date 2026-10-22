@@ -11,9 +11,9 @@ mod assets;
 pub use assets::{AssetType, DocumentPolicy, HttpAsset, HttpAssets, HttpAssetsContract};
 mod bounded_io;
 mod browser_stream;
-#[cfg(unix)]
+#[cfg(any(unix, windows))]
 mod local;
-#[cfg(unix)]
+#[cfg(any(unix, windows))]
 pub use local::LocalHttpService;
 mod delivery;
 mod diagnostics;

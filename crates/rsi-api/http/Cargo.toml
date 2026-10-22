@@ -31,6 +31,9 @@ url.workspace = true
 libc.workspace = true
 rustix.workspace = true
 
+[target.'cfg(windows)'.dependencies]
+rsi-api-local-transport = { path = "../local-transport" }
+
 [dev-dependencies]
 tokio = { workspace = true, features = ["test-util"] }
 rsi-api = { path = "../core" }

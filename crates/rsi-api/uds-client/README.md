@@ -1,7 +1,7 @@
 # rsi-api-uds-client
 
-This ordinary native connection plugin supplies ApiClient over a same-UID Unix
-socket. Configuration selects an absolute socket path, EndpointId, HostEpoch and
+This ordinary native connection plugin supplies ApiClient over a same-user local
+transport. Configuration selects an endpoint path, EndpointId, HostEpoch and
 opaque LocalCompatibilityKey. Socket paths must also pass the host standard
 library Unix address constructor, including its native length and NUL checks. The product owns their selection and build/launch
 policy. This package imports no Service Host process owner or domain implementation.
@@ -22,9 +22,12 @@ The local listener closes HTTP/1 after one exchange. Pipelined extra requests
 cannot dispatch a second operation and do not roll back an admitted first
 mutation. They are no longer interpreted as private-protocol trailing frames.
 
-Tests exercise real isolated Unix listeners, malformed responses, generation and
-credential fences, cancellation and ordinary plugin retirement. Native platforms
-without Unix sockets do not expose this adapter. Browser closures exclude it.
+On Windows the endpoint is an admitted local named pipe and configuration also
+requires server PID and process creation time. Every exchange uses the
+[local transport](../local-transport/README.md) to verify actual server identity
+and the current user's SID before transmitting HTTP. Browser closures exclude it.
+Tests exercise isolated native listeners, malformed responses, generation and
+credential fences, cancellation and ordinary plugin retirement.
 
 The opt-in `test-support` feature records bounded per-exchange setup, response-head
 and complete finite-response times. The ignored report benchmark holds an SSE

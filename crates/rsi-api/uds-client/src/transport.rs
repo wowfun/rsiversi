@@ -58,7 +58,7 @@ impl ConnectionTransport for LocalTransport {
         let deadline = self.execution.deadline_after(Duration::from_mins(1));
         let (mut sender, connection) = tokio::select! { biased;
             () = retiring.cancelled() => return Err(ApiError::ShuttingDown),
-            result = deadline.timeout(crate::io::connect(&self.config.socket)) => result.map_err(|_| lost())??,
+            result = deadline.timeout(crate::io::connect(&self.config)) => result.map_err(|_| lost())??,
         };
         #[cfg(feature = "test-support")]
         let setup_ns = started_at.elapsed().as_nanos();

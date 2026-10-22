@@ -5753,6 +5753,7 @@ dependencies = [
  "libc",
  "reqwest 0.12.28",
  "rsi-api",
+ "rsi-api-local-transport",
  "rsi-api-protocol",
  "rsi-credentials-protocol",
  "rsi-meta",
@@ -5790,6 +5791,15 @@ dependencies = [
  "tokio",
  "tokio-util",
  "zeroize",
+]
+
+[[package]]
+name = "rsi-api-local-transport"
+version = "0.0.1"
+dependencies = [
+ "rsi-process-native",
+ "tokio",
+ "windows-sys 0.61.2",
 ]
 
 [[package]]
@@ -5860,8 +5870,10 @@ dependencies = [
  "rsi-api",
  "rsi-api-client",
  "rsi-api-http",
+ "rsi-api-local-transport",
  "rsi-api-protocol",
  "rsi-meta",
+ "rsi-process-native",
  "rustix 1.1.4",
  "serde",
  "serde_json",

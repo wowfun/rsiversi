@@ -24,18 +24,43 @@ pub struct UdsClientConfig {
     pub host_epoch: HostEpoch,
     /// Opaque local build/launch fence derived by the product.
     pub compatibility: LocalCompatibilityKey,
+    /// Expected Windows server PID, verified on every native connection.
+    #[cfg(windows)]
+    pub process_id: u32,
+    /// Expected Windows process creation time, fencing PID reuse.
+    #[cfg(windows)]
+    pub process_start_token: String,
 }
 impl UdsClientConfig {
     /// Rejects unusable or unbounded local socket addresses before connecting.
     pub fn validate(&self) -> Result<()> {
-        if !self.socket.is_absolute() {
-            return Err(ApiError::Invalid(
-                "Unix socket path must be absolute".into(),
-            ));
+        #[cfg(unix)]
+        {
+            if !self.socket.is_absolute() {
+                return Err(ApiError::Invalid(
+                    "Unix socket path must be absolute".into(),
+                ));
+            }
+            std::os::unix::net::SocketAddr::from_pathname(&self.socket)
+                .map(|_| ())
+                .map_err(|error| ApiError::Invalid(format!("invalid Unix socket path: {error}")))
         }
-        std::os::unix::net::SocketAddr::from_pathname(&self.socket)
-            .map(|_| ())
-            .map_err(|error| ApiError::Invalid(format!("invalid Unix socket path: {error}")))
+        #[cfg(windows)]
+        {
+            if self.process_id == 0
+                || self.process_start_token.is_empty()
+                || self.process_start_token.len() > 20
+                || !self
+                    .process_start_token
+                    .bytes()
+                    .all(|byte| byte.is_ascii_digit())
+            {
+                return Err(ApiError::Invalid("invalid local process identity".into()));
+            }
+            rsi_api_local_transport::PipeName::new(&self.socket)
+                .map(|_| ())
+                .map_err(|error| ApiError::Invalid(error.to_string()))
+        }
     }
 }
 

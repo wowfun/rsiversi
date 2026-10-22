@@ -425,7 +425,7 @@ impl State {
             connection.admit(rsi_api_protocol::ApiAdmission::new(Arc::new(permit)));
             let origin = match &self.access {
                 crate::access::Access::Remote { policy, .. } => policy.origin.as_str(),
-                #[cfg(unix)]
+                #[cfg(any(unix, windows))]
                 crate::access::Access::Local(_) => return Err(ApiError::Unauthorized),
             };
             return crate::assets::response(
