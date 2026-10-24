@@ -43,14 +43,19 @@ pub type AssetResult<T> = std::result::Result<T, AssetError>;
 #[derive(Debug)]
 struct Bundle {
     revision: String,
+    desktop_bridge: Option<rsi_api_protocol::ProtocolDescriptor>,
     files: BTreeMap<String, HttpAsset>,
     renderer_files: BTreeSet<String>,
     catalog: Option<RendererCatalog>,
     leases: AtomicUsize,
 }
 impl Bundle {
-    fn new(files: BTreeMap<String, HttpAsset>) -> AssetResult<Arc<Self>> {
+    fn new(
+        files: BTreeMap<String, HttpAsset>,
+        desktop_bridge: Option<rsi_api_protocol::ProtocolDescriptor>,
+    ) -> AssetResult<Arc<Self>> {
         let mut digest = Sha256::new();
+        digest.update(serde_json::to_vec(&desktop_bridge).expect("closed descriptor"));
         for (name, asset) in &files {
             digest.update((name.len() as u64).to_le_bytes());
             digest.update(name);
@@ -97,6 +102,7 @@ impl Bundle {
             .transpose()?;
         Ok(Arc::new(Self {
             revision: hex::encode(digest.finalize()),
+            desktop_bridge,
             files,
             renderer_files,
             catalog,
@@ -179,7 +185,7 @@ impl WebAssetControl {
                     &owner.budget,
                     previous.as_ref().map(|bundle| &bundle.files),
                 )?;
-                Bundle::new(files)
+                Bundle::new(files.files, files.desktop_bridge)
             })
             .await
             .map_err(|_| AssetError::Invalid("bundle reader stopped".into()))?
@@ -198,6 +204,22 @@ impl WebAssetControl {
             .current
             .as_ref()
             .map(|bundle| bundle.revision.clone())
+            .ok_or(AssetError::Closed)
+    }
+    /// Descriptor retained with the current generation's verified bootstrap bytes.
+    ///
+    /// # Panics
+    /// Panics if an earlier publication panic poisoned the generation state.
+    pub fn desktop_bridge(&self) -> AssetResult<Option<rsi_api_protocol::ProtocolDescriptor>> {
+        if self.stop.is_cancelled() {
+            return Err(AssetError::Closed);
+        }
+        self.state
+            .lock()
+            .expect("Web assets poisoned")
+            .current
+            .as_ref()
+            .map(|bundle| bundle.desktop_bridge.clone())
             .ok_or(AssetError::Closed)
     }
     /// Coalesced successful publications, with no source-file polling.
@@ -439,6 +461,9 @@ impl AssetCandidate {
                 "candidate has no renderer catalog".into(),
             ));
         }
+        if candidate.desktop_bridge != current.desktop_bridge {
+            return Err(AssetError::RestartRequired);
+        }
         for (base, other) in [(current, candidate), (candidate, current)] {
             for (name, asset) in &base.files {
                 if !base.renderer_files.contains(name)
@@ -505,7 +530,7 @@ impl WebAssetControl {
                     previous = Some(next);
                     let expected = owner.revision()?;
                     owner
-                        .stage(config.directory.clone(), config.files.clone())?
+                        .stage_config(config.clone())?
                         .wait()
                         .await?
                         .publish(&expected)?;
@@ -572,32 +597,35 @@ mod tests {
                     "capabilities": [], "surfaces": ["pane"]
                 }]
             })).unwrap();
-            Bundle::new(BTreeMap::from([
-                (
-                    "/preview-local.html".into(),
-                    HttpAsset {
-                        kind: rsi_api_http::AssetType::Html,
-                        policy,
-                        bytes: owner.budget.copy(b"same document bytes").unwrap(),
-                    },
-                ),
-                (
-                    "/renderer.js".into(),
-                    HttpAsset {
-                        kind: rsi_api_http::AssetType::JavaScript,
-                        policy: rsi_api_http::DocumentPolicy::default(),
-                        bytes: owner.budget.copy(renderer).unwrap(),
-                    },
-                ),
-                (
-                    "/ui-renderers.json".into(),
-                    HttpAsset {
-                        kind: rsi_api_http::AssetType::Json,
-                        policy: rsi_api_http::DocumentPolicy::default(),
-                        bytes: owner.budget.copy(&catalog).unwrap(),
-                    },
-                ),
-            ]))
+            Bundle::new(
+                BTreeMap::from([
+                    (
+                        "/preview-local.html".into(),
+                        HttpAsset {
+                            kind: rsi_api_http::AssetType::Html,
+                            policy,
+                            bytes: owner.budget.copy(b"same document bytes").unwrap(),
+                        },
+                    ),
+                    (
+                        "/renderer.js".into(),
+                        HttpAsset {
+                            kind: rsi_api_http::AssetType::JavaScript,
+                            policy: rsi_api_http::DocumentPolicy::default(),
+                            bytes: owner.budget.copy(renderer).unwrap(),
+                        },
+                    ),
+                    (
+                        "/ui-renderers.json".into(),
+                        HttpAsset {
+                            kind: rsi_api_http::AssetType::Json,
+                            policy: rsi_api_http::DocumentPolicy::default(),
+                            bytes: owner.budget.copy(&catalog).unwrap(),
+                        },
+                    ),
+                ]),
+                None,
+            )
             .unwrap()
         };
         let current = make(rsi_api_http::DocumentPolicy::SandboxLocal);
@@ -627,6 +655,7 @@ mod tests {
         let revision = "a".repeat(64);
         let bundle = Arc::new(Bundle {
             revision: revision.clone(),
+            desktop_bridge: None,
             files: BTreeMap::from([(
                 "/renderer.js".into(),
                 HttpAsset {
@@ -650,7 +679,7 @@ mod tests {
         {
             let mut state = owner.state.lock().unwrap();
             state.retiring = Some(Arc::downgrade(&bundle));
-            state.current = Some(Bundle::new(BTreeMap::new()).unwrap());
+            state.current = Some(Bundle::new(BTreeMap::new(), None).unwrap());
         }
         assert!(owner.get(&url).unwrap().is_none());
         assert_eq!(response.bytes.as_bytes(), b"renderer");

@@ -7,7 +7,7 @@ const limits = JSON.parse(readFileSync(new URL('../dev-control/conformance.json'
 const maximum = limits.maximum_frame_bytes;
 const startupTimeout = limits.startup_timeout_ms;
 const schemas = {
-  start_frontend: ['port', 'family'], frontend_bound: ['origin'],
+  start_frontend: ['port', 'family'], frontend_bound: ['origin', 'desktop_bridge'],
   configure_proxy: ['upstream'], proxy_ready: [],
 };
 const failure = () => new Error('Invalid development control frame');
@@ -52,7 +52,11 @@ function parseFrame(bytes) {
   const fields = schemas[message.event];
   keys(message, ['event', ...fields]);
   if (message.event === 'start_frontend' && (!Number.isInteger(message.port) || message.port < 0 || message.port > 65535 || typeof message.family !== 'string' || !/^[a-f0-9]{64}$/.test(message.family))) throw failure();
-  if (message.event === 'frontend_bound') loopbackAddress(message.origin);
+  if (message.event === 'frontend_bound') {
+    loopbackAddress(message.origin);
+    keys(message.desktop_bridge, ['name', 'version']);
+    if (message.desktop_bridge.name !== 'rsi.desktop.bridge' || !validProtocolIdentity(message.desktop_bridge.name, message.desktop_bridge.version)) throw failure();
+  }
   if (message.event === 'configure_proxy') loopbackAddress(message.upstream);
   return frame;
 }

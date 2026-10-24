@@ -191,6 +191,7 @@ impl Runner {
             let rsi_web_control::Reply::Ready {
                 address,
                 ticket: Some(ticket),
+                ..
             } = reply
             else {
                 return Err("Host did not report a watch listener".into());
@@ -198,6 +199,7 @@ impl Runner {
             session.configure(address).await?;
             listener = Some(stream);
             Some(rsi_web_control::DesktopLaunch {
+                desktop_bridge: session.desktop_bridge(),
                 url: format!("{}#rsi-launch={ticket}", session.origin()),
             })
         } else {

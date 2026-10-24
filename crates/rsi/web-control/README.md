@@ -7,7 +7,8 @@ Connection loss retires this listener independently of persistent Web.
 
 The installed Desktop launcher may retain that watch listener and deliver one
 bounded `DesktopLaunch` frame over private standard input. The frame contains a
-canonical loopback URL and one-use ticket. Desktop accepts it only in explicit
+canonical loopback URL, one-use ticket, and mandatory `desktop_bridge` descriptor
+retained with that listener's verified assets. Desktop accepts it only in explicit
 managed frontend mode; the remaining pipe is the launcher's lifetime lease.
 No launch URL or ticket is placed in process arguments.
 

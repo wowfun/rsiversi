@@ -86,11 +86,11 @@ test('POSIX PATH setup quotes the chosen prefix without evaluating its contents'
 test('independent producer rejects UI aliases and invalid dependency selections before effects', () => {
   assert.throws(() => parse(['tui', root]));
   assert.throws(() => parse(['core', 'relative']));
-  assert.throws(() => parse(['desktop', root]));
+  assert.equal(parse(['desktop', root]).kind, 'desktop');
   assert.throws(() => parse(['web', root, '--web-package', root]));
   assert.throws(() => parse(['web', root, '--debug', '--debug']));
-  assert.deepEqual(parse(['desktop', root, '--debug', '--web-package', root]),
-    {kind:'desktop', output:root, debug:true, replace:false, webPackage:root});
+  assert.deepEqual(parse(['desktop', root, '--debug']),
+    {kind:'desktop', output:root, debug:true, replace:false});
 });
 test('source publication replaces only its own package and preserves unrelated output files', async () => {
   const directory = await mkdtemp(join(tmpdir(), 'rsi producer '));

@@ -23,11 +23,28 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         Some(_) => return Err("unknown option".into()),
         None => None,
     };
+    let bridge = if family.is_some() {
+        Some(
+            serde_json::from_str::<rsi_api_protocol::ProtocolDescriptor>(
+                &arguments
+                    .next()
+                    .ok_or("missing built Desktop bridge descriptor JSON")?
+                    .into_string()
+                    .map_err(|_| "descriptor must be UTF-8")?,
+            )?,
+        )
+    } else {
+        None
+    };
     if !directory.is_absolute() || arguments.next().is_some() {
         return Err("expected one absolute bundle directory".into());
     }
     if let Some(family) = family {
-        let receipt = rsi_web_assets::pairing_receipt(&directory, &family)?;
+        let receipt = rsi_web_assets::pairing_receipt(
+            &directory,
+            &family,
+            bridge.expect("producer descriptor"),
+        )?;
         std::fs::write(directory.join("rsi-build.json"), receipt)?;
     }
     let mut host = HostBuilder::without_paths("bundle-check");

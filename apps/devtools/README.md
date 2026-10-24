@@ -16,10 +16,11 @@ Installer admission tests use stable PowerShell error IDs, independent of the
 user's display language.
 
 `node apps/devtools/build.mjs core|web|desktop|ssh-helper ABSOLUTE_PACKAGE
-[--debug] [--replace] [--web-package ABSOLUTE_WEB_PACKAGE]` builds one independent package.
+[--debug] [--replace]` builds one independent package.
 All native builds use the ordinary shared Cargo target directory. Web builds its
 document, Worker and WASM; it does not build or replace the native core. Desktop
-requires an exact Web package manifest. SSH helper builds its same-CPU Linux musl
+checks the loaded Web document bridge before opening its window. Web is installed
+separately and may be updated independently. SSH helper builds its same-CPU Linux musl
 target on Linux. Toolchain and system prerequisites are explicit; the producer
 does not install compilers or libraries.
 SSH publication also enforces the transport owner's 128 MiB image bound.
@@ -46,7 +47,7 @@ homes and commands with `--watch`; trusted recipes belong to
 [`rsi.toml`](../../crates/rsi/core/docs/launch.md). There is no separate development
 runtime or source-directory launcher.
 
-`node apps/devtools/packages.mjs assemble KIND OUTPUT INPUT [WEB_MANIFEST]`
+`node apps/devtools/packages.mjs assemble KIND OUTPUT INPUT`
 assembles already built artifacts. Output must be new. Payloads are hashed and
 copied in 64 KiB chunks, then verified before the manifest is written. The package
 owner's disk bounds cover unstripped debug binaries without making them buffer

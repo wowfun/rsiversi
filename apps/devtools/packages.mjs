@@ -166,11 +166,10 @@ export function hostInterfacePackages(metadata, entry) {
   });
 }
 
-export async function assemble(kind, output, input, webManifest) {
+export async function assemble(kind, output, input) {
   if (!['core','web','desktop','ssh-helper'].includes(kind) || !isAbsolute(output) || !isAbsolute(input))
     throw new Error('assemble requires core|web|desktop|ssh-helper and absolute output/input paths');
   if (kind === 'ssh-helper' && process.platform !== 'linux') throw new Error('SSH helper publication requires Linux');
-  if ((kind === 'desktop') !== Boolean(webManifest)) throw new Error('Only Desktop requires an exact Web manifest');
   if (!platforms.has(process.platform) || !architectures.has(process.arch)) throw new Error('Unsupported native target');
   const version = process.env.RSI_RELEASE_VERSION ?? '0.0.1-local';
   if (!/^[!-~]{1,128}$/.test(version)) throw new Error('Invalid package version');
@@ -190,10 +189,6 @@ export async function assemble(kind, output, input, webManifest) {
     manifest.exports[kind] = {kind:'executable',path:filename};
     if (kind === 'ssh-helper') manifest.requires.push(await descriptor(join(root,'crates/rsi-ssh/protocol')));
     if (kind === 'desktop') {
-      const bytes = await bounded(webManifest);
-      const dependency = parseManifest(bytes);
-      if (dependency.name !== 'web' || dependency.target !== 'portable') throw new Error('Desktop requires portable Web');
-      manifest.dependencies.push({name:'web',digest:hash(bytes)});
       manifest.requires.push(await descriptor(join(root,'crates/rsi/web-control')));
     }
   }
@@ -288,9 +283,9 @@ export async function signRepository(directory, name, sequence, pem, expectedKey
 if (process.argv[1] && resolve(process.argv[1]) === fileURLToPath(import.meta.url)) {
   const [operation,...args] = process.argv.slice(2);
   try {
-    if (operation === 'assemble' && (args.length === 3 || args.length === 4)) await assemble(...args);
+    if (operation === 'assemble' && args.length === 3) await assemble(...args);
     else if (operation === 'sign' && args.length === 3) await signRepository(args[0],args[1],Number(args[2]),
       process.env.RSI_REPOSITORY_SIGNING_KEY,process.env.RSI_PACKAGE_REPOSITORY_KEY);
-    else throw new Error('Usage: packages.mjs assemble KIND OUTPUT INPUT [WEB_MANIFEST] | sign ROOT NAME SEQUENCE');
+    else throw new Error('Usage: packages.mjs assemble KIND OUTPUT INPUT | sign ROOT NAME SEQUENCE');
   } catch (error) { console.error(error.message); process.exitCode=1; }
 }

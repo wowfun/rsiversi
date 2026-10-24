@@ -11,6 +11,11 @@ async fn ordinary_product_watched_smoke() {
     install_web(&fixture);
     let root = fixture.temporary.path();
     std::fs::write(
+        root.join("bridge.json"),
+        include_str!("../../../../crates/rsi/desktop-bridge/wire-contract.json"),
+    )
+    .unwrap();
+    std::fs::write(
         root.join("build.mjs"),
         "if(process.env.DEEPSEEK_API_KEY)process.exit(8);",
     )
@@ -20,6 +25,7 @@ import http from 'node:http';
 import readline from 'node:readline';
 import fs from 'node:fs';
 if(process.env.DEEPSEEK_API_KEY)process.exit(8);
+const desktopBridge=JSON.parse(fs.readFileSync('bridge.json','utf8'));
 let id, upstream, protocol, stage=0, noisy=false;
 const server=http.createServer((request,response)=>{
   if(!noisy){noisy=true;process.stdout.write('post-ready plugin diagnostic\n');}
@@ -33,7 +39,7 @@ lines.on('line',line=>{
   const frame=JSON.parse(line),message=frame.message; protocol=frame.interface;
   if(stage===0&&message.event==='start_frontend'){
     id=frame.run_id;stage=1;server.listen(message.port,'127.0.0.1',()=>{
-      send({event:'frontend_bound',origin:`http://127.0.0.1:${server.address().port}`});
+      send({event:'frontend_bound',origin:`http://127.0.0.1:${server.address().port}`,desktop_bridge:desktopBridge});
     });
   }else if(stage===1&&frame.run_id===id&&message.event==='configure_proxy'){
     upstream=message.upstream;stage=2;
@@ -52,7 +58,11 @@ lines.on('close',()=>{server.close();clearInterval(timer);});
             directory: root.into(),
             command: vec![node.to_str().unwrap().into(), "build.mjs".into()],
             output: "package/package.json".into(),
-            inputs: vec!["build.mjs".into(), "frontend.mjs".into()],
+            inputs: vec![
+                "build.mjs".into(),
+                "frontend.mjs".into(),
+                "bridge.json".into(),
+            ],
             frontend: Some(rsi::LaunchFrontend {
                 command: vec![node.to_str().unwrap().into(), "frontend.mjs".into()],
                 port: 0,

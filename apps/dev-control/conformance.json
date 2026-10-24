@@ -10,12 +10,12 @@
     },
     {
       "name": "bound",
-      "json": "{\"interface\":@protocol@,\"version\":1,\"run_id\":\"0123456789abcdef0123456789abcdef\",\"message\":{\"event\":\"frontend_bound\",\"origin\":\"http://127.0.0.1:1234\"}}",
+      "json": "{\"interface\":@protocol@,\"version\":1,\"run_id\":\"0123456789abcdef0123456789abcdef\",\"message\":{\"event\":\"frontend_bound\",\"desktop_bridge\":{\"name\":\"rsi.desktop.bridge\",\"version\":5},\"origin\":\"http://127.0.0.1:1234\"}}",
       "valid": true
     },
     {
       "name": "default-http-port",
-      "json": "{\"interface\":@protocol@,\"version\":1,\"run_id\":\"0123456789abcdef0123456789abcdef\",\"message\":{\"event\":\"frontend_bound\",\"origin\":\"http://127.0.0.1\"}}",
+      "json": "{\"interface\":@protocol@,\"version\":1,\"run_id\":\"0123456789abcdef0123456789abcdef\",\"message\":{\"event\":\"frontend_bound\",\"desktop_bridge\":{\"name\":\"rsi.desktop.bridge\",\"version\":5},\"origin\":\"http://127.0.0.1\"}}",
       "valid": true
     },
     {
@@ -85,7 +85,7 @@
     },
     {
       "name": "default-port-spelling",
-      "json": "{\"interface\":@protocol@,\"version\":1,\"run_id\":\"0123456789abcdef0123456789abcdef\",\"message\":{\"event\":\"frontend_bound\",\"origin\":\"http://127.0.0.1:80\"}}",
+      "json": "{\"interface\":@protocol@,\"version\":1,\"run_id\":\"0123456789abcdef0123456789abcdef\",\"message\":{\"event\":\"frontend_bound\",\"desktop_bridge\":{\"name\":\"rsi.desktop.bridge\",\"version\":5},\"origin\":\"http://127.0.0.1:80\"}}",
       "valid": false
     },
     {
@@ -105,7 +105,7 @@
     },
     {
       "name": "array-origin",
-      "json": "{\"interface\":@protocol@,\"version\":1,\"run_id\":\"0123456789abcdef0123456789abcdef\",\"message\":{\"event\":\"frontend_bound\",\"origin\":[\"http://127.0.0.1:1234\"]}}",
+      "json": "{\"interface\":@protocol@,\"version\":1,\"run_id\":\"0123456789abcdef0123456789abcdef\",\"message\":{\"event\":\"frontend_bound\",\"desktop_bridge\":{\"name\":\"rsi.desktop.bridge\",\"version\":5},\"origin\":[\"http://127.0.0.1:1234\"]}}",
       "valid": false
     },
     {
@@ -125,7 +125,7 @@
     },
     {
       "name": "invalid-origin-url",
-      "json": "{\"interface\":@protocol@,\"version\":1,\"run_id\":\"aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa\",\"message\":{\"event\":\"frontend_bound\",\"origin\":\"not-a-url\"}}",
+      "json": "{\"interface\":@protocol@,\"version\":1,\"run_id\":\"aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa\",\"message\":{\"event\":\"frontend_bound\",\"desktop_bridge\":{\"name\":\"rsi.desktop.bridge\",\"version\":5},\"origin\":\"not-a-url\"}}",
       "valid": false
     },
     {
@@ -135,7 +135,27 @@
     },
     {
       "name": "foreign-interface",
-      "json": "{\"interface\":{\"name\":\"rsi.frontend.control\",\"version\":1,\"schema\":\"0000000000000000000000000000000000000000000000000000000000000000\"},\"version\":1,\"run_id\":\"aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa\",\"message\":{\"event\":\"proxy_ready\"}}",
+      "json": "{\"interface\":{\"name\":\"rsi.frontend.control\",\"version\":1},\"version\":1,\"run_id\":\"aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa\",\"message\":{\"event\":\"proxy_ready\"}}",
+      "valid": false
+    },
+    {
+      "name": "missing-bridge",
+      "json": "{\"interface\":@protocol@,\"version\":1,\"run_id\":\"0123456789abcdef0123456789abcdef\",\"message\":{\"event\":\"frontend_bound\",\"origin\":\"http://127.0.0.1:1234\"}}",
+      "valid": false
+    },
+    {
+      "name": "wrong-bridge-name",
+      "json": "{\"interface\":@protocol@,\"version\":1,\"run_id\":\"0123456789abcdef0123456789abcdef\",\"message\":{\"event\":\"frontend_bound\",\"desktop_bridge\":{\"name\":\"rsi.other\",\"version\":5},\"origin\":\"http://127.0.0.1:1234\"}}",
+      "valid": false
+    },
+    {
+      "name": "zero-bridge-version",
+      "json": "{\"interface\":@protocol@,\"version\":1,\"run_id\":\"0123456789abcdef0123456789abcdef\",\"message\":{\"event\":\"frontend_bound\",\"desktop_bridge\":{\"name\":\"rsi.desktop.bridge\",\"version\":0},\"origin\":\"http://127.0.0.1:1234\"}}",
+      "valid": false
+    },
+    {
+      "name": "unknown-bridge-field",
+      "json": "{\"interface\":@protocol@,\"version\":1,\"run_id\":\"0123456789abcdef0123456789abcdef\",\"message\":{\"event\":\"frontend_bound\",\"desktop_bridge\":{\"name\":\"rsi.desktop.bridge\",\"version\":5,\"schema\":\"old\"},\"origin\":\"http://127.0.0.1:1234\"}}",
       "valid": false
     }
   ]

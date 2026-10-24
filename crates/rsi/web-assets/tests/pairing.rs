@@ -14,9 +14,18 @@ fn bundle() -> tempfile::TempDir {
     for file in BOOTSTRAP_FILES {
         std::fs::write(root.path().join(file), file.as_bytes()).unwrap();
     }
+    std::fs::write(root.path().join("file-preview.js"), b"fixture preview").unwrap();
     std::fs::write(
         root.path().join("rsi-build.json"),
-        pairing_receipt(root.path(), FAMILY).unwrap(),
+        pairing_receipt(
+            root.path(),
+            FAMILY,
+            rsi_api_protocol::ProtocolDescriptor {
+                name: "rsi.desktop.bridge".into(),
+                version: 5,
+            },
+        )
+        .unwrap(),
     )
     .unwrap();
     root
@@ -69,6 +78,20 @@ async fn paired_admission_retains_exact_checked_bytes_and_retires_cleanly() {
     let running = result.unwrap();
     assert!(factory.take_diagnostic().is_none());
     let assets = running.lookup_local::<HttpAssetsContract>().unwrap();
+    let control = running.lookup_local::<WebAssetControlContract>().unwrap();
+    assert_eq!(control.desktop_bridge().unwrap().unwrap().version, 5);
+    // A new package selected on disk does not rewrite the held generation.
+    let next = pairing_receipt(
+        root.path(),
+        FAMILY,
+        rsi_api_protocol::ProtocolDescriptor {
+            name: "rsi.desktop.bridge".into(),
+            version: 6,
+        },
+    )
+    .unwrap();
+    std::fs::write(root.path().join("rsi-build.json"), next).unwrap();
+    assert_eq!(control.desktop_bridge().unwrap().unwrap().version, 5);
     std::fs::write(root.path().join("app.js"), "changed after admission").unwrap();
     assert_eq!(
         assets.get("/app.js").unwrap().unwrap().bytes.as_bytes(),
@@ -138,6 +161,7 @@ async fn each_bootstrap_file_is_pinned_including_wasm() {
 
 fn files(root: &Path) -> Vec<String> {
     let mut files: Vec<String> = BOOTSTRAP_FILES.iter().map(|name| (*name).into()).collect();
+    files.push("file-preview.js".into());
     if root.join("ui-renderers.json").exists() {
         files.extend(["standard.js".into(), "ui-renderers.json".into()]);
     }
@@ -145,11 +169,53 @@ fn files(root: &Path) -> Vec<String> {
 }
 
 #[tokio::test]
+async fn changed_bridge_requires_restart_without_replacing_the_held_generation() {
+    let root = bundle();
+    renderer(root.path(), b"initial renderer");
+    let (started, _) = start(root.path()).await;
+    let running = started.unwrap();
+    let control = running.lookup_local::<WebAssetControlContract>().unwrap();
+    let revision = control.revision().unwrap();
+    let receipt = pairing_receipt(
+        root.path(),
+        FAMILY,
+        rsi_api_protocol::ProtocolDescriptor {
+            name: "rsi.desktop.bridge".into(),
+            version: 6,
+        },
+    )
+    .unwrap();
+    std::fs::write(root.path().join("rsi-build.json"), receipt).unwrap();
+    let candidate = control
+        .stage_verified(root.path().to_owned())
+        .unwrap()
+        .wait()
+        .await
+        .unwrap();
+    assert!(matches!(
+        candidate.publish(&revision),
+        Err(rsi_web_assets::AssetError::RestartRequired)
+    ));
+    assert_eq!(control.revision().unwrap(), revision);
+    assert_eq!(control.desktop_bridge().unwrap().unwrap().version, 5);
+    drop(candidate);
+    assert!(running.shutdown().await.is_clean());
+}
+
+#[tokio::test]
 async fn independent_bundles_keep_internal_integrity_without_core_family_equality() {
     for corrupt in [false, true] {
         let root = bundle();
         // A producer's family is independent of the core that admits the package.
-        let receipt = pairing_receipt(root.path(), &"b".repeat(64)).unwrap();
+        let receipt = pairing_receipt(
+            root.path(),
+            &"b".repeat(64),
+            rsi_api_protocol::ProtocolDescriptor {
+                name: "rsi.desktop.bridge".into(),
+                version: 5,
+            },
+        )
+        .unwrap();
         std::fs::write(root.path().join("rsi-build.json"), receipt).unwrap();
         if corrupt {
             std::fs::write(root.path().join("worker.js"), b"foreign worker").unwrap();
@@ -209,7 +275,7 @@ async fn paired_renderer_updates_retire_and_restart_without_changing_receipt() {
     let old_url = old.url("standard.js").unwrap();
     renderer(root.path(), b"updated renderer");
     let candidate = control
-        .stage(root.path().to_owned(), files(root.path()))
+        .stage_verified(root.path().to_owned())
         .unwrap()
         .wait()
         .await
@@ -248,4 +314,69 @@ async fn paired_renderer_updates_retire_and_restart_without_changing_receipt() {
             .to_string()
             .contains("worker.js")
     );
+}
+
+#[tokio::test]
+async fn verified_watch_publishes_renderer_edits_and_keeps_bootstrap_fence() {
+    let root = bundle();
+    renderer(root.path(), b"initial renderer");
+    let mut host = HostBuilder::without_paths("verified-watch");
+    host.register_local_contract::<HttpAssetsContract>()
+        .unwrap();
+    host.register_local_contract::<WebAssetControlContract>()
+        .unwrap();
+    host.register_linked(
+        "assets",
+        "1",
+        UpdateMode::RestartRequired,
+        Arc::new(rsi_web_assets::VerifiedWebAssetsFactory),
+    )
+    .unwrap();
+    let running = host
+        .build()
+        .unwrap()
+        .start(Profile::new(vec![ProfileEntry::new(
+            "assets",
+            "assets",
+            serde_json::json!({"directory":root.path(),"files":files(root.path()),"watch":true}),
+        )]))
+        .await
+        .unwrap();
+    let control = running.lookup_local::<WebAssetControlContract>().unwrap();
+    let before = control.revision().unwrap();
+    renderer(root.path(), b"updated renderer with different length");
+    tokio::time::timeout(std::time::Duration::from_secs(5), async {
+        while control.revision().unwrap() == before {
+            tokio::time::sleep(std::time::Duration::from_millis(25)).await;
+        }
+    })
+    .await
+    .unwrap();
+    assert!(control.diagnostic().is_none());
+    assert_eq!(control.desktop_bridge().unwrap().unwrap().version, 5);
+    let updated = control.revision().unwrap();
+    std::fs::write(root.path().join("worker.js"), b"new bootstrap").unwrap();
+    std::fs::write(
+        root.path().join("rsi-build.json"),
+        pairing_receipt(
+            root.path(),
+            FAMILY,
+            rsi_api_protocol::ProtocolDescriptor {
+                name: "rsi.desktop.bridge".into(),
+                version: 5,
+            },
+        )
+        .unwrap(),
+    )
+    .unwrap();
+    tokio::time::timeout(std::time::Duration::from_secs(5), async {
+        while control.diagnostic().is_none() {
+            tokio::time::sleep(std::time::Duration::from_millis(25)).await;
+        }
+    })
+    .await
+    .unwrap();
+    assert_eq!(control.revision().unwrap(), updated);
+    assert!(control.diagnostic().unwrap().contains("restart"));
+    assert!(running.shutdown().await.is_clean());
 }

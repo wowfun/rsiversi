@@ -76,7 +76,7 @@ async function start() {
   loopbackAddress(origin);
   const configured = control.expect('configure_proxy', null);
   configured.catch(() => {});
-  await control.send({event: 'frontend_bound', origin});
+  await control.send({event: 'frontend_bound', origin, desktop_bridge: JSON.parse(config.define.__RSI_DESKTOP_BRIDGE__)});
   const message = await configured;
   proxy.configure(message.upstream);
   await control.send({event: 'proxy_ready'});

@@ -154,7 +154,7 @@ struct Manager {
     authentication: Arc<dyn DeviceAuthentication>,
 }
 struct Listener {
-    _assets: Option<Arc<ListenerAssets>>,
+    assets: Option<Arc<ListenerAssets>>,
     fiber: FiberHandle,
     http: Arc<dyn HttpListener>,
     source: Option<Assets>,
@@ -171,6 +171,10 @@ impl Listener {
         Reply::Ready {
             address: self.http.address(),
             ticket,
+            desktop_bridge: self
+                .assets
+                .as_ref()
+                .and_then(|assets| assets.control.desktop_bridge().ok().flatten()),
         }
     }
     async fn close(self) -> rsi_meta::Result<()> {
@@ -483,7 +487,7 @@ impl Manager {
             })
             .transpose()?;
         Ok(Listener {
-            _assets: assets,
+            assets,
             fiber,
             http,
             source,

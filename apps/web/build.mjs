@@ -45,7 +45,9 @@ run(bindgen, [
   ...(profile === "debug" ? ["--no-demangle"] : []),
   join(target, `wasm32-unknown-unknown/${profile}/rsi_web.wasm`),
 ]);
-await build({ root: source, configFile: join(source, "vite.config.mjs"), build: { outDir: output } });
+const {documentConfiguration} = await import('./vite.config.mjs');
+const documentConfig = documentConfiguration({command:'build'});
+await build({...documentConfig, root: source, configFile: false, build: {...documentConfig.build, outDir: output} });
 for (const {name: file, stage} of bootstrapFiles.filter(file => ["copy", "worker"].includes(file.stage))) {
   if (stage === 'worker') await writeFile(join(output, file), (await (await import('node:fs/promises')).readFile(join(source, file), 'utf8')).replaceAll('__RSI_BUILD_FAMILY__', family));
   else await copyFile(join(source, file), join(output, file));
@@ -62,5 +64,5 @@ if (compiler.status !== 0) throw compiler.error ?? new Error("rustc host lookup 
 const host = compiler.stdout.trim();
 if (!host) throw new Error("rustc did not report its native host");
 run("cargo", ["run", "--locked", "-p", "rsi-web-assets", "--example", "check_bundle",
-  "--target", host, ...(profile === "release" ? ["--release"] : []), "--", output, "--write-pairing", family]);
+  "--target", host, ...(profile === "release" ? ["--release"] : []), "--", output, "--write-pairing", family, documentConfig.define.__RSI_DESKTOP_BRIDGE__]);
 console.log(JSON.stringify({ event: "web-built", directory: output, profile }));

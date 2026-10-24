@@ -84,10 +84,10 @@ rsi plugin install --local "$PWD/.local/packages/web"
 rsi web
 ```
 
-Desktop 使用 `node apps/devtools/build.mjs desktop ABSOLUTE_NEW_PACKAGE
---web-package ABSOLUTE_WEB_PACKAGE` 构建，再用 `rsi plugin install --local`
+Desktop 使用 `node apps/devtools/build.mjs desktop ABSOLUTE_NEW_PACKAGE` 构建，再用 `rsi plugin install --local`
 安装这两个包目录。Windows 启动时需要 WebView2；Linux 构建还需要
-`libgtk-3-dev libwebkit2gtk-4.1-dev`。Desktop 包固定其精确的 Web 依赖。
+`libgtk-3-dev libwebkit2gtk-4.1-dev`。Desktop 与 Web 可以独立更新；Desktop
+会在打开窗口前检查实际加载文档的 bridge 版本。
 SSH helper 在 Linux 上通过 `build.mjs ssh-helper` 单独构建；先准备相同 CPU 的
 musl target 和编译器，再通过 `rsi` 安装。
 
@@ -100,6 +100,12 @@ Windows 和 Linux 上的 TUI 与 Web 共享常驻 Host。关闭 UI 只断开附�
 接下来可阅读[第一次对话](first-conversation.md)。
 
 ## 升级与导入已有数据
+
+包清单 format 2 需要新的 core 可执行文件。已有 format-1 包仓库应先把新二进制
+安装到另一个空目录，停止旧 Host 和应用，再用新二进制及相同的 home 选项运行
+`plugin list`。通过一次 `plugin uninstall NAME...` 移除全部旧选择，包括 `core`。
+旧租约释放后运行 `plugin gc`，再安装新包。保留配置、状态和信任记录；重置不能
+代替这项迁移。旧二进制不能安装 format-2 包。
 
 先停止 Host，再把 `--reset-config`、`--reset-state` 或两者放在常用应用命令之前。
 重置会保留备份、凭据和已安装包。例如 `rsi --reset-config --reset-state tui`

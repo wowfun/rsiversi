@@ -533,7 +533,15 @@ async fn catalog_admits_independent_web_bundle_and_rejects_bootstrap_tampering()
         }
         std::fs::write(
             assets.join("rsi-build.json"),
-            rsi_web_assets::pairing_receipt(&assets, &"b".repeat(64)).unwrap(),
+            rsi_web_assets::pairing_receipt(
+                &assets,
+                &"b".repeat(64),
+                rsi_api_protocol::ProtocolDescriptor {
+                    name: "rsi.desktop.bridge".into(),
+                    version: 5,
+                },
+            )
+            .unwrap(),
         )
         .unwrap();
         if corrupt {

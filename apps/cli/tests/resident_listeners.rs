@@ -153,7 +153,7 @@ fn install_web(fixture: &CliFixture) {
     std::fs::write(
         assets.join("rsi-build.json"),
         serde_json::to_vec(&serde_json::json!({
-            "format":1, "family_sha256":"b".repeat(64), "bootstrap":bootstrap,
+            "format":2, "desktop_bridge":{"name":"rsi.desktop.bridge","version":5}, "family_sha256":"b".repeat(64), "bootstrap":bootstrap,
         }))
         .unwrap(),
     )
@@ -226,7 +226,7 @@ async fn web(fixture: &CliFixture, port: bool) -> (String, String) {
 async fn bootstrap(origin: &str, header: &str) -> String {
     let address = origin.strip_prefix("http://").unwrap();
     let mut stream = tokio::net::TcpStream::connect(address).await.unwrap();
-    stream.write_all(format!("POST /api/v1/browser-bootstrap HTTP/1.1\r\nHost: {address}\r\nOrigin: {origin}\r\nX-Rsi-Csrf: 1\r\nContent-Length: 0\r\nConnection: close\r\n{header}\r\n\r\n").as_bytes()).await.unwrap();
+    stream.write_all(format!("POST /api/v2/browser-bootstrap HTTP/1.1\r\nHost: {address}\r\nOrigin: {origin}\r\nX-Rsi-Csrf: 1\r\nContent-Length: 0\r\nConnection: close\r\n{header}\r\n\r\n").as_bytes()).await.unwrap();
     let mut reply = String::new();
     tokio::time::timeout(
         std::time::Duration::from_secs(5),
@@ -522,7 +522,9 @@ async fn serve_admits_independent_assets_and_connection_loss_retires_only_its_li
     assert_eq!(response.status(), 200);
     assert_eq!(response.text().await.unwrap(), "index.html");
     let unauthenticated = client
-        .post(format!("{origin}/api/v1/connection/describe/1"))
+        .post(format!(
+            "{origin}/api/v2/rsi-api-protocol/4/connection/describe/1/read"
+        ))
         .body("{}")
         .send()
         .await

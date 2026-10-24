@@ -36,7 +36,7 @@ test('independent native package and pinned signing preserve exact executable by
   } finally { await cleanup(root); }
 });
 
-test('Desktop dependency must match the published Web manifest exactly', async () => {
+test('Desktop publication remains independent when Web is updated', async () => {
   const root = await mkdtemp(join(tmpdir(),'rsi-package-'));
   try {
     const directory = join(root,'web');
@@ -47,13 +47,14 @@ test('Desktop dependency must match the published Web manifest exactly', async (
     const web = {format:2,name:'web',target:'portable',version:'1',files:[file],dependencies:[],exports:{},requires:[]};
     await writeFile(join(directory,'package.json'),JSON.stringify(web));
     await writeFile(join(root,'desktop-input'),'native');
-    const desktop = await assemble('desktop',join(root,'desktop'),join(root,'desktop-input'),join(directory,'package.json'));
+    const desktop = await assemble('desktop',join(root,'desktop'),join(root,'desktop-input'));
     assert.equal(desktop.requires[0].name,'rsi.web.control');
+    assert.deepEqual(desktop.dependencies,[]);
     web.version = '2';
     await writeFile(join(directory,'package.json'),JSON.stringify(web));
     const {privateKey,publicKey} = generateKeyPairSync('ed25519');
-    await assert.rejects(signRepository(root,'fixture',1,privateKey.export({type:'pkcs8',format:'pem'}),
-      publicKey.export({type:'spki',format:'der'}).subarray(-32).toString('hex')),/dependency/);
+    await signRepository(root,'fixture',1,privateKey.export({type:'pkcs8',format:'pem'}),
+      publicKey.export({type:'spki',format:'der'}).subarray(-32).toString('hex'));
   } finally { await cleanup(root); }
 });
 

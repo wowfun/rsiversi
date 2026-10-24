@@ -60,9 +60,17 @@ impl std::fmt::Debug for Frame {
 #[derive(Clone, Serialize, Deserialize)]
 #[serde(tag = "event", rename_all = "snake_case", deny_unknown_fields)]
 pub enum Message {
-    StartFrontend { port: u16, family: String },
-    FrontendBound { origin: String },
-    ConfigureProxy { upstream: String },
+    StartFrontend {
+        port: u16,
+        family: String,
+    },
+    FrontendBound {
+        origin: String,
+        desktop_bridge: rsi_api_protocol::ProtocolDescriptor,
+    },
+    ConfigureProxy {
+        upstream: String,
+    },
     ProxyReady {},
 }
 
@@ -113,7 +121,17 @@ impl Frame {
         }
         match &self.message {
             Message::StartFrontend { family, .. } if !hex(family, 64) => return Err(invalid()),
-            Message::FrontendBound { origin } | Message::ConfigureProxy { upstream: origin } => {
+            Message::FrontendBound {
+                origin,
+                desktop_bridge,
+            } => {
+                loopback_address(origin)?;
+                desktop_bridge.validate().map_err(|_| invalid())?;
+                if desktop_bridge.name != "rsi.desktop.bridge" {
+                    return Err(invalid());
+                }
+            }
+            Message::ConfigureProxy { upstream: origin } => {
                 loopback_address(origin)?;
             }
             _ => {}

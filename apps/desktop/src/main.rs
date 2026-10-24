@@ -149,6 +149,7 @@ fn prepare_launch(
         input
             .join()
             .map_err(|_| "Desktop launch input worker failed")?;
+        rsi_desktop_bridge::admit_frontend(Some(&launch.desktop_bridge))?;
         (None, tauri::Url::parse(&launch.url).map_err(error)?)
     } else {
         runtime.block_on(async {
@@ -184,11 +185,15 @@ fn prepare_launch(
                 rsi_web_control::Reply::Ready {
                     address,
                     ticket: Some(ticket),
-                } if address.ip().is_loopback() => Ok((
-                    Some(stream),
-                    tauri::Url::parse(&format!("http://{address}/#rsi-launch={ticket}"))
-                        .map_err(error)?,
-                )),
+                    desktop_bridge,
+                } if address.ip().is_loopback() => {
+                    rsi_desktop_bridge::admit_frontend(desktop_bridge.as_ref())?;
+                    Ok((
+                        Some(stream),
+                        tauri::Url::parse(&format!("http://{address}/#rsi-launch={ticket}"))
+                            .map_err(error)?,
+                    ))
+                }
                 rsi_web_control::Reply::Error { message } => Err(message),
                 _ => Err("Host did not publish a Desktop listener".into()),
             }

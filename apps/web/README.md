@@ -5,7 +5,7 @@ Web bundle. Document, Worker and WASM share one freshly generated internal
 identity and a verified closed set of file hashes. It does not build a native
 core or require a native build-family identity. The package manifest declares
 the wire interfaces needed from the Host. Desktop bridge compatibility is
-checked independently from its owning generated snapshot.
+checked against the descriptor held with the admitted Web bootstrap.
 
 The supervised development overlay uses the pinned Vite 6.4.3. Its owned HTTP
 listener preserves port zero, proxy configuration retains Vite's supplied option
@@ -33,8 +33,17 @@ loopback HTTP/WebSocket transport. Desktop adds only the
 [bounded native bridge](../../crates/rsi/desktop-bridge/README.md) for clipboard,
 streamed save-dialog export and draft-aware window closing. Its injected marker
 selects conveniences; Tauri’s exact main-document URL capability owns authority.
-The document embeds the bridge descriptor derived from its reviewed wire
-snapshot. Custom scheme locations do not select a second application runtime.
+The document embeds the bridge descriptor from its owning wire declaration.
+Custom scheme locations do not select a second application runtime.
+
+Human approval and question dialogs hold one in-flight decision and show failures
+once inside the dialog. In-flight delivery exposes busy state; an uncertain outcome
+keeps the decision disabled after delivery settles. Known application admission
+refusals allow explicit retry unless their owner marks the connection closed.
+The Worker and document require that admission marker before advertising retry;
+they do not infer it from error messages. An explicit Settings open clears a local
+dismissal fence, including after close delivery failed. That fence applies only
+to Settings catalogs/editors; other details and resource panels render independently.
 
 The standard renderer displays an optional `data.image` by reading its explicitly
 declared PNG source in bounded 64 KiB windows. Its published renderer declares

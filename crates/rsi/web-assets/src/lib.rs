@@ -138,12 +138,16 @@ impl PluginFactory for WebAssetsFactory {
     }
 }
 
+struct LoadedAssets {
+    files: BTreeMap<String, HttpAsset>,
+    desktop_bridge: Option<rsi_api_protocol::ProtocolDescriptor>,
+}
 fn load(
     config: &Config,
     stop: &CancellationToken,
     budget: &ByteBudget,
     previous: Option<&BTreeMap<String, HttpAsset>>,
-) -> AssetResult<BTreeMap<String, HttpAsset>> {
+) -> AssetResult<LoadedAssets> {
     let directory = open_directory(&config.directory).map_err(io_error)?;
     let mut files = BTreeMap::new();
     for name in &config.files {
@@ -200,10 +204,15 @@ fn load(
             },
         );
     }
-    if let Some(expected) = &config.pairing {
-        pairing::verify(&directory, &config.directory, expected, &files)?;
-    }
-    Ok(files)
+    let desktop_bridge = config
+        .pairing
+        .as_ref()
+        .map(|expected| pairing::verify(&directory, &config.directory, expected, &files))
+        .transpose()?;
+    Ok(LoadedAssets {
+        files,
+        desktop_bridge,
+    })
 }
 fn identical(file: &mut File, expected: &[u8], stop: &CancellationToken) -> AssetResult<bool> {
     let mut buffer = [0_u8; 8192];

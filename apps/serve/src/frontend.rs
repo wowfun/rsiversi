@@ -164,6 +164,7 @@ impl FrontendRuntime {
             run_id: hex::encode(id),
             buffered: Vec::new(),
             origin: String::new(),
+            desktop_bridge: None,
             _package: package,
         };
         let startup = async {
@@ -173,13 +174,18 @@ impl FrontendRuntime {
                     family,
                 })
                 .await?;
-            let Message::FrontendBound { origin } = session.receive().await? else {
+            let Message::FrontendBound {
+                origin,
+                desktop_bridge,
+            } = session.receive().await?
+            else {
                 return Err("frontend did not report bound Origin".into());
             };
             rsi_api_http::LoopbackBrowserOrigin::new(origin)
                 .map_err(|_| "frontend Origin invalid")?
                 .as_str()
                 .clone_into(&mut session.origin);
+            session.desktop_bridge = Some(desktop_bridge);
             Ok(())
         };
         let result = tokio::time::timeout(rsi_dev_control::STARTUP_TIMEOUT, startup)
@@ -200,12 +206,22 @@ pub struct FrontendSession {
     run_id: String,
     buffered: Vec<u8>,
     origin: String,
+    desktop_bridge: Option<rsi_api_protocol::ProtocolDescriptor>,
     _package: Option<rsi_packages::PackageLease>,
 }
 impl FrontendSession {
     /// Actual admitted Origin, not a requested or guessed port.
     pub fn origin(&self) -> &str {
         &self.origin
+    }
+    /// Bridge identity received from this frontend's actual build configuration.
+    ///
+    /// # Panics
+    /// Panics if called before successful frontend startup.
+    pub fn desktop_bridge(&self) -> rsi_api_protocol::ProtocolDescriptor {
+        self.desktop_bridge
+            .clone()
+            .expect("successful frontend startup")
     }
     async fn send(&self, message: Message) -> Result<(), String> {
         let frame = Frame::new(&self.run_id, message).map_err(|_| "invalid frontend command")?;

@@ -48,6 +48,7 @@ struct Receipt {
     format: u8,
     family_sha256: String,
     bootstrap: BTreeMap<String, String>,
+    desktop_bridge: rsi_api_protocol::ProtocolDescriptor,
 }
 
 /// Exact-family fixture admission; expected identity cannot come from Profile config.
@@ -117,7 +118,7 @@ pub(super) fn verify(
     path: &Path,
     identity: &Identity,
     files: &BTreeMap<String, HttpAsset>,
-) -> AssetResult<()> {
+) -> AssetResult<rsi_api_protocol::ProtocolDescriptor> {
     let failure = |detail: String| AssetError::Invalid(format!("Web bundle: {detail}. {REBUILD}"));
     let file = open_file(directory, path, RECEIPT)
         .map_err(|_| failure(format!("missing or unreadable {RECEIPT}")))?;
@@ -136,7 +137,7 @@ pub(super) fn verify(
     }
     let receipt: Receipt =
         serde_json::from_slice(&bytes).map_err(|_| failure("invalid receipt JSON".into()))?;
-    if receipt.format != 1
+    if receipt.format != 2
         || receipt.family_sha256.len() != 64
         || !receipt.family_sha256.bytes().all(|b| b.is_ascii_hexdigit())
         || matches!(identity, Identity::Exact(expected) if &receipt.family_sha256 != expected)
@@ -164,12 +165,31 @@ pub(super) fn verify(
             return Err(failure(format!("bootstrap digest mismatch for {name}")));
         }
     }
-    Ok(())
+    receipt
+        .desktop_bridge
+        .validate()
+        .map_err(|_| failure("invalid Desktop bridge descriptor".into()))?;
+    if receipt.desktop_bridge.name != "rsi.desktop.bridge" {
+        return Err(failure("unexpected Desktop bridge protocol".into()));
+    }
+    Ok(receipt.desktop_bridge)
 }
 
 /// Creates a receipt from admitted bootstrap bytes for an explicit build producer.
 /// This function does not write files or confer distributor authenticity.
-pub fn pairing_receipt(directory: &Path, family: &str) -> AssetResult<Vec<u8>> {
+pub fn pairing_receipt(
+    directory: &Path,
+    family: &str,
+    desktop_bridge: rsi_api_protocol::ProtocolDescriptor,
+) -> AssetResult<Vec<u8>> {
+    desktop_bridge
+        .validate()
+        .map_err(|e| AssetError::Invalid(e.to_string()))?;
+    if desktop_bridge.name != "rsi.desktop.bridge" {
+        return Err(AssetError::Invalid(
+            "unexpected Desktop bridge protocol".into(),
+        ));
+    }
     if family.len() != 64 || !family.bytes().all(|b| b.is_ascii_hexdigit()) {
         return Err(AssetError::Invalid("invalid build family digest".into()));
     }
@@ -195,13 +215,14 @@ pub fn pairing_receipt(directory: &Path, family: &str) -> AssetResult<Vec<u8>> {
                 (*name).to_owned(),
                 format!(
                     "{:x}",
-                    Sha256::digest(files[&format!("/{name}")].bytes.as_bytes())
+                    Sha256::digest(files.files[&format!("/{name}")].bytes.as_bytes())
                 ),
             )
         })
         .collect();
     serde_json::to_vec(&Receipt {
-        format: 1,
+        format: 2,
+        desktop_bridge,
         family_sha256: family.to_owned(),
         bootstrap,
     })

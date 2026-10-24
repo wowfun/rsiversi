@@ -104,6 +104,8 @@ pub enum Reply {
         address: SocketAddr,
         /// One-use ticket with a ten-minute maximum lifetime.
         ticket: Option<String>,
+        /// Desktop bridge declared by the listener's retained Web generation.
+        desktop_bridge: Option<ProtocolDescriptor>,
     },
     /// No persistent browser listener remains.
     Stopped {},
@@ -132,6 +134,8 @@ impl std::fmt::Debug for Reply {
 pub struct DesktopLaunch {
     /// Exact frontend URL including the one-use launch fragment.
     pub url: String,
+    /// Descriptor baked into the frontend that owns this URL.
+    pub desktop_bridge: ProtocolDescriptor,
 }
 impl std::fmt::Debug for DesktopLaunch {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
@@ -144,6 +148,10 @@ impl DesktopLaunch {
     /// # Errors
     /// Returns an error for an invalid Origin or launch ticket.
     pub fn validate(&self) -> io::Result<()> {
+        self.desktop_bridge.validate().map_err(io::Error::other)?;
+        if self.desktop_bridge.name != "rsi.desktop.bridge" {
+            return Err(io::Error::other("unexpected Desktop bridge protocol"));
+        }
         let (origin, ticket) = self
             .url
             .split_once("#rsi-launch=")
@@ -226,6 +234,10 @@ mod tests {
         ] {
             assert!(
                 DesktopLaunch {
+                    desktop_bridge: ProtocolDescriptor {
+                        name: "rsi.desktop.bridge".into(),
+                        version: 5
+                    },
                     url: format!("{url}{}", "b".repeat(64))
                 }
                 .validate()
@@ -233,6 +245,10 @@ mod tests {
             );
         }
         let launch = DesktopLaunch {
+            desktop_bridge: ProtocolDescriptor {
+                name: "rsi.desktop.bridge".into(),
+                version: 5,
+            },
             url: format!("http://127.0.0.1:42117#rsi-launch={}", "b".repeat(64)),
         };
         launch.validate().unwrap();
@@ -276,6 +292,7 @@ mod tests {
         let reply = Reply::Ready {
             address: "127.0.0.1:8787".parse().unwrap(),
             ticket: Some("private-ticket".into()),
+            desktop_bridge: None,
         };
         assert!(!format!("{reply:?}").contains("private-ticket"));
     }

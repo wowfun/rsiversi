@@ -77,7 +77,8 @@ response bytes and complete leases retain their own original charges.
 
 The explicit development option `watch = true` polls metadata of the configured
 files every 250 ms. One owned worker stages and validates the complete candidate
-and publishes by expected revision. Invalid or incomplete writes retain the
+and publishes by expected revision, retaining the original verified or paired
+receipt policy. Invalid or incomplete writes retain the
 current bundle and a bounded diagnostic; another observed edit retries. Changes
 to bootstrap files report RestartRequired. Production defaults to no watcher.
 Watch tasks and preparation readers share this activation's cleanup owner; no
@@ -90,6 +91,12 @@ files still reserve their full new capacity before allocation; no digest or
 metadata-only equality substitutes for byte verification.
 
 ## Product bundle admission
+
+Receipt format 2 includes the explicit `desktop_bridge` name and version baked
+into that build's JavaScript. The loader retains this descriptor with the verified
+bootstrap bytes. It participates in bundle identity and cannot change during a
+renderer-only publication. Desktop admission reads this retained descriptor;
+it never reopens a selected package's receipt to describe an older listener.
 
 The official application catalog and local Web adapter use
 `VerifiedWebAssetsFactory`, including custom application Profiles. It validates

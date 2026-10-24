@@ -86,10 +86,10 @@ rsi plugin install --local "$PWD/.local/packages/web"
 rsi web
 ```
 
-Desktop uses `node apps/devtools/build.mjs desktop ABSOLUTE_NEW_PACKAGE
---web-package ABSOLUTE_WEB_PACKAGE`, followed by `rsi plugin install --local`
+Desktop uses `node apps/devtools/build.mjs desktop ABSOLUTE_NEW_PACKAGE`, followed by `rsi plugin install --local`
 for both directories. Windows needs WebView2 at launch; Linux builds also need
-`libgtk-3-dev libwebkit2gtk-4.1-dev`. The Desktop package pins its exact Web dependency.
+`libgtk-3-dev libwebkit2gtk-4.1-dev`. Desktop and Web update independently. Desktop
+checks the bridge version of the actual loaded document before opening a window.
 An SSH helper is built separately on Linux with `build.mjs ssh-helper`; prepare
 the same-CPU musl target and compiler first, then install it through `rsi`.
 
@@ -102,6 +102,15 @@ detaches it. `rsi web stop` stops the browser listener, while `rsi host stop`
 stops the shared service. Continue with [your first conversation](first-conversation.md).
 
 ## Upgrade and transfer existing data
+
+Manifest format 2 requires a new core executable. For an existing format-1 store,
+install the new binary to a separate empty prefix first, stop the old Host and
+applications, then use that new executable with the same home options to run
+`plugin list`. Remove every old selection, including `core`, in one
+`plugin uninstall NAME...` command. Run `plugin gc` after old leases close, then
+install the new packages. Keep the configuration, state and trust records;
+resetting them does not replace this migration. The old binary cannot install
+format-2 packages.
 
 After stopping the Host, place `--reset-config`, `--reset-state`, or both before
 the usual application command. They retain backups, credentials and installed

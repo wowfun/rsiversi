@@ -108,10 +108,20 @@ fn core_repository(
 pub(super) async fn install(
     store: &PackageStore,
     repository: rsi::LaunchRepository,
-    names: Vec<String>,
+    mut names: Vec<String>,
     interfaces: &[rsi_packages::Interface],
     target: &str,
 ) -> rsi::Result<Resolution> {
+    if names.iter().any(|name| name == "desktop")
+        && !names.iter().any(|name| name == "web")
+        && !store
+            .resolution()
+            .map_err(error)?
+            .packages
+            .contains_key("web")
+    {
+        names.push("web".into());
+    }
     let base = root(&repository.url)?;
     let key: [u8; 32] = hex::decode(&repository.public_key)
         .map_err(error)?
@@ -394,7 +404,7 @@ mod tests {
         let key = ring::signature::Ed25519KeyPair::from_seed_unchecked(&[7; 32]).unwrap();
         let content = b"format = 1\n".to_vec();
         let manifest = serde_json::to_vec(&serde_json::json!({
-            "format": 1, "name": "fixture", "version": "1", "target": "portable",
+            "format": 2, "name": "fixture", "version": "1", "target": "portable",
             "dependencies": [], "requires": [],
             "files": [{"path":"profile.toml","bytes":content.len(),"digest":hex::encode(Sha256::digest(&content)),"executable":false}],
             "exports":{"main":{"kind":"application_profile","path":"profile.toml"}}

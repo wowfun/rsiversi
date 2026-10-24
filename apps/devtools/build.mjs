@@ -6,23 +6,20 @@ import { fileURLToPath } from 'node:url';
 import { assemble } from './packages.mjs';
 
 const root = fileURLToPath(new URL('../../', import.meta.url));
-const usage = 'Usage: node apps/devtools/build.mjs core|web|desktop|ssh-helper ABSOLUTE_PACKAGE [--debug] [--replace] [--web-package ABSOLUTE_WEB_PACKAGE]';
+const usage = 'Usage: node apps/devtools/build.mjs core|web|desktop|ssh-helper ABSOLUTE_PACKAGE [--debug] [--replace]';
 export function parse(args) {
   if (args.some(arg => ['--help', '-h'].includes(arg))) return null;
   const [kind, output, ...rest] = args;
   if (!['core', 'web', 'desktop', 'ssh-helper'].includes(kind) || !output || !isAbsolute(output))
     throw new Error(usage);
-  let debug = false, replace = false, webPackage;
+  let debug = false, replace = false;
   for (let index = 0; index < rest.length; index++) {
     if (rest[index] === '--debug' && !debug) debug = true;
     else if (rest[index] === '--replace' && !replace) replace = true;
-    else if (rest[index] === '--web-package' && !webPackage && isAbsolute(rest[index + 1] ?? ''))
-      webPackage = rest[++index];
     else throw new Error(usage);
   }
-  if ((kind === 'desktop') !== Boolean(webPackage)) throw new Error('Desktop requires --web-package; other packages do not accept it.');
   if (kind === 'ssh-helper' && process.platform !== 'linux') throw new Error('Build the SSH helper on Linux.');
-  return {kind, output, debug, replace, webPackage};
+  return {kind, output, debug, replace};
 }
 export function parseEnvironmentDeclaration(declaration) {
   const match = /^([A-Za-z_][A-Za-z0-9_()]*)(?:=([a-z0-9_-]+(?:\/[a-z0-9_-]+)*))?$/.exec(declaration);
@@ -62,7 +59,7 @@ function run(program, args, environment) {
   });
 }
 export async function build(options) {
-  const {kind, output, debug, replace, webPackage} = options;
+  const {kind, output, debug, replace} = options;
   try {
     const info = await lstat(output);
     if (!replace || !info.isDirectory() || info.isSymbolicLink()) throw new Error('Output must be a new or explicitly replaceable ordinary directory.');
@@ -90,7 +87,7 @@ export async function build(options) {
       input = join(target, ...(triple ? [triple] : []), profile, name + (process.platform === 'win32' ? '.exe' : ''));
     }
     const stage = join(temporary, 'package');
-    const manifest = await assemble(kind, stage, input, webPackage && join(webPackage, 'package.json'));
+    const manifest = await assemble(kind, stage, input);
     await publishPackage(stage, output, manifest, replace);
     return manifest;
   } finally {
@@ -117,7 +114,7 @@ export async function publishPackage(stage, output, manifest, replace = false) {
       const receipt = await lstat(receiptPath);
       if (!receipt.isFile() || receipt.isSymbolicLink() || receipt.size > 1024 * 1024) throw new Error('Output must be a bounded package.');
       const previous = JSON.parse(await readFile(receiptPath, 'utf8'));
-      if (previous.format !== 1 || previous.name !== manifest.name || previous.target !== manifest.target)
+      if (previous.format !== (receiptPath === marker ? 1 : 2) || previous.name !== manifest.name || previous.target !== manifest.target)
         throw new Error('Output belongs to a different package.');
     }
   }

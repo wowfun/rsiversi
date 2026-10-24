@@ -238,7 +238,10 @@ impl Runner {
             () = self.stop.cancelled() => return Ok(()),
             result = request(&self.owner, command) => result?,
         };
-        let Reply::Ready { address, ticket } = reply else {
+        let Reply::Ready {
+            address, ticket, ..
+        } = reply
+        else {
             return Err("listener did not report readiness".into());
         };
         if let Some(web) = &self.web {
