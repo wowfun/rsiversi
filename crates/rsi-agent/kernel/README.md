@@ -1,5 +1,26 @@
 # rsi-agent-kernel
 
+Retirement excludes admitted command preparation as well as submitted work.
+Command registration and retirement share the submission and Kernel-state
+admission order; a command cannot enter behind an accepted retirement reservation.
+Acknowledged retirement releases Session residency, pending execution leases and
+that Session's evidence cache entries.
+
+Controlled-work observations retain Running and Unsettled entries within a
+1,024-entry Kernel-instance bound. Only confirmed Settled entries can be reclaimed.
+An abandoned reporter cannot later publish settlement; recovery from Unsettled
+requires confirming native cleanup and restarting the owning Service Host. Purge
+reports UnsettledWork separately from ordinary capacity. Exhaustion refuses new
+work; time-based eviction cannot prove that unknown native work has stopped.
+
+Agent waits subscribe to their caller, current descendants and root membership
+before observing durable progress. Unrelated claim activity does not wake them.
+A bounded five-second fallback covers missed external commits. Empty
+mailboxes are decided from metadata without loading payloads. Claim cancellation,
+retirement and shutdown independently interrupt the wait and retain owned cleanup.
+Continuation peer walks use the Session prefix of the ordered registry and prune
+expired entries in that prefix.
+
 Live language attempts use a Kernel-owned logical reservation pool, defaulting
 to 256 MiB. `maximum_live_model_bytes` accepts positive multiples of 64 MiB and
 may be raised by the host; division by 64 MiB gives the admitted concurrency
@@ -637,3 +658,10 @@ idle observation. Wait cleanup retains its existing lifecycle proof, not a new
 business grant. Agent reads check current execution admission before I/O and before
 publication. Quiescence clears pending input leases after accepted tasks drain,
 so a retained Kernel handle cannot keep a stopped provider connection alive.
+
+Session retirement reserves the same exact Session submission keys as mutations,
+without waiting for active owners. It rejects loading, queued, claimed, pending
+durability, uncertain cleanup and live Program owners before returning a guard.
+The guard holds those keys through the Store retirement commit. Only after that
+commit may it release the selected resident composition pins; shared generations
+and unselected Sessions remain owned normally. Unknown capability means refusal.

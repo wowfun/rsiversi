@@ -67,12 +67,15 @@ pub const HELP: &str = "Session command options (headless):\n  --commands | --co
       [--output text|jsonl]\n\
   rsi run cli [--cwd PATH] [--resume SESSION|--history SESSION|--list|--session-id SESSION]\n\
       [--agent-preset ID] [--output text|jsonl]\n\
+  rsi run cli --cas-gc-preview LIMIT|--cas-gc JSON|--cas-gc-status OPERATION_ID\n\
+  rsi run cli --purge-preview JSON|--purge JSON|--purge-status OPERATION_ID\n\
   rsi run cli --export SESSION|latest [-f markdown|md|json] [-i CONTENTS] [-o PATH]\n\
   rsi run tui [--cwd PATH] [--resume SESSION|--session-id SESSION]\n\
       [--agent-preset ID]\n";
 
 #[derive(Clone, Debug)]
 pub(crate) struct SessionCommand {
+    maintenance: Option<MaintenanceCommand>,
     export: Option<String>,
     export_command: rsi_client::ExportCommand,
     list: bool,
@@ -84,6 +87,15 @@ pub(crate) struct SessionCommand {
     output: OutputMode,
 }
 
+#[derive(Clone, Debug)]
+pub(crate) enum MaintenanceCommand {
+    CasPreview(usize),
+    CasCollect(rsi_agent_store_protocol::CasGcRequest),
+    CasStatus(String),
+    Preview(rsi_agent_store_protocol::PurgeRequest),
+    Purge(rsi_agent_store_protocol::PurgeRequest),
+    Status(String),
+}
 #[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
 pub(crate) enum OutputMode {
     #[default]
@@ -309,6 +321,7 @@ pub(crate) struct OutcomeEnvelope<'a> {
 impl SessionCommand {
     pub(crate) fn parse(arguments: Vec<OsString>) -> Result<Self> {
         let mut command = Self {
+            maintenance: None,
             export: None,
             export_command: rsi_client::ExportCommand::default(),
             list: false,
@@ -325,6 +338,16 @@ impl SessionCommand {
         while let Some(argument) = arguments.next() {
             let argument = utf8(argument)?;
             match argument.as_str() {
+                "--cas-gc-preview" | "--cas-gc" | "--cas-gc-status" | "--purge-preview"
+                | "--purge" | "--purge-status" => {
+                    let value =
+                        rsi_application::arguments::string_value(&mut arguments, &argument)?;
+                    set_option(
+                        &mut command.maintenance,
+                        parse_maintenance(&argument, value)?,
+                        &argument,
+                    )?;
+                }
                 "--export" => set_option(
                     &mut command.export,
                     rsi_application::arguments::string_value(&mut arguments, "--export")?,
@@ -388,28 +411,46 @@ impl SessionCommand {
                 }
             }
         }
-        if command.export.is_some() {
-            if command.list
-                || command.history.is_some()
-                || command.resume.is_some()
-                || command.session_id.is_some()
-                || command.agent_preset.is_some()
+        command.parse_export(export_tokens, output_set)?;
+        command.validate_selection()?;
+
+        Ok(command)
+    }
+    fn parse_export(&mut self, export_tokens: Vec<String>, output_set: bool) -> Result<()> {
+        if self.export.is_some() {
+            if self.list
+                || self.history.is_some()
+                || self.resume.is_some()
+                || self.session_id.is_some()
+                || self.agent_preset.is_some()
                 || output_set
             {
                 return Err(usage(
                     "--export cannot be combined with Session selection or --output",
                 ));
             }
-            command.export_command = rsi_client::parse_export_tokens(export_tokens)
+            self.export_command = rsi_client::parse_export_tokens(export_tokens)
                 .map_err(|error| usage(error.to_string()))?;
         } else if !export_tokens.is_empty() {
             return Err(usage("export format, include and path require --export"));
         }
-        command.validate_selection()?;
-
-        Ok(command)
+        Ok(())
     }
     fn validate_selection(&self) -> Result<()> {
+        if self.maintenance.is_some()
+            && (self.list
+                || self.export.is_some()
+                || self.history.is_some()
+                || self.resume.is_some()
+                || self.cwd.is_some()
+                || self.session_id.is_some()
+                || self.agent_preset.is_some())
+        {
+            return Err(usage(
+                "maintenance operations cannot be combined with Session selection",
+            ));
+        }
+
         if (u8::from(self.list)
             + u8::from(self.history.is_some())
             + u8::from(self.resume.is_some()))
@@ -1405,6 +1446,7 @@ fn is_query_result(kind: &str) -> bool {
     matches!(
         kind,
         "sessions"
+            | "session_maintenance"
             | "history"
             | "inspection"
             | "output"
@@ -1500,4 +1542,52 @@ fn write_model_events(
         }
     }
     Ok(())
+}
+
+fn parse_maintenance(argument: &str, value: String) -> Result<MaintenanceCommand> {
+    if argument.starts_with("--cas-gc") {
+        if value.len() > 4096 {
+            return Err(usage("CAS collection request exceeds 4096 bytes"));
+        }
+        let operation = match argument {
+            "--cas-gc-preview" => {
+                let limit = value
+                    .parse::<usize>()
+                    .map_err(|_| usage("expected CAS preview limit"))?;
+                if !(1..=256).contains(&limit) {
+                    return Err(usage("CAS preview limit must be 1..=256"));
+                }
+                MaintenanceCommand::CasPreview(limit)
+            }
+            "--cas-gc-status" => {
+                SessionId::new(&value).map_err(|e| usage(e.to_string()))?;
+                MaintenanceCommand::CasStatus(value)
+            }
+            _ => {
+                let request: rsi_agent_store_protocol::CasGcRequest =
+                    serde_json::from_str(&value).map_err(|e| usage(e.to_string()))?;
+                request.validate().map_err(|e| usage(e.to_string()))?;
+                MaintenanceCommand::CasCollect(request)
+            }
+        };
+        Ok(operation)
+    } else {
+        if value.len() > 256 * 1024 {
+            return Err(usage("purge request exceeds 256 KiB"));
+        }
+        let operation = if argument == "--purge-status" {
+            SessionId::new(&value).map_err(|e| usage(e.to_string()))?;
+            MaintenanceCommand::Status(value)
+        } else {
+            let request: rsi_agent_store_protocol::PurgeRequest =
+                serde_json::from_str(&value).map_err(|e| usage(e.to_string()))?;
+            request.validate().map_err(|e| usage(e.to_string()))?;
+            if argument == "--purge" {
+                MaintenanceCommand::Purge(request)
+            } else {
+                MaintenanceCommand::Preview(request)
+            }
+        };
+        Ok(operation)
+    }
 }

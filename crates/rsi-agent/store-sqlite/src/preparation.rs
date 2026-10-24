@@ -55,6 +55,7 @@ impl SqliteStore {
     pub(super) async fn pin_session(&self, id: &SessionId) -> Result<SessionValidationLease> {
         // Validation never waits for a pin slot while holding the validation lane.
         let proof = self.session_proof(id).await?;
+        self.ensure_not_retired(id).await?;
         let acquire = Arc::clone(&self.inner.pin_admission).acquire_owned();
         tokio::pin!(acquire);
         loop {

@@ -14,3 +14,8 @@ lock. It has no raw-file corruption or disk-reopen boundary to revalidate.
 The reusable mechanical conformance harness runs unchanged against Memory and
 SQLite. Backend-specific corruption, filesystem, reopen, and writer-lease
 evidence remains with SQLite.
+
+Native Fact/control CAS references must name an existing publication of the exact
+length before either append path commits. Prepared CAS values retain their backing
+allocation. Memory has no deletion/maintenance capability or Domain reference registry;
+retirement, pure Domain codec coverage and filesystem ownership tests use SQLite.

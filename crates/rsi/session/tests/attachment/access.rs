@@ -153,6 +153,25 @@ async fn remote_session_reads_are_offline_caller_bound_and_live_streams_recheck_
         scoped.read_header(remote).await,
         Err(SessionError::Api(ApiError::Unauthorized))
     ));
+    for selected in [
+        remote.clone(),
+        SessionId::new("absent-maintenance").unwrap(),
+    ] {
+        let request = rsi_agent_store_protocol::PurgeRequest {
+            operation_id: rsi_agent_store_protocol::MaintenanceOperationId::new("private-preview")
+                .unwrap(),
+            targets: vec![rsi_agent_store_protocol::PurgeTarget {
+                session_id: selected,
+                header_sha256: headers[1].fingerprint().unwrap(),
+                fact_seq: 1,
+                control_seq: 0,
+            }],
+        };
+        assert!(matches!(
+            scoped.preview_purge(request).await,
+            Err(SessionError::Api(ApiError::Unauthorized))
+        ));
+    }
     assert!(matches!(
         scoped.attach(remote).await,
         Err(SessionError::Api(ApiError::Unauthorized))
@@ -748,6 +767,28 @@ async fn protected_target_reference_capture_refuses_before_accessing_a_source() 
         handle
             .capture_reference(SessionId::new("missing-source").unwrap())
             .await,
+        Err(SessionError::Api(ApiError::Unauthorized))
+    ));
+    service.stop().await.unwrap();
+}
+
+#[tokio::test]
+async fn protected_purge_is_refused_before_execution_admission() {
+    let (_dir, service, _gate, slots, handle) = workflow_cancel_fixture(true).await;
+    let header = handle.header().await.unwrap();
+    let _occupied = slots.acquire().await.unwrap();
+    let request = rsi_agent_store_protocol::PurgeRequest {
+        operation_id: rsi_agent_store_protocol::MaintenanceOperationId::new("protected-purge")
+            .unwrap(),
+        targets: vec![rsi_agent_store_protocol::PurgeTarget {
+            session_id: header.session_id().clone(),
+            header_sha256: header.fingerprint().unwrap(),
+            fact_seq: 1,
+            control_seq: 0,
+        }],
+    };
+    assert!(matches!(
+        service.preview_purge(request).await,
         Err(SessionError::Api(ApiError::Unauthorized))
     ));
     service.stop().await.unwrap();

@@ -48,6 +48,16 @@ fn validate_state(state: &State) -> Result<(), String> {
     Ok(())
 }
 
+fn reference_state(
+    state: &State,
+    output: &mut rsi_agent_session_protocol::ReferenceCollector,
+) -> Result<(), String> {
+    if let Some(session) = &state.scanned_session {
+        output.session(session)?;
+    }
+    Ok(())
+}
+
 #[derive(Debug)]
 struct Contributor {
     source: Arc<dyn WorkspaceContext>,
@@ -233,6 +243,7 @@ impl PluginFactory for WorkspaceContributorFactory {
             DomainIdentity::new(DOMAIN_ID, 2).expect("static domain"),
             &State::default(),
             validate_state,
+            rsi_agent_composition_protocol::DomainReferencePolicy::Visit(reference_state),
         )
         .map_err(|error| MetaError::Activation(error.to_string()))?;
         let context = plan.context().registration_context()?;

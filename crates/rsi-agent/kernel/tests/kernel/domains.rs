@@ -28,6 +28,7 @@ fn domain_composition() -> (Arc<DomainComposition>, DomainHandle<bool>) {
         DomainIdentity::new("fixture.plan", 1).unwrap(),
         &false,
         |_| Ok(()),
+        rsi_agent_composition_protocol::DomainReferencePolicy::None,
     )
     .unwrap();
     let catalog = DomainCatalog::new([definition.registration()]).unwrap();

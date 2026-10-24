@@ -11,6 +11,7 @@ path = "src/lib.rs"
 doctest = false
 
 [dependencies]
+rsi-meta-contract = { path = "../../rsi-meta/contract" }
 base64.workspace = true
 rsi-execution-protocol = { path = "../../rsi-execution/protocol" }
 jsonschema.workspace = true

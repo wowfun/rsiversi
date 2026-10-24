@@ -946,6 +946,93 @@ async fn agent_wait_cancellation_is_typed_and_durably_resumed_as_cancel() {
 }
 
 #[tokio::test]
+async fn agent_wait_observes_kernel_cancellation_after_durable_parking() {
+    let store = Arc::new(MemoryStore::new());
+    let kernel = kernel(store.clone()).await;
+    let worker = kernel.start_workers();
+    let root_id = SessionId::new("session-wait-cancel-root").unwrap();
+    kernel
+        .submit_message(SubmitMessage {
+            session: fresh(header(root_id.as_str())),
+            message: mailbox_message("message-wait-cancel-root"),
+            delivery: rsi_agent_session_protocol::MessageDelivery::NextTurn,
+        })
+        .await
+        .unwrap();
+    let _root_lease = kernel.register("executor-wait-cancel-root".into()).unwrap();
+    let root_claim = kernel
+        .claim("executor-wait-cancel-root", CancellationToken::new())
+        .await
+        .unwrap()
+        .unwrap();
+    let caller = control_tool_caller(&kernel, &root_claim).await;
+    kernel
+        .spawn_agent(SpawnAgentRequest {
+            output_contract: None,
+            role: None,
+            model: None,
+            reasoning_effort: None,
+            cancellation: CancellationToken::new(),
+            caller: caller.clone(),
+            child_session_id: SessionId::new("session-wait-cancel-child").unwrap(),
+            task_name: "cancel-child".into(),
+            message_id: MessageId::new("message-wait-cancel-child").unwrap(),
+            message: "remain ready".into(),
+            fork_turns: ForkTurnSelection::None,
+        })
+        .await
+        .unwrap();
+    let waiting = tokio::spawn({
+        let kernel = kernel.clone();
+        let caller = caller.clone();
+        async move {
+            kernel
+                .wait_agent(
+                    &caller,
+                    std::time::Duration::from_secs(180),
+                    CancellationToken::new(),
+                )
+                .await
+        }
+    });
+    tokio::time::timeout(std::time::Duration::from_secs(5), async {
+        loop {
+            let controls = store.read_controls(&root_id, 0, 32).await.unwrap();
+            if controls
+                .records
+                .iter()
+                .any(|record| matches!(record.body(), AgentControlRecordBody::WaitParked { .. }))
+            {
+                break;
+            }
+            tokio::task::yield_now().await;
+        }
+    })
+    .await
+    .unwrap();
+    kernel
+        .cancel(&root_id, root_claim.turn_id(), None)
+        .await
+        .unwrap();
+    assert_eq!(
+        tokio::time::timeout(std::time::Duration::from_secs(5), waiting)
+            .await
+            .unwrap()
+            .unwrap(),
+        Err(TurnError::Cancelled)
+    );
+    let controls = store.read_controls(&root_id, 0, 16).await.unwrap();
+    assert!(controls.records.iter().any(|record| matches!(
+        record.body(),
+        AgentControlRecordBody::WaitResumed {
+            cause: WaitResumeCause::Cancel,
+            ..
+        }
+    )));
+    kernel.shutdown(worker).await.unwrap();
+}
+
+#[tokio::test]
 #[allow(clippy::too_many_lines)] // The 513-record interval proves scalar completion classification without control replay.
 async fn wait_completion_cause_uses_snapshot_without_control_replay() {
     let memory = Arc::new(MemoryStore::new());
@@ -1935,4 +2022,85 @@ async fn publish_reply_parts(
             .await
             .unwrap();
     }
+}
+
+#[tokio::test(start_paused = true)]
+async fn agent_wait_ignores_unrelated_claims_and_skips_empty_mailbox_payloads() {
+    let memory = Arc::new(MemoryStore::new());
+    let store = Arc::new(FactReadRaceStore::new(memory.clone()));
+    let kernel =
+        AgentKernel::recover_with_clock(store.clone(), composition(), Arc::new(FixedClock))
+            .await
+            .unwrap();
+    let workers = kernel.start_workers();
+    let (parent, child, _lease) = active_parent_and_child(&kernel).await;
+    kernel
+        .submit_message(SubmitMessage {
+            session: fresh(header("unrelated-wait-root")),
+            message: mailbox_message("unrelated-wait-input"),
+            delivery: rsi_agent_session_protocol::MessageDelivery::NextTurn,
+        })
+        .await
+        .unwrap();
+    let _other_executor = kernel.register("unrelated-wait-executor".into()).unwrap();
+    let other = kernel
+        .claim("unrelated-wait-executor", CancellationToken::new())
+        .await
+        .unwrap()
+        .unwrap();
+    store.mailbox_reads.lock().unwrap().clear();
+    store.mailbox_summary_reads.lock().unwrap().clear();
+    let cancellation = CancellationToken::new();
+    let wait = tokio::spawn({
+        let kernel = kernel.clone();
+        let caller = kernel.agent_caller(&parent).unwrap();
+        let cancellation = cancellation.clone();
+        async move {
+            kernel
+                .wait_agent(&caller, std::time::Duration::from_secs(60), cancellation)
+                .await
+        }
+    });
+    while store
+        .mailbox_summary_reads
+        .lock()
+        .unwrap()
+        .get(parent.session_id())
+        .copied()
+        .unwrap_or(0)
+        == 0
+    {
+        tokio::task::yield_now().await;
+    }
+    let reads = store.subtree_reads.lock().unwrap()[parent.session_id()];
+    kernel.release(&other).unwrap();
+    for _ in 0..16 {
+        tokio::task::yield_now().await;
+    }
+    assert_eq!(
+        store.subtree_reads.lock().unwrap()[parent.session_id()],
+        reads
+    );
+    assert_eq!(
+        store
+            .mailbox_reads
+            .lock()
+            .unwrap()
+            .get(parent.session_id())
+            .copied()
+            .unwrap_or(0),
+        0
+    );
+    assert!(!wait.is_finished());
+    cancellation.cancel();
+    assert!(matches!(wait.await.unwrap(), Err(TurnError::Cancelled)));
+    kernel
+        .finish_turn(&child, &TurnOutcome::Completed)
+        .await
+        .unwrap();
+    kernel
+        .finish_turn(&parent, &TurnOutcome::Completed)
+        .await
+        .unwrap();
+    kernel.shutdown(workers).await.unwrap();
 }

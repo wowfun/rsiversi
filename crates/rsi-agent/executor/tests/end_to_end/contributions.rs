@@ -351,6 +351,7 @@ async fn concurrent_command_drops_stale_post_tool_batch_without_failing_or_repla
         DomainIdentity::new("fixture.report", 1).unwrap(),
         &false,
         |_| Ok(()),
+        rsi_agent_composition_protocol::DomainReferencePolicy::None,
     )
     .unwrap();
     let domains = DomainCatalog::new([definition.registration()]).unwrap();
@@ -639,6 +640,7 @@ async fn nondispatched_retry_keeps_selection_and_does_not_claim_new_step_input()
         DomainIdentity::new(rsi_agent_model_selection::DOMAIN, 1).unwrap(),
         &Some(selection),
         |_: &Option<ModelSelection>| Ok(()),
+        rsi_agent_composition_protocol::DomainReferencePolicy::None,
     )
     .unwrap();
     let domains = DomainCatalog::new([definition.registration()]).unwrap();

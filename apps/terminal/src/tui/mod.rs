@@ -16,6 +16,7 @@ mod input;
 mod job_preview;
 mod prompts;
 mod queue;
+mod reference_previews;
 mod references;
 mod render;
 mod request_details;
@@ -204,6 +205,10 @@ enum Update {
     Menu(Menu),
     Recent(rsi_session_protocol::RecentSessionPage),
     Reference(rsi_agent_session_protocol::ReferenceTextPage),
+    CapturedReference(
+        rsi_agent_session_protocol::ReferenceTextPage,
+        reference_previews::PreviewLease,
+    ),
     FilePicker(rsi_session_files_ui::FilePickerPage),
     Message(rsi_agent_session_protocol::AgentMessage),
     Output(rsi_process::OutputPage),
@@ -336,6 +341,7 @@ struct Client {
     state: State,
     generation: u64,
     tasks: FuturesUnordered<Task>,
+    reference_previews: Arc<reference_previews::Previews>,
     exports: Arc<std::sync::atomic::AtomicUsize>,
     owned: BTreeSet<MessageId>,
     submission: Submission,
@@ -473,6 +479,7 @@ impl Client {
             ),
             generation: 0,
             tasks: FuturesUnordered::new(),
+            reference_previews: Arc::default(),
             exports: Arc::default(),
             owned: BTreeSet::new(),
             submission: Submission::default(),
@@ -1024,7 +1031,22 @@ impl Client {
         self.state.close_ui();
         let handle = self.handle.clone();
         let application = self.application.clone();
-        self.state.invalidate_detail();
+        let reference_preview = match &action {
+            Action::PreviewReference(reference, _) | Action::AddReference(reference)
+                if self
+                    .state
+                    .reference_preview
+                    .as_ref()
+                    .is_some_and(|lease| lease.capture_id == reference.snapshot.capture_id) =>
+            {
+                self.state.reference_preview.take()
+            }
+            _ => None,
+        };
+        if !matches!(action, Action::Decide(..)) {
+            self.state.invalidate_detail();
+        }
+        self.state.reference_preview = reference_preview;
         self.extension_view = None;
         if self.state.header.protection().is_some()
             && matches!(
@@ -2132,6 +2154,10 @@ async fn run_inner(
                         },
                         Ok(Update::HistorySearch(request,reply)) => client.show_history(&request,*reply),
                         Ok(Update::Reference(page)) => client.state.show_reference(page),
+                        Ok(Update::CapturedReference(page, lease)) => {
+                            client.state.show_reference(page);
+                            client.state.reference_preview = Some(lease);
+                        },
                         Ok(Update::FilePicker(page)) => client.state.show_file_picker(page),
                         Ok(Update::Recent(page)) => {
                             client.recent = page.next;
@@ -2278,6 +2304,7 @@ async fn run_inner(
                     let now_ms = u64::try_from(std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).unwrap_or_default().as_millis()).unwrap_or(u64::MAX);
                     dirty |= client.state.tick_activity(now_ms);
                     client.poll_preview(tokio::time::Instant::now());
+                    if let Some(notice) = client.reference_previews.notice() { client.state.notice(notice); dirty = true; }
                     if terminal.failed() { return Err(error("Terminal writer stopped")); }
                     let (width,height) = terminal::size();
                     if dimensions != (width,height) { dimensions=(width,height); dirty=true; }
@@ -2317,6 +2344,7 @@ async fn run_inner(
     external.shutdown().await;
     profiles.shutdown().await;
     client.tasks.clear();
+    let reference_cleanup = client.reference_previews.close().await;
     let cleanup = match observer {
         Some(observer) => observer.stop().await,
         None => Ok(()),

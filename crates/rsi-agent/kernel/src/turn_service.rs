@@ -3,6 +3,13 @@ use rsi_agent_session_protocol::MessageDelivery;
 
 #[async_trait]
 impl TurnService for AgentKernel {
+    fn prepare_retirement(
+        &self,
+        sessions: &[SessionId],
+    ) -> TurnResult<Box<dyn rsi_agent_turn_protocol::SessionRetirement>> {
+        maintenance::reserve(self, sessions)
+    }
+
     async fn mutate_queue(
         &self,
         session: &SessionId,
@@ -192,6 +199,14 @@ impl TurnService for AgentKernel {
         }
         let deadline = Instant::now() + timeout;
         let execution = self.admit_agent_read(caller)?;
+        let root = caller
+            .header()
+            .fork_origin()
+            .map_or(caller.session_id(), |origin| &origin.root_session_id);
+        let mut watches = vec![
+            self.inner.session_changes.session(caller.session_id()),
+            self.inner.session_changes.tree(root),
+        ];
         let baseline = self
             .inner
             .store
@@ -199,6 +214,12 @@ impl TurnService for AgentKernel {
             .await
             .map_err(turn_store_error)?;
         baseline.validate().map_err(turn_store_error)?;
+        watches.extend(
+            baseline
+                .descendants
+                .iter()
+                .map(|child| self.inner.session_changes.session(&child.status.session_id)),
+        );
         drop(execution);
         if baseline.descendants.is_empty()
             || baseline
@@ -231,15 +252,17 @@ impl TurnService for AgentKernel {
             .ok_or_else(|| TurnError::Invalid("Agent wait deadline overflowed".into()))?;
         let parked = self.park_agent_wait(caller, deadline_ms).await?;
         let (result, cause) = 'waiting: loop {
-            let changed = self.inner.claim_changed.notified();
-            tokio::pin!(changed);
-            changed.as_mut().enable();
-            match tokio::time::timeout_at(
-                deadline,
-                observe_agent_wait_change(self, caller, &baseline),
-            )
-            .await
-            {
+            // Mark before reading: commits during the observation remain pending.
+            for watch in &mut watches {
+                watch.mark_seen();
+            }
+            let observation = tokio::select! {
+                biased;
+                () = cancellation.cancelled() => break 'waiting (Err(TurnError::Cancelled), WaitResumeCause::Cancel),
+                () = parked.interrupted() => break 'waiting (Err(TurnError::Cancelled), WaitResumeCause::Cancel),
+                result = tokio::time::timeout_at(deadline, observe_agent_wait_change(self, caller, &baseline)) => result,
+            };
+            match observation {
                 Ok(Ok(Some(cause))) => {
                     break 'waiting (Ok(AgentWaitResult::Changed), cause);
                 }
@@ -253,7 +276,10 @@ impl TurnService for AgentKernel {
                 () = cancellation.cancelled() => {
                     break 'waiting (Err(TurnError::Cancelled), WaitResumeCause::Cancel);
                 }
-                () = &mut changed => {}
+                () = parked.interrupted() => {
+                    break 'waiting (Err(TurnError::Cancelled), WaitResumeCause::Cancel);
+                }
+                _ = futures_util::future::select_all(watches.iter_mut().map(|watch| Box::pin(watch.changed()))) => {}
                 () = tokio::time::sleep(DURABLE_OBSERVER_FALLBACK_INTERVAL) => {}
                 () = tokio::time::sleep_until(deadline) => {
                     break 'waiting (Ok(AgentWaitResult::TimedOut), WaitResumeCause::Timeout);

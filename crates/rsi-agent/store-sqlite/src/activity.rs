@@ -38,7 +38,7 @@ impl SqliteStore {
                 let values = (0..sessions.len()).map(|index| format!("({index},?{})", index + 1)).collect::<Vec<_>>().join(",");
                 let sql = format!("WITH requested(ordinal, id) AS (VALUES {values})
                     SELECT sessions.session_id, sessions.coordinates_key, sessions.created_at_ms, sessions.last_activity_ms
-                    FROM requested LEFT JOIN sessions ON sessions.session_id = requested.id ORDER BY requested.ordinal");
+                    FROM requested LEFT JOIN sessions ON sessions.session_id = requested.id AND NOT EXISTS(SELECT 1 FROM session_tombstones WHERE session_id=requested.id) ORDER BY requested.ordinal");
                 let mut statement = transaction.prepare(&sql).map_err(sql_error)?;
                 let mut rows = statement.query(rusqlite::params_from_iter(sessions.iter().map(SessionId::as_str))).map_err(sql_error)?;
                 let mut result = Vec::with_capacity(sessions.len());
@@ -222,6 +222,7 @@ pub(super) fn ordered_query(
     let mut parameters = Vec::new();
     let mut query = |scope: &ExecutionLocations| -> Result<String> {
         let (mut conditions, values) = selection(scope, key)?;
+        conditions.push("session_id NOT IN (SELECT session_id FROM session_tombstones)".into());
         parameters.extend(values);
         if let Some((timestamp, id)) = after {
             conditions.push(format!("({column}, session_id) < (?, ?)"));
@@ -305,7 +306,7 @@ mod tests {
     #[test]
     fn maximum_location_union_preserves_all_rows_across_continuation_pages() {
         let connection = Connection::open_in_memory().unwrap();
-        connection.execute_batch("CREATE TABLE sessions(session_id TEXT PRIMARY KEY, coordinates_key TEXT, created_at_ms INTEGER, last_activity_ms INTEGER);").unwrap();
+        connection.execute_batch("CREATE TABLE session_tombstones(session_id TEXT PRIMARY KEY); CREATE TABLE sessions(session_id TEXT PRIMARY KEY, coordinates_key TEXT, created_at_ms INTEGER, last_activity_ms INTEGER);").unwrap();
         let mut locations = std::collections::BTreeSet::from([
             rsi_agent_session_protocol::ExecutionLocation::Local,
         ]);
@@ -373,7 +374,7 @@ mod tests {
     #[test]
     fn selected_location_pages_bound_physical_sort_work_before_merging() {
         let mut connection = Connection::open_in_memory().unwrap();
-        connection.execute_batch("CREATE TABLE sessions(session_id TEXT PRIMARY KEY, coordinates_key TEXT, created_at_ms INTEGER, last_activity_ms INTEGER);").unwrap();
+        connection.execute_batch("CREATE TABLE session_tombstones(session_id TEXT PRIMARY KEY); CREATE TABLE sessions(session_id TEXT PRIMARY KEY, coordinates_key TEXT, created_at_ms INTEGER, last_activity_ms INTEGER);").unwrap();
         for (name, sql) in crate::EXPECTED_INDEXES {
             if matches!(
                 name,

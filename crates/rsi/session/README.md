@@ -1,5 +1,32 @@
 # rsi-session
 
+Purge response waits have a 60-second deadline and report the original operation
+identity as an unknown outcome on expiry. Actual Store work retains its maintenance
+permit and lifecycle fences until completion; a timeout cannot prove that native
+I/O stopped. Navigation cleanup runs after releasing that Store permit. A competing
+request from the same principal with the exact same operation and selection reads
+the existing receipt without reacquiring that permit; absent acknowledgement is
+still OutcomeUnknown. It never starts a second mutation. Different operations
+receive Capacity while Store work owns the single lane. A live
+hard owner returns a Busy preview before retirement; unattributed lifecycle close
+contention returns Capacity. The separate 30-second drain deadline is shared by all selected
+readers, not restarted for each Session. Retired streams emit ShuttingDown once,
+then EOF, while their actual workers retain ownership until they finish.
+An uncertain purge admission retains its closing owners and kernel reservations
+until a subsequent Store binding read settles admission. An absent binding after
+the writer has returned reopens new attachments; an existing binding permanently
+retires the old generation. Status and subsequent purge requests reconcile this
+single outstanding admission before proceeding. Internal binding resolution does
+not require execution grants; receipt reads and new mutations still do. Failed
+resolution retains its owners and returns Capacity without revealing another
+caller's operation identity.
+Attachment retains its lifecycle gate before reading a Header. This joins any
+concurrent retirement even when no older handle survives; durable tombstones
+reject later attachments without retaining every retired identity in memory.
+Finite projection, resource, reference, command, job and metrics reads observe
+Session retirement. Evidence workers retain ownership until dispatched Store I/O
+returns, then stop before further reads or cache publication.
+
 Native workspace canonicalization uses the shared
 [path representation](../../rsi-workspace/path/README.md) after verifying the
 physical directory.

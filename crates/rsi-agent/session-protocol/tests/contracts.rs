@@ -425,7 +425,7 @@ fn header_reports_old_format_before_removed_fields_and_rejects_them_in_current_f
     )
     .unwrap();
     let current = serde_json::to_value(&header).unwrap();
-    assert_eq!(current["format_version"], 22);
+    assert_eq!(current["format_version"], 23);
     assert!(current.get("workspace_trust").is_none());
     for version in [21, 20, 19, 18, 17, 16, 15, 14, 1] {
         // Put the obsolete field before the version to prove decoding is not key-order dependent.
@@ -1137,6 +1137,7 @@ fn reference_envelope_bound_admits_worst_case_json_escaping_and_rejects_excess()
     assert!(encoded.len() <= MAXIMUM_REFERENCE_SNAPSHOT_BYTES);
     assert!(
         ReferenceSnapshotRef {
+            capture_id: "fixture-capture".into(),
             sha256: "a".repeat(64),
             byte_len: (MAXIMUM_REFERENCE_SNAPSHOT_BYTES + 1) as u64
         }

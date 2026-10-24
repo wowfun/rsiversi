@@ -1503,3 +1503,163 @@ async fn cursor_successors_and_refreshes_preserve_both_caps_at_global_capacity()
     assert!(book.read(&owner, &successor).is_ok());
     assert!(book.cuts.iter().any(|c| c.issued == foreign));
 }
+
+#[derive(Debug)]
+struct CleanupDomain {
+    spec: DomainSpec,
+    written: Mutex<Vec<serde_json::Value>>,
+}
+#[async_trait]
+impl Domain for CleanupDomain {
+    fn ensure_available(&self) -> std::result::Result<(), rsi_storage::StorageError> {
+        Ok(())
+    }
+    fn spec(&self) -> &DomainSpec {
+        &self.spec
+    }
+    async fn snapshot(
+        &self,
+    ) -> std::result::Result<BTreeMap<String, serde_json::Value>, rsi_storage::StorageError> {
+        Ok(BTreeMap::new())
+    }
+    async fn put(
+        &self,
+        key: &str,
+        value: serde_json::Value,
+    ) -> std::result::Result<(), rsi_storage::StorageError> {
+        assert_eq!(key, "metadata");
+        self.written.lock().unwrap().push(value);
+        Ok(())
+    }
+    async fn delete(&self, _: &str) -> std::result::Result<bool, rsi_storage::StorageError> {
+        panic!("cleanup updates the shared metadata document")
+    }
+}
+
+#[tokio::test]
+async fn purge_cleanup_requires_completion_preserves_other_records_and_retries_capacity() {
+    use rsi_agent_store_protocol::{PurgeRequest, PurgeTarget, StoreMaintenance};
+    use rsi_session_protocol::{NavigationCleanup, SessionPurgeCleanup};
+    let root = tempfile::tempdir().unwrap();
+    let store = Arc::new(rsi_agent_store_sqlite::SqliteStore::open(root.path()).unwrap());
+    let mut navigation = owner().await;
+    let selected = SessionId::new("row-001").unwrap();
+    let other = SessionId::new("row-002").unwrap();
+    let header = navigation.store.header(&selected).await.unwrap();
+    let turn = TurnId::new("complete").unwrap();
+    store
+        .commit_agent(rsi_agent_store_protocol::AtomicAgentCommit {
+            sessions: vec![rsi_agent_store_protocol::AtomicSessionAppend {
+                session_id: selected.clone(),
+                expected_fact_seq: 0,
+                expected_control_seq: 0,
+                header: Some(header.clone()),
+                facts: vec![
+                    Arc::new(
+                        SessionFact::new(
+                            1,
+                            1,
+                            SessionFactBody::TurnAccepted {
+                                turn_id: turn.clone(),
+                                text: "fixture".into(),
+                                model: None,
+                                reasoning_effort: None,
+                                sandbox: rsi_sandbox::SandboxMode::WorkspaceWrite,
+                                require_approval: false,
+                            },
+                        )
+                        .unwrap(),
+                    ),
+                    Arc::new(
+                        SessionFact::new(
+                            2,
+                            2,
+                            SessionFactBody::TurnTerminal {
+                                turn_id: turn.clone(),
+                                outcome: rsi_agent_session_protocol::TurnOutcome::Completed,
+                                result: None,
+                            },
+                        )
+                        .unwrap(),
+                    ),
+                ],
+                controls: vec![
+                    rsi_agent_session_protocol::AgentControlRecord::new(
+                        1,
+                        2,
+                        rsi_agent_session_protocol::AgentControlRecordBody::TurnBoundaryRecorded {
+                            turn_id: turn,
+                            terminal_fact_seq: 2,
+                        },
+                    )
+                    .unwrap(),
+                ],
+            }],
+            required_active_activations: vec![],
+            quiescent_descendants_of: None,
+        })
+        .await
+        .unwrap();
+    let request = PurgeRequest {
+        operation_id: rsi_agent_store_protocol::MaintenanceOperationId::new("cleanup").unwrap(),
+        targets: vec![PurgeTarget {
+            session_id: selected.clone(),
+            header_sha256: header.fingerprint().unwrap(),
+            fact_seq: 2,
+            control_seq: 1,
+        }],
+    };
+    let domain = Arc::new(CleanupDomain {
+        spec: navigation.domain.spec().clone(),
+        written: Mutex::new(Vec::new()),
+    });
+    let owner = Arc::get_mut(&mut navigation).unwrap();
+    owner.store = store.clone();
+    owner.domain = domain.clone();
+    let metadata = SessionMetadata {
+        title: Some("Keep".into()),
+        archived: false,
+        pinned: true,
+    };
+    owner.state.lock().unwrap().document = Arc::new(Document {
+        accounting: None,
+        revision: 7,
+        records: [
+            (selected.clone(), metadata.clone()),
+            (other.clone(), metadata.clone()),
+        ]
+        .into(),
+    });
+    let cleanup = PurgeCleanup(Arc::downgrade(&navigation));
+    store.begin_purge(request.clone()).await.unwrap().unwrap();
+    assert_eq!(
+        cleanup.status("cleanup").await.unwrap(),
+        NavigationCleanup::Pending
+    );
+    assert!(matches!(
+        cleanup.cleanup("cleanup").await,
+        Err(SessionError::Invalid(_))
+    ));
+    assert!(domain.written.lock().unwrap().is_empty());
+    assert!(store.purge_batch("cleanup").await.unwrap().complete);
+    let busy = navigation.writer.clone().acquire_owned().await.unwrap();
+    assert!(matches!(
+        cleanup.cleanup("cleanup").await,
+        Err(SessionError::Capacity)
+    ));
+    assert_eq!(
+        cleanup.status("cleanup").await.unwrap(),
+        NavigationCleanup::Pending
+    );
+    drop(busy);
+    cleanup.cleanup("cleanup").await.unwrap();
+    assert_eq!(
+        cleanup.status("cleanup").await.unwrap(),
+        NavigationCleanup::Complete
+    );
+    cleanup.cleanup("cleanup").await.unwrap();
+    assert_eq!(domain.written.lock().unwrap().len(), 1);
+    let state = navigation.state.lock().unwrap();
+    assert_eq!(state.document.records.len(), 1);
+    assert_eq!(state.document.records.get(&other), Some(&metadata));
+}

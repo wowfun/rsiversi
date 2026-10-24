@@ -127,8 +127,8 @@ fn full_builder_preserves_v12_payload_and_v6_envelope_without_a_third_full_copy(
         additional,
         hex::encode(Sha256::digest(&bytes))
     );
-    // The v11 fold additionally carries the live Turn recovery instruction binding; the generic
-    // v6 outer envelope is unchanged; Session 21 and builder 2.9.0 bind the current cache.
+    // The v12 fold additionally carries the live Turn recovery instruction binding; the generic
+    // v6 outer envelope is unchanged; Session 23 and builder 2.9.0 bind the current cache.
     let prefix = b"rsi-agent-model-context-v6\0".len() + 32;
     let metadata_len = u32::from_le_bytes(bytes[prefix..prefix + 4].try_into().unwrap()) as usize;
     let metadata: serde_json::Value =
@@ -151,7 +151,7 @@ fn full_builder_preserves_v12_payload_and_v6_envelope_without_a_third_full_copy(
     );
     assert_eq!(
         hex::encode(Sha256::digest(&bytes)),
-        "416486284f335fcf9c089485cffcaa3158f4c5e4c21a03ff6fa180733abd4209"
+        "2c6540516876c7c2be6758908b430af0f79af3db6eef70282da407054ee9a9b5"
     );
     assert!(
         additional < 3 * bytes.len(),

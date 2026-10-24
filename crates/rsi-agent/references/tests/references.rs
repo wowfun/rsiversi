@@ -522,7 +522,11 @@ async fn exact_old_selection_is_reread_and_frozen_across_growth_with_unicode_and
         )
         .await
         .unwrap();
-    assert_eq!(again, frozen);
+    assert_ne!(again.snapshot.capture_id, frozen.snapshot.capture_id);
+    assert_eq!(again.snapshot.sha256, frozen.snapshot.sha256);
+    assert_eq!(again.snapshot.byte_len, frozen.snapshot.byte_len);
+    assert_eq!(again.metadata, frozen.metadata);
+    assert_eq!(again.preview, frozen.preview);
     let page = owner
         .preview(target, frozen, 0, 65536, CancellationToken::new())
         .await
@@ -625,6 +629,154 @@ async fn observed_capture_never_claims_native_facts_and_checks_original_bytes() 
         .unwrap()
         .validate()
         .unwrap();
+    owner.close().await;
+    assert!(runtime.shutdown().await.is_clean());
+}
+
+#[tokio::test]
+async fn cancelled_delivery_does_not_retain_pending_capture_slots() {
+    use rsi_agent_references::ObservedReferenceText;
+    use sha2::{Digest as _, Sha256};
+    use std::sync::atomic::{AtomicUsize, Ordering};
+    let runtime = rsi_meta::Runtime::default();
+    let owner = References::new(
+        Arc::new(MemoryStore::default()),
+        runtime.execution().clone(),
+    );
+    let source = ReferenceSource::Observed {
+        owner: "acp".into(),
+        id: "source".into(),
+        epoch: 1,
+    };
+    // More than the per-target capture limit: each completed but undelivered
+    // publication must drop its reservation before the next request.
+    for cancel in [true, true, true, true, true, true, false] {
+        let cancellation = CancellationToken::new();
+        let token = cancellation.clone();
+        let checks = Arc::new(AtomicUsize::new(0));
+        let context = CaptureContext::new(
+            source.clone(),
+            header("target").coordinates().clone(),
+            header("target"),
+            (),
+            move || {
+                if checks.fetch_add(1, Ordering::SeqCst) == 3 && cancel {
+                    token.cancel();
+                }
+                true
+            },
+        )
+        .unwrap();
+        let result = owner
+            .capture_observed(
+                ObservedReferenceText {
+                    source: source.clone(),
+                    coordinates: header("target").coordinates().clone(),
+                    text: "observed".into(),
+                    selection: ReferenceSelection {
+                        record: ReferenceRecord {
+                            sequence: 1,
+                            kind: ReferenceContentKind::Assistant,
+                            content_index: 0,
+                        },
+                        through_seq: 1,
+                        start: 0,
+                        end: 8,
+                        text_sha256: hex::encode(Sha256::digest(b"observed")),
+                        scanned_bytes: 128,
+                    },
+                },
+                context,
+                cancellation,
+            )
+            .await;
+        if cancel {
+            assert!(matches!(result, Err(ReferenceError::Cancelled)));
+        } else {
+            let reference = result.unwrap();
+            owner.release_pending(&reference.metadata.target.session_id, &reference.snapshot);
+        }
+    }
+    owner.close().await;
+    assert!(runtime.shutdown().await.is_clean());
+}
+
+#[tokio::test]
+async fn verified_reference_retains_sqlite_publication_after_capture_owner_closes() {
+    use rsi_agent_store_protocol::StoreMaintenance;
+    let runtime = rsi_meta::Runtime::default();
+    let root = tempfile::tempdir().unwrap();
+    let store = Arc::new(rsi_agent_store_sqlite::SqliteStore::open(root.path()).unwrap());
+    let source = header("source");
+    let target = header("target");
+    append(
+        &*store,
+        &source,
+        0,
+        vec![accepted("seed", "reference proof"), terminal("seed")],
+    )
+    .await;
+    let owner = References::new(store.clone(), runtime.execution().clone());
+    let binding = ReferenceBinding {
+        session_id: source.session_id().clone(),
+        header_sha256: source.fingerprint().unwrap(),
+    };
+    let frozen = owner
+        .capture(
+            selected_context(&binding, target.clone()),
+            CancellationToken::new(),
+        )
+        .await
+        .unwrap();
+    let duplicate = owner
+        .capture(
+            selected_context(&binding, target.clone()),
+            CancellationToken::new(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(frozen.snapshot.sha256, duplicate.snapshot.sha256);
+    assert_ne!(frozen.snapshot.capture_id, duplicate.snapshot.capture_id);
+    owner.release_pending(target.session_id(), &frozen.snapshot);
+    owner.release_pending(target.session_id(), &frozen.snapshot);
+    let selected = store.preview_cas_gc(1).await.unwrap().pop().unwrap();
+    assert!(matches!(
+        store.collect_cas("duplicate-still-owned", selected).await,
+        Err(rsi_agent_store_protocol::StoreError::ReadCapacity)
+    ));
+    drop(
+        owner
+            .verify(target.clone(), duplicate.clone(), CancellationToken::new())
+            .await
+            .unwrap(),
+    );
+    owner.release_pending(target.session_id(), &duplicate.snapshot);
+    owner.close().await;
+    let owner = References::new(store.clone(), runtime.execution().clone());
+    let publication = owner
+        .verify(target.clone(), frozen.clone(), CancellationToken::new())
+        .await
+        .unwrap();
+    let selected = store.preview_cas_gc(1).await.unwrap().pop().unwrap();
+    assert!(matches!(
+        store.collect_cas("gc-verified", selected.clone()).await,
+        Err(rsi_agent_store_protocol::StoreError::ReadCapacity)
+    ));
+    drop(publication);
+    assert!(
+        store
+            .collect_cas("gc-verified", selected)
+            .await
+            .unwrap()
+            .complete
+    );
+    // A decoded cache hit cannot resurrect the removed publication.
+    assert!(
+        owner
+            .verify(target, frozen, CancellationToken::new())
+            .await
+            .is_err()
+    );
     owner.close().await;
     assert!(runtime.shutdown().await.is_clean());
 }

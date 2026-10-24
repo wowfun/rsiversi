@@ -13,6 +13,10 @@ struct Input {
 #[derive(Deserialize)]
 #[serde(tag = "kind", rename_all = "snake_case", deny_unknown_fields)]
 enum Operation {
+    Release {
+        target: rsi_agent_session_protocol::ReferenceBinding,
+        snapshot: rsi_agent_session_protocol::ReferenceSnapshotRef,
+    },
     History {
         request: Box<rsi_history_api::Request>,
     },
@@ -38,9 +42,38 @@ impl GuiApplication {
             Ok(input) => input,
             Err(failure) => return Box::pin(async move { Err(error(failure)) }),
         };
+        if let Operation::Release { target, snapshot } = &input.operation {
+            let (target, snapshot) = (target.clone(), snapshot.clone());
+            return self.admit(false, None, move |app| async move {
+                target.validate().map_err(error)?;
+                snapshot.validate().map_err(error)?;
+                let handle = match app.session.attach(&target.session_id).await {
+                    Ok(handle) => handle,
+                    Err(rsi_session_protocol::SessionError::NotFound(_)) => {
+                        return Ok("null".into());
+                    }
+                    Err(failure) => return Err(error(failure)),
+                };
+                if handle
+                    .header()
+                    .await
+                    .map_err(error)?
+                    .fingerprint()
+                    .map_err(error)?
+                    != target.header_sha256
+                {
+                    return Err("Reference target Header changed".into());
+                }
+                handle.release_reference(snapshot).await.map_err(error)?;
+                Ok("null".into())
+            });
+        }
         self.admit(false, Some(input.pane), move |app| async move {
             let attached = app.pane(input.pane)?.attachment(&input.generation)?;
             let output = match input.operation {
+                Operation::Release { .. } => {
+                    unreachable!("release uses its original target binding")
+                }
                 Operation::History { request } => {
                     if let rsi_history_api::Request::Freeze { target, .. } = request.as_ref()
                         && target != &attached.id

@@ -80,9 +80,14 @@ fn activate_tools(plan: &ActivationPlan, service: &Arc<McpService>) -> rsi_meta:
     let identity = state.identity().clone();
     let manifest: McpManifest = serde_json::from_value(state.state().value().clone())
         .map_err(|_| meta("Invalid saved MCP manifest"))?;
-    let definition = DomainDefinition::new(identity, &manifest, McpManifest::validate)
-        .map_err(meta)?
-        .with_fork_policy(DomainForkPolicy::ResetToInitial);
+    let definition = DomainDefinition::new(
+        identity,
+        &manifest,
+        McpManifest::validate,
+        rsi_agent_composition_protocol::DomainReferencePolicy::None,
+    )
+    .map_err(meta)?
+    .with_fork_policy(DomainForkPolicy::ResetToInitial);
     let context = plan.context().registration_context()?;
     let (_, domain) = definition
         .register(plan.local::<DomainRegistrarContract>()?.as_ref(), &context)

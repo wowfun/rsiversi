@@ -41,8 +41,8 @@ pub use contribution::{
 };
 pub use domain::{
     DomainBaseline, DomainBinding, DomainCatalog, DomainCatalogBuilder, DomainDefinition,
-    DomainError, DomainForkPolicy, DomainHandle, DomainRegistrar, DomainRegistrarContract,
-    DomainRegistration, ValidatedDomainProposal,
+    DomainError, DomainForkPolicy, DomainHandle, DomainReferencePolicy, DomainRegistrar,
+    DomainRegistrarContract, DomainRegistration, ValidatedDomainProposal,
 };
 pub use projection::{SessionProjection, SessionProjectionAdapter, SessionProjectionContext};
 pub use resource::{SessionResourceAdapter, SessionResourceReader};

@@ -1,5 +1,13 @@
 # rsi-terminal
 
+Reference previews retain a capture until it is added to the draft or closed.
+Paging keeps that ownership; closing, replacing the detail, changing Session,
+failed previews and late replies release it. An admitted capture is joined even
+when its presentation is cancelled, so a returned identity is never lost. Cleanup
+failures retain their identity and slot for the next explicit capture attempt;
+that retry does not prevent a new preview from using another free slot.
+Shutdown drains owned preview work and reports any failed cleanup.
+
 Windows fullscreen input supports Windows Terminal (PowerShell or Git Bash).
 Entry checks require its session marker and usable console handles; inherited
 environment variables do not attest the host's ancestry. Missing prerequisites
@@ -588,3 +596,16 @@ on a blocking worker. It verifies the
 the details form invalidates pending and already completed preview deliveries.
 The existing TUI has no native image viewer;
 this text preview works within its cell renderer and needs no external application.
+
+Explicit Session cleanup is available through `rsi run cli --purge-preview JSON`,
+`--purge JSON`, and `--purge-status OPERATION_ID`. JSON contains `operation_id`
+and sorted `targets` with `session_id`, `header_sha256`, `fact_seq`, `control_seq`.
+Use the exact previewed versions and retain that operation ID when retrying.
+Each purge call advances one bounded batch; repeat the identical request until
+`complete` is true. No descendants or CAS objects are implicitly selected.
+
+Local Host administrators can use `--cas-gc-preview LIMIT`, `--cas-gc JSON`, and
+`--cas-gc-status OPERATION_ID`. The collection JSON contains `operation_id` and the
+exact `target` returned by preview. The target includes hash, byte length and
+publication generation; retry the same identity after an uncertain result.
+This is separate from Session purge and offline `rsi agent-store compact`.

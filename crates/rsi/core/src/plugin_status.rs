@@ -242,7 +242,7 @@ impl Source {
                 }
             }
         }
-        if lease.retiring().is_cancelled() {
+        if lease.is_retiring() {
             return Err(ApiError::Unavailable);
         }
         page.validate(request)?;

@@ -127,6 +127,16 @@ pub(super) fn failure(
     failure: Failure,
 ) -> rsi_session_protocol::Result<SessionError> {
     let valid = match &failure {
+        Failure::MaintenanceOutcomeUnknown { kind, .. } => matches!(
+            (operation, kind),
+            (
+                Operation::Purge,
+                rsi_session_protocol::MaintenanceKind::Purge
+            ) | (
+                Operation::CasGc,
+                rsi_session_protocol::MaintenanceKind::CasGc
+            )
+        ),
         Failure::Terminal { error } => {
             matches!(
                 operation,
@@ -170,6 +180,19 @@ pub(super) fn failure(
     }
 }
 impl State {
+    async fn maintenance<I: Serialize + Sync, O: DeserializeOwned>(
+        &self,
+        operation: Operation,
+        operation_id: &rsi_agent_store_protocol::MaintenanceOperationId,
+        input: &I,
+    ) -> rsi_session_protocol::Result<O> {
+        let result = self.call(operation, input).await;
+        if matches!(&result, Err(SessionError::MaintenanceOutcomeUnknown { operation_id: received, .. }) if received != operation_id)
+        {
+            return Err(malformed(operation));
+        }
+        result
+    }
     pub async fn call<I: Serialize + Sync, O: DeserializeOwned>(
         &self,
         operation: Operation,
@@ -186,6 +209,118 @@ impl State {
 }
 #[async_trait]
 impl SessionService for SessionClient {
+    async fn preview_cas_gc(
+        &self,
+        limit: usize,
+    ) -> rsi_session_protocol::Result<Vec<rsi_agent_store_protocol::CasGcTarget>> {
+        if !(1..=256).contains(&limit) {
+            return Err(SessionError::Invalid(
+                "CAS preview limit must be 1..=256".into(),
+            ));
+        }
+        let result: Vec<rsi_agent_store_protocol::CasGcTarget> =
+            self.state.call(Operation::CasGcPreview, &limit).await?;
+        if result.len() > limit {
+            return Err(malformed(Operation::CasGcPreview));
+        }
+        for target in &result {
+            target
+                .validate()
+                .map_err(|_| malformed(Operation::CasGcPreview))?;
+        }
+        Ok(result)
+    }
+    async fn collect_cas(
+        &self,
+        request: rsi_agent_store_protocol::CasGcRequest,
+    ) -> rsi_session_protocol::Result<rsi_agent_store_protocol::CasGcReceipt> {
+        request
+            .validate()
+            .map_err(|e| SessionError::Invalid(e.to_string()))?;
+        let result: rsi_agent_store_protocol::CasGcReceipt = self
+            .state
+            .maintenance(Operation::CasGc, &request.operation_id, &request)
+            .await?;
+        if result.operation_id != request.operation_id || result.target != request.target {
+            return Err(malformed(Operation::CasGc));
+        }
+        Ok(result)
+    }
+    async fn cas_gc_status(
+        &self,
+        operation: &str,
+    ) -> rsi_session_protocol::Result<Option<rsi_agent_store_protocol::CasGcReceipt>> {
+        rsi_agent_store_protocol::MaintenanceOperationId::new(operation)
+            .map_err(|e| SessionError::Invalid(e.to_string()))?;
+        let result: Option<rsi_agent_store_protocol::CasGcReceipt> =
+            self.state.call(Operation::CasGcStatus, &operation).await?;
+        if let Some(receipt) = &result {
+            if receipt.operation_id.as_str() != operation {
+                return Err(malformed(Operation::CasGcStatus));
+            }
+            receipt
+                .validate()
+                .map_err(|_| malformed(Operation::CasGcStatus))?;
+        }
+        Ok(result)
+    }
+
+    async fn preview_purge(
+        &self,
+        request: rsi_agent_store_protocol::PurgeRequest,
+    ) -> rsi_session_protocol::Result<rsi_agent_store_protocol::PurgePreview> {
+        request
+            .validate()
+            .map_err(|e| SessionError::Invalid(e.to_string()))?;
+        let preview: rsi_agent_store_protocol::PurgePreview =
+            self.state.call(Operation::PurgePreview, &request).await?;
+        validate_purge_preview(Operation::PurgePreview, &request, &preview)?;
+        Ok(preview)
+    }
+    async fn purge(
+        &self,
+        request: rsi_agent_store_protocol::PurgeRequest,
+    ) -> rsi_session_protocol::Result<
+        Result<rsi_session_protocol::SessionPurgeReceipt, rsi_agent_store_protocol::PurgePreview>,
+    > {
+        request
+            .validate()
+            .map_err(|e| SessionError::Invalid(e.to_string()))?;
+        let result: Result<
+            rsi_session_protocol::SessionPurgeReceipt,
+            rsi_agent_store_protocol::PurgePreview,
+        > = self
+            .state
+            .maintenance(Operation::Purge, &request.operation_id, &request)
+            .await?;
+        match &result {
+            Ok(receipt) if receipt.store.operation_id != request.operation_id => {
+                return Err(malformed(Operation::Purge));
+            }
+            Err(preview) => validate_purge_preview(Operation::Purge, &request, preview)?,
+            _ => {}
+        }
+        Ok(result)
+    }
+    async fn purge_status(
+        &self,
+        operation_id: &str,
+    ) -> rsi_session_protocol::Result<Option<rsi_session_protocol::SessionPurgeReceipt>> {
+        rsi_agent_store_protocol::MaintenanceOperationId::new(operation_id)
+            .map_err(|e| SessionError::Invalid(e.to_string()))?;
+        let result: Option<rsi_session_protocol::SessionPurgeReceipt> = self
+            .state
+            .call(Operation::PurgeStatus, &operation_id)
+            .await?;
+        if result
+            .as_ref()
+            .is_some_and(|receipt| receipt.store.operation_id.as_str() != operation_id)
+        {
+            return Err(malformed(Operation::PurgeStatus));
+        }
+        Ok(result)
+    }
+
     async fn read_header(
         &self,
         session_id: &SessionId,
@@ -358,6 +493,18 @@ impl Handle {
 }
 #[async_trait]
 impl SessionHandle for Handle {
+    async fn release_reference(
+        &self,
+        snapshot: rsi_agent_session_protocol::ReferenceSnapshotRef,
+    ) -> rsi_session_protocol::Result<()> {
+        snapshot
+            .validate()
+            .map_err(|e| SessionError::Invalid(e.to_string()))?;
+        self.frozen()
+            .call(Operation::ReleaseReference, &snapshot)
+            .await
+    }
+
     async fn terminal(
         &self,
         request: rsi_session_protocol::terminal::Request,
@@ -1036,6 +1183,37 @@ pub(super) fn validate_approvals(requests: &[ApprovalRequest]) -> rsi_session_pr
             )
             .filter(|bytes| *bytes <= 16 * 1024 * 1024)
             .ok_or_else(|| malformed(Operation::Approvals))?;
+    }
+    Ok(())
+}
+
+fn validate_purge_preview(
+    operation: Operation,
+    request: &rsi_agent_store_protocol::PurgeRequest,
+    preview: &rsi_agent_store_protocol::PurgePreview,
+) -> rsi_session_protocol::Result<()> {
+    use rsi_agent_store_protocol::PurgeBlocker;
+    if preview.blockers.len() > rsi_agent_store_protocol::MAXIMUM_PURGE_BLOCKERS {
+        return Err(malformed(operation));
+    }
+    for (index, blocker) in preview.blockers.iter().enumerate() {
+        if preview.blockers[..index].contains(blocker) {
+            return Err(malformed(operation));
+        }
+        let id = match blocker {
+            PurgeBlocker::Changed { session_id }
+            | PurgeBlocker::Busy { session_id }
+            | PurgeBlocker::UncertainWork { session_id }
+            | PurgeBlocker::ProductOwned { session_id } => session_id,
+            PurgeBlocker::Referenced { target, .. } => target,
+        };
+        if !request
+            .targets
+            .iter()
+            .any(|target| &target.session_id == id)
+        {
+            return Err(malformed(operation));
+        }
     }
     Ok(())
 }

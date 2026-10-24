@@ -761,3 +761,6 @@ async fn store_capacity_flush_preserves_pending_bytes_and_io_failure_count() {
     }
     assert!(kernel.shutdown(kernel.start_workers()).await.is_ok());
 }
+
+#[path = "maintenance_tests.rs"]
+mod maintenance;

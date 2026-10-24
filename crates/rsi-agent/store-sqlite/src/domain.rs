@@ -168,7 +168,7 @@ pub(super) fn read_states(
 ) -> Result<StoreDomainStatePage> {
     let (fact, control) = connection
         .query_row(
-            "SELECT durable_seq, control_seq FROM sessions WHERE session_id = ?1",
+            "SELECT durable_seq, control_seq FROM (SELECT * FROM sessions WHERE session_id NOT IN (SELECT session_id FROM session_tombstones)) AS sessions WHERE session_id = ?1",
             [session.as_str()],
             |row| Ok((row.get::<_, i64>(0)?, row.get::<_, i64>(1)?)),
         )
@@ -229,7 +229,7 @@ pub(super) fn read_turn_usage(
         "SELECT durable_seq, control_seq,
             (SELECT COUNT(*) FROM domain_requests WHERE session_id = ?1 AND source_turn_id = ?2),
             (SELECT COALESCE(SUM(control_bytes), 0) FROM domain_requests WHERE session_id = ?1 AND source_turn_id = ?2)
-        FROM sessions WHERE session_id = ?1",
+        FROM (SELECT * FROM sessions WHERE session_id NOT IN (SELECT session_id FROM session_tombstones)) AS sessions WHERE session_id = ?1",
         params![session.as_str(), turn.as_str()],
         |row| Ok((row.get::<_, i64>(0)?, row.get::<_, i64>(1)?, row.get::<_, i64>(2)?, row.get::<_, i64>(3)?)),
     ).optional().map_err(sql_error)?.ok_or_else(|| StoreError::NotFound(session.to_string()))?;

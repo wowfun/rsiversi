@@ -105,6 +105,8 @@ struct FactReadRaceStore {
     control_read_attempts: AtomicUsize,
     control_read_error: Mutex<Option<StoreError>>,
     count_control_reads_for: Mutex<Option<SessionId>>,
+    subtree_reads: Mutex<std::collections::BTreeMap<SessionId, usize>>,
+    mailbox_summary_reads: Mutex<std::collections::BTreeMap<SessionId, usize>>,
     mailbox_reads: Mutex<std::collections::BTreeMap<SessionId, usize>>,
     read_captured: Notify,
     release_read: Notify,
@@ -203,6 +205,8 @@ impl FactReadRaceStore {
             control_read_attempts: AtomicUsize::new(0),
             control_read_error: Mutex::new(None),
             count_control_reads_for: Mutex::new(None),
+            subtree_reads: Mutex::default(),
+            mailbox_summary_reads: Mutex::default(),
             mailbox_reads: Mutex::new(std::collections::BTreeMap::new()),
             read_captured: Notify::new(),
             release_read: Notify::new(),
@@ -1110,6 +1114,12 @@ impl SessionStore for FactReadRaceStore {
         &self,
         session_id: &SessionId,
     ) -> rsi_agent_store_protocol::Result<rsi_agent_store_protocol::StoreAgentMailboxSummary> {
+        *self
+            .mailbox_summary_reads
+            .lock()
+            .unwrap()
+            .entry(session_id.clone())
+            .or_default() += 1;
         self.inner.read_agent_mailbox_summary(session_id).await
     }
 
@@ -1150,6 +1160,12 @@ impl SessionStore for FactReadRaceStore {
         &self,
         parent_session_id: &SessionId,
     ) -> rsi_agent_store_protocol::Result<rsi_agent_store_protocol::StoreAgentSubtreeSnapshot> {
+        *self
+            .subtree_reads
+            .lock()
+            .unwrap()
+            .entry(parent_session_id.clone())
+            .or_default() += 1;
         if self.failed_subtree.lock().unwrap().as_ref() == Some(parent_session_id) {
             return Err(StoreError::Io("persistent subtree failure".into()));
         }
@@ -1246,7 +1262,16 @@ impl SessionStore for FactReadRaceStore {
         self.inner.write_context_checkpoint(write).await
     }
 
-    async fn put_cas(&self, bytes: Arc<[u8]>) -> rsi_agent_store_protocol::Result<CasObjectRef> {
+    async fn retain_cas(
+        &self,
+        object: &CasObjectRef,
+    ) -> rsi_agent_store_protocol::Result<rsi_agent_store_protocol::PreparedCasObject> {
+        self.inner.retain_cas(object).await
+    }
+    async fn put_cas(
+        &self,
+        bytes: Arc<[u8]>,
+    ) -> rsi_agent_store_protocol::Result<rsi_agent_store_protocol::PreparedCasObject> {
         self.cas_writes.fetch_add(1, Ordering::SeqCst);
         self.inner.put_cas(bytes).await
     }

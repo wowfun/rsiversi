@@ -61,6 +61,11 @@ pub use command::{
 mod domain;
 mod projection;
 mod reference;
+mod references;
+pub use references::{
+    DomainReferenceCodec, DurableReference, MAXIMUM_RECORD_REFERENCES, ReferenceCodecRegistration,
+    ReferenceCodecRegistrationContract, ReferenceCollector,
+};
 mod resource;
 pub use domain::{
     DomainFactSpan, DomainFactSpanBuilder, DomainIdentity, DomainMutationSource, DomainRevision,
@@ -87,7 +92,7 @@ pub use resource::{
 };
 
 /// Exact durable format accepted by this pre-release implementation.
-pub const SESSION_FORMAT_VERSION: u32 = 22;
+pub const SESSION_FORMAT_VERSION: u32 = 23;
 /// Maximum bytes in one session, turn, effect, profile, or error-code identity.
 pub const MAXIMUM_AGENT_IDENTIFIER_BYTES: usize = 256;
 /// Maximum bytes in one Agent preset directory-segment identity.

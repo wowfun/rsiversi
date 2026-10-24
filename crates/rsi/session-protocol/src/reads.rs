@@ -36,6 +36,7 @@ pub struct SessionReadLease {
     header: SessionHeader,
     retiring: CancellationToken,
     _activity: Box<dyn Send + Sync>,
+    lifecycle: crate::SessionLifecycleActivity,
 }
 impl fmt::Debug for SessionReadLease {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
@@ -50,11 +51,13 @@ impl SessionReadLease {
         header: SessionHeader,
         retiring: CancellationToken,
         activity: impl Send + Sync + 'static,
+        lifecycle: crate::SessionLifecycleActivity,
     ) -> Self {
         Self {
             header,
             retiring,
             _activity: Box::new(activity),
+            lifecycle,
         }
     }
     /// Exact Header held at read admission.
@@ -64,6 +67,13 @@ impl SessionReadLease {
     /// Cancel a read when its owning Session service retires or scoped View is revoked.
     pub fn retiring(&self) -> &CancellationToken {
         &self.retiring
+    }
+    /// Synchronously rejects a closed Session generation or revoked read scope.
+    pub fn is_retiring(&self) -> bool {
+        self.retiring.is_cancelled() || self.lifecycle.retiring().is_cancelled()
+    }
+    pub(crate) fn promote(&mut self) -> Result<()> {
+        self.lifecycle.promote()
     }
 }
 
@@ -83,4 +93,42 @@ pub struct SessionReadContract;
 impl rsi_meta_contract::LocalContract for SessionReadContract {
     const KEY: &'static str = "rsi.session.read";
     type Service = dyn SessionReads;
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use std::sync::Arc;
+    #[test]
+    fn retirement_check_does_not_wait_for_notification_relay() {
+        use rsi_agent_session_protocol::{AgentPresetId, FrozenAgentSettings};
+        let header = SessionHeader::new_local(
+            SessionId::new("read-fence").unwrap(),
+            1,
+            "/workspace",
+            AgentPresetId::new("test").unwrap(),
+            FrozenAgentSettings::new(
+                "test",
+                "",
+                rsi_ai_protocol::ModelRef::new("test", "model").unwrap(),
+                rsi_sandbox::SandboxMode::ReadOnly,
+                false,
+            )
+            .unwrap(),
+        )
+        .unwrap();
+        let gate = Arc::new(crate::SessionLifecycle::default());
+        let lease = SessionReadLease::new(
+            header,
+            CancellationToken::new(),
+            (),
+            gate.attach().unwrap().read().unwrap(),
+        );
+        assert!(!lease.is_retiring());
+        let closing = crate::SessionLifecycle::close_many(&[gate]).unwrap();
+        assert!(!lease.retiring().is_cancelled(), "no relay has run");
+        assert!(lease.is_retiring());
+        drop(lease);
+        drop(closing);
+    }
 }

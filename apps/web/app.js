@@ -616,6 +616,40 @@ class Pane {
     const failure = results.find(result => result.status === "rejected");
     if (failure) throw failure.reason;
   }
+  renderReferenceCleanup() {
+    for (const [id, cleanup] of this.referenceCleanup ?? []) {
+      if (!cleanup.message || (cleanup.namespace && (connection?.closing || JSON.stringify(connection?.drafts?.namespace) !== cleanup.namespace))) continue;
+      const row = element("div", "draft-error");
+      row.append(element("p", "", cleanup.message), button("Retry reference cleanup", async () => {
+        try { await cleanup.retry(); this.referenceCleanup.delete(id); }
+        catch { /* The retained cleanup updates its diagnostic and remains retryable. */ }
+        this.renderComposer();
+      }, "quiet"));
+      this.draftStatus.append(row);
+    }
+  }
+  releaseReference(reference, editor, generation, invoke) {
+    const id = reference?.snapshot.capture_id;
+    if (!id || editor.references.some(item => item.snapshot.capture_id === id)) return Promise.resolve();
+    const cleanups = this.referenceCleanup ??= new Map();
+    if (cleanups.has(id)) return cleanups.get(id).retry();
+    const namespace = editor.record?.key ? JSON.stringify(editor.record.key.slice(0, 2)) : undefined;
+    let pending;
+    const cleanup = {message:"", namespace, retry:() => {
+      if (pending) return pending;
+      pending = Promise.resolve().then(() => {
+        if (namespace && (connection?.closing || JSON.stringify(connection?.drafts?.namespace) !== namespace)) throw new Error("Reconnect to the original endpoint and account to release this capture");
+        const release = namespace ? boundCall(connection) : invoke;
+        return release("reference_input", JSON.stringify({pane:this.index,generation,operation:{kind:"release",target:reference.metadata.target,snapshot:reference.snapshot}}));
+      })
+        .then(() => { cleanups.delete(id); })
+        .catch(error => { cleanup.message = `Reference cleanup failed: ${error.message}`; throw new Error(cleanup.message); })
+        .finally(() => { pending = undefined; this.renderComposer(); });
+      return pending;
+    }};
+    cleanups.set(id, cleanup);
+    return cleanup.retry();
+  }
   renderComposer() {
     const editor = this.editor, pending = editor?.record.pending;
     if (this.input.value !== (editor?.text ?? "")) this.input.value = editor?.text ?? "";
@@ -629,7 +663,22 @@ class Pane {
     const sendLabel = pending ? (pending.phase === "prepared" ? "Send saved request" : pending.kind !== "command" ? "Retry previous" : "Check command result") : this.composerActions?.primary.label ?? "Send";
     if (this.send.textContent !== sendLabel) this.send.textContent = sendLabel;
     this.draftStatus.replaceChildren();
+    this.draftStatus.removeAttribute("role");
     if (this.bindingError) this.draftStatus.append(element("p", "draft-error", this.bindingError));
+    if (connection?.storageNotice) {
+      const discard = button(this.discardDraftsConfirmed ? "Confirm discard all saved drafts" : "Discard saved drafts…", async () => {
+        if (!this.discardDraftsConfirmed) {
+          this.discardDraftsConfirmed = true; this.renderComposer();
+          return;
+        }
+        discard.disabled = true;
+        try { await DraftStore.discardAllSaved(); location.reload(); }
+        catch (error) { discard.disabled = false; notify(`Draft reset failed: ${error.message}`); }
+      }, "quiet");
+      if (this.discardDraftsConfirmed) this.draftStatus.append(element("p", "draft-error", "This deletes all saved text, images, references and pending request identities for this site. It cannot be undone."));
+      this.draftStatus.append(discard);
+    }
+    this.renderReferenceCleanup();
     if (editor?.failure) {
       this.draftStatus.append(...draftRecovery(editor));
     } else if (editor?.dirty) this.draftStatus.append(element("p", "hint", "Saving draft…"));
@@ -657,7 +706,12 @@ class Pane {
       const source = referenceOrigin(reference.metadata), interval = referenceInterval(reference.metadata);
       row.append(element("span", "reference-origin", `${source} · through record ${interval.through_seq}${interval.omissions.length ? " · shortened" : ""}`),
         button("Preview reference", () => this.showReferencePicker(reference), "quiet"),
-        button("Remove reference", () => { this.edit(this.editor.text, this.editor.images, this.editor.references.filter(item => item.snapshot.sha256 !== reference.snapshot.sha256)); this.input.focus(); }, "quiet"));
+        button("Remove reference", async () => {
+          if (this.editor !== editor) return;
+          const owner = connection, generation = this.generation;
+          this.edit(editor.text, editor.images, editor.references.filter(item => item.snapshot.capture_id !== reference.snapshot.capture_id)); this.input.focus();
+          await this.releaseReference(reference, editor, generation, boundCall(owner)).catch(() => {});
+        }, "quiet"));
       this.referenceList.append(row);
     }
     this.referenceList.hidden = !editor?.references.length;
@@ -707,20 +761,28 @@ class Pane {
         status.textContent = ""; show(reference, page);
       } catch (error) { if (alive() && request === revision) status.textContent = `Reference unavailable: ${error.message}. Your draft is unchanged.`; }
     };
+    let pendingCapture;
+    const releaseCapture = async () => {
+      const captured = pendingCapture; pendingCapture = undefined;
+      if (!captured) return;
+      await this.releaseReference(captured, editor, generation, call);
+    };
     const capture = button("Capture preview", async () => {
       const revision = ++request; capture.disabled = true; content.replaceChildren(); status.textContent = "Capturing conversation…";
       try {
+        await releaseCapture();
         const reference = JSON.parse(await call("reference_input", JSON.stringify({pane:this.index,generation,operation:{kind:"capture",source:source.value.trim()}})));
-        if (!alive() || revision !== request) return;
+        pendingCapture = reference;
+        if (!alive() || revision !== request) { await releaseCapture(); return; }
         status.textContent = "Captured. Review it before adding to the draft."; show(reference);
-      } catch (error) { if (alive() && revision === request) status.textContent = `Capture failed: ${error.message}. Your draft is unchanged.`; }
+      } catch (error) { if (alive() && revision === request) status.textContent = `${error.message.startsWith("Reference cleanup failed:") ? error.message : `Capture failed: ${error.message}`}. Your draft is unchanged.`; }
       finally { if (alive()) capture.disabled = false; }
     }, "primary");
     actions.append(capture);
     dialog.append(heading,help);
     if (!existing) dialog.append(choices,source,actions);
     dialog.append(status,content);
-    dialog.addEventListener("close", () => { request++; if (this.referenceDialog === dialog) this.referenceDialog = undefined; dialog.remove(); if (this.generation === generation && this.editor === editor) this.input.focus(); });
+    dialog.addEventListener("close", () => { request++; void releaseCapture().catch(() => { this.renderComposer(); }); if (this.referenceDialog === dialog) this.referenceDialog = undefined; dialog.remove(); if (this.generation === generation && this.editor === editor) this.input.focus(); });
     document.body.append(dialog); dialog.showModal();
     if (existing) show(existing); else source.focus();
   }
@@ -962,7 +1024,7 @@ class Pane {
       return row;
     }));
   }
-  reset() { this.switching = false; this.exportAbort?.abort(); this.referenceDialog?.close(); this.fileDialog?.close(); this.recovery.hidden = true; this.recovery.replaceChildren(); this.editor = undefined; this.input.value = ""; this.render(null, []); }
+  reset() { this.discardDraftsConfirmed = false; this.switching = false; this.exportAbort?.abort(); this.referenceDialog?.close(); this.fileDialog?.close(); this.recovery.hidden = true; this.recovery.replaceChildren(); this.editor = undefined; this.input.value = ""; this.render(null, []); }
   completionToken() {
     const text = this.input.value, cursor = this.input.selectionStart;
     if (this.composing || !this.generation || this.switching || this.input.selectionEnd !== cursor) return;

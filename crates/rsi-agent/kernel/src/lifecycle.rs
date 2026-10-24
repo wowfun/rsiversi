@@ -949,13 +949,8 @@ impl AgentKernel {
             }
         }
         let continuation = self
-            .inner
-            .continuations
-            .lock()
-            .expect("continuation registry poisoned")
-            .iter()
-            .filter(|((session, _), _)| session == header.session_id())
-            .filter_map(|(_, lease)| lease.upgrade())
+            .session_continuations(header.session_id())
+            .into_iter()
             .find(|lease| lease.binding().revision.get() == 0);
         if let Some(lease) = continuation {
             let (retained_header, composition) = self.inner.continuation_issuer.inspect(&lease)?;

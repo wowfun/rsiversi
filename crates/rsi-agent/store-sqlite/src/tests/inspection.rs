@@ -292,7 +292,18 @@ async fn full_inspection_checks_canonical_program_references_beyond_sqlite_verif
         &test_fact(1),
     ))
     .await;
+    let object = store
+        .put_cas(Arc::from(b"0123456789".as_slice()))
+        .await
+        .unwrap();
+    fs::remove_file(root.path().join("cas").join(&object.sha256)).unwrap();
+    let digest = object.sha256.clone();
+    drop(object);
     drop(store);
+    Connection::open(root.path().join("sessions.sqlite3"))
+        .unwrap()
+        .execute("DELETE FROM cas_objects", [])
+        .unwrap();
     let (summary, events) = inspect(root.path(), CasInspectionMode::Full).await;
     assert!(summary.references > 0);
     assert!(events.iter().any(|event| matches!(
@@ -303,8 +314,8 @@ async fn full_inspection_checks_canonical_program_references_beyond_sqlite_verif
     let connection = Connection::open(root.path().join("sessions.sqlite3")).unwrap();
     connection
         .execute(
-            "INSERT INTO cas_objects(sha256, byte_len) VALUES (?1, 11)",
-            ["a".repeat(64)],
+            "INSERT INTO cas_objects(sha256,byte_len) VALUES(?1,11)",
+            [digest],
         )
         .unwrap();
     drop(connection);
@@ -373,7 +384,7 @@ async fn inspection_refuses_active_writer_wal_and_missing_root_without_creation(
     drop(store);
     let connection = Connection::open(root.path().join("sessions.sqlite3")).unwrap();
     connection
-        .execute_batch("PRAGMA journal_mode=WAL; INSERT INTO cas_objects VALUES ('invalid', 1)")
+        .execute_batch("PRAGMA journal_mode=WAL; INSERT INTO cas_objects(sha256,byte_len) VALUES ('invalid', 1)")
         .unwrap();
     let wal = root.path().join("sessions.sqlite3-wal");
     assert!(fs::metadata(&wal).unwrap().len() > 0);
@@ -411,7 +422,7 @@ async fn inspection_never_follows_leaf_or_cas_root_symlinks() {
     drop(store);
     let outside = root.path().join("outside");
     fs::write(&outside, b"outside data").unwrap();
-    let leaf = root.path().join("cas").join(object.sha256);
+    let leaf = root.path().join("cas").join(&object.sha256);
     fs::remove_file(&leaf).unwrap();
     std::os::unix::fs::symlink(&outside, &leaf).unwrap();
     let (summary, events) = inspect(root.path(), CasInspectionMode::Full).await;
@@ -446,9 +457,14 @@ async fn full_inspection_checks_frozen_references_in_controls_and_facts() {
     let root = tempfile::tempdir().unwrap();
     let store = SqliteStore::open(root.path()).unwrap();
     let id = seed_session(&store, "frozen-inspection").await;
-    let digest = "c".repeat(64);
+    let prepared = store
+        .put_cas(Arc::from(b"0123456789".as_slice()))
+        .await
+        .unwrap();
+    let digest = prepared.sha256.clone();
     let reference = FrozenReference {
         snapshot: ReferenceSnapshotRef {
+            capture_id: "fixture-capture".into(),
             sha256: digest.clone(),
             byte_len: 10,
         },
@@ -541,7 +557,13 @@ async fn full_inspection_checks_frozen_references_in_controls_and_facts() {
         })
         .await
         .unwrap();
+    fs::remove_file(root.path().join("cas").join(&digest)).unwrap();
+    drop(prepared);
     drop(store);
+    Connection::open(root.path().join("sessions.sqlite3"))
+        .unwrap()
+        .execute("DELETE FROM cas_objects", [])
+        .unwrap();
     let (summary, events) = inspect(root.path(), CasInspectionMode::Full).await;
     assert_eq!(summary.references, 2);
     for stream in [CasInspectionStream::Control, CasInspectionStream::Fact] {

@@ -138,6 +138,12 @@ async fn actual_dispatch_rejects_cross_session_and_origin_forgery_before_invocat
         Operation::ListWorkflows,
         Operation::ReadWorkflow,
         Operation::CancelWorkflow,
+        Operation::CasGcPreview,
+        Operation::CasGc,
+        Operation::CasGcStatus,
+        Operation::PurgePreview,
+        Operation::Purge,
+        Operation::PurgeStatus,
     ];
     assert_eq!(
         local.operations().await.unwrap().operations().len(),

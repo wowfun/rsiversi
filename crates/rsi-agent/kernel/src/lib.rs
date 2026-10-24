@@ -885,6 +885,7 @@ mod finalization;
 mod human_wait;
 mod jobs;
 mod lifecycle;
+mod maintenance;
 mod notifications;
 mod program;
 mod projection;

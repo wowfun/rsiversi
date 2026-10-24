@@ -225,6 +225,7 @@ impl PluginFactory for GoalFactory {
             DomainIdentity::new(GOAL_DOMAIN, 2).map_err(activation)?,
             &GoalState::default(),
             GoalState::validate,
+            rsi_agent_composition_protocol::DomainReferencePolicy::None,
         )
         .map_err(activation)?;
         let context = plan.context().registration_context()?;

@@ -219,7 +219,7 @@ impl SessionAuthority {
         }
         let execution = match self {
             Self::Human(s) => {
-                if s.retiring().is_cancelled() {
+                if s.is_retiring() {
                     return Err("Session authority retired".into());
                 }
                 Some(s.execution())
@@ -618,7 +618,7 @@ impl SessionBrowser {
             .await
             .clone();
         let mut entries = self.entries.lock().expect("browser entries");
-        if entries.get(session).is_some_and(|e| Arc::ptr_eq(e, entry)) {
+        if result.is_ok() && entries.get(session).is_some_and(|e| Arc::ptr_eq(e, entry)) {
             entries.remove(session);
         }
         result
@@ -844,7 +844,7 @@ mod tests {
     }
     #[cfg(unix)]
     #[tokio::test]
-    async fn failed_retirement_removes_the_binding_and_all_waiters_share_the_failure() {
+    async fn failed_retirement_retains_the_binding_and_all_waiters_share_the_failure() {
         let (runtime, _permits) = crate::runtime::ownership_tests::full_ready_runtime();
         let owner = SessionBrowser::new(runtime, Arc::new(UnusedMedia)).unwrap();
         let entry = test_entry();
@@ -867,7 +867,7 @@ mod tests {
         );
         assert_eq!(first, Err("failed native receipt".into()));
         assert_eq!(first, second);
-        assert!(!owner.entries.lock().unwrap().contains_key(&session));
+        assert!(owner.entries.lock().unwrap().contains_key(&session));
         owner.close().await;
     }
     #[cfg(unix)]

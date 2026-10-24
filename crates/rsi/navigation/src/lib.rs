@@ -606,6 +606,103 @@ fn session_error(error: SessionError) -> ApiError {
         _ => ApiError::Unavailable,
     }
 }
+#[derive(Debug)]
+struct PurgeCleanup(std::sync::Weak<Navigation>);
+#[async_trait]
+impl rsi_session_protocol::SessionPurgeCleanup for PurgeCleanup {
+    async fn status(
+        &self,
+        operation: &str,
+    ) -> rsi_session_protocol::Result<rsi_session_protocol::NavigationCleanup> {
+        let owner = self.0.upgrade().ok_or(SessionError::ShuttingDown)?;
+        let store = owner
+            .store
+            .maintenance()
+            .ok_or(SessionError::Api(ApiError::Unavailable))?;
+        let (request, _) = store
+            .purge_binding(operation)
+            .await
+            .map_err(|e| SessionError::Backend(e.to_string()))?
+            .ok_or_else(|| SessionError::NotFound(operation.into()))?;
+        let state = owner.state.lock().expect("navigation state poisoned");
+        let absent = request
+            .targets
+            .iter()
+            .all(|target| !state.document.records.contains_key(&target.session_id));
+        Ok(if absent {
+            rsi_session_protocol::NavigationCleanup::Complete
+        } else {
+            rsi_session_protocol::NavigationCleanup::Pending
+        })
+    }
+
+    async fn cleanup(&self, operation: &str) -> rsi_session_protocol::Result<()> {
+        let owner = self.0.upgrade().ok_or(SessionError::ShuttingDown)?;
+        let store = owner
+            .store
+            .maintenance()
+            .ok_or(SessionError::Api(ApiError::Unavailable))?;
+        let receipt = store
+            .purge_status(operation)
+            .await
+            .map_err(|e| SessionError::Backend(e.to_string()))?
+            .ok_or_else(|| SessionError::NotFound(operation.into()))?;
+        if !receipt.complete {
+            return Err(SessionError::Invalid("purge is not complete".into()));
+        }
+        let (request, _) = store
+            .purge_binding(operation)
+            .await
+            .map_err(|e| SessionError::Backend(e.to_string()))?
+            .ok_or_else(|| SessionError::NotFound(operation.into()))?;
+        let permit = owner
+            .writer
+            .clone()
+            .try_acquire_owned()
+            .map_err(|_| SessionError::Capacity)?;
+        owner
+            .run_mutation(move |owner| {
+                Box::pin(async move {
+                    let _permit = permit;
+                    let mut document = owner
+                        .state
+                        .lock()
+                        .expect("navigation state poisoned")
+                        .document
+                        .as_ref()
+                        .clone();
+                    let mut changed = false;
+                    for target in request.targets {
+                        if document.records.contains_key(&target.session_id) {
+                            document.edit(&target.session_id, &SessionMetadata::default())?;
+                            changed = true;
+                        }
+                    }
+                    if changed {
+                        owner
+                            .domain
+                            .put(
+                                "metadata",
+                                serde_json::to_value(&document)
+                                    .map_err(|_| ApiError::Unavailable)?,
+                            )
+                            .await
+                            .map_err(storage_error)?;
+                        owner
+                            .state
+                            .lock()
+                            .expect("navigation state poisoned")
+                            .document = Arc::new(document);
+                    }
+                    Ok(())
+                })
+            })
+            .map_err(SessionError::Api)?
+            .await
+            .map_err(SessionError::Api)
+    }
+}
+
 /// Nominal Host navigation capability.
 #[derive(Debug)]
 pub struct NavigationContract;
@@ -692,11 +789,17 @@ impl PluginFactory for NavigationFactory {
         let supply = plan
             .context()
             .provide_local::<NavigationContract>(owner.clone())?;
+        let cleanup = plan
+            .context()
+            .provide_local::<rsi_session_protocol::SessionPurgeCleanupContract>(Arc::new(
+                PurgeCleanup(Arc::downgrade(&owner)),
+            ))?;
         plan.defer(
             "drain navigation",
             Box::new(move || {
                 Box::pin(async move {
                     drop(supply);
+                    drop(cleanup);
                     futures_util::join!(
                         owner.close(),
                         futures_util::future::join_all(

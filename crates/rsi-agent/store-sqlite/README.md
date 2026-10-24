@@ -1,5 +1,76 @@
 # rsi-agent-store-sqlite
 
+Session maintenance persists operation receipts and retirement tombstones outside
+Session-owned rows. Reference coverage is per canonical record and includes its
+content digest; a source snapshot must agree with this projection before deletion.
+Append serializes each canonical record once for persistence and reference coverage;
+the coverage digest hashes those exact inserted JSON bytes.
+Schema 37 retains a bounded, checksummed execution-location projection for purge
+recovery instead of complete Header copies. It is collected during the same
+admission read as the immutable selection; protected Headers are never admitted.
+Schema 38 adds partial indexes for pending purge and CAS collection receipts;
+completed history does not enlarge recovery scans.
+Open holds an exclusive OS writer lease across all Store connections and CAS jobs,
+so a second Store process cannot publish or collect objects concurrently.
+A new Store generation establishes full reference coverage before deletion.
+Maintenance audits retain the writer lane through one immediate transaction and
+proof publication; ordinary readers remain independent. A successful audit is
+cached against the writer's commit-attempt counter
+and SQLite data version. Successful Store-owned transactions maintain this proof;
+before strict admission, inserting incomplete reference coverage invalidates it.
+A partial index makes that check independent of complete history. A refused
+writer call whose transaction rolled back preserves the proof. Failed calls that
+attempted a commit and unaccounted changes invalidate it. The proof's own stamp
+must match external writes; sampling a newer stamp cannot authenticate them.
+Reopen always requires a new audit.
+The first audit temporarily queues writes, avoiding repeated full scans under
+continuous appends. Foreign SQLite lock contention remains a pre-admission
+refusal; no audit enables strict admission by itself.
+Maintenance requires the codecs for every persisted Domain that may contain
+references. Reinstall the owning codec before auditing or rebuilding an unknown
+Domain. Retaining all CAS alone cannot prove the absence of cross-Session edges,
+so it cannot authorize Session purge. Normal non-strict appends remain available
+until a deletion is admitted; failed maintenance does not tighten that policy.
+Subsequent batches authenticate that operation's immutable binding and only the
+canonical records selected for deletion, in the same bounded writer transaction.
+Each record must match its digest and exact reference coverage before removal;
+extra coverage must be absent before deleting its Session Header. Corruption in a
+later batch prevents that batch, without undoing earlier completed batches. Strict
+transactional append rejects new references to tombstoned Sessions. Batches do not
+replay unrelated or unselected surviving history.
+New CAS collection and previews require that current coverage proof, so collecting
+a page of objects does not replay the entire Store for each hash. Resuming an existing
+Deleting receipt uses its original generation binding and per-hash ownership; its
+durable fence already rejects new references. Completed purge bindings remain part
+of full validation because they permanently authenticate retired identities.
+Deletion stages select bounded rows through Session indexes without a global rowid
+sort. Tombstones have an operation/Session index for repeated batch selection.
+Strict admission is enabled in the same transaction as blocker-free purge or CAS
+collection admission. That immediate transaction checks the proof and performs any
+required audit before admission without releasing the writer lane. Refused requests
+leave the reference policy unchanged.
+A current strict proof avoids repeating the policy write per CAS object. Reference policy is
+read once per Session append in its writer transaction, then shared by all records
+in that append; offline rebuilding uses its transactionally enabled strict policy.
+Retiring Sessions are unavailable to normal readers/writers, including old cached
+validation leases. Batch limits describe stored payload and logical records, not
+WAL growth, physical file shrinkage or a wall-clock deadline.
+Batch receipts read observational free-page and CAS-count statistics after the
+writer transaction commits; these statistics do not extend the deletion lock.
+Header and model-intent reads check retirement in the same SQLite read snapshot
+as their result, so a concurrent tombstone cannot split admission from observation.
+All Session data reads enforce availability in their data snapshot. Cached
+validation proofs establish canonical integrity, not continued availability;
+ordinary warm reads do not dispatch a separate retirement query. Standalone
+validation and preparation still check availability before returning a lease.
+GC authenticates the durable object generation and absence of references before
+unlinking its no-follow regular-file entry. Damaged bytes do not prevent disposal
+of an unreferenced object; file type, namespace and unlink failures remain errors.
+
+Recent-session pages select bounded Header projections in the same ordered query.
+They share the ordinary Header decoder and integrity checks, without one extra
+query per result or decoding an unbounded JSON value.
+
 The `model_effect_coordinates` unique expression index derives Session/Turn/effect/role
 directly from canonical Fact JSON for ModelIntent, ModelStarted and
 ModelAttemptSettled. It is schema-validated on open and enforced by both append
@@ -406,3 +477,15 @@ An unexpected EOF within an admitted CAS body is corruption, not a retryable I/O
 
 CAS payload and inspection reads retry interrupted trailing EOF probes. A signal
 alone cannot classify a complete object as unreadable or growing.
+
+Offline verification and CAS inspection refuse unfinished Session or CAS retirement with an explicit
+pending-retirement diagnostic; resume the original operation before verifying.
+
+Reference-index rebuilding is an explicit offline operation with the exclusive
+Store writer lease and exact pure Domain codecs supplied by the caller. It first
+validates canonical history, rebuilds only derived edges in one transaction, and
+rejects unfinished retirements. Unknown codecs abort the rebuild transaction.
+Compact is a separate offline operation: it requires an existing valid Store,
+refuses unfinished Session/CAS deletions, obtains the same writer lease, uses
+SQLite VACUUM, and reports database-file bytes before and after checkpointing.
+Neither Session purge nor CAS collection promises to shrink the database file.

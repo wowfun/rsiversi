@@ -1,5 +1,17 @@
 # rsi-agent-composition-protocol
 
+Every Domain definition declares an immutable reference policy alongside its
+semantic validator: either explicitly no Session/Agent-CAS references, or a pure
+bounded visitor over the decoded state type. The exact Domain identity/version
+owns this policy. `None` unconditionally promises that the version contains no
+references, so extraction does not decode or semantically validate the state.
+Typed state admission still runs its validator; `Visit` decodes and validates
+before visiting durable state. Changing reference semantics requires a version change.
+Visitors inspect typed fields, never arbitrary JSON strings or schema examples.
+The erased codec retains no execution/composition authority and can be retained
+by Store reference validation after the originating generation is released.
+An unavailable exact codec cannot be interpreted as an empty reference set.
+
 Context contributions receive the executing claim's non-durable execution lease.
 Finite resource readers receive the current caller's lease independently of the
 composition pin. The resource adapter rejects a missing remote lease, a mismatched

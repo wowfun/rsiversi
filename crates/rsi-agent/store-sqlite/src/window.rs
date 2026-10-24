@@ -19,7 +19,7 @@ impl SqliteStore {
         let materializations = self.inner.fact_materializations.clone();
         self.with_reader(move |connection| {
             let transaction=connection.transaction_with_behavior(TransactionBehavior::Deferred).map_err(sql_error)?;
-            let durable_seq=transaction.query_row("SELECT durable_seq FROM sessions WHERE session_id=?1",[session_id.as_str()],|row|row.get::<_,i64>(0)).optional().map_err(sql_error)?.ok_or_else(||StoreError::NotFound(session_id.to_string())).and_then(|value|decode_u64("Fact horizon",value))?;
+            let durable_seq=transaction.query_row("SELECT durable_seq FROM (SELECT * FROM sessions WHERE session_id NOT IN (SELECT session_id FROM session_tombstones)) AS sessions WHERE session_id=?1",[session_id.as_str()],|row|row.get::<_,i64>(0)).optional().map_err(sql_error)?.ok_or_else(||StoreError::NotFound(session_id.to_string())).and_then(|value|decode_u64("Fact horizon",value))?;
             if after_seq>durable_seq {return Err(StoreError::Invalid("Fact window cursor exceeds durable horizon".into()));}
             let mut window=StoreFactWindow{after_seq,through_seq:after_seq,durable_seq,facts:vec![],omitted:vec![],encoded_bytes:0};
             let mut admitted=Vec::new();

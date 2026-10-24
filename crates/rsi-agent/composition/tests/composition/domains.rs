@@ -34,6 +34,7 @@ impl PluginFactory for DomainsFactory {
             DomainIdentity::new("fixture.plan", 1).unwrap(),
             &initial,
             |_| Ok(()),
+            rsi_agent_composition_protocol::DomainReferencePolicy::None,
         )
         .unwrap();
         let (handle, lease) = definition

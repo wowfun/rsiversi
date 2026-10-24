@@ -1,4 +1,32 @@
 mod queue;
+
+/// Checks metadata-only retention after a fixture corrupts bytes without changing
+/// the registered object's length. Reading those bytes must still authenticate them.
+///
+/// # Panics
+/// Panics if the backend hashes during retention or accepts corrupted read bytes.
+pub async fn assert_metadata_only_cas_retention(
+    store: &dyn SessionStore,
+    object: &rsi_agent_store_protocol::CasObjectRef,
+) {
+    let lease = store.retain_cas(object).await.unwrap();
+    assert_eq!(lease.reference(), object);
+    assert!(matches!(
+        store
+            .read_cas(
+                object,
+                rsi_api_protocol::ByteBudget::new(1024).unwrap().into()
+            )
+            .await,
+        Err(StoreError::Corrupt(_))
+    ));
+    let mut wrong_length = object.clone();
+    wrong_length.byte_len += 1;
+    assert!(matches!(
+        store.retain_cas(&wrong_length).await,
+        Err(StoreError::Corrupt(_))
+    ));
+}
 pub use queue::assert_queue_store_contract;
 mod program;
 pub use program::assert_program_store_contract;

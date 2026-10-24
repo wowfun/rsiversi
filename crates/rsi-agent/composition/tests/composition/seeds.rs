@@ -46,8 +46,13 @@ impl PluginFactory for SeedFactory {
             .ok_or_else(|| MetaError::Activation("missing saved manifest".into()))?;
         let names: Vec<String> = serde_json::from_value(snapshot.state().value().clone())
             .map_err(|error| MetaError::Activation(error.to_string()))?;
-        let definition = DomainDefinition::new(identity(), &names, validate)
-            .map_err(|error| MetaError::Activation(error.to_string()))?;
+        let definition = DomainDefinition::new(
+            identity(),
+            &names,
+            validate,
+            rsi_agent_composition_protocol::DomainReferencePolicy::None,
+        )
+        .map_err(|error| MetaError::Activation(error.to_string()))?;
         let (_, domain) = definition
             .register(
                 plan.local::<DomainRegistrarContract>()?.as_ref(),

@@ -18,6 +18,16 @@ type CommandResult = TurnResult<DomainMutationReceipt>;
 #[derive(Default)]
 pub(super) struct CommandRequests(Mutex<BTreeMap<CommandKey, PendingCommand>>);
 
+impl CommandRequests {
+    pub(super) fn contains_any(&self, ids: &[SessionId]) -> bool {
+        self.0
+            .lock()
+            .expect("command requests poisoned")
+            .keys()
+            .any(|(id, _)| ids.binary_search(id).is_ok())
+    }
+}
+
 struct PendingCommand {
     digest: String,
     receiver: watch::Receiver<Option<CommandResult>>,
@@ -149,6 +159,17 @@ impl AgentKernel {
                 if pending.len() >= 64 {
                     return Err(TurnError::Capacity);
                 }
+                // Retirement holds this same key before inspecting Kernel state.
+                // Publish the pending command while both admission locks are held.
+                let submission = self
+                    .inner
+                    .submission_admission
+                    .register(header.session_id());
+                let _registration = submission
+                    .mutex
+                    .clone()
+                    .try_lock_owned()
+                    .map_err(|_| TurnError::Capacity)?;
                 let (sender, receiver) = watch::channel(None);
                 pending.insert(
                     key.clone(),

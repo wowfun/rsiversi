@@ -898,6 +898,7 @@ async fn independent_domains_share_a_session_but_not_a_second_owner_or_generatio
             DomainIdentity::new("fixture.goal", 1).unwrap(),
             &false,
             |_| Ok(()),
+            rsi_agent_composition_protocol::DomainReferencePolicy::None,
         )
         .unwrap()
         .registration(),
@@ -905,6 +906,7 @@ async fn independent_domains_share_a_session_but_not_a_second_owner_or_generatio
             DomainIdentity::new("fixture.schedule", 1).unwrap(),
             &false,
             |_| Ok(()),
+            rsi_agent_composition_protocol::DomainReferencePolicy::None,
         )
         .unwrap()
         .registration(),
@@ -1152,7 +1154,13 @@ async fn queued_automatic_domains_alternate_without_charging_the_loser() {
         .register("two automatic domains", || Ok(()), Ok)
         .unwrap();
     let definitions = ["fixture.goal", "fixture.schedule"].map(|id| {
-        DomainDefinition::new(DomainIdentity::new(id, 1).unwrap(), &false, |_| Ok(())).unwrap()
+        DomainDefinition::new(
+            DomainIdentity::new(id, 1).unwrap(),
+            &false,
+            |_| Ok(()),
+            rsi_agent_composition_protocol::DomainReferencePolicy::None,
+        )
+        .unwrap()
     });
     let domains =
         DomainCatalog::new(definitions.iter().map(DomainDefinition::registration)).unwrap();
@@ -1443,7 +1451,13 @@ async fn total_lease_bound_spans_domains_and_releases_one_slot() {
     let fixture = Fixture::start(Arc::new(MemoryStore::new()), false).await;
     let old = fixture.composition.pin.read().unwrap().clone();
     let definitions = ["one", "two", "three"].map(|id| {
-        DomainDefinition::new(DomainIdentity::new(id, 1).unwrap(), &false, |_| Ok(())).unwrap()
+        DomainDefinition::new(
+            DomainIdentity::new(id, 1).unwrap(),
+            &false,
+            |_| Ok(()),
+            rsi_agent_composition_protocol::DomainReferencePolicy::None,
+        )
+        .unwrap()
     });
     let pin = AgentCompositionPin::new(
         old.preset_id().clone(),

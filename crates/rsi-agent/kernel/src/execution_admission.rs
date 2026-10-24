@@ -22,6 +22,12 @@ impl Default for Messages {
     }
 }
 impl Messages {
+    pub(super) fn remove_session(&self, session: &SessionId) {
+        self.entries
+            .lock()
+            .expect("execution messages")
+            .remove(session);
+    }
     pub(super) fn clear(&self) {
         self.entries.lock().expect("execution messages").clear();
     }

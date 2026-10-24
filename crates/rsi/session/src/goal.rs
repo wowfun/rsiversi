@@ -22,59 +22,65 @@ impl LocalSessionHandle {
     }
 
     async fn goal_snapshot(&self) -> GoalResult<GoalSnapshot> {
-        let _activity = self.begin_activity().map_err(goal_error)?;
-        self.reconcile_fresh_read().await.map_err(goal_error)?;
-        let state = self.state.lock().await;
-        let header = state.header().map_err(goal_error)?.clone();
-        let (revision, domain) = if let HandleState::Fresh(draft) = &*state {
-            let snapshot = draft
-                .baseline()
-                .initial_states()
-                .into_iter()
-                .find(|snapshot| snapshot.identity().id() == GOAL_DOMAIN)
-                .ok_or(GoalError::Unavailable)?;
-            (
-                draft.revision(),
-                DomainStateView {
-                    revision: DomainRevision::new(0),
-                    snapshot,
-                },
-            )
-        } else {
-            drop(state);
-            let page = self
-                .store
-                .read_domain_states(self.session_id(), None)
-                .await
-                .map_err(backend)?;
-            page.validate().map_err(backend)?;
-            if page.selected_control_seq != page.durable_control_seq {
-                return Err(GoalError::Backend(
-                    "Goal domain read returned a historical cut".into(),
-                ));
-            }
-            let state = page
-                .states
-                .into_iter()
-                .find(|state| state.snapshot.identity().id() == GOAL_DOMAIN)
-                .ok_or(GoalError::Unavailable)?;
-            (
-                CommandRevision::Durable {
-                    control_seq: page.durable_control_seq,
-                },
-                DomainStateView {
-                    revision: state.head.revision,
-                    snapshot: state.snapshot,
-                },
-            )
-        };
-        let state = GoalState::decode(&domain.snapshot).map_err(GoalError::Invalid)?;
-        Ok(GoalSnapshot {
-            header,
-            revision,
-            domain,
-            state,
-        })
+        let activity = self.begin_read().map_err(goal_error)?;
+        tokio::select! {
+            biased;
+            () = activity.0.retiring().cancelled() => Err(goal_error(SessionError::ShuttingDown)),
+            result = async {
+                self.reconcile_fresh_read().await.map_err(goal_error)?;
+                let state = self.state.lock().await;
+                let header = state.header().map_err(goal_error)?.clone();
+                let (revision, domain) = if let HandleState::Fresh(draft) = &*state {
+                    let snapshot = draft
+                        .baseline()
+                        .initial_states()
+                        .into_iter()
+                        .find(|snapshot| snapshot.identity().id() == GOAL_DOMAIN)
+                        .ok_or(GoalError::Unavailable)?;
+                    (
+                        draft.revision(),
+                        DomainStateView {
+                            revision: DomainRevision::new(0),
+                            snapshot,
+                        },
+                    )
+                } else {
+                    drop(state);
+                    let page = self
+                        .store
+                        .read_domain_states(self.session_id(), None)
+                        .await
+                        .map_err(backend)?;
+                    page.validate().map_err(backend)?;
+                    if page.selected_control_seq != page.durable_control_seq {
+                        return Err(GoalError::Backend(
+                            "Goal domain read returned a historical cut".into(),
+                        ));
+                    }
+                    let state = page
+                        .states
+                        .into_iter()
+                        .find(|state| state.snapshot.identity().id() == GOAL_DOMAIN)
+                        .ok_or(GoalError::Unavailable)?;
+                    (
+                        CommandRevision::Durable {
+                            control_seq: page.durable_control_seq,
+                        },
+                        DomainStateView {
+                            revision: state.head.revision,
+                            snapshot: state.snapshot,
+                        },
+                    )
+                };
+                let state = GoalState::decode(&domain.snapshot).map_err(GoalError::Invalid)?;
+                Ok(GoalSnapshot {
+                    header,
+                    revision,
+                    domain,
+                    state,
+                })
+            } => result,
+        }
     }
 
     async fn retain_goal(

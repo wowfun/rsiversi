@@ -1,8 +1,9 @@
 //! Typed definitions and exact frozen-generation proposals. No persistence authority.
 
 use rsi_agent_session_protocol::{
-    DomainIdentity, DomainMutationSource, DomainRevision, DomainSnapshot, DomainStateCommit,
-    DomainStateUpdate, DomainStateValue, MAXIMUM_DOMAIN_BASELINE_BYTES, MAXIMUM_SESSION_DOMAINS,
+    DomainIdentity, DomainMutationSource, DomainReferenceCodec, DomainRevision, DomainSnapshot,
+    DomainStateCommit, DomainStateUpdate, DomainStateValue, MAXIMUM_DOMAIN_BASELINE_BYTES,
+    MAXIMUM_SESSION_DOMAINS, ReferenceCollector,
 };
 use serde::{Serialize, de::DeserializeOwned};
 use std::{collections::BTreeMap, fmt, marker::PhantomData, sync::Arc};
@@ -57,9 +58,23 @@ pub enum DomainForkPolicy {
     ResetToInitial,
 }
 
-trait Codec: fmt::Debug + Send + Sync {
+/// Mandatory immutable reference semantics for a decoded Domain state.
+#[derive(Debug)]
+pub enum DomainReferencePolicy<T> {
+    /// This type contains no Session or Agent-CAS references.
+    None,
+    /// Pure bounded visitor over typed fields; errors reject maintenance coverage.
+    Visit(fn(&T, &mut ReferenceCollector) -> std::result::Result<(), String>),
+}
+impl<T> Copy for DomainReferencePolicy<T> {}
+impl<T> Clone for DomainReferencePolicy<T> {
+    fn clone(&self) -> Self {
+        *self
+    }
+}
+
+trait Codec: DomainReferenceCodec {
     fn fork_policy(&self) -> DomainForkPolicy;
-    fn identity(&self) -> &DomainIdentity;
     fn initial(&self) -> &DomainSnapshot;
     fn validate(&self, state: &DomainStateValue) -> Result<()>;
 }
@@ -68,6 +83,7 @@ struct TypedCodec<T> {
     initial: DomainSnapshot,
     fork_policy: DomainForkPolicy,
     validate: fn(&T) -> std::result::Result<(), String>,
+    references: DomainReferencePolicy<T>,
     marker: PhantomData<T>,
 }
 
@@ -92,12 +108,38 @@ impl<T: DeserializeOwned + Send + Sync> TypedCodec<T> {
     }
 }
 
-impl<T: DeserializeOwned + Send + Sync> Codec for TypedCodec<T> {
-    fn fork_policy(&self) -> DomainForkPolicy {
-        self.fork_policy
-    }
+impl<T: DeserializeOwned + Send + Sync + 'static> DomainReferenceCodec for TypedCodec<T> {
     fn identity(&self) -> &DomainIdentity {
         self.initial.identity()
+    }
+    fn definition_key(&self) -> (std::any::TypeId, usize, usize) {
+        (
+            std::any::TypeId::of::<T>(),
+            self.validate as usize,
+            match self.references {
+                DomainReferencePolicy::None => 0,
+                DomainReferencePolicy::Visit(visit) => visit as usize,
+            },
+        )
+    }
+    fn references(
+        &self,
+        state: &DomainStateValue,
+        output: &mut ReferenceCollector,
+    ) -> std::result::Result<(), String> {
+        match self.references {
+            DomainReferencePolicy::None => Ok(()),
+            DomainReferencePolicy::Visit(visit) => {
+                let value = self.decode(state).map_err(|error| error.to_string())?;
+                visit(&value, output)
+            }
+        }
+    }
+}
+
+impl<T: DeserializeOwned + Send + Sync + 'static> Codec for TypedCodec<T> {
+    fn fork_policy(&self) -> DomainForkPolicy {
+        self.fork_policy
     }
     fn initial(&self) -> &DomainSnapshot {
         &self.initial
@@ -135,6 +177,7 @@ impl<T: Serialize + DeserializeOwned + Send + Sync + 'static> DomainDefinition<T
         identity: DomainIdentity,
         initial: &T,
         validate: fn(&T) -> std::result::Result<(), String>,
+        references: DomainReferencePolicy<T>,
     ) -> Result<Self> {
         validate(initial).map_err(|reason| invalid(&identity, &reason))?;
         let state = encode(&identity, initial)?;
@@ -142,6 +185,7 @@ impl<T: Serialize + DeserializeOwned + Send + Sync + 'static> DomainDefinition<T
             initial: DomainSnapshot::new(identity, state),
             fork_policy: DomainForkPolicy::Inherit,
             validate,
+            references,
             marker: PhantomData,
         });
         // Validate the serialized representation as well: linked serializers may differ from T.
@@ -156,6 +200,7 @@ impl<T: Serialize + DeserializeOwned + Send + Sync + 'static> DomainDefinition<T
                 initial: self.codec.initial.clone(),
                 fork_policy: policy,
                 validate: self.codec.validate,
+                references: self.codec.references,
                 marker: PhantomData,
             }),
         }
@@ -335,6 +380,14 @@ struct Catalog {
 }
 
 impl DomainCatalog {
+    /// Pure exact-version reference codecs, independent of generation authority.
+    pub fn reference_codecs(&self) -> Vec<Arc<dyn DomainReferenceCodec>> {
+        self.inner
+            .definitions
+            .values()
+            .map(|entry| entry.codec.clone() as Arc<dyn DomainReferenceCodec>)
+            .collect()
+    }
     /// Freezes unique domain names and validates aggregate initial-state bounds.
     ///
     /// # Errors

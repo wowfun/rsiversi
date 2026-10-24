@@ -18,6 +18,12 @@ pub(crate) const RECENT_READ_LIMIT: usize = (LARGE_REPLY - 64 * 1024) / HEADER_R
 #[derive(Clone, Copy, Debug, PartialEq)]
 #[allow(missing_docs)]
 pub enum Operation {
+    CasGcPreview,
+    CasGc,
+    CasGcStatus,
+    PurgePreview,
+    Purge,
+    PurgeStatus,
     WorkflowReadiness,
     ListWorkflows,
     ReadWorkflow,
@@ -51,6 +57,7 @@ pub enum Operation {
     CaptureReference,
     PreviewReference,
     ReadReference,
+    ReleaseReference,
     GoalControl,
     GoalStatus,
     GoalObserve,
@@ -66,7 +73,14 @@ pub enum Operation {
     AnswerApproval,
 }
 impl Operation {
-    pub const ALL: [Self; 46] = [
+    /// Current Session operation descriptors.
+    pub const ALL: [Self; 53] = [
+        Self::CasGcPreview,
+        Self::CasGc,
+        Self::CasGcStatus,
+        Self::PurgePreview,
+        Self::Purge,
+        Self::PurgeStatus,
         Self::WorkflowReadiness,
         Self::ListWorkflows,
         Self::ReadWorkflow,
@@ -100,6 +114,7 @@ impl Operation {
         Self::CaptureReference,
         Self::PreviewReference,
         Self::ReadReference,
+        Self::ReleaseReference,
         Self::GoalControl,
         Self::GoalStatus,
         Self::GoalObserve,
@@ -122,6 +137,12 @@ impl Operation {
         use OperationClass::{Control, Data, Subscription};
         use OperationEffect::{Mutation, Read};
         let (name, class, effect, input, output) = match self {
+            Self::CasGcPreview => ("cas-gc-preview", Data, Read, 64, 64 * 1024),
+            Self::CasGc => ("cas-gc", Control, Mutation, 4096, 4096),
+            Self::CasGcStatus => ("cas-gc-status", Data, Read, 1024, 4096),
+            Self::PurgePreview => ("purge-preview", Data, Read, 256 * 1024, 256 * 1024),
+            Self::Purge => ("purge", Data, Mutation, 256 * 1024, 256 * 1024),
+            Self::PurgeStatus => ("purge-status", Data, Read, 1024, 4096),
             Self::WorkflowReadiness => ("workflow-readiness", Data, Read, 8192, 8192),
             Self::ListWorkflows => ("list-workflows", Data, Read, 8192, 4 * 1024 * 1024),
             Self::ReadWorkflow => ("read-workflow", Data, Read, 8192, 2 * 1024 * 1024),
@@ -160,6 +181,7 @@ impl Operation {
             ),
             Self::CaptureReference => ("reference-capture", Data, Read, 8192, 64 * 1024),
             Self::PreviewReference => ("reference-preview", Data, Read, 64 * 1024, 512 * 1024),
+            Self::ReleaseReference => ("reference-release", Control, Mutation, 8192, 8192),
             Self::ReadReference => ("reference-read", Data, Read, 8192, 512 * 1024),
             Self::GoalControl => ("goal-control", Data, Mutation, 32 * 1024, 16 * 1024),
             Self::GoalStatus => ("goal-status", Control, Read, 8192, 16 * 1024),
@@ -301,6 +323,10 @@ pub(crate) enum Observation<C, F> {
 #[derive(Deserialize, Serialize)]
 #[serde(tag = "code", rename_all = "snake_case", deny_unknown_fields)]
 pub(crate) enum Failure {
+    MaintenanceOutcomeUnknown {
+        kind: rsi_session_protocol::MaintenanceKind,
+        operation_id: rsi_agent_store_protocol::MaintenanceOperationId,
+    },
     WorkflowUnavailable {
         reason: rsi_session_protocol::WorkflowRuntimeKind,
     },
@@ -354,6 +380,9 @@ pub(crate) fn domain<T>(
     result.map(Ok).or_else(|error| {
         let invalid = |_| ApiError::Backend("invalid Session error identity".into());
         Ok(Err(match error {
+            SessionError::MaintenanceOutcomeUnknown { kind, operation_id } => {
+                Failure::MaintenanceOutcomeUnknown { kind, operation_id }
+            }
             SessionError::WorkflowUnavailable(reason) => Failure::WorkflowUnavailable { reason },
             SessionError::WorkflowOutcomeUnknown { session, run } => {
                 Failure::WorkflowOutcomeUnknown { session, run }
@@ -409,6 +438,9 @@ pub(crate) fn domain<T>(
 impl Failure {
     pub fn into_error(self) -> SessionError {
         match self {
+            Self::MaintenanceOutcomeUnknown { kind, operation_id } => {
+                SessionError::MaintenanceOutcomeUnknown { kind, operation_id }
+            }
             Self::WorkflowUnavailable { reason } => SessionError::WorkflowUnavailable(reason),
             Self::WorkflowOutcomeUnknown { session, run } => {
                 SessionError::WorkflowOutcomeUnknown { session, run }

@@ -576,14 +576,32 @@ impl AgentKernel {
 }
 
 impl AgentKernel {
-    fn continuation_peers(&self, lease: &ContinuationLease) -> Vec<ContinuationLease> {
-        self.inner
+    pub(super) fn session_continuations(&self, session: &SessionId) -> Vec<ContinuationLease> {
+        let mut registry = self
+            .inner
             .continuations
             .lock()
-            .expect("continuation registry poisoned")
-            .iter()
-            .filter(|((session, _), _)| session == lease.session_id())
-            .filter_map(|(_, weak)| weak.upgrade())
+            .expect("continuation registry poisoned");
+        let mut expired = Vec::new();
+        let live = registry
+            .range((session.clone(), String::new())..)
+            .take_while(|((id, _), _)| id == session)
+            .filter_map(|(key, weak)| {
+                weak.upgrade().or_else(|| {
+                    expired.push(key.clone());
+                    None
+                })
+            })
+            .collect();
+        for key in expired {
+            registry.remove(&key);
+        }
+        live
+    }
+
+    fn continuation_peers(&self, lease: &ContinuationLease) -> Vec<ContinuationLease> {
+        self.session_continuations(lease.session_id())
+            .into_iter()
             .filter(|other| !other.same_lease(lease) && other.is_armed())
             .collect()
     }

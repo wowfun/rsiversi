@@ -56,6 +56,7 @@ struct Parked {
 }
 
 pub(super) struct Guard {
+    interrupts: [CancellationToken; 3],
     request: Option<tokio::sync::oneshot::Sender<(WaitResumeCause, CancellationToken)>>,
     completion: tokio::task::JoinHandle<TurnResult<()>>,
 }
@@ -75,6 +76,14 @@ impl HumanWait for Guard {
 }
 
 impl Guard {
+    pub(super) async fn interrupted(&self) {
+        tokio::select! {
+            () = self.interrupts[0].cancelled() => {},
+            () = self.interrupts[1].cancelled() => {},
+            () = self.interrupts[2].cancelled() => {},
+        }
+    }
+
     pub(super) async fn finish(
         mut self: Box<Self>,
         cause: WaitResumeCause,
@@ -223,6 +232,11 @@ impl Parked {
 
     fn track(self) -> Guard {
         let tasks = self.kernel.inner.tasks.clone();
+        let interrupts = [
+            self.mutation.stopping(),
+            self.turn_cancellation.clone(),
+            self.kernel.inner.submission_admission.closed.clone(),
+        ];
         let (request, receive) = tokio::sync::oneshot::channel();
         // Registered before the admitting task finishes; the returned handle
         // only sends/closes a channel, even when dropped outside Tokio.
@@ -243,6 +257,7 @@ impl Parked {
             self.resume(cause, cancellation).await
         });
         Guard {
+            interrupts,
             request: Some(request),
             completion,
         }

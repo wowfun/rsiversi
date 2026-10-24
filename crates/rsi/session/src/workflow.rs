@@ -47,188 +47,206 @@ fn tools(
 }
 impl LocalSessionHandle {
     pub(super) async fn read_workflow_readiness(&self) -> Result<WorkflowReadiness> {
-        let _activity = self.begin_activity()?;
-        let _admission = self.admit()?;
-        self.reconcile_fresh_read().await?;
-        let (tool_state, generation, fresh_plan) = {
-            let state = self.state.lock().await;
-            match &*state {
-                HandleState::Fresh(draft) => (
-                    tools(draft.composition().manifest()),
-                    Some(draft.composition().source_digest().to_owned()),
-                    Some(
-                        draft
-                            .baseline()
-                            .initial_states()
-                            .into_iter()
-                            .find(|s| {
-                                s.identity().id() == rsi_agent_plan_policy::PLAN_POLICY_DOMAIN
-                            })
-                            .and_then(|s| s.state().value().as_bool()),
-                    ),
-                ),
-                HandleState::Attached(header) => match self
-                    .projection_service
-                    .resident_composition(self.session_id())
-                    .map_err(map_turn_error)?
-                {
-                    ResidentComposition::Resident {
-                        header: resident,
-                        source_digest,
-                        manifest,
-                    } if resident.as_ref() == header.as_ref() => {
-                        (tools(manifest), Some(source_digest), None)
+        let activity = self.begin_read()?;
+        tokio::select! {
+            biased;
+            () = activity.0.retiring().cancelled() => Err(SessionError::ShuttingDown),
+            result = async {
+                let _admission = self.admit()?;
+                self.reconcile_fresh_read().await?;
+                let (tool_state, generation, fresh_plan) = {
+                    let state = self.state.lock().await;
+                    match &*state {
+                        HandleState::Fresh(draft) => (
+                            tools(draft.composition().manifest()),
+                            Some(draft.composition().source_digest().to_owned()),
+                            Some(
+                                draft
+                                    .baseline()
+                                    .initial_states()
+                                    .into_iter()
+                                    .find(|s| {
+                                        s.identity().id() == rsi_agent_plan_policy::PLAN_POLICY_DOMAIN
+                                    })
+                                    .and_then(|s| s.state().value().as_bool()),
+                            ),
+                        ),
+                        HandleState::Attached(header) => match self
+                            .projection_service
+                            .resident_composition(self.session_id())
+                            .map_err(map_turn_error)?
+                        {
+                            ResidentComposition::Resident {
+                                header: resident,
+                                source_digest,
+                                manifest,
+                            } if resident.as_ref() == header.as_ref() => {
+                                (tools(manifest), Some(source_digest), None)
+                            }
+                            ResidentComposition::NotResident => (WorkflowTools::NotResident, None, None),
+                            _ => (WorkflowTools::Unavailable, None, None),
+                        },
+                        HandleState::Expired => return Err(SessionError::NotFound("draft lease".into())),
                     }
-                    ResidentComposition::NotResident => (WorkflowTools::NotResident, None, None),
-                    _ => (WorkflowTools::Unavailable, None, None),
-                },
-                HandleState::Expired => return Err(SessionError::NotFound("draft lease".into())),
-            }
-        };
-        let plan = if let Some(plan) = fresh_plan {
-            plan
-        } else {
-            self.store
-                .read_domain_states(self.session_id(), None)
-                .await
-                .ok()
-                .and_then(|page| {
-                    page.states
-                        .into_iter()
-                        .find(|s| {
-                            s.snapshot.identity().id() == rsi_agent_plan_policy::PLAN_POLICY_DOMAIN
+                };
+                let plan = if let Some(plan) = fresh_plan {
+                    plan
+                } else {
+                    self.store
+                        .read_domain_states(self.session_id(), None)
+                        .await
+                        .ok()
+                        .and_then(|page| {
+                            page.states
+                                .into_iter()
+                                .find(|s| {
+                                    s.snapshot.identity().id() == rsi_agent_plan_policy::PLAN_POLICY_DOMAIN
+                                })
+                                .and_then(|s| s.snapshot.state().value().as_bool())
                         })
-                        .and_then(|s| s.snapshot.state().value().as_bool())
+                };
+                self.admit()?;
+                Ok(WorkflowReadiness {
+                    runtime: runtime(self.workflow.as_deref()),
+                    tools: tool_state,
+                    plan: match plan {
+                        Some(true) => WorkflowPlan::On,
+                        Some(false) => WorkflowPlan::Off,
+                        None => WorkflowPlan::Unavailable,
+                    },
+                    local_execution: *self.coordinates.location()
+                        == rsi_workspace_protocol::ExecutionLocation::Local,
+                    generation,
                 })
-        };
-        self.admit()?;
-        Ok(WorkflowReadiness {
-            runtime: runtime(self.workflow.as_deref()),
-            tools: tool_state,
-            plan: match plan {
-                Some(true) => WorkflowPlan::On,
-                Some(false) => WorkflowPlan::Off,
-                None => WorkflowPlan::Unavailable,
-            },
-            local_execution: *self.coordinates.location()
-                == rsi_workspace_protocol::ExecutionLocation::Local,
-            generation,
-        })
+            } => result,
+        }
     }
     pub(super) async fn workflow_list(&self, request: WorkflowList) -> Result<WorkflowPage> {
         request.validate()?;
-        let _activity = self.begin_activity()?;
-        let _admission = self.admit()?;
-        if !self.reconcile_fresh_read().await? {
-            if request
-                .cursor
-                .as_ref()
-                .is_some_and(|cursor| cursor.seed_control_seq != 0)
-            {
-                return Err(SessionError::Invalid(
-                    "workflow seed exceeds draft control tail".into(),
-                ));
-            }
-            return Ok(WorkflowPage {
-                seed_control_seq: 0,
-                runs: vec![],
-                next: None,
-            });
+        let activity = self.begin_read()?;
+        tokio::select! {
+            biased;
+            () = activity.0.retiring().cancelled() => Err(SessionError::ShuttingDown),
+            result = async {
+                let _admission = self.admit()?;
+                if !self.reconcile_fresh_read().await? {
+                    if request
+                        .cursor
+                        .as_ref()
+                        .is_some_and(|cursor| cursor.seed_control_seq != 0)
+                    {
+                        return Err(SessionError::Invalid(
+                            "workflow seed exceeds draft control tail".into(),
+                        ));
+                    }
+                    return Ok(WorkflowPage {
+                        seed_control_seq: 0,
+                        runs: vec![],
+                        next: None,
+                    });
+                }
+                let watermark = self
+                    .store
+                    .read_watermarks(self.session_id())
+                    .await
+                    .map_err(map_store_error)?;
+                let cursor = request.cursor.unwrap_or(WorkflowCursor {
+                    seed_control_seq: watermark.durable_control_seq,
+                    before_accepted_control_seq: None,
+                });
+                if cursor.seed_control_seq > watermark.durable_control_seq {
+                    return Err(SessionError::Invalid(
+                        "workflow seed exceeds durable control tail".into(),
+                    ));
+                }
+                let page = self
+                    .turns
+                    .list_session_programs(
+                        self.session_id(),
+                        cursor.seed_control_seq,
+                        cursor.before_accepted_control_seq,
+                        request.limit,
+                    )
+                    .await
+                    .map_err(map_turn_error)?;
+                self.admit()?;
+                let next = if page.has_more {
+                    Some(WorkflowCursor {
+                        seed_control_seq: cursor.seed_control_seq,
+                        before_accepted_control_seq: page.runs.last().map(|run| run.accepted_control_seq),
+                    })
+                } else {
+                    None
+                };
+                Ok(WorkflowPage {
+                    seed_control_seq: cursor.seed_control_seq,
+                    runs: page.runs,
+                    next,
+                })
+            } => result,
         }
-        let watermark = self
-            .store
-            .read_watermarks(self.session_id())
-            .await
-            .map_err(map_store_error)?;
-        let cursor = request.cursor.unwrap_or(WorkflowCursor {
-            seed_control_seq: watermark.durable_control_seq,
-            before_accepted_control_seq: None,
-        });
-        if cursor.seed_control_seq > watermark.durable_control_seq {
-            return Err(SessionError::Invalid(
-                "workflow seed exceeds durable control tail".into(),
-            ));
-        }
-        let page = self
-            .turns
-            .list_session_programs(
-                self.session_id(),
-                cursor.seed_control_seq,
-                cursor.before_accepted_control_seq,
-                request.limit,
-            )
-            .await
-            .map_err(map_turn_error)?;
-        self.admit()?;
-        let next = if page.has_more {
-            Some(WorkflowCursor {
-                seed_control_seq: cursor.seed_control_seq,
-                before_accepted_control_seq: page.runs.last().map(|run| run.accepted_control_seq),
-            })
-        } else {
-            None
-        };
-        Ok(WorkflowPage {
-            seed_control_seq: cursor.seed_control_seq,
-            runs: page.runs,
-            next,
-        })
     }
     pub(super) async fn workflow_detail(&self, request: WorkflowRead) -> Result<WorkflowDetail> {
         request.validate()?;
-        let _activity = self.begin_activity()?;
-        let _admission = self.admit()?;
-        let details = self
-            .turns
-            .read_session_program(
-                self.session_id(),
-                &request.run_id,
-                rsi_agent_turn_protocol::ProgramRead {
-                    expected_control_seq: request.expected_control_seq,
-                    children_offset: request.children_offset,
-                    result: request.result_offset.is_some(),
-                    script: request.script_offset.is_some(),
-                },
-            )
-            .await
-            .map_err(map_turn_error)?;
-        let result = if let Some(offset) = request.result_offset {
-            Some(fragment_page(
-                details
-                    .result
-                    .as_ref()
-                    .ok_or_else(|| SessionError::Invalid("workflow result unavailable".into()))?,
-                details
-                    .overview
-                    .result_ref
-                    .as_ref()
-                    .ok_or_else(|| SessionError::Invalid("workflow has no result".into()))?,
-                offset,
-            )?)
-        } else {
-            None
-        };
-        let script = if let Some(offset) = request.script_offset {
-            Some(fragment_page(
-                details
-                    .script
-                    .as_ref()
-                    .ok_or_else(|| SessionError::Invalid("workflow script unavailable".into()))?,
-                &details.overview.script_ref,
-                offset,
-            )?)
-        } else {
-            None
-        };
-        self.admit()?;
-        Ok(WorkflowDetail {
-            run: details.overview,
-            children: details.children,
-            children_offset: details.children_offset,
-            next_children_offset: details.next_children_offset,
-            result,
-            script,
-        })
+        let activity = self.begin_read()?;
+        tokio::select! {
+            biased;
+            () = activity.0.retiring().cancelled() => Err(SessionError::ShuttingDown),
+            result = async {
+                let _admission = self.admit()?;
+                let details = self
+                    .turns
+                    .read_session_program(
+                        self.session_id(),
+                        &request.run_id,
+                        rsi_agent_turn_protocol::ProgramRead {
+                            expected_control_seq: request.expected_control_seq,
+                            children_offset: request.children_offset,
+                            result: request.result_offset.is_some(),
+                            script: request.script_offset.is_some(),
+                        },
+                    )
+                    .await
+                    .map_err(map_turn_error)?;
+                let result = if let Some(offset) = request.result_offset {
+                    Some(fragment_page(
+                        details
+                            .result
+                            .as_ref()
+                            .ok_or_else(|| SessionError::Invalid("workflow result unavailable".into()))?,
+                        details
+                            .overview
+                            .result_ref
+                            .as_ref()
+                            .ok_or_else(|| SessionError::Invalid("workflow has no result".into()))?,
+                        offset,
+                    )?)
+                } else {
+                    None
+                };
+                let script = if let Some(offset) = request.script_offset {
+                    Some(fragment_page(
+                        details
+                            .script
+                            .as_ref()
+                            .ok_or_else(|| SessionError::Invalid("workflow script unavailable".into()))?,
+                        &details.overview.script_ref,
+                        offset,
+                    )?)
+                } else {
+                    None
+                };
+                self.admit()?;
+                Ok(WorkflowDetail {
+                    run: details.overview,
+                    children: details.children,
+                    children_offset: details.children_offset,
+                    next_children_offset: details.next_children_offset,
+                    result,
+                    script,
+                })
+            } => result,
+        }
     }
     pub(super) async fn workflow_cancel(
         &self,

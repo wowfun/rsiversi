@@ -22,7 +22,7 @@ export function validateEditor(text, images, references = []) {
   require(Array.isArray(references) && references.length <= 4, "A draft can hold at most four conversation references");
   let previewBytes = 0;
   for (const reference of references) {
-    require(reference && Object.keys(reference).sort().join() === "metadata,preview,snapshot" && reference.snapshot && Object.keys(reference.snapshot).sort().join() === "byte_len,sha256" && hex(reference.snapshot.sha256) && integer(reference.snapshot.byte_len, 8 * MiB) && reference.snapshot.byte_len > 0, "Invalid frozen conversation reference");
+    require(reference && Object.keys(reference).sort().join() === "metadata,preview,snapshot" && reference.snapshot && Object.keys(reference.snapshot).sort().join() === "byte_len,capture_id,sha256" && identity(reference.snapshot.capture_id) && bytes(reference.snapshot.capture_id) <= 64 && hex(reference.snapshot.sha256) && integer(reference.snapshot.byte_len, 8 * MiB) && reference.snapshot.byte_len > 0, "Invalid frozen conversation reference");
     require(typeof reference.preview === "string" && bytes(reference.preview) > 0 && bytes(reference.preview) <= 8192 && !/[\u0000\u007f]/u.test(reference.preview), "Invalid reference preview");
     const metadata = reference.metadata;
     const decimal = value => typeof value === "string" && /^(0|[1-9][0-9]{0,19})$/.test(value) && BigInt(value) <= 18446744073709551615n;
@@ -53,43 +53,40 @@ export function validateEditor(text, images, references = []) {
   require(textBytes + previewBytes <= MiB, "Draft text and reference previews exceed 1 MiB");
   return textBytes + referenceBytes(references);
 }
-function validatePending(pending, version = 4) {
-  require(pending && Object.keys(pending).sort().join() === (version >= 3 ? "editRevision,id,images,kind,opaque,phase,references,text_bytes" : "editRevision,id,images,kind,opaque,phase,text_bytes"));
+function validatePending(pending) {
+  require(pending && Object.keys(pending).sort().join() === "editRevision,id,images,kind,opaque,phase,references,text_bytes");
   require(pending && ["message", "command", "queue"].includes(pending.kind) && identity(pending.id));
   require(typeof pending.opaque === "string" && bytes(pending.opaque) <= (pending.kind !== "command" ? 8 * MiB : 32 * 1024));
   require(integer(pending.text_bytes, MiB) && integer(pending.images, 8));
-  if (version >= 3) require(integer(pending.references, 4));
+  require(integer(pending.references, 4));
   require(["prepared", "dispatching", "unknown"].includes(pending.phase) && integer(pending.editRevision));
 }
 const surface = value => typeof value === "string" && /^[a-z0-9_-]{1,32}$/.test(value);
 const principalKey = value => value === "local" || (typeof value === "string" && /^device:[0-9a-f]{32}$/.test(value));
-function validateRecord(record, version = 4) {
-  const legacy = version === 1;
-  require(record?.version === version && Array.isArray(record.key) && record.key.length === 4 &&
-    hex(record.key[0], 32) && (legacy ? hex(record.key[1], 32) && integer(record.key[2], 1) : principalKey(record.key[1]) && surface(record.key[2])) && identity(record.key[3]));
+function validateRecord(record) {
+  require(record?.version === 5 && Array.isArray(record.key) && record.key.length === 4 &&
+    hex(record.key[0], 32) && (principalKey(record.key[1]) && surface(record.key[2])) && identity(record.key[3]));
   require(equal(record.scope, record.key.slice(0, 3)) && hex(record.header) && hex(record.incarnation, 32));
   require(integer(record.editRevision) && integer(record.pendingRevision) && typeof record.everDispatched === "boolean");
-  validateEditor(record.text, record.images, version >= 3 ? record.references : []);
-  if (version >= 3) require(record.references.every(reference => reference.metadata.target.session_id === record.key[3] && reference.metadata.target.header_sha256 === record.header), "Reference belongs to another draft Header");
+  validateEditor(record.text, record.images, record.references);
+  require(record.references.every(reference => reference.metadata.target.session_id === record.key[3] && reference.metadata.target.header_sha256 === record.header), "Reference belongs to another draft Header");
   if (record.pending !== null) {
-    validatePending(record.pending, version);
+    validatePending(record.pending);
     require(record.pending.editRevision <= record.editRevision && (record.pending.phase === "prepared" || record.everDispatched));
   }
   if (record.receipt !== null) require(typeof record.receipt === "string" && bytes(record.receipt) <= 4096);
   if (record.creation !== null) {
     const creation = record.creation;
     // The Rust Web README owns the default-preset Fresh creation contract.
-    require(creation && Object.keys(creation).sort().join() === (version < 4 ? "agent_preset_id,session_id,workspace_id,workspace_trust" : "agent_preset_id,session_id,workspace_id"));
+    require(creation && Object.keys(creation).sort().join() === "agent_preset_id,session_id,workspace_id");
     require(hex(creation.workspace_id) && creation.session_id === record.key[3] && creation.agent_preset_id === null);
-    if (version < 4) require(["trusted", "untrusted"].includes(creation.workspace_trust));
   }
-  require(Object.keys(record).sort().join() === (version >= 3 ? "creation,editRevision,everDispatched,header,images,incarnation,key,pending,pendingRevision,receipt,references,scope,text,version" : "creation,editRevision,everDispatched,header,images,incarnation,key,pending,pendingRevision,receipt,scope,text,version"));
+  require(Object.keys(record).sort().join() === "creation,editRevision,everDispatched,header,images,incarnation,key,pending,pendingRevision,receipt,references,scope,text,version");
   return record;
 }
 const referenceBytes = references => references?.length ? bytes(JSON.stringify(references)) : 0;
 const usage = record => record ? [1, bytes(record.text) + referenceBytes(record.references), record.pending?.text_bytes ?? 0, bytes(record.pending?.opaque ?? "")] : [0, 0, 0, 0];
-const legacyLimits = [64, 2 * MiB, 2 * MiB, 16 * MiB];
-const limits = legacyLimits.map(value => value * 2);
+const limits = [128, 4 * MiB, 4 * MiB, 32 * MiB];
 function validateCounters(value) {
   require(Array.isArray(value) && value.length === limits.length && value.every((count, index) => integer(count, limits[index])));
   return value;
@@ -105,59 +102,18 @@ function samePending(expected, saved) {
   if (saved.pendingRevision !== expected.pendingRevision || !equal(saved.pending, expected.pending)) throw conflict(saved);
 }
 
-function migrate(tx, fail, version) {
-  const legacy = version === 1, quota = legacy ? legacyLimits : limits;
-  const rows = [], totals = legacy ? [[0,0,0,0],[0,0,0,0]] : [[0,0,0,0]], saved = structuredClone(totals);
-  let finished = 0;
-  const complete = () => {
-    if (++finished !== 2) return;
-    try {
-      require(equal(totals, saved), "Old draft counters are inconsistent; migration was aborted");
-      const drafts = tx.objectStore("drafts"), usageStore = tx.objectStore("usage");
-      drafts.clear(); usageStore.clear();
-      for (const record of rows) {
-        record.version = 4;
-        if (version < 3) { record.references = []; if (record.pending) record.pending.references = 0; }
-        if (record.creation) delete record.creation.workspace_trust;
-        if (legacy) { record.key[1] = `device:${record.key[1]}`; record.key[2] = record.key[2] === 0 ? "main" : "compare"; }
-        record.scope = record.key.slice(0,3); validateRecord(record); drafts.add(record);
-      }
-      usageStore.put(totals[0].map((count,index) => count + (totals[1]?.[index] ?? 0)), "aggregate");
-    } catch (error) { fail(error); }
-  };
-  const records = tx.objectStore("drafts").openCursor();
-  records.onsuccess = () => {
-    try {
-      const cursor = records.result; if (!cursor) { complete(); return; }
-      const record = validateRecord(cursor.value, version); require(equal(cursor.key, record.key));
-      const total = totals[legacy ? record.key[2] : 0];
-      usage(record).forEach((cost,index) => total[index] += cost);
-      require(total.every((count,index) => integer(count,quota[index])), "Old drafts exceed their recorded quota; migration was aborted");
-      rows.push(record); cursor.continue();
-    } catch (error) { fail(error); }
-  };
-  const counters = tx.objectStore("usage").openCursor();
-  counters.onsuccess = () => {
-    try {
-      const cursor = counters.result; if (!cursor) { complete(); return; }
-      require(legacy ? integer(cursor.key,1) : cursor.key === "aggregate");
-      require(Array.isArray(cursor.value) && cursor.value.length === 4 && cursor.value.every((count,index) => integer(count,quota[index])));
-      saved[legacy ? cursor.key : 0] = cursor.value; cursor.continue();
-    } catch (error) { fail(error); }
-  };
-}
 let database;
 async function openDatabase() {
   if (!database) database = new Promise((resolve, reject) => {
     let failure;
-    const request = indexedDB.open("rsi.composer", 4);
+    const request = indexedDB.open("rsi.composer", 5);
     request.onupgradeneeded = event => {
       const fail = error => { failure = error; request.transaction.abort(); };
       if (failure) { request.transaction.abort(); return; }
       if (event.oldVersion === 0) {
         const records = request.result.createObjectStore("drafts", { keyPath: "key" });
         records.createIndex("scope", "scope"); request.result.createObjectStore("usage");
-      } else if (event.oldVersion === 1 || event.oldVersion === 2) migrate(request.transaction, fail, event.oldVersion);
+      }
       else fail(new Error("Unsupported saved draft schema"));
     };
     request.onerror = () => reject(failure ?? request.error);
@@ -173,6 +129,17 @@ async function openDatabase() {
 }
 
 export class DraftStore {
+  static async discardAllSaved() {
+    if (database) { try { (await database).close(); } catch { /* Refused schema has no open connection. */ } }
+    database = undefined;
+    await new Promise((resolve, reject) => {
+      const request = indexedDB.deleteDatabase("rsi.composer");
+      request.onsuccess = () => resolve();
+      request.onerror = () => reject(request.error);
+      request.onblocked = () => reject(new Error("Close other RSIversi tabs, then reload to finish discarding drafts"));
+    });
+  }
+
   static async open(endpoint, principal) {
     require(hex(endpoint,32) && principal && (principal.kind === "local" ? Object.keys(principal).length === 1 : principal.kind === "device" && Object.keys(principal).length === 2 && hex(principal.device_id,32)), "Authenticated draft namespace is unavailable");
     const key = principal.kind === "local" ? "local" : `device:${principal.device_id}`;
@@ -275,7 +242,7 @@ export class DraftStore {
   blank(pane, session, header, creation) {
     const key = this.key(pane, session);
     return validateRecord({
-      version: 4, key, scope: key.slice(0, 3), incarnation: [...crypto.getRandomValues(new Uint8Array(16))].map(value => value.toString(16).padStart(2, "0")).join(""),
+      version: 5, key, scope: key.slice(0, 3), incarnation: [...crypto.getRandomValues(new Uint8Array(16))].map(value => value.toString(16).padStart(2, "0")).join(""),
       editRevision: 0, pendingRevision: 0, text: "", images: [], references: [], header,
       creation: creation ?? null, everDispatched: !creation, pending: null, receipt: null,
     });

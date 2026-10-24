@@ -254,6 +254,10 @@ impl SqliteStore {
         read_job(self.inner.clone(), stop.0.clone(), job, operation, publish).await
     }
 
+    #[expect(
+        clippy::too_many_lines,
+        reason = "One shared-flight transition keeps admission, cancellation and proof publication ordered."
+    )]
     pub(super) async fn session_proof(&self, id: &SessionId) -> Result<Proof> {
         if let Some(proof) = self.inner.session_proof(id) {
             self.inner.cold_validation.hit();

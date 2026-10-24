@@ -43,6 +43,9 @@ use std::sync::{
 use tokio::sync::{Mutex, Notify, Semaphore};
 use tokio_util::sync::CancellationToken;
 
+#[path = "attachment/maintenance.rs"]
+mod maintenance;
+
 #[path = "attachment/access.rs"]
 mod access;
 
@@ -59,10 +62,48 @@ struct UnavailableTurns {
     tree: Option<Vec<SessionId>>,
     live_tree: Option<Arc<LiveTree>>,
     workflow_gate: Option<Arc<access::WorkflowGate>>,
+    retirement: Option<Arc<dyn TurnService>>,
+    workflow_read_entered: Option<Arc<tokio::sync::Semaphore>>,
 }
 
 #[async_trait]
 impl TurnService for UnavailableTurns {
+    fn prepare_retirement(
+        &self,
+        sessions: &[SessionId],
+    ) -> TurnResult<Box<dyn rsi_agent_turn_protocol::SessionRetirement>> {
+        self.retirement
+            .as_ref()
+            .ok_or_else(|| TurnError::Invalid("retirement unavailable".into()))?
+            .prepare_retirement(sessions)
+    }
+    async fn list_session_programs(
+        &self,
+        _: &SessionId,
+        _: u64,
+        _: Option<u64>,
+        _: usize,
+    ) -> TurnResult<rsi_agent_turn_protocol::ProgramHistoryPage> {
+        if let Some(entered) = &self.workflow_read_entered {
+            entered.add_permits(1);
+            std::future::pending().await
+        } else {
+            Err(TurnError::Invalid("workflow history unavailable".into()))
+        }
+    }
+    async fn read_session_program(
+        &self,
+        _: &SessionId,
+        _: &rsi_agent_session_protocol::ProgramRunId,
+        _: rsi_agent_turn_protocol::ProgramRead,
+    ) -> TurnResult<rsi_agent_turn_protocol::ProgramDetails> {
+        if let Some(entered) = &self.workflow_read_entered {
+            entered.add_permits(1);
+            std::future::pending().await
+        } else {
+            Err(TurnError::Invalid("workflow details unavailable".into()))
+        }
+    }
     async fn cancel_session_program(
         &self,
         _: &SessionId,

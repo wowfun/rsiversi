@@ -235,10 +235,12 @@ impl Drop for PendingGuard {
 
 impl LocalSessionHandle {
     pub(super) async fn read_draft_snapshot(&self) -> Result<SessionDraftView> {
-        let _activity = self.begin_activity()?;
-        self.reconcile_fresh_read().await?;
-        let state = self.state.lock().await;
-        draft_view(&state)
+        self.read_until_retired(async {
+            self.reconcile_fresh_read().await?;
+            let state = self.state.lock().await;
+            draft_view(&state)
+        })
+        .await
     }
 
     async fn run_preset_selection(&self, request: SelectDraftPreset) -> Result<SessionDraftView> {
@@ -275,24 +277,26 @@ impl LocalSessionHandle {
         draft_view(&state)
     }
     pub(super) async fn list_commands(&self) -> Result<SessionCommandsView> {
-        let _activity = self.begin_activity()?;
-        self.reconcile_fresh_read().await?;
-        let state = self.state.lock().await;
-        if let HandleState::Fresh(draft) = &*state {
-            return SessionCommandsView::new(draft.revision(), draft.command_descriptors())
-                .map_err(|error| protocol_error(&error));
-        }
-        state.header()?;
-        drop(state);
-        self.commands
-            .list(
-                self.turns
-                    .prepare_resume(self.session_id())
-                    .await
-                    .map_err(map_turn_error)?,
-            )
-            .await
-            .map_err(map_turn_error)
+        self.read_until_retired(async {
+            self.reconcile_fresh_read().await?;
+            let state = self.state.lock().await;
+            if let HandleState::Fresh(draft) = &*state {
+                return SessionCommandsView::new(draft.revision(), draft.command_descriptors())
+                    .map_err(|error| protocol_error(&error));
+            }
+            state.header()?;
+            drop(state);
+            self.commands
+                .list(
+                    self.turns
+                        .prepare_resume(self.session_id())
+                        .await
+                        .map_err(map_turn_error)?,
+                )
+                .await
+                .map_err(map_turn_error)
+        })
+        .await
     }
 
     pub(super) async fn dispatch_command(
@@ -339,23 +343,25 @@ impl LocalSessionHandle {
         &self,
         request_id: &DomainRequestId,
     ) -> Result<Option<SessionCommandReceipt>> {
-        let _activity = self.begin_activity()?;
-        self.reconcile_fresh_read().await?;
-        let state = self.state.lock().await;
-        if let HandleState::Fresh(draft) = &*state {
-            return Ok(draft.command_receipt(request_id));
-        }
-        state.header()?;
-        drop(state);
-        self.commands
-            .query(self.session_id(), request_id)
-            .await
-            .map_err(|error| command_error(error, request_id))?
-            .map(|receipt| {
-                SessionCommandReceipt::committed(receipt.control_seq(), receipt.commit())
-                    .map_err(|error| protocol_error(&error))
-            })
-            .transpose()
+        self.read_until_retired(async {
+            self.reconcile_fresh_read().await?;
+            let state = self.state.lock().await;
+            if let HandleState::Fresh(draft) = &*state {
+                return Ok(draft.command_receipt(request_id));
+            }
+            state.header()?;
+            drop(state);
+            self.commands
+                .query(self.session_id(), request_id)
+                .await
+                .map_err(|error| command_error(error, request_id))?
+                .map(|receipt| {
+                    SessionCommandReceipt::committed(receipt.control_seq(), receipt.commit())
+                        .map_err(|error| protocol_error(&error))
+                })
+                .transpose()
+        })
+        .await
     }
 
     async fn run_draft_command(

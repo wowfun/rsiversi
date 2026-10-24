@@ -9,6 +9,7 @@ use rsi_agent_session_protocol::{
     ProgramRunDescriptor, ProgramRunEvent, ProgramRunId,
 };
 use rsi_agent_store_protocol::Result;
+use std::sync::Arc;
 async fn append_program(
     store: &dyn SessionStore,
     id: &SessionId,
@@ -67,6 +68,10 @@ pub async fn assert_program_store_contract(
         })
         .await
         .unwrap();
+    let script = store
+        .put_cas(Arc::from(b"0123456789".as_slice()))
+        .await
+        .unwrap();
     let descriptor = ProgramRunDescriptor {
         run_id: run.clone(),
         session_id: id.clone(),
@@ -89,11 +94,34 @@ pub async fn assert_program_store_contract(
         sandbox: header.settings().sandbox(),
         require_approval: header.settings().require_approval(),
         script: ProgramBlob {
-            sha256: "a".repeat(64),
-            bytes: 10,
+            sha256: script.sha256.clone(),
+            bytes: script.byte_len,
         },
         guard: None,
     };
+    assert!(
+        store
+            .read_program_records(&id, &run)
+            .await
+            .unwrap()
+            .is_none()
+    );
+    let before = store.read_watermarks(&id).await.unwrap();
+    let mut missing = descriptor.clone();
+    missing.script.sha256 = "f".repeat(64);
+    assert!(matches!(
+        append_program(
+            store,
+            &id,
+            &run,
+            ProgramRunEvent::Accepted {
+                descriptor: Box::new(missing)
+            }
+        )
+        .await,
+        Err(rsi_agent_store_protocol::StoreError::NotFound(_))
+    ));
+    assert_eq!(store.read_watermarks(&id).await.unwrap(), before);
     assert!(
         store
             .read_program_records(&id, &run)

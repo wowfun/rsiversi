@@ -422,7 +422,16 @@ impl SessionStore for PausedStore {
     ) -> StoreResult<StoreSessionPage> {
         self.inner.list_open_sessions(after, limit).await
     }
-    async fn put_cas(&self, bytes: Arc<[u8]>) -> StoreResult<CasObjectRef> {
+    async fn retain_cas(
+        &self,
+        object: &CasObjectRef,
+    ) -> rsi_agent_store_protocol::Result<rsi_agent_store_protocol::PreparedCasObject> {
+        self.inner.retain_cas(object).await
+    }
+    async fn put_cas(
+        &self,
+        bytes: Arc<[u8]>,
+    ) -> StoreResult<rsi_agent_store_protocol::PreparedCasObject> {
         self.inner.put_cas(bytes).await
     }
     async fn read_cas(

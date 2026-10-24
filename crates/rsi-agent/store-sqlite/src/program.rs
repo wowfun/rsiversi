@@ -245,6 +245,7 @@ impl SqliteStore {
             let transaction = connection
                 .transaction_with_behavior(TransactionBehavior::Deferred)
                 .map_err(sql_error)?;
+            super::reference_index::available(&transaction, &session)?;
             let Some(head) = head(&transaction, &session, &run)? else {
                 return Ok(None);
             };
@@ -460,6 +461,7 @@ impl SqliteStore {
             let tx = connection
                 .transaction_with_behavior(TransactionBehavior::Deferred)
                 .map_err(sql_error)?;
+            super::reference_index::available(&tx, &session)?;
             let mut stmt = tx.prepare(PROGRAM_HISTORY_SQL).map_err(sql_error)?;
             let mut rows = stmt
                 .query(params![

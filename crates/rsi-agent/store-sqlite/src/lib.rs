@@ -40,7 +40,7 @@ use std::fs::OpenOptions;
 use std::fs::{self, File};
 use std::io::{Read as _, Write as _};
 use std::path::{Path, PathBuf};
-use std::sync::atomic::{AtomicU64, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::sync::{Arc, Mutex};
 use std::time::Duration;
 use tokio::sync::Semaphore;
@@ -52,7 +52,13 @@ const MAXIMUM_ORPHANED_CAS_STAGING_FILES: usize = 64;
 const VALIDATED_SESSION_CACHE_CAPACITY: usize = 256;
 const FORK_BOUNDARY_CACHE_CAPACITY: usize = 256;
 const MAXIMUM_INDEXED_MESSAGE_STATE_BYTES: usize = 4 * 1024;
-const EXPECTED_TABLES: [(&str, &str); 16] = [
+const EXPECTED_TABLES: [(&str, &str); 22] = [
+    ("cas_deletions", "CREATE TABLE cas_deletions (operation_id TEXT PRIMARY KEY NOT NULL, sha256 TEXT NOT NULL, byte_len INTEGER NOT NULL CHECK (byte_len > 0), generation INTEGER NOT NULL CHECK (generation > 0), state TEXT NOT NULL CHECK (state IN ('deleting', 'deleted')), UNIQUE (sha256, generation)) STRICT"),
+    ("reference_policy", "CREATE TABLE reference_policy (id INTEGER PRIMARY KEY CHECK (id = 1), strict INTEGER NOT NULL CHECK (strict IN (0, 1))) STRICT"),
+    ("reference_records", "CREATE TABLE reference_records (session_id TEXT NOT NULL, stream TEXT NOT NULL CHECK (stream IN ('header', 'fact', 'control')), seq INTEGER NOT NULL CHECK (seq >= 0), sha256 TEXT NOT NULL, complete INTEGER NOT NULL CHECK (complete IN (0, 1)), PRIMARY KEY (session_id, stream, seq)) STRICT"),
+    ("reference_edges", "CREATE TABLE reference_edges (session_id TEXT NOT NULL, stream TEXT NOT NULL, seq INTEGER NOT NULL, target_kind TEXT NOT NULL CHECK (target_kind IN ('session', 'cas')), target_id TEXT NOT NULL, target_bytes INTEGER NOT NULL CHECK (target_bytes >= 0), PRIMARY KEY (session_id, stream, seq, target_kind, target_id), FOREIGN KEY (session_id, stream, seq) REFERENCES reference_records(session_id, stream, seq) ON DELETE RESTRICT) STRICT"),
+    ("purge_operations", "CREATE TABLE purge_operations (operation_id TEXT PRIMARY KEY NOT NULL, request_json TEXT NOT NULL, locations_json TEXT NOT NULL, locations_sha256 TEXT NOT NULL, complete INTEGER NOT NULL CHECK (complete IN (0, 1)), deleted_records INTEGER NOT NULL CHECK (deleted_records >= 0), deleted_payload_bytes INTEGER NOT NULL CHECK (deleted_payload_bytes >= 0)) STRICT"),
+    ("session_tombstones", "CREATE TABLE session_tombstones (session_id TEXT PRIMARY KEY NOT NULL, operation_id TEXT NOT NULL REFERENCES purge_operations(operation_id) ON DELETE RESTRICT, state TEXT NOT NULL CHECK (state IN ('retiring', 'purged'))) STRICT"),
     ("program_runs", "CREATE TABLE program_runs (
         session_id TEXT NOT NULL REFERENCES sessions(session_id) ON DELETE RESTRICT,
         run_id TEXT NOT NULL,
@@ -268,12 +274,33 @@ const EXPECTED_TABLES: [(&str, &str); 16] = [
     (
         "cas_objects",
         "CREATE TABLE cas_objects (
+            generation INTEGER NOT NULL DEFAULT 1 CHECK (generation > 0),
             sha256 TEXT PRIMARY KEY NOT NULL,
             byte_len INTEGER NOT NULL CHECK (byte_len > 0)
          ) STRICT",
     ),
 ];
-const EXPECTED_INDEXES: [(&str, &str); 22] = [
+const EXPECTED_INDEXES: [(&str, &str); 27] = [
+    (
+        "purge_operations_pending",
+        "CREATE INDEX purge_operations_pending ON purge_operations(operation_id) WHERE complete=0",
+    ),
+    (
+        "cas_deletions_pending",
+        "CREATE INDEX cas_deletions_pending ON cas_deletions(operation_id) WHERE state='deleting'",
+    ),
+    (
+        "reference_records_incomplete",
+        "CREATE INDEX reference_records_incomplete ON reference_records(session_id) WHERE complete=0",
+    ),
+    (
+        "operation_tombstones",
+        "CREATE INDEX operation_tombstones ON session_tombstones(operation_id, session_id)",
+    ),
+    (
+        "incoming_references",
+        "CREATE INDEX incoming_references ON reference_edges(target_kind, target_id, session_id)",
+    ),
     (
         "model_effect_coordinates",
         "CREATE UNIQUE INDEX model_effect_coordinates ON facts (session_id, turn_id, json_extract(fact_json, '$.effect_id'), json_extract(fact_json, '$.type')) WHERE json_extract(fact_json, '$.type') IN ('model_intent', 'model_started', 'model_attempt_settled')",
@@ -424,6 +451,19 @@ impl ForkBoundaryCache {
 }
 
 struct StoreInner {
+    reference_codecs: Arc<rsi_agent_store_protocol::ReferenceCodecs>,
+    retirement_started: AtomicBool,
+    reference_proof: Mutex<Option<reference_validation::Proof>>,
+    reference_commits: Arc<AtomicU64>,
+    #[cfg(feature = "test-support")]
+    purge_admission_fault: Mutex<Option<bool>>,
+    #[cfg(feature = "test-support")]
+    purge_admission_pause: Mutex<Option<FactPagePause>>,
+    #[cfg(feature = "test-support")]
+    purge_binding_fault: AtomicBool,
+    #[cfg(test)]
+    reference_audits: AtomicU64,
+    cas_ownership: cas_ownership::Ownership,
     cas_publication: cas::Publication,
     connections: DatabaseConnections,
     #[cfg(windows)]
@@ -649,8 +689,37 @@ impl SqliteStore {
             .map_err(sql_error)?;
         #[cfg(windows)]
         namespace.sync_all().map_err(io_error)?;
+        let reference_commits = Arc::new(AtomicU64::new(0));
+        let commits = reference_commits.clone();
+        writer_connection
+            .commit_hook(Some(move || {
+                commits.fetch_add(1, Ordering::Relaxed);
+                false
+            }))
+            .map_err(sql_error)?;
         Ok(Self {
             inner: Arc::new(StoreInner {
+                retirement_started: AtomicBool::new(
+                    writer_connection
+                        .query_row(
+                            "SELECT EXISTS(SELECT 1 FROM session_tombstones)",
+                            [],
+                            |row| row.get(0),
+                        )
+                        .map_err(sql_error)?,
+                ),
+                reference_codecs: Arc::default(),
+                reference_proof: Mutex::new(None),
+                reference_commits,
+                #[cfg(feature = "test-support")]
+                purge_admission_fault: Mutex::new(None),
+                #[cfg(feature = "test-support")]
+                purge_admission_pause: Mutex::new(None),
+                #[cfg(feature = "test-support")]
+                purge_binding_fault: AtomicBool::new(false),
+                #[cfg(test)]
+                reference_audits: AtomicU64::new(0),
+                cas_ownership: cas_ownership::Ownership::default(),
                 cas_publication: cas::Publication::default(),
                 connections: DatabaseConnections {
                     reader: Mutex::new(reader_connection),
@@ -717,7 +786,13 @@ impl SqliteStore {
     /// digest, and all turn-index relationships.
     pub fn verify(root: impl AsRef<Path>) -> Result<()> {
         let offline = filesystem::open_offline_store(root.as_ref())?;
-        validate_database(&offline.connection)
+        offline_maintenance::require_settled(&offline.connection)?;
+        validate_database(&offline.connection)?;
+        reference_index::validate_retiring(
+            &offline.connection,
+            &rsi_agent_store_protocol::ReferenceCodecs::default(),
+        )?;
+        Ok(())
     }
 
     async fn with_database<T, F>(
@@ -773,7 +848,10 @@ impl SqliteStore {
                 let mut connection = owner.connections.writer.lock().map_err(|_| {
                     StoreError::Io("SQLite writer connection mutex was poisoned".into())
                 })?;
-                operation(&mut connection)
+                reference_validation::check_cached(&owner, &connection)?;
+                let result = operation(&mut connection);
+                reference_validation::after_write(&owner, &connection, result.is_ok())?;
+                result
             },
         )
         .await
@@ -929,8 +1007,15 @@ impl SqliteStore {
 }
 
 mod activity;
+mod maintenance;
+mod offline_maintenance;
+mod reference_index;
+mod reference_validation;
+pub use offline_maintenance::CompactReceipt;
 mod append;
 mod cas;
+mod cas_gc;
+mod cas_ownership;
 mod cold_validation;
 pub use cold_validation::ColdValidationMetrics;
 mod domain;
@@ -1088,6 +1173,11 @@ impl PluginFactory for SqliteStoreFactory {
             }
             MetaError::Activation(error.to_string())
         })?;
+        let codecs = plan
+            .context()
+            .provide_local::<rsi_agent_session_protocol::ReferenceCodecRegistrationContract>(
+            store.inner.reference_codecs.clone(),
+        )?;
         let store: Arc<dyn SessionStore> = Arc::new(store);
         let supply = plan
             .context()
@@ -1097,6 +1187,7 @@ impl PluginFactory for SqliteStoreFactory {
             Box::new(move || {
                 Box::pin(async move {
                     drop(supply);
+                    drop(codecs);
                     Ok(())
                 })
             }),

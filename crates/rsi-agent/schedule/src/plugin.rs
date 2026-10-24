@@ -335,6 +335,7 @@ impl PluginFactory for ScheduleFactory {
             DomainIdentity::new(SCHEDULE_DOMAIN, 1).map_err(activation)?,
             &ScheduleState::default(),
             ScheduleState::validate,
+            rsi_agent_composition_protocol::DomainReferencePolicy::None,
         )
         .map_err(activation)?
         .with_fork_policy(DomainForkPolicy::ResetToInitial);

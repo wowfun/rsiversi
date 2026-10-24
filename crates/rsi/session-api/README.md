@@ -1,5 +1,9 @@
 # rsi-session-api
 
+Purge previews include UncertainWork for missing native settlement evidence.
+The decoder bounds total refusal evidence by the Store protocol limit and checks
+selected identities and uniqueness, without mirroring a per-target server count.
+
 `session/model-observe` v2 exposes the independent model live channel as incremental
 pages. A connection starts at raw offset zero; subsequent revisions append at the
 previous prefix's exact raw byte length. A new attempt or an empty terminal status
@@ -222,3 +226,20 @@ exact Session/run as WorkflowOutcomeUnknown for rereading. Session-scoped plugin
 receive an explicit operation allowlist; these four user controls are excluded.
 
 Recent v7 carries the opaque continuation owned by the [Session protocol](../session-protocol/README.md). Clients authenticate visible descending ordering, the next visible cut, token bounds and forward token progress, including empty pages.
+
+The deployment-level `purge-preview`, `purge`, and `purge-status` operations use
+the caller-scoped Session maintenance service. Narrowed Session contribution
+clients do not receive these operations. Requests carry an exact sorted selection
+and a caller-allocated operation identity; responses correlate that identity and
+only report bounded, authorized blockers. Purge advances one batch per call.
+
+Purge uses Data/Mutation because 256 exact targets can exceed the Control request
+budget. One-object CAS collection fits Control/Mutation. Both retain mutation
+ownership after waiter loss; malformed mutation replies mean outcome unknown.
+An acknowledged `maintenance_outcome_unknown` failure carries the original
+operation identity and receipt family (`purge` or `cas_gc`) through the wire.
+The client accepts it only for that family's mutation and the caller's exact
+operation identity. A foreign failure is malformed evidence, never a recovery
+instruction for another operation. Maintenance identities are validated by the
+Store protocol type when constructed or decoded, including error receipts.
+Store read/publication admission pressure remains a retryable Capacity refusal.

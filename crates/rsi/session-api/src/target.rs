@@ -11,7 +11,13 @@ pub(crate) fn operations() -> Vec<OperationSpec> {
     Operation::ALL
         .into_iter()
         .filter(|operation| match operation {
-            Operation::Create
+            Operation::CasGcPreview
+            | Operation::CasGc
+            | Operation::CasGcStatus
+            | Operation::PurgePreview
+            | Operation::Purge
+            | Operation::PurgeStatus
+            | Operation::Create
             | Operation::Recent
             | Operation::ReadHeader
             | Operation::WorkflowReadiness
@@ -44,6 +50,7 @@ pub(crate) fn operations() -> Vec<OperationSpec> {
             | Operation::CaptureReference
             | Operation::PreviewReference
             | Operation::ReadReference
+            | Operation::ReleaseReference
             | Operation::GoalControl
             | Operation::GoalStatus
             | Operation::GoalObserve

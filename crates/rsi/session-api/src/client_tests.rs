@@ -895,3 +895,6 @@ async fn recent_cursor_rejects_zero_creation_before_dispatch() {
     assert!(client.list_recent(Some(&cursor), 1).await.is_err());
     assert_eq!(remote.calls.load(Ordering::SeqCst), before);
 }
+
+#[path = "client_tests/maintenance.rs"]
+mod maintenance;

@@ -1,5 +1,12 @@
 # rsi-browser
 
+Failed browser retirement retains its stopped binding and Session source owner.
+Repeated close observes the same final Process settlement receipt; it cannot
+retry a consumed native cleanup operation. The native runtime is fenced and Open
+reports its retained diagnostic before checking Session capacity. Confirm native
+cleanup and restart the Service Host to replace this failed runtime. Merely
+removing the stopped entry or retrying its immutable receipt cannot recover it.
+
 Browser owns one generation-bound runtime lease, its frozen destination policy,
 private CDP and MCP connections, deterministic checker and user evidence. Process
 owns native launch and reaping; Sandbox supplies the exact restricted plan.

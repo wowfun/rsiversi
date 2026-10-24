@@ -93,6 +93,10 @@ impl PluginFactory for SessionFactory {
             plan.local::<rsi_goal::GoalControllerContract>()?,
             plan.local::<rsi_agent_turn_protocol::SessionContinuationsContract>()?,
         );
+        let context = plan.context().clone();
+        let service = service.with_purge_cleanup(move || {
+            context.lookup_local::<rsi_session_protocol::SessionPurgeCleanupContract>()
+        });
         let service = Arc::new(service);
         let frozen_supply = plan
             .context()

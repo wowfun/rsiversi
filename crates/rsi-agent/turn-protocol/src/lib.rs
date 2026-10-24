@@ -660,9 +660,24 @@ pub enum TurnUpdate {
 /// Detachable stream of live updates. Dropping it does not cancel the turn.
 pub type TurnObservation = Pin<Box<dyn Stream<Item = Result<TurnUpdate>> + Send + 'static>>;
 
+/// Exclusive exact-Session submission reservation for maintenance.
+/// Retain through durable retirement; dropping before that merely releases admission.
+pub trait SessionRetirement: fmt::Debug + Send + Sync {
+    /// Releases only selected idle residency after Store confirms tombstones.
+    fn release_residency(&self);
+}
+
 /// Application-facing process-local Turn service.
 #[async_trait]
 pub trait TurnService: fmt::Debug + Send + Sync + 'static {
+    /// Reserves idle exact identities; unknown ownership fails closed.
+    fn prepare_retirement(&self, sessions: &[SessionId]) -> Result<Box<dyn SessionRetirement>> {
+        let _ = sessions;
+        Err(TurnError::Invalid(
+            "Session retirement ownership is unavailable".into(),
+        ))
+    }
+
     /// Reads retained process-local settlement evidence without loading history.
     fn controlled_work(
         &self,
@@ -1684,6 +1699,11 @@ impl Drop for ExecutorLease {
 /// Closed Turn runtime failure taxonomy.
 #[derive(Clone, Debug, Error, Eq, PartialEq)]
 pub enum TurnError {
+    /// A lost controlled-work reporter cannot prove native settlement.
+    #[error(
+        "controlled work in Session `{0}` is unsettled; confirm native cleanup and restart the Service Host"
+    )]
+    UnsettledWork(String),
     /// The target has no current live execution admission; durable input remains waiting.
     #[error("execution requires a live target admission")]
     ExecutionUnavailable,

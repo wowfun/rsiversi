@@ -534,6 +534,46 @@ async fn run(
     work: &LineWork,
     surfaces: &crate::surfaces::TerminalSurfaces,
 ) -> Result<()> {
+    if let Some(operation) = command.maintenance {
+        let value = match operation {
+            MaintenanceCommand::CasPreview(limit) => serde_json::to_value(
+                application
+                    .preview_cas_gc(limit)
+                    .await
+                    .map_err(session_error)?,
+            ),
+            MaintenanceCommand::CasCollect(request) => serde_json::to_value(
+                application
+                    .collect_cas(request)
+                    .await
+                    .map_err(session_error)?,
+            ),
+            MaintenanceCommand::CasStatus(operation) => serde_json::to_value(
+                application
+                    .cas_gc_status(&operation)
+                    .await
+                    .map_err(session_error)?,
+            ),
+            MaintenanceCommand::Preview(request) => serde_json::to_value(
+                application
+                    .preview_purge(request)
+                    .await
+                    .map_err(session_error)?,
+            ),
+            MaintenanceCommand::Purge(request) => {
+                serde_json::to_value(application.purge(request).await.map_err(session_error)?)
+            }
+            MaintenanceCommand::Status(operation) => serde_json::to_value(
+                application
+                    .purge_status(&operation)
+                    .await
+                    .map_err(session_error)?,
+            ),
+        }
+        .map_err(session_error)?;
+        notice(renderer, "session_maintenance", value).await?;
+        return Ok(());
+    }
     if command.list {
         sessions(&application, None, renderer).await?;
         return Ok(());

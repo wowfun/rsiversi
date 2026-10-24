@@ -166,7 +166,8 @@ mod store_contract;
 pub use contribution::activate_contribution_owner;
 pub use domain_contract::assert_domain_store_contract;
 pub use store_contract::{
-    assert_mechanical_store_contract, assert_program_store_contract, assert_queue_store_contract,
+    assert_mechanical_store_contract, assert_metadata_only_cas_retention,
+    assert_program_store_contract, assert_queue_store_contract,
 };
 
 /// Test-only ordinary factory providing one chosen Memory Store instance.

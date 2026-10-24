@@ -6,15 +6,18 @@ use rsi_agent_composition_protocol::{
 fn fork_resets_only_declared_domains_and_still_validates_parent_payloads() {
     use rsi_agent_composition_protocol::{DomainBaseline, DomainForkPolicy};
     use rsi_agent_session_protocol::{DomainSnapshot, DomainStateValue};
-    let inherited =
-        DomainDefinition::new(DomainIdentity::new("inherited", 1).unwrap(), &false, |_| {
-            Ok(())
-        })
-        .unwrap();
+    let inherited = DomainDefinition::new(
+        DomainIdentity::new("inherited", 1).unwrap(),
+        &false,
+        |_| Ok(()),
+        rsi_agent_composition_protocol::DomainReferencePolicy::None,
+    )
+    .unwrap();
     let independent = DomainDefinition::new(
         DomainIdentity::new("independent", 1).unwrap(),
         &false,
         |_| Ok(()),
+        rsi_agent_composition_protocol::DomainReferencePolicy::None,
     )
     .unwrap()
     .with_fork_policy(DomainForkPolicy::ResetToInitial);
@@ -83,6 +86,7 @@ fn definition() -> DomainDefinition<Plan> {
                 Err("remaining exceeds ten".into())
             }
         },
+        rsi_agent_composition_protocol::DomainReferencePolicy::None,
     )
     .unwrap()
 }
@@ -210,7 +214,8 @@ fn cold_typed_decode_rejects_missing_wrong_and_invalid_codecs_without_mutating_r
                 Ok(())
             } else {
                 Err("invalid".into())
-            }
+            },
+            rsi_agent_composition_protocol::DomainReferencePolicy::None
         )
         .is_err()
     );
@@ -224,6 +229,7 @@ fn frozen_domain_sets_bound_names_counts_and_aggregate_baseline_bytes() {
                 DomainIdentity::new(format!("domain.{index}"), 1).unwrap(),
                 &false,
                 |_| Ok(()),
+                rsi_agent_composition_protocol::DomainReferencePolicy::None,
             )
             .unwrap()
         })
@@ -235,11 +241,13 @@ fn frozen_domain_sets_bound_names_counts_and_aggregate_baseline_bytes() {
         DomainCatalog::new(definitions.iter().map(DomainDefinition::registration)),
         Err(DomainError::Capacity)
     ));
-    let duplicate =
-        DomainDefinition::new(DomainIdentity::new("domain.0", 2).unwrap(), &true, |_| {
-            Ok(())
-        })
-        .unwrap();
+    let duplicate = DomainDefinition::new(
+        DomainIdentity::new("domain.0", 2).unwrap(),
+        &true,
+        |_| Ok(()),
+        rsi_agent_composition_protocol::DomainReferencePolicy::None,
+    )
+    .unwrap();
     assert!(matches!(
         DomainCatalog::new([definitions[0].registration(), duplicate.registration()]),
         Err(DomainError::Duplicate(_))
@@ -250,6 +258,7 @@ fn frozen_domain_sets_bound_names_counts_and_aggregate_baseline_bytes() {
                 DomainIdentity::new(format!("large.{index}"), 1).unwrap(),
                 &"x".repeat(220_000),
                 |_| Ok(()),
+                rsi_agent_composition_protocol::DomainReferencePolicy::None,
             )
             .unwrap()
         })
@@ -305,15 +314,20 @@ fn a_draft_baseline_freezes_actual_initial_values_and_preserves_them_on_rejectio
 #[test]
 fn draft_batches_never_publish_a_valid_prefix_before_a_later_rejection() {
     use rsi_agent_composition_protocol::DomainBaseline;
-    let first = DomainDefinition::new(DomainIdentity::new("first", 1).unwrap(), &false, |_| Ok(()))
-        .unwrap();
-    let second =
-        DomainDefinition::new(
-            DomainIdentity::new("second", 1).unwrap(),
-            &false,
-            |_| Ok(()),
-        )
-        .unwrap();
+    let first = DomainDefinition::new(
+        DomainIdentity::new("first", 1).unwrap(),
+        &false,
+        |_| Ok(()),
+        rsi_agent_composition_protocol::DomainReferencePolicy::None,
+    )
+    .unwrap();
+    let second = DomainDefinition::new(
+        DomainIdentity::new("second", 1).unwrap(),
+        &false,
+        |_| Ok(()),
+        rsi_agent_composition_protocol::DomainReferencePolicy::None,
+    )
+    .unwrap();
     let catalog = DomainCatalog::new([first.registration(), second.registration()]).unwrap();
     let a = catalog.bind(&first).unwrap();
     let b = catalog.bind(&second).unwrap();
@@ -346,4 +360,32 @@ fn draft_batches_never_publish_a_valid_prefix_before_a_later_rejection() {
             .iter()
             .all(|update| update.snapshot().state().value() == &serde_json::json!(true))
     );
+}
+
+#[test]
+fn reference_free_versions_skip_decoding_but_visitors_validate_durable_state() {
+    use rsi_agent_composition_protocol::DomainReferencePolicy;
+    use rsi_agent_session_protocol::{DomainStateValue, ReferenceCollector};
+    for policy in [
+        DomainReferencePolicy::None,
+        DomainReferencePolicy::Visit(|_: &bool, _: &mut ReferenceCollector| Ok(())),
+    ] {
+        let definition = DomainDefinition::new(
+            DomainIdentity::new("reference-contract", 1).unwrap(),
+            &false,
+            |_| Ok(()),
+            policy,
+        )
+        .unwrap();
+        let catalog = DomainCatalog::new([definition.registration()]).unwrap();
+        let codec = catalog.reference_codecs().remove(0);
+        let invalid_typed_state = DomainStateValue::new(serde_json::json!("not boolean")).unwrap();
+        let mut references = ReferenceCollector::default();
+        let result = codec.references(&invalid_typed_state, &mut references);
+        assert_eq!(
+            result.is_ok(),
+            matches!(policy, DomainReferencePolicy::None)
+        );
+        assert!(references.iter().next().is_none());
+    }
 }

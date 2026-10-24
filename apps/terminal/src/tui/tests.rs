@@ -1764,7 +1764,7 @@ async fn multiline_reserved_and_double_slash_reach_human_submission_exactly() {
         assert!(client.setup_command.is_none());
         assert!(handle.commands.lock().unwrap().is_empty());
         assert!(
-            matches!(handle.submitted_requests.lock().unwrap()[0].content.as_slice(),[MessageInput::Text{text:body}] if body==text)
+            matches!(&*handle.submitted_requests.lock().unwrap()[0].content,[MessageInput::Text{text:body}] if body==text)
         );
         surface.stop().await;
         assert!(runtime.shutdown().await.is_clean());

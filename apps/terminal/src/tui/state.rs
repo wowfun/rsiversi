@@ -178,6 +178,7 @@ pub(super) struct State {
     pub(super) references: Vec<rsi_agent_session_protocol::FrozenReference>,
     pub(super) reference_bytes: usize,
     pub(super) reference_status: String,
+    pub(super) reference_preview: Option<super::reference_previews::PreviewLease>,
     pub(super) file_insert: Option<std::ops::Range<usize>>,
     pub(super) model: Option<ModelRef>,
     pub(super) reasoning_effort: Option<rsi_ai_protocol::ReasoningEffortId>,
@@ -244,6 +245,7 @@ impl State {
         requested
     }
     pub(super) fn invalidate_detail(&mut self) {
+        self.reference_preview = None;
         self.preview = None;
         self.view_revision = self.view_revision.wrapping_add(1);
         self.detail_stop.cancel();
@@ -281,6 +283,7 @@ impl State {
             references: Vec::new(),
             reference_bytes: 0,
             reference_status: String::new(),
+            reference_preview: None,
             file_insert: None,
             model: None,
             reasoning_effort: None,
@@ -435,7 +438,9 @@ impl State {
                 self.file_insert = None;
             }
             if self.ui_form.is_none() {
+                let reference_preview = self.reference_preview.take();
                 self.invalidate_detail();
+                self.reference_preview = reference_preview;
             }
             return;
         }

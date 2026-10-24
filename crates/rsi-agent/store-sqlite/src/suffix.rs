@@ -19,7 +19,7 @@ impl SqliteStore {
         self.with_reader(move |connection| {
             let transaction = connection.transaction_with_behavior(TransactionBehavior::Deferred).map_err(sql_error)?;
             let (through, digest) = transaction.query_row(
-                "SELECT durable_seq, CASE WHEN length(CAST(fact_prefix_sha256 AS BLOB)) = 64 THEN fact_prefix_sha256 ELSE '' END FROM sessions WHERE session_id = ?1",
+                "SELECT durable_seq, CASE WHEN length(CAST(fact_prefix_sha256 AS BLOB)) = 64 THEN fact_prefix_sha256 ELSE '' END FROM (SELECT * FROM sessions WHERE session_id NOT IN (SELECT session_id FROM session_tombstones)) AS sessions WHERE session_id = ?1",
                 [session_id.as_str()], |row| Ok((row.get::<_,i64>(0)?, row.get::<_,String>(1)?)))
                 .optional().map_err(sql_error)?.ok_or_else(|| StoreError::NotFound(session_id.to_string()))?;
             let through_seq = decode_u64("suffix horizon", through)?;

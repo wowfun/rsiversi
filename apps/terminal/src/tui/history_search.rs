@@ -71,6 +71,22 @@ impl Client {
             return;
         };
         self.state.open_detail("Reading history owner…".into());
+        if matches!(request, Request::Freeze { .. }) {
+            let previews = self.reference_previews.clone();
+            let handle = self.handle.clone();
+            self.spawn_detail(async move {
+                let (page, lease) = previews
+                    .capture(handle, async move {
+                        match client.call(request).await.map_err(error)? {
+                            Reply::Frozen { reference } => Ok(reference),
+                            _ => Err(error("History freeze did not return a reference")),
+                        }
+                    })
+                    .await?;
+                Ok(Update::CapturedReference(page, lease))
+            });
+            return;
+        }
         self.spawn_detail(async move {
             let reply = client.call(request.clone()).await.map_err(error)?;
             Ok(Update::HistorySearch(Box::new(request), Box::new(reply)))

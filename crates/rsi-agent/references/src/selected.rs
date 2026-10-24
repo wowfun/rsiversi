@@ -129,15 +129,18 @@ async fn publish(
     store: &dyn SessionStore,
     envelope: export::ValidatedEnvelope,
     stop: &CancellationToken,
-) -> Result<FrozenReference> {
+    capture_id: String,
+) -> Result<(FrozenReference, rsi_agent_store_protocol::PreparedCasObject)> {
     check(stop)?;
     let bytes = serde_json::to_vec(&envelope).map_err(invalid)?.into();
     let object = store.put_cas(bytes).await?;
     check(stop)?;
-    envelope.into_frozen(ReferenceSnapshotRef {
-        sha256: object.sha256,
+    let reference = envelope.into_frozen(ReferenceSnapshotRef {
+        capture_id,
+        sha256: object.sha256.clone(),
         byte_len: object.byte_len,
-    })
+    })?;
+    Ok((reference, object))
 }
 
 /// Original observed text reread by its product owner after authorization.
@@ -174,56 +177,66 @@ impl References {
             return Err(invalid("capture source binding mismatch"));
         }
         selection.validate().map_err(invalid)?;
-        self.run(cancellation, move |store, stop, _| async move {
-            let header = store.header(&source.session_id).await?;
-            check(&stop)?;
-            context.check()?;
-            if header.fingerprint().map_err(invalid)? != source.header_sha256
-                || header.coordinates() != context.coordinates()
-                || header.protection().is_some()
-            {
-                return Err(invalid("selected source Header or workspace mismatch"));
-            }
-            let _validation = store.prepare_session(&source.session_id).await?;
-            check(&stop)?;
-            context.check()?;
-            let window = store
-                .read_fact_window(
-                    &source.session_id,
-                    selection.record.sequence - 1,
-                    1,
-                    MAXIMUM_REFERENCE_SCAN_BYTES,
-                )
-                .await?;
-            check(&stop)?;
-            if window.durable_seq < selection.through_seq
-                || !window.omitted.is_empty()
-                || window.encoded_bytes != selection.scanned_bytes
-            {
-                return Err(invalid(
-                    "selected original cutoff or encoded length mismatch",
-                ));
-            }
-            let fact = window
-                .facts
-                .first()
-                .ok_or_else(|| invalid("selected original is unavailable"))?;
-            let original = reference_texts(fact)
-                .into_iter()
-                .find(|text| text.record == selection.record)
-                .ok_or_else(|| invalid("selected content is not exportable"))?;
-            let envelope = envelope(
-                ReferenceSource::Native { binding: source },
-                context.target(),
-                selection,
-                &original.text,
-            )?;
-            context.check()?;
-            let reference = publish(&*store, envelope, &stop).await?;
-            context.check()?;
-            Ok(reference)
-        })
-        .await
+        let pending = self.pending.clone();
+        let reservation = pending.reserve(context.target().session_id())?;
+        let (reference, object, reservation) = self
+            .run(cancellation, move |store, stop, _| async move {
+                let header = store.header(&source.session_id).await?;
+                check(&stop)?;
+                context.check()?;
+                if header.fingerprint().map_err(invalid)? != source.header_sha256
+                    || header.coordinates() != context.coordinates()
+                    || header.protection().is_some()
+                {
+                    return Err(invalid("selected source Header or workspace mismatch"));
+                }
+                let _validation = store.prepare_session(&source.session_id).await?;
+                check(&stop)?;
+                context.check()?;
+                let window = store
+                    .read_fact_window(
+                        &source.session_id,
+                        selection.record.sequence - 1,
+                        1,
+                        MAXIMUM_REFERENCE_SCAN_BYTES,
+                    )
+                    .await?;
+                check(&stop)?;
+                if window.durable_seq < selection.through_seq
+                    || !window.omitted.is_empty()
+                    || window.encoded_bytes != selection.scanned_bytes
+                {
+                    return Err(invalid(
+                        "selected original cutoff or encoded length mismatch",
+                    ));
+                }
+                let fact = window
+                    .facts
+                    .first()
+                    .ok_or_else(|| invalid("selected original is unavailable"))?;
+                let original = reference_texts(fact)
+                    .into_iter()
+                    .find(|text| text.record == selection.record)
+                    .ok_or_else(|| invalid("selected content is not exportable"))?;
+                let envelope = envelope(
+                    ReferenceSource::Native { binding: source },
+                    context.target(),
+                    selection,
+                    &original.text,
+                )?;
+                context.check()?;
+                let (reference, object) =
+                    publish(&*store, envelope, &stop, reservation.id.clone()).await?;
+                context.check()?;
+                Ok((reference, object, reservation))
+            })
+            .await?;
+        pending.publish(
+            reference.metadata.target.session_id.clone(),
+            object,
+            reservation,
+        )?;
+        Ok(reference)
     }
 
     /// Freezes a trusted observed original without reinterpreting it as native Facts.
@@ -246,12 +259,22 @@ impl References {
             original.selection,
             &original.text,
         )?;
-        self.run(cancellation, move |store, stop, _| async move {
-            context.check()?;
-            let reference = publish(&*store, envelope, &stop).await?;
-            context.check()?;
-            Ok(reference)
-        })
-        .await
+        let pending = self.pending.clone();
+        let reservation = pending.reserve(context.target().session_id())?;
+        let (reference, object, reservation) = self
+            .run(cancellation, move |store, stop, _| async move {
+                context.check()?;
+                let (reference, object) =
+                    publish(&*store, envelope, &stop, reservation.id.clone()).await?;
+                context.check()?;
+                Ok((reference, object, reservation))
+            })
+            .await?;
+        pending.publish(
+            reference.metadata.target.session_id.clone(),
+            object,
+            reservation,
+        )?;
+        Ok(reference)
     }
 }

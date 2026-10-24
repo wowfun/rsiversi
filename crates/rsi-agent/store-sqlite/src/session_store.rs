@@ -23,11 +23,11 @@ const LIST_READY_MESSAGES_FIRST_SQL: &str =
      ORDER BY r.timestamp_ms, r.session_id, r.ready_control_seq LIMIT ?5";
 pub(super) const LIST_AGENT_CHILDREN_AFTER_SQL: &str =
     "SELECT session_id, path_json, task_name FROM agent_nodes
-     WHERE parent_session_id = ?1 AND session_id > ?2
+     WHERE session_id NOT IN (SELECT session_id FROM session_tombstones) AND parent_session_id = ?1 AND session_id > ?2
      ORDER BY session_id LIMIT ?3";
 const LIST_AGENT_CHILDREN_FIRST_SQL: &str =
     "SELECT session_id, path_json, task_name FROM agent_nodes
-     WHERE parent_session_id = ?1
+     WHERE session_id NOT IN (SELECT session_id FROM session_tombstones) AND parent_session_id = ?1
      ORDER BY session_id LIMIT ?3";
 pub(super) const LIST_WAITING_ACTIVATIONS_AFTER_SQL: &str =
     "SELECT session_id FROM active_activations
@@ -46,6 +46,9 @@ const LIST_READY_ROOTS_FIRST_SQL: &str = "SELECT root_session_id FROM ready_mess
 #[async_trait]
 #[allow(clippy::too_many_lines)] // The trait implementation keeps each Store seam explicit.
 impl SessionStore for SqliteStore {
+    fn maintenance(&self) -> Option<&dyn rsi_agent_store_protocol::StoreMaintenance> {
+        Some(self)
+    }
     async fn contains_model_intent(
         &self,
         session_id: &SessionId,
@@ -57,7 +60,9 @@ impl SessionStore for SqliteStore {
         let turn_id = turn_id.clone();
         let effect_id = effect_id.clone();
         self.with_reader(move |connection| {
-            connection
+            let transaction = connection.transaction().map_err(sql_error)?;
+            reference_index::available(&transaction, &session_id)?;
+            transaction
                 .query_row(
                     append::MODEL_COORDINATE_LOOKUP,
                     params![
@@ -109,7 +114,7 @@ impl SessionStore for SqliteStore {
         validate_session_read_limit(limit)?;
         let after = after.cloned();
         self.with_reader(move|connection| {
-            let sql=if after.is_some(){"SELECT session_id,message_id FROM agent_messages WHERE state='pending' AND message_source='program' AND (session_id,message_id)>(?1,?2) ORDER BY session_id,message_id LIMIT ?3"}else{"SELECT session_id,message_id FROM agent_messages WHERE state='pending' AND message_source='program' ORDER BY session_id,message_id LIMIT ?1"};
+            let sql=if after.is_some(){"SELECT session_id,message_id FROM agent_messages WHERE session_id NOT IN (SELECT session_id FROM session_tombstones) AND state='pending' AND message_source='program' AND (session_id,message_id)>(?1,?2) ORDER BY session_id,message_id LIMIT ?3"}else{"SELECT session_id,message_id FROM agent_messages WHERE session_id NOT IN (SELECT session_id FROM session_tombstones) AND state='pending' AND message_source='program' ORDER BY session_id,message_id LIMIT ?1"};
             let mut statement=connection.prepare(sql).map_err(sql_error)?;
             let mut rows=if let Some(after)=after {statement.query(params![after.session_id.as_str(),after.message_id.as_str(),sqlite_u64("program notice limit", (limit+1) as u64)?])}else{statement.query([sqlite_u64("program notice limit", (limit+1) as u64)?])}.map_err(sql_error)?;
             let mut notices=Vec::new();while let Some(row)=rows.next().map_err(sql_error)? {notices.push(StoreProgramNotice {session_id:SessionId::new(bounded_text(row,0,256).map_err(sql_error)?).map_err(|e|StoreError::Corrupt(e.to_string()))?,message_id:MessageId::new(bounded_text(row,1,256).map_err(sql_error)?).map_err(|e|StoreError::Corrupt(e.to_string()))?});}
@@ -124,7 +129,9 @@ impl SessionStore for SqliteStore {
         self.ensure_session_validated(session).await?;
         let (session, turn) = (session.clone(), turn.clone());
         self.with_reader(move |connection| {
-            let run = connection
+            let transaction = connection.transaction().map_err(sql_error)?;
+            reference_index::available(&transaction, &session)?;
+            let run = transaction
                 .query_row(
                     "SELECT run_id FROM program_runs WHERE session_id=?1 AND creator_turn_id=?2",
                     params![session.as_str(), turn.as_str()],
@@ -201,7 +208,7 @@ impl SessionStore for SqliteStore {
         self.with_reader(move |connection| {
             let (fact, control) = connection
                 .query_row(
-                    "SELECT durable_seq, control_seq FROM sessions WHERE session_id = ?1",
+                    "SELECT durable_seq, control_seq FROM sessions WHERE session_id NOT IN (SELECT session_id FROM session_tombstones) AND session_id = ?1",
                     [session_id.as_str()],
                     |row| Ok((row.get::<_, i64>(0)?, row.get::<_, i64>(1)?)),
                 )
@@ -225,14 +232,20 @@ impl SessionStore for SqliteStore {
         {
             self.ensure_session_validated(&session_id).await?;
         }
+        let owner = self.inner.clone();
         let commit = self
             .with_writer(move |connection| {
                 let transaction = connection
                     .transaction_with_behavior(TransactionBehavior::Immediate)
                     .map_err(sql_error)?;
-                admit_append(&transaction, &batch)?;
+                let references = reference_index::Writer::new(
+                    &transaction,
+                    &batch.session_id,
+                    &owner.reference_codecs,
+                )?;
+                admit_append(&transaction, &batch, &references)?;
                 for fact in &batch.facts {
-                    insert_fact(&transaction, &batch.session_id, fact)?;
+                    insert_fact(&transaction, &batch.session_id, fact, &references)?;
                 }
                 let durable_seq = advance_watermark(&transaction, &batch)?;
                 super::activity::advance_activity(
@@ -288,7 +301,7 @@ impl SessionStore for SqliteStore {
                         let root = &guard.session_id;
                         let exists = transaction
                             .query_row(
-                                "SELECT EXISTS(SELECT 1 FROM sessions WHERE session_id = ?1)",
+                                "SELECT EXISTS(SELECT 1 FROM sessions WHERE session_id NOT IN (SELECT session_id FROM session_tombstones) AND session_id = ?1)",
                                 [root.as_str()],
                                 |row| row.get::<_, bool>(0),
                             )
@@ -305,7 +318,7 @@ impl SessionStore for SqliteStore {
                         rsi_agent_store_protocol::ProgramGraphChecks::capture(&commit.sessions);
                     let mut sessions = Vec::with_capacity(commit.sessions.len());
                     for append in commit.sessions {
-                        sessions.push(apply_atomic_sqlite_append(&transaction, append)?);
+                        sessions.push(apply_atomic_sqlite_append(&transaction, append, &owner.reference_codecs)?);
                     }
                     graph.validate(&program_graph::Graph(&transaction))?;
                     let subtree = validate_sqlite_quiescence_guard(
@@ -342,13 +355,16 @@ impl SessionStore for SqliteStore {
     }
 
     async fn validate_session(&self, session_id: &SessionId) -> Result<()> {
-        self.ensure_session_validated(session_id).await
+        self.ensure_session_validated(session_id).await?;
+        self.ensure_not_retired(session_id).await
     }
 
     async fn header(&self, session_id: &SessionId) -> Result<SessionHeader> {
         let session_id = session_id.clone();
         self.with_reader(move |connection| {
-            read_session_header_row(connection, &session_id).map(|(header, _)| header)
+            let transaction = connection.transaction().map_err(sql_error)?;
+            reference_index::available(&transaction, &session_id)?;
+            read_session_header_row(&transaction, &session_id).map(|(header, _)| header)
         })
         .await
     }
@@ -383,6 +399,7 @@ impl SessionStore for SqliteStore {
             let transaction = connection
                 .transaction_with_behavior(TransactionBehavior::Deferred)
                 .map_err(sql_error)?;
+            reference_index::available(&transaction, &session_id)?;
             let record = super::domain::read_request(&transaction, &session_id, &request_id)?;
             transaction.commit().map_err(sql_error)?;
             Ok(record)
@@ -400,6 +417,7 @@ impl SessionStore for SqliteStore {
         let slot = slot.clone();
         self.with_reader(move |connection| {
             let transaction=connection.transaction_with_behavior(TransactionBehavior::Deferred).map_err(sql_error)?;
+            reference_index::available(&transaction, &session)?;
             let id:Option<String>=transaction.query_row("SELECT message_id FROM agent_messages WHERE session_id=?1 AND queue_slot_id=?2 ORDER BY accepted_control_seq DESC LIMIT 1",params![session.as_str(),slot.as_str()],|row|bounded_text(row,0,256)).optional().map_err(sql_error)?;
             let entry=id.map(|id| MessageId::new(id).map_err(|error|StoreError::Corrupt(error.to_string())).and_then(|id|super::validation::read_indexed_agent_message(&transaction,&session,&id))).transpose()?;
             transaction.commit().map_err(sql_error)?;
@@ -414,14 +432,22 @@ impl SessionStore for SqliteStore {
         self.ensure_session_validated(session).await?;
         let session = session.clone();
         let operation = operation.clone();
-        self.with_reader(move |connection| super::queue::read(connection, &session, &operation))
-            .await
+        self.with_reader(move |connection| {
+            let transaction = connection.transaction().map_err(sql_error)?;
+            reference_index::available(&transaction, &session)?;
+            super::queue::read(&transaction, &session, &operation)
+        })
+        .await
     }
     async fn queue_mutation_count(&self, session: &SessionId) -> Result<usize> {
         self.ensure_session_validated(session).await?;
         let session = session.clone();
-        self.with_reader(move |connection| super::queue::count(connection, &session))
-            .await
+        self.with_reader(move |connection| {
+            let transaction = connection.transaction().map_err(sql_error)?;
+            reference_index::available(&transaction, &session)?;
+            super::queue::count(&transaction, &session)
+        })
+        .await
     }
     async fn read_turn_domain_usage(
         &self,
@@ -457,7 +483,7 @@ impl SessionStore for SqliteStore {
                     .map_err(sql_error)?;
                 let durable_seq = transaction
                     .query_row(
-                        "SELECT durable_seq FROM sessions WHERE session_id = ?1",
+                        "SELECT durable_seq FROM sessions WHERE session_id NOT IN (SELECT session_id FROM session_tombstones) AND session_id = ?1",
                         [session_id.as_str()],
                         |row| row.get::<_, i64>(0),
                     )
@@ -568,7 +594,7 @@ impl SessionStore for SqliteStore {
                 .map_err(sql_error)?;
             let durable_seq = transaction
                 .query_row(
-                    "SELECT control_seq FROM sessions WHERE session_id = ?1",
+                    "SELECT control_seq FROM sessions WHERE session_id NOT IN (SELECT session_id FROM session_tombstones) AND session_id = ?1",
                     [session_id.as_str()],
                     |row| row.get::<_, i64>(0),
                 )
@@ -661,7 +687,7 @@ impl SessionStore for SqliteStore {
                 .map_err(sql_error)?;
             let durable_seq = transaction
                 .query_row(
-                    "SELECT durable_seq FROM sessions WHERE session_id = ?1",
+                    "SELECT durable_seq FROM sessions WHERE session_id NOT IN (SELECT session_id FROM session_tombstones) AND session_id = ?1",
                     [session_id.as_str()],
                     |row| row.get::<_, i64>(0),
                 )
@@ -770,7 +796,7 @@ impl SessionStore for SqliteStore {
                 .map_err(sql_error)?;
             let durable_seq = transaction
                 .query_row(
-                    "SELECT durable_seq FROM sessions WHERE session_id = ?1",
+                    "SELECT durable_seq FROM sessions WHERE session_id NOT IN (SELECT session_id FROM session_tombstones) AND session_id = ?1",
                     [session_id.as_str()],
                     |row| row.get::<_, i64>(0),
                 )
@@ -889,7 +915,7 @@ impl SessionStore for SqliteStore {
             let indexed = transaction
                 .query_row(
                     "SELECT session.durable_seq, turn.accepted_seq, turn.terminal_seq
-                     FROM sessions AS session
+                     FROM (SELECT * FROM sessions WHERE session_id NOT IN (SELECT session_id FROM session_tombstones)) AS session
                      LEFT JOIN turns AS turn
                        ON turn.session_id = session.session_id AND turn.turn_id = ?2
                      WHERE session.session_id = ?1",
@@ -935,6 +961,9 @@ impl SessionStore for SqliteStore {
         let session_id = session_id.clone();
         let invoking_turn_id = invoking_turn_id.clone();
         let historical = selection != ForkTurnSelection::None;
+        if historical {
+            self.ensure_not_retired(&session_id).await?;
+        }
         let key = ForkBoundaryKey {
             session: session_id.clone(),
             invoking: invoking_turn_id.clone(),
@@ -954,6 +983,7 @@ impl SessionStore for SqliteStore {
         let cache_key = key.clone();
         let publisher = owner.clone();
         let resolve = move |transaction: &Transaction<'_>| {
+            reference_index::available(transaction, &session_id)?;
             if historical
                 && let Some(boundary) = owner
                     .fork_boundaries
@@ -1156,7 +1186,7 @@ impl SessionStore for SqliteStore {
                 .map_err(sql_error)?;
             let durable_seq = transaction
                 .query_row(
-                    "SELECT durable_seq FROM sessions WHERE session_id = ?1",
+                    "SELECT durable_seq FROM sessions WHERE session_id NOT IN (SELECT session_id FROM session_tombstones) AND session_id = ?1",
                     [session_id.as_str()],
                     |row| row.get::<_, i64>(0),
                 )
@@ -1231,7 +1261,7 @@ impl SessionStore for SqliteStore {
                 let mut statement = connection
                     .prepare(
                         "SELECT session_id FROM sessions
-                         WHERE session_id > ?1 ORDER BY session_id LIMIT ?2",
+                         WHERE session_id NOT IN (SELECT session_id FROM session_tombstones) AND session_id > ?1 ORDER BY session_id LIMIT ?2",
                     )
                     .map_err(sql_error)?;
                 let rows = statement
@@ -1248,7 +1278,7 @@ impl SessionStore for SqliteStore {
                 }
             } else {
                 let mut statement = connection
-                    .prepare("SELECT session_id FROM sessions ORDER BY session_id LIMIT ?1")
+                    .prepare("SELECT session_id FROM sessions WHERE session_id NOT IN (SELECT session_id FROM session_tombstones) ORDER BY session_id LIMIT ?1")
                     .map_err(sql_error)?;
                 let rows = statement
                     .query_map([sqlite_limit], |row| bounded_text(row, 0, 256))
@@ -1297,34 +1327,20 @@ impl SessionStore for SqliteStore {
                         .map(|cursor| (cursor.created_at_ms, &cursor.session_id)),
                     limit + 1,
                 )?;
-                let mut projections = Vec::with_capacity(limit + 1);
+                let sql = format!("SELECT session_id, {} FROM sessions WHERE session_id IN (SELECT session_id FROM ({sql})) ORDER BY created_at_ms DESC, session_id DESC", crate::validation::header_projection());
+                let mut sessions = Vec::with_capacity(limit + 1);
+                let mut has_more = false;
                 {
                     let mut statement = transaction.prepare(&sql).map_err(sql_error)?;
-                    let rows = statement
-                        .query_map(rusqlite::params_from_iter(parameters), |row| {
-                            Ok((bounded_text(row, 0, 256)?, row.get::<_, i64>(2)?))
-                        })
-                        .map_err(sql_error)?;
-                    for row in rows {
-                        projections.push(row.map_err(sql_error)?);
+                    let mut rows = statement.query(rusqlite::params_from_iter(parameters)).map_err(sql_error)?;
+                    while let Some(row) = rows.next().map_err(sql_error)? {
+                        if sessions.len() == limit { has_more = true; break; }
+                        let session_id = SessionId::new(bounded_text(row, 0, 256).map_err(sql_error)?)
+                            .map_err(|error| StoreError::Corrupt(error.to_string()))?;
+                        let header = crate::validation::decode_header_projection(&session_id,
+                            crate::validation::read_header_projection(row, 1).map_err(sql_error)?)?.0;
+                        sessions.push(StoreRecentSession { header });
                     }
-                }
-                let has_more = projections.len() > limit;
-                projections.truncate(limit);
-                let mut sessions = Vec::with_capacity(projections.len());
-                for (encoded_session_id, created_at_ms) in projections {
-                    let session_id = SessionId::new(encoded_session_id)
-                        .map_err(|error| StoreError::Corrupt(error.to_string()))?;
-                    let header = read_session_header_row(&transaction, &session_id)?.0;
-                    if header.created_at_ms()
-                        != decode_u64("session creation timestamp", created_at_ms)?
-                    {
-                        return Err(StoreError::Corrupt(
-                            "recent-session ordering timestamp differs from its durable header"
-                                .into(),
-                        ));
-                    }
-                    sessions.push(StoreRecentSession { header });
                 }
                 let page = StoreRecentSessionPage {
                     after,
@@ -1477,7 +1493,7 @@ impl SessionStore for SqliteStore {
         let session_id = session_id.clone();
         self.with_subtree_reader(&root, move |transaction, tree| {
             let (header, _) = read_session_header_row(transaction, &session_id)?;
-            let (fact_seq, control_seq) = transaction.query_row("SELECT durable_seq, control_seq FROM sessions WHERE session_id = ?1", [session_id.as_str()],
+            let (fact_seq, control_seq) = transaction.query_row("SELECT durable_seq, control_seq FROM sessions WHERE session_id NOT IN (SELECT session_id FROM session_tombstones) AND session_id = ?1", [session_id.as_str()],
                 |row| Ok((row.get::<_, i64>(0)?, row.get::<_, i64>(1)?))).map_err(sql_error)?;
             let mut statement = transaction.prepare("SELECT
                 message_id, delivery, target, bound_turn_id,
@@ -1525,7 +1541,7 @@ impl SessionStore for SqliteStore {
         let message = message.clone();
         self.with_reader(move |connection| {
             connection.query_row(
-                "SELECT EXISTS(SELECT 1 FROM agent_messages WHERE session_id=?1 AND message_id=?2) FROM sessions WHERE session_id=?1",
+                "SELECT EXISTS(SELECT 1 FROM agent_messages WHERE session_id=?1 AND message_id=?2) FROM sessions WHERE session_id NOT IN (SELECT session_id FROM session_tombstones) AND session_id=?1",
                 params![session.as_str(), message.as_str()], |row| row.get(0),
             ).optional().map_err(sql_error)?.ok_or_else(|| StoreError::NotFound(session.to_string()))
         }).await
@@ -1545,7 +1561,7 @@ impl SessionStore for SqliteStore {
                 .map_err(sql_error)?;
             let tail = transaction
                 .query_row(
-                    "SELECT control_seq FROM sessions WHERE session_id = ?1",
+                    "SELECT control_seq FROM sessions WHERE session_id NOT IN (SELECT session_id FROM session_tombstones) AND session_id = ?1",
                     [session_id.as_str()],
                     |row| row.get::<_, i64>(0),
                 )
@@ -1576,7 +1592,7 @@ impl SessionStore for SqliteStore {
                 .map_err(sql_error)?;
             let (durable_fact_seq, durable_control_seq) = transaction
                 .query_row(
-                    "SELECT durable_seq, control_seq FROM sessions WHERE session_id = ?1",
+                    "SELECT durable_seq, control_seq FROM sessions WHERE session_id NOT IN (SELECT session_id FROM session_tombstones) AND session_id = ?1",
                     [session_id.as_str()],
                     |row| Ok((row.get::<_, i64>(0)?, row.get::<_, i64>(1)?)),
                 )
@@ -1671,7 +1687,7 @@ impl SessionStore for SqliteStore {
                     "SELECT durable_seq, control_seq,
                             (SELECT COUNT(*) FROM agent_messages
                              WHERE session_id = ?1 AND state = 'pending')
-                     FROM sessions WHERE session_id = ?1",
+                     FROM sessions WHERE session_id NOT IN (SELECT session_id FROM session_tombstones) AND session_id = ?1",
                     [session_id.as_str()],
                     |row| {
                         Ok((
@@ -1806,7 +1822,9 @@ impl SessionStore for SqliteStore {
         self.ensure_session_validated(session_id).await?;
         let session_id = session_id.clone();
         self.with_reader(move |connection| {
-            connection
+            let transaction = connection.transaction().map_err(sql_error)?;
+            reference_index::available(&transaction, &session_id)?;
+            transaction
                 .query_row(
                     "SELECT activation_id, parent_session_id, turn_id, phase,
                             completion_reserved_bytes, completion_to_program
@@ -1992,7 +2010,7 @@ impl SessionStore for SqliteStore {
                 .map_err(sql_error)?;
             let exists = transaction
                 .query_row(
-                    "SELECT 1 FROM sessions WHERE session_id = ?1",
+                    "SELECT 1 FROM sessions WHERE session_id NOT IN (SELECT session_id FROM session_tombstones) AND session_id = ?1",
                     [session_id.as_str()],
                     |_| Ok(()),
                 )
@@ -2089,6 +2107,7 @@ impl SessionStore for SqliteStore {
         write.validate()?;
         self.ensure_session_validated(&write.session_id).await?;
         self.with_writer(move |connection| {
+            reference_index::available(connection, &write.session_id)?;
             let transaction = connection
                 .transaction_with_behavior(TransactionBehavior::Immediate)
                 .map_err(sql_error)?;
@@ -2098,7 +2117,7 @@ impl SessionStore for SqliteStore {
                             length(CAST(header_json AS BLOB)),
                             CASE WHEN length(CAST(header_json AS BLOB)) <= ?2
                                  THEN header_json END
-                     FROM sessions WHERE session_id = ?1",
+                     FROM sessions WHERE session_id NOT IN (SELECT session_id FROM session_tombstones) AND session_id = ?1",
                     params![
                         write.session_id.as_str(),
                         i64::try_from(MAXIMUM_SESSION_HEADER_BYTES)
@@ -2175,16 +2194,28 @@ impl SessionStore for SqliteStore {
         .await
     }
 
-    async fn put_cas(&self, bytes: Arc<[u8]>) -> Result<CasObjectRef> {
+    async fn put_cas(
+        &self,
+        bytes: Arc<[u8]>,
+    ) -> Result<rsi_agent_store_protocol::PreparedCasObject> {
         if bytes.is_empty() || bytes.len() > MAXIMUM_STORE_CAS_BYTES {
             return Err(StoreError::Invalid(
                 "CAS bytes must be nonempty and bounded".into(),
             ));
         }
+        let hash = format!("{:x}", Sha256::digest(&bytes));
+        let ownership = self.inner.cas_ownership.acquire(&hash, false)?;
+        let retained = ownership.clone();
+        self.with_reader(move |connection| {
+            let _retained = retained;
+            cas_ownership::available(connection, &hash)
+        })
+        .await?;
         let owner = Arc::clone(&self.inner);
         let reference = self
             .with_cas_publication(move || {
-                install_cas(&owner.cas_dir, &bytes, &owner.cas_publication)
+                let reference = install_cas(&owner.cas_dir, &bytes, &owner.cas_publication)?;
+                rsi_agent_store_protocol::PreparedCasObject::new(reference, ownership)
             })
             .await?;
         self.with_writer(move |connection| {
@@ -2205,7 +2236,7 @@ impl SessionStore for SqliteStore {
             } else {
                 connection
                     .execute(
-                        "INSERT INTO cas_objects (sha256, byte_len) VALUES (?1, ?2)",
+                        "INSERT INTO cas_objects (sha256, byte_len, generation) VALUES (?1, ?2, (SELECT COALESCE(MAX(generation),0)+1 FROM cas_deletions WHERE sha256=?1))",
                         params![
                             &reference.sha256,
                             sqlite_u64("CAS byte length", reference.byte_len)?,
@@ -2218,15 +2249,50 @@ impl SessionStore for SqliteStore {
         .await
     }
 
+    async fn retain_cas(
+        &self,
+        object: &CasObjectRef,
+    ) -> Result<rsi_agent_store_protocol::PreparedCasObject> {
+        object.validate()?;
+        let ownership = self.inner.cas_ownership.acquire(&object.sha256, false)?;
+        let descriptor = object.clone();
+        let retained = ownership.clone();
+        self.with_reader(move |connection| {
+            let _retained = retained;
+            cas_ownership::available(connection, &descriptor.sha256)?;
+            let bytes: Option<i64> = connection
+                .query_row(
+                    "SELECT byte_len FROM cas_objects WHERE sha256=?1",
+                    [&descriptor.sha256],
+                    |row| row.get(0),
+                )
+                .optional()
+                .map_err(sql_error)?;
+            let bytes = bytes.ok_or_else(|| StoreError::NotFound(descriptor.sha256.clone()))?;
+            if decode_u64("CAS byte length", bytes)? != descriptor.byte_len {
+                return Err(StoreError::Corrupt(
+                    "CAS reference disagrees with SQLite metadata".into(),
+                ));
+            }
+            Ok(())
+        })
+        .await?;
+        rsi_agent_store_protocol::PreparedCasObject::new(object.clone(), ownership)
+    }
+
     async fn read_cas(
         &self,
         object: &CasObjectRef,
         admission: rsi_api_protocol::ByteAdmission,
     ) -> Result<rsi_api_protocol::RetainedBytes> {
         object.validate()?;
+        let ownership = self.inner.cas_ownership.acquire(&object.sha256, false)?;
+        let reading_metadata = ownership.clone();
         let object = object.clone();
         let verified = object.clone();
         self.with_reader(move |connection| {
+            let _reading_metadata = reading_metadata;
+            cas_ownership::available(connection, &object.sha256)?;
             let byte_len = connection
                 .query_row(
                     "SELECT byte_len FROM cas_objects WHERE sha256 = ?1",
@@ -2246,6 +2312,7 @@ impl SessionStore for SqliteStore {
         .await?;
         let cas_dir = Arc::clone(&self.inner.cas_dir);
         self.with_cas(move || {
+            let _ownership = ownership;
             let maximum = usize::try_from(verified.byte_len)
                 .map_err(|_| StoreError::Corrupt("CAS length exceeds host".into()))?;
             let reservation = admission
@@ -2352,10 +2419,10 @@ pub(super) fn read_agent_subtree(
     let mut statement = connection
         .prepare(
             "WITH RECURSIVE subtree(session_id) AS (
-           SELECT session_id FROM sessions WHERE session_id = ?1
+           SELECT session_id FROM sessions WHERE session_id NOT IN (SELECT session_id FROM session_tombstones) AND session_id = ?1
            UNION
            SELECT child.session_id FROM agent_nodes child JOIN subtree parent
-             ON child.parent_session_id = parent.session_id LIMIT ?2
+             ON child.parent_session_id = parent.session_id WHERE child.session_id NOT IN (SELECT session_id FROM session_tombstones) LIMIT ?2
          )
          SELECT CASE WHEN length(CAST(subtree.session_id AS BLOB)) <= ?4 THEN subtree.session_id END,
            CASE WHEN length(CAST(node.parent_session_id AS BLOB)) <= ?4 THEN node.parent_session_id END,

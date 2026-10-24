@@ -19,7 +19,7 @@ impl Registry {
             source,
         )
     }
-    fn insert(
+    pub(super) fn insert(
         &mut self,
         key: (SessionId, TurnId),
         claim: u64,
@@ -27,7 +27,7 @@ impl Registry {
     ) -> Result<()> {
         if let Some(index) = self.0.iter().position(|entry| entry.key == key) {
             if self.0[index].claim == claim
-                || self.0[index].source.status() == ControlledWorkStatus::Running
+                || self.0[index].source.status() != ControlledWorkStatus::Settled
             {
                 return Err(TurnError::Invalid(
                     "controlled work already published or still running".into(),
@@ -39,12 +39,22 @@ impl Registry {
             let index = self
                 .0
                 .iter()
-                .position(|entry| entry.source.status() != ControlledWorkStatus::Running)
+                .position(|entry| entry.source.status() == ControlledWorkStatus::Settled)
                 .ok_or(TurnError::Capacity)?;
             self.0.remove(index);
         }
         self.0.push_back(Entry { key, claim, source });
         Ok(())
+    }
+    pub(super) fn busy(&self, session: &SessionId) -> bool {
+        self.0.iter().any(|entry| {
+            &entry.key.0 == session && entry.source.status() != ControlledWorkStatus::Settled
+        })
+    }
+    pub(super) fn unsettled(&self, session: &SessionId) -> bool {
+        self.0.iter().any(|entry| {
+            &entry.key.0 == session && entry.source.status() == ControlledWorkStatus::Unsettled
+        })
     }
     pub(super) fn get(&self, session: &SessionId, turn: &TurnId) -> Option<ControlledWork> {
         self.0.iter().find_map(|entry| {
@@ -86,12 +96,40 @@ mod tests {
             registry.get(&key(1).0, &key(1).1).unwrap().status(),
             ControlledWorkStatus::Running
         );
-        drop(reporter);
+        reporter.finish(true);
         let (replacement, _owner) = ControlledWork::new();
         assert!(
             registry.insert(key(1024), 1, replacement.clone()).is_err(),
             "one publication per claim even after completion"
         );
         registry.insert(key(1024), 2, replacement).unwrap();
+    }
+    #[test]
+    fn uncertain_cleanup_survives_replacement_and_capacity_pressure() {
+        let mut registry = Registry::default();
+        let key = |n| {
+            (
+                SessionId::new("s").unwrap(),
+                TurnId::new(format!("t{n}")).unwrap(),
+            )
+        };
+        for n in 0..MAXIMUM_OBSERVATIONS {
+            let (view, owner) = ControlledWork::new();
+            drop(owner);
+            registry.insert(key(n), 1, view).unwrap();
+        }
+        let (replacement, _owner) = ControlledWork::new();
+        assert!(matches!(
+            registry.insert(key(0), 2, replacement.clone()),
+            Err(TurnError::Invalid(_))
+        ));
+        assert!(matches!(
+            registry.insert(key(MAXIMUM_OBSERVATIONS), 1, replacement),
+            Err(TurnError::Capacity)
+        ));
+        assert_eq!(
+            registry.get(&key(0).0, &key(0).1).unwrap().status(),
+            ControlledWorkStatus::Unsettled
+        );
     }
 }

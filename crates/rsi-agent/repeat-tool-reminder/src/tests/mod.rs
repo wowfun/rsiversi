@@ -46,6 +46,7 @@ impl Fixture {
             DomainIdentity::new(DOMAIN, 1).unwrap(),
             &State::default(),
             State::validate,
+            rsi_agent_composition_protocol::DomainReferencePolicy::Visit(State::references),
         )
         .unwrap();
         let catalog = DomainCatalog::new([definition.registration()]).unwrap();

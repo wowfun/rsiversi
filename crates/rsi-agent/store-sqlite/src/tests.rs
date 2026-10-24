@@ -1,4 +1,7 @@
 use super::*;
+#[cfg(any(unix, windows))]
+#[path = "tests/maintenance.rs"]
+mod maintenance;
 
 #[cfg(windows)]
 #[test]
@@ -456,7 +459,7 @@ async fn offline_validation_pages_every_session_and_rejects_late_corruption() {
 #[test]
 fn offline_identity_pages_bound_retention_and_do_not_skip_invalid_rows() {
     let db = Connection::open_in_memory().unwrap();
-    db.execute_batch("CREATE TABLE sessions (session_id TEXT PRIMARY KEY)")
+    db.execute_batch("CREATE TABLE sessions (session_id TEXT PRIMARY KEY); CREATE TABLE session_tombstones(session_id TEXT PRIMARY KEY)")
         .unwrap();
     for index in 0..513 {
         db.execute(
@@ -496,7 +499,7 @@ fn offline_identity_pages_classify_non_text_and_invalid_utf8_as_corruption() {
         "INSERT INTO sessions VALUES (NULL)",
     ] {
         let db = Connection::open_in_memory().unwrap();
-        db.execute_batch("CREATE TABLE sessions (session_id TEXT PRIMARY KEY)")
+        db.execute_batch("CREATE TABLE sessions (session_id TEXT PRIMARY KEY); CREATE TABLE session_tombstones(session_id TEXT PRIMARY KEY)")
             .unwrap();
         db.execute_batch(sql).unwrap();
         let result = crate::validation::session_id_page(&db, None);
@@ -511,14 +514,14 @@ use crate::session_store::{
     LIST_AGENT_CHILDREN_AFTER_SQL, LIST_READY_MESSAGES_AFTER_SQL, LIST_READY_ROOTS_AFTER_SQL,
     LIST_WAITING_ACTIVATIONS_AFTER_SQL,
 };
-#[cfg(unix)]
+#[cfg(any(unix, windows))]
 use rsi_agent_session_protocol::{AgentPresetId, FrozenAgentSettings};
-#[cfg(unix)]
+#[cfg(any(unix, windows))]
 use rsi_ai_protocol::ModelRef;
-#[cfg(unix)]
+#[cfg(any(unix, windows))]
 use rsi_sandbox::SandboxMode;
 
-#[cfg(unix)]
+#[cfg(any(unix, windows))]
 fn test_header(session_id: &str) -> SessionHeader {
     SessionHeader::new_local(
         SessionId::new(session_id).unwrap(),
@@ -537,7 +540,7 @@ fn test_header(session_id: &str) -> SessionHeader {
     .unwrap()
 }
 
-#[cfg(unix)]
+#[cfg(any(unix, windows))]
 fn test_fact(sequence: u64) -> SessionFact {
     SessionFact::new(
         sequence,
@@ -900,8 +903,21 @@ async fn reader_observes_complete_snapshots_across_an_uncommitted_writer() {
             header: None,
             facts: (vec![test_fact(2)]).into_iter().map(Into::into).collect(),
         };
-        admit_append(&transaction, &batch).unwrap();
-        insert_fact(&transaction, &batch.session_id, &batch.facts[0]).unwrap();
+        admit_append(
+            &transaction,
+            &batch,
+            &reference_index::Writer::new(&transaction, &batch.session_id, &Default::default())
+                .unwrap(),
+        )
+        .unwrap();
+        insert_fact(
+            &transaction,
+            &batch.session_id,
+            &batch.facts[0],
+            &reference_index::Writer::new(&transaction, &batch.session_id, &Default::default())
+                .unwrap(),
+        )
+        .unwrap();
         advance_watermark(&transaction, &batch).unwrap();
         entered_tx.send(()).unwrap();
         release_rx.recv().unwrap();
@@ -3169,4 +3185,63 @@ async fn cas_process_crash_reopens_without_admitting_unconfirmed_metadata() {
                 .is_none()
         );
     }
+}
+
+#[tokio::test]
+#[cfg(any(unix, windows))]
+async fn recent_page_uses_one_bounded_header_query() {
+    static READS: std::sync::atomic::AtomicUsize = std::sync::atomic::AtomicUsize::new(0);
+    fn trace(event: rusqlite::trace::TraceEvent<'_>) {
+        if let rusqlite::trace::TraceEvent::Stmt(statement, _) = event
+            && statement.sql().starts_with("SELECT ")
+        {
+            READS.fetch_add(1, Ordering::Relaxed);
+        }
+    }
+    let root = tempfile::tempdir().unwrap();
+    let store = SqliteStore::open(root.path()).unwrap();
+    for index in 0..12 {
+        let header = test_header(&format!("recent-query-{index:02}"));
+        store
+            .append(AppendBatch {
+                session_id: header.session_id().clone(),
+                expected_seq: 0,
+                header: Some(header),
+                facts: vec![test_fact(1).into()],
+            })
+            .await
+            .unwrap();
+    }
+    store
+        .with_reader(|connection| {
+            connection.trace_v2(
+                rusqlite::trace::TraceEventCodes::SQLITE_TRACE_STMT,
+                Some(trace),
+            );
+            Ok(())
+        })
+        .await
+        .unwrap();
+    let page = store
+        .list_recent_sessions(
+            &rsi_agent_store_protocol::ExecutionLocations::all(),
+            None,
+            8,
+        )
+        .await
+        .unwrap();
+    store
+        .with_reader(|connection| {
+            connection.trace_v2(rusqlite::trace::TraceEventCodes::empty(), None);
+            Ok(())
+        })
+        .await
+        .unwrap();
+    assert_eq!(READS.load(Ordering::Relaxed), 1);
+    assert_eq!(page.sessions.len(), 8);
+    assert!(page.has_more);
+    assert_eq!(
+        page.sessions[0].header.session_id().as_str(),
+        "recent-query-11"
+    );
 }

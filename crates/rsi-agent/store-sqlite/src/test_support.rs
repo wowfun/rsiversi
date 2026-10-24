@@ -19,6 +19,38 @@ impl Drop for WorkerPause {
 }
 
 impl SqliteStore {
+    /// Pauses admitted purge I/O before commit; dropping the guard releases it.
+    ///
+    /// # Panics
+    /// Panics if another pause is installed or the test mutex is poisoned.
+    pub fn pause_next_purge_admission(&self) -> (tokio::sync::oneshot::Receiver<()>, WorkerPause) {
+        let (started, entered) = tokio::sync::oneshot::channel();
+        let (release, wait) = std::sync::mpsc::channel();
+        assert!(
+            self.inner
+                .purge_admission_pause
+                .lock()
+                .unwrap()
+                .replace((started, wait))
+                .is_none()
+        );
+        (entered, WorkerPause(Some(release)))
+    }
+    /// Fails one purge before or after commit, then fails its first reconciliation read.
+    ///
+    /// # Panics
+    /// Panics if another fault is installed or the test mutex is poisoned.
+    pub fn fail_next_purge_admission(&self, after_commit: bool) {
+        assert!(
+            self.inner
+                .purge_admission_fault
+                .lock()
+                .unwrap()
+                .replace(after_commit)
+                .is_none()
+        );
+    }
+
     /// Fails one CAS operation before execution or after successful execution.
     ///
     /// # Panics

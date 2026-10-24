@@ -107,15 +107,21 @@ async fn byte_admission_keeps_zero_weight_results() {
     });
     let empty = Store::new(String::new(), false);
     cache
-        .load(empty.clone(), key("empty", 1), ())
+        .load(empty.clone(), key("empty", 1), CancellationToken::new(), ())
         .await
         .unwrap();
     let full = Store::new("x".repeat(16), false);
-    cache.load(full.clone(), key("full", 1), ()).await.unwrap();
-    cache.load(full, key("next", 1), ()).await.unwrap();
+    cache
+        .load(full.clone(), key("full", 1), CancellationToken::new(), ())
+        .await
+        .unwrap();
+    cache
+        .load(full, key("next", 1), CancellationToken::new(), ())
+        .await
+        .unwrap();
     let calls = empty.calls.load(Ordering::SeqCst);
     cache
-        .load(empty.clone(), key("empty", 1), ())
+        .load(empty.clone(), key("empty", 1), CancellationToken::new(), ())
         .await
         .unwrap();
     assert_eq!(empty.calls.load(Ordering::SeqCst), calls);
@@ -146,7 +152,11 @@ async fn unavailable_results_obey_entry_capacity_and_completion_waiter_pins() {
     let first = tokio::spawn({
         let cache = cache.clone();
         let store = store.clone();
-        async move { cache.load(store, key("pin-0", 1), ()).await }
+        async move {
+            cache
+                .load(store, key("pin-0", 1), CancellationToken::new(), ())
+                .await
+        }
     });
     store.entered(1).await;
     let receiver = {
@@ -160,7 +170,12 @@ async fn unavailable_results_obey_entry_capacity_and_completion_waiter_pins() {
     let mut pins = vec![first.await.unwrap().unwrap()];
     for i in 1..super::MAXIMUM_ENTRIES {
         let selected = cache
-            .load(store.clone(), key(&format!("pin-{i}"), 1), ())
+            .load(
+                store.clone(),
+                key(&format!("pin-{i}"), 1),
+                CancellationToken::new(),
+                (),
+            )
             .await
             .unwrap();
         assert!(matches!(
@@ -171,7 +186,9 @@ async fn unavailable_results_obey_entry_capacity_and_completion_waiter_pins() {
     }
     assert_eq!(cache.budget.used(), 0);
     assert!(matches!(
-        cache.load(store.clone(), key("next", 1), ()).await,
+        cache
+            .load(store.clone(), key("next", 1), CancellationToken::new(), ())
+            .await,
         Err(SessionError::Capacity)
     ));
     assert_eq!(store.calls.load(Ordering::SeqCst), super::MAXIMUM_ENTRIES);
@@ -179,11 +196,16 @@ async fn unavailable_results_obey_entry_capacity_and_completion_waiter_pins() {
     // release it. Admission must wait for that ownership too.
     drop(pins.remove(0));
     assert!(matches!(
-        cache.load(store.clone(), key("next", 1), ()).await,
+        cache
+            .load(store.clone(), key("next", 1), CancellationToken::new(), ())
+            .await,
         Err(SessionError::Capacity)
     ));
     drop(receiver);
-    cache.load(store.clone(), key("next", 1), ()).await.unwrap();
+    cache
+        .load(store.clone(), key("next", 1), CancellationToken::new(), ())
+        .await
+        .unwrap();
     assert_eq!(
         store.calls.load(Ordering::SeqCst),
         super::MAXIMUM_ENTRIES + 1
@@ -210,11 +232,26 @@ async fn rejected_cold_admission_preserves_idle_entries() {
         ..EvidenceReader::default()
     });
     let small = Store::new("idle".into(), false);
-    drop(cache.load(small.clone(), key("idle", 1), ()).await.unwrap());
+    drop(
+        cache
+            .load(small.clone(), key("idle", 1), CancellationToken::new(), ())
+            .await
+            .unwrap(),
+    );
     let large = Store::new("x".repeat(32), false);
-    let pinned = cache.load(large, key("pinned", 1), ()).await.unwrap();
+    let pinned = cache
+        .load(large, key("pinned", 1), CancellationToken::new(), ())
+        .await
+        .unwrap();
     assert!(matches!(
-        cache.load(small.clone(), key("rejected", 1), ()).await,
+        cache
+            .load(
+                small.clone(),
+                key("rejected", 1),
+                CancellationToken::new(),
+                ()
+            )
+            .await,
         Err(SessionError::Capacity)
     ));
     assert!(
@@ -225,7 +262,12 @@ async fn rejected_cold_admission_preserves_idle_entries() {
             .entries
             .contains_key(&key("idle", 1))
     );
-    drop(cache.load(small.clone(), key("idle", 1), ()).await.unwrap());
+    drop(
+        cache
+            .load(small.clone(), key("idle", 1), CancellationToken::new(), ())
+            .await
+            .unwrap(),
+    );
     assert_eq!(small.calls.load(Ordering::SeqCst), 1);
     drop(pinned);
     cache.stop().await.unwrap();
@@ -243,13 +285,18 @@ async fn cold_admission_reclaims_idle_bytes_against_the_actual_budget() {
     let store = Store::new("small section".into(), false);
     drop(
         cache
-            .load(store.clone(), key("first", 1), ())
+            .load(store.clone(), key("first", 1), CancellationToken::new(), ())
             .await
             .unwrap(),
     );
     drop(
         cache
-            .load(store.clone(), key("second", 1), ())
+            .load(
+                store.clone(),
+                key("second", 1),
+                CancellationToken::new(),
+                (),
+            )
             .await
             .unwrap(),
     );
@@ -278,6 +325,7 @@ async fn sixty_four_pages_reuse_only_the_selected_section_and_exact_reference() 
                     store.clone(),
                     SessionId::new("session").unwrap(),
                     &request(seq, offset),
+                    CancellationToken::new(),
                     (),
                 )
                 .await
@@ -340,13 +388,23 @@ async fn invalid_reference_binding_is_not_cached() {
     let cache = Arc::new(EvidenceReader::default());
     for expected in [2, 4] {
         assert!(matches!(
-            cache.load(store.clone(), key("session", 2), ()).await,
+            cache
+                .load(
+                    store.clone(),
+                    key("session", 2),
+                    CancellationToken::new(),
+                    ()
+                )
+                .await,
             Err(SessionError::Invalid(_))
         ));
         assert_eq!(store.calls.load(Ordering::SeqCst), expected);
         assert_eq!(cache.budget.used(), 0);
     }
-    cache.load(store, key("session", 1), ()).await.unwrap();
+    cache
+        .load(store, key("session", 1), CancellationToken::new(), ())
+        .await
+        .unwrap();
     cache.stop().await.unwrap();
 }
 
@@ -365,13 +423,21 @@ async fn shared_load_outlives_waiters_and_shutdown_retains_actual_work() {
         let cache = cache.clone();
         let store = store.clone();
         let guard = Guard(drops.clone());
-        async move { cache.load(store, key("one", 2), guard).await }
+        async move {
+            cache
+                .load(store, key("one", 2), CancellationToken::new(), guard)
+                .await
+        }
     });
     store.entered(1).await;
     let second = tokio::spawn({
         let cache = cache.clone();
         let store = store.clone();
-        async move { cache.load(store, key("one", 2), ()).await }
+        async move {
+            cache
+                .load(store, key("one", 2), CancellationToken::new(), ())
+                .await
+        }
     });
     tokio::task::yield_now().await;
     first.abort();
@@ -388,7 +454,9 @@ async fn shared_load_outlives_waiters_and_shutdown_retains_actual_work() {
     cache.close();
     for closed in [key("one", 2), key("new", 1)] {
         assert!(matches!(
-            cache.load(store.clone(), closed, ()).await,
+            cache
+                .load(store.clone(), closed, CancellationToken::new(), ())
+                .await,
             Err(SessionError::ShuttingDown)
         ));
     }
@@ -408,6 +476,42 @@ async fn shared_load_outlives_waiters_and_shutdown_retains_actual_work() {
 }
 
 #[tokio::test]
+async fn session_retirement_stops_followup_reads_and_late_cache_publication() {
+    let store = Store::new("source".into(), true);
+    let cache = Arc::new(EvidenceReader::default());
+    let retiring = CancellationToken::new();
+    let drops = Arc::new(AtomicUsize::new(0));
+    let task = tokio::spawn({
+        let cache = cache.clone();
+        let store = store.clone();
+        let retiring = retiring.clone();
+        let guard = Guard(drops.clone());
+        async move { cache.load(store, key("retiring", 2), retiring, guard).await }
+    });
+    store.entered(1).await;
+    retiring.cancel();
+    assert_eq!(
+        drops.load(Ordering::SeqCst),
+        0,
+        "dispatched Store work still owns the read"
+    );
+    store.gate.cancel();
+    assert!(matches!(
+        task.await.unwrap(),
+        Err(SessionError::ShuttingDown)
+    ));
+    assert_eq!(
+        store.calls.load(Ordering::SeqCst),
+        1,
+        "no follow-up original read"
+    );
+    assert_eq!(drops.load(Ordering::SeqCst), 1);
+    assert!(cache.state.lock().unwrap().entries.is_empty());
+    assert_eq!(cache.budget.used(), 0);
+    cache.stop().await.unwrap();
+}
+
+#[tokio::test]
 async fn cold_loads_are_bounded_errors_retry_and_idle_entries_are_evicted() {
     let store = Store::new("source".into(), true);
     let cache = Arc::new(EvidenceReader::default());
@@ -416,12 +520,23 @@ async fn cold_loads_are_bounded_errors_retry_and_idle_entries_are_evicted() {
         callers.push(tokio::spawn({
             let cache = cache.clone();
             let store = store.clone();
-            async move { cache.load(store, key(&format!("session-{i}"), 1), ()).await }
+            async move {
+                cache
+                    .load(
+                        store,
+                        key(&format!("session-{i}"), 1),
+                        CancellationToken::new(),
+                        (),
+                    )
+                    .await
+            }
         }));
     }
     store.entered(4).await;
     assert!(matches!(
-        cache.load(store.clone(), key("fifth", 1), ()).await,
+        cache
+            .load(store.clone(), key("fifth", 1), CancellationToken::new(), ())
+            .await,
         Err(SessionError::Capacity)
     ));
     assert_eq!(store.calls.load(Ordering::SeqCst), 4);
@@ -433,14 +548,24 @@ async fn cold_loads_are_bounded_errors_retry_and_idle_entries_are_evicted() {
     store.fail.store(true, Ordering::SeqCst);
     assert!(
         cache
-            .load(store.clone(), key("retry", 1), ())
+            .load(store.clone(), key("retry", 1), CancellationToken::new(), ())
             .await
             .is_err()
     );
-    assert!(cache.load(store.clone(), key("retry", 1), ()).await.is_ok());
+    assert!(
+        cache
+            .load(store.clone(), key("retry", 1), CancellationToken::new(), ())
+            .await
+            .is_ok()
+    );
     for i in 0..65 {
         cache
-            .load(store.clone(), key(&format!("idle-{i}"), 1), ())
+            .load(
+                store.clone(),
+                key(&format!("idle-{i}"), 1),
+                CancellationToken::new(),
+                (),
+            )
             .await
             .unwrap();
     }
@@ -466,18 +591,28 @@ async fn byte_capacity_is_reclaimed_only_from_idle_selected_sources() {
     for i in 0..4 {
         pins.push(
             cache
-                .load(store.clone(), key(&format!("pinned-{i}"), 1), ())
+                .load(
+                    store.clone(),
+                    key(&format!("pinned-{i}"), 1),
+                    CancellationToken::new(),
+                    (),
+                )
                 .await
                 .unwrap(),
         );
     }
     assert!(matches!(
-        cache.load(store.clone(), key("next", 1), ()).await,
+        cache
+            .load(store.clone(), key("next", 1), CancellationToken::new(), ())
+            .await,
         Err(SessionError::Capacity)
     ));
     assert_eq!(store.calls.load(Ordering::SeqCst), 4);
     drop(pins.remove(0));
-    cache.load(store.clone(), key("next", 1), ()).await.unwrap();
+    cache
+        .load(store.clone(), key("next", 1), CancellationToken::new(), ())
+        .await
+        .unwrap();
     assert_eq!(store.calls.load(Ordering::SeqCst), 5);
     assert!(
         !cache
@@ -594,7 +729,17 @@ impl SessionStore for Store {
     ) -> Result<StoreSessionPage> {
         unreachable!()
     }
-    async fn put_cas(&self, bytes: Arc<[u8]>) -> Result<CasObjectRef> {
+    async fn retain_cas(
+        &self,
+        object: &CasObjectRef,
+    ) -> rsi_agent_store_protocol::Result<rsi_agent_store_protocol::PreparedCasObject> {
+        let _ = object;
+        Err(StoreError::Unsupported("CAS".into()))
+    }
+    async fn put_cas(
+        &self,
+        bytes: Arc<[u8]>,
+    ) -> Result<rsi_agent_store_protocol::PreparedCasObject> {
         unreachable!()
     }
     async fn read_cas(

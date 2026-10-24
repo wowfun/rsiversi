@@ -13,6 +13,7 @@ impl LocalSessionHandle {
     }
 
     async fn capture_projection(&self) -> Result<ProjectionSnapshot> {
+        self.read_until_retired(async {
         let reservation = self.projection_retention.reserve_capture()?;
         let cancellation = self.projection_stopped.child_token();
         let _guard = cancellation.clone().drop_guard();
@@ -21,8 +22,7 @@ impl LocalSessionHandle {
             biased;
             () = cancellation.cancelled() => Err(SessionError::ShuttingDown),
             result = deadline.timeout(async {
-                let _activity = self.begin_activity()?;
-                self.reconcile_fresh_read().await?;
+                        self.reconcile_fresh_read().await?;
                 let captured = {
                     let state = self.state.lock().await;
                     match &*state {
@@ -46,6 +46,8 @@ impl LocalSessionHandle {
                 reservation.retain(snapshot)
             }) => result.map_err(|_| SessionError::Backend("Session projection capture deadline elapsed".into()))?,
         }
+
+        }).await
     }
 
     pub(super) async fn projection_stream(&self) -> Result<ProjectionStream> {

@@ -153,6 +153,7 @@ impl PluginFactory for TodoFactory {
             DomainIdentity::new(DOMAIN, 1).map_err(activation)?,
             &TodoList::default(),
             TodoList::validate,
+            rsi_agent_composition_protocol::DomainReferencePolicy::None,
         )
         .map_err(activation)?
         .with_fork_policy(DomainForkPolicy::ResetToInitial);

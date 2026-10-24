@@ -233,8 +233,13 @@ async fn failed_switch_preserves_the_exact_prior_draft_and_success_moves_one_pin
 async fn freezing_and_failed_switch_preserve_mutated_initial_state_but_success_resets_defaults() {
     use rsi_agent_composition_protocol::{DomainCatalog, DomainDefinition};
     use rsi_agent_session_protocol::{DomainIdentity, DomainRevision};
-    let definition =
-        DomainDefinition::new(DomainIdentity::new("plan", 1).unwrap(), &false, |_| Ok(())).unwrap();
+    let definition = DomainDefinition::new(
+        DomainIdentity::new("plan", 1).unwrap(),
+        &false,
+        |_| Ok(()),
+        rsi_agent_composition_protocol::DomainReferencePolicy::None,
+    )
+    .unwrap();
     let domains = DomainCatalog::new([definition.registration()]).unwrap();
     let handle = domains.bind(&definition).unwrap();
     let composition = Arc::new(FakeComposition {

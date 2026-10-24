@@ -75,7 +75,7 @@ impl ProgramRun for LiveRun {
                 let _admission = admission;
                 let _execution = execution;
                 let _source = source;
-                kernel
+                let _publication = kernel
                     .inner
                     .store
                     .put_cas(script)
@@ -193,14 +193,18 @@ impl ProgramRun for LiveRun {
         self.kernel
             .owned_commit(async move {
                 let _admission = admission;
-                if let Some(bytes) = bytes {
-                    kernel
-                        .inner
-                        .store
-                        .put_cas(bytes)
-                        .await
-                        .map_err(turn_store_error)?;
-                }
+                let _publication = if let Some(bytes) = bytes {
+                    Some(
+                        kernel
+                            .inner
+                            .store
+                            .put_cas(bytes)
+                            .await
+                            .map_err(turn_store_error)?,
+                    )
+                } else {
+                    None
+                };
                 kernel.commit_program_append(append).await?;
                 kernel.inner.execution_messages.publish(notice_execution);
                 cancellation.cancel();

@@ -239,6 +239,10 @@ impl LocalSessionService {
     }
 }
 impl LocalSessionHandle {
+    // The worker owns the stream and lifecycle activity until its actual exit.
+    // A one-slot demand channel permits one poll per request; the oneshot reply
+    // transfers only an item. Dropping the consumer cancels demand, not ownership.
+    // Every worker break drops the stream and activity together, including errors.
     pub(super) fn guard_stream<T: Send + 'static>(
         &self,
         stream: impl futures_util::Stream<Item = Result<T>> + Send + 'static,
@@ -257,18 +261,70 @@ impl LocalSessionHandle {
             rsi_api_protocol::CallOrigin::Local => tokio_util::sync::CancellationToken::new(),
             rsi_api_protocol::CallOrigin::Device(device) => device.revoked.clone(),
         };
-        Box::pin(async_stream::try_stream! {
+        let activity = match self.lifecycle.read() {
+            Ok(activity) => activity,
+            Err(error) => return Box::pin(futures_util::stream::once(async { Err(error) })),
+        };
+        let retiring = activity.retiring().clone();
+        let stopped = self.projection_stopped.clone();
+        let detached = tokio_util::sync::CancellationToken::new();
+        let dropped = detached.clone().drop_guard();
+        let (demand, mut requests) =
+            tokio::sync::mpsc::channel::<tokio::sync::oneshot::Sender<Option<Result<T>>>>(1);
+        let worker_retiring = retiring.clone();
+        let worker_stopped = stopped.clone();
+        let worker_protected = protected.clone();
+        let worker_revoked = revoked.clone();
+        drop(self.execution.spawn(async move {
+            let _activity = activity;
             let mut stream = Box::pin(stream);
             loop {
+                let request = tokio::select! {
+                    biased;
+                    ()=detached.cancelled()=>break,
+                    ()=worker_retiring.cancelled()=>break,
+                    ()=worker_stopped.cancelled()=>break,
+                    ()=worker_protected.cancelled()=>break,
+                    ()=worker_revoked.cancelled()=>break,
+                    request=requests.recv()=>request,
+                };
+                let Some(reply) = request else {
+                    break;
+                };
                 let item = tokio::select! {
                     biased;
-                    () = protected.cancelled() => Err(SessionError::Api(rsi_api_protocol::ApiError::Unauthorized)),
-                    () = revoked.cancelled() => Err(SessionError::Api(rsi_api_protocol::ApiError::Unauthorized)),
-                    item = stream.next() => Ok(item),
-                }?;
-                let Some(item) = item else { break; };
-                drop(admit_execution(resolver.as_ref(), &origin, &location)?);
-                yield item?;
+                    ()=detached.cancelled()=>break,
+                    ()=worker_retiring.cancelled()=>break,
+                    ()=worker_stopped.cancelled()=>break,
+                    ()=worker_protected.cancelled()=>break,
+                    ()=worker_revoked.cancelled()=>break,
+                    item=stream.next()=>item,
+                };
+                let finished = item.as_ref().is_none_or(Result::is_err);
+                if reply.send(item).is_err() || finished {
+                    break;
+                }
+            }
+        }));
+        Box::pin(async_stream::stream! {
+            let _dropped = dropped;
+            loop {
+                if protected.is_cancelled() || revoked.is_cancelled() {
+                    yield Err(SessionError::Api(rsi_api_protocol::ApiError::Unauthorized)); break;
+                }
+                if retiring.is_cancelled() || stopped.is_cancelled() { yield Err(SessionError::ShuttingDown); break; }
+                if let Err(error)=admit_execution(resolver.as_ref(),&origin,&location) { yield Err(error); break; }
+                let (reply,receive)=tokio::sync::oneshot::channel();
+                if demand.send(reply).await.is_err() { yield Err(SessionError::ShuttingDown); break; }
+                let item=receive.await.ok().flatten();
+                if protected.is_cancelled() || revoked.is_cancelled() {
+                    yield Err(SessionError::Api(rsi_api_protocol::ApiError::Unauthorized)); break;
+                }
+                if retiring.is_cancelled() || stopped.is_cancelled() { yield Err(SessionError::ShuttingDown); break; }
+                let Some(item)=item else { break; };
+                let item=admit_execution(resolver.as_ref(),&origin,&location).and(item);
+                let failed=item.is_err();yield item;
+                if failed { break; }
             }
         })
     }

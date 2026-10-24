@@ -1,5 +1,29 @@
 use super::*;
 
+#[test]
+fn maintenance_text_result_is_json_on_stdout() {
+    let mut renderer = CliRenderState::default();
+    let mut stdout = Vec::new();
+    let mut stderr = Vec::new();
+    let value = serde_json::json!({"operation_id":"purge-test","complete":true});
+    renderer
+        .write(
+            &mut stdout,
+            &mut stderr,
+            OutputMode::Text,
+            &CliEvent::Notice {
+                kind: "session_maintenance".into(),
+                value: value.clone(),
+            },
+        )
+        .unwrap();
+    assert_eq!(
+        serde_json::from_slice::<serde_json::Value>(&stdout).unwrap(),
+        value
+    );
+    assert!(stderr.is_empty());
+}
+
 #[tokio::test]
 async fn resume_workspace_accepts_same_directory_and_rejects_different_directory() {
     let temporary = tempfile::tempdir().unwrap();
@@ -352,6 +376,16 @@ async fn cancelled_terminal_keeps_its_finish_line_under_renderer_backpressure() 
 
 #[derive(Debug, Default)]
 pub(crate) struct UnknownThenAcceptedHandle {
+    pub(crate) approvals: std::sync::Mutex<Vec<rsi_approval_protocol::ApprovalRequest>>,
+    pub(crate) approval_answers: std::sync::atomic::AtomicUsize,
+    pub(crate) approval_failure: std::sync::atomic::AtomicBool,
+    pub(crate) capture: std::sync::Mutex<Option<rsi_agent_session_protocol::FrozenReference>>,
+    pub(crate) capture_gate: std::sync::Mutex<Option<Arc<tokio::sync::Semaphore>>>,
+    pub(crate) captures: std::sync::atomic::AtomicUsize,
+    pub(crate) preview_failure: std::sync::atomic::AtomicBool,
+    pub(crate) release_failure: std::sync::atomic::AtomicBool,
+    pub(crate) released_references:
+        std::sync::Mutex<Vec<rsi_agent_session_protocol::ReferenceSnapshotRef>>,
     pub(crate) queue_requests:
         std::sync::Mutex<Vec<rsi_agent_session_protocol::QueueMutationRequest>>,
     pub(crate) queue_receipt:
@@ -413,6 +447,61 @@ impl UnknownThenAcceptedHandle {
 
 #[async_trait::async_trait]
 impl SessionHandle for UnknownThenAcceptedHandle {
+    async fn capture_reference(
+        &self,
+        _: SessionId,
+    ) -> rsi_session_protocol::Result<rsi_agent_session_protocol::FrozenReference> {
+        let index = self
+            .captures
+            .fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+        let gate = self.capture_gate.lock().unwrap().clone();
+        if let Some(gate) = gate {
+            gate.acquire().await.unwrap().forget();
+        }
+        let mut reference = self
+            .capture
+            .lock()
+            .unwrap()
+            .clone()
+            .ok_or(SessionError::Capacity)?;
+        reference.snapshot.capture_id = format!("capture-{index}");
+        Ok(reference)
+    }
+    async fn preview_reference(
+        &self,
+        reference: rsi_agent_session_protocol::FrozenReference,
+        offset: usize,
+        _: usize,
+    ) -> rsi_session_protocol::Result<rsi_agent_session_protocol::ReferenceTextPage> {
+        if self
+            .preview_failure
+            .load(std::sync::atomic::Ordering::SeqCst)
+        {
+            return Err(SessionError::Capacity);
+        }
+        Ok(rsi_agent_session_protocol::ReferenceTextPage {
+            recorded: None,
+            reference,
+            offset,
+            next_offset: offset,
+            text: String::new(),
+            has_more: false,
+        })
+    }
+
+    async fn release_reference(
+        &self,
+        snapshot: rsi_agent_session_protocol::ReferenceSnapshotRef,
+    ) -> rsi_session_protocol::Result<()> {
+        if self
+            .release_failure
+            .load(std::sync::atomic::Ordering::SeqCst)
+        {
+            return Err(SessionError::Capacity);
+        }
+        self.released_references.lock().unwrap().push(snapshot);
+        Ok(())
+    }
     async fn mutate_queue(
         &self,
         request: rsi_agent_session_protocol::QueueMutationRequest,
@@ -868,7 +957,7 @@ impl SessionHandle for UnknownThenAcceptedHandle {
         if let Some(gate) = &self.observation_gate {
             let _permit = gate.acquire().await.unwrap();
         }
-        Ok(Vec::new())
+        Ok(self.approvals.lock().unwrap().clone())
     }
 
     async fn answer_approval(
@@ -877,7 +966,18 @@ impl SessionHandle for UnknownThenAcceptedHandle {
         _approval_id: &str,
         _decision: rsi_approval_protocol::ApprovalDecision,
     ) -> rsi_session_protocol::Result<bool> {
-        unreachable!("not used")
+        self.approval_answers
+            .fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+        if self
+            .approval_failure
+            .load(std::sync::atomic::Ordering::SeqCst)
+        {
+            return Err(SessionError::Api(
+                rsi_api_protocol::ApiError::OutcomeUnknown,
+            ));
+        }
+        self.approvals.lock().unwrap().clear();
+        Ok(true)
     }
 }
 
@@ -1668,4 +1768,29 @@ async fn headless_observations_start_only_after_claimed_turn_is_admitted() {
         1
     );
     assert!(sink.observations.lock().unwrap().is_none());
+}
+
+#[test]
+fn maintenance_commands_are_bounded_and_exclusive_from_session_work() {
+    let parse =
+        |values: &[&str]| SessionCommand::parse(values.iter().map(OsString::from).collect());
+    assert!(matches!(
+        parse(&["--cas-gc-preview", "256"]).unwrap().maintenance,
+        Some(MaintenanceCommand::CasPreview(256))
+    ));
+    assert!(parse(&["--cas-gc-preview", "0"]).is_err());
+    assert!(parse(&["--cas-gc-preview", "257"]).is_err());
+    assert!(parse(&["--purge-status", "operation", "--list"]).is_err());
+    assert!(parse(&["--purge-status", "operation", "--cas-gc-preview", "1"]).is_err());
+    assert!(parse(&["--purge-status", "operation", "hello"]).is_err());
+    let request=serde_json::json!({"operation_id":"purge","targets":[{"session_id":"session","header_sha256":"a".repeat(64),"fact_seq":2,"control_seq":1}]}).to_string();
+    assert!(matches!(
+        parse(&["--purge-preview", &request]).unwrap().maintenance,
+        Some(MaintenanceCommand::Preview(_))
+    ));
+    let gc=serde_json::json!({"operation_id":"gc","target":{"object":{"sha256":"b".repeat(64),"byte_len":8},"generation":1}}).to_string();
+    assert!(matches!(
+        parse(&["--cas-gc", &gc]).unwrap().maintenance,
+        Some(MaintenanceCommand::CasCollect(_))
+    ));
 }

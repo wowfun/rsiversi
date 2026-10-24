@@ -28,12 +28,13 @@ impl Default for FileOwners {
     }
 }
 impl FileOwners {
-    fn publish(&self, mut opened: OpenedFile, entry: Arc<Entry>) -> Result<OpenedFile> {
+    fn publish(self: &Arc<Self>, mut opened: OpenedFile, entry: Arc<Entry>) -> Result<OpenedFile> {
         let mut entries = self
             .entries
             .lock()
             .unwrap_or_else(std::sync::PoisonError::into_inner);
-        if self.capacity.is_closed() || entry.expires <= Instant::now() {
+        if self.capacity.is_closed() || entry.expires <= Instant::now() || entry.read.is_retiring()
+        {
             return Err(FilesError::Cancelled);
         }
         for _ in 0..8 {
@@ -43,7 +44,33 @@ impl FileOwners {
                 .expect("128-bit lowercase hexadecimal token");
             if !entries.contains_key(&token) {
                 opened.token = token;
+                let marker = Arc::downgrade(&entry.marker);
+                let released = entry.released.clone();
+                let owners = Arc::downgrade(self);
+                let token = opened.token.clone();
+                let retiring = entry.read.retiring().clone();
+                let expiry = tokio::time::Instant::from_std(entry.expires);
                 entries.insert(opened.token.clone(), entry);
+                tokio::spawn(async move {
+                    tokio::select! { () = released.cancelled() => return, () = retiring.cancelled() => {}, () = tokio::time::sleep_until(expiry) => {} }
+                    if let (Some(owner), Some(marker)) = (owners.upgrade(), marker.upgrade()) {
+                        let removed = {
+                            let mut entries = owner
+                                .entries
+                                .lock()
+                                .unwrap_or_else(std::sync::PoisonError::into_inner);
+                            if entries
+                                .get(&token)
+                                .is_some_and(|entry| Arc::ptr_eq(&entry.marker, &marker))
+                            {
+                                entries.remove(&token)
+                            } else {
+                                None
+                            }
+                        };
+                        drop(removed);
+                    }
+                });
                 return Ok(opened);
             }
         }
@@ -116,6 +143,9 @@ fn principal(origin: &CallOrigin) -> Option<DeviceId> {
 }
 #[derive(Debug)]
 struct Entry {
+    marker: Arc<()>,
+    released: CancellationToken,
+    read: Arc<rsi_session_protocol::SessionReadLease>,
     resource: ExecutionFiles,
     provider_token: FileToken,
     target: SessionTarget,
@@ -123,8 +153,14 @@ struct Entry {
     expires: Instant,
     _capacity: OwnedSemaphorePermit,
 }
+impl Drop for Entry {
+    fn drop(&mut self) {
+        self.released.cancel();
+    }
+}
 #[derive(Debug)]
 pub(super) struct FilesView {
+    read: Arc<rsi_session_protocol::SessionReadLease>,
     owners: Arc<FileOwners>,
     lease: ExecutionLease,
     target: SessionTarget,
@@ -145,8 +181,10 @@ impl FilesView {
         lease: ExecutionLease,
         target: SessionTarget,
         origin: &CallOrigin,
+        read: Arc<rsi_session_protocol::SessionReadLease>,
     ) -> Self {
         Self {
+            read,
             owners,
             lease,
             target,
@@ -165,6 +203,9 @@ impl FilesView {
         Ok(entry.clone())
     }
     fn check(&self, entry: &Entry) -> Result<()> {
+        if self.read.is_retiring() || entry.read.is_retiring() {
+            return Err(FilesError::Cancelled);
+        }
         if entry.target != self.target || entry.principal != self.principal {
             return Err(FilesError::Binding);
         }
@@ -228,6 +269,7 @@ impl FilesView {
         let target = self.target.clone();
         let principal = self.principal.clone();
         let expires = Instant::now() + FILE_TOKEN_LIFETIME;
+        let read = self.read.clone();
         // The reply owns the scope and capacity even if the waiter disappears
         // before or after completion. No unconsumed token escapes publication.
         let (reply, result) = oneshot::channel();
@@ -235,6 +277,9 @@ impl FilesView {
             let opened = files.open(binding, path, kind, cancellation).await;
             let _ = reply.send(opened.map(|opened| {
                 let entry = Arc::new(Entry {
+                    marker: Arc::new(()),
+                    released: CancellationToken::new(),
+                    read,
                     provider_token: opened.token.clone(),
                     resource,
                     target,
@@ -258,16 +303,24 @@ impl FilesView {
     ) -> Result<FilePage> {
         let entry = self.entry(&token)?;
         let files = self.view(&entry)?;
-        let result = files
-            .read(
-                binding.clone(),
-                entry.provider_token.clone(),
-                offset,
-                maximum,
-                cancellation,
-            )
-            .await;
-        if matches!(result, Err(FilesError::Unavailable)) {
+        let retained = entry.clone();
+        let selected_binding = binding.clone();
+        let result = tokio::spawn(async move {
+            files
+                .read(
+                    selected_binding,
+                    retained.provider_token.clone(),
+                    offset,
+                    maximum,
+                    cancellation,
+                )
+                .await
+        })
+        .await
+        .unwrap_or(Err(FilesError::OutcomeUnknown));
+        if matches!(result, Err(FilesError::Unavailable))
+            && let Ok(files) = self.view(&entry)
+        {
             self.check_unavailable(files.as_ref(), &binding, &token, &entry);
         }
         result
@@ -282,16 +335,24 @@ impl FilesView {
     ) -> Result<DirectoryPage> {
         let entry = self.entry(&token)?;
         let files = self.view(&entry)?;
-        let result = files
-            .list(
-                binding.clone(),
-                entry.provider_token.clone(),
-                offset,
-                maximum,
-                cancellation,
-            )
-            .await;
-        if matches!(result, Err(FilesError::Unavailable)) {
+        let retained = entry.clone();
+        let selected_binding = binding.clone();
+        let result = tokio::spawn(async move {
+            files
+                .list(
+                    selected_binding,
+                    retained.provider_token.clone(),
+                    offset,
+                    maximum,
+                    cancellation,
+                )
+                .await
+        })
+        .await
+        .unwrap_or(Err(FilesError::OutcomeUnknown));
+        if matches!(result, Err(FilesError::Unavailable))
+            && let Ok(files) = self.view(&entry)
+        {
             self.check_unavailable(files.as_ref(), &binding, &token, &entry);
         }
         result

@@ -63,6 +63,19 @@ impl Drop for ScopeLease<'_> {
     }
 }
 impl Terminals {
+    pub(super) fn busy(&self, session: &SessionId) -> Result<bool> {
+        let state = self
+            .state
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        if state.stopped {
+            return Err(SessionError::ShuttingDown);
+        }
+        Ok(state.scopes.get(session).is_some_and(|entry| {
+            entry.operations.load(Ordering::Acquire) != 0 || !entry.scope.is_empty()
+        }))
+    }
+
     pub(super) fn new(
         provider: Arc<dyn PtyProvider>,
         sandbox: Arc<dyn rsi_sandbox::Sandbox>,
@@ -440,6 +453,10 @@ mod tests {
         assert_eq!(first.calls.load(Ordering::Acquire), 1);
         assert_eq!(second.calls.load(Ordering::Acquire), 1);
         assert!(registry.state.lock().unwrap().scopes.is_empty());
+        assert!(matches!(
+            registry.busy(&SessionId::new("unrelated").unwrap()),
+            Err(SessionError::ShuttingDown)
+        ));
     }
 
     #[tokio::test]

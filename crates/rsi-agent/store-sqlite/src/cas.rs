@@ -457,9 +457,17 @@ pub(super) fn decode_json<T: serde::de::DeserializeOwned>(label: &str, json: &st
 
 pub(super) fn decode_projected_json<T: serde::de::DeserializeOwned>(
     label: &str,
-    (encoded_len, json): (i64, Option<String>),
+    projection: (i64, Option<String>),
     maximum_bytes: usize,
 ) -> Result<T> {
+    decode_projected_json_with_source(label, projection, maximum_bytes).map(|(value, _)| value)
+}
+
+pub(super) fn decode_projected_json_with_source<T: serde::de::DeserializeOwned>(
+    label: &str,
+    (encoded_len, json): (i64, Option<String>),
+    maximum_bytes: usize,
+) -> Result<(T, String)> {
     super::cold_validation::check()?;
     #[cfg(feature = "test-support")]
     let _decode = super::test_support::DecodeProbe::start();
@@ -480,7 +488,8 @@ pub(super) fn decode_projected_json<T: serde::de::DeserializeOwned>(
             "{label} byte length disagrees with its SQLite projection"
         )));
     }
-    decode_json(label, &json)
+    let value = decode_json(label, &json)?;
+    Ok((value, json))
 }
 
 pub(super) fn read_indexed_fact(
@@ -683,6 +692,32 @@ fn cas_read_error(digest: &str, error: std::io::Error) -> StoreError {
     } else {
         io_error(error)
     }
+}
+
+#[cfg(any(unix, windows))]
+pub(super) fn remove_cas(cas_dir: &Path, object: &CasObjectRef) -> Result<()> {
+    object.validate()?;
+    let namespace = PublicationDirectory::new(
+        rsi_files_native_fs::open_absolute_directory_no_follow(cas_dir).map_err(io_error)?,
+    )
+    .map_err(io_error)?;
+    let name = Path::new(&object.sha256);
+    match namespace.open(name) {
+        Ok((file, _metadata)) => {
+            // The receipt and exclusive hash lease authorize disposal. Opening
+            // through the retained namespace validates the regular-file entry;
+            // unreferenced corrupt bytes must not wedge recovery.
+            drop(file);
+            namespace.remove(name).map_err(io_error)?;
+        }
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => {}
+        Err(error) => return Err(io_error(error)),
+    }
+    namespace.sync().map_err(io_error)
+}
+#[cfg(not(any(unix, windows)))]
+pub(super) fn remove_cas(_: &Path, _: &CasObjectRef) -> Result<()> {
+    Err(StoreError::Unsupported("CAS namespace deletion".into()))
 }
 
 #[cfg(test)]

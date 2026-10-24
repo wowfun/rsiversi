@@ -145,6 +145,9 @@ impl SessionReads for Reads {
             self.header.clone(),
             self.retiring.clone(),
             Activity(self.active.clone()),
+            Arc::new(rsi_session_protocol::SessionLifecycle::default())
+                .attach()?
+                .read()?,
         ))
     }
 }
@@ -354,9 +357,25 @@ impl Harness {
             .timeout(std::time::Duration::from_secs(5))
             .build()
             .unwrap()
-            .post(format!("{}/api/v1/files/{operation}/2", self.origin))
+            .post(format!(
+                "{}{}",
+                self.origin,
+                match operation {
+                    "open" => rsi_session_files::FilesOperation::Open,
+                    "read" => rsi_session_files::FilesOperation::Read,
+                    "list" => rsi_session_files::FilesOperation::List,
+                    "release" => rsi_session_files::FilesOperation::Release,
+                    _ => panic!("unknown fixture operation"),
+                }
+                .spec()
+                .call()
+                .to_path()
+            ))
             .header("content-type", "application/json")
-            .header("x-rsi-wire-version", "1")
+            .header(
+                "x-rsi-wire-version",
+                rsi_api_protocol::API_WIRE_VERSION.to_string(),
+            )
             .header("x-rsi-host-epoch", self.epoch.as_str())
             .body(serde_json::to_vec(&body).unwrap());
         if authenticated {
@@ -454,7 +473,7 @@ async fn real_http_requires_authentication_before_session_binding_and_reads_sele
 }
 
 #[tokio::test]
-async fn credential_revocation_cancels_an_in_flight_real_page_and_releases_session_activity() {
+async fn credential_revocation_cancels_the_page_while_its_open_token_retains_a_lease() {
     let _serial = SERIAL.lock().await;
     let harness = Harness::start().await;
     let file = harness
@@ -471,7 +490,8 @@ async fn credential_revocation_cancels_an_in_flight_real_page_and_releases_sessi
     let target = harness.target();
     let read = tokio::spawn(async move { client.read(target, file, 0, 10).await });
     harness.reader.entered.acquire().await.unwrap().forget();
-    assert_eq!(harness.reads.active.load(Ordering::SeqCst), 1);
+    // The open token and this request independently retain their Session reads.
+    assert_eq!(harness.reads.active.load(Ordering::SeqCst), 2);
     let cancellation = harness.reader.cancellation.lock().unwrap().clone().unwrap();
     harness.auth.0.cancel();
     assert_eq!(

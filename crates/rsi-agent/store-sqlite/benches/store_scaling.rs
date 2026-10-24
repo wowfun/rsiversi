@@ -66,6 +66,9 @@ async fn run() {
         }
         if std::env::var_os("RSI_STORE_BENCH_SKIP_MIXED").is_none() {
             benchmark_mixed_lanes().await;
+            if std::env::var_os("RSI_STORE_BENCH_MIXED_ONLY").is_some() {
+                return;
+            }
         }
     }
     for sessions in [128, 256, 512] {
@@ -696,9 +699,10 @@ async fn benchmark_cas_publication() {
 async fn benchmark_mixed_lanes() {
     let root = tempfile::tempdir().unwrap();
     let store = SqliteStore::open(root.path()).unwrap();
-    // Two 31 MiB bodies approach the 64 MiB page budget while staying below
-    // the independent 36 MiB per-Fact boundary. The exact encoded size is reported.
-    append_session(&store, 0, 4, 31 * 1024 * 1024, true).await;
+    // Two 22 MiB text bodies approach the 64 MiB page budget after evidence
+    // encoding while respecting the independent model-output bound.
+    // Report encoded size rather than assuming text length equals stored length.
+    append_session(&store, 0, 4, 22 * 1024 * 1024, true).await;
     append_session(&store, 1, 2, 256, false).await;
     let large = SessionId::new("session-000").unwrap();
     let small = SessionId::new("session-001").unwrap();

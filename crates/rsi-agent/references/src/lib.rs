@@ -5,6 +5,7 @@
 
 mod capture_context;
 mod export;
+mod pending;
 mod selected;
 pub use capture_context::CaptureContext;
 pub use selected::{ObservedReferenceText, ReferenceText, reference_texts};
@@ -20,7 +21,7 @@ use rsi_agent_session_protocol::{
     ReferenceSnapshotEnvelope, ReferenceSnapshotRef, ReferenceSource, ReferenceSuffix,
     ReferenceTextPage, SessionFact, SessionFactBody, SessionHeader, TurnId,
 };
-use rsi_agent_store_protocol::{CasObjectRef, SessionStore, StoreError};
+use rsi_agent_store_protocol::{CasObjectRef, PreparedCasObject, SessionStore, StoreError};
 use sha2::{Digest as _, Sha256};
 use std::{
     collections::VecDeque,
@@ -71,14 +72,17 @@ struct VerifiedEnvelopes(
 );
 impl VerifiedEnvelopes {
     fn get(&mut self, snapshot: &ReferenceSnapshotRef) -> Option<Arc<ReferenceSnapshotEnvelope>> {
-        let index = self.0.iter().position(|(key, _)| key == snapshot)?;
+        let index = self.0.iter().position(|(key, _)| {
+            key.sha256 == snapshot.sha256 && key.byte_len == snapshot.byte_len
+        })?;
         let entry = self.0.remove(index)?;
         let envelope = entry.1.clone();
         self.0.push_back(entry);
         Some(envelope)
     }
     fn insert(&mut self, snapshot: ReferenceSnapshotRef, envelope: Arc<ReferenceSnapshotEnvelope>) {
-        self.0.retain(|(key, _)| key != &snapshot);
+        self.0
+            .retain(|(key, _)| key.sha256 != snapshot.sha256 || key.byte_len != snapshot.byte_len);
         if self.0.len() == 2 {
             self.0.pop_front();
         }
@@ -90,6 +94,7 @@ impl VerifiedEnvelopes {
 #[derive(Debug)]
 pub struct References {
     store: Arc<dyn SessionStore>,
+    pending: Arc<pending::Pending>,
     cache: Arc<Mutex<VerifiedEnvelopes>>,
     execution: rsi_meta::Execution,
     slots: Arc<Semaphore>,
@@ -102,6 +107,7 @@ impl References {
     pub fn new(store: Arc<dyn SessionStore>, execution: rsi_meta::Execution) -> Self {
         Self {
             store,
+            pending: Arc::default(),
             cache: Arc::default(),
             execution,
             slots: Arc::new(Semaphore::new(2)),
@@ -122,6 +128,7 @@ impl References {
             self.tasks.close();
         }
         self.tasks.wait().await;
+        self.pending.clear();
         self.cache
             .lock()
             .unwrap_or_else(std::sync::PoisonError::into_inner)
@@ -179,55 +186,78 @@ impl References {
         };
         let binding = binding.clone();
         let source = binding.session_id.clone();
-        self.run(cancellation, move |store, stop, _cache| async move {
-            let source_header = store.header(&source).await?;
-            check(&stop)?;
-            context.check()?;
-            if source_header.fingerprint().map_err(invalid)? != binding.header_sha256
-                || source_header.coordinates() != context.coordinates()
-                || source_header.protection().is_some()
-            {
-                return Err(invalid("suffix source Header or workspace mismatch"));
-            }
-            let _validation = store.prepare_session(&source).await?;
-            check(&stop)?;
-            context.check()?;
-            let suffix = store
-                .read_fact_suffix(
-                    &source,
-                    MAXIMUM_REFERENCE_SCAN_FACTS,
-                    MAXIMUM_REFERENCE_SCAN_BYTES,
-                )
-                .await?;
-            check(&stop)?;
-            context.check()?;
-            let envelope = export::capture(&source_header, context.target(), suffix)?;
-            let bytes: Arc<[u8]> = serde_json::to_vec(&envelope).map_err(invalid)?.into();
-            check(&stop)?;
-            context.check()?;
-            let object = store.put_cas(bytes).await?;
-            check(&stop)?;
-            context.check()?;
-            envelope.into_frozen(ReferenceSnapshotRef {
-                sha256: object.sha256,
-                byte_len: object.byte_len,
+        let pending = self.pending.clone();
+        let reservation = pending.reserve(context.target().session_id())?;
+        let (reference, object, reservation) = self
+            .run(cancellation, move |store, stop, _cache| async move {
+                let source_header = store.header(&source).await?;
+                check(&stop)?;
+                context.check()?;
+                if source_header.fingerprint().map_err(invalid)? != binding.header_sha256
+                    || source_header.coordinates() != context.coordinates()
+                    || source_header.protection().is_some()
+                {
+                    return Err(invalid("suffix source Header or workspace mismatch"));
+                }
+                let _validation = store.prepare_session(&source).await?;
+                check(&stop)?;
+                context.check()?;
+                let suffix = store
+                    .read_fact_suffix(
+                        &source,
+                        MAXIMUM_REFERENCE_SCAN_FACTS,
+                        MAXIMUM_REFERENCE_SCAN_BYTES,
+                    )
+                    .await?;
+                check(&stop)?;
+                context.check()?;
+                let envelope = export::capture(&source_header, context.target(), suffix)?;
+                let bytes: Arc<[u8]> = serde_json::to_vec(&envelope).map_err(invalid)?.into();
+                check(&stop)?;
+                context.check()?;
+                let object = store.put_cas(bytes).await?;
+                check(&stop)?;
+                context.check()?;
+                let reference = envelope.into_frozen(ReferenceSnapshotRef {
+                    capture_id: reservation.id.clone(),
+                    sha256: object.sha256.clone(),
+                    byte_len: object.byte_len,
+                })?;
+                Ok((reference, object, reservation))
             })
-        })
-        .await
+            .await?;
+        pending.publish(
+            reference.metadata.target.session_id.clone(),
+            object,
+            reservation,
+        )?;
+        Ok(reference)
     }
-    /// Verifies a descriptor's exact CAS payload and original-target binding.
+    /// Releases one unsubmitted capture; a recorded canonical reference remains a GC root.
+    pub fn release_pending(
+        &self,
+        target: &rsi_agent_session_protocol::SessionId,
+        snapshot: &ReferenceSnapshotRef,
+    ) {
+        self.pending.release(target, &snapshot.capture_id);
+    }
+    /// Releases all captures when the actual Session/draft owner ends.
+    pub fn release_session(&self, target: &rsi_agent_session_protocol::SessionId) {
+        self.pending.release_session(target);
+    }
+    /// Verifies the descriptor and returns ownership retained through submission.
     pub async fn verify(
         &self,
         target: SessionHeader,
         reference: FrozenReference,
         cancellation: CancellationToken,
-    ) -> Result<()> {
+    ) -> Result<PreparedCasObject> {
         reference.validate().map_err(invalid)?;
         target.validate().map_err(invalid)?;
         self.run(cancellation, move |store, stop, cache| async move {
             load(&*store, &target, &reference, &stop, &cache)
                 .await
-                .map(|_| ())
+                .map(|(_, publication)| publication)
         })
         .await
     }
@@ -245,7 +275,8 @@ impl References {
         reference.validate().map_err(invalid)?;
         target.validate().map_err(invalid)?;
         self.run(cancellation, move |store, stop, cache| async move {
-            let envelope = load(&*store, &target, &reference, &stop, &cache).await?;
+            let (envelope, _publication) =
+                load(&*store, &target, &reference, &stop, &cache).await?;
             page(reference, &envelope.text, offset, maximum)
         })
         .await
@@ -302,7 +333,8 @@ impl References {
                 reference.clone()
             };
             drop(facts);
-            let envelope = load(&*store, &recorded_header, &reference, &stop, &cache).await?;
+            let (envelope, _publication) =
+                load(&*store, &recorded_header, &reference, &stop, &cache).await?;
             let mut page = page(reference, &envelope.text, request.offset, request.maximum)?;
             page.recorded = Some(request);
             page.validate().map_err(invalid)?;
@@ -317,13 +349,20 @@ async fn load(
     reference: &FrozenReference,
     stop: &CancellationToken,
     cache: &Mutex<VerifiedEnvelopes>,
-) -> Result<Arc<ReferenceSnapshotEnvelope>> {
+) -> Result<(Arc<ReferenceSnapshotEnvelope>, PreparedCasObject)> {
     reference.validate().map_err(invalid)?;
     if &reference.metadata.target.session_id != target.session_id()
         || reference.metadata.target.header_sha256 != target.fingerprint().map_err(invalid)?
     {
         return Err(invalid("reference belongs to another target Header"));
     }
+    // Cached decoding never replaces current durable object ownership.
+    let publication = store
+        .retain_cas(&CasObjectRef {
+            sha256: reference.snapshot.sha256.clone(),
+            byte_len: reference.snapshot.byte_len,
+        })
+        .await?;
     let cached = cache
         .lock()
         .unwrap_or_else(std::sync::PoisonError::into_inner)
@@ -366,7 +405,7 @@ async fn load(
     if envelope.metadata != reference.metadata || envelope.preview != reference.preview {
         return Err(invalid("reference metadata or preview changed"));
     }
-    Ok(envelope)
+    Ok((envelope, publication))
 }
 fn page(
     reference: FrozenReference,

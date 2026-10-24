@@ -131,6 +131,7 @@ impl Fixture {
             DomainIdentity::new("fixture.toggle", 1).unwrap(),
             &false,
             |_| Ok(()),
+            rsi_agent_composition_protocol::DomainReferencePolicy::None,
         )
         .unwrap();
         let domains = DomainCatalog::new([definition.registration()]).unwrap();

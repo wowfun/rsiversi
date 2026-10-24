@@ -147,7 +147,7 @@ export async function verifyDom(browser, root, report, name) {
         pane.renderResourcePreview({ ...data, resource_revision: "3", resource: null });
         const closed = pane.resourcePreview.hidden && !pane.resourcePreview.children.length;
         const saved = pane.editor;
-        const reference = { snapshot: { sha256: "a".repeat(64), byte_len: 900 }, preview: "Reference", metadata: { source: {kind: "native", binding: {session_id: "source", header_sha256: "b".repeat(64)}}, target: {session_id: "target", header_sha256: "c".repeat(64)}, capture: {kind: "suffix", interval: {through_seq: "1", scanned_after_seq: "0", retained_after_seq: "0", retained_through_seq: "1", fact_prefix_sha256: "d".repeat(64), scanned_bytes: 100, omissions: []}}, text_bytes: 9 } };
+        const reference = { snapshot: { capture_id: "fixture-capture", sha256: "a".repeat(64), byte_len: 900 }, preview: "Reference", metadata: { source: {kind: "native", binding: {session_id: "source", header_sha256: "b".repeat(64)}}, target: {session_id: "target", header_sha256: "c".repeat(64)}, capture: {kind: "suffix", interval: {through_seq: "1", scanned_after_seq: "0", retained_after_seq: "0", retained_through_seq: "1", fact_prefix_sha256: "d".repeat(64), scanned_bytes: 100, omissions: []}}, text_bytes: 9 } };
         validateEditor("", [], [reference]);
         pane.editor = { referencesRevision: 1, references: [reference] };
         pane.renderReferences();

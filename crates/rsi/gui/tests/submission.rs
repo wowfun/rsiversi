@@ -107,6 +107,7 @@ struct Backend {
     queue_unknown: std::sync::atomic::AtomicBool,
     queue_conflict: std::sync::atomic::AtomicBool,
     pending_messages: Mutex<Vec<rsi_agent_store_protocol::StorePendingMessage>>,
+    released_references: Mutex<Vec<ReferenceSnapshotRef>>,
     active_turn: Mutex<Option<TurnId>>,
     receipt_sequence: std::sync::atomic::AtomicU64,
     facts: Mutex<Vec<SessionFact>>,
@@ -174,6 +175,13 @@ impl SessionService for Service {
 }
 #[async_trait]
 impl SessionHandle for Backend {
+    async fn release_reference(
+        &self,
+        snapshot: ReferenceSnapshotRef,
+    ) -> rsi_session_protocol::Result<()> {
+        self.released_references.lock().unwrap().push(snapshot);
+        Ok(())
+    }
     async fn export(
         &self,
         options: rsi_session_protocol::export::ExportOptions,

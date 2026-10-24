@@ -40,6 +40,7 @@ async fn fixture_with_store(
         rsi_agent_session_protocol::DomainIdentity::new("fixture.program-policy", 1).unwrap(),
         &false,
         |_| Ok(()),
+        rsi_agent_composition_protocol::DomainReferencePolicy::None,
     )
     .unwrap();
     let catalog =
@@ -272,6 +273,14 @@ async fn workflow_capacity_rejects_overlap_and_ninth_owner_then_reopens_after_te
     assert!(!f.run.cancellation().is_cancelled());
     f.run.detach().await.unwrap();
     end_creator(&f).await;
+    assert!(
+        matches!(
+            f.kernel
+                .prepare_retirement(std::slice::from_ref(f.root.session_id())),
+            Err(TurnError::Capacity)
+        ),
+        "detached Program outlives its completed creator and refuses retirement"
+    );
 
     let mut owners = Vec::new();
     for index in 1..8 {

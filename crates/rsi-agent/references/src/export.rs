@@ -299,6 +299,7 @@ mod tests {
         assert_eq!(bytes, serde_json::to_vec(&envelope.0).unwrap());
         let byte_len = u64::try_from(bytes.len()).unwrap();
         let snapshot = ReferenceSnapshotRef {
+            capture_id: "fixture-capture".into(),
             sha256: "a".repeat(64),
             byte_len,
         };
@@ -307,7 +308,11 @@ mod tests {
         for (sha256, byte_len) in [(String::new(), byte_len), ("a".repeat(64), 0)] {
             assert!(
                 captured()
-                    .into_frozen(ReferenceSnapshotRef { sha256, byte_len })
+                    .into_frozen(ReferenceSnapshotRef {
+                        capture_id: "fixture-capture".into(),
+                        sha256,
+                        byte_len
+                    })
                     .is_err()
             );
         }
@@ -375,6 +380,7 @@ mod tests {
         .unwrap()
         .as_envelope()
         .frozen(ReferenceSnapshotRef {
+            capture_id: "fixture-capture".into(),
             sha256: "b".repeat(64),
             byte_len: 100,
         })
@@ -640,15 +646,16 @@ mod tests {
             let reference = envelope
                 .as_envelope()
                 .frozen(ReferenceSnapshotRef {
-                    sha256: object.sha256,
+                    capture_id: "fixture-capture".into(),
+                    sha256: object.sha256.clone(),
                     byte_len: object.byte_len,
                 })
                 .unwrap();
-            let first = crate::load(&store, &header, &reference, &stop, &cache)
+            let (first, _publication) = crate::load(&store, &header, &reference, &stop, &cache)
                 .await
                 .unwrap();
             for _ in 0..16 {
-                let again = crate::load(&store, &header, &reference, &stop, &cache)
+                let (again, _publication) = crate::load(&store, &header, &reference, &stop, &cache)
                     .await
                     .unwrap();
                 assert!(
@@ -673,7 +680,7 @@ mod tests {
             saved.push((reference, first));
             assert!(cache.lock().unwrap().0.len() <= 2);
         }
-        let first = crate::load(&store, &header, &saved[0].0, &stop, &cache)
+        let (first, _publication) = crate::load(&store, &header, &saved[0].0, &stop, &cache)
             .await
             .unwrap();
         assert!(

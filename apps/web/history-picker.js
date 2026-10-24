@@ -23,39 +23,42 @@ export function openHistoryPicker(pane,view,call,button){
   let busy=false,serial=0,continuation;
   const alive=()=>dialog.open&&pane.referenceDialog===dialog&&pane.generation===generation&&pane.editor===editor;
   const coverage=value=>`Indexed through ${value.indexed_through}; observed through ${value.observed_through}; omitted ${value.omissions}. ${value.has_more?"More indexing needed.":"Caught up at this observation."}`;
+  let pendingReference;
+  const release=reference=>{if(reference)void pane.releaseReference(reference,editor,generation,call).catch(()=>{});};
+  const replaceBody=(...children)=>{release(pendingReference);pendingReference=undefined;body.replaceChildren(...children);};
   const perform=async(request,render)=>{if(busy)return;busy=true;const current=++serial;for(const field of [...controls.querySelectorAll("button"),range,workspace,kind,source,choices,query])field.disabled=true;status.textContent="Reading history owner…";
-    try{const reply=JSON.parse(await call("reference_input",JSON.stringify({pane:pane.index,generation,operation:{kind:"history",request}})));if(alive()&&serial===current)render(reply);}catch(error){if(alive())status.textContent=error.message;}finally{busy=false;if(alive())for(const field of [...controls.querySelectorAll("button"),range,workspace,kind,source,choices,query])field.disabled=false;}
+    try{const reply=JSON.parse(await call("reference_input",JSON.stringify({pane:pane.index,generation,operation:{kind:"history",request}})));if(alive()&&serial===current)render(reply);else if(request.operation==="freeze")release(reply.reference);}catch(error){if(alive())status.textContent=error.message;}finally{busy=false;if(alive())for(const field of [...controls.querySelectorAll("button"),range,workspace,kind,source,choices,query])field.disabled=false;}
   };
   const progress=value=>{continuation=value.continuation;return `Authorized sources ${value.visible_sources}; pending ${value.pending_sources}. ${value.discovery_complete?"Discovery reached the end of this pass.":"Discovery is partial."}${value.metadata_unavailable?" Saved metadata is unavailable; refresh discovery to retry.":""}${value.capacity_limited?" Capacity reached; some saved history is omitted.":""}`;};
   const search=(after,selected=queryScope(),text=query.value)=>{perform({operation:"query",scope:selected,query:text,after:after??null},reply=>{
-    body.replaceChildren();if(reply.kind==="stale"){status.textContent=reply.reason;return;}
+    replaceBody();if(reply.kind==="stale"){status.textContent=reply.reason;return;}
     status.textContent=progress(reply.progress);
     for(const result of reply.matches){const {hit}=result,item=node("article","","inline-card");item.append(node("p",`${result.label} · ${result.scope.conversation.id} · ${hit.original.record.kind} · record ${hit.original.record.sequence}`,"hint"),node("pre",hit.preview),button("Open original",()=>read(result.scope,hit,0,result.reference_allowed),"quiet"));body.append(item);}
     if(!reply.matches.length)body.append(node("p","No matches in the indexed portion."));
     if(reply.next)body.append(button("More matches",()=>search(reply.next,selected,text),"quiet"));
   });};
   const read=(exactScope,hit,offset,referenceAllowed=true)=>perform({operation:"read",scope:exactScope,hit,offset},reply=>{
-    status.textContent=`Verified original · record ${hit.original.record.sequence} · bytes ${reply.offset}–${reply.next_offset} of ${hit.original.end}`;body.replaceChildren();
+    status.textContent=`Verified original · record ${hit.original.record.sequence} · bytes ${reply.offset}–${reply.next_offset} of ${hit.original.end}`;replaceBody();
     const original=node("textarea");original.readOnly=true;original.value=reply.text;original.rows=12;original.setAttribute("aria-label","Verified original text");
     const selected=node("p","Select text in the original, then freeze the fragment.","hint");
     const freeze=button("Freeze selected fragment",()=>{
       const start=reply.offset+new TextEncoder().encode(original.value.slice(0,original.selectionStart)).length,end=reply.offset+new TextEncoder().encode(original.value.slice(0,original.selectionEnd)).length;
       if(start===end){status.textContent="Select a nonempty fragment first.";return;}
       perform({operation:"freeze",scope:exactScope,hit,target:context.session,start,end},result=>{
-        status.textContent="Frozen. Review these exact bytes before adding to your draft.";body.replaceChildren(node("pre",result.reference.preview),button("Add selected reference to draft",()=>{if(!alive())return;pane.edit(editor.text,editor.images,[...editor.references,result.reference]);dialog.close();},"primary"));
+        status.textContent="Frozen. Review these exact bytes before adding to your draft.";replaceBody(node("pre",result.reference.preview),button("Add selected reference to draft",()=>{if(!alive())return;pane.edit(editor.text,editor.images,[...editor.references,result.reference]);dialog.close();},"primary"));pendingReference=result.reference;
       });
     },"primary");body.append(original,selected);if(referenceAllowed)body.append(freeze);else body.append(node("p","Protected history can be read but cannot be frozen.","hint"));
     if(reply.offset>0)body.append(button("Previous original page",()=>read(exactScope,hit,Math.max(0,reply.offset-65536),referenceAllowed),"quiet"));
     if(reply.has_more)body.append(button("Next original page",()=>read(exactScope,hit,reply.next_offset,referenceAllowed),"quiet"));
   });
-  const inspect=(after,selected=queryScope())=>perform({operation:"progress",scope:selected,after:after??null},reply=>{status.textContent=progress(reply.progress);body.replaceChildren();for(const source of reply.sources){const item=node("article","","inline-card");item.append(node("p",`${source.label} · ${source.scope.conversation.id}`),node("p",coverage(source.coverage)+(source.unavailable?" Unavailable in this pass; refresh to retry.":""),"hint"),button("Rebuild this source",()=>perform({operation:"rebuild",scope:source.scope},value=>{status.textContent=coverage(value.coverage);}),"quiet"));body.append(item);}if(reply.next)body.append(button("More source coverage",()=>inspect(reply.next,selected),"quiet"));});
-  const reset=(after)=>perform({operation:"reset",scope:{kind:"workspace",workspace:workspace.value},after:after??null},reply=>{status.textContent="Workspace index reset · "+progress(reply.progress);body.replaceChildren();if(reply.next)body.append(button("Continue workspace reset",()=>reset(reply.next),"quiet"));});
-  controls.append(button("Reset selected workspace index",()=>reset(),"quiet"),button("Continue indexing",()=>perform({operation:"discover",scope:queryScope(),after:continuation??null},reply=>{status.textContent=progress(reply.progress);body.replaceChildren();}),"quiet"),button("Search text",()=>search(),"primary"),button("Inspect coverage",()=>inspect(),"quiet"),button("Refresh discovery",()=>perform({operation:"discover",scope:queryScope(),after:null},reply=>{status.textContent=progress(reply.progress);body.replaceChildren();}),"quiet"));
-  const invalidate=filter=>{serial++;if(filter)continuation=undefined;body.replaceChildren();status.textContent="Search conditions changed. Search again to show current matches.";};
+  const inspect=(after,selected=queryScope())=>perform({operation:"progress",scope:selected,after:after??null},reply=>{status.textContent=progress(reply.progress);replaceBody();for(const source of reply.sources){const item=node("article","","inline-card");item.append(node("p",`${source.label} · ${source.scope.conversation.id}`),node("p",coverage(source.coverage)+(source.unavailable?" Unavailable in this pass; refresh to retry.":""),"hint"),button("Rebuild this source",()=>perform({operation:"rebuild",scope:source.scope},value=>{status.textContent=coverage(value.coverage);}),"quiet"));body.append(item);}if(reply.next)body.append(button("More source coverage",()=>inspect(reply.next,selected),"quiet"));});
+  const reset=(after)=>perform({operation:"reset",scope:{kind:"workspace",workspace:workspace.value},after:after??null},reply=>{status.textContent="Workspace index reset · "+progress(reply.progress);replaceBody();if(reply.next)body.append(button("Continue workspace reset",()=>reset(reply.next),"quiet"));});
+  controls.append(button("Reset selected workspace index",()=>reset(),"quiet"),button("Continue indexing",()=>perform({operation:"discover",scope:queryScope(),after:continuation??null},reply=>{status.textContent=progress(reply.progress);replaceBody();}),"quiet"),button("Search text",()=>search(),"primary"),button("Inspect coverage",()=>inspect(),"quiet"),button("Refresh discovery",()=>perform({operation:"discover",scope:queryScope(),after:null},reply=>{status.textContent=progress(reply.progress);replaceBody();}),"quiet"));
+  const invalidate=filter=>{serial++;if(filter)continuation=undefined;replaceBody();status.textContent="Search conditions changed. Search again to show current matches.";};
   for(const field of [range,workspace,kind,source,choices])field.addEventListener("change",()=>invalidate(true));
   query.addEventListener("input",()=>invalidate(false));
   query.addEventListener("keydown",event=>{if(event.key==="Enter"){event.preventDefault();search();}});
   dialog.append(heading,help,range,workspace,kind,source,choices,query,controls,status,body);
-  dialog.addEventListener("close",()=>{serial++;if(pane.referenceDialog===dialog)pane.referenceDialog=undefined;dialog.remove();if(pane.generation===generation&&pane.editor===editor)pane.input.focus();
+  dialog.addEventListener("close",()=>{serial++;release(pendingReference);if(pane.referenceDialog===dialog)pane.referenceDialog=undefined;dialog.remove();if(pane.generation===generation&&pane.editor===editor)pane.input.focus();
   });document.body.append(dialog);dialog.showModal();query.focus();perform({operation:"discover",scope:queryScope(),after:null},reply=>{status.textContent=progress(reply.progress);});
 }

@@ -51,6 +51,33 @@ pub(super) async fn fixture() -> (Runtime, Arc<Backend>, Arc<rsi_gui::GuiApplica
 }
 
 #[tokio::test]
+async fn reference_cleanup_uses_original_target_after_pane_replacement() {
+    let (runtime, backend, app) = fixture().await;
+    let header = backend.header.lock().unwrap().clone().unwrap();
+    let snapshot = ReferenceSnapshotRef {
+        capture_id: "a".repeat(32),
+        sha256: "b".repeat(64),
+        byte_len: 100,
+    };
+    let mut input = json!({"pane":"main","generation":"stale",
+        "operation":{"kind":"release","target":{"session_id":header.session_id(),
+            "header_sha256":header.fingerprint().unwrap()},"snapshot":snapshot}});
+    app.reference_input(&input.to_string()).await.unwrap();
+    assert_eq!(*backend.released_references.lock().unwrap(), vec![snapshot]);
+    input["operation"]["target"]["header_sha256"] = json!("c".repeat(64));
+    assert!(
+        app.reference_input(&input.to_string())
+            .await
+            .unwrap_err()
+            .contains("Header changed")
+    );
+    input["operation"]["target"]["session_id"] = json!("already-removed");
+    app.reference_input(&input.to_string()).await.unwrap();
+    assert_eq!(backend.released_references.lock().unwrap().len(), 1);
+    assert!(runtime.shutdown().await.is_clean());
+}
+
+#[tokio::test]
 async fn source_details_page_exact_bytes_and_cancel_across_view_and_pane_replacement() {
     let (runtime, backend, app) = fixture().await;
     let initial = view(&app);
@@ -253,7 +280,13 @@ async fn simultaneous_source_views_keep_independent_reads_across_float_settings_
     .await
     .unwrap();
     // Closing the independent settings owner cannot cancel either source read.
-    app.command(r#"{"action":"close_detail"}"#).await.unwrap();
+    app.command(r#"{"action":"settings_list"}"#).await.unwrap();
+    assert!(!view(&app)["settings_catalog"].is_null());
+    let revision = view(&app)["settings_revision"].clone();
+    app.command(&json!({"action":"close_settings","revision":revision}).to_string())
+        .await
+        .unwrap();
+    assert!(view(&app)["settings_catalog"].is_null());
     assert_eq!(backend.active_source.load(Ordering::SeqCst), 2);
     app.command(&json!({"action":"close_detail","view":first_view["view"]}).to_string())
         .await

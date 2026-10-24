@@ -41,6 +41,12 @@ impl Default for MetricsCache {
     }
 }
 impl MetricsCache {
+    pub(super) fn remove(&self, id: &SessionId) {
+        self.entries
+            .lock()
+            .expect("metrics cache")
+            .retain(|(key, _)| &key.session != id);
+    }
     fn entry(&self, session: &SessionId) -> Result<Arc<tokio::sync::Mutex<Scan>>> {
         self.key_entry(Key {
             session: session.clone(),

@@ -44,11 +44,16 @@ impl PluginFactory for RetrievalToolsFactory {
         let config: RetrievalConfig =
             serde_json::from_value(state.state().value().clone()).map_err(meta)?;
         let context = plan.context().registration_context()?;
-        let (_, domain) = DomainDefinition::new(identity, &config, RetrievalConfig::validate)
-            .map_err(meta)?
-            .with_fork_policy(DomainForkPolicy::ResetToInitial)
-            .register(plan.local::<DomainRegistrarContract>()?.as_ref(), &context)
-            .map_err(meta)?;
+        let (_, domain) = DomainDefinition::new(
+            identity,
+            &config,
+            RetrievalConfig::validate,
+            rsi_agent_composition_protocol::DomainReferencePolicy::None,
+        )
+        .map_err(meta)?
+        .with_fork_policy(DomainForkPolicy::ResetToInitial)
+        .register(plan.local::<DomainRegistrarContract>()?.as_ref(), &context)
+        .map_err(meta)?;
         let service = plan.local::<RetrievalContract>()?;
         let mut tools = vec![];
         if config.web_fetch {

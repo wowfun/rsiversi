@@ -28,7 +28,9 @@ mod evidence;
 /// Read-only conversation artifacts and stream verification.
 pub mod export;
 pub use activity::{ActivityRequest, ActivityStatus, SessionActivity, SessionActivityPage};
+mod lifecycle;
 mod reads;
+pub use lifecycle::{SessionClosing, SessionEpoch, SessionLifecycle, SessionLifecycleActivity};
 /// Session-bound live terminal requests.
 pub mod terminal;
 pub use evidence::{EvidencePage, EvidencePageContent, EvidenceRead};
@@ -483,6 +485,15 @@ impl RecentSessionPage {
 /// One attached Session interface.
 #[async_trait]
 pub trait SessionHandle: fmt::Debug + Send + Sync + 'static {
+    /// Releases an unsubmitted frozen-reference reservation for this exact Session.
+    async fn release_reference(
+        &self,
+        snapshot: rsi_agent_session_protocol::ReferenceSnapshotRef,
+    ) -> Result<()> {
+        let _ = snapshot;
+        Err(SessionError::Api(rsi_api_protocol::ApiError::Unavailable))
+    }
+
     /// Exports a fixed durable cut without submitting or resuming execution.
     async fn export(&self, options: export::ExportOptions) -> Result<export::ExportStream> {
         let _ = options;
@@ -695,9 +706,95 @@ impl rsi_meta_contract::LocalContract for SessionDraftControlContract {
     type Service = dyn SessionDraftControl;
 }
 
+/// Product cleanup state, separate from canonical Store retirement.
+#[derive(Clone, Debug, Eq, PartialEq, serde::Serialize, serde::Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum NavigationCleanup {
+    /// Session purge has not completed.
+    Pending,
+    /// Navigation metadata is absent durably.
+    Complete,
+    /// This Host does not supply navigation cleanup.
+    Unavailable,
+    /// Cleanup failed and can be retried with the original operation.
+    Failed,
+}
+/// Product maintenance receipt with independent navigation outcome.
+#[derive(Clone, Debug, Eq, PartialEq, serde::Serialize, serde::Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct SessionPurgeReceipt {
+    /// Mechanical durable deletion receipt.
+    pub store: rsi_agent_store_protocol::PurgeReceipt,
+    /// Separately acknowledged metadata cleanup.
+    pub navigation: NavigationCleanup,
+}
+/// Local owner for idempotent metadata cleanup after canonical retirement.
+#[async_trait]
+pub trait SessionPurgeCleanup: fmt::Debug + Send + Sync {
+    /// Resolves the completed Store operation itself before removing exact metadata.
+    async fn cleanup(&self, operation_id: &str) -> Result<()>;
+    /// Observes durable metadata absence without starting cleanup.
+    async fn status(&self, operation_id: &str) -> Result<NavigationCleanup>;
+}
+/// Optional metadata-owner contract, looked up at execution time.
+#[derive(Debug)]
+pub struct SessionPurgeCleanupContract;
+impl rsi_meta_contract::LocalContract for SessionPurgeCleanupContract {
+    const KEY: &'static str = "rsi.session.purge-cleanup";
+    type Service = dyn SessionPurgeCleanup;
+}
+
 /// Transport-independent Session domain service.
 #[async_trait]
 pub trait SessionService: fmt::Debug + Send + Sync + 'static {
+    /// Local-Host-only bounded preview of unreferenced Agent-CAS registrations.
+    async fn preview_cas_gc(
+        &self,
+        limit: usize,
+    ) -> Result<Vec<rsi_agent_store_protocol::CasGcTarget>> {
+        let _ = limit;
+        Err(SessionError::Api(rsi_api_protocol::ApiError::Unavailable))
+    }
+    /// Local-Host-only idempotent collection of one exact publication generation.
+    async fn collect_cas(
+        &self,
+        request: rsi_agent_store_protocol::CasGcRequest,
+    ) -> Result<rsi_agent_store_protocol::CasGcReceipt> {
+        let _ = request;
+        Err(SessionError::Api(rsi_api_protocol::ApiError::Unavailable))
+    }
+    /// Pure observation of an original collection operation.
+    async fn cas_gc_status(
+        &self,
+        operation: &str,
+    ) -> Result<Option<rsi_agent_store_protocol::CasGcReceipt>> {
+        let _ = operation;
+        Err(SessionError::Api(rsi_api_protocol::ApiError::Unavailable))
+    }
+
+    /// Previews exact optimistic retirement without cancelling readers.
+    async fn preview_purge(
+        &self,
+        request: rsi_agent_store_protocol::PurgeRequest,
+    ) -> Result<rsi_agent_store_protocol::PurgePreview> {
+        let _ = request;
+        Err(SessionError::Api(rsi_api_protocol::ApiError::Unavailable))
+    }
+    /// Admits retirement and advances one bounded batch; retry the same request.
+    async fn purge(
+        &self,
+        request: rsi_agent_store_protocol::PurgeRequest,
+    ) -> Result<std::result::Result<SessionPurgeReceipt, rsi_agent_store_protocol::PurgePreview>>
+    {
+        let _ = request;
+        Err(SessionError::Api(rsi_api_protocol::ApiError::Unavailable))
+    }
+    /// Reads an exact operation, authorized by its original execution locations.
+    async fn purge_status(&self, operation_id: &str) -> Result<Option<SessionPurgeReceipt>> {
+        let _ = operation_id;
+        Err(SessionError::Api(rsi_api_protocol::ApiError::Unavailable))
+    }
+
     /// Reads bounded current-generation activity without discovering cold history.
     async fn activity(&self) -> Result<SessionActivityPage> {
         Err(SessionError::NotFound("Session activity owner".into()))
@@ -745,9 +842,29 @@ impl rsi_meta_contract::LocalContract for SessionContract {
     type Service = dyn SessionService;
 }
 
+/// Maintenance receipt family used to reconcile an uncertain mutation.
+#[derive(Clone, Copy, Debug, Eq, PartialEq, serde::Serialize, serde::Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum MaintenanceKind {
+    /// Exact selected Session retirement.
+    Purge,
+    /// Exact Agent-CAS publication collection.
+    CasGc,
+}
+
 /// Closed Session application failure taxonomy shared by all adapters.
 #[derive(Clone, Debug, Error, Eq, PartialEq)]
 pub enum SessionError {
+    /// Dispatch may have committed; query this kind's original operation receipt.
+    #[error(
+        "{kind:?} operation {operation_id} has an unknown outcome; query its original identity"
+    )]
+    MaintenanceOutcomeUnknown {
+        /// Receipt family, never inferred from a potentially reused identity.
+        kind: MaintenanceKind,
+        /// Original caller-preallocated operation identity.
+        operation_id: rsi_agent_store_protocol::MaintenanceOperationId,
+    },
     /// Runtime is unavailable before building the opt-in Workflow generation.
     #[error(
         "Workflow runtime is {0:?}; configure and restart its Host, or explicitly create a standard Session"

@@ -56,6 +56,8 @@ pub use source::{
 #[derive(Clone, Debug, Eq, PartialEq, Deserialize, Serialize)]
 #[serde(deny_unknown_fields)]
 pub struct ReferenceSnapshotRef {
+    /// Unique pending-capture release identity, independent of CAS deduplication.
+    pub capture_id: String,
     /// Lowercase SHA-256 of the canonical envelope bytes.
     pub sha256: String,
     /// Exact encoded envelope length.
@@ -64,6 +66,12 @@ pub struct ReferenceSnapshotRef {
 impl ReferenceSnapshotRef {
     /// Revalidates digest and the reference-specific CAS size ceiling.
     pub fn validate(&self) -> Result<()> {
+        validate_safe_text("reference capture", &self.capture_id, 64, false)?;
+        if self.capture_id.is_empty() {
+            return Err(SessionError::Invalid(
+                "empty reference capture identity".into(),
+            ));
+        }
         validate_sha256("reference snapshot", &self.sha256)?;
         if self.byte_len == 0 || self.byte_len > MAXIMUM_REFERENCE_SNAPSHOT_BYTES as u64 {
             return Err(SessionError::Invalid(

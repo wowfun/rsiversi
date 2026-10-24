@@ -52,6 +52,7 @@ impl Fixture {
             self.lease.clone(),
             self.target.clone(),
             &CallOrigin::Local,
+            test_read(),
         )
     }
 }
@@ -353,6 +354,10 @@ impl Files for Backend {
 }
 
 #[tokio::test]
+#[expect(
+    clippy::too_many_lines,
+    reason = "One resource lifecycle covers lost releases, expiry and capacity recovery."
+)]
 async fn expired_owners_recover_capacity_after_lost_release() {
     let root = tempfile::tempdir().unwrap();
     let backend = Arc::new(Backend::default());
@@ -375,7 +380,13 @@ async fn expired_owners_recover_capacity_after_lost_release() {
         root.path().canonicalize().unwrap(),
     )
     .unwrap();
-    let view = FilesView::new(owners.clone(), lease.clone(), target.clone(), &origin);
+    let view = FilesView::new(
+        owners.clone(),
+        lease.clone(),
+        target.clone(),
+        &origin,
+        test_read(),
+    );
     for _ in 0..3 {
         for _ in 0..MAXIMUM_FILE_TOKENS {
             view.open(
@@ -426,7 +437,13 @@ async fn expired_owners_recover_capacity_after_lost_release() {
         assert_eq!(owners.capacity.available_permits(), MAXIMUM_FILE_TOKENS);
     }
     drop(view);
-    let next = FilesView::new(owners.clone(), lease, target, &CallOrigin::Local);
+    let next = FilesView::new(
+        owners.clone(),
+        lease,
+        target,
+        &CallOrigin::Local,
+        test_read(),
+    );
     let opened = next
         .open(
             binding.clone(),
@@ -614,6 +631,7 @@ async fn a_foreign_principal_cannot_describe_or_release_an_owned_token() {
         fixture.lease.clone(),
         fixture.target.clone(),
         &foreign,
+        test_read(),
     );
     assert_eq!(
         foreign_view.describe(&fixture.binding, &opened.token),
@@ -651,7 +669,13 @@ async fn admitted_open_keeps_capacity_after_waiter_loss_and_cannot_publish_after
             root.path().canonicalize().unwrap(),
         )
         .unwrap();
-        let view = FilesView::new(owners.clone(), lease, target, &CallOrigin::Local);
+        let view = FilesView::new(
+            owners.clone(),
+            lease,
+            target,
+            &CallOrigin::Local,
+            test_read(),
+        );
         let (entered, entering) = oneshot::channel();
         let (finish, finishing) = oneshot::channel();
         *backend.pause.lock().unwrap() = Some((entered, finishing));
@@ -687,4 +711,30 @@ async fn admitted_open_keeps_capacity_after_waiter_loss_and_cannot_publish_after
         .unwrap();
         assert!(owners.entries.lock().unwrap().is_empty());
     }
+}
+
+fn test_read() -> Arc<rsi_session_protocol::SessionReadLease> {
+    use rsi_agent_session_protocol::{AgentPresetId, FrozenAgentSettings, SessionHeader};
+    let header = SessionHeader::new_local(
+        SessionId::new("files-fixture").unwrap(),
+        1,
+        "/workspace",
+        AgentPresetId::new("test").unwrap(),
+        FrozenAgentSettings::new(
+            "settings",
+            "system",
+            rsi_ai_protocol::ModelRef::new("test", "model").unwrap(),
+            rsi_sandbox::SandboxMode::ReadOnly,
+            false,
+        )
+        .unwrap(),
+    )
+    .unwrap();
+    let gate = Arc::new(rsi_session_protocol::SessionLifecycle::default());
+    Arc::new(rsi_session_protocol::SessionReadLease::new(
+        header,
+        CancellationToken::new(),
+        (),
+        gate.attach().unwrap().read().unwrap(),
+    ))
 }

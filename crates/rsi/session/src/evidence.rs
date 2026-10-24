@@ -133,11 +133,19 @@ impl Default for EvidenceReader {
     }
 }
 impl EvidenceReader {
+    pub(super) fn remove(&self, session: &SessionId) {
+        self.state
+            .lock()
+            .expect("evidence cache")
+            .entries
+            .retain(|Key(id, _, _), _| id != session);
+    }
     pub(super) async fn read<G: Send + Sync + 'static>(
         self: &Arc<Self>,
         store: Arc<dyn SessionStore>,
         session: SessionId,
         request: &EvidenceRead,
+        retiring: CancellationToken,
         guard: G,
     ) -> Result<EvidencePage> {
         request.validate()?;
@@ -145,6 +153,7 @@ impl EvidenceReader {
         self.load(
             store,
             Key(session, request.intent_seq, request.section),
+            retiring,
             guard.clone(),
         )
         .await?
@@ -154,11 +163,12 @@ impl EvidenceReader {
         self: &Arc<Self>,
         store: Arc<dyn SessionStore>,
         key: Key,
+        retiring: CancellationToken,
         guard: G,
     ) -> Loaded {
         let mut receiver = {
             let mut state = self.state.lock().expect("evidence admission");
-            if self.stopped.is_cancelled() {
+            if self.stopped.is_cancelled() || retiring.is_cancelled() {
                 return Err(SessionError::ShuttingDown);
             }
             state.clock += 1;
@@ -197,6 +207,7 @@ impl EvidenceReader {
                         &key,
                         reservation,
                         &owner.stopped,
+                        &retiring,
                     ))
                     .catch_unwind()
                     .await
@@ -206,7 +217,8 @@ impl EvidenceReader {
                     .map(Arc::new);
                     let result = {
                         let mut state = owner.state.lock().expect("evidence completion");
-                        if owner.stopped.is_cancelled() {
+                        if owner.stopped.is_cancelled() || retiring.is_cancelled() {
+                            state.entries.remove(&key);
                             Err(SessionError::ShuttingDown)
                         } else {
                             match &result {
@@ -274,13 +286,14 @@ async fn load_section(
     key: &Key,
     reservation: ByteReservation,
     stopped: &CancellationToken,
+    retiring: &CancellationToken,
 ) -> Result<Selected> {
     let Key(session, intent_seq, section) = key;
     let mut page = store
         .read_facts(session, intent_seq - 1, 1)
         .await
         .map_err(map_store_error)?;
-    if stopped.is_cancelled() {
+    if stopped.is_cancelled() || retiring.is_cancelled() {
         return Err(SessionError::ShuttingDown);
     }
     let fact = page
@@ -318,7 +331,7 @@ async fn load_section(
                         rsi_agent_store_protocol::EvidenceOriginal::read(store, session, seq)
                             .await
                             .map_err(resolve_error)?;
-                    if stopped.is_cancelled() {
+                    if stopped.is_cancelled() || retiring.is_cancelled() {
                         return Err(SessionError::ShuttingDown);
                     }
                     let text = original

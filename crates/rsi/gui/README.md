@@ -1,5 +1,9 @@
 # rsi-gui
 
+Reference release binds the original target Header and capture ID independently
+of the displayed pane. It reacquires authorized Session access; an already absent
+target is an idempotent release.
+
 The Automation panel consumes negotiated, caller-scoped Automation API operations
 through the same client connection as Session UI. It keeps a bounded page and one
 selected attempt. Screenshots use a finite `automation_artifact` response outside

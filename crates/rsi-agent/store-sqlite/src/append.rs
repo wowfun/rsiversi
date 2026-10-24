@@ -72,7 +72,9 @@ pub(super) fn validate_sqlite_quiescence_guard(
 pub(super) fn apply_atomic_sqlite_append(
     transaction: &Transaction<'_>,
     append: AtomicSessionAppend,
+    codecs: &rsi_agent_store_protocol::ReferenceCodecs,
 ) -> Result<StoreSessionWatermarks> {
+    super::reference_index::available(transaction, &append.session_id)?;
     let existing = transaction
         .query_row(
             "SELECT durable_seq, control_seq FROM sessions WHERE session_id = ?1",
@@ -103,6 +105,7 @@ pub(super) fn apply_atomic_sqlite_append(
             actual: actual_control,
         });
     }
+    let references = super::reference_index::Writer::new(transaction, &append.session_id, codecs)?;
     match (existing, append.header.as_ref()) {
         (None, Some(header)) => {
             transaction
@@ -114,7 +117,7 @@ pub(super) fn apply_atomic_sqlite_append(
                     params![
                         append.session_id.as_str(),
                         sqlite_u64("session creation timestamp", header.created_at_ms())?,
-                        encode_json("session header", header)?,
+                        references.header(header)?,
                         hex::encode(EMPTY_FACT_PREFIX_DIGEST),
                         hex::encode(EMPTY_CONTROL_PREFIX_DIGEST),
                         super::activity::coordinates_key(header.coordinates())?,
@@ -141,7 +144,7 @@ pub(super) fn apply_atomic_sqlite_append(
         .map_err(sql_error)
         .and_then(|digest| decode_sha256("Fact-prefix digest", &digest))?;
     for fact in &append.facts {
-        insert_fact(transaction, &append.session_id, fact)?;
+        insert_fact(transaction, &append.session_id, fact, &references)?;
         fact_digest = advance_fact_prefix_digest(fact_digest, fact)
             .map_err(|error| StoreError::Invalid(error.to_string()))?;
         if matches!(fact.body(), SessionFactBody::TurnTerminal { .. }) {
@@ -209,6 +212,7 @@ pub(super) fn apply_atomic_sqlite_append(
             &append.session_id,
             minimum_entered_fact_seq,
             record,
+            &references,
         )?;
         control_digest = advance_control_prefix_digest(control_digest, record)
             .map_err(|error| StoreError::Invalid(error.to_string()))?;
@@ -289,6 +293,7 @@ pub(super) fn insert_control(
     session_id: &SessionId,
     minimum_entered_fact_seq: u64,
     record: &AgentControlRecord,
+    references: &super::reference_index::Writer<'_>,
 ) -> Result<()> {
     ControlIndexer {
         transaction,
@@ -296,7 +301,7 @@ pub(super) fn insert_control(
         minimum_entered_fact_seq,
         record,
     }
-    .insert()
+    .insert(references)
 }
 
 pub(super) struct ControlIndexer<'a, 'connection> {
@@ -308,14 +313,14 @@ pub(super) struct ControlIndexer<'a, 'connection> {
 
 impl ControlIndexer<'_, '_> {
     #[allow(clippy::too_many_lines)] // One transaction projects the closed set of control records into mechanical indexes.
-    fn insert(&self) -> Result<()> {
+    fn insert(&self, references: &super::reference_index::Writer<'_>) -> Result<()> {
         self.transaction
             .execute(
                 "INSERT INTO agent_controls (session_id, seq, control_json) VALUES (?1, ?2, ?3)",
                 params![
                     self.session_id.as_str(),
                     sqlite_u64("control sequence", self.record.seq())?,
-                    encode_json("Agent control record", self.record)?,
+                    references.control(self.record)?,
                 ],
             )
             .map_err(sql_error)?;
@@ -1054,7 +1059,11 @@ pub(super) fn decode_ready_message(
     })
 }
 
-pub(super) fn admit_append(transaction: &Transaction<'_>, batch: &AppendBatch) -> Result<()> {
+pub(super) fn admit_append(
+    transaction: &Transaction<'_>,
+    batch: &AppendBatch,
+    references: &super::reference_index::Writer<'_>,
+) -> Result<()> {
     let existing = transaction
         .query_row(
             "SELECT durable_seq FROM sessions WHERE session_id = ?1",
@@ -1083,7 +1092,7 @@ pub(super) fn admit_append(transaction: &Transaction<'_>, batch: &AppendBatch) -
                 params![
                     batch.session_id.as_str(),
                     sqlite_u64("session creation timestamp", header.created_at_ms())?,
-                    encode_json("session header", header)?,
+                    references.header(header)?,
                     hex::encode(EMPTY_FACT_PREFIX_DIGEST),
                     hex::encode(EMPTY_CONTROL_PREFIX_DIGEST),
                     super::activity::coordinates_key(header.coordinates())?,
@@ -1240,6 +1249,7 @@ pub(super) fn insert_fact(
     transaction: &Transaction<'_>,
     session_id: &SessionId,
     fact: &SessionFact,
+    references: &super::reference_index::Writer<'_>,
 ) -> Result<()> {
     if let Some((effect, role)) = rsi_agent_store_protocol::store_fact_model_coordinate(fact.body())
     {
@@ -1272,7 +1282,7 @@ pub(super) fn insert_fact(
                 sqlite_u64("fact sequence", fact.seq())?,
                 fact.body().turn_id().as_str(),
                 fact_index_kind(fact.body()),
-                encode_json("session Fact", fact)?,
+                references.fact(fact)?,
             ],
         )
         .map_err(sql_error)?;

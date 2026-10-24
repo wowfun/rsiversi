@@ -44,7 +44,7 @@ pub struct CasInspectionSummary {
     pub verified_objects: u64,
     /// Bytes actually read by hashing, including partially checked files.
     pub hashed_bytes: u64,
-    /// Native references checked in canonical Facts and controls.
+    /// Distinct native CAS references per canonical Fact or control checked.
     pub references: u64,
     /// Issues emitted, independent of whether the inspection completed.
     pub issues: u64,
@@ -189,6 +189,13 @@ impl SqliteStore {
             return Ok(summary);
         }
         let offline = filesystem::open_offline_store(root.as_ref()).map_err(|source| {
+            summary.completion = CasInspectionCompletion::Failed;
+            CasInspectionError {
+                source,
+                partial: Box::new(summary.clone()),
+            }
+        })?;
+        super::offline_maintenance::require_settled(&offline.connection).map_err(|source| {
             summary.completion = CasInspectionCompletion::Failed;
             CasInspectionError {
                 source,
@@ -501,24 +508,18 @@ impl<V: FnMut(CasInspectionEvent) -> ControlFlow<()>> Inspection<'_, V> {
             issue,
         })
     }
-    fn content(
+    fn references(
         &mut self,
         session: &SessionId,
         stream: CasInspectionStream,
         sequence: u64,
-        content: &[rsi_agent_session_protocol::AgentMessageContent],
+        references: &rsi_agent_session_protocol::ReferenceCollector,
     ) -> Result<()> {
-        for content in content {
-            use rsi_agent_session_protocol::AgentMessageContent;
-            match content {
-                AgentMessageContent::Reference { reference } => self.reference(
-                    session,
-                    stream,
-                    sequence,
-                    &reference.snapshot.sha256,
-                    reference.snapshot.byte_len,
-                )?,
-                AgentMessageContent::Text { .. } | AgentMessageContent::Image { .. } => {}
+        for reference in references.iter() {
+            if let rsi_agent_session_protocol::DurableReference::Cas { sha256, byte_len } =
+                reference
+            {
+                self.reference(session, stream, sequence, sha256, *byte_len)?;
             }
         }
         Ok(())
@@ -530,47 +531,21 @@ impl<V: FnMut(CasInspectionEvent) -> ControlFlow<()>> validation::CanonicalObser
     fn checkpoint(&mut self) -> Result<()> {
         self.checkpoint()
     }
-    fn control(&mut self, session: &SessionId, record: &AgentControlRecord) -> Result<()> {
-        use rsi_agent_session_protocol::ProgramRunEvent;
-        match record.body() {
-            AgentControlRecordBody::ProgramRun {
-                event: ProgramRunEvent::Accepted { descriptor },
-                ..
-            } => self.reference(
-                session,
-                CasInspectionStream::Control,
-                record.seq(),
-                &descriptor.script.sha256,
-                descriptor.script.bytes,
-            ),
-            AgentControlRecordBody::ProgramRun {
-                event:
-                    ProgramRunEvent::Terminal {
-                        result: Some(result),
-                        ..
-                    },
-                ..
-            } => self.reference(
-                session,
-                CasInspectionStream::Control,
-                record.seq(),
-                &result.sha256,
-                result.bytes,
-            ),
-            AgentControlRecordBody::MessageAccepted { message, .. } => self.content(
-                session,
-                CasInspectionStream::Control,
-                record.seq(),
-                &message.content,
-            ),
-            _ => Ok(()),
-        }
+    fn control(&mut self, session: &SessionId, record: &AgentControlRecord, _: &str) -> Result<()> {
+        self.references(
+            session,
+            CasInspectionStream::Control,
+            record.seq(),
+            &rsi_agent_store_protocol::native_control_references(record)?,
+        )
     }
-    fn fact(&mut self, session: &SessionId, fact: &SessionFact) -> Result<()> {
-        if let SessionFactBody::InputMessageEntered { content, .. } = fact.body() {
-            self.content(session, CasInspectionStream::Fact, fact.seq(), content)?;
-        }
-        Ok(())
+    fn fact(&mut self, session: &SessionId, fact: &SessionFact, _: &str) -> Result<()> {
+        self.references(
+            session,
+            CasInspectionStream::Fact,
+            fact.seq(),
+            &rsi_agent_store_protocol::fact_references(fact)?,
+        )
     }
 }
 fn valid_length(value: i64) -> Option<u64> {

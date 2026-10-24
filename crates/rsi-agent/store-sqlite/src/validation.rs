@@ -4,10 +4,10 @@ pub(super) trait CanonicalObserver {
     fn checkpoint(&mut self) -> Result<()> {
         Ok(())
     }
-    fn control(&mut self, _: &SessionId, _: &AgentControlRecord) -> Result<()> {
+    fn control(&mut self, _: &SessionId, _: &AgentControlRecord, _: &str) -> Result<()> {
         Ok(())
     }
-    fn fact(&mut self, _: &SessionId, _: &SessionFact) -> Result<()> {
+    fn fact(&mut self, _: &SessionId, _: &SessionFact, _: &str) -> Result<()> {
         Ok(())
     }
 }
@@ -305,13 +305,87 @@ thread_local! {
     pub(super) static HEADER_READS: std::cell::Cell<usize> = const { std::cell::Cell::new(0) };
 }
 
+pub(super) fn header_projection() -> String {
+    format!("created_at_ms, durable_seq,
+                    CASE WHEN length(CAST(fact_prefix_sha256 AS BLOB)) = 64
+                         THEN fact_prefix_sha256 END,
+                    length(CAST(header_json AS BLOB)),
+                    CASE WHEN length(CAST(header_json AS BLOB)) <= {MAXIMUM_SESSION_HEADER_BYTES}
+                         THEN header_json END,
+                    CASE WHEN length(CAST(control_prefix_sha256 AS BLOB)) = 64
+                         THEN control_prefix_sha256 END, control_seq, coordinates_key, last_activity_ms
+")
+}
+
+pub(super) struct HeaderRow {
+    created_at_ms: i64,
+    durable_seq: i64,
+    fact_prefix_sha256: Option<String>,
+    header_encoded_len: i64,
+    header_json: Option<String>,
+    control_prefix_sha256: Option<String>,
+    control_seq: i64,
+    coordinates_key: String,
+    last_activity_ms: i64,
+}
+
+pub(super) fn read_header_projection(
+    row: &rusqlite::Row<'_>,
+    offset: usize,
+) -> rusqlite::Result<HeaderRow> {
+    Ok(HeaderRow {
+        created_at_ms: row.get(offset)?,
+        durable_seq: row.get(offset + 1)?,
+        fact_prefix_sha256: row.get(offset + 2)?,
+        header_encoded_len: row.get(offset + 3)?,
+        header_json: row.get(offset + 4)?,
+        control_prefix_sha256: row.get(offset + 5)?,
+        control_seq: row.get(offset + 6)?,
+        coordinates_key: bounded_text(row, offset + 7, 128 * 1024)?,
+        last_activity_ms: row.get(offset + 8)?,
+    })
+}
+
 pub(super) fn read_session_header_row(
     connection: &Connection,
     session_id: &SessionId,
 ) -> Result<(SessionHeader, u64)> {
+    read_session_header_source(connection, session_id).map(|(header, seq, _)| (header, seq))
+}
+
+pub(super) fn read_session_header_source(
+    connection: &Connection,
+    session_id: &SessionId,
+) -> Result<(SessionHeader, u64, String)> {
     #[cfg(test)]
     HEADER_READS.set(HEADER_READS.get() + 1);
-    let (
+    let row = connection
+        .query_row(
+            &format!(
+                "SELECT {} FROM sessions WHERE session_id = ?1",
+                header_projection()
+            ),
+            [session_id.as_str()],
+            |row| read_header_projection(row, 0),
+        )
+        .optional()
+        .map_err(sql_error)?
+        .ok_or_else(|| StoreError::NotFound(session_id.to_string()))?;
+    decode_header_source(session_id, row)
+}
+
+pub(super) fn decode_header_projection(
+    session_id: &SessionId,
+    row: HeaderRow,
+) -> Result<(SessionHeader, u64)> {
+    decode_header_source(session_id, row).map(|(header, seq, _)| (header, seq))
+}
+
+fn decode_header_source(
+    session_id: &SessionId,
+    row: HeaderRow,
+) -> Result<(SessionHeader, u64, String)> {
+    let HeaderRow {
         created_at_ms,
         durable_seq,
         fact_prefix_sha256,
@@ -321,39 +395,7 @@ pub(super) fn read_session_header_row(
         control_seq,
         coordinates_key,
         last_activity_ms,
-    ) = connection
-        .query_row(
-            "SELECT created_at_ms, durable_seq,
-                    CASE WHEN length(CAST(fact_prefix_sha256 AS BLOB)) = 64
-                         THEN fact_prefix_sha256 END,
-                    length(CAST(header_json AS BLOB)),
-                    CASE WHEN length(CAST(header_json AS BLOB)) <= ?2
-                         THEN header_json END,
-                    CASE WHEN length(CAST(control_prefix_sha256 AS BLOB)) = 64
-                         THEN control_prefix_sha256 END, control_seq, coordinates_key, last_activity_ms
-             FROM sessions WHERE session_id = ?1",
-            params![
-                session_id.as_str(),
-                i64::try_from(MAXIMUM_SESSION_HEADER_BYTES)
-                    .expect("session header bound fits SQLite INTEGER"),
-            ],
-            |row| {
-                Ok((
-                    row.get::<_, i64>(0)?,
-                    row.get::<_, i64>(1)?,
-                    row.get::<_, Option<String>>(2)?,
-                    row.get::<_, i64>(3)?,
-                    row.get::<_, Option<String>>(4)?,
-                    row.get::<_, Option<String>>(5)?,
-                    row.get::<_, i64>(6)?,
-                    bounded_text(row, 7, 128 * 1024)?,
-                    row.get::<_, i64>(8)?,
-                ))
-            },
-        )
-        .optional()
-        .map_err(sql_error)?
-        .ok_or_else(|| StoreError::NotFound(session_id.to_string()))?;
+    } = row;
     let durable_seq = decode_u64("durable sequence", durable_seq)?;
     decode_u64("durable control sequence", control_seq)?;
     for (label, digest) in [
@@ -364,7 +406,7 @@ pub(super) fn read_session_header_row(
             digest.ok_or_else(|| StoreError::Corrupt(format!("{label} has invalid length")))?;
         validate_sha256(label, &digest)?;
     }
-    let header: SessionHeader = decode_projected_json(
+    let (header, encoded): (SessionHeader, _) = super::cas::decode_projected_json_with_source(
         "session header",
         (header_encoded_len, header_json),
         MAXIMUM_SESSION_HEADER_BYTES,
@@ -386,7 +428,7 @@ pub(super) fn read_session_header_row(
             "Session coordinate or activity projection differs from its Header".into(),
         ));
     }
-    Ok((header, durable_seq))
+    Ok((header, durable_seq, encoded))
 }
 
 pub(super) fn validate_turn_index(connection: &Connection, session_id: &SessionId) -> Result<()> {
@@ -539,9 +581,13 @@ pub(super) fn session_id_page(
     let projection =
         "SELECT CASE WHEN length(CAST(session_id AS BLOB)) <= ?1 THEN session_id END FROM sessions";
     let sql = if after.is_some() {
-        format!("{projection} WHERE session_id > ?2 ORDER BY session_id LIMIT 256")
+        format!(
+            "{projection} WHERE NOT EXISTS(SELECT 1 FROM session_tombstones t WHERE t.session_id=sessions.session_id) AND session_id > ?2 ORDER BY session_id LIMIT 256"
+        )
     } else {
-        format!("{projection} ORDER BY session_id LIMIT 256")
+        format!(
+            "{projection} WHERE NOT EXISTS(SELECT 1 FROM session_tombstones t WHERE t.session_id=sessions.session_id) ORDER BY session_id LIMIT 256"
+        )
     };
     let maximum = i64::try_from(rsi_agent_session_protocol::MAXIMUM_AGENT_IDENTIFIER_BYTES)
         .expect("identity bound fits SQLite INTEGER");
@@ -1079,7 +1125,7 @@ impl ActivationProjection {
 }
 
 #[allow(clippy::too_many_lines)] // One canonical scan compares the complete Fact-derived session projection.
-fn validate_canonical_fact_prefix(
+pub(super) fn validate_canonical_fact_prefix(
     connection: &Connection,
     session_id: &SessionId,
     observer: &mut impl CanonicalObserver,
@@ -1114,7 +1160,7 @@ fn validate_canonical_fact_prefix(
         let sequence = decode_u64("Fact sequence", row.get::<_, i64>(0).map_err(sql_error)?)?;
         let turn_id = bounded_text(row, 1, 256).map_err(sql_error)?;
         let fact_kind = bounded_text(row, 2, 8).map_err(sql_error)?;
-        let fact: SessionFact = decode_projected_json(
+        let (fact, encoded): (SessionFact, _) = super::cas::decode_projected_json_with_source(
             "session Fact",
             (
                 row.get::<_, i64>(3).map_err(sql_error)?,
@@ -1132,7 +1178,7 @@ fn validate_canonical_fact_prefix(
                 "session Fact JSON differs from its durable turn index columns".into(),
             ));
         }
-        observer.fact(session_id, &fact)?;
+        observer.fact(session_id, &fact, &encoded)?;
         activity.observe_fact(&fact);
         digest = advance_fact_prefix_digest(digest, &fact).map_err(|error| {
             StoreError::Corrupt(format!("stored session Fact is invalid: {error}"))
@@ -1389,16 +1435,17 @@ fn validate_agent_indexes_observed(
         .map_err(sql_error)?;
     while let Some(row) = rows.next().map_err(sql_error)? {
         observer.checkpoint()?;
-        let record: AgentControlRecord = decode_projected_json(
-            "Agent control record",
-            (
-                row.get(0).map_err(sql_error)?,
-                row.get(1).map_err(sql_error)?,
-            ),
-            MAXIMUM_SESSION_FACT_BYTES,
-        )?;
+        let (record, encoded): (AgentControlRecord, _) =
+            super::cas::decode_projected_json_with_source(
+                "Agent control record",
+                (
+                    row.get(0).map_err(sql_error)?,
+                    row.get(1).map_err(sql_error)?,
+                ),
+                MAXIMUM_SESSION_FACT_BYTES,
+            )?;
         decoded += 1;
-        observer.control(selected, &record)?;
+        observer.control(selected, &record, &encoded)?;
         activity.observe_control(&record);
         #[cfg(test)]
         CONTROL_DECODES.set(CONTROL_DECODES.get() + 1);

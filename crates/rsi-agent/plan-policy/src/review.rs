@@ -85,6 +85,18 @@ pub(super) struct ReviewState {
     last_review: Option<ReviewReceipt>,
 }
 impl ReviewState {
+    pub(super) fn references(
+        &self,
+        output: &mut rsi_agent_session_protocol::ReferenceCollector,
+    ) -> Result<(), String> {
+        if let Some(plan) = &self.plan {
+            output.session(&plan.plan_ref.session_id)?;
+        }
+        if let Some(review) = &self.last_review {
+            output.session(&review.plan_ref.session_id)?;
+        }
+        Ok(())
+    }
     pub(super) fn validate(&self) -> Result<(), String> {
         if let Some(saved) = &self.plan {
             saved.document.validate()?;

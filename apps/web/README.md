@@ -85,29 +85,23 @@ After a rejected edit restores admitted text, both Send and Enter can submit
 that text if no other send fence applies. Reset clears admission notices and
 disables composition until a new record is bound.
 
-IndexedDB schema 4 namespaces composer records by endpoint, real principal
-(`local` or authenticated DeviceId), stable surface key and SessionId. Upgrade
-validates both old pane ledgers, migrates their records and commits one aggregate
-ledger atomically. It preserves exact pending request strings, phases, receipts
-and incarnations; a malformed record or quota mismatch aborts the entire upgrade.
-Upgrade from schema 1 or 2 removes the obsolete workspace-trust field from
-creation intents. Existing editor text, images, references and Header bindings
-remain intact; it never rewrites the opaque Rust submission. A different service/Store version does not
-make an old pending request replayable: Rust checks its operation and immutable
-Header binding. Reconnect to the owning compatible service to reconcile it;
-otherwise retain the old record for explicit recovery instead of replaying or
-silently deleting it.
-The origin-wide allowance remains the old two-pane aggregate: 128 records, 4 MiB
+IndexedDB schema 5 namespaces composer records by endpoint, real principal
+(`local` or authenticated DeviceId), stable surface key and SessionId. Only this
+schema is accepted; older schemas are refused without rewriting their records,
+ledgers or version. Explicit discard is the separate recovery action. Rust still
+checks every pending operation and immutable Header binding before reconciliation.
+The origin-wide allowance is: 128 records, 4 MiB
 editable text, 4 MiB pending text and 32 MiB opaque pending requests. Creating
 another surface or connecting another principal does not increase that allowance.
 The current editor record also retains at most four frozen conversation
 references, charged to editable-text quota by their encoded descriptor size.
-Schema 1 and 2 upgrades add an empty reference list without changing pending
-opaque requests. Captured descriptors keep their original target Header binding;
+Captured descriptors keep their original target Header binding;
 moving a Fresh draft to a different Header requires removing its references and
 explicitly capturing them again. Capture failure, preview and removal preserve
 the text editor and focus. Submission freezes text, images and references together;
-retry uses the same opaque request and never captures again.
+retry uses the same opaque request and never captures again. Removing a reference
+updates the local draft before best-effort remote release. A cleanup failure is
+shown without restoring the removed reference or changing the draft's text.
 
 The first-party workbench uses one React 18.3.1 runtime for its workspace/session
 navigation, selected detail-mode surface, composer and Session resource column.

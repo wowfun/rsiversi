@@ -1,5 +1,10 @@
 # rsi-navigation
 
+Purge cleanup removes only the completed operation's selected Session metadata.
+Status is read-only; cleanup is idempotent and preserves unrelated records. Writer
+capacity refusal leaves the document unchanged and permits explicit retry. A
+pending durable purge cannot authorize navigation removal.
+
 The ordinary `AttentionFactory` owns a separate version-1 Storage domain of
 explicit per-principal reading positions. It combines bounded Session activity
 metadata with eight ACP resident observations, never scans recent history, and
@@ -122,3 +127,9 @@ access; every new page applies current Header scope policy again.
 
 Header lookup failure propagates as unavailable; an absent Header or denied
 protection scope is omitted. Storage failure cannot be presented as a hidden row.
+
+Completed Session purge operations have an independent, idempotent navigation
+cleanup receipt. Cleanup resolves the original completed Store selection and
+removes only those metadata records, preserving all unselected records. Failure
+leaves canonical purge complete and is retried through the same operation status;
+absence of this owner is reported as unavailable rather than successful cleanup.

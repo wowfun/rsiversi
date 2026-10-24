@@ -426,6 +426,7 @@ impl UnpublishedGeneration {
                 rsi_agent_composition_protocol::ToolOutputCatalog::identity(),
                 &outputs,
                 rsi_agent_composition_protocol::ToolOutputCatalog::validate,
+                rsi_agent_composition_protocol::DomainReferencePolicy::None,
             )?;
             let credential = context.registration_context().map_err(|_| {
                 unavailable(preset_id, "Tool output registration owner unavailable")
@@ -439,6 +440,20 @@ impl UnpublishedGeneration {
                 .seal()
                 .map_err(|_| unavailable(preset_id, "Agent domain catalog sealing failed"))?,
         );
+        if let Some(registration) =
+            context.lookup_local::<rsi_agent_session_protocol::ReferenceCodecRegistrationContract>()
+        {
+            registration
+                .install(
+                    self.domains
+                        .as_ref()
+                        .expect("sealed domains")
+                        .reference_codecs(),
+                )
+                .map_err(|_| {
+                    unavailable(preset_id, "Domain reference codec registration failed")
+                })?;
+        }
         self.contributions = Some(
             self.contribution_stage
                 .seal()

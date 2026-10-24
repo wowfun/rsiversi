@@ -1,5 +1,36 @@
 # rsi-agent-store-protocol
 
+Product purge previews distinguish `UncertainWork` (missing native settlement
+evidence) from `Busy` (work that can still settle). Such a blocker does not admit
+deletion or imply that retrying the mutation can resolve the native owner.
+
+Explicit Session maintenance uses a sorted bounded selection with immutable Header
+fingerprints and both durable cursors. It never expands to descendants or cancels
+execution. The product must close its live owners before admitting retirement;
+Store independently rechecks durable idleness, complete reference coverage and
+incoming edges outside the explicit selection during initial admission.
+An operation identity retains its original request and progress across restart.
+Purge recovery retains only each selected execution location for product
+authorization, not copies of the deleted Headers, configuration or workspace paths.
+The immutable selection and tombstones remain necessary to reject identity reuse
+and correlate repeated operations. Purge is logical deletion, not secure erasure
+of SQLite free pages, WAL files or backups.
+Persistent retirement tombstones survive Header deletion and reject resurrection.
+Each deletion transaction admits at most 512 logical records and 64 MiB + 384 bytes
+of stored payload. The extra 384 bytes accommodate a maximum-size Context checkpoint's
+256-byte Session identity and two 64-byte digests. This excludes WAL and index overhead;
+writer ownership is released between
+batches. Session purge retains Agent CAS and Media objects. Object collection and
+exclusive database compaction are separate operations with separate receipts.
+
+Canonical reference indexes derive only from decoded Headers, controls, Facts and
+exact pure Domain codecs. Missing codecs return Unsupported. Missing, extra or
+changed index edges are corruption, never proof of absence. Maintenance enables
+strict admission only after a successful coverage audit and an atomic recheck for
+concurrent incomplete coverage; a failed audit does not change write policy. New
+writes then maintain coverage and edges in their canonical transaction and cannot
+reference a retiring Session or deleting CAS object.
+
 Model intent, start and settlement coordinates are unique by Session/Turn/effect/role
 across the complete stored history. Append and atomic Agent commit enforce this
 mechanical uniqueness in the same transaction as the Facts. Kernel validates
@@ -349,3 +380,26 @@ reads accept ByteAdmission, reserve in the actual owning worker before payload
 allocation, and return RetainedBytes whose shared lease survives the last clone. Missing metadata or a missing
 CAS file returns `NotFound`; malformed files and inconsistent metadata remain
 `Corrupt`, and other filesystem faults remain `Io`.
+
+CAS publication returns a non-serializable `PreparedCasObject`. Its retained lease
+blocks reclamation until the canonical referencing commit finishes. A new lease
+for an existing descriptor checks its registry identity, length and deletion fence
+without reading the payload; it never recreates a missing registry entry. It is
+ownership, not a byte-integrity proof. Consumers must authenticate newly loaded
+bytes with `read_cas`; a previously verified immutable cache can reuse its bytes. Active readers retain the same ownership through actual I/O,
+including cancelled waiters. Agent CAS collection is explicit, checks complete
+typed reference coverage, and admits one hash/generation under exclusive local
+ownership plus a durable deleting receipt. Canonical appends reject deleting or
+missing objects. Namespace removal and directory sync precede metadata removal;
+completed old receipts cannot remove a later publication of the same hash.
+
+Native canonical reference projection is shared by the derived edge index and
+offline CAS inspection. Domain state is added only through exact registered codecs;
+native-only inspection does not infer plugin references.
+
+Pending maintenance can be rediscovered through `StoreMaintenance` without a
+remembered operation ID. Purge and CAS collection each expose a read-only,
+lexically ordered page of at most 256 unfinished IDs, with an exclusive optional
+after-ID cursor. A short page ends the current scan; concurrent completions may
+remove IDs. Discovery grants no mutation authority and never resumes work. Use the
+existing binding/status methods and ordinary authorization before explicit retry.

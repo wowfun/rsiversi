@@ -17,7 +17,8 @@ impl rsi_session_protocol::SessionReads for LocalSessionService {
         scoped.drafts.accepting()?;
         let handle = scoped.attach_local(&target.session_id).await?;
         let admission = handle.admit()?;
-        let activity = handle.begin_activity()?;
+        let activity = handle.begin_draft_activity()?;
+        let lifecycle = handle.lifecycle.read()?;
         handle.reconcile_fresh_read().await?;
         let header = handle.header_snapshot().await?;
         if header.session_id() != &target.session_id
@@ -37,13 +38,15 @@ impl rsi_session_protocol::SessionReads for LocalSessionService {
         // Scope revocation propagates synchronously to the published read token.
         let retiring = protected.child_token();
         let owner_retiring = self.projection_stopped.clone();
+        let session_retiring = lifecycle.retiring().clone();
         let retiring_task = retiring.clone();
         let guard = retiring.clone().drop_guard();
-        drop(self.execution.spawn(async move {tokio::select!{()=retiring_task.cancelled()=>{},()=owner_retiring.cancelled()=>retiring_task.cancel()}}));
+        drop(self.execution.spawn(async move {tokio::select!{()=retiring_task.cancelled()=>{},()=owner_retiring.cancelled()=>retiring_task.cancel(),()=session_retiring.cancelled()=>retiring_task.cancel()}}));
         Ok(rsi_session_protocol::SessionReadLease::new(
             (*header).clone(),
             retiring,
             (activity, admission, guard),
+            lifecycle,
         ))
     }
 }

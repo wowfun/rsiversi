@@ -112,6 +112,15 @@ struct State {
     count: u32,
 }
 impl State {
+    fn references(
+        &self,
+        output: &mut rsi_agent_session_protocol::ReferenceCollector,
+    ) -> Result<(), String> {
+        if let Some(session) = &self.session {
+            output.session(session)?;
+        }
+        Ok(())
+    }
     fn validate(&self) -> Result<(), String> {
         if self.session.is_some() != self.turn.is_some()
             || (self.session.is_none() && self.through_fact_seq != 0)
@@ -350,6 +359,7 @@ impl PluginFactory for RepeatToolReminderFactory {
             DomainIdentity::new(DOMAIN, 1).expect("static domain"),
             &State::default(),
             State::validate,
+            rsi_agent_composition_protocol::DomainReferencePolicy::Visit(State::references),
         )
         .map_err(|error| MetaError::Activation(error.to_string()))?;
         let context = plan.context().registration_context()?;

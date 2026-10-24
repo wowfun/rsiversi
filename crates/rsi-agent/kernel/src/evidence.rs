@@ -74,6 +74,10 @@ pub(super) struct Cache {
     recent: VecDeque<Key>,
 }
 impl Cache {
+    pub(super) fn remove_session(&mut self, session: &SessionId) {
+        self.entries.retain(|(id, _), _| id != session);
+        self.recent.retain(|(id, _)| id != session);
+    }
     fn get(&mut self, key: &Key) -> Option<rsi_agent_store_protocol::EvidenceDigests> {
         let value = self.entries.get(key)?.clone();
         self.recent.retain(|old| old != key);

@@ -34,7 +34,9 @@ partial text/reasoning is retained with an interruption marker and no tool
 authority. Request, source, usage and replay evidence are projected from this
 single canonical stream.
 
-Format 22 freezes `FrozenAgentSettings.output_budgets`: at most 256 unique
+Format 23 gives every frozen reference snapshot a bounded `capture_id`, independent
+of its content address, so pending captures can be released independently.
+It also freezes `FrozenAgentSettings.output_budgets`: at most 256 unique
 exact deployment/model entries, 64 KiB encoded, each with a validated
 `max_output_tokens`. An empty table uses the selected model's declared default request cap.
 Model/effort selection never changes this Session policy.

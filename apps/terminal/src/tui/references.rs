@@ -44,24 +44,25 @@ impl State {
     pub(super) fn show_reference(&mut self, page: ReferenceTextPage) {
         let reference = &page.reference;
         let metadata = &reference.metadata;
+        let lease = self.reference_preview.take();
         self.open_detail(format!("Reference {}\nCaptured through record {} · retained records {}..{} · {} bytes\nOmissions: {}\n\n{}",
             metadata.source, metadata.through_seq(), metadata.retained_interval().0,
             metadata.retained_interval().1, metadata.text_bytes,
             if metadata.omissions().is_empty() {"none".into()} else {format!("{:?}",metadata.omissions())},
             super::super::terminal_text(&page.text)));
+        self.reference_preview = lease;
         self.detail_previous = (page.offset > 0)
             .then(|| Action::PreviewReference(reference.clone(), page.offset.saturating_sub(8192)));
         self.detail_next = page
             .has_more
             .then(|| Action::PreviewReference(reference.clone(), page.next_offset));
-        let items = if self
-            .references
-            .iter()
-            .any(|item| item.snapshot == reference.snapshot)
-        {
+        let items = if let Some(existing) = self.references.iter().find(|item| {
+            item.snapshot.sha256 == reference.snapshot.sha256
+                && item.snapshot.byte_len == reference.snapshot.byte_len
+        }) {
             vec![(
                 "Remove from draft".into(),
-                Action::RemoveReference(reference.snapshot.sha256.clone()),
+                Action::RemoveReference(existing.snapshot.capture_id.clone()),
             )]
         } else if self.references.len() < 4 {
             vec![(
@@ -160,18 +161,25 @@ impl Client {
             Action::CaptureReference(source) => {
                 let handle = self.handle.clone();
                 self.state.open_detail("Capturing conversation…".into());
+                let previews = self.reference_previews.clone();
                 self.spawn_detail(async move {
-                    let reference = handle.capture_reference(source).await.map_err(error)?;
-                    handle
-                        .preview_reference(reference, 0, 8192)
-                        .await
-                        .map(Update::Reference)
-                        .map_err(error)
+                    let capture_handle = handle.clone();
+                    let (page, lease) = previews
+                        .capture(handle, async move {
+                            capture_handle
+                                .capture_reference(source)
+                                .await
+                                .map_err(error)
+                        })
+                        .await?;
+                    Ok(Update::CapturedReference(page, lease))
                 });
             }
             Action::PreviewReference(reference, offset) => {
                 let handle = self.handle.clone();
+                let lease = self.state.reference_preview.take();
                 self.state.open_detail("Reading frozen reference…".into());
+                self.state.reference_preview = lease;
                 self.spawn_detail(async move {
                     handle
                         .preview_reference(reference, offset, 8192)
@@ -184,17 +192,36 @@ impl Client {
                 if let Err(problem) = self.add_reference(reference) {
                     self.state.notice(problem.to_string());
                 } else {
+                    if let Some(lease) = self.state.reference_preview.take() {
+                        lease.adopt();
+                    }
                     self.state.escape();
                     self.state.info("Frozen reference added; draft retained");
                 }
             }
-            Action::RemoveReference(digest) => {
+            Action::RemoveReference(capture_id) => {
+                let removed = self
+                    .state
+                    .references
+                    .iter()
+                    .find(|reference| reference.snapshot.capture_id == capture_id)
+                    .cloned();
                 self.state
                     .references
-                    .retain(|reference| reference.snapshot.sha256 != digest);
+                    .retain(|reference| reference.snapshot.capture_id != capture_id);
                 self.state.refresh_references();
                 self.state.escape();
                 self.state.info("Reference removed from draft");
+                if let Some(reference) = removed {
+                    let handle = self.handle.clone();
+                    self.spawn(async move {
+                        handle
+                            .release_reference(reference.snapshot)
+                            .await
+                            .map_err(error)?;
+                        Ok(Update::Notice("Reference retention released".into()))
+                    });
+                }
             }
             _ => unreachable!("reference actions dispatched by the exhaustive caller"),
         }
@@ -207,12 +234,10 @@ impl Client {
         {
             return Err(error("Reference belongs to a different target session"));
         }
-        if self
-            .state
-            .references
-            .iter()
-            .any(|item| item.snapshot == reference.snapshot)
-        {
+        if self.state.references.iter().any(|item| {
+            item.snapshot.sha256 == reference.snapshot.sha256
+                && item.snapshot.byte_len == reference.snapshot.byte_len
+        }) {
             return Err(error("Reference is already in this draft"));
         }
         let mut content = self.state.reference_input();

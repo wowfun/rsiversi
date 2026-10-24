@@ -162,11 +162,71 @@ impl SessionApi {
             .await;
     }
 }
+fn maintenance_operations(
+    registrar: &dyn ApiRegistrar,
+    service: &Arc<dyn SessionIngress>,
+    scratch: &Scratch,
+) -> rsi_api_protocol::Result<Vec<ApiRegistration>> {
+    let mut maintenance = Vec::new();
+    macro_rules! root {
+        ($op:ident, $input:ty, $method:ident) => {{
+            let owner = service.clone();
+            let budget = scratch.clone();
+            maintenance.push(registrar.register(
+                Operation::$op.spec(),
+                json_handler(move |context, request: $input| {
+                    let owner = owner.scoped(context.origin);
+                    let budget = budget.clone();
+                    async move {
+                        let reservation = budget.reserve(Operation::$op).await?;
+                        admitted(owner.$method(request).await, reservation)
+                    }
+                }),
+            )?);
+        }};
+    }
+    root!(CasGcPreview, usize, preview_cas_gc);
+    root!(CasGc, rsi_agent_store_protocol::CasGcRequest, collect_cas);
+    root!(
+        PurgePreview,
+        rsi_agent_store_protocol::PurgeRequest,
+        preview_purge
+    );
+    root!(Purge, rsi_agent_store_protocol::PurgeRequest, purge);
+    let owner = service.clone();
+    let budget = scratch.clone();
+    maintenance.push(registrar.register(
+        Operation::PurgeStatus.spec(),
+        json_handler(move |context, operation: String| {
+            let owner = owner.scoped(context.origin);
+            let budget = budget.clone();
+            async move {
+                let reservation = budget.reserve(Operation::PurgeStatus).await?;
+                admitted(owner.purge_status(&operation).await, reservation)
+            }
+        }),
+    )?);
+    let owner = service.clone();
+    let budget = scratch.clone();
+    maintenance.push(registrar.register(
+        Operation::CasGcStatus.spec(),
+        json_handler(move |context, operation: String| {
+            let owner = owner.scoped(context.origin);
+            let budget = budget.clone();
+            async move {
+                let reservation = budget.reserve(Operation::CasGcStatus).await?;
+                admitted(owner.cas_gc_status(&operation).await, reservation)
+            }
+        }),
+    )?);
+    Ok(maintenance)
+}
 fn root_operations(
     registrar: &dyn ApiRegistrar,
     service: Arc<dyn SessionIngress>,
     scratch: Scratch,
 ) -> rsi_api_protocol::Result<Vec<ApiRegistration>> {
+    let mut maintenance = maintenance_operations(registrar, &service, &scratch)?;
     let create_scratch = scratch.clone();
     let ingress = service.clone();
     let create = registrar.register(
@@ -244,7 +304,8 @@ fn root_operations(
             }
         }),
     )?;
-    Ok(vec![create, attach, read_header, recent])
+    maintenance.extend([create, attach, read_header, recent]);
+    Ok(maintenance)
 }
 #[allow(clippy::too_many_lines)] // Keep the closed operation-to-handler mapping reviewable in one place.
 fn handle_operations(
@@ -265,6 +326,12 @@ fn handle_operations(
         };
     }
     vec![
+        add!(
+            ReleaseReference,
+            |owner, snapshot: rsi_agent_session_protocol::ReferenceSnapshotRef| async move {
+                owner.release_reference(snapshot).await
+            }
+        ),
         add!(WorkflowReadiness, |owner, (): ()| async move {
             owner.workflow_readiness().await
         }),

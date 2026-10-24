@@ -204,6 +204,7 @@ impl Fixture {
             DomainIdentity::new("fixture.toggle", 1).unwrap(),
             &false,
             |_| Ok(()),
+            rsi_agent_composition_protocol::DomainReferencePolicy::None,
         )
         .unwrap();
         let domains = DomainCatalog::new([definition.registration()]).unwrap();
@@ -460,6 +461,12 @@ async fn identical_waiters_share_a_callback_and_disconnect_does_not_abandon_its_
         async move { kernel.execute(session, input).await }
     });
     fixture.callback.entered.acquire().await.unwrap().forget();
+    assert!(matches!(
+        fixture
+            .kernel
+            .prepare_retirement(std::slice::from_ref(&fixture.session_id)),
+        Err(TurnError::Capacity)
+    ));
     let second = tokio::spawn({
         let kernel = fixture.kernel.clone();
         let session = kernel.prepare_resume(&fixture.session_id).await.unwrap();

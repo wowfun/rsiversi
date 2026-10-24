@@ -23,8 +23,11 @@ sha2.workspace = true
 thiserror.workspace = true
 tokio.workspace = true
 tokio-util = { workspace = true, features = ["rt"] }
+getrandom.workspace = true
 
 [dev-dependencies]
+rsi-agent-store-sqlite = { path = "../store-sqlite" }
+tempfile.workspace = true
 rsi-sandbox = { path = "../../rsi-sandbox/core" }
 rsi-agent-testkit = { path = "../testkit" }
 tokio = { workspace = true, features = ["test-util"] }

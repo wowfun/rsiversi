@@ -26,6 +26,16 @@ impl Default for Managed {
     }
 }
 impl Managed {
+    pub(super) fn remove(&self, id: &SessionId) {
+        self.ids
+            .lock()
+            .expect("managed Session identities")
+            .retain(|current| current != id);
+        self.cached
+            .lock()
+            .expect("Session activity cache")
+            .remove(id);
+    }
     pub(super) fn opened(&self, id: &SessionId) {
         let mut ids = self.ids.lock().expect("managed Session identities");
         ids.retain(|current| current != id);

@@ -56,6 +56,10 @@ async fn capture_capacity_precedes_callbacks_and_drop_retirement_cancel_all_acti
             Err(SessionError::ShuttingDown)
         ));
     }
+    assert!(matches!(
+        next.next().await,
+        Some(Err(SessionError::ShuttingDown))
+    ));
     assert!(next.next().await.is_none());
     assert_eq!(fixture.kernel.observer_snapshot().total.current, 0);
     assert!(
@@ -221,6 +225,10 @@ async fn retiring_the_service_ends_idle_projection_subscriptions() {
     let mut stream = handle.observe_projections().await.unwrap();
     stream.next().await.unwrap().unwrap();
     fixture.service.stop().await.unwrap();
+    assert!(matches!(
+        stream.next().await,
+        Some(Err(SessionError::ShuttingDown))
+    ));
     assert!(stream.next().await.is_none());
     assert!(matches!(
         handle.observe_projections().await,

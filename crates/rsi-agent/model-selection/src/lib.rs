@@ -148,6 +148,7 @@ impl PluginFactory for ModelSelectionFactory {
             DomainIdentity::new(DOMAIN, 1).expect("static domain"),
             &None::<ModelSelection>,
             validate,
+            rsi_agent_composition_protocol::DomainReferencePolicy::None,
         )
         .map_err(|e| MetaError::Activation(e.to_string()))?
         .with_fork_policy(DomainForkPolicy::ResetToInitial);

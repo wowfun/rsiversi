@@ -44,6 +44,7 @@ async fn setup_conclusion(stack: &BaseStack, conclude: bool) -> (Arc<Settlement>
         DomainIdentity::new("fixture.settlement", 1).unwrap(),
         &0_u64,
         |_: &u64| Ok(()),
+        rsi_agent_composition_protocol::DomainReferencePolicy::None,
     )
     .unwrap();
     let domains = DomainCatalog::new([definition.registration()]).unwrap();

@@ -1,5 +1,18 @@
 # rsi-session-protocol
 
+Session lifecycle admission distinguishes cancellable reads from hard source and
+mutation owners. Closing atomically refuses hard owners before cancelling any
+read. Read-to-source promotion uses the same gate lock, so either promotion wins
+and maintenance reports Busy, or closing wins and promotion fails. Closing waits
+for actual read guards to drain. A failed pre-retirement attempt reopens a new
+epoch; old handles never regain admission. Durable retirement cannot reopen.
+Recording acknowledged durable retirement is an infallible, idempotent transition
+on the unique closing owner. Callers drain reads before Store admission; once the
+Store commits, this transition cannot abandon another selected gate halfway through.
+`SessionReadLease::is_retiring` checks the Session gate synchronously as well as
+scope revocation. Resource publication uses this check; `retiring()` is a wakeup
+notification and may observe the Session transition after a relay is scheduled.
+
 `SubmitInput.content` is an immutable `ValidatedSessionInput`. Construction and
 external decoding apply the same complete-input bounds before any provider,
 Media or Store work. In-process consumers borrow the validated slice or consume
@@ -354,3 +367,36 @@ Session ID before any client dispatch.
 Recent continuations expire before further reads. Retiring a completed final
 page removes its admitted cut without rechecking TTL; a cleanup step cannot
 discard an otherwise authorized result merely because the scan crossed expiry.
+
+Session maintenance takes an exact sorted selection with Header fingerprints and
+Fact/control watermarks. Preview is advisory; purge rechecks ordinary mutation
+location authority, refuses product-owned Sessions and retains live-owner locks
+before cancelling soft readers. One shared 30-second deadline bounds draining the
+entire selected group. The host drains actual read work before recording
+durable retirement. Unknown cleanup, ownership or commit outcomes never authorize
+reopening an old generation. Retrying uses the original operation identity and
+selection; status authorizes against the original execution-location bindings even after purge.
+Protected Headers are refused before those bindings are admitted. `Busy` names only
+a selected Session observed to own live work; un-attributable admission contention
+returns `Capacity`. Kernel reservations are retained across the whole selection.
+Known pre-admission Store refusals release closing ownership and permit a new
+attachment epoch; Capacity must not permanently retire a Session without a tombstone.
+After an uncertain admission returns, an authoritative binding read may prove
+absence and release the closing owners for a fresh epoch. Failed reconciliation
+retains those owners until status or a subsequent purge can establish the result.
+One call advances at most one Store batch; no recursive child expansion or CAS
+collection is implicit. Incoming source IDs are disclosed only after Header protection and execution-location
+admission succeed for the current caller.
+
+Agent-CAS maintenance is a separate local-Host administrative operation: bounded
+preview, collection of one exact hash/length/publication generation, and pure receipt
+query. Device-scoped callers are rejected; Session purge never implies CAS collection.
+An uncertain maintenance mutation returns `MaintenanceOutcomeUnknown` with its
+operation kind and original identity; clients reconcile through that kind's status
+endpoint and retain the same request for any retry. Local I/O failures after mutation
+dispatch cannot establish that no commit occurred. Navigation
+status observes durable metadata absence; only explicit purge retries perform cleanup.
+
+Workflow readiness/history/detail and Goal snapshots hold cancellable read ownership.
+Goal arm/retain-for-settlement and initial-round reservation hold hard ownership:
+they can create live continuation authority or commit work.

@@ -252,6 +252,7 @@ impl PluginFactory for PlanPolicyFactory {
             DomainIdentity::new(PLAN_POLICY_DOMAIN, 1).expect("static domain"),
             &false,
             |_| Ok(()),
+            rsi_agent_composition_protocol::DomainReferencePolicy::None,
         )
         .map_err(|error| MetaError::Activation(error.to_string()))?;
         let context = plan.context().registration_context()?;
@@ -262,6 +263,7 @@ impl PluginFactory for PlanPolicyFactory {
             DomainIdentity::new(REVIEW_DOMAIN, 1).expect("static domain"),
             &ReviewState::default(),
             ReviewState::validate,
+            rsi_agent_composition_protocol::DomainReferencePolicy::Visit(ReviewState::references),
         )
         .map_err(|e| MetaError::Activation(e.to_string()))?
         .with_fork_policy(rsi_agent_composition_protocol::DomainForkPolicy::ResetToInitial)

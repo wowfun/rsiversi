@@ -91,6 +91,7 @@ where
                     .acquire(context.origin.clone(), &request.target)
                     .await
                     .map_err(session_error)?;
+                let lease = Arc::new(lease);
                 let binding = FilesBinding::new(
                     services.caller.clone(),
                     request.target.session_id.as_str(),
@@ -106,6 +107,7 @@ where
                     execution,
                     request.target.clone(),
                     &context.origin,
+                    lease.clone(),
                 ));
                 let cancellation = context.retiring.child_token();
                 let _on_drop = cancellation.clone().drop_guard();

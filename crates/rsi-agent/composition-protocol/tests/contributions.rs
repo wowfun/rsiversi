@@ -100,6 +100,7 @@ fn duplicate_domain_proposals_do_not_admit_their_companion_inputs() {
         DomainIdentity::new("fixture.state", 1).unwrap(),
         &false,
         |_| Ok(()),
+        rsi_agent_composition_protocol::DomainReferencePolicy::None,
     )
     .unwrap();
     let catalog = DomainCatalog::new([definition.registration()]).unwrap();

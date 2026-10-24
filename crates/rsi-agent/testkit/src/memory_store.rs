@@ -17,6 +17,24 @@ use super::{
     async_trait, validate_message_claim_fact, validate_read_limit, validate_session_read_limit,
 };
 
+#[cfg(test)]
+#[tokio::test]
+async fn retention_checks_metadata_while_reads_authenticate_bytes() {
+    let store = MemoryStore::default();
+    let prepared = store
+        .put_cas(Arc::from(b"verified".as_slice()))
+        .await
+        .unwrap();
+    let object = prepared.reference().clone();
+    store
+        .inner
+        .lock()
+        .unwrap()
+        .cas
+        .insert(object.sha256.clone(), Arc::from(b"tampered".as_slice()));
+    crate::assert_metadata_only_cas_retention(&store, &object).await;
+}
+
 #[async_trait]
 impl SessionStore for MemoryStore {
     async fn contains_model_intent(
@@ -471,6 +489,13 @@ impl SessionStore for MemoryStore {
 
     async fn append(&self, batch: AppendBatch) -> Result<AppendCommit> {
         batch.validate()?;
+        let commit = AppendCommit {
+            durable_seq: batch
+                .facts
+                .last()
+                .expect("a validated append is nonempty")
+                .seq(),
+        };
         let activity =
             rsi_agent_store_protocol::appended_activity(batch.header.as_ref(), &batch.facts, &[]);
         if self.should_fail_append() {
@@ -480,6 +505,7 @@ impl SessionStore for MemoryStore {
             .inner
             .lock()
             .unwrap_or_else(std::sync::PoisonError::into_inner);
+        validate_cas_references(&state, &batch.facts, &[])?;
         if let Some(session) = state.sessions.get_mut(&batch.session_id) {
             let actual = session.facts.last().map_or(0, |fact| fact.seq());
             if actual != batch.expected_seq {
@@ -503,13 +529,6 @@ impl SessionStore for MemoryStore {
             session.facts.extend(batch.facts);
             session.turns.extend(turn_updates);
             session.fact_prefix_digest = fact_prefix_digest;
-            let commit = AppendCommit {
-                durable_seq: session
-                    .facts
-                    .last()
-                    .expect("a validated append is nonempty")
-                    .seq(),
-            };
             index_activity(&mut state, &batch.session_id, Some(previous));
             Ok(commit)
         } else {
@@ -526,11 +545,6 @@ impl SessionStore for MemoryStore {
                 .header
                 .ok_or_else(|| StoreError::NotFound(batch.session_id.as_str().to_owned()))?;
             validate_memory_agent_node(&state, &header)?;
-            let durable_seq = batch
-                .facts
-                .last()
-                .expect("a validated append is nonempty")
-                .seq();
             let (turns, fact_prefix_digest) =
                 index_appended_turns(&BTreeMap::new(), &batch.facts, EMPTY_FACT_PREFIX_DIGEST)?;
             let model_coordinates = index_model_coordinates(&BTreeSet::new(), &batch.facts)?;
@@ -568,7 +582,7 @@ impl SessionStore for MemoryStore {
                 },
             );
             index_activity(&mut state, &batch.session_id, None);
-            Ok(AppendCommit { durable_seq })
+            Ok(commit)
         }
     }
 
@@ -1754,7 +1768,10 @@ impl SessionStore for MemoryStore {
         Ok(())
     }
 
-    async fn put_cas(&self, bytes: Arc<[u8]>) -> Result<CasObjectRef> {
+    async fn put_cas(
+        &self,
+        bytes: Arc<[u8]>,
+    ) -> Result<rsi_agent_store_protocol::PreparedCasObject> {
         if bytes.is_empty() || bytes.len() > MAXIMUM_STORE_CAS_BYTES {
             return Err(StoreError::Invalid(
                 "CAS bytes must be nonempty and bounded".into(),
@@ -1770,8 +1787,29 @@ impl SessionStore for MemoryStore {
             .unwrap_or_else(std::sync::PoisonError::into_inner)
             .cas
             .entry(reference.sha256.clone())
-            .or_insert(bytes);
-        Ok(reference)
+            .or_insert_with(|| bytes.clone());
+        rsi_agent_store_protocol::PreparedCasObject::new(reference, bytes)
+    }
+
+    async fn retain_cas(
+        &self,
+        object: &CasObjectRef,
+    ) -> Result<rsi_agent_store_protocol::PreparedCasObject> {
+        object.validate()?;
+        let bytes = self
+            .inner
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .cas
+            .get(&object.sha256)
+            .cloned()
+            .ok_or_else(|| StoreError::NotFound(object.sha256.clone()))?;
+        if bytes.len() as u64 != object.byte_len {
+            return Err(StoreError::Corrupt(
+                "CAS registration length differs".into(),
+            ));
+        }
+        rsi_agent_store_protocol::PreparedCasObject::new(object.clone(), bytes)
     }
 
     async fn read_cas(
@@ -1876,11 +1914,43 @@ fn apply_domain_updates(
     Ok(())
 }
 
+fn validate_cas_references(
+    state: &MemoryState,
+    facts: &[Arc<SessionFact>],
+    controls: &[AgentControlRecord],
+) -> Result<()> {
+    let projections = facts
+        .iter()
+        .map(|fact| rsi_agent_store_protocol::fact_references(fact))
+        .chain(
+            controls
+                .iter()
+                .map(rsi_agent_store_protocol::native_control_references),
+        );
+    for references in projections {
+        for reference in references?.iter() {
+            if let rsi_agent_session_protocol::DurableReference::Cas { sha256, byte_len } =
+                reference
+            {
+                let bytes = state
+                    .cas
+                    .get(sha256)
+                    .ok_or_else(|| StoreError::NotFound(sha256.clone()))?;
+                if bytes.len() as u64 != *byte_len {
+                    return Err(StoreError::Corrupt("canonical CAS length differs".into()));
+                }
+            }
+        }
+    }
+    Ok(())
+}
+
 #[allow(clippy::too_many_lines)] // Keep the mechanical atomic-append mirror auditable as one transaction state transition.
 fn apply_atomic_memory_append(
     state: &mut MemoryState,
     append: AtomicSessionAppend,
 ) -> Result<StoreSessionWatermarks> {
+    validate_cas_references(state, &append.facts, &append.controls)?;
     let activity = rsi_agent_store_protocol::appended_activity(
         append.header.as_ref(),
         &append.facts,

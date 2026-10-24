@@ -11,10 +11,11 @@ pub struct SessionSourceLease {
 }
 impl SessionSourceLease {
     /// Combines independently admitted owners only when they name the same location.
-    pub fn new(read: SessionReadLease, execution: ExecutionLease) -> Result<Self> {
+    pub fn new(mut read: SessionReadLease, execution: ExecutionLease) -> Result<Self> {
         if read.header().coordinates().location() != execution.binding().location() {
             return Err(SessionError::Api(rsi_api_protocol::ApiError::Unauthorized));
         }
+        read.promote()?;
         Ok(Self { read, execution })
     }
     /// Fixed Header of the admitted source.
@@ -28,6 +29,10 @@ impl SessionSourceLease {
     /// Session-provider retirement cancels subsequent source work.
     pub fn retiring(&self) -> &tokio_util::sync::CancellationToken {
         self.read.retiring()
+    }
+    /// Synchronous Session-generation fence, independent of notification relay timing.
+    pub fn is_retiring(&self) -> bool {
+        self.read.is_retiring()
     }
 }
 /// Server-only source owner already bound to one Session and actual authenticated caller.

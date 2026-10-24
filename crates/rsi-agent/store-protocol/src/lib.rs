@@ -20,6 +20,18 @@ use std::sync::Arc;
 use thiserror::Error;
 
 mod activity;
+mod maintenance;
+mod maintenance_id;
+pub use maintenance_id::MaintenanceOperationId;
+mod references;
+pub use maintenance::{
+    CasGcReceipt, CasGcRequest, CasGcTarget, MAXIMUM_PURGE_BLOCKERS, PurgeBlocker, PurgePreview,
+    PurgeReceipt, PurgeRequest, PurgeTarget, StoreMaintenance,
+};
+pub use references::{
+    ReferenceCodecs, control_references, fact_references, header_references,
+    native_control_references,
+};
 mod domain;
 pub use activity::*;
 mod queue;
@@ -42,7 +54,7 @@ pub use window::{
 };
 
 /// Exact `SQLite` and in-memory Store schema version.
-pub const AGENT_STORE_SCHEMA_VERSION: u32 = 34;
+pub const AGENT_STORE_SCHEMA_VERSION: u32 = 38;
 /// Maximum Facts in one atomic append.
 pub const MAXIMUM_STORE_BATCH_FACTS: usize = 512;
 /// Maximum encoded bytes in one atomic append.
@@ -1758,6 +1770,56 @@ pub struct CasObjectRef {
     pub byte_len: u64,
 }
 
+/// Retained, non-serializable publication ownership through canonical commit.
+#[derive(Clone)]
+pub struct PreparedCasObject {
+    object: CasObjectRef,
+    _retained: Arc<dyn std::any::Any + Send + Sync>,
+}
+impl fmt::Debug for PreparedCasObject {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.debug_tuple("PreparedCasObject")
+            .field(&self.object)
+            .finish()
+    }
+}
+impl PreparedCasObject {
+    /// Backend constructor; retained ownership must prevent collection until Drop.
+    pub fn new(object: CasObjectRef, retained: impl Send + Sync + 'static) -> Result<Self> {
+        object.validate()?;
+        Ok(Self {
+            object,
+            _retained: Arc::new(retained),
+        })
+    }
+    /// Portable descriptor, which by itself does not retain publication ownership.
+    pub fn reference(&self) -> &CasObjectRef {
+        &self.object
+    }
+}
+impl std::ops::Deref for PreparedCasObject {
+    type Target = CasObjectRef;
+    fn deref(&self) -> &CasObjectRef {
+        &self.object
+    }
+}
+impl PartialEq for PreparedCasObject {
+    fn eq(&self, other: &Self) -> bool {
+        self.object == other.object
+    }
+}
+impl Eq for PreparedCasObject {}
+impl PartialEq<CasObjectRef> for PreparedCasObject {
+    fn eq(&self, other: &CasObjectRef) -> bool {
+        &self.object == other
+    }
+}
+impl PartialEq<PreparedCasObject> for CasObjectRef {
+    fn eq(&self, other: &PreparedCasObject) -> bool {
+        self == &other.object
+    }
+}
+
 impl<'de> Deserialize<'de> for CasObjectRef {
     fn deserialize<D>(deserializer: D) -> std::result::Result<Self, D::Error>
     where
@@ -1826,6 +1888,10 @@ impl fmt::Debug for SessionValidationLease {
 /// Mechanical durable operations under one already-held writer lease.
 #[async_trait]
 pub trait SessionStore: fmt::Debug + Send + Sync + 'static {
+    /// Explicit optional maintenance capability; absence is Unsupported, never implicit deletion.
+    fn maintenance(&self) -> Option<&dyn StoreMaintenance> {
+        None
+    }
     /// Reads up to 64 exact indexed summaries in one snapshot, preserving input order.
     /// Missing identities return None; no Header or transcript body is read.
     async fn session_activity_summaries(
@@ -2284,7 +2350,10 @@ pub trait SessionStore: fmt::Debug + Send + Sync + 'static {
         ))
     }
     /// Publishes bounded immutable bytes and returns their computed identity.
-    async fn put_cas(&self, bytes: Arc<[u8]>) -> Result<CasObjectRef>;
+    async fn put_cas(&self, bytes: Arc<[u8]>) -> Result<PreparedCasObject>;
+    /// Checks registry identity and length, retaining ownership without reading bytes.
+    /// This lease is not a byte-integrity proof; `read_cas` authenticates new payloads.
+    async fn retain_cas(&self, object: &CasObjectRef) -> Result<PreparedCasObject>;
     /// Verifies durable length before worker-owned allocation admission. Returned
     /// clones retain the byte reservation until their last owner is released.
     async fn read_cas(
