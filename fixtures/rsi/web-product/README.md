@@ -1,5 +1,13 @@
 # Web product verification
 
+`verify.mjs` runs `worker-conformance.mjs` before the acknowledgement deadline
+probe against the published Worker and Rust/Wasm module. The fixture supplies
+its verified build family and an isolated registered device receipt. It checks
+presentation-frame acknowledgements, valid commands, structured Rust admission
+refusals for malformed commands, continued use after rejection, and zero live
+request/timer resources after disconnect. It adds no production test export and
+does not assert that Serde unit variants reject unknown fields.
+
 Running fixtures select one paired publication and hold its
 [generation lease](../../../apps/devtools/README.md) through Node lifetime,
 including service restarts. Receipt hashes are checked after lease acquisition;

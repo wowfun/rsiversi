@@ -249,3 +249,8 @@ continuous CLI observation across two Turns. A one-permit Store-read fixture
 prevents regression of deadlock between suspended observation and interaction
 refresh. Completed-output tests carry a nonzero Bash exit and truncated text
 through context, then request raw UTF-8 boundary pages through `output_read`.
+
+Native Windows CI explicitly executes the process identity library tests. The
+Linux sandbox job checks that the execution source-reader and PTY lease tests
+are present before selecting their exact ignored names; zero selected tests is
+a failure. Native macOS remains a separate platform validation requirement.

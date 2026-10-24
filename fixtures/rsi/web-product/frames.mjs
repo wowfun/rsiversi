@@ -1,5 +1,6 @@
 import assert from "node:assert/strict";
 import { join } from "node:path";
+import { workerConformance } from "./worker-conformance.mjs";
 
 export async function verifyFrameDom(page, report, browser) {
   const result = await page.evaluate(async () => {
@@ -45,6 +46,8 @@ export async function verifyAcknowledgementDeadline(page, service) {
   const {paired}=await import('./paired-env.mjs');
   const receipt = service.register("ack deadline fixture");
   const { family: buildFamily } = paired;
+  const conformance = await page.evaluate(workerConformance, {receipt: service.register("Worker conformance"), buildFamily});
+  assert.equal(conformance.ok, true);
   const result = await page.evaluate(async ({receipt, buildFamily}) => {
     const worker = new Worker("/worker.js", { type: "module" });
     let sequence = 0, frameCount = 0;
@@ -80,5 +83,5 @@ export async function verifyAcknowledgementDeadline(page, service) {
   assert.equal(result.frameCount, 1);
   assert.match(result.error, /acknowledgement timed out/);
   assert.deepEqual(result.resources, { pending_timers: 0, active_alarms: 0, active_requests: 0 });
-  return result;
+  return { ...result, conformance };
 }

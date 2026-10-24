@@ -1920,3 +1920,6 @@ fn text_attempt(turn: &TurnId, effect: &EffectId, text: String) -> SessionFactBo
         .unwrap(),
     }
 }
+
+#[path = "kernel/authority_properties.rs"]
+mod authority_properties;

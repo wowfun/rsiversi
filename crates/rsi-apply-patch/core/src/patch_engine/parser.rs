@@ -340,3 +340,62 @@ mod tests {
         }
     }
 }
+
+#[cfg(test)]
+mod properties {
+    use super::*;
+    #[test]
+    fn generated_valid_documents_roundtrip_and_mutations_fail_closed() {
+        let mut seed = 0x5253_4976_6572_7369_u64;
+        let alphabet = ['a', '中', '🦀', ' ', '\t', '-', '+', 'é', '"', '\\'];
+        for case in 0..512 {
+            let mut line = format!("case-{case}-");
+            for _ in 0..(case % 67) {
+                seed = seed.wrapping_mul(6_364_136_223_846_793_005).wrapping_add(1);
+                line.push(alphabet[(seed >> 32) as usize % alphabet.len()]);
+            }
+            let document = format!(
+                "*** Begin Patch\n*** Add File: nested/f{case}.txt\n+{line}\n*** End Patch\n"
+            );
+            let parsed = parse_patch(&document)
+                .unwrap_or_else(|error| panic!("case {case}: {error:?}: {document}"));
+            let [ParsedOperation::Add { content, .. }] = parsed.as_slice() else {
+                panic!("case {case}: wrong operation");
+            };
+            assert_eq!(content, format!("{line}\n").as_bytes(), "case {case}");
+            for ending in ["\n", "\r\n"] {
+                let update = format!(
+                    "*** Begin Patch\n*** Update File: f.txt\n@@\n-{line}\n+replacement-{case}\n*** End Patch\n"
+                );
+                let parsed = parse_patch(&update).unwrap();
+                let [ParsedOperation::Update { path, chunks, .. }] = parsed.as_slice() else {
+                    panic!("case {case}: wrong update");
+                };
+                let actual = super::super::file_update::derive_update(
+                    &format!("{line}{ending}"),
+                    path,
+                    chunks,
+                    0,
+                    &mut Vec::new(),
+                )
+                .unwrap();
+                assert_eq!(actual, format!("replacement-{case}{ending}"), "case {case}");
+            }
+            for invalid in [
+                document.replacen("*** Begin Patch", "invalid", 1),
+                document.replace("*** End Patch", ""),
+                document.replace(&format!("nested/f{case}.txt"), "../outside.txt"),
+                document.replacen(&format!("+{line}"), &format!("invalid:{line}"), 1),
+            ] {
+                assert!(
+                    parse_patch(&invalid).is_err(),
+                    "case {case}: accepted {invalid}"
+                );
+            }
+            // Arbitrary scalar cuts exercise truncated Unicode framing without invalid Rust strings.
+            for (cut, _) in document.char_indices().step_by(7) {
+                let _ = parse_patch(&document[..cut]);
+            }
+        }
+    }
+}

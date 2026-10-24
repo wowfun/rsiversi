@@ -677,3 +677,39 @@ mod tests {
         }
     }
 }
+
+#[cfg(test)]
+mod authority_properties {
+    use super::*;
+    #[test]
+    fn revocation_and_uncertainty_are_monotonic_and_exact_generation_scoped() {
+        for mask in 0_u16..256 {
+            let id = JobScopeId::new("property", ["scope"]).unwrap();
+            let first = JobScopeAuthority::provider_owned(id.clone(), 7, 9);
+            let clone = first.clone();
+            let successor = JobScopeAuthority::provider_owned(id, 7, 9);
+            assert!(!first.same_generation(&successor));
+            let (mut revoked, mut unknown) = (false, false);
+            for step in 0..8 {
+                if mask & (1 << step) != 0 {
+                    clone.revoke();
+                    revoked = true;
+                } else {
+                    first.mark_outcome_unknown();
+                    unknown = true;
+                }
+                assert_eq!(first.is_active(), !revoked);
+                assert_eq!(clone.has_unknown_outcome(), unknown);
+                assert!(successor.is_active());
+                assert!(!successor.has_unknown_outcome());
+                assert!(first.belongs_to(7));
+                assert!(!first.belongs_to(8));
+            }
+            let weak = first.provider_state();
+            drop(first);
+            assert!(weak.upgrade().is_some());
+            drop(clone);
+            assert!(weak.upgrade().is_none());
+        }
+    }
+}

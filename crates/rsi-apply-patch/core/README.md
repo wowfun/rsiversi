@@ -70,3 +70,8 @@ contribution's configured helper and empty environment through its native lease.
 the same patch engine's exact marker in its immutable helper image. Ordinary
 helper lifecycle environment never enters the patch child. Native-only embeddings
 retain their explicitly supplied helper and empty environment.
+
+Private parser properties generate 512 valid Unicode add/update documents from a
+fixed seed, check exact content and line-ending preservation, then mutate framing
+and path boundaries. Failures report the reproducible case number and document;
+these tests need no filesystem effects or public parser API.

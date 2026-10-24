@@ -1095,6 +1095,10 @@ jobs:
         if: ${{ !cancelled() && steps.native_toolchain.outcome == 'success' }}
         timeout-minutes: 20
         run: cargo test --locked -p rsi-process-local -p rsi-files -p rsi-credentials-local -p rsi-acp-application --all-targets --no-fail-fast
+      - name: Test native Windows process identity guards
+        if: ${{ !cancelled() && steps.native_toolchain.outcome == 'success' }}
+        timeout-minutes: 5
+        run: cargo test --locked -p rsi-process-native --lib
       - name: Test Automation portable behavior and native admission boundaries
         if: ${{ !cancelled() && steps.native_toolchain.outcome == 'success' }}
         timeout-minutes: 20
@@ -1204,7 +1208,7 @@ jobs:
 
   rsi-ssh-linux:
     runs-on: ubuntu-24.04
-    timeout-minutes: 173
+    timeout-minutes: 183
     env:
       CARGO_BUILD_JOBS: 2
       RUST_MIN_STACK: 268435456
@@ -1319,6 +1323,19 @@ jobs:
           trap 'sudo sysctl -w "$setting=$previous"' EXIT
           sudo sysctl -w "$setting=0"
           cargo test --locked -p rsi-sandbox-local --test local native_source_reader_reads_tmp_ancestors_without_write_or_host_network_access -- --ignored --exact
+      - name: Verify native execution source-reader and PTY leases
+        timeout-minutes: 10
+        if: ${{ !cancelled() && steps.ssh_setup.outcome == 'success' && steps.ssh_helper_build.outcome == 'success' && steps.ssh_native.outcome == 'success' }}
+        run: |
+          setting=kernel.apparmor_restrict_unprivileged_userns
+          previous=$(sysctl -n "$setting")
+          trap 'sudo sysctl -w "$setting=$previous"' EXIT
+          sudo sysctl -w "$setting=0"
+          listing=$(cargo test --locked -p rsi-execution-local --test native -- --list)
+          for test in source_reader_lease_keeps_tmp_ancestors_visible_and_read_only native_pty_executes_and_resizes_through_the_same_lease; do
+            printf '%s\n' "$listing" | grep -Fx "$test: test"
+            cargo test --locked -p rsi-execution-local --test native "$test" -- --ignored --exact
+          done
       - name: Verify actual SSH execution, context, LSP, MCP and saturated control ACKs
         timeout-minutes: 30
         if: ${{ !cancelled() && steps.ssh_setup.outcome == 'success' && steps.ssh_helper_build.outcome == 'success' && steps.ssh_native.outcome == 'success' }}
