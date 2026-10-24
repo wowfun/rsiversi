@@ -1,5 +1,9 @@
 # rsi-pty
 
+Failed native reaping retains the terminal in its scope. A nonempty scope cannot
+be reported empty or reused merely because a close waiter received an error.
+Repeated close retries settlement without admitting new input.
+
 An ordinary plugin over the native Process PTY contract. The provider admits at
 most 256 scopes and 256 retained terminals. Aggregate reservations are 256 MiB
 for screens, 64 MiB for snapshots, and 64 MiB for follower queues. Screens reserve

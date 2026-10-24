@@ -77,9 +77,8 @@ impl Scope {
                 let term = lock(&self.inner).terminals.get(&terminal).cloned();
                 if let Some(term) = term {
                     term.process.terminate();
-                    let result = term.closed().await;
+                    term.closed().await?;
                     lock(&self.inner).terminals.remove(&terminal);
-                    result?;
                 }
                 Ok(Reply::Done)
             }

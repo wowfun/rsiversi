@@ -12,6 +12,7 @@ fn native_invalid_input_preserves_taxonomy_and_diagnostic_bound() {
 struct Fake {
     stopped: AtomicBool,
     hold_reap: AtomicBool,
+    fail_reap: AtomicBool,
     changed: Notify,
     writes: Mutex<Vec<Vec<u8>>>,
     waits: AtomicUsize,
@@ -72,6 +73,9 @@ impl PtyControl for Fake {
         loop {
             let changed = self.changed.notified();
             if self.stopped.load(Ordering::Acquire) && !self.hold_reap.load(Ordering::Acquire) {
+                if self.fail_reap.load(Ordering::Acquire) {
+                    return Err(rsi_process::ProcessError::Io("reap failed".into()));
+                }
                 return Ok(ProcessOutcome {
                     exit_code: Some(0),
                     signal: None,
@@ -1102,4 +1106,27 @@ async fn admitted_creation_panic_is_unknown_and_releases_capacity_without_replay
         PtyError::OutcomeUnknown
     );
     scope.retire().await.unwrap();
+}
+
+#[tokio::test]
+async fn failed_close_retains_unsettled_terminal_ownership() {
+    for operation in [
+        Operation::Close {
+            terminal: "pty".into(),
+        },
+        Operation::CloseAll,
+    ] {
+        let (scope, _, process) = fixture();
+        process.fail_reap.store(true, Ordering::Release);
+        assert!(scope.execute(operation).await.is_err());
+        assert!(!scope.is_empty());
+        assert!(scope.retire().await.is_err());
+        assert!(!scope.is_empty());
+        process.fail_reap.store(false, Ordering::Release);
+        scope.retire().await.unwrap();
+        assert!(
+            scope.is_empty(),
+            "a later successful reap releases retained ownership"
+        );
+    }
 }

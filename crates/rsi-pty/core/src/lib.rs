@@ -321,16 +321,18 @@ impl Scope {
             term.process.terminate();
         }
         let mut error = None;
-        for result in
-            futures_util::future::join_all(terminals.values().map(|term| term.closed())).await
-        {
-            if let Err(failure) = result {
-                error.get_or_insert(failure);
-            }
-        }
+        let outcomes =
+            futures_util::future::join_all(terminals.values().map(|term| term.closed())).await;
         let mut state = lock(&self.inner);
-        for id in terminals.keys() {
-            state.terminals.remove(id);
+        for (id, result) in terminals.keys().zip(outcomes) {
+            match result {
+                Ok(()) => {
+                    state.terminals.remove(id);
+                }
+                Err(failure) => {
+                    error.get_or_insert(failure);
+                }
+            }
         }
         error.map_or(Ok(()), Err)
     }
