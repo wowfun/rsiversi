@@ -880,8 +880,8 @@ async fn verify_retry(resolution: usize) {
         let last = requests.last().unwrap();
         assert_ne!(last.message_id, original.message_id);
         assert_eq!(
-            last.content,
-            vec![SessionInput::Text {
+            &*last.content,
+            &[SessionInput::Text {
                 text: "edited next draft".into()
             }]
         );

@@ -135,8 +135,8 @@ async fn ordered_images_and_image_only_retry_freeze_complete_content() {
         );
         let original = backend.requests.lock().unwrap()[0].clone();
         assert_eq!(
-            original.content,
-            vec![
+            &*original.content,
+            &[
                 SessionInput::Image { media: second },
                 SessionInput::Image {
                     media: first.clone()

@@ -1,5 +1,12 @@
 # rsi-session-protocol
 
+`SubmitInput.content` is an immutable `ValidatedSessionInput`. Construction and
+external decoding apply the same complete-input bounds before any provider,
+Media or Store work. In-process consumers borrow the validated slice or consume
+its blocks without repeating content validation. Its wire representation remains
+the ordered input array. Media existence, captured-reference binding, execution
+authority and durable admission are independently validated by their owners.
+
 Recent listing returns descending visible Headers and an optional opaque `next`
 cursor. `has_more` means more scanning work exists, including hidden rows; clients
 continue with `next` even when a page is empty. Cursors never expose skipped

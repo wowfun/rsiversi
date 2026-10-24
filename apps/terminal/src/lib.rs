@@ -917,6 +917,10 @@ pub(crate) async fn run_headless_application(
             Ok(id) => id,
             Err(error) => return report_error(&error),
         };
+        let content = match rsi_session_protocol::ValidatedSessionInput::try_from(content) {
+            Ok(content) => content,
+            Err(error) => return report_error(&session_cli::session_error(error)),
+        };
         let cancellation = CancellationToken::new();
         let signal = match arm_signal(cancellation.clone(), &work).await {
             Ok(signal) => signal,

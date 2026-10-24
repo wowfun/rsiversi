@@ -86,7 +86,9 @@ async fn wait_receipt(
 fn input(id: &str) -> SubmitInput {
     SubmitInput {
         message_id: MessageId::new(id).unwrap(),
-        content: vec![SessionInput::Text { text: id.into() }],
+        content: vec![SessionInput::Text { text: id.into() }]
+            .try_into()
+            .unwrap(),
         delivery: rsi_agent_session_protocol::MessageDelivery::NextTurn,
         model: None,
         reasoning_effort: None,

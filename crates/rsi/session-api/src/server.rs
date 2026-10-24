@@ -385,7 +385,6 @@ fn handle_operations(
             |owner, request_id: DomainRequestId| async move { owner.command_status(&request_id).await }
         ),
         add!(Submit, |owner, request: SubmitInput| async move {
-            rsi_session_protocol::validate_session_input(&request.content)?;
             owner.submit(request).await
         }),
         add!(Image, |owner, request: SubmitDirectImage| async move {

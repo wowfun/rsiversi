@@ -11,7 +11,7 @@ use rsi_session_protocol::SessionObservationStream;
 use rsi_session_protocol::{
     CreateSession, InteractionRetention, InteractionStream, RecentSessionCursor, RecentSessionPage,
     SessionError, SessionHandle, SessionHistoryPage, SessionService, SubmitDirectImage,
-    SubmitInput, TurnReceipt, validate_session_input,
+    SubmitInput, TurnReceipt,
 };
 use serde::{Serialize, de::DeserializeOwned};
 use std::{collections::BTreeSet, sync::Arc};
@@ -626,7 +626,6 @@ impl SessionHandle for Handle {
         Ok(reply.message)
     }
     async fn submit(&self, request: SubmitInput) -> rsi_session_protocol::Result<MessageReceipt> {
-        validate_session_input(&request.content)?;
         let result = self.call(Operation::Submit, &request).await;
         match result {
             Ok(receipt) => self.receipt(receipt, &request.message_id, Operation::Submit),

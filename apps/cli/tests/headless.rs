@@ -827,7 +827,9 @@ async fn standard_profile_runs_fresh_and_resume_through_durable_plugins() {
             message_id: MessageId::new("message-first").unwrap(),
             content: vec![SessionInput::Text {
                 text: "/status".into(),
-            }],
+            }]
+            .try_into()
+            .unwrap(),
             model: None,
             sandbox: None,
         })
@@ -860,7 +862,9 @@ async fn standard_profile_runs_fresh_and_resume_through_durable_plugins() {
             message_id: MessageId::new("message-second").unwrap(),
             content: vec![SessionInput::Text {
                 text: "again".into(),
-            }],
+            }]
+            .try_into()
+            .unwrap(),
             model: Some(ModelRef::new("fixture", "fixture-model").unwrap()),
             sandbox: Some(SandboxMode::ReadOnly),
         })
@@ -1879,7 +1883,9 @@ async fn real_question_tool_and_inspection_have_local_and_uds_parity() {
                 message_id: MessageId::new("question-input").unwrap(),
                 content: vec![SessionInput::Text {
                     text: "ask a question".into(),
-                }],
+                }]
+                .try_into()
+                .unwrap(),
                 model: None,
                 sandbox: None,
             })

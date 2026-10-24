@@ -52,7 +52,7 @@ async fn create(daemon: &DaemonFixture, fixture: &Fixture, id: &str) -> Arc<dyn 
 fn message(id: &str, content: Vec<SessionInput>) -> SubmitInput {
     SubmitInput {
         message_id: MessageId::new(id).unwrap(),
-        content,
+        content: content.try_into().unwrap(),
         delivery: rsi_agent_session_protocol::MessageDelivery::NextTurn,
         model: None,
         reasoning_effort: None,

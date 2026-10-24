@@ -83,7 +83,7 @@ async fn local_status_has_no_source_or_model_submission_and_is_bounded() {
     assert_eq!(requests.len(), 2, "the fixture retries one unknown receipt");
     for request in requests {
         assert!(
-            matches!(request.content.as_slice(), [MessageInput::Text { text }] if text == "only this prompt")
+            matches!(&*request.content, [MessageInput::Text { text }] if text == "only this prompt")
         );
     }
     surface.stop().await;

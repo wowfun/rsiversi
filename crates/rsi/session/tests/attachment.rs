@@ -1087,7 +1087,9 @@ async fn submit_text(
             reasoning_effort: None,
             delivery: rsi_agent_session_protocol::MessageDelivery::NextTurn,
             message_id: MessageId::new(message_id).unwrap(),
-            content: vec![SessionInput::Text { text: text.into() }],
+            content: vec![SessionInput::Text { text: text.into() }]
+                .try_into()
+                .unwrap(),
             model: None,
             sandbox: None,
         })
@@ -1318,7 +1320,9 @@ async fn assert_competing_message_publication(change_created_at: bool, concurren
                 message_id: MessageId::new("message-lost-publication-race").unwrap(),
                 content: vec![SessionInput::Text {
                     text: "first attempt".into(),
-                }],
+                }]
+                .try_into()
+                .unwrap(),
                 model: None,
                 sandbox: None,
             })
@@ -1340,7 +1344,9 @@ async fn assert_competing_message_publication(change_created_at: bool, concurren
             message_id: MessageId::new("message-after-publication-race").unwrap(),
             content: vec![SessionInput::Text {
                 text: "retry through the attached path".into(),
-            }],
+            }]
+            .try_into()
+            .unwrap(),
             model: None,
             sandbox: None,
         })
@@ -1652,7 +1658,9 @@ async fn cold_resume_preset_failure_precedes_workspace_registration() {
             message_id: MessageId::new("message-must-not-start").unwrap(),
             content: vec![SessionInput::Text {
                 text: "must not start".into(),
-            }],
+            }]
+            .try_into()
+            .unwrap(),
             model: None,
             sandbox: None,
         })

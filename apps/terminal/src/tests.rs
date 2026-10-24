@@ -894,7 +894,9 @@ async fn unknown_message_outcome_retries_the_same_identity_once() {
             message_id: message_id.clone(),
             content: vec![MessageInput::Text {
                 text: "reconcile".into(),
-            }],
+            }]
+            .try_into()
+            .unwrap(),
             model: None,
             sandbox: None,
         },
@@ -1153,7 +1155,9 @@ async fn interrupt_that_loses_message_claim_race_still_cancels_the_claimed_turn(
             message_id: MessageId::new("message-reconcile").unwrap(),
             content: vec![MessageInput::Text {
                 text: "cancel".into(),
-            }],
+            }]
+            .try_into()
+            .unwrap(),
             model: None,
             sandbox: None,
         },
@@ -1189,7 +1193,9 @@ async fn unknown_message_outcome_queries_before_resending_input() {
             message_id: MessageId::new("message-reconcile").unwrap(),
             content: vec![MessageInput::Text {
                 text: "query accepted input".into(),
-            }],
+            }]
+            .try_into()
+            .unwrap(),
             model: None,
             sandbox: None,
         },
@@ -1227,7 +1233,9 @@ async fn interaction_refresh_cannot_deadlock_a_suspended_observation_read() {
             message_id: MessageId::new("message-reconcile").unwrap(),
             content: vec![MessageInput::Text {
                 text: "observe".into(),
-            }],
+            }]
+            .try_into()
+            .unwrap(),
             model: None,
             sandbox: None,
         },

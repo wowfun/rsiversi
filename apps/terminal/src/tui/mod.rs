@@ -742,10 +742,13 @@ impl Client {
                 }
             };
             let content = self.state.reference_input();
-            if let Err(problem) = rsi_session_protocol::validate_session_input(&content) {
-                self.state.notice(problem.to_string());
-                return;
-            }
+            let content = match rsi_session_protocol::ValidatedSessionInput::try_from(content) {
+                Ok(content) => content,
+                Err(problem) => {
+                    self.state.notice(problem.to_string());
+                    return;
+                }
+            };
             self.submission.request = Some(SubmitInput {
                 reasoning_effort: None,
                 delivery,
@@ -771,7 +774,7 @@ impl Client {
         self.submission.rejected = false;
         self.submission.busy = self.spawn_as(WorkKind::Submit, async move {
             if !retry
-                && let [MessageInput::Text { text }] = request.content.as_slice()
+                && let [MessageInput::Text { text }] = &*request.content
                 && !slash::literal(text)
             {
                 let id = rsi_agent_session_protocol::DomainRequestId::new(format!(

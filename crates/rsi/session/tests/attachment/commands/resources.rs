@@ -77,7 +77,9 @@ fn input(id: &str) -> SubmitInput {
         delivery: rsi_agent_session_protocol::MessageDelivery::NextTurn,
         content: vec![SessionInput::Text {
             text: "resource plateau".into(),
-        }],
+        }]
+        .try_into()
+        .unwrap(),
         model: None,
         sandbox: None,
     }

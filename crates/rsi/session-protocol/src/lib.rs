@@ -270,6 +270,47 @@ pub fn validate_session_input(content: &[SessionInput]) -> Result<()> {
     Ok(())
 }
 
+/// Immutable complete input, validated before any external work.
+#[derive(Clone, Debug, Eq, PartialEq, serde::Serialize)]
+#[serde(transparent)]
+pub struct ValidatedSessionInput(Vec<SessionInput>);
+
+impl TryFrom<Vec<SessionInput>> for ValidatedSessionInput {
+    type Error = SessionError;
+    fn try_from(content: Vec<SessionInput>) -> Result<Self> {
+        validate_session_input(&content)?;
+        Ok(Self(content))
+    }
+}
+impl<'de> serde::Deserialize<'de> for ValidatedSessionInput {
+    fn deserialize<D: serde::Deserializer<'de>>(
+        deserializer: D,
+    ) -> std::result::Result<Self, D::Error> {
+        let content = <Vec<SessionInput> as serde::Deserialize>::deserialize(deserializer)?;
+        Self::try_from(content).map_err(serde::de::Error::custom)
+    }
+}
+impl std::ops::Deref for ValidatedSessionInput {
+    type Target = [SessionInput];
+    fn deref(&self) -> &Self::Target {
+        &self.0
+    }
+}
+impl IntoIterator for ValidatedSessionInput {
+    type Item = SessionInput;
+    type IntoIter = std::vec::IntoIter<SessionInput>;
+    fn into_iter(self) -> Self::IntoIter {
+        self.0.into_iter()
+    }
+}
+impl<'a> IntoIterator for &'a ValidatedSessionInput {
+    type Item = &'a SessionInput;
+    type IntoIter = std::slice::Iter<'a, SessionInput>;
+    fn into_iter(self) -> Self::IntoIter {
+        self.0.iter()
+    }
+}
+
 /// One idempotent multimodal mailbox submission.
 #[derive(Clone, Debug, serde::Serialize, serde::Deserialize)]
 #[serde(deny_unknown_fields)]
@@ -279,7 +320,7 @@ pub struct SubmitInput {
     /// Caller-preallocated durable message identity.
     pub message_id: MessageId,
     /// Nonempty ordered text and image content.
-    pub content: Vec<SessionInput>,
+    pub content: ValidatedSessionInput,
     /// Optional invocation-scoped model route.
     pub model: Option<ModelRef>,
     /// Effort for an explicit invocation model; absent means that model's default.

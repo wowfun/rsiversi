@@ -47,7 +47,7 @@ use rsi_session_protocol::{
     AgentSettingsSource, CreateSession, InteractionRetention, RecentSessionCursor,
     RecentSessionPage, Result, SessionApprovalControl, SessionError, SessionHandle,
     SessionHistoryPage, SessionInput, SessionObservationStream, SessionService, SessionSummary,
-    SubmitDirectImage, SubmitInput, TurnReceipt, validate_session_input,
+    SubmitDirectImage, SubmitInput, TurnReceipt, ValidatedSessionInput,
 };
 
 /// Process-local adapter over the Agent Kernel and mechanical Store.
@@ -730,13 +730,12 @@ impl LocalSessionHandle {
 
     async fn prepare_input_content(
         &self,
-        blocks: Vec<SessionInput>,
+        blocks: ValidatedSessionInput,
         header: &SessionHeader,
     ) -> Result<(
         Vec<AgentMessageContent>,
         Option<rsi_execution::ExecutionLease>,
     )> {
-        validate_session_input(&blocks)?;
         let execution = self.prepare_workspace(header).await?;
         let mut content = Vec::with_capacity(blocks.len());
         for block in blocks {
@@ -1081,7 +1080,6 @@ impl SessionHandle for LocalSessionHandle {
     async fn submit(&self, request: SubmitInput) -> Result<MessageReceipt> {
         let _admission = self.admit_mutation()?;
         let _activity = self.begin_activity()?;
-        validate_session_input(&request.content)?;
         let delivery = request.delivery;
         if delivery == rsi_agent_session_protocol::MessageDelivery::NextStep {
             return Err(SessionError::Invalid(
@@ -1183,8 +1181,10 @@ impl SessionHandle for LocalSessionHandle {
                                 SessionInput::Reference { reference }
                             }
                         })
-                        .collect();
-                    let prepared = self.prepare_input_content(input, &header).await?;
+                        .collect::<Vec<_>>();
+                    let prepared = self
+                        .prepare_input_content(input.try_into()?, &header)
+                        .await?;
                     *content = prepared.0;
                     execution = prepared.1;
                 }

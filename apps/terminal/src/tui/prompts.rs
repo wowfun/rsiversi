@@ -51,7 +51,7 @@ impl Prompts {
 impl Client {
     pub(super) fn remember_prompt(&mut self) {
         if let Some(request) = &self.submission.request
-            && let [MessageInput::Text { text }] = request.content.as_slice()
+            && let [MessageInput::Text { text }] = &*request.content
         {
             self.prompts.remember(self.state.header.session_id(), text);
         }

@@ -276,11 +276,10 @@ impl GuiApplication {
                 if !input.text.is_empty() { content.push(SessionInput::Text { text: input.text.clone() }); }
                 content.extend(input.images.iter().cloned().map(|media| SessionInput::Image { media }));
                 content.extend(input.references.iter().cloned().map(|reference| SessionInput::Reference { reference }));
-                rsi_session_protocol::validate_session_input(&content).map_err(error)?;
                 let id = MessageId::new(rsi_ui::fresh_identity("message")?).map_err(error)?;
                 let request = SubmitInput {
                     reasoning_effort: None,
-                    message_id: id.clone(), content,
+                    message_id: id.clone(), content: content.try_into().map_err(error)?,
                     delivery,
                     model: None,
                     sandbox: None,
@@ -337,7 +336,6 @@ impl GuiApplication {
                                 .into(),
                         );
                     }
-                    rsi_session_protocol::validate_session_input(&input.content).map_err(error)?;
                     let texts = input
                         .content
                         .iter()

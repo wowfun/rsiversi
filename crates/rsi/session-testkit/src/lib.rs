@@ -149,7 +149,9 @@ pub async fn assert_session_contract(
         message_id: message_id.clone(),
         content: vec![SessionInput::Text {
             text: "hello contract".into(),
-        }],
+        }]
+        .try_into()
+        .unwrap(),
         model: None,
         sandbox: None,
     };
@@ -208,7 +210,9 @@ pub async fn assert_session_contract(
                 message_id: message_id.clone(),
                 content: vec![SessionInput::Text {
                     text: "changed body".into(),
-                }],
+                }]
+                .try_into()
+                .unwrap(),
                 model: None,
                 sandbox: None,
             })

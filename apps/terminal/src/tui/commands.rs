@@ -132,7 +132,7 @@ impl Client {
             self.owned.remove(&request.message_id);
             if result.is_err()
                 && self.state.editor.text().is_empty()
-                && let [MessageInput::Text { text }] = request.content.as_slice()
+                && let [MessageInput::Text { text }] = &*request.content
             {
                 let _ = self.state.editor.insert(text);
             }

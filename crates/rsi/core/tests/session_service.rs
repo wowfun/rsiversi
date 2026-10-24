@@ -338,7 +338,9 @@ async fn run_message_with_text_to_terminal(
             reasoning_effort: None,
             delivery: rsi_agent_session_protocol::MessageDelivery::NextTurn,
             message_id: message_id.clone(),
-            content: vec![SessionInput::Text { text: text.into() }],
+            content: vec![SessionInput::Text { text: text.into() }]
+                .try_into()
+                .unwrap(),
             model: None,
             sandbox: None,
         })
@@ -920,7 +922,9 @@ async fn independent_media_upload_survives_message_rejection_and_host_restart() 
             message_id: MessageId::new("rejected-media-message").unwrap(),
             content: vec![SessionInput::Image {
                 media: reference.clone(),
-            }],
+            }]
+            .try_into()
+            .unwrap(),
             model: Some(rsi_ai_protocol::ModelRef::new("missing", "route").unwrap()),
             sandbox: None,
         })

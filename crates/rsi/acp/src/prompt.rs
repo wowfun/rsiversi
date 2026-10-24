@@ -10,12 +10,12 @@ use rsi_agent_turn_protocol::{
     TurnService,
 };
 use rsi_approval_protocol::ApprovalDecision;
-use rsi_session_protocol::{SessionInput, SubmitInput};
+use rsi_session_protocol::{SessionInput, SubmitInput, ValidatedSessionInput};
 use serde_json::json;
 use std::sync::atomic::Ordering;
 use tokio_util::sync::CancellationToken;
 
-pub(super) fn content(blocks: Vec<schema::ContentBlock>) -> Result<Vec<SessionInput>, Failure> {
+pub(super) fn content(blocks: Vec<schema::ContentBlock>) -> Result<ValidatedSessionInput, Failure> {
     let content = blocks
         .into_iter()
         .map(|block| match block {
@@ -26,8 +26,7 @@ pub(super) fn content(blocks: Vec<schema::ContentBlock>) -> Result<Vec<SessionIn
             _ => Err(Failure::Parameters),
         })
         .collect::<Result<Vec<_>, _>>()?;
-    rsi_session_protocol::validate_session_input(&content).map_err(|_| Failure::Parameters)?;
-    Ok(content)
+    content.try_into().map_err(|_| Failure::Parameters)
 }
 
 async fn permissions(session: &Attached, peer: &PeerHandle) -> Result<(), Failure> {
@@ -208,7 +207,7 @@ async fn observe(
 pub(super) async fn run(
     session: &Attached,
     turns: &dyn TurnService,
-    content: Vec<SessionInput>,
+    content: ValidatedSessionInput,
     peer: &PeerHandle,
     cancellation: CancellationToken,
 ) -> Result<schema::PromptResponse, Failure> {

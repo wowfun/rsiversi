@@ -539,7 +539,9 @@ pub fn input(id: &str) -> SubmitInput {
         message_id: MessageId::new(id).unwrap(),
         content: vec![rsi_session_protocol::SessionInput::Text {
             text: "shared controller".into(),
-        }],
+        }]
+        .try_into()
+        .unwrap(),
         model: None,
         sandbox: None,
     }

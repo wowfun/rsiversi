@@ -183,7 +183,9 @@ fn submit() -> SubmitInput {
         message_id: MessageId::new("message").unwrap(),
         content: vec![SessionInput::Text {
             text: "hello".into(),
-        }],
+        }]
+        .try_into()
+        .unwrap(),
         model: None,
         sandbox: None,
     }

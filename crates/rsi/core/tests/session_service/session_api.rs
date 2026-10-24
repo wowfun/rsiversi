@@ -440,7 +440,9 @@ async fn lost_submission(api: Arc<HttpClient>, session: &SessionId) {
         message_id: rsi_agent_session_protocol::MessageId::new("lost-http-reply").unwrap(),
         content: vec![rsi_session_protocol::SessionInput::Text {
             text: "preserve accepted identity".into(),
-        }],
+        }]
+        .try_into()
+        .unwrap(),
         model: None,
         sandbox: None,
     };
