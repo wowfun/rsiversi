@@ -5,8 +5,8 @@ from pathlib import Path
 from preview_policy import verify as verify_policy
 
 def verify(script, button, fill, until, screenshot, frame, workspace, report):
-    encoded = (Path(__file__).resolve().parents[3] / 'crates/rsi/desktop-bridge/wire-schema.json').read_bytes()
-    descriptor = {**json.loads(encoded)['contract'], 'schema':hashlib.sha256(encoded).hexdigest()}
+    encoded = (Path(__file__).resolve().parents[3] / 'crates/rsi/desktop-bridge/wire-contract.json').read_bytes()
+    descriptor = json.loads(encoded)
     payload = json.dumps({'protocol':descriptor,'operation':{'kind':'hello'}})
     invocation = "window.__TAURI_INTERNALS__.invoke('rsi_bridge',{payload:" + json.dumps(payload) + "})"
     script("window.mainBridgeProbe=null;"+invocation+".then(()=>mainBridgeProbe='accepted',()=>mainBridgeProbe='rejected');return true")

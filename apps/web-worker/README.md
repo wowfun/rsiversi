@@ -4,13 +4,13 @@ This package adapts the [shared GUI application](../../crates/rsi/gui/README.md)
 Worker. It owns browser authentication, Worker exports, binary transfer and
 API-backed renderer generation leases. Session controllers, projections,
 submission reconciliation and GUI actions belong to the shared application.
-Its generated wire snapshot covers the document/Worker bridge, JavaScript
-admission and Rust exports. This is an internal interface of the verified Web
-bundle; it is not a required Host API or a native build-family comparison.
+The document/Worker bridge, JavaScript admission and Rust exports are one internal
+interface of the verified, paired Web bundle. Its bundle identity and receipt bind
+these components; it has no independently negotiated protocol descriptor.
 
 `package.metadata.rsi.host-interface-packages` declares the interfaces this
 application consumes from its Host. Packaging resolves each named owner through
-the actual WASM normal-dependency closure and reads its source-backed descriptor.
+the actual WASM normal-dependency closure and reads its declared descriptor.
 Transitive implementation codecs, such as the native SSH helper transport, do
 not become Host requirements merely because their data types are dependencies.
 

@@ -1,0 +1,12 @@
+[
+  {"name":"hello","operation":{"kind":"hello"},"valid":true},
+  {"name":"request close","operation":{"kind":"request_close"},"valid":true},
+  {"name":"Unicode clipboard","operation":{"kind":"clipboard","text":"插件\n🎲"},"valid":true},
+  {"name":"export chunk","operation":{"kind":"export_write","token":"aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa","event":{"type":"chunk","offset":"0","text":"hello"}},"valid":true},
+  {"name":"export finish","operation":{"kind":"export_finish","token":"aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"},"valid":true},
+  {"name":"export cancel","operation":{"kind":"export_cancel","token":"aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"},"valid":true},
+  {"name":"close receipt","operation":{"kind":"close","attempt":9,"ready":true},"valid":true},
+  {"name":"unknown field","operation":{"kind":"hello","path":"arbitrary"},"valid":false},
+  {"name":"invalid reservation","operation":{"kind":"export_finish","token":"short"},"valid":false},
+  {"name":"unknown operation","operation":{"kind":"execute"},"valid":false}
+]

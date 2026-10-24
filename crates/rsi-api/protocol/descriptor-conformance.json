@@ -7,12 +7,12 @@
   {
     "name": ".leading.",
     "version": 1,
-    "valid": true
+    "valid": false
   },
   {
     "name": "_",
     "version": 4294967295,
-    "valid": true
+    "valid": false
   },
   {
     "name": "",
@@ -47,6 +47,21 @@
   {
     "name": "rsi.api",
     "version": 1.5,
+    "valid": false
+  },
+  {
+    "name": ".",
+    "version": 1,
+    "valid": false
+  },
+  {
+    "name": "..",
+    "version": 1,
+    "valid": false
+  },
+  {
+    "name": "1rsi",
+    "version": 1,
     "valid": false
   }
 ]

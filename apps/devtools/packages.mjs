@@ -82,7 +82,7 @@ export function parseManifest(bytes) {
 export function validateManifest(manifest) {
   const fail = () => { throw new Error('Invalid package manifest'); };
   if (!fields(manifest,['format','name','version','target','dependencies','files','exports','requires'])
-      || manifest.format !== 1 || !identifier(manifest.name) || typeof manifest.version !== 'string' || !/^[!-~]{1,128}$/.test(manifest.version)
+      || manifest.format !== 2 || !identifier(manifest.name) || typeof manifest.version !== 'string' || !/^[!-~]{1,128}$/.test(manifest.version)
       || !/^(portable|(?:windows|linux|macos)-(?:x86_64|aarch64))$/.test(manifest.target)
       || !Array.isArray(manifest.files) || manifest.files.length < 1 || manifest.files.length > 4096
       || !Array.isArray(manifest.dependencies) || manifest.dependencies.length > 128
@@ -113,7 +113,7 @@ export function validateManifest(manifest) {
     dependencies.add(dependency.name);
   }
   for (const required of manifest.requires) {
-    if (!fields(required,['name','version','schema']) || !validProtocolIdentity(required.name, required.version) || !digest(required.schema) || interfaces.has(required.name)) fail();
+    if (!fields(required,['name','version']) || !validProtocolIdentity(required.name, required.version) || interfaces.has(required.name)) fail();
     interfaces.add(required.name);
   }
 }
@@ -125,7 +125,7 @@ async function bounded(path, limit = 1024 * 1024) {
   return bytes;
 }
 async function descriptor(directory) {
-  return wireDescriptor(join(directory, 'wire-schema.json'));
+  return wireDescriptor(join(directory, 'wire-contract.json'));
 }
 async function webRequirements() {
   const cargo = spawnSync('cargo', ['metadata', '--locked', '--format-version', '1',
@@ -174,7 +174,7 @@ export async function assemble(kind, output, input, webManifest) {
   if (!platforms.has(process.platform) || !architectures.has(process.arch)) throw new Error('Unsupported native target');
   const version = process.env.RSI_RELEASE_VERSION ?? '0.0.1-local';
   if (!/^[!-~]{1,128}$/.test(version)) throw new Error('Invalid package version');
-  const manifest = {format:1,name:kind,version,target:kind === 'web' ? 'portable' : target,
+  const manifest = {format:2,name:kind,version,target:kind === 'web' ? 'portable' : target,
     dependencies:[],files:[],exports:{},requires:[]};
   const copies = [];
   if (kind === 'web') {

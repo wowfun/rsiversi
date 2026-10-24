@@ -250,6 +250,99 @@ mod tests {
     use super::*;
     use ring::signature::KeyPair as _;
     use std::sync::{Arc, Mutex};
+    #[tokio::test]
+    async fn desktop_download_adds_missing_web_and_preserves_an_installed_web() {
+        let key = ring::signature::Ed25519KeyPair::from_seed_unchecked(&[8; 32]).unwrap();
+        let content = b"format = 1\n".to_vec();
+        let mut packages = serde_json::Map::new();
+        let mut routes = BTreeMap::new();
+        for name in ["desktop", "web"] {
+            let manifest = serde_json::to_vec(&serde_json::json!({
+                "format":2,"name":name,"version":"1","target":"portable","dependencies":[],"requires":[],
+                "files":[{"path":"profile.toml","bytes":content.len(),"digest":hex::encode(Sha256::digest(&content)),"executable":false}],
+                "exports":{"main":{"kind":"application_profile","path":"profile.toml"}}
+            })).unwrap();
+            packages.insert(name.into(), serde_json::json!({"portable":{"manifest":format!("{name}/package.json"),"digest":hex::encode(Sha256::digest(&manifest))}}));
+            routes.insert(format!("/{name}/package.json"), manifest);
+            routes.insert(format!("/{name}/profile.toml"), content.clone());
+        }
+        let now = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .unwrap()
+            .as_secs();
+        let payload = serde_json::to_vec(&serde_json::json!({"format":1,"name":"fixture","sequence":1,"issued":now,"expires":now+3600,"packages":packages})).unwrap();
+        routes.insert(
+            "/repository.json".into(),
+            serde_json::to_vec(&SignedRepository {
+                payload: hex::encode(&payload),
+                signature: hex::encode(key.sign(&payload).as_ref()),
+            })
+            .unwrap(),
+        );
+        let routes = Arc::new(Mutex::new(routes));
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let address = listener.local_addr().unwrap();
+        let responses = routes.clone();
+        let server = tokio::spawn(async move {
+            let app = axum::Router::new().fallback(move |uri: axum::http::Uri| {
+                let responses = responses.clone();
+                async move {
+                    responses
+                        .lock()
+                        .unwrap()
+                        .get(uri.path())
+                        .cloned()
+                        .map_or((axum::http::StatusCode::NOT_FOUND, Vec::new()), |bytes| {
+                            (axum::http::StatusCode::OK, bytes)
+                        })
+                }
+            });
+            axum::serve(listener, app).await.unwrap();
+        });
+        let repository = rsi::LaunchRepository {
+            name: "fixture".into(),
+            url: format!("http://{address}/"),
+            public_key: hex::encode(key.public_key()),
+        };
+        let home = tempfile::tempdir().unwrap();
+        let store = PackageStore::open(&home.path().join("packages")).unwrap();
+        let first = install(
+            &store,
+            repository.clone(),
+            vec!["desktop".into()],
+            &[],
+            "windows-x86_64",
+        )
+        .await
+        .unwrap();
+        assert!(first.packages.contains_key("desktop"));
+        assert!(first.packages.contains_key("web"));
+        routes.lock().unwrap().remove("/web/package.json");
+        let next = install(
+            &store,
+            repository.clone(),
+            vec!["desktop".into()],
+            &[],
+            "windows-x86_64",
+        )
+        .await
+        .unwrap();
+        assert_eq!(next.packages["web"], first.packages["web"]);
+        assert!(
+            install(
+                &store,
+                repository,
+                vec!["desktop".into(), "web".into()],
+                &[],
+                "windows-x86_64"
+            )
+            .await
+            .is_err()
+        );
+        assert_eq!(store.resolution().unwrap().packages, next.packages);
+        server.abort();
+        let _ = server.await;
+    }
     #[test]
     fn core_repository_accepts_only_compiled_identity_or_its_mirror() {
         let repository = |name: &str, key: &str, url: &str| rsi::LaunchRepository {

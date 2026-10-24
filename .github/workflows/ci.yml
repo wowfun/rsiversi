@@ -73,12 +73,10 @@ jobs:
         env:
           RSI_AGENT_NOTES_BASE: ${{ steps.notes_base.outputs.base }}
         run: cargo xtask verify-agent-notes
-      - name: Verify protocol schemas and model versions
-        if: ${{ !cancelled() && steps.notes_base.outcome == 'success' }}
+      - name: Verify explicit protocol declarations
+        if: ${{ !cancelled() && steps.docs_setup.outcome == 'success' }}
         timeout-minutes: 5
-        env:
-          RSI_PROTOCOL_BASE: ${{ steps.notes_base.outputs.base }}
-        run: cargo xtask verify-protocols --base "$RSI_PROTOCOL_BASE"
+        run: cargo xtask verify-protocols
       - name: Verify architecture
         if: ${{ !cancelled() && steps.docs_setup.outcome == 'success' }}
         timeout-minutes: 5

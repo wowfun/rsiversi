@@ -3,7 +3,7 @@
     "name": "ordinary profile",
     "valid": true,
     "manifest": {
-      "format": 1,
+      "format": 2,
       "name": "fixture",
       "version": "1",
       "target": "portable",
@@ -29,7 +29,7 @@
     "name": "trailing identifier dot",
     "valid": false,
     "manifest": {
-      "format": 1,
+      "format": 2,
       "name": "fixture.",
       "version": "1",
       "target": "portable",
@@ -55,7 +55,7 @@
     "name": "undeclared export",
     "valid": false,
     "manifest": {
-      "format": 1,
+      "format": 2,
       "name": "fixture",
       "version": "1",
       "target": "portable",
@@ -81,7 +81,7 @@
     "name": "nonexecutable export",
     "valid": false,
     "manifest": {
-      "format": 1,
+      "format": 2,
       "name": "fixture",
       "version": "1",
       "target": "portable",
@@ -107,7 +107,7 @@
     "name": "bad dependency digest",
     "valid": false,
     "manifest": {
-      "format": 1,
+      "format": 2,
       "name": "fixture",
       "version": "1",
       "target": "portable",
@@ -138,7 +138,7 @@
     "name": "self dependency",
     "valid": false,
     "manifest": {
-      "format": 1,
+      "format": 2,
       "name": "fixture",
       "version": "1",
       "target": "portable",
@@ -169,7 +169,7 @@
     "name": "zero interface version",
     "valid": false,
     "manifest": {
-      "format": 1,
+      "format": 2,
       "name": "fixture",
       "version": "1",
       "target": "portable",
@@ -177,8 +177,7 @@
       "requires": [
         {
           "name": "wire",
-          "version": 0,
-          "schema": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
+          "version": 0
         }
       ],
       "files": [
@@ -201,7 +200,7 @@
     "name": "reserved path",
     "valid": false,
     "manifest": {
-      "format": 1,
+      "format": 2,
       "name": "fixture",
       "version": "1",
       "target": "portable",
@@ -227,7 +226,7 @@
     "name": "oversized component",
     "valid": false,
     "manifest": {
-      "format": 1,
+      "format": 2,
       "name": "fixture",
       "version": "1",
       "target": "portable",
@@ -253,7 +252,7 @@
     "name": "unknown field",
     "valid": false,
     "manifest": {
-      "format": 1,
+      "format": 2,
       "name": "fixture",
       "version": "1",
       "target": "portable",
@@ -280,7 +279,7 @@
     "name": "non boolean executable",
     "valid": false,
     "manifest": {
-      "format": 1,
+      "format": 2,
       "name": "fixture",
       "version": "1",
       "target": "portable",
@@ -292,6 +291,32 @@
           "bytes": 4,
           "digest": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
           "executable": "true"
+        }
+      ],
+      "exports": {
+        "main": {
+          "kind": "application_profile",
+          "path": "asset"
+        }
+      }
+    }
+  },
+  {
+    "name": "legacy source fingerprint manifest",
+    "valid": false,
+    "manifest": {
+      "format": 1,
+      "name": "fixture",
+      "version": "1",
+      "target": "portable",
+      "dependencies": [],
+      "requires": [],
+      "files": [
+        {
+          "path": "asset",
+          "bytes": 4,
+          "digest": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+          "executable": false
         }
       ],
       "exports": {

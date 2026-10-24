@@ -13,6 +13,9 @@ use std::{
 };
 
 const MAX_PACKAGES: usize = 128;
+#[cfg(test)]
+#[path = "migration_tests.rs"]
+mod migration_tests;
 const MAX_OBJECTS: usize = 256;
 /// One installed selection and its exact admitted provenance.
 #[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]

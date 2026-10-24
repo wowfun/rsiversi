@@ -88,17 +88,30 @@ pub struct Manifest {
 impl Manifest {
     /// Bounds bytes before parsing, then validates all cross-field rules.
     pub fn parse(bytes: &[u8]) -> Result<Self> {
+        #[derive(Deserialize)]
+        struct Format {
+            format: u32,
+        }
         if bytes.len() > crate::MAX_DOCUMENT {
             return Err(invalid("manifest exceeds 1 MiB"));
         }
-        let manifest: Self = serde_json::from_slice(bytes).map_err(|e| invalid(e.to_string()))?;
+        let manifest: Self = serde_json::from_slice(bytes).map_err(|error| {
+            if serde_json::from_slice::<Format>(bytes).is_ok_and(|format| format.format != 2) {
+                invalid("unsupported package manifest format; expected 2")
+            } else {
+                invalid(error.to_string())
+            }
+        })?;
+        if manifest.format != 2 {
+            return Err(invalid("unsupported package manifest format; expected 2"));
+        }
         manifest.validate()?;
         Ok(manifest)
     }
     /// Validates typed input as strictly as decoded metadata.
     pub fn validate(&self) -> Result<()> {
         crate::identifier(&self.name)?;
-        if self.format != 1
+        if self.format != 2
             || self.version.is_empty()
             || self.version.len() > 128
             || !self.version.bytes().all(|b| b.is_ascii_graphic())
@@ -170,8 +183,7 @@ impl Manifest {
         }
         let mut interfaces = BTreeSet::new();
         for required in &self.requires {
-            crate::identifier(&required.name)?;
-            crate::hash(&required.schema)?;
+            required.validate().map_err(|e| invalid(e.to_string()))?;
             if required.version == 0 || !interfaces.insert(&required.name) {
                 return Err(invalid("invalid or duplicate interface"));
             }
@@ -183,8 +195,8 @@ impl Manifest {
         for required in &self.requires {
             if !offered.contains(required) {
                 return Err(invalid(format!(
-                    "required interface {} v{} schema {} is unavailable",
-                    required.name, required.version, required.schema
+                    "required interface {} v{} is unavailable",
+                    required.name, required.version
                 )));
             }
         }

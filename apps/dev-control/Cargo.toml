@@ -16,7 +16,7 @@ tokio = { workspace = true, features = ["io-util"] }
 tokio = { workspace = true, features = ["macros", "rt"] }
 
 [build-dependencies]
-rsi-api-schema-build = { path = "../../crates/rsi-api/schema-build" }
+rsi-api-contract-build = { path = "../../crates/rsi-api/contract-build" }
 
 [lints]
 workspace = true

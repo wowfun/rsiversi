@@ -488,10 +488,9 @@ mod tests {
         let protocol = rsi_api_protocol::ProtocolDescriptor {
             name: "fixture.application".into(),
             version: 1,
-            schema: "a".repeat(64),
         };
         let manifest = Manifest {
-            format: 1,
+            format: 2,
             name: "example".into(),
             version: "1".into(),
             target: "portable".into(),

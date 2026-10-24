@@ -26,7 +26,7 @@ tokio = { workspace = true, features = ["time", "sync", "macros"] }
 tokio-util.workspace = true
 
 [build-dependencies]
-rsi-api-schema-build = { path = "../../rsi-api/schema-build" }
+rsi-api-contract-build = { path = "../../rsi-api/contract-build" }
 
 [lints]
 workspace = true

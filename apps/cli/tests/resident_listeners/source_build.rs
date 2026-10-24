@@ -5,7 +5,7 @@ use std::{path::Path, time::Duration};
 fn package(source: &Path, bytes: &[u8]) {
     std::fs::write(source.join("input"), bytes).unwrap();
     std::fs::write(source.join("manifest"),serde_json::to_vec(&serde_json::json!({
-        "format":1,"name":"fixture-build","version":"fixture","target":"portable","dependencies":[],"requires":[],
+        "format":2,"name":"fixture-build","version":"fixture","target":"portable","dependencies":[],"requires":[],
         "files":[{"path":"payload","bytes":bytes.len(),"digest":hex::encode(Sha256::digest(bytes)),"executable":false}],
         "exports":{"main":{"kind":"application_profile","path":"payload"}}
     })).unwrap()).unwrap();

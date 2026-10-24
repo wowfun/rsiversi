@@ -1,7 +1,20 @@
 import assert from 'node:assert/strict';
 import {test} from 'node:test';
 import {desktopCall,saveDesktopExport} from '../desktop-bridge.js';
-const descriptor = {name:'rsi.desktop.bridge',version:1,schema:'a'.repeat(64)};
+import {readFileSync} from 'node:fs';
+import {desktopBridgeDescriptor} from '../wire-descriptors.mjs';
+const descriptor = desktopBridgeDescriptor();
+
+test('document encodes the shared native request corpus with its actual build descriptor', async () => {
+  const cases = JSON.parse(readFileSync(new URL('../../../crates/rsi/desktop-bridge/conformance.json', import.meta.url), 'utf8'));
+  const protocol = desktopBridgeDescriptor();
+  for (const sample of cases.filter(sample => sample.valid)) {
+    let request;
+    const scope = {__RSI_DESKTOP__:true, __TAURI_INTERNALS__:{invoke: async (_command, {payload}) => { request = JSON.parse(payload); }}};
+    await desktopCall(sample.operation, scope, protocol);
+    assert.deepEqual(request, {protocol, operation:sample.operation}, sample.name);
+  }
+});
 test('native call sends the explicit descriptor and operation to a single product command',async()=>{
   const calls=[],scope={__RSI_DESKTOP__:true,__TAURI_INTERNALS__:{invoke:(...args)=>{calls.push(args);return Promise.resolve(null);}}};
   await desktopCall({kind:'clipboard',text:'hello'},scope,descriptor);

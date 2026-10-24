@@ -87,7 +87,7 @@ mod tests {
         let publish = |bytes: &[u8]| {
             std::fs::write(source.join("helper"), bytes).unwrap();
             let manifest = Manifest {
-                format: 1,
+                format: 2,
                 name: "ssh-helper".into(),
                 version: "fixture".into(),
                 target: format!("linux-{}", std::env::consts::ARCH),

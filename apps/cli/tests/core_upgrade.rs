@@ -94,7 +94,7 @@ impl Fixture {
     fn manifest(&self) {
         let name = self.candidate.file_name().unwrap().to_str().unwrap();
         std::fs::write(self.package.join("package.json"), serde_json::to_vec(&serde_json::json!({
-            "format":1, "name":"core", "version":"fixture", "target":format!("{}-{}",std::env::consts::OS,std::env::consts::ARCH),
+            "format":2, "name":"core", "version":"fixture", "target":format!("{}-{}",std::env::consts::OS,std::env::consts::ARCH),
             "dependencies":[], "requires":[],
             "exports":{"core":{"kind":"executable","path":name}},
             "files":[{"path":name,"bytes":std::fs::metadata(&self.candidate).unwrap().len(),"digest":hash(&self.candidate),"executable":true}]

@@ -1,5 +1,4 @@
 fn main() {
-    rsi_api_schema_build::build();
     println!("cargo:rerun-if-env-changed=RSI_WEB_BUNDLE_ID");
     if let Ok(identity) = std::env::var("RSI_WEB_BUNDLE_ID") {
         assert!(

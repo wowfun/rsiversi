@@ -1,5 +1,6 @@
 import {afterEach, beforeEach, test} from 'node:test';
 import assert from 'node:assert/strict';
+import {desktopBridgeDescriptor} from '../wire-descriptors.mjs';
 import {downloadSession} from '../session-export.js';
 
 const deferred = () => { let resolve; const promise = new Promise(r=>resolve=r); return {promise,resolve}; };
@@ -8,7 +9,7 @@ beforeEach(() => {
   original = Object.fromEntries(['__RSI_DESKTOP__','__RSI_DESKTOP_BRIDGE__','__TAURI_INTERNALS__'].map(key=>[key,Object.getOwnPropertyDescriptor(globalThis,key)]));
   nativeCalls = [];
   globalThis.__RSI_DESKTOP__ = true;
-  globalThis.__RSI_DESKTOP_BRIDGE__ = {name:'rsi.desktop.bridge',version:1,schema:'a'.repeat(64)};
+  globalThis.__RSI_DESKTOP_BRIDGE__ = desktopBridgeDescriptor();
   globalThis.__TAURI_INTERNALS__ = {invoke:async (_command,{payload})=>{
     const operation=JSON.parse(payload).operation; nativeCalls.push(operation);
     return operation.kind==='export_open'?{token:'native'}:null;

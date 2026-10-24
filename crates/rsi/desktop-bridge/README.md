@@ -14,6 +14,7 @@ retains the task until persistence or cancellation finishes. Close acknowledgmen
 carry a monotonically increasing attempt number, so a stale document response
 cannot close a later document.
 
-Web builds derive the expected descriptor from the reviewed generated snapshot.
-The native executable derives it from source at compile time. A mismatch fails
-before any native side effect.
+Web and native builds read the owner's explicit wire-contract.json declaration.
+Before window creation, Desktop checks the descriptor retained with the actual
+Web bundle or reported by its supervised frontend. Each call also checks it.
+The shared conformance corpus exercises JavaScript encoding and Rust decoding.

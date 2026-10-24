@@ -44,7 +44,7 @@ test('Desktop dependency must match the published Web manifest exactly', async (
     const content = Buffer.from('file');
     const file = {path:'asset',bytes:4,digest:createHash('sha256').update(content).digest('hex'),executable:false};
     await writeFile(join(directory,'asset'),content);
-    const web = {format:1,name:'web',target:'portable',version:'1',files:[file],dependencies:[],exports:{},requires:[]};
+    const web = {format:2,name:'web',target:'portable',version:'1',files:[file],dependencies:[],exports:{},requires:[]};
     await writeFile(join(directory,'package.json'),JSON.stringify(web));
     await writeFile(join(root,'desktop-input'),'native');
     const desktop = await assemble('desktop',join(root,'desktop'),join(root,'desktop-input'),join(directory,'package.json'));
@@ -107,8 +107,8 @@ test('signing refuses JSON forms rejected by Serde integer and duplicate-field a
   const [sample] = JSON.parse(await readFile(new URL('../../../crates/rsi/packages/manifest-conformance.json', import.meta.url)));
   const valid = JSON.stringify(sample.manifest);
   assert.doesNotThrow(() => parseManifest(Buffer.from(valid)));
-  assert.throws(() => parseManifest(Buffer.from(valid.replace('"format":1', '"format":1.0'))), /integer/);
-  assert.throws(() => parseManifest(Buffer.from(valid.replace('"format":1', '"format":1,"format":1'))), /duplicate/);
+  assert.throws(() => parseManifest(Buffer.from(valid.replace('"format":2', '"format":2.0'))), /integer/);
+  assert.throws(() => parseManifest(Buffer.from(valid.replace('"format":2', '"format":2,"format":2'))), /duplicate/);
 });
 
 test('protocol identities follow the shared Rust corpus independently of package names', async () => {

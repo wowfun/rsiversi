@@ -7,7 +7,7 @@ fn source(root: &std::path::Path, name: &str, bytes: &[u8]) -> InstallSource {
     std::fs::create_dir_all(&directory).unwrap();
     std::fs::write(directory.join("application.toml"), bytes).unwrap();
     let manifest = Manifest {
-        format: 1,
+        format: 2,
         name: name.into(),
         version: "1".into(),
         target: "portable".into(),
@@ -235,7 +235,6 @@ fn manifest_rejects_escaping_case_aliases_devices_and_missing_interfaces() {
     let interface = Interface {
         name: "session".into(),
         version: 1,
-        schema: "a".repeat(64),
     };
     let mut required = base;
     required.requires.push(interface.clone());
@@ -424,11 +423,11 @@ fn manifest_integer_tokens_and_duplicate_fields_are_not_silently_coerced() {
     let root = tempfile::tempdir().unwrap();
     let input = source(root.path(), "web", b"test");
     let bytes = String::from_utf8(input.manifest).unwrap();
-    assert!(Manifest::parse(bytes.replace("\"format\":1", "\"format\":1.0").as_bytes()).is_err());
+    assert!(Manifest::parse(bytes.replace("\"format\":2", "\"format\":2.0").as_bytes()).is_err());
     assert!(
         Manifest::parse(
             bytes
-                .replace("\"format\":1", "\"format\":1,\"format\":1")
+                .replace("\"format\":2", "\"format\":2,\"format\":2")
                 .as_bytes()
         )
         .is_err()

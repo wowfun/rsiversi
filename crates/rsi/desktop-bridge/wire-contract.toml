@@ -1,3 +1,0 @@
-name = "rsi.desktop.bridge"
-version = 3
-sources = ["../../../apps/web/desktop-bridge.js"]

@@ -4773,8 +4773,8 @@ dependencies = [
  "rsi-agent-session-protocol",
  "rsi-agent-turn-protocol",
  "rsi-ai-protocol",
+ "rsi-api-contract-build",
  "rsi-api-protocol",
- "rsi-api-schema-build",
  "rsi-approval-protocol",
  "rsi-meta",
  "rsi-session-protocol",
@@ -4792,8 +4792,8 @@ dependencies = [
  "hex",
  "rsi-acp-protocol",
  "rsi-api",
+ "rsi-api-contract-build",
  "rsi-api-protocol",
- "rsi-api-schema-build",
  "rsi-meta",
  "serde",
  "serde_json",
@@ -5488,8 +5488,8 @@ dependencies = [
  "rsi-ai-protocol",
  "rsi-ai-provider",
  "rsi-api",
+ "rsi-api-contract-build",
  "rsi-api-protocol",
- "rsi-api-schema-build",
  "rsi-credentials-testkit",
  "rsi-meta",
  "serde",
@@ -5727,13 +5727,22 @@ dependencies = [
 ]
 
 [[package]]
+name = "rsi-api-contract-build"
+version = "0.0.1"
+dependencies = [
+ "serde",
+ "serde_json",
+ "tempfile",
+]
+
+[[package]]
 name = "rsi-api-device-api"
 version = "0.0.1"
 dependencies = [
  "async-trait",
  "rsi-api",
+ "rsi-api-contract-build",
  "rsi-api-protocol",
- "rsi-api-schema-build",
  "rsi-credentials-protocol",
  "rsi-meta",
  "serde",
@@ -5834,7 +5843,7 @@ dependencies = [
  "futures-util",
  "getrandom 0.3.4",
  "hex",
- "rsi-api-schema-build",
+ "rsi-api-contract-build",
  "rsi-credentials-protocol",
  "rsi-meta-contract",
  "serde",
@@ -5842,21 +5851,6 @@ dependencies = [
  "thiserror 2.0.20",
  "tokio",
  "tokio-util",
-]
-
-[[package]]
-name = "rsi-api-schema-build"
-version = "0.0.1"
-dependencies = [
- "hex",
- "proc-macro2",
- "quote",
- "serde",
- "serde_json",
- "sha2",
- "syn 2.0.119",
- "tempfile",
- "toml 0.9.12+spec-1.1.0",
 ]
 
 [[package]]
@@ -6064,8 +6058,8 @@ dependencies = [
  "base64 0.22.1",
  "rsi-agent-session-protocol",
  "rsi-ai-protocol",
+ "rsi-api-contract-build",
  "rsi-api-protocol",
- "rsi-api-schema-build",
  "serde",
  "serde_json",
  "tokio",
@@ -6303,8 +6297,8 @@ dependencies = [
  "async-trait",
  "rsi-agent-session-protocol",
  "rsi-ai-protocol",
+ "rsi-api-contract-build",
  "rsi-api-protocol",
- "rsi-api-schema-build",
  "rsi-credentials-protocol",
  "rsi-execution-protocol",
  "rsi-mcp-protocol",
@@ -6401,8 +6395,8 @@ dependencies = [
 name = "rsi-desktop-bridge"
 version = "0.0.1"
 dependencies = [
+ "rsi-api-contract-build",
  "rsi-api-protocol",
- "rsi-api-schema-build",
  "rsi-session-protocol",
  "serde",
  "serde_json",
@@ -6412,8 +6406,8 @@ dependencies = [
 name = "rsi-dev-control"
 version = "0.0.1"
 dependencies = [
+ "rsi-api-contract-build",
  "rsi-api-protocol",
- "rsi-api-schema-build",
  "serde",
  "serde_json",
  "tokio",
@@ -6444,8 +6438,8 @@ name = "rsi-directory-picker-api"
 version = "0.0.1"
 dependencies = [
  "async-trait",
+ "rsi-api-contract-build",
  "rsi-api-protocol",
- "rsi-api-schema-build",
  "rsi-execution-protocol",
  "rsi-meta",
  "serde",
@@ -6681,8 +6675,8 @@ version = "0.0.1"
 dependencies = [
  "rsi-acp-protocol",
  "rsi-agent-session-protocol",
+ "rsi-api-contract-build",
  "rsi-api-protocol",
- "rsi-api-schema-build",
  "rsi-conversation",
  "rsi-workspace-protocol",
  "serde",
@@ -6711,8 +6705,8 @@ dependencies = [
 name = "rsi-host-control"
 version = "0.0.1"
 dependencies = [
+ "rsi-api-contract-build",
  "rsi-api-protocol",
- "rsi-api-schema-build",
  "serde",
  "serde_json",
  "tokio",
@@ -6724,8 +6718,8 @@ version = "0.0.1"
 dependencies = [
  "async-trait",
  "rsi-api",
+ "rsi-api-contract-build",
  "rsi-api-protocol",
- "rsi-api-schema-build",
  "rsi-meta",
  "rsi-meta-profile",
  "serde",
@@ -6925,8 +6919,8 @@ dependencies = [
  "hex",
  "image",
  "rsi-api",
+ "rsi-api-contract-build",
  "rsi-api-protocol",
- "rsi-api-schema-build",
  "rsi-media",
  "rsi-media-local",
  "rsi-media-protocol",
@@ -7087,8 +7081,8 @@ version = "0.0.1"
 dependencies = [
  "async-trait",
  "rsi-api",
+ "rsi-api-contract-build",
  "rsi-api-protocol",
- "rsi-api-schema-build",
  "rsi-meta",
  "serde",
  "serde_json",
@@ -7133,8 +7127,8 @@ version = "0.0.1"
 dependencies = [
  "rsi-agent-session-protocol",
  "rsi-agent-store-protocol",
+ "rsi-api-contract-build",
  "rsi-api-protocol",
- "rsi-api-schema-build",
  "rsi-conversation",
  "rsi-session-protocol",
  "rsi-workspace-protocol",
@@ -7220,8 +7214,8 @@ version = "0.0.1"
 dependencies = [
  "async-trait",
  "rsi-api",
+ "rsi-api-contract-build",
  "rsi-api-protocol",
- "rsi-api-schema-build",
  "rsi-meta",
  "rsi-process",
  "rsi-process-local",
@@ -7503,8 +7497,8 @@ dependencies = [
  "rsi-agent-turn-protocol",
  "rsi-ai-protocol",
  "rsi-api",
+ "rsi-api-contract-build",
  "rsi-api-protocol",
- "rsi-api-schema-build",
  "rsi-approval-protocol",
  "rsi-goal",
  "rsi-meta",
@@ -7557,10 +7551,10 @@ dependencies = [
  "rsi-agent-session-protocol",
  "rsi-ai-protocol",
  "rsi-api",
+ "rsi-api-contract-build",
  "rsi-api-http",
  "rsi-api-http-client",
  "rsi-api-protocol",
- "rsi-api-schema-build",
  "rsi-credentials-protocol",
  "rsi-execution",
  "rsi-files",
@@ -7719,8 +7713,8 @@ dependencies = [
  "async-trait",
  "futures-util",
  "rsi-api",
+ "rsi-api-contract-build",
  "rsi-api-protocol",
- "rsi-api-schema-build",
  "rsi-meta",
  "rsi-settings",
  "rsi-settings-local",
@@ -7879,8 +7873,8 @@ name = "rsi-ssh-protocol"
 version = "0.0.1"
 dependencies = [
  "base64 0.22.1",
+ "rsi-api-contract-build",
  "rsi-api-protocol",
- "rsi-api-schema-build",
  "rsi-execution",
  "rsi-files-protocol",
  "rsi-process",
@@ -8130,8 +8124,8 @@ dependencies = [
  "async-trait",
  "futures-util",
  "rsi-api",
+ "rsi-api-contract-build",
  "rsi-api-protocol",
- "rsi-api-schema-build",
  "rsi-meta",
  "rsi-meta-scope",
  "rsi-ui",
@@ -8190,7 +8184,6 @@ dependencies = [
  "js-sys",
  "rsi-api-browser-client",
  "rsi-api-protocol",
- "rsi-api-schema-build",
  "rsi-client-composition",
  "rsi-credentials-protocol",
  "rsi-gui",
@@ -8243,9 +8236,9 @@ dependencies = [
  "async-trait",
  "futures-util",
  "rsi-api",
+ "rsi-api-contract-build",
  "rsi-api-http",
  "rsi-api-protocol",
- "rsi-api-schema-build",
  "rsi-host",
  "rsi-meta",
  "rsi-ui-protocol",
@@ -8262,9 +8255,9 @@ dependencies = [
 name = "rsi-web-control"
 version = "0.0.1"
 dependencies = [
+ "rsi-api-contract-build",
  "rsi-api-http",
  "rsi-api-protocol",
- "rsi-api-schema-build",
  "serde",
  "serde_json",
  "tokio",
@@ -8322,10 +8315,10 @@ dependencies = [
  "async-trait",
  "futures-util",
  "rsi-api",
+ "rsi-api-contract-build",
  "rsi-api-http",
  "rsi-api-http-client",
  "rsi-api-protocol",
- "rsi-api-schema-build",
  "rsi-credentials-protocol",
  "rsi-execution",
  "rsi-meta",
@@ -8403,8 +8396,8 @@ name = "rsi-workspace-review-api"
 version = "0.0.1"
 dependencies = [
  "rsi-agent-session-protocol",
+ "rsi-api-contract-build",
  "rsi-api-protocol",
- "rsi-api-schema-build",
  "rsi-conversation",
  "rsi-workspace-protocol",
  "serde",
@@ -8436,7 +8429,7 @@ dependencies = [
  "percent-encoding",
  "pulldown-cmark",
  "ra_ap_syntax",
- "rsi-api-schema-build",
+ "rsi-api-contract-build",
  "rustix 1.1.4",
  "serde",
  "serde_json",

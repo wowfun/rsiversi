@@ -101,7 +101,7 @@ fn run() -> Result<(), String> {
             code_check::run(&repository).map_err(|error| format!("code-check:\n{error}"))
         }
         _ => Err(
-            "usage: rsi-xtask verify-architecture | rsi-xtask code-check | rsi-xtask verify-agent-notes [--write] | rsi-xtask verify-lockfiles [--online] | rsi-xtask verify-docs [--structure-only] | rsi-xtask rsi-meta conformance"
+            "usage: rsi-xtask verify-protocols | rsi-xtask verify-architecture | rsi-xtask code-check | rsi-xtask verify-agent-notes [--write] | rsi-xtask verify-lockfiles [--online] | rsi-xtask verify-docs [--structure-only] | rsi-xtask rsi-meta conformance"
                 .into(),
         ),
     }

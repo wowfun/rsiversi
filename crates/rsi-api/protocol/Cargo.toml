@@ -26,4 +26,4 @@ getrandom.workspace = true
 workspace = true
 
 [build-dependencies]
-rsi-api-schema-build = { path = "../schema-build" }
+rsi-api-contract-build = { path = "../contract-build" }

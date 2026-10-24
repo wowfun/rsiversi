@@ -60,5 +60,3 @@ zeroize.workspace = true
 [lints]
 workspace = true
 
-[build-dependencies]
-rsi-api-schema-build = { path = "../../crates/rsi-api/schema-build" }

@@ -6,12 +6,21 @@ installing a package never runs a compiler, lifecycle script or executable.
 Profiles select activation. The resolution lock records installed names, exact
 manifest digests and dependency closures; it contains no enabled flag.
 
-A manifest declares its target, every file's relative path, length and SHA-256,
+A format-2 manifest declares its target, every file's relative path, length and SHA-256,
 exact dependencies, named exports and required interface descriptors. Paths are
 portable relative components; links, device names, case-fold collisions and
 undeclared exports are refused. Publication stages all bytes, verifies the
 entire dependency closure and atomically replaces one resolution lock. Failed
 admission leaves the previous package selection authoritative.
+
+Required interfaces contain protocol name and explicit semantic version. Source
+fingerprints are not admission inputs. Parsing bounds bytes, decodes the closed
+format once, and validates its format and cross-field rules. Failed decoding may
+probe only the format to explain an unsupported historical manifest. Resolution locks and signed repository metadata retain
+format 1. To leave manifest format 1, first install the new executable to a separate
+empty prefix, stop old holders, remove all old selections (including core) in one
+uninstall, and collect unselected objects after their leases close. Existing trust
+receipts and user data are retained; install never skips old leased objects.
 
 Official metadata is an Ed25519-signed bounded payload under an explicitly
 pinned public key. It declares a monotonically increasing sequence, issue and

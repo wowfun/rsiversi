@@ -1,3 +1,3 @@
 fn main() {
-    rsi_api_schema_build::build();
+    rsi_api_contract_build::build();
 }

@@ -185,7 +185,7 @@ fn install_web(fixture: &CliFixture) {
     std::fs::write(
         package.join("package.json"),
         serde_json::to_vec(&serde_json::json!({
-            "format":1,"name":"web","version":"fixture","target":"portable","dependencies":[],
+            "format":2,"name":"web","version":"fixture","target":"portable","dependencies":[],
             "files":files,"exports":{"web":{"kind":"web_assets","path":"assets"}},
             "requires":rsi_serve::supported_protocols(),
         }))

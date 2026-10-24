@@ -11,7 +11,7 @@ name = "rsi-xtask"
 path = "src/main.rs"
 
 [dependencies]
-rsi-api-schema-build = { path = "../../rsi-api/schema-build" }
+rsi-api-contract-build = { path = "../../rsi-api/contract-build" }
 tempfile.workspace = true
 
 percent-encoding.workspace = true

@@ -16,6 +16,25 @@ pub fn protocol_descriptor() -> ProtocolDescriptor {
     rsi_api_protocol::wire_contract!()
 }
 
+/// Checks the actual document before creating a native window.
+///
+/// # Errors
+/// Names both package interfaces when an explicit update is required.
+pub fn admit_frontend(actual: Option<&ProtocolDescriptor>) -> Result<(), String> {
+    let expected = protocol_descriptor();
+    if actual == Some(&expected) {
+        return Ok(());
+    }
+    let actual = actual.map_or_else(
+        || "missing".to_owned(),
+        |value| format!("{} v{}", value.name, value.version),
+    );
+    Err(format!(
+        "Web bundle declares {actual}; Desktop requires {} v{}. Update the Web or Desktop package before launching.",
+        expected.name, expected.version
+    ))
+}
+
 /// Descriptor-fenced document request.
 #[derive(Debug, Deserialize, Serialize)]
 #[serde(deny_unknown_fields)]
@@ -100,6 +119,34 @@ pub fn decode(source: &str) -> Result<Operation, &'static str> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    #[test]
+    fn javascript_request_corpus_matches_the_rust_decoder() {
+        let cases: Vec<serde_json::Value> =
+            serde_json::from_str(include_str!("../conformance.json")).unwrap();
+        for case in cases {
+            let source = serde_json::json!({"protocol":protocol_descriptor(), "operation":case["operation"]}).to_string();
+            let decoded = decode(&source);
+            assert_eq!(
+                decoded.is_ok(),
+                case["valid"].as_bool().unwrap(),
+                "{}",
+                case["name"]
+            );
+            if let Ok(operation) = decoded {
+                assert_eq!(serde_json::to_value(operation).unwrap(), case["operation"]);
+            }
+        }
+    }
+    #[test]
+    fn frontend_admission_is_independent_of_package_digest() {
+        let expected = protocol_descriptor();
+        assert!(admit_frontend(Some(&expected)).is_ok());
+        let mut next = expected.clone();
+        next.version += 1;
+        let error = admit_frontend(Some(&next)).unwrap_err();
+        assert!(error.contains("Web") && error.contains("Desktop"));
+        assert!(admit_frontend(None).is_err());
+    }
     #[test]
     fn rejects_unknown_fields_and_interface_drift_before_operations() {
         let mut request = serde_json::to_value(Request {

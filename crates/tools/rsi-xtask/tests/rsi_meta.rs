@@ -266,6 +266,10 @@ fn ci_exercises_every_agent_package_and_formats_the_repository_once() {
 }
 
 #[test]
+#[expect(
+    clippy::too_many_lines,
+    reason = "This gate checks the complete Windows job composition."
+)]
 fn windows_compile_gate_keeps_independent_lint_and_unsupported_boundary_checks() {
     let workflow: serde_json::Value = yaml_serde::from_str(
         &fs::read_to_string(repository().join(".github/workflows/ci.yml")).unwrap(),
@@ -684,20 +688,17 @@ fn ci_events_separate_pull_requests_main_pushes_and_manual_runs() {
     }
     let protocols = documentation
         .iter()
-        .find(|step| step["name"].as_str() == Some("Verify protocol schemas and model versions"))
+        .find(|step| step["name"].as_str() == Some("Verify explicit protocol declarations"))
         .unwrap();
     assert_eq!(
         protocols["run"].as_str(),
-        Some("cargo xtask verify-protocols --base \"$RSI_PROTOCOL_BASE\"")
+        Some("cargo xtask verify-protocols")
     );
-    assert_eq!(
-        protocols["env"]["RSI_PROTOCOL_BASE"].as_str(),
-        Some("${{ steps.notes_base.outputs.base }}")
-    );
+    assert!(protocols["env"].is_null());
     assert_eq!(protocols["timeout-minutes"].as_u64(), Some(5));
     assert_eq!(
         protocols["if"].as_str(),
-        Some("${{ !cancelled() && steps.notes_base.outcome == 'success' }}")
+        Some("${{ !cancelled() && steps.docs_setup.outcome == 'success' }}")
     );
     assert!(protocols["continue-on-error"].is_null());
     let notes = documentation
@@ -1819,7 +1820,14 @@ fn package_release_has_bounded_topology_and_signing_authority() {
         workflow["concurrency"]["cancel-in-progress"].as_bool(),
         Some(false)
     );
-    assert_eq!(workflow["jobs"]["native"]["needs"].as_str(), Some("web"));
+    assert!(workflow["jobs"]["native"]["needs"].is_null());
+    let native_steps = workflow["jobs"]["native"]["steps"].as_sequence().unwrap();
+    assert!(
+        native_steps
+            .iter()
+            .all(|step| step["with"]["name"].as_str() != Some("package-web"))
+    );
+    assert!(!source.contains("--web-package"));
     assert_eq!(
         workflow["jobs"]["sign"]["needs"].as_sequence().unwrap(),
         &vec![
