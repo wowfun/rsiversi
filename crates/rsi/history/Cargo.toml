@@ -34,6 +34,7 @@ tokio-util.workspace = true
 rustix.workspace = true
 rsi-files-native-fs = { path = "../../rsi-files/native-fs" }
 [dev-dependencies]
+rsi-api = { path = "../../rsi-api/core" }
 rsi-files-protocol = { path = "../../rsi-files/protocol" }
 rsi-agent-testkit = { path = "../../rsi-agent/testkit" }
 rsi-ai-protocol = { path = "../../rsi-ai/protocol" }

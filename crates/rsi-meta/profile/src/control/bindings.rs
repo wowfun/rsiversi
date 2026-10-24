@@ -134,7 +134,7 @@ impl Namespace {
     }
 }
 
-fn resolve_contract(
+pub(super) fn resolve_contract(
     resolver: &dyn ProfileResolver,
     lane: IsolationLane,
     key: &str,

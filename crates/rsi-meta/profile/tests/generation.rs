@@ -277,6 +277,41 @@ fn unknown_factory_is_rejected_while_resolving_the_opaque_plan() {
     ));
 }
 
+#[test]
+fn unknown_fresh_and_named_markers_fail_before_any_factory_prepares() {
+    let temp = tempfile::tempdir().unwrap();
+    let path = temp.path().join("profile.toml");
+    for lane in ["local", "events"] {
+        for named in [false, true] {
+            let declaration = if named {
+                "{ key = 'unknown', label = 'shared' }"
+            } else {
+                "'unknown'"
+            };
+            std::fs::write(&path, format!("format = 1\n[[steps]]\nkind = 'plugin'\nid = 'first'\nplugin = 'test.prepare-failure'\n[[steps]]\nkind = 'group'\nid = 'scope'\n[steps.isolation]\n{lane} = [{declaration}]\n[[steps.nodes]]\nkind = 'plugin'\nid = 'inside'\nplugin = 'test.prepare-failure'\n")).unwrap();
+            let candidate = compiler(temp.path())
+                .compile(&ProfileProgram::from_file(&path))
+                .unwrap();
+            let calls = Arc::new(AtomicUsize::new(0));
+            let result = ProfileGenerationPlan::resolve(
+                candidate,
+                Arc::new(SingleResolver {
+                    plugin: "test.prepare-failure",
+                    factory: Arc::new(PrepareFailureFactory {
+                        calls: calls.clone(),
+                    }),
+                }),
+            );
+            assert!(matches!(
+                result,
+                Err(rsi_meta_profile::ProfileError::UnknownLocalContract { .. }
+                    | rsi_meta_profile::ProfileError::UnknownLocalEvent { .. })
+            ));
+            assert_eq!(calls.load(Ordering::SeqCst), 0);
+        }
+    }
+}
+
 #[tokio::test]
 async fn activation_is_owned_by_one_disposable_wrapper_fiber() {
     let temp = tempfile::tempdir().unwrap();

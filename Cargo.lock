@@ -6657,6 +6657,7 @@ dependencies = [
  "rsi-agent-testkit",
  "rsi-agent-turn-protocol",
  "rsi-ai-protocol",
+ "rsi-api",
  "rsi-api-protocol",
  "rsi-conversation",
  "rsi-execution",

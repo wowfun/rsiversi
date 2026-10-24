@@ -2,6 +2,40 @@ use rsi_meta_profile::{ProfileCandidate, ProfileCompiler, ProfileError, ProfileP
 use std::collections::BTreeSet;
 use std::path::Path;
 
+#[cfg(test)]
+mod tests {
+    use super::*;
+    #[test]
+    fn fresh_and_named_isolation_use_the_registered_agent_markers() {
+        let root = tempfile::tempdir().unwrap();
+        let path = root.path().join("agent.profile.toml");
+        let compiler = AgentPresetProfileCompiler::new(
+            ProfileCompiler::new(
+                rsi_meta_profile::ProfileEnvironment::without_paths("test", Default::default())
+                    .unwrap(),
+                Default::default(),
+            ),
+            ["test.child"],
+        )
+        .with_isolation_markers(["test.local".into()], ["test.event".into()]);
+        for (lane, key) in [("local", "test.local"), ("events", "test.event")] {
+            for named in [false, true] {
+                for known in [false, true] {
+                    let selected = if known { key } else { "unknown.marker" };
+                    let value = if named {
+                        format!("{{ key = '{selected}', label = 'shared' }}")
+                    } else {
+                        format!("'{selected}'")
+                    };
+                    std::fs::write(&path, format!("format = 1\n[[steps]]\nkind = 'group'\nid = 'scope'\n[steps.isolation]\n{lane} = [{value}]\n[[steps.nodes]]\nkind = 'plugin'\nid = 'leaf'\nplugin = 'test.child'\n")).unwrap();
+                    let result = compiler.compile(&path);
+                    assert_eq!(result.is_ok(), known, "{lane} named={named}: {result:?}");
+                }
+            }
+        }
+    }
+}
+
 /// Maximum UTF-8 bytes retained for one redacted Profile-health reason.
 pub const MAX_PROFILE_HEALTH_REASON_BYTES: usize = 256;
 
@@ -13,6 +47,8 @@ pub const MAX_PROFILE_HEALTH_REASON_BYTES: usize = 256;
 pub struct AgentPresetProfileCompiler {
     compiler: ProfileCompiler,
     allowed_plugins: BTreeSet<String>,
+    local_markers: BTreeSet<String>,
+    event_markers: BTreeSet<String>,
 }
 
 impl AgentPresetProfileCompiler {
@@ -25,7 +61,21 @@ impl AgentPresetProfileCompiler {
         Self {
             compiler,
             allowed_plugins: allowed_plugins.into_iter().map(Into::into).collect(),
+            local_markers: BTreeSet::new(),
+            event_markers: BTreeSet::new(),
         }
+    }
+
+    /// Supplies names from the same Agent declarations used by the runtime resolver.
+    #[must_use]
+    pub fn with_isolation_markers(
+        mut self,
+        local: impl IntoIterator<Item = String>,
+        events: impl IntoIterator<Item = String>,
+    ) -> Self {
+        self.local_markers = local.into_iter().collect();
+        self.event_markers = events.into_iter().collect();
+        self
     }
 
     pub(crate) fn compile(
@@ -43,15 +93,32 @@ impl AgentPresetProfileCompiler {
                 ));
             }
             for isolation in leaf.isolations() {
-                if !isolation.local().is_empty() {
-                    return Err(bound_reason(
-                        "the Agent Profile requests unsupported Local isolation".to_owned(),
-                    ));
-                }
-                if !isolation.events().is_empty() {
-                    return Err(bound_reason(
-                        "the Agent Profile requests unsupported event isolation".to_owned(),
-                    ));
+                use rsi_meta_profile::IsolationLane;
+                let fresh = isolation
+                    .local()
+                    .iter()
+                    .map(|key| (IsolationLane::Local, key.as_str()))
+                    .chain(
+                        isolation
+                            .events()
+                            .iter()
+                            .map(|key| (IsolationLane::Event, key.as_str())),
+                    );
+                let named = isolation
+                    .named()
+                    .iter()
+                    .map(|entry| (entry.lane(), entry.key()));
+                for (lane, key) in fresh.chain(named) {
+                    let known = match lane {
+                        IsolationLane::Local => self.local_markers.contains(key),
+                        IsolationLane::Event => self.event_markers.contains(key),
+                        IsolationLane::Portable => true,
+                    };
+                    if !known {
+                        return Err(
+                            "the Agent Profile references an unknown isolation marker".into()
+                        );
+                    }
                 }
             }
         }

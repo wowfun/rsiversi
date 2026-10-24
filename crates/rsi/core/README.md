@@ -1,5 +1,16 @@
 # rsi
 
+The route adapters for workspace-review, history, ACP, device operations,
+workspace, models, settings, media, output and Session use Replayable registration.
+Disable/enable and regrouping affect routes while admitted mutations drain; linked
+implementation changes still require rebuilding the binary and replacing its catalog.
+Profile apply can wait for that drain and reports Pending until convergence. A
+timeout never releases a route name while its old worker remains active. After
+bounded observation retries stop, reopen the affected surface to subscribe again.
+Session Files keeps its Local client coupling, UI API keeps its lease state,
+Directory Picker keeps its SSH settlement requirement, and Native Addons keeps
+its self-refresh settlement; these adapters remain RestartRequired.
+
 Product service applications receive an active `RemoteServiceContract` after
 Host startup and native identity validation. They own their transport attachment,
 not a second service generation. The Host supplies local browser authorization

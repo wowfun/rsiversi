@@ -582,6 +582,15 @@ impl StandardAddonSet {
         Ok(catalog)
     }
 
+    pub(crate) fn agent_isolation_markers(&self, lane: &str) -> Vec<String> {
+        self.addons
+            .iter()
+            .flat_map(|addon| &addon.markers)
+            .filter(|marker| marker.scope == AddonScope::Agent && marker.lane == lane)
+            .map(|marker| marker.key.to_owned())
+            .collect()
+    }
+
     pub(crate) fn digest(&self) -> rsi_host::Result<String> {
         let mut digest = Sha256::new();
         digest.update(b"rsi.standard.addons.v2");

@@ -30,8 +30,10 @@ The caller must pair the replacement with the executable contribution snapshot
 used for the same Agent build. Existing catalog values keep their own compiler.
 A roster row is healthy only when the complete Profile source,
 including required includes and pure expressions, compiles semantically and
-every enabled leaf belongs to that allowlist. Agent-forbidden Local or event
-isolation is rejected by the same pure preflight. Valid-id directories with a
+every enabled leaf belongs to that allowlist. Fresh and named Local/event isolation
+accept the frozen Agent marker declarations; unknown names produce a redacted
+preflight error without preparing factories. Graph activation and rollback determine
+whether isolated providers satisfy their consumers. Valid-id directories with a
 missing, non-regular, oversized, non-UTF-8, syntactically invalid, or
 semantically invalid composition remain visible with a bounded categorical
 reason instead of disappearing. Reasons do not contain source text, expression

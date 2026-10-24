@@ -91,6 +91,9 @@ Every startup or reload rereads immutable sources and rebuilds the candidate
 from an empty tree. Parse, source bounds, expression evaluation, identity and
 patch checks, factory resolution, context/isolation derivation, and watcher
 capture complete before retiring or applying child Fibers. Position preflight
+checks every fresh and named Local/event marker through the nominal resolver before
+any factory preparation; this lookup allocates no isolation and executes no plugin.
+Position preflight
 reserves only bounded composition metadata, without execution admission. Equality and restart checks
 therefore reserve no duplicate Fibers. Replayable convergence prepares and
 applies only the next changed or new leaf after prior capacity has been released;

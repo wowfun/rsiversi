@@ -6,6 +6,7 @@ mod authority;
 mod cache;
 mod discovery;
 mod plugin;
+mod settlement;
 mod source;
 mod tools;
 pub use authority::HistoryAuthority;
@@ -121,8 +122,14 @@ impl ProductHistorySearch {
         cancellation: CancellationToken,
     ) -> Result<Reply> {
         request.validate()?;
+        let mutation = request.spec().effect == rsi_api_protocol::OperationEffect::Mutation;
         let stop = self.stop.child_token();
-        let _guard = stop.clone().drop_guard();
+        let guard = stop.clone().drop_guard();
+        let (_waiter, worker) = if mutation {
+            (None, Some(guard))
+        } else {
+            (Some(guard), None)
+        };
         let worker_stop = stop.clone();
         let task = {
             let _lock = self.admission.lock().expect("history admission");
@@ -136,15 +143,31 @@ impl ProductHistorySearch {
             let owner = self.clone();
             self.execution.spawn(self.tasks.track_future(async move {
                 let _permit = permit;
-                let result = owner.execute(authority, request, &worker_stop).await;
-                check(&worker_stop)?;
-                result
+                let _guard = worker;
+                settlement::worker(
+                    async {
+                        owner
+                            .execute(authority, request, &worker_stop)
+                            .await
+                            .map(|reply| {
+                                settlement::PendingReply::new(reply, owner.references.clone())
+                            })
+                    },
+                    mutation,
+                    &worker_stop,
+                )
+                .await
             }))
         };
         let deadline = self
             .execution
             .deadline_after(std::time::Duration::from_secs(30));
-        tokio::select! {biased;()=cancellation.cancelled()=>Err(ApiError::ShuttingDown),()=self.stop.cancelled()=>Err(ApiError::ShuttingDown),result=deadline.timeout(task)=>result.map_err(|_|ApiError::Unavailable)?.map_err(|_|ApiError::Unavailable)?}
+        if mutation {
+            return settlement::mutation(task, deadline, stop.clone())
+                .await
+                .map(settlement::PendingReply::deliver);
+        }
+        tokio::select! {biased;()=cancellation.cancelled()=>Err(ApiError::ShuttingDown),()=self.stop.cancelled()=>Err(ApiError::ShuttingDown),result=deadline.timeout(task)=>result.map_err(|_|ApiError::Unavailable)?.map_err(|_|ApiError::Unavailable)?.map(settlement::PendingReply::deliver)}
     }
     /// Closes admission and drains actual reads and `SQLite` workers before releasing the lease.
     ///

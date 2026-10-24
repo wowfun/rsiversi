@@ -8,10 +8,16 @@ external conversation, Workspace and References contracts. Kernel, Meta and the
 Agent Store do not own search semantics or the FTS database. The
 [wire contract](../history-api/README.md) owns user-visible bounds and scope.
 
-Two retained workers admit finite operations without an unbounded queue. Dropped
-waiters cancel further steps, while dispatched Store, journal and blocking SQLite
-work keeps its permit until completion; retirement drains before releasing the
-lease. Each native batch admits at most 256 Facts and 16 MiB before body decoding.
+Two retained workers admit finite operations without an unbounded queue. Reads
+may cancel their waiter; admitted mutations retain completion ownership until their
+Store, journal and blocking SQLite work has settled. Route retirement closes new
+admission and waits for those mutations. A deadline cancels further steps but joins
+the actual worker and returns its known result. A dropped mutation waiter does not
+cancel that worker. Undelivered frozen replies release their pending capture by
+identity. Lost workers or ambiguous shutdown
+return `OutcomeUnknown`; partial effects are never
+reported as a definitive pre-execution rejection. Retirement drains before releasing
+the lease. Each native batch admits at most 256 Facts and 16 MiB before body decoding.
 Derived index documents additionally stop before an original when reaching 8192
 fields or 64 MiB of encoded metadata plus text. One bounded original is staged
 before this decision; it is retried by the next batch, never silently omitted.

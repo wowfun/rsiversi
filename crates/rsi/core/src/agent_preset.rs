@@ -242,6 +242,10 @@ pub(crate) fn standard_agent_profile_compiler(
             .descriptions()
             .filter(|factory| factory.scope == crate::AddonScope::Agent)
             .map(|factory| factory.plugin.clone()),
+    )
+    .with_isolation_markers(
+        addons.agent_isolation_markers("local"),
+        addons.agent_isolation_markers("event"),
     ))
 }
 
@@ -274,6 +278,10 @@ pub(crate) fn native_agent_profile_compiler(
                     .filter(|entry| entry.scope() == crate::AddonScope::Agent)
                     .map(|entry| entry.plugin().to_owned()),
             ),
+    )
+    .with_isolation_markers(
+        base.agent_isolation_markers("local"),
+        base.agent_isolation_markers("event"),
     ))
 }
 

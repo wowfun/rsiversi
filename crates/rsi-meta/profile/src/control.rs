@@ -1869,6 +1869,21 @@ fn resolve_target(
     resolver: &dyn ProfileResolver,
     candidate: ProfileCandidate,
 ) -> Result<ResolvedTarget> {
+    for leaf in candidate.leaves() {
+        for isolation in leaf.isolations() {
+            for (lane, keys) in [
+                (crate::IsolationLane::Local, isolation.local()),
+                (crate::IsolationLane::Event, isolation.events()),
+            ] {
+                for key in keys {
+                    bindings::resolve_contract(resolver, lane, key)?;
+                }
+            }
+            for named in isolation.named() {
+                bindings::resolve_contract(resolver, named.lane(), named.key())?;
+            }
+        }
+    }
     let leaves = candidate
         .leaves()
         .iter()

@@ -60,7 +60,7 @@ pub(crate) fn register(
         builder.register_linked(
             id,
             env!("CARGO_PKG_VERSION"),
-            UpdateMode::RestartRequired,
+            route_update_mode(id),
             factory,
         )?;
         let config = if matches!(
@@ -106,6 +106,22 @@ pub(crate) fn register(
     ));
     builder.register_fragment(ProfileFragment::new("rsi.standard.api", entries))?;
     Ok(())
+}
+
+fn route_update_mode(id: &str) -> UpdateMode {
+    match id {
+        "rsi.workspace-review.api"
+        | "rsi.history.api"
+        | "rsi.acp.api"
+        | "rsi.api.devices.operations"
+        | "rsi.workspace.api"
+        | "rsi.models.api"
+        | "rsi.settings.api"
+        | "rsi.media.api"
+        | "rsi.output.api"
+        | "rsi.session.api" => UpdateMode::Replayable,
+        _ => UpdateMode::RestartRequired,
+    }
 }
 
 fn factories() -> Vec<(&'static str, std::sync::Arc<dyn rsi_meta::PluginFactory>)> {
