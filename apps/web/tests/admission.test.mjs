@@ -7,5 +7,6 @@ test('both bridge ends classify terminal traffic independently from document com
  for(const type of ['create','takeover','detach','unknown'])assert.equal(lane('terminal',JSON.stringify({request:{type}})),'ordinary');
  assert.equal(lane('terminal','malformed'),'ordinary');assert.equal(lane('command','{}'),'ordinary');
  assert.equal(lane('export_cancel'),'exportControl');
+ assert.equal(lane('command',JSON.stringify({action:'close_settings',revision:'1'})),'exportControl');
  assert.equal(lane('disconnect'),'lifecycle');assert.deepEqual(limits,{ordinary:8,terminalRead:32,terminalWrite:8,lifecycle:1,exportControl:8});
 });

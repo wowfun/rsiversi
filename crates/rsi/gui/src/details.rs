@@ -133,6 +133,7 @@ pub(crate) struct RemoteCatalog {
 pub(crate) struct Details {
     pub(crate) sequence: Arc<AtomicU64>,
     pub(crate) revision: u64,
+    pub(crate) settings_window: u64,
     pub stop: CancellationToken,
     pub ui: Option<UiDetail>,
     pub remote_catalog: Option<RemoteCatalog>,
@@ -153,6 +154,7 @@ impl Details {
         Self {
             sequence,
             revision: 0,
+            settings_window: 0,
             stop: CancellationToken::new(),
             ui: None,
             remote_catalog: None,
@@ -187,6 +189,14 @@ impl Details {
         self.settings_catalog = None;
         self.interaction = None;
         Ok(self.revision)
+    }
+    pub fn begin_settings(&mut self, explicit_open: bool) -> Result<u64> {
+        let opening = explicit_open || (self.settings_catalog.is_none() && self.editor.is_none());
+        let revision = self.begin()?;
+        if opening {
+            self.settings_window = revision;
+        }
+        Ok(revision)
     }
     pub fn source_result(&mut self, revision: u64, result: Result<FieldWindow>) {
         if self.revision != revision || self.stop.is_cancelled() {

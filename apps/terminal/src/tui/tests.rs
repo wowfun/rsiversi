@@ -8,6 +8,104 @@ mod ui;
 mod workspace;
 
 #[tokio::test]
+async fn approval_review_reads_authority_and_uncertain_decisions_require_explicit_refresh() {
+    let (mut client, handle, runtime, surface) = client().await;
+    let request: rsi_approval_protocol::ApprovalRequest =
+        serde_json::from_value(serde_json::json!({
+            "subject":{"session_id":"s","turn_id":"t","effect_id":"e"},
+            "id":"approval","action":"Run command","reason":"old cached reason","review":null
+        }))
+        .unwrap();
+    let mut fresh = request.clone();
+    fresh.reason = "fresh owner evidence".into();
+    *handle.approvals.lock().unwrap() = vec![fresh.clone()];
+    client.action(Action::Approval(request.clone()));
+    let Update::Approval(current) = client.tasks.next().await.unwrap().result.unwrap() else {
+        panic!("approval read");
+    };
+    assert_eq!(current, Some(fresh.clone()));
+    client.show_approval(current);
+    assert_eq!(client.state.reviewed_approval, Some(fresh.clone()));
+    client.state.menu.clone_from(&client.state.detail_actions);
+    client.state.escape();
+    assert_eq!(
+        client.state.reviewed_approval,
+        Some(fresh.clone()),
+        "closing the choices keeps the reviewed detail"
+    );
+    let decision = rsi_approval_protocol::ApprovalDecision::AllowOnce;
+    client.action(Action::Decide(request, decision));
+    assert!(
+        client.tasks.is_empty(),
+        "a renderer-cached request cannot authorize a decision"
+    );
+    handle
+        .approval_failure
+        .store(true, std::sync::atomic::Ordering::SeqCst);
+    client.action(Action::Decide(fresh.clone(), decision));
+    client.action(Action::Decide(fresh.clone(), decision));
+    let revision = client.state.view_revision;
+    client.state.detail_offset = 3;
+    client.action(Action::Approval(fresh.clone()));
+    assert_eq!(client.state.view_revision, revision);
+    assert!(
+        client.state.detail.is_some(),
+        "keep review while the answer is pending"
+    );
+    let Update::ApprovalDecided(request, result) =
+        client.tasks.next().await.unwrap().result.unwrap()
+    else {
+        panic!("answer");
+    };
+    client.approval_decided(request, result, true);
+    assert_eq!(
+        client.state.detail_offset, 3,
+        "unknown result preserves the reviewed position"
+    );
+    assert_eq!(
+        handle
+            .approval_answers
+            .load(std::sync::atomic::Ordering::SeqCst),
+        1
+    );
+    assert!(client.state.reviewed_approval.is_none());
+    assert!(matches!(
+        client.state.detail_actions.as_ref().unwrap().items[0].1,
+        Action::Approval(_)
+    ));
+    client.action(Action::Decide(fresh.clone(), decision));
+    assert!(client.tasks.is_empty());
+    client.state.escape();
+    client.approval_decided(
+        fresh.clone(),
+        Err(rsi_session_protocol::SessionError::Api(
+            rsi_api_protocol::ApiError::OutcomeUnknown,
+        )),
+        false,
+    );
+    assert!(
+        client.state.detail.is_none(),
+        "late replies cannot reopen a dismissed review"
+    );
+    handle.approvals.lock().unwrap().clear();
+    client.action(Action::Approval(fresh));
+    let Update::Approval(current) = client.tasks.next().await.unwrap().result.unwrap() else {
+        panic!("refresh");
+    };
+    client.show_approval(current);
+    assert!(client.state.detail.is_none());
+    assert_eq!(
+        handle
+            .approval_answers
+            .load(std::sync::atomic::Ordering::SeqCst),
+        1
+    );
+    drop(client);
+    surface.stop().await;
+    assert!(runtime.shutdown().await.is_clean());
+}
+
+#[tokio::test]
 async fn effort_command_completes_and_dispatches_without_a_model_request() {
     let (mut client, handle, runtime, surface) = client().await;
     client.state.editor.insert("/eff").unwrap();

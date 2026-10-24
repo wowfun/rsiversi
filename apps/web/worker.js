@@ -116,7 +116,7 @@ self.onmessage = ({ data }) => {
       const result = await dispatch(data);
       postMessage({ kind: "reply", id: data.id, result }, result instanceof Uint8Array ? [result.buffer] : []);
     } catch (error) {
-      postMessage({ kind: "reply", id: data.id, error: String(error) });
+      postMessage({ kind: "reply", id: data.id, error: String(error), notAdmitted: error?.notAdmitted === true, retryable: error?.notAdmitted === true && error?.retryable !== false });
     } finally { calls[selected]--; }
   })();
   if (!control) {

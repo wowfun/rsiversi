@@ -447,8 +447,10 @@ impl GuiApplication {
                     let mut registry = self.details.lock().expect("attention detail");
                     let details = registry.open(
                         Some((index, generation.clone(), attachment.id.clone())),
-                        serde_json::json!({"action":"inspect_interaction","owner":attachment.id,"id":detail["request"]["id"]}),
+                        serde_json::json!({"action":"inspect_interaction","pane":index,"generation":generation,"owner":attachment.id,"id":detail["request"]["id"]}),
                     )?;
+                    let mut detail = detail;
+                    detail["ticket"] = details.revision.to_string().into();
                     details.interaction = Some(detail);
                 }
             }
@@ -790,7 +792,10 @@ impl GuiApplication {
                 generation,
                 owner,
                 id,
-            } => self.inspect_interaction(pane, &generation, &owner, &id),
+            } => {
+                self.inspect_interaction(pane, &generation, &owner, &id)
+                    .await
+            }
             _ => Err("Command does not belong to a pane".into()),
         }
     }
@@ -1093,7 +1098,7 @@ impl GuiApplication {
         state.history = Some(transcript);
         Ok(())
     }
-    fn inspect_interaction(
+    async fn inspect_interaction(
         &self,
         index: crate::SurfaceId,
         generation: &str,
@@ -1101,32 +1106,42 @@ impl GuiApplication {
         id: &str,
     ) -> Result<()> {
         let attachment = self.pane(index)?.attachment(generation)?;
-        let state = attachment
-            .renderer
-            .state
-            .lock()
-            .expect("Web renderer poisoned");
-        let snapshot = state
-            .interactions
-            .as_ref()
-            .ok_or("Interactions are not available")?;
-        let detail = if let Some(request) = snapshot
-            .questions()
-            .iter()
-            .find(|request| request.id == id && request.session_id == owner)
-        {
+        let (questions, approvals) = tokio::join!(
+            attachment.handle.pending_questions(),
+            attachment.handle.pending_approvals(),
+        );
+        let detail = if let Some(request) = questions.as_ref().ok().and_then(|requests| {
+            requests
+                .iter()
+                .find(|request| request.id == id && request.session_id == owner)
+        }) {
             serde_json::json!({"pane":index,"generation":generation,"kind":"question","request":request})
-        } else if let Some(request) = snapshot
-            .approvals()
-            .iter()
-            .find(|request| request.id == id && request.subject.session_id() == owner)
-        {
+        } else if let Some(request) = approvals.as_ref().ok().and_then(|requests| {
+            requests
+                .iter()
+                .find(|request| request.id == id && request.subject.session_id() == owner)
+        }) {
             serde_json::json!({"pane":index,"generation":generation,"kind":"approval","request":request})
         } else {
-            return Err("Interaction is no longer pending".into());
+            let removed = {
+                let mut registry = self.details.lock().expect("Web details poisoned");
+                let question = questions.is_ok()
+                    && registry.settle_observed(index, generation, owner, id, "question");
+                let approval = approvals.is_ok()
+                    && registry.settle_observed(index, generation, owner, id, "approval");
+                question || approval
+            };
+            if !removed {
+                questions.map_err(error)?;
+                approvals.map_err(error)?;
+            }
+            return Ok(());
         };
+        self.pane(index)?.attachment(generation)?;
         let mut registry = self.details.lock().expect("Web details poisoned");
-        let details = registry.open(Some((index, generation.into(), attachment.id.clone())), serde_json::json!({"action":"inspect_interaction","pane":index,"generation":generation,"owner":owner,"id":id}))?;
+        let details = registry.reopen(Some((index, generation.into(), attachment.id.clone())), serde_json::json!({"action":"inspect_interaction","pane":index,"generation":generation,"owner":owner,"id":id}))?;
+        let mut detail = detail;
+        detail["ticket"] = details.revision.to_string().into();
         details.interaction = Some(detail);
         Ok(())
     }

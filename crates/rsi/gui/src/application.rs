@@ -229,6 +229,7 @@ pub(crate) enum Command {
     },
     SettingsRead {
         namespace: String,
+        window: Option<String>,
     },
     SettingsList,
     SettingsNext {
@@ -239,7 +240,10 @@ pub(crate) enum Command {
         text: String,
     },
     CloseDetail {
-        view: Option<String>,
+        view: String,
+    },
+    CloseSettings {
+        revision: String,
     },
     FloatPanel {
         view: String,
@@ -301,6 +305,7 @@ impl Command {
             | Self::SettingsNext { .. }
             | Self::SettingsSave { .. }
             | Self::CloseDetail { .. }
+            | Self::CloseSettings { .. }
             | Self::FloatPanel { .. } => None,
         }
     }
@@ -475,21 +480,56 @@ impl GuiApplication {
     /// # Panics
     /// Panics if an earlier application panic poisoned its state.
     pub fn command(self: &Arc<Self>, source: &str) -> BoxFuture<'static, Result<()>> {
-        if source.len() > 1024 * 1024 + 4096 {
-            return Box::pin(async { Err("Web command exceeds 1 MiB".into()) });
+        match self.try_command(source) {
+            Ok(waiter) => waiter,
+            Err(error) => Box::pin(async { Err(error) }),
         }
-        let command: Command = match serde_json::from_str(source) {
-            Ok(command) => command,
-            Err(_) => return Box::pin(async { Err("Invalid Web command".into()) }),
-        };
+    }
+    /// Admits a command, distinguishing refusal from an admitted operation's outcome.
+    ///
+    /// # Errors
+    /// Returns malformed-input, closed-application or capacity errors before admission.
+    ///
+    /// # Panics
+    /// Panics if an earlier application panic poisoned its state.
+    pub fn try_command(self: &Arc<Self>, source: &str) -> Result<BoxFuture<'static, Result<()>>> {
+        if source.len() > 1024 * 1024 + 4096 {
+            return Err("Web command exceeds 1 MiB".into());
+        }
+        let command: Command =
+            serde_json::from_str(source).map_err(|_| "Invalid Web command".to_owned())?;
+        if let Command::CloseSettings { revision } = command {
+            self.close_settings(&revision)?;
+            return Ok(Box::pin(async { Ok(()) }));
+        }
         // Plugin operations publish their outcome in the shared workbench. A
         // recovered connection must not leave its previous error as a global banner.
         let global_error = !matches!(command, Command::Plugins { .. });
-        self.admit(
+        self.try_admit(
             global_error,
             command.affected_pane(),
             move |app| async move { app.execute(command).await },
         )
+    }
+    fn close_settings(&self, revision: &str) -> Result<()> {
+        let expected = revision
+            .parse::<u64>()
+            .map_err(|_| "Invalid Settings revision")?;
+        if expected == 0 || expected.to_string() != revision {
+            return Err("Invalid Settings revision".into());
+        }
+        let _admission = self.admission.lock().expect("Web admission poisoned");
+        if self.stop.is_cancelled() {
+            return Err("Web application is closed".into());
+        }
+        let mut details = self.details.lock().expect("Web details poisoned");
+        if details.settings.settings_window == expected {
+            details.settings.begin()?;
+            details.settings.settings_window = 0;
+            drop(details);
+            self.changed();
+        }
+        Ok(())
     }
     pub(crate) fn admit<T, F, Fut>(
         self: &Arc<Self>,
@@ -624,6 +664,7 @@ impl GuiApplication {
             "has_media": self.media.is_some() && media,
             "settings": details.settings.editor,
             "settings_catalog": details.settings.settings_catalog,
+            "settings_revision": details.settings.settings_window.to_string(),
             "notice": *self.notice.lock().expect("Web notice poisoned"),
         })
     }
@@ -822,19 +863,19 @@ impl GuiApplication {
                 }
                 Ok(())
             }
-            Command::SettingsRead { namespace } => self.read_settings(&namespace).await,
+            Command::SettingsRead { namespace, window } => {
+                self.read_settings(&namespace, window.as_deref()).await
+            }
             Command::SettingsList => self.list_settings(None).await,
             Command::SettingsNext { ticket } => self.list_settings(Some(&ticket)).await,
             Command::SettingsSave { ticket, text } => self.save_settings(&ticket, &text).await,
             Command::CloseDetail { view } => {
                 let mut registry = self.details.lock().expect("Web details poisoned");
-                if let Some(view) = view {
-                    registry.close(&view)?;
-                } else {
-                    registry.settings.begin()?;
-                }
+                registry.close(&view)?;
                 Ok(())
             }
+            // command() normally handles this synchronously before ordinary admission.
+            Command::CloseSettings { revision } => self.close_settings(&revision),
             Command::FloatPanel { view, floating } => self
                 .details
                 .lock()

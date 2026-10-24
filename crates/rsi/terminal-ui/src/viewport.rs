@@ -15,7 +15,8 @@ pub struct Viewport {
 #[serde(deny_unknown_fields)]
 #[allow(clippy::struct_excessive_bools)] // Serialized independent Block flags.
 struct WindowBlock {
-    markdown: Option<crate::markdown::Document>,
+    #[serde(with = "shared_document")]
+    markdown: Option<std::sync::Arc<crate::markdown::Document>>,
     elapsed_ms: Option<u64>,
     running: bool,
     outcome: Option<ProcessOutcome>,
@@ -158,7 +159,7 @@ impl Viewport {
                 _ => block.title.clone(),
             };
             blocks.push(WindowBlock {
-                markdown: prepared.as_deref().cloned(),
+                markdown: prepared,
                 elapsed_ms,
                 running,
                 outcome: matches!(block.role, Role::Reasoning | Role::Tool)
@@ -295,7 +296,7 @@ impl Viewport {
 
 fn restore_markdown(
     target: &mut Block,
-    document: Option<crate::markdown::Document>,
+    document: Option<std::sync::Arc<crate::markdown::Document>>,
     markdown_bytes: &mut usize,
 ) -> Result<(), &'static str> {
     if let Some(document) = document {
@@ -309,9 +310,31 @@ fn restore_markdown(
             return Err("invalid Markdown block");
         }
         document.validate(&target.text())?;
-        target.markdown = Some(std::sync::Arc::new(document));
+        target.markdown = Some(document);
     }
     Ok(())
+}
+
+mod shared_document {
+    use crate::markdown::Document;
+    use serde::{Deserialize, Deserializer, Serialize, Serializer};
+    use std::sync::Arc;
+
+    #[expect(
+        clippy::ref_option,
+        reason = "Serde with hooks require a reference to the complete field type."
+    )]
+    pub(super) fn serialize<S: Serializer>(
+        value: &Option<Arc<Document>>,
+        serializer: S,
+    ) -> Result<S::Ok, S::Error> {
+        value.as_deref().serialize(serializer)
+    }
+    pub(super) fn deserialize<'de, D: Deserializer<'de>>(
+        deserializer: D,
+    ) -> Result<Option<Arc<Document>>, D::Error> {
+        Option::<Document>::deserialize(deserializer).map(|value| value.map(Arc::new))
+    }
 }
 
 fn unfolded(
@@ -543,6 +566,65 @@ fn window_piece(piece: &Piece, ranges: &[std::ops::Range<usize>]) -> WindowPiece
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn markdown_capture_and_restore_share_the_document_and_preserve_portable_values() {
+        for text in [
+            "# Hello\n你好 **world**",
+            "```rust\nlet value = 1;",
+            "| A | B |\n|---|---|\n| 一 | two |",
+        ] {
+            let mut transcript = Transcript::default();
+            transcript.add(
+                "answer".into(),
+                "Assistant",
+                Role::Assistant,
+                Piece::new(
+                    Source {
+                        seq: 1,
+                        field: rsi_conversation::FactField::ModelText { index: 0 },
+                    },
+                    text,
+                    0,
+                    super::super::WINDOW,
+                ),
+            );
+            let mut cache = FoldCache::default();
+            let mut capture = || {
+                Viewport::capture_cached(&transcript, true, None, (80, 24), None, None, &mut cache)
+                    .0
+            };
+            let first = capture();
+            let second = capture();
+            let document = first.blocks[0].markdown.as_ref().unwrap().clone();
+            assert!(std::sync::Arc::ptr_eq(
+                &document,
+                second.blocks[0].markdown.as_ref().unwrap()
+            ));
+            let encoded = serde_json::to_value(&first).unwrap();
+            assert_eq!(
+                encoded["blocks"][0]["markdown"],
+                serde_json::to_value(document.as_ref()).unwrap()
+            );
+            drop(cache);
+            let restored = first.restore().unwrap();
+            assert!(std::sync::Arc::ptr_eq(
+                &document,
+                restored.blocks[0].markdown.as_ref().unwrap()
+            ));
+            let portable: Viewport = serde_json::from_value(encoded.clone()).unwrap();
+            let portable = portable.restore().unwrap();
+            assert_eq!(restored.blocks[0].markdown, portable.blocks[0].markdown);
+            let mut invalid = encoded;
+            invalid["blocks"][0]["markdown"]["text"] = serde_json::json!("\u{1b}");
+            assert!(
+                serde_json::from_value::<Viewport>(invalid)
+                    .unwrap()
+                    .restore()
+                    .is_err()
+            );
+        }
+    }
 
     #[test]
     fn process_outcomes_require_settled_process_blocks_on_the_wire() {

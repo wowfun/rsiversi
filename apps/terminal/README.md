@@ -1,5 +1,14 @@
 # rsi-terminal
 
+Opening an approval reads current pending requests from its Session owner. A decision
+keeps the review visible until a known result; an uncertain reply offers only an
+explicit pending-state refresh before another decision. Cached interaction menus
+never authorize an answer.
+Repeated approval-open actions during a pending decision preserve its view and
+scroll position. Cleanup failures are polled independently of presentation tasks.
+Optional feature clients are obtained locally; their actual asynchronous operation
+reports availability without blocking input on a separate discovery round trip.
+
 Reference previews retain a capture until it is added to the draft or closed.
 Paging keeps that ownership; closing, replacing the detail, changing Session,
 failed previews and late replies release it. An admitted capture is joined even
@@ -7,6 +16,18 @@ when its presentation is cancelled, so a returned identity is never lost. Cleanu
 failures retain their identity and slot for the next explicit capture attempt;
 that retry does not prevent a new preview from using another free slot.
 Shutdown drains owned preview work and reports any failed cleanup.
+
+Approval detail bounds prepared-argument output to 256 KiB on UTF-8 boundaries,
+marks omitted content explicitly, and retains the bounded raw request view.
+Large file-write approvals therefore remain renderable within the scene budget.
+
+Headless commands with an API-backed connection discover only their selected
+workflow's operation keys before creating a workspace or Session. Listing commands
+does not require submission, observation or Media routes. Direct local services
+retain their typed composition contract. Discovery is advisory; each call still
+uses current Host admission and does not reuse the discovered execution policy.
+Opening `/history` or `/automation` rediscovers that workbench's complete operation
+set, so reopening observes Replayable route changes without reconnecting.
 
 Windows fullscreen input supports Windows Terminal (PowerShell or Git Bash).
 Entry checks require its session marker and usable console handles; inherited
@@ -596,6 +617,12 @@ on a blocking worker. It verifies the
 the details form invalidates pending and already completed preview deliveries.
 The existing TUI has no native image viewer;
 this text preview works within its cell renderer and needs no external application.
+
+Permission review presents the prepared action, reason, execution location,
+working directory and requested sandbox policy before the full argument values.
+Requested policy is not evidence of sandbox enforcement. The bounded raw-request
+window remains available below those fields; decisions keep their exact request
+identity and are never automatically replayed.
 
 Explicit Session cleanup is available through `rsi run cli --purge-preview JSON`,
 `--purge JSON`, and `--purge-status OPERATION_ID`. JSON contains `operation_id`

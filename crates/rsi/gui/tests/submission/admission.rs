@@ -213,6 +213,10 @@ async fn global_admission_failure_has_a_structured_unsent_result() {
     let result = dispatch(&app, &generation, &prepared, "dispatch").await;
     assert_eq!(result["status"], "not_admitted", "{result}");
     assert!(result["error"].as_str().unwrap().contains("busy"));
+    assert!(
+        app.try_command(r#"{"action":"refresh"}"#).is_err(),
+        "GUI refusal is distinguishable before awaiting a command"
+    );
     assert!(backend.requests.lock().unwrap().is_empty());
     drop(waiting);
     assert!(runtime.shutdown().await.is_clean());

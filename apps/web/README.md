@@ -1,5 +1,23 @@
 # Web document bridge
 
+After an uncertain approval reply, choices stay disabled until an explicit
+request refresh reads current pending state. Refresh never repeats the decision.
+Questions and plan reviews use the same recovery control and freeze all answer
+fields while sending. Reference cleanup retains its original target binding and
+can retry across pane changes or a reconnect to the same endpoint and principal.
+A failed pending-state read restores the choices' previous state: enabled choices
+remain usable, while an uncertain decision still requires successful readback.
+An already-settled request closes its panel without reporting a refresh failure.
+Replacing content in an open Settings dialog moves focus into the new content;
+closing it restores the original trigger. Pending reference cleanup consumes its
+capture identity independently of content deduplication in the draft. Failed
+release retains an explicit retry action, including after its preview closes.
+Draft removal, history selection and conversation previews share that cleanup owner.
+Composer journal schema 5 carries those capture identities; unsupported saved
+schemas are rejected without rewriting their data. When storage cannot open, an
+explicit two-step discard action deletes this site's entire saved-draft journal
+(including saved request identities) and reloads; it never runs automatically.
+
 `node apps/web/build.mjs ABSOLUTE_EMPTY_DIRECTORY [--dev]` builds an independent
 Web bundle. Document, Worker and WASM share one freshly generated internal
 identity and a verified closed set of file hashes. It does not build a native
@@ -165,6 +183,10 @@ annotations identify a durable request across rendering and reconnects. Native
 command bindings own the action inputs and authorization.
 Approval details are identified by both the owning Session and request ID, so
 switching between parent and child approvals also replaces their action bindings.
+Prepared arguments and raw approval JSON each have a 256 KiB UTF-8 display budget
+with an explicit truncation marker. Scrollable evidence is keyboard focusable.
+Deny is the first decision, matching the TUI;
+rendering never submits a decision automatically.
 
 The standard renderer retains each button and its label node while its action,
 label and value remain unchanged. Field and readiness refreshes preserve that

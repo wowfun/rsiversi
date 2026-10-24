@@ -195,7 +195,7 @@ export class DocumentConnection {
   async #receive(data) {
     if (data.kind === "reply") {
       const waiter = this.#takePending(data.id);
-      if (data.error) waiter?.reject(Object.assign(new Error(data.error), { notAdmitted: data.notAdmitted === true, retryable: data.retryable !== false }));
+      if (data.error) waiter?.reject(Object.assign(new Error(data.error), { notAdmitted: data.notAdmitted === true, retryable: data.notAdmitted === true && data.retryable !== false }));
       else waiter?.resolve(data.result);
     } else if (data.kind === "failed") {
       if (!["Failed", "Closed"].includes(this.#phase)) this.fail(new Error(data.error));

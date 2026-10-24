@@ -7,6 +7,8 @@ import { presentationKey } from "./presentation-store.js";
 import { downloadSession } from "./session-export.js";
 import { DocumentConnection } from "./document-connection.js";
 import { settingsForm, canUseSettingsForm } from "./settings-form.js";
+import { SettingsDialog } from "./settings-dialog.js";
+import { approvalFields, approvalArguments, approvalReason, approvalJson, decisionAction } from "./approval-review.js";
 import { publish, installActions, selectSurface } from "./src/bridge.ts";
 import { createDocumentTransport } from "./src/native.ts";
 import { isDesktop, desktopCall } from "./desktop-bridge.js";
@@ -132,6 +134,7 @@ async function perform(run) {
   try { await run(); } catch (error) { notify(String(error.message ?? error)); }
 }
 function clearView() {
+  settingsDialog.reset();
   presentationIdentity.set(undefined); publish(undefined); view = undefined; catalogKey = undefined; dialogKey = undefined; lastNotice = undefined;
   clearImages(); clearResources();
   for (const pane of panes.values()) pane.reset();
@@ -227,7 +230,10 @@ function boundCall(owner) {
     : Promise.reject(Object.assign(new Error("Connect to your service first"), { notAdmitted: true, retryable: false }));
 }
 
-function command(value) { return call("command", JSON.stringify(value)); }
+function command(value) {
+  if (value.action === "settings_list" || value.action === "settings_read") settingsDialog.reopen(connection);
+  return call("command", JSON.stringify(value));
+}
 
 async function connectWith(receipt, localTicket) {
   if (connecting || (connection && !connection.closing)) throw new Error("A connection is already active or opening");
@@ -511,6 +517,8 @@ class Pane {
     extras.addEventListener("keydown",event=>{if(event.key==="Escape"){extras.open=false;plus.focus();event.preventDefault();}});
     actions.append(this.cancel, this.deliveryMenu, this.send); bar.append(extras,this.model, this.effort, this.modelReceipt, actions);
     this.hint = element("div", "composer-hint", "Ctrl / ⌘ Enter to send · Enter for a new line");
+    this.hint.id = `composer-hint-${crypto.randomUUID()}`;
+    this.input.setAttribute("aria-describedby", this.hint.id);
     this.composer.append(this.resourcePreview, this.completionPanel, this.referenceList, this.input, this.imageInput, this.imageList, this.frozenImages, this.draftStatus, bar, this.hint);
     this.protectedNotice = element("div", "pane-notice");
     this.protectedNotice.append(element("p", "", "Protected investigation. Use Deployment checks to cancel or create a new attempt."),button("Export investigation",()=>this.exportSession(""),"quiet"));
@@ -1188,8 +1196,13 @@ class Pane {
     this.extensionView.replaceChildren();
     this.extensionView.hidden = !data;
     const snapshot = data?.projections;
-    const status = data?.projection_notice ? "Unavailable · last snapshot" : snapshot ? (snapshot.cursor.kind === "draft" ? `Draft · revision ${snapshot.cursor.revision}` : `Durable · Fact ${snapshot.cursor.fact_seq} · control ${snapshot.cursor.control_seq}`) : "Loading";
+    const status = data?.projection_notice ? "Unavailable · last snapshot" : snapshot ? (snapshot.cursor.kind === "draft" ? "Draft state" : "Recorded session state") : "Loading";
     this.extensionView.append(element("summary", "", "Extensions"),element("p", "hint",status));
+    if (snapshot) {
+      const coordinates = element("details", "projection-coordinates");
+      coordinates.append(element("summary", "", "Snapshot details"), element("pre", "", JSON.stringify(snapshot.cursor, null, 2)));
+      this.extensionView.append(coordinates);
+    }
     if (data?.projection_notice) this.extensionView.append(element("p", "extension-error", data.projection_notice));
     for (const entry of snapshot?.entries ?? []) {
       const section = element("section", "extension-value");
@@ -1412,7 +1425,9 @@ function render(next) {
   if (!panes.has(selected)) selected = panes.keys().next().value;
   select(selected);
   publish(next);
-  renderDetail(next, modalTarget);
+  const showSettings = settingsDialog.update(connection, next.settings_revision);
+  if ((next.settings_catalog || next.settings) && !showSettings) modalTarget.clear();
+  else renderDetail(next, modalTarget);
   renderResources(next);
 }
 installActions({ command, open: openInSelected, select, call,
@@ -1437,19 +1452,38 @@ $("detail").addEventListener("close", () => {
   else panes.get(selected)?.input?.focus();
   detailTrigger = undefined;
 });
+function interactionRefresh(form, base, owner, failure, command) {
+  let refreshing = false;
+  const refresh = button("Refresh request", async () => {
+    if (refreshing) return;
+    refreshing = true; refresh.disabled = true;
+    form.setAttribute("aria-busy", "true");
+    const controls = [...form.querySelectorAll("button,input,textarea,select")].filter(control => control !== refresh);
+    const previous = controls.map(control => control.disabled);
+    for (const control of controls) control.disabled = true;
+    try { await command({action:"inspect_interaction", ...base, owner}); }
+    catch (error) {
+      controls.forEach((control, index) => { control.disabled = previous[index]; });
+      failure.textContent = `Pending-state read failed: ${error.message}`;
+    }
+    finally { refreshing = false; refresh.disabled = false; form.setAttribute("aria-busy", "false"); }
+  }, "quiet");
+  return refresh;
+}
 function showDialog(key, title, body) {
   if (dialogKey === key) return;
+  const restore = $("detail").open && $("detail").contains(document.activeElement);
   dialogKey = key; $("detail-title").textContent = title; $("detail-body").replaceChildren(body);
   if (!$("detail").open) { detailTrigger = document.activeElement; $("detail").showModal(); }
+  else if (restore) ([...body.querySelectorAll('button:not(:disabled),input:not(:disabled),textarea:not(:disabled),select:not(:disabled),[tabindex="0"]')].find(node => node.getClientRects().length && getComputedStyle(node).visibility !== "hidden") ?? $("detail-close")).focus();
 }
-async function closeDetail() {
-  const owner = connection, key = dialogKey;
-  await boundCall(owner)("command", JSON.stringify({action: "close_detail"}));
-  if (connection !== owner || dialogKey !== key) return;
-  dialogKey = undefined; $("detail").close();
-}
-$("detail-close").addEventListener("click", () => perform(closeDetail));
-$("detail").addEventListener("cancel", event => { event.preventDefault(); perform(closeDetail); });
+const settingsDialog = new SettingsDialog({
+  close() { dialogKey = undefined; $("detail").close(); },
+  send(owner, revision) { return boundCall(owner)("command", JSON.stringify({action: "close_settings", revision})); },
+  failed(owner, error) { if (connection === owner) notify(String(error.message ?? error)); },
+});
+$("detail-close").addEventListener("click", () => settingsDialog.dismiss());
+$("detail").addEventListener("cancel", event => { event.preventDefault(); settingsDialog.dismiss(); });
 const modalTarget = {
   get key() { return dialogKey; },
   get body() { return $("detail-body"); },
@@ -1518,7 +1552,7 @@ function renderDetail(next, target) {
     else if (!catalog.page) body.append(element("p", "", catalog.namespace ? `Reading ${catalog.namespace}…` : "Loading registered settings…"));
     else {
       const list = element("div", "settings-list");
-      for (const namespace of catalog.page.namespaces) list.append(button(namespace, () => command({ action: "settings_read", namespace }), "settings-namespace quiet"));
+      for (const namespace of catalog.page.namespaces) list.append(button(namespace, () => command({ action: "settings_read", namespace, window: next.settings_revision }), "settings-namespace quiet"));
       if (!catalog.page.namespaces.length) list.append(element("p", "", "No registered settings."));
       const actions = element("div", "actions");
       const nextPage = button("More settings", () => command({ action: "settings_next", ticket: catalog.ticket }));
@@ -1610,7 +1644,7 @@ function renderDetail(next, target) {
   if (next.detail) {
     const detail = next.detail; const request = detail.request;
     const key = JSON.stringify([detail.pane, detail.generation, detail.kind,
-      detail.kind === "approval" ? request.subject.session_id : null, request.id]);
+      detail.kind === "approval" ? request.subject.session_id : null, request.id, detail.ticket]);
     if (target.key === key) return;
     const form = element("form");
     const base = { pane: detail.pane, generation: detail.generation, id: request.id };
@@ -1619,20 +1653,22 @@ function renderDetail(next, target) {
       form.append(element("pre", "review-plan", request.questions[0].prompt));
       const feedback = element("textarea"); feedback.rows = 3;
       feedback.setAttribute("aria-label", "Optional review feedback");
-      const failure = element("p", "error");
+      const failure = element("p", "error"); failure.setAttribute("role", "alert");
       const actions = element("div", "actions");
+      const refresh = interactionRefresh(form, base, request.session_id, failure, command);
+      const answer = decisionAction(choice => command({ action: "answer", ...base, answers: [], review: {
+        binding: review.binding, choice_id: choice.id, feedback: feedback.value || null,
+      }}), disabled => { feedback.disabled = disabled; for (const action of actions.children) action.disabled = disabled; }, text => { failure.textContent = text; }, pending => { refresh.disabled = pending; form.setAttribute("aria-busy", String(pending)); });
       for (const choice of review.choices) {
         actions.append(button(choice.label, async () => {
           if (new TextEncoder().encode(feedback.value).length > 4096) {
             failure.textContent = "Feedback must fit within 4 KiB."; return;
           }
-          await command({ action: "answer", ...base, answers: [], review: {
-            binding: review.binding, choice_id: choice.id, feedback: feedback.value || null,
-          }});
+          await answer(choice);
         }));
       }
       form.addEventListener("submit", event => event.preventDefault());
-      form.append(element("label", "", "Optional review feedback"), feedback, failure, actions);
+      form.append(element("label", "", "Optional review feedback"), feedback, failure, actions, refresh);
       target.show(key, "Review plan", form);
     } else if (detail.kind === "question") {
       const inputs = request.questions.map(question => {
@@ -1642,18 +1678,45 @@ function renderDetail(next, target) {
         field.append(element("label", "", question.prompt), choices, input); form.append(field); return input;
       });
       const send = element("button", "primary", "Send answers"); send.type = "submit"; form.append(send);
-      form.addEventListener("submit", event => { event.preventDefault(); perform(() => command({ action: "answer", ...base, answers: inputs.map(input => input.value) })); });
+      const failure = element("p", "error"); failure.setAttribute("role", "alert"); form.append(failure);
+      const refresh = interactionRefresh(form, base, request.session_id, failure, command);
+      const answer = decisionAction(() => command({ action: "answer", ...base, answers: inputs.map(input => input.value) }), disabled => { for (const field of form.querySelectorAll("button,textarea")) if (field !== refresh) field.disabled = disabled; }, text => { failure.textContent = text; }, pending => { refresh.disabled = pending; form.setAttribute("aria-busy", String(pending)); });
+      form.append(refresh);
+      form.addEventListener("submit", event => { event.preventDefault(); perform(answer); });
       target.show(key, "Answer the assistant", form);
     } else {
-      form.append(element("p", "", request.reason), element("pre", "", JSON.stringify(request.review ?? request, null, 2)));
+      form.classList.add("approval-review");
+      form.append(element("h2", "approval-action", request.action), element("p", "approval-reason", approvalReason(request.reason)));
+      const evidence = element("dl", "approval-evidence");
+      for (const [label, value] of approvalFields(request.review)) evidence.append(element("dt", "", label), element("dd", "", value));
+      if (evidence.children.length) form.append(evidence);
+      if (request.review) {
+        form.append(element("h3", "", "Prepared arguments"));
+        for (const [label, value] of approvalArguments(request.review.arguments)) {
+          const field = element("section", "approval-argument");
+          if (label) field.append(element("strong", "", label));
+          const text = element("pre", "", value); text.tabIndex = 0;
+          field.append(text); form.append(field);
+        }
+      }
+      const raw = element("details", "approval-raw");
+      raw.append(element("summary", "", "Raw request"));
+      raw.addEventListener("toggle", () => {
+        if (!raw.open || raw.children.length > 1) return;
+        const rawText = element("pre", "", approvalJson(request)); rawText.tabIndex = 0; raw.append(rawText);
+      });
+      form.append(raw);
       const actions = element("div", "actions");
-      actions.append(button("Allow once", () => command({ action: "approve", ...base, owner: request.subject.session_id, allow: true }), "primary"),
-        button("Deny", () => command({ action: "approve", ...base, owner: request.subject.session_id, allow: false })));
-      form.append(actions); target.show(key, request.action, form);
+      const failure = element("p", "error"); failure.setAttribute("role", "alert");
+      const refresh = interactionRefresh(form, base, request.subject.session_id, failure, command);
+      const decide = decisionAction(allow => command({ action: "approve", ...base, owner: request.subject.session_id, allow }),
+        disabled => { for (const choice of actions.children) choice.disabled = disabled; }, text => { failure.textContent = text; }, pending => { refresh.disabled = pending; form.setAttribute("aria-busy", String(pending)); });
+      actions.append(button("Deny", () => decide(false), "primary"), button("Allow once", () => decide(true)));
+      form.append(failure, actions, refresh); target.show(key, request.action, form);
     }
     return;
   }
-  if (target.key && target.key !== "settings-prompt") target.clear();
+  if (target.key) target.clear();
 }
 
 

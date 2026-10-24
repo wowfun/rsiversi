@@ -48,7 +48,7 @@ export function Navigation() {
       <span className={`session-state ${activity}`} aria-label={`Activity: ${activity}`}/>
       <strong>{presentation.titles.get(entry.session)}</strong>
     </button>
-    <details className="session-options"><summary aria-label={`Options for ${entry.session}`}>···</summary>
+    <details className="session-options"><summary aria-label={`Options for ${presentation.titles.get(entry.session)}`}>···</summary>
       <Button size="sm" onClick={()=>void run(()=>mutate(entry.session,{...entry.metadata,pinned:!entry.metadata.pinned}))} disabled={entry.metadata.archived}>{entry.metadata.pinned?'Unpin':'Pin'}</Button>
       <Button size="sm" onClick={()=>{setEdit(entry);setTitle(entry.metadata.title??'')}}>Rename</Button>
       <Button size="sm" onClick={()=>void run(()=>mutate(entry.session,{...entry.metadata,pinned:false,archived:!entry.metadata.archived}))}>{entry.metadata.archived?'Unarchive':'Archive'}</Button>
@@ -101,7 +101,7 @@ export function Navigation() {
     setPendingStarts(value=>{const next={...value};delete next[endpoint];return next})
   }
   return <>
-    <div className="section-heading"><h2>Workspaces</h2><div className="navigation-actions"><Button size="sm" aria-label="Search conversations" aria-expanded={searchOpen} onClick={()=>setSearchOpen(!searchOpen)}>⌕</Button><Button size="sm" aria-label="Filter conversations" aria-expanded={filterOpen} onClick={()=>setFilterOpen(!filterOpen)}>☷</Button><Button size="sm" data-testid="choose-workspace" aria-label="Choose workspace" onClick={chooseWorkspace}>+</Button><Button id="refresh" size="sm" aria-label="Refresh workspaces and conversations" onClick={()=>void run(async()=>{await input.command({action:'refresh'});await search()})}>↻</Button></div></div>
+    <div className="section-heading"><h2>Workspaces</h2><div className="navigation-actions"><Button size="sm" aria-label="Search conversations" aria-expanded={searchOpen} onClick={()=>setSearchOpen(!searchOpen)}>⌕</Button><Button size="sm" aria-label="Filter conversations" aria-expanded={filterOpen} onClick={()=>setFilterOpen(!filterOpen)}>☷</Button><Button size="sm" data-testid="choose-workspace" aria-label="Choose workspace" onClick={chooseWorkspace}>+</Button><Button id="refresh" size="sm" aria-label="Refresh capabilities, workspaces and conversations" title="Refresh capabilities, workspaces and conversations" onClick={()=>void run(async()=>{await input.command({action:'refresh'});await search()})}>↻</Button></div></div>
     <form hidden={!searchOpen} className="navigation-search" onSubmit={event=>{event.preventDefault();void run(()=>search())}}><input aria-label="Search conversations" placeholder="Search conversations" value={query} onChange={event=>setQuery(event.target.value)}/><Button size="sm" type="submit" aria-label="Search">⌕</Button></form>
     <select hidden={!filterOpen} aria-label="Conversation filter" value={mode} onChange={event=>{const value=event.target.value;setMode(value);if(value!=='attention')void run(()=>search({...filter,archived:value==='archived'}))}}><option value="all">All conversations</option><option value="attention">Needs attention</option><option value="archived">Archived</option></select>
     <div className="navigation-modes">

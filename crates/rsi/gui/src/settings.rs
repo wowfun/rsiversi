@@ -52,7 +52,7 @@ impl GuiApplication {
             } else {
                 None
             };
-            let revision = details.begin()?;
+            let revision = details.begin_settings(ticket.is_none())?;
             details.settings_catalog = Some(SettingsCatalog {
                 ticket: revision.to_string(),
                 namespace: None,
@@ -73,12 +73,17 @@ impl GuiApplication {
             .settings_page(revision, result);
         Ok(())
     }
-    pub(crate) async fn read_settings(&self, namespace: &str) -> Result<()> {
+    pub(crate) async fn read_settings(&self, namespace: &str, window: Option<&str>) -> Result<()> {
         validate_namespace(namespace).map_err(error)?;
         let (revision, stop) = {
             let mut registry = self.details.lock().expect("Web details poisoned");
             let details = &mut registry.settings;
-            let revision = details.begin()?;
+            if let Some(window) = window
+                && (window != details.settings_window.to_string() || details.stop.is_cancelled())
+            {
+                return Ok(());
+            }
+            let revision = details.begin_settings(window.is_none())?;
             details.settings_catalog = Some(SettingsCatalog {
                 ticket: revision.to_string(),
                 namespace: Some(namespace.into()),

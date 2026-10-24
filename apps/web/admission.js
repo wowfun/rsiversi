@@ -1,6 +1,9 @@
 // Shared document/Worker transport bounds; Rust validates the actual request.
 export const limits = Object.freeze({ ordinary: 8, terminalRead: 32, terminalWrite: 8, lifecycle: 1, exportControl: 8 });
 export function lane(method, payload) {
+  if (method === "command" && typeof payload === "string" && payload.length <= 128) {
+    try { if (JSON.parse(payload)?.action === "close_settings") return "exportControl"; } catch {}
+  }
   if(method==="directory_input" && typeof payload==="string" && payload.length<=128*1024){
     try {if(JSON.parse(payload)?.action==="cancel")return "exportControl";} catch {}
   }

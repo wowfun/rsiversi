@@ -226,7 +226,12 @@ async fn closing_settings_cancels_reads_and_registration_changes_stay_in_their_d
         })
         .await
         .unwrap();
-        app.command(r#"{"action":"close_detail"}"#).await.unwrap();
+        app.command(
+            &json!({"action":"close_settings","revision":view(&app)["settings_revision"]})
+                .to_string(),
+        )
+        .await
+        .unwrap();
         old.await.unwrap();
         assert_eq!(backend.settings.active.load(Ordering::SeqCst), 0);
         assert!(view(&app)["settings_catalog"].is_null());
@@ -246,6 +251,64 @@ async fn closing_settings_cancels_reads_and_registration_changes_stay_in_their_d
             .contains("registration changed")
     );
     assert_eq!(view(&app)["notice"], "");
+    assert!(runtime.shutdown().await.is_clean());
+}
+
+#[tokio::test]
+async fn stale_settings_close_preserves_new_read_and_rejects_noncanonical_revisions() {
+    let (runtime, backend, app) = fixture().await;
+    app.command(r#"{"action":"settings_list"}"#).await.unwrap();
+    let first = view(&app)["settings_revision"].clone();
+    app.command(&json!({"action":"close_settings","revision":first}).to_string())
+        .await
+        .unwrap();
+    app.command(r#"{"action":"settings_read","namespace":"fixture.00"}"#)
+        .await
+        .unwrap();
+    let newer = view(&app)["settings"].clone();
+    app.command(&json!({"action":"close_settings","revision":first}).to_string())
+        .await
+        .unwrap();
+    assert_eq!(view(&app)["settings"], newer);
+    for revision in ["0", "01", "-1", "18446744073709551616"] {
+        assert!(
+            app.command(&json!({"action":"close_settings","revision":revision}).to_string())
+                .await
+                .is_err()
+        );
+    }
+    assert!(app.command(r#"{"action":"close_detail"}"#).await.is_err());
+    let revision = view(&app)["settings_revision"].clone();
+    app.command(&json!({"action":"close_settings","revision":revision}).to_string())
+        .await
+        .unwrap();
+    app.command(&json!({"action":"close_settings","revision":revision}).to_string())
+        .await
+        .unwrap();
+    assert!(view(&app)["settings"].is_null());
+    assert_eq!(backend.settings.writes.load(Ordering::SeqCst), 0);
+    assert!(runtime.shutdown().await.is_clean());
+}
+
+#[tokio::test]
+async fn explicit_settings_reopen_fences_a_delayed_close() {
+    let (runtime, _, app) = fixture().await;
+    for reopen in [
+        r#"{"action":"settings_list"}"#,
+        r#"{"action":"settings_read","namespace":"fixture.00"}"#,
+    ] {
+        app.command(r#"{"action":"settings_list"}"#).await.unwrap();
+        let first = view(&app)["settings_revision"].clone();
+        // The document dismissed locally; delivery of its close is delayed.
+        app.command(reopen).await.unwrap();
+        let reopened = view(&app)["settings_revision"].clone();
+        assert_ne!(first, reopened);
+        app.command(&json!({"action":"close_settings","revision":first}).to_string())
+            .await
+            .unwrap();
+        assert_eq!(view(&app)["settings_revision"], reopened);
+        assert!(view(&app)["settings_catalog"].is_object() || view(&app)["settings"].is_object());
+    }
     assert!(runtime.shutdown().await.is_clean());
 }
 
@@ -372,5 +435,39 @@ async fn composer_actions_require_display_ack_and_reject_changed_preferences_wit
         shown["revision"]
     );
     assert!(backend.requests.lock().unwrap().is_empty());
+    assert!(runtime.shutdown().await.is_clean());
+}
+
+#[tokio::test]
+async fn closing_rendered_settings_window_cancels_unrendered_namespace_read() {
+    let (runtime, backend, app) = fixture().await;
+    app.command(r#"{"action":"settings_list"}"#).await.unwrap();
+    let rendered = view(&app)["settings_revision"].clone();
+    backend.settings.blocked.store(true, Ordering::SeqCst);
+    let reading = app.command(
+        &json!({"action":"settings_read","namespace":"fixture.00","window":rendered}).to_string(),
+    );
+    tokio::time::timeout(std::time::Duration::from_secs(1), async {
+        while backend.settings.active.load(Ordering::SeqCst) != 1 {
+            tokio::task::yield_now().await;
+        }
+    })
+    .await
+    .unwrap();
+    assert_eq!(view(&app)["settings_revision"], rendered);
+    app.command(&json!({"action":"close_settings","revision":rendered}).to_string())
+        .await
+        .unwrap();
+    reading.await.unwrap();
+    assert_eq!(backend.settings.active.load(Ordering::SeqCst), 0);
+    assert!(view(&app)["settings"].is_null());
+    assert!(view(&app)["settings_catalog"].is_null());
+    backend.settings.blocked.store(false, Ordering::SeqCst);
+    app.command(r#"{"action":"settings_list"}"#).await.unwrap();
+    assert_ne!(view(&app)["settings_revision"], rendered);
+    app.command(&json!({"action":"close_settings","revision":rendered}).to_string())
+        .await
+        .unwrap();
+    assert!(!view(&app)["settings_catalog"].is_null());
     assert!(runtime.shutdown().await.is_clean());
 }

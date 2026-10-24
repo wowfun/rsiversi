@@ -1,4 +1,5 @@
 //! Fullscreen presentation over Session. The Kernel remains the execution authority.
+mod approval;
 mod clipboard;
 mod commands;
 mod external;
@@ -213,6 +214,11 @@ enum Update {
     Message(rsi_agent_session_protocol::AgentMessage),
     Output(rsi_process::OutputPage),
     Notice(String),
+    Approval(Option<rsi_approval_protocol::ApprovalRequest>),
+    ApprovalDecided(
+        rsi_approval_protocol::ApprovalRequest,
+        rsi_session_protocol::Result<bool>,
+    ),
     ModelSelected(rsi_agent_session_protocol::ModelSelection),
     Copy(clipboard::Delivery),
     Submitted(rsi_session_protocol::Result<rsi_agent_turn_protocol::MessageReceipt>),
@@ -351,6 +357,7 @@ struct Client {
     presented_turn: Option<TurnId>,
     inspection: Option<StoreSessionInspection>,
     interactions: Option<rsi_session_protocol::InteractionSnapshot>,
+    approval_busy: bool,
     projections: Option<rsi_session_protocol::ProjectionSnapshot>,
     projection_notice: String,
     extension_view: Option<commands::ExtensionView>,
@@ -489,6 +496,7 @@ impl Client {
             presented_turn: None,
             inspection: attached.inspection,
             interactions: None,
+            approval_busy: false,
             projections: None,
             projection_notice: String::new(),
             extension_view: None,
@@ -519,6 +527,7 @@ impl Client {
         self.tasks.len() + self.exports.load(std::sync::atomic::Ordering::Acquire)
     }
     fn reset_attachment_tasks(&mut self) {
+        self.approval_busy = false;
         self.tasks = std::mem::take(&mut self.tasks)
             .into_iter()
             .filter(|task| matches!(task.kind, WorkKind::Automation))
@@ -1015,6 +1024,15 @@ impl Client {
 
     #[allow(clippy::too_many_lines)] // Exhaustive controller actions share the same attachment and outcome guards.
     fn action(&mut self, action: Action) -> bool {
+        if self.approval_busy
+            && matches!(
+                action,
+                Action::Approval(_) | Action::Approvals | Action::Decide(..)
+            )
+        {
+            self.state.info("The approval decision is still pending");
+            return false;
+        }
         self.state.clear_info();
         if self.pending_requests() >= 8 && !matches!(action, Action::Exit | Action::Retry) {
             self.state
@@ -1504,7 +1522,11 @@ impl Client {
                                 .iter()
                                 .map(|request| {
                                     (
-                                        format!("{} · {}", request.action, request.reason),
+                                        format!(
+                                            "{} · {}",
+                                            request.action,
+                                            approval::friendly_reason(&request.reason)
+                                        ),
                                         Action::Approval(request.clone()),
                                     )
                                 })
@@ -1528,63 +1550,8 @@ impl Client {
                     self.state.notice("Question is no longer live");
                 }
             }
-            Action::Approval(request) => {
-                if self
-                    .interactions
-                    .as_ref()
-                    .is_some_and(|snapshot| snapshot.approvals().contains(&request))
-                {
-                    self.state.open_detail(transcript::json_window(&request));
-                    self.state.detail_actions = Some(Menu {
-                        title: format!("{} · {}", request.action, request.reason),
-                        selected: 0,
-                        items: vec![
-                            (
-                                "Deny".into(),
-                                Action::Decide(
-                                    request.clone(),
-                                    rsi_approval_protocol::ApprovalDecision::Deny,
-                                ),
-                            ),
-                            (
-                                "Allow once".into(),
-                                Action::Decide(
-                                    request,
-                                    rsi_approval_protocol::ApprovalDecision::AllowOnce,
-                                ),
-                            ),
-                        ],
-                    });
-                    self.state
-                        .notice("Review the prepared request; Enter opens Deny / Allow once");
-                } else {
-                    self.state.notice("Approval is no longer live");
-                }
-            }
-            Action::Decide(request, decision) => {
-                self.state.escape();
-                if self
-                    .interactions
-                    .as_ref()
-                    .is_some_and(|snapshot| snapshot.approvals().contains(&request))
-                {
-                    self.spawn(async move {
-                        let owner = SessionId::new(request.subject.session_id()).map_err(error)?;
-                        let accepted = handle
-                            .answer_approval(&owner, &request.id, decision)
-                            .await
-                            .map_err(error)?;
-                        Ok(Update::Notice(if accepted {
-                            String::new()
-                        } else {
-                            "Approval is no longer live; reopen approvals".into()
-                        }))
-                    });
-                } else {
-                    self.state
-                        .notice("Approval changed; reopen the current request");
-                }
-            }
+            Action::Approval(request) => self.inspect_approval(request),
+            Action::Decide(request, decision) => self.decide_approval(request, decision),
             Action::Detail => {
                 if let Some(block) = self.state.transcript.blocks.get(self.state.focused)
                     && block.role == transcript::Role::Metadata
@@ -2122,7 +2089,7 @@ async fn run_inner(
                         WorkKind::Automation => client.automation_pending = false,
                         WorkKind::Read | WorkKind::Detail | WorkKind::Submit | WorkKind::Queue => {},
                     }
-                    if work.view_revision != client.state.view_revision && matches!(&work.result, Ok(Update::HistorySearch(..) | Update::Ui(_) | Update::UiPresentation(..) | Update::UiRetired | Update::UiImage(_) | Update::Menu(_) | Update::Recent(_) | Update::Message(_) | Update::QueueContent(..) | Update::Window(_) | Update::Output(_) | Update::Attached(_))) { continue; }
+                    if work.view_revision != client.state.view_revision && matches!(&work.result, Ok(Update::Approval(_) | Update::HistorySearch(..) | Update::Ui(_) | Update::UiPresentation(..) | Update::UiRetired | Update::UiImage(_) | Update::Menu(_) | Update::Recent(_) | Update::Message(_) | Update::QueueContent(..) | Update::Window(_) | Update::Output(_) | Update::Attached(_))) { continue; }
                     match work.result {
                         Ok(Update::Ui(view)) => client.show_ui(view),
                         Ok(Update::UiPresentation(lease, pin)) => client.show_ui_presentation(lease, pin),
@@ -2135,6 +2102,8 @@ async fn run_inner(
                             client.state.notice(problem.to_string());
                         },
                         Ok(Update::Notice(message)) => client.state.info(message),
+                        Ok(Update::Approval(request)) => client.show_approval(request),
+                        Ok(Update::ApprovalDecided(request, result)) => client.approval_decided(request, result, work.view_revision == client.state.view_revision),
                         Ok(Update::ModelSelected(selection)) => {
                             client.state.info(format!("Switched to {} · {}", selection.model.model(), selection.reasoning_effort.as_ref().map_or("default", |effort| effort.as_str())));
                             client.refresh_metrics();
@@ -2343,6 +2312,7 @@ async fn run_inner(
     .await;
     external.shutdown().await;
     profiles.shutdown().await;
+    client.state.invalidate_detail();
     client.tasks.clear();
     let reference_cleanup = client.reference_previews.close().await;
     let cleanup = match observer {
@@ -2351,6 +2321,7 @@ async fn run_inner(
     };
     let shell_cleanup = surfaces.close().await;
     result
+        .and(reference_cleanup)
         .and(cleanup)
         .and(shell_cleanup)
         .and(presentation_cleanup)

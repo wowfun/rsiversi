@@ -81,6 +81,24 @@ impl PanelRegistry {
             })
             .detail)
     }
+    /// Reinspect an exact interaction without allocating another document tab.
+    pub fn reopen(
+        &mut self,
+        owner: Option<(SurfaceId, String, SessionId)>,
+        reopen: Value,
+    ) -> Result<&mut Details> {
+        let existing = self
+            .entries
+            .iter()
+            .find(|(_, entry)| entry.owner == owner && entry.reopen == reopen)
+            .map(|(id, _)| *id);
+        if let Some(id) = existing {
+            let entry = self.entries.get_mut(&id).expect("selected entry");
+            entry.detail.begin()?;
+            return Ok(&mut entry.detail);
+        }
+        self.open(owner, reopen)
+    }
     pub fn ticket(&self, ticket: &str) -> Result<&Details> {
         let revision = parse(ticket)?;
         self.entries
@@ -165,6 +183,29 @@ impl PanelRegistry {
             entry.detail.settle(pane, generation, owner, id);
             !had || entry.detail.interaction.is_some()
         });
+    }
+    pub fn settle_observed(
+        &mut self,
+        pane: SurfaceId,
+        generation: &str,
+        owner: &str,
+        id: &str,
+        kind: &str,
+    ) -> bool {
+        let before = self.entries.len();
+        self.entries.retain(|_, entry| {
+            if entry
+                .detail
+                .interaction
+                .as_ref()
+                .is_none_or(|detail| detail["kind"] != kind)
+            {
+                return true;
+            }
+            entry.detail.settle(pane, generation, owner, id);
+            entry.detail.interaction.is_some()
+        });
+        self.entries.len() != before
     }
     pub fn prune_ui(&mut self, current: impl Fn(&rsi_ui::UiReference) -> bool) {
         self.entries.retain(|_, entry| {

@@ -434,7 +434,17 @@ fn register_browser_application(
 #[wasm_bindgen]
 pub async fn command(source: String) -> Result<(), JsValue> {
     let app = application()?;
-    app.command(&source).await.map_err(failure)
+    app.try_command(&source)
+        .map_err(command_refusal)?
+        .await
+        .map_err(failure)
+}
+
+fn command_refusal(error: String) -> JsValue {
+    let error = js_sys::Error::new(&rsi_gui::display_error(error));
+    js_sys::Reflect::set(&error, &JsValue::from_str("notAdmitted"), &JsValue::TRUE)
+        .expect("new JavaScript Error is extensible");
+    error.into()
 }
 
 /// Freezes input before the document persists its execution intent.

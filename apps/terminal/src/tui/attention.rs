@@ -22,14 +22,17 @@ impl Ui {
             let mut items = vec![("Refresh activity".into(), Choice::Attention)];
             for row in page.entries {
                 let label = match &row.position.conversation {
-                    rsi_conversation::ConversationIdentity::Native(id) => format!("Native {id}"),
+                    rsi_conversation::ConversationIdentity::Native(id) => format!(
+                        "Conversation {}",
+                        id.as_str().get(..12).unwrap_or(id.as_str())
+                    ),
                     rsi_conversation::ConversationIdentity::External(id) => {
                         format!("External {}", id.as_str())
                     }
                 };
                 if row.targets.is_empty() {
                     items.push((
-                        format!("{:?} · {label}", row.status),
+                        format!("{} · {label}", attention_label(row.status)),
                         Choice::AttentionOpen(row.position, None),
                     ));
                 } else {
@@ -129,5 +132,15 @@ impl Ui {
                 .map(|_| ())
                 .map_err(|error| error.to_string())
         })
+    }
+}
+
+fn attention_label(status: rsi_navigation_api::attention::Status) -> &'static str {
+    use rsi_navigation_api::attention::Status;
+    match status {
+        Status::Waiting => "Waiting for you",
+        Status::Running => "Running",
+        Status::Unknown => "Status unavailable",
+        Status::Unread => "New activity",
     }
 }

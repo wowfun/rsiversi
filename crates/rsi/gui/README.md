@@ -1,8 +1,53 @@
 # rsi-gui
 
+An interaction refresh that confirms settlement removes its panel and succeeds.
+Read failures preserve the panel and report the failed observation.
+
+Interaction refresh uses the same pane, generation, owner and request binding
+whether opened from attention or directly.
+
 Reference release binds the original target Header and capture ID independently
 of the displayed pane. It reacquires authorized Session access; an already absent
 target is an idempotent release.
+
+An initial discovery failure leaves the application open with a diagnostic and
+an empty remote catalog; Refresh retries discovery. A composition without an API
+client uses its supplied local services directly.
+Explicit interaction inspection reads current pending questions/approvals from
+the Session, including when recovering an uncertain decision reply. Reinspection
+reuses the panel for that exact attachment and interaction, advances its presentation
+revision, and removes it when the request is no longer pending.
+Capability refresh replaces the last successful catalog only after discovery
+succeeds. Frame visibility is derived once per catalog replacement. A temporary discovery failure leaves the previous feature visibility
+and data intact. `try_command` separates refusal before application admission
+from the result of admitted work; document adapters may enable an explicit retry
+only for the former, without interpreting error text.
+
+Settings dismissal is local and immediate. Each Settings window owns a monotone
+revision carried as a decimal string in frames. An explicit catalog or namespace
+open allocates a fresh window. Catalog paging retains it; namespace navigation
+carries the current `window` identity and ignores stale navigation. Each read has
+a separate internal fence.
+`close_settings` cancels the exact window, including reads whose frames have not
+yet rendered, through bounded control admission independent of ordinary commands;
+a close for a previously closed window is a successful no-op. Resource panels use
+`close_detail` with their explicit view identity. Closing Settings cancels its
+reads, not an already accepted save. The document fences dismissed revisions by
+connection identity, so late frames or replies cannot reopen them or close a
+newer Settings window.
+
+Approval presentation keeps the action visible within the review and separates the
+reason, execution location, working directory,
+requested sandbox policy and prepared arguments. Requested policy is
+not isolation evidence. Adapters bound argument and raw-request display windows
+and explicitly mark omitted text; the decision binding retains the full request.
+One pending decision disables both choices without retrying an unknown outcome.
+Ordinary status labels use presentation vocabulary; exact durable coordinates
+remain available in details. Composer keyboard instructions are visible and
+programmatically associated with their editor.
+Known machine-generated Turn reasons use plain presentation text; the complete
+original request uses the same bounded Raw request window. Long words and paths wrap within
+the review pane, including a 320 px viewport.
 
 The Automation panel consumes negotiated, caller-scoped Automation API operations
 through the same client connection as Session UI. It keeps a bounded page and one

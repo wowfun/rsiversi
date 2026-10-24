@@ -80,6 +80,7 @@ fn missing<T>() -> rsi_session_protocol::Result<T> {
 #[derive(Debug, Default)]
 struct Backend {
     workspace_lists: std::sync::atomic::AtomicUsize,
+    pending_approvals: Mutex<Option<Vec<rsi_approval_protocol::ApprovalRequest>>>,
     export_gate: Mutex<Option<Arc<admission::HeaderGate>>>,
     task_panels: Arc<task_panels::Scenario>,
     unpublished: std::sync::atomic::AtomicBool,
@@ -609,7 +610,11 @@ impl SessionHandle for Backend {
     async fn pending_approvals(
         &self,
     ) -> rsi_session_protocol::Result<Vec<rsi_approval_protocol::ApprovalRequest>> {
-        missing()
+        self.pending_approvals
+            .lock()
+            .unwrap()
+            .clone()
+            .map_or_else(missing, Ok)
     }
     async fn answer_approval(
         &self,
@@ -1096,3 +1101,58 @@ async fn start_ui(root: &Context) {
 #[cfg(feature = "test-support")]
 #[path = "../src/frame_allocations.rs"]
 mod frame_allocations;
+
+#[tokio::test]
+async fn interaction_refresh_reads_authoritative_pending_requests_even_without_question_support() {
+    let (runtime, backend, app) = sources::fixture().await;
+    let pane = sources::view(&app)["surfaces"]["main"].clone();
+    let request = rsi_approval_protocol::ApprovalRequest {
+        subject: rsi_approval_protocol::ApprovalSubject::new(
+            pane["session"].as_str().unwrap(),
+            "turn",
+            "effect",
+        )
+        .unwrap(),
+        id: "approval".into(),
+        action: "Write file".into(),
+        reason: "Human decision".into(),
+        review: None,
+    };
+    *backend.pending_approvals.lock().unwrap() = Some(vec![request]);
+    app.command(&serde_json::json!({"action":"attention_open","pane":"main",
+        "position":rsi_navigation_api::attention::Position { conversation:rsi_conversation::ConversationIdentity::Native(SessionId::new(pane["session"].as_str().unwrap()).unwrap()),epoch:"0".into(),sequence:"0".into()},
+        "target":rsi_navigation_api::attention::Target::Native {request:ActivityRequest::Approval {turn:TurnId::new("turn").unwrap(),request:"approval".into()}}
+    }).to_string()).await.unwrap();
+    let pane = sources::view(&app)["surfaces"]["main"].clone();
+    let inspect = serde_json::json!({"action":"inspect_interaction", "pane":"main", "generation":pane["generation"], "owner":pane["session"], "id":"approval"}).to_string();
+    assert_eq!(
+        sources::panel(&app)["detail"]["request"]["action"],
+        "Write file"
+    );
+    let view = sources::panel(&app)["view"].clone();
+    for index in 0..20 {
+        backend.pending_approvals.lock().unwrap().as_mut().unwrap()[0].reason =
+            format!("Revision {index}");
+        app.command(&inspect).await.unwrap();
+        let frame = sources::view(&app);
+        assert_eq!(frame["panels"].as_array().unwrap().len(), 1);
+        assert_eq!(frame["panels"][0]["view"], view);
+        assert_eq!(
+            frame["panels"][0]["detail"]["request"]["reason"],
+            format!("Revision {index}")
+        );
+    }
+    backend
+        .pending_approvals
+        .lock()
+        .unwrap()
+        .as_mut()
+        .unwrap()
+        .clear();
+    assert!(
+        app.command(&inspect).await.is_ok(),
+        "confirmed settlement is successful refresh, not an error"
+    );
+    assert!(sources::view(&app)["panels"].as_array().unwrap().is_empty());
+    assert!(runtime.shutdown().await.is_clean());
+}

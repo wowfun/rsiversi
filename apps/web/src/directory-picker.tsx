@@ -30,7 +30,7 @@ function DirectoryPicker({close}:{close:()=>void}) {
       if(!alive.current||revision!==request.current)return
       setColumns(parent&&parent.entries.some(entry=>entry.path===listing.path)?[parent,listing]:[listing]);setPath(listing.path);setEditing(false);setUncertain(false)
       return listing
-    }catch(error){if(alive.current&&revision===request.current)setStatus(String(error))}
+    }catch(error){if(alive.current&&revision===request.current)setStatus(error instanceof Error?error.message:String(error))}
     finally{if(alive.current&&revision===request.current)setBusy(undefined)}
   }
   useEffect(()=>{
@@ -44,7 +44,7 @@ function DirectoryPicker({close}:{close:()=>void}) {
         setAvailable(state.supported&&state.allowed)
         if(state.supported&&state.allowed)await browse(null)
         else {setBusy(undefined);setEditing(true);setStatus(state.supported?(location.kind==='local'?'Local browsing requires a configuration grant. Enter a known path to register it.':'This SSH target requires Use permission.'):'Directory browsing is unavailable for this location.')}
-      }catch(error){if(alive.current&&revision===request.current){setBusy(undefined);setEditing(true);setStatus(String(error))}}
+      }catch(error){if(alive.current&&revision===request.current){setBusy(undefined);setEditing(true);setStatus(error instanceof Error?error.message:String(error))}}
     })()
     return()=>{alive.current=false;request.current++;if(readId.current)void input.directory({action:'cancel',request_id:readId.current}).catch(()=>{})}
   },[selected])
@@ -56,7 +56,7 @@ function DirectoryPicker({close}:{close:()=>void}) {
       const created=await directory<{path:string}>({action:'create',location,parent:current.path,name})
       if(!alive.current)return
       setNewFolder(false);setName('');const parent=await browse(current.path);if(parent)await browse(created.path,parent)
-    }catch(error){if(alive.current){setStatus(String(error));const kind=(error as {kind?:string})?.kind;setUncertain(!kind||kind==='outcome_unknown')}}
+    }catch(error){if(alive.current){setStatus(error instanceof Error?error.message:String(error));const kind=(error as {kind?:string})?.kind;setUncertain(!kind||kind==='outcome_unknown')}}
     finally{if(alive.current)setBusy(undefined)}
   }
   async function open() {
@@ -71,7 +71,7 @@ function DirectoryPicker({close}:{close:()=>void}) {
       }
       await input.open({action:'register_workspace',location,path:physical});close()
     }
-    catch(error){if(alive.current){setStatus(String(error));setBusy(undefined)}}
+    catch(error){if(alive.current){setStatus(error instanceof Error?error.message:String(error));setBusy(undefined)}}
   }
   const closing=()=>{if(busy!=='create'&&busy!=='open')close()}
   const crumbs=current?[{label:'/',path:'/'},...current.breadcrumbs.map((label,index)=>({label,path:'/'+current.breadcrumbs.slice(0,index+1).join('/')}))]:[]

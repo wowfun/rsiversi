@@ -179,6 +179,7 @@ pub(super) struct State {
     pub(super) reference_bytes: usize,
     pub(super) reference_status: String,
     pub(super) reference_preview: Option<super::reference_previews::PreviewLease>,
+    pub(super) reviewed_approval: Option<rsi_approval_protocol::ApprovalRequest>,
     pub(super) file_insert: Option<std::ops::Range<usize>>,
     pub(super) model: Option<ModelRef>,
     pub(super) reasoning_effort: Option<rsi_ai_protocol::ReasoningEffortId>,
@@ -245,6 +246,7 @@ impl State {
         requested
     }
     pub(super) fn invalidate_detail(&mut self) {
+        self.reviewed_approval = None;
         self.reference_preview = None;
         self.preview = None;
         self.view_revision = self.view_revision.wrapping_add(1);
@@ -284,6 +286,7 @@ impl State {
             reference_bytes: 0,
             reference_status: String::new(),
             reference_preview: None,
+            reviewed_approval: None,
             file_insert: None,
             model: None,
             reasoning_effort: None,
@@ -439,8 +442,10 @@ impl State {
             }
             if self.ui_form.is_none() {
                 let reference_preview = self.reference_preview.take();
+                let reviewed_approval = self.reviewed_approval.take();
                 self.invalidate_detail();
                 self.reference_preview = reference_preview;
+                self.reviewed_approval = reviewed_approval;
             }
             return;
         }

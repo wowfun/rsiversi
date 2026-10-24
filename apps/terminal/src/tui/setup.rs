@@ -487,7 +487,7 @@ impl Ui {
                 if was_mutation {
                     self.reconcile();
                     self.menu(
-                        "Setup write requires reconciliation",
+                        "Save result unknown; check the saved configuration before retrying",
                         vec![("Refresh configuration…".into(), Choice::Refresh)],
                     );
                 } else if self.definition.is_some() {
@@ -948,7 +948,10 @@ impl Ui {
                 let id = self.candidate.as_ref().ok_or("Choose model")?.id.clone();
                 self.definition.as_mut().ok_or("Choose provider")?.config["reasoning_efforts"]
                     [&id] = serde_json::to_value(&profile).map_err(|error| error.to_string())?;
-                let mut items = vec![("Default unknown".into(), Choice::EffortDefault(None))];
+                let mut items = vec![(
+                    "No default (provider decides)".into(),
+                    Choice::EffortDefault(None),
+                )];
                 items.extend(
                     profile
                         .supported()
@@ -2052,7 +2055,7 @@ mod tests {
                 .iter()
                 .map(|(name, _)| name.as_str())
                 .collect::<Vec<_>>(),
-            vec!["Default unknown", "off", "max"]
+            vec!["No default (provider decides)", "off", "max"]
         );
         let result = ui.choose(
             Choice::EffortDefault(Some(

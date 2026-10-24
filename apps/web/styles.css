@@ -211,3 +211,7 @@ h2 { margin:0; font-size:.91rem; font-weight:700; }
 .history-results { min-width: 0; }
 .history-results pre { white-space: pre-wrap; overflow-wrap: anywhere; }
 .history-results textarea { resize: vertical; }
+
+.projection-coordinates { margin-block: .5rem; padding: .6rem; border: 1px solid var(--line); border-radius: .5rem; }
+.projection-coordinates summary { cursor: pointer; }
+.projection-coordinates pre { white-space: pre-wrap; overflow-wrap: anywhere; font-size: .8rem; }

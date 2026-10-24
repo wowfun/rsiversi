@@ -25,6 +25,16 @@ async function fixture(options = {}) {
   return f;
 }
 
+test('reply retry evidence requires known refusal and preserves an explicit closed marker', async () => {
+  const f = await fixture();
+  for (const [evidence, retryable] of [[{},false],[{notAdmitted:true},true],[{notAdmitted:true,retryable:false},false]]) {
+    const pending = f.owner.request('command','{}').catch(error=>error);
+    await f.transport.onmessage({data:{kind:'reply',id:f.calls.at(-1).id,error:'failed',...evidence}});
+    assert.equal((await pending).retryable,retryable);
+  }
+  await f.owner.retire();
+});
+
 for(const reason of [new Error("storage setup failed"),"storage setup failed"]) test(`authentication storage ${typeof reason} rejection fences waiting frames and pending input`,async()=>{
   const opening=gate(),storage=gate();let frames=0;
   const f=openingFixture({onFrame:()=>{frames++;return {accepted:true};}});

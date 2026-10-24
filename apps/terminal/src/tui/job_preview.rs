@@ -42,7 +42,7 @@ impl Client {
             for job in &page.jobs {
                 if let Some(effect) = &job.origin {
                     items.push((
-                        format!("{} · {} · {:?}", job.name, job.id, job.status),
+                        format!("{} · {} · {}", job.name, job.id, job_status(job.status)),
                         Action::Preview(JobPreviewRequest {
                             turn_id: page.turn_id.clone(),
                             generation: page.generation,
@@ -142,7 +142,7 @@ pub(super) fn show(
         );
         return;
     };
-    let mut text = format!("{} · {:?}\n", page.request.job_id, output.status);
+    let mut text = format!("{} · {}\n", page.request.job_id, job_status(output.status));
     let mut items = Vec::new();
     for (name, stream, maximum) in [
         ("stdout", &output.stdout, page.request.stdout_bytes),
@@ -185,5 +185,16 @@ pub(super) fn show(
     });
     if output.status.is_terminal() {
         state.preview = None;
+    }
+}
+
+fn job_status(status: rsi_jobs::JobStatus) -> &'static str {
+    match status {
+        rsi_jobs::JobStatus::Running => "Running",
+        rsi_jobs::JobStatus::Stopping => "Stopping",
+        rsi_jobs::JobStatus::Completed => "Completed",
+        rsi_jobs::JobStatus::Failed => "Failed",
+        rsi_jobs::JobStatus::OutcomeUnknown => "Outcome unknown",
+        rsi_jobs::JobStatus::Cancelled => "Cancelled",
     }
 }

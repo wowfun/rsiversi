@@ -79,7 +79,7 @@ function Shell({renderSlot}: PropsRenderSlots<'rsi.navigation' | 'rsi.main' | 'r
     {licenses && <Modal className="license-dialog" label="Third-party software" close={()=>setLicenses(false)}><h2>Third-party software</h2><p>DeepSeek Harness · MIT · {[...new Set(provenance.files.map(file=>file.revision))].map(revision=>revision.slice(0,7)).join(', ')}</p><pre>{license}</pre><p>xterm.js 6.0.0 · MIT</p><pre>{xtermLicense}</pre><p>xterm Fit 0.11.0 · MIT</p><pre>{fitLicense}</pre><Button onClick={()=>setLicenses(false)}>Close licenses</Button></Modal>}
     {connected&&settings&&<Modal className="settings-modal" label="Settings" close={()=>setSettings(false)}><Setup close={()=>setSettings(false)}/></Modal>}
     <div id="resource-parking" hidden/>
-    <dialog id="detail" className="detail-dialog"><div className="dialog-heading"><h2 id="detail-title">Details</h2><button id="detail-close" aria-label="Close details">×</button></div><div id="detail-body"/></dialog>
+    <dialog id="detail" className="detail-dialog" aria-labelledby="detail-title"><div className="dialog-heading"><h2 id="detail-title">Details</h2><button id="detail-close" aria-label="Close details">×</button></div><div id="detail-body"/></dialog>
   </LayoutContext.Provider>
 }
 function Main() {

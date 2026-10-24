@@ -1,5 +1,11 @@
 # rsi-terminal-ui
 
+Linked scene capture and restore share immutable parsed Markdown documents for
+the exact source revision and width. Portable encoding retains the same value
+shape and performs the same source-map, character and capacity validation on
+restore. Retained scenes keep their own document alive after cache eviction;
+document capacity is conservatively charged to every owning scene.
+
 Scene protocol version 15 carries one base surface (application or Session) and
 at most one redacted application overlay. A bounded Composer prefix selects the
 inline model/effort list at the base editor rectangle; other overlays use a
