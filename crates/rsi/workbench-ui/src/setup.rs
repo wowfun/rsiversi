@@ -1,6 +1,6 @@
 use super::{
     ActivationPlan, Arc, BoxFuture, ConfigValue, LocalContract, Mutex, PluginFactory,
-    PreparedActivation, Result, Work, contribute, error, meta, prepare, watch,
+    PreparedActivation, Result, Work, contribute, error, prepare, watch,
 };
 use async_trait::async_trait;
 use rsi_configuration_api::{
@@ -93,11 +93,21 @@ pub struct Receipt {
 }
 /// Typed redacted application setup projection.
 #[derive(Clone, Debug, Default, Serialize)]
+#[expect(
+    clippy::struct_excessive_bools,
+    reason = "Independent optional capabilities can be combined freely; they are not mutually exclusive states."
+)]
 pub struct SetupView {
     /// Exact version of this setup view.
     pub ticket: String,
     /// Whether configuration mutations are authorized.
     pub allowed: bool,
+    /// Current provider credential operations are available.
+    pub credentials_available: bool,
+    /// Provider replacement is currently available.
+    pub providers_writable: bool,
+    /// Settings read and replacement are currently available.
+    pub settings_writable: bool,
     /// Desired and applied provider configuration.
     pub providers: Option<ProvidersSnapshot>,
     /// Current non-secret Agent defaults.
@@ -114,12 +124,14 @@ pub struct SetupView {
 #[derive(Debug, Default)]
 struct State {
     view: SetupView,
+    capabilities: Option<rsi_api_protocol::OperationCatalog>,
     agent: Option<SettingsSnapshot>,
     presets: Option<SettingsSnapshot>,
 }
 /// Setup presentation state owned by one ordinary application plugin.
 #[derive(Debug)]
 pub struct SetupFeature {
+    api: Arc<dyn rsi_api_protocol::ApiClient>,
     authority: ConfigurationClient,
     providers: ManagedProvidersClient,
     credentials: ProviderCredentialsClient,
@@ -268,22 +280,82 @@ impl SetupFeature {
         });
     }
     async fn refresh(&self) -> Result<()> {
-        let allowed = self.authority.allowed().await.map_err(error)?;
-        let providers = self.providers.read().await.map_err(error)?;
-        let agent = self.settings.read("rsi.agent").await.map_err(error)?;
-        let presets = self
-            .settings
-            .read("rsi.agent-presets")
-            .await
-            .map_err(error)?;
+        match self.api.operations().await {
+            Ok(capabilities) => {
+                self.state.lock().expect("setup view poisoned").capabilities = Some(capabilities)
+            }
+            Err(failure) => {
+                if self
+                    .state
+                    .lock()
+                    .expect("setup view poisoned")
+                    .capabilities
+                    .is_none()
+                {
+                    return Err(error(failure));
+                }
+            }
+        }
+        let capabilities = self
+            .state
+            .lock()
+            .expect("setup view poisoned")
+            .capabilities
+            .clone();
+        let available = |spec: rsi_api_protocol::OperationSpec| {
+            capabilities
+                .as_ref()
+                .is_some_and(|catalog| catalog.contains_all(&[spec.key()]))
+        };
+        let allowed = if available(rsi_configuration_api::ConfigurationOperation::Status.spec()) {
+            self.authority.allowed().await.map_err(error)?
+        } else {
+            false
+        };
+        let providers = if available(rsi_configuration_api::ProvidersOperation::Read.spec()) {
+            Some(self.providers.read().await.map_err(error)?)
+        } else {
+            None
+        };
+        let (agent, presets) = if available(rsi_settings_api::Operation::Read.spec()) {
+            (
+                Some(self.settings.read("rsi.agent").await.map_err(error)?),
+                Some(
+                    self.settings
+                        .read("rsi.agent-presets")
+                        .await
+                        .map_err(error)?,
+                ),
+            )
+        } else {
+            (None, None)
+        };
         let mut state = self.state.lock().expect("setup view poisoned");
         state.view.ticket = rsi_ui::fresh_identity("setup")?;
         state.view.allowed = allowed;
-        state.view.providers = Some(providers);
-        state.view.agent = agent.value.clone();
-        state.view.presets = presets.value.clone();
-        state.agent = Some(agent);
-        state.presets = Some(presets);
+        state.view.credentials_available = [
+            rsi_configuration_api::CredentialOperation::Status.spec(),
+            rsi_configuration_api::CredentialOperation::Set.spec(),
+            rsi_configuration_api::CredentialOperation::Unset.spec(),
+        ]
+        .into_iter()
+        .all(available);
+        state.view.providers_writable = providers.is_some()
+            && available(rsi_configuration_api::ProvidersOperation::Replace.spec());
+        state.view.settings_writable =
+            agent.is_some() && available(rsi_settings_api::Operation::Replace.spec());
+        if !state.view.credentials_available {
+            state.view.credential = None;
+        }
+        state.view.providers = providers;
+        state.view.agent = agent
+            .as_ref()
+            .map_or(Value::Null, |snapshot| snapshot.value.clone());
+        state.view.presets = presets
+            .as_ref()
+            .map_or(Value::Null, |snapshot| snapshot.value.clone());
+        state.agent = agent;
+        state.presets = presets;
         Ok(())
     }
     async fn credential_status(&self, provider: ProviderKind, slot: String) -> Result<()> {
@@ -423,9 +495,10 @@ impl PluginFactory for SetupFeatureFactory {
     async fn activate(&self, plan: ActivationPlan) -> rsi_meta::Result<()> {
         let api = plan.local::<rsi_api_protocol::ApiClientContract>()?;
         let feature = Arc::new(SetupFeature {
-            authority: ConfigurationClient::new(api.clone()).map_err(meta)?,
-            providers: ManagedProvidersClient::new(api.clone()).map_err(meta)?,
-            credentials: ProviderCredentialsClient::new(api).map_err(meta)?,
+            api: api.clone(),
+            authority: ConfigurationClient::new(api.clone()),
+            providers: ManagedProvidersClient::new(api.clone()),
+            credentials: ProviderCredentialsClient::new(api),
             settings: plan.local::<SettingsAccessContract>()?,
             state: Mutex::default(),
             work: Work::new(plan.context().runtime().execution().clone()),

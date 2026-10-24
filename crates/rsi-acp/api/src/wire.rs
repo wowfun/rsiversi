@@ -6,22 +6,36 @@ use rsi_api_protocol::{
     OperationAccess, OperationClass, OperationEffect, OperationId, OperationSpec, RequestEncoding,
 };
 use serde::{Deserialize, Serialize};
-#[derive(Clone, Copy)]
-pub(super) enum Operation {
+#[derive(Clone, Copy, Debug)]
+/// Owner-defined operations for explicit capability discovery.
+pub enum Operation {
+    /// Endpoints operation.
     Endpoints,
+    /// Residents operation.
     Residents,
+    /// List operation.
     List,
+    /// View operation.
     View,
+    /// Start operation.
     Start,
+    /// Reconnect operation.
     Reconnect,
+    /// Submit operation.
     Submit,
+    /// Cancel operation.
     Cancel,
+    /// Close operation.
     Close,
+    /// Answer operation.
     Answer,
+    /// Page operation.
     Page,
+    /// Window operation.
     Window,
 }
 impl Operation {
+    /// All operation identities owned by this protocol.
     pub const ALL: [Self; 12] = [
         Self::Endpoints,
         Self::Residents,
@@ -36,6 +50,10 @@ impl Operation {
         Self::Page,
         Self::Window,
     ];
+    /// Local request and response policy for this operation.
+    ///
+    /// # Panics
+    /// Panics if a built-in operation identity is invalid.
     pub fn spec(self) -> OperationSpec {
         use OperationClass::{Control, Data};
         use OperationEffect::{Mutation, Read};

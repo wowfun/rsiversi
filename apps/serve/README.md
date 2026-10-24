@@ -1,5 +1,9 @@
 # rsi-serve
 
+Serve owns connection negotiation and Web asset operations for its entire
+generation. Closing or retiring a local registration reports that owner's state;
+it never redirects those operations to a colliding parent service registration.
+
 ## Resident product listeners
 
 The product launcher connects to the already selected local Host. Its ordinary
@@ -46,6 +50,9 @@ the internal bootstrap receipt; installed packages additionally retain their
 immutable package closure and check required interfaces. Core executable identity
 is not a Web bundle family.
 The embedded local Web adapter applies the same internal bundle verification.
+Its merged operation catalog uses the same Application-local precedence as
+dispatch. A later Service generation publishing the same operation ID cannot
+replace that local operation or erase unrelated discovery entries.
 
 A watch invocation with an explicit source frontend recipe creates an independent
 connection-owned listener. Its exact frontend Origin is validated before HTTP

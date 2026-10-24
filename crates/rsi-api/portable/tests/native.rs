@@ -59,7 +59,7 @@ impl PluginFactory for Capture {
             .requiring(Requirement::new(
                 "fixture.api",
                 portable::CONTRACT,
-                ContractVersion(1),
+                ContractVersion(portable::VERSION),
             )))
     }
     async fn activate(&self, plan: ActivationPlan) -> rsi_meta::Result<()> {
@@ -94,7 +94,7 @@ async fn request(
     let mut call = probe.open().unwrap();
     call.send(Message::from_parts(
         control(&Header::Call {
-            operation: operation(name).id,
+            operation: operation(name).call(),
             bytes: bytes.len(),
         }),
         vec![grant.clone()],

@@ -79,7 +79,11 @@ impl BrowserTransport {
     ) -> Result<()> {
         let path = if token.is_some() { "login" } else { "logout" };
         let pending = self.bridge.start(RequestData {
-            url: format!("{}/api/v1/{path}", self.origin),
+            url: format!(
+                "{}{}/{path}",
+                self.origin,
+                rsi_api_protocol::API_PATH_PREFIX
+            ),
             class: OperationClass::Control,
             headers: self.headers(),
             authorization: token,
@@ -145,7 +149,10 @@ impl Drop for BrowserTransport {
 }
 fn base_headers() -> Vec<(&'static str, String)> {
     vec![
-        ("x-rsi-wire-version", "1".into()),
+        (
+            "x-rsi-wire-version",
+            rsi_api_protocol::API_WIRE_VERSION.to_string().into(),
+        ),
         ("x-rsi-csrf", "1".into()),
     ]
 }
@@ -187,13 +194,7 @@ impl ConnectionTransport for BrowserTransport {
             headers.push(("x-rsi-host-epoch", epoch.as_str().into()));
         }
         let pending = self.bridge.start(RequestData {
-            url: format!(
-                "{}/api/v1/{}/{}/{}",
-                self.origin,
-                operation.id.domain(),
-                operation.id.name(),
-                operation.id.version()
-            ),
+            url: format!("{}{}", self.origin, operation.call().to_path()),
             class: operation.class,
             headers,
             authorization: None,

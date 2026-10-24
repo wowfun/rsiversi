@@ -50,17 +50,19 @@ async fn lost_headers_malformed_replies_and_missing_stream_end_preserve_failure_
     let calls = Arc::new(Mutex::new(BTreeMap::<String, usize>::new()));
     let recorded = calls.clone();
     let server = tokio::spawn(async move {
-        for _ in 0..7 {
+        // Connect describes identity; ordinary calls do not fetch a catalog.
+        for _ in 0..6 {
             let (mut socket, _) = listener.accept().await.unwrap();
             let path = read_request(&mut socket).await;
             *recorded.lock().unwrap().entry(path.clone()).or_default() += 1;
-            let name = path.split('/').nth(4).unwrap();
+            let call = OperationCall::from_path(&path).unwrap();
+            let name = call.key.id.name();
             if matches!(name, "lost" | "read") {
                 continue;
             }
             let body = match name {
                 "describe" => serde_json::to_vec(&ConnectionDescription {
-                    wire_version: 1,
+                    wire_version: rsi_api_protocol::API_WIRE_VERSION,
                     endpoint_id: expected.endpoint_id.clone(),
                     host_epoch: expected.host_epoch.clone(),
                 })
@@ -82,7 +84,7 @@ async fn lost_headers_malformed_replies_and_missing_stream_end_preserve_failure_
                 "application/json"
             };
             let head = format!(
-                "HTTP/1.1 200 OK\r\nContent-Type: {mime}\r\nContent-Length: {}\r\nX-Rsi-Wire-Version: 1\r\nX-Rsi-Endpoint-Id: {}\r\nX-Rsi-Host-Epoch: {}\r\nConnection: close\r\n\r\n",
+                "HTTP/1.1 200 OK\r\nContent-Type: {mime}\r\nContent-Length: {}\r\nX-Rsi-Wire-Version: 2\r\nX-Rsi-Endpoint-Id: {}\r\nX-Rsi-Host-Epoch: {}\r\nConnection: close\r\n\r\n",
                 body.len(),
                 expected.endpoint_id.as_str(),
                 epoch.as_str()
@@ -128,7 +130,7 @@ async fn lost_headers_malformed_replies_and_missing_stream_end_preserve_failure_
         .unwrap()
         .unwrap();
     let calls = calls.lock().unwrap();
-    assert_eq!(calls.len(), 7);
+    assert_eq!(calls.len(), 6);
     assert!(calls.values().all(|count| *count == 1));
 }
 

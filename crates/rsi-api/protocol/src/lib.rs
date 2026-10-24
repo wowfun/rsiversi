@@ -7,6 +7,7 @@
 mod authentication;
 pub mod browser_stream;
 mod budget;
+mod call;
 mod client;
 mod identity;
 mod json;
@@ -19,6 +20,7 @@ pub use budget::{
     ByteAccumulator, ByteAdmission, ByteBudget, ByteReceiver, ByteReservation, RetainedBytes,
     measure_json,
 };
+pub use call::*;
 pub use client::*;
 pub use identity::{DeviceId, EndpointId, HostEpoch, LocalCompatibilityKey};
 pub use json::{call_json, json_handler};
@@ -35,6 +37,18 @@ pub const MAXIMUM_API_BYTES: usize = 64 * 1024 * 1024;
 /// API foundation failure, independent of domain error taxonomies.
 #[derive(Clone, Debug, Eq, PartialEq, Error)]
 pub enum ApiError {
+    /// No current registration has this operation identity.
+    #[error("API operation is not registered")]
+    UnknownOperation,
+    /// This operation is draining admitted work before replacement.
+    #[error("API operation is retiring")]
+    OperationRetiring,
+    /// The registered operation belongs to a different protocol revision.
+    #[error("API operation protocol differs")]
+    ProtocolMismatch,
+    /// The caller and registered operation disagree about read, mutation or stream.
+    #[error("API operation call shape differs")]
+    CallShapeMismatch,
     /// Mutation execution may have happened, but its outcome cannot be established.
     #[error("API operation outcome is unknown; reconcile using its domain identity")]
     OutcomeUnknown,

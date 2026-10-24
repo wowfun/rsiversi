@@ -144,15 +144,13 @@ impl LocalTransport {
     ) -> Result<http::Request<Full<Bytes>>> {
         http::Request::builder()
             .method("POST")
-            .uri(format!(
-                "/api/v1/{}/{}/{}",
-                operation.id.domain(),
-                operation.id.name(),
-                operation.id.version()
-            ))
+            .uri(operation.call().to_path())
             .header("host", "rsi.local")
             .header("connection", "close")
-            .header("x-rsi-wire-version", "1")
+            .header(
+                "x-rsi-wire-version",
+                rsi_api_protocol::API_WIRE_VERSION.to_string(),
+            )
             .header("x-rsi-local-key", self.config.compatibility.as_str())
             .header(
                 "x-rsi-host-epoch",

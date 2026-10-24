@@ -7,7 +7,7 @@ use rsi_api_protocol::{
 };
 use std::sync::Arc;
 
-pub(crate) fn operations(available: &[OperationSpec]) -> Result<Vec<OperationSpec>> {
+pub(crate) fn operations() -> Vec<OperationSpec> {
     Operation::ALL
         .into_iter()
         .filter(|operation| match operation {
@@ -59,13 +59,6 @@ pub(crate) fn operations(available: &[OperationSpec]) -> Result<Vec<OperationSpe
             | Operation::AnswerApproval => true,
         })
         .map(Operation::spec)
-        .map(|operation| {
-            if available.contains(&operation) {
-                Ok(operation)
-            } else {
-                Err(ApiError::Unavailable)
-            }
-        })
         .collect()
 }
 #[derive(Debug)]
@@ -81,15 +74,19 @@ enum Backend {
 pub struct SessionTargetClient {
     session: SessionId,
     description: ConnectionDescription,
-    operations: Vec<OperationSpec>,
+    operations: Arc<[rsi_api_protocol::OperationKey]>,
     input: [ByteBudget; 3],
     backend: Backend,
 }
 impl SessionTargetClient {
     /// Narrows an existing connection without changing its authentication or receipt semantics.
-    pub fn new(api: Arc<dyn ApiClient>, session: SessionId) -> Result<Self> {
-        let operations = operations(api.operations())?;
-        Ok(Self {
+    pub fn new(api: Arc<dyn ApiClient>, session: SessionId) -> Self {
+        let operations = operations()
+            .iter()
+            .map(OperationSpec::key)
+            .collect::<Vec<_>>()
+            .into();
+        Self {
             session,
             operations,
             description: api.description().clone(),
@@ -100,7 +97,7 @@ impl SessionTargetClient {
             ]
             .map(|class| api.input_budget(class)),
             backend: Backend::Client(api),
-        })
+        }
     }
     /// Uses one explicitly supplied registry generation and trusted non-serialized origin.
     pub fn from_dispatch(
@@ -109,29 +106,31 @@ impl SessionTargetClient {
         origin: CallOrigin,
         session: SessionId,
     ) -> Result<Self> {
-        let operations = operations(&api.operations())?;
-        // Borrow the existing lane pools through ordinary admission; the unused
-        // invocation drops immediately without dispatching domain work.
+        let operations = operations()
+            .iter()
+            .map(OperationSpec::key)
+            .collect::<Vec<_>>()
+            .into();
         let input = [
-            Operation::MessageStatus,
-            Operation::Attach,
-            Operation::Observe,
+            OperationClass::Control,
+            OperationClass::Data,
+            OperationClass::Subscription,
         ]
-        .map(|operation| {
-            api.admit(&operation.spec().id, origin.clone())
-                .map(|invocation| invocation.input_budget())
-        });
-        let [control, data, subscription] = input;
+        .map(|class| api.input_budget(class));
         Ok(Self {
             session,
             description,
             operations,
-            input: [control?, data?, subscription?],
+            input,
             backend: Backend::Dispatch { api, origin },
         })
     }
+    /// Fixed explicitly granted operation keys, independent of current availability.
+    pub fn allowed_keys(&self) -> Arc<[rsi_api_protocol::OperationKey]> {
+        self.operations.clone()
+    }
     fn validate_target(&self, operation: &OperationSpec, input: &RetainedBytes) -> Result<()> {
-        if !self.operations.contains(operation) {
+        if !self.operations.contains(&operation.key()) {
             return Err(ApiError::Unauthorized);
         }
         if input.len() > operation.maximum_request_bytes {
@@ -170,8 +169,30 @@ impl ApiClient for SessionTargetClient {
     fn description(&self) -> &ConnectionDescription {
         &self.description
     }
-    fn operations(&self) -> &[OperationSpec] {
-        &self.operations
+    async fn operations(&self) -> Result<rsi_api_protocol::OperationCatalog> {
+        let current = match &self.backend {
+            Backend::Client(api) => api.operations().await?.operations().to_vec(),
+            Backend::Dispatch { api, origin } => api
+                .operations()?
+                .into_iter()
+                .filter(|spec| spec.access.permits(origin))
+                .collect(),
+        };
+        rsi_api_protocol::OperationCatalog::new(
+            current
+                .into_iter()
+                .filter(|spec| self.operations.contains(&spec.key()))
+                .collect(),
+        )
+    }
+    async fn operation(&self, key: &rsi_api_protocol::OperationKey) -> Result<OperationSpec> {
+        if !self.operations.contains(key) {
+            return Err(ApiError::Unauthorized);
+        }
+        match &self.backend {
+            Backend::Client(api) => api.operation(key).await,
+            Backend::Dispatch { api, origin } => api.operation(key, origin),
+        }
     }
     fn input_budget(&self, class: OperationClass) -> ByteBudget {
         self.input[match class {
@@ -186,10 +207,7 @@ impl ApiClient for SessionTargetClient {
         match &self.backend {
             Backend::Client(api) => api.call(operation, input).await,
             Backend::Dispatch { api, origin } => {
-                let invocation = api.admit(&operation.id, origin.clone())?;
-                if invocation.spec() != operation {
-                    return Err(ApiError::Unavailable);
-                }
+                let invocation = api.admit(&operation.call(), origin.clone())?;
                 invocation.invoke(input).await
             }
         }
@@ -208,11 +226,7 @@ mod workflow_tests {
     use super::*;
     #[test]
     fn scoped_plugins_do_not_implicitly_receive_workflow_operations() {
-        let available = Operation::ALL
-            .into_iter()
-            .map(Operation::spec)
-            .collect::<Vec<_>>();
-        let narrowed = operations(&available).unwrap();
+        let narrowed = operations();
         for op in [
             Operation::WorkflowReadiness,
             Operation::ListWorkflows,

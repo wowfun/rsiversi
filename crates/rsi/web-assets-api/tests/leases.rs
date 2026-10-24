@@ -88,7 +88,7 @@ impl Fixture {
         input: &impl serde::Serialize,
     ) -> BoxFuture<'static, rsi_api_protocol::Result<ApiOutput>> {
         let spec = &rsi_web_assets_api::operations()[usize::from(commit)];
-        let invocation = self.registry.admit(&spec.id, origin).unwrap();
+        let invocation = self.registry.admit(&spec.call(), origin).unwrap();
         let bytes = invocation
             .input_budget()
             .encode(input, spec.maximum_request_bytes)

@@ -4,7 +4,7 @@ import type {SshView} from './ssh-targets.tsx'
 interface Target {host_epoch:string;target:string;server:string}
 interface Config {id:string;enabled:boolean;tools:string[];resource_templates:boolean;transport:{kind:'ssh_stdio';target:string;command:string;arguments:string[];cwd:string;environment:Record<string,unknown>}}
 export interface McpSshView {available:boolean;state:{target:Target;revision:string;config:Config|null;apply_error:unknown}|null;uncertain:boolean;notice:string|null}
-export function McpSsh({view,ssh,busy,command}:{view:McpSshView;ssh?:SshView;busy:boolean;command:(value:Record<string,unknown>)=>void}) {
+export function McpSsh({view,ssh,busy,command,actions=[]}:{actions?:string[];view:McpSshView;ssh?:SshView;busy:boolean;command:(value:Record<string,unknown>)=>void}) {
   const [target,setTarget]=useState(''),[server,setServer]=useState('')
   const selection={host_epoch:ssh?.catalog?.host_epoch??'',target,server}
   const current=view.state?.target.target===target&&view.state.target.server===server&&view.state.target.host_epoch===selection.host_epoch?view.state:undefined
@@ -16,19 +16,20 @@ export function McpSsh({view,ssh,busy,command}:{view:McpSshView;ssh?:SshView;bus
     {!ssh?.catalog&&<p className="hint">Refresh SSH targets to select an execution target.</p>}
     {view.notice&&<p role="status">{view.notice}</p>}
     {view.uncertain&&<p role="alert">Read the current configuration before another change.</p>}
-    {current&&<Editor key={`${target}:${server}:${current.revision}`} state={current} locked={busy||view.uncertain} command={command}/>}
+    {current&&<Editor actions={actions} key={`${target}:${server}:${current.revision}`} state={current} locked={busy||view.uncertain} command={command}/>}
   </section>
 }
-function Editor({state,locked,command}:{state:NonNullable<McpSshView['state']>;locked:boolean;command:(value:Record<string,unknown>)=>void}) {
+function Editor({state,locked,command,actions}:{actions:string[];state:NonNullable<McpSshView['state']>;locked:boolean;command:(value:Record<string,unknown>)=>void}) {
   const saved=state.config
   const [program,setProgram]=useState(saved?.transport.command??''),[cwd,setCwd]=useState(saved?.transport.cwd??''),[args,setArgs]=useState(JSON.stringify(saved?.transport.arguments??[],null,2)),[env,setEnv]=useState(JSON.stringify(saved?.transport.environment??{},null,2)),[tools,setTools]=useState(saved?.tools.join('\n')??''),[enabled,setEnabled]=useState(saved?.enabled??false),[templates,setTemplates]=useState(saved?.resource_templates??false),[error,setError]=useState('')
   const change={target:state.target,expected:state.revision,config:null}
-  const save=()=>{try{
-    const argumentsValue=JSON.parse(args),environment=JSON.parse(env)
+  const save=()=>{if(!actions.includes('mcp_ssh.put'))return;try{
+    const parse=(text:string,field:string)=>{try{return JSON.parse(text)}catch{throw new Error(`${field} must be valid JSON`)}}
+    const argumentsValue=parse(args,'Arguments'),environment=parse(env,'Environment')
     if(!Array.isArray(argumentsValue)||argumentsValue.some(item=>typeof item!=='string'))throw new Error('Arguments must be a JSON array of strings')
     if(!environment||typeof environment!=='object'||Array.isArray(environment))throw new Error('Environment must be a JSON object')
     setError('');command({kind:'put',change:{...change,config:{id:state.target.server,enabled,tools:tools.split('\n').map(value=>value.trim()).filter(Boolean),resource_templates:templates,transport:{kind:'ssh_stdio',target:state.target.target,command:program,arguments:argumentsValue,cwd,environment}}}})
-  }catch(error){setError(String(error))}}
+  }catch(error){setError(error instanceof Error?error.message:String(error))}}
   return <form onSubmit={event=>{event.preventDefault();save()}}><fieldset disabled={locked}>
     <p className="hint">Configuration revision {state.revision}. Saving does not grant credentials or start a Session.</p>
     <label>Target executable<input aria-label="MCP target executable" value={program} required onChange={event=>setProgram(event.target.value)}/></label>
@@ -40,6 +41,6 @@ function Editor({state,locked,command}:{state:NonNullable<McpSshView['state']>;l
     <label className="check"><input type="checkbox" checked={enabled} onChange={event=>setEnabled(event.target.checked)}/>Enable this server</label>
     <label className="check"><input type="checkbox" checked={templates} onChange={event=>setTemplates(event.target.checked)}/>Allow this server’s dynamic resource templates</label>
     {error&&<p role="alert">{error}</p>}
-    <div className="actions"><Button type="submit">Save SSH MCP server</Button><Button type="button" disabled={!saved} onClick={()=>command({kind:'refresh',change})}>Connect SSH MCP server</Button><Button type="button" disabled={!saved} onClick={()=>command({kind:'remove',change})}>Remove SSH MCP server</Button></div>
+    <div className="actions"><Button type="submit" disabled={!actions.includes('mcp_ssh.put')}>Save SSH MCP server</Button><Button type="button" disabled={!saved||!actions.includes('mcp_ssh.refresh')} onClick={()=>command({kind:'refresh',change})}>Connect SSH MCP server</Button><Button type="button" disabled={!saved||!actions.includes('mcp_ssh.remove')} onClick={()=>command({kind:'remove',change})}>Remove SSH MCP server</Button></div>
   </fieldset></form>
 }

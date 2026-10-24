@@ -883,6 +883,7 @@ pub(crate) async fn run_headless_application(
     application: Arc<dyn SessionService>,
     workspace: Arc<dyn rsi_workspace_protocol::WorkspaceRegistry>,
     media: Arc<dyn rsi_media_protocol::Media>,
+    api: Option<Arc<dyn rsi_api_protocol::ApiClient>>,
     command: Command,
     work: ApplicationWork,
 ) -> u8 {
@@ -896,6 +897,17 @@ pub(crate) async fn run_headless_application(
             Ok(options) => options,
             Err(error) => return report_error(&error),
         };
+        if let Some(api) = &api
+            && let Err(error) = headless_commands::preflight(
+                api.as_ref(),
+                &options,
+                command.extension.as_ref(),
+                has_task,
+            )
+            .await
+        {
+            return report_error(&error);
+        }
         let handle =
             match resolve_application_handle(&application, &workspace, options.session).await {
                 Ok(handle) => handle,

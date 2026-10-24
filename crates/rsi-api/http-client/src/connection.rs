@@ -67,8 +67,11 @@ impl ApiClient for HttpClient {
     fn description(&self) -> &ConnectionDescription {
         self.connection.description()
     }
-    fn operations(&self) -> &[OperationSpec] {
-        self.connection.operations()
+    async fn operations(&self) -> Result<rsi_api_protocol::OperationCatalog> {
+        self.connection.operations().await
+    }
+    async fn operation(&self, key: &rsi_api_protocol::OperationKey) -> Result<OperationSpec> {
+        self.connection.operation(key).await
     }
     fn input_budget(&self, class: OperationClass) -> ByteBudget {
         self.connection.input_budget(class)

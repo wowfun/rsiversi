@@ -10,6 +10,7 @@ mod wire;
 pub use client::Client;
 pub use plugin::{ClientFactory, EndpointFactory};
 pub use server::Endpoint;
+pub use wire::Operation;
 
 #[cfg(test)]
 mod tests;

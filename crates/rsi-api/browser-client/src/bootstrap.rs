@@ -42,7 +42,7 @@ async fn exchange(
     ticket: Option<&SecretValue>,
 ) -> Result<EndpointId> {
     let pending = bridge.start(RequestData {
-        url: format!("{origin}/api/v1/browser-bootstrap"),
+        url: format!("{origin}{}", rsi_api_protocol::BROWSER_BOOTSTRAP_PATH),
         class: OperationClass::Control,
         headers: vec![("x-rsi-csrf", "1".into())],
         authorization: None,

@@ -16,7 +16,7 @@ and consume exactly one outstanding offer; they are never automatically replayed
 Unknown commit outcomes require closing and explicitly reconnecting the observer.
 
 The native server consumes an explicit WebAssetControl; the portable typed client
-validates exact negotiated operation policies and catalog metadata. Serve owns the
+uses per-call identity and shape checks and validates returned catalog metadata. Serve owns the
 registrations in its Application, alongside its listener, using existing device
 authentication. Static bootstrap files need no renderer lease. Renderer generation
 paths and aggregate retained-byte accounting remain owned by WebAssets.

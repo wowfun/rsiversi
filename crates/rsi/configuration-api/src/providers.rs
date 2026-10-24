@@ -123,15 +123,9 @@ pub struct ManagedProvidersClient {
     pub(crate) api: Arc<dyn ApiClient>,
 }
 impl ManagedProvidersClient {
-    /// Requires both exact managed-provider operations.
-    pub fn new(api: Arc<dyn ApiClient>) -> Result<Self> {
-        if [ProvidersOperation::Read, ProvidersOperation::Replace]
-            .into_iter()
-            .any(|operation| !api.operations().contains(&operation.spec()))
-        {
-            return Err(ApiError::Unavailable);
-        }
-        Ok(Self { api })
+    /// Creates a typed proxy; availability is resolved when each operation is called.
+    pub fn new(api: Arc<dyn ApiClient>) -> Self {
+        Self { api }
     }
     async fn call<I: Serialize + Sync>(
         &self,

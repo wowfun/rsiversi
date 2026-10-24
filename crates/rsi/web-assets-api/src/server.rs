@@ -103,13 +103,11 @@ impl ApiHandler for Handler {
         output: ApiResponseCapacity,
     ) -> Result<ApiOutput> {
         if self.commit {
+            let capacity = output.into_finite()?;
             let request: Commit =
                 serde_json::from_slice(input.as_bytes()).map_err(|_| malformed())?;
             request.validate()?;
             self.state.commit(&context.origin, &request)?;
-            let ApiResponseCapacity::Finite(capacity) = output else {
-                return Err(ApiError::Unavailable);
-            };
             Ok(ApiOutput::Reply(ApiMessage {
                 json: capacity.encode(&true)?,
                 binary: None,

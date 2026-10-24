@@ -47,13 +47,8 @@ impl PluginFactory for Factory {
         let business = plan.local::<UiBusinessApiContract>()?;
         business.scope.validate().map_err(activation)?;
         let key = rsi_ui::fresh_identity("ui-api").map_err(activation)?;
-        let operations = business
-            .client
-            .operations()
-            .iter()
-            .map(|operation| operation.id.clone())
-            .collect::<Vec<_>>();
-        let api = rsi_api_portable::export_api(&plan, &key, business.client.clone(), &operations)?;
+        let operations = &business.operations;
+        let api = rsi_api_portable::export_api(&plan, &key, business.client.clone(), operations)?;
         let bound = Arc::new(Bound {
             context: plan.context().clone(),
             adapter: Adapter {

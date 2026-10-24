@@ -62,7 +62,7 @@ async fn web_alias_and_profile_serve_default_assets_with_stable_authorized_ident
         let (child, origin, ticket) = start(&fixture, &args).await;
         let response = request(
             &origin,
-            "/api/v1/browser-bootstrap",
+            "/api/v2/browser-bootstrap",
             &format!("X-Rsi-Launch-Ticket: {ticket}\r\n"),
         )
         .await;
@@ -83,7 +83,7 @@ async fn web_alias_and_profile_serve_default_assets_with_stable_authorized_ident
             identity(
                 &request(
                     &origin,
-                    "/api/v1/browser-bootstrap",
+                    "/api/v2/browser-bootstrap",
                     &format!("Cookie: {cookie}\r\n")
                 )
                 .await
@@ -93,7 +93,7 @@ async fn web_alias_and_profile_serve_default_assets_with_stable_authorized_ident
         assert!(
             request(
                 &origin,
-                "/api/v1/browser-bootstrap",
+                "/api/v2/browser-bootstrap",
                 &format!("X-Rsi-Launch-Ticket: {ticket}\r\n")
             )
             .await

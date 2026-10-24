@@ -3,6 +3,41 @@ use serde::Serialize;
 use std::sync::atomic::{AtomicUsize, Ordering};
 
 #[test]
+fn finite_conversion_preserves_reservation_and_measured_delivery_lifetimes() {
+    use rsi_api_protocol::{ApiResponseCapacity, FiniteResponseCapacity};
+    let budget = ByteBudget::new(16).unwrap();
+    let capacity = ApiResponseCapacity::Finite(budget.reserve(16).unwrap().into())
+        .into_finite()
+        .unwrap();
+    assert_eq!(budget.used(), 16);
+    let bytes = capacity.encode(&true).unwrap();
+    let copy = bytes.clone();
+    drop(bytes);
+    assert!(budget.used() > 0);
+    drop(copy);
+    assert_eq!(budget.used(), 0);
+    let measured = ApiResponseCapacity::Finite(FiniteResponseCapacity::Measured {
+        budget: budget.clone(),
+        maximum: 16,
+    })
+    .into_finite()
+    .unwrap();
+    assert_eq!(budget.used(), 0);
+    let bytes = measured.encode(&true).unwrap();
+    assert_eq!(budget.used(), 4);
+    drop(bytes);
+    assert!(matches!(
+        ApiResponseCapacity::Subscription {
+            budget: budget.clone(),
+            maximum: 16
+        }
+        .into_finite(),
+        Err(ApiError::Backend(_))
+    ));
+    assert_eq!(budget.used(), 0);
+}
+
+#[test]
 fn attached_count_admission_survives_last_transport_slice() {
     let budget = ByteBudget::new(8).unwrap();
     let guard = std::sync::Arc::new(());

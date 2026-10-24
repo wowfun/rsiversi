@@ -39,8 +39,8 @@ impl ApiClient for Connection {
     fn description(&self) -> &ConnectionDescription {
         &self.description
     }
-    fn operations(&self) -> &[OperationSpec] {
-        &self.operations
+    async fn operations(&self) -> rsi_api_protocol::Result<rsi_api_protocol::OperationCatalog> {
+        rsi_api_protocol::OperationCatalog::new(self.operations.clone())
     }
     fn input_budget(&self, _: OperationClass) -> ByteBudget {
         ByteBudget::default()
@@ -52,7 +52,7 @@ impl ApiClient for Connection {
     ) -> rsi_api_protocol::Result<ApiOutput> {
         let output = self
             .dispatch
-            .admit(&operation.id, CallOrigin::Local)?
+            .admit(&operation.call(), CallOrigin::Local)?
             .invoke(input)
             .await?;
         if let Some(corrupt) = self.corrupt {
@@ -164,11 +164,11 @@ async fn server(path: &std::path::Path) -> Runtime {
 
 async fn client_composition(dispatch: Arc<dyn ApiDispatch>) -> (Runtime, rsi_meta::FiberHandle) {
     let connection = Arc::new(Connection {
-        operations: dispatch.operations(),
+        operations: dispatch.operations().unwrap(),
         dispatch: dispatch.clone(),
         corrupt: None,
         description: ConnectionDescription {
-            wire_version: 1,
+            wire_version: rsi_api_protocol::API_WIRE_VERSION,
             endpoint_id: EndpointId::from_bytes([1; 16]),
             host_epoch: HostEpoch::from_bytes([2; 16]),
         },
@@ -283,10 +283,13 @@ async fn native_file_and_namespace_api_preserve_cas_last_good_state_and_scope_id
     assert_eq!(document["hidden"], json!({"private":"retained"}));
     let operation = dispatch
         .operations()
+        .unwrap()
         .into_iter()
         .find(|operation| operation.id.name() == "read")
         .unwrap();
-    let invocation = dispatch.admit(&operation.id, CallOrigin::Local).unwrap();
+    let invocation = dispatch
+        .admit(&operation.call(), CallOrigin::Local)
+        .unwrap();
     let input = invocation
         .input_budget()
         .copy(br#"{"namespace":"ui","raw":true}"#)
@@ -318,16 +321,16 @@ async fn malformed_success_after_real_file_commit_is_unknown_and_the_write_remai
         let initial = registration.scope.get().unwrap();
         let dispatch = server.root().lookup_local::<ApiDispatchContract>().unwrap();
         let connection = Arc::new(Connection {
-            operations: dispatch.operations(),
+            operations: dispatch.operations().unwrap(),
             dispatch,
             corrupt: Some(corrupt),
             description: ConnectionDescription {
-                wire_version: 1,
+                wire_version: rsi_api_protocol::API_WIRE_VERSION,
                 endpoint_id: EndpointId::from_bytes([1; 16]),
                 host_epoch: HostEpoch::from_bytes([2; 16]),
             },
         });
-        let client = rsi_settings_api::SettingsClient::new(connection).unwrap();
+        let client = rsi_settings_api::SettingsClient::new(connection);
         assert!(matches!(
             client
                 .replace("ui", &initial.version(), json!({"enabled":false}))
@@ -358,16 +361,15 @@ async fn malformed_discovery_replies_are_rejected_before_client_exposure() {
         Corruption::DiscoveryCursor,
     ] {
         let client = rsi_settings_api::SettingsClient::new(Arc::new(Connection {
-            operations: dispatch.operations(),
+            operations: dispatch.operations().unwrap(),
             dispatch: dispatch.clone(),
             corrupt: Some(corrupt),
             description: ConnectionDescription {
-                wire_version: 1,
+                wire_version: rsi_api_protocol::API_WIRE_VERSION,
                 endpoint_id: EndpointId::from_bytes([1; 16]),
                 host_epoch: HostEpoch::from_bytes([2; 16]),
             },
-        }))
-        .unwrap();
+        }));
         let result = if matches!(
             corrupt,
             Corruption::DiscoveryOrder | Corruption::DiscoveryCursor

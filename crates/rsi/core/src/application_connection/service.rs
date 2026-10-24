@@ -3,7 +3,7 @@ use crate::application_services::{ServingService, ServingServiceContract};
 use async_trait::async_trait;
 use rsi_api_protocol::{
     ApiDispatch, ApiError, ApiInvocation, AuthenticatedDevice, CallOrigin, DeviceAdministration,
-    DeviceAuthentication, DeviceId, DeviceRecord, OperationId, OperationSpec, RegisteredDevice,
+    DeviceAuthentication, DeviceId, DeviceRecord, OperationCall, OperationSpec, RegisteredDevice,
 };
 use rsi_credentials_protocol::SecretValue;
 use rsi_meta::{ActivationPlan, ConfigValue, PluginFactory, PreparedActivation};
@@ -119,7 +119,7 @@ impl PluginFactory for ServiceFactory {
             )?;
             (running, stopped)
         };
-        running
+        let dispatch = running
             .api_dispatch()
             .map_err(|error| self.0.diagnosed(error))?;
         running
@@ -137,6 +137,12 @@ impl PluginFactory for ServiceFactory {
             .publish_domains(&mut plan, crate::addon::DomainLookup::Service(&running))?;
         let context = plan.context();
         let service = Arc::new(Service {
+            inputs: [
+                rsi_api_protocol::OperationClass::Control,
+                rsi_api_protocol::OperationClass::Data,
+                rsi_api_protocol::OperationClass::Subscription,
+            ]
+            .map(|class| dispatch.input_budget(class)),
             running: Arc::downgrade(&running),
             stopped,
             execution: context.runtime().execution().clone(),
@@ -194,12 +200,39 @@ impl PluginFactory for ServiceFactory {
 
 #[derive(Debug)]
 struct Service {
+    inputs: [rsi_api_protocol::ByteBudget; 3],
     running: Weak<crate::RunningRsi>,
     stopped: watch::Receiver<Option<Result<(), String>>>,
     execution: rsi_meta::Execution,
     launches: tokio_util::task::TaskTracker,
     launch_closed: Mutex<bool>,
     launch_device: Arc<tokio::sync::OnceCell<RegisteredDevice>>,
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    #[tokio::test]
+    async fn dispatch_lookup_failure_preserves_input_pool_and_is_not_an_empty_catalog() {
+        let pool = rsi_api_protocol::ByteBudget::new(1024).unwrap();
+        let service = Service {
+            inputs: std::array::from_fn(|_| pool.clone()),
+            running: Weak::new(),
+            stopped: watch::channel(None).1,
+            execution: rsi_meta::Execution::native(tokio::runtime::Handle::current()),
+            launches: tokio_util::task::TaskTracker::new(),
+            launch_closed: Mutex::new(false),
+            launch_device: Arc::default(),
+        };
+        assert!(matches!(service.operations(), Err(ApiError::Unavailable)));
+        let retained = service
+            .input_budget(rsi_api_protocol::OperationClass::Data)
+            .copy(b"{}")
+            .unwrap();
+        assert_eq!(pool.used(), 2);
+        drop(retained);
+        assert_eq!(pool.used(), 0);
+    }
 }
 impl Service {
     async fn close_launches(&self) {
@@ -220,15 +253,34 @@ impl Service {
 impl ApiDispatch for Service {
     fn admit(
         &self,
-        operation: &OperationId,
+        operation: &OperationCall,
         origin: CallOrigin,
     ) -> rsi_api_protocol::Result<Box<dyn ApiInvocation>> {
         self.current::<rsi_api_protocol::ApiDispatchContract>()?
             .admit(operation, origin)
     }
-    fn operations(&self) -> Vec<OperationSpec> {
-        self.current::<rsi_api_protocol::ApiDispatchContract>()
-            .map_or_else(|_| Vec::new(), |dispatch| dispatch.operations())
+    fn operations(&self) -> rsi_api_protocol::Result<Vec<OperationSpec>> {
+        self.current::<rsi_api_protocol::ApiDispatchContract>()?
+            .operations()
+    }
+    fn operation(
+        &self,
+        key: &rsi_api_protocol::OperationKey,
+        origin: &CallOrigin,
+    ) -> rsi_api_protocol::Result<OperationSpec> {
+        self.current::<rsi_api_protocol::ApiDispatchContract>()?
+            .operation(key, origin)
+    }
+    fn input_budget(
+        &self,
+        class: rsi_api_protocol::OperationClass,
+    ) -> rsi_api_protocol::ByteBudget {
+        self.inputs[match class {
+            rsi_api_protocol::OperationClass::Control => 0,
+            rsi_api_protocol::OperationClass::Data => 1,
+            rsi_api_protocol::OperationClass::Subscription => 2,
+        }]
+        .clone()
     }
 }
 impl DeviceAuthentication for Service {

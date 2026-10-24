@@ -301,6 +301,7 @@ async fn standard_api_plugins_share_durable_identity_and_serve_independent_domai
     let dispatch = host.lookup_local::<ApiDispatchContract>().unwrap();
     let domains = dispatch
         .operations()
+        .unwrap()
         .into_iter()
         .map(|spec| spec.id.domain().to_owned())
         .collect::<std::collections::BTreeSet<_>>();
@@ -341,6 +342,7 @@ async fn standard_api_plugins_share_durable_identity_and_serve_independent_domai
     assert!(
         dispatch
             .operations()
+            .unwrap()
             .iter()
             .filter(|spec| matches!(spec.id.domain(), "devices" | "inspector" | "native-addons"))
             .all(|spec| spec.access == rsi_api_protocol::OperationAccess::Local)
@@ -385,7 +387,7 @@ async fn standard_api_plugins_share_durable_identity_and_serve_independent_domai
         .unwrap(),
     );
     assert_eq!(api.description(), description.as_ref());
-    let external = rsi_acp_api::Client::new(api.clone()).unwrap();
+    let external = rsi_acp_api::Client::new(api.clone());
     assert!(
         rsi_acp_protocol::service::ExternalConversations::endpoints(&external)
             .await
@@ -398,20 +400,20 @@ async fn standard_api_plugins_share_durable_identity_and_serve_independent_domai
             .unwrap()
             .is_empty()
     );
-    let workspace = rsi_workspace_api::WorkspaceClient::new(api.clone()).unwrap();
+    let workspace = rsi_workspace_api::WorkspaceClient::new(api.clone());
     let registered_workspace = workspace.get_or_create(&fixture.workspace).await.unwrap();
     assert_eq!(
         workspace.get(&registered_workspace.id).await.unwrap(),
         registered_workspace
     );
-    let settings = rsi_settings_api::SettingsClient::new(api.clone()).unwrap();
+    let settings = rsi_settings_api::SettingsClient::new(api.clone());
     let snapshot = settings.read("rsi.agent").await.unwrap();
     assert_eq!(snapshot.value["default_model"]["model"], "fixture-model");
-    let models = rsi_ai_models_api::ModelsClient::new(api.clone()).unwrap();
+    let models = rsi_ai_models_api::ModelsClient::new(api.clone());
     assert_eq!(models.list_models(None, 256).await.unwrap().models.len(), 1);
-    rsi_media_api::MediaClient::new(api.clone()).unwrap();
-    rsi_process_output_api::OutputClient::new(api.clone()).unwrap();
-    let sessions = rsi_session_api::SessionClient::new(api.clone()).unwrap();
+    rsi_media_api::MediaClient::new(api.clone());
+    rsi_process_output_api::OutputClient::new(api.clone());
+    let sessions = rsi_session_api::SessionClient::new(api.clone());
     assert!(
         sessions
             .list_recent(None, 8)
@@ -421,7 +423,7 @@ async fn standard_api_plugins_share_durable_identity_and_serve_independent_domai
             .is_empty()
     );
     std::fs::write(fixture.workspace.join("sample"), b"a\0\xffz").unwrap();
-    let files = rsi_session_files::SessionFilesClient::new(api.clone()).unwrap();
+    let files = rsi_session_files::SessionFilesClient::new(api.clone());
     let (target, file) =
         super::files::browse(&sessions, &files, registered_workspace.id, "http").await;
     dropped_ui_binding_releases_profile(&host, &target.session_id).await;
@@ -464,7 +466,10 @@ async fn standard_api_plugins_share_durable_identity_and_serve_independent_domai
     task.await.unwrap().unwrap();
     assert!(host.shutdown().await.is_clean());
     assert!(authority.revoked.is_cancelled());
-    assert!(dispatch.operations().is_empty());
+    assert!(matches!(
+        dispatch.operations(),
+        Err(rsi_api_protocol::ApiError::ShuttingDown)
+    ));
     let restarted = candidate
         .build()
         .unwrap()
@@ -483,6 +488,7 @@ async fn standard_api_plugins_share_durable_identity_and_serve_independent_domai
             .lookup_local::<ApiDispatchContract>()
             .unwrap()
             .operations()
+            .unwrap()
             .into_iter()
             .map(|spec| spec.id.domain().to_owned())
             .collect()
@@ -562,7 +568,7 @@ async fn remote_ui(
     session: &rsi_agent_session_protocol::SessionId,
 ) -> rsi_ui_api::UiObservation {
     use rsi_ui_api::{CatalogRequest, ExportScope, Observe, Selection, UiClient};
-    let client = UiClient::new(api).unwrap();
+    let client = UiClient::new(api);
     let scope = ExportScope {
         kind: "session".into(),
         key: session.to_string(),
@@ -656,6 +662,7 @@ async fn managed_ready(
         *changes.borrow(),
         dispatch
             .operations()
+            .unwrap()
             .iter()
             .map(|spec| spec.id.domain())
             .collect::<std::collections::BTreeSet<_>>()
@@ -761,6 +768,7 @@ async fn managed_owner_waits_for_parent_profile_publication() {
     assert!(
         !dispatch
             .operations()
+            .unwrap()
             .iter()
             .any(|spec| spec.id.domain() == "providers")
     );
@@ -778,7 +786,7 @@ async fn managed_owner_waits_for_parent_profile_publication() {
         .encode(&serde_json::json!({}), operation.maximum_request_bytes)
         .unwrap();
     let reply = dispatch
-        .admit(&operation.id, rsi_api_protocol::CallOrigin::Local)
+        .admit(&operation.call(), rsi_api_protocol::CallOrigin::Local)
         .unwrap()
         .invoke(input)
         .await

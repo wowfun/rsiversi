@@ -25,7 +25,7 @@ async fn wire_at(
     let ApiOutput::Reply(reply) = running
         .api_dispatch()
         .unwrap()
-        .admit(&spec.id, origin)?
+        .admit(&spec.call(), origin)?
         .invoke(payload)
         .await?
     else {

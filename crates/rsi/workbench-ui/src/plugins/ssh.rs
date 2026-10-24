@@ -41,7 +41,7 @@ impl std::fmt::Debug for SshCommand {
 /// Non-secret target projection independent of profile configuration values.
 #[derive(Clone, Debug, Default, Serialize)]
 pub struct SshView {
-    /// Required target operations were negotiated.
+    /// The target catalog read is available.
     pub available: bool,
     /// Local-only trust confirmation was negotiated.
     pub can_trust: bool,

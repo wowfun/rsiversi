@@ -261,15 +261,9 @@ pub struct Client {
     api: Arc<dyn ApiClient>,
 }
 impl Client {
-    /// Requires the exact complete operation catalog.
-    pub fn new(api: Arc<dyn ApiClient>) -> rsi_api_protocol::Result<Self> {
-        if [Operation::Status, Operation::List, Operation::Create]
-            .into_iter()
-            .any(|operation| !api.operations().contains(&operation.spec()))
-        {
-            return Err(ApiError::Unavailable);
-        }
-        Ok(Self { api })
+    /// Creates a typed proxy; availability is resolved when each operation is called.
+    pub fn new(api: Arc<dyn ApiClient>) -> Self {
+        Self { api }
     }
     async fn call<I: Serialize + Sync, O: serde::de::DeserializeOwned>(
         &self,
@@ -473,8 +467,7 @@ impl PluginFactory for ClientFactory {
         Ok(PreparedActivation::new(ConfigValue::Null).requiring_local::<ApiClientContract>())
     }
     async fn activate(&self, plan: ActivationPlan) -> rsi_meta::Result<()> {
-        let client = Client::new(plan.local::<ApiClientContract>()?)
-            .map_err(|error| MetaError::Activation(error.to_string()))?;
+        let client = Client::new(plan.local::<ApiClientContract>()?);
         let supply = plan
             .context()
             .provide_local::<ClientContract>(Arc::new(client))?;

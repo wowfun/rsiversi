@@ -89,8 +89,11 @@ impl ApiHandler for Handler {
         input: RetainedBytes,
         output: ApiResponseCapacity,
     ) -> Result<ApiOutput> {
+        if self.name == "observe" {
+            return self.state.observe(context, decode(&input)?, output);
+        }
+        let mut capacity = output.into_finite()?;
         match self.name {
-            "observe" => self.state.observe(context, decode(&input)?, output),
             "catalog" => {
                 let scope = decode(&input)?;
                 let state = self.state.clone();
@@ -104,17 +107,14 @@ impl ApiHandler for Handler {
                 let entries = task
                     .await
                     .map_err(|_| ApiError::Backend("UI catalog task failed".into()))??;
-                reply(output, &entries)
+                reply(capacity, &entries)
             }
             "invoke" => {
                 self.state.invoke(context, decode(&input)?).await?;
-                reply(output, &true)
+                reply(capacity, &true)
             }
             "source" => {
                 let bytes = self.state.source(context, decode(&input)?).await?;
-                let ApiResponseCapacity::Finite(mut capacity) = output else {
-                    return Err(ApiError::Unavailable);
-                };
                 let binary = capacity
                     .split(bytes.len())?
                     .retain_vec(bytes.as_bytes().to_vec())?
@@ -133,10 +133,10 @@ fn decode<T: DeserializeOwned>(input: &RetainedBytes) -> Result<T> {
     serde_json::from_slice(input.as_bytes())
         .map_err(|_| ApiError::Invalid("invalid UI request".into()))
 }
-fn reply(output: ApiResponseCapacity, value: &impl serde::Serialize) -> Result<ApiOutput> {
-    let ApiResponseCapacity::Finite(capacity) = output else {
-        return Err(ApiError::Unavailable);
-    };
+fn reply(
+    capacity: rsi_api_protocol::FiniteResponseCapacity,
+    value: &impl serde::Serialize,
+) -> Result<ApiOutput> {
     Ok(ApiOutput::Reply(ApiMessage {
         json: capacity.encode(value)?,
         binary: None,

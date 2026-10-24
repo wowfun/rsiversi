@@ -35,7 +35,7 @@ impl std::fmt::Debug for McpSshCommand {
 /// One authorized non-secret configuration and independently reported outcome.
 #[derive(Clone, Debug, Default, Serialize)]
 pub struct McpSshView {
-    /// All exact SSH stdio management operations were negotiated.
+    /// The exact SSH stdio configuration read is available.
     pub available: bool,
     /// Latest exact authorized observation; never an execution lease.
     pub state: Option<wire::State>,

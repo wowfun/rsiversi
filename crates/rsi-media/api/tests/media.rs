@@ -44,11 +44,11 @@ struct Connection {
 impl Connection {
     fn new(dispatch: Arc<dyn ApiDispatch>, corruption: Corruption) -> Self {
         Self {
-            operations: dispatch.operations(),
+            operations: dispatch.operations().unwrap(),
             dispatch,
             corruption,
             description: ConnectionDescription {
-                wire_version: 1,
+                wire_version: rsi_api_protocol::API_WIRE_VERSION,
                 endpoint_id: EndpointId::from_bytes([1; 16]),
                 host_epoch: HostEpoch::from_bytes([2; 16]),
             },
@@ -63,8 +63,8 @@ impl ApiClient for Connection {
     fn description(&self) -> &ConnectionDescription {
         &self.description
     }
-    fn operations(&self) -> &[OperationSpec] {
-        &self.operations
+    async fn operations(&self) -> rsi_api_protocol::Result<rsi_api_protocol::OperationCatalog> {
+        rsi_api_protocol::OperationCatalog::new(self.operations.clone())
     }
     fn input_budget(&self, _: OperationClass) -> ByteBudget {
         ByteBudget::default()
@@ -76,7 +76,7 @@ impl ApiClient for Connection {
     ) -> rsi_api_protocol::Result<ApiOutput> {
         let reply = self
             .dispatch
-            .admit(&operation.id, CallOrigin::Local)?
+            .admit(&operation.call(), CallOrigin::Local)?
             .invoke(input)
             .await?;
         if operation.id.name() == "import" {
@@ -231,7 +231,7 @@ async fn real_cas_and_independent_plugins_preserve_publication_retention_and_res
         .iter()
         .find(|spec| spec.id.name() == "read")
         .unwrap();
-    let invocation = dispatch.admit(&read.id, CallOrigin::Local).unwrap();
+    let invocation = dispatch.admit(&read.call(), CallOrigin::Local).unwrap();
     let mut foreign = serde_json::to_value(&reference).unwrap();
     foreign["session"] = json!("wrong");
     let input = invocation.input_budget().encode(&foreign, 1024).unwrap();
@@ -241,7 +241,7 @@ async fn real_cas_and_independent_plugins_preserve_publication_retention_and_res
     ));
     assert!(client.shutdown().await.is_clean());
     assert!(server.shutdown().await.is_clean());
-    assert!(dispatch.operations().is_empty());
+    assert!(dispatch.operations().unwrap().is_empty());
     let reopened = self::server(temporary.path()).await;
     let media = reopened.root().lookup_local::<MediaContract>().unwrap();
     assert_eq!(media.read(&reference).await.unwrap().reference, reference);
@@ -257,7 +257,7 @@ async fn reply_loss_does_not_replay_and_bad_read_metadata_or_bytes_never_escape(
         dispatch.clone(),
         Corruption::LostImportReply,
     ));
-    let media = MediaClient::new(lost.clone()).unwrap();
+    let media = MediaClient::new(lost.clone());
     assert_eq!(
         media
             .import_image(source(ImageFormat::Png))
@@ -282,14 +282,14 @@ async fn reply_loss_does_not_replay_and_bad_read_metadata_or_bytes_never_escape(
         Corruption::MissingBinary,
     ] {
         let connection = Arc::new(Connection::new(dispatch.clone(), corruption));
-        let media = MediaClient::new(connection.clone()).unwrap();
+        let media = MediaClient::new(connection.clone());
         assert!(matches!(
             media.read(&reference).await,
             Err(MediaError::Api(ApiError::Invalid(_)))
         ));
         assert_eq!(connection.received.used(), 0);
     }
-    let media = MediaClient::new(Arc::new(Connection::new(dispatch, Corruption::None))).unwrap();
+    let media = MediaClient::new(Arc::new(Connection::new(dispatch, Corruption::None)));
     let mut unknown = reference.clone();
     unknown.id = rsi_media_protocol::MediaId::new("0".repeat(64)).unwrap();
     assert_eq!(

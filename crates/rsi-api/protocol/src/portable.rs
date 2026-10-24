@@ -1,11 +1,11 @@
 //! Closed framing for an explicitly granted Portable API client capability.
-use crate::{ConnectionDescription, OperationCatalog, OperationId};
+use crate::{ConnectionDescription, OperationCall};
 use serde::{Deserialize, Serialize};
 
 /// Exact Meta Portable contract identifier.
 pub const CONTRACT: &str = "rsi.api.portable";
 /// Contract revision, independent of domain API versions.
-pub const VERSION: u32 = 1;
+pub const VERSION: u32 = 2;
 /// Maximum encoded control header, excluding its one-byte tag.
 pub const MAXIMUM_HEADER_BYTES: usize = 1024;
 /// Maximum bytes in one payload fragment, excluding its tag and offset.
@@ -23,8 +23,6 @@ pub const FRAGMENT_TAG: u8 = 1;
 pub struct Description {
     /// Existing authenticated or local connection identity, never caller-provided authority.
     pub connection: ConnectionDescription,
-    /// Exact selected owning operation contracts.
-    pub operations: OperationCatalog,
 }
 
 /// A bounded control frame. Each declared payload follows in contiguous fragments.
@@ -41,7 +39,7 @@ pub enum Header {
     /// Calls one selected operation; metadata and authority come from the exporter.
     Call {
         /// Exact domain-owned operation identity.
-        operation: OperationId,
+        operation: OperationCall,
         /// Complete request body length, bounded by the registered operation.
         bytes: usize,
     },
@@ -75,6 +73,15 @@ pub enum Header {
 #[derive(Clone, Copy, Debug, Eq, PartialEq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum ErrorCode {
+    /// Explicit operation admission failure.
+    UnknownOperation,
+    /// Explicit operation admission failure.
+    OperationRetiring,
+    /// Explicit operation admission failure.
+    ProtocolMismatch,
+    /// Explicit operation admission failure.
+    CallShapeMismatch,
+
     /// The mutation may have executed; the caller must use domain receipts.
     OutcomeUnknown,
     /// Caller authority has been revoked or rejected.

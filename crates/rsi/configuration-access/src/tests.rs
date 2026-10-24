@@ -1,7 +1,7 @@
 use super::*;
 use rsi_api_protocol::{
     ApiDispatchContract, ApiOutput, ApiRegistrarContract, ByteBudget, DeviceAuthentication,
-    EndpointId, OperationId,
+    EndpointId,
 };
 use rsi_meta::{ResolvedFactory, Runtime, UpdateMode};
 use rsi_settings_protocol::{SettingsContract, SettingsMetadata, SettingsSpec, ValidateWith};
@@ -328,7 +328,13 @@ async fn existing_settings_wire_cannot_bypass_grants_or_change_preset_roots() {
                 .unwrap();
             let result = dispatch
                 .admit(
-                    &OperationId::new("settings", name, 1).unwrap(),
+                    &match name {
+                        "replace" => rsi_settings_api::Operation::Replace,
+                        "clear" => rsi_settings_api::Operation::Clear,
+                        _ => unreachable!(),
+                    }
+                    .spec()
+                    .call(),
                     origin.clone(),
                 )
                 .unwrap()
@@ -518,7 +524,7 @@ async fn credential_write_survives_reply_loss_and_holds_the_revoke_fence() {
             spec.maximum_request_bytes,
         )
         .unwrap();
-    let call = dispatch.admit(&spec.id, origin.clone()).unwrap();
+    let call = dispatch.admit(&spec.call(), origin.clone()).unwrap();
     let waiter = tokio::spawn(async move { call.invoke(input).await });
     credentials.entered.acquire().await.unwrap().forget();
     waiter.abort();
@@ -625,7 +631,7 @@ async fn plugin_read_checks_real_grant_and_holds_revocation_until_observation_fi
             )
             .unwrap()
     };
-    let call = dispatch.admit(&spec.id, origin.clone()).unwrap();
+    let call = dispatch.admit(&spec.call(), origin.clone()).unwrap();
     assert!(matches!(
         call.invoke(input()).await,
         Err(ApiError::Unauthorized)
@@ -636,7 +642,7 @@ async fn plugin_read_checks_real_grant_and_holds_revocation_until_observation_fi
         .unwrap()
         .await
         .unwrap();
-    let call = dispatch.admit(&spec.id, origin.clone()).unwrap();
+    let call = dispatch.admit(&spec.call(), origin.clone()).unwrap();
     let bytes = input();
     let waiter = tokio::spawn(async move { call.invoke(bytes).await });
     source.entered.acquire().await.unwrap().forget();
@@ -665,7 +671,7 @@ async fn plugin_read_checks_real_grant_and_holds_revocation_until_observation_fi
         serde_json::from_slice(message.json.as_ref()).unwrap();
     assert_eq!(page.observed_revision, "7");
     assert_eq!(revoke.await.unwrap().revision, "2");
-    let call = dispatch.admit(&spec.id, origin).unwrap();
+    let call = dispatch.admit(&spec.call(), origin).unwrap();
     assert!(matches!(
         call.invoke(input()).await,
         Err(ApiError::Unauthorized)
@@ -700,7 +706,7 @@ async fn backend_failure_in_another_domain_closes_cached_grant_admission() {
         .unwrap();
     assert!(matches!(
         dispatch
-            .admit(&spec.id, CallOrigin::Local)
+            .admit(&spec.call(), CallOrigin::Local)
             .unwrap()
             .invoke(input)
             .await,

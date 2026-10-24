@@ -136,10 +136,10 @@ pub async fn workflow_restart_impact(
         .await
         .map_err(error)?,
     );
-    let result = match rsi_inspector::InspectorClient::new(client.clone()) {
-        Ok(inspector) => inspector.workflows().await.map_err(error),
-        Err(err) => Err(error(err)),
-    };
+    let result = rsi_inspector::InspectorClient::new(client.clone())
+        .workflows()
+        .await
+        .map_err(error);
     client.close().await;
     result
 }

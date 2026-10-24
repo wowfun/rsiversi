@@ -1,7 +1,7 @@
 use crate::wire::{Clear, Failure, List, Operation, Read, Replace};
 use async_trait::async_trait;
 use rsi_api_protocol::{ApiClient, ApiClientContract, ApiError, call_json};
-use rsi_meta::{ActivationPlan, ConfigValue, MetaError, PluginFactory, PreparedActivation};
+use rsi_meta::{ActivationPlan, ConfigValue, PluginFactory, PreparedActivation};
 use rsi_settings_protocol::{
     Result, SettingsAccess, SettingsAccessContract, SettingsDescription, SettingsError,
     SettingsPage, SettingsSnapshot, SettingsVersion, validate_namespace, validate_section,
@@ -17,15 +17,9 @@ pub struct SettingsClient {
     api: Arc<dyn ApiClient>,
 }
 impl SettingsClient {
-    /// Requires every exact Settings operation before publishing projection authority.
-    pub fn new(api: Arc<dyn ApiClient>) -> rsi_api_protocol::Result<Self> {
-        if Operation::ALL
-            .iter()
-            .any(|operation| !api.operations().contains(&operation.spec()))
-        {
-            return Err(ApiError::Unavailable);
-        }
-        Ok(Self { api })
+    /// Creates a typed proxy; availability is resolved when each operation is called.
+    pub fn new(api: Arc<dyn ApiClient>) -> Self {
+        Self { api }
     }
     async fn call<I: Serialize + Sync>(
         &self,
@@ -152,8 +146,7 @@ impl PluginFactory for SettingsClientFactory {
         Ok(crate::prepare(config)?.requiring_local::<ApiClientContract>())
     }
     async fn activate(&self, plan: ActivationPlan) -> rsi_meta::Result<()> {
-        let client = SettingsClient::new(plan.local::<ApiClientContract>()?)
-            .map_err(|error| MetaError::Activation(error.to_string()))?;
+        let client = SettingsClient::new(plan.local::<ApiClientContract>()?);
         let supply = plan
             .context()
             .provide_local::<SettingsAccessContract>(Arc::new(client))?;

@@ -353,7 +353,7 @@ async fn local_http_rejects_remote_credentials_and_foreign_request_authority() {
             .await
             .unwrap();
         let request = format!(
-            "POST /api/v1/local/echo/1 HTTP/1.1\r\nHost: {host}\r\nX-Rsi-Wire-Version: 1\r\nX-Rsi-Host-Epoch: {}\r\nX-Rsi-Local-Key: {}\r\n{extra}Content-Type: application/json\r\nContent-Length: 2\r\n\r\n{{}}",
+            "POST /api/v2/rsi-api-protocol/4/local/echo/1/read HTTP/1.1\r\nHost: {host}\r\nX-Rsi-Wire-Version: 2\r\nX-Rsi-Host-Epoch: {}\r\nX-Rsi-Local-Key: {}\r\n{extra}Content-Type: application/json\r\nContent-Length: 2\r\n\r\n{{}}",
             harness.config.host_epoch.as_str(),
             harness.config.compatibility.as_str()
         );
@@ -382,7 +382,7 @@ async fn pipelined_bytes_cannot_dispatch_a_second_mutation_or_undo_the_first() {
         .await
         .unwrap();
     let request = format!(
-        "POST /api/v1/local/mutate/1 HTTP/1.1\r\nHost: rsi.local\r\nX-Rsi-Wire-Version: 1\r\nX-Rsi-Host-Epoch: {}\r\nX-Rsi-Local-Key: {}\r\nContent-Type: application/json\r\nContent-Length: 2\r\n\r\n{{}}",
+        "POST /api/v2/rsi-api-protocol/4/local/mutate/1/mutation HTTP/1.1\r\nHost: rsi.local\r\nX-Rsi-Wire-Version: 2\r\nX-Rsi-Host-Epoch: {}\r\nX-Rsi-Local-Key: {}\r\nContent-Type: application/json\r\nContent-Length: 2\r\n\r\n{{}}",
         harness.config.host_epoch.as_str(),
         harness.config.compatibility.as_str(),
     );

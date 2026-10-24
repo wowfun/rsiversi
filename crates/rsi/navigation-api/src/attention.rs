@@ -180,15 +180,9 @@ pub struct Client {
     api: Arc<dyn ApiClient>,
 }
 impl Client {
-    /// Checks exact advertised operations.
-    pub fn new(api: Arc<dyn ApiClient>) -> Result<Self> {
-        if [Operation::Read, Operation::MarkRead]
-            .into_iter()
-            .any(|op| !api.operations().contains(&op.spec()))
-        {
-            return Err(ApiError::Unavailable);
-        }
-        Ok(Self { api })
+    /// Creates a typed proxy; availability is resolved when each operation is called.
+    pub fn new(api: Arc<dyn ApiClient>) -> Self {
+        Self { api }
     }
     /// Reads a bounded current-owner view.
     pub async fn read(&self) -> Result<Page> {

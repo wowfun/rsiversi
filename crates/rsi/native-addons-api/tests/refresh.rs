@@ -40,7 +40,7 @@ async fn refresh_validates_before_owner_and_drain_keeps_abandoned_mutation_owned
         release: Semaphore::new(0),
     });
     let api = NativeAddonsApi::register(registry.as_ref(), owner.clone()).unwrap();
-    let operations = registry.operations();
+    let operations = registry.operations().unwrap();
     assert_eq!(operations.len(), 1);
     let operation = &operations[0];
     assert_eq!(
@@ -49,7 +49,7 @@ async fn refresh_validates_before_owner_and_drain_keeps_abandoned_mutation_owned
     );
     assert!(matches!(
         registry.admit(
-            &operation.id,
+            &operation.call(),
             CallOrigin::Device(rsi_api_protocol::AuthenticatedDevice {
                 id: rsi_api_protocol::DeviceId::from_bytes([9; 16]),
                 revoked: tokio_util::sync::CancellationToken::new()
@@ -61,14 +61,16 @@ async fn refresh_validates_before_owner_and_drain_keeps_abandoned_mutation_owned
         |value: serde_json::Value| ByteBudget::new(1024).unwrap().encode(&value, 1024).unwrap();
     assert!(
         registry
-            .admit(&operation.id, CallOrigin::Local)
+            .admit(&operation.call(), CallOrigin::Local)
             .unwrap()
             .invoke(encode(serde_json::json!({"source":"unreviewed"})))
             .await
             .is_err()
     );
     assert_eq!(owner.calls.load(Ordering::SeqCst), 0);
-    let call = registry.admit(&operation.id, CallOrigin::Local).unwrap();
+    let call = registry
+        .admit(&operation.call(), CallOrigin::Local)
+        .unwrap();
     let bytes = encode(serde_json::json!({}));
     let waiter = tokio::spawn(async move { call.invoke(bytes).await });
     owner.entered.notified().await;
@@ -76,7 +78,7 @@ async fn refresh_validates_before_owner_and_drain_keeps_abandoned_mutation_owned
     let _ = waiter.await;
     let close = tokio::spawn(api.close());
     tokio::time::timeout(std::time::Duration::from_secs(2), async {
-        while !registry.operations().is_empty() {
+        while !registry.operations().unwrap().is_empty() {
             tokio::task::yield_now().await;
         }
     })
@@ -93,7 +95,7 @@ async fn refresh_validates_before_owner_and_drain_keeps_abandoned_mutation_owned
     let api = NativeAddonsApi::register(registry.as_ref(), owner.clone()).unwrap();
     owner.release.add_permits(1);
     let ApiOutput::Reply(reply) = registry
-        .admit(&operation.id, CallOrigin::Local)
+        .admit(&operation.call(), CallOrigin::Local)
         .unwrap()
         .invoke(encode(serde_json::json!({})))
         .await

@@ -137,8 +137,17 @@ fn session_header(
     let input =
         serde_json::to_vec(&json!({"session_id":scope.key})).map_err(|error| error.to_string())?;
     let header = Header::Call {
-        operation: rsi_api_protocol::OperationId::new("session", "attach", 7)
-            .map_err(|error| error.to_string())?,
+        operation: rsi_api_protocol::OperationCall {
+            key: rsi_api_protocol::OperationKey {
+                protocol: serde_json::from_str(include_str!(
+                    "../../../../crates/rsi/session-api/wire-contract.json"
+                ))
+                .map_err(|error| error.to_string())?,
+                id: rsi_api_protocol::OperationId::new("session", "attach", 7)
+                    .map_err(|error| error.to_string())?,
+            },
+            shape: rsi_api_protocol::CallShape::Read,
+        },
         bytes: input.len(),
     };
     let mut encoded = vec![HEADER_TAG];

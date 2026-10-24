@@ -52,6 +52,10 @@ pub(crate) fn response(mut source: ApiStream, revoked: CancellationToken) -> Res
 
 fn error_json(error: &ApiError) -> Bytes {
     Bytes::from_static(match error {
+        ApiError::UnknownOperation => b"{\"code\":\"unknown_operation\"}",
+        ApiError::OperationRetiring => b"{\"code\":\"operation_retiring\"}",
+        ApiError::ProtocolMismatch => b"{\"code\":\"protocol_mismatch\"}",
+        ApiError::CallShapeMismatch => b"{\"code\":\"call_shape_mismatch\"}",
         ApiError::OutcomeUnknown => b"{\"code\":\"outcome_unknown\"}",
         ApiError::Unauthorized => b"{\"code\":\"unauthorized\"}",
         ApiError::Capacity => b"{\"code\":\"capacity\"}",

@@ -65,6 +65,7 @@ impl PluginFactory for Target {
                     kind: "session".into(),
                     key: session.to_string(),
                 },
+                operations: api.allowed_keys(),
                 client: Arc::new(api),
             }))?;
         let (target, lease) = plan

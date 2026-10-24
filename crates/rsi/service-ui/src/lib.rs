@@ -81,8 +81,7 @@ impl PluginFactory for TargetFactory {
                     .session_id()
                     .to_string(),
             },
-            client: UiClient::new(plan.local::<rsi_api_protocol::ApiClientContract>()?)
-                .map_err(meta)?,
+            client: UiClient::new(plan.local::<rsi_api_protocol::ApiClientContract>()?),
             state: tokio::sync::Mutex::new(State::default()),
             published: std::sync::Mutex::new(None),
             stop: CancellationToken::new(),

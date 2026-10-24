@@ -181,11 +181,7 @@ async fn read(context: &Context, operation: Operation) -> Result<UiView> {
         },
     };
     Ok(present(
-        Client::new(api)
-            .map_err(error)?
-            .call(request)
-            .await
-            .map_err(error)?,
+        Client::new(api).call(request).await.map_err(error)?,
     ))
 }
 fn present(reply: Reply) -> UiView {

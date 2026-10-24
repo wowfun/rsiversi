@@ -68,7 +68,7 @@ impl Remote {
     fn new() -> Arc<Self> {
         Arc::new(Self {
             description: ConnectionDescription {
-                wire_version: 1,
+                wire_version: rsi_api_protocol::API_WIRE_VERSION,
                 endpoint_id: EndpointId::from_bytes([1; 16]),
                 host_epoch: HostEpoch::from_bytes([2; 16]),
             },
@@ -115,8 +115,8 @@ impl ApiClient for Remote {
     fn description(&self) -> &ConnectionDescription {
         &self.description
     }
-    fn operations(&self) -> &[OperationSpec] {
-        &self.operations
+    async fn operations(&self) -> rsi_api_protocol::Result<rsi_api_protocol::OperationCatalog> {
+        rsi_api_protocol::OperationCatalog::new(self.operations.clone())
     }
     fn input_budget(&self, _: OperationClass) -> ByteBudget {
         self.input.clone()
@@ -165,7 +165,7 @@ fn header() -> SessionHeader {
 }
 async fn fixture() -> (Arc<Remote>, SessionClient, Arc<dyn SessionHandle>) {
     let remote = Remote::new();
-    let client = SessionClient::new(remote.clone()).unwrap();
+    let client = SessionClient::new(remote.clone());
     remote.reply(&header());
     let handle = client.attach(header().session_id()).await.unwrap();
     (remote, client, handle)
@@ -223,7 +223,7 @@ async fn subscription_handlers_admit_actual_delivery_bytes() {
         Operation::Projections,
     ] {
         let remote = Remote::new();
-        let client = SessionClient::new(remote.clone()).unwrap();
+        let client = SessionClient::new(remote.clone());
         remote.reply(&header());
         let body = if operation == Operation::Observe {
             observed_fact(1, 1)
@@ -591,7 +591,7 @@ async fn descendant_approvals_use_one_validated_tree_and_reuse_its_membership() 
 }
 
 #[test]
-fn session_client_requires_current_header_operation_versions() {
+fn session_proxy_keeps_local_call_versions_without_constructor_admission() {
     let versions = [
         (Operation::Create, 8),
         (Operation::Attach, 7),
@@ -612,9 +612,10 @@ fn session_client_requires_current_header_operation_versions() {
             .unwrap();
         old.id =
             rsi_api_protocol::OperationId::new("session", current.id.name(), version - 1).unwrap();
-        assert!(matches!(
-            SessionClient::new(remote),
-            Err(ApiError::Unavailable)
+        let proxy = SessionClient::new(remote.clone());
+        assert!(Arc::ptr_eq(
+            &proxy.state.api,
+            &(remote as Arc<dyn ApiClient>)
         ));
     }
     for operation in [Operation::History, Operation::ReadMessage] {
@@ -624,7 +625,7 @@ fn session_client_requires_current_header_operation_versions() {
     assert_eq!(Operation::ModelObserve.spec().id.version(), 2);
     assert_eq!(Operation::Submit.spec().id.version(), 5);
     assert_eq!(Operation::MessageStatus.spec().id.version(), 3);
-    assert!(SessionClient::new(Remote::new()).is_ok());
+    let _proxy = SessionClient::new(Remote::new());
 }
 
 #[tokio::test]
@@ -769,7 +770,7 @@ fn workflow_failures_are_bound_to_their_actual_operations() {
 #[tokio::test]
 async fn recent_continuation_accepts_empty_scans_and_rejects_stale_or_foreign_visible_cuts() {
     let remote = Remote::new();
-    let client = SessionClient::new(remote.clone()).unwrap();
+    let client = SessionClient::new(remote.clone());
     let cursor = RecentSessionCursor {
         token: "1".repeat(32),
         after: None,
@@ -835,7 +836,7 @@ async fn recent_pages_reject_wrong_order_request_bounds_and_visible_successor() 
     let newer = row("newer", 2);
     let older = row("older", 1);
     let remote = Remote::new();
-    let client = SessionClient::new(remote.clone()).unwrap();
+    let client = SessionClient::new(remote.clone());
     let after = RecentSessionCursor {
         token: "1".repeat(32),
         after: Some(newer.position()),
@@ -882,7 +883,7 @@ async fn recent_pages_reject_wrong_order_request_bounds_and_visible_successor() 
 #[tokio::test]
 async fn recent_cursor_rejects_zero_creation_before_dispatch() {
     let remote = Remote::new();
-    let client = SessionClient::new(remote.clone()).unwrap();
+    let client = SessionClient::new(remote.clone());
     let cursor = RecentSessionCursor {
         token: "1".repeat(32),
         after: Some(rsi_session_protocol::RecentSessionPosition {

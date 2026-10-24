@@ -440,31 +440,15 @@ pub struct Client {
     api: Arc<dyn ApiClient>,
 }
 impl Client {
-    /// Requires the closed human management operations; Local grant methods negotiate separately.
-    pub fn new(api: Arc<dyn ApiClient>) -> Result<Self> {
-        for op in [
-            Operation::Catalog,
-            Operation::Preview,
-            Operation::Previews,
-            Operation::Commit,
-            Operation::Receipt,
-            Operation::Receipts,
-            Operation::Discard,
-        ] {
-            if !api.operations().contains(&op.spec()) {
-                return Err(ApiError::Unavailable);
-            }
-        }
-        Ok(Self { api })
+    /// Creates a typed proxy; availability is resolved when each operation is called.
+    pub fn new(api: Arc<dyn ApiClient>) -> Self {
+        Self { api }
     }
     async fn call<I: Serialize + Sync, O: DeserializeOwned>(
         &self,
         op: Operation,
         input: &I,
     ) -> Reply<O> {
-        if !self.api.operations().contains(&op.spec()) {
-            return Err(ApiError::Unavailable);
-        }
         let result = call_json(self.api.as_ref(), &op.spec(), input).await?;
         if let Err(error) = &result {
             Failure::validate(error)?;

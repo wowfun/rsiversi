@@ -9,14 +9,12 @@ use std::sync::{Arc, Weak};
 struct LocalClient {
     running: Weak<crate::RunningRsi>,
     description: Arc<ConnectionDescription>,
-    operations: Vec<OperationSpec>,
     inputs: ByteBudget,
 }
 pub(crate) fn client(running: &Arc<crate::RunningRsi>) -> crate::Result<Arc<dyn ApiClient>> {
     Ok(Arc::new(LocalClient {
         running: Arc::downgrade(running),
         description: running.connection_description()?,
-        operations: running.api_dispatch()?.operations(),
         inputs: ByteBudget::new(64 * 1024 * 1024)
             .map_err(|error| crate::RsiError::Boot(error.to_string()))?,
     }))
@@ -26,8 +24,24 @@ impl ApiClient for LocalClient {
     fn description(&self) -> &ConnectionDescription {
         &self.description
     }
-    fn operations(&self) -> &[OperationSpec] {
-        &self.operations
+    async fn operations(&self) -> rsi_api_protocol::Result<rsi_api_protocol::OperationCatalog> {
+        let running = self.running.upgrade().ok_or(ApiError::ShuttingDown)?;
+        rsi_api_protocol::OperationCatalog::new(
+            running
+                .api_dispatch()
+                .map_err(|_| ApiError::Unavailable)?
+                .operations()?,
+        )
+    }
+    async fn operation(
+        &self,
+        key: &rsi_api_protocol::OperationKey,
+    ) -> rsi_api_protocol::Result<OperationSpec> {
+        let running = self.running.upgrade().ok_or(ApiError::ShuttingDown)?;
+        running
+            .api_dispatch()
+            .map_err(|_| ApiError::Unavailable)?
+            .operation(key, &CallOrigin::Local)
     }
     fn input_budget(&self, _: OperationClass) -> ByteBudget {
         self.inputs.clone()
@@ -37,13 +51,10 @@ impl ApiClient for LocalClient {
         operation: &OperationSpec,
         input: RetainedBytes,
     ) -> rsi_api_protocol::Result<ApiOutput> {
-        if !self.operations.contains(operation) {
-            return Err(ApiError::Unavailable);
-        }
         let running = self.running.upgrade().ok_or(ApiError::ShuttingDown)?;
         let dispatch = running.api_dispatch().map_err(|_| ApiError::Unavailable)?;
         dispatch
-            .admit(&operation.id, CallOrigin::Local)?
+            .admit(&operation.call(), CallOrigin::Local)?
             .invoke(input)
             .await
     }

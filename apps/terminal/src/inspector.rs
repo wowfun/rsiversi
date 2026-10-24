@@ -59,7 +59,7 @@ impl Command {
 pub(crate) async fn run(api: Arc<dyn ApiClient>, command: Command, work: ApplicationWork) -> u8 {
     crate::document::run(
         async move {
-            let client = InspectorClient::new(api)?;
+            let client = InspectorClient::new(api);
             let document = match command {
                 Command::Runtime(request) => client.runtime(&request).await?,
                 Command::Profile(request) => client.profile(&request).await?,

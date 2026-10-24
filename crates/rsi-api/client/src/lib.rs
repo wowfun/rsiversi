@@ -39,6 +39,10 @@ pub fn decode_error(bytes: &[u8]) -> Result<ApiError> {
     #[derive(Deserialize)]
     #[serde(rename_all = "snake_case")]
     enum Code {
+        UnknownOperation,
+        OperationRetiring,
+        ProtocolMismatch,
+        CallShapeMismatch,
         OutcomeUnknown,
         Unauthorized,
         Capacity,
@@ -52,6 +56,10 @@ pub fn decode_error(bytes: &[u8]) -> Result<ApiError> {
     }
     let envelope: Envelope = serde_json::from_slice(bytes).map_err(|_| invalid())?;
     Ok(match envelope.code {
+        Code::UnknownOperation => ApiError::UnknownOperation,
+        Code::OperationRetiring => ApiError::OperationRetiring,
+        Code::ProtocolMismatch => ApiError::ProtocolMismatch,
+        Code::CallShapeMismatch => ApiError::CallShapeMismatch,
         Code::OutcomeUnknown => ApiError::OutcomeUnknown,
         Code::Unauthorized => ApiError::Unauthorized,
         Code::Capacity => ApiError::Capacity,

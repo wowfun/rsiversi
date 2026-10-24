@@ -16,7 +16,8 @@ pub(crate) const PROJECTION_REPLY: usize =
 pub(crate) const RECENT_READ_LIMIT: usize = (LARGE_REPLY - 64 * 1024) / HEADER_REPLY;
 
 #[derive(Clone, Copy, Debug, PartialEq)]
-pub(crate) enum Operation {
+#[allow(missing_docs)]
+pub enum Operation {
     WorkflowReadiness,
     ListWorkflows,
     ReadWorkflow,
@@ -113,6 +114,10 @@ impl Operation {
         Self::Approvals,
         Self::AnswerApproval,
     ];
+    /// Returns the local call semantics and default policy.
+    ///
+    /// # Panics
+    /// Panics if a built-in operation identity is invalid.
     pub fn spec(self) -> OperationSpec {
         use OperationClass::{Control, Data, Subscription};
         use OperationEffect::{Mutation, Read};

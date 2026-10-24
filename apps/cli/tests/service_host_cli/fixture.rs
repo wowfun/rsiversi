@@ -1,3 +1,5 @@
+#[cfg(windows)]
+use std::fmt::Write as _;
 struct CliFixture {
     temporary: TempDir,
     workspace: std::path::PathBuf,
@@ -70,10 +72,10 @@ max_output_reserve_tokens = 16384
                 "user_agent_roots": [config.join("agents")],
                 "user_skill_roots": [config.join("skills")]
             });
-            source.push_str(&format!(
+            write!(source,
                 "\n[[steps]]\nkind = 'patch'\ntarget = 'rsi-agent-workspace-context'\nconfig_json = {}\n",
                 toml::Value::String(context.to_string())
-            ));
+            ).unwrap();
             std::fs::write(profile, source).unwrap();
         }
         std::fs::write(

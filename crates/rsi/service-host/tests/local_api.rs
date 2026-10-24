@@ -178,7 +178,7 @@ async fn listener_plugin_owns_publication_and_disposes_without_retiring_the_api_
         );
     }
     let client = connect(&runtime, &paths).await;
-    assert_eq!(client.operations().len(), 3);
+    assert_eq!(client.operations().await.unwrap().operations().len(), 3);
     let mut waiter = Box::pin(listener.stopped());
     assert!(waiter.as_mut().now_or_never().is_none());
     drop(waiter);
@@ -205,6 +205,7 @@ async fn listener_plugin_owns_publication_and_disposes_without_retiring_the_api_
             .lookup_local::<ApiDispatchContract>()
             .unwrap()
             .operations()
+            .unwrap()
             .len(),
         3
     );
@@ -331,7 +332,7 @@ async fn local_listener_reports_shared_protocol_failures_and_identity_rejections
         .unwrap();
     malformed.read_to_end(&mut Vec::new()).await.unwrap();
     let mut foreign = connect_stream(&paths).await;
-    foreign.write_all(b"POST /api/v1/connection/describe/1 HTTP/1.1\r\nHost: rsi.local\r\nContent-Length: 0\r\n\r\n").await.unwrap();
+    foreign.write_all(b"POST /api/v2/rsi-api-protocol/4/connection/describe/1/read HTTP/1.1\r\nHost: rsi.local\r\nContent-Length: 0\r\n\r\n").await.unwrap();
     let mut response = Vec::new();
     foreign.read_to_end(&mut response).await.unwrap();
     assert!(response.starts_with(b"HTTP/1.1 401"));

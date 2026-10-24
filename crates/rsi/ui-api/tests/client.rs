@@ -29,8 +29,8 @@ impl ApiClient for Remote {
     fn description(&self) -> &ConnectionDescription {
         &self.description
     }
-    fn operations(&self) -> &[OperationSpec] {
-        &self.operations
+    async fn operations(&self) -> rsi_api_protocol::Result<rsi_api_protocol::OperationCatalog> {
+        rsi_api_protocol::OperationCatalog::new(self.operations.clone())
     }
     fn input_budget(&self, _: OperationClass) -> ByteBudget {
         self.budget.clone()
@@ -43,7 +43,7 @@ impl ApiClient for Remote {
 fn remote(replies: Vec<Result<ApiOutput>>) -> Arc<Remote> {
     Arc::new(Remote {
         description: ConnectionDescription {
-            wire_version: 1,
+            wire_version: rsi_api_protocol::API_WIRE_VERSION,
             endpoint_id: EndpointId::from_bytes([1; 16]),
             host_epoch: HostEpoch::from_bytes([2; 16]),
         },
@@ -106,7 +106,7 @@ async fn changed_identity_backwards_revision_and_foreign_selection_close_the_str
             Ok(message(&invalid)),
             Ok(message(&item(3))),
         ]);
-        let client = UiClient::new(remote(vec![Ok(ApiOutput::Stream(Box::pin(stream)))])).unwrap();
+        let client = UiClient::new(remote(vec![Ok(ApiOutput::Stream(Box::pin(stream)))]));
         let mut observation = client.observe(&request()).await.unwrap();
         assert_eq!(
             observation
@@ -130,7 +130,7 @@ async fn changed_identity_backwards_revision_and_foreign_selection_close_the_str
 #[tokio::test]
 async fn malformed_action_reply_is_unknown_and_never_replayed() {
     let api = remote(vec![Ok(ApiOutput::Reply(message(&false)))]);
-    let client = UiClient::new(api.clone()).unwrap();
+    let client = UiClient::new(api.clone());
     let shown = item(1);
     let request = Invoke {
         application: "app".into(),
@@ -153,7 +153,12 @@ async fn malformed_action_reply_is_unknown_and_never_replayed() {
 async fn binary_windows_and_catalog_order_are_validated_at_the_client() {
     let mut reply = message(&serde_json::json!({"bytes": 5}));
     reply.binary = Some(ByteBudget::default().copy(b"12345").unwrap());
-    let client = UiClient::new(remote(vec![Ok(ApiOutput::Reply(reply)), Ok(ApiOutput::Reply(message(&serde_json::json!({"entries":[{"bundle":"b","surface":"s","title":"B"},{"bundle":"a","surface":"s","title":"A"}],"next":null}))))])).unwrap();
+    let client = UiClient::new(remote(vec![
+        Ok(ApiOutput::Reply(reply)),
+        Ok(ApiOutput::Reply(message(
+            &serde_json::json!({"entries":[{"bundle":"b","surface":"s","title":"B"},{"bundle":"a","surface":"s","title":"A"}],"next":null}),
+        ))),
+    ]));
     let source = rsi_ui_api::Source {
         application: "app".into(),
         presentation: item(1).snapshot.presentation,

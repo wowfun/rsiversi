@@ -26,10 +26,10 @@ message/channel sequences and reserved control scheduling; framing alone does no
 establish those lifecycle or latency guarantees.
 
 `rsi.ssh.helper` describes this interface independently of any application build.
-Its generated snapshot includes binary header types, enum discriminants, codecs,
-framing constants and the referenced request/reply models. Published helper
-packages require this exact descriptor; the product checks it again when opening
-a new connection.
+Its explicit name and version identify the binary header, discriminants, codecs,
+framing constants and request/reply models. Frame golden and decoding tests cover
+that contract. Published helper packages require this descriptor; the product
+checks it again when opening a new connection.
 
 Reserved control payloads admit only terminate, PTY resize and Files
 release. They reject unknown operations/fields and validate nonzero identities and

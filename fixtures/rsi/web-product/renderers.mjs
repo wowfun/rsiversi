@@ -115,7 +115,7 @@ try {
   // never receives its reply. Mutations must not be replayed on this connection.
   let lostCommitRequests = 0;
   phase = 'lost commit reply';
-  await context.route("**/api/v1/web-assets/commit/1", async route => {
+  await context.route("**/api/v2/rsi-web-assets-api/3/web-assets/commit/1/mutation", async route => {
     lostCommitRequests++;
     const committed = await route.fetch();
     assert.equal(committed.status(), 200);
@@ -130,7 +130,7 @@ try {
   await page.locator("#detail").waitFor({ state: "hidden" });
   assert.equal(lostCommitRequests, 1);
   await page.screenshot({ path: join(report, "lost-commit-explicit-reconnect.png") });
-  await context.unroute("**/api/v1/web-assets/commit/1");
+  await context.unroute("**/api/v2/rsi-web-assets-api/3/web-assets/commit/1/mutation");
   phase = 'explicit reconnect';
   await page.locator("#reconnect").click();
   await page.locator("#workbench").waitFor({ state: "visible" });

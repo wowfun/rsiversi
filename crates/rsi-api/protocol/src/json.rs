@@ -50,11 +50,7 @@ where
     ) -> Result<ApiOutput> {
         let request: I = serde_json::from_slice(input.as_bytes())
             .map_err(|_| ApiError::Invalid("invalid domain request".into()))?;
-        let ApiResponseCapacity::Finite(reservation) = output else {
-            return Err(ApiError::Backend(
-                "finite JSON handler requires finite response admission".into(),
-            ));
-        };
+        let reservation = output.into_finite()?;
         match (self.call)(context, request).await? {
             Ok(reply) => Ok(ApiOutput::Reply(ApiMessage {
                 json: reservation.encode(&reply).map_err(encoding_failed)?,

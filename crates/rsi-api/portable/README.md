@@ -3,15 +3,23 @@
 This adapter transports an explicitly supplied `ApiClient` capability through
 ordinary Meta Portable calls. It never decodes a caller origin, Context or Local
 contract key from a request, never imports product domains, and never creates a
-Runtime. An exporter selects an explicit subset of the client's negotiated
-operations. The exact operation metadata still owns admission class, effect,
-request encoding and byte bounds; requests carry only operation identity.
-Negotiation operations are always supplied by the adapter. A selection may
-include each negotiation identity once; it does not replace adapter metadata.
-Both public export entry points reject duplicate selected identities.
+Runtime. An exporter fixes an explicit set of complete `OperationKey` grants.
+Creation is synchronous; empty grants and temporarily absent operations are valid.
+Discovery intersects the current upstream directory with that fixed set. Each
+business call checks its grant, resolves the current single-key upstream policy,
+checks call shape and applies export and upstream byte bounds before forwarding.
+Policy resolution occupies a Control slot before making any upstream request;
+the registered execution-class slot then owns payload receipt and forwarding.
+The final upstream dispatcher independently admits against its current registration.
+Foundation operations are handled locally, without recursively querying upstream.
+The export owns description, full-directory and required single-key discovery;
+single-key discovery uses Control and full-directory discovery uses Data.
+Neither discovery nor later registration can enlarge the grant. Duplicate grants
+are rejected. Profile `ExportConfig.operations` contains keys, not bare IDs.
+Both export entry points validate complete grant keys before publishing capability.
 
-An importer requires `rsi.api.portable` version 1, captures one description and
-operation catalog, and publishes the ordinary Local `ApiClient` contract. The
+An importer requires `rsi.api.portable` version 2, captures connection identity
+and publishes the ordinary Local `ApiClient` contract with live discovery. The
 captured Portable capability fences both caller and provider generations. An
 exporter may publish its captured capability locally for deliberate transfer to
 another Portable call. Such transfer grants exactly the exported API authority;

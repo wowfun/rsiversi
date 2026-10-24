@@ -19,19 +19,19 @@ export async function malformedProbe(browser, glue, wasm, catalog) {
   const server = createServer((request, response) => {
     if (request.url === "/forbidden-replay") { redirects++; response.writeHead(500).end(); return; }
     if (request.url === "/") { response.end("<!doctype html><title>Malformed Fetch fixture</title>"); return; }
-    if (request.method !== "POST" || !request.url.startsWith("/api/v1/")) { response.writeHead(404).end(); return; }
+    if (request.method !== "POST" || !request.url.startsWith("/api/v2/")) { response.writeHead(404).end(); return; }
     let bytes = 0;
     request.on("data", chunk => { bytes += chunk.length; if (bytes > 1024) request.destroy(); });
     request.on("end", () => {
-      const name = request.url.split("/")[4];
+      const name = request.url.split("/")[6];
       calls.set(request.url, (calls.get(request.url) || 0) + 1);
       assert(calls.get(request.url) <= 32, "unbounded transport retransmission");
-      if (request.url === "/api/v1/login") { response.destroy(); return; }
+      if (request.url === "/api/v2/login") { response.destroy(); return; }
       let status = 200;
-      const headers = { "x-rsi-wire-version": "1", "x-rsi-endpoint-id": "02".repeat(16),
+      const headers = { "x-rsi-wire-version": "2", "x-rsi-endpoint-id": "02".repeat(16),
         "x-rsi-host-epoch": "03".repeat(16), "content-type": "application/json", "connection": "close" };
       let body = Buffer.from("true");
-      if (name === "describe") body = Buffer.from(JSON.stringify({ wire_version: 1, endpoint_id: "02".repeat(16), host_epoch: "03".repeat(16) }));
+      if (name === "describe") body = Buffer.from(JSON.stringify({ wire_version: 2, endpoint_id: "02".repeat(16), host_epoch: "03".repeat(16) }));
       else if (name === "operations") body = Buffer.from(JSON.stringify(catalog));
       else if (name === "caller") {
         const identity = {kind:"device",device_id:"06".repeat(16)};
@@ -75,7 +75,7 @@ export async function malformedProbe(browser, glue, wasm, catalog) {
   const sockets = new WebSocketServer({ server, maxPayload: 1024, perMessageDeflate: false });
   sockets.on("connection", (socket, request) => {
     assert.equal(socket.protocol, `rsi-stream-v1.${"06".repeat(16)}.${"03".repeat(16)}.2`);
-    const name = request.url.split("/")[4];
+    const name = request.url.split("/")[6];
     assert(Object.hasOwn(streamFrames, name));
     let sent = -1;
     socket.on("message", (bytes, binary) => {
@@ -106,7 +106,7 @@ export async function malformedProbe(browser, glue, wasm, catalog) {
       assert.equal(count, 1, `RSI replayed request ${path}`);
       assert(calls.has(path), `request never arrived ${path}`);
       const delivered = calls.get(path);
-      if (path === "/api/v1/login" || path.includes("head-loss")) {
+      if (path === "/api/v2/login" || path.includes("head-loss")) {
         retransmissions.push({ path, fetch_calls: count, http_deliveries: delivered });
       } else assert.equal(delivered, 1, `unexpected HTTP replay ${path}`);
     }

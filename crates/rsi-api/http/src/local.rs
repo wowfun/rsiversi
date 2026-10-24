@@ -32,7 +32,7 @@ impl LocalHttpService {
         description: &ConnectionDescription,
         compatibility: LocalCompatibilityKey,
     ) -> Result<Self> {
-        if description.wire_version != 1 {
+        if description.wire_version != rsi_api_protocol::API_WIRE_VERSION {
             return Err(ApiError::Unavailable);
         }
         Ok(Self {

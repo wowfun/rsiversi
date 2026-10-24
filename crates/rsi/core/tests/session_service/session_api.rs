@@ -275,7 +275,7 @@ async fn http_session_plugins_pass_the_same_real_kernel_store_scenario() {
         .await
         .unwrap(),
     );
-    let other = rsi_session_api::SessionClient::new(second.clone()).unwrap();
+    let other = rsi_session_api::SessionClient::new(second.clone());
     device_drafts(session.as_ref(), &other, &create).await;
     second.close().await;
     lost_submission(api.clone(), &create.session_id).await;
@@ -301,6 +301,7 @@ async fn http_session_plugins_pass_the_same_real_kernel_store_scenario() {
             .lookup_local::<ApiDispatchContract>()
             .unwrap()
             .operations()
+            .unwrap()
             .iter()
             .any(|op| op.id.domain() == "session")
     );
@@ -318,8 +319,10 @@ async fn http_session_plugins_pass_the_same_real_kernel_store_scenario() {
 }
 
 async fn target_grants(api: Arc<HttpClient>, session_id: &SessionId) {
-    let grant =
-        Arc::new(rsi_session_api::SessionTargetClient::new(api, session_id.clone()).unwrap());
+    let grant = Arc::new(rsi_session_api::SessionTargetClient::new(
+        api,
+        session_id.clone(),
+    ));
     assert_eq!(grant.operations().len(), 39);
     let handle = rsi_session_api::SessionClient::attach_target(grant.clone(), session_id)
         .await
@@ -402,8 +405,8 @@ impl ApiClient for LoseSubmitReply {
     fn description(&self) -> &rsi_api_protocol::ConnectionDescription {
         self.api.description()
     }
-    fn operations(&self) -> &[rsi_api_protocol::OperationSpec] {
-        self.api.operations()
+    async fn operations(&self) -> rsi_api_protocol::Result<rsi_api_protocol::OperationCatalog> {
+        self.api.operations().await
     }
     fn input_budget(
         &self,
@@ -432,7 +435,7 @@ async fn lost_submission(api: Arc<HttpClient>, session: &SessionId) {
         api,
         submissions: std::sync::atomic::AtomicUsize::new(0),
     });
-    let client = rsi_session_api::SessionClient::new(connection.clone()).unwrap();
+    let client = rsi_session_api::SessionClient::new(connection.clone());
     let handle = client.attach(session).await.unwrap();
     let request = rsi_session_protocol::SubmitInput {
         reasoning_effort: None,

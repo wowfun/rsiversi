@@ -36,15 +36,15 @@ impl ApiClient for Local {
     fn description(&self) -> &ConnectionDescription {
         &self.description
     }
-    fn operations(&self) -> &[OperationSpec] {
-        &self.operations
+    async fn operations(&self) -> rsi_api_protocol::Result<rsi_api_protocol::OperationCatalog> {
+        rsi_api_protocol::OperationCatalog::new(self.operations.clone())
     }
     fn input_budget(&self, _: OperationClass) -> ByteBudget {
         ByteBudget::new(4096).unwrap()
     }
     async fn call(&self, operation: &OperationSpec, input: RetainedBytes) -> Result<ApiOutput> {
         self.dispatch
-            .admit(&operation.id, CallOrigin::Local)?
+            .admit(&operation.call(), CallOrigin::Local)?
             .invoke(input)
             .await
     }
@@ -120,13 +120,13 @@ async fn actual_host_inspection_is_redacted_paginated_local_and_withdrawn() {
             .lookup_local::<ConnectionDescriptionContract>()
             .unwrap())
         .clone(),
-        operations: dispatch.operations(),
+        operations: dispatch.operations().unwrap(),
         dispatch: dispatch.clone(),
     });
-    let client = InspectorClient::new(local.clone()).unwrap();
+    let client = InspectorClient::new(local.clone());
     assert_runtime_pages(&client, &root).await;
     assert_declaration_pages(&client).await;
-    let configuration = rsi_configuration_api::ConfigurationClient::new(local.clone()).unwrap();
+    let configuration = rsi_configuration_api::ConfigurationClient::new(local.clone());
     let mut offset = 0;
     let mut saw_visible = false;
     let mut saw_disabled = false;
@@ -183,10 +183,11 @@ async fn actual_host_inspection_is_redacted_paginated_local_and_withdrawn() {
     assert!(
         !dispatch
             .operations()
+            .unwrap()
             .iter()
             .any(|value| value.id.domain() == "inspector")
     );
-    let client = InspectorClient::new(local).unwrap();
+    let client = InspectorClient::new(local);
     assert!(client.runtime(&RuntimeRequest::default()).await.is_err());
 }
 
@@ -463,7 +464,7 @@ async fn assert_local_access_and_requests(local: &Local) {
             id: DeviceId::from_bytes([7; 16]),
             revoked: tokio_util::sync::CancellationToken::new(),
         });
-        assert!(local.dispatch.admit(&operation.id, remote).is_err());
+        assert!(local.dispatch.admit(&operation.call(), remote).is_err());
         for invalid in [json!({"unknown": true}), json!({"maximum_items": 0})] {
             let bytes = ByteBudget::new(1024)
                 .unwrap()

@@ -5,16 +5,24 @@ use rsi_workspace_protocol::{WorkspaceCursor, WorkspaceError, WorkspaceId};
 use serde::{Deserialize, Serialize};
 use std::path::PathBuf;
 
-#[derive(Clone, Copy)]
-pub(crate) enum Operation {
+#[derive(Clone, Copy, Debug)]
+/// Owner-defined operations for explicit capability discovery.
+pub enum Operation {
+    /// Get operation.
     Get,
+    /// List operation.
     List,
+    /// Workspace ordering seed.
     OrderSeed,
+    /// Register operation.
     Register,
+    /// Status operation.
     Status,
+    /// Delete operation.
     Delete,
 }
 impl Operation {
+    /// All operation identities owned by this protocol.
     pub const ALL: [Self; 6] = [
         Self::Get,
         Self::List,
@@ -23,6 +31,10 @@ impl Operation {
         Self::Status,
         Self::Delete,
     ];
+    /// Local request and response policy for this operation.
+    ///
+    /// # Panics
+    /// Panics if a built-in operation identity is invalid.
     pub fn spec(self) -> OperationSpec {
         let (name, effect) = match self {
             Self::Get => ("get", OperationEffect::Read),

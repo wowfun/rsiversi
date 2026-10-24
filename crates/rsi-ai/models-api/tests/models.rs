@@ -58,10 +58,10 @@ struct Connection {
 impl Connection {
     fn new(dispatch: Arc<dyn ApiDispatch>, response: Option<Vec<u8>>) -> Self {
         Self {
-            operations: dispatch.operations(),
+            operations: dispatch.operations().unwrap(),
             dispatch,
             description: ConnectionDescription {
-                wire_version: 1,
+                wire_version: rsi_api_protocol::API_WIRE_VERSION,
                 endpoint_id: EndpointId::from_bytes([1; 16]),
                 host_epoch: HostEpoch::from_bytes([2; 16]),
             },
@@ -74,8 +74,8 @@ impl ApiClient for Connection {
     fn description(&self) -> &ConnectionDescription {
         &self.description
     }
-    fn operations(&self) -> &[OperationSpec] {
-        &self.operations
+    async fn operations(&self) -> rsi_api_protocol::Result<rsi_api_protocol::OperationCatalog> {
+        rsi_api_protocol::OperationCatalog::new(self.operations.clone())
     }
     fn input_budget(&self, _: OperationClass) -> ByteBudget {
         ByteBudget::default()
@@ -92,7 +92,7 @@ impl ApiClient for Connection {
             }));
         }
         self.dispatch
-            .admit(&operation.id, CallOrigin::Local)?
+            .admit(&operation.call(), CallOrigin::Local)?
             .invoke(input)
             .await
     }
@@ -200,10 +200,13 @@ async fn real_router_registration_gates_and_pages_cross_the_domain_api_without_i
     }
     let operation = dispatch
         .operations()
+        .unwrap()
         .into_iter()
         .find(|operation| operation.id.domain() == "models")
         .unwrap();
-    let invocation = dispatch.admit(&operation.id, CallOrigin::Local).unwrap();
+    let invocation = dispatch
+        .admit(&operation.call(), CallOrigin::Local)
+        .unwrap();
     let input = invocation
         .input_budget()
         .copy(br#"{"after":null,"limit":1,"extra":true}"#)
@@ -255,7 +258,7 @@ async fn peer_pages_reject_duplicates_count_and_cursor_regression() {
             dispatch.clone(),
             Some(serde_json::to_vec(&page).unwrap()),
         ));
-        let client = ModelsClient::new(connection).unwrap();
+        let client = ModelsClient::new(connection);
         assert!(client.list_models(Some(&model), 1).await.is_err());
     }
     assert!(server.shutdown().await.is_clean());

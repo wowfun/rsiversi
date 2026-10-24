@@ -319,7 +319,7 @@ impl Harness {
             .await
             .unwrap(),
         );
-        let client = SessionFilesClient::new(transport.clone()).unwrap();
+        let client = SessionFilesClient::new(transport.clone());
         Self {
             _temporary: temporary,
             origin,
@@ -481,7 +481,14 @@ async fn credential_revocation_cancels_an_in_flight_real_page_and_releases_sessi
     tokio::time::timeout(std::time::Duration::from_secs(2), cancellation.cancelled())
         .await
         .unwrap();
-    assert_eq!(harness.reads.active.load(Ordering::SeqCst), 0);
+    tokio::time::timeout(std::time::Duration::from_secs(2), async {
+        while harness.reads.active.load(Ordering::SeqCst) != 1 {
+            tokio::task::yield_now().await;
+        }
+    })
+    .await
+    .unwrap();
+    // Closing the API owner releases the remaining token lease; Harness checks zero.
     harness.close().await;
 }
 
@@ -663,7 +670,7 @@ async fn file_tokens_are_principal_bound_and_cleanup_needs_no_new_use_grant() {
         .await
         .unwrap(),
     );
-    let other = SessionFilesClient::new(other_transport.clone()).unwrap();
+    let other = SessionFilesClient::new(other_transport.clone());
     let file = harness
         .client
         .open(

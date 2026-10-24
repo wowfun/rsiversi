@@ -39,6 +39,9 @@ pub fn operation(name: &str) -> OperationSpec {
 }
 #[derive(Debug)]
 pub struct Behavior {
+    pub policy_calls: AtomicUsize,
+    pub pause_policy: std::sync::atomic::AtomicBool,
+    pub policy_release: Semaphore,
     pub mutations: AtomicUsize,
     pub finished: AtomicUsize,
     pub release: Semaphore,
@@ -90,9 +93,9 @@ impl ApiHandler for Handler {
 }
 #[derive(Debug)]
 struct LocalClient {
+    behavior: Arc<Behavior>,
     registry: Arc<ApiRegistry>,
     description: ConnectionDescription,
-    operations: Vec<OperationSpec>,
     input: ByteBudget,
 }
 #[async_trait]
@@ -100,15 +103,28 @@ impl ApiClient for LocalClient {
     fn description(&self) -> &ConnectionDescription {
         &self.description
     }
-    fn operations(&self) -> &[OperationSpec] {
-        &self.operations
+    async fn operations(&self) -> rsi_api_protocol::Result<rsi_api_protocol::OperationCatalog> {
+        rsi_api_protocol::OperationCatalog::new(self.registry.operations()?)
+    }
+    async fn operation(&self, key: &rsi_api_protocol::OperationKey) -> Result<OperationSpec> {
+        self.behavior.policy_calls.fetch_add(1, Ordering::SeqCst);
+        if self.behavior.pause_policy.load(Ordering::SeqCst) {
+            self.behavior
+                .policy_release
+                .acquire()
+                .await
+                .unwrap()
+                .forget();
+        }
+        self.registry
+            .operation(key, &rsi_api_protocol::CallOrigin::Local)
     }
     fn input_budget(&self, _: OperationClass) -> ByteBudget {
         self.input.clone()
     }
     async fn call(&self, operation: &OperationSpec, input: RetainedBytes) -> Result<ApiOutput> {
         self.registry
-            .admit(&operation.id, CallOrigin::Local)?
+            .admit(&operation.call(), CallOrigin::Local)?
             .invoke(input)
             .await
     }
@@ -167,6 +183,9 @@ impl Fixture {
     pub async fn with_runtime(runtime: Runtime) -> Self {
         let registry = Arc::new(ApiRegistry::new(runtime.execution().clone()));
         let behavior = Arc::new(Behavior {
+            policy_calls: AtomicUsize::new(0),
+            pause_policy: false.into(),
+            policy_release: Semaphore::new(0),
             mutations: AtomicUsize::new(0),
             finished: AtomicUsize::new(0),
             release: Semaphore::new(0),
@@ -186,17 +205,17 @@ impl Fixture {
             );
         }
         let source = Arc::new(LocalClient {
+            behavior: behavior.clone(),
             description: ConnectionDescription {
-                wire_version: 1,
+                wire_version: rsi_api_protocol::API_WIRE_VERSION,
                 endpoint_id: EndpointId::from_bytes([1; 16]),
                 host_epoch: HostEpoch::from_bytes([2; 16]),
             },
-            operations: registry.operations(),
             registry: registry.clone(),
             input: ByteBudget::default(),
         });
         apply(&runtime.root(), "source", Source(source), ConfigValue::Null).await;
-        let exporter = apply(&runtime.root(), "export", rsi_api_portable::PortableApiExportFactory, serde_json::json!({"service":"fixture.api","operations": [operation("echo").id,operation("mutate").id,operation("stream").id,operation("domain").id],"publish_local":true})).await;
+        let exporter = apply(&runtime.root(), "export", rsi_api_portable::PortableApiExportFactory, serde_json::json!({"service":"fixture.api","operations": [operation("echo").key(),operation("mutate").key(),operation("stream").key(),operation("domain").key()],"publish_local":true})).await;
         let (isolated, _) = runtime
             .root()
             .isolate_local_fresh::<ApiClientContract>()
@@ -225,6 +244,17 @@ impl Fixture {
             registration.close().await;
         }
         self.registry.close().await;
+    }
+    pub fn register_echo(&self, spec: OperationSpec) -> ApiRegistration {
+        self.registry
+            .register(
+                spec,
+                Arc::new(Handler {
+                    name: "echo",
+                    behavior: self.behavior.clone(),
+                }),
+            )
+            .unwrap()
     }
 }
 pub async fn until(mut condition: impl FnMut() -> bool) {

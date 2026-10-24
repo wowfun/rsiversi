@@ -1,8 +1,14 @@
-use rsi_api_protocol::{OperationCatalog, OperationId, describe_operation, operations_operation};
+use rsi_api_protocol::{
+    OperationCatalog, OperationId, describe_operation, operation_operation, operations_operation,
+};
 
 #[test]
 fn catalogs_validate_descriptors_duplicates_and_entry_bound_during_decode() {
-    let mut entries = vec![describe_operation(), operations_operation()];
+    let mut entries = vec![
+        describe_operation(),
+        operation_operation(),
+        operations_operation(),
+    ];
     let encoded = serde_json::to_vec(&entries).unwrap();
     assert_eq!(
         serde_json::from_slice::<OperationCatalog>(&encoded)

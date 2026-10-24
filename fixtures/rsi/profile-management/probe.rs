@@ -60,32 +60,32 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         )
         .await?,
     );
-    let client = Client::new(api.clone())?;
+    let client = Client::new(api.clone());
     let result = async {
         Ok::<_, Box<dyn std::error::Error>>(match request {
             Request::Catalog { query } => serde_json::to_value(client.catalog(query).await?)?,
             Request::SshCatalog => serde_json::to_value(
-                rsi_configuration_api::ssh::Client::new(api.clone())?
+                rsi_configuration_api::ssh::Client::new(api.clone())
                     .catalog()
                     .await?,
             )?,
             Request::SshTrust { request } => serde_json::to_value(
-                rsi_configuration_api::ssh::Client::new(api.clone())?
+                rsi_configuration_api::ssh::Client::new(api.clone())
                     .confirm_trust(request)
                     .await?,
             )?,
             Request::SshConnect { request } => serde_json::to_value(
-                rsi_configuration_api::ssh::Client::new(api.clone())?
+                rsi_configuration_api::ssh::Client::new(api.clone())
                     .connect(request)
                     .await?,
             )?,
             Request::SshDisconnect { request } => serde_json::to_value(
-                rsi_configuration_api::ssh::Client::new(api.clone())?
+                rsi_configuration_api::ssh::Client::new(api.clone())
                     .disconnect(request)
                     .await?,
             )?,
             Request::SshResolve { request } => serde_json::to_value(
-                rsi_configuration_api::ssh::Client::new(api.clone())?
+                rsi_configuration_api::ssh::Client::new(api.clone())
                     .resolve_directory(request)
                     .await?,
             )?,

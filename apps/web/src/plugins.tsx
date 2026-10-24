@@ -21,15 +21,15 @@ export function Plugins({loading=false}:{loading?:boolean}) {
   })()
   const label = (value: string) => value.replaceAll('_',' ')
   return <section className="plugins-panel" aria-label="Plugins">
-    {view?.ssh?.available && <SshTargets view={view.ssh} busy={busy} command={value=>command({kind:'ssh',command:value})} grantCommand={value=>command({kind:'leaves',command:value})} grantRevision={view.leaves?.grants?.revision ?? null}/>}
-    {view?.mcp_ssh?.available&&<McpSsh view={view.mcp_ssh} ssh={view.ssh} busy={busy} command={value=>command({kind:'mcp_ssh',command:value})}/>}
+    {view?.ssh?.available && <SshTargets actions={view.actions} view={view.ssh} busy={busy} command={value=>command({kind:'ssh',command:value})} grantCommand={value=>command({kind:'leaves',command:value})} grantRevision={view.leaves?.grants?.revision ?? null}/>}
+    {view?.mcp_ssh?.available&&<McpSsh actions={view.actions} view={view.mcp_ssh} ssh={view.ssh} busy={busy} command={value=>command({kind:'mcp_ssh',command:value})}/>}
     {view?.leaves?.available && <ProfileLeaves view={view.leaves} busy={busy} command={value => command({kind:'leaves',command:value})}/>}
     <div className="actions"><h2>Plugins</h2><Button disabled={busy} onClick={() => command({kind:'refresh'})}>Refresh plugin status</Button></div>
     <div className="actions" aria-label="Plugin observation source">
       <Button disabled={busy} onClick={() => command({kind:'select',target:{kind:'host'}})}>Host plugins</Button>
       <Button disabled={busy || !agentPreset} onClick={() => command({kind:'select',target:{kind:'preset',id:agentPreset}})}>Current preset configuration</Button>
-      <Button disabled={busy || !session || !header} onClick={() => command({kind:'select',target:{kind:'session',target:{session_id:session,header_key:header}}})}>Session resident generation</Button>
-      <label>Preset identity<input value={preset} maxLength={255} onChange={event => setPreset(event.target.value)}/></label>
+      <Button disabled={busy || !session || !header} onClick={() => command({kind:'select',target:{kind:'session',target:{session_id:session,header_key:header}}})}>Plugins used by this conversation</Button>
+      <label>Preset ID<input value={preset} maxLength={255} onChange={event => setPreset(event.target.value)}/></label>
       <Button disabled={busy || !preset} onClick={() => command({kind:'select',target:{kind:'preset',id:preset}})}>Inspect preset</Button>
     </div>
     <p>Source: {view?.target.kind ?? 'host'}</p>
@@ -40,16 +40,16 @@ export function Plugins({loading=false}:{loading?:boolean}) {
     {!page && !view?.diagnostic && <p role="status">Read current plugin status to begin.</p>}
     {view?.exa_available && <WebRetrieval view={view} busy={busy} command={command}/>}
     {view?.mcp_available && <section className="mcp-panel" aria-label="MCP connections">
-      <div className="actions"><h3>MCP connections</h3><Button disabled={busy} onClick={() => void run(() => input.command({action:'settings_read',namespace:'rsi.mcp'}))}>Edit HTTP endpoints</Button><Button disabled={busy} onClick={() => command({kind:'mcp_status'})}>Read MCP status</Button><Button disabled={busy} onClick={() => command({kind:'mcp_refresh',server:null})}>Apply and refresh HTTP</Button></div>
+      <div className="actions"><h3>MCP connections</h3><Button disabled={busy} onClick={() => void run(() => input.command({action:'settings_read',namespace:'rsi.mcp'}))}>Edit HTTP endpoints</Button><Button disabled={busy} onClick={() => command({kind:'mcp_status'})}>Read MCP status</Button><Button disabled={busy || !view.actions?.includes('mcp_refresh')} onClick={() => command({kind:'mcp_refresh',server:null})}>Apply and refresh HTTP</Button></div>
       <p className="hint">Enable endpoints and select their tool names in HTTP settings. Save, then apply and refresh. New conversations use the verified catalog; existing conversations keep their saved definitions. All conversation tools share a 64-tool limit. Configure stdio in the Local Host Profile.</p>
       {view.mcp_notice && <p role="status" className="mcp-notice">{view.mcp_notice}</p>}
       {view.mcp && <><p className="mcp-readiness">{view.mcp.settings_pending ? 'Saved HTTP settings need to be applied. ' : ''}{view.mcp.fresh_ready ? 'MCP catalog verified.' : `MCP catalog unavailable: ${label(view.mcp.fresh_error ?? 'unknown')}.`}</p>
         {view.mcp.servers.length === 0 && <p>No MCP endpoints configured.</p>}
         {view.mcp.servers.map(server => <article className="plugin-row" key={server.id}>
           <h4>{server.id} <span className="hint">{server.transport === 'stdio' ? 'Local stdio · remote observation only' : 'HTTP'}</span></h4>
-          <p>{server.enabled ? (server.ready ? 'Ready' : label(server.error ?? 'unverified')) : 'Disabled'} · Connection epoch {server.epoch}</p>
+          <p>{server.enabled ? (server.ready ? 'Ready' : label(server.error ?? 'unverified')) : 'Disabled'} · Connection generation {server.epoch}</p>
           <p className="hint">{server.last_verified_sha256 ? `Last verified catalog ${server.last_verified_sha256.slice(0,12)}` : 'No verified catalog yet'}</p>
-          {server.transport === 'http' && <Button disabled={busy || !server.enabled} onClick={() => command({kind:'mcp_refresh',server:server.id})}>Refresh {server.id}</Button>}
+          {server.transport === 'http' && <Button disabled={busy || !server.enabled || !view.actions?.includes('mcp_refresh')} onClick={() => command({kind:'mcp_refresh',server:server.id})}>Refresh {server.id}</Button>}
           {server.tools.length > 0 && <details><summary>Verified tools · {server.tools.filter(tool => tool.selected).length} selected / {server.tools.length}</summary><ul>{server.tools.map(tool => <li key={tool.name}><code>{tool.name}</code> · {tool.selected ? 'selected' : 'not selected'}</li>)}</ul><p className="hint">Selection changes take effect after saving HTTP settings and refreshing the connection.</p></details>}
           {server.credential && <McpCredential key={`${server.id}:${server.credential.owner}/${server.credential.slot}`} server={server} view={view} busy={busy} command={command}/>}
         </article>)}
@@ -74,7 +74,7 @@ function WebRetrieval({view,busy,command}:{view:PluginsView;busy:boolean;command
       <p>{status ? `${status.availability.kind} · ${status.editable ? 'editable' : 'read only'}` : 'Read Exa credential status before changing it.'}</p>
       <Button disabled={busy} onClick={() => command({kind:'exa_status'})}>Read Exa credential status</Button>
       <label>Exa API key<input type="password" autoComplete="new-password" spellCheck={false} maxLength={64*1024} value={secret} disabled={busy || !status?.editable} onChange={event => setSecret(event.target.value)}/></label>
-      <div className="actions"><Button disabled={busy || !status?.editable || !secret} onClick={() => {const value=secret;setSecret('');command({kind:'exa_set',secret:value})}}>Save Exa credential</Button><Button disabled={busy || !status?.editable} onClick={() => {setSecret('');command({kind:'exa_unset'})}}>Remove Exa credential</Button></div>
+      <div className="actions"><Button disabled={busy || !status?.editable || !secret || !view.actions?.includes('exa_set')} onClick={() => {const value=secret;setSecret('');command({kind:'exa_set',secret:value})}}>Save Exa credential</Button><Button disabled={busy || !status?.editable || !view.actions?.includes('exa_unset')} onClick={() => {setSecret('');command({kind:'exa_unset'})}}>Remove Exa credential</Button></div>
       <p className="hint">Saving or removing this credential does not submit a search or change which tools are enabled.</p>
     </details>
     {view.exa_notice && <p role="status">{view.exa_notice}</p>}
@@ -88,9 +88,9 @@ function McpCredential({server,view,busy,command}:{server:McpServer;view:Plugins
   const current = observed?.target.server === target.server && observed.target.reference.owner === target.reference.owner && observed.target.reference.slot === target.reference.slot ? observed : undefined
   return <details className="mcp-credential"><summary>Credential · {target.reference.slot}</summary>
     <p>{current ? `${current.availability.kind} · ${current.editable ? 'editable' : 'read only'}` : 'Read credential status before changing it.'}</p>
-    <div className="actions"><Button disabled={busy} onClick={() => command({kind:'mcp_credential_status',target})}>Read credential status for {server.id}</Button></div>
+    <div className="actions"><Button disabled={busy || !view.actions?.includes('mcp_credential_status')} onClick={() => command({kind:'mcp_credential_status',target})}>Read credential status for {server.id}</Button></div>
     <label>API key for {server.id}<input type="password" autoComplete="new-password" maxLength={64 * 1024} spellCheck={false} value={secret} disabled={busy || !current?.editable} onChange={event => setSecret(event.target.value)} /></label>
-    <div className="actions"><Button disabled={busy || !current?.editable || !secret} onClick={() => {const value=secret;setSecret('');command({kind:'mcp_credential_set',target,secret:value})}}>Save credential for {server.id}</Button><Button disabled={busy || !current?.editable} onClick={() => {setSecret('');command({kind:'mcp_credential_unset',target})}}>Remove credential for {server.id}</Button></div>
+    <div className="actions"><Button disabled={busy || !current?.editable || !secret || !view.actions?.includes('mcp_credential_set')} onClick={() => {const value=secret;setSecret('');command({kind:'mcp_credential_set',target,secret:value})}}>Save credential for {server.id}</Button><Button disabled={busy || !current?.editable || !view.actions?.includes('mcp_credential_unset')} onClick={() => {setSecret('');command({kind:'mcp_credential_unset',target})}}>Remove credential for {server.id}</Button></div>
     <p className="hint">Credential writes have their own result. Refresh the connection separately to verify access.</p>
   </details>
 }

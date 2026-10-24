@@ -102,9 +102,7 @@ pub(super) async fn run(
     let mut menu: Option<Menu> = None;
     let mut selected: usize = 0;
     let mut recent = None;
-    let automation = context
-        .lookup_local::<rsi_api_protocol::ApiClientContract>()
-        .and_then(|api| rsi_automation_api::Client::new(api).ok());
+    let mut automation: Option<rsi_automation_api::Client> = None;
     let mut automation_work: Option<super::automation::Pending> = None;
     let mut automation_actions = std::collections::BTreeMap::new();
     let mut history: Option<
@@ -278,7 +276,7 @@ pub(super) async fn run(
                                     else if label == "/external" {external.open();}
                                     else if label == "/profiles" {profiles.open();}
                                     else if label == "/attention" {external.open_attention();}
-                                    else if label == "/automation" {if let Some(client)=automation.clone(){super::automation::Pending::start(&mut automation_work,client,super::automation::list());}else{status="Automation is unavailable on this connection".into();}}
+                                    else if label == "/automation" {automation=super::feature_api(context).map(rsi_automation_api::Client::new);if let Some(client)=automation.clone(){super::automation::Pending::start(&mut automation_work,client,super::automation::list());}else{status="Automation is unavailable on this connection".into();}}
                                     else if label == "/model" { setup.open(setup::Command::Models, false); }
                                     else { let application = application.clone(); let cursor = if label == "More sessions…" { recent.clone() } else { None }; history = Some(Box::pin(async move { application.list_recent(cursor.as_ref(), 128).await.map_err(error) })); }
                                 },
@@ -291,7 +289,7 @@ pub(super) async fn run(
                                 if editor.cursor()!=editor.text().len() || matches!(command,setup::Command::Invalid) {status="Invalid command or cursor not at end. Draft retained; /help lists usage.".into();continue;}
                                 editor.take();
                                 match command {
-                                    setup::Command::Automation=>{if let Some(client)=automation.clone(){status=if super::automation::Pending::start(&mut automation_work,client,super::automation::list()){"Reading deployment owner…"}else{"Deployment operation is still awaiting its result"}.into();}else{status="Automation is unavailable on this connection".into();}},
+                                    setup::Command::Automation=>{automation=super::feature_api(context).map(rsi_automation_api::Client::new);if let Some(client)=automation.clone(){status=if super::automation::Pending::start(&mut automation_work,client,super::automation::list()){"Reading deployment owner…"}else{"Deployment operation is still awaiting its result"}.into();}else{status="Automation is unavailable on this connection".into();}},
                                     setup::Command::Attention => external.open_attention(),
                                     setup::Command::ExternalOpen(id) => external.open_conversation(id),
                                     setup::Command::External => external.open(),

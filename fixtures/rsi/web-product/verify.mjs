@@ -96,11 +96,11 @@ try {
         URL.revokeObjectURL = url => { window.previewUrls.delete(url); revoke(url); };
       });
       context.on("response", async response => {
-        if (!response.url().includes("/api/v1/")) return;
+        if (!response.url().includes("/api/v2/")) return;
         const headers = await response.allHeaders();
         if (response.url().endsWith("/login")) {
           const sent = await response.request().allHeaders();
-          exchanges.push({ path: "/api/v1/login", status: response.status(), protocol: headers["x-rsi-http-version"], origin: sent.origin, site: sent["sec-fetch-site"], cookie: !!sent.cookie, bearer: sent.authorization?.startsWith("Bearer ") }); return;
+          exchanges.push({ path: "/api/v2/login", status: response.status(), protocol: headers["x-rsi-http-version"], origin: sent.origin, site: sent["sec-fetch-site"], cookie: !!sent.cookie, bearer: sent.authorization?.startsWith("Bearer ") }); return;
         }
         const exchange = { path: new URL(response.url()).pathname, status: response.status(), headers };
         exchanges.push(exchange);

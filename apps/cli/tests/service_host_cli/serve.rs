@@ -131,7 +131,7 @@ async fn verify_serve(fixture: &CliFixture, child: &mut tokio::process::Child) {
     assert_eq!(ready["event"], "serving");
     let address = ready["bind"].as_str().unwrap();
     let mut socket = tokio::net::TcpStream::connect(address).await.unwrap();
-    socket.write_all(format!("POST /api/v1/connection/describe/1 HTTP/1.1\r\nHost: {address}\r\nContent-Length: 2\r\nConnection: close\r\n\r\n{{}}").as_bytes()).await.unwrap();
+    socket.write_all(format!("POST /api/v2/rsi-api-protocol/4/connection/describe/1/read HTTP/1.1\r\nHost: {address}\r\nContent-Length: 2\r\nConnection: close\r\n\r\n{{}}").as_bytes()).await.unwrap();
     let mut response = Vec::new();
     tokio::time::timeout(
         std::time::Duration::from_secs(5),
@@ -211,8 +211,42 @@ async fn request(
     let epoch = epoch.map_or_else(String::new, |epoch| {
         format!("X-Rsi-Host-Epoch: {epoch}\r\n")
     });
+    let (domain, name) = operation.split_once('/').unwrap();
+    let call = if domain == "connection" {
+        match name {
+            "describe" => rsi_api_protocol::describe_operation(),
+            "operations" => rsi_api_protocol::operations_operation(),
+            _ => panic!("unsupported fixture connection call"),
+        }
+        .call()
+    } else {
+        rsi_api_protocol::OperationCall {
+            key: rsi_api_protocol::OperationKey {
+                protocol: serde_json::from_str(match domain {
+                    "devices" => {
+                        include_str!("../../../../crates/rsi-api/device-api/wire-contract.json")
+                    }
+                    "inspector" => {
+                        include_str!("../../../../crates/rsi/inspector/wire-contract.json")
+                    }
+                    "native-addons" => {
+                        include_str!("../../../../crates/rsi/native-addons-api/wire-contract.json")
+                    }
+                    _ => panic!("unsupported fixture API"),
+                })
+                .unwrap(),
+                id: rsi_api_protocol::OperationId::new(domain, name, 1).unwrap(),
+            },
+            shape: if name == "list" || domain == "inspector" {
+                rsi_api_protocol::CallShape::Read
+            } else {
+                rsi_api_protocol::CallShape::Mutation
+            },
+        }
+    };
+    let path = call.to_path();
     let head = format!(
-        "POST /api/v1/{operation}/1 HTTP/1.1\r\nHost: {address}\r\nAuthorization: Bearer {token}\r\nX-Rsi-Wire-Version: 1\r\n{epoch}Content-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n",
+        "POST {path} HTTP/1.1\r\nHost: {address}\r\nAuthorization: Bearer {token}\r\nX-Rsi-Wire-Version: 2\r\n{epoch}Content-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n",
         body.len()
     );
     socket
@@ -259,7 +293,7 @@ async fn check_device_management(fixture: &CliFixture, address: &str, origin: &s
         "connection/describe",
         token,
         None,
-        r#"{"wire_version":1}"#,
+        r#"{"wire_version":2}"#,
     )
     .await;
     assert_eq!(description.0, 200);
@@ -300,7 +334,7 @@ async fn check_device_management(fixture: &CliFixture, address: &str, origin: &s
             "connection/describe",
             token,
             None,
-            r#"{"wire_version":1}"#
+            r#"{"wire_version":2}"#
         )
         .await
         .0,

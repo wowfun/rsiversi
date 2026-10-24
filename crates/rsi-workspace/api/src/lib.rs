@@ -9,6 +9,7 @@ mod endpoint;
 mod wire;
 pub use client::{WorkspaceClient, WorkspaceClientFactory};
 pub use endpoint::{WorkspaceApi, WorkspaceApiFactory};
+pub use wire::Operation;
 
 fn empty(config: &rsi_meta::ConfigValue) -> rsi_meta::Result<()> {
     if config.is_null() || config.as_object().is_some_and(serde_json::Map::is_empty) {

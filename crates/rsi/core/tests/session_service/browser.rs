@@ -210,7 +210,7 @@ async fn session_browser_real_http_ws_nodes_images_and_presentation_detach() {
         })
         .await
         .unwrap();
-    let client = UiClient::new(daemon.connection.api_client()).unwrap();
+    let client = UiClient::new(daemon.connection.api_client());
     let observe = Observe {
         application: "browser-proof".into(),
         selections: vec![Selection {

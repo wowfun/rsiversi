@@ -341,12 +341,9 @@ pub struct Client {
     api: Arc<dyn ApiClient>,
 }
 impl Client {
-    /// Negotiate the complete typed read operation set.
-    pub fn new(api: Arc<dyn ApiClient>) -> Result<Self> {
-        if operations().iter().any(|s| !api.operations().contains(s)) {
-            return Err(ApiError::Unavailable);
-        }
-        Ok(Self { api })
+    /// Creates a typed proxy; availability is resolved when each operation is called.
+    pub fn new(api: Arc<dyn ApiClient>) -> Self {
+        Self { api }
     }
     /// Perform one finite read.
     pub async fn call(&self, request: Request) -> Result<Reply> {

@@ -22,7 +22,7 @@ async fn receive(socket: &mut TcpStream) {
         }
     }
     let text = String::from_utf8(bytes).unwrap();
-    assert!(text.starts_with("POST /api/v1/"));
+    assert!(text.starts_with("POST /api/v2/"));
     let length: usize = text
         .lines()
         .find_map(|line| {
@@ -46,7 +46,7 @@ async fn respond(
     extra: &str,
 ) {
     let headers = format!(
-        "HTTP/1.1 {status} Response\r\nContent-Type: {mime}\r\nContent-Length: {declared}\r\nX-Rsi-Wire-Version: 1\r\nX-Rsi-Endpoint-Id: {}\r\nX-Rsi-Host-Epoch: {}\r\nConnection: close\r\n{extra}\r\n",
+        "HTTP/1.1 {status} Response\r\nContent-Type: {mime}\r\nContent-Length: {declared}\r\nX-Rsi-Wire-Version: 2\r\nX-Rsi-Endpoint-Id: {}\r\nX-Rsi-Host-Epoch: {}\r\nConnection: close\r\n{extra}\r\n",
         EndpointId::from_bytes([2; 16]).as_str(),
         HostEpoch::from_bytes([3; 16]).as_str()
     );
@@ -55,7 +55,7 @@ async fn respond(
     socket.shutdown().await.unwrap();
 }
 async fn fixture(
-    operation: OperationSpec,
+    _operation: OperationSpec,
     status: u16,
     mime: &'static str,
     body: Vec<u8>,
@@ -65,33 +65,16 @@ async fn fixture(
     let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
     let origin = format!("http://{}", listener.local_addr().unwrap());
     let task = tokio::spawn(async move {
-        for index in 0..3 {
+        for index in 0..2 {
             let (mut socket, _) = listener.accept().await.unwrap();
             receive(&mut socket).await;
             match index {
                 0 => {
                     let bytes = serde_json::to_vec(&ConnectionDescription {
-                        wire_version: 1,
+                        wire_version: rsi_api_protocol::API_WIRE_VERSION,
                         endpoint_id: EndpointId::from_bytes([2; 16]),
                         host_epoch: HostEpoch::from_bytes([3; 16]),
                     })
-                    .unwrap();
-                    respond(
-                        &mut socket,
-                        200,
-                        "application/json",
-                        &bytes,
-                        bytes.len(),
-                        "",
-                    )
-                    .await;
-                }
-                1 => {
-                    let bytes = serde_json::to_vec(&vec![
-                        describe_operation(),
-                        operations_operation(),
-                        operation.clone(),
-                    ])
                     .unwrap();
                     respond(
                         &mut socket,

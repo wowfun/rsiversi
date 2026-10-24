@@ -14,6 +14,7 @@ pub use policy::{
     LocalSettingsPolicy, SettingsMutationLease, SettingsMutationPolicy,
     SettingsMutationPolicyContract,
 };
+pub use wire::Operation;
 
 fn prepare(config: &rsi_meta::ConfigValue) -> rsi_meta::Result<rsi_meta::PreparedActivation> {
     if !config.is_null() && !config.as_object().is_some_and(serde_json::Map::is_empty) {

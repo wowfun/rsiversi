@@ -8,12 +8,20 @@ use serde::{Deserialize, Serialize};
 use sha2::{Digest as _, Sha256};
 
 #[derive(Clone, Copy, Debug)]
-pub(crate) enum Operation {
+/// Owner-defined operations for explicit capability discovery.
+pub enum Operation {
+    /// Import operation.
     Import,
+    /// Read operation.
     Read,
 }
 impl Operation {
+    /// All operation identities owned by this protocol.
     pub const ALL: [Self; 2] = [Self::Import, Self::Read];
+    /// Local request and response policy for this operation.
+    ///
+    /// # Panics
+    /// Panics if a built-in operation identity is invalid.
     pub fn spec(self) -> OperationSpec {
         let (name, effect, encoding, input, output) = match self {
             Self::Import => (

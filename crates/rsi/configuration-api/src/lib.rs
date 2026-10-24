@@ -122,15 +122,9 @@ pub struct ConfigurationClient {
     api: Arc<dyn ApiClient>,
 }
 impl ConfigurationClient {
-    /// Requires the status operation; Local administration negotiates independently.
-    pub fn new(api: Arc<dyn ApiClient>) -> Result<Self> {
-        if !api
-            .operations()
-            .contains(&ConfigurationOperation::Status.spec())
-        {
-            return Err(ApiError::Unavailable);
-        }
-        Ok(Self { api })
+    /// Creates a typed proxy; availability is resolved when each operation is called.
+    pub fn new(api: Arc<dyn ApiClient>) -> Self {
+        Self { api }
     }
     async fn call<I: Serialize + Sync, O: DeserializeOwned>(
         &self,
@@ -138,9 +132,7 @@ impl ConfigurationClient {
         request: &I,
     ) -> Result<O> {
         let spec = operation.spec();
-        if !self.api.operations().contains(&spec) {
-            return Err(ApiError::Unavailable);
-        }
+
         match call_json::<_, _, Never>(self.api.as_ref(), &spec, request).await? {
             Ok(value) => Ok(value),
             Err(never) => match never {},

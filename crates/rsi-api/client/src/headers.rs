@@ -27,7 +27,8 @@ pub fn response_identity(
     endpoint: &EndpointId,
     expected_epoch: Option<&HostEpoch>,
 ) -> Result<HostEpoch> {
-    if one(headers, "x-rsi-wire-version")? != Some("1")
+    if one(headers, "x-rsi-wire-version")?
+        != Some(rsi_api_protocol::API_WIRE_VERSION.to_string().as_str())
         || one(headers, "x-rsi-endpoint-id")? != Some(endpoint.as_str())
     {
         return Err(invalid());
@@ -76,10 +77,13 @@ pub fn finite_response_head(status: u16, headers: &http::HeaderMap) -> Result<Fi
 /// Checks that a decoded common failure agrees with its HTTP status.
 pub fn validate_error_status(status: u16, error: &ApiError) -> Result<()> {
     let expected = match error {
+        ApiError::UnknownOperation | ApiError::Unavailable => 404,
+        ApiError::OperationRetiring
+        | ApiError::ProtocolMismatch
+        | ApiError::CallShapeMismatch
+        | ApiError::ShuttingDown => 409,
         ApiError::Unauthorized => 401,
         ApiError::Capacity => 429,
-        ApiError::ShuttingDown => 409,
-        ApiError::Unavailable => 404,
         ApiError::Invalid(_) => 400,
         ApiError::Backend(_) | ApiError::OutcomeUnknown => 500,
         ApiError::Domain(_) => return Err(invalid()),

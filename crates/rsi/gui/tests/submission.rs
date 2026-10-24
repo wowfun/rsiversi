@@ -79,6 +79,7 @@ fn missing<T>() -> rsi_session_protocol::Result<T> {
 }
 #[derive(Debug, Default)]
 struct Backend {
+    workspace_lists: std::sync::atomic::AtomicUsize,
     export_gate: Mutex<Option<Arc<admission::HeaderGate>>>,
     task_panels: Arc<task_panels::Scenario>,
     unpublished: std::sync::atomic::AtomicBool,
@@ -629,7 +630,7 @@ impl Backend {
 #[derive(Debug)]
 struct Unused;
 #[async_trait]
-impl rsi_workspace_protocol::WorkspaceRegistry for Unused {
+impl rsi_workspace_protocol::WorkspaceRegistry for Service {
     async fn order_seed(
         &self,
     ) -> rsi_workspace_protocol::Result<rsi_workspace_protocol::WorkspaceOrderSeed> {
@@ -646,7 +647,13 @@ impl rsi_workspace_protocol::WorkspaceRegistry for Unused {
         _: Option<rsi_workspace_protocol::WorkspaceCursor>,
         _: usize,
     ) -> rsi_workspace_protocol::Result<rsi_workspace_protocol::WorkspacePage> {
-        unreachable!()
+        self.0
+            .workspace_lists
+            .fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+        Ok(rsi_workspace_protocol::WorkspacePage {
+            records: vec![],
+            next: None,
+        })
     }
     async fn register_at(
         &self,
@@ -741,7 +748,9 @@ impl PluginFactory for Providers {
             .unwrap();
         let _w = plan
             .context()
-            .provide_local::<rsi_workspace_protocol::WorkspaceRegistryContract>(Arc::new(Unused))
+            .provide_local::<rsi_workspace_protocol::WorkspaceRegistryContract>(Arc::new(Service(
+                self.0.clone(),
+            )))
             .unwrap();
         let _m = plan
             .context()

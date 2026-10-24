@@ -5,15 +5,22 @@ use rsi_settings_protocol::{SettingsError, SettingsVersion};
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
 
-#[derive(Clone, Copy)]
-pub(crate) enum Operation {
+#[derive(Clone, Copy, Debug)]
+/// Owner-defined operations for explicit capability discovery.
+pub enum Operation {
+    /// List operation.
     List,
+    /// Describe operation.
     Describe,
+    /// Read operation.
     Read,
+    /// Replace operation.
     Replace,
+    /// Clear operation.
     Clear,
 }
 impl Operation {
+    /// All operation identities owned by this protocol.
     pub const ALL: [Self; 5] = [
         Self::List,
         Self::Describe,
@@ -21,6 +28,10 @@ impl Operation {
         Self::Replace,
         Self::Clear,
     ];
+    /// Local request and response policy for this operation.
+    ///
+    /// # Panics
+    /// Panics if a built-in operation identity is invalid.
     pub fn spec(self) -> OperationSpec {
         let (name, effect) = match self {
             Self::List => ("list", OperationEffect::Read),

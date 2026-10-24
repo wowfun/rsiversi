@@ -2,8 +2,7 @@ use async_trait::async_trait;
 use futures_util::StreamExt as _;
 use rsi_api_protocol::{
     ApiClientContract, ApiError, ApiOutput, ConnectionDescription, EndpointId, HostEpoch,
-    OperationAccess, OperationCatalog, OperationClass, OperationEffect, OperationId, OperationSpec,
-    RequestEncoding, describe_operation, operations_operation,
+    OperationAccess, OperationClass, OperationEffect, OperationId, OperationSpec, RequestEncoding,
     portable::{self, Description, Header},
 };
 use rsi_meta::{
@@ -17,8 +16,6 @@ use std::sync::Arc;
 enum Fault {
     Clean,
     WrongVersion,
-    MissingDescribe,
-    MissingOperations,
     Empty,
     Gap,
     OversizedFragment,
@@ -83,7 +80,7 @@ impl PluginFactory for Provider {
         let supply = plan.context().provide(
             "probe.api",
             portable::CONTRACT,
-            ContractVersion(1),
+            ContractVersion(portable::VERSION),
             Arc::new(Self {
                 fault: self.fault,
                 effect: self.effect,
@@ -104,39 +101,13 @@ impl Provider {
     fn description(&self) -> Description {
         let mut description = Description {
             connection: ConnectionDescription {
-                wire_version: 1,
+                wire_version: rsi_api_protocol::API_WIRE_VERSION,
                 endpoint_id: EndpointId::from_bytes([1; 16]),
                 host_epoch: HostEpoch::from_bytes([2; 16]),
             },
-            operations: OperationCatalog::new(vec![
-                describe_operation(),
-                operations_operation(),
-                operation(self.fault, self.effect),
-            ])
-            .unwrap(),
         };
         if matches!(self.fault, Fault::WrongVersion) {
-            description.connection.wire_version = 2;
-        }
-        if matches!(
-            self.fault,
-            Fault::MissingDescribe | Fault::MissingOperations
-        ) {
-            let excluded = if matches!(self.fault, Fault::MissingDescribe) {
-                describe_operation()
-            } else {
-                operations_operation()
-            };
-            description.operations = OperationCatalog::new(
-                description
-                    .operations
-                    .operations()
-                    .iter()
-                    .filter(|op| **op != excluded)
-                    .cloned()
-                    .collect(),
-            )
-            .unwrap();
+            description.connection.wire_version = 99;
         }
         description
     }
@@ -344,12 +315,8 @@ async fn exact_64_mib_response_and_escaped_binary_slice_share_retained_admission
 }
 
 #[tokio::test]
-async fn import_rejects_unsupported_wire_version_and_incomplete_negotiation_grants() {
-    for fault in [
-        Fault::WrongVersion,
-        Fault::MissingDescribe,
-        Fault::MissingOperations,
-    ] {
+async fn import_rejects_unsupported_wire_version() {
+    for fault in [Fault::WrongVersion] {
         let runtime = Runtime::default();
         let root = runtime.root();
         root.apply(

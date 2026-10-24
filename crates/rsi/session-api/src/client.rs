@@ -41,22 +41,15 @@ pub struct SessionClient {
     state: Arc<State>,
 }
 impl SessionClient {
-    /// Requires every exact Session operation before publishing the application capability.
-    pub fn new(api: Arc<dyn ApiClient>) -> rsi_api_protocol::Result<Self> {
-        if Operation::ALL
-            .iter()
-            .any(|operation| !api.operations().contains(&operation.spec()))
-        {
-            return Err(ApiError::Unavailable);
-        }
-        Ok(Self::from_api(api))
+    /// Creates the Session proxy independently of current route availability.
+    pub fn new(api: Arc<dyn ApiClient>) -> Self {
+        Self::from_api(api)
     }
-    /// Validates the restricted handle catalog and attaches only the supplied Session.
+    /// Attaches only the supplied Session; each operation uses current Host admission.
     pub async fn attach_target(
         api: Arc<dyn ApiClient>,
         session: &SessionId,
     ) -> rsi_session_protocol::Result<Arc<dyn SessionHandle>> {
-        crate::target::operations(api.operations()).map_err(SessionError::Api)?;
         Self::from_api(api).attach(session).await
     }
     fn from_api(api: Arc<dyn ApiClient>) -> Self {

@@ -61,11 +61,11 @@ try {
           page.on("console", (message) => console.error(`${name}: ${message.text()}`));
           await page.goto(`${origin}/`);
           const auth = await page.evaluate(async () => {
-            const login = await fetch("/api/v1/login", { method: "POST", headers: {
-              authorization: `Bearer ${"a".repeat(64)}`, "x-rsi-csrf": "1", "x-rsi-wire-version": "1",
+            const login = await fetch("/api/v2/login", { method: "POST", headers: {
+              authorization: `Bearer ${"a".repeat(64)}`, "x-rsi-csrf": "1", "x-rsi-wire-version": "2",
             } });
-            const missingCsrf = await fetch("/api/v1/connection/describe/1", { method: "POST",
-              headers: { "content-type": "application/json", "x-rsi-wire-version": "1" }, body: '{"wire_version":1}' });
+            const missingCsrf = await fetch("/api/v2/rsi-api-protocol/4/connection/describe/1/read", { method: "POST",
+              headers: { "content-type": "application/json", "x-rsi-wire-version": "2" }, body: '{"wire_version":2}' });
             return { login: login.status, missingCsrf: missingCsrf.status, cookie: document.cookie };
           });
           assert.deepEqual(auth, { login: 200, missingCsrf: 401, cookie: "" });
@@ -76,10 +76,10 @@ try {
           assert.equal(cookies[0].path, "/api");
           assert.equal(cookies[0].secure, secure);
           for (const forgedOrigin of [undefined, "https://foreign.invalid"]) {
-            const headers = { "x-rsi-wire-version": "1", "x-rsi-csrf": "1", "content-type": "application/json" };
+            const headers = { "x-rsi-wire-version": "2", "x-rsi-csrf": "1", "content-type": "application/json" };
             if (forgedOrigin) headers.origin = forgedOrigin;
-            const rejected = await context.request.post(`${origin}/api/v1/connection/describe/1`, {
-              headers, data: '{"wire_version":1}',
+            const rejected = await context.request.post(`${origin}/api/v2/rsi-api-protocol/4/connection/describe/1/read`, {
+              headers, data: '{"wire_version":2}',
             });
             assert.equal(rejected.status(), 401, "cookie authority requires exact Origin");
           }
@@ -105,8 +105,8 @@ try {
           const page = await context.newPage();
           page.on("console", message => console.error(`${name}: ${message.text()}`));
           await page.goto(origin);
-          const status = await page.evaluate(async () => (await fetch("/api/v1/login", { method: "POST",
-            headers: { authorization: `Bearer ${"a".repeat(64)}`, "x-rsi-csrf": "1", "x-rsi-wire-version": "1" } })).status);
+          const status = await page.evaluate(async () => (await fetch("/api/v2/login", { method: "POST",
+            headers: { authorization: `Bearer ${"a".repeat(64)}`, "x-rsi-csrf": "1", "x-rsi-wire-version": "2" } })).status);
           assert.equal(status, 200);
           const results = await Promise.all([
             executeWorker(page, glue, wasm, "run_shared_pool_probe"),

@@ -10,7 +10,7 @@ use std::sync::{LazyLock, Mutex};
 use thiserror::Error;
 
 /// Service Host wire protocol epoch.
-pub const SERVICE_HOST_PROTOCOL_EPOCH: u32 = 10;
+pub const SERVICE_HOST_PROTOCOL_EPOCH: u32 = 11;
 static SERVICE_HOST_EXECUTABLE_BUILD: LazyLock<Result<String, String>> =
     LazyLock::new(executable_product_build);
 

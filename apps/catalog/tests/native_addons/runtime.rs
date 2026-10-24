@@ -381,6 +381,7 @@ async fn bounded_refresh_waiters_can_cancel_while_retirement_still_joins_the_nat
     assert!(
         !dispatch
             .operations()
+            .unwrap()
             .iter()
             .any(|value| value.id == operation)
     );

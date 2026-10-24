@@ -16,7 +16,7 @@ use hyper::{
 use hyper_util::rt::{TokioIo, TokioTimer};
 use rsi_api_protocol::{
     ApiDispatch, ApiError, ApiMessage, ApiOutput, DeviceAuthentication, EndpointId, HostEpoch,
-    OperationEffect, OperationId, RequestEncoding, Result,
+    OperationEffect, RequestEncoding, Result,
 };
 use rsi_meta::Execution;
 use std::{convert::Infallible, io, net::SocketAddr, sync::Arc, time::Duration};
@@ -391,7 +391,10 @@ impl State {
             "x-content-type-options",
             http::HeaderValue::from_static("nosniff"),
         );
-        headers.insert("x-rsi-wire-version", http::HeaderValue::from_static("1"));
+        headers.insert(
+            "x-rsi-wire-version",
+            http::HeaderValue::from(rsi_api_protocol::API_WIRE_VERSION),
+        );
         headers.insert(
             "x-rsi-endpoint-id",
             self.endpoint.as_str().parse().expect("validated identity"),
@@ -441,7 +444,7 @@ impl State {
         }
         let (parts, body) = request.into_parts();
         let path = parts.uri.path();
-        if path == "/api/v1/browser-bootstrap" {
+        if path == rsi_api_protocol::BROWSER_BOOTSTRAP_PATH {
             let bootstrap = self.bootstrap.as_ref().ok_or(ApiError::Unavailable)?;
             return self.access.bootstrap(
                 &parts.headers,
@@ -450,27 +453,25 @@ impl State {
                 &self.endpoint,
             );
         }
-        if matches!(path, "/api/v1/login" | "/api/v1/logout") {
+        if matches!(
+            path,
+            rsi_api_protocol::LOGIN_PATH | rsi_api_protocol::LOGOUT_PATH
+        ) {
             return self.access.cookie(path, &parts.headers, &body);
         }
         let caller = self.access.authenticate(&parts.headers)?;
         let operation = operation(path)?;
-        if operation != rsi_api_protocol::describe_operation().id
+        if operation != rsi_api_protocol::describe_operation().call()
             && one(&parts.headers, "x-rsi-host-epoch")? != Some(self.epoch.as_str())
         {
             return Err(ApiError::ShuttingDown);
         }
-        if one(&parts.headers, "x-rsi-wire-version")? != Some("1") {
+        if one(&parts.headers, "x-rsi-wire-version")?
+            != Some(rsi_api_protocol::API_WIRE_VERSION.to_string().as_str())
+        {
             return Err(ApiError::Unavailable);
         }
-        let content_type = one(&parts.headers, "content-type")?;
-        if !matches!(
-            content_type,
-            Some("application/json" | "application/octet-stream")
-        ) || one(&parts.headers, "content-encoding")?.is_some()
-        {
-            return Err(ApiError::Invalid("unsupported request encoding".into()));
-        }
+        let content_type = request_content_type(&parts.headers)?;
         let invocation = self.dispatch.admit(&operation, caller.origin)?;
         let spec = invocation.spec().clone();
         let mime = match spec.encoding {
@@ -509,16 +510,20 @@ impl State {
     }
 }
 
-pub(crate) fn operation(path: &str) -> Result<OperationId> {
-    let parts: Vec<_> = path.split('/').collect();
-    if parts.len() != 6 || parts[..3] != ["", "api", "v1"] {
-        return Err(ApiError::Unavailable);
+fn request_content_type(headers: &http::HeaderMap) -> Result<Option<&str>> {
+    let content_type = one(headers, "content-type")?;
+    if !matches!(
+        content_type,
+        Some("application/json" | "application/octet-stream")
+    ) || one(headers, "content-encoding")?.is_some()
+    {
+        return Err(ApiError::Invalid("unsupported request encoding".into()));
     }
-    let version = parts[5].parse::<u16>().map_err(|_| ApiError::Unavailable)?;
-    if parts[5] != version.to_string() {
-        return Err(ApiError::Unavailable);
-    }
-    OperationId::new(parts[3], parts[4], version)
+    Ok(content_type)
+}
+
+pub(crate) fn operation(path: &str) -> Result<rsi_api_protocol::OperationCall> {
+    rsi_api_protocol::OperationCall::from_path(path)
 }
 
 async fn receive(
@@ -609,6 +614,26 @@ fn reply(message: ApiMessage) -> Response<Body> {
 
 pub(crate) fn failure(error: ApiError) -> Response<Body> {
     let (status, bytes, mime) = match error {
+        ApiError::UnknownOperation => (
+            StatusCode::NOT_FOUND,
+            Bytes::from_static(b"{\"code\":\"unknown_operation\"}"),
+            "application/json",
+        ),
+        ApiError::OperationRetiring => (
+            StatusCode::CONFLICT,
+            Bytes::from_static(b"{\"code\":\"operation_retiring\"}"),
+            "application/json",
+        ),
+        ApiError::ProtocolMismatch => (
+            StatusCode::CONFLICT,
+            Bytes::from_static(b"{\"code\":\"protocol_mismatch\"}"),
+            "application/json",
+        ),
+        ApiError::CallShapeMismatch => (
+            StatusCode::CONFLICT,
+            Bytes::from_static(b"{\"code\":\"call_shape_mismatch\"}"),
+            "application/json",
+        ),
         ApiError::OutcomeUnknown => (
             StatusCode::INTERNAL_SERVER_ERROR,
             Bytes::from_static(b"{\"code\":\"outcome_unknown\"}"),

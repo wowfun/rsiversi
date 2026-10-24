@@ -17,8 +17,8 @@ impl ApiClient for Remote {
     fn description(&self) -> &ConnectionDescription {
         &self.description
     }
-    fn operations(&self) -> &[OperationSpec] {
-        &self.operations
+    async fn operations(&self) -> rsi_api_protocol::Result<rsi_api_protocol::OperationCatalog> {
+        rsi_api_protocol::OperationCatalog::new(self.operations.clone())
     }
     fn input_budget(&self, _: OperationClass) -> ByteBudget {
         ByteBudget::default()
@@ -47,11 +47,10 @@ impl ApiClient for Remote {
         }))
     }
 }
-#[tokio::test]
-async fn exact_ssh_mcp_editor_requires_current_read_and_unknown_mutation_never_replays() {
+fn feature() -> (Arc<PluginsFeature>, Arc<Remote>) {
     let remote = Arc::new(Remote {
         description: ConnectionDescription {
-            wire_version: 1,
+            wire_version: rsi_api_protocol::API_WIRE_VERSION,
             endpoint_id: EndpointId::from_bytes([1; 16]),
             host_epoch: HostEpoch::from_bytes([2; 16]),
         },
@@ -71,19 +70,26 @@ async fn exact_ssh_mcp_editor_requires_current_read_and_unknown_mutation_never_r
         mutations: Mutex::new(0),
     });
     let owner = Arc::new(PluginsFeature {
-        client: rsi_configuration_api::ConfigurationClient::new(remote.clone()).unwrap(),
+        client: rsi_configuration_api::ConfigurationClient::new(remote.clone()),
         mcp: None,
         mcp_ssh: Some(wire::Client::new(remote.clone())),
         exa: None,
         leaves: None,
-        leaf_grants: false,
         ssh: None,
-        ssh_trust: false,
+        api: remote.clone(),
+        capabilities: Mutex::new(crate::plugins::PluginCapabilities::new(
+            &rsi_api_protocol::OperationCatalog::new(remote.operations.clone()).unwrap(),
+        )),
         state: Mutex::default(),
         work: Work::new(rsi_meta::Execution::native(
             tokio::runtime::Handle::current(),
         )),
     });
+    (owner, remote)
+}
+#[tokio::test]
+async fn exact_ssh_mcp_editor_requires_current_read_and_unknown_mutation_never_replays() {
+    let (owner, remote) = feature();
     let target:wire::Target=serde_json::from_value(serde_json::json!({"host_epoch":remote.description.host_epoch,"target":"a".repeat(32),"server":"fixture"})).unwrap();
     let change = wire::Change {
         target: target.clone(),

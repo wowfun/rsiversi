@@ -1858,7 +1858,7 @@ async fn real_question_tool_and_inspection_have_local_and_uds_parity() {
                 .unwrap(),
         );
         let application: Arc<dyn rsi_session_protocol::SessionService> = if remote {
-            Arc::new(SessionClient::new(client.clone()).unwrap())
+            Arc::new(SessionClient::new(client.clone()))
         } else {
             local.clone()
         };
@@ -1914,7 +1914,7 @@ async fn real_question_tool_and_inspection_have_local_and_uds_parity() {
             *handle.header().await.unwrap().session_id()
         );
         let reconnected = Arc::new(UdsClient::connect(execution, config).await.unwrap());
-        let reconnect = SessionClient::new(reconnected.clone()).unwrap();
+        let reconnect = SessionClient::new(reconnected.clone());
         let attached = reconnect
             .attach(handle.header().await.unwrap().session_id())
             .await

@@ -11,6 +11,10 @@ pub(crate) async fn send(
     maximum: usize,
 ) -> Result<()> {
     let (code, bytes) = match error {
+        ApiError::UnknownOperation => (ErrorCode::UnknownOperation, None),
+        ApiError::OperationRetiring => (ErrorCode::OperationRetiring, None),
+        ApiError::ProtocolMismatch => (ErrorCode::ProtocolMismatch, None),
+        ApiError::CallShapeMismatch => (ErrorCode::CallShapeMismatch, None),
         ApiError::OutcomeUnknown => (ErrorCode::OutcomeUnknown, None),
         ApiError::Unauthorized => (ErrorCode::Unauthorized, None),
         ApiError::Domain(bytes) if bytes.len() <= maximum => (ErrorCode::Domain, Some(bytes)),
@@ -55,6 +59,10 @@ pub(crate) async fn receive(
         return Err(wire::invalid());
     }
     Ok(match code {
+        ErrorCode::UnknownOperation => ApiError::UnknownOperation,
+        ErrorCode::OperationRetiring => ApiError::OperationRetiring,
+        ErrorCode::ProtocolMismatch => ApiError::ProtocolMismatch,
+        ErrorCode::CallShapeMismatch => ApiError::CallShapeMismatch,
         ErrorCode::OutcomeUnknown => ApiError::OutcomeUnknown,
         ErrorCode::Unauthorized => ApiError::Unauthorized,
         ErrorCode::Backend => ApiError::Backend("Portable API provider failed".into()),

@@ -3,7 +3,7 @@ use rsi_api_protocol::{
     ApiClient, ApiError, ApiOutput, ApiResponseCapacity, ByteBudget, ConnectionDescription,
     ConnectionHello, EndpointId, FiniteResponseCapacity, HostEpoch, OperationCatalog,
     OperationClass, OperationEffect, OperationSpec, Result, RetainedBytes, describe_operation,
-    operations_operation, supervised_stream,
+    operation_operation, operations_operation, supervised_stream,
 };
 use rsi_meta_execution::Execution;
 use std::{
@@ -47,7 +47,6 @@ pub struct ClientResponseCapacity {
 pub struct ClientConnection {
     inner: Arc<Connection>,
     description: ConnectionDescription,
-    catalog: OperationCatalog,
 }
 #[derive(Debug)]
 struct Connection {
@@ -109,18 +108,36 @@ fn lane(class: OperationClass) -> usize {
     }
 }
 impl ClientConnection {
+    async fn query_operations(
+        &self,
+        key: Option<rsi_api_protocol::OperationKey>,
+    ) -> Result<OperationCatalog> {
+        let spec = if key.is_some() {
+            operation_operation()
+        } else {
+            operations_operation()
+        };
+        let input = self.input_budget(spec.class).encode(
+            &rsi_api_protocol::OperationsQuery { key },
+            spec.maximum_request_bytes,
+        )?;
+        let ApiOutput::Reply(reply) = self.call(&spec, input).await? else {
+            return Err(crate::invalid());
+        };
+        if reply.binary.is_some() {
+            return Err(crate::invalid());
+        }
+        serde_json::from_slice(reply.json.as_bytes()).map_err(|_| crate::invalid())
+    }
+
     /// Uses identity and descriptors already negotiated by the supplied transport.
     /// The transport owns verification against its exact provider generation.
     pub fn from_negotiated(
         execution: Execution,
         transport: Arc<dyn ConnectionTransport>,
         description: ConnectionDescription,
-        catalog: OperationCatalog,
     ) -> Result<Self> {
-        if description.wire_version != 1
-            || !catalog.operations().contains(&describe_operation())
-            || !catalog.operations().contains(&operations_operation())
-        {
+        if description.wire_version != rsi_api_protocol::API_WIRE_VERSION {
             return Err(ApiError::Invalid(
                 "invalid negotiated API connection".into(),
             ));
@@ -132,7 +149,6 @@ impl ClientConnection {
                 transport,
             )),
             description,
-            catalog,
         })
     }
     /// Negotiates one deployment over an explicitly owned transport.
@@ -148,7 +164,7 @@ impl ClientConnection {
                 let operation = describe_operation();
                 let input = inner.input[0].encode(
                     &ConnectionHello {
-                        wire_version: 1,
+                        wire_version: rsi_api_protocol::API_WIRE_VERSION,
                         expected_endpoint: Some(inner.endpoint.clone()),
                     },
                     operation.maximum_request_bytes,
@@ -163,37 +179,13 @@ impl ClientConnection {
                 }
                 let description: ConnectionDescription =
                     serde_json::from_slice(reply.json.as_bytes()).map_err(|_| crate::invalid())?;
-                if description.wire_version != 1
+                if description.wire_version != rsi_api_protocol::API_WIRE_VERSION
                     || description.endpoint_id != inner.endpoint
                     || description.host_epoch != epoch
                 {
                     return Err(crate::invalid());
                 }
-                drop(reply);
-                let operation = operations_operation();
-                let input = inner.input[1].copy(b"{}")?;
-                let admission = inner.admit(&operation, &input)?;
-                let (_, reply) = inner
-                    .exchange(&operation, input, Some(&epoch), admission)
-                    .await?;
-                let ApiOutput::Reply(reply) = reply else {
-                    return Err(crate::invalid());
-                };
-                if reply.binary.is_some() {
-                    return Err(crate::invalid());
-                }
-                let catalog: OperationCatalog =
-                    serde_json::from_slice(reply.json.as_bytes()).map_err(|_| crate::invalid())?;
-                if !catalog.operations().contains(&describe_operation())
-                    || !catalog.operations().contains(&operations_operation())
-                {
-                    return Err(crate::invalid());
-                }
-                Ok(Self {
-                    inner,
-                    description,
-                    catalog,
-                })
+                Ok(Self { inner, description })
             })
             .await
             .map_err(|_| ApiError::Backend("API negotiation deadline elapsed".into()))?
@@ -241,16 +233,22 @@ impl ApiClient for ClientConnection {
     fn description(&self) -> &ConnectionDescription {
         &self.description
     }
-    fn operations(&self) -> &[OperationSpec] {
-        self.catalog.operations()
+    async fn operations(&self) -> Result<OperationCatalog> {
+        self.query_operations(None).await
+    }
+    async fn operation(&self, key: &rsi_api_protocol::OperationKey) -> Result<OperationSpec> {
+        self.query_operations(Some(key.clone()))
+            .await?
+            .operations()
+            .first()
+            .filter(|spec| spec.key() == *key)
+            .cloned()
+            .ok_or(ApiError::UnknownOperation)
     }
     fn input_budget(&self, class: OperationClass) -> ByteBudget {
         self.inner.input[lane(class)].clone()
     }
     async fn call(&self, operation: &OperationSpec, input: RetainedBytes) -> Result<ApiOutput> {
-        if !self.catalog.operations().contains(operation) {
-            return Err(ApiError::Unavailable);
-        }
         let admission = self.inner.admit(operation, &input)?;
         let operation = operation.clone();
         let epoch = self.description.host_epoch.clone();
@@ -398,5 +396,55 @@ fn uncertain(error: ApiError, mutation: bool) -> ApiError {
         ApiError::OutcomeUnknown
     } else {
         error
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    #[derive(Debug)]
+    struct UnusedTransport;
+    #[async_trait]
+    impl ConnectionTransport for UnusedTransport {
+        async fn exchange(
+            &self,
+            _: &OperationSpec,
+            _: RetainedBytes,
+            _: &EndpointId,
+            _: Option<&HostEpoch>,
+            _: ClientResponseCapacity,
+            _: &CancellationToken,
+        ) -> Result<(HostEpoch, ApiOutput)> {
+            unreachable!("admission test")
+        }
+    }
+    #[tokio::test]
+    async fn data_saturation_does_not_block_policy_discovery_or_subscriptions() {
+        let connection = Connection::new(
+            Execution::native(tokio::runtime::Handle::current()),
+            EndpointId::from_bytes([1; 16]),
+            Arc::new(UnusedTransport),
+        );
+        let discovery = operation_operation();
+        discovery.validate().unwrap();
+        let mut data = discovery.clone();
+        data.class = OperationClass::Data;
+        let input = ByteBudget::default()
+            .encode(&serde_json::json!({}), data.maximum_request_bytes)
+            .unwrap();
+        let held: Vec<_> = (0..4)
+            .map(|_| connection.admit(&data, &input).unwrap())
+            .collect();
+        assert!(matches!(
+            connection.admit(&data, &input),
+            Err(ApiError::Capacity)
+        ));
+        let policy = connection.admit(&discovery, &input).unwrap();
+        let control = connection.admit(&describe_operation(), &input).unwrap();
+        let mut subscription = data;
+        subscription.class = OperationClass::Subscription;
+        let subscription = connection.admit(&subscription, &input).unwrap();
+        drop((held, policy, control, subscription));
+        assert_eq!(connection.work.state.lock().unwrap().active, 0);
     }
 }

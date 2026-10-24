@@ -15,7 +15,7 @@ async fn call_as(
     let ApiOutput::Reply(output) = running
         .api_dispatch()
         .unwrap()
-        .admit(&spec.id, origin)?
+        .admit(&spec.call(), origin)?
         .invoke(input)
         .await?
     else {
@@ -494,8 +494,8 @@ async fn history_observed_epoch_replacement_rejects_old_candidates_but_keeps_fro
     );
     std::fs::write(&fixture.profile, toml::to_string(&document).unwrap()).unwrap();
     let daemon = DaemonFixture::new(&fixture).await;
-    let direct = rsi_acp_api::Client::new(daemon.connection.api_client()).unwrap();
-    let client = rsi_history_api::Client::new(daemon.connection.api_client()).unwrap();
+    let direct = rsi_acp_api::Client::new(daemon.connection.api_client());
+    let client = rsi_history_api::Client::new(daemon.connection.api_client());
     let id = ConversationId::new("history-observed").unwrap();
     direct.start(id.clone(), "history-peer").await.unwrap();
     direct.submit(&id, "human evidence").await.unwrap();

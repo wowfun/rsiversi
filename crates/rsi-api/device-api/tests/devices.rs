@@ -54,8 +54,8 @@ impl ApiClient for Local {
     fn description(&self) -> &ConnectionDescription {
         &self.description
     }
-    fn operations(&self) -> &[OperationSpec] {
-        &self.operations
+    async fn operations(&self) -> rsi_api_protocol::Result<rsi_api_protocol::OperationCatalog> {
+        rsi_api_protocol::OperationCatalog::new(self.operations.clone())
     }
     fn input_budget(&self, _: OperationClass) -> ByteBudget {
         ByteBudget::new(64 * 1024).unwrap()
@@ -63,7 +63,7 @@ impl ApiClient for Local {
     async fn call(&self, operation: &OperationSpec, input: RetainedBytes) -> Result<ApiOutput> {
         let response = self
             .registry
-            .admit(&operation.id, CallOrigin::Local)?
+            .admit(&operation.call(), CallOrigin::Local)?
             .invoke(input)
             .await?;
         if operation.id == rsi_api_protocol::OperationId::new("devices", "register", 1).unwrap()
@@ -90,16 +90,16 @@ impl Harness {
         let devices = Arc::new(Devices::default());
         let api = DeviceApi::register(registry.as_ref(), devices.clone()).unwrap();
         let local = Arc::new(Local {
-            operations: registry.operations(),
+            operations: registry.operations().unwrap(),
             registry,
             description: ConnectionDescription {
-                wire_version: 1,
+                wire_version: rsi_api_protocol::API_WIRE_VERSION,
                 endpoint_id: EndpointId::from_bytes([2; 16]),
                 host_epoch: HostEpoch::from_bytes([3; 16]),
             },
             lose_registration: AtomicBool::new(false),
         });
-        let client = DeviceClient::new(local.clone()).unwrap();
+        let client = DeviceClient::new(local.clone());
         Self {
             devices,
             api,
@@ -197,7 +197,7 @@ async fn validates_requests_and_untrusted_rosters_and_fences_escaped_clients() {
     harness.api.close().await;
     assert!(matches!(
         harness.client.list().await,
-        Err(ApiError::Unavailable | ApiError::ShuttingDown)
+        Err(ApiError::UnknownOperation)
     ));
     harness.local.registry.close().await;
 }

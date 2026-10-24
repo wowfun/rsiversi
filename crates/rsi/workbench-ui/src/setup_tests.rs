@@ -14,14 +14,19 @@ struct Remote {
     operations: Vec<OperationSpec>,
     result: Mutex<Option<rsi_api_protocol::Result<serde_json::Value>>>,
     writes: AtomicUsize,
+    discovery_failed: std::sync::atomic::AtomicBool,
+    reads: AtomicUsize,
 }
 #[async_trait::async_trait]
 impl ApiClient for Remote {
     fn description(&self) -> &ConnectionDescription {
         &self.description
     }
-    fn operations(&self) -> &[OperationSpec] {
-        &self.operations
+    async fn operations(&self) -> rsi_api_protocol::Result<rsi_api_protocol::OperationCatalog> {
+        if self.discovery_failed.load(Ordering::SeqCst) {
+            return Err(ApiError::Capacity);
+        }
+        rsi_api_protocol::OperationCatalog::new(self.operations.clone())
     }
     fn input_budget(&self, _: OperationClass) -> ByteBudget {
         ByteBudget::default()
@@ -31,6 +36,18 @@ impl ApiClient for Remote {
         operation: &OperationSpec,
         _: RetainedBytes,
     ) -> rsi_api_protocol::Result<ApiOutput> {
+        if operation == &ConfigurationOperation::Status.spec() {
+            self.reads.fetch_add(1, Ordering::SeqCst);
+            return Ok(ApiOutput::Reply(ApiMessage {
+                json: ByteBudget::default()
+                    .encode(
+                        &serde_json::json!({"allowed":true}),
+                        operation.maximum_response_bytes,
+                    )
+                    .unwrap(),
+                binary: None,
+            }));
+        }
         assert_eq!(operation, &ProvidersOperation::Replace.spec());
         self.writes.fetch_add(1, Ordering::SeqCst);
         let value = self
@@ -103,7 +120,7 @@ async fn failed_unknown_or_unapplied_provider_writes_never_save_a_default_or_rep
             .map(str::to_owned);
         let remote = Arc::new(Remote {
             description: ConnectionDescription {
-                wire_version: 1,
+                wire_version: rsi_api_protocol::API_WIRE_VERSION,
                 endpoint_id: EndpointId::from_bytes([1; 16]),
                 host_epoch: HostEpoch::from_bytes([2; 16]),
             },
@@ -117,13 +134,16 @@ async fn failed_unknown_or_unapplied_provider_writes_never_save_a_default_or_rep
             ],
             result: Mutex::new(Some(result)),
             writes: AtomicUsize::new(0),
+            discovery_failed: false.into(),
+            reads: AtomicUsize::new(0),
         });
         let settings = Arc::new(NoSettings::default());
         let runtime = rsi_meta::Runtime::default();
         let feature = Arc::new(SetupFeature {
-            authority: ConfigurationClient::new(remote.clone()).unwrap(),
-            providers: ManagedProvidersClient::new(remote.clone()).unwrap(),
-            credentials: ProviderCredentialsClient::new(remote.clone()).unwrap(),
+            api: remote.clone(),
+            authority: ConfigurationClient::new(remote.clone()),
+            providers: ManagedProvidersClient::new(remote.clone()),
+            credentials: ProviderCredentialsClient::new(remote.clone()),
             settings: settings.clone(),
             state: Mutex::default(),
             work: Work::new(runtime.execution().clone()),
@@ -218,4 +238,44 @@ async fn reject_invalid_deployments(
             "invalid deployment must fail before provider publication"
         );
     }
+}
+
+#[tokio::test]
+async fn setup_refresh_uses_last_catalog_when_discovery_fails() {
+    let remote = Arc::new(Remote {
+        description: ConnectionDescription {
+            wire_version: rsi_api_protocol::API_WIRE_VERSION,
+            endpoint_id: EndpointId::from_bytes([1; 16]),
+            host_epoch: HostEpoch::from_bytes([2; 16]),
+        },
+        operations: vec![ConfigurationOperation::Status.spec()],
+        result: Mutex::new(None),
+        writes: AtomicUsize::new(0),
+        discovery_failed: false.into(),
+        reads: AtomicUsize::new(0),
+    });
+    let runtime = rsi_meta::Runtime::default();
+    let feature = SetupFeature {
+        api: remote.clone(),
+        authority: ConfigurationClient::new(remote.clone()),
+        providers: ManagedProvidersClient::new(remote.clone()),
+        credentials: ProviderCredentialsClient::new(remote.clone()),
+        settings: Arc::new(NoSettings::default()),
+        state: Mutex::default(),
+        work: Work::new(runtime.execution().clone()),
+    };
+    remote.discovery_failed.store(true, Ordering::SeqCst);
+    assert!(feature.refresh().await.is_err());
+    assert_eq!(remote.reads.load(Ordering::SeqCst), 0);
+    remote.discovery_failed.store(false, Ordering::SeqCst);
+    feature.refresh().await.unwrap();
+    let first_ticket = feature.snapshot().ticket;
+    remote.discovery_failed.store(true, Ordering::SeqCst);
+    feature.refresh().await.unwrap();
+    assert_eq!(remote.reads.load(Ordering::SeqCst), 2);
+    assert!(feature.snapshot().allowed);
+    assert_ne!(feature.snapshot().ticket, first_ticket);
+    assert!(!feature.snapshot().credentials_available);
+    feature.work.close().await;
+    assert!(runtime.shutdown().await.is_clean());
 }

@@ -317,7 +317,7 @@ impl Fixture {
             .into_iter()
             .find(|op| op.id.name() == name)
             .unwrap();
-        let invocation = self.registry.admit(&spec.id, origin).unwrap();
+        let invocation = self.registry.admit(&spec.call(), origin).unwrap();
         let bytes = invocation
             .input_budget()
             .encode(input, spec.maximum_request_bytes)

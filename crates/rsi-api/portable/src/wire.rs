@@ -61,7 +61,11 @@ pub(crate) async fn header(port: &mut impl Port) -> Result<Header> {
     {
         return Err(invalid());
     }
-    serde_json::from_slice(&message.as_bytes()[1..]).map_err(|_| invalid())
+    let header: Header = serde_json::from_slice(&message.as_bytes()[1..]).map_err(|_| invalid())?;
+    if let Header::Call { operation, .. } = &header {
+        operation.key.validate()?;
+    }
+    Ok(header)
 }
 pub(crate) async fn eof(port: &mut impl Port) -> Result<()> {
     if port.recv().await?.is_some() {

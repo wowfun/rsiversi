@@ -69,19 +69,9 @@ pub struct ProviderCredentialsClient {
     api: Arc<dyn ApiClient>,
 }
 impl ProviderCredentialsClient {
-    /// Requires exact setup operations from the connected Host.
-    pub fn new(api: Arc<dyn ApiClient>) -> Result<Self> {
-        if [
-            CredentialOperation::Status,
-            CredentialOperation::Set,
-            CredentialOperation::Unset,
-        ]
-        .into_iter()
-        .any(|operation| !api.operations().contains(&operation.spec()))
-        {
-            return Err(ApiError::Unavailable);
-        }
-        Ok(Self { api })
+    /// Creates a typed proxy; availability is resolved when each operation is called.
+    pub fn new(api: Arc<dyn ApiClient>) -> Self {
+        Self { api }
     }
     fn reference(provider: ProviderKind, slot: &str) -> Result<Reference<'_>> {
         CredentialRef::new(provider.owner(), slot)

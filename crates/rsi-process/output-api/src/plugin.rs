@@ -50,8 +50,7 @@ impl PluginFactory for OutputClientFactory {
         Ok(prepare(config)?.requiring_local::<ApiClientContract>())
     }
     async fn activate(&self, plan: ActivationPlan) -> rsi_meta::Result<()> {
-        let client = OutputClient::new(plan.local::<ApiClientContract>()?)
-            .map_err(|error| MetaError::Activation(error.to_string()))?;
+        let client = OutputClient::new(plan.local::<ApiClientContract>()?);
         let supply = plan
             .context()
             .provide_local::<ProcessOutputCacheContract>(Arc::new(client))?;

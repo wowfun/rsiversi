@@ -429,10 +429,7 @@ impl BootedServiceHost {
         let running = Arc::new(running);
         let result = (|| {
             let api = crate::local_api_client::client(&running)?;
-            let output_cache = Arc::new(
-                rsi_process_output_api::OutputClient::new(api.clone())
-                    .map_err(|error| RsiError::Boot(error.to_string()))?,
-            );
+            let output_cache = Arc::new(rsi_process_output_api::OutputClient::new(api.clone()));
             Ok(Self {
                 api,
                 description: running.connection_description()?,

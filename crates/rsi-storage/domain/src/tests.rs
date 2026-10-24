@@ -383,7 +383,9 @@ async fn api_mutation_preserves_an_over_bound_domain_rejection_without_writing()
     let registration = registry
         .register(operation.clone(), Arc::new(OverBoundWrite(domain.clone())))
         .unwrap();
-    let call = registry.admit(&operation.id, CallOrigin::Local).unwrap();
+    let call = registry
+        .admit(&operation.call(), CallOrigin::Local)
+        .unwrap();
     let input = call.input_budget().copy(b"null").unwrap();
     assert!(matches!(
         call.invoke(input).await,

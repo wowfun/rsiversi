@@ -137,7 +137,7 @@ async fn wire_preserves_large_identities_and_validates_before_source_then_withdr
     let registry = ApiRegistry::new(Execution::native(tokio::runtime::Handle::current()));
     let source = Arc::new(Source::default());
     let api = InspectorApi::register(&registry, source.clone()).unwrap();
-    let operations = registry.operations();
+    let operations = registry.operations().unwrap();
     assert_eq!(operations.len(), 5);
     let runtime = operations
         .iter()
@@ -153,7 +153,7 @@ async fn wire_preserves_large_identities_and_validates_before_source_then_withdr
         let bytes = ByteBudget::new(1024).unwrap().encode(&value, 1024).unwrap();
         assert!(
             registry
-                .admit(&runtime.id, CallOrigin::Local)
+                .admit(&runtime.call(), CallOrigin::Local)
                 .unwrap()
                 .invoke(bytes)
                 .await
@@ -166,7 +166,7 @@ async fn wire_preserves_large_identities_and_validates_before_source_then_withdr
         .encode(&RuntimeRequest::default(), 1024)
         .unwrap();
     let ApiOutput::Reply(reply) = registry
-        .admit(&runtime.id, CallOrigin::Local)
+        .admit(&runtime.call(), CallOrigin::Local)
         .unwrap()
         .invoke(bytes)
         .await
@@ -196,8 +196,8 @@ async fn wire_preserves_large_identities_and_validates_before_source_then_withdr
     assert_eq!(source.0.load(Ordering::SeqCst), 1);
     drop(reply);
     api.close().await;
-    assert!(registry.operations().is_empty());
-    assert!(registry.admit(&runtime.id, CallOrigin::Local).is_err());
+    assert!(registry.operations().unwrap().is_empty());
+    assert!(registry.admit(&runtime.call(), CallOrigin::Local).is_err());
 }
 
 #[derive(Debug)]
@@ -211,8 +211,8 @@ impl rsi_api_protocol::ApiClient for RegisteredClient {
     fn description(&self) -> &rsi_api_protocol::ConnectionDescription {
         &self.description
     }
-    fn operations(&self) -> &[rsi_api_protocol::OperationSpec] {
-        &self.operations
+    async fn operations(&self) -> rsi_api_protocol::Result<rsi_api_protocol::OperationCatalog> {
+        rsi_api_protocol::OperationCatalog::new(self.operations.clone())
     }
     fn input_budget(&self, _: rsi_api_protocol::OperationClass) -> ByteBudget {
         ByteBudget::default()
@@ -223,7 +223,7 @@ impl rsi_api_protocol::ApiClient for RegisteredClient {
         input: rsi_api_protocol::RetainedBytes,
     ) -> rsi_api_protocol::Result<ApiOutput> {
         self.registry
-            .admit(&operation.id, CallOrigin::Local)?
+            .admit(&operation.call(), CallOrigin::Local)?
             .invoke(input)
             .await
     }
@@ -237,15 +237,14 @@ async fn workflow_client_checks_real_registered_impact_and_withdrawal() {
     let source = Arc::new(Source::default());
     let api = InspectorApi::register(registry.as_ref(), source.clone()).unwrap();
     let client = rsi_inspector::InspectorClient::new(Arc::new(RegisteredClient {
-        operations: registry.operations(),
+        operations: registry.operations().unwrap(),
         registry,
         description: rsi_api_protocol::ConnectionDescription {
-            wire_version: 1,
+            wire_version: rsi_api_protocol::API_WIRE_VERSION,
             endpoint_id: rsi_api_protocol::EndpointId::from_bytes([1; 16]),
             host_epoch: rsi_api_protocol::HostEpoch::from_bytes([2; 16]),
         },
-    }))
-    .unwrap();
+    }));
     assert!(matches!(
         client.workflows().await,
         Err(ApiError::Unavailable)

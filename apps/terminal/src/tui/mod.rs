@@ -1859,12 +1859,6 @@ async fn run_inner(
             .clone()
             .ok_or_else(|| error("TUI surface target is unavailable"))?,
     );
-    client.text_history = context
-        .lookup_local::<rsi_api_protocol::ApiClientContract>()
-        .and_then(|api| rsi_history_api::Client::new(api).ok());
-    client.automation = context
-        .lookup_local::<rsi_api_protocol::ApiClientContract>()
-        .and_then(|api| rsi_automation_api::Client::new(api).ok());
     client.plugins = context.lookup_local::<rsi_workbench_ui::PluginsFeatureContract>();
     client.files = observer.as_ref().expect("initial surface").files.clone();
     let mut ui_changes = client.ui.registry.membership_changes();
@@ -1914,6 +1908,12 @@ async fn run_inner(
             if let Some(target) = client.integration_credential.take()
                 && let Some(feature) = client.plugins.clone() { setup.open_integration(target, feature); }
             if let Some(command) = client.setup_command.take() {
+                if matches!(command, setup::Command::Automation) {
+                    client.automation = feature_api(&context).map(rsi_automation_api::Client::new);
+                }
+                if matches!(command, setup::Command::History(..) | setup::Command::HistoryAll(..) | setup::Command::HistoryWorkspace(..)) {
+                    client.text_history = feature_api(&context).map(rsi_history_api::Client::new);
+                }
                 match command { setup::Command::Export(options) => {
                     let handle = client.handle.clone();
                     if client.pending_requests() >= 8 { client.state.notice("Client request queue is busy; try /export again shortly"); }
@@ -2397,3 +2397,9 @@ fn markdown_status(enabled: bool) -> &'static str {
 #[cfg(windows)]
 #[allow(unsafe_code)]
 mod windows;
+
+fn feature_api(
+    context: &rsi_meta::Context,
+) -> Option<std::sync::Arc<dyn rsi_api_protocol::ApiClient>> {
+    context.lookup_local::<rsi_api_protocol::ApiClientContract>()
+}

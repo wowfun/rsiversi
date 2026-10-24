@@ -29,8 +29,8 @@ impl ApiClient for Connection {
     fn description(&self) -> &ConnectionDescription {
         &self.description
     }
-    fn operations(&self) -> &[OperationSpec] {
-        &self.operations
+    async fn operations(&self) -> rsi_api_protocol::Result<rsi_api_protocol::OperationCatalog> {
+        rsi_api_protocol::OperationCatalog::new(self.dispatch.operations()?)
     }
     fn input_budget(&self, _: OperationClass) -> ByteBudget {
         ByteBudget::default()
@@ -41,7 +41,7 @@ impl ApiClient for Connection {
         input: RetainedBytes,
     ) -> rsi_api_protocol::Result<ApiOutput> {
         self.dispatch
-            .admit(&operation.id, CallOrigin::Local)?
+            .admit(&operation.call(), CallOrigin::Local)?
             .invoke(input)
             .await
     }
@@ -73,7 +73,7 @@ fn linked(name: &str, factory: Arc<dyn PluginFactory>) -> ResolvedFactory {
 }
 fn description() -> ConnectionDescription {
     ConnectionDescription {
-        wire_version: 1,
+        wire_version: rsi_api_protocol::API_WIRE_VERSION,
         endpoint_id: EndpointId::from_bytes([1; 16]),
         host_epoch: HostEpoch::from_bytes([2; 16]),
     }
@@ -97,12 +97,15 @@ async fn client_runtime(api: Arc<dyn ApiClient>) -> Runtime {
 }
 
 #[cfg(unix)]
-async fn local_capture(path: &std::path::Path) -> (Runtime, String, Vec<u8>) {
+async fn local_capture(
+    path: &std::path::Path,
+) -> (Runtime, rsi_meta::FiberHandle, String, Vec<u8>) {
     use rsi_sandbox::{
         ConfinedProcess, EnforcementStamp, SandboxBackend, SandboxFileSystem, SandboxMode,
         SandboxNetwork, SandboxScratch,
     };
     let runtime = Runtime::default();
+    let mut api = None;
     for (name, factory, config) in [
         (
             "process",
@@ -112,11 +115,14 @@ async fn local_capture(path: &std::path::Path) -> (Runtime, String, Vec<u8>) {
         ("api", Arc::new(rsi_api::ApiFactory), Value::Null),
         ("output-api", Arc::new(OutputApiFactory), Value::Null),
     ] {
-        runtime
+        let fiber = runtime
             .root()
             .apply(linked(name, factory), config)
             .await
             .unwrap();
+        if name == "output-api" {
+            api = Some(fiber);
+        }
     }
     let process = runtime.root().lookup_local::<ProcessContract>().unwrap();
     let mut source = vec![0; 65_537];
@@ -149,17 +155,17 @@ async fn local_capture(path: &std::path::Path) -> (Runtime, String, Vec<u8>) {
     assert_eq!(managed.wait().await.unwrap().exit_code, Some(0));
     let tail = managed.stdout().read_from(0).unwrap();
     assert!(tail.lossy);
-    (runtime, tail.full_output.unwrap(), source)
+    (runtime, api.unwrap(), tail.full_output.unwrap(), source)
 }
 
 #[tokio::test]
 #[cfg(unix)]
 async fn real_process_cache_pages_cross_independent_plugins_without_spawn_authority() {
     let temporary = tempfile::tempdir().unwrap();
-    let (server, id, source) = local_capture(temporary.path()).await;
+    let (server, registration, id, source) = local_capture(temporary.path()).await;
     let dispatch = server.root().lookup_local::<ApiDispatchContract>().unwrap();
     let api = Arc::new(Connection {
-        operations: dispatch.operations(),
+        operations: dispatch.operations().unwrap(),
         dispatch: dispatch.clone(),
         description: description(),
     });
@@ -185,7 +191,9 @@ async fn real_process_cache_pages_cross_independent_plugins_without_spawn_author
         Err(ProcessError::Io(_))
     ));
     let operation = &api.operations[0];
-    let invocation = dispatch.admit(&operation.id, CallOrigin::Local).unwrap();
+    let invocation = dispatch
+        .admit(&operation.call(), CallOrigin::Local)
+        .unwrap();
     let input = invocation
         .input_budget()
         .encode(
@@ -197,6 +205,35 @@ async fn real_process_cache_pages_cross_independent_plugins_without_spawn_author
         invocation.invoke(input).await,
         Err(ApiError::Invalid(_))
     ));
+    let cache = server
+        .root()
+        .lookup_local::<ProcessOutputCacheContract>()
+        .unwrap();
+    assert!(registration.dispose().await.is_clean());
+    assert!(api.operations().await.unwrap().operations().is_empty());
+    assert!(matches!(
+        output.read(&id, 0, 1).await,
+        Err(ProcessError::Api(ApiError::UnknownOperation))
+    ));
+    server
+        .root()
+        .apply(
+            linked("output-api-restored", Arc::new(OutputApiFactory)),
+            Value::Null,
+        )
+        .await
+        .unwrap();
+    assert!(Arc::ptr_eq(
+        &cache,
+        &server
+            .root()
+            .lookup_local::<ProcessOutputCacheContract>()
+            .unwrap()
+    ));
+    assert_eq!(
+        output.read(&id, 0, 65_536).await.unwrap().bytes.as_ref(),
+        &source[..65_536]
+    );
     assert!(client.shutdown().await.is_clean());
     assert!(
         client
@@ -205,7 +242,7 @@ async fn real_process_cache_pages_cross_independent_plugins_without_spawn_author
             .is_none()
     );
     assert!(server.shutdown().await.is_clean());
-    assert!(dispatch.operations().is_empty());
+    assert!(dispatch.operations().unwrap().is_empty());
 }
 
 #[derive(Debug)]
@@ -221,8 +258,8 @@ impl ApiClient for Peer {
     fn description(&self) -> &ConnectionDescription {
         &self.description
     }
-    fn operations(&self) -> &[OperationSpec] {
-        &self.operations
+    async fn operations(&self) -> rsi_api_protocol::Result<rsi_api_protocol::OperationCatalog> {
+        rsi_api_protocol::OperationCatalog::new(self.operations.clone())
     }
     fn input_budget(&self, _: OperationClass) -> ByteBudget {
         ByteBudget::default()
@@ -272,6 +309,7 @@ async fn read_spec() -> OperationSpec {
         .lookup_local::<ApiDispatchContract>()
         .unwrap()
         .operations()
+        .unwrap()
         .remove(0);
     lease.close().await;
     assert!(runtime.shutdown().await.is_clean());
@@ -279,7 +317,7 @@ async fn read_spec() -> OperationSpec {
 }
 
 #[tokio::test]
-async fn absent_cache_activates_without_dispatch_but_incompatible_metadata_rejects() {
+async fn absent_cache_is_discovered_per_call_and_local_policy_does_not_gate_construction() {
     #[derive(Debug)]
     struct NoCache(ConnectionDescription);
     #[async_trait]
@@ -287,18 +325,18 @@ async fn absent_cache_activates_without_dispatch_but_incompatible_metadata_rejec
         fn description(&self) -> &ConnectionDescription {
             &self.0
         }
-        fn operations(&self) -> &[OperationSpec] {
-            &[]
+        async fn operations(&self) -> rsi_api_protocol::Result<rsi_api_protocol::OperationCatalog> {
+            rsi_api_protocol::OperationCatalog::new(vec![])
         }
         fn input_budget(&self, _: OperationClass) -> ByteBudget {
-            panic!("absent output must not allocate a request")
+            ByteBudget::default()
         }
         async fn call(
             &self,
             _: &OperationSpec,
             _: RetainedBytes,
         ) -> rsi_api_protocol::Result<ApiOutput> {
-            panic!("absent output must not dispatch")
+            Err(ApiError::UnknownOperation)
         }
     }
     let runtime = client_runtime(Arc::new(NoCache(description()))).await;
@@ -308,7 +346,7 @@ async fn absent_cache_activates_without_dispatch_but_incompatible_metadata_rejec
         .unwrap();
     assert!(matches!(
         output.read(&"a".repeat(32), 0, 1).await,
-        Err(ProcessError::Api(ApiError::Unavailable))
+        Err(ProcessError::Api(ApiError::UnknownOperation))
     ));
     assert!(matches!(
         output.read("invalid", 0, 1).await,
@@ -324,16 +362,22 @@ async fn absent_cache_activates_without_dispatch_but_incompatible_metadata_rejec
 
     let mut incompatible = read_spec().await;
     incompatible.maximum_request_bytes += 1;
-    assert!(matches!(
-        OutputClient::new(Arc::new(Peer {
-            description: description(),
-            operations: vec![incompatible],
-            metadata: Value::Null,
-            binary: false,
-            budget: ByteBudget::default(),
-        })),
-        Err(ApiError::Invalid(_))
-    ));
+    let client = OutputClient::new(Arc::new(Peer {
+        description: description(),
+        operations: vec![incompatible],
+        metadata: json!({"id":"a".repeat(32),"offset":0,"next_offset":4,"total_bytes":4}),
+        binary: true,
+        budget: ByteBudget::default(),
+    }));
+    assert_eq!(
+        client
+            .read(&"a".repeat(32), 0, 4)
+            .await
+            .unwrap()
+            .bytes
+            .as_ref(),
+        &[0, 255, 27, 128]
+    );
 }
 
 #[tokio::test]
@@ -351,7 +395,7 @@ async fn byte_slices_keep_receive_admission_and_malformed_pages_never_escape() {
             budget: budget.clone(),
         })
     };
-    let client = OutputClient::new(peer(valid.clone(), true)).unwrap();
+    let client = OutputClient::new(peer(valid.clone(), true));
     let page = client.read(&id, 0, 4).await.unwrap();
     assert_eq!(budget.used(), 4);
     let slice = page.bytes.slice(1..2);
@@ -372,14 +416,14 @@ async fn byte_slices_keep_receive_admission_and_malformed_pages_never_escape() {
     ] {
         let mut metadata = valid.clone();
         metadata[key] = value;
-        let client = OutputClient::new(peer(metadata, true)).unwrap();
+        let client = OutputClient::new(peer(metadata, true));
         assert!(matches!(
             client.read(&id, 0, 4).await,
             Err(ProcessError::Api(ApiError::Invalid(_)))
         ));
         assert_eq!(budget.used(), 0);
     }
-    let missing = OutputClient::new(peer(valid, false)).unwrap();
+    let missing = OutputClient::new(peer(valid, false));
     assert!(missing.read(&id, 0, 4).await.is_err());
     assert_eq!(budget.used(), 0);
     assert!(matches!(

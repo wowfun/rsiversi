@@ -1,5 +1,17 @@
 # rsi-api-protocol
 
+Single-key discovery (`connection.operation`, a required `OperationsQuery.key`)
+uses the Control lane with a 128 KiB response bound, so current owner policy remains
+available when business Data calls fill their lane. The full directory
+(`connection.operations`) remains a Data read with its 1 MiB response bound.
+
+`OperationCall` owns the canonical URL codec:
+`/api/v2/{protocol}/{protocol_version}/{domain}/{operation}/{operation_version}/{shape}`.
+The shape is `read`, `mutation` or `stream`; identity segments follow their owning
+typed grammar. Decoding caps the entire path at 300 bytes, validates each identity,
+and requires exact re-encoding, rejecting alternate numeric spellings, escaping,
+extra segments and trailing slashes. HTTP and browser transports share this codec.
+
 A completed ByteReceiver can transfer its allocation into another explicit byte
 budget. It compacts unused capacity and acquires the destination lease before
 releasing the source lease; rejection releases the unfinished transfer. Immutable

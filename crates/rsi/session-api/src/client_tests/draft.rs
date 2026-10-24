@@ -83,7 +83,7 @@ async fn selection_rejects_changed_immutable_fields_wrong_revision_and_wrong_err
 #[tokio::test]
 async fn create_retry_correlates_original_input_while_returning_the_current_selected_draft() {
     let remote = Remote::new();
-    let client = SessionClient::new(remote.clone()).unwrap();
+    let client = SessionClient::new(remote.clone());
     let request = CreateSession {
         workspace_id: rsi_workspace_protocol::WorkspaceId::parse(
             "c52ddf65534b7b46035084358ab7902be4bfef220bdb503ac7039cc861905b05",

@@ -48,8 +48,7 @@ impl PluginFactory for SessionFilesApiFactory {
         let client = crate::local::client(
             plan.local::<ApiDispatchContract>()?,
             plan.local::<ConnectionDescriptionContract>()?,
-        )
-        .map_err(|error| MetaError::Activation(error.to_string()))?;
+        );
         let supply = plan
             .context()
             .provide_local::<SessionFilesContract>(Arc::new(client))?;
@@ -73,8 +72,7 @@ impl PluginFactory for SessionFilesClientFactory {
         Ok(prepare(config)?.requiring_local::<ApiClientContract>())
     }
     async fn activate(&self, plan: ActivationPlan) -> rsi_meta::Result<()> {
-        let client = SessionFilesClient::new(plan.local::<ApiClientContract>()?)
-            .map_err(|error| MetaError::Activation(error.to_string()))?;
+        let client = SessionFilesClient::new(plan.local::<ApiClientContract>()?);
         let supply = plan
             .context()
             .provide_local::<SessionFilesContract>(Arc::new(client))?;

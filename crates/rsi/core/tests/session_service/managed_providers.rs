@@ -24,7 +24,7 @@ async fn call(
     let output = running
         .api_dispatch()
         .unwrap()
-        .admit(&spec.id, origin)?
+        .admit(&spec.call(), origin)?
         .invoke(input)
         .await?;
     let ApiOutput::Reply(output) = output else {
@@ -66,7 +66,7 @@ async fn service_preset_settings_select_future_headers_through_the_actual_api_sc
     )
     .await
     .unwrap();
-    let settings = rsi_settings_api::SettingsClient::new(connection.api_client()).unwrap();
+    let settings = rsi_settings_api::SettingsClient::new(connection.api_client());
     let workspace = connection
         .workspace_registry()
         .get_or_create(&fixture.workspace)
@@ -510,7 +510,7 @@ async fn admitted_credential_write_survives_lost_waiter_and_unknown_is_never_rep
         let admitted = running
             .api_dispatch()
             .unwrap()
-            .admit(&spec.id, CallOrigin::Local)
+            .admit(&spec.call(), CallOrigin::Local)
             .unwrap();
         let waiter = tokio::spawn(async move { admitted.invoke(request).await });
         store.entered.notified().await;
@@ -608,8 +608,7 @@ async fn credential_file_failure_is_redacted_and_does_not_use_environment_or_cla
     )
     .await
     .unwrap();
-    let client =
-        rsi_configuration_api::ProviderCredentialsClient::new(connection.api_client()).unwrap();
+    let client = rsi_configuration_api::ProviderCredentialsClient::new(connection.api_client());
     let provider = ProviderKind::OpenaiCompatible;
     for error in [
         client
@@ -670,7 +669,7 @@ async fn wire(
     let ApiOutput::Reply(output) = running
         .api_dispatch()
         .unwrap()
-        .admit(&spec.id, origin)?
+        .admit(&spec.call(), origin)?
         .invoke(input)
         .await?
     else {
@@ -855,12 +854,11 @@ async fn native_local_api_client_follows_owned_and_borrowed_service_lifetimes() 
     let api = connection.api_client();
     assert!(
         ConfigurationClient::new(api.clone())
-            .unwrap()
             .allowed()
             .await
             .unwrap()
     );
-    let providers = ManagedProvidersClient::new(api).unwrap();
+    let providers = ManagedProvidersClient::new(api);
     assert_eq!(
         providers
             .replace("0", vec![deployment("native")])
@@ -873,7 +871,7 @@ async fn native_local_api_client_follows_owned_and_borrowed_service_lifetimes() 
     assert!(providers.read().await.is_err());
     assert!(runtime.shutdown().await.is_clean());
     let daemon = DaemonFixture::new(&fixture).await;
-    let providers = ManagedProvidersClient::new(daemon.connection.api_client()).unwrap();
+    let providers = ManagedProvidersClient::new(daemon.connection.api_client());
     assert_eq!(providers.read().await.unwrap().applied_revision, "1");
     daemon.connection.shutdown().await.unwrap();
     assert_eq!(

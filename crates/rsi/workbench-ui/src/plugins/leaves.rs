@@ -269,7 +269,7 @@ impl PluginsFeature {
             state.leaves.receipts.push(receipt.preview.ticket.clone());
         }
         state.leaves.notice = Some(match &receipt.outcome {
-            Outcome::Pending => "The original source operation is still running".into(),
+            Outcome::Pending => "Applying the original change. Admitted work may still be draining; refresh this receipt to check progress.".into(),
             Outcome::Unknown => "Source outcome unknown. Query the original receipt.".into(),
             Outcome::Failed { failure } => failure_message(failure),
             Outcome::Saved { .. } => {

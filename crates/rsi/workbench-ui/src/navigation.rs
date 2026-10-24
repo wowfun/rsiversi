@@ -1,6 +1,6 @@
 use super::{
     ActivationPlan, Arc, BoxFuture, ConfigValue, LocalContract, Mutex, PluginFactory,
-    PreparedActivation, Result, Work, contribute, error, meta, prepare, watch,
+    PreparedActivation, Result, Work, contribute, error, prepare, watch,
 };
 use async_trait::async_trait;
 use futures_util::StreamExt;
@@ -573,6 +573,11 @@ impl NavigationFeature {
         let mut state = self.state.lock().expect("navigation attention view");
         let (page, notice) = match result {
             Ok(page) => (Some(page), None),
+            Err(
+                rsi_api_protocol::ApiError::UnknownOperation
+                | rsi_api_protocol::ApiError::OperationRetiring
+                | rsi_api_protocol::ApiError::ProtocolMismatch,
+            ) => (None, None),
             Err(_) => (
                 state.view.attention.clone(),
                 Some("Activity refresh unavailable; showing the last observation".to_owned()),
@@ -602,12 +607,10 @@ impl PluginFactory for NavigationFeatureFactory {
     async fn activate(&self, plan: ActivationPlan) -> rsi_meta::Result<()> {
         let (refresh, mut changes) = watch::channel(());
         let feature = Arc::new(NavigationFeature {
-            attention: rsi_navigation_api::attention::Client::new(
+            attention: Some(rsi_navigation_api::attention::Client::new(
                 plan.local::<rsi_api_protocol::ApiClientContract>()?,
-            )
-            .ok(),
-            client: NavigationClient::new(plan.local::<rsi_api_protocol::ApiClientContract>()?)
-                .map_err(meta)?,
+            )),
+            client: NavigationClient::new(plan.local::<rsi_api_protocol::ApiClientContract>()?),
             state: Mutex::default(),
             work: Work::new(plan.context().runtime().execution().clone()),
             serial: tokio::sync::Mutex::new(()),
@@ -750,6 +753,9 @@ mod group_tests {
     use serde_json::{Value, json};
     #[derive(Debug)]
     struct Pages {
+        catalog_reads: std::sync::atomic::AtomicUsize,
+        attention_reads: std::sync::atomic::AtomicUsize,
+        attention_error: Mutex<Option<ApiError>>,
         block_next_read: std::sync::atomic::AtomicBool,
         read_entered: tokio::sync::Notify,
         release_read: tokio::sync::Notify,
@@ -767,8 +773,10 @@ mod group_tests {
         fn description(&self) -> &ConnectionDescription {
             &self.description
         }
-        fn operations(&self) -> &[OperationSpec] {
-            &self.operations
+        async fn operations(&self) -> rsi_api_protocol::Result<rsi_api_protocol::OperationCatalog> {
+            self.catalog_reads
+                .fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+            rsi_api_protocol::OperationCatalog::new(self.operations.clone())
         }
         fn input_budget(&self, _: OperationClass) -> ByteBudget {
             ByteBudget::default()
@@ -778,6 +786,16 @@ mod group_tests {
             operation: &OperationSpec,
             input: RetainedBytes,
         ) -> rsi_api_protocol::Result<ApiOutput> {
+            if operation == &rsi_navigation_api::attention::Operation::Read.spec() {
+                self.attention_reads
+                    .fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+                if let Some(error) = self.attention_error.lock().unwrap().clone() {
+                    return Err(error);
+                }
+                return Ok(ApiOutput::Reply(ApiMessage {
+                    json: ByteBudget::default().encode(&json!({"host_epoch":self.description.host_epoch,"entries":[],"truncated":false}), 65536)?, binary: None,
+                }));
+            }
             if self
                 .block_next_read
                 .swap(false, std::sync::atomic::Ordering::SeqCst)
@@ -849,6 +867,9 @@ mod group_tests {
     }
     fn fixture() -> (Arc<Pages>, Arc<NavigationFeature>) {
         let api = Arc::new(Pages {
+            catalog_reads: 0.into(),
+            attention_reads: 0.into(),
+            attention_error: Mutex::new(None),
             block_next_read: false.into(),
             read_entered: tokio::sync::Notify::new(),
             release_read: tokio::sync::Notify::new(),
@@ -859,7 +880,7 @@ mod group_tests {
             race_pins: false.into(),
             fail_registered: false.into(),
             description: ConnectionDescription {
-                wire_version: 1,
+                wire_version: rsi_api_protocol::API_WIRE_VERSION,
                 endpoint_id: EndpointId::from_bytes([1; 16]),
                 host_epoch: HostEpoch::from_bytes([2; 16]),
             },
@@ -874,7 +895,7 @@ mod group_tests {
             .into(),
         });
         let owner = Arc::new(NavigationFeature {
-            client: NavigationClient::new(api.clone()).unwrap(),
+            client: NavigationClient::new(api.clone()),
             attention: None,
             state: Mutex::default(),
             work: Work::new(rsi_meta::Execution::native(
@@ -886,6 +907,38 @@ mod group_tests {
             stop: tokio_util::sync::CancellationToken::new(),
         });
         (api, owner)
+    }
+    #[tokio::test]
+    async fn attention_poll_uses_one_call_and_clears_only_typed_retirement() {
+        let (api, mut owner) = fixture();
+        Arc::get_mut(&mut owner).unwrap().attention =
+            Some(rsi_navigation_api::attention::Client::new(api.clone()));
+        assert!(owner.refresh_attention().await);
+        *api.attention_error.lock().unwrap() = Some(ApiError::Unavailable);
+        assert!(owner.refresh_attention().await);
+        assert!(!owner.view()["attention"].is_null());
+        assert!(!owner.view()["attention_notice"].is_null());
+        for error in [
+            ApiError::UnknownOperation,
+            ApiError::OperationRetiring,
+            ApiError::ProtocolMismatch,
+        ] {
+            *api.attention_error.lock().unwrap() = None;
+            owner.refresh_attention().await;
+            *api.attention_error.lock().unwrap() = Some(error);
+            assert!(owner.refresh_attention().await);
+            assert!(owner.view()["attention"].is_null());
+            assert!(owner.view()["attention_notice"].is_null());
+        }
+        assert_eq!(
+            api.catalog_reads.load(std::sync::atomic::Ordering::SeqCst),
+            0
+        );
+        assert_eq!(
+            api.attention_reads
+                .load(std::sync::atomic::Ordering::SeqCst),
+            8
+        );
     }
     #[tokio::test]
     async fn full_background_refresh_does_not_issue_a_second_query_for_its_head() {

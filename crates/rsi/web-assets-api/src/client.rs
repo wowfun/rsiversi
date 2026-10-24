@@ -1,4 +1,4 @@
-use crate::{Commit, Observe, Offer, malformed, operation, operations};
+use crate::{Commit, Observe, Offer, malformed, operation};
 use futures_util::StreamExt as _;
 use rsi_api_protocol::{ApiClient, ApiError, ApiOutput, ApiStream, Result};
 use std::sync::Arc;
@@ -7,15 +7,9 @@ use std::sync::Arc;
 #[derive(Clone, Debug)]
 pub struct AssetsClient(Arc<dyn ApiClient>);
 impl AssetsClient {
-    /// Requires the exact policies of both operations.
-    pub fn new(api: Arc<dyn ApiClient>) -> Result<Self> {
-        if !operations()
-            .iter()
-            .all(|spec| api.operations().contains(spec))
-        {
-            return Err(ApiError::Unavailable);
-        }
-        Ok(Self(api))
+    /// Creates a typed proxy; availability is resolved when each operation is called.
+    pub fn new(api: Arc<dyn ApiClient>) -> Self {
+        Self(api)
     }
     async fn call(&self, commit: bool, request: &impl serde::Serialize) -> Result<ApiOutput> {
         let spec = operation(commit);

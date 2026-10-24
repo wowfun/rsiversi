@@ -50,6 +50,20 @@ pub(crate) struct Entry {
 }
 
 impl ApiRegistry {
+    /// Reports current membership without copying the catalog or granting admission.
+    pub fn contains_operation(&self, operation: &OperationId) -> bool {
+        let state = self
+            .state
+            .inner
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        !state.closed
+            && state
+                .operations
+                .get(operation)
+                .is_some_and(|entry| !entry.retired.load(Ordering::Acquire))
+    }
+
     /// Creates independent input/output budgets and the standard non-queuing limits.
     pub fn new(execution: Execution) -> Self {
         Self {
@@ -135,7 +149,42 @@ impl ApiRegistrar for ApiRegistry {
 }
 
 impl ApiDispatch for ApiRegistry {
-    fn admit(&self, operation: &OperationId, origin: CallOrigin) -> Result<Box<dyn ApiInvocation>> {
+    fn input_budget(&self, class: OperationClass) -> ByteBudget {
+        self.input[lane(class)].clone()
+    }
+    fn operation(
+        &self,
+        key: &rsi_api_protocol::OperationKey,
+        origin: &CallOrigin,
+    ) -> Result<OperationSpec> {
+        let state = self
+            .state
+            .inner
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        if state.closed {
+            return Err(ApiError::ShuttingDown);
+        }
+        let entry = state
+            .operations
+            .get(&key.id)
+            .ok_or(ApiError::UnknownOperation)?;
+        if !entry.spec.access.permits(origin) {
+            return Err(ApiError::UnknownOperation);
+        }
+        if entry.spec.protocol != key.protocol {
+            return Err(ApiError::ProtocolMismatch);
+        }
+        if entry.retired.load(Ordering::Acquire) {
+            return Err(ApiError::OperationRetiring);
+        }
+        Ok(entry.spec.clone())
+    }
+    fn admit(
+        &self,
+        operation: &rsi_api_protocol::OperationCall,
+        origin: CallOrigin,
+    ) -> Result<Box<dyn ApiInvocation>> {
         if let CallOrigin::Device(device) = &origin
             && device.revoked.is_cancelled()
         {
@@ -152,14 +201,20 @@ impl ApiDispatch for ApiRegistry {
             }
             let entry = state
                 .operations
-                .get(operation)
-                .ok_or(ApiError::Unavailable)?
+                .get(&operation.key.id)
+                .ok_or(ApiError::UnknownOperation)?
                 .clone();
-            if entry.retired.load(Ordering::Acquire) {
-                return Err(ApiError::ShuttingDown);
-            }
             if !entry.spec.access.permits(&origin) {
                 return Err(ApiError::Unauthorized);
+            }
+            if entry.spec.protocol != operation.key.protocol {
+                return Err(ApiError::ProtocolMismatch);
+            }
+            if entry.spec.shape() != operation.shape {
+                return Err(ApiError::CallShapeMismatch);
+            }
+            if entry.retired.load(Ordering::Acquire) {
+                return Err(ApiError::OperationRetiring);
             }
             let lane = lane(entry.spec.class);
             if state.calls[lane] >= GLOBAL_CALLS[lane] {
@@ -215,18 +270,21 @@ impl ApiDispatch for ApiRegistry {
         }))
     }
 
-    fn operations(&self) -> Vec<OperationSpec> {
+    fn operations(&self) -> Result<Vec<OperationSpec>> {
         let state = self
             .state
             .inner
             .lock()
             .unwrap_or_else(std::sync::PoisonError::into_inner);
-        state
+        if state.closed {
+            return Err(ApiError::ShuttingDown);
+        }
+        Ok(state
             .operations
             .values()
             .filter(|entry| !entry.retired.load(Ordering::Acquire))
             .map(|entry| entry.spec.clone())
-            .collect()
+            .collect())
     }
 }
 

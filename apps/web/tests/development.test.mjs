@@ -60,11 +60,11 @@ test('owned Vite socket gates requests then preserves HTTP and WebSocket authori
     const origin=bound.origin;
     assert.equal((await get(origin,'/')).status,503);assert.equal(seen.length,0);
     peer.send({event:'configure_proxy',upstream:`http://127.0.0.1:${upstream.address().port}`});assert.equal((await peer.next()).event,'proxy_ready');
-    const response=await get(origin,'/api/v1/probe',{Origin:origin,'X-Rsi-Csrf':'1'});assert.equal(response.status,200);
+    const response=await get(origin,'/api/v2/probe',{Origin:origin,'X-Rsi-Csrf':'1'});assert.equal(response.status,200);
     assert.equal(JSON.parse(response.body).host,new URL(origin).host);assert.equal(JSON.parse(response.body).origin,origin);
-    const foreign=await get(origin,'/api/v1/probe',{Origin:'http://foreign.invalid'});assert.equal(JSON.parse(foreign.body).origin,'http://foreign.invalid');
+    const foreign=await get(origin,'/api/v2/probe',{Origin:'http://foreign.invalid'});assert.equal(JSON.parse(foreign.body).origin,'http://foreign.invalid');
     const address=new URL(origin);const socket=connect(Number(address.port),'127.0.0.1');await once(socket,'connect');
-    socket.write(`GET /api/v1/stream HTTP/1.1\r\nHost: ${address.host}\r\nOrigin: ${origin}\r\nUpgrade: websocket\r\nConnection: Upgrade\r\nSec-WebSocket-Version: 13\r\nSec-WebSocket-Key: ZGV2ZWxvcG1lbnQtdGVzdA==\r\nSec-WebSocket-Protocol: rsi-stream-v1\r\n\r\n`);
+    socket.write(`GET /api/v2/stream HTTP/1.1\r\nHost: ${address.host}\r\nOrigin: ${origin}\r\nUpgrade: websocket\r\nConnection: Upgrade\r\nSec-WebSocket-Version: 13\r\nSec-WebSocket-Key: ZGV2ZWxvcG1lbnQtdGVzdA==\r\nSec-WebSocket-Protocol: rsi-stream-v1\r\n\r\n`);
     const [bytes]=await once(socket,'data');assert.match(bytes.toString(),/101 Switching Protocols/);assert.match(bytes.toString(),/Sec-WebSocket-Protocol: rsi-stream-v1/i);socket.destroy();
     assert.equal(seen.at(-1).origin,origin);assert.equal(seen.at(-1)['sec-websocket-protocol'],'rsi-stream-v1');
     assert.equal((await get(origin,'/')).status,200);

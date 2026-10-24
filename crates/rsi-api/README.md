@@ -6,13 +6,34 @@ transport adapters consume registered operations and authenticated caller
 identity. The API foundation has no dependency on Session, Agent, Workspace,
 Media, Settings, standard Host paths or rendering.
 
-Each operation publishes its owning protocol name, semantic model version and
-generated wire-contract fingerprint. The
-[schema generator](schema-build/README.md) covers Serde models and custom codecs
-through the owner's source dependency closure. Clients compare descriptors for
-the operations they consume before sending domain requests. Unrelated optional
-operations and executable build hashes do not determine wire compatibility.
-Malformed descriptors are rejected during bounded catalog admission.
+Each operation publishes its owning protocol name and semantic model version
+from the owner's `wire-contract.json`. The [contract builder](contract-build/README.md)
+generates those constants without inspecting implementation sources or dependencies.
+Wire compatibility is an explicit owner contract, tested with actual encoded values.
+Malformed descriptors are rejected at decoded catalog and manifest boundaries.
+
+Calls carry a complete `OperationKey` (protocol and operation identity) and a
+`Read`, `Mutation` or `Stream` shape. Dispatch compares identity and shape before
+resource admission. Registered Host metadata owns authorization, execution class
+and bounds; client metadata owns its local encoding, receive bounds and cancellation.
+Policy equality is not required. HTTP, UDS and browser transports use the shared
+`OperationCall` path codec and API framing version. Portable carries that same call.
+Portable validates decoded discovery keys before grant lookup or upstream calls.
+Registry access checks precede protocol, shape and retirement diagnostics for
+an existing operation; denied callers cannot inspect its registered metadata.
+Single-key discovery applies the caller's access before protocol or retirement
+diagnostics and reports denied keys as unknown. Catalog lookup failure propagates
+as an error, never as a successful empty catalog.
+
+Connections negotiate foundation identity, not a frozen business catalog. Typed
+clients are proxies; discovery asynchronously reads current registrations and is
+never execution authority. Features query the keys they consume when opened or
+refreshed. Missing, retiring, protocol-mismatched and shape-mismatched operations
+have distinct errors. A single-key discovery query supports forwarding boundaries
+without adding a discovery exchange to ordinary typed calls.
+`ApiDispatch::input_budget` borrows a resource pool without admitting an operation.
+Forwarding Services retain their generation's pools across lookup gaps; admission
+and discovery still resolve the current dispatch and may fail while it is unavailable.
 
 Immutable API buffers retain their byte reservation through every clone and
 nonempty slice. Empty slices retain neither storage nor attached resource guards. Input retention, output retention and transport scratch use separate
@@ -42,7 +63,10 @@ including retired registrations that still own work. There is no waiting queue.
 Input and output each have separate retention pools: 2 MiB for controls and
 64 MiB for each data/subscription lane. Finite
 mutation response upper bounds are reserved before invoking a handler. Finite
-reads reserve their measured encoding or copy size before allocating response
+handlers consume response capacity through the protocol's finite conversion;
+subscription capacity is rejected before domain work. Registry membership reads
+only the selected live operation and confer no admission or caller authority.
+Finite reads reserve their measured encoding or copy size before allocating response
 storage, under both the operation maximum and shared delivery pool. Read execution
 scratch remains the domain adapter's responsibility; a small retained reply does
 not require another full operation maximum to be available. Subscription

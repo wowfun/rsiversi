@@ -53,7 +53,10 @@ impl ConnectionTransport for Transport {
         output: rsi_api_client::ClientResponseCapacity,
         retiring: &CancellationToken,
     ) -> Result<(HostEpoch, ApiOutput)> {
-        let rsi_api_client::ClientResponseCapacity { receiving: output, retained } = output;
+        let rsi_api_client::ClientResponseCapacity {
+            receiving: output,
+            retained,
+        } = output;
         let current = HostEpoch::from_bytes([9; 16]);
         assert!(epoch.is_none_or(|epoch| epoch == &current));
         if operation.id == observation().id {
@@ -69,7 +72,7 @@ impl ConnectionTransport for Transport {
         };
         let body = if operation.id == describe_operation().id {
             capacity.encode(&ConnectionDescription {
-                wire_version: 1,
+                wire_version: rsi_api_protocol::API_WIRE_VERSION,
                 endpoint_id: endpoint.clone(),
                 host_epoch: current.clone(),
             })?

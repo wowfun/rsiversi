@@ -29,7 +29,7 @@ impl Remote {
     fn new() -> Arc<Self> {
         Arc::new(Self {
             description: ConnectionDescription {
-                wire_version: 1,
+                wire_version: rsi_api_protocol::API_WIRE_VERSION,
                 endpoint_id: EndpointId::from_bytes([1; 16]),
                 host_epoch: HostEpoch::from_bytes([2; 16]),
             },
@@ -55,8 +55,8 @@ impl ApiClient for Remote {
     fn description(&self) -> &ConnectionDescription {
         &self.description
     }
-    fn operations(&self) -> &[OperationSpec] {
-        &self.operations
+    async fn operations(&self) -> rsi_api_protocol::Result<rsi_api_protocol::OperationCatalog> {
+        rsi_api_protocol::OperationCatalog::new(self.operations.clone())
     }
     fn input_budget(&self, _: OperationClass) -> ByteBudget {
         ByteBudget::default()
@@ -104,7 +104,7 @@ fn is_malformed<T>(result: &Result<T>) -> bool {
 
 pub async fn malformed_open_binding_and_file_pages_never_escape_or_replay() {
     let remote = Remote::new();
-    let client = SessionFilesClient::new(remote.clone()).unwrap();
+    let client = SessionFilesClient::new(remote.clone());
     for body in [
         json!({"path": "78", "kind": "file", "length": 2, "token": "0".repeat(32)}),
         json!({"path": "737562", "kind": "directory", "length": 2, "token": "0".repeat(32)}),
@@ -148,7 +148,7 @@ pub async fn malformed_open_binding_and_file_pages_never_escape_or_replay() {
 
 pub async fn directory_client_checks_parent_exact_names_order_and_forward_progress() {
     let remote = Remote::new();
-    let client = SessionFilesClient::new(remote.clone()).unwrap();
+    let client = SessionFilesClient::new(remote.clone());
     let a = json!({"path": "7375622f61", "name": "a", "kind": "file"});
     let b = json!({"path": "7375622f62", "name": "b", "kind": null});
     let other = json!({"path": "6f746865722f61", "name": "a", "kind": "file"});

@@ -69,8 +69,7 @@ impl PluginFactory for AssetsFactory {
         Ok(PreparedActivation::new(ConfigValue::Null).requiring_local::<ApiClientContract>())
     }
     async fn activate(&self, plan: ActivationPlan) -> rsi_meta::Result<()> {
-        let client = AssetsClient::new(plan.local::<ApiClientContract>()?)
-            .map_err(|error| MetaError::Activation(error.to_string()))?;
+        let client = AssetsClient::new(plan.local::<ApiClientContract>()?);
         let owner = Arc::new(Assets {
             client,
             application: self.0.clone(),

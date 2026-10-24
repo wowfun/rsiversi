@@ -38,18 +38,15 @@ impl ConnectionTransport for NativeTransport {
             ApiResponseCapacity::Finite(capacity) => (Some(capacity), None),
             ApiResponseCapacity::Subscription { budget, .. } => (None, Some(budget)),
         };
-        let url = format!(
-            "{}/api/v1/{}/{}/{}",
-            self.origin,
-            operation.id.domain(),
-            operation.id.name(),
-            operation.id.version()
-        );
+        let url = format!("{}{}", self.origin, operation.call().to_path());
         let mut request = self
             .transport
             .post(url)
             .header("authorization", self.authorization.clone())
-            .header("x-rsi-wire-version", "1")
+            .header(
+                "x-rsi-wire-version",
+                rsi_api_protocol::API_WIRE_VERSION.to_string(),
+            )
             .header(
                 "content-type",
                 match operation.encoding {

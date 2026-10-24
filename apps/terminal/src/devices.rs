@@ -70,7 +70,7 @@ impl Command {
     ) -> rsi_api_protocol::Result<zeroize::Zeroizing<Vec<u8>>> {
         let encoded = match self {
             Self::ConfigurationList => serde_json::to_vec(
-                &rsi_configuration_api::ConfigurationClient::new(api)?
+                &rsi_configuration_api::ConfigurationClient::new(api)
                     .grants()
                     .await?,
             ),
@@ -79,7 +79,7 @@ impl Command {
                 revision,
                 granted,
             } => serde_json::to_vec(
-                &rsi_configuration_api::ConfigurationClient::new(api)?
+                &rsi_configuration_api::ConfigurationClient::new(api)
                     .set_grant(&id, &revision, granted)
                     .await?,
             ),
@@ -110,7 +110,7 @@ impl Command {
 pub(crate) async fn run(api: Arc<dyn ApiClient>, command: Command, work: ApplicationWork) -> u8 {
     crate::document::run(
         async move {
-            let client = DeviceClient::new(api.clone())?;
+            let client = DeviceClient::new(api.clone());
             command.execute(&client, api).await
         },
         work,

@@ -93,8 +93,8 @@ impl ApiClient for Client {
     fn description(&self) -> &ConnectionDescription {
         &self.description
     }
-    fn operations(&self) -> &[OperationSpec] {
-        std::slice::from_ref(&self.spec)
+    async fn operations(&self) -> rsi_api_protocol::Result<rsi_api_protocol::OperationCatalog> {
+        rsi_api_protocol::OperationCatalog::new((std::slice::from_ref(&self.spec)).to_vec())
     }
     fn input_budget(&self, _: OperationClass) -> ByteBudget {
         ByteBudget::default()
@@ -118,7 +118,7 @@ async fn typed_client_marks_malformed_mutation_replies_unknown_but_local_encodin
             spec.effect = effect;
             let client = Client {
                 description: ConnectionDescription {
-                    wire_version: 1,
+                    wire_version: rsi_api_protocol::API_WIRE_VERSION,
                     endpoint_id: EndpointId::from_bytes([1; 16]),
                     host_epoch: HostEpoch::from_bytes([2; 16]),
                 },

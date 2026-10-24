@@ -2,7 +2,7 @@ use super::*;
 use async_trait::async_trait;
 use rsi_api_protocol::{
     ApiContext, ApiHandler, ApiRegistrar, ApiResponseCapacity, AuthenticatedDevice, DeviceId,
-    OperationAccess, OperationClass, OperationSpec, RetainedBytes,
+    OperationAccess, OperationClass, OperationId, OperationSpec, RetainedBytes,
 };
 use rsi_credentials_protocol::SecretValue;
 use tokio::io::{AsyncReadExt, AsyncWriteExt, DuplexStream};
@@ -67,7 +67,7 @@ async fn request(
         delivery,
     )));
     let request = format!(
-        "POST /api/v1/{path}/1 HTTP/1.1\r\nHost: 127.0.0.1\r\nAuthorization: Bearer {TOKEN}\r\nX-Rsi-Wire-Version: 1\r\nX-Rsi-Host-Epoch: {}\r\nContent-Type: application/json\r\nContent-Length: {}\r\n\r\n{body}",
+        "POST /api/v2/rsi-api-protocol/4/{path}/1/read HTTP/1.1\r\nHost: 127.0.0.1\r\nAuthorization: Bearer {TOKEN}\r\nX-Rsi-Wire-Version: 2\r\nX-Rsi-Host-Epoch: {}\r\nContent-Type: application/json\r\nContent-Length: {}\r\n\r\n{body}",
         state.epoch.as_str(),
         body.len()
     );
@@ -157,7 +157,7 @@ async fn verify() {
     finite(
         &state,
         "connection/describe",
-        r#"{"wire_version":1}"#,
+        r#"{"wire_version":2}"#,
         &mut tasks,
         200,
     )

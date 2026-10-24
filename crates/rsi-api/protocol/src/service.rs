@@ -120,6 +120,19 @@ pub enum ApiResponseCapacity {
     },
 }
 
+impl ApiResponseCapacity {
+    /// Transfers finite admission without changing its reservation or measurement policy.
+    /// Subscription capacity is a handler-contract error, rejected before domain work.
+    pub fn into_finite(self) -> Result<FiniteResponseCapacity> {
+        match self {
+            Self::Finite(capacity) => Ok(capacity),
+            Self::Subscription { .. } => Err(ApiError::Backend(
+                "finite handler requires finite response admission".into(),
+            )),
+        }
+    }
+}
+
 /// Finite response storage. Reads admit exact payload storage after measuring;
 /// mutations and incoming responses can carry an already acquired maximum.
 #[derive(Debug)]
@@ -265,9 +278,18 @@ impl fmt::Debug for ApiAdmission {
 /// Transport-independent lookup and admission for trusted connections.
 pub trait ApiDispatch: fmt::Debug + Send + Sync + 'static {
     /// Admits using registered metadata and an authenticated origin.
-    fn admit(&self, operation: &OperationId, origin: CallOrigin) -> Result<Box<dyn ApiInvocation>>;
-    /// Returns the bounded currently registered domain contracts for negotiation.
-    fn operations(&self) -> Vec<OperationSpec>;
+    fn admit(
+        &self,
+        operation: &crate::OperationCall,
+        origin: CallOrigin,
+    ) -> Result<Box<dyn ApiInvocation>>;
+    /// Borrows a lane pool without admitting or executing an operation.
+    fn input_budget(&self, class: OperationClass) -> ByteBudget;
+    /// Reads current policy after access checking; denied keys are unknown.
+    /// Callers must still invoke `admit` to execute the operation.
+    fn operation(&self, key: &crate::OperationKey, origin: &CallOrigin) -> Result<OperationSpec>;
+    /// Returns current contracts, or a lookup/shutdown error rather than an empty catalog.
+    fn operations(&self) -> Result<Vec<OperationSpec>>;
 }
 
 /// Domain-registration lifetime implemented by a registry provider.

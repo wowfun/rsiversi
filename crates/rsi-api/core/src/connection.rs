@@ -4,7 +4,8 @@ use rsi_api_protocol::{
     ApiRegistrar, ApiRegistrarContract, ApiRegistration, ApiResponseCapacity, CallOrigin,
     CallerIdentity, ConnectionDescription, ConnectionDescriptionContract, ConnectionHello,
     EndpointId, EndpointIdentityContract, HostEpoch, HostGenerationContract, OperationCatalog,
-    Result, RetainedBytes, caller_operation, describe_operation, operations_operation,
+    Result, RetainedBytes, caller_operation, describe_operation, operation_operation,
+    operations_operation,
 };
 use rsi_meta::{ActivationPlan, ConfigValue, MetaError, PluginFactory, PreparedActivation};
 use serde::Deserialize;
@@ -25,7 +26,7 @@ impl ConnectionApi {
         host_epoch: HostEpoch,
     ) -> Result<Self> {
         let description = Arc::new(ConnectionDescription {
-            wire_version: 1,
+            wire_version: rsi_api_protocol::API_WIRE_VERSION,
             endpoint_id,
             host_epoch,
         });
@@ -33,12 +34,24 @@ impl ConnectionApi {
             describe_operation(),
             Arc::new(Describe((*description).clone())),
         )?;
-        let operations =
-            registrar.register(operations_operation(), Arc::new(Operations(dispatch)))?;
+        let operation = registrar.register(
+            operation_operation(),
+            Arc::new(Operations {
+                dispatch: dispatch.clone(),
+                single: true,
+            }),
+        )?;
+        let operations = registrar.register(
+            operations_operation(),
+            Arc::new(Operations {
+                dispatch,
+                single: false,
+            }),
+        )?;
         let caller = registrar.register(caller_operation(), Arc::new(Caller))?;
         Ok(Self {
             description,
-            registrations: vec![describe, operations, caller],
+            registrations: vec![describe, operation, operations, caller],
         })
     }
     /// Clones the immutable identity shared by all listeners of this generation.
@@ -115,7 +128,7 @@ impl ApiHandler for Describe {
     ) -> Result<ApiOutput> {
         let hello: ConnectionHello = serde_json::from_slice(input.as_bytes())
             .map_err(|_| ApiError::Invalid("invalid handshake".into()))?;
-        if hello.wire_version != 1
+        if hello.wire_version != rsi_api_protocol::API_WIRE_VERSION
             || hello
                 .expected_endpoint
                 .as_ref()
@@ -123,11 +136,7 @@ impl ApiHandler for Describe {
         {
             return Err(ApiError::Unavailable);
         }
-        let ApiResponseCapacity::Finite(reservation) = output else {
-            return Err(ApiError::Backend(
-                "invalid connection response class".into(),
-            ));
-        };
+        let reservation = output.into_finite()?;
         Ok(ApiOutput::Reply(ApiMessage {
             json: reservation.encode(&self.0)?,
             binary: None,
@@ -157,11 +166,7 @@ impl ApiHandler for Caller {
                 device_id: device.id,
             },
         };
-        let ApiResponseCapacity::Finite(reservation) = output else {
-            return Err(ApiError::Backend(
-                "invalid connection response class".into(),
-            ));
-        };
+        let reservation = output.into_finite()?;
         Ok(ApiOutput::Reply(ApiMessage {
             json: reservation.encode(&identity)?,
             binary: None,
@@ -170,7 +175,10 @@ impl ApiHandler for Caller {
 }
 
 #[derive(Debug)]
-struct Operations(Arc<dyn ApiDispatch>);
+struct Operations {
+    dispatch: Arc<dyn ApiDispatch>,
+    single: bool,
+}
 #[async_trait]
 impl ApiHandler for Operations {
     async fn invoke(
@@ -179,17 +187,21 @@ impl ApiHandler for Operations {
         input: RetainedBytes,
         output: ApiResponseCapacity,
     ) -> Result<ApiOutput> {
-        let _: Empty = serde_json::from_slice(input.as_bytes())
-            .map_err(|_| ApiError::Invalid("operations expects an empty object".into()))?;
-        let ApiResponseCapacity::Finite(reservation) = output else {
-            return Err(ApiError::Backend(
-                "invalid connection response class".into(),
-            ));
+        let query: rsi_api_protocol::OperationsQuery = serde_json::from_slice(input.as_bytes())
+            .map_err(|_| ApiError::Invalid("invalid operations query".into()))?;
+        if self.single && query.key.is_none() {
+            return Err(ApiError::Invalid("operation query requires a key".into()));
+        }
+        let operations = if let Some(key) = query.key {
+            key.validate()?;
+            vec![self.dispatch.operation(&key, &context.origin)?]
+        } else {
+            self.dispatch.operations()?
         };
+        let reservation = output.into_finite()?;
         Ok(ApiOutput::Reply(ApiMessage {
             json: reservation.encode(&OperationCatalog::new(
-                self.0
-                    .operations()
+                operations
                     .into_iter()
                     .filter(|operation| operation.access.permits(&context.origin))
                     .collect(),

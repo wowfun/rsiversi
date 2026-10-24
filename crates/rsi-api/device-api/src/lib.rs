@@ -134,15 +134,9 @@ pub struct DeviceClient {
     api: Arc<dyn ApiClient>,
 }
 impl DeviceClient {
-    /// Requires all exact local-only operation descriptors before use.
-    pub fn new(api: Arc<dyn ApiClient>) -> Result<Self> {
-        if !["register", "list", "revoke"]
-            .iter()
-            .all(|name| api.operations().contains(&operation(name)))
-        {
-            return Err(ApiError::Unavailable);
-        }
-        Ok(Self { api })
+    /// Creates a proxy; optional operation availability is discovered separately.
+    pub fn new(api: Arc<dyn ApiClient>) -> Self {
+        Self { api }
     }
     /// Returns the endpoint identity to bind a new credential to its deployment.
     pub fn endpoint_id(&self) -> &rsi_api_protocol::EndpointId {

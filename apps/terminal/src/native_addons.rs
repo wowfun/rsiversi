@@ -20,7 +20,7 @@ impl Command {
 pub(crate) async fn run(api: Arc<dyn ApiClient>, command: Command, work: ApplicationWork) -> u8 {
     crate::document::run(
         async move {
-            let client = NativeAddonsClient::new(api)?;
+            let client = NativeAddonsClient::new(api);
             let receipt = match command {
                 Command::Refresh => client.refresh().await?,
             }.map_err(|error| ApiError::Backend(error.to_string()))?;

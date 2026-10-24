@@ -37,6 +37,67 @@ struct Harness {
     stop: CancellationToken,
     task: tokio::task::JoinHandle<Result<()>>,
 }
+
+#[tokio::test]
+async fn an_existing_connection_discovers_and_calls_replaced_routes_with_current_policy() {
+    let harness = Harness::start(false).await;
+    let client = harness.connect().await;
+    let local = spec("late", OperationClass::Data, OperationEffect::Read);
+    assert!(
+        !client
+            .operations()
+            .await
+            .unwrap()
+            .contains_all(&[local.key()])
+    );
+    let handler = Arc::new(Echo(AtomicUsize::new(0)));
+    let registration = harness
+        .registry
+        .register(local.clone(), handler.clone())
+        .unwrap();
+    assert!(
+        client
+            .operations()
+            .await
+            .unwrap()
+            .contains_all(&[local.key()])
+    );
+    client.call(&local, input(&client, &local)).await.unwrap();
+    registration.close().await;
+    assert!(
+        !client
+            .operations()
+            .await
+            .unwrap()
+            .contains_all(&[local.key()])
+    );
+    assert!(matches!(
+        client.call(&local, input(&client, &local)).await,
+        Err(ApiError::UnknownOperation)
+    ));
+    let mut policy = local.clone();
+    policy.class = OperationClass::Control;
+    policy.maximum_request_bytes = 512;
+    policy.maximum_response_bytes = 512;
+    let replacement = harness
+        .registry
+        .register(policy.clone(), handler.clone())
+        .unwrap();
+    assert_eq!(client.operation(&local.key()).await.unwrap(), policy);
+    client.call(&local, input(&client, &local)).await.unwrap();
+    assert_eq!(handler.0.load(Ordering::SeqCst), 2);
+    replacement.close().await;
+    policy.protocol.version += 1;
+    let incompatible = harness.registry.register(policy, handler.clone()).unwrap();
+    assert!(matches!(
+        client.call(&local, input(&client, &local)).await,
+        Err(ApiError::ProtocolMismatch)
+    ));
+    assert_eq!(handler.0.load(Ordering::SeqCst), 2);
+    incompatible.close().await;
+    client.close().await;
+    harness.close().await;
+}
 impl Harness {
     async fn start(tls: bool) -> Self {
         let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
@@ -314,7 +375,7 @@ async fn actual_tls_negotiation_binary_sse_and_client_retirement_preserve_the_re
     false_metadata.effect = OperationEffect::Mutation;
     assert!(matches!(
         client.call(&false_metadata, input(&client, &binary)).await,
-        Err(ApiError::Unavailable)
+        Err(ApiError::CallShapeMismatch)
     ));
     assert_eq!(echo.0.load(Ordering::SeqCst), 2);
     client.close().await;
@@ -522,14 +583,14 @@ async fn ordinary_client_plugin_withdraws_and_fences_escaped_capability_without_
     let operation = describe_operation();
     let input = client
         .input_budget(operation.class)
-        .copy(br#"{"wire_version":1}"#)
+        .copy(br#"{"wire_version":2}"#)
         .unwrap();
     client.call(&operation, input).await.unwrap();
     fiber.dispose().await;
     assert!(runtime.root().lookup_local::<ApiClientContract>().is_none());
     let input = client
         .input_budget(operation.class)
-        .copy(br#"{"wire_version":1}"#)
+        .copy(br#"{"wire_version":2}"#)
         .unwrap();
     assert!(matches!(
         client.call(&operation, input).await,

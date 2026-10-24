@@ -11,6 +11,12 @@ default = []
 test-support = []
 
 [dependencies]
+rsi-settings-api = { path = "../../rsi-settings/api" }
+rsi-session-api = { path = "../session-api" }
+rsi-ai-models-api = { path = "../../rsi-ai/models-api" }
+rsi-workspace-api = { path = "../../rsi-workspace/api" }
+rsi-acp-api = { path = "../../rsi-acp/api" }
+rsi-media-api = { path = "../../rsi-media/api" }
 rsi-automation-api = { path = "../automation-api" }
 rsi-directory-picker-api = { path = "../directory-picker-api" }
 async-stream.workspace = true

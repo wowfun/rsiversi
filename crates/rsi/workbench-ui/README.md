@@ -1,6 +1,18 @@
 # rsi-workbench-ui
 
+Discovery is advisory: a failed catalog refresh preserves previous capability
+hints and does not prevent authoritative reads. Selecting a plugin page reuses
+those hints; explicit Refresh updates them. Call admission remains authoritative.
+
+Plugin observations remain available in read-only catalogs. Their `actions` list
+advertises each exact optional command separately; renderers disable missing
+actions without hiding the corresponding observations. Refresh reads current
+registrations, including replacements in the same Host generation.
+
 Plugin status guidance includes the last completed Host update separately from current health; its observation revision fences pagination. Polling and Busy admission do not manufacture completed attempts.
+Transient discovery failures preserve the last successful capability catalog.
+An initial discovery failure publishes an unavailable feature with a diagnostic;
+an explicit refresh can recover it without reactivating the application.
 
 An automatic full navigation refresh already supplies the newest cursor and skips
 the redundant head comparison query in that round.
@@ -8,7 +20,9 @@ the redundant head comparison query in that round.
 Navigation observes the bounded attention API with at most one poll or explicit
 navigation operation in flight. An unchanged page backs off from one to eight
 seconds; a local invalidation or changed page resets that delay. A failed refresh
-retains the last page with an explicit stale-state notice. Explicit reading
+retains the last page with an explicit stale-state notice. A typed missing, retiring
+or incompatible operation response clears it. Each poll performs only the read;
+discovery does not precede individual reads. Explicit reading
 acknowledgments are retained operations and never retried after uncertain results.
 
 Saving a model requires a string deployment identity in its provider definition

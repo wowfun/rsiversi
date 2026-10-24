@@ -8,7 +8,7 @@ use std::sync::Mutex;
 #[derive(Debug)]
 struct Controls {
     description: ConnectionDescription,
-    operations: Vec<OperationSpec>,
+    operations: Mutex<Vec<OperationSpec>>,
     calls: Mutex<Vec<String>>,
     release: tokio::sync::Semaphore,
 }
@@ -17,8 +17,8 @@ impl ApiClient for Controls {
     fn description(&self) -> &ConnectionDescription {
         &self.description
     }
-    fn operations(&self) -> &[OperationSpec] {
-        &self.operations
+    async fn operations(&self) -> rsi_api_protocol::Result<rsi_api_protocol::OperationCatalog> {
+        rsi_api_protocol::OperationCatalog::new(self.operations.lock().unwrap().clone())
     }
     fn input_budget(&self, _: OperationClass) -> ByteBudget {
         ByteBudget::default()
@@ -51,15 +51,15 @@ async fn dismissed_control_survives_new_actions_and_attachment_until_its_receipt
     let (mut client, _, runtime, surface) = client().await;
     let api = Arc::new(Controls {
         description: ConnectionDescription {
-            wire_version: 1,
+            wire_version: rsi_api_protocol::API_WIRE_VERSION,
             endpoint_id: EndpointId::from_bytes([1; 16]),
             host_epoch: HostEpoch::from_bytes([2; 16]),
         },
-        operations: rsi_automation_api::operations(),
+        operations: Mutex::new(rsi_automation_api::operations()),
         calls: Mutex::new(vec![]),
         release: tokio::sync::Semaphore::new(0),
     });
-    client.automation = Some(rsi_automation_api::Client::new(api.clone()).unwrap());
+    client.automation = Some(rsi_automation_api::Client::new(api.clone()));
     client.automation_request(rsi_automation_api::Request::Resume {
         id: "1".into(),
         request_id: "retained-control".into(),
@@ -112,15 +112,15 @@ async fn opening_unrelated_detail_retires_the_inflight_automation_read() {
     let (mut client, _, runtime, surface) = client().await;
     let api = Arc::new(Controls {
         description: ConnectionDescription {
-            wire_version: 1,
+            wire_version: rsi_api_protocol::API_WIRE_VERSION,
             endpoint_id: EndpointId::from_bytes([1; 16]),
             host_epoch: HostEpoch::from_bytes([2; 16]),
         },
-        operations: rsi_automation_api::operations(),
+        operations: Mutex::new(rsi_automation_api::operations()),
         calls: Mutex::new(vec![]),
         release: tokio::sync::Semaphore::new(0),
     });
-    client.automation = Some(rsi_automation_api::Client::new(api.clone()).unwrap());
+    client.automation = Some(rsi_automation_api::Client::new(api.clone()));
     client.automation_request(super::super::automation::list());
     {
         let mut work = Box::pin(client.tasks.next());
@@ -195,15 +195,15 @@ async fn busy_automation_read_preserves_the_existing_detail_instead_of_loading_f
     let (mut client, _, runtime, surface) = client().await;
     let api = Arc::new(Controls {
         description: ConnectionDescription {
-            wire_version: 1,
+            wire_version: rsi_api_protocol::API_WIRE_VERSION,
             endpoint_id: EndpointId::from_bytes([1; 16]),
             host_epoch: HostEpoch::from_bytes([2; 16]),
         },
-        operations: rsi_automation_api::operations(),
+        operations: Mutex::new(rsi_automation_api::operations()),
         calls: Mutex::new(vec![]),
         release: tokio::sync::Semaphore::new(0),
     });
-    client.automation = Some(rsi_automation_api::Client::new(api.clone()).unwrap());
+    client.automation = Some(rsi_automation_api::Client::new(api.clone()));
     client.state.open_detail("Existing result".into());
     client
         .exports
@@ -258,5 +258,61 @@ async fn protected_question_draft_remains_local_without_dispatch() {
     assert!(client.tasks.is_empty() && handle.answers.lock().unwrap().is_empty());
     assert_eq!(client.state.answer.as_ref().unwrap().editor.text(), "1");
     surface.stop().await;
+    assert!(runtime.shutdown().await.is_clean());
+}
+
+#[derive(Debug)]
+struct Connection(Arc<Controls>);
+#[async_trait::async_trait]
+impl rsi_meta::PluginFactory for Connection {
+    fn prepare(&self, _: &rsi_meta::ConfigValue) -> rsi_meta::Result<rsi_meta::PreparedActivation> {
+        Ok(rsi_meta::PreparedActivation::new(serde_json::Value::Null))
+    }
+    async fn activate(&self, plan: rsi_meta::ActivationPlan) -> rsi_meta::Result<()> {
+        plan.context()
+            .provide_local::<rsi_api_protocol::ApiClientContract>(self.0.clone())?;
+        Ok(())
+    }
+}
+#[tokio::test]
+async fn feature_clients_do_not_wait_for_advisory_discovery() {
+    let runtime = rsi_meta::Runtime::default();
+    let context = runtime.root();
+    let api = Arc::new(Controls {
+        description: ConnectionDescription {
+            wire_version: rsi_api_protocol::API_WIRE_VERSION,
+            endpoint_id: EndpointId::from_bytes([1; 16]),
+            host_epoch: HostEpoch::from_bytes([2; 16]),
+        },
+        operations: Mutex::new(
+            rsi_automation_api::operations()
+                .into_iter()
+                .filter(|spec| spec.id.name() == "status")
+                .collect(),
+        ),
+        calls: Mutex::new(vec![]),
+        release: tokio::sync::Semaphore::new(0),
+    });
+    let _owner = context
+        .apply(
+            rsi_meta::ResolvedFactory::linked(
+                "connection",
+                "fixture",
+                rsi_meta::UpdateMode::RestartRequired,
+                Arc::new(Connection(api.clone())),
+            ),
+            serde_json::Value::Null,
+        )
+        .await
+        .unwrap();
+    assert!(super::super::feature_api(&context).is_some());
+    *api.operations.lock().unwrap() = rsi_automation_api::operations();
+    assert!(super::super::feature_api(&context).is_some());
+    api.operations.lock().unwrap().clear();
+    assert!(super::super::feature_api(&context).is_some());
+    assert!(
+        api.calls.lock().unwrap().is_empty(),
+        "obtaining a local client must not execute a remote operation"
+    );
     assert!(runtime.shutdown().await.is_clean());
 }

@@ -351,9 +351,9 @@ async fn http_description(address: std::net::SocketAddr, token: Option<&str>) ->
     use tokio::io::{AsyncReadExt as _, AsyncWriteExt as _};
     tokio::time::timeout(std::time::Duration::from_secs(5), async {
         let mut stream = tokio::net::TcpStream::connect(address).await.unwrap();
-        let body = r#"{"wire_version":1,"expected_endpoint":null}"#;
+        let body = r#"{"wire_version":2,"expected_endpoint":null}"#;
         let auth = token.map_or_else(String::new, |token| format!("Authorization: Bearer {token}\r\n"));
-        let request = format!("POST /api/v1/connection/describe/1 HTTP/1.1\r\nHost: 127.0.0.1\r\n{auth}Content-Type: application/json\r\nX-Rsi-Wire-Version: 1\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{body}", body.len());
+        let request = format!("POST /api/v2/rsi-api-protocol/4/connection/describe/1/read HTTP/1.1\r\nHost: 127.0.0.1\r\n{auth}Content-Type: application/json\r\nX-Rsi-Wire-Version: 2\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{body}", body.len());
         stream.write_all(request.as_bytes()).await.unwrap();
         let mut response = Vec::new();
         stream.take(64 * 1024).read_to_end(&mut response).await.unwrap();
@@ -508,10 +508,13 @@ async fn retained_service_observation_does_not_keep_native_ownership_after_shutd
         authentication.authenticate(&registered.token),
         Err(rsi_api_protocol::ApiError::Unavailable)
     ));
-    assert!(dispatch.operations().is_empty());
+    assert!(matches!(
+        dispatch.operations(),
+        Err(rsi_api_protocol::ApiError::Unavailable)
+    ));
     assert!(matches!(
         dispatch.admit(
-            &rsi_api_protocol::describe_operation().id,
+            &rsi_api_protocol::describe_operation().call(),
             rsi_api_protocol::CallOrigin::Local
         ),
         Err(rsi_api_protocol::ApiError::Unavailable)

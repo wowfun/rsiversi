@@ -247,21 +247,9 @@ pub struct NavigationClient {
     api: Arc<dyn ApiClient>,
 }
 impl NavigationClient {
-    /// Requires exact navigation operations.
-    pub fn new(api: Arc<dyn ApiClient>) -> Result<Self> {
-        if [
-            NavigationOperation::Query,
-            NavigationOperation::Pinned,
-            NavigationOperation::Replace,
-            NavigationOperation::OrderSeed,
-            NavigationOperation::Summaries,
-        ]
-        .into_iter()
-        .any(|operation| !api.operations().contains(&operation.spec()))
-        {
-            return Err(ApiError::Unavailable);
-        }
-        Ok(Self { api })
+    /// Creates a typed proxy; availability is resolved when each operation is called.
+    pub fn new(api: Arc<dyn ApiClient>) -> Self {
+        Self { api }
     }
     /// Reads one page, validating remote bounds and query/Host continuation identity.
     pub async fn query(

@@ -7,6 +7,7 @@
 mod client;
 mod plugin;
 mod wire;
+pub use wire::Operation;
 
 pub use client::MediaClient;
 pub use plugin::{MediaApiFactory, MediaClientFactory};
@@ -18,7 +19,7 @@ use rsi_api_protocol::{
 };
 use rsi_media_protocol::{MAXIMUM_IMAGE_DESCRIPTOR_BYTES, Media, MediaRef};
 use std::sync::Arc;
-use wire::{Operation, map_failure};
+use wire::map_failure;
 
 #[derive(Debug)]
 struct Handler {
@@ -34,9 +35,7 @@ impl ApiHandler for Handler {
         input: RetainedBytes,
         output: ApiResponseCapacity,
     ) -> rsi_api_protocol::Result<ApiOutput> {
-        let ApiResponseCapacity::Finite(mut capacity) = output else {
-            return Err(ApiError::Backend("finite Media admission required".into()));
-        };
+        let mut capacity = output.into_finite()?;
         match self.operation {
             Operation::Import => {
                 let (source, options) = wire::parse_import(&input.into_bytes())?;

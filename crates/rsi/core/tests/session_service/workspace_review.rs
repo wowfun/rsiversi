@@ -51,7 +51,7 @@ async fn workspace_review_api_waits_for_real_shell_work_and_preserves_summaries_
     let index = std::fs::read(fixture.workspace.join(".git/index")).unwrap();
     let head = std::fs::read(fixture.workspace.join(".git/HEAD")).unwrap();
     let daemon = DaemonFixture::new(&fixture).await;
-    let client = Client::new(daemon.connection.api_client()).unwrap();
+    let client = Client::new(daemon.connection.api_client());
     let settings = daemon.running.settings_access().unwrap();
     let current = settings.read("rsi.agent").await.unwrap();
     let mut value = current.value.clone();
@@ -239,7 +239,7 @@ async fn workspace_review_api_waits_for_real_shell_work_and_preserves_summaries_
     drop((client, handle));
     daemon.shutdown().await;
     let daemon = DaemonFixture::new(&fixture).await;
-    let client = Client::new(daemon.connection.api_client()).unwrap();
+    let client = Client::new(daemon.connection.api_client());
     let Reply::Summaries { epoch, items, .. } = client
         .call(Request::List { scope, after: None })
         .await

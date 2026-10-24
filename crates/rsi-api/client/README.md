@@ -66,8 +66,9 @@ do not duplicate body decoding or error-status classification.
 
 A non-HTTP transport that has already authenticated and negotiated its provider
 may construct `ClientConnection::from_negotiated` with that exact immutable
-connection description and operation catalog. The constructor validates the
-shared wire version and required negotiation descriptors; the transport owns the
+connection description. The constructor validates the shared wire version; typed
+clients discover optional operations explicitly and admit each call against the
+current registration. The transport owns the
 proof that those values belong to its captured provider generation. It uses the
 same call slots, receiving/retained pools, owned mutation jobs and unpolled-stream
 retirement as ordinary connection negotiation. Portable adapters use this seam;

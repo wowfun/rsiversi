@@ -6,6 +6,171 @@ use rsi_api_protocol::{
 use rsi_configuration_api::*;
 use rsi_meta::Execution;
 use std::collections::VecDeque;
+
+#[derive(Debug)]
+struct ChangingCatalog {
+    inner: Arc<Remote>,
+    operations: Mutex<Vec<OperationSpec>>,
+    failed: std::sync::atomic::AtomicBool,
+}
+#[async_trait]
+impl ApiClient for ChangingCatalog {
+    fn description(&self) -> &ConnectionDescription {
+        self.inner.description()
+    }
+    async fn operations(&self) -> rsi_api_protocol::Result<rsi_api_protocol::OperationCatalog> {
+        if self.failed.load(std::sync::atomic::Ordering::Relaxed) {
+            return Err(ApiError::Capacity);
+        }
+        rsi_api_protocol::OperationCatalog::new(self.operations.lock().unwrap().clone())
+    }
+    fn input_budget(&self, class: OperationClass) -> ByteBudget {
+        self.inner.input_budget(class)
+    }
+    async fn call(
+        &self,
+        operation: &OperationSpec,
+        input: RetainedBytes,
+    ) -> rsi_api_protocol::Result<ApiOutput> {
+        if operation != &ConfigurationOperation::Plugins.spec() {
+            return Err(ApiError::UnknownOperation);
+        }
+        self.inner.call(operation, input).await
+    }
+}
+
+#[tokio::test]
+async fn refresh_hides_and_restores_optional_features_in_the_existing_workbench() {
+    let (mut owner, remote) = feature(vec![Ok(page(0, "1")), Ok(page(0, "2")), Ok(page(0, "3"))]);
+    let changing = Arc::new(ChangingCatalog {
+        inner: remote,
+        operations: Mutex::new(vec![]),
+        failed: std::sync::atomic::AtomicBool::new(false),
+    });
+    let mutable = Arc::get_mut(&mut owner).unwrap();
+    mutable.api = changing.clone();
+    mutable.client = ConfigurationClient::new(changing.clone());
+    for present in [true, false, true] {
+        *changing.operations.lock().unwrap() = if present {
+            vec![ExaOperation::Status.spec()]
+        } else {
+            vec![]
+        };
+        owner.command(PluginsCommand::Refresh).await.unwrap();
+        assert_eq!(owner.snapshot().exa_available, present);
+        assert!(
+            owner.snapshot().actions.is_empty(),
+            "read availability does not imply writes"
+        );
+        assert!(!owner.snapshot().ssh.available);
+    }
+    owner.work.close().await;
+}
+#[tokio::test]
+async fn refresh_updates_individual_write_actions_without_hiding_read_only_status() {
+    let (mut owner, remote) = feature(vec![Ok(page(0, "1")), Ok(page(0, "2"))]);
+    let changing = Arc::new(ChangingCatalog {
+        inner: remote,
+        operations: Mutex::new(vec![ExaOperation::Status.spec(), ExaOperation::Set.spec()]),
+        failed: std::sync::atomic::AtomicBool::new(false),
+    });
+    let mutable = Arc::get_mut(&mut owner).unwrap();
+    mutable.api = changing.clone();
+    mutable.client = ConfigurationClient::new(changing.clone());
+    owner.command(PluginsCommand::Refresh).await.unwrap();
+    assert!(owner.snapshot().exa_available);
+    assert_eq!(owner.snapshot().actions, vec!["exa_set"]);
+    changing
+        .operations
+        .lock()
+        .unwrap()
+        .retain(|spec| spec == &ExaOperation::Status.spec());
+    owner.command(PluginsCommand::Refresh).await.unwrap();
+    assert!(owner.snapshot().exa_available);
+    assert!(owner.snapshot().actions.is_empty());
+    owner.work.close().await;
+}
+#[tokio::test]
+async fn discovery_failure_preserves_capabilities_and_refresh_recovers() {
+    let (mut owner, remote) = feature(vec![Ok(page(0, "1")), Ok(page(0, "2")), Ok(page(0, "3"))]);
+    let changing = Arc::new(ChangingCatalog {
+        inner: remote,
+        operations: Mutex::new(vec![ExaOperation::Status.spec()]),
+        failed: std::sync::atomic::AtomicBool::new(false),
+    });
+    let mutable = Arc::get_mut(&mut owner).unwrap();
+    mutable.api = changing.clone();
+    mutable.client = ConfigurationClient::new(changing.clone());
+    owner.command(PluginsCommand::Refresh).await.unwrap();
+    changing
+        .failed
+        .store(true, std::sync::atomic::Ordering::Relaxed);
+    owner.command(PluginsCommand::Refresh).await.unwrap();
+    assert!(owner.snapshot().exa_available);
+    assert!(owner.snapshot().page.is_some());
+    changing
+        .failed
+        .store(false, std::sync::atomic::Ordering::Relaxed);
+    changing.operations.lock().unwrap().clear();
+    owner.command(PluginsCommand::Refresh).await.unwrap();
+    assert!(!owner.snapshot().exa_available);
+    owner.work.close().await;
+}
+#[derive(Debug)]
+struct DiscoveryConnection(Arc<ChangingCatalog>);
+#[async_trait]
+impl PluginFactory for DiscoveryConnection {
+    fn prepare(&self, _: &ConfigValue) -> rsi_meta::Result<PreparedActivation> {
+        Ok(PreparedActivation::new(ConfigValue::Null))
+    }
+    async fn activate(&self, plan: ActivationPlan) -> rsi_meta::Result<()> {
+        plan.context()
+            .provide_local::<rsi_api_protocol::ApiClientContract>(self.0.clone())?;
+        Ok(())
+    }
+}
+#[tokio::test]
+async fn factory_survives_initial_discovery_failure_and_refresh_recovers() {
+    let (fixture, remote) = feature(vec![Ok(page(0, "1"))]);
+    let api = Arc::new(ChangingCatalog {
+        inner: remote,
+        operations: Mutex::new(vec![ExaOperation::Status.spec()]),
+        failed: std::sync::atomic::AtomicBool::new(true),
+    });
+    let runtime = rsi_meta::Runtime::default();
+    let root = runtime.root();
+    for (id, factory) in [
+        (
+            "connection",
+            Arc::new(DiscoveryConnection(api.clone())) as Arc<dyn PluginFactory>,
+        ),
+        ("ui", Arc::new(rsi_ui::UiFactory)),
+        ("plugins", Arc::new(PluginsFeatureFactory)),
+    ] {
+        let owner = root
+            .apply(
+                rsi_meta::ResolvedFactory::linked(
+                    id,
+                    "fixture",
+                    rsi_meta::UpdateMode::RestartRequired,
+                    factory,
+                ),
+                ConfigValue::Null,
+            )
+            .await
+            .unwrap();
+        assert_eq!(owner.snapshot().state, rsi_meta::FiberState::Active);
+    }
+    let feature = root.lookup_local::<PluginsFeatureContract>().unwrap();
+    assert!(feature.snapshot().diagnostic.is_some());
+    api.failed
+        .store(false, std::sync::atomic::Ordering::Relaxed);
+    feature.command(PluginsCommand::Refresh).await.unwrap();
+    assert!(feature.snapshot().exa_available);
+    assert!(feature.snapshot().diagnostic.is_none());
+    feature.work.close().await;
+    fixture.work.close().await;
+}
 #[derive(Debug)]
 struct Remote {
     description: ConnectionDescription,
@@ -18,8 +183,8 @@ impl ApiClient for Remote {
     fn description(&self) -> &ConnectionDescription {
         &self.description
     }
-    fn operations(&self) -> &[OperationSpec] {
-        &self.operations
+    async fn operations(&self) -> rsi_api_protocol::Result<rsi_api_protocol::OperationCatalog> {
+        rsi_api_protocol::OperationCatalog::new(self.operations.clone())
     }
     fn input_budget(&self, _: OperationClass) -> ByteBudget {
         ByteBudget::default()
@@ -71,7 +236,7 @@ fn feature(
 ) -> (Arc<PluginsFeature>, Arc<Remote>) {
     let remote = Arc::new(Remote {
         description: ConnectionDescription {
-            wire_version: 1,
+            wire_version: rsi_api_protocol::API_WIRE_VERSION,
             endpoint_id: EndpointId::from_bytes([1; 16]),
             host_epoch: HostEpoch::from_bytes([2; 16]),
         },
@@ -84,14 +249,16 @@ fn feature(
     });
     (
         Arc::new(PluginsFeature {
-            client: ConfigurationClient::new(remote.clone()).unwrap(),
+            client: ConfigurationClient::new(remote.clone()),
             mcp: None,
             mcp_ssh: None,
             exa: None,
             leaves: None,
             ssh: None,
-            ssh_trust: false,
-            leaf_grants: false,
+            api: remote.clone(),
+            capabilities: Mutex::new(crate::plugins::PluginCapabilities::new(
+                &rsi_api_protocol::OperationCatalog::new(remote.operations.clone()).unwrap(),
+            )),
             state: Mutex::default(),
             work: Work::new(Execution::native(tokio::runtime::Handle::current())),
         }),
@@ -156,8 +323,8 @@ impl ApiClient for CredentialRemote {
     fn description(&self) -> &ConnectionDescription {
         &self.description
     }
-    fn operations(&self) -> &[OperationSpec] {
-        &self.operations
+    async fn operations(&self) -> rsi_api_protocol::Result<rsi_api_protocol::OperationCatalog> {
+        rsi_api_protocol::OperationCatalog::new(self.operations.clone())
     }
     fn input_budget(&self, _: OperationClass) -> ByteBudget {
         ByteBudget::default()
@@ -195,7 +362,7 @@ async fn abandoned_exa_write_holds_admission_clears_observation_and_is_not_repla
     let (configuration, _) = feature(vec![]);
     let remote = Arc::new(CredentialRemote {
         description: ConnectionDescription {
-            wire_version: 1,
+            wire_version: rsi_api_protocol::API_WIRE_VERSION,
             endpoint_id: EndpointId::from_bytes([1; 16]),
             host_epoch: HostEpoch::from_bytes([2; 16]),
         },
@@ -210,11 +377,13 @@ async fn abandoned_exa_write_holds_admission_clears_observation_and_is_not_repla
         client: configuration.client.clone(),
         mcp: None,
         mcp_ssh: None,
-        exa: Some(ExaClient::new(remote.clone()).unwrap()),
+        exa: Some(ExaClient::new(remote.clone())),
         leaves: None,
         ssh: None,
-        ssh_trust: false,
-        leaf_grants: false,
+        api: remote.clone(),
+        capabilities: Mutex::new(crate::plugins::PluginCapabilities::new(
+            &rsi_api_protocol::OperationCatalog::new(remote.operations.clone()).unwrap(),
+        )),
         state: Mutex::default(),
         work: Work::new(Execution::native(tokio::runtime::Handle::current())),
     });

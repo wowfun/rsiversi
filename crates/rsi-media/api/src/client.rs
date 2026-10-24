@@ -10,15 +10,9 @@ pub struct MediaClient {
     api: Arc<dyn ApiClient>,
 }
 impl MediaClient {
-    /// Requires the exact import/read contracts before exposing Media capability.
-    pub fn new(api: Arc<dyn ApiClient>) -> rsi_api_protocol::Result<Self> {
-        if Operation::ALL
-            .iter()
-            .any(|operation| !api.operations().contains(&operation.spec()))
-        {
-            return Err(ApiError::Unavailable);
-        }
-        Ok(Self { api })
+    /// Creates a typed proxy; availability is resolved when each operation is called.
+    pub fn new(api: Arc<dyn ApiClient>) -> Self {
+        Self { api }
     }
 }
 #[async_trait]

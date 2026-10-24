@@ -8,8 +8,8 @@ read media, resolve credentials or create a Session. The operation has a closed
 4 KiB request and a 1 MiB response bound, enough for all 256 bounded ModelRefs
 including JSON escaping. It uses read ownership in the Data lane.
 
-The ordinary client plugin requires the exact negotiated operation and publishes
-the same read-only Models contract. It checks count, ordering and exclusive cursor
+The ordinary client plugin publishes a proxy for the same read-only Models contract;
+each call uses the current registration. It checks count, ordering and exclusive cursor
 progress against the requested page. API failure classifications remain intact.
 Neither plugin imports native routers, provider implementations or rendering.
 

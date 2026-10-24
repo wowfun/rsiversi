@@ -59,7 +59,7 @@ export async function verifyLocalLaunch(binary, assets, engines = [['chromium', 
         assert.equal(await page.locator('#login').isVisible(), false);
       };
       const identity = page => page.evaluate(async () => {
-        const response = await fetch('/api/v1/browser-bootstrap', {method:'POST',headers:{'X-Rsi-Csrf':'1'}});
+        const response = await fetch('/api/v2/browser-bootstrap', {method:'POST',headers:{'X-Rsi-Csrf':'1'}});
         if (!response.ok) throw new Error('cookie recovery rejected');
         return response.json();
       });
@@ -91,7 +91,7 @@ export async function verifyLocalLaunch(binary, assets, engines = [['chromium', 
       assert.deepEqual(await identity(tab), first);
       // A valid existing cookie must not hide a definitive ticket rejection.
       let rejectedExchanges = 0, rejectedRecoveries = 0;
-      await context.route('**/api/v1/browser-bootstrap', async route => {
+      await context.route('**/api/v2/browser-bootstrap', async route => {
         if (route.request().headers()['x-rsi-launch-ticket']) rejectedExchanges++;
         else rejectedRecoveries++;
         await route.continue();
@@ -103,13 +103,13 @@ export async function verifyLocalLaunch(binary, assets, engines = [['chromium', 
       assert.equal(rejectedExchanges, 1);
       assert.equal(rejectedRecoveries, 0);
       await stale.close();
-      await context.unroute('**/api/v1/browser-bootstrap');
+      await context.unroute('**/api/v2/browser-bootstrap');
       for (const [status, code, message] of [
         [429, 'capacity', 'Local service is busy'],
         [409, 'generation_retired', 'Local service is shutting down'],
       ]) {
         let requests = 0;
-        await context.route('**/api/v1/browser-bootstrap', async route => {
+        await context.route('**/api/v2/browser-bootstrap', async route => {
           requests++;
           await route.fulfill({status, contentType:'application/json', body:JSON.stringify({code})});
         });
@@ -119,7 +119,7 @@ export async function verifyLocalLaunch(binary, assets, engines = [['chromium', 
         assert.equal(await rejected.locator('#workbench').isVisible(), false);
         assert.equal(requests, 1, 'a classified rejection must not attempt cookie recovery');
         await rejected.close();
-        await context.unroute('**/api/v1/browser-bootstrap');
+        await context.unroute('**/api/v2/browser-bootstrap');
       }
       // A consumed ticket cannot create a second authenticated browser.
       const stranger = await browser.newContext();
@@ -148,7 +148,7 @@ export async function verifyLocalLaunch(binary, assets, engines = [['chromium', 
       const restarted = await start();
       const reopened = await context.newPage();
       let exchanges = 0, recoveries = 0;
-      await context.route('**/api/v1/browser-bootstrap', async route => {
+      await context.route('**/api/v2/browser-bootstrap', async route => {
         if (route.request().headers()['x-rsi-launch-ticket']) {
           exchanges++;
           const response = await route.fetch();
@@ -164,7 +164,7 @@ export async function verifyLocalLaunch(binary, assets, engines = [['chromium', 
       await connected(reopened);
       assert.equal(exchanges, 1);
       assert.equal(recoveries, 1);
-      await context.unroute('**/api/v1/browser-bootstrap');
+      await context.unroute('**/api/v2/browser-bootstrap');
       assert.deepEqual(await identity(reopened), first);
       assert(JSON.parse(run(["run",'devices','configuration','list']).stdout).devices.includes(first.device_id));
       assert.equal(providerCalls, 0, 'configuration must not invoke a provider');

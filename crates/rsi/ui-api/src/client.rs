@@ -8,15 +8,9 @@ use std::sync::Arc;
 #[derive(Clone, Debug)]
 pub struct UiClient(Arc<dyn ApiClient>);
 impl UiClient {
-    /// Requires the exact owning operation policies before exposing any call.
-    pub fn new(api: Arc<dyn ApiClient>) -> Result<Self> {
-        if !crate::operations()
-            .iter()
-            .all(|spec| api.operations().contains(spec))
-        {
-            return Err(ApiError::Unavailable);
-        }
-        Ok(Self(api))
+    /// Creates a typed proxy; availability is resolved when each operation is called.
+    pub fn new(api: Arc<dyn ApiClient>) -> Self {
+        Self(api)
     }
     async fn call(
         &self,

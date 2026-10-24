@@ -10,7 +10,6 @@ use serde::{Deserialize, Serialize};
 use serde_json::{Value, json};
 use std::sync::Arc;
 
-const NAMES: [&str; 5] = ["runtime", "profile", "factories", "native", "workflows"];
 fn operation(name: &str) -> OperationSpec {
     OperationSpec {
         protocol: rsi_api_protocol::wire_contract!(),
@@ -109,15 +108,9 @@ impl InspectorApi {
 #[derive(Debug)]
 pub struct InspectorClient(Arc<dyn ApiClient>);
 impl InspectorClient {
-    /// Requires the complete exact local Inspector descriptor set.
-    pub fn new(api: Arc<dyn ApiClient>) -> Result<Self> {
-        if !NAMES
-            .iter()
-            .all(|name| api.operations().contains(&operation(name)))
-        {
-            return Err(ApiError::Unavailable);
-        }
-        Ok(Self(api))
+    /// Creates a typed proxy; availability is resolved when each operation is called.
+    pub fn new(api: Arc<dyn ApiClient>) -> Self {
+        Self(api)
     }
     async fn call<I: Serialize + Sync>(&self, name: &str, request: &I) -> Result<Value> {
         match call_json::<_, Value, Never>(self.0.as_ref(), &operation(name), request).await? {

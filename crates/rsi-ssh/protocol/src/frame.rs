@@ -261,6 +261,22 @@ impl Frame {
 mod tests {
     use super::*;
     #[test]
+    fn request_frame_has_the_reviewed_byte_order_and_header_layout() {
+        let frame = Frame::new(9, FrameKind::Request, 12, 0, true, b"{}".to_vec()).unwrap();
+        let expected = [
+            82, 83, 73, 1, 1, 1, 0, 0, 0, 0, 0, 0, 0, 0, 0, 9, 0, 0, 0, 0, 0, 0, 0, 12, 0, 0, 0, 2,
+            0, 0, 0, 0,
+        ];
+        assert_eq!(frame.encode_header(9).unwrap(), expected);
+        assert_eq!(
+            FrameHeader::decode(&expected, 9)
+                .unwrap()
+                .with_body(b"{}".to_vec())
+                .unwrap(),
+            frame
+        );
+    }
+    #[test]
     fn malformed_headers_reject_before_body_allocation_and_old_epochs_never_encode() {
         let frame = Frame::new(9, FrameKind::Request, 12, 0, true, b"{}".to_vec()).unwrap();
         let encoded = frame.encode_header(9).unwrap();

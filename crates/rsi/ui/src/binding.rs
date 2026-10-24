@@ -10,6 +10,8 @@ pub struct UiBusinessApi {
     pub scope: crate::ExportScope,
     /// API client already restricted by its owning domain to that target.
     pub client: Arc<dyn rsi_api_protocol::ApiClient>,
+    /// Fixed operation grants; discovery never expands this set.
+    pub operations: Arc<[rsi_api_protocol::OperationKey]>,
 }
 /// Target-supplied business grant; an ordinary global `ApiClient` is never a fallback.
 #[derive(Debug)]

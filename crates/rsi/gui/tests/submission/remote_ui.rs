@@ -10,6 +10,7 @@ use std::sync::atomic::{AtomicUsize, Ordering};
 // authenticated binding and device revocation are covered by the product fixture.
 #[derive(Debug)]
 struct Remote {
+    discovery_failed: std::sync::atomic::AtomicBool,
     description: ConnectionDescription,
     operations: Vec<OperationSpec>,
     budget: ByteBudget,
@@ -54,8 +55,11 @@ impl ApiClient for Remote {
     fn description(&self) -> &ConnectionDescription {
         &self.description
     }
-    fn operations(&self) -> &[OperationSpec] {
-        &self.operations
+    async fn operations(&self) -> rsi_api_protocol::Result<rsi_api_protocol::OperationCatalog> {
+        if self.discovery_failed.load(Ordering::SeqCst) {
+            return Err(ApiError::Capacity);
+        }
+        rsi_api_protocol::OperationCatalog::new(self.operations.clone())
     }
     fn input_budget(&self, _: OperationClass) -> ByteBudget {
         self.budget.clone()
@@ -128,13 +132,26 @@ async fn ready(app: &rsi_gui::GuiApplication, revision: u64) -> Value {
     .unwrap()
 }
 
+async fn assert_discovery_recovers(app: &Arc<rsi_gui::GuiApplication>, remote: &Remote) {
+    remote.discovery_failed.store(true, Ordering::SeqCst);
+    assert!(app.command(r#"{"action":"refresh"}"#).await.is_err());
+    assert_eq!(
+        sources::view(app)["has_remote_ui"],
+        true,
+        "discovery failure preserves last-known capabilities"
+    );
+    remote.discovery_failed.store(false, Ordering::SeqCst);
+    app.command(r#"{"action":"refresh"}"#).await.unwrap();
+}
+
 #[tokio::test]
 async fn remote_arbitrary_models_derive_scope_from_the_pane_and_never_replay_consumed_tickets() {
     let runtime = Runtime::default();
     let root = runtime.root();
     let remote = Arc::new(Remote {
+        discovery_failed: std::sync::atomic::AtomicBool::new(true),
         description: ConnectionDescription {
-            wire_version: 1,
+            wire_version: rsi_api_protocol::API_WIRE_VERSION,
             endpoint_id: EndpointId::from_bytes([1; 16]),
             host_epoch: HostEpoch::from_bytes([2; 16]),
         },
@@ -165,10 +182,20 @@ async fn remote_arbitrary_models_derive_scope_from_the_pane_and_never_replay_con
     let app = root
         .lookup_local::<rsi_gui::GuiApplicationContract>()
         .unwrap();
+    assert_eq!(sources::view(&app)["has_remote_ui"], false);
+    assert!(
+        sources::view(&app)["notice"]
+            .as_str()
+            .unwrap()
+            .contains("Refresh")
+    );
+    remote.discovery_failed.store(false, Ordering::SeqCst);
+    app.command(r#"{"action":"refresh"}"#).await.unwrap();
     app.command(r#"{"action":"create","pane":"main","workspace":"aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"}"#).await.unwrap();
     let view = sources::view(&app);
     let pane = &view["surfaces"]["main"];
     assert_eq!(view["has_remote_ui"], true);
+    assert_discovery_recovers(&app, &remote).await;
     let list = json!({"action":"remote_ui_list","pane":"main","generation":pane["generation"]})
         .to_string();
     for _ in 0..24 {
@@ -224,5 +251,49 @@ async fn remote_arbitrary_models_derive_scope_from_the_pane_and_never_replay_con
             assert_eq!(request["selections"][0]["scope"]["key"], pane["session"]);
         }
     }
+    assert!(runtime.shutdown().await.is_clean());
+}
+
+#[tokio::test]
+async fn workspace_refresh_reads_list_without_optional_order_seed() {
+    let runtime = Runtime::default();
+    let root = runtime.root();
+    let backend = Arc::new(Backend::default());
+    let remote = Arc::new(Remote {
+        discovery_failed: false.into(),
+        description: ConnectionDescription {
+            wire_version: rsi_api_protocol::API_WIRE_VERSION,
+            endpoint_id: EndpointId::from_bytes([1; 16]),
+            host_epoch: HostEpoch::from_bytes([2; 16]),
+        },
+        operations: vec![rsi_workspace_api::Operation::List.spec()],
+        budget: ByteBudget::default(),
+        sender: Mutex::new(None),
+        active: Arc::new(0.into()),
+        calls: Mutex::new(vec![]),
+    });
+    for (id, factory) in [
+        (
+            "providers",
+            Arc::new(Providers(backend.clone())) as Arc<dyn PluginFactory>,
+        ),
+        ("connection", Arc::new(Connection(remote))),
+        ("ui", Arc::new(rsi_ui::UiFactory)),
+        ("web", Arc::new(rsi_gui::GuiApplicationFactory)),
+    ] {
+        root.apply(
+            ResolvedFactory::linked(id, "fixture", UpdateMode::RestartRequired, factory),
+            Value::Null,
+        )
+        .await
+        .unwrap();
+    }
+    let app = root
+        .lookup_local::<rsi_gui::GuiApplicationContract>()
+        .unwrap();
+    let before = backend.workspace_lists.load(Ordering::SeqCst);
+    app.command(r#"{"action":"refresh"}"#).await.unwrap();
+    assert_eq!(backend.workspace_lists.load(Ordering::SeqCst), before + 1);
+    assert!(sources::view(&app)["catalog"]["workspace_order_seed"].is_null());
     assert!(runtime.shutdown().await.is_clean());
 }

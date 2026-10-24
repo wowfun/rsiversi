@@ -46,7 +46,9 @@ TCP accept failures retry after 100 ms without cancelling existing connections;
 shutdown and completed connection jobs remain observable during this backoff.
 
 The native HTTP adapter routes authenticated POST requests to exact registered
-operations at `/api/v1/<domain>/<name>/<version>`. Domain plugins own all business
+operations through the [shared OperationCall path codec](../protocol/README.md).
+The API v2 path carries protocol name/version, operation domain/name/version and
+call shape. Domain plugins own all business
 DTOs. Native clients use a bearer token; browser login transfers that token into
 an HttpOnly, SameSite=Strict cookie, with Secure enabled under TLS. Cookie calls
 require the exact configured Origin and `X-Rsi-Csrf: 1`. Every request checks the
@@ -149,10 +151,11 @@ release them. There is no reconnect or replay. The handshake/input deadline is
 subscriptions have no read deadline. TLS browser traffic continues to require
 HTTP/2 and does not use this loopback-only transport.
 
-`connection/describe/1` and `connection/operations/1` are ordinary registered read
+`connection/describe/1`, `connection/operations/1` and `connection/operation/1` are ordinary registered read
 operations owned by the independent API connection plugin. The HTTP listener
 consumes them and never registers or retires them. The former negotiates wire
-version and endpoint/generation identity;
+version and endpoint/generation identity; the single-key policy query stays available
+on Control when Data directory reads cannot be admitted;
 all other domain calls require the negotiated `X-Rsi-Host-Epoch`. Operation versions
 describe wire compatibility, not executable equality. Local automatic owner reuse
 retains its independent home authority, process identity, Host epoch and
@@ -192,7 +195,7 @@ The classification grants no API authority and never accepts request-authored
 CSP strings. Product asset providers own which exact paths receive each policy.
 
 An explicitly injected BrowserBootstrap capability enables the loopback-only
-`POST /api/v1/browser-bootstrap` route. It requires an empty body, exact Host and
+`POST /api/v2/browser-bootstrap` route. It requires an empty body, exact Host and
 Origin, and `X-Rsi-Csrf: 1`. A single bounded `X-Rsi-Launch-Ticket` header exchanges
 a one-use application ticket for a device cookie; without that header
 a valid cookie returns only EndpointId and DeviceId for recovery. Bearer

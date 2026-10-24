@@ -17,15 +17,9 @@ pub struct SessionFilesClient {
     api: Arc<dyn ApiClient>,
 }
 impl SessionFilesClient {
-    /// Require exact Files operations before exposing the capability.
-    pub fn new(api: Arc<dyn ApiClient>) -> rsi_api_protocol::Result<Self> {
-        if FilesOperation::ALL
-            .iter()
-            .any(|operation| !api.operations().contains(&operation.spec()))
-        {
-            return Err(ApiError::Unavailable);
-        }
-        Ok(Self { api })
+    /// Creates a typed proxy; availability is resolved when each operation is called.
+    pub fn new(api: Arc<dyn ApiClient>) -> Self {
+        Self { api }
     }
     async fn call<
         I: Input + Clone + PartialEq + Serialize + DeserializeOwned + Send + Sync,

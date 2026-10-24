@@ -12,25 +12,23 @@ use std::sync::Arc;
 struct LocalReads {
     dispatch: Arc<dyn ApiDispatch>,
     description: Arc<ConnectionDescription>,
-    operations: Vec<OperationSpec>,
+    operations: Vec<rsi_api_protocol::OperationKey>,
     input: ByteBudget,
 }
 
 pub(crate) fn client(
     dispatch: Arc<dyn ApiDispatch>,
     description: Arc<ConnectionDescription>,
-) -> Result<SessionFilesClient> {
+) -> SessionFilesClient {
     let operations = [
         FilesOperation::Open,
         FilesOperation::Read,
         FilesOperation::List,
         FilesOperation::Release,
     ]
-    .map(FilesOperation::spec)
+    .map(|op| op.spec().key())
     .to_vec();
-    let input = dispatch
-        .admit(&FilesOperation::Open.spec().id, CallOrigin::Local)?
-        .input_budget();
+    let input = dispatch.input_budget(OperationClass::Data);
     SessionFilesClient::new(Arc::new(LocalReads {
         dispatch,
         description,
@@ -44,20 +42,29 @@ impl ApiClient for LocalReads {
     fn description(&self) -> &ConnectionDescription {
         &self.description
     }
-    fn operations(&self) -> &[OperationSpec] {
-        &self.operations
+    async fn operations(&self) -> Result<rsi_api_protocol::OperationCatalog> {
+        rsi_api_protocol::OperationCatalog::new(
+            self.dispatch
+                .operations()?
+                .into_iter()
+                .filter(|spec| self.operations.contains(&spec.key()))
+                .collect(),
+        )
+    }
+    async fn operation(&self, key: &rsi_api_protocol::OperationKey) -> Result<OperationSpec> {
+        if !self.operations.contains(key) {
+            return Err(ApiError::Unauthorized);
+        }
+        self.dispatch.operation(key, &CallOrigin::Local)
     }
     fn input_budget(&self, _: OperationClass) -> ByteBudget {
         self.input.clone()
     }
     async fn call(&self, operation: &OperationSpec, input: RetainedBytes) -> Result<ApiOutput> {
-        if !self.operations.contains(operation) {
+        if !self.operations.contains(&operation.key()) {
             return Err(ApiError::Invalid("unnegotiated Files operation".into()));
         }
-        let invocation = self.dispatch.admit(&operation.id, CallOrigin::Local)?;
-        if invocation.spec() != operation {
-            return Err(ApiError::Invalid("Files operation contract changed".into()));
-        }
+        let invocation = self.dispatch.admit(&operation.call(), CallOrigin::Local)?;
         invocation.invoke(input).await
     }
 }

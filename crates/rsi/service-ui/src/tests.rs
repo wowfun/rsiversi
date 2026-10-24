@@ -22,8 +22,8 @@ impl ApiClient for Api {
     fn description(&self) -> &ConnectionDescription {
         &self.description
     }
-    fn operations(&self) -> &[OperationSpec] {
-        &self.operations
+    async fn operations(&self) -> rsi_api_protocol::Result<rsi_api_protocol::OperationCatalog> {
+        rsi_api_protocol::OperationCatalog::new(self.operations.clone())
     }
     fn input_budget(&self, _: OperationClass) -> ByteBudget {
         ByteBudget::default()
@@ -109,7 +109,7 @@ fn fixture(
     let api = Arc::new(Api {
         operations: rsi_ui_api::operations().to_vec(),
         description: ConnectionDescription {
-            wire_version: 1,
+            wire_version: rsi_api_protocol::API_WIRE_VERSION,
             endpoint_id: EndpointId::from_bytes([1; 16]),
             host_epoch: HostEpoch::from_bytes([2; 16]),
         },
@@ -125,7 +125,7 @@ fn fixture(
                 kind: "session".into(),
                 key: "actual-session".into(),
             },
-            client: UiClient::new(api.clone()).unwrap(),
+            client: UiClient::new(api.clone()),
             state: tokio::sync::Mutex::new(State::default()),
             published: std::sync::Mutex::new(None),
             stop: CancellationToken::new(),

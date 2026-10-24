@@ -210,7 +210,10 @@ fn decode_head(bytes: &[u8]) -> Result<Head> {
     let metadata: rsi_api_protocol::browser_stream::Head =
         serde_json::from_slice(bytes).map_err(|_| lost())?;
     let mut headers = http::HeaderMap::new();
-    headers.insert("x-rsi-wire-version", http::HeaderValue::from_static("1"));
+    headers.insert(
+        "x-rsi-wire-version",
+        http::HeaderValue::from(rsi_api_protocol::API_WIRE_VERSION),
+    );
     headers.insert("x-rsi-http-version", http::HeaderValue::from_static("1.1"));
     headers.insert(
         "x-rsi-endpoint-id",

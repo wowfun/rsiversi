@@ -3,8 +3,8 @@ use async_trait::async_trait;
 use futures_util::StreamExt as _;
 use rsi_api_protocol::{
     ApiClient, ApiError, ApiMessage, ApiOutput, ByteBudget, OperationCatalog, OperationClass,
-    OperationEffect, OperationId, OperationSpec, Result, RetainedBytes, describe_operation,
-    operations_operation,
+    OperationEffect, OperationKey, OperationSpec, Result, RetainedBytes, describe_operation,
+    operation_operation, operations_operation,
     portable::{Description, Header, MAXIMUM_DESCRIPTION_BYTES},
 };
 use rsi_meta::{Execution, InvocationContext, MetaError, ProviderChannel, ServiceEndpoint};
@@ -16,6 +16,7 @@ use tokio_util::{sync::CancellationToken, task::TaskTracker};
 pub(crate) struct Export {
     api: Mutex<Option<Arc<dyn ApiClient>>>,
     description: Description,
+    selected: Arc<[OperationKey]>,
     execution: Execution,
     scratch: ByteBudget,
     stop: CancellationToken,
@@ -25,31 +26,19 @@ pub(crate) struct Export {
 impl Export {
     pub fn new(
         api: Arc<dyn ApiClient>,
-        selected: &[OperationId],
+        selected: &[OperationKey],
         execution: Execution,
     ) -> Result<Self> {
-        let mut operations = vec![describe_operation(), operations_operation()];
-        for id in selected {
-            if operations.iter().any(|spec| spec.id == *id) {
-                continue;
-            }
-            let operation = api
-                .operations()
-                .iter()
-                .find(|spec| spec.id == *id)
-                .ok_or(ApiError::Unavailable)?;
-            operations.push(operation.clone());
-        }
         let description = Description {
             connection: api.description().clone(),
-            operations: OperationCatalog::new(operations)?,
         };
-        if description.connection.wire_version != 1 {
+        if description.connection.wire_version != rsi_api_protocol::API_WIRE_VERSION {
             return Err(wire::invalid());
         }
         Ok(Self {
             api: Mutex::new(Some(api)),
             description,
+            selected: selected.into(),
             execution,
             scratch: ByteBudget::default(),
             stop: CancellationToken::new(),
@@ -97,23 +86,7 @@ impl Export {
                 wire::send_payload(channel, &self.scratch, bytes.as_bytes(), &[]).await
             }
             Header::Call { operation, bytes } => {
-                let operation = self
-                    .description
-                    .operations
-                    .operations()
-                    .iter()
-                    .find(|spec| spec.id == operation)
-                    .ok_or(ApiError::Unavailable)?
-                    .clone();
-                if bytes > operation.maximum_request_bytes {
-                    return Err(wire::invalid());
-                }
-                let lane = match operation.class {
-                    OperationClass::Control => 0,
-                    OperationClass::Data => 1,
-                    OperationClass::Subscription => 2,
-                };
-                let permit = self.slots[lane]
+                let lookup = self.slots[0]
                     .clone()
                     .try_acquire_owned()
                     .map_err(|_| ApiError::Capacity)?;
@@ -123,6 +96,35 @@ impl Export {
                     .unwrap_or_else(std::sync::PoisonError::into_inner)
                     .clone()
                     .ok_or(ApiError::ShuttingDown)?;
+                let spec = if operation.key == describe_operation().key() {
+                    describe_operation()
+                } else if operation.key == operations_operation().key() {
+                    operations_operation()
+                } else if operation.key == operation_operation().key() {
+                    operation_operation()
+                } else {
+                    if !self.selected.contains(&operation.key) {
+                        return Err(ApiError::Unauthorized);
+                    }
+                    api.operation(&operation.key).await?
+                };
+                if operation.shape != spec.shape() {
+                    return Err(ApiError::CallShapeMismatch);
+                }
+                let operation = spec;
+                if bytes > operation.maximum_request_bytes {
+                    return Err(wire::invalid());
+                }
+                let lane = match operation.class {
+                    OperationClass::Control => 0,
+                    OperationClass::Data => 1,
+                    OperationClass::Subscription => 2,
+                };
+                drop(lookup);
+                let permit = self.slots[lane]
+                    .clone()
+                    .try_acquire_owned()
+                    .map_err(|_| ApiError::Capacity)?;
                 let input = wire::payload(
                     channel,
                     api.input_budget(operation.class).reserve(bytes)?,
@@ -167,8 +169,14 @@ impl Export {
         input: RetainedBytes,
         permit: OwnedSemaphorePermit,
     ) -> (Option<OwnedSemaphorePermit>, Result<ApiOutput>) {
-        if operation == describe_operation() || operation == operations_operation() {
-            return (Some(permit), self.negotiation(&operation, &input));
+        if operation == describe_operation()
+            || operation == operations_operation()
+            || operation == operation_operation()
+        {
+            return (
+                Some(permit),
+                self.negotiation(api.as_ref(), &operation, &input).await,
+            );
         }
         if operation.effect == OperationEffect::Read {
             return (Some(permit), api.call(&operation, input).await);
@@ -179,11 +187,16 @@ impl Export {
         }));
         task.await.unwrap_or((None, Err(ApiError::OutcomeUnknown)))
     }
-    fn negotiation(&self, operation: &OperationSpec, input: &RetainedBytes) -> Result<ApiOutput> {
+    async fn negotiation(
+        &self,
+        api: &dyn ApiClient,
+        operation: &OperationSpec,
+        input: &RetainedBytes,
+    ) -> Result<ApiOutput> {
         let json = if operation == &describe_operation() {
             let hello: rsi_api_protocol::ConnectionHello =
                 serde_json::from_slice(input.as_bytes()).map_err(|_| wire::invalid())?;
-            if hello.wire_version != 1
+            if hello.wire_version != rsi_api_protocol::API_WIRE_VERSION
                 || hello
                     .expected_endpoint
                     .as_ref()
@@ -196,12 +209,36 @@ impl Export {
                 operation.maximum_response_bytes,
             )?
         } else {
-            #[derive(serde::Deserialize)]
-            #[serde(deny_unknown_fields)]
-            struct Empty {}
-            let _: Empty = serde_json::from_slice(input.as_bytes()).map_err(|_| wire::invalid())?;
+            let query: rsi_api_protocol::OperationsQuery =
+                serde_json::from_slice(input.as_bytes()).map_err(|_| wire::invalid())?;
+            if operation == &operation_operation() && query.key.is_none() {
+                return Err(wire::invalid());
+            }
+            let mut operations = vec![
+                describe_operation(),
+                operation_operation(),
+                operations_operation(),
+            ];
+            if let Some(key) = query.key {
+                key.validate()?;
+                operations.retain(|spec| spec.key() == key);
+                if operations.is_empty() {
+                    if !self.selected.contains(&key) {
+                        return Err(ApiError::Unauthorized);
+                    }
+                    operations.push(api.operation(&key).await?);
+                }
+            } else {
+                for spec in api.operations().await?.operations() {
+                    if self.selected.contains(&spec.key())
+                        && !operations.iter().any(|own| own.key() == spec.key())
+                    {
+                        operations.push(spec.clone());
+                    }
+                }
+            }
             self.scratch.encode(
-                &self.description.operations,
+                &OperationCatalog::new(operations)?,
                 operation.maximum_response_bytes,
             )?
         };

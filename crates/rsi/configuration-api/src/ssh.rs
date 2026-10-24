@@ -315,29 +315,15 @@ pub struct Client {
     api: Arc<dyn ApiClient>,
 }
 impl Client {
-    /// Requires the authenticated target operations; Local trust negotiates separately.
-    pub fn new(api: Arc<dyn ApiClient>) -> Result<Self> {
-        for operation in [
-            Operation::Catalog,
-            Operation::ResolveDirectory,
-            Operation::PutCandidate,
-            Operation::Connect,
-            Operation::Disconnect,
-        ] {
-            if !api.operations().contains(&operation.spec()) {
-                return Err(ApiError::Unavailable);
-            }
-        }
-        Ok(Self { api })
+    /// Creates a typed proxy; availability is resolved when each operation is called.
+    pub fn new(api: Arc<dyn ApiClient>) -> Self {
+        Self { api }
     }
     async fn call<I: Serialize + Sync, O: DeserializeOwned>(
         &self,
         operation: Operation,
         input: &I,
     ) -> Reply<O> {
-        if !self.api.operations().contains(&operation.spec()) {
-            return Err(ApiError::Unavailable);
-        }
         call_json(self.api.as_ref(), &operation.spec(), input).await
     }
     /// Resolves only on the selected target, never on the Service filesystem.

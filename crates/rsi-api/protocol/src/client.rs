@@ -62,6 +62,14 @@ impl LocalContract for ConnectionDescriptionContract {
 #[serde(transparent)]
 pub struct OperationCatalog(Vec<OperationSpec>);
 impl OperationCatalog {
+    /// Tests feature availability without granting authority or comparing policies.
+    pub fn contains_all(&self, keys: &[crate::OperationKey]) -> bool {
+        keys.iter().all(|key| {
+            self.0
+                .iter()
+                .any(|spec| spec.protocol == key.protocol && spec.id == key.id)
+        })
+    }
     /// Validates trusted typed descriptors before publishing a catalog.
     pub fn new(operations: Vec<OperationSpec>) -> Result<Self> {
         if operations.len() > MAXIMUM_OPERATIONS {
@@ -76,7 +84,7 @@ impl OperationCatalog {
         }
         Ok(Self(operations))
     }
-    /// Borrows exact negotiated descriptors without allocating another catalog.
+    /// Borrows descriptors from this discovery response without another allocation.
     pub fn operations(&self) -> &[OperationSpec] {
         &self.0
     }
@@ -119,6 +127,10 @@ pub fn describe_operation() -> OperationSpec {
 pub fn operations_operation() -> OperationSpec {
     connection_operation("operations", OperationClass::Data, 1024 * 1024)
 }
+/// Required single-key policy discovery, independently admitted from Data work.
+pub fn operation_operation() -> OperationSpec {
+    connection_operation("operation", OperationClass::Control, 128 * 1024)
+}
 /// Bounded authenticated discovery of the current invocation's principal.
 pub fn caller_operation() -> OperationSpec {
     connection_operation("caller", OperationClass::Control, 1024)
@@ -145,12 +157,31 @@ fn connection_operation(
 pub trait ApiClient: fmt::Debug + Send + Sync + 'static {
     /// Returns the deployment and generation established before publishing this client.
     fn description(&self) -> &ConnectionDescription;
-    /// Borrows the bounded exact operation descriptors advertised by this generation.
-    fn operations(&self) -> &[OperationSpec];
+    /// Reads the current bounded directory; discovery is not execution authority.
+    async fn operations(&self) -> Result<OperationCatalog>;
+    /// Reads current policy for one explicit key. Remote adapters use a filtered query.
+    async fn operation(&self, key: &crate::OperationKey) -> Result<OperationSpec> {
+        self.operations()
+            .await?
+            .operations()
+            .iter()
+            .find(|spec| spec.protocol == key.protocol && spec.id == key.id)
+            .cloned()
+            .ok_or(ApiError::UnknownOperation)
+    }
     /// Supplies the input lane's budget to reserve before encoding or reading a source.
     fn input_budget(&self, class: OperationClass) -> ByteBudget;
-    /// Requires an exact negotiated descriptor and never automatically replays a mutation.
+    /// Uses local receive policy and never automatically replays a mutation.
     async fn call(&self, operation: &OperationSpec, input: RetainedBytes) -> Result<ApiOutput>;
+}
+
+/// Optional single-key discovery filter, independent of connection establishment.
+#[derive(Clone, Debug, Default, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct OperationsQuery {
+    /// Selects one current operation; absence requests the bounded directory.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub key: Option<crate::OperationKey>,
 }
 
 /// Nominal Local contract consumed by domain client plugins.

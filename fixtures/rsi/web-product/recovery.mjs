@@ -67,7 +67,7 @@ try {
   };
   const waitText = (tab,session,text) => waitRecord(tab,session,record=>record?.text===text);
   await connect(page,receipt);
-  const caller = await page.evaluate(async () => (await (await fetch("/api/v1/connection/caller/1",{method:"POST",headers:{"content-type":"application/json"},body:"{}"})).json()).device_id);
+  const caller = await page.evaluate(async () => (await (await fetch("/api/v2/rsi-api-protocol/4/connection/caller/1/read",{method:"POST",headers:{"content-type":"application/json"},body:"{}"})).json()).device_id);
   await page.locator(".workspace-add summary").click();
       await page.locator("#workspace-path").fill(service.workspace);
   await page.getByRole("button",{name:"Add workspace",exact:true}).click();
@@ -112,7 +112,7 @@ try {
   await other.locator("#login").waitFor({state:"visible"}); await other.close();
   // A cookie switch cannot authorize an old tab as the new device.
   const deviceB = await context.newPage(); await connect(deviceB,service.register(`${name} saved drafts B`));
-  assert.equal(await page.evaluate(async expected => (await fetch("/api/v1/connection/caller/1",{method:"POST",headers:{"content-type":"application/json","X-Rsi-Expected-Device":expected},body:"{}"})).status,caller),401);
+  assert.equal(await page.evaluate(async expected => (await fetch("/api/v2/rsi-api-protocol/4/connection/caller/1/read",{method:"POST",headers:{"content-type":"application/json","X-Rsi-Expected-Device":expected},body:"{}"})).status,caller),401);
   await pane(deviceB).getByRole("button",{name:"Restore drafts",exact:true}).click();
   assert.equal(await pane(deviceB).locator(".saved-draft").count(),0);
   await deviceB.getByRole("button",{name:"Sign out",exact:true}).click(); await deviceB.locator("#login").waitFor({state:"visible"}); await deviceB.close();

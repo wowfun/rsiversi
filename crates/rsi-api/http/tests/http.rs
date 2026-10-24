@@ -46,6 +46,21 @@ struct Harness {
     task: tokio::task::JoinHandle<Result<()>>,
 }
 impl Harness {
+    fn path(&self, operation: &str) -> String {
+        use rsi_api_protocol::ApiDispatch as _;
+        let (domain, name) = operation.split_once('/').expect("test operation");
+        self.registry
+            .operations()
+            .unwrap()
+            .into_iter()
+            .find(|spec| spec.id.domain() == domain && spec.id.name() == name)
+            .unwrap_or_else(|| OperationSpec {
+                id: OperationId::new(domain, name, 1).unwrap(),
+                ..spec(name, OperationClass::Data, OperationEffect::Read)
+            })
+            .call()
+            .to_path()
+    }
     async fn start() -> Self {
         Self::start_with_tls(false).await
     }
@@ -126,16 +141,17 @@ impl Harness {
     }
     fn request(&self, operation: &str) -> reqwest::RequestBuilder {
         Self::client()
-            .post(format!("{}/api/v1/{operation}/1", self.origin))
+            .post(format!("{}{}", self.origin, self.path(operation)))
             .bearer_auth(TOKEN)
             .header("content-type", "application/json")
-            .header("x-rsi-wire-version", "1")
+            .header("x-rsi-wire-version", "2")
             .header("x-rsi-host-epoch", self.epoch.as_str())
     }
     async fn raw(&self, operation: &str) -> TcpStream {
         let mut socket = TcpStream::connect(self.address).await.unwrap();
+        let path = self.path(operation);
         let request = format!(
-            "POST /api/v1/{operation}/1 HTTP/1.1\r\nHost: {}\r\nAuthorization: Bearer {TOKEN}\r\nX-Rsi-Wire-Version: 1\r\nX-Rsi-Host-Epoch: {}\r\nContent-Type: application/json\r\nContent-Length: 2\r\n\r\n{{}}",
+            "POST {path} HTTP/1.1\r\nHost: {}\r\nAuthorization: Bearer {TOKEN}\r\nX-Rsi-Wire-Version: 2\r\nX-Rsi-Host-Epoch: {}\r\nContent-Type: application/json\r\nContent-Length: 2\r\n\r\n{{}}",
             self.address,
             self.epoch.as_str()
         );
@@ -170,7 +186,7 @@ async fn expected_device_is_checked_before_domain_dispatch_and_cookie_removal() 
         assert_eq!(response.status(), status);
         response.bytes().await.unwrap();
         let response = Harness::client()
-            .post(format!("{}/api/v1/logout", harness.origin))
+            .post(format!("{}/api/v2/logout", harness.origin))
             .header("origin", &harness.origin)
             .header("x-rsi-csrf", "1")
             .header("cookie", format!("rsi-device={TOKEN}"))
@@ -183,7 +199,7 @@ async fn expected_device_is_checked_before_domain_dispatch_and_cookie_removal() 
         response.bytes().await.unwrap();
     }
     let response = Harness::client()
-        .post(format!("{}/api/v1/logout", harness.origin))
+        .post(format!("{}/api/v2/logout", harness.origin))
         .header("origin", &harness.origin)
         .header("x-rsi-csrf", "1")
         .header(
@@ -200,7 +216,7 @@ async fn expected_device_is_checked_before_domain_dispatch_and_cookie_removal() 
     );
     response.bytes().await.unwrap();
     let response = Harness::client()
-        .post(format!("{}/api/v1/logout", harness.origin))
+        .post(format!("{}/api/v2/logout", harness.origin))
         .header("origin", &harness.origin)
         .header("x-rsi-csrf", "1")
         .header("cookie", format!("rsi-device={TOKEN}"))
@@ -215,7 +231,7 @@ async fn expected_device_is_checked_before_domain_dispatch_and_cookie_removal() 
     assert!(!response.headers().contains_key("set-cookie"));
     response.bytes().await.unwrap();
     let response = Harness::client()
-        .post(format!("{}/api/v1/logout", harness.origin))
+        .post(format!("{}/api/v2/logout", harness.origin))
         .header("origin", &harness.origin)
         .header("x-rsi-csrf", "1")
         .send()
@@ -428,11 +444,14 @@ async fn immutable_assets_are_public_exact_and_bounded_without_blocking_api_cont
     }
     assert_eq!(get().send().await.unwrap().status(), 429);
     let control = client
-        .post(format!("{}/api/v1/connection/describe/1", harness.origin))
+        .post(format!(
+            "{}/api/v2/rsi-api-protocol/4/connection/describe/1/read",
+            harness.origin
+        ))
         .bearer_auth(TOKEN)
         .header("content-type", "application/json")
-        .header("x-rsi-wire-version", "1")
-        .body(r#"{"wire_version":1}"#)
+        .header("x-rsi-wire-version", "2")
+        .body(r#"{"wire_version":2}"#)
         .send()
         .await
         .unwrap();
@@ -476,7 +495,7 @@ async fn tls_requires_explicit_certificate_trust_and_browser_cookies_are_secure(
     assert!(
         harness
             .request("connection/describe")
-            .body(r#"{"wire_version":1}"#)
+            .body(r#"{"wire_version":2}"#)
             .send()
             .await
             .is_err()
@@ -492,7 +511,7 @@ async fn tls_requires_explicit_certificate_trust_and_browser_cookies_are_secure(
         .build()
         .unwrap();
     let login = client
-        .post(format!("{}/api/v1/login", harness.origin))
+        .post(format!("{}/api/v2/login", harness.origin))
         .bearer_auth(TOKEN)
         .header("origin", &harness.origin)
         .header("x-rsi-csrf", "1")
@@ -507,11 +526,14 @@ async fn tls_requires_explicit_certificate_trust_and_browser_cookies_are_secure(
             .contains("; Secure")
     );
     let reply = client
-        .post(format!("{}/api/v1/connection/describe/1", harness.origin))
+        .post(format!(
+            "{}/api/v2/rsi-api-protocol/4/connection/describe/1/read",
+            harness.origin
+        ))
         .bearer_auth(TOKEN)
-        .header("x-rsi-wire-version", "1")
+        .header("x-rsi-wire-version", "2")
         .header("content-type", "application/json")
-        .body(r#"{"wire_version":1}"#)
+        .body(r#"{"wire_version":2}"#)
         .send()
         .await
         .unwrap();
@@ -585,15 +607,15 @@ async fn finite_wire_lengths_survive_http2_delivery_and_http1_binary_framing() {
             )
             .unwrap();
         for (operation, input, status) in [
-            ("connection/describe", r#"{"wire_version":1}"#, 200),
+            ("connection/describe", r#"{"wire_version":2}"#, 200),
             ("test/binary", "{}", 200),
-            ("connection/describe", r#"{"wire_version":2}"#, 404),
+            ("connection/describe", r#"{"wire_version":99}"#, 404),
         ] {
             let reply = client
-                .post(format!("{}/api/v1/{operation}/1", harness.origin))
+                .post(format!("{}{}", harness.origin, harness.path(operation)))
                 .bearer_auth(TOKEN)
                 .header("content-type", "application/json")
-                .header("x-rsi-wire-version", "1")
+                .header("x-rsi-wire-version", "2")
                 .header("x-rsi-host-epoch", harness.epoch.as_str())
                 .body(input)
                 .send()
@@ -790,7 +812,7 @@ async fn malformed_encoding_is_rejected_before_exhausted_mutation_admission() {
             harness
                 .registry
                 .admit(
-                    &spec("blocked", OperationClass::Data, OperationEffect::Mutation).id,
+                    &spec("blocked", OperationClass::Data, OperationEffect::Mutation).call(),
                     origin.clone(),
                 )
                 .unwrap(),
@@ -837,7 +859,7 @@ async fn chunked_requests_retain_received_bytes_instead_of_each_operation_maximu
         .unwrap();
     let admission = harness
         .registry
-        .admit(&operation.id, CallOrigin::Local)
+        .admit(&operation.call(), CallOrigin::Local)
         .unwrap();
     let budget = admission.input_budget();
     drop(admission);
@@ -845,7 +867,7 @@ async fn chunked_requests_retain_received_bytes_instead_of_each_operation_maximu
     for expected in 1..=2 {
         let mut peer = TcpStream::connect(harness.address).await.unwrap();
         let headers = format!(
-            "POST /api/v1/test/chunked/1 HTTP/1.1\r\nHost: {}\r\nAuthorization: Bearer {TOKEN}\r\nX-Rsi-Wire-Version: 1\r\nX-Rsi-Host-Epoch: {}\r\nContent-Type: application/json\r\nTransfer-Encoding: chunked\r\n\r\n1\r\nx\r\n",
+            "POST /api/v2/rsi-api-protocol/4/test/chunked/1/read HTTP/1.1\r\nHost: {}\r\nAuthorization: Bearer {TOKEN}\r\nX-Rsi-Wire-Version: 2\r\nX-Rsi-Host-Epoch: {}\r\nContent-Type: application/json\r\nTransfer-Encoding: chunked\r\n\r\n1\r\nx\r\n",
             harness.address,
             harness.epoch.as_str()
         );
@@ -916,7 +938,7 @@ async fn incomplete_headers_cannot_exceed_thirty_two_unclassified_connections() 
     for _ in 0..32 {
         let mut socket = TcpStream::connect(harness.address).await.unwrap();
         socket
-            .write_all(b"POST /api/v1/connection/describe/1 HTTP/1.1\r\n")
+            .write_all(b"POST /api/v2/rsi-api-protocol/4/connection/describe/1/read HTTP/1.1\r\n")
             .await
             .unwrap();
         sockets.push(socket);
@@ -954,10 +976,10 @@ async fn http2_stream_delivery_retains_device_quota_through_flow_control_and_res
         .unwrap();
     let request = |name: &str| {
         client
-            .post(format!("{}/api/v1/{name}/1", harness.origin))
+            .post(format!("{}{}", harness.origin, harness.path(name)))
             .bearer_auth(TOKEN)
             .header("content-type", "application/json")
-            .header("x-rsi-wire-version", "1")
+            .header("x-rsi-wire-version", "2")
             .header("x-rsi-host-epoch", harness.epoch.as_str())
     };
     let producer = Arc::new(LargeReply);
@@ -987,7 +1009,7 @@ async fn http2_stream_delivery_retains_device_quota_through_flow_control_and_res
     );
     full.bytes().await.unwrap();
     let control = request("connection/describe")
-        .body(r#"{"wire_version":1}"#)
+        .body(r#"{"wire_version":2}"#)
         .send()
         .await
         .unwrap();
@@ -998,9 +1020,25 @@ async fn http2_stream_delivery_retains_device_quota_through_flow_control_and_res
         "data flow control preserves control progress"
     );
     control.bytes().await.unwrap();
+    let policy = request("connection/operation")
+        .body(serde_json::json!({"key":rsi_api_protocol::describe_operation().key()}).to_string())
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(
+        policy.status(),
+        200,
+        "single-key policy lookup preserves progress while Data deliveries retain quota"
+    );
+    let catalog: rsi_api_protocol::OperationCatalog =
+        serde_json::from_slice(&policy.bytes().await.unwrap()).unwrap();
+    assert_eq!(
+        catalog.operations(),
+        &[rsi_api_protocol::describe_operation()]
+    );
     let foreign = request("connection/describe")
         .header("host", "foreign.invalid")
-        .body(r#"{"wire_version":1}"#)
+        .body(r#"{"wire_version":2}"#)
         .send()
         .await
         .unwrap();
@@ -1037,7 +1075,7 @@ async fn handshake_and_cookie_calls_enforce_origin_epoch_and_closed_requests() {
     let harness = Harness::start().await;
     let response = harness
         .request("connection/describe")
-        .body(r#"{"wire_version":1}"#)
+        .body(r#"{"wire_version":2}"#)
         .send()
         .await
         .unwrap();
@@ -1049,18 +1087,18 @@ async fn handshake_and_cookie_calls_enforce_origin_epoch_and_closed_requests() {
         harness
             .request("connection/describe")
             .header("origin", "https://foreign.invalid")
-            .body(r#"{"wire_version":1}"#),
+            .body(r#"{"wire_version":2}"#),
         harness
             .request("connection/describe")
             .header("x-rsi-local-key", "4".repeat(64))
-            .body(r#"{"wire_version":1}"#),
+            .body(r#"{"wire_version":2}"#),
         harness
             .request("connection/describe")
             .header("host", "foreign.invalid")
-            .body(r#"{"wire_version":1}"#),
+            .body(r#"{"wire_version":2}"#),
         harness
             .request("connection/describe")
-            .body(r#"{"wire_version":1,"undeclared":true}"#),
+            .body(r#"{"wire_version":2,"undeclared":true}"#),
         harness
             .request("connection/operations")
             .header("x-rsi-host-epoch", "0".repeat(32))
@@ -1069,7 +1107,7 @@ async fn handshake_and_cookie_calls_enforce_origin_epoch_and_closed_requests() {
         assert!(!request.send().await.unwrap().status().is_success());
     }
     let login = Harness::client()
-        .post(format!("{}/api/v1/login", harness.origin))
+        .post(format!("{}/api/v2/login", harness.origin))
         .bearer_auth(TOKEN)
         .header("origin", &harness.origin)
         .header("x-rsi-csrf", "1")
@@ -1082,9 +1120,12 @@ async fn handshake_and_cookie_calls_enforce_origin_epoch_and_closed_requests() {
     let credential = cookie.split(';').next().unwrap();
     let browser = || {
         Harness::client()
-            .post(format!("{}/api/v1/connection/operations/1", harness.origin))
+            .post(format!(
+                "{}/api/v2/rsi-api-protocol/4/connection/operations/1/read",
+                harness.origin
+            ))
             .header("cookie", credential)
-            .header("x-rsi-wire-version", "1")
+            .header("x-rsi-wire-version", "2")
             .header("x-rsi-host-epoch", harness.epoch.as_str())
             .header("content-type", "application/json")
             .body("{}")
@@ -1206,7 +1247,7 @@ async fn real_disconnect_preserves_mutation_jobs_and_device_quota_until_the_writ
     assert_eq!(
         harness
             .request("connection/describe")
-            .body(r#"{"wire_version":1}"#)
+            .body(r#"{"wire_version":2}"#)
             .send()
             .await
             .unwrap()
@@ -1390,7 +1431,7 @@ async fn ordinary_http_plugin_retires_listener_without_withdrawing_shared_connec
         .root()
         .lookup_local::<rsi_api_protocol::ApiDispatchContract>()
         .unwrap();
-    assert_eq!(dispatcher.operations().len(), 3);
+    assert_eq!(dispatcher.operations().unwrap().len(), 3);
     assert_ne!(listener.address().port(), 0);
     let socket = TcpStream::connect(listener.address()).await.unwrap();
     let mut stopped = Box::pin(listener.stopped());
@@ -1403,7 +1444,7 @@ async fn ordinary_http_plugin_retires_listener_without_withdrawing_shared_connec
             .lookup_local::<HttpListenerContract>()
             .is_none()
     );
-    assert_eq!(dispatcher.operations().len(), 3);
+    assert_eq!(dispatcher.operations().unwrap().len(), 3);
     assert!(
         runtime
             .root()
@@ -1411,7 +1452,7 @@ async fn ordinary_http_plugin_retires_listener_without_withdrawing_shared_connec
             .is_some()
     );
     connection.dispose().await;
-    assert!(dispatcher.operations().is_empty());
+    assert!(dispatcher.operations().unwrap().is_empty());
     assert!(
         runtime
             .root()
@@ -1523,11 +1564,13 @@ async fn two_listeners_share_connection_operations_after_one_transport_stops() {
     first.stop.cancel();
     first.task.await.unwrap().unwrap();
     let response = Harness::client()
-        .post(format!("{origin}/api/v1/connection/describe/1"))
+        .post(format!(
+            "{origin}/api/v2/rsi-api-protocol/4/connection/describe/1/read"
+        ))
         .bearer_auth(TOKEN)
         .header("content-type", "application/json")
-        .header("x-rsi-wire-version", "1")
-        .body(r#"{"wire_version":1}"#)
+        .header("x-rsi-wire-version", "2")
+        .body(r#"{"wire_version":2}"#)
         .send()
         .await
         .unwrap();
@@ -1537,11 +1580,13 @@ async fn two_listeners_share_connection_operations_after_one_transport_stops() {
     assert_eq!(&description, first.connection.description().as_ref());
     first.connection.close().await;
     let response = Harness::client()
-        .post(format!("{origin}/api/v1/connection/describe/1"))
+        .post(format!(
+            "{origin}/api/v2/rsi-api-protocol/4/connection/describe/1/read"
+        ))
         .bearer_auth(TOKEN)
         .header("content-type", "application/json")
-        .header("x-rsi-wire-version", "1")
-        .body(r#"{"wire_version":1}"#)
+        .header("x-rsi-wire-version", "2")
+        .body(r#"{"wire_version":2}"#)
         .send()
         .await
         .unwrap();
@@ -1574,7 +1619,10 @@ async fn idle_h2_connections_retain_unclassified_admission_and_expire() {
     for _ in 0..32 {
         let client = slow_http2_client();
         let response = client
-            .post(format!("{}/api/v1/connection/describe/1", harness.origin))
+            .post(format!(
+                "{}/api/v2/rsi-api-protocol/4/connection/describe/1/read",
+                harness.origin
+            ))
             .header("content-type", "application/json")
             .body("{}")
             .send()
@@ -1587,7 +1635,10 @@ async fn idle_h2_connections_retain_unclassified_admission_and_expire() {
     let fresh = slow_http2_client();
     assert!(
         fresh
-            .post(format!("{}/api/v1/connection/describe/1", harness.origin))
+            .post(format!(
+                "{}/api/v2/rsi-api-protocol/4/connection/describe/1/read",
+                harness.origin
+            ))
             .body("{}")
             .send()
             .await
@@ -1597,11 +1648,14 @@ async fn idle_h2_connections_retain_unclassified_admission_and_expire() {
     // Keep every client pool alive. Server retirement must not depend on Drop at the peer.
     tokio::time::sleep(Duration::from_secs(11)).await;
     let response = fresh
-        .post(format!("{}/api/v1/connection/describe/1", harness.origin))
+        .post(format!(
+            "{}/api/v2/rsi-api-protocol/4/connection/describe/1/read",
+            harness.origin
+        ))
         .bearer_auth(TOKEN)
         .header("content-type", "application/json")
-        .header("x-rsi-wire-version", "1")
-        .body(r#"{"wire_version":1}"#)
+        .header("x-rsi-wire-version", "2")
+        .body(r#"{"wire_version":2}"#)
         .send()
         .await
         .unwrap();
@@ -1692,7 +1746,7 @@ async fn listener_recovers_from_descriptor_pressure_and_can_stop_during_backoff(
         // Queue a real connection without yielding to accept, then exhaust this
         // isolated subprocess's descriptors before its next scheduler turn.
         let mut peer = std::net::TcpStream::connect(harness.address).unwrap();
-        std::io::Write::write_all(&mut peer, format!("POST /api/v1/connection/describe/1 HTTP/1.1\r\nHost: {}\r\nAuthorization: Bearer {TOKEN}\r\nX-Rsi-Wire-Version: 1\r\nContent-Type: application/json\r\nContent-Length: 18\r\n\r\n{{\"wire_version\":1}}", harness.address).as_bytes()).unwrap();
+        std::io::Write::write_all(&mut peer, format!("POST /api/v2/rsi-api-protocol/4/connection/describe/1/read HTTP/1.1\r\nHost: {}\r\nAuthorization: Bearer {TOKEN}\r\nX-Rsi-Wire-Version: 2\r\nContent-Type: application/json\r\nContent-Length: 18\r\n\r\n{{\"wire_version\":2}}", harness.address).as_bytes()).unwrap();
         peer.set_nonblocking(true).unwrap();
         let mut peer = TcpStream::from_std(peer).unwrap();
         let limits = rustix::process::getrlimit(rustix::process::Resource::Nofile);
@@ -1853,7 +1907,7 @@ async fn local_browser_factory_admits_only_the_owned_frontend_origin_and_never_r
             ),
         ] {
             let mut request = Harness::client()
-                .post(format!("{backend_origin}/api/v1/browser-bootstrap"))
+                .post(format!("{backend_origin}/api/v2/browser-bootstrap"))
                 .header("host", host)
                 .header("origin", origin)
                 .header("x-rsi-launch-ticket", "b".repeat(64));
@@ -1864,7 +1918,7 @@ async fn local_browser_factory_admits_only_the_owned_frontend_origin_and_never_r
             assert!(!ticket.0.load(std::sync::atomic::Ordering::SeqCst));
         }
         let response = Harness::client()
-            .post(format!("{backend_origin}/api/v1/browser-bootstrap"))
+            .post(format!("{backend_origin}/api/v2/browser-bootstrap"))
             .header("host", expected.trim_start_matches("http://"))
             .header("origin", expected)
             .header("x-rsi-csrf", "1")
@@ -1895,7 +1949,7 @@ async fn browser_bootstrap_fences_before_consumption_and_recovers_only_authentic
     let harness = Harness::start_with_bootstrap(false, None, Some(ticket.clone())).await;
     let request = || {
         Harness::client()
-            .post(format!("{}/api/v1/browser-bootstrap", harness.origin))
+            .post(format!("{}/api/v2/browser-bootstrap", harness.origin))
             .header("x-rsi-csrf", "1")
     };
     for (header, value) in [
@@ -2031,7 +2085,7 @@ async fn browser_bootstrap_explicit_ticket_replaces_cookies_without_authenticati
         let cookie = format!("rsi-device={old_token}");
         let request = || {
             Harness::client()
-                .post(format!("{}/api/v1/browser-bootstrap", harness.origin))
+                .post(format!("{}/api/v2/browser-bootstrap", harness.origin))
                 .header("x-rsi-csrf", "1")
                 .header("origin", &harness.origin)
                 .header("x-rsi-launch-ticket", "b".repeat(64))
@@ -2071,7 +2125,7 @@ async fn browser_bootstrap_explicit_ticket_replaces_cookies_without_authenticati
             401
         );
         let recovery = Harness::client()
-            .post(format!("{}/api/v1/browser-bootstrap", harness.origin))
+            .post(format!("{}/api/v2/browser-bootstrap", harness.origin))
             .header("x-rsi-csrf", "1")
             .header("origin", &harness.origin)
             .header("cookie", &new_cookie)
@@ -2090,7 +2144,7 @@ async fn browser_bootstrap_revocation_during_launch_never_restores_device_author
     let harness = Harness::start_with_bootstrap(false, None, Some(ticket.clone())).await;
     harness.authentication.0.cancel();
     let response = Harness::client()
-        .post(format!("{}/api/v1/browser-bootstrap", harness.origin))
+        .post(format!("{}/api/v2/browser-bootstrap", harness.origin))
         .header("origin", &harness.origin)
         .header("x-rsi-csrf", "1")
         .header("x-rsi-launch-ticket", "b".repeat(64))

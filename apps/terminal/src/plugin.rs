@@ -168,6 +168,10 @@ impl Factory {
                 .requiring_local::<ConnectionLifetimeContract>(),
         })
     }
+    #[expect(
+        clippy::too_many_lines,
+        reason = "Application variants share one activation and cleanup owner."
+    )]
     fn activate(mut plan: ActivationPlan) -> rsi_meta::Result<()> {
         let lease = TerminalLease::acquire()?;
         let state = plan.take_state::<Prepared>()?;
@@ -198,7 +202,13 @@ impl Factory {
                 let workspace = plan.local::<WorkspaceRegistryContract>()?;
                 let media = plan.local::<rsi_media_protocol::MediaContract>()?;
                 Box::pin(crate::run_headless_application(
-                    session, workspace, media, command, retiring,
+                    session,
+                    workspace,
+                    media,
+                    plan.context()
+                        .lookup_local::<rsi_api_protocol::ApiClientContract>(),
+                    command,
+                    retiring,
                 ))
             }
             Prepared::Cli(command) => {

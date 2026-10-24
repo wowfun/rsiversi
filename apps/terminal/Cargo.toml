@@ -7,6 +7,10 @@ license.workspace = true
 publish = false
 
 [dependencies]
+rsi-session-api = { path = "../../crates/rsi/session-api" }
+rsi-workspace-api = { path = "../../crates/rsi-workspace/api" }
+rsi-media-api = { path = "../../crates/rsi-media/api" }
+rsi-jobs = { path = "../../crates/rsi-jobs/core" }
 rsi-automation-api = { path = "../../crates/rsi/automation-api" }
 rsi-session-export = { path = "../../crates/rsi/session-export" }
 rsi-ui-api = { path = "../../crates/rsi/ui-api" }

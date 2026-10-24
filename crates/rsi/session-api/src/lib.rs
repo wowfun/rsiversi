@@ -16,6 +16,8 @@ pub use client::SessionClient;
 pub use plugin::{SessionApiFactory, SessionClientFactory};
 pub use server::SessionApi;
 pub use target::SessionTargetClient;
+/// Owned Session operation identities for per-feature capability discovery.
+pub use wire::Operation;
 
 /// Generated descriptor for admission before using this interface.
 pub fn protocol_descriptor() -> rsi_api_protocol::ProtocolDescriptor {

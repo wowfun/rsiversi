@@ -99,7 +99,7 @@ for (const [name, engine] of [["chromium", chromium], ["firefox", firefox]]) {
     await page.getByRole("button", { name: "Edit as JSON", exact: true }).click();
     const editor = page.getByRole("textbox", { name: "Settings JSON" });
     assert.deepEqual(JSON.parse(await editor.inputValue()), { note: "public browser settings" });
-    const denied = page.waitForResponse(response => response.url().endsWith('/api/v1/settings/replace/1'));
+    const denied = page.waitForResponse(response => response.url().endsWith('/api/v2/rsi-settings-api/3/settings/replace/1/mutation'));
     await page.getByRole("button", { name: "Save settings", exact: true }).click();
     assert.equal((await denied).status(), 401);
     assert.deepEqual(JSON.parse(await editor.inputValue()), { note: "public browser settings" });

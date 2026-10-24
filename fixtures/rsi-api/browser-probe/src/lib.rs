@@ -123,7 +123,12 @@ fn decoder_probe() {
 fn compact_sse_probe() {
     use rsi_api_client::{SseDecoder, SseEvent};
     let budget = ByteBudget::default();
-    let mut decoder = SseDecoder::new(ByteBudget::default(), budget.clone(), 36 * 1024 * 1024 + 64 * 1024).unwrap();
+    let mut decoder = SseDecoder::new(
+        ByteBudget::default(),
+        budget.clone(),
+        36 * 1024 * 1024 + 64 * 1024,
+    )
+    .unwrap();
     let mut held = Vec::new();
     for frame in [b"event: item\ndata: 1\n\n", b"event: item\ndata: 2\n\n"] {
         let (_, Some(SseEvent::Item(item))) = decoder.push(frame).unwrap() else {
@@ -135,10 +140,22 @@ fn compact_sse_probe() {
     drop(held);
     assert_eq!(budget.used(), 0);
     let receiving = ByteBudget::default();
-    let mut facts = SseDecoder::new(receiving.clone(), budget.clone(), 36 * 1024 * 1024 + 64 * 1024).unwrap();
-    let mut interactions = SseDecoder::new(receiving.clone(), budget.clone(), 32 * 1024 * 1024 + 64 * 1024).unwrap();
+    let mut facts = SseDecoder::new(
+        receiving.clone(),
+        budget.clone(),
+        36 * 1024 * 1024 + 64 * 1024,
+    )
+    .unwrap();
+    let mut interactions = SseDecoder::new(
+        receiving.clone(),
+        budget.clone(),
+        32 * 1024 * 1024 + 64 * 1024,
+    )
+    .unwrap();
     assert!(facts.push(b"event: item\ndata: tr").unwrap().1.is_none());
-    let (_, Some(SseEvent::Item(interaction))) = interactions.push(b"event: item\ndata: true\n\n").unwrap() else {
+    let (_, Some(SseEvent::Item(interaction))) =
+        interactions.push(b"event: item\ndata: true\n\n").unwrap()
+    else {
         panic!("interleaved interaction")
     };
     let (_, Some(SseEvent::Item(fact))) = facts.push(b"ue\n\n").unwrap() else {
@@ -192,14 +209,26 @@ async fn response_driver_probe(execution: Execution) {
     let source = Box::pin(futures_util::stream::iter([Ok(bytes::Bytes::from_static(
         b"event: item\ndata: 1\n\nevent: end\ndata: {}\n\n",
     ))]));
-    let mut stream = decode_event_stream(source, ByteBudget::default(), budget.clone(), 128, execution.clone());
+    let mut stream = decode_event_stream(
+        source,
+        ByteBudget::default(),
+        budget.clone(),
+        128,
+        execution.clone(),
+    );
     assert_eq!(stream.next().await.unwrap().unwrap().json.as_bytes(), b"1");
     assert!(stream.next().await.is_none());
     drop(stream);
     let source = Box::pin(futures_util::stream::iter([Ok(bytes::Bytes::from_static(
         b"event: item\ndata: 1\n\n",
     ))]));
-    let mut stream = decode_event_stream(source, ByteBudget::default(), budget.clone(), 128, execution);
+    let mut stream = decode_event_stream(
+        source,
+        ByteBudget::default(),
+        budget.clone(),
+        128,
+        execution,
+    );
     assert!(stream.next().await.unwrap().is_ok());
     assert!(stream.next().await.unwrap().is_err());
     drop(stream);
@@ -218,7 +247,7 @@ async fn delivery_probe(execution: Execution) {
     });
     let mut leases = Vec::new();
     for _ in 0..4 {
-        let call = registry.admit(&operation.id, origin.clone()).unwrap();
+        let call = registry.admit(&operation.call(), origin.clone()).unwrap();
         leases.push(call.retain_admission());
         let input = call.input_budget().copy(b"null").unwrap();
         drop(call.invoke(input).await.unwrap());
@@ -226,11 +255,11 @@ async fn delivery_probe(execution: Execution) {
     registration.close().await;
     let replacement = registry.register(operation.clone(), gate).unwrap();
     assert!(matches!(
-        registry.admit(&operation.id, origin.clone()),
+        registry.admit(&operation.call(), origin.clone()),
         Err(ApiError::Capacity)
     ));
     leases.pop();
-    drop(registry.admit(&operation.id, origin).unwrap());
+    drop(registry.admit(&operation.call(), origin).unwrap());
     drop(leases);
     replacement.close().await;
     registry.close().await;
@@ -246,13 +275,13 @@ async fn mutation_probe(execution: Execution) {
         revoked: tokio_util::sync::CancellationToken::new(),
     });
     for _ in 0..4 {
-        let call = registry.admit(&operation.id, origin.clone()).unwrap();
+        let call = registry.admit(&operation.call(), origin.clone()).unwrap();
         let input = call.input_budget().copy(b"null").unwrap();
         drop(call.invoke(input));
     }
     gate.entered.acquire_many(4).await.unwrap().forget();
     assert!(matches!(
-        registry.admit(&operation.id, origin),
+        registry.admit(&operation.call(), origin),
         Err(ApiError::Capacity)
     ));
     let mut closing = Box::pin(registration.close());
@@ -268,7 +297,9 @@ async fn read_probe(execution: Execution) {
     let gate = gate();
     let operation = spec(OperationEffect::Read);
     let registration = registry.register(operation.clone(), gate.clone()).unwrap();
-    let call = registry.admit(&operation.id, CallOrigin::Local).unwrap();
+    let call = registry
+        .admit(&operation.call(), CallOrigin::Local)
+        .unwrap();
     let input = call.input_budget().copy(b"null").unwrap();
     let waiter = call.invoke(input);
     gate.entered.acquire().await.unwrap().forget();
@@ -310,7 +341,7 @@ async fn plugin_probe(execution: Execution) {
             .is_none()
     );
     assert!(matches!(
-        dispatch.admit(&operation.id, CallOrigin::Local),
+        dispatch.admit(&operation.call(), CallOrigin::Local),
         Err(ApiError::ShuttingDown)
     ));
     registration.close().await;

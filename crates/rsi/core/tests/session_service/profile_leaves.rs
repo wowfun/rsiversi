@@ -17,7 +17,7 @@ async fn raw(
     let ApiOutput::Reply(reply) = running
         .api_dispatch()
         .unwrap()
-        .admit(&spec.id, origin)?
+        .admit(&spec.call(), origin)?
         .invoke(input)
         .await?
     else {

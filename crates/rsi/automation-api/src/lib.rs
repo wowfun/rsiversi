@@ -173,16 +173,9 @@ pub struct Client {
 #[derive(Deserialize)]
 enum Never {}
 impl Client {
-    /// # Errors
-    /// Rejects invalid resources or unavailable exact operation versions.
-    pub fn new(api: Arc<dyn ApiClient>) -> Result<Self> {
-        if operations()
-            .iter()
-            .any(|spec| !api.operations().contains(spec))
-        {
-            return Err(ApiError::Unavailable);
-        }
-        Ok(Self { api })
+    /// Creates a typed proxy; availability is resolved when each operation is called.
+    pub fn new(api: Arc<dyn ApiClient>) -> Self {
+        Self { api }
     }
     /// # Errors
     /// Rejects malformed requests or responses and propagates transport refusals.
@@ -674,8 +667,8 @@ mod tests {
         fn description(&self) -> &ConnectionDescription {
             &self.description
         }
-        fn operations(&self) -> &[OperationSpec] {
-            &self.specs
+        async fn operations(&self) -> rsi_api_protocol::Result<rsi_api_protocol::OperationCatalog> {
+            rsi_api_protocol::OperationCatalog::new((&self.specs).to_vec())
         }
         fn input_budget(&self, _: OperationClass) -> ByteBudget {
             ByteBudget::default()
@@ -691,7 +684,7 @@ mod tests {
     fn replies(value: Value) -> Arc<Replies> {
         Arc::new(Replies {
             description: ConnectionDescription {
-                wire_version: 1,
+                wire_version: rsi_api_protocol::API_WIRE_VERSION,
                 endpoint_id: EndpointId::from_bytes([1; 16]),
                 host_epoch: HostEpoch::from_bytes([2; 16]),
             },
@@ -719,22 +712,18 @@ mod tests {
         ] {
             let api = replies(serde_json::json!({}));
             assert_eq!(
-                Client::new(api.clone()).unwrap().call(request).await,
+                Client::new(api.clone()).call(request).await,
                 Err(ApiError::OutcomeUnknown)
             );
             assert_eq!(api.calls.load(std::sync::atomic::Ordering::SeqCst), 1);
         }
         let api = replies(serde_json::json!({}));
         assert!(matches!(
-            Client::new(api.clone())
-                .unwrap()
-                .call(Request::Status)
-                .await,
+            Client::new(api.clone()).call(Request::Status).await,
             Err(ApiError::Invalid(_))
         ));
         assert!(matches!(
             Client::new(api.clone())
-                .unwrap()
                 .call(Request::Cancel {
                     id: "0".into(),
                     request_id: "invalid".into()
@@ -763,7 +752,7 @@ mod tests {
         ] {
             let api = replies(serde_json::json!({"id":"1","state":"cancelled","unverified":true}));
             assert_eq!(
-                Client::new(api.clone()).unwrap().call(request).await,
+                Client::new(api.clone()).call(request).await,
                 Err(ApiError::OutcomeUnknown)
             );
             assert_eq!(api.calls.load(std::sync::atomic::Ordering::Relaxed), 1);

@@ -8,7 +8,13 @@ fn identity_headers_reject_duplicate_or_changed_generations_before_payload_use()
     let endpoint = EndpointId::from_bytes([1; 16]);
     let epoch = HostEpoch::from_bytes([2; 16]);
     let mut headers = http::HeaderMap::new();
-    headers.insert("x-rsi-wire-version", "1".parse().unwrap());
+    headers.insert(
+        "x-rsi-wire-version",
+        rsi_api_protocol::API_WIRE_VERSION
+            .to_string()
+            .parse()
+            .unwrap(),
+    );
     headers.insert("x-rsi-endpoint-id", endpoint.as_str().parse().unwrap());
     headers.insert("x-rsi-host-epoch", epoch.as_str().parse().unwrap());
     assert_eq!(response_identity(&headers, &endpoint, None).unwrap(), epoch);
@@ -61,6 +67,10 @@ fn transport_status_must_agree_with_a_closed_common_error() {
         (429, ApiError::Capacity),
         (409, ApiError::ShuttingDown),
         (404, ApiError::Unavailable),
+        (404, ApiError::UnknownOperation),
+        (409, ApiError::OperationRetiring),
+        (409, ApiError::ProtocolMismatch),
+        (409, ApiError::CallShapeMismatch),
         (400, ApiError::Invalid(String::new())),
         (500, ApiError::OutcomeUnknown),
         (500, ApiError::Backend(String::new())),

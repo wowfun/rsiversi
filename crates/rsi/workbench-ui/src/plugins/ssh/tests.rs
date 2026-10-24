@@ -17,8 +17,8 @@ impl ApiClient for Remote {
     fn description(&self) -> &ConnectionDescription {
         &self.description
     }
-    fn operations(&self) -> &[OperationSpec] {
-        &self.operations
+    async fn operations(&self) -> rsi_api_protocol::Result<rsi_api_protocol::OperationCatalog> {
+        rsi_api_protocol::OperationCatalog::new(self.operations.clone())
     }
     fn input_budget(&self, _: OperationClass) -> ByteBudget {
         ByteBudget::default()
@@ -50,7 +50,7 @@ impl ApiClient for Remote {
 async fn unknown_ssh_mutation_requires_explicit_read_and_never_replays() {
     let remote = Arc::new(Remote {
         description: ConnectionDescription {
-            wire_version: 1,
+            wire_version: rsi_api_protocol::API_WIRE_VERSION,
             endpoint_id: EndpointId::from_bytes([1; 16]),
             host_epoch: HostEpoch::from_bytes([2; 16]),
         },
@@ -71,14 +71,16 @@ async fn unknown_ssh_mutation_requires_explicit_read_and_never_replays() {
         mutations: Mutex::new(0),
     });
     let owner = Arc::new(PluginsFeature {
-        client: rsi_configuration_api::ConfigurationClient::new(remote.clone()).unwrap(),
+        client: rsi_configuration_api::ConfigurationClient::new(remote.clone()),
         mcp: None,
         mcp_ssh: None,
         exa: None,
         leaves: None,
-        leaf_grants: false,
-        ssh: Some(wire::Client::new(remote.clone()).unwrap()),
-        ssh_trust: false,
+        ssh: Some(wire::Client::new(remote.clone())),
+        api: remote.clone(),
+        capabilities: Mutex::new(crate::plugins::PluginCapabilities::new(
+            &rsi_api_protocol::OperationCatalog::new(remote.operations.clone()).unwrap(),
+        )),
         state: Mutex::default(),
         work: Work::new(rsi_meta::Execution::native(
             tokio::runtime::Handle::current(),

@@ -24,7 +24,6 @@ pub enum FilesOperation {
     Release,
 }
 impl FilesOperation {
-    pub(super) const ALL: [Self; 4] = [Self::Open, Self::Read, Self::List, Self::Release];
     /// Registered authentication, cancellation and wire-budget policy.
     #[allow(clippy::missing_panics_doc)] // All operation identifiers are compile-time constants.
     pub fn spec(self) -> OperationSpec {

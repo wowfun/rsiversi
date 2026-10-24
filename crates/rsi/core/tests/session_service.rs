@@ -388,6 +388,7 @@ async fn built_in_standard_host_profile_boots_the_real_product_composition() {
             .api_dispatch()
             .unwrap()
             .operations()
+            .unwrap()
             .contains(&rsi_configuration_api::McpOperation::Status.spec()),
         "startup must publish MCP configuration before clients freeze operations"
     );

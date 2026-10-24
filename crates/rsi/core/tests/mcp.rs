@@ -35,15 +35,15 @@ impl ApiClient for Client {
     fn description(&self) -> &ConnectionDescription {
         &self.description
     }
-    fn operations(&self) -> &[OperationSpec] {
-        &self.operations
+    async fn operations(&self) -> rsi_api_protocol::Result<rsi_api_protocol::OperationCatalog> {
+        rsi_api_protocol::OperationCatalog::new(self.operations.clone())
     }
     fn input_budget(&self, _: OperationClass) -> ByteBudget {
         ByteBudget::new(1024 * 1024).unwrap()
     }
     async fn call(&self, operation: &OperationSpec, input: RetainedBytes) -> Result<ApiOutput> {
         self.dispatch
-            .admit(&operation.id, self.origin.clone())?
+            .admit(&operation.call(), self.origin.clone())?
             .invoke(input)
             .await
     }
@@ -300,11 +300,11 @@ async fn real_grants_fence_status_and_hold_refresh_through_reply_loss_and_revoca
             .lookup_local::<ConnectionDescriptionContract>()
             .unwrap())
         .clone(),
-        operations: dispatch.operations().clone(),
+        operations: dispatch.operations().unwrap().clone(),
         dispatch,
         origin: origin.clone(),
     });
-    let api = McpClient::new(client.clone()).unwrap();
+    let api = McpClient::new(client.clone());
     assert!(matches!(api.status().await, Err(ApiError::Unauthorized)));
     let grant = host
         .lookup_local::<rsi_configuration_access::ConfigurationAccessContract>()
@@ -490,11 +490,11 @@ async fn remote_mcp_credentials_bind_current_http_reference_and_stdio_remains_ob
             .lookup_local::<ConnectionDescriptionContract>()
             .unwrap())
         .clone(),
-        operations: dispatch.operations().clone(),
+        operations: dispatch.operations().unwrap().clone(),
         dispatch,
         origin,
     });
-    let api = McpClient::new(raw.clone()).unwrap();
+    let api = McpClient::new(raw.clone());
     let encoded = serde_json::to_string(&api.status().await.unwrap()).unwrap();
     for forbidden in ["/private/", "hidden-argument", "environment"] {
         assert!(!encoded.contains(forbidden));
@@ -619,14 +619,14 @@ async fn remote_exa_credential_uses_fixed_owner_and_grant_without_enabling_or_qu
             .lookup_local::<ConnectionDescriptionContract>()
             .unwrap())
         .clone(),
-        operations: dispatch.operations().clone(),
+        operations: dispatch.operations().unwrap().clone(),
         dispatch,
         origin: CallOrigin::Device(AuthenticatedDevice {
             id: registered.record.id.clone(),
             revoked: CancellationToken::new(),
         }),
     });
-    let api = ExaClient::new(raw).unwrap();
+    let api = ExaClient::new(raw);
     assert!(matches!(api.status().await, Err(ApiError::Unauthorized)));
     assert!(matches!(
         api.set(SecretValue::new("rejected-fixture-key").unwrap())

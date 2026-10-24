@@ -68,21 +68,15 @@ pub struct ExaClient {
     api: Arc<dyn ApiClient>,
 }
 impl ExaClient {
-    /// Requires the negotiated availability operation.
-    pub fn new(api: Arc<dyn ApiClient>) -> Result<Self> {
-        if !api.operations().contains(&ExaOperation::Status.spec()) {
-            return Err(ApiError::Unavailable);
-        }
-        Ok(Self { api })
+    /// Creates a typed proxy; availability is resolved when each operation is called.
+    pub fn new(api: Arc<dyn ApiClient>) -> Self {
+        Self { api }
     }
     async fn call<I: Serialize + Sync, O: DeserializeOwned>(
         &self,
         operation: ExaOperation,
         input: &I,
     ) -> Result<O> {
-        if !self.api.operations().contains(&operation.spec()) {
-            return Err(ApiError::Unavailable);
-        }
         match call_json::<_, _, CredentialStoreFailure>(self.api.as_ref(), &operation.spec(), input)
             .await?
         {

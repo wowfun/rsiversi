@@ -18,7 +18,11 @@ use rsi_meta::{ActivationPlan, ConfigValue, MetaError, PluginFactory, PreparedAc
 use serde::{Deserialize, Serialize};
 use std::sync::Arc;
 
-fn operation() -> OperationSpec {
+/// List operation used for feature availability.
+///
+/// # Panics
+/// Panics if a built-in operation identity is invalid.
+pub fn operation() -> OperationSpec {
     OperationSpec {
         protocol: rsi_api_protocol::wire_contract!(),
         id: OperationId::new("models", "list", 1).expect("constant operation"),
@@ -30,7 +34,11 @@ fn operation() -> OperationSpec {
         maximum_response_bytes: 1024 * 1024,
     }
 }
-fn describe_operation() -> OperationSpec {
+/// Description operation used for feature availability.
+///
+/// # Panics
+/// Panics if a built-in operation identity is invalid.
+pub fn describe_operation() -> OperationSpec {
     OperationSpec {
         protocol: rsi_api_protocol::wire_contract!(),
         id: OperationId::new("models", "describe", 1).expect("constant operation"),
@@ -90,14 +98,9 @@ pub struct ModelsClient {
     api: Arc<dyn ApiClient>,
 }
 impl ModelsClient {
-    /// Requires the exact catalog operation before exposing a model enumeration service.
-    pub fn new(api: Arc<dyn ApiClient>) -> rsi_api_protocol::Result<Self> {
-        if !api.operations().contains(&operation())
-            || !api.operations().contains(&describe_operation())
-        {
-            return Err(ApiError::Unavailable);
-        }
-        Ok(Self { api })
+    /// Creates a typed proxy; availability is resolved when each operation is called.
+    pub fn new(api: Arc<dyn ApiClient>) -> Self {
+        Self { api }
     }
 }
 #[async_trait]
@@ -226,8 +229,7 @@ impl PluginFactory for ModelsClientFactory {
         Ok(prepare(config)?.requiring_local::<ApiClientContract>())
     }
     async fn activate(&self, plan: ActivationPlan) -> rsi_meta::Result<()> {
-        let client = ModelsClient::new(plan.local::<ApiClientContract>()?)
-            .map_err(|error| MetaError::Activation(error.to_string()))?;
+        let client = ModelsClient::new(plan.local::<ApiClientContract>()?);
         let supply = plan
             .context()
             .provide_local::<LanguageModelsContract>(Arc::new(client))?;

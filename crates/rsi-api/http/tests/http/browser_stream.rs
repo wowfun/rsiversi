@@ -7,7 +7,7 @@ use tokio_tungstenite::{
 };
 
 fn request(harness: &Harness, name: &str) -> http::Request<()> {
-    let mut request = format!("ws://{}/api/v1/{name}/1", harness.address)
+    let mut request = format!("ws://{}{}", harness.address, harness.path(name))
         .into_client_request()
         .unwrap();
     request

@@ -1,6 +1,6 @@
 use crate::{PortableApiClient, export::Export};
 use async_trait::async_trait;
-use rsi_api_protocol::{ApiClientContract, OperationId, portable};
+use rsi_api_protocol::{ApiClientContract, OperationKey, portable};
 use rsi_meta::{
     ActivationPlan, Capability, ConfigValue, ContractVersion, LocalContract, MetaError,
     PluginFactory, PreparedActivation, Requirement,
@@ -24,7 +24,7 @@ struct ImportConfig {
 #[serde(deny_unknown_fields)]
 struct ExportConfig {
     service: String,
-    operations: Vec<OperationId>,
+    operations: Vec<OperationKey>,
     #[serde(default)]
     publish_local: bool,
 }
@@ -114,7 +114,10 @@ impl PluginFactory for PortableApiExportFactory {
     fn prepare(&self, config: &ConfigValue) -> rsi_meta::Result<PreparedActivation> {
         let value: ExportConfig = serde_json::from_value(config.clone()).map_err(|_| invalid())?;
         service(&value.service)?;
-        if value.operations.len() > rsi_api_protocol::MAXIMUM_OPERATIONS - 2
+        for key in &value.operations {
+            key.validate().map_err(|_| invalid())?;
+        }
+        if value.operations.len() > rsi_api_protocol::MAXIMUM_OPERATIONS - 3
             || value.operations.iter().collect::<BTreeSet<_>>().len() != value.operations.len()
         {
             return Err(invalid());
@@ -158,10 +161,13 @@ pub fn export_api(
     plan: &ActivationPlan,
     key: &str,
     api: Arc<dyn rsi_api_protocol::ApiClient>,
-    operations: &[rsi_api_protocol::OperationId],
+    operations: &[rsi_api_protocol::OperationKey],
 ) -> rsi_meta::Result<Capability> {
     service(key)?;
-    if operations.len() > rsi_api_protocol::MAXIMUM_OPERATIONS - 2
+    for operation in operations {
+        operation.validate().map_err(activation)?;
+    }
+    if operations.len() > rsi_api_protocol::MAXIMUM_OPERATIONS - 3
         || operations.iter().collect::<BTreeSet<_>>().len() != operations.len()
     {
         return Err(invalid());

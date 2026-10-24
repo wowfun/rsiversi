@@ -12,8 +12,8 @@ impl ApiClient for Remote {
     fn description(&self) -> &ConnectionDescription {
         &self.description
     }
-    fn operations(&self) -> &[OperationSpec] {
-        &self.operations
+    async fn operations(&self) -> rsi_api_protocol::Result<rsi_api_protocol::OperationCatalog> {
+        rsi_api_protocol::OperationCatalog::new(self.operations.clone())
     }
     fn input_budget(&self, _: OperationClass) -> ByteBudget {
         ByteBudget::default()
@@ -70,7 +70,7 @@ async fn decoded_mutation_metadata_cannot_claim_another_review_or_known_failure(
     let epoch = HostEpoch::generate().unwrap();
     let remote = Arc::new(Remote {
         description: ConnectionDescription {
-            wire_version: 1,
+            wire_version: rsi_api_protocol::API_WIRE_VERSION,
             endpoint_id: EndpointId::generate().unwrap(),
             host_epoch: epoch.clone(),
         },
@@ -90,7 +90,7 @@ async fn decoded_mutation_metadata_cannot_claim_another_review_or_known_failure(
         .collect(),
         reply: Mutex::new(None),
     });
-    let client = Client::new(remote.clone()).unwrap();
+    let client = Client::new(remote.clone());
     let preview = Preview {
         host_epoch: epoch,
         ticket: "b".repeat(32),

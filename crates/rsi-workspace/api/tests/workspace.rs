@@ -119,6 +119,7 @@ async fn actual_workspace_storage_and_domain_plugins_work_over_http_without_sess
             .lookup_local::<ApiDispatchContract>()
             .unwrap()
             .operations()
+            .unwrap()
             .iter()
             .any(|operation| operation.id.domain() == "workspace")
     );
@@ -282,7 +283,8 @@ async fn exercise_workspace(
     assert_eq!(workspace.get(&two.id).await.unwrap(), two);
 
     // The same advertised operation rejects a foreign field through its owning DTO.
-    let operation = api
+    let catalog = api.operations().await.unwrap();
+    let operation = catalog
         .operations()
         .iter()
         .find(|operation| operation.id.name() == "register")

@@ -78,8 +78,8 @@ impl ApiClient for Client {
     fn description(&self) -> &ConnectionDescription {
         &self.description
     }
-    fn operations(&self) -> &[OperationSpec] {
-        &self.operations
+    async fn operations(&self) -> rsi_api_protocol::Result<rsi_api_protocol::OperationCatalog> {
+        rsi_api_protocol::OperationCatalog::new(self.operations.clone())
     }
     fn input_budget(&self, _: OperationClass) -> ByteBudget {
         ByteBudget::default()
@@ -90,7 +90,7 @@ impl ApiClient for Client {
         input: RetainedBytes,
     ) -> rsi_api_protocol::Result<ApiOutput> {
         self.registry
-            .admit(&operation.id, CallOrigin::Local)?
+            .admit(&operation.call(), CallOrigin::Local)?
             .invoke(input)
             .await
     }
@@ -108,15 +108,15 @@ async fn commit_result_loss_and_invalid_registration_reply_stay_unknown_without_
         });
         let endpoint = WorkspaceApi::register(registry.as_ref(), provider.clone()).unwrap();
         let connection = Arc::new(Client {
-            operations: registry.operations(),
+            operations: registry.operations().unwrap(),
             registry: registry.clone(),
             description: ConnectionDescription {
-                wire_version: 1,
+                wire_version: rsi_api_protocol::API_WIRE_VERSION,
                 endpoint_id: EndpointId::from_bytes([1; 16]),
                 host_epoch: HostEpoch::from_bytes([2; 16]),
             },
         });
-        let client = WorkspaceClient::new(connection).unwrap();
+        let client = WorkspaceClient::new(connection);
         assert!(matches!(
             client.get_or_create(Path::new("relative")).await,
             Err(WorkspaceError::InvalidInput(_))

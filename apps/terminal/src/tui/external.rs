@@ -67,7 +67,7 @@ impl Ui {
         Self {
             attention: context
                 .lookup_local::<rsi_api_protocol::ApiClientContract>()
-                .and_then(|api| rsi_navigation_api::attention::Client::new(api).ok()),
+                .map(rsi_navigation_api::attention::Client::new),
             attention_menu: false,
             deferred_open: None,
             native: None,

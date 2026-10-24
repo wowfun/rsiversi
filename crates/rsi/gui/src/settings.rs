@@ -6,6 +6,9 @@ use rsi_settings_protocol::{MAXIMUM_SETTINGS_PAGE, validate_namespace};
 
 impl GuiApplication {
     pub(crate) async fn refresh_preferences(&self) -> bool {
+        if !self.available(&[rsi_settings_api::Operation::Read.spec()]) {
+            return false;
+        }
         let _read = self.preference_read.lock().await;
         let result = rsi_client_preferences::Preferences::load(self.settings.as_ref()).await;
         self.apply_preferences(result)

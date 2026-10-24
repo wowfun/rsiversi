@@ -127,8 +127,7 @@ impl PluginFactory for ConnectionFactory {
             .publish_domains(&mut plan, crate::addon::DomainLookup::Local(&connection));
         let session = connection.session_service();
         let api = connection.api_client();
-        let external =
-            Arc::new(rsi_acp_api::Client::new(api.clone()).map_err(|error| self.diagnosed(error))?);
+        let external = Arc::new(rsi_acp_api::Client::new(api.clone()));
         let workspace = connection.workspace_registry();
         let models = connection.language_models();
         let output = connection.output_cache();

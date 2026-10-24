@@ -48,8 +48,7 @@ impl PluginFactory for ClientFactory {
         Ok(prepare(value)?.requiring_local::<ApiClientContract>())
     }
     async fn activate(&self, plan: ActivationPlan) -> rsi_meta::Result<()> {
-        let client = Client::new(plan.local::<ApiClientContract>()?)
-            .map_err(|error| MetaError::Activation(error.to_string()))?;
+        let client = Client::new(plan.local::<ApiClientContract>()?);
         plan.context()
             .provide_local::<ExternalConversationsContract>(Arc::new(client))?;
         Ok(())

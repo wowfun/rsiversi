@@ -93,7 +93,7 @@ async fn native_tool_and_direct_uds_share_external_owner_without_cross_caller_au
     );
     std::fs::write(&fixture.profile, toml::to_string(&document).unwrap()).unwrap();
     let daemon = DaemonFixture::new(&fixture).await;
-    let direct = rsi_acp_api::Client::new(daemon.connection.api_client()).unwrap();
+    let direct = rsi_acp_api::Client::new(daemon.connection.api_client());
     assert_eq!(direct.endpoints().await.unwrap()[0].id, "configured");
     let one = create(&daemon, &fixture, "delegating-one").await;
     let two = create(&daemon, &fixture, "delegating-two").await;
@@ -189,7 +189,7 @@ async fn verify_attention(
     id: &ConversationId,
 ) {
     use rsi_navigation_api::attention::{Client, Status as AttentionStatus, Target};
-    let attention = Client::new(daemon.connection.api_client()).unwrap();
+    let attention = Client::new(daemon.connection.api_client());
     direct.submit(id, "permission").await.unwrap();
     let permission = tokio::time::timeout(std::time::Duration::from_secs(5), async {
         loop {

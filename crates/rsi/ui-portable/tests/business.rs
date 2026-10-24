@@ -39,8 +39,8 @@ impl ApiClient for TargetApi {
     fn description(&self) -> &ConnectionDescription {
         &self.description
     }
-    fn operations(&self) -> &[OperationSpec] {
-        &self.operations
+    async fn operations(&self) -> rsi_api_protocol::Result<rsi_api_protocol::OperationCatalog> {
+        rsi_api_protocol::OperationCatalog::new(self.operations.clone())
     }
     fn input_budget(&self, _: OperationClass) -> ByteBudget {
         self.budget.clone()
@@ -77,6 +77,7 @@ impl PluginFactory for Grant {
                     key: "semantic-key".into(),
                 },
                 client: self.0.clone(),
+                operations: vec![operation().key()].into(),
             }))?;
         plan.defer(
             "business facet",
@@ -207,7 +208,7 @@ async fn presentation_child_transfers_only_its_explicit_grant_and_retires_escape
         "grant",
         Grant(Arc::new(TargetApi {
             description: ConnectionDescription {
-                wire_version: 1,
+                wire_version: rsi_api_protocol::API_WIRE_VERSION,
                 endpoint_id: EndpointId::from_bytes([1; 16]),
                 host_epoch: HostEpoch::from_bytes([2; 16]),
             },

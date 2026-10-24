@@ -118,8 +118,11 @@ impl ApiClient for UdsClient {
     fn description(&self) -> &ConnectionDescription {
         self.0.description()
     }
-    fn operations(&self) -> &[OperationSpec] {
-        self.0.operations()
+    async fn operations(&self) -> Result<rsi_api_protocol::OperationCatalog> {
+        self.0.operations().await
+    }
+    async fn operation(&self, key: &rsi_api_protocol::OperationKey) -> Result<OperationSpec> {
+        self.0.operation(key).await
     }
     fn input_budget(&self, class: OperationClass) -> ByteBudget {
         self.0.input_budget(class)

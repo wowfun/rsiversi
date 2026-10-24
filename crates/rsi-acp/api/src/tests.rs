@@ -116,8 +116,8 @@ impl ApiClient for Local {
     fn description(&self) -> &ConnectionDescription {
         &self.description
     }
-    fn operations(&self) -> &[OperationSpec] {
-        &self.operations
+    async fn operations(&self) -> rsi_api_protocol::Result<rsi_api_protocol::OperationCatalog> {
+        rsi_api_protocol::OperationCatalog::new(self.operations.clone())
     }
     fn input_budget(&self, _: OperationClass) -> ByteBudget {
         self.budget.clone()
@@ -129,7 +129,7 @@ impl ApiClient for Local {
     ) -> rsi_api_protocol::Result<ApiOutput> {
         let mut output = self
             .registry
-            .admit(&operation.id, CallOrigin::Local)?
+            .admit(&operation.call(), CallOrigin::Local)?
             .invoke(input)
             .await?;
         if self.lose.load(Ordering::Acquire) {
@@ -154,10 +154,10 @@ fn fixture() -> (Arc<Source>, Endpoint, Arc<Local>, Client) {
     let owner: Arc<dyn ExternalConversations> = source.clone();
     let endpoint = Endpoint::register(registry.as_ref(), &owner).unwrap();
     let local = Arc::new(Local {
-        operations: registry.operations(),
+        operations: registry.operations().unwrap(),
         registry,
         description: ConnectionDescription {
-            wire_version: 1,
+            wire_version: rsi_api_protocol::API_WIRE_VERSION,
             endpoint_id: EndpointId::from_bytes([2; 16]),
             host_epoch: HostEpoch::from_bytes([3; 16]),
         },
@@ -165,7 +165,7 @@ fn fixture() -> (Arc<Source>, Endpoint, Arc<Local>, Client) {
         lose: AtomicBool::new(false),
         tamper: AtomicBool::new(false),
     });
-    let client = Client::new(local.clone()).unwrap();
+    let client = Client::new(local.clone());
     (source, endpoint, local, client)
 }
 #[tokio::test]

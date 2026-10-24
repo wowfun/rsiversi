@@ -133,10 +133,22 @@ impl TerminalSurfaces {
                 .lookup_local::<rsi_session_files::SessionFilesContract>()
                 .is_some();
         register_ui_targets(&mut catalog, has_ui, has_files)?;
-        let has_service_ui = has_ui
-            && parent
-                .lookup_local::<rsi_api_protocol::ApiClientContract>()
-                .is_some_and(|api| rsi_ui_api::UiClient::new(api).is_ok());
+        let has_service_ui = if has_ui {
+            if let Some(api) = parent.lookup_local::<rsi_api_protocol::ApiClientContract>() {
+                api.operations().await.is_ok_and(|catalog| {
+                    catalog.contains_all(
+                        &rsi_ui_api::operations()
+                            .iter()
+                            .map(rsi_api_protocol::OperationSpec::key)
+                            .collect::<Vec<_>>(),
+                    )
+                })
+            } else {
+                false
+            }
+        } else {
+            false
+        };
         if has_service_ui {
             catalog
                 .register_local_contract::<rsi_service_ui::ReaderContract>()

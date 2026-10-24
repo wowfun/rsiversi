@@ -336,9 +336,58 @@ pub(crate) struct SettingsEditor {
     pub version: rsi_settings_protocol::SettingsVersion,
 }
 
+#[derive(Debug)]
+pub(crate) struct Capabilities {
+    catalog: Option<rsi_api_protocol::OperationCatalog>,
+    external: bool,
+    remote_ui: bool,
+    automation: bool,
+    media: bool,
+}
+impl Capabilities {
+    pub(crate) fn new(catalog: Option<rsi_api_protocol::OperationCatalog>) -> Self {
+        let available = |specs: &[rsi_api_protocol::OperationSpec]| {
+            catalog.as_ref().is_none_or(|catalog| {
+                specs.iter().all(|spec| {
+                    catalog
+                        .operations()
+                        .iter()
+                        .any(|current| current.protocol == spec.protocol && current.id == spec.id)
+                })
+            })
+        };
+        Self {
+            external: available(&[
+                rsi_acp_api::Operation::Endpoints.spec(),
+                rsi_acp_api::Operation::Residents.spec(),
+                rsi_acp_api::Operation::List.spec(),
+            ]),
+            remote_ui: available(&rsi_ui_api::operations()),
+            automation: available(&[rsi_automation_api::Request::Status.spec()]),
+            media: available(&[
+                rsi_media_api::Operation::Import.spec(),
+                rsi_media_api::Operation::Read.spec(),
+            ]),
+            catalog,
+        }
+    }
+    fn available(&self, specs: &[rsi_api_protocol::OperationSpec]) -> bool {
+        self.catalog.as_ref().is_none_or(|catalog| {
+            specs.iter().all(|spec| {
+                catalog
+                    .operations()
+                    .iter()
+                    .any(|current| current.protocol == spec.protocol && current.id == spec.id)
+            })
+        })
+    }
+}
+
 /// Ordinary shared GUI application handle; its plugin retains all admitted command work.
 #[derive(Debug)]
 pub struct GuiApplication {
+    pub(crate) api: Option<Arc<dyn rsi_api_protocol::ApiClient>>,
+    pub(crate) capabilities: Mutex<Capabilities>,
     pub(crate) automation: Option<rsi_automation_api::Client>,
     pub(crate) automation_view: Mutex<serde_json::Value>,
     pub(crate) automation_work: tokio::sync::Mutex<()>,
@@ -381,6 +430,13 @@ pub struct GuiApplication {
     admission: Mutex<()>,
 }
 impl GuiApplication {
+    pub(crate) fn available(&self, specs: &[rsi_api_protocol::OperationSpec]) -> bool {
+        self.capabilities
+            .lock()
+            .expect("GUI capabilities")
+            .available(specs)
+    }
+
     /// Reads one bounded screenshot through the negotiated caller-scoped API.
     /// The response is not retained in the incremental presentation baseline.
     pub fn automation_artifact(
@@ -541,22 +597,31 @@ impl GuiApplication {
     }
     pub(crate) fn sections(&self) -> serde_json::Value {
         let details = self.details.lock().expect("Web details poisoned");
+        let (external, remote_ui, automation, media) = {
+            let capabilities = self.capabilities.lock().expect("GUI capabilities");
+            (
+                capabilities.external,
+                capabilities.remote_ui,
+                capabilities.automation,
+                capabilities.media,
+            )
+        };
         let preferences = self.preferences.lock().expect("GUI preferences poisoned");
         serde_json::json!({
             "application_surfaces": self.application_target.as_ref().and_then(|target| self.ui.surfaces(target).ok()).unwrap_or_default(),
             "plugins": self.plugins.as_ref().map(|feature| feature.snapshot()),
             "setup": self.setup.as_ref().map(|feature| feature.view()),
             "navigation": self.navigation.as_ref().map(|feature| feature.view()),
-            "external_catalog": self.external.as_ref().map(|_|self.external_catalog.lock().expect("external catalog").clone()),
+            "external_catalog": self.external.as_ref().filter(|_| external).map(|_|self.external_catalog.lock().expect("external catalog").clone()),
             "catalog": *self.catalog.lock().expect("Web catalog poisoned"),
             "preferences": preferences.0.web,
             "appearance": preferences.0.appearance,
             "preference_error": preferences.1,
             "panels": details.snapshot(),
-            "has_remote_ui": self.remote_ui.is_some(),
-            "automation": self.automation.as_ref().map(|_|self.automation_view.lock().expect("Automation view").clone()),
+            "has_remote_ui": self.remote_ui.is_some() && remote_ui,
+            "automation": self.automation.as_ref().filter(|_| automation).map(|_|self.automation_view.lock().expect("Automation view").clone()),
                         "media_limits": crate::panes::images::limits(),
-            "has_media": self.media.is_some(),
+            "has_media": self.media.is_some() && media,
             "settings": details.settings.editor,
             "settings_catalog": details.settings.settings_catalog,
             "notice": *self.notice.lock().expect("Web notice poisoned"),
@@ -810,21 +875,37 @@ impl PluginFactory for GuiApplicationFactory {
     async fn activate(&self, plan: ActivationPlan) -> rsi_meta::Result<()> {
         let (changed, _) = watch::channel(0_u64);
         let settings = plan.local::<rsi_settings_protocol::SettingsAccessContract>()?;
-        let preferences = rsi_client_preferences::Preferences::load(settings.as_ref())
-            .await
-            .map_err(|error| MetaError::Activation(error.to_string()))?;
+        let api = plan
+            .context()
+            .lookup_local::<rsi_api_protocol::ApiClientContract>();
+        let (capabilities, notice) = match &api {
+            Some(api) => match api.operations().await {
+                Ok(catalog) => (Some(catalog), String::new()),
+                Err(error) => (
+                    Some(rsi_api_protocol::OperationCatalog::new(Vec::new()).map_err(meta)?),
+                    format!("Capability discovery failed: {error}. Refresh to retry."),
+                ),
+            },
+            None => (None, String::new()),
+        };
+        let preferences = if capabilities.as_ref().is_none_or(|catalog| {
+            catalog.contains_all(&[rsi_settings_api::Operation::Read.spec().key()])
+        }) {
+            rsi_client_preferences::Preferences::load(settings.as_ref())
+                .await
+                .map_err(|error| MetaError::Activation(error.to_string()))?
+        } else {
+            rsi_client_preferences::Preferences::default()
+        };
         let has_files = plan
             .context()
             .lookup_local::<rsi_session_files::SessionFilesContract>()
             .is_some();
         let shell = start_shell(plan.context(), changed.clone(), has_files).await?;
-        let api = plan
-            .context()
-            .lookup_local::<rsi_api_protocol::ApiClientContract>();
         let app = Arc::new(GuiApplication {
-            automation: api
-                .clone()
-                .and_then(|api| rsi_automation_api::Client::new(api).ok()),
+            api: api.clone(),
+            capabilities: Mutex::new(Capabilities::new(capabilities)),
+            automation: api.clone().map(rsi_automation_api::Client::new),
             automation_view: Mutex::new(serde_json::json!({})),
             automation_work: tokio::sync::Mutex::new(()),
             external: plan
@@ -849,10 +930,8 @@ impl PluginFactory for GuiApplicationFactory {
                 .context()
                 .lookup_local::<rsi_ui::UiTargetContract>()
                 .filter(|target| target.kind() == rsi_ui::TargetKind::Application),
-            history_search: api
-                .clone()
-                .and_then(|api| rsi_history_api::Client::new(api).ok()),
-            remote_ui: api.and_then(|client| rsi_ui_api::UiClient::new(client).ok()),
+            history_search: api.clone().map(rsi_history_api::Client::new),
+            remote_ui: api.map(rsi_ui_api::UiClient::new),
             session: plan.local::<rsi_session_protocol::SessionContract>()?,
             workspace: plan.local::<rsi_workspace_protocol::WorkspaceRegistryContract>()?,
             models: plan.local::<rsi_ai_protocol::LanguageModelsContract>()?,
@@ -873,7 +952,7 @@ impl PluginFactory for GuiApplicationFactory {
             catalog: Mutex::new(Catalog::default()),
             catalog_work: tokio::sync::Mutex::new(()),
             details: Mutex::new(crate::panel_registry::PanelRegistry::default()),
-            notice: Mutex::new(String::new()),
+            notice: Mutex::new(notice),
             execution: plan.context().runtime().execution().clone(),
             changed,
             slots: Arc::new(Semaphore::new(8)),

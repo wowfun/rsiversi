@@ -112,15 +112,9 @@ impl NativeAddonsApi {
 #[derive(Debug)]
 pub struct NativeAddonsClient(Arc<dyn ApiClient>);
 impl NativeAddonsClient {
-    /// Requires the exact local mutation descriptor.
-    ///
-    /// # Errors
-    /// Returns unavailable when the negotiated descriptor is absent or differs.
-    pub fn new(api: Arc<dyn ApiClient>) -> Result<Self> {
-        if !api.operations().contains(&operation()) {
-            return Err(ApiError::Unavailable);
-        }
-        Ok(Self(api))
+    /// Constructs a proxy; availability and access are checked on each call.
+    pub fn new(api: Arc<dyn ApiClient>) -> Self {
+        Self(api)
     }
     /// Attempts the current selection once and returns its typed staging outcome.
     ///

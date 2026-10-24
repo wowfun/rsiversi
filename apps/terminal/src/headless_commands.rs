@@ -6,10 +6,119 @@ use super::{
 use rsi_agent_session_protocol::{DomainRequestId, SessionCommandInvocation};
 use tokio_util::sync::CancellationToken;
 
+pub(crate) async fn preflight(
+    api: &dyn rsi_api_protocol::ApiClient,
+    options: &crate::HeadlessTurnOptions,
+    extension: Option<&Extension>,
+    has_task: bool,
+) -> Result<()> {
+    use rsi_session_api::Operation as Session;
+    let mut operations = match &options.session {
+        crate::SessionSelection::Fresh { .. } => vec![
+            rsi_workspace_api::Operation::Register.spec().key(),
+            Session::Create.spec().key(),
+        ],
+        crate::SessionSelection::Resume { cwd, .. } => {
+            let mut keys = vec![Session::Attach.spec().key()];
+            if cwd.is_some() {
+                keys.push(Session::ReadHeader.spec().key());
+            }
+            keys
+        }
+    };
+    if let Some(extension) = extension {
+        let selected: &[Session] = match extension {
+            Extension::List => &[Session::Commands],
+            Extension::Execute(_) => &[Session::ExecuteCommand, Session::CommandStatus],
+            Extension::Status(_) => &[Session::CommandStatus],
+        };
+        operations.extend(selected.iter().map(|operation| operation.spec().key()));
+    }
+    if has_task {
+        operations.extend(
+            [
+                Session::Submit,
+                Session::MessageStatus,
+                Session::Observe,
+                Session::Cancel,
+            ]
+            .map(|operation| operation.spec().key()),
+        );
+        if !options.images.is_empty() {
+            operations.push(rsi_media_api::Operation::Import.spec().key());
+        }
+    }
+    let catalog = api
+        .operations()
+        .await
+        .map_err(|error| RsiError::Run(error.to_string()))?;
+    if let Some(missing) = operations
+        .iter()
+        .find(|key| !catalog.contains_all(std::slice::from_ref(key)))
+    {
+        return Err(RsiError::Run(format!(
+            "selected headless command requires {}.{} v{} ({}/v{})",
+            missing.id.domain(),
+            missing.id.name(),
+            missing.id.version(),
+            missing.protocol.name,
+            missing.protocol.version
+        )));
+    }
+    Ok(())
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
     use crate::arguments::Command;
+    #[tokio::test]
+    async fn command_listing_works_without_submission_or_media_but_task_preflight_fails() {
+        use rsi_api_protocol::*;
+        #[derive(Debug)]
+        struct ListingOnly;
+        #[async_trait::async_trait]
+        impl ApiClient for ListingOnly {
+            fn description(&self) -> &ConnectionDescription {
+                panic!("preflight does not reconnect")
+            }
+            async fn operations(&self) -> rsi_api_protocol::Result<OperationCatalog> {
+                OperationCatalog::new(vec![
+                    rsi_session_api::Operation::Attach.spec(),
+                    rsi_session_api::Operation::Commands.spec(),
+                ])
+            }
+            fn input_budget(&self, _: OperationClass) -> ByteBudget {
+                panic!("preflight must not execute")
+            }
+            async fn call(
+                &self,
+                _: &OperationSpec,
+                _: RetainedBytes,
+            ) -> rsi_api_protocol::Result<ApiOutput> {
+                panic!("preflight must not execute")
+            }
+        }
+        let options = crate::HeadlessTurnOptions {
+            task: String::new(),
+            session: crate::SessionSelection::Resume {
+                session_id: rsi_agent_session_protocol::SessionId::new("fixture").unwrap(),
+                cwd: None,
+            },
+            message_id: None,
+            images: Vec::new(),
+            model: None,
+            sandbox: None,
+            output: OutputMode::Jsonl,
+        };
+        preflight(&ListingOnly, &options, Some(&Extension::List), false)
+            .await
+            .unwrap();
+        let error = preflight(&ListingOnly, &options, None, true)
+            .await
+            .unwrap_err();
+        assert!(error.to_string().contains("session.submit"));
+    }
     #[test]
     fn headless_command_grammar_rejects_ambiguous_modes_and_bounds_full_invocation() {
         let parse =
