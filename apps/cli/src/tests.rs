@@ -108,25 +108,30 @@ fn global_resets_share_one_parser_and_application_arguments_remain_literal() {
 }
 
 #[test]
-fn agent_store_verify_has_a_strict_absolute_root_contract() {
+fn agent_store_commands_have_a_strict_absolute_root_contract() {
     let temporary = tempfile::tempdir().unwrap();
     let root = temporary.path().join("agent-store");
-    let Parse::AgentStore(command) = parse(&[
-        "agent-store",
-        "verify",
-        "--root",
-        root.to_str().unwrap(),
-        "--output",
-        "json",
-    ])
-    .unwrap() else {
-        panic!("agent-store")
-    };
-    assert_eq!(command.root, Some(root));
-    assert_eq!(command.output, ManagementOutput::Json);
-    assert!(parse(&["agent-store", "verify", "--root", "relative"]).is_err());
-    assert!(parse(&["agent-store", "verify", "--root", "/a", "--root", "/b"]).is_err());
+    for verb in ["verify", "compact"] {
+        let Parse::AgentStore(command) = parse(&[
+            "agent-store",
+            verb,
+            "--root",
+            root.to_str().unwrap(),
+            "--output",
+            "json",
+        ])
+        .unwrap() else {
+            panic!("agent-store")
+        };
+        assert_eq!(command.root.as_ref(), Some(&root));
+        assert_eq!(command.output, ManagementOutput::Json);
+        assert_eq!(command.compact, verb == "compact");
+        assert!(parse(&["agent-store", verb, "--root", "relative"]).is_err());
+        assert!(parse(&["agent-store", verb, "--root", "/a", "--root", "/b"]).is_err());
+        assert!(parse(&["agent-store", verb, "--output", "invalid"]).is_err());
+    }
     assert!(parse(&["agent-store", "unknown"]).is_err());
+    assert!(cli::AGENT_STORE_HELP.contains("compact   Vacuum"));
 }
 
 #[test]

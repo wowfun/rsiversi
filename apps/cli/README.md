@@ -57,3 +57,11 @@ There is no debug-only launch grammar or source-tree UI selector.
 The [launch maintenance contract](../../crates/rsi/core/docs/launch.md) owns
 global config/state resets, explicit import and recoverable core replacement.
 Application help is resolved before home initialization or maintenance.
+
+`rsi agent-store verify` audits an existing, cleanly closed Store without creating it.
+`rsi agent-store compact` obtains the exclusive Store writer lease, refuses pending
+Session/CAS retirements, and performs SQLite VACUUM. Stop the Host first. It changes
+the database file layout, preserves logical records, and reports database bytes
+before and after; it does not collect CAS. Both commands accept an absolute `--root`
+and `--output text|json`. JSON uses version 1, a command-specific `type`, `status`
+and `root`; compact additionally reports `before_bytes` and `after_bytes`.

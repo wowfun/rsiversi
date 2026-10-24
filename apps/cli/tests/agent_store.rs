@@ -136,3 +136,108 @@ fn built_binary_verify_rejects_a_snapshot_with_an_uncheckpointed_wal() {
     assert!(stderr.contains("cleanly closed"), "{stderr}");
     drop(store);
 }
+
+#[test]
+fn built_binary_compact_reports_envelope_and_preserves_a_verifiable_store() {
+    let temporary = tempfile::tempdir().unwrap();
+    let root = temporary.path().join("agent");
+    let store = SqliteStore::open(&root).unwrap();
+    let id = SessionId::new("compact-preserved").unwrap();
+    let runtime = tokio::runtime::Runtime::new().unwrap();
+    runtime
+        .block_on(
+            store.append(AppendBatch {
+                session_id: id.clone(),
+                expected_seq: 0,
+                header: Some(
+                    SessionHeader::new_local(
+                        id.clone(),
+                        1,
+                        "/workspace",
+                        AgentPresetId::new("test").unwrap(),
+                        FrozenAgentSettings::new(
+                            "test",
+                            "system",
+                            ModelRef::new("test", "test").unwrap(),
+                            SandboxMode::ReadOnly,
+                            false,
+                        )
+                        .unwrap(),
+                    )
+                    .unwrap(),
+                ),
+                facts: vec![
+                    SessionFact::new(
+                        1,
+                        1,
+                        SessionFactBody::TurnAccepted {
+                            turn_id: TurnId::new("retained-turn").unwrap(),
+                            text: "preserve this canonical fact".into(),
+                            model: None,
+                            reasoning_effort: None,
+                            sandbox: SandboxMode::ReadOnly,
+                            require_approval: false,
+                        },
+                    )
+                    .unwrap()
+                    .into(),
+                ],
+            }),
+        )
+        .unwrap();
+    let before = runtime.block_on(store.read_facts(&id, 0, 1)).unwrap();
+    drop(store);
+    let output = Command::new(env!("CARGO_BIN_EXE_rsi"))
+        .args([
+            "agent-store",
+            "compact",
+            "--root",
+            root.to_str().unwrap(),
+            "--output",
+            "json",
+        ])
+        .output()
+        .unwrap();
+    assert!(output.status.success(), "{output:?}");
+    assert!(output.stderr.is_empty());
+    let value: Value = serde_json::from_slice(&output.stdout).unwrap();
+    assert_eq!(value["version"], 1);
+    assert_eq!(value["type"], "agent_store_compact");
+    assert_eq!(value["status"], "ok");
+    assert_eq!(value["root"], root.to_str().unwrap());
+    assert!(value["after_bytes"].as_u64().unwrap() <= value["before_bytes"].as_u64().unwrap());
+    SqliteStore::verify(&root).unwrap();
+    let store = SqliteStore::open(&root).unwrap();
+    assert_eq!(
+        runtime.block_on(store.read_facts(&id, 0, 1)).unwrap(),
+        before
+    );
+}
+#[test]
+fn built_binary_compact_refuses_missing_locked_and_retiring_stores() {
+    let temporary = tempfile::tempdir().unwrap();
+    let root = temporary.path().join("agent");
+    let compact = || {
+        Command::new(env!("CARGO_BIN_EXE_rsi"))
+            .args(["agent-store", "compact", "--root", root.to_str().unwrap()])
+            .output()
+            .unwrap()
+    };
+    let absent = compact();
+    assert_eq!(absent.status.code(), Some(2));
+    assert!(!root.exists());
+    let store = SqliteStore::open(&root).unwrap();
+    let locked = compact();
+    assert_eq!(locked.status.code(), Some(2));
+    drop(store);
+    let connection = rusqlite::Connection::open(root.join("sessions.sqlite3")).unwrap();
+    connection.execute("INSERT INTO cas_deletions(operation_id,sha256,byte_len,generation,state) VALUES('pending',?1,1,1,'deleting')", ["a".repeat(64)]).unwrap();
+    drop(connection);
+    let pending = compact();
+    assert_eq!(pending.status.code(), Some(2));
+    assert!(
+        String::from_utf8(pending.stderr)
+            .unwrap()
+            .contains("pending retirements")
+    );
+}

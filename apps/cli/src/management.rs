@@ -18,6 +18,29 @@ pub(super) async fn run_agent_store(command: AgentStoreCommand) -> u8 {
             Err(error) => return report_error(&error),
         },
     };
+    if command.compact {
+        let compact_root = root.clone();
+        let result = tokio::task::spawn_blocking(move || SqliteStore::compact(compact_root)).await;
+        return match result {
+            Ok(Ok(receipt)) => match command.output {
+                ManagementOutput::Json => write_json(&serde_json::json!({
+                    "version": 1, "type": "agent_store_compact", "status": "ok", "root": root,
+                    "before_bytes": receipt.before_bytes, "after_bytes": receipt.after_bytes,
+                })),
+                ManagementOutput::Text => write_text_line(&format!(
+                    "compacted\t{} -> {} bytes",
+                    receipt.before_bytes, receipt.after_bytes
+                )),
+            }
+            .map_or_else(|error| report_error(&error), |()| 0),
+            Ok(Err(error)) => report_error(&RsiError::Boot(format!(
+                "Agent Store compact failed: {error}"
+            ))),
+            Err(error) => report_error(&RsiError::Boot(format!(
+                "Agent Store compact completion unknown: {error}"
+            ))),
+        };
+    }
     let verify_root = root.clone();
     let verification = tokio::task::spawn_blocking(move || SqliteStore::verify(verify_root)).await;
     match verification {

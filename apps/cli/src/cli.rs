@@ -26,13 +26,13 @@ pub(super) const HELP: &str = "Usage:\n\
   rsi host <start|serve|restart|stop|status|reload> [--profile HOST]\n\
   rsi addon <list|install|enable|disable|uninstall> [ARGUMENT] [--root ABSOLUTE] [--output text|json]\n\
   rsi agent-preset <COMMAND> [--output text|json]\n\
-  rsi agent-store verify [--root ABSOLUTE] [--output text|json]\n\n\
+  rsi agent-store verify|compact [--root ABSOLUTE] [--output text|json]\n\n\
 Commands:\n\
   run             Run a named application plugin Profile\n\
   profile         Inspect and manage Application and Host Profiles\n\
   host            Control the explicit local Service Host daemon\n\
   agent-preset    Inspect and manage local Agent presets\n\
-  agent-store     Verify the durable Agent Store\n\
+  agent-store     Verify or compact an offline durable Agent Store\n\
   addon           Manage local native source bytes and explicit selection\n\n\
 Startup option:\n\
   --config-home DIR  Select the final configuration directory\n\
@@ -83,9 +83,10 @@ Commands:\n\
   set      Store one syntactically valid preset id\n\
   clear    Re-inherit the deployment default\n";
 pub(super) const AGENT_STORE_HELP: &str = "Usage:\n\
-  rsi agent-store verify [--root ABSOLUTE] [--output text|json]\n\n\
+  rsi agent-store verify|compact [--root ABSOLUTE] [--output text|json]\n\n\
 Commands:\n\
-  verify    Run an offline full integrity audit without creating a Store\n";
+  verify    Run an offline full integrity audit without creating a Store\n\
+  compact   Vacuum an existing Store exclusively; stop the Host and finish retirements first\n";
 pub(super) const BOOT_FAILURE_EXIT_CODE: u8 = 2;
 
 pub(super) enum Parse {
@@ -177,6 +178,7 @@ pub(super) struct AgentPresetCommand {
 
 #[derive(Clone, Debug)]
 pub(super) struct AgentStoreCommand {
+    pub(super) compact: bool,
     pub(super) root: Option<PathBuf>,
     pub(super) output: ManagementOutput,
 }
@@ -208,7 +210,7 @@ pub(super) fn parse_agent_store(arguments: impl Iterator<Item = OsString>) -> rs
     {
         return Ok(Parse::Help(AGENT_STORE_HELP));
     }
-    if command != "verify" {
+    if !matches!(command, "verify" | "compact") {
         return Err(agent_store_usage(format!(
             "unknown agent-store command `{command}`"
         )));
@@ -257,7 +259,11 @@ pub(super) fn parse_agent_store(arguments: impl Iterator<Item = OsString>) -> rs
         }
         index += 1;
     }
-    Ok(Parse::AgentStore(AgentStoreCommand { root, output }))
+    Ok(Parse::AgentStore(AgentStoreCommand {
+        root,
+        output,
+        compact: command == "compact",
+    }))
 }
 
 pub(super) fn parse_agent_preset(arguments: impl Iterator<Item = OsString>) -> rsi::Result<Parse> {
