@@ -1,8 +1,5 @@
 //! Product authorization and retained lifetime around mechanical retirement.
-use super::{
-    LocalSessionService, Result, SessionError, SessionHeader, SessionService, map_store_error,
-    map_turn_error,
-};
+use super::{LocalSessionService, Result, SessionError, map_store_error, map_turn_error};
 use rsi_agent_store_protocol::{
     PurgeBlocker, PurgePreview, PurgeReceipt, PurgeRequest, StoreMaintenance,
 };
@@ -97,17 +94,17 @@ impl LocalSessionService {
             .maintenance()
             .ok_or(SessionError::Api(rsi_api_protocol::ApiError::Unavailable))
     }
-    fn authorize_purge_headers(
+    fn authorize_purge_access(
         &self,
-        headers: &[SessionHeader],
+        headers: &[rsi_agent_store_protocol::StoreSessionAccess],
     ) -> Result<Vec<Option<rsi_execution::ExecutionOperation>>> {
         self.check_origin()?;
-        if headers.iter().any(|header| header.protection().is_some()) {
+        if headers.iter().any(|header| header.protection.is_some()) {
             return Err(SessionError::Api(rsi_api_protocol::ApiError::Unauthorized));
         }
         headers
             .iter()
-            .map(|header| self.admit(header.coordinates().location()))
+            .map(|header| self.admit(&header.location))
             .collect()
     }
     fn authorize_purge_locations(
@@ -120,46 +117,64 @@ impl LocalSessionService {
             .map(|location| self.admit(location))
             .collect()
     }
-    async fn selected_headers(&self, request: &PurgeRequest) -> Result<Vec<SessionHeader>> {
+    async fn selected_access(
+        &self,
+        request: &PurgeRequest,
+    ) -> Result<Vec<rsi_agent_store_protocol::StoreSessionAccess>> {
         self.check_origin()?;
-        let mut headers = Vec::with_capacity(request.targets.len());
-        for target in &request.targets {
-            headers.push(
-                self.store
-                    .header(&target.session_id)
-                    .await
-                    .map_err(map_store_error)
-                    .map_err(|error| {
-                        if matches!(self.origin, rsi_api_protocol::CallOrigin::Device(_))
-                            && matches!(error, SessionError::NotFound(_))
-                        {
-                            SessionError::Api(rsi_api_protocol::ApiError::Unauthorized)
-                        } else {
-                            error
-                        }
-                    })?,
-            );
-        }
-        Ok(headers)
+        let ids: Vec<_> = request
+            .targets
+            .iter()
+            .map(|target| target.session_id.clone())
+            .collect();
+        let rows = self
+            .store
+            .session_access(&ids)
+            .await
+            .map_err(map_store_error)?;
+        validate_access_rows(&ids, &rows).map_err(map_store_error)?;
+        rows.into_iter()
+            .map(|row| {
+                row.map_err(map_store_error).map_err(|error| {
+                    if matches!(self.origin, rsi_api_protocol::CallOrigin::Device(_))
+                        && matches!(error, SessionError::NotFound(_))
+                    {
+                        SessionError::Api(rsi_api_protocol::ApiError::Unauthorized)
+                    } else {
+                        error
+                    }
+                })
+            })
+            .collect()
     }
-    async fn redact(&self, mut preview: PurgePreview) -> Result<PurgePreview> {
-        for blocker in &mut preview.blockers {
-            if let PurgeBlocker::Referenced { source, .. } = blocker
-                && let Some(id) = source.as_ref()
-                && self.read_header(id).await.is_err()
-            {
-                *source = None;
-            }
-        }
-        self.check_origin()?;
-        Ok(preview)
+    async fn redact(&self, preview: PurgePreview) -> Result<PurgePreview> {
+        redact_sources(
+            preview,
+            |ids| {
+                let store = self.store.clone();
+                async move { store.session_access(&ids).await }
+            },
+            |row| {
+                let token = match row.protection.as_ref() {
+                    None => tokio_util::sync::CancellationToken::new(),
+                    Some(scope) => self
+                        .protection
+                        .as_ref()
+                        .ok_or(SessionError::Api(rsi_api_protocol::ApiError::Unauthorized))?
+                        .view(scope, &self.origin)?,
+                };
+                Ok((token, self.admit(&row.location)?))
+            },
+            || self.check_origin(),
+        )
+        .await
     }
     pub(super) async fn maintenance_preview(&self, request: PurgeRequest) -> Result<PurgePreview> {
         request.validate().map_err(map_store_error)?;
         self.check_origin()?;
         self.reconcile_purge_admission().await?;
-        let headers = self.selected_headers(&request).await?;
-        let _admission = self.authorize_purge_headers(&headers)?;
+        let headers = self.selected_access(&request).await?;
+        let _admission = self.authorize_purge_access(&headers)?;
         self.authorized_preview(&request, false).await
     }
     async fn authorized_preview(
@@ -273,35 +288,32 @@ impl LocalSessionService {
     ) -> Result<std::result::Result<SessionPurgeReceipt, PurgePreview>> {
         request.validate().map_err(map_store_error)?;
         self.check_origin()?;
-        let permit = match self.maintenance.clone().try_acquire_owned() {
-            Ok(permit) => permit,
-            Err(_) => {
-                let active = self.active_purge.lock().expect("active purge").clone();
-                let Some(active) = active.filter(|active| {
-                    active.same_caller(&self.origin)
-                        && active.request.operation_id == request.operation_id
-                }) else {
-                    return Err(SessionError::Capacity);
-                };
-                if active.request != request {
-                    return Err(SessionError::Invalid(
-                        "purge identity reused with a different selection".into(),
-                    ));
-                }
-                return match tokio::time::timeout(
-                    std::time::Duration::from_secs(60),
-                    self.maintenance_status(request.operation_id.as_str()),
-                )
-                .await
-                {
-                    Ok(Ok(Some(receipt))) => Ok(Ok(receipt)),
-                    Ok(Err(error)) => Err(error),
-                    Ok(Ok(None)) | Err(_) => Err(SessionError::MaintenanceOutcomeUnknown {
-                        kind: MaintenanceKind::Purge,
-                        operation_id: request.operation_id,
-                    }),
-                };
+        let Ok(permit) = self.maintenance.clone().try_acquire_owned() else {
+            let active = self.active_purge.lock().expect("active purge").clone();
+            let Some(active) = active.filter(|active| {
+                active.same_caller(&self.origin)
+                    && active.request.operation_id == request.operation_id
+            }) else {
+                return Err(SessionError::Capacity);
+            };
+            if active.request != request {
+                return Err(SessionError::Invalid(
+                    "purge identity reused with a different selection".into(),
+                ));
             }
+            return match tokio::time::timeout(
+                std::time::Duration::from_mins(1),
+                self.maintenance_status(request.operation_id.as_str()),
+            )
+            .await
+            {
+                Ok(Ok(Some(receipt))) => Ok(Ok(receipt)),
+                Ok(Err(error)) => Err(error),
+                Ok(Ok(None)) | Err(_) => Err(SessionError::MaintenanceOutcomeUnknown {
+                    kind: MaintenanceKind::Purge,
+                    operation_id: request.operation_id,
+                }),
+            };
         };
         *self.active_purge.lock().expect("active purge") = Some(ActivePurge {
             request: request.clone(),
@@ -324,6 +336,10 @@ impl LocalSessionService {
         }));
         await_purge(receive, operation_id).await?
     }
+    #[expect(
+        clippy::too_many_lines,
+        reason = "purge retains authorization and retirement ownership through durable commit and reconciliation"
+    )]
     async fn run_purge(
         &self,
         request: PurgeRequest,
@@ -349,8 +365,8 @@ impl LocalSessionService {
                 .map_err(uncertain)?;
             return Ok(Ok(receipt));
         }
-        let headers = self.selected_headers(&request).await?;
-        let _admission = self.authorize_purge_headers(&headers)?;
+        let headers = self.selected_access(&request).await?;
+        let _admission = self.authorize_purge_access(&headers)?;
         let ids: Vec<_> = request
             .targets
             .iter()
@@ -462,7 +478,7 @@ async fn await_purge<T>(
     receive: tokio::sync::oneshot::Receiver<T>,
     operation_id: rsi_agent_store_protocol::MaintenanceOperationId,
 ) -> Result<T> {
-    tokio::time::timeout(std::time::Duration::from_secs(60), receive)
+    tokio::time::timeout(std::time::Duration::from_mins(1), receive)
         .await
         .ok()
         .and_then(std::result::Result::ok)
@@ -499,9 +515,212 @@ async fn drain_readers(owners: &[rsi_session_protocol::SessionClosing]) -> Resul
     .map_err(|_| SessionError::Capacity)
 }
 
+// Collection retains every successful policy lease until the final visibility check.
+fn validate_access_rows(
+    ids: &[rsi_agent_session_protocol::SessionId],
+    rows: &[rsi_agent_store_protocol::Result<rsi_agent_store_protocol::StoreSessionAccess>],
+) -> rsi_agent_store_protocol::Result<()> {
+    if ids.len() != rows.len()
+        || ids
+            .iter()
+            .zip(rows)
+            .any(|(id, row)| row.as_ref().is_ok_and(|row| &row.session_id != id))
+    {
+        return Err(rsi_agent_store_protocol::StoreError::Corrupt(
+            "access batch differs from requested Session identities".into(),
+        ));
+    }
+    Ok(())
+}
+
+async fn redact_sources<G, F>(
+    mut preview: PurgePreview,
+    read: impl Fn(Vec<rsi_agent_session_protocol::SessionId>) -> F,
+    authorize: impl Fn(
+        &rsi_agent_store_protocol::StoreSessionAccess,
+    ) -> Result<(tokio_util::sync::CancellationToken, G)>,
+    check_origin: impl Fn() -> Result<()>,
+) -> Result<PurgePreview>
+where
+    F: std::future::Future<
+            Output = rsi_agent_store_protocol::Result<
+                Vec<rsi_agent_store_protocol::Result<rsi_agent_store_protocol::StoreSessionAccess>>,
+            >,
+        > + Send,
+{
+    let ids = preview
+        .blockers
+        .iter()
+        .filter_map(|blocker| match blocker {
+            PurgeBlocker::Referenced { source, .. } => source.clone(),
+            _ => None,
+        })
+        .collect::<std::collections::BTreeSet<_>>()
+        .into_iter()
+        .collect::<Vec<_>>();
+    if ids.is_empty() {
+        return Ok(preview);
+    }
+    let mut admitted = std::collections::BTreeMap::new();
+    for chunk in ids.chunks(256) {
+        let Ok(rows) = read(chunk.to_vec()).await else {
+            continue;
+        };
+        if validate_access_rows(chunk, &rows).is_err() {
+            continue;
+        }
+        for row in rows.into_iter().flatten() {
+            if let Ok(lease) = authorize(&row) {
+                admitted.insert(row.session_id, lease);
+            }
+        }
+    }
+    check_origin()?;
+    for blocker in &mut preview.blockers {
+        if let PurgeBlocker::Referenced { source, .. } = blocker
+            && source
+                .as_ref()
+                .and_then(|id| admitted.get(id))
+                .is_none_or(|(token, _)| token.is_cancelled())
+        {
+            *source = None;
+        }
+    }
+    Ok(preview)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+    #[tokio::test]
+    async fn reference_redaction_retains_only_readable_authorized_unrevoked_sources() {
+        use rsi_agent_session_protocol::{ExecutionLocation, SessionId};
+        use rsi_agent_store_protocol::{StoreError, StoreSessionAccess};
+        use std::sync::Arc;
+        use tokio_util::sync::CancellationToken;
+        let target = SessionId::new("target").unwrap();
+        let ids: Vec<_> = (0..513)
+            .map(|n| SessionId::new(format!("source-{n:03}")).unwrap())
+            .collect();
+        let preview = PurgePreview {
+            blockers: ids
+                .iter()
+                .chain(&ids[..1])
+                .map(|id| PurgeBlocker::Referenced {
+                    source: Some(id.clone()),
+                    target: target.clone(),
+                })
+                .collect(),
+        };
+        let revoked = CancellationToken::new();
+        let retained = Arc::new(());
+        let reads = std::sync::Mutex::new(Vec::new());
+        let result = redact_sources(
+            preview,
+            |chunk| {
+                let (reads, ids, retained, revoked) = (&reads, &ids, &retained, &revoked);
+                async move {
+                    reads.lock().unwrap().push(chunk.len());
+                    if chunk[0] == ids[256] {
+                        assert!(
+                            Arc::strong_count(retained) > 1,
+                            "prior execution guards survive later reads"
+                        );
+                        revoked.cancel();
+                        return Err(StoreError::Io("batch read failed".into()));
+                    }
+                    Ok(chunk
+                        .iter()
+                        .map(|id| {
+                            if id == &ids[2] {
+                                Err(StoreError::Io("row read failed".into()))
+                            } else {
+                                Ok(StoreSessionAccess {
+                                    session_id: id.clone(),
+                                    location: ExecutionLocation::Local,
+                                    protection: None,
+                                })
+                            }
+                        })
+                        .collect())
+                }
+            },
+            |row| {
+                if row.session_id == ids[3] {
+                    return Err(SessionError::Api(rsi_api_protocol::ApiError::Unauthorized));
+                }
+                Ok((
+                    if row.session_id == ids[1] {
+                        revoked.clone()
+                    } else {
+                        CancellationToken::new()
+                    },
+                    retained.clone(),
+                ))
+            },
+            || {
+                assert!(Arc::strong_count(&retained) > 1);
+                Ok(())
+            },
+        )
+        .await
+        .unwrap();
+        assert_eq!(*reads.lock().unwrap(), vec![256, 256, 1]);
+        assert_eq!(Arc::strong_count(&retained), 1);
+        for (index, blocker) in result.blockers.iter().enumerate() {
+            let id = &ids[index % ids.len()];
+            let hidden = matches!(index, 1..=3 | 256..=511);
+            assert_eq!(
+                blocker,
+                &PurgeBlocker::Referenced {
+                    source: (!hidden).then(|| id.clone()),
+                    target: target.clone()
+                }
+            );
+        }
+    }
+
+    #[tokio::test]
+    async fn reference_redaction_rechecks_origin_after_collection() {
+        use rsi_agent_session_protocol::{ExecutionLocation, SessionId};
+        use rsi_agent_store_protocol::StoreSessionAccess;
+        let revoked = tokio_util::sync::CancellationToken::new();
+        let source = SessionId::new("source").unwrap();
+        let preview = PurgePreview {
+            blockers: vec![PurgeBlocker::Referenced {
+                source: Some(source.clone()),
+                target: SessionId::new("target").unwrap(),
+            }],
+        };
+        let result = redact_sources(
+            preview,
+            |_| {
+                let (revoked, source) = (&revoked, &source);
+                async move {
+                    revoked.cancel();
+                    Ok(vec![Ok(StoreSessionAccess {
+                        session_id: source.clone(),
+                        location: ExecutionLocation::Local,
+                        protection: None,
+                    })])
+                }
+            },
+            |_| Ok((tokio_util::sync::CancellationToken::new(), ())),
+            || {
+                if revoked.is_cancelled() {
+                    Err(SessionError::Api(rsi_api_protocol::ApiError::Unauthorized))
+                } else {
+                    Ok(())
+                }
+            },
+        )
+        .await;
+        assert_eq!(
+            result,
+            Err(SessionError::Api(rsi_api_protocol::ApiError::Unauthorized))
+        );
+    }
+
     #[test]
     fn hard_owner_admitted_after_preview_returns_busy_without_cancelling_other_reads() {
         let ids =
@@ -596,4 +815,32 @@ mod tests {
         assert_eq!(drain_readers(&closing).await, Err(SessionError::Capacity));
         assert_eq!(start.elapsed(), std::time::Duration::from_secs(30));
     }
+}
+
+#[cfg(test)]
+#[test]
+fn access_batch_requires_exact_length_and_positional_identities() {
+    use rsi_agent_session_protocol::{ExecutionLocation, SessionId};
+    use rsi_agent_store_protocol::{StoreError, StoreSessionAccess};
+    let id = SessionId::new("selected").unwrap();
+    let row = |name| {
+        Ok(StoreSessionAccess {
+            session_id: SessionId::new(name).unwrap(),
+            location: ExecutionLocation::Local,
+            protection: None,
+        })
+    };
+    assert!(matches!(
+        validate_access_rows(std::slice::from_ref(&id), &[]),
+        Err(StoreError::Corrupt(_))
+    ));
+    assert!(validate_access_rows(std::slice::from_ref(&id), &[row("other")]).is_err());
+    assert!(
+        validate_access_rows(
+            std::slice::from_ref(&id),
+            &[row("selected"), row("selected")]
+        )
+        .is_err()
+    );
+    assert!(validate_access_rows(&[id], &[row("selected")]).is_ok());
 }

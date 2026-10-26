@@ -1941,6 +1941,15 @@ pub trait SessionStore: fmt::Debug + Send + Sync + 'static {
     async fn validate_session(&self, session_id: &SessionId) -> Result<()>;
     /// Reads bounded immutable metadata without scanning session history.
     async fn header(&self, session_id: &SessionId) -> Result<SessionHeader>;
+    /// Reads ordered per-item access projections from one metadata snapshot.
+    async fn session_access(
+        &self,
+        sessions: &[SessionId],
+    ) -> Result<Vec<Result<StoreSessionAccess>>> {
+        validate_access_selection(sessions)?;
+        Err(StoreError::Unsupported("Session access batches".into()))
+    }
+
     /// Reads the complete bounded domain set at the current or explicit control horizon.
     async fn read_domain_states(
         &self,
@@ -2479,6 +2488,42 @@ impl StoreError {
 
 /// Store result.
 pub type Result<T> = std::result::Result<T, StoreError>;
+
+/// Bounded immutable metadata used by caller-owned access policy.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct StoreSessionAccess {
+    /// Exact selected identity.
+    pub session_id: SessionId,
+    /// Location of the immutable Session workspace.
+    pub location: rsi_agent_session_protocol::ExecutionLocation,
+    /// Optional caller-interpreted protection scope.
+    pub protection: Option<rsi_agent_session_protocol::SessionProtectionScope>,
+}
+impl From<&SessionHeader> for StoreSessionAccess {
+    fn from(header: &SessionHeader) -> Self {
+        Self {
+            session_id: header.session_id().clone(),
+            location: header.coordinates().location().clone(),
+            protection: header.protection().cloned(),
+        }
+    }
+}
+/// Checks batch selection without changing caller order.
+pub fn validate_access_selection(sessions: &[SessionId]) -> Result<()> {
+    if sessions.is_empty()
+        || sessions.len() > 256
+        || sessions
+            .iter()
+            .collect::<std::collections::BTreeSet<_>>()
+            .len()
+            != sessions.len()
+    {
+        return Err(StoreError::Invalid(
+            "access selection must contain 1..=256 unique Sessions".into(),
+        ));
+    }
+    Ok(())
+}
 
 /// Validates one Store read limit.
 pub fn validate_read_limit(limit: usize) -> Result<()> {

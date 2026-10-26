@@ -165,6 +165,34 @@ async fn complete_non_strict_writes_preserve_the_reference_audit() {
 }
 
 #[tokio::test]
+async fn access_batch_keeps_retiring_and_purged_errors_in_selection_order() {
+    let root = tempfile::tempdir().unwrap();
+    let store = SqliteStore::open(root.path()).unwrap();
+    let retired = seed(&store, "retired-access", 1).await;
+    let live = seed(&store, "live-access", 1).await;
+    let selection = [
+        live.targets[0].session_id.clone(),
+        retired.targets[0].session_id.clone(),
+    ];
+    store.begin_purge(retired.clone()).await.unwrap().unwrap();
+    for purged in [false, true] {
+        if purged {
+            assert!(
+                store
+                    .purge_batch(retired.operation_id.as_str())
+                    .await
+                    .unwrap()
+                    .complete
+            );
+        }
+        let rows = store.session_access(&selection).await.unwrap();
+        assert_eq!(rows.len(), 2);
+        assert_eq!(rows[0].as_ref().unwrap().session_id, selection[0]);
+        assert!(matches!(&rows[1], Err(StoreError::NotFound(id)) if id == selection[1].as_str()));
+    }
+}
+
+#[tokio::test]
 async fn warm_integrity_proof_does_not_dispatch_an_extra_reader_after_purge() {
     let root = tempfile::tempdir().unwrap();
     let store = SqliteStore::open(root.path()).unwrap();

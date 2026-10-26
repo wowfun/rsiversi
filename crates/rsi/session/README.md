@@ -326,3 +326,15 @@ Activity visibility omits absent or unauthorized Headers; other Store or policy
 failures propagate, rather than silently removing Sessions from the projection.
 Activity retains reading leases throughout collection and rechecks them and the
 caller before publishing a page; revocation during collection refuses delivery.
+
+Purge selections authorize ordered Store access projections from one batch.
+The adapter verifies exact row count and positional Session identities before
+authorization. Malformed selected-access batches fail closed; malformed source
+batches redact their source identities without authorizing an unrelated row.
+The in-process Store owns batch shape and identity; Session owns visibility policy.
+Missing selected identities remain NotFound locally and Unauthorized for Devices.
+Referenced blocker sources are deduplicated into batches of at most 256; failed
+or unauthorized reads hide their identities. Product protection tokens and
+execution admissions stay retained through the final projection, with protection
+and Device revocation rechecked before output. Store begin_purge still performs
+its own atomic immutable-header and durable-cursor recheck.

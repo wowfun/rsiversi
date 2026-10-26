@@ -403,3 +403,10 @@ lexically ordered page of at most 256 unfinished IDs, with an exclusive optional
 after-ID cursor. A short page ends the current scan; concurrent completions may
 remove IDs. Discovery grants no mutation authority and never resumes work. Use the
 existing binding/status methods and ordinary authorization before explicit retry.
+
+Session access batches select 1..256 unique identities in caller order from one
+metadata snapshot. Each result retains only SessionId, execution location and
+optional protection scope. Providers validate each full bounded Header before
+projection and release it before the next row. Per-item NotFound/Corrupt errors
+remain ordered; a batch failure describes the whole snapshot. This seam grants
+no access and does not validate historical Facts.

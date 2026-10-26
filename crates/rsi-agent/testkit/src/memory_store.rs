@@ -623,6 +623,29 @@ impl SessionStore for MemoryStore {
         }
     }
 
+    async fn session_access(
+        &self,
+        sessions: &[SessionId],
+    ) -> Result<Vec<Result<rsi_agent_store_protocol::StoreSessionAccess>>> {
+        rsi_agent_store_protocol::validate_access_selection(sessions)?;
+        let state = self
+            .inner
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        Ok(sessions
+            .iter()
+            .map(|id| {
+                state
+                    .sessions
+                    .get(id)
+                    .map(|session| {
+                        rsi_agent_store_protocol::StoreSessionAccess::from(&session.header)
+                    })
+                    .ok_or_else(|| StoreError::NotFound(id.to_string()))
+            })
+            .collect())
+    }
+
     async fn header(&self, session_id: &SessionId) -> Result<SessionHeader> {
         self.inner
             .lock()

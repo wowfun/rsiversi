@@ -359,6 +359,29 @@ impl SessionStore for SqliteStore {
         self.ensure_not_retired(session_id).await
     }
 
+    async fn session_access(
+        &self,
+        sessions: &[SessionId],
+    ) -> Result<Vec<Result<rsi_agent_store_protocol::StoreSessionAccess>>> {
+        rsi_agent_store_protocol::validate_access_selection(sessions)?;
+        let sessions = sessions.to_vec();
+        self.with_reader(move |connection| {
+            let transaction = connection.transaction().map_err(sql_error)?;
+            let result = sessions
+                .iter()
+                .map(|id| {
+                    reference_index::available(&transaction, id)?;
+                    read_session_header_row(&transaction, id).map(|(header, _)| {
+                        rsi_agent_store_protocol::StoreSessionAccess::from(&header)
+                    })
+                })
+                .collect();
+            transaction.commit().map_err(sql_error)?;
+            Ok(result)
+        })
+        .await
+    }
+
     async fn header(&self, session_id: &SessionId) -> Result<SessionHeader> {
         let session_id = session_id.clone();
         self.with_reader(move |connection| {
