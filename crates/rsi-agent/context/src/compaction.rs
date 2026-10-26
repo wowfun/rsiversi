@@ -129,8 +129,19 @@ enum InstructionKind {
 }
 
 impl SemanticState {
-    pub(super) fn global_weight(&self) -> Result<usize> {
+    pub(super) fn global_weights(&self) -> Result<[usize; 3]> {
+        Ok([
+            crate::budget::weight(&self.identity)?,
+            self.usage_weight()?,
+            crate::budget::weight(&self.summary)?,
+        ])
+    }
+    #[cfg(test)]
+    pub(super) fn measured_global_weight(&self) -> Result<usize> {
         crate::budget::weight(&(&self.identity, &self.usage, &self.summary))
+    }
+    pub(super) fn usage_weight(&self) -> Result<usize> {
+        crate::budget::weight(&self.usage)
     }
     pub(super) fn turn_weight(&self, turn: &TurnId) -> Result<usize> {
         let source = self.sources.get(turn).map(|source| {
@@ -1022,6 +1033,7 @@ impl ContextFold {
         }
         if let Some(usage) = usage {
             let session = self.observed_session();
+            self.accounting_impact = crate::AccountingImpact::Usage;
             self.semantic.as_mut().expect("semantic cursor").usage = Some(ConversationUsage {
                 session,
                 model,
@@ -1163,6 +1175,7 @@ impl ContextFold {
         });
         state.usage = None;
         self.release_summarized_turns();
+        self.accounting_impact = crate::AccountingImpact::Full;
         Ok(())
     }
 

@@ -122,6 +122,14 @@ impl ModelContext {
     }
 }
 
+#[derive(Debug, Default, PartialEq)]
+enum AccountingImpact {
+    #[default]
+    Turns,
+    Usage,
+    Full,
+}
+
 /// Incremental fold over one immutable session header and its Facts.
 #[derive(Debug)]
 pub struct ContextFold {
@@ -132,6 +140,8 @@ pub struct ContextFold {
     metadata_weights: BTreeMap<TurnId, usize>,
     metadata_bytes: usize,
     global_metadata_bytes: usize,
+    global_weights: [usize; 3],
+    accounting_impact: AccountingImpact,
     semantic: Option<compaction::SemanticState>,
     system_message: Option<Message>,
     system_message_bytes: usize,
@@ -258,6 +268,8 @@ impl ContextFold {
             metadata_weights: BTreeMap::new(),
             metadata_bytes: 0,
             global_metadata_bytes: 0,
+            global_weights: [0; 3],
+            accounting_impact: AccountingImpact::Turns,
             semantic: None,
             system_message,
             system_message_bytes,
@@ -315,10 +327,18 @@ impl ContextFold {
     fn reaccount(&mut self) -> Result<()> {
         self.metadata_weights.clear();
         self.metadata_bytes = 0;
-        self.global_metadata_bytes = self
+        self.global_weights = self
             .semantic
             .as_ref()
-            .map_or(Ok(0), compaction::SemanticState::global_weight)?;
+            .map_or(Ok([0; 3]), compaction::SemanticState::global_weights)?;
+        self.global_metadata_bytes = self.global_weight()?;
+        #[cfg(test)]
+        assert_eq!(
+            self.global_metadata_bytes,
+            self.semantic
+                .as_ref()
+                .map_or(Ok(0), compaction::SemanticState::measured_global_weight)?
+        );
         for turn in &self.turns {
             let bytes = self.turn_metadata_weight(turn)?;
             self.metadata_bytes = self
@@ -328,6 +348,15 @@ impl ContextFold {
             self.metadata_weights.insert(turn.id.clone(), bytes);
         }
         self.credit.resize(self.retained_weight()?)
+    }
+    fn global_weight(&self) -> Result<usize> {
+        if self.semantic.is_none() {
+            return Ok(0);
+        }
+        // JSON tuple framing: brackets plus two separators.
+        self.global_weights.iter().try_fold(4usize, |sum, weight| {
+            sum.checked_add(*weight).ok_or(ContextError::Capacity)
+        })
     }
     fn turn_metadata_weight(&self, turn: &ProjectedTurn) -> Result<usize> {
         #[cfg(test)]
@@ -348,8 +377,15 @@ impl ContextFold {
             .ok_or(ContextError::Capacity)
     }
     fn reaccount_fact(&mut self, fact: &SessionFact, changed: Vec<TurnId>) -> Result<()> {
-        if matches!(fact.body(), SessionFactBody::ModelAttemptSettled { .. }) {
+        if self.accounting_impact == AccountingImpact::Full {
             return self.reaccount();
+        }
+        if self.accounting_impact == AccountingImpact::Usage {
+            self.global_weights[1] = self
+                .semantic
+                .as_ref()
+                .map_or(Ok(0), compaction::SemanticState::usage_weight)?;
+            self.global_metadata_bytes = self.global_weight()?;
         }
         let changed: std::collections::BTreeSet<_> = changed
             .into_iter()
@@ -413,6 +449,7 @@ impl ContextFold {
         source: &rsi_agent_session_protocol::SessionId,
     ) -> Result<()> {
         self.admit_fact(fact)?;
+        self.accounting_impact = AccountingImpact::Turns;
         let result = (|| {
             self.apply_body(fact.body(), fact.seq())?;
             let changed = self.record_semantic_fact(source, fact)?;
@@ -1914,5 +1951,128 @@ mod checkpoint_encoding_tests {
         };
         assert!(writer.write_all(&vec![b'x'; 1024]).is_err());
         assert_eq!(writer.bytes, b"head");
+    }
+
+    fn accounting_fact(fold: &mut ContextFold, body: SessionFactBody) {
+        let seq = fold.through_seq() + 1;
+        fold.apply(&[SessionFact::new(seq, seq, body).unwrap()])
+            .unwrap();
+    }
+
+    fn settlement_history() -> ContextFold {
+        let mut fold = ContextFold::new(accounting_header(), ContextBudget::default()).unwrap();
+        fold.enable_semantic(DefaultContextBuilder::default().identity())
+            .unwrap();
+        for n in 0..128 {
+            let turn_id = TurnId::new(format!("history-{n}")).unwrap();
+            accounting_fact(
+                &mut fold,
+                SessionFactBody::TurnAccepted {
+                    turn_id: turn_id.clone(),
+                    text: "hello".into(),
+                    model: None,
+                    reasoning_effort: None,
+                    sandbox: rsi_sandbox::SandboxMode::ReadOnly,
+                    require_approval: false,
+                },
+            );
+            if n < 127 {
+                accounting_fact(
+                    &mut fold,
+                    SessionFactBody::TurnTerminal {
+                        turn_id,
+                        outcome: rsi_agent_session_protocol::TurnOutcome::Completed,
+                        result: None,
+                    },
+                );
+            }
+        }
+        fold
+    }
+
+    #[test]
+    fn conversation_settlement_recounts_one_turn_and_matches_the_full_oracle() {
+        use rsi_agent_session_protocol::{ModelAttemptLog, ModelEventPurpose, ModelPurpose};
+        use rsi_ai_protocol::{
+            AiCapability, FinishReason, LanguageEvent, PreparedCallSnapshot, RetryPolicy,
+            TokenUsage,
+        };
+        let mut fold = settlement_history();
+        let turn_id = TurnId::new("history-127").unwrap();
+        let effect_id = EffectId::new("conversation").unwrap();
+        accounting_fact(
+            &mut fold,
+            SessionFactBody::ModelIntent {
+                turn_id: turn_id.clone(),
+                effect_id: effect_id.clone(),
+                purpose: ModelPurpose::Conversation,
+                price_quote: None,
+                evidence: rsi_agent_session_protocol::RequestEvidence::Unavailable {
+                    reason: rsi_agent_session_protocol::EvidenceUnavailable::NotCaptured,
+                },
+                snapshot: PreparedCallSnapshot {
+                    language_settings: None,
+                    call_id: "call-model".into(),
+                    deployment_id: "deployment".into(),
+                    provider_family: "test".into(),
+                    capability: AiCapability::Language,
+                    model: "model".into(),
+                    protocol: "test".into(),
+                    transport: "memory".into(),
+                    endpoint_fingerprint: "endpoint".into(),
+                    config_generation: 1,
+                    credential_source: None,
+                    retry_policy: RetryPolicy::default(),
+                    request_sha256: "a".repeat(64),
+                },
+            },
+        );
+        fold.metadata_recounts.set(0);
+        accounting_fact(
+            &mut fold,
+            SessionFactBody::ModelAttemptSettled {
+                turn_id,
+                effect_id,
+                purpose: ModelEventPurpose::Conversation,
+                attempt: ModelAttemptLog::from_events(
+                    [
+                        (
+                            0,
+                            LanguageEvent::ContentStarted {
+                                index: 0,
+                                content: rsi_ai_protocol::ContentStart::Text,
+                            },
+                        ),
+                        (
+                            0,
+                            LanguageEvent::ContentDelta {
+                                index: 0,
+                                delta: rsi_ai_protocol::ContentDelta::Text("answer".into()),
+                            },
+                        ),
+                        (0, LanguageEvent::ContentFinished { index: 0 }),
+                        (
+                            0,
+                            LanguageEvent::Usage {
+                                usage: TokenUsage::new(500, 10, None, None, None).unwrap(),
+                            },
+                        ),
+                        (
+                            0,
+                            LanguageEvent::Finished {
+                                reason: FinishReason::Stop,
+                                replay: None,
+                            },
+                        ),
+                    ],
+                    true,
+                )
+                .unwrap(),
+            },
+        );
+        assert_eq!(fold.metadata_recounts.get(), 1);
+        let retained = fold.credit.bytes();
+        fold.reaccount().unwrap();
+        assert_eq!(fold.credit.bytes(), retained);
     }
 }

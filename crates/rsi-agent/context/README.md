@@ -363,3 +363,9 @@ Tool batches. Installed summaries rebuild bounded metadata. Six
 encoded Turn identity weights cover owned index keys, while semantic fragments
 and batches use measured canonical weights. Accumulated assembler text and
 unchanged metadata are never reserialized for each delta.
+
+Fact ingestion carries an explicit accounting impact: changed Turns, global usage,
+or a complete replacement after a summary is actually installed. Conversation
+settlement updates only its Turn and the variable-length usage projection. Identity and
+installed-summary weights remain cached separately; full recount remains the
+restore/summary path and the deterministic accounting oracle.
