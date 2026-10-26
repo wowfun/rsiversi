@@ -146,42 +146,7 @@ async fn assert_discovery_recovers(app: &Arc<rsi_gui::GuiApplication>, remote: &
 
 #[tokio::test]
 async fn remote_arbitrary_models_derive_scope_from_the_pane_and_never_replay_consumed_tickets() {
-    let runtime = Runtime::default();
-    let root = runtime.root();
-    let remote = Arc::new(Remote {
-        discovery_failed: std::sync::atomic::AtomicBool::new(true),
-        description: ConnectionDescription {
-            wire_version: rsi_api_protocol::API_WIRE_VERSION,
-            endpoint_id: EndpointId::from_bytes([1; 16]),
-            host_epoch: HostEpoch::from_bytes([2; 16]),
-        },
-        operations: rsi_ui_api::operations().to_vec(),
-        budget: ByteBudget::default(),
-        sender: Mutex::new(None),
-        active: Arc::new(AtomicUsize::new(0)),
-        calls: Mutex::new(vec![]),
-    });
-    for (id, factory) in [
-        (
-            "domains",
-            Arc::new(Providers(Arc::new(Backend::default()))) as Arc<dyn PluginFactory>,
-        ),
-        ("connection", Arc::new(Connection(remote.clone()))),
-        ("ui", Arc::new(rsi_ui::UiFactory)),
-        ("web", Arc::new(rsi_gui::GuiApplicationFactory)),
-    ] {
-        let fiber = root
-            .apply(
-                ResolvedFactory::linked(id, "fixture", UpdateMode::RestartRequired, factory),
-                ConfigValue::Null,
-            )
-            .await
-            .unwrap();
-        assert_eq!(fiber.snapshot().state, FiberState::Active);
-    }
-    let app = root
-        .lookup_local::<rsi_gui::GuiApplicationContract>()
-        .unwrap();
+    let (runtime, remote, app) = remote_ui_fixture().await;
     assert_eq!(sources::view(&app)["has_remote_ui"], false);
     assert!(
         sources::view(&app)["notice"]
@@ -296,4 +261,44 @@ async fn workspace_refresh_reads_list_without_optional_order_seed() {
     assert_eq!(backend.workspace_lists.load(Ordering::SeqCst), before + 1);
     assert!(sources::view(&app)["catalog"]["workspace_order_seed"].is_null());
     assert!(runtime.shutdown().await.is_clean());
+}
+
+async fn remote_ui_fixture() -> (Runtime, Arc<Remote>, Arc<rsi_gui::GuiApplication>) {
+    let runtime = Runtime::default();
+    let root = runtime.root();
+    let remote = Arc::new(Remote {
+        discovery_failed: std::sync::atomic::AtomicBool::new(true),
+        description: ConnectionDescription {
+            wire_version: rsi_api_protocol::API_WIRE_VERSION,
+            endpoint_id: EndpointId::from_bytes([1; 16]),
+            host_epoch: HostEpoch::from_bytes([2; 16]),
+        },
+        operations: rsi_ui_api::operations().to_vec(),
+        budget: ByteBudget::default(),
+        sender: Mutex::new(None),
+        active: Arc::new(AtomicUsize::new(0)),
+        calls: Mutex::new(vec![]),
+    });
+    for (id, factory) in [
+        (
+            "domains",
+            Arc::new(Providers(Arc::new(Backend::default()))) as Arc<dyn PluginFactory>,
+        ),
+        ("connection", Arc::new(Connection(remote.clone()))),
+        ("ui", Arc::new(rsi_ui::UiFactory)),
+        ("web", Arc::new(rsi_gui::GuiApplicationFactory)),
+    ] {
+        let fiber = root
+            .apply(
+                ResolvedFactory::linked(id, "fixture", UpdateMode::RestartRequired, factory),
+                ConfigValue::Null,
+            )
+            .await
+            .unwrap();
+        assert_eq!(fiber.snapshot().state, FiberState::Active);
+    }
+    let app = root
+        .lookup_local::<rsi_gui::GuiApplicationContract>()
+        .unwrap();
+    (runtime, remote, app)
 }

@@ -12,7 +12,7 @@ fn maintenance_text_result_is_json_on_stdout() {
             &mut stderr,
             OutputMode::Text,
             &CliEvent::Notice {
-                kind: "session_maintenance".into(),
+                kind: "session_maintenance",
                 value: value.clone(),
             },
         )

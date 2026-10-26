@@ -379,7 +379,7 @@ fn lifecycle_and_owner_admit_the_same_bounded_process_tokens() {
         (format!("process-{}", owner.pid), true),
         ("process-0".into(), false),
         ("18446744073709551616".into(), false),
-        ("".into(), false),
+        (String::new(), false),
         ("1".repeat(129), false),
     ] {
         owner.process_start_token = token;

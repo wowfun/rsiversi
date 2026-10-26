@@ -1538,7 +1538,7 @@ impl Domain for CleanupDomain {
 
 #[tokio::test]
 async fn purge_cleanup_requires_completion_preserves_other_records_and_retries_capacity() {
-    use rsi_agent_store_protocol::{PurgeRequest, PurgeTarget, StoreMaintenance};
+    use rsi_agent_store_protocol::StoreMaintenance;
     use rsi_session_protocol::{NavigationCleanup, SessionPurgeCleanup};
     let root = tempfile::tempdir().unwrap();
     let store = Arc::new(rsi_agent_store_sqlite::SqliteStore::open(root.path()).unwrap());
@@ -1546,69 +1546,7 @@ async fn purge_cleanup_requires_completion_preserves_other_records_and_retries_c
     let selected = SessionId::new("row-001").unwrap();
     let other = SessionId::new("row-002").unwrap();
     let header = navigation.store.header(&selected).await.unwrap();
-    let turn = TurnId::new("complete").unwrap();
-    store
-        .commit_agent(rsi_agent_store_protocol::AtomicAgentCommit {
-            sessions: vec![rsi_agent_store_protocol::AtomicSessionAppend {
-                session_id: selected.clone(),
-                expected_fact_seq: 0,
-                expected_control_seq: 0,
-                header: Some(header.clone()),
-                facts: vec![
-                    Arc::new(
-                        SessionFact::new(
-                            1,
-                            1,
-                            SessionFactBody::TurnAccepted {
-                                turn_id: turn.clone(),
-                                text: "fixture".into(),
-                                model: None,
-                                reasoning_effort: None,
-                                sandbox: rsi_sandbox::SandboxMode::WorkspaceWrite,
-                                require_approval: false,
-                            },
-                        )
-                        .unwrap(),
-                    ),
-                    Arc::new(
-                        SessionFact::new(
-                            2,
-                            2,
-                            SessionFactBody::TurnTerminal {
-                                turn_id: turn.clone(),
-                                outcome: rsi_agent_session_protocol::TurnOutcome::Completed,
-                                result: None,
-                            },
-                        )
-                        .unwrap(),
-                    ),
-                ],
-                controls: vec![
-                    rsi_agent_session_protocol::AgentControlRecord::new(
-                        1,
-                        2,
-                        rsi_agent_session_protocol::AgentControlRecordBody::TurnBoundaryRecorded {
-                            turn_id: turn,
-                            terminal_fact_seq: 2,
-                        },
-                    )
-                    .unwrap(),
-                ],
-            }],
-            required_active_activations: vec![],
-            quiescent_descendants_of: None,
-        })
-        .await
-        .unwrap();
-    let request = PurgeRequest {
-        operation_id: rsi_agent_store_protocol::MaintenanceOperationId::new("cleanup").unwrap(),
-        targets: vec![PurgeTarget {
-            session_id: selected.clone(),
-            header_sha256: header.fingerprint().unwrap(),
-            fact_seq: 2,
-            control_seq: 1,
-        }],
-    };
+    let request = seed_purge_cleanup(&store, header).await;
     let domain = Arc::new(CleanupDomain {
         spec: navigation.domain.spec().clone(),
         written: Mutex::new(Vec::new()),
@@ -1662,4 +1600,74 @@ async fn purge_cleanup_requires_completion_preserves_other_records_and_retries_c
     let state = navigation.state.lock().unwrap();
     assert_eq!(state.document.records.len(), 1);
     assert_eq!(state.document.records.get(&other), Some(&metadata));
+}
+
+async fn seed_purge_cleanup(
+    store: &rsi_agent_store_sqlite::SqliteStore,
+    header: SessionHeader,
+) -> rsi_agent_store_protocol::PurgeRequest {
+    use rsi_agent_store_protocol::{PurgeRequest, PurgeTarget};
+    let turn = TurnId::new("complete").unwrap();
+    store
+        .commit_agent(rsi_agent_store_protocol::AtomicAgentCommit {
+            sessions: vec![rsi_agent_store_protocol::AtomicSessionAppend {
+                session_id: header.session_id().clone(),
+                expected_fact_seq: 0,
+                expected_control_seq: 0,
+                header: Some(header.clone()),
+                facts: vec![
+                    Arc::new(
+                        SessionFact::new(
+                            1,
+                            1,
+                            SessionFactBody::TurnAccepted {
+                                turn_id: turn.clone(),
+                                text: "fixture".into(),
+                                model: None,
+                                reasoning_effort: None,
+                                sandbox: rsi_sandbox::SandboxMode::WorkspaceWrite,
+                                require_approval: false,
+                            },
+                        )
+                        .unwrap(),
+                    ),
+                    Arc::new(
+                        SessionFact::new(
+                            2,
+                            2,
+                            SessionFactBody::TurnTerminal {
+                                turn_id: turn.clone(),
+                                outcome: rsi_agent_session_protocol::TurnOutcome::Completed,
+                                result: None,
+                            },
+                        )
+                        .unwrap(),
+                    ),
+                ],
+                controls: vec![
+                    rsi_agent_session_protocol::AgentControlRecord::new(
+                        1,
+                        2,
+                        rsi_agent_session_protocol::AgentControlRecordBody::TurnBoundaryRecorded {
+                            turn_id: turn,
+                            terminal_fact_seq: 2,
+                        },
+                    )
+                    .unwrap(),
+                ],
+            }],
+            required_active_activations: vec![],
+            quiescent_descendants_of: None,
+        })
+        .await
+        .unwrap();
+    PurgeRequest {
+        operation_id: rsi_agent_store_protocol::MaintenanceOperationId::new("cleanup").unwrap(),
+        targets: vec![PurgeTarget {
+            session_id: header.session_id().clone(),
+            header_sha256: header.fingerprint().unwrap(),
+            fact_seq: 2,
+            control_seq: 1,
+        }],
+    }
 }

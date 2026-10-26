@@ -189,7 +189,7 @@ async fn failed_and_late_previews_release_even_after_session_switch() {
     {
         let pending = client.tasks.next();
         tokio::pin!(pending);
-        tokio::select! { _ = &mut pending => panic!("capture is blocked"), _ = async {
+        tokio::select! { _ = &mut pending => panic!("capture is blocked"), () = async {
             while handle.captures.load(std::sync::atomic::Ordering::SeqCst) < 2 { tokio::task::yield_now().await; }
         } => {} }
     }

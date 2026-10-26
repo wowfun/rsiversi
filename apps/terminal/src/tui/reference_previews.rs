@@ -31,8 +31,8 @@ impl Default for Previews {
             tasks: TaskTracker::new(),
             slots: Arc::new(Semaphore::new(4)),
             jobs: Arc::new(Semaphore::new(4)),
-            failed: Default::default(),
-            notice: Default::default(),
+            failed: std::sync::Mutex::default(),
+            notice: std::sync::Mutex::default(),
         }
     }
 }

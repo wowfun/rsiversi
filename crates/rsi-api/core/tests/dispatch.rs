@@ -68,7 +68,7 @@ async fn single_key_discovery_remains_available_when_data_is_full() {
         };
         let catalog: rsi_api_protocol::OperationCatalog =
             serde_json::from_slice(reply.json.as_bytes()).unwrap();
-        assert_eq!(catalog.operations(), &[data.clone()]);
+        assert_eq!(catalog.operations(), std::slice::from_ref(&data));
     }
     drop(held);
     registration.close().await;

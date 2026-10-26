@@ -11,9 +11,12 @@ mod tests {
         let path = root.path().join("agent.profile.toml");
         let compiler = AgentPresetProfileCompiler::new(
             ProfileCompiler::new(
-                rsi_meta_profile::ProfileEnvironment::without_paths("test", Default::default())
-                    .unwrap(),
-                Default::default(),
+                rsi_meta_profile::ProfileEnvironment::without_paths(
+                    "test",
+                    std::collections::BTreeMap::default(),
+                )
+                .unwrap(),
+                rsi_meta_profile::ProfileLimits::default(),
             ),
             ["test.child"],
         )

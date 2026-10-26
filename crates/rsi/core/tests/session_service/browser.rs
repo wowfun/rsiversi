@@ -101,6 +101,21 @@ async fn invoke_for(
         .await
         .unwrap_or_else(|error| panic!("{label}: {error}"));
 }
+fn view_has_text(item: &UiItem, needle: &str) -> bool {
+    let view = item
+        .item
+        .snapshot
+        .model
+        .standard_view
+        .as_ref()
+        .expect("standard browser view");
+    view.title.contains(needle)
+        || view.elements.iter().any(|element| match element {
+            UiElement::Text { text } | UiElement::Code { text } => text.contains(needle),
+            UiElement::Field { label, value } => label.contains(needle) || value.contains(needle),
+            UiElement::Input { .. } | UiElement::Button { .. } => false,
+        })
+}
 fn node(item: &UiItem, name: &str) -> String {
     let code = item
         .item
@@ -235,14 +250,12 @@ async fn session_browser_real_http_ws_nodes_images_and_presentation_detach() {
     )
     .await;
     let item = next(&mut stream).await;
-    assert!(
-        format!("{:?}", item.item.snapshot.model.standard_view).contains("Shared Session browser")
-    );
+    assert!(view_has_text(&item, "Shared Session browser"));
     tokio::time::sleep(std::time::Duration::from_millis(250)).await;
     invoke(&client, &item, "Observe page", "", "", "", None).await;
     let item = next(&mut stream).await;
     assert!(
-        format!("{:?}", item.item.snapshot.model.standard_view).contains("WS verified"),
+        view_has_text(&item, "WS verified"),
         "real same-origin WebSocket traversed the confined proxy: {:?}",
         item.item.snapshot.model.standard_view
     );
@@ -274,7 +287,7 @@ async fn session_browser_real_http_ws_nodes_images_and_presentation_detach() {
     )
     .await;
     let item = next(&mut stream).await;
-    assert!(format!("{:?}", item.item.snapshot.model.standard_view).contains("stale_observation"));
+    assert!(view_has_text(&item, "stale_observation"));
     invoke(
         &client,
         &item,
@@ -286,7 +299,7 @@ async fn session_browser_real_http_ws_nodes_images_and_presentation_detach() {
     )
     .await;
     let item = next(&mut stream).await;
-    assert!(format!("{:?}", item.item.snapshot.model.standard_view).contains("Hello Ada"));
+    assert!(view_has_text(&item, "Hello Ada"));
     invoke(
         &client,
         &item,
@@ -310,8 +323,7 @@ async fn session_browser_real_http_ws_nodes_images_and_presentation_detach() {
     .await;
     let item = next(&mut stream).await;
     assert!(
-        format!("{:?}", item.item.snapshot.model.standard_view)
-            .contains("node_changed_or_not_actionable"),
+        view_has_text(&item, "node_changed_or_not_actionable"),
         "a detached ElementHandle never retargets its replacement"
     );
     invoke(&client, &item, "Capture screenshot", "", "", "", None).await;
@@ -350,7 +362,7 @@ async fn session_browser_real_http_ws_nodes_images_and_presentation_detach() {
     let mut stream = client.observe(&observe).await.unwrap();
     let item = next(&mut stream).await;
     assert!(
-        format!("{:?}", item.item.snapshot.model.standard_view).contains("Hello Ada"),
+        view_has_text(&item, "Hello Ada"),
         "presentation detach retains browser"
     );
     for (number, capacity) in [(2, false), (3, true)] {
@@ -423,7 +435,7 @@ async fn session_browser_real_http_ws_nodes_images_and_presentation_detach() {
     assert_eq!(item.item.snapshot.model.data["image"]["width"], 1280);
     invoke(&client, &item, "Close browser", "", "", "", None).await;
     let item = next(&mut stream).await;
-    assert!(format!("{:?}", item.item.snapshot.model.standard_view).contains("closed"));
+    assert!(view_has_text(&item, "closed"));
     drop((stream, client, session, service));
     daemon.shutdown().await;
     provider.abort();

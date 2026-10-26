@@ -961,19 +961,7 @@ async fn incomplete_headers_cannot_exceed_thirty_two_unclassified_connections() 
 #[tokio::test]
 async fn http2_stream_delivery_retains_device_quota_through_flow_control_and_reset() {
     let harness = Harness::start_with_tls(true).await;
-    let certificate = reqwest::Certificate::from_pem(include_bytes!(
-        "../../../../fixtures/rsi-api/tls/server-cert.pem"
-    ))
-    .unwrap();
-    let client = reqwest::Client::builder()
-        .no_proxy()
-        .add_root_certificate(certificate)
-        .http2_prior_knowledge()
-        .http2_initial_stream_window_size(1024)
-        .http2_initial_connection_window_size(64 * 1024)
-        .timeout(Duration::from_secs(5))
-        .build()
-        .unwrap();
+    let client = small_window_http2_client();
     let request = |name: &str| {
         client
             .post(format!("{}{}", harness.origin, harness.path(name)))
@@ -2161,4 +2149,20 @@ async fn browser_bootstrap_revocation_during_launch_never_restores_device_author
         Err(ApiError::Unauthorized)
     ));
     harness.close().await;
+}
+
+fn small_window_http2_client() -> reqwest::Client {
+    let certificate = reqwest::Certificate::from_pem(include_bytes!(
+        "../../../../fixtures/rsi-api/tls/server-cert.pem"
+    ))
+    .unwrap();
+    reqwest::Client::builder()
+        .no_proxy()
+        .add_root_certificate(certificate)
+        .http2_prior_knowledge()
+        .http2_initial_stream_window_size(1024)
+        .http2_initial_connection_window_size(64 * 1024)
+        .timeout(Duration::from_secs(5))
+        .build()
+        .unwrap()
 }

@@ -67,7 +67,11 @@ mod tests {
 
     #[test]
     fn attachment_codec_bounds_prefix_and_owns_exact_frame() {
-        for length in [0, MAX_ATTACHMENT_HELLO as u32 + 1, u32::MAX] {
+        for length in [
+            0,
+            u32::try_from(MAX_ATTACHMENT_HELLO).unwrap() + 1,
+            u32::MAX,
+        ] {
             assert!(decode_attachment_length(length.to_be_bytes()).is_err());
             assert!(decode_attachment_hello(&length.to_be_bytes()).is_err());
         }
@@ -83,7 +87,7 @@ mod tests {
         let mut value = serde_json::to_value(hello).unwrap();
         value["unknown"] = true.into();
         let payload = serde_json::to_vec(&value).unwrap();
-        let mut frame = (payload.len() as u32).to_be_bytes().to_vec();
+        let mut frame = u32::try_from(payload.len()).unwrap().to_be_bytes().to_vec();
         frame.extend_from_slice(&payload);
         assert!(decode_attachment_hello(&frame).is_err());
     }

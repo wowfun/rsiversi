@@ -145,14 +145,14 @@ impl ProductHistorySearch {
                 let _permit = permit;
                 let _guard = worker;
                 settlement::worker(
-                    async {
+                    Box::pin(async {
                         owner
                             .execute(authority, request, &worker_stop)
                             .await
                             .map(|reply| {
                                 settlement::PendingReply::new(reply, owner.references.clone())
                             })
-                    },
+                    }),
                     mutation,
                     &worker_stop,
                 )

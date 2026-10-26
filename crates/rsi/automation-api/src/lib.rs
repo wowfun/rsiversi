@@ -668,7 +668,7 @@ mod tests {
             &self.description
         }
         async fn operations(&self) -> rsi_api_protocol::Result<rsi_api_protocol::OperationCatalog> {
-            rsi_api_protocol::OperationCatalog::new((&self.specs).to_vec())
+            rsi_api_protocol::OperationCatalog::new(self.specs.clone())
         }
         fn input_budget(&self, _: OperationClass) -> ByteBudget {
             ByteBudget::default()

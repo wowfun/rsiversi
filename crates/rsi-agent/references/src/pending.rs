@@ -19,7 +19,7 @@ struct State {
 pub(super) struct Reservation {
     pub(super) id: String,
     _global: OwnedSemaphorePermit,
-    _session: OwnedSemaphorePermit,
+    session: OwnedSemaphorePermit,
 }
 impl Default for Pending {
     fn default() -> Self {
@@ -58,7 +58,7 @@ impl Pending {
         Ok(Reservation {
             id: hex::encode(id),
             _global: global,
-            _session: session,
+            session,
         })
     }
     pub(super) fn publish(
@@ -71,7 +71,7 @@ impl Pending {
             .state
             .lock()
             .unwrap_or_else(std::sync::PoisonError::into_inner);
-        if self.slots.is_closed() || reservation._session.semaphore().is_closed() {
+        if self.slots.is_closed() || reservation.session.semaphore().is_closed() {
             return Err(ReferenceError::Cancelled);
         }
         state
