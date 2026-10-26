@@ -11,3 +11,12 @@ export async function cleanupFinally(finalize, ...actions) {
   try { await cleanupAll(...actions); } catch (error) { failure = error; }
   await cleanupAll(() => { if (failure) throw failure; }, finalize);
 }
+
+// A cleanup failure supplements the probe failure rather than replacing it.
+export async function finishFixture(primary, ...actions) {
+  try { await cleanupAll(...actions); }
+  catch (cleanup) {
+    if (primary) throw new AggregateError([primary, cleanup], 'Fixture and cleanup failed', {cause: primary});
+    throw cleanup;
+  }
+}

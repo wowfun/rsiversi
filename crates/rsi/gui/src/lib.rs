@@ -13,7 +13,9 @@ mod panel_registry;
 mod panes;
 mod projection;
 mod renderer;
+mod resource_open;
 mod surface_id;
+pub use panes::terminal::TerminalFailure;
 pub use surface_id::SurfaceId;
 
 pub use application::{

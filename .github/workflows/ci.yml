@@ -360,6 +360,8 @@ jobs:
           RSI_REPORT_DIR="$RUNNER_TEMP/rsi-web-evidence/navigation-order" node navigation-order.mjs
           RSI_REPORT_DIR="$RUNNER_TEMP/rsi-web-evidence/device-storage" node device-storage.mjs
           RSI_REPORT_DIR="$RUNNER_TEMP/rsi-web-evidence/review-lifecycle" node review-lifecycle.mjs
+          RSI_REPORT_DIR="$RUNNER_TEMP/rsi-web-evidence/settings-drafts" node settings-drafts.mjs
+          RSI_REPORT_DIR="$RUNNER_TEMP/rsi-web-evidence/restore-tabs" node restore-tabs.mjs
           RSI_WEB_REPORT="$RUNNER_TEMP/rsi-web-evidence/workbench" node workbench.mjs
           cd ../../..
           node fixtures/rsi/workbench-reference/settings-goldens.mjs --report "$RUNNER_TEMP/rsi-web-evidence/settings-goldens"
@@ -1178,7 +1180,7 @@ jobs:
 
   windows-repository-tools:
     runs-on: windows-2025
-    timeout-minutes: 75
+    timeout-minutes: 80
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1
         timeout-minutes: 5
@@ -1214,6 +1216,15 @@ jobs:
         if: ${{ !cancelled() }}
         timeout-minutes: 5
         run: node --test apps/devtools/tests/install.test.mjs
+      - name: Install Windows browser fixture packages
+        if: ${{ !cancelled() }}
+        timeout-minutes: 5
+        working-directory: fixtures/rsi/web-product
+        run: npm ci --ignore-scripts
+      - name: Verify Windows browser fixture admission and cleanup
+        if: ${{ !cancelled() }}
+        timeout-minutes: 2
+        run: node --test fixtures/rsi/web-product/service.test.mjs
 
   rsi-ssh-linux:
     runs-on: ubuntu-24.04

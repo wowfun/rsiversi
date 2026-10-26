@@ -170,8 +170,8 @@ export class DeviceStore {
       tx.onabort=tx.onerror=()=>reject(failure??tx.error??new Error('Presentation read failed'));
     });
   }
-  async apply(bucket,intent,scope='') {
-    return (await this.applyAll([{bucket,intent,scope}]))[0];
+  async apply(bucket,intent,scope='',beforeCommit) {
+    return (await this.#applyAll([{bucket,intent,scope}],undefined,beforeCommit))[0];
   }
   async applyAll(changes) {
     return this.#applyAll(changes);
@@ -185,7 +185,7 @@ export class DeviceStore {
       {bucket:'preferences',scope:'',intent:{kind:'patch',patch:{}}},
     ],preference);
   }
-  async #applyAll(changes,manualPreference) {
+  async #applyAll(changes,manualPreference,beforeCommit) {
     if(this.closed || !Array.isArray(changes) || changes.length<1 || changes.length>3 || changes.some(change=>!keys(change,'bucket,intent,scope') || !budgets[change.bucket]) || new Set(changes.map(change=>change.bucket)).size!==changes.length)throw new Error('Invalid presentation transaction');
     const selected=changes.map(change=>({...change,key:this.scopedKey(change.scope)}));
     return new Promise((resolve,reject)=>{
@@ -207,6 +207,9 @@ export class DeviceStore {
             for(const record of records)if(!retained.has(record.key))store.delete(record.key);
             store.put(next.replacement);
           });
+          // A synchronous owner can reserve effects for the actual latest
+          // committed layout. Throwing aborts every queued write in this tx.
+          beforeCommit?.(results.map(result=>result.value));
         }catch(error){failure=error;tx.abort();}
       };
       selected.forEach(({bucket},index)=>{

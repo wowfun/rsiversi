@@ -1,4 +1,5 @@
 import { lane, limits } from "./admission.js";
+import { ResourceOwner } from "./src/resource-owner.mjs";
 
 // Bound the document waiter; an expired native operation may still own work.
 function closeStage(operation, stage) {
@@ -14,6 +15,7 @@ export class DocumentConnection {
   #transport;
   #mounts;
   #pending = new Map();
+  #openingWaiters = [];
   #inFlight = Object.fromEntries(Object.keys(limits).map(selected => [selected, 0]));
   #nextId = 0;
   #phase = "Opening";
@@ -30,6 +32,8 @@ export class DocumentConnection {
   #onCleanupFailure;
 
   constructor({ transport, mounts, isCurrent, onFrame, onFailure, onCleanupFailure }) {
+    this.resources = new ResourceOwner((method, payload) => method === 'resource_open'
+      ? this.#openResource(payload) : this.request(method, payload));
     this.#transport = transport;
     this.#mounts = mounts;
     this.#isCurrent = isCurrent;
@@ -52,6 +56,7 @@ export class DocumentConnection {
   retire() {
     if (!["Failed", "Closed"].includes(this.#phase)) {
       this.#phase = "Closed";
+      this.#pumpOpenResources();
       this.#authenticationDone();
       this.#rejectPending(new Error("The application connection was replaced"));
     }
@@ -76,6 +81,25 @@ export class DocumentConnection {
     });
   }
 
+  #openResource(payload) {
+    return new Promise((resolve, reject) => {
+      this.#openingWaiters.push({payload, resolve, reject});
+      this.#pumpOpenResources();
+    });
+  }
+
+  #pumpOpenResources() {
+    if (this.closing || !this.#isCurrent()) {
+      for (const waiter of this.#openingWaiters.splice(0)) waiter.reject(Object.assign(new Error("The application connection is closed"), {notAdmitted:true,retryable:false}));
+      return;
+    }
+    // Leave one ordinary slot available for foreground input and cleanup.
+    while (this.#openingWaiters.length && this.#inFlight.ordinary < limits.ordinary - 1) {
+      const {payload,resolve,reject}=this.#openingWaiters.shift();
+      this.request('resource_open',payload).then(resolve,reject);
+    }
+  }
+
   async authenticate(payload, openDrafts) {
     try {
       const identity = JSON.parse(await this.request("connect", payload));
@@ -98,6 +122,9 @@ export class DocumentConnection {
     if (waiter) {
       this.#pending.delete(id);
       this.#inFlight[waiter.lane]--;
+      if (waiter.lane === 'ordinary') {
+        this.#pumpOpenResources();
+      }
     }
     return waiter;
   }
@@ -116,7 +143,14 @@ export class DocumentConnection {
 
   #close() {
     if (!this.#teardown) {
-      this.#teardown = Promise.all([this.#closeMounts(), this.#terminate()]).then(() => {});
+      this.#teardown = Promise.allSettled([this.#closeMounts(), this.#terminate()]).then(results => {
+        const errors = results.filter(result => result.status === 'rejected').map(result => result.reason);
+        const error = errors.length > 1
+          ? new AggregateError(errors, errors.map(error => error?.message ?? String(error)).join('; '))
+          : errors[0];
+        this.resources.retire(error);
+        if (errors.length) throw error;
+      });
       this.#teardown.catch(error => { if (this.#isCurrent()) this.#onCleanupFailure?.(error); });
     }
     return this.#teardown;
@@ -134,6 +168,7 @@ export class DocumentConnection {
   fail(error) {
     if (["Failed", "Closed"].includes(this.#phase)) return this.settled();
     this.#phase = "Failed";
+    this.#pumpOpenResources();
     this.#authenticationDone();
     this.#rejectPending(error);
     const teardown = this.#close();
@@ -145,7 +180,7 @@ export class DocumentConnection {
     if (this.#disconnectTask) return this.#disconnectTask;
     if (!["Opening", "Ready"].includes(this.#phase) || !this.#isCurrent()) return Promise.resolve();
     const opening = this.#phase === "Opening";
-    if (!opening) this.#phase = "Draining";
+    if (!opening) { this.#phase = "Draining"; this.#pumpOpenResources(); }
     this.#disconnectTask = (opening ? this.#disconnectOpening(flushCapturedDrafts) : this.#disconnect(flushCapturedDrafts)).finally(() => {
       if (this.#phase === "Ready") this.#disconnectTask = undefined;
     });
@@ -158,6 +193,7 @@ export class DocumentConnection {
     if (!this.#isCurrent()) { await this.retire(); return; }
     if (this.#phase !== "Ready") { await this.#close(); return; }
     this.#phase = "Draining";
+    this.#pumpOpenResources();
     return this.#disconnect(flush);
   }
 
@@ -183,6 +219,7 @@ export class DocumentConnection {
       if (this.#phase !== "Draining") return;
       if (!this.#isCurrent()) { await this.retire(); return; }
       this.#phase = "Closed";
+      this.#pumpOpenResources();
       this.#authenticationDone();
       this.#rejectPending(new Error("The application disconnected"));
       return resources;

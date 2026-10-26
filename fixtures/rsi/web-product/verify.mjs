@@ -269,8 +269,7 @@ try {
       assert.match(await left.locator(".transcript").innerText(), /\bsegment 0\b/);
       assert.match(await left.locator(".transcript").innerText(), /Stream complete\./);
       await page.getByRole("button", { name: "Settings", exact: true }).click();
-      await page.locator(".advanced-settings summary").click();
-      await page.getByRole("button", { name: "Open registered settings", exact: true }).click();
+      await page.getByRole("button", { name: "Advanced", exact: true }).click();
       await page.getByRole("button", { name: "rsi.agent", exact: true }).click();
       await page.locator(".settings-applies").filter({ hasText: "Applies to new conversations" }).waitFor();
       assert.equal(await page.locator(".settings-description summary").allTextContents().then(labels => labels.join(",")), "Schema,Defaults");
@@ -311,7 +310,6 @@ try {
       await page.waitForFunction(previous=>!previous.isConnected,savingExact);await savingExact.dispose();
       assert(await approvalSetting.isChecked());
       assert.equal(JSON.parse(await caps.inputValue())[0].max_output_tokens,123);
-      await closeDetails(page);
       await page.getByRole("button", { name: "Close settings", exact: true }).click();
       await page.locator("#workspaces [data-testid=workspace-open]").first().click();
       await left.getByRole("textbox", { name: "Main message" }).fill("Please run the failing command");
@@ -403,17 +401,15 @@ try {
       assert.match(await right.locator(".transcript").innerText(), /Review the right workspace/);
       await page.setViewportSize({ width: 1440, height: 980 });
       await page.getByRole("button", { name: "Settings", exact: true }).click();
-      await page.locator(".advanced-settings summary").click();
-      await page.getByRole("button", { name: "Open registered settings", exact: true }).click();
+      await page.getByRole("button", { name: "Advanced", exact: true }).click();
       await page.getByRole("button", { name: "rsi.client", exact: true }).click();
-      await page.locator("#detail .hint").filter({ hasText: "GUI preferences apply live across this Profile" }).waitFor();
+      await page.locator(".registered-settings .hint").filter({ hasText: "GUI preferences apply live across this Profile" }).waitFor();
       const preferenceEditor = page.getByRole("combobox", { name: "Settings / web / submit_key",exact:true });
       await preferenceEditor.selectOption({label:"enter"});
       const previousPreferences = await preferenceEditor.elementHandle();
       await page.getByRole("button", { name: "Save settings", exact: true }).click();
       await page.waitForFunction(previous => !previous.isConnected, previousPreferences);
       await previousPreferences.dispose();
-      await closeDetails(page);
       await page.getByRole("button", { name: "Close settings", exact: true }).click();
       assert.match(await left.locator(".composer-hint").innerText(), /Enter to send · Shift Enter for a new line/);
       await page.evaluate(() => document.addEventListener("rsi-disconnected", event => { window.closedResources = event.detail; }, { once: true }));

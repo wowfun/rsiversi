@@ -16,18 +16,19 @@ export async function verifyDom(browser, root, report, name) {
   try {
     const document = await readFile(join(root, "fixtures/rsi/web-product/document-island.html"), "utf8");
     const standard = await readFile(join(root, "apps/web/standard.js"), "utf8");
-    await documentModules(page,root,"http://rsi-dom.invalid",document.replace(/<script[^>]*>[\s\S]*?<\/script>/g,""),["standard.js", "admission.js", "mounts.js", "drafts.js", "settings-form.js", "file-picker.js", "external-pane.js", "external-drafts.js", "desktop-bridge.js", "turn-presentation.js", "composer-actions.js", "document-connection.js"]);
+    await documentModules(page,root,"https://rsi-dom.invalid",document.replace(/<script[^>]*>[\s\S]*?<\/script>/g,""),["standard.js", "admission.js", "mounts.js", "drafts.js", "settings-form.js", "file-picker.js", "external-pane.js", "external-drafts.js", "desktop-bridge.js", "turn-presentation.js", "composer-actions.js", "document-connection.js", "settings-drafts.js", "settings-editor.js", "settings-focus.js", "settings-dialog.js", "disclosure.js", "approval-review.js", "history-picker.js", "session-export.js", "src/resource-owner.mjs"]);
     await page.evaluate(async () => { Object.assign(globalThis, await import("/admission.js")); });
-    await page.route('http://rsi-dom.invalid/rsi-renderers/*/standard.js',route=>route.fulfill({contentType:'text/javascript',body:standard}));
+    await page.route('https://rsi-dom.invalid/rsi-renderers/*/standard.js',route=>route.fulfill({contentType:'text/javascript',body:standard}));
     const offer = { revision: "a".repeat(64), catalog: { format: 1, renderers: [{ id: "rsi.standard", abi: 1, entry: "standard.js", files: [{ name: "standard.js", sha256: createHash("sha256").update(standard).digest("hex") }], schemas: [{ name: "rsi.standard.view", version: 1 }], capabilities: ["invoke", "focus"], surfaces: ["dialog"] }] } };
     await page.evaluate(offer => { window.testRendererOffer = offer; }, offer);
     await page.addStyleTag({ path: join(root, "apps/web/styles.css") });
+    await page.addStyleTag({ path: join(root, "apps/web/src/workbench.css") });
     await page.evaluate(async()=>{
-      for(const file of ["mounts.js", "drafts.js", "settings-form.js", "file-picker.js", "external-pane.js", "external-drafts.js", "desktop-bridge.js", "turn-presentation.js", "composer-actions.js", "document-connection.js"]) Object.assign(globalThis,await import("/"+file));
+      for(const file of ["mounts.js", "drafts.js", "settings-form.js", "file-picker.js", "external-pane.js", "external-drafts.js", "desktop-bridge.js", "turn-presentation.js", "composer-actions.js", "document-connection.js", "settings-drafts.js", "settings-editor.js", "settings-focus.js", "settings-dialog.js", "disclosure.js", "approval-review.js", "history-picker.js", "session-export.js", "src/resource-owner.mjs"]) Object.assign(globalThis,await import("/"+file));
     });
     // Projection-only native adapter; the real bridge is covered by its owner.
     await page.evaluate(() => { globalThis.fixtureNativeCalls = []; globalThis.desktopCall = async operation => {fixtureNativeCalls.push(operation);}; globalThis.setClipboardWriter = () => {}; });
-    await page.addScriptTag({ content: 'let fixtureMounts; function createDocumentTransport(){return new Worker("/worker.js",{type:"module"})} const resourceHosts=new Map();function publishResources(){}function clearResources(){resourceHosts.clear()}function renderDetailAtFixture(value){return renderDetail(value,modalTarget)}function renderUiDetailAtFixture(value){return renderUiDetail(value,modalTarget)}const presentationIdentity = {set(){}};function presentationKey(){return "fixture"} function publish() {} let fixtureActions; function installActions(actions) {fixtureActions=actions} function selectSurface() {}\n' + (await readFile(join(root, "apps/web/app.js"), "utf8")).replace(/\r\n/g, "\n").replace(/^import .*;\n/gm, "").replace("const nativeDocument = isDesktop();", "let nativeDocument = isDesktop();").replace('export function initialize() {\n', '').replace(/\n}\s*$/, '') });
+    await page.addScriptTag({ content: 'let fixtureMounts; function createDocumentTransport(){return new Worker("/worker.js",{type:"module"})} const resourceHosts=new Map();function publishResources(){}function clearResources(){resourceHosts.clear()}function fixtureStore(value){const listeners=new Set();return {getSnapshot:()=>value,set(next){if(value===next)return;value=next;for(const listener of listeners)listener()},subscribe(listener){listeners.add(listener);return()=>listeners.delete(listener)}}}const settingsPanel=fixtureStore("advanced"),advancedSettings=fixtureStore(undefined),settingsHost=fixtureStore(document.querySelector("#registered-fixture"));const fixturePanelTarget={key:undefined,get body(){return document.querySelector("#fixture-panel-body")},rendererKey:"fixture-panel",surface:"dialog",show(key,title,body){this.key=key;this.body.replaceChildren(body)},clear(){this.key=undefined;this.body.replaceChildren()}};function renderDetailAtFixture(value){return renderDetail(value,value.settings||value.settings_catalog?registeredTarget:fixturePanelTarget)}function renderUiDetailAtFixture(value){return renderUiDetail(value,fixturePanelTarget)}const presentationIdentity = {set(){}};function presentationKey(){return "fixture"} function publish() {} let fixtureActions; function installActions(actions) {fixtureActions=actions} function selectSurface() {}\n' + (await readFile(join(root, "apps/web/app.js"), "utf8")).replace(/\r\n/g, "\n").replace(/^import .*;\n/gm, "").replace("const nativeDocument = isDesktop();", "let nativeDocument = isDesktop();").replace('export function initialize() {\n', '').replace(/\n}\s*$/, '') });
     assert.deepEqual(errors, [], "document bootstrap has no uncaught errors");
     await page.evaluate(async () => {
       fixtureMounts = await MountTable.open();
@@ -39,6 +40,7 @@ export async function verifyDom(browser, root, report, name) {
       connection = createDocumentConnection(transport, fixtureMounts);
       await connection.authenticate({}, async () => ({drafts: await DraftStore.open("a".repeat(32), {kind:"device",device_id:"b".repeat(32)})}));
       for (const key of ["main", "compare"]) panes.set(key, new Pane(key));
+      panes.get("main").node.classList.add("selected");
       // These are projection fixtures: give each synthetic attachment valid metadata.
       for (const pane of panes.values()) {
         pane.composerActions={revision:"1",primary:{id:"queue",label:"Send"},alternative:{id:"steer",label:"Steer"}};
@@ -49,13 +51,13 @@ export async function verifyDom(browser, root, report, name) {
     await page.evaluate(() => renderDetailAtFixture({settings:{ticket:"numeric-switch", namespace:"fixture.numbers", text:'{"limit":2}', description:{writable:true, defaults:{limit:2}, metadata:{description:"Exact numeric input", applies:"live", sensitive_fields:[], schema:{type:"object", properties:{limit:{type:"number"}}, required:["limit"]}}}}}));
     await page.getByLabel("Settings / limit", {exact:true}).fill("1.0000000000000001");
     await page.getByRole("button", {name:"Save settings", exact:true}).click();
-    await page.locator(".settings-field-error").filter({hasText:"exact number representation"}).waitFor();
+    await page.locator(".settings-field-error").filter({hasText:"No document transport in projection fixture"}).waitFor();
     await page.getByRole("button", {name:"Edit as JSON", exact:true}).click();
-    assert.equal(await page.locator(".settings-field-error").innerText(), "");
+    assert.match(await page.locator(".settings-field-error").innerText(), /No document transport/);
     await page.getByLabel("Settings JSON", {exact:true}).waitFor({state:"visible", timeout:2000});
     assert.match(await page.getByLabel("Settings JSON", {exact:true}).inputValue(), /1\.0000000000000001/);
     await page.screenshot({path:join(report, `${name}-settings-exact-json.png`)});
-    await page.evaluate(() => {document.querySelector("#detail").close(); dialogKey=undefined;});
+    await page.evaluate(() => {registeredTarget.clear();});
     const completionIdentity = await page.evaluate(() => {
       const pane=panes.get("main");
       pane.generation="completion-proof";
@@ -83,6 +85,7 @@ export async function verifyDom(browser, root, report, name) {
     assert.equal(retainedHistory,0,"unchanged omitted history must not detach and reinsert its controls");
     const turnIdentity = await page.evaluate(() => {
       const pane=panes.get('main');
+      pane.node.classList.remove("is-empty");
       document.documentElement.dataset.detail='standard';
       const transcript={omitted:false,blocks:[
         {key:'process',role:'reasoning',title:'Thinking',text:'Process\n'.repeat(60),sources:1},
@@ -94,11 +97,12 @@ export async function verifyDom(browser, root, report, name) {
       const observer=new MutationObserver(()=>{});observer.observe(pane.transcript,{childList:true});
       for(let i=0;i<20;i++)pane.renderTranscript(structuredClone(transcript),false);
       const unchangedMoves=observer.takeRecords().length;observer.disconnect();
-      const answer=nodes[1];pane.transcript.scrollTop=answer.offsetTop+45;pane.readingSummary=true;
-      const before=answer.getBoundingClientRect().top;
+      const answer=nodes[1];pane.transcript.scrollTop+=answer.getBoundingClientRect().top-pane.transcript.getBoundingClientRect().top+45;pane.readingSummary=true;
+      if(pane.transcript.clientHeight===0||answer.getClientRects().length===0)throw new Error("reading anchor requires visible content");
+      const before=answer.getBoundingClientRect().top;window.anchorProbe={before,scroll:pane.transcript.scrollTop,height:pane.transcript.scrollHeight,anchors:readingPosition(pane.transcript,true).anchors.map(a=>({offset:a.offset,tag:a.node.className,height:a.node.clientHeight}))};
       Object.assign(transcript.turns.entries.t,{status:'Completed',running:false,candidate:[],answer:['answer']});transcript.turns.revision='2';
       pane.renderTranscript(transcript,false);
-      const anchorDelta=Math.abs(answer.getBoundingClientRect().top-before);
+      const anchorDelta=Math.abs(answer.getBoundingClientRect().top-before);Object.assign(window.anchorProbe,{after:answer.getBoundingClientRect().top,afterScroll:pane.transcript.scrollTop,afterHeight:pane.transcript.scrollHeight});
       const retained=nodes.every((node,i)=>node===[...pane.blocks.values()][i].node);
       const collapsed=nodes[0].hidden&&!answer.hidden;
       pane.renderTranscript({omitted:false,blocks:[],turns:{revision:'3',entries:{}}},false);
@@ -107,11 +111,13 @@ export async function verifyDom(browser, root, report, name) {
       return {unchangedMoves,anchorDelta,retained,collapsed,retired};
     });
     // Scroll offsets are rounded by the engine while block geometry remains fractional.
+    await writeFile(join(report, "anchor-diagnostic.json"),JSON.stringify(await page.evaluate(()=>window.anchorProbe)));
     assert(turnIdentity.anchorDelta<1,`Turn collapse moved the reading anchor: ${turnIdentity.anchorDelta}`);
     assert.deepEqual({...turnIdentity,anchorDelta:0},{unchangedMoves:0,anchorDelta:0,retained:true,collapsed:true,retired:true});
     await writeFile(join(report,`${name}-turn-identity.json`),JSON.stringify(turnIdentity));
     const transcriptScroll = await page.evaluate(() => {
       const pane=panes.get("main"), transcript={omitted:true,blocks:[{key:"scroll",role:"assistant",title:"Assistant",text:"Retained line\n".repeat(100),sources:8}]};
+      pane.node.classList.remove("is-empty");
       pane.transcript.style.cssText="height:200px;max-height:200px;flex:none;overflow:auto";
       pane.renderTranscript(transcript,true);
       const bottom=()=>pane.transcript.scrollHeight-pane.transcript.clientHeight;
@@ -212,15 +218,15 @@ export async function verifyDom(browser, root, report, name) {
           id: "call-1", subject: { session_id: owner }, reason: owner, action: "run tool", review: { owner },
         } } });
       }
-      const text = $("detail").textContent;
-      [...$("detail").querySelectorAll("button")].find(button => button.textContent === "Allow once").click();
+      const text = $("fixture-panel").textContent;
+      [...$("fixture-panel").querySelectorAll("button")].find(button => button.textContent === "Allow once").click();
       return { text, sent };
       } finally { owner.request=originalRequest; }
     });
     assert(approvals.text.includes("child-session") && !approvals.text.includes("parent-session"));
     assert.equal(approvals.sent.length, 1);
     assert.equal(approvals.sent[0].owner, "child-session");
-    await page.evaluate(() => {$("detail").close();dialogKey=undefined;});
+    await page.evaluate(() => {fixturePanelTarget.clear();});
     const protection = await page.evaluate(async () => {
       const pane=panes.get("main");
       pane.render({generation:"protected-projection",session:"protected-session",path:"/workspace",protected:true,
@@ -343,9 +349,9 @@ export async function verifyDom(browser, root, report, name) {
     assert.deepEqual(ime, { composing: 0, after: 1 });
     const failedSetup = await page.evaluate(() => {
       renderUiDetailAtFixture({ ticket: "fixture-startup", model: null, binding: null, error: null });
-      const loading = document.querySelector("#detail-body").textContent;
+      const loading = document.querySelector("#fixture-panel-body").textContent;
       renderUiDetailAtFixture({ ticket: "fixture-startup", model: null, binding: null, error: "Source startup rejected" });
-      return { loading, failed: document.querySelector("#detail-body").textContent };
+      return { loading, failed: document.querySelector("#fixture-panel-body").textContent };
     });
     assert.deepEqual(failedSetup, { loading: "Loading…", failed: "Source startup rejected" });
     const contributed = await page.evaluate(async () => {
@@ -422,12 +428,12 @@ export async function verifyDom(browser, root, report, name) {
       let oldMessage;
       const oldTransport = {terminate(){}};
       const old = await fixtureConnect(await MountTable.open(), oldTransport, message => {oldMessage=message;});
-      showDialog("old-detail", "Old detail", element("div", "", "old"));
-      const closing = closeDetail();
-      showDialog("replacement-detail", "Replacement detail", element("div", "", "new"));
+      fixturePanelTarget.show("old-detail", "Old detail", element("div", "", "old"));
+      const closing = boundCall(old)("command",JSON.stringify({action:"close_detail",view:"1",expected_open_revision:"1"}));
+      fixturePanelTarget.show("replacement-detail", "Replacement detail", element("div", "", "new"));
       oldTransport.onmessage({data:{kind:"reply",id:oldMessage.id,result:null}});
       await closing;
-      const replacementPreserved = dialogKey === "replacement-detail" && $("detail").open;
+      const replacementPreserved = fixturePanelTarget.key === "replacement-detail" && fixturePanelTarget.body.textContent === "new";
       const readOld = boundCall(old); await old.retire();
       const sent = [];
       const fresh = await fixtureConnect(await MountTable.open(), {terminate(){}}, message => {sent.push(message);});
@@ -435,7 +441,7 @@ export async function verifyDom(browser, root, report, name) {
       try {
         await previewImage(preview, {id:"old-owner-preview",bytes:1,width:1,height:1}, "old-ticket", readOld);
         return {replacementPreserved, freshRequests:sent.length, rejectedOldRead:preview.textContent.includes("Image unavailable")};
-      } finally {preview.remove(); modalTarget.clear(); await fresh.retire();}
+      } finally {preview.remove(); fixturePanelTarget.clear(); await fresh.retire();}
     });
     assert.deepEqual(detailOwners, {replacementPreserved:true,freshRequests:0,rejectedOldRead:true});
     const drainReplacement = await page.evaluate(async () => {

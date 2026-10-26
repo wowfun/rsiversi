@@ -127,7 +127,7 @@ try {
   await writeGeneration("D");
   await page.locator("#connection-state").filter({ hasText: "Connection failed" }).waitFor();
   await page.locator("#login").waitFor({ state: "visible" });
-  await page.locator("#detail").waitFor({ state: "hidden" });
+  await page.locator("#workbench").waitFor({ state: "hidden" });
   assert.equal(lostCommitRequests, 1);
   await page.screenshot({ path: join(report, "lost-commit-explicit-reconnect.png") });
   await context.unroute("**/api/v2/rsi-web-assets-api/3/web-assets/commit/1/mutation");

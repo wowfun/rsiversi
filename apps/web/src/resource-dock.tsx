@@ -9,6 +9,7 @@ import {input,source,useSelected,useView,type Surface} from './bridge.ts'
 import {presentationIdentity,useLayout,useNarrow,useViewport} from './presentation.tsx'
 import {Terminals,type Follower} from './terminal.tsx'
 import {Button} from './button.tsx'
+import {ResourceOwner} from './resource-owner.mjs'
 
 const labels:DockLabels={emptyPane:'Open a resource to use this pane',splitPane:'Split resources',splitPaneDisabled:'Two resource panes are open',splitPaneNarrow:'Widen resources to split',closeTab:'Close resource tab',addTab:'Open resources',dockFloat:'Dock resource',closeFloat:'Close resource window',dropZone:{center:'Merge tabs',left:'Split left',right:'Split right',top:'',bottom:''}}
 const descriptor=(host:ResourceHost,surface:Surface):Coordinate=>{
@@ -28,13 +29,22 @@ function ResourceBody({view}:{view:string}) {
   useLayoutEffect(()=>{const host=resourceHosts.get(view);if(host&&root.current)root.current.append(host.body);return()=>{if(host?.body.isConnected)document.getElementById('resource-parking')?.append(host.body)}},[view])
   return <div className="resource-host" ref={root}/>
 }
-interface Binding {view?:string;created?:Follower;error?:string;requested?:boolean}
+interface Binding {label?:string;view?:string;open_revision?:string;opening?:ReturnType<ResourceOwner['open']>;created?:ReturnType<ResourceOwner['attachment']>;error?:string;floating?:boolean}
 export function openTerminals() { window.dispatchEvent(new Event('rsi:terminals')) }
 export function ResourceDocks({launcher}:{launcher:ReactNode}) {
   const surfaces=useView(view=>view?.surfaces),selected=useSelected(value=>value)
-  return <>{Object.entries(surfaces??{}).map(([pane,surface])=>surface&&surface.kind!=='external'&&<SessionDock key={`${pane}:${surface.generation}`} pane={pane} surface={surface} active={pane===selected} launcher={launcher}/>)}</>
+  const owner=input.resourceOwner()
+  if(!owner)return null
+  return <>{Object.entries(surfaces??{}).map(([pane,surface])=>surface&&surface.kind!=='external'&&<SessionDock key={`${owner.id}:${pane}:${surface.generation}`} owner={owner} pane={pane} surface={surface} active={pane===selected} launcher={launcher}/>)}</>
 }
-function SessionDock({pane,surface,active,launcher}:{pane:string;surface:Surface;active:boolean;launcher:ReactNode}) {
+export function ResourceCleanupNotice() {
+  useView(view=>!!view)
+  const owner=input.resourceOwner()
+  const errors=useSyncExternalStore(owner?.subscribe??(()=>()=>{}),owner?.getSnapshot??(()=>emptyErrors))
+  return owner&&errors.length>0&&<div className="resource-cleanup-notice" role="alert" aria-label="Resource cleanup" tabIndex={0}>Resource operations need attention.{errors.map((error:any)=><p key={error.key}><span title={error.key} data-session={error.session}>{error.label}</span>: {error.error} {error.retryable?<Button aria-label={`Retry cleanup for ${error.label} (${error.key})`} disabled={error.busy} onClick={()=>owner.retry(error.key)}>Retry cleanup</Button>:<span>Disconnect and reconnect to resolve this uncertain operation.</span>}</p>)}</div>
+}
+const emptyErrors:never[]=[]
+function SessionDock({owner,pane,surface,active,launcher}:{owner:ResourceOwner;pane:string;surface:Surface;active:boolean;launcher:ReactNode}) {
   const identity=useSyncExternalStore(presentationIdentity.subscribe,presentationIdentity.getSnapshot)
   const hosts=useSyncExternalStore(resources.subscribe,resources.getSnapshot)
   const [doc,setDoc]=useState<DockDocument>(emptyDock),[notice,setNotice]=useState(''),[revision,changed]=useState(0)
@@ -44,43 +54,56 @@ function SessionDock({pane,surface,active,launcher}:{pane:string;surface:Surface
   const viewport=useViewport()
   const scope=`dock:${surface.session}`
   const relevant=(host:ResourceHost)=>host.entry.session===surface.session&&host.entry.pane===pane&&host.entry.generation===surface.generation||host.entry.session===null&&pane==='main'
-  const command=(value:Record<string,unknown>)=>input.command({...value,pane,generation:surface.generation})
-  const terminal=async(request:unknown)=>JSON.parse(await input.terminal({pane,generation:surface.generation,request}))
+  const command=(value:Record<string,unknown>)=>owner.call('command',JSON.stringify(value))
+  const terminal=async(request:unknown)=>JSON.parse(await owner.call('terminal',JSON.stringify({pane,generation:surface.generation,request})))
   const publish=(next:DockDocument)=>{current.current=next;if(alive.current)setDoc(next)}
-  const enqueue=(work:(valid:()=>boolean)=>Promise<void>)=>{const epoch=generation.current,valid=()=>alive.current&&generation.current===epoch;queue.current=queue.current.then(async()=>{if(valid())await work(valid)}).catch(error=>{if(valid())setNotice(String(error))})}
+  const enqueue=(work:(valid:()=>boolean)=>Promise<void>,retired=()=>{})=>{const epoch=generation.current,valid=()=>alive.current&&generation.current===epoch;queue.current=queue.current.then(async()=>{if(valid())await work(valid);else retired()}).catch(error=>{if(valid())setNotice(String(error))})}
   const save=async(intent:DockIntent)=>{
-    const owner=store.current
+    const storage=store.current
+    const reserved:ReturnType<ResourceOwner['reservePanel']>[]=[]
     // A failed save is reported and the previously committed layout is retained.
-    if(owner)return (await owner.apply('layouts',intent,scope)).value as DockDocument
-    setNotice('Resource layout is not saved on this device.')
-    return dockIntent(current.current,intent)
+    try{
+      let next:DockDocument
+      if(storage)next=(await storage.apply('layouts',intent,scope,(values:unknown[])=>reserved.push(...reserveRemoved(values[0] as DockDocument)))).value as DockDocument
+      else {setNotice('Resource layout is not saved on this device.');next=dockIntent(current.current,intent);reserved.push(...reserveRemoved(next))}
+      for(const item of reserved)item.commit()
+      return next
+    }catch(error){for(const item of reserved)item.cancel();throw error}
   }
-  const reopen=async(c:Coordinate)=>{
+  const openingCommand=(c:Coordinate)=>{
     if(c.action==='surface'||c.action==='application_surface'){
       const candidates=c.action==='surface'?source.getSnapshot()?.surfaces[pane]?.ui_surfaces:source.getSnapshot()?.application_surfaces
       const item=candidates?.find(item=>item.bundle===c.bundle&&item.reference.name===c.name)
       if(!item)throw new Error('This extension is unavailable in the current Session')
-      if(c.action==='surface')await command({action:'ui_surface',reference:item.reference})
-      else await input.command({action:'application_ui_surface',reference:item.reference})
-    }else if(c.action==='remote_surface')await command({action:'reopen_remote_surface',bundle:c.bundle,surface:c.name})
-    else await command(c)
+      if(c.action==='application_surface')return {action:'application_ui_surface',reference:item.reference}
+      return {action:'ui_surface',reference:item.reference,pane,generation:surface.generation}
+    }
+    return {...(c.action==='remote_surface'?{action:'reopen_remote_surface',bundle:c.bundle,surface:c.name}:c),pane,generation:surface.generation}
   }
   const bindHosts=()=>{
     let updated=false
     for(const host of resources.getSnapshot().filter(relevant)){
-      if(claimed.current.has(host.entry.view))continue
-      let c;try{c=descriptor(host,surface)}catch{continue}
-      const match=Object.values(current.current.state.tabs).find(tab=>tab.contentId===JSON.stringify(c)&&bindings.current.get(tab.id)?.requested&&!bindings.current.get(tab.id)?.view)
-      if(match){bindings.current.set(match.id,{view:host.entry.view});claimed.current.add(host.entry.view);updated=true}
+      if(owner.suppresses(host.entry))continue
+      for(const binding of bindings.current.values())if(binding.opening?.request===host.entry.opening_request || binding.view===host.entry.view&&binding.open_revision!==host.entry.open_revision){
+        // A new explicit inspection reuses this still-open tab, never a closed one.
+        binding.view=host.entry.view;binding.open_revision=host.entry.open_revision;binding.opening=undefined;binding.error=undefined
+        claimed.current.add(`${host.entry.view}:${host.entry.open_revision}`);updated=true
+      }
     }
     return updated
+  }
+  const release=(binding:Binding)=>binding.created?{commit:binding.created.close,cancel:()=>{}}:binding.opening?owner.reserveOpen(binding.opening):binding.view?owner.reservePanel(surface.session,{view:binding.view,open_revision:binding.open_revision},binding.label):undefined
+  const reserveRemoved=(next:DockDocument)=>{
+    const reservations:ReturnType<ResourceOwner['reservePanel']>[]=[]
+    try{for(const [id,binding] of bindings.current)if(!next.state.tabs[id]){const reserved=release(binding);if(reserved)reservations.push(reserved)}}
+    catch(error){for(const reserved of reservations)reserved.cancel();throw error}
+    return reservations
   }
   const reconcile=async(next:DockDocument,valid=()=>alive.current)=>{
     if(!valid())return
     for(const [id,binding] of bindings.current)if(!next.state.tabs[id]){
+      release(binding)?.commit()
       bindings.current.delete(id)
-      if(!valid())return
-      if(binding.view)await input.command({action:'close_detail',view:binding.view})
       // Terminal component unmount owns detach; it never terminates its shell.
     }
     if(!valid())return
@@ -89,14 +112,22 @@ function SessionDock({pane,surface,active,launcher}:{pane:string;surface:Surface
       if(!valid())return
       const c=coordinate(JSON.parse(tab.contentId));let binding=bindings.current.get(tab.id)
       if(c.action==='resources'||c.action==='terminal')continue
-      if(!binding){binding={requested:true};bindings.current.set(tab.id,binding)
-        // Command acceptance can precede the presentation frame. Keep the
-        // pending binding so adopt() associates that later frame with this tab.
-        try{await reopen(c);if(!valid())return;bindHosts()}
-        catch(error){if(!valid())return;bindings.current.set(tab.id,{error:String(error)})}
+      if(!binding){
+        binding={label:tab.title};bindings.current.set(tab.id,binding)
+        try{
+          const opening=owner.open(surface.session,openingCommand(c),tab.title),selected=binding
+          selected.opening=opening
+          void opening.promise!.then((reply:any)=>{
+            if(!valid()||bindings.current.get(tab.id)!==selected){owner.reserveOpen(opening).commit();return}
+            if(reply.status==='unavailable'){selected.error=reply.reason;selected.opening=undefined}
+            else {selected.opening=undefined;selected.error=undefined;selected.view=reply.view;selected.open_revision=reply.open_revision;claimed.current.add(`${reply.view}:${reply.open_revision}`)}
+            changed(n=>n+1)
+          }).catch((error:unknown)=>{if(valid()&&bindings.current.get(tab.id)===selected){selected.error=String(error);changed(n=>n+1)}})
+        }catch(error){binding.error=String(error)}
       }
       const view=bindings.current.get(tab.id)?.view
-      if(view){const host=resourceHosts.get(view);if(host&&host.entry.floating!==floatingTab(next.state,tab.id))await input.command({action:'float_panel',view,floating:floatingTab(next.state,tab.id)})}
+      if(view){const host=resourceHosts.get(view),floating=floatingTab(next.state,tab.id),selected=bindings.current.get(tab.id)!
+        if(host&&host.entry.floating!==floating&&selected.floating!==floating){selected.floating=floating;void command({action:'float_panel',view,floating}).catch((error:unknown)=>{selected.floating=undefined;if(valid())setNotice(String(error))})}}
     }
     if(valid())changed(n=>n+1)
   }
@@ -120,51 +151,59 @@ function SessionDock({pane,surface,active,launcher}:{pane:string;surface:Surface
       if(owner){unsubscribe=owner.subscribe('layouts',scope,reload);window.addEventListener('focus',reload)}
       adopt()
     })
-    return()=>{live=false;alive.current=false;generation.current++;ready.current=false;unsubscribe?.();window.removeEventListener('focus',reload);owner?.close();store.current=undefined}
+    return()=>{live=false;alive.current=false;generation.current++;ready.current=false;for(const binding of bindings.current.values())release(binding)?.commit();bindings.current.clear();unsubscribe?.();window.removeEventListener('focus',reload);owner?.close();store.current=undefined}
   },[identity])
   const adopt=()=>{
     if(!ready.current)return
-    for(const view of claimed.current)if(!resourceHosts.has(view))claimed.current.delete(view)
+    for(const key of claimed.current){const [view,revision]=key.split(':');if(resourceHosts.get(view)?.entry.open_revision!==revision)claimed.current.delete(key)}
     const rebound=bindHosts()
     for(const host of hostList.current.filter(relevant)){
-      if(claimed.current.has(host.entry.view))continue
-      claimed.current.add(host.entry.view)
+      const key=`${host.entry.view}:${host.entry.open_revision}`
+      if(claimed.current.has(key)||owner.suppresses(host.entry)||owner.owns(host.entry.opening_request))continue
+      claimed.current.add(key)
       enqueue(async valid=>{
         try{
           const c=descriptor(host,surface)
           const next=await save({kind:'dock',operation:'open',coordinate:c,title:host.title,duplicate:true})
           if(!valid())return
           const added=getPane(next.state,next.state.activePaneId).activeTabId!
-          bindings.current.set(added,{view:host.entry.view});await reconcile(next,valid)
+          bindings.current.set(added,{label:host.title,view:host.entry.view,open_revision:host.entry.open_revision});await reconcile(next,valid)
           if(!valid())return
           update({resourcesClosed:false})
-        }catch(error){if(valid())await input.command({action:'close_detail',view:host.entry.view});throw error}
+        }catch(error){owner.reservePanel(surface.session,host.entry,host.title).commit();throw error}
       })
     }
     if(rebound)changed(n=>n+1)
   }
   useEffect(adopt,[hosts])
-  const openTerminal=(id?:string)=>enqueue(async valid=>{
-    let created:Follower|undefined
-    try{
-      if(!id){created=(await terminal({type:'create',size:{rows:24,columns:80}})).value;id=created!.terminal.id}
-      if(!valid()){if(created)await terminal({type:'detach',attachment:created.id});return}
-      const previous=current.current,next=await save({kind:'dock',operation:'open',coordinate:{action:'terminal',terminal:id},title:'Terminal'})
-      if(!valid()){if(created)await terminal({type:'detach',attachment:created.id});return}
-      const tab=Object.values(next.state.tabs).find(tab=>JSON.parse(tab.contentId).terminal===id)!
-      if(created&&previous.state.tabs[tab.id])await terminal({type:'detach',attachment:created.id})
-      else if(created)bindings.current.set(tab.id,{created})
-      await reconcile(next,valid);if(valid())update({resourcesClosed:false})
-    }catch(error){if(created)await terminal({type:'detach',attachment:created.id});throw error}
-  })
+  const openTerminal=(id?:string)=>{
+    const epoch=generation.current,valid=()=>alive.current&&generation.current===epoch
+    let created:ReturnType<ResourceOwner['attachment']>|undefined
+    try{if(!id)created=owner.attachment(surface.session,pane,surface.generation,{type:'create',size:{rows:24,columns:80}})}catch(error){setNotice(String(error));return}
+    // Creating a shell may take time; only persistence belongs in the layout queue.
+    void (created?created.promise.then((value:Follower)=>value.terminal.id):Promise.resolve(id!)).then(terminalId=>{
+      if(!valid()){created?.close();return}
+      enqueue(async currentValid=>{
+        try{
+          if(!valid()||!currentValid()){created?.close();return}
+          const previous=current.current,next=await save({kind:'dock',operation:'open',coordinate:{action:'terminal',terminal:terminalId},title:'Terminal'})
+          if(!valid()||!currentValid()){created?.close();return}
+          const tab=Object.values(next.state.tabs).find(tab=>JSON.parse(tab.contentId).terminal===terminalId)!
+          if(created&&previous.state.tabs[tab.id])created.close()
+          else if(created)bindings.current.set(tab.id,{created})
+          await reconcile(next,currentValid);if(valid())update({resourcesClosed:false})
+        }catch(error){created?.close();throw error}
+      },()=>created?.close())
+    }).catch(error=>{created?.close();if(valid())setNotice(String(error))})
+  }
   useEffect(()=>{const show=()=>{if(activeRef.current){apply('open',{coordinate:{action:'resources'},title:'Resources'});update({resourcesClosed:false})}};window.addEventListener('rsi:terminals',show);return()=>window.removeEventListener('rsi:terminals',show)},[])
   const intents:DockIntents={focusTab:tab=>apply('focus',{tab}),focusPane:pane=>apply('focus-pane',{pane}),splitPane:pane=>apply('split',{pane}),addTab:pane=>apply('open',{coordinate:{action:'resources'},title:'Resources',pane,duplicate:true}),closeTab:tab=>apply('close',{tab}),duplicateTab:tab=>apply('duplicate',{tab}),floatTab:(tab,rect)=>apply('float',{tab,rect}),unfloatPane:pane=>apply('dock',{pane}),placeTab:(tab,pane,index)=>apply('place',{tab,pane,index}),dropTab:(tab,pane,zone)=>apply('drop',{tab,pane,zone}),moveFloat:(pane,x,y)=>apply('move-float',{pane,x,y}),resizeFloat:(pane,rect)=>apply('resize-float',{pane,rect}),resizeSplit:(split,sizes)=>apply('resize',{split,sizes})}
   const body=(tab:TabRecord)=>{
     const c=coordinate(JSON.parse(tab.contentId)),binding=bindings.current.get(tab.id)
     if(c.action==='resources')return <div className="resource-launcher">{launcher}<TerminalList active={active&&getPane(doc.state,paneFor(doc.state,tab.id)!).activeTabId===tab.id} list={()=>terminal({type:'list'})} open={openTerminal}/></div>
-    if(c.action==='terminal')return <Terminals pane={pane} surface={surface} initial={String(c.terminal)} created={binding?.created} onOpen={openTerminal} hide={()=>apply('close',{tab:tab.id})}/>
+    if(c.action==='terminal')return <Terminals owner={owner} pane={pane} surface={surface} initial={String(c.terminal)} created={binding?.created} onOpen={openTerminal} hide={()=>apply('close',{tab:tab.id})}/>
     if(binding?.view&&resourceHosts.has(binding.view))return <ResourceBody view={binding.view}/>
-    return <div className="resource-unavailable"><p role="status">{binding?.error??(binding?.view?'This resource has retired.':'Opening resource…')}</p><Button onClick={()=>enqueue(async valid=>{bindings.current.delete(tab.id);await reconcile(current.current,valid)})}>Reopen resource</Button></div>
+    return <div className="resource-unavailable"><p role="status">{binding?.error??(binding?.view?'This resource has retired.':'Opening resource…')}</p><Button disabled={!binding?.error&&!binding?.view} onClick={()=>enqueue(async valid=>{const old=bindings.current.get(tab.id);if(old)release(old)?.commit();bindings.current.delete(tab.id);await reconcile(current.current,valid)})}>Reopen resource</Button></div>
   }
   void revision
   const displayed=useMemo(()=>displayDock(doc.state,viewport.width,viewport.height,narrow),[doc.state,viewport.width,viewport.height,narrow])

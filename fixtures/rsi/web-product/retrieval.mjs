@@ -14,7 +14,7 @@ export async function verifyRetrieval(page,pane,service,report,browser) {
     await first.setChecked(fetch);await second.setChecked(search);
     await page.screenshot({path:join(report,`${browser}-retrieval-settings.png`)});
     const old=await first.elementHandle();await page.getByRole('button',{name:'Save settings',exact:true}).click();await page.waitForFunction(element=>!element.isConnected,old);await old.dispose();
-    await page.getByRole('button',{name:'Close details',exact:true}).click();
+    await page.getByRole('button',{name:'Plugins',exact:true}).click();
   };
   await edit(true,true);
   await panel.locator('summary').click();const key=panel.getByLabel('Exa API key',{exact:true});assert(await key.isDisabled());
@@ -29,7 +29,7 @@ export async function verifyRetrieval(page,pane,service,report,browser) {
   await panel.getByRole('button',{name:'Web retrieval settings',exact:true}).click();
   const fetch=page.getByRole('checkbox',{name:'Settings / web_fetch',exact:true}),search=page.getByRole('checkbox',{name:'Settings / web_search',exact:true});
   await fetch.waitFor();assert(await fetch.isChecked());assert(await search.isChecked());await fetch.uncheck();await search.uncheck();const old=await fetch.elementHandle();
-  await page.getByRole('button',{name:'Save settings',exact:true}).click();await page.waitForFunction(element=>!element.isConnected,old);await old.dispose();await page.getByRole('button',{name:'Close details',exact:true}).click();
+  await page.getByRole('button',{name:'Save settings',exact:true}).click();await page.waitForFunction(element=>!element.isConnected,old);await old.dispose();await page.getByRole('button',{name:'Plugins',exact:true}).click();
   await page.getByRole('button',{name:'Close settings',exact:true}).click();assert.equal(await draft.inputValue(),'Retained while configuring web retrieval');await draft.fill('');
   await writeFile(join(report,`${browser}-retrieval.json`),JSON.stringify({status:'passed',typed_flags:true,default_disabled:true,credential_saved_and_removed:true,no_implicit_model_request:true,draft_retained:true}));
 }

@@ -2,6 +2,7 @@ import type { SshView } from "./ssh-targets.tsx"
 import { bindSnapshotSelector } from '../vendor/dsh/renderer/bind.ts'
 import type { LeafView } from './profile-leaves.tsx'
 import type {AutomationView} from './automation.tsx'
+import type {ResourceOwner} from './resource-owner.mjs'
 
 export interface Model { deployment: string; model: string }
 export type ExecutionLocation = {kind:'local'} | {kind:'ssh';target:string}
@@ -32,18 +33,23 @@ export function observable<T>(initial: T) {
 }
 export const source = observable<View | undefined>(undefined)
 export const selection = observable('main')
+export type SettingsSection='models'|'appearance'|'plugins'|'advanced'
+export const settingsPanel=observable<SettingsSection|undefined>(undefined)
+export const advancedSettings=observable<string|undefined>(undefined)
+export const settingsHost=observable<HTMLElement|undefined>(undefined)
 export const useView = bindSnapshotSelector(source)
 export const useSelected = bindSnapshotSelector(selection)
 export const publish = source.set
 export const selectSurface = selection.set
 type Command = Record<string, unknown>
-interface Actions { command(command: Command): Promise<unknown>; open(command: Command): Promise<unknown>; select(key: string): void; closeSurface(key: string): Promise<void>; addSurface(key: string): Promise<void>; call(method: string, payload: unknown): Promise<unknown> }
+interface Actions { dismissSettings():void; resources():ResourceOwner|undefined; command(command: Command): Promise<unknown>; open(command: Command): Promise<unknown>; select(key: string): void; closeSurface(key: string): Promise<void>; addSurface(key: string): Promise<void>; call(method: string, payload: unknown): Promise<unknown> }
 let actions: Actions | undefined
 export function installActions(value: Actions) { actions = value }
 export const input = {
+  resourceOwner() { return actions?.resources() },
+  dismissSettings() { actions?.dismissSettings();settingsPanel.set(undefined) },
   automationArtifact(value: unknown): Promise<string> { return actions ? actions.call("automation_artifact",JSON.stringify(value)) as Promise<string> : Promise.reject(new Error("Application is starting")) },
   directory(value: unknown): Promise<string> { return actions ? actions.call("directory_input",JSON.stringify(value)) as Promise<string> : Promise.reject(new Error("Application is starting")) },
-  terminal(value: unknown): Promise<string> { return actions ? actions.call("terminal", JSON.stringify(value)) as Promise<string> : Promise.reject(new Error("Application is starting")) },
   command(value: Command) { if (!actions) return Promise.reject(new Error('Application is starting')); return actions.command(value) },
   open(value: Command) { if (!actions) return Promise.reject(new Error('Application is starting')); return actions.open(value) },
   select(key: string) { actions?.select(key) },
@@ -51,4 +57,4 @@ export const input = {
   add(key: string) { return actions?.addSurface(key) ?? Promise.reject(new Error('Application is starting')) },
 }
 export function report(error: unknown) { const node = document.getElementById('notice'); if (node) {node.textContent = error instanceof Error ? error.message : String(error); node.hidden = false} }
-export async function run(work: () => Promise<unknown>) { try { await work() } catch (error) { report(error) } }
+export async function run(work: () => Promise<unknown>) { try { await work(); return true } catch (error) { report(error); return false } }

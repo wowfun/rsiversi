@@ -25,6 +25,54 @@ async function fixture(options = {}) {
   return f;
 }
 
+test('restoring sixteen resources waits for ordinary admission without blocking cleanup',async()=>{
+  const f=await fixture(),held=Array.from({length:8},()=>f.owner.request('command','{}'));
+  const opens=Array.from({length:16},()=>f.owner.resources.open('session',{}));
+  const receipts=Promise.all(opens.map(open=>open.promise));receipts.catch(()=>{});
+  await new Promise(resolve=>setImmediate(resolve));
+  assert.equal(f.calls.filter(call=>call.method==='resource_open').length,0);
+  for(const call of f.calls.filter(call=>call.method==='command'))await f.transport.onmessage({data:{kind:'reply',id:call.id,result:'{}'}});
+  await Promise.all(held);
+  const replied=new Set();
+  for(let round=0;round<3;round++){
+    await new Promise(resolve=>setImmediate(resolve));
+    const calls=f.calls.filter(call=>call.method==='resource_open'&&!replied.has(call.id));
+    assert.equal(calls.length,Math.min(7,16-replied.size));
+    const foreground=f.owner.request("command","{}");
+    const foregroundCall=f.calls.at(-1);
+    assert.equal(foregroundCall.method,"command");
+    await f.transport.onmessage({data:{kind:"reply",id:foregroundCall.id,result:"{}"}});
+    await foreground;
+    for(const call of calls){
+      replied.add(call.id);
+      const request=JSON.parse(call.payload).opening_request;
+      await f.transport.onmessage({data:{kind:'reply',id:call.id,result:JSON.stringify({status:'opened',request,view:String(call.id),open_revision:'1'})}});
+    }
+  }
+  assert.equal((await receipts).length,16);
+  await f.owner.retire();
+});
+
+test('retirement releases resource openings waiting for a lane without dispatching them',async()=>{
+  const f=await fixture(),held=Array.from({length:8},()=>f.owner.request('command','{}').catch(()=>{}));
+  const opens=Array.from({length:16},()=>f.owner.resources.open('session',{}).promise.catch(error=>error));
+  await new Promise(resolve=>setImmediate(resolve));
+  await f.owner.retire();await Promise.all(held);
+  assert((await Promise.all(opens)).every(error=>error.notAdmitted===true));
+  assert.equal(f.calls.filter(call=>call.method==='resource_open').length,0);
+  assert.equal(f.owner.resources.opens.size,0);
+});
+
+for(const failed of ['renderer','transport'])test(`teardown waits for the other leg after ${failed} failure`,async()=>{
+  const other=gate(),failure=new Error(`${failed} failed`);
+  const f=await fixture({close:()=>failed==='renderer'?Promise.reject(failure):other.promise,terminate:()=>failed==='transport'?Promise.reject(failure):other.promise});
+  const retirement=f.owner.retire();const rejection=assert.rejects(retirement,new RegExp(failed));
+  await new Promise(resolve=>setImmediate(resolve));
+  assert.equal(f.owner.resources.retired,false,'unfinished teardown still owns resources');
+  other.resolve();await rejection;
+  assert.equal(f.owner.resources.retired,true);
+});
+
 test('reply retry evidence requires known refusal and preserves an explicit closed marker', async () => {
   const f = await fixture();
   for (const [evidence, retryable] of [[{},false],[{notAdmitted:true},true],[{notAdmitted:true,retryable:false},false]]) {

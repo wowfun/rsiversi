@@ -426,7 +426,7 @@ async fn terminal_poll_budget_is_independent_bounded_and_drained_on_shutdown() {
         .terminal(&request(json!({"type":"read","attachment":"pty-32"})))
         .await
         .unwrap_err();
-    assert!(rejected.contains("busy"), "{rejected}");
+    assert!(rejected.to_string().contains("busy"), "{rejected}");
     app.command(
         &json!({"action":"model_refresh","pane":"main","generation":generation}).to_string(),
     )
@@ -435,13 +435,59 @@ async fn terminal_poll_budget_is_independent_bounded_and_drained_on_shutdown() {
     assert!(runtime.shutdown().await.is_clean());
     assert_eq!(backend.terminal_detaches.lock().unwrap().len(), 33);
     for read in reads {
-        assert!(read.await.unwrap_err().contains("Application closed"));
+        assert!(
+            read.await
+                .unwrap_err()
+                .to_string()
+                .contains("Application closed")
+        );
     }
     assert!(
         app.terminal(&request(json!({"type":"read","attachment":"pty-32"})))
             .await
             .is_err()
     );
+}
+
+#[tokio::test]
+async fn terminal_retirement_reports_uncertain_detach_and_still_drains_other_followers() {
+    let (runtime, backend, app, generation) = fixture().await;
+    for terminal in ["a", "b"] {
+        app.terminal(&json!({"pane":"main","generation":generation,"request":{"type":"attach","terminal":terminal}}).to_string()).await.unwrap();
+    }
+    *backend.terminal_detach_failure.lock().unwrap() = Some(
+        rsi_session_protocol::SessionError::Api(rsi_api_protocol::ApiError::OutcomeUnknown),
+    );
+    assert!(
+        !runtime.shutdown().await.is_clean(),
+        "uncertain detach must reach the retirement report"
+    );
+    assert_eq!(*backend.terminal_detaches.lock().unwrap(), vec!["b"]);
+}
+
+#[tokio::test]
+async fn terminal_refusals_and_detach_retry_preserve_exact_ownership() {
+    let (runtime, backend, app, generation) = fixture().await;
+    let request =
+        |value| json!({"pane":"main","generation":generation,"request":value}).to_string();
+    let refused = app
+        .terminal(&request(
+            json!({"type":"create","size":{"rows":24,"cols":80}}),
+        ))
+        .await
+        .unwrap_err();
+    assert!(refused.no_attachment);
+    app.terminal(&request(json!({"type":"attach","terminal":"retained"})))
+        .await
+        .unwrap();
+    *backend.terminal_detach_failure.lock().unwrap() = Some(
+        rsi_session_protocol::SessionError::Api(rsi_api_protocol::ApiError::OutcomeUnknown),
+    );
+    let detach = request(json!({"type":"detach","attachment":"retained"}));
+    assert!(!app.terminal(&detach).await.unwrap_err().no_attachment);
+    app.terminal(&detach).await.unwrap();
+    assert_eq!(*backend.terminal_detaches.lock().unwrap(), vec!["retained"]);
+    assert!(runtime.shutdown().await.is_clean());
 }
 
 #[tokio::test]
@@ -485,5 +531,81 @@ async fn stop_requires_an_acknowledged_exact_active_turn() {
         *backend.cancel.lock().unwrap(),
         vec![CancelTarget::Turn(turn)]
     );
+    assert!(runtime.shutdown().await.is_clean());
+}
+
+#[tokio::test]
+async fn committed_switch_reports_retired_cleanup_separately() {
+    let (runtime, backend, app, generation) = fixture().await;
+    app.terminal(&json!({"pane":"main","generation":generation,"request":{"type":"attach","terminal":"old"}}).to_string()).await.unwrap();
+    *backend.terminal_detach_failure.lock().unwrap() = Some(
+        rsi_session_protocol::SessionError::Api(rsi_api_protocol::ApiError::OutcomeUnknown),
+    );
+    let session = super::sources::view(&app)["surfaces"]["main"]["session"].clone();
+    app.command(&json!({"action":"open","pane":"main","session":session}).to_string())
+        .await
+        .unwrap();
+    let view = super::sources::view(&app);
+    assert_ne!(view["surfaces"]["main"]["generation"], generation);
+    assert_eq!(view["surfaces"]["main"]["session"], session);
+    assert!(
+        view["notice"]
+            .as_str()
+            .unwrap()
+            .contains("Previous conversation cleanup failed")
+    );
+    assert!(runtime.shutdown().await.is_clean());
+}
+
+#[tokio::test]
+async fn late_attachment_reports_cleanup_knowledge() {
+    for failed in [false, true] {
+        let (runtime, backend, app, generation) = fixture().await;
+        let gate = Arc::new(TerminalGate {
+            entered: tokio::sync::Semaphore::new(0),
+            release: CancellationToken::new(),
+        });
+        *backend.terminal_attach_gate.lock().unwrap() = Some(gate.clone());
+        let attach = app.terminal(&json!({"pane":"main","generation":generation,"request":{"type":"attach","terminal":"late"}}).to_string());
+        tokio::time::timeout(std::time::Duration::from_secs(3), gate.entered.acquire())
+            .await
+            .unwrap()
+            .unwrap()
+            .forget();
+        let session = super::sources::view(&app)["surfaces"]["main"]["session"].clone();
+        app.command(&json!({"action":"open","pane":"main","session":session}).to_string())
+            .await
+            .unwrap();
+        if failed {
+            *backend.terminal_detach_failure.lock().unwrap() = Some(
+                rsi_session_protocol::SessionError::Api(rsi_api_protocol::ApiError::OutcomeUnknown),
+            );
+        }
+        gate.release.cancel();
+        let error = attach.await.unwrap_err();
+        assert!(
+            error.to_string().contains("closed while attaching"),
+            "{error}"
+        );
+        assert_eq!(error.no_attachment, !failed);
+        assert_eq!(error.to_string().contains("detach failed"), failed);
+        assert!(runtime.shutdown().await.is_clean());
+    }
+}
+
+#[tokio::test]
+async fn late_terminal_detach_transfers_to_original_pane_shutdown() {
+    let (runtime, backend, app, generation) = fixture().await;
+    app.terminal(&json!({"pane":"main","generation":generation,"request":{"type":"attach","terminal":"retained"}}).to_string()).await.unwrap();
+    app.command(r#"{"action":"close_surface","pane":"main"}"#)
+        .await
+        .unwrap();
+    assert_eq!(*backend.terminal_detaches.lock().unwrap(), vec!["retained"]);
+    let reply=app.terminal(&json!({"pane":"main","generation":generation,"request":{"type":"detach","attachment":"retained"}}).to_string()).await.unwrap();
+    assert_eq!(
+        serde_json::from_str::<serde_json::Value>(&reply).unwrap()["cleanup"],
+        "application"
+    );
+    assert_eq!(backend.terminal_detaches.lock().unwrap().len(), 1);
     assert!(runtime.shutdown().await.is_clean());
 }

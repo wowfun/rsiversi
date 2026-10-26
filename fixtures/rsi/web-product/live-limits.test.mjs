@@ -15,6 +15,7 @@ test('live capacities are explicit, exact and bounded without model inference',(
   const profile=deepseekProfile('model.v1',liveLimits(environment));
   assert.match(profile,/language_models\."model.v1"/);
   assert.match(profile,/max_output_reserve_tokens=393216/);
+  assert.match(profile,/default_output_tokens=\{"model.v1"=4096\}/);
   for(const model of [undefined,null,42,'','bad"model']) {
     assert.throws(()=>deepseekProfile(model,liveLimits(environment)),/model identifier/);
   }

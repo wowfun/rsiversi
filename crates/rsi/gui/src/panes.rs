@@ -22,7 +22,7 @@ mod source_details;
 #[path = "submissions.rs"]
 mod submissions;
 #[path = "terminal.rs"]
-mod terminal;
+pub(crate) mod terminal;
 #[path = "ui_details.rs"]
 mod ui_details;
 
@@ -164,17 +164,20 @@ impl ResourcePreview {
 impl Attachment {
     async fn close(&self) -> Result<()> {
         self.export.close().await;
-        self.detach_terminals().await;
+        let mut failure = self.detach_terminals().await.err();
         self.file_read
             .lock()
             .expect("File picker cancellation poisoned")
             .cancel();
-        let mut failure = self
+        let resource_failure = self
             .resource
             .lock()
             .expect("GUI resource poisoned")
             .clear()
             .err();
+        if let Some(error) = resource_failure {
+            failure.get_or_insert(error);
+        }
         let cards = std::mem::take(&mut *self.inline.lock().expect("inline cards poisoned"));
         for card in cards.values() {
             card.stop.cancel();
@@ -969,8 +972,12 @@ impl GuiApplication {
             .map_err(|_| "Surface selection capacity exhausted")?;
         pane.changed();
         self.changed();
-        if let Some(old) = old {
-            old.close().await?;
+        if let Some(old) = old
+            && let Err(error) = old.close().await
+        {
+            *self.notice.lock().expect("Web notice poisoned") =
+                format!("Previous conversation cleanup failed: {error}");
+            self.changed();
         }
         Ok(())
     }

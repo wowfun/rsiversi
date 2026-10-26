@@ -5,7 +5,7 @@ export async function resources(page) {
   if(await toggle.getAttribute('aria-expanded')!=='true')await toggle.click();
 }
 export const resourceSelector='.resource-dock:not([hidden]) [data-dockkit-content]:not([aria-hidden=true]) .resource-content';
-const detailSelector=`#detail[open], ${resourceSelector}`;
+const detailSelector=resourceSelector;
 export function details(page) {return page.locator(detailSelector).last();}
 export async function sourceInspectionGeometry(page,{timeout=30_000}={}) {
   const result=await page.waitForFunction(selector=>{
@@ -46,11 +46,6 @@ export async function clickUiControl(page, rootSelector, label, {timeout=30_000}
 }
 export function clickDetails(page,label) {return clickUiControl(page,detailSelector,label);}
 export async function closeDetails(page) {
-  if(await page.locator('#detail[open]').isVisible()) {
-    await page.getByRole('button',{name:'Close details',exact:true}).click();
-    await page.locator('#detail').waitFor({state:'hidden'});
-    return;
-  }
   const floating=page.locator('[data-dockkit-float-active=true]:visible [data-dockkit-float-close]');
   if(await floating.count()) {const owner=floating.locator('xpath=ancestor::*[@data-dockkit-content]');const id=await owner.getAttribute('data-dockkit-content');await floating.click();await page.locator(`[data-dockkit-content="${id}"]`).waitFor({state:'detached'});return;}
   const active=page.locator('.resource-dock:not([hidden]) [data-dockkit-pane-active=true] [data-dockkit-tab][aria-selected=true]:visible');
@@ -80,7 +75,7 @@ export async function detailMode(page,value) {
   const menu=page.locator('.conversation-menu');
   if(!await menu.evaluate(node=>node.open))await menu.locator('summary').click();
   await page.getByLabel('Detail level',{exact:true}).selectOption(value);
-  await menu.locator('summary').click();
+  if(await menu.evaluate(node=>node.open))await menu.locator('summary').click();
 }
 export async function externalAgents(page) {
   const menu=page.locator('.external-navigation');

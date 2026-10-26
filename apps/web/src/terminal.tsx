@@ -3,29 +3,31 @@ import {Terminal as Xterm} from '@xterm/xterm'
 import {FitAddon} from '@xterm/addon-fit'
 import '@xterm/xterm/css/xterm.css'
 import {Button} from './button.tsx'
-import {input,type Surface} from './bridge.ts'
+import {type Surface} from './bridge.ts'
 import {readTerminalPage} from './terminal-read.mjs'
 import {TerminalInput} from './terminal-input.mjs'
 import {terminalDocument} from './terminal-style.ts'
+import {ResourceOwner} from './resource-owner.mjs'
 
 type Status={id:string;size:{rows:number;columns:number};phase:{state:string;exit_code?:number|null;signal?:number|null};controller:string|null;controller_epoch:number}
 export type Follower={terminal:Status;id:string}
 type Reply={type:string;value:any;ack?:string}
 function terminalTheme(){const style=getComputedStyle(document.documentElement);return {background:style.getPropertyValue('--secondary-surface').trim(),foreground:style.getPropertyValue('--ink').trim(),cursor:style.getPropertyValue('--teal').trim(),selectionBackground:style.getPropertyValue('--active').trim()}}
 const encoder=new TextEncoder()
-export function Terminals({pane,surface,hide,initial,created,onOpen}:{pane:string;surface:Surface;hide:()=>void;initial?:string;created?:Follower;onOpen?:(id?:string)=>void}) {
+export function Terminals({owner,pane,surface,hide,initial,created,onOpen}:{owner:ResourceOwner;pane:string;surface:Surface;hide:()=>void;initial?:string;created?:ReturnType<ResourceOwner['attachment']>;onOpen?:(id?:string)=>void}) {
   const [roster,setRoster]=useState<Status[]>([]),[follower,setFollower]=useState<Follower>(),[status,setStatus]=useState<Status>(),[notice,setNotice]=useState(''),[busy,setBusy]=useState(false)
-  const screen=useRef<HTMLDivElement>(null),alive=useRef(true),current=useRef<Follower>(),pump=useRef<TerminalInput>(),display=useRef<Xterm>(),resizeCurrent=useRef<()=>void>()
-  const request=async(request:unknown):Promise<Reply>=>JSON.parse(await input.terminal({pane,generation:surface.generation,request}))
+  const screen=useRef<HTMLDivElement>(null),alive=useRef(true),current=useRef<Follower>(),pump=useRef<TerminalInput>(),display=useRef<Xterm>(),resizeCurrent=useRef<()=>void>(),attachment=useRef<ReturnType<ResourceOwner['attachment']>>()
+  const request=async(request:unknown):Promise<Reply>=>JSON.parse(await owner.call('terminal',JSON.stringify({pane,generation:surface.generation,request})))
   const operate=(operation:unknown)=>request(operation)
   const refresh=async()=>{const reply=await operate({type:'list'});if(alive.current)setRoster(reply.value)}
-  const detach=async(value:Follower)=>{await operate({type:'detach',attachment:value.id})}
-  useEffect(()=>{alive.current=true;if(created){current.current=created;setFollower(created);setStatus(created.terminal)}else if(initial){void attach(initial).catch(error=>setNotice(String(error)))}void refresh().catch(error=>setNotice(String(error)));return()=>{alive.current=false;pump.current?.stop();if(current.current)void detach(current.current).catch(()=>{})}},[])
+  const detach=()=>{attachment.current?.close();attachment.current=undefined}
+  useEffect(()=>{alive.current=true;if(created){attachment.current=created;void created.promise.then((value:Follower)=>{if(!alive.current){created.close();return}current.current=value;setFollower(value);setStatus(value.terminal)}).catch(error=>{if(alive.current)setNotice(String(error))})}else if(initial){void attach(initial).catch(error=>{if(alive.current)setNotice(String(error))})}void refresh().catch(error=>setNotice(String(error)));return()=>{alive.current=false;pump.current?.stop();detach()}},[])
   const action=async(work:()=>Promise<void>)=>{if(busy)return;setBusy(true);setNotice('');try{await work()}catch(error){if(alive.current)setNotice(String(error))}finally{if(alive.current)setBusy(false)}}
   const attach=async(id?:string)=>{
-    pump.current?.stop();if(current.current){await detach(current.current);current.current=undefined;setFollower(undefined)}
-    const reply=await request(id?{type:'attach',terminal:id}:{type:'create',size:{rows:24,columns:80}}),value=reply.value as Follower
-    if(!alive.current){await detach(value);return}
+    pump.current?.stop();if(current.current){detach();current.current=undefined;setFollower(undefined)}
+    const lease=owner.attachment(surface.session,pane,surface.generation,id?{type:'attach',terminal:id}:{type:'create',size:{rows:24,columns:80}});attachment.current=lease
+    const value=await lease.promise as Follower
+    if(!alive.current){lease.close();return}
     current.current=value;setFollower(value);setStatus(value.terminal);await refresh()
   }
   const installWriter=(value:Follower,terminal:Status)=>{
@@ -83,7 +85,7 @@ export function Terminals({pane,surface,hide,initial,created,onOpen}:{pane:strin
   const writer=!!follower&&status?.controller===follower.id&&status.phase.state==='running'
   const phase=status?.phase.state==='exited'?`Exited ${status.phase.exit_code??`(signal ${status.phase.signal??'unknown'})`}`:status?.phase.state==='failed'?'Stopped with an error':writer?'You have control':status?'Read only':'No terminal selected'
   return <section className="terminal-panel" aria-label="Session terminals">
-    <div className="terminal-toolbar"><strong>Terminal</strong><span className={`terminal-authority ${writer?'is-writer':''}`} role="status">{phase}</span><div className="terminal-actions"><Button size="sm" disabled={busy} onClick={()=>onOpen?onOpen():void action(()=>attach())}>New terminal</Button><Button size="sm" disabled={busy} onClick={()=>void action(refresh)}>Refresh</Button>{follower&&status?.phase.state==='running'&&<Button size="sm" disabled={busy} onClick={()=>void action(async()=>{const reply=await operate({type:'takeover',attachment:follower.id});follower.terminal=reply.value;current.current=follower;setStatus(reply.value);installWriter(follower,reply.value);resizeCurrent.current?.();display.current?.focus()})}>Take control</Button>}{follower&&<Button size="sm" disabled={busy} onClick={()=>void action(async()=>{await operate({type:'close',terminal:follower.terminal.id});pump.current?.stop();current.current=undefined;setFollower(undefined);setStatus(undefined);await refresh()})}>Terminate terminal</Button>}<Button size="sm" onClick={hide} aria-label="Hide terminal panel">×</Button></div></div>
+    <div className="terminal-toolbar"><strong>Terminal</strong><span className={`terminal-authority ${writer?'is-writer':''}`} role="status">{phase}</span><div className="terminal-actions"><Button size="sm" disabled={busy} onClick={()=>onOpen?onOpen():void action(()=>attach())}>New terminal</Button><Button size="sm" disabled={busy} onClick={()=>void action(refresh)}>Refresh</Button>{follower&&status?.phase.state==='running'&&<Button size="sm" disabled={busy} onClick={()=>void action(async()=>{const reply=await operate({type:'takeover',attachment:follower.id});follower.terminal=reply.value;current.current=follower;setStatus(reply.value);installWriter(follower,reply.value);resizeCurrent.current?.();display.current?.focus()})}>Take control</Button>}{follower&&<Button size="sm" disabled={busy} onClick={()=>void action(async()=>{await operate({type:'close',terminal:follower.terminal.id});pump.current?.stop();detach();current.current=undefined;setFollower(undefined);setStatus(undefined);await refresh()})}>Terminate terminal</Button>}<Button size="sm" onClick={hide} aria-label="Hide terminal panel">×</Button></div></div>
     {!initial&&roster.length>0&&<nav className="terminal-tabs" aria-label="Open terminals">{roster.map((terminal,index)=><Button size="sm" key={terminal.id} aria-pressed={follower?.terminal.id===terminal.id} title={terminal.id} disabled={busy} onClick={()=>onOpen?onOpen(terminal.id):void action(()=>attach(terminal.id))}>Bash {index+1} · {terminal.phase.state}</Button>)}</nav>}
     {notice&&<p className="terminal-notice" role="alert">{notice}</p>}
     <div className="terminal-screen" ref={screen} hidden={!follower}/>

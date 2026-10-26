@@ -16,6 +16,7 @@ export async function openBrowserPage(engine, errors) {
 export async function connectWorkbench(page, service, label) {
   await page.goto(service.origin);
   await page.locator('#receipt').fill(JSON.stringify(service.register(label)));
+  if (service.developmentHttp) await page.getByLabel('Allow local HTTP for development', {exact: true}).check();
   await page.getByRole('button', {name: 'Connect', exact: true}).click();
   await page.locator('#workbench').waitFor({state: 'visible'});
 }

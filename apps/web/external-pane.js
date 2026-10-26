@@ -37,7 +37,7 @@ export function externalPaneClass({ element, button, command, perform }) {
       this.close = button("Close peer", () => this.control({kind:"close"}), "quiet");
       this.controls.append(this.refresh,this.beginning,this.next,this.live,this.resume,this.load,this.close);
       this.permissions = element("div", "external-permissions");this.permissions.setAttribute("aria-label","External permissions");
-      this.transcript = element("div", "transcript external-transcript");this.transcript.setAttribute("aria-label","Observed history");
+      this.transcript = element("div", "transcript external-transcript");this.transcript.setAttribute("aria-label","Observed history");this.transcript.setAttribute("role","region");this.transcript.tabIndex=0;
       this.source = element("section", "external-source");this.source.hidden=true;
       this.notice = element("p", "settings-error");this.notice.setAttribute("role","alert");
       this.composer = element("form", "composer external-composer");

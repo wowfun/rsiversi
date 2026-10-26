@@ -44,6 +44,12 @@ try{
     two.evaluate(()=>store.apply('layouts',{kind:'workspace',id:'two',expanded:true})),
   ]);
   const expanded=await one.evaluate(()=>store.read('layouts'));assert.equal(expanded.value.workspaces.length,2);
+  const reservedRollback=await one.evaluate(async()=>{
+    const before=await store.read('layouts');let observed,error;
+    try{await store.apply('layouts',{kind:'patch',patch:{navigationWidth:320}},'',values=>{observed=values[0].navigationWidth;throw Error('cleanup capacity full')})}catch(failure){error=failure.message}
+    return {before,after:await store.read('layouts'),observed,error};
+  });
+  assert.equal(reservedRollback.observed,320);assert.match(reservedRollback.error,/cleanup capacity full/);assert.deepEqual(reservedRollback.after,reservedRollback.before);
   const order=await one.evaluate(async()=>{
     const members=Array.from({length:65},(_,i)=>({id:`s-${i}`,partition:'local/project/unpinned'}));
     await store.apply('orders',{kind:'reconcile',members},'sessions');

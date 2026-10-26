@@ -4,6 +4,7 @@ import {mkdir,writeFile,stat} from 'node:fs/promises';
 import {join,resolve} from 'node:path';
 import {chromium,firefox} from 'playwright';
 import {startService} from './service.mjs';
+import {cleanupAll} from './cleanup.mjs';
 const report=resolve(process.env.RSI_WEB_REPORT??'target/rsi-web-product/ui-alignment');
 await mkdir(report,{recursive:true});
 for(const [name,engine] of Object.entries({chromium,firefox})){
@@ -21,16 +22,25 @@ for(const [name,engine] of Object.entries({chromium,firefox})){
     const editor=await page.getByLabel('Main message',{exact:true}).elementHandle();
     await page.getByTestId('choose-workspace').click();
     const dialog=page.getByRole('dialog',{name:'Select workspace directory'});
+    if(process.platform==='win32') {
+      // Native browsing is explicitly Unix-only; exercise the supported known-path entry.
+      await dialog.getByRole('status').filter({hasText:'Directory browsing is unavailable for this location.'}).waitFor();
+      await mkdir(join(service.workspace,'ui-folder'));
+      await dialog.getByLabel('Directory path').fill(join(service.workspace,'ui-folder'));
+      checks.push({directoryBrowsing:'unsupported on Windows',knownPathEntry:true});
+    } else {
     await dialog.getByRole('button',{name:'Edit directory path',exact:true}).click();await dialog.getByLabel('Directory path').fill(service.workspace);await dialog.getByRole('button',{name:'Go',exact:true}).click();
     await dialog.getByRole('button',{name:'+ New folder',exact:true}).click();await dialog.getByLabel('Folder name').fill('.');await dialog.getByRole('button',{name:'Create folder',exact:true}).click();await dialog.getByRole('status').filter({hasText:'Invalid directory path or folder name'}).waitFor();assert.equal(await dialog.getByRole('button',{name:'Read parent to check result',exact:true}).count(),0);await dialog.getByLabel('Folder name').fill('ui-folder');await dialog.getByRole('button',{name:'Create folder',exact:true}).click();
     await page.waitForFunction(()=>document.querySelector('.directory-column:last-child')?.getAttribute('aria-label')?.endsWith('/ui-folder'));assert.equal(await dialog.locator('.directory-column').count(),2);await page.screenshot({path:join(directory,'directory-dark.png')});
-    await dialog.getByRole('button',{name:'Open',exact:true}).click();await dialog.waitFor({state:'detached'});await page.waitForFunction(()=>!document.querySelector('[aria-label="Main message"]').disabled);
+    checks.push({directory:true,create:true});
+    }
+    await dialog.locator('footer').getByRole('button',{name:'Open',exact:true}).click();await dialog.waitFor({state:'detached'});await page.waitForFunction(()=>!document.querySelector('[aria-label="Main message"]').disabled);
     assert((await stat(join(service.workspace,'ui-folder'))).isDirectory());
     assert(await editor.evaluate(node=>node===document.querySelector('[aria-label="Main message"]')));
     const input=page.getByLabel('Main message',{exact:true});await input.fill('Markdown example');await input.press('Enter');await page.locator('.message.assistant').filter({hasText:'Review notes'}).waitFor();await page.waitForFunction(()=>document.querySelector('.pane-status').textContent==='Completed');
     assert(await editor.evaluate(node=>node===document.querySelector('[aria-label="Main message"]')),'empty and docked composer identity');
     await page.getByRole('button',{name:'Copy code',exact:true}).click();await page.getByRole('button',{name:'Copied',exact:true}).waitFor();
-    checks.push({directory:true,create:true,enterSend:true,composerIdentity:true,clipboard:true});
+    checks.push({enterSend:true,composerIdentity:true,clipboard:true});
     await page.locator('[data-testid="conversation-row"]').first().waitFor();await page.locator('[data-testid="conversation-row"] .session-options summary').first().click();await page.getByRole('button',{name:'Pin',exact:true}).click();await page.getByRole('region',{name:'Pinned conversations'}).getByTestId('conversation-open').waitFor();
     const refreshGroup = page.getByRole('button', {name:'Refresh conversations in ui-folder',exact:true});
     await refreshGroup.waitFor();await refreshGroup.click();await refreshGroup.waitFor({state:'detached'});
@@ -41,7 +51,16 @@ for(const [name,engine] of Object.entries({chromium,firefox})){
       // Apply through the real Settings owner; same device preference is also used by Desktop.
       await page.getByRole('button',{name:'Commands',exact:true}).click();await page.getByRole('combobox',{name:'Search commands'}).fill('appearance');await page.getByRole('combobox',{name:'Search commands'}).press('Enter');
       await page.getByRole('combobox',{name:'Settings / appearance / theme',exact:true}).selectOption({label:theme});
-      await page.getByRole('button',{name:'Save settings',exact:true}).click();await page.waitForFunction(theme=>document.documentElement.dataset.theme===theme,theme);await page.getByRole('button',{name:'Close details',exact:true}).click();await page.locator('#detail').waitFor({state:'hidden'});
+      await page.getByRole('button',{name:'Save settings',exact:true}).click();await page.waitForFunction(theme=>document.documentElement.dataset.theme===theme,theme);await page.getByRole('button',{name:'Close settings',exact:true}).click();await page.getByRole('dialog',{name:'Settings',exact:true}).waitFor({state:'hidden'});
+      const options=page.locator('.pane.selected details.conversation-menu');
+      if(await options.count()) {
+        await options.locator('summary').click();await options.locator('summary').press('Escape');
+        assert.equal(await options.getAttribute('open'),null);
+        assert(await options.locator('summary').evaluate(node=>node===document.activeElement));
+        await options.locator('summary').click();await input.click();assert.equal(await options.getAttribute('open'),null);
+      }
+      assert.equal(await page.locator('.pane.selected .transcript').getAttribute('role'),'region');
+      assert.equal(await page.locator('.pane.selected .transcript').getAttribute('tabindex'),'0');
       const geometry=await page.evaluate(()=>{const input=document.querySelector('.pane.selected .composer'),button=document.querySelector('.pane.selected [data-testid="composer-send"]'),r=button.getBoundingClientRect();return{overflow:document.documentElement.scrollWidth-innerWidth,composer:input.getBoundingClientRect().toJSON(),sidebar:document.querySelector('.workbench>.sidebar')?.getBoundingClientRect().width??null,rail:document.querySelector('.workbench>.navigation-rail')?.getBoundingClientRect().width??null,sendHit:button.contains(document.elementFromPoint(r.x+r.width/2,r.y+r.height/2)),theme:document.documentElement.dataset.theme,scheme:getComputedStyle(document.documentElement).colorScheme}});
       assert(geometry.overflow<=1,JSON.stringify(geometry));assert(geometry.sendHit,JSON.stringify(geometry));assert(geometry.composer.x>=0&&geometry.composer.right<=width,JSON.stringify(geometry));if(width>=1024)assert.equal(geometry.sidebar,280);if(width===768)assert.equal(geometry.rail,56);
       checks.push({width,theme,...geometry});await page.screenshot({path:join(directory,`${width}-${theme}.png`)});
@@ -71,14 +90,15 @@ for(const [name,engine] of Object.entries({chromium,firefox})){
     await page.getByRole('alert').filter({hasText:'Layout preferences could not be loaded'}).waitFor();
     for(const width of [390,1440]) {
       await page.setViewportSize({width,height:900});
+      await page.waitForFunction(width=>!!document.querySelector('.workbench>.sidebar')===(width>=1024),width);
+      await page.screenshot({path:join(directory,`alert-${width}.png`)});
       const geometry=await page.evaluate(()=>{
         const header=document.querySelector('.connected-header').getBoundingClientRect();
         const alert=document.querySelector('.preference-error').getBoundingClientRect();
         const control=document.querySelector('[aria-label="Toggle resources"]'),rect=control.getBoundingClientRect();
-        return {headerBottom:header.bottom,alertTop:alert.top,controlHit:control.contains(document.elementFromPoint(rect.x+rect.width/2,rect.y+rect.height/2))};
+        return {headerTop:header.top,headerBottom:header.bottom,alertTop:alert.top,alertBottom:alert.bottom,controlHit:control.contains(document.elementFromPoint(rect.x+rect.width/2,rect.y+rect.height/2))};
       });
-      await page.screenshot({path:join(directory,`alert-${width}.png`)});
-      assert(geometry.headerBottom<=geometry.alertTop,`Toolbar overlaps alert at ${width}px: ${JSON.stringify(geometry)}`);
+      assert(geometry.headerBottom<=geometry.alertTop||geometry.alertBottom<=geometry.headerTop,`Toolbar overlaps alert at ${width}px: ${JSON.stringify(geometry)}`);
       assert(geometry.controlHit,'alert must not cover toolbar controls');
       checks.push({alertLayout:true,width,...geometry});
     }
@@ -90,5 +110,5 @@ for(const [name,engine] of Object.entries({chromium,firefox})){
     await page.getByRole('button',{name:'Sign out',exact:true}).click();await page.locator('#workbench').waitFor({state:'hidden'});
     await writeFile(join(directory,'result.json'),JSON.stringify({family:paired.family,browser:await browser.version(),checks,errors},null,2));
   }catch(error){if(page){await page.screenshot({path:join(directory,'failure.png')}).catch(()=>{});await writeFile(join(directory,'failure.html'),await page.content()).catch(()=>{});}await writeFile(join(directory,'failure.json'),JSON.stringify({error:String(error),errors}));throw error;}
-  finally{await browser.close();await service?.close();}
+  finally{await cleanupAll(()=>browser.close(),()=>service?.close());}
 }

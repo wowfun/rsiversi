@@ -31,7 +31,7 @@ a separate internal fence.
 `close_settings` cancels the exact window, including reads whose frames have not
 yet rendered, through bounded control admission independent of ordinary commands;
 a close for a previously closed window is a successful no-op. Resource panels use
-`close_detail` with their explicit view identity. Closing Settings cancels its
+`close_detail` with their explicit view and opening revision. Closing Settings cancels its
 reads, not an already accepted save. The document fences dismissed revisions by
 connection identity, so late frames or replies cannot reopen them or close a
 newer Settings window.
@@ -458,6 +458,19 @@ Each calling thread retains only its latest synchronous frame sample. Default
 builds contain no timing instrumentation. Detail generation fences asynchronous
 reads; it is not a content revision suitable for caching unchanged global JSON.
 
+Resource panels expose a separate opening revision. Closing compares both the
+view and opening revision atomically; absence or a newer incarnation is an
+idempotent completion. Content updates do not change that identity. Document
+`resource_open` requests carry a bounded UUID and a closed resource command,
+retain ordinary command admission, and return the identity captured at allocation
+or an explicit unavailable result. Their frames echo the request. Independent
+document opens allocate distinct panels even for equal coordinates; ordinary
+interaction reinspection may reuse a view with a new opening revision. These
+identities are connection-local and confer no Session or action authority.
+An opening request may own at most one live panel. Duplicate live correlation
+IDs and a second allocation in the same command are refused before insertion;
+the first receipt remains available for failure cleanup without poisoning the registry.
+
 The standard-product CI job explicitly lints this feature and exercises frame
 reconstruction and materialization counts in ordinary submission tests. The larger
 timing report remains ignored and uses the same case with additional samples.
@@ -493,7 +506,12 @@ provider's aggregate follower limit. They share command task ownership and
 shutdown draining, but do not occupy the eight ordinary command slots. Terminal
 writes have eight independent admission slots; lifecycle operations use ordinary
 command admission. Output reads use bounded capacity retry on the Subscription
-API lane. Detach always releases local follower state, even if the remote detach fails.
+API lane. A failed exact detach retains its follower on a live pane for retry
+until acknowledged or the terminal is known unavailable. Attachment retirement
+attempts every follower and reports uncertain detach while draining other owners.
+A committed pane switch succeeds even if retiring its previous attachment fails;
+the cleanup failure is published separately. A late attach that loses its pane
+reports any failure to detach the newly allocated follower.
 
 Workspace selection creates Sessions with default project instruction and skill
 discovery; creation commands and draft reuse carry no workspace-trust setting.
@@ -574,7 +592,16 @@ Every action/read must still match the current view ticket and the original
 Session attachment. Moving, selecting or floating a tab does not replace that
 view. Closing cancels and releases only that entry. Session detach closes every
 entry from its exact attachment, and application shutdown drains all entries.
-Settings reads/editing have an independent modal owner.
+Settings reads/editing have an independent modal owner. Editor projections include
+the actual read version (scope identity and decimal revision string) for document
+draft comparison; writes still require the current server-held ticket and version.
+Terminal document failures distinguish typed pre-allocation refusal and confirmed
+late-attachment self-detach from unknown outcomes. Detach for an issued, retired
+pane generation acknowledges transfer to application-owned attachment shutdown;
+the reply does not claim that shutdown has already succeeded. Shutdown failures
+remain in the application diagnostic and retirement report. Such detach
+it never acts on a replacement pane. Terminal cleanup follows the Terminals contract above. It does
+not offer a retry through a replacement pane.
 
 The registry admits at most 16 views and four floating views per Session, with
 64 entries across the application. Capacity rejection preserves existing entries;

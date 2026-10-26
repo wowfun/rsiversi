@@ -242,6 +242,7 @@ pub(crate) enum Command {
     },
     CloseDetail {
         view: String,
+        expected_open_revision: String,
     },
     CloseSettings {
         revision: String,
@@ -338,8 +339,15 @@ pub(crate) struct SettingsEditor {
     pub text: String,
     pub ticket: String,
     pub description: rsi_settings_protocol::SettingsDescription,
-    #[serde(skip)]
+    #[serde(serialize_with = "serialize_settings_version")]
     pub version: rsi_settings_protocol::SettingsVersion,
+}
+
+fn serialize_settings_version<S: serde::Serializer>(
+    version: &rsi_settings_protocol::SettingsVersion,
+    serializer: S,
+) -> std::result::Result<S::Ok, S::Error> {
+    (&version.scope_id, version.revision.to_string()).serialize(serializer)
 }
 
 #[derive(Debug)]
@@ -833,7 +841,7 @@ impl GuiApplication {
         clippy::too_many_lines,
         reason = "Closed application command dispatch forwards each operation to its owning feature"
     )]
-    async fn execute(self: &Arc<Self>, command: Command) -> Result<()> {
+    pub(crate) async fn execute(self: &Arc<Self>, command: Command) -> Result<()> {
         match command {
             Command::Automation { request } => {
                 if matches!(request, rsi_automation_api::Request::Artifact { .. }) {
@@ -987,9 +995,12 @@ impl GuiApplication {
             Command::SettingsList => self.list_settings(None).await,
             Command::SettingsNext { ticket } => self.list_settings(Some(&ticket)).await,
             Command::SettingsSave { ticket, text } => self.save_settings(&ticket, &text).await,
-            Command::CloseDetail { view } => {
+            Command::CloseDetail {
+                view,
+                expected_open_revision,
+            } => {
                 let mut registry = self.details.lock().expect("Web details poisoned");
-                registry.close(&view)?;
+                registry.close(&view, &expected_open_revision)?;
                 Ok(())
             }
             // command() normally handles this synchronously before ordinary admission.

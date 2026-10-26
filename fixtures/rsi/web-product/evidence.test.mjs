@@ -1,9 +1,9 @@
 import assert from 'node:assert/strict';
 import test from 'node:test';
-import {mkdtemp, mkdir, writeFile, readFile, symlink, rm} from 'node:fs/promises';
+import {mkdtemp, mkdir, writeFile, readFile, symlink, lstat, rm} from 'node:fs/promises';
 import {tmpdir} from 'node:os';
 import {join} from 'node:path';
-import {cleanupAll} from './cleanup.mjs';
+import {cleanupAll,finishFixture} from './cleanup.mjs';
 import {redactEvidence, requireProviderUsage, liveTurnTerminal, settleLiveEvidence, recoverLiveRead} from './evidence.mjs';
 
 test('live read recovery never replays the read or masks unclassified failures',async()=>{
@@ -52,7 +52,7 @@ test('cleanup settles every owner after synchronous and asynchronous failures', 
   assert.deepEqual(settled, ['browser', 'service', 'provider']);
 });
 
-test('redaction sanitizes all nested evidence before reporting and ignores links', async () => {
+test('redaction sanitizes all nested evidence before reporting', async () => {
   const root = await mkdtemp(join(tmpdir(), 'rsi-evidence-'));
   try {
     const report = join(root, 'report'), browser = join(report, 'browser');
@@ -60,12 +60,25 @@ test('redaction sanitizes all nested evidence before reporting and ignores links
     const key = 'fixture-private-key';
     const paths = [join(report, 'a.log'), join(report, 'b.json'), join(browser, 'c.jsonl')];
     for (const path of paths) await writeFile(path, `${key} ${key}`);
-    const external = join(root, 'external.txt'); await writeFile(external, key);
-    await symlink(external, join(browser, 'linked.txt'));
     await assert.rejects(redactEvidence(report, key), /3 files sanitized, 0 files inaccessible/);
     for (const path of paths) assert.equal(await readFile(path, 'utf8'), '[REDACTED] [REDACTED]');
-    assert.equal(await readFile(external, 'utf8'), key);
     await redactEvidence(report, key);
+  } finally { await rm(root, {recursive: true, force: true}); }
+});
+
+test('redaction does not follow native links outside the evidence directory', async () => {
+  const root = await mkdtemp(join(tmpdir(), 'rsi-evidence-link-'));
+  try {
+    const report = join(root, 'report'), external = join(root, 'external');
+    await mkdir(report); await mkdir(external);
+    const key = 'fixture-private-key', target = join(external, 'external.txt');
+    await writeFile(target, key);
+    const link = join(report, process.platform === 'win32' ? 'linked-directory' : 'linked.txt');
+    await symlink(process.platform === 'win32' ? external : target, link,
+      process.platform === 'win32' ? 'junction' : 'file');
+    assert((await lstat(link)).isSymbolicLink(), 'fixture must exercise a real native link');
+    await redactEvidence(report, key);
+    assert.equal(await readFile(target, 'utf8'), key, 'redaction must not write through the link');
   } finally { await rm(root, {recursive: true, force: true}); }
 });
 
@@ -126,4 +139,14 @@ test('browser setup preserves both creation and cleanup failures', async () => {
     newContext: async () => ({newPage: async () => { throw creation; }}),
     close: async () => { throw cleanup; },
   })}, []), error => error instanceof AggregateError && error.errors[0] === creation && error.errors[1] === cleanup);
+});
+
+test('fixture cleanup keeps the primary failure and still closes Service after browser failure', async()=>{
+  const primary=new Error('original assertion'), close=new Error('browser close'), settled=[];
+  await assert.rejects(finishFixture(primary,
+    ()=>{settled.push('browser');throw close;},
+    async()=>{settled.push('service');},
+  ), error=>error.cause===primary && error.errors[0]===primary && error.errors[1].errors.includes(close));
+  assert.deepEqual(settled,['browser','service']);
+  await finishFixture(primary,()=>{});
 });

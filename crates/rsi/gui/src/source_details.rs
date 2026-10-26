@@ -117,7 +117,11 @@ impl GuiApplication {
             } else {
                 registry.open(Some((index, generation.into(), attached.id.clone())), serde_json::json!({"action":"inspect_source","pane":index,"generation":generation,"source":source}))?
             };
-            let revision = details.begin()?;
+            let revision = if ticket.is_some() {
+                details.begin()?
+            } else {
+                details.revision
+            };
             details.source = Some(SourceDetail {
                 pane: index,
                 generation: generation.into(),

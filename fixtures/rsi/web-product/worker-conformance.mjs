@@ -34,6 +34,12 @@ export async function workerConformance({ buildFamily, receipt }) {
   });
   const rejected = [];
   try {
+    for(const method of ['resource_open','terminal']){
+      let refused=false;
+      try{await call(method,'{}')}catch(error){if(!error.notAdmitted)throw new Error(`${method} missing-owner refusal lost admission evidence`);refused=true;}
+      if(!refused)throw new Error(`${method} unexpectedly admitted without an application`);
+      rejected.push(`${method} before connect`);
+    }
     const identity = JSON.parse(await call('connect', { receipt: JSON.stringify(receipt), devHttp: false, buildFamily }));
     if (!identity.endpoint_id || identity.principal?.kind !== 'device') throw new Error('Invalid identity reply');
     await frame;

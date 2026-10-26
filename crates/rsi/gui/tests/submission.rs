@@ -87,6 +87,8 @@ struct Backend {
     reject_submissions: std::sync::atomic::AtomicBool,
     header_gate: Mutex<Option<Arc<admission::HeaderGate>>>,
     terminal_gate: Mutex<Option<Arc<admission::TerminalGate>>>,
+    terminal_attach_gate: Mutex<Option<Arc<admission::TerminalGate>>>,
+    terminal_detach_failure: Mutex<Option<rsi_session_protocol::SessionError>>,
     terminal_detaches: Mutex<Vec<String>>,
     children: Mutex<std::collections::BTreeMap<SessionId, Arc<Backend>>>,
     tree: Mutex<Vec<rsi_agent_store_protocol::StoreAgentDescendantStatus>>,
@@ -205,20 +207,27 @@ impl SessionHandle for Backend {
         match request {
             Request::Operate {
                 operation: Operation::Attach { terminal },
-            } => Ok(Reply::Attached(Attachment {
-                id: terminal.clone(),
-                stream_epoch: 1,
-                terminal: Terminal {
-                    id: terminal,
-                    size: Size {
-                        rows: 24,
-                        columns: 80,
+            } => {
+                let gate = self.terminal_attach_gate.lock().unwrap().clone();
+                if let Some(gate) = gate {
+                    gate.entered.add_permits(1);
+                    gate.release.cancelled().await;
+                }
+                Ok(Reply::Attached(Attachment {
+                    id: terminal.clone(),
+                    stream_epoch: 1,
+                    terminal: Terminal {
+                        id: terminal,
+                        size: Size {
+                            rows: 24,
+                            columns: 80,
+                        },
+                        phase: Phase::Running,
+                        controller: None,
+                        controller_epoch: 1,
                     },
-                    phase: Phase::Running,
-                    controller: None,
-                    controller_epoch: 1,
-                },
-            })),
+                }))
+            }
             Request::Operate {
                 operation: Operation::Read { .. },
             } => {
@@ -230,6 +239,9 @@ impl SessionHandle for Backend {
             Request::Operate {
                 operation: Operation::Detach { attachment, .. },
             } => {
+                if let Some(error) = self.terminal_detach_failure.lock().unwrap().take() {
+                    return Err(error);
+                }
                 self.terminal_detaches.lock().unwrap().push(attachment);
                 Ok(Reply::Done)
             }
@@ -640,8 +652,6 @@ impl Backend {
         })
     }
 }
-#[derive(Debug)]
-struct Unused;
 #[async_trait]
 impl rsi_workspace_protocol::WorkspaceRegistry for Service {
     async fn order_seed(

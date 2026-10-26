@@ -2,12 +2,13 @@ import {paired} from './paired-env.mjs';
 import {startService,waitUntil} from './service.mjs';
 import {connectWorkbench,openWorkspace} from './browser-fixture.mjs';
 import {resources} from './controls.mjs';
+import {assertNoNotices} from './task-checks.mjs';
 import {chromium} from 'playwright';
 import {mkdir,writeFile,readFile} from 'node:fs/promises';
 import {join} from 'node:path';
 import assert from 'node:assert/strict';
 const report=process.env.RSI_REPORT_DIR;assert(report);await mkdir(report,{recursive:false});
-let service,browser,page;const errors=[],checks=[];
+let service,browser,page;const errors=[],checks=[],skipped=[];
 try{
  service=await startService({binary:paired.binary,assets:paired.assets,report});
  await writeFile(join(service.workspace,'panel.txt'),'Independent panel bytes\n');
@@ -45,6 +46,7 @@ try{
  await page.locator(`[data-dockkit-tab="${first}"]`).click({button:'right'});await page.getByRole('menuitem',{name:'Close resource tab',exact:true}).click();
  await page.getByRole('button',{name:'Undo layout',exact:true}).click();await page.locator(`[data-dockkit-tab="${first}"]`).waitFor();checks.push('Close undo reopens resource coordinates');
  await page.getByRole('button',{name:'Open resources',exact:true}).first().click();
+ if(process.platform==='linux') {
  await page.getByRole('button',{name:'New terminal',exact:true}).click();
  const terminal=page.getByRole('region',{name:'Session terminals',exact:true});
  await terminal.getByRole('status').filter({hasText:'You have control'}).waitFor();
@@ -78,11 +80,14 @@ try{
  await terminal.getByRole('status').filter({hasText:'You have control'}).waitFor();
  await terminal.locator('.xterm-helper-textarea').focus();await page.keyboard.type('exit 0');await page.keyboard.press('Enter');
  await terminal.getByRole('status').filter({hasText:'Exited 0'}).waitFor();
+ } else skipped.push({scenario:'Native terminal execution and follower movement',reason:'Requires Linux'});
  const geometries=[];
  for(const theme of ['light','dark'])for(const [width,height] of [[1440,900],[1024,768],[767,900],[390,844]]){
    await page.emulateMedia({colorScheme:theme,reducedMotion:'reduce'});await page.setViewportSize({width,height});
    await page.waitForFunction(width=>{const desktop=!!document.querySelector('.workbench>.sidebar');const dock=document.querySelector('.resource-dock');return desktop===(width>=1024)&&!!dock&&dock.classList.contains('resource-fullscreen')===(width<768)},width);
    await resources(page);
+   await assertNoNotices(page);
+   assert.deepEqual(await page.locator('.resource-dock>p[role="alert"]:visible').allTextContents(),[]);
    await page.locator('.resource-dock:not([hidden])').waitFor({state:'visible'});
    const geometry=await page.evaluate(()=>{
      const box=selector=>{const rect=document.querySelector(selector)?.getBoundingClientRect();return rect?{x:rect.x,y:rect.y,width:rect.width,height:rect.height}:null};
@@ -94,8 +99,15 @@ try{
    await page.screenshot({path:join(report,`dock-${width}-${theme}.png`)});geometries.push({theme,width,height,...geometry});
  }
  await writeFile(join(report,'geometry.json'),JSON.stringify(geometries,null,2));
- checks.push('Eight Linux Chromium DPR 1 viewport/theme checks without document overflow');
- await writeFile(join(report,'result.json'),JSON.stringify({family:paired.family,checks,errors},null,2));assert.deepEqual(errors,[]);
- console.log(JSON.stringify({family:paired.family,checks,errors}));
+ checks.push(`Eight ${process.platform} Chromium DPR 1 viewport/theme checks without document overflow`);
+ if(process.platform==='win32'){
+   await page.getByRole('button',{name:'New terminal',exact:true}).click();
+   await page.locator('.resource-dock>p[role="alert"]').filter({hasText:/Linux|unavailable/i}).waitFor();
+   assert.equal(await page.locator('.resource-cleanup-notice').count(),0,'Known terminal refusal does not retain cleanup');
+   await page.screenshot({path:join(report,'terminal-refusal.png')});
+   checks.push('Windows terminal refusal is visible without a cleanup retry banner');
+ }
+ await writeFile(join(report,'result.json'),JSON.stringify({family:paired.family,checks,skipped,errors},null,2));assert.deepEqual(errors,[]);
+ console.log(JSON.stringify({family:paired.family,checks,skipped,errors}));
 }catch(error){if(page){await page.screenshot({path:join(report,'failure.png')}).catch(()=>{});await writeFile(join(report,'failure.html'),await page.content());await writeFile(join(report,'failure.txt'),await page.locator('body').innerText().catch(()=>String(error)));}throw error}
 finally{await browser?.close();await service?.close()}

@@ -447,6 +447,17 @@ fn command_refusal(error: String) -> JsValue {
     error.into()
 }
 
+/// Opens one document resource and returns its allocation receipt.
+#[wasm_bindgen]
+pub async fn resource_open(source: String) -> Result<String, JsValue> {
+    connected_application()
+        .map_err(command_refusal)?
+        .try_resource_open(&source)
+        .map_err(command_refusal)?
+        .await
+        .map_err(failure)
+}
+
 /// Freezes input before the document persists its execution intent.
 #[wasm_bindgen]
 pub async fn prepare_submission(source: String) -> Result<String, JsValue> {
@@ -543,7 +554,17 @@ pub async fn read_image(selection: String) -> Result<js_sys::Uint8Array, JsValue
 /// Executes one bounded terminal operation without consuming a renderer frame.
 #[wasm_bindgen]
 pub async fn terminal(source: String) -> Result<String, JsValue> {
-    application()?.terminal(&source).await.map_err(failure)
+    connected_application()
+        .map_err(command_refusal)?
+        .terminal(&source)
+        .await
+        .map_err(|error| {
+            if error.no_attachment {
+                command_refusal(error.to_string())
+            } else {
+                failure(error)
+            }
+        })
 }
 
 /// Reads a bounded model-local source; the Worker derives its exact target and revision.
@@ -723,9 +744,12 @@ pub fn resource_snapshot() -> JsValue {
     JsValue::from_str(&serde_json::json!({"pending_timers":execution.pending_timers,"active_alarms":execution.active_alarms,"active_requests":requests}).to_string())
 }
 fn application() -> Result<Arc<GuiApplication>, JsValue> {
+    connected_application().map_err(failure)
+}
+fn connected_application() -> Result<Arc<GuiApplication>, String> {
     OWNER
         .with(|owner| owner.borrow().app.clone())
-        .ok_or_else(|| failure("Web application is not connected"))
+        .ok_or_else(|| "Web application is not connected".into())
 }
 fn failure(error: impl std::fmt::Display) -> JsValue {
     JsValue::from_str(&rsi_gui::display_error(error))

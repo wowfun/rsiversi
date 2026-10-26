@@ -3,14 +3,20 @@ import assert from 'node:assert/strict';
 import {mkdir,writeFile} from 'node:fs/promises';
 import {resolve,join} from 'node:path';
 import {chromium} from 'playwright';
-import {createServer} from '../../../apps/web/node_modules/vite/dist/node/index.js';
+import {createServer,normalizePath} from '../../../apps/web/node_modules/vite/dist/node/index.js';
 const root=resolve(import.meta.dirname,'../../../apps/web'),report=process.env.RSI_REPORT_DIR;
 assert(report,'RSI_REPORT_DIR must name an isolated report directory');
-const entry=join(root,'review-test.tsx');
+const entry=normalizePath(join(root,'review-test.tsx'));
 const code=`
 import React from 'react';
 import {createRoot} from 'react-dom/client';
-import {ResourceDocks} from './src/resource-dock.tsx';
+import {ResourceDocks,ResourceCleanupNotice} from './src/resource-dock.tsx';
+import {ResourceOwner} from './src/resource-owner.mjs';
+import {installDisclosures} from './disclosure.js';
+import {settingsEditor,MAXIMUM_SETTINGS_BYTES} from './settings-editor.js';
+import {settingsDrafts} from './settings-drafts.js';
+import {settingsFocus} from './settings-focus.js';
+import {Button} from './src/button.tsx';
 import {DeviceStore,applyIntent} from './device-store.js';
 import {PresentationStore} from './presentation-store.js';
 import {useDeviceNavigation} from './src/navigation-device.ts';
@@ -20,6 +26,101 @@ import {defaultLayout} from './presentation-layout.js';
 import {source,installActions} from './src/bridge.ts';
 import {resources,resourceHosts,publishResources,clearResources} from './src/resource-hosts.ts';
 window.modules={defaultLayout,DeviceStore,emptyDock,dockIntent,resources,resourceHosts,publishResources,clearResources};
+window.settingsChecks=()=>{
+ const schema={type:'object',properties:{name:{type:'string'}}};
+ const exact='{"unknown":9007199254740993,"negative":-0,"decimal":1.0}';
+ const precise=settingsEditor(schema,exact);document.body.append(precise.element);
+ if(precise.json()!==exact)throw Error('Exact JSON changed');
+ precise.element.querySelector('button').click();
+ if(precise.json()!==exact)throw Error('Rejected form switch changed exact JSON');
+ precise.element.remove();
+ const huge=settingsEditor(schema,JSON.stringify({name:'x'.repeat(MAXIMUM_SETTINGS_BYTES)}));document.body.append(huge.element);
+ if(!huge.element.querySelector('textarea').readOnly||!huge.element.querySelector('button').disabled||huge.canSave())throw Error('Initial bound bypass');
+ huge.element.remove();
+ const editor=settingsEditor(schema,'{"name":"small"}');document.body.append(editor.element);
+ let modeInputs=0;editor.element.addEventListener('input',()=>modeInputs++);
+ editor.element.querySelector('button').click();const text=editor.element.querySelector('textarea.settings-text');
+ if(modeInputs||text.value!=='{"name":"small"}')throw Error('Mode switch changed or dirtied untouched JSON');
+ text.value='{';text.dispatchEvent(new Event('input',{bubbles:true}));if(editor.canSave())throw Error('Invalid JSON enabled Save');
+ text.value=JSON.stringify({name:'界'.repeat(MAXIMUM_SETTINGS_BYTES/2)});text.dispatchEvent(new Event('input',{bubbles:true}));
+ if(editor.canSave()||!editor.element.querySelector('button').disabled)throw Error('UTF-8 bound bypass');
+ let refused=false;try{editor.json()}catch{refused=true}if(!refused)throw Error('Oversized submission admitted');
+ text.value='{"name":"restored"}';text.dispatchEvent(new Event('input',{bubbles:true}));editor.element.querySelector('button').click();
+ if(!editor.canSave()||JSON.parse(editor.json()).name!=='restored')throw Error('Reduced edit did not recover');
+ editor.element.remove();
+ const readonly=settingsEditor(schema,'{"name":"fixed"}',true);document.body.append(readonly.element);
+ readonly.element.querySelector('button').click();readonly.element.querySelector('button').click();
+ if(!readonly.element.querySelector('input').matches(':disabled')||readonly.canSave())throw Error('Rebuilt fields escaped read-only state');
+ readonly.element.remove();return {exactJson:true,initialBound:true,utf8EditBound:true,recovery:true,readOnlyRebuild:true};
+};
+
+window.settingsDraftChecks=async()=>{
+ const calls=[];let settle;
+ const drafts=settingsDrafts(command=>{calls.push(command);return new Promise(resolve=>{settle=resolve})});
+ const editor=(namespace,ticket,revision='1')=>({namespace,ticket,version:['scope',revision],text:'{"name":"saved"}',description:{writable:true,defaults:{},metadata:{schema:{type:'object',properties:{name:{type:'string'}}},sensitive_fields:[],applies:'live',description:'Draft fixture'}}});
+ const a=editor('rsi.client','a'),b=editor('rsi.agent','b');
+ const host=document.createElement('section');document.body.append(host);
+ const show=value=>{const restore=settingsFocus(host),form=drafts.render(value);host.replaceChildren(form);restore();return form};
+ const focused=()=>{if(!host.contains(document.activeElement))throw Error("Settings lost keyboard focus")};
+ const readyFocus=stage=>{focused();if(!document.activeElement.matches('button:not(:disabled),input:not(:disabled),textarea:not(:disabled),select:not(:disabled)'))throw Error("Ready Settings must focus an enabled control at "+stage+": "+document.activeElement.outerHTML.slice(0,160))};
+ let form=show(a);form.querySelector('fieldset button').click();
+ let text=form.querySelector('textarea');const exact='{"large":9007199254740993,"negative":-0,"decimal":1.0}';
+ text.value=exact;text.dispatchEvent(new Event('input',{bubbles:true}));show(b);form=show({...a,ticket:'a2'});
+ if(form.querySelector('textarea')!==text||text.value!==exact)throw Error('Section return discarded the exact draft');
+ form=show({...a,ticket:'a3',version:['scope','2']});
+ if(!form.querySelector('[type=submit]').disabled||text.value!==exact)throw Error('Stale draft silently rebased');
+ form=show({...a,ticket:'reconciled'});
+ if(form.querySelector('[role=alert]').textContent||form.querySelector('[type=submit]').disabled)throw Error('Reconciled draft kept a stale conflict');
+ form=show({...a,ticket:'a3',version:['scope','2']});
+ const discard=[...form.querySelectorAll('button')].find(button=>button.textContent==='Discard edits and reload');discard.focus();discard.click();focused();
+ show({...a,ticket:'a4',version:['scope','2']});settle();await new Promise(resolve=>setTimeout(resolve,0));
+ if(form.querySelector('[type=submit]').disabled)throw Error('Explicit reload did not recover');readyFocus('discard');
+ form.querySelector('input[type="text"]').value='changed';form.querySelector('input[type="text"]').dispatchEvent(new Event('input',{bubbles:true}));form.querySelector('[type=submit]').focus();form.requestSubmit();focused();
+ if(!form.querySelector('fieldset').disabled)throw Error('Save allowed edits during publication');
+ show({...a,ticket:'a5',version:['scope','3']});settle();await new Promise(resolve=>setTimeout(resolve,0));
+ if(form.querySelector('[type=submit]').disabled)throw Error('Frame-before-ack save did not recover');readyFocus('frame-before-ack');
+ form.requestSubmit();settle();await new Promise(resolve=>setTimeout(resolve,0));
+ if(!form.querySelector('[type=submit]').disabled)throw Error('Acknowledged save reused old ticket');
+ if(!form.querySelector('[role=alert]').textContent.includes('Waiting for refreshed settings'))throw Error('Waiting save is invisible');
+ const recover=[...form.querySelectorAll('button')].find(button=>button.textContent==='Reload settings');
+ if(!recover||recover.disabled)throw Error('Waiting save has no safe recovery');recover.click();settle();await new Promise(resolve=>setTimeout(resolve,0));
+ if(calls.at(-1).action!=='settings_read'||!form.querySelector('[type=submit]').disabled)throw Error('Recovery replayed save or reused ticket');
+ show({...a,ticket:'a6',version:['scope','4']});
+ if(form.querySelector('[type=submit]').disabled)throw Error('Ack-before-frame save did not recover');readyFocus('ack-before-frame');
+ form.querySelector('input[type="text"]').value='draft';form.querySelector('input[type="text"]').dispatchEvent(new Event('input',{bubbles:true}));
+ show({...a,ticket:'a7',version:['scope','5']});
+ [...form.querySelectorAll('button')].find(button=>button.textContent==='Discard edits and reload').click();settle();await new Promise(resolve=>setTimeout(resolve,0));
+ if(!form.querySelector('[type=submit]').disabled)throw Error('Discard unlocked before refresh');
+ show({...a,ticket:'a8',version:['scope','5']});
+ if(form.querySelector('input[type="text"]').value!=='saved'||form.querySelector('[type=submit]').disabled)throw Error('Same-version refreshed discard retained edits: '+JSON.stringify({inputs:[...form.querySelectorAll('input')].map(input=>[input.type,input.value]),disabled:form.querySelector('[type=submit]').disabled,notice:form.querySelector('[role=alert]').textContent}));
+ const restore=settingsFocus(host);host.replaceChildren(document.createTextNode('Loading settings…'));restore();focused();show(a);readyFocus('loading');
+ drafts.clear();if(show(a)===form)throw Error('Closed window retained draft owner');host.remove();
+ return {exactDraft:true,versionConflict:true,explicitDiscard:true,saveFrameOrders:true,focusRetained:true,conflictCleared:true,calls:calls.map(call=>call.action)};
+};
+window.mountCleanup=async()=>{
+ const owner=new ResourceOwner(async()=>{throw Error('Input is busy')});
+ owner.reservePanel('opaque-session',{view:'1',open_revision:'2'},'Workspace files').commit();
+ await new Promise(resolve=>setTimeout(resolve,0));
+ installActions({resources:()=>owner});source.set({surfaces:{},application_surfaces:[]});
+ const node=document.createElement('section');document.body.append(node);const root=createRoot(node);
+ root.render(<ResourceCleanupNotice/>);window.unmountCleanup=()=>{root.unmount();node.remove()};
+};
+window.mountCleanupFlood=async()=>{
+ await import('./src/workbench.css');
+ window.cleanupCalls=0;
+ const owner=new ResourceOwner(async()=>{window.cleanupCalls++;throw Error('Input is busy. '+ '原始资源仍等待清理。'.repeat(8))});
+ for(let i=0;i<64;i++)owner.reservePanel('session-'+Math.floor(i/16),{view:String(i+1),open_revision:'2'},'Workspace files '+(i+1)).commit();
+ await new Promise(resolve=>setTimeout(resolve,0));
+ installActions({resources:()=>owner});source.set({surfaces:{},application_surfaces:[]});
+ const node=document.createElement('div');node.id='root';document.body.append(node);const root=createRoot(node);
+ root.render(<><header><strong>RSIversi · cleanup recovery</strong></header><ResourceCleanupNotice/><main id="workbench" className="workbench navigation-hidden resources-closed"><section style={{gridColumn:2,minHeight:0,padding:16,display:'flex',flexDirection:'column'}}><h1>Conversation remains available</h1><p>64 retained cleanup failures, four Sessions. Retry controls stay inside their own scroll area.</p><label style={{marginTop:'auto'}}>Main message<textarea aria-label="Main message" placeholder="Continue the conversation"/></label></section></main></>);
+ window.unmountCleanupFlood=()=>{root.unmount();node.remove()};
+};
+window.mountDisclosures=()=>{
+ const node=document.createElement('section');document.body.append(node);const root=createRoot(node),stop=installDisclosures(document);
+ root.render(<><details className="session-options"><summary>Conversation options</summary><Button onClick={()=>{node.querySelector('output').textContent='action received'}}>Pin conversation</Button><Button onClick={()=>new Promise(resolve=>{window.finishMenuAction=resolve})}>Slow action</Button><Button onClick={async()=>{throw Error("Action failed")}}>Failing action</Button><select aria-label="Menu selection" defaultValue="a"><option value="a">A</option><option value="b">B</option></select></details><p id="notice" hidden/><input aria-label="Outside menu"/><output>no action</output><div className="mode-verbose"><details className="source-menu" open><summary style={{display:'none'}}>Inline sources</summary><Button onClick={()=>{node.querySelector('output').textContent='inline one'}}>Inline one</Button><Button onClick={()=>{node.querySelector('output').textContent='inline two'}}>Inline two</Button></details></div><dialog id="verbose-dialog"><button>Modal action</button></dialog></>);
+ return ()=>{stop();root.unmount();node.remove()};
+};
 window.stalePresentationReply=async(mode)=>{
  const original=PresentationStore.open,actEnvironment=window.IS_REACT_ACT_ENVIRONMENT;
  window.IS_REACT_ACT_ENVIRONMENT=true;
@@ -103,12 +204,13 @@ window.lifecycle=async(stage)=>{
  const add=window.addEventListener,remove=window.removeEventListener;
  const listeners=new Set();window.addEventListener=function(type,fn,...args){if(type==='focus')listeners.add(fn);return add.call(this,type,fn,...args)};
  window.removeEventListener=function(type,fn,...args){if(type==='focus')listeners.delete(fn);return remove.call(this,type,fn,...args)};
- installActions({command:()=>pause('reopen'),call:async(method,payload)=>{const request=JSON.parse(payload).request;if(request.type==='create'){await pause('terminal');return JSON.stringify({value:{id:'attachment',terminal:{id:'created'}}})}if(request.type==='detach')events.detaches++;return JSON.stringify({value:[]})},open:async()=>{},select(){},closeSurface:async()=>{},addSurface:async()=>{}});
+ const resourceOwner=new ResourceOwner(async(method,payload)=>{const data=JSON.parse(payload);if(method==='resource_open'){await pause('reopen');return JSON.stringify({status:'opened',request:data.opening_request,view:'1',open_revision:'1'})}if(method==='command')return '{}';const request=data.request;if(request.type==='create'){await pause('terminal');return JSON.stringify({value:{id:'attachment',terminal:{id:'created'}}})}if(request.type==='detach')events.detaches++;return JSON.stringify({value:[]})});
+ installActions({resources:()=>resourceOwner,command:async()=>{},call:resourceOwner.call,open:async()=>{},select(){},closeSurface:async()=>{},addSurface:async()=>{}});
  presentationIdentity.set('lifecycle:'+stage);
  source.set({surfaces:{main:{kind:'native',session:'test',generation:'1',ui_surfaces:[]}},application_surfaces:[]});
  const node=document.createElement('div');document.body.append(node);const root=createRoot(node);root.render(<LayoutContext.Provider value={{layout:{...defaultLayout,resourcesClosed:false},update(){},expand(){}}}><ResourceDocks launcher={<span>Resources</span>}/></LayoutContext.Provider>);
  if(stage==='terminal'){for(let attempt=0;attempt<100&&!node.querySelector('.terminal-list');attempt++)await new Promise(resolve=>setTimeout(resolve,10));[...node.querySelectorAll('button')].find(button=>button.textContent==='New terminal').click()}
- await started;root.unmount();release();await new Promise(resolve=>setTimeout(resolve,30));
+ await Promise.race([started,new Promise((_,reject)=>setTimeout(()=>reject(Error("lifecycle did not reach "+stage)),10000))]);root.unmount();release();await new Promise(resolve=>setTimeout(resolve,30));
  window.dispatchEvent(new Event('focus'));await new Promise(resolve=>setTimeout(resolve,30));
  events.focus=listeners.size;DeviceStore.open=original;window.addEventListener=add;window.removeEventListener=remove;node.remove();return events;
 };
@@ -117,7 +219,8 @@ window.mountExtension=async(action,seed)=>{
  if(seed){const store=await DeviceStore.open(identity);await store.apply('layouts',{kind:'dock',operation:'open',coordinate:{action,bundle:'fixture',name:'card'},title:'Fixture card'},scope);store.close()}
  const reference={name:'card',revision:'fixture'};
  window.extensionCommands=[];
- installActions({command:async command=>{window.extensionCommands.push(command)},call:async()=>'',open:async()=>{},select(){},closeSurface:async()=>{},addSurface:async()=>{}});
+ const resourceOwner=new ResourceOwner(async(method,text)=>{const request=JSON.parse(text);if(method==='resource_open'){window.extensionCommands.push(request.command);return JSON.stringify({status:'opened',request:request.opening_request,view:String(window.extensionCommands.length),open_revision:String(window.extensionCommands.length)})}return JSON.stringify({value:[]})});
+ installActions({resources:()=>resourceOwner,command:async()=>{},call:resourceOwner.call,open:async()=>{},select(){},closeSurface:async()=>{},addSurface:async()=>{}});
  presentationIdentity.set(identity);
  const item={bundle:'fixture',reference,title:'Fixture card'};
  source.set({surfaces:{main:{kind:'native',session:'extension-session',generation:'17',ui_surfaces:[item]}},application_surfaces:[item]});
@@ -125,12 +228,18 @@ window.mountExtension=async(action,seed)=>{
  root.render(<LayoutContext.Provider value={{layout:{...defaultLayout,resourcesClosed:false},update(){},expand(){}}}><ResourceDocks launcher={<span>Resources</span>}/></LayoutContext.Provider>);
  window.unmountExtension=()=>{root.unmount();node.remove()};
 };
+if(new URLSearchParams(location.search).has('cleanup'))await window.mountCleanupFlood();
 `;
 const server=await createServer({configFile:false,root,optimizeDeps:{entries:[]},esbuild:{jsx:'automatic'},server:{host:'127.0.0.1',port:0},plugins:[{name:'review-fixture',resolveId(id){if(id==='/review-test.tsx')return entry},load(id){if(id===entry)return code},configureServer(server){server.middlewares.use('/review.html',(_req,res)=>{res.setHeader('Content-Type','text/html');res.end('<!doctype html><title>Review lifecycle</title><script type="module" src="/review-test.tsx"></script>')})}}]});
 let browser;const errors=[],checks=[];
+if(process.env.RSI_REVIEW_PREVIEW){
+ await server.listen();console.log(`http://127.0.0.1:${server.httpServer.address().port}/review.html?cleanup=1`);
+ await new Promise(resolve=>{process.once('SIGINT',resolve);process.once('SIGTERM',resolve)});await server.close();
+}else{
 try{
  await mkdir(report,{recursive:true});await server.listen();browser=await chromium.launch();
- const page=await browser.newPage();page.on('pageerror',e=>errors.push(e.message));await page.goto(`http://127.0.0.1:${server.httpServer.address().port}/review.html`);await page.waitForFunction(()=>window.lifecycle);
+ const page=await browser.newPage();page.on('pageerror',e=>errors.push(e.message));page.on('console',event=>{if(event.type()==='error')errors.push(event.text())});await page.goto(`http://127.0.0.1:${server.httpServer.address().port}/review.html`);await page.waitForFunction(()=>window.lifecycle);
+ checks.push({settingsEditor:await page.evaluate(()=>window.settingsChecks()),settingsDrafts:await page.evaluate(()=>window.settingsDraftChecks())});
  for(const mode of ['write','read','write-error','reload']){
   const presentation=await page.evaluate(mode=>window.stalePresentationReply(mode),mode);
   assert.equal(presentation.width,310);assert.equal(presentation.notice,'');checks.push({stalePresentationReply:mode,...presentation});
@@ -281,5 +390,56 @@ try{
  await page.waitForFunction(()=>Math.abs(Number(document.querySelector('output').textContent)-550/1200)<1e-9);
  checks.push({viewportResize:{before:630,after:540,keyboard:550}});
  await page.evaluate(()=>window.unmountResize());
+ await page.evaluate(()=>{window.unmountDisclosures=window.mountDisclosures()});
+ const menu=page.locator('details.session-options'),summary=menu.locator('summary');
+ await summary.click();await menu.getByRole('button',{name:'Pin conversation',exact:true}).click();
+ assert.equal(await page.locator('output').innerText(),'action received');
+ assert.equal(await menu.getAttribute('open'),null);
+ await summary.click();await summary.press('Escape');assert.equal(await menu.getAttribute('open'),null);
+ assert(await summary.evaluate(node=>node===document.activeElement));
+ await summary.click();await page.getByRole('textbox',{name:'Outside menu'}).focus();assert.equal(await menu.getAttribute('open'),null);
+ await page.evaluate(()=>{document.activeElement.blur();document.querySelector('details.session-options').open=true});
+ await page.keyboard.press('Escape');assert.equal(await menu.getAttribute('open'),null);assert(await summary.evaluate(node=>node===document.activeElement));
+ await summary.click();await menu.getByRole('button',{name:'Slow action',exact:true}).click();
+ assert.equal(await menu.getAttribute('open'),null);await page.evaluate(()=>window.finishMenuAction());
+ await summary.click();await menu.getByRole('button',{name:'Failing action',exact:true}).click();
+ assert.equal(await menu.getAttribute('open'),null);assert.equal(await page.locator('#notice').innerText(),'Action failed');
+ await summary.click();await page.getByLabel('Menu selection',{exact:true}).selectOption('b');
+ assert.equal(await menu.getAttribute('open'),null);assert(await summary.evaluate(node=>node===document.activeElement));
+ await page.getByRole('button',{name:'Inline one',exact:true}).click();
+ await page.getByRole('button',{name:'Inline two',exact:true}).click();
+ assert.equal(await page.locator('output').innerText(),'inline two');
+ await page.getByRole('textbox',{name:'Outside menu'}).click();
+ assert(await page.locator('.mode-verbose .source-menu').evaluate(node=>node.open));
+ await page.evaluate(()=>document.querySelector('#verbose-dialog').showModal());
+ await page.keyboard.press('Escape');
+ assert.equal(await page.locator('#verbose-dialog').evaluate(node=>node.open),false);
+ await summary.click();await menu.getByRole('button',{name:'Pin conversation',exact:true}).focus();await page.keyboard.press('Enter');
+ assert(await summary.evaluate(node=>node===document.activeElement));
+ await page.evaluate(()=>window.unmountDisclosures());checks.push({disclosureAction:true,escapeFocus:true,outsideFocus:true});
+ await page.evaluate(()=>window.mountCleanup());
+ const cleanup=page.getByRole('alert');await cleanup.waitFor();
+ assert.match(await cleanup.innerText(),/Workspace files: Input is busy/);
+ assert.doesNotMatch(await cleanup.innerText(),/opaque-session|panel:1:2|Error:/);
+ assert.equal(await cleanup.locator('[data-session]').getAttribute('title'),'panel:1:2');
+ await page.evaluate(()=>window.unmountCleanup());checks.push({humanCleanupLabel:true});
+ await page.evaluate(()=>window.mountCleanupFlood());
+ const flood=page.getByRole('alert',{name:'Resource cleanup'});await flood.waitFor();
+ assert.equal(await flood.getByRole('button',{name:/^Retry cleanup for /}).count(),64);
+ for(const width of [1440,390]){
+  await page.setViewportSize({width,height:844});
+  await flood.focus();await page.keyboard.press('Home');
+  const geometry=await page.evaluate(()=>{const alert=document.querySelector('.resource-cleanup-notice'),main=document.querySelector('#workbench'),composer=document.querySelector('textarea');return {height:alert.clientHeight,scroll:alert.scrollHeight,main:main.clientHeight,bottom:composer.getBoundingClientRect().bottom,width:document.documentElement.scrollWidth}});
+  assert(geometry.height<=844*.3+1&&geometry.scroll>geometry.height&&geometry.main>300&&geometry.bottom<=844&&geometry.width<=width,JSON.stringify(geometry));
+  await page.screenshot({path:join(report,`cleanup-${width}.png`)});
+  const last=flood.getByRole('button',{name:/^Retry cleanup for /}).last();await last.focus();
+  assert(await last.evaluate(node=>{const button=node.getBoundingClientRect(),alert=node.closest('[role=alert]').getBoundingClientRect();return button.top>=alert.top&&button.bottom<=alert.bottom}));
+  await page.screenshot({path:join(report,`cleanup-last-${width}.png`)});
+  await page.keyboard.press('Enter');await page.waitForFunction(()=>window.cleanupCalls>64);
+  checks.push({boundedCleanup:{width,...geometry}});
+ }
+ await page.evaluate(()=>window.unmountCleanupFlood());
  assert.deepEqual(errors,[]);await writeFile(join(report,'result.json'),JSON.stringify({checks,errors},null,2));
-}finally{await browser?.close();await server.close()}
+}catch(error){await writeFile(join(report,'failure.json'),JSON.stringify({error:String(error),errors,checks},null,2));throw error;}finally{await browser?.close();await server.close()}
+
+}

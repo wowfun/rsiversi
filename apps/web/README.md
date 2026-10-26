@@ -8,8 +8,12 @@ can retry across pane changes or a reconnect to the same endpoint and principal.
 A failed pending-state read restores the choices' previous state: enabled choices
 remain usable, while an uncertain decision still requires successful readback.
 An already-settled request closes its panel without reporting a refresh failure.
+Menu activation closes its disclosure before awaiting the action. Select changes
+that close a disclosure return keyboard focus to its summary.
 Replacing content in an open Settings dialog moves focus into the new content;
-closing it restores the original trigger. Pending reference cleanup consumes its
+loading replacements keep focus on the registered host, then return it to an
+enabled control when the content is ready.
+Closing it restores the original trigger. Pending reference cleanup consumes its
 capture identity independently of content deduplication in the draft. Failed
 release retains an explicit retry action, including after its preview closes.
 Draft removal, history selection and conversation previews share that cleanup owner.
@@ -95,7 +99,8 @@ External conversation panes render the Rust controller's distinct identity,
 observations and exact permission options. They have no native Goal, preset or
 model controls. Close peer is explicit; switching panes only detaches observation.
 Drafts follow the shared [retention and revision policy](../external-drafts.md),
-including Web's multiple bindings and pending-text accounting.
+including Web's multiple bindings and pending-text accounting. Their save-status
+line retains its height while empty so saving cannot move composer pointer targets.
 A pane without a retained draft disables composition;
 it retries binding when draft availability changes, without rebuilding history.
 Capacity notices never hide an unknown send outcome.
@@ -751,6 +756,32 @@ controls cannot cover sign-out or application close.
 Settings has a fixed 188px navigation and independently scrolling options; its
 800px shell uses the pinned panel radius and elevation, and becomes fullscreen
 with section controls above the options below 768px.
+Models and access, Appearance, Plugins, and Advanced share this shell. Registered
+settings retain exact local drafts for Appearance and the selected Advanced
+namespace until the Settings window closes. Returning to a section reads its
+current version; an unchanged version rebinds the draft to the new ticket. A
+changed version retains the draft but disables Save until explicit discard and
+reload. Choosing another Advanced namespace replaces that section's draft.
+A Settings frame renders only in its selected Appearance or Advanced section;
+one document owner dispatches section reads, including namespace links from Plugins.
+Opening a section fences its previous frame until the new read revision arrives;
+loading and failed reads share the section host and expose a read-only retry.
+Late frames cannot replace a different section. Switching editor modes preserves the untouched JSON bytes and does not dirty a
+draft. Save requires valid, bounded JSON. After save or explicit discard, the
+editor waits visibly for a fresh read ticket; a Reload settings action can request
+that read again without replaying a write or unlocking an old ticket.
+Switching sections or editor modes never saves. Returning to a form requires lossless numeric values.
+The editor enforces its 1 MiB UTF-8 limit on every mode switch and submission.
+An initially oversized value is read-only in JSON mode; newly oversized edits
+remain editable so they can be reduced, but cannot be submitted. Read-only state
+also applies to controls rebuilt after switching modes.
+Conversation selection remains visible directly in the toolbar at narrow widths.
+Transient composer, delivery, conversation, session and source menus use native
+focus order, outside dismissal, and the innermost
+unmodified Escape; IME composition never dismisses them.
+Verbose source actions remain inline and do not participate in disclosure dismissal.
+Closing a menu action restores focus to its summary if focus was inside the menu.
+Transcript regions are named and keyboard focusable without announcing every streamed text change.
 Stable tab hosts retain visited terminal
 followers across selection, movement, floating and fullscreen. Closing a tab
 detaches; only explicit termination ends its shell. Restoring terminal coordinates
@@ -767,9 +798,47 @@ at most 64 undo entries within the record budget. Runtime view IDs, references a
 terminal attachments never enter this record. Close/undo/reload resolve current
 resource coordinates; terminal restore only attaches read-only. A failed save
 leaves the committed layout intact and reports its failure.
-An accepted reopen remains pending until its presentation frame arrives. Command
-replies do not imply that the document has rendered that frame; late resources
-bind to their pending tab instead of creating another durable tab.
+Document resource opens carry a connection-local UUID and return an exact
+view/open-revision receipt or an unavailable result. Frames echo the UUID;
+neither reply ordering nor equal coordinates identify a pending tab. Duplicate
+document tabs own distinct resources. A closed pending tab releases a late
+receipt instead of adopting it into another tab.
+Before saving a close, the connection reserves its cleanup responsibility. A
+failed save preserves the old layout; a successful save publishes immediately,
+independently of remote cleanup. Cleanup retains the original connection and
+resource incarnation, with one request in flight per identity and explicit retry
+after failure when an exact cleanup identity is available. An uncertain opening
+without an identity cannot be replayed: it shows a reconnect requirement, not a
+Retry action. A matching frame can reconcile a resource opening receipt and binds
+the originating tab even before its RPC settles. Leaving a Session dock commits
+cleanup for its pending opens as well as its bound panels. Cancelled cleanup
+reservations cannot subsequently dispatch. Resource projection accepts null
+surfaces before a Session opens or after it closes; unchanged panel and surface
+generation snapshots do not repeat reconciliation. Typed
+terminal refusals before attachment allocation release the reserved responsibility.
+Missing Worker application ownership is also a known refusal for resource opens
+and terminal requests; it never implies an unknown allocation.
+Retired-pane detach is owned by attachment shutdown, independently of current-pane
+admission. Connection teardown failures appear through the connection's global
+failure notice. Opens reserve their eventual cleanup before dispatch, sharing a
+budget of 64 responsibilities globally and 16 per Session with attachments and
+adopted-panel cleanup. Live opens retain that reservation; closing them needs no
+new capacity. An uncertain allocation retains one responsibility until an exact
+receipt or application teardown resolves it; it cannot be discarded to admit
+more opens. Capacity refusal never discards an older responsibility. The cleanup
+reservation stays inert until closure commits; observing an opening frame only
+reconciles its identity and cannot authorize cleanup. The cleanup
+alert is capped at 30% of the viewport (18 rem) and independently keyboard-scrollable,
+keeping later Retry actions and the workbench reachable. Retirement
+ends these ephemeral identities only after their original application closes.
+Resource opens waiting for an ordinary RPC slot remain within the connection's
+open-responsibility bounds. Slot release admits waiting opens one at a time in
+FIFO order, reserving one ordinary slot for foreground commands. Draining wakes
+queued opens with a known refusal. Layout
+edits and cleanup do not await that queue. Retirement refuses undispatched opens.
+Renderer and transport teardown both settle (including their bounded deadlines)
+before resource retirement publishes their combined failure or success.
+Terminal cleanup detaches followers and never terminates shells.
 Asynchronous Dock setup belongs to one effect lifetime. Retirement prevents late
 storage reads or reopen replies from publishing or installing subscriptions.
 Resource host notifications describe membership and tab metadata; content-only

@@ -380,6 +380,16 @@ fn assert_windows_tooling_gate(workflow: &serde_json::Value) {
     let tools = &workflow["jobs"]["windows-repository-tools"];
     assert_eq!(tools["runs-on"], "windows-2025");
     assert_windows_architecture_admission(tools);
+    let steps = tools["steps"].as_array().unwrap();
+    assert!(
+        steps
+            .iter()
+            .any(|step| step["run"] == "node --test fixtures/rsi/web-product/service.test.mjs")
+    );
+    assert!(steps.iter().any(
+        |step| step["working-directory"] == "fixtures/rsi/web-product"
+            && step["run"] == "npm ci --ignore-scripts"
+    ));
     for package in [
         "rsi-xtask",
         "rsi-app-tools",
@@ -1157,6 +1167,14 @@ fn paired_web_consumers_have_independent_failure_domains() {
             .find(|step| step["id"].as_str() == Some(id))
             .unwrap()
     };
+    for fixture in ["settings-drafts.mjs", "restore-tabs.mjs"] {
+        assert!(
+            step("web_product")["run"]
+                .as_str()
+                .unwrap()
+                .contains(&format!("node {fixture}"))
+        );
+    }
     let harness = step("web_harness");
     assert_eq!(
         harness["working-directory"].as_str(),

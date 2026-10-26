@@ -5,7 +5,10 @@ export class SettingsDialog {
     this.reset();
   }
   reset() { this.owner = undefined; this.revision = undefined; this.dismissed = 0n; }
-  reopen(owner) { if (this.owner === owner) this.dismissed = 0n; }
+  begin(owner, revision) {
+    if(owner!==this.owner){this.reset();this.owner=owner;}
+    if(typeof revision==='string'&&/^[1-9][0-9]{0,19}$/.test(revision))this.dismissed=BigInt(revision)>this.dismissed?BigInt(revision):this.dismissed;
+  }
   update(owner, revision) {
     if (owner !== this.owner) { this.reset(); this.owner = owner; }
     if (typeof revision !== "string" || !/^[1-9][0-9]{0,19}$/.test(revision)

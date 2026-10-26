@@ -1,7 +1,7 @@
 import {observable} from './bridge.ts'
 
 export interface PanelEntry {
-  view:string; session:string|null; pane:string|null; generation:string|null; floating:boolean
+  view:string; open_revision:string; opening_request:string|null; session:string|null; pane:string|null; generation:string|null; floating:boolean
   reopen:Record<string,unknown>|null
 }
 export interface ResourceHost {

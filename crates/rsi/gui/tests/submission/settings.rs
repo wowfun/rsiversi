@@ -161,6 +161,27 @@ impl SettingsAccess for Fixture {
 }
 
 #[tokio::test]
+async fn settings_draft_version_preserves_large_revisions_and_the_actual_read_scope() {
+    let (runtime, backend, app) = fixture().await;
+    backend.settings.snapshot.lock().unwrap().revision = 9_007_199_254_740_993;
+    app.command(r#"{"action":"settings_read","namespace":"fixture.00"}"#)
+        .await
+        .unwrap();
+    let editor = view(&app)["settings"].clone();
+    assert_eq!(
+        editor["version"],
+        json!(["0".repeat(32), "9007199254740993"])
+    );
+    app.command(
+        &json!({"action":"settings_save","ticket":editor["ticket"],"text":"{}"}).to_string(),
+    )
+    .await
+    .unwrap();
+    assert_eq!(view(&app)["settings"]["version"][1], "9007199254740994");
+    assert!(runtime.shutdown().await.is_clean());
+}
+
+#[tokio::test]
 async fn settings_pages_descriptions_and_read_only_editor_preserve_cas() {
     let (runtime, backend, app) = fixture().await;
     app.command(r#"{"action":"settings_list"}"#).await.unwrap();

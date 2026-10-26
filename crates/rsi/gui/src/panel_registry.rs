@@ -16,6 +16,8 @@ const MAXIMUM_SESSION_FLOATS: usize = 4;
 
 #[derive(Debug)]
 struct Entry {
+    open_revision: u64,
+    opening_request: Option<String>,
     owner: Option<(SurfaceId, String, SessionId)>,
     reopen: Value,
     floating: bool,
@@ -43,6 +45,15 @@ impl PanelRegistry {
         owner: Option<(SurfaceId, String, SessionId)>,
         reopen: Value,
     ) -> Result<&mut Details> {
+        let opening_request = crate::resource_open::request();
+        if opening_request.is_some()
+            && self
+                .entries
+                .values()
+                .any(|entry| entry.opening_request == opening_request)
+        {
+            return Err("Resource opening request already owns a panel".into());
+        }
         let session = owner.as_ref().map(|owner| &owner.2);
         if self.entries.len() >= MAXIMUM_VIEWS
             || self
@@ -70,10 +81,14 @@ impl PanelRegistry {
             + 1;
         let mut detail = Details::with_sequence(self.sequence.clone());
         detail.begin()?;
+        let open_revision = detail.revision;
+        crate::resource_open::allocated(id, open_revision)?;
         Ok(&mut self
             .entries
             .entry(id)
             .or_insert(Entry {
+                open_revision,
+                opening_request,
                 owner,
                 reopen,
                 floating: false,
@@ -87,6 +102,9 @@ impl PanelRegistry {
         owner: Option<(SurfaceId, String, SessionId)>,
         reopen: Value,
     ) -> Result<&mut Details> {
+        if crate::resource_open::request().is_some() {
+            return self.open(owner, reopen);
+        }
         let existing = self
             .entries
             .iter()
@@ -95,6 +113,8 @@ impl PanelRegistry {
         if let Some(id) = existing {
             let entry = self.entries.get_mut(&id).expect("selected entry");
             entry.detail.begin()?;
+            entry.open_revision = entry.detail.revision;
+            entry.opening_request = None;
             return Ok(&mut entry.detail);
         }
         self.open(owner, reopen)
@@ -145,8 +165,16 @@ impl PanelRegistry {
             })
             .map(|entry| &mut entry.detail)
     }
-    pub fn close(&mut self, view: &str) -> Result<()> {
-        self.entries.remove(&parse(view)?);
+    pub fn close(&mut self, view: &str, expected_open_revision: &str) -> Result<()> {
+        let view = parse(view)?;
+        let expected = parse(expected_open_revision)?;
+        if self
+            .entries
+            .get(&view)
+            .is_some_and(|entry| entry.open_revision == expected)
+        {
+            self.entries.remove(&view);
+        }
         Ok(())
     }
     pub fn floating(&mut self, view: &str, floating: bool) -> Result<()> {
@@ -225,7 +253,7 @@ impl PanelRegistry {
     pub fn snapshot(&self) -> Vec<Value> {
         self.entries.iter().map(|(id, entry)| {
             let detail = &entry.detail;
-            json!({"view":id.to_string(),"session":entry.owner.as_ref().map(|owner| &owner.2),"pane":entry.owner.as_ref().map(|owner| owner.0),"generation":entry.owner.as_ref().map(|owner| &owner.1),"floating":entry.floating,"reopen":entry.reopen,
+            json!({"view":id.to_string(),"open_revision":entry.open_revision.to_string(),"opening_request":entry.opening_request,"session":entry.owner.as_ref().map(|owner| &owner.2),"pane":entry.owner.as_ref().map(|owner| owner.0),"generation":entry.owner.as_ref().map(|owner| &owner.1),"floating":entry.floating,"reopen":entry.reopen,
                 "ui_detail":detail.ui,"remote_ui_catalog":detail.remote_catalog,
                 "image_detail":detail.image,"source_media":detail.source.as_ref().and_then(crate::details::SourceDetail::media),
                 "detail":detail.interaction,"source_detail":detail.source,"block_sources":detail.block_sources})
@@ -263,7 +291,7 @@ mod tests {
         registry.floating(&view, true).unwrap();
         assert!(registry.ticket(&ticket).is_ok());
         assert!(!stopped.is_cancelled());
-        registry.close(&view).unwrap();
+        registry.close(&view, &ticket).unwrap();
         assert!(stopped.is_cancelled());
         assert!(!active.is_cancelled());
         assert!(registry.ticket(&ticket).is_err());
@@ -299,5 +327,44 @@ mod tests {
         for entry in registry.entries.values() {
             assert!(!entry.detail.stop.is_cancelled());
         }
+    }
+    #[test]
+    fn delayed_close_cannot_remove_a_reinspected_incarnation() {
+        let mut registry = PanelRegistry::default();
+        registry.open(Some(owner()), json!({})).unwrap();
+        let first = registry.snapshot()[0].clone();
+        registry.reopen(Some(owner()), json!({})).unwrap();
+        let next = registry.snapshot()[0].clone();
+        assert_eq!(first["view"], next["view"]);
+        assert_ne!(first["open_revision"], next["open_revision"]);
+        registry
+            .close(
+                first["view"].as_str().unwrap(),
+                first["open_revision"].as_str().unwrap(),
+            )
+            .unwrap();
+        assert_eq!(registry.snapshot().len(), 1);
+        // Updating content does not change the closing identity.
+        registry
+            .entries
+            .values_mut()
+            .next()
+            .unwrap()
+            .detail
+            .begin()
+            .unwrap();
+        registry
+            .close(
+                next["view"].as_str().unwrap(),
+                next["open_revision"].as_str().unwrap(),
+            )
+            .unwrap();
+        assert!(registry.snapshot().is_empty());
+        registry
+            .close(
+                next["view"].as_str().unwrap(),
+                next["open_revision"].as_str().unwrap(),
+            )
+            .unwrap();
     }
 }

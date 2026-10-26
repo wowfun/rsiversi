@@ -11,12 +11,13 @@ export async function verifyPresentation(page, pane, service, report, name) {
   await peer.locator('#reconnect').click();
   await peer.locator('#workbench').waitFor({state:'visible'});
   async function save(theme,size) {
+    await page.getByRole('button',{name:'Settings',exact:true}).click();
     await page.getByRole('button',{name:'Appearance',exact:true}).click();
     await page.getByRole('combobox',{name:'Settings / appearance / theme',exact:true}).selectOption({label:theme});
     await page.getByRole('spinbutton',{name:'Settings / appearance / content_font_size',exact:true}).fill(String(size));
     const old=await page.getByRole('button',{name:'Save settings',exact:true}).elementHandle();
     await old.click();await page.waitForFunction(old=>!old.isConnected,old);await old.dispose();
-    await page.getByRole('button',{name:'Close details',exact:true}).click();
+    await page.getByRole('button',{name:'Close settings',exact:true}).click();
     await page.waitForFunction(([theme,size])=>document.documentElement.dataset.theme===theme&&document.documentElement.dataset.contentSize===String(size),[theme,size]);
     await peer.waitForFunction(([theme,size])=>document.documentElement.dataset.theme===theme&&document.documentElement.dataset.contentSize===String(size),[theme,size]);
   }
@@ -47,7 +48,7 @@ export async function verifyPresentation(page, pane, service, report, name) {
     await page.getByRole('combobox',{name:'Search commands'}).fill('appearance');
     await page.getByRole('combobox',{name:'Search commands'}).press('Enter');
     await page.getByRole('combobox',{name:'Settings / appearance / theme',exact:true}).waitFor();
-    await page.getByRole('button',{name:'Close details',exact:true}).click();
+    await page.getByRole('button',{name:'Close settings',exact:true}).click();
     await page.locator('.conversation-menu').evaluate(node=>node.open=true);await page.getByLabel('Detail level').selectOption('standard');await page.locator('.conversation-menu').evaluate(node=>node.open=false);
     await pane.locator('.turn-summary').last().click();
     const summary=pane.locator('.message.tool .summary-toggle').last();

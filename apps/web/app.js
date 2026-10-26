@@ -6,10 +6,12 @@ import { presentationIdentity } from "./src/presentation.tsx";
 import { presentationKey } from "./presentation-store.js";
 import { downloadSession } from "./session-export.js";
 import { DocumentConnection } from "./document-connection.js";
-import { settingsForm, canUseSettingsForm } from "./settings-form.js";
+import {settingsDrafts} from './settings-drafts.js';
+import {settingsFocus} from './settings-focus.js';
 import { SettingsDialog } from "./settings-dialog.js";
+import {installDisclosures,closeDisclosure} from './disclosure.js';
 import { approvalFields, approvalArguments, approvalReason, approvalJson, decisionAction } from "./approval-review.js";
-import { publish, installActions, selectSurface } from "./src/bridge.ts";
+import { publish, installActions, selectSurface,settingsPanel,settingsHost,advancedSettings } from "./src/bridge.ts";
 import { createDocumentTransport } from "./src/native.ts";
 import { isDesktop, desktopCall } from "./desktop-bridge.js";
 const nativeDocument = isDesktop();
@@ -27,6 +29,7 @@ function referenceInterval(meta) {
   return capture.kind === "suffix" ? {...capture.interval, first:String(BigInt(capture.interval.retained_after_seq)+1n), last:capture.interval.retained_through_seq} : {through_seq:capture.selection.through_seq,first:capture.selection.record.sequence,last:capture.selection.record.sequence,omissions:[]};
 }
 export function initialize() {
+installDisclosures(document);
 const $ = id => document.getElementById(id);
 let localLaunch;
 if (location.hash.startsWith("#rsi-launch=")) {
@@ -43,7 +46,7 @@ let rendererSlots = [];
 let selected = "main";
 let connected = false;
 let catalogKey;
-let dialogKey;
+let selectingSettings=false,settingsRead;
 let lastNotice;
 const imageCache = new Map();
 let imageEpoch = 0;
@@ -122,7 +125,7 @@ function markdown(nodes) {
 function button(label, run, className) {
   const node = element("button", className, label);
   node.type = "button";
-  node.addEventListener("click", () => perform(run));
+  node.addEventListener("click", () => {closeDisclosure(node);void perform(run)});
   return node;
 }
 function notify(message) {
@@ -135,11 +138,11 @@ async function perform(run) {
 }
 function clearView() {
   settingsDialog.reset();
-  presentationIdentity.set(undefined); publish(undefined); view = undefined; catalogKey = undefined; dialogKey = undefined; lastNotice = undefined;
+  registeredDrafts.clear();advancedSettings.set(undefined);
+  presentationIdentity.set(undefined); publish(undefined); view = undefined; catalogKey = undefined; lastNotice = undefined;
   clearImages(); clearResources();
   for (const pane of panes.values()) pane.reset();
   ExternalPane.clearDrafts();
-  $("detail").close();
 }
 function failWorker(error, current = connection) { current?.fail(new Error(error)); }
 function connectionFailed(error, current) {
@@ -205,7 +208,7 @@ function createDocumentConnection(transport, table) {
     isCurrent: () => connection === current,
     onFrame: (frame, assets) => presentFrame(frame, assets, current),
     onFailure: error => connectionFailed(error, current),
-    onCleanupFailure: error => notify(`Renderer cleanup failed: ${error.message}`),
+    onCleanupFailure: error => notify(`Connection cleanup failed: ${error.message}`),
   });
   return current;
 }
@@ -231,8 +234,26 @@ function boundCall(owner) {
 }
 
 function command(value) {
-  if (value.action === "settings_list" || value.action === "settings_read") settingsDialog.reopen(connection);
-  return call("command", JSON.stringify(value));
+  const reading=value.action === "settings_list" || value.action === "settings_read";
+  const owner=connection,request=reading?{}:undefined;
+  if (reading) {
+    settingsRead=request;
+    settingsDialog.begin(owner, view?.settings_revision);
+    if(value.namespace!=='rsi.client')advancedSettings.set(value.namespace);
+    selectingSettings=true;
+    try { settingsPanel.set(value.namespace==='rsi.client'?'appearance':'advanced'); }
+    finally { selectingSettings=false; }
+    registeredKey=undefined;
+    settingsHost.getSnapshot()?.replaceChildren(document.createTextNode('Loading settings…'));
+  }
+  return call("command", JSON.stringify(value)).catch(error=>{
+    if(reading&&settingsRead===request&&connection===owner&&settingsPanel.getSnapshot()===(value.namespace==='rsi.client'?'appearance':'advanced')){
+      const body=element('div','settings-catalog');
+      body.append(element('p','settings-error',String(error?.message??error)),button('Reload settings',()=>command(value.namespace?{action:'settings_read',namespace:value.namespace}:{action:'settings_list'})));
+      registeredTarget.show(request,'Settings',body);
+    }
+    throw error;
+  });
 }
 
 async function connectWith(receipt, localTicket) {
@@ -427,6 +448,7 @@ class Pane {
     tools.append(this.extensionView);
     this.transcript = element("div", "transcript");
     this.transcript.setAttribute("aria-label", "Conversation transcript");
+    this.transcript.setAttribute("role", "region");
     this.transcript.tabIndex = 0;
     this.transcript.addEventListener("scroll", () => {
       this.scheduleVisible();
@@ -512,9 +534,6 @@ class Pane {
     const extras = element("details", "composer-extras");
     const plus=element("summary","","+");plus.setAttribute("aria-label","Add to conversation");
     const extraActions=element("div","composer-extra-actions");extraActions.append(this.attach,this.addFile,this.addReference,this.searchHistory,this.exportButton);extras.append(plus,extraActions);
-    extraActions.addEventListener("click",event=>{if(event.target.closest("button"))extras.open=false;});
-    extras.addEventListener("focusout",event=>{if(!extras.contains(event.relatedTarget))extras.open=false;});
-    extras.addEventListener("keydown",event=>{if(event.key==="Escape"){extras.open=false;plus.focus();event.preventDefault();}});
     actions.append(this.cancel, this.deliveryMenu, this.send); bar.append(extras,this.model, this.effort, this.modelReceipt, actions);
     this.hint = element("div", "composer-hint", "Ctrl / ⌘ Enter to send · Enter for a new line");
     this.hint.id = `composer-hint-${crypto.randomUUID()}`;
@@ -1426,11 +1445,12 @@ function render(next) {
   select(selected);
   publish(next);
   const showSettings = settingsDialog.update(connection, next.settings_revision);
-  if ((next.settings_catalog || next.settings) && !showSettings) modalTarget.clear();
-  else renderDetail(next, modalTarget);
+  if (next.settings_catalog || next.settings) {
+    if(showSettings)renderDetail(next,registeredTarget);
+  } else registeredTarget.clear();
   renderResources(next);
 }
-installActions({ command, open: openInSelected, select, call,
+installActions({ command, open: openInSelected, select, call, resources: () => connection?.resources, dismissSettings:()=>settingsDialog.dismiss(),
   async closeSurface(key) {
     const owner = connection;
     const pane = panes.get(key);
@@ -1446,12 +1466,6 @@ installActions({ command, open: openInSelected, select, call,
   },
 });
 
-let detailTrigger;
-$("detail").addEventListener("close", () => {
-  if (detailTrigger?.isConnected && detailTrigger.getClientRects().length) detailTrigger.focus();
-  else panes.get(selected)?.input?.focus();
-  detailTrigger = undefined;
-});
 function interactionRefresh(form, base, owner, failure, command) {
   let refreshing = false;
   const refresh = button("Refresh request", async () => {
@@ -1470,27 +1484,32 @@ function interactionRefresh(form, base, owner, failure, command) {
   }, "quiet");
   return refresh;
 }
-function showDialog(key, title, body) {
-  if (dialogKey === key) return;
-  const restore = $("detail").open && $("detail").contains(document.activeElement);
-  dialogKey = key; $("detail-title").textContent = title; $("detail-body").replaceChildren(body);
-  if (!$("detail").open) { detailTrigger = document.activeElement; $("detail").showModal(); }
-  else if (restore) ([...body.querySelectorAll('button:not(:disabled),input:not(:disabled),textarea:not(:disabled),select:not(:disabled),[tabindex="0"]')].find(node => node.getClientRects().length && getComputedStyle(node).visibility !== "hidden") ?? $("detail-close")).focus();
-}
 const settingsDialog = new SettingsDialog({
-  close() { dialogKey = undefined; $("detail").close(); },
+  close() { settingsRead=undefined; settingsPanel.set(undefined); },
   send(owner, revision) { return boundCall(owner)("command", JSON.stringify({action: "close_settings", revision})); },
   failed(owner, error) { if (connection === owner) notify(String(error.message ?? error)); },
 });
-$("detail-close").addEventListener("click", () => settingsDialog.dismiss());
-$("detail").addEventListener("cancel", event => { event.preventDefault(); settingsDialog.dismiss(); });
-const modalTarget = {
-  get key() { return dialogKey; },
-  get body() { return $("detail-body"); },
-  rendererKey: "settings-detail", surface: "dialog", show: showDialog,
-  clear() { dialogKey = undefined; $("detail").close(); },
+const registeredDrafts=settingsDrafts(value=>boundCall(connection)("command",JSON.stringify(value)));
+let registeredKey;
+const registeredTarget={
+  get key(){return registeredKey},get body(){return settingsHost.getSnapshot()},
+  rendererKey:'settings-detail',surface:'dialog',
+  show(key,title,body){const host=settingsHost.getSnapshot();if(!host)return;registeredKey=key;const restore=settingsFocus(host);host.replaceChildren(body);restore()},
+  clear(){registeredKey=undefined;settingsHost.getSnapshot()?.replaceChildren()},
 };
+settingsPanel.subscribe(()=>{
+  if(selectingSettings)return;
+  const section=settingsPanel.getSnapshot(),namespace=advancedSettings.getSnapshot();
+  const request=section==='appearance'?{action:'settings_read',namespace:'rsi.client'}:section==='advanced'?(namespace?{action:'settings_read',namespace}:{action:'settings_list'}):undefined;
+  if(request)void command(request).catch(error=>notify(String(error?.message??error)));
+});
+settingsHost.subscribe(()=>{registeredKey=undefined;if(!settingsHost.getSnapshot()){registeredDrafts.clear();advancedSettings.set(undefined)}if(view&&settingsHost.getSnapshot()&&settingsDialog.update(connection,view.settings_revision))renderDetail(view,registeredTarget)});
+let resourceCapture;
 function renderResources(next) {
+  const scope=JSON.stringify(Object.entries(next.surfaces??{}).map(([key,value])=>[key,value?.generation]));
+  if(resourceCapture?.owner===connection&&resourceCapture.panels===next.panels&&resourceCapture.media===next.has_media&&resourceCapture.scope===scope)return;
+  resourceCapture={owner:connection,panels:next.panels,media:next.has_media,scope};
+  connection?.resources.observe(next.panels ?? [], next.surfaces);
   const keep = new Set();
   for (const entry of next.panels ?? []) {
     keep.add(entry.view);
@@ -1544,11 +1563,15 @@ function renderDetail(next, target) {
     target.show(key, "Service extensions", body); return;
   }
   if (next.settings_catalog) {
+    if(target===registeredTarget&&settingsPanel.getSnapshot()!==(next.settings_catalog.namespace==='rsi.client'?'appearance':'advanced'))return;
     const catalog = next.settings_catalog;
+    if(!catalog.namespace)advancedSettings.set(undefined);
     const key = JSON.stringify(catalog);
     if (target.key === key) return;
     const body = element("div", "settings-catalog");
-    if (catalog.error) body.append(element("p", "settings-error", catalog.error));
+    if (catalog.error) {
+      body.append(element("p", "settings-error", catalog.error),button("Reload settings",()=>command(catalog.namespace?{action:'settings_read',namespace:catalog.namespace}:{action:'settings_list'})));
+    }
     else if (!catalog.page) body.append(element("p", "", catalog.namespace ? `Reading ${catalog.namespace}…` : "Loading registered settings…"));
     else {
       const list = element("div", "settings-list");
@@ -1610,37 +1633,12 @@ function renderDetail(next, target) {
   }
   if (next.settings) {
     const editor = next.settings;
+    if(target===registeredTarget&&settingsPanel.getSnapshot()!==(editor.namespace==='rsi.client'?'appearance':'advanced'))return;
     if (target.key === editor.ticket) return;
-    const form = element("form"); const text = element("textarea", "settings-text"); text.value = editor.text; text.spellcheck = false; text.setAttribute("aria-label", "Settings JSON");
-    const save = element("button", "primary", "Save settings"); save.type = "submit";
-    const description = editor.description;
-    const applies = { live: "Applies live", new_session: "Applies to new conversations", restart: "Restart required" }[description.metadata.applies];
-    form.append(element("p", "settings-applies", applies), element("p", "hint", description.metadata.description));
-    for (const [label, value] of [["Schema", description.metadata.schema], ["Defaults", description.defaults]]) {
-      const disclosure = element("details", "settings-description");
-      disclosure.append(element("summary", "", label), element("pre", "", JSON.stringify(value, null, 2))); form.append(disclosure);
-    }
-    if (description.metadata.sensitive_fields.length) form.append(element("p", "hint", `Sensitive fields: ${description.metadata.sensitive_fields.map(path => path.join(" / ") || "(root)").join(", ")}`));
-    const safeForm = canUseSettingsForm(editor.text);
-    const fields = safeForm ? settingsForm(description.metadata.schema, JSON.parse(editor.text), !description.writable) : {element:element("p","hint","This value contains exact numeric text; use JSON to preserve it."),read:()=>{throw new Error("Use the exact JSON editor")}};
-    let jsonMode = !safeForm;
-    const toggle = button("Edit as JSON", () => {
-      if (!jsonMode) {text.value=fields.json();failure.textContent="";jsonMode=true;fields.element.hidden=true;text.hidden=false;toggle.hidden=true;text.focus()}
-    });
-    text.hidden=safeForm;toggle.hidden=!safeForm;
-    const failure = element("p", "settings-error settings-field-error");failure.setAttribute("role","alert");
-    form.append(element("p", "hint", "Saving requires the version you opened."), fields.element, toggle, text, failure, save);
-    if (!description.writable) { text.readOnly = true; save.disabled = true; form.append(element("p", "hint", "Settings provider is read-only.")); }
-    if (new TextEncoder().encode(editor.text).length > 1024 * 1024) {
-      fields.element.disabled=true;text.readOnly=true;save.disabled=true;form.append(element("p", "hint", "This value exceeds the Web editor's 1 MiB input limit."));
-    }
-    form.addEventListener("submit", async event => {
-      event.preventDefault();if(save.disabled)return;save.disabled=true;failure.textContent="";
-      try {await command({action:"settings_save",ticket:editor.ticket,text:jsonMode ? text.value : JSON.stringify(fields.read())})}
-      catch(error) {failure.textContent=error instanceof Error ? error.message : String(error);save.disabled=!description.writable}
-    });
-    target.show(editor.ticket, editor.namespace, form); return;
+    if(editor.namespace!=='rsi.client')advancedSettings.set(editor.namespace);
+    target.show(editor.ticket,editor.namespace,registeredDrafts.render(editor)); return;
   }
+
   if (next.detail) {
     const detail = next.detail; const request = detail.request;
     const key = JSON.stringify([detail.pane, detail.generation, detail.kind,

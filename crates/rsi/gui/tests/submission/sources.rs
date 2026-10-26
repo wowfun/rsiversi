@@ -16,7 +16,7 @@ pub(super) fn panel(app: &rsi_gui::GuiApplication) -> Value {
 }
 pub(super) async fn close_panel(app: &Arc<rsi_gui::GuiApplication>) {
     let selected = panel(app);
-    app.command(&json!({"action":"close_detail","view":selected["view"]}).to_string())
+    app.command(&json!({"action":"close_detail","view":selected["view"],"expected_open_revision":selected["open_revision"]}).to_string())
         .await
         .unwrap();
 }
@@ -48,6 +48,49 @@ pub(super) async fn fixture() -> (Runtime, Arc<Backend>, Arc<rsi_gui::GuiApplica
         .unwrap();
     app.command(r#"{"action":"create","pane":"main","workspace":"aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"}"#).await.unwrap();
     (runtime, backend, app)
+}
+
+#[tokio::test]
+async fn explicit_resource_open_receipts_keep_same_coordinate_documents_independent() {
+    let (runtime, _, app) = fixture().await;
+    let generation = view(&app)["surfaces"]["main"]["generation"].clone();
+    // Even an unavailable source has a real error document, with its own identity.
+    let command = json!({"action":"inspect_source","pane":"main","generation":generation,"source":{"seq":"99","field":{"kind":"turn_input"}}});
+    let mut receipts = Vec::new();
+    for request in [
+        "00000000-0000-4000-8000-000000000001",
+        "00000000-0000-4000-8000-000000000002",
+    ] {
+        let reply = app
+            .try_resource_open(&json!({"opening_request":request,"command":command}).to_string())
+            .unwrap()
+            .await
+            .unwrap();
+        let reply: Value = serde_json::from_str(&reply).unwrap();
+        assert_eq!(reply["status"], "opened");
+        assert_eq!(reply["request"], request);
+        let snapshot = view(&app);
+        let opened = snapshot["panels"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .find(|entry| entry["view"] == reply["view"])
+            .unwrap();
+        assert_eq!(opened["source_detail"]["ticket"], reply["open_revision"]);
+        receipts.push(reply);
+    }
+    assert_ne!(receipts[0]["view"], receipts[1]["view"]);
+    let first = &receipts[0];
+    app.command(&json!({"action":"close_detail","view":first["view"],"expected_open_revision":first["open_revision"]}).to_string()).await.unwrap();
+    assert_eq!(view(&app)["panels"].as_array().unwrap().len(), 1);
+    assert_eq!(panel(&app)["view"], receipts[1]["view"]);
+    let reply=app.try_resource_open(&json!({"opening_request":"00000000-0000-4000-8000-000000000003","command":{"action":"inspect_source","pane":"main","generation":"stale","source":{"seq":"99","field":{"kind":"turn_input"}}}}).to_string()).unwrap().await.unwrap();
+    assert_eq!(
+        serde_json::from_str::<Value>(&reply).unwrap()["status"],
+        "unavailable"
+    );
+    assert_eq!(view(&app)["panels"].as_array().unwrap().len(), 1);
+    assert!(runtime.shutdown().await.is_clean());
 }
 
 #[tokio::test]
@@ -288,7 +331,7 @@ async fn simultaneous_source_views_keep_independent_reads_across_float_settings_
         .unwrap();
     assert!(view(&app)["settings_catalog"].is_null());
     assert_eq!(backend.active_source.load(Ordering::SeqCst), 2);
-    app.command(&json!({"action":"close_detail","view":first_view["view"]}).to_string())
+    app.command(&json!({"action":"close_detail","view":first_view["view"],"expected_open_revision":first_view["open_revision"]}).to_string())
         .await
         .unwrap();
     wait(1).await;

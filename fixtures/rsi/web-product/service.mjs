@@ -1,3 +1,4 @@
+import {readFactEvidence} from './fact-evidence.mjs';
 import { cleanupAll } from './cleanup.mjs';
 import assert from "node:assert/strict";
 import { createHash } from "node:crypto";
@@ -6,7 +7,7 @@ import net from "node:net";
 import { spawn, spawnSync } from "node:child_process";
 import { once } from "node:events";
 import { createInterface } from "node:readline";
-import { mkdtemp, mkdir, readFile, writeFile, rm } from "node:fs/promises";
+import { mkdtemp, mkdir, readFile, writeFile, rm, stat } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join, dirname, basename } from "node:path";
 import { setTimeout as pause } from "node:timers/promises";
@@ -20,7 +21,8 @@ export async function waitUntil(probe, label, ms = 30_000) {
 
 export function boundedRun(binary, args, options = {}) {
   const result = spawnSync(binary, args, { timeout: 300_000, maxBuffer: 2 * 1024 * 1024, ...options });
-  assert.equal(result.status, 0, result.error?.message ?? result.stderr?.toString() ?? `Process exited with status ${result.status}`);
+  assert.equal(result.status, 0, result.error?.message ??
+    `Process exited with status ${result.status}: ${(result.stderr?.toString() || result.stdout?.toString() || 'no diagnostic').slice(-4096)}`);
   return result;
 }
 export async function deadline(promise, label, ms = 30_000) {
@@ -132,7 +134,7 @@ async function startProvider(onRequest) {
     async close() { const closed = new Promise(resolve => server.close(resolve)); for (const socket of sockets) socket.destroy(); await closed; } };
 }
 
-export async function startService({ binary, assets, report, configure, onRequest, deepseekKey, watchAssets = false }) {
+export async function startService({ binary, assets, report, configure, onRequest, deepseekKey, watchAssets = false, developmentHttp = false }) {
   const temporary = await mkdtemp(join(tmpdir(), "rsi-web-"));
   const provider = await startProvider(onRequest);
   let child; let stopped; let hostStarted = false;
@@ -155,7 +157,9 @@ export async function startService({ binary, assets, report, configure, onReques
       try { result = await deadline(stopped, "service stop", 20_000); }
       catch { child.kill("SIGKILL"); await stopped; throw new Error("Service exceeded clean shutdown deadline"); }
       const [code, signal] = result;
-      if (code !== 0 || signal !== null) throw new Error(`Service cleanup failed: exit ${code}, signal ${signal}`);
+      const forcedWindows = process.platform === 'win32' && signal === 'SIGTERM';
+      await writeFile(join(report, 'service-process-shutdown.json'), JSON.stringify({platform:process.platform,code,signal,mode:forcedWindows?'windows-terminate-process':'graceful'}));
+      if (!forcedWindows && (code !== 0 || signal !== null)) throw new Error(`Service cleanup failed: exit ${code}, signal ${signal}`);
     } } catch (error) { failure = error; }
     if (hostStarted) {
       const stopHost = force => boundedRun(binary, ["host", "stop", ...(force ? ["--force"] : [])],
@@ -177,6 +181,11 @@ export async function startService({ binary, assets, report, configure, onReques
     await cleanupAll(
       () => { if (failed) throw failed; },
       () => writeFile(join(report, "service.stderr.log"), stderr),
+      async () => {
+        const log = join(env.XDG_STATE_HOME, 'rsi/session-host/owner.log');
+        const info = await stat(log).catch(error => { if (error.code !== 'ENOENT') throw error; });
+        if (info && info.size <= 1024 * 1024) await writeFile(join(report, 'host.stderr.log'), await readFile(log));
+      },
       () => provider.close(),
       () => hostStarted
         ? writeFile(join(report, "retained-host-home.txt"), `${temporary}\n`)
@@ -186,6 +195,16 @@ export async function startService({ binary, assets, report, configure, onReques
   try {
     await mkdir(workspace); await mkdir(env.HOME);
     const config = join(env.XDG_CONFIG_HOME, "rsi");
+    await mkdir(config,{recursive:true});
+    if(process.platform==='win32') boundedRun('powershell.exe',['-NoProfile','-NonInteractive','-Command',`
+      $ErrorActionPreference='Stop'
+      $directory=$env:RSI_FIXTURE_DIRECTORY
+      $identity=[System.Security.Principal.WindowsIdentity]::GetCurrent().User
+      $acl=[System.Security.AccessControl.DirectorySecurity]::new()
+      $userSid=$identity.Value
+      $acl.SetSecurityDescriptorSddlForm(('O:{0}D:P(A;OICI;FA;;;SY)(A;OICI;FA;;;BA)(A;OICI;FA;;;{0})' -f $userSid),[System.Security.AccessControl.AccessControlSections]'Owner,Access')
+      [System.IO.Directory]::SetAccessControl($directory,$acl)
+    `],{env:{...process.env,RSI_FIXTURE_DIRECTORY:config}});
     const host = join(config, "host-profiles/fixture"); const application = join(config, "application-profiles/browser-fixture");
     await mkdir(host, { recursive: true }); await mkdir(application, { recursive: true });
     await writeFile(join(config, "rsi.toml"), "format = 1\n[service]\nkind = 'catalog'\nid = 'fixture'\n");
@@ -194,10 +213,10 @@ export async function startService({ binary, assets, report, configure, onReques
     await writeFile(join(application, "application.profile.toml"), `format = 1\n[[steps]]\nkind = "plugin"\nid = "service"\nplugin = "rsi.application.service"\nconfig = { host_profile = "fixture" }\n[[steps]]\nkind = "plugin"\nid = "http"\nplugin = "rsi.application.serve"\n`);
     await configure?.({ config, workspace, run, provider });
     const certificate = join(temporary, "certificate.pem"); const key = join(temporary, "key.pem");
-    boundedRun("openssl", ["req", "-x509", "-newkey", "rsa:2048", "-nodes", "-days", "1", "-subj", "/CN=localhost", "-addext", "subjectAltName=IP:127.0.0.1,DNS:localhost", "-keyout", key, "-out", certificate]);
+    if (!developmentHttp) boundedRun("openssl", ["req", "-x509", "-newkey", "rsa:2048", "-nodes", "-days", "1", "-subj", "/CN=localhost", "-addext", "subjectAltName=IP:127.0.0.1,DNS:localhost", "-keyout", key, "-out", certificate]);
     const reservation = net.createServer(); reservation.listen(0, "127.0.0.1"); await once(reservation, "listening");
     const address = `127.0.0.1:${reservation.address().port}`;
-    let origin = `https://${address}`, launchUrl;
+    let origin = `${developmentHttp?'http':'https'}://${address}`, launchUrl;
     await new Promise(resolve => reservation.close(resolve));
     if (watchAssets) {
       const directory = dirname(assets), output = join(directory, "web-package");
@@ -208,7 +227,7 @@ export async function startService({ binary, assets, report, configure, onReques
     hostStarted = true;
     const argumentsValue = watchAssets
       ? ["--watch", "web", "--port", "0", "--no-open"]
-      : ["run", "browser-fixture", "--assets", assets, "--bind", address, "--origin", origin, "--tls-certificate", certificate, "--tls-key", key];
+      : ["run", "browser-fixture", "--assets", assets, "--bind", address, "--origin", origin, ...(developmentHttp ? ['--dev-http'] : ["--tls-certificate", certificate, "--tls-key", key])];
     child = spawn(binary, argumentsValue, { cwd: workspace, env, stdio: ["ignore", "pipe", "pipe"] });
     stopped = once(child, "exit");
     child.stderr.on("data", chunk => { stderr += chunk.toString(); if (stderr.length > 1024 * 1024) { stderr = stderr.slice(0, 1024 * 1024); child.kill("SIGTERM"); } });
@@ -221,7 +240,17 @@ export async function startService({ binary, assets, report, configure, onReques
     } else assert.equal(JSON.parse(ready).event, "serving");
     };
     await startProcess();
-    return { origin, launchUrl, workspace, run, provider, close, get pid() { return child.pid; },
+    return { origin, launchUrl, developmentHttp: new URL(origin).protocol === 'http:', workspace, run, provider, close, get pid() { return child.pid; },
+      async readSessionFacts(session) {
+        assert(typeof session==='string'&&session.length>0&&session.length<=128);
+        const {DatabaseSync}=await import('node:sqlite');
+        const database=new DatabaseSync(join(env.XDG_STATE_HOME,'rsi/agent/sessions.sqlite3'),{readOnly:true});
+        try {
+          const {facts,selection}=readFactEvidence(database,session);
+          await writeFile(join(report,'fact-evidence-source.json'),JSON.stringify(selection));
+          return facts;
+        } finally {database.close();}
+      },
       probe(program, input) { return boundedRun(program, [], {cwd: workspace, env, encoding: 'utf8', input: JSON.stringify(input)}); },
       async restart(change) { await stopProcess(); await change?.(); await startProcess(); },
       register(label) {

@@ -14,7 +14,7 @@ export async function verifyMcp(page,pane,report,browser) {
       await page.getByRole('button',{name:'Edit as JSON',exact:true}).click();
       const editor=page.getByRole('textbox',{name:'Settings JSON',exact:true});await editor.fill(JSON.stringify(config));const old=await editor.elementHandle();
       await page.getByRole('button',{name:'Save settings',exact:true}).click();await page.waitForFunction(element=>!element.isConnected,old);await old.dispose();
-      await page.getByRole('button',{name:'Close details',exact:true}).click();
+      await page.getByRole('button',{name:'Plugins',exact:true}).click();
     };
     await edit({servers:[{id:'fixture',enabled:true,tools:['echo'],transport:{kind:'streamable_http',url:fixture.url,credential:{owner:'rsi.mcp',slot:'browser-fixture'}}}]});
     await panel.getByRole('button',{name:'Read MCP status',exact:true}).click();await panel.getByText('Saved HTTP settings need to be applied.',{exact:false}).waitFor();

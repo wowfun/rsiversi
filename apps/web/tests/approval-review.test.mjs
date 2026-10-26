@@ -59,7 +59,7 @@ test('request refresh coalesces clicks and keeps decisions disabled until fresh 
   const {readFile} = await import('node:fs/promises'); const {default:vm} = await import('node:vm');
   const source = await readFile(new URL('../app.js', import.meta.url), 'utf8');
   const start = source.indexOf('function interactionRefresh(');
-  const end = source.indexOf('function showDialog(', start);
+  const end = source.indexOf('const settingsDialog =', start);
   let resolve, reject, calls=0;
   const controls=[{disabled:false},{disabled:true},{disabled:false}];
   const scope = {button:(_label,run)=>({run}), form:{setAttribute(){},querySelectorAll:()=>controls},

@@ -1,5 +1,42 @@
 # Web product verification
 
+The review lifecycle fixture exercises current React resource owners against real
+IndexedDB, including delayed opens and window replacement. It also covers
+Settings editor mode switches, exact JSON retention, UTF-8 byte limits
+and read-only controls after rebuilding the form. Device-storage tests
+verify that failure to reserve cleanup aborts the layout transaction. UI alignment
+uses the unified Settings window and verifies disclosure Escape/outside dismissal,
+focus return, Verbose inline source actions, modal Escape, transcript keyboard regions and responsive geometry. These are
+document/runtime checks; `plan-live.mjs` separately exercises an explicitly selected
+real provider through the paired Worker and native service.
+Windows UI alignment verifies known-path workspace entry; native directory
+browsing/creation retains its Unix-only contract. Live DeepSeek profiles bind the
+request's default output cap to the explicitly supplied default output reserve,
+so a provider default cannot silently exceed the fixture's declared capacity.
+Manual inspection can explicitly select the fixture's loopback development HTTP
+mode; TLS remains the automated default. Windows fixture process teardown uses
+Node's TerminateProcess, records that limitation, then independently stops the
+isolated Host through its normal command. It is not graceful application-exit
+evidence; document disconnect and Host drain have their own assertions.
+Before deleting an isolated home, cleanup retains its Host diagnostic log when
+it is at most 1 MiB, including failures before service readiness.
+Windows fixtures create the native filesystem's exact protected private ACL
+(TokenUser owner; explicit full control for SYSTEM, Administrators and TokenUser)
+on their newly created configuration directory before writing settings. They
+never repair user paths.
+
+The Settings draft fixture checks Plugins-to-Advanced namespace routing through
+Web retrieval on native Windows. MCP management requires native Unix Profile
+authority, so Windows asserts its editor entry is absent; Unix additionally
+checks the MCP editor entry. Missing Windows MCP management is not a fixture
+timeout or a claim of supported management.
+The live plan probe reads up to 512 Facts and 16 MiB from its own SQLite database
+in one read-only transaction for durable evidence; this avoids the Unix-only
+interactive Line input adapter. Native terminal execution remains Linux-only.
+The Dock fixture reports that execution as skipped on other platforms. On Windows
+it exercises the native terminal refusal through the paired Worker and checks
+that no cleanup responsibility or retry banner is created.
+
 `verify.mjs` runs `worker-conformance.mjs` before the acknowledgement deadline
 probe against the published Worker and Rust/Wasm module. The fixture supplies
 its verified build family and an isolated registered device receipt. It checks
@@ -7,6 +44,17 @@ presentation-frame acknowledgements, valid commands, structured Rust admission
 refusals for malformed commands, continued use after rejection, and zero live
 request/timer resources after disconnect. It adds no production test export and
 does not assert that Serde unit variants reject unknown fields.
+`settings-drafts.mjs` verifies exact drafts across sections, concurrent-writer
+conflicts, exact refreshed contents after explicit reload and Worker refusals before connection. `restore-tabs.mjs`
+reopens sixteen persisted file views through the real document admission queue.
+Settings also verifies Plugins links select the requested namespace.
+Both run in the product Web CI step and use `RSI_REPORT_DIR` for a new report
+directory and the paired publication. Settings checks include keyboard focus after
+save/discard; `review-lifecycle.mjs` separately covers deterministic reply ordering,
+invalid JSON, untouched mode switches and safe read recovery while awaiting a fresh ticket.
+Restoration setup duplicates tabs through the product menu; it does not import
+Dock internals or write IndexedDB records. The restored run requires exactly 16
+open replies and no local or global cleanup notices.
 
 Running fixtures select one paired publication and hold its
 [generation lease](../../../apps/devtools/README.md) through Node lifetime,
@@ -404,7 +452,12 @@ completion may also arrive without a sampled intermediate `Running` status.
 `evidence.test.mjs` checks this causal matching without a live credential.
 Live fixture cleanup attempts every resource close before scanning all evidence
 text for credentials, even when a close fails. Cleanup and redaction failures
-are both reported.
+are both reported. Redaction tests exercise ordinary nested files independently
+of link creation. The no-follow fixture uses a directory junction on Windows
+and a file symlink on POSIX, verifies the native link type, and checks that the
+external target remains unchanged. Default Windows checks require neither
+administrator privileges nor Developer Mode; they do not claim file-symlink
+creation coverage on hosts that forbid it.
 
 Preview probes include catalog overflow, encoded image dimension rejection before
 any image `src` assignment, and actual frame-src/frame-ancestors behavior with a
@@ -674,6 +727,10 @@ standard product login and caller state instead.
 The product service fixture runs `rsi.application.serve` against the shared Host
 and selects its independent Web bundle with `--assets`. Its foreground connection
 owns only the HTTPS listener; cleanup explicitly stops the isolated Host.
+On Windows the fixture applies a private ACL to its temporary configuration
+directory before launch, and records Node's SIGTERM/TerminateProcess shutdown
+separately from a graceful exit. Both admission and cleanup branches have isolated
+service tests in the Windows tooling job.
 
 Service readiness allows 210 seconds for a cold debug executable to publish its
 immutable Host image before binding. This is distinct from the fixture-lease
@@ -687,3 +744,17 @@ entry and lazy module are observed source inputs. The compiled WASM artifact is
 not a source input and exceeds the source owner's per-file observation bound.
 It connects through the printed one-use browser launch URL. Cold static/broken
 renderer cases continue to use the authenticated Serve fixture.
+
+Manual-receipt browser setup carries the Service's explicit development-HTTP mode
+to the login checkbox before connecting. HTTPS leaves the option unchanged.
+The isolated live Fact reader selects at most 513 ordered metadata rows and stops
+on the first count or accumulated-byte overflow (512 Facts, 16 MiB). Only an
+admitted selection is loaded and parsed, in the same read transaction.
+Browser evidence capture is best effort on failure. Fixture teardown attempts
+both browser and Service cleanup and retains the original error if either fails.
+
+`review-lifecycle.mjs` renders 64 cleanup failures with the owning component and
+stylesheet at 1440 px and 390 px, checks the last Retry control by keyboard, and
+retains screenshots. Set `RSI_REVIEW_PREVIEW=1` with `RSI_REPORT_DIR` to keep that
+isolated component scene available at the printed local URL for manual inspection.
+This scene verifies cleanup layout; it is not a full connected-workbench capture.
