@@ -671,7 +671,7 @@ pub(super) fn turn_store_error(error: StoreError) -> TurnError {
     match error {
         StoreError::ValidationBusy | StoreError::ReadCapacity => TurnError::Capacity,
         StoreError::Invalid(message) => TurnError::Invalid(bounded_diagnostic(&message)),
-        error @ StoreError::SchemaMismatch { .. } => {
+        error @ (StoreError::SchemaMismatch { .. } | StoreError::Corrupt(_)) => {
             TurnError::Invariant(bounded_diagnostic(&error.to_string()))
         }
         StoreError::NotFound(session) => TurnError::SessionNotFound(session),

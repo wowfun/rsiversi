@@ -15,10 +15,26 @@ async fn mailbox_admission_creates_a_zero_fact_session_and_survives_restart() {
         .await
         .unwrap();
     assert_eq!(receipt.state, MessageState::Pending);
-    let facts = store.read_facts(&session_id, 0, 1).await.unwrap();
+    let facts = store
+        .read_facts(
+            &session_id,
+            0,
+            1,
+            rsi_agent_store_protocol::MAXIMUM_STORE_FACT_PAGE_BYTES,
+        )
+        .await
+        .unwrap();
     assert_eq!(facts.durable_seq, 0);
     assert!(facts.facts.is_empty());
-    let controls = store.read_controls(&session_id, 0, 8).await.unwrap();
+    let controls = store
+        .read_controls(
+            &session_id,
+            0,
+            8,
+            rsi_agent_store_protocol::MAXIMUM_STORE_FACT_PAGE_BYTES,
+        )
+        .await
+        .unwrap();
     assert_eq!(controls.durable_seq, 1);
     assert_eq!(controls.records.len(), 1);
     let recent = store
@@ -31,7 +47,15 @@ async fn mailbox_admission_creates_a_zero_fact_session_and_survives_restart() {
         .unwrap();
     assert_eq!(recent.sessions.len(), 1);
     assert_eq!(recent.sessions[0].header.session_id(), &session_id);
-    let history = store.read_facts_before(&session_id, 0, 8).await.unwrap();
+    let history = store
+        .read_facts_before(
+            &session_id,
+            0,
+            8,
+            rsi_agent_store_protocol::MAXIMUM_STORE_FACT_PAGE_BYTES,
+        )
+        .await
+        .unwrap();
     assert_eq!(history.before_seq, 1);
     assert_eq!(history.durable_seq, 0);
     assert!(history.facts.is_empty());
@@ -128,7 +152,15 @@ async fn message_claim_atomically_enters_activation_turn_step_and_input() {
             entered_fact_seq: 3,
         }
     );
-    let facts = store.read_facts(&session_id, 0, 8).await.unwrap();
+    let facts = store
+        .read_facts(
+            &session_id,
+            0,
+            8,
+            rsi_agent_store_protocol::MAXIMUM_STORE_FACT_PAGE_BYTES,
+        )
+        .await
+        .unwrap();
     assert_eq!(facts.durable_seq, 3);
     assert!(matches!(
         facts.facts[0].body(),
@@ -142,7 +174,15 @@ async fn message_claim_atomically_enters_activation_turn_step_and_input() {
         facts.facts[2].body(),
         SessionFactBody::InputMessageEntered { .. }
     ));
-    let controls = store.read_controls(&session_id, 0, 8).await.unwrap();
+    let controls = store
+        .read_controls(
+            &session_id,
+            0,
+            8,
+            rsi_agent_store_protocol::MAXIMUM_STORE_FACT_PAGE_BYTES,
+        )
+        .await
+        .unwrap();
     assert_eq!(controls.durable_seq, 3);
 
     let mut resumed = restarted

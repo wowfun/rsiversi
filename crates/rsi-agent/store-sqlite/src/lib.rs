@@ -15,13 +15,12 @@ use rsi_agent_session_protocol::{
 use rsi_agent_store_protocol::{
     AGENT_STORE_SCHEMA_VERSION, AppendBatch, AppendCommit, AtomicAgentCommit,
     AtomicAgentCommitResult, AtomicSessionAppend, CasObjectRef, MAXIMUM_CONTEXT_CHECKPOINT_BYTES,
-    MAXIMUM_STORE_CAS_BYTES, MAXIMUM_STORE_CONTROL_PAGE_BYTES, MAXIMUM_STORE_FACT_PAGE_BYTES,
-    MAXIMUM_STORE_MAILBOX_PAGE_BYTES, Result, SessionStore, SessionStoreContract,
-    StoreActivationPhase, StoreActiveActivation, StoreAgentChild, StoreAgentChildPage,
-    StoreAgentDescendantStatus, StoreAgentMailbox, StoreAgentMailboxSummary, StoreAgentMessage,
-    StoreAgentMessageState, StoreAgentSessionStatus, StoreAgentSubtreeSnapshot,
-    StoreBackwardFactPage, StoreControlPage, StoreError, StoreFactPage, StoreFactTurnRole,
-    StoreForkBoundary, StoreOpenTurn, StoreOpenTurnPage, StoreReadyMessage,
+    MAXIMUM_STORE_CAS_BYTES, MAXIMUM_STORE_CONTROL_PAGE_BYTES, MAXIMUM_STORE_MAILBOX_PAGE_BYTES,
+    Result, SessionStore, SessionStoreContract, StoreActivationPhase, StoreActiveActivation,
+    StoreAgentChild, StoreAgentChildPage, StoreAgentDescendantStatus, StoreAgentMailbox,
+    StoreAgentMailboxSummary, StoreAgentMessage, StoreAgentMessageState, StoreAgentSessionStatus,
+    StoreAgentSubtreeSnapshot, StoreBackwardFactPage, StoreControlPage, StoreError, StoreFactPage,
+    StoreFactTurnRole, StoreForkBoundary, StoreOpenTurn, StoreOpenTurnPage, StoreReadyMessage,
     StoreReadyMessageCursor, StoreReadyMessagePage, StoreReadyRootPage, StoreRecentSession,
     StoreRecentSessionCursor, StoreRecentSessionPage, StoreSessionWatermarks, StoreTurnBoundary,
     StoreTurnFactPage, StoreWaitingActivationPage, StoredContextCheckpoint, WriteContextCheckpoint,
@@ -528,9 +527,50 @@ struct StoreInner {
 
 struct DatabaseConnections {
     // Readers close before the final writer, which checkpoints the WAL.
-    reader: Mutex<Connection>,
-    validation_reader: Mutex<Connection>,
-    writer: Mutex<Connection>,
+    readers: Mutex<Vec<Connection>>,
+    validation_reader: Mutex<Option<Connection>>,
+    writer: Mutex<Option<Connection>>,
+}
+
+// The checkout owns the Store, so readers cannot outlive its writer lease.
+struct ReaderLease {
+    connection: Option<Connection>,
+    owner: Arc<StoreInner>,
+}
+impl Drop for ReaderLease {
+    fn drop(&mut self) {
+        if let Some(connection) = self.connection.take() {
+            if std::thread::panicking() || !connection.is_autocommit() {
+                self.owner.reader_admission.close();
+            } else {
+                match self.owner.connections.readers.lock() {
+                    Ok(mut readers) => readers.push(connection),
+                    Err(_) => self.owner.reader_admission.close(),
+                }
+            }
+        }
+    }
+}
+fn run_connection<T>(
+    slot: &mut Option<Connection>,
+    admission: &Semaphore,
+    operation: impl FnOnce(&mut Connection) -> Result<T>,
+) -> Result<T> {
+    if admission.is_closed() {
+        return Err(StoreError::Io("SQLite lane closed".into()));
+    }
+    let connection = slot
+        .as_mut()
+        .ok_or_else(|| StoreError::Io("SQLite connection closed".into()))?;
+    let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| operation(connection)));
+    if result.is_err() || !connection.is_autocommit() {
+        admission.close();
+        drop(slot.take());
+        return Err(StoreError::Io(
+            "SQLite worker left an unhealthy connection; lane closed".into(),
+        ));
+    }
+    result.expect("panic handled")
 }
 
 #[derive(Debug, Default)]
@@ -678,6 +718,12 @@ impl SqliteStore {
             configure_reader(&reader)?;
             reader
         };
+        let second_reader = Connection::open_with_flags(
+            &database_path,
+            OpenFlags::SQLITE_OPEN_READ_ONLY | OpenFlags::SQLITE_OPEN_NOFOLLOW,
+        )
+        .map_err(sql_error)?;
+        configure_reader(&second_reader)?;
         let validation_connection = Connection::open_with_flags(
             &database_path,
             OpenFlags::SQLITE_OPEN_READ_ONLY | OpenFlags::SQLITE_OPEN_NOFOLLOW,
@@ -722,16 +768,16 @@ impl SqliteStore {
                 cas_ownership: cas_ownership::Ownership::default(),
                 cas_publication: cas::Publication::default(),
                 connections: DatabaseConnections {
-                    reader: Mutex::new(reader_connection),
-                    validation_reader: Mutex::new(validation_connection),
-                    writer: Mutex::new(writer_connection),
+                    readers: Mutex::new(vec![reader_connection, second_reader]),
+                    validation_reader: Mutex::new(Some(validation_connection)),
+                    writer: Mutex::new(Some(writer_connection)),
                 },
                 #[cfg(windows)]
                 _namespace: namespace,
                 #[cfg(windows)]
                 _database: database,
                 writer_admission: Arc::new(Semaphore::new(1)),
-                reader_admission: Arc::new(Semaphore::new(1)),
+                reader_admission: Arc::new(Semaphore::new(2)),
                 validated_sessions: Arc::new(Mutex::new(ValidatedSessionCache::default())),
                 fork_boundaries: Mutex::new(ForkBoundaryCache::default()),
                 #[cfg(test)]
@@ -810,6 +856,7 @@ impl SqliteStore {
         #[cfg(feature = "test-support")]
         let queued = std::time::Instant::now();
         let permit = admission
+            .clone()
             .acquire_owned()
             .await
             .map_err(|_| StoreError::Io(closed_message.into()))?;
@@ -824,7 +871,11 @@ impl SqliteStore {
                 dispatched,
                 std::any::type_name::<T>(),
             );
-            let result = operation();
+            let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(operation))
+                .unwrap_or_else(|_| {
+                    admission.close();
+                    Err(StoreError::Io("SQLite worker panicked; lane closed".into()))
+                });
             #[cfg(feature = "test-support")]
             drop(measurement);
             result
@@ -846,12 +897,17 @@ impl SqliteStore {
             Some(self.inner.writer_measurements.clone()),
             move || {
                 let mut connection = owner.connections.writer.lock().map_err(|_| {
+                    owner.writer_admission.close();
                     StoreError::Io("SQLite writer connection mutex was poisoned".into())
                 })?;
-                reference_validation::check_cached(&owner, &connection)?;
-                let result = operation(&mut connection);
-                reference_validation::after_write(&owner, &connection, result.is_ok())?;
-                result
+                run_connection(&mut connection, &owner.writer_admission, |connection| {
+                    reference_validation::check_cached(&owner, connection)?;
+                    let result = operation(connection);
+                    if connection.is_autocommit() {
+                        reference_validation::after_write(&owner, connection, result.is_ok())?;
+                    }
+                    result
+                })
             },
         )
         .await
@@ -869,10 +925,22 @@ impl SqliteStore {
             #[cfg(feature = "test-support")]
             Some(self.inner.reader_measurements.clone()),
             move || {
-                let mut connection = owner.connections.reader.lock().map_err(|_| {
-                    StoreError::Io("SQLite reader connection mutex was poisoned".into())
-                })?;
-                operation(&mut connection)
+                let connection = owner
+                    .connections
+                    .readers
+                    .lock()
+                    .map_err(|_| {
+                        owner.reader_admission.close();
+                        StoreError::Io("SQLite reader pool mutex was poisoned".into())
+                    })?
+                    .pop()
+                    .ok_or_else(|| StoreError::Io("SQLite reader slot has no connection".into()))?;
+                let mut lease = ReaderLease {
+                    connection: Some(connection),
+                    owner,
+                };
+                let admission = lease.owner.reader_admission.clone();
+                run_connection(&mut lease.connection, &admission, operation)
             },
         )
         .await

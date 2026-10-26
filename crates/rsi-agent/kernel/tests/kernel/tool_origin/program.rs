@@ -320,7 +320,12 @@ async fn nested_program_calls_bind_frozen_catalog_parent_and_ordinals_and_stay_o
     );
     flush_bodies(&kernel, &claim, vec![started(turn, "one")]).await;
     let prefix = store
-        .read_facts(claim.session_id(), 0, 128)
+        .read_facts(
+            claim.session_id(),
+            0,
+            128,
+            rsi_agent_store_protocol::MAXIMUM_STORE_FACT_PAGE_BYTES,
+        )
         .await
         .unwrap()
         .facts;
@@ -387,7 +392,12 @@ async fn nested_program_calls_bind_frozen_catalog_parent_and_ordinals_and_stay_o
         .await
         .unwrap();
     let suffix = store
-        .read_facts(claim.session_id(), prefix.last().unwrap().seq(), 128)
+        .read_facts(
+            claim.session_id(),
+            prefix.last().unwrap().seq(),
+            128,
+            rsi_agent_store_protocol::MAXIMUM_STORE_FACT_PAGE_BYTES,
+        )
         .await
         .unwrap()
         .facts;

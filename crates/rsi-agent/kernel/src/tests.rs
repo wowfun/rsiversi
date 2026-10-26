@@ -2,7 +2,7 @@ use super::turn_state::apply_tool_body;
 use super::*;
 
 #[derive(Debug)]
-struct ClaimFixture;
+pub(super) struct ClaimFixture;
 #[async_trait]
 impl rsi_tools_protocol::ToolRuntime for ClaimFixture {
     fn visit_definitions(&self, visitor: &mut dyn FnMut(&rsi_tools_protocol::ToolDefinition)) {

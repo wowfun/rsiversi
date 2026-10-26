@@ -8,6 +8,7 @@ use rsi_agent_session_protocol::{
     CommandArguments, ContributionId, DomainIdentity, DomainRequestId, SessionCommandDescriptor,
     SessionCommandInvocation,
 };
+use rsi_agent_store_protocol::MAXIMUM_STORE_FACT_PAGE_BYTES as FACT_PAGE_BYTES;
 use rsi_agent_turn_protocol::SessionCommands;
 
 #[tokio::test]
@@ -366,7 +367,7 @@ async fn commands_commit_idle_state_once_and_query_after_cold_recovery_without_c
         let fixture = Fixture::start(store, false).await;
         let before = fixture
             .store
-            .read_facts(&fixture.session_id, 0, 16)
+            .read_facts(&fixture.session_id, 0, 16, FACT_PAGE_BYTES)
             .await
             .unwrap();
         let input = fixture.invocation("toggle-on", true).await;
@@ -399,7 +400,7 @@ async fn commands_commit_idle_state_once_and_query_after_cold_recovery_without_c
         assert_eq!(
             fixture
                 .store
-                .read_facts(&fixture.session_id, 0, 16)
+                .read_facts(&fixture.session_id, 0, 16, FACT_PAGE_BYTES)
                 .await
                 .unwrap()
                 .facts,

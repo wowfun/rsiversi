@@ -1,5 +1,8 @@
 use super::*;
 #[cfg(any(unix, windows))]
+#[path = "tests/admission.rs"]
+mod admission;
+#[cfg(any(unix, windows))]
 #[path = "tests/maintenance.rs"]
 mod maintenance;
 
@@ -50,8 +53,10 @@ async fn cas_publication_faults_never_admit_metadata_and_retry_resynchronizes() 
             let count: i64 = store
                 .inner
                 .connections
-                .reader
+                .readers
                 .lock()
+                .unwrap()
+                .last()
                 .unwrap()
                 .query_row("SELECT COUNT(*) FROM cas_objects", [], |row| row.get(0))
                 .unwrap();
@@ -81,8 +86,10 @@ async fn cas_publication_faults_never_admit_metadata_and_retry_resynchronizes() 
             let count: i64 = store
                 .inner
                 .connections
-                .reader
+                .readers
                 .lock()
+                .unwrap()
+                .last()
                 .unwrap()
                 .query_row("SELECT COUNT(*) FROM cas_objects", [], |row| row.get(0))
                 .unwrap();
@@ -366,15 +373,18 @@ async fn online_validation_sql_work() {
             }
             drop(store);
             let store = SqliteStore::open(root.path()).unwrap();
-            for connection in [
-                &store.inner.connections.validation_reader,
-                &store.inner.connections.reader,
-            ] {
-                connection
-                    .lock()
-                    .unwrap()
-                    .trace_v2(TraceEventCodes::SQLITE_TRACE_PROFILE, Some(count));
-            }
+            selection_work::trace_readers(
+                &store,
+                TraceEventCodes::SQLITE_TRACE_PROFILE,
+                Some(count),
+            );
+            store
+                .inner
+                .connections
+                .validation_reader
+                .lock()
+                .unwrap()
+                .trace_v2(TraceEventCodes::SQLITE_TRACE_PROFILE, Some(count));
             for cycle in 0..3 {
                 VM.store(0, Ordering::Relaxed);
                 SCANS.store(0, Ordering::Relaxed);
@@ -383,7 +393,20 @@ async fn online_validation_sql_work() {
                 let previous_runs = store.inner.validation_runs.load(Ordering::Relaxed);
                 let start = std::time::Instant::now();
                 for id in &sessions {
-                    assert_eq!(store.read_facts(id, 0, 1).await.unwrap().facts.len(), 1);
+                    assert_eq!(
+                        store
+                            .read_facts(
+                                id,
+                                0,
+                                1,
+                                rsi_agent_store_protocol::MAXIMUM_STORE_FACT_PAGE_BYTES
+                            )
+                            .await
+                            .unwrap()
+                            .facts
+                            .len(),
+                        1
+                    );
                 }
                 eprintln!(
                     "sqlite sessions={size} facts={facts} controls={controls} cycle={cycle} fact_page_calls={size} validation_runs={} vm_steps={} full_scan_steps={} validation_queue_ns={} validation_work_ns={} elapsed={:?}",
@@ -400,7 +423,12 @@ async fn online_validation_sql_work() {
             let validated = store.inner.validation_runs.load(Ordering::Relaxed);
             for _ in 0..100 {
                 store
-                    .read_facts(sessions.last().unwrap(), 0, 1)
+                    .read_facts(
+                        sessions.last().unwrap(),
+                        0,
+                        1,
+                        rsi_agent_store_protocol::MAXIMUM_STORE_FACT_PAGE_BYTES,
+                    )
                     .await
                     .unwrap();
             }
@@ -572,7 +600,8 @@ async fn control_projection_replay_enforces_the_individual_control_bound() {
         })
         .await
         .unwrap();
-    let writer = store.inner.connections.writer.lock().unwrap();
+    let mut slot = store.inner.connections.writer.lock().unwrap();
+    let writer = slot.as_mut().unwrap();
     let record = AgentControlRecord::new(
         1,
         1,
@@ -621,7 +650,20 @@ async fn poisoned_proof_cache_does_not_override_a_committed_write() {
     SqliteStore::verify(root.path()).expect("committed write did not survive cache failure");
     let store = SqliteStore::open(root.path()).unwrap();
     store.validate_session(&id).await.unwrap();
-    assert_eq!(store.read_facts(&id, 0, 1).await.unwrap().facts.len(), 1);
+    assert_eq!(
+        store
+            .read_facts(
+                &id,
+                0,
+                1,
+                rsi_agent_store_protocol::MAXIMUM_STORE_FACT_PAGE_BYTES
+            )
+            .await
+            .unwrap()
+            .facts
+            .len(),
+        1
+    );
 }
 
 #[test]
@@ -684,7 +726,8 @@ fn cache_insertion_returns_the_retained_proof_and_reuses_it_on_hits() {
 fn recent_session_cursor_seeks_both_columns_of_the_ordering_index() {
     let root = tempfile::tempdir().unwrap();
     let store = SqliteStore::open(root.path()).unwrap();
-    let connection = store.inner.connections.reader.lock().unwrap();
+    let readers = store.inner.connections.readers.lock().unwrap();
+    let connection = readers.last().unwrap();
     let detail = connection
         .query_row(
             "EXPLAIN QUERY PLAN
@@ -704,7 +747,8 @@ fn recent_session_cursor_seeks_both_columns_of_the_ordering_index() {
 fn agent_cursor_queries_seek_their_complete_ordering_keys() {
     let root = tempfile::tempdir().unwrap();
     let store = SqliteStore::open(root.path()).unwrap();
-    let connection = store.inner.connections.reader.lock().unwrap();
+    let readers = store.inner.connections.readers.lock().unwrap();
+    let connection = readers.last().unwrap();
 
     let ready_messages = connection
         .query_row(
@@ -906,16 +950,24 @@ async fn reader_observes_complete_snapshots_across_an_uncommitted_writer() {
         admit_append(
             &transaction,
             &batch,
-            &reference_index::Writer::new(&transaction, &batch.session_id, &Default::default())
-                .unwrap(),
+            &reference_index::Writer::new(
+                &transaction,
+                &batch.session_id,
+                &rsi_agent_store_protocol::ReferenceCodecs::default(),
+            )
+            .unwrap(),
         )
         .unwrap();
         insert_fact(
             &transaction,
             &batch.session_id,
             &batch.facts[0],
-            &reference_index::Writer::new(&transaction, &batch.session_id, &Default::default())
-                .unwrap(),
+            &reference_index::Writer::new(
+                &transaction,
+                &batch.session_id,
+                &rsi_agent_store_protocol::ReferenceCodecs::default(),
+            )
+            .unwrap(),
         )
         .unwrap();
         advance_watermark(&transaction, &batch).unwrap();
@@ -925,18 +977,35 @@ async fn reader_observes_complete_snapshots_across_an_uncommitted_writer() {
     });
 
     entered_rx.await.unwrap();
-    let before = store.read_facts(&session_id, 0, 8).await.unwrap();
+    let before = store
+        .read_facts(
+            &session_id,
+            0,
+            8,
+            rsi_agent_store_protocol::MAXIMUM_STORE_FACT_PAGE_BYTES,
+        )
+        .await
+        .unwrap();
     assert_eq!(before.durable_seq, 1);
     assert_eq!(before.facts.len(), 1);
     release_tx.send(()).unwrap();
     tokio::task::spawn_blocking(move || writer.join().unwrap())
         .await
         .unwrap();
-    let after = store.read_facts(&session_id, 0, 8).await.unwrap();
+    let after = store
+        .read_facts(
+            &session_id,
+            0,
+            8,
+            rsi_agent_store_protocol::MAXIMUM_STORE_FACT_PAGE_BYTES,
+        )
+        .await
+        .unwrap();
     assert_eq!(after.durable_seq, 2);
     assert_eq!(after.facts.len(), 2);
 
-    let reader = store.inner.connections.reader.lock().unwrap();
+    let readers = store.inner.connections.readers.lock().unwrap();
+    let reader = readers.last().unwrap();
     assert_eq!(
         reader
             .query_row("PRAGMA query_only", [], |row| row.get::<_, i64>(0))
@@ -1083,7 +1152,7 @@ async fn missing_subtree_session_is_corruption() {
         })
         .await
         .unwrap();
-    store.inner.connections.writer.lock().unwrap().execute_batch(
+    store.inner.connections.writer.lock().unwrap().as_ref().unwrap().execute_batch(
         "PRAGMA foreign_keys=OFF;
          INSERT INTO agent_nodes VALUES ('missing-session', 'orphan-root', 'orphan-root', '[1]', 'child', '{}');
          PRAGMA foreign_keys=ON;"
@@ -1259,7 +1328,12 @@ async fn cold_subtree_and_quiescence_reject_a_descendant_missing_its_indexes() {
         ));
         assert_eq!(
             store
-                .read_facts(parent.session_id(), 0, 8)
+                .read_facts(
+                    parent.session_id(),
+                    0,
+                    8,
+                    rsi_agent_store_protocol::MAXIMUM_STORE_FACT_PAGE_BYTES
+                )
                 .await
                 .unwrap()
                 .durable_seq,
@@ -1302,7 +1376,8 @@ async fn subtree_snapshot_rejects_cycles_and_oversized_lineage_fields() {
         ("execution_owner_json", " ".repeat(4097)),
     ] {
         let original: String = {
-            let writer = store.inner.connections.writer.lock().unwrap();
+            let mut slot = store.inner.connections.writer.lock().unwrap();
+            let writer = slot.as_mut().unwrap();
             let original = writer
                 .query_row(
                     &format!("SELECT {field} FROM agent_nodes WHERE session_id='subtree-child'"),
@@ -1328,13 +1403,15 @@ async fn subtree_snapshot_rejects_cycles_and_oversized_lineage_fields() {
             .writer
             .lock()
             .unwrap()
+            .as_ref()
+            .unwrap()
             .execute(
                 &format!("UPDATE agent_nodes SET {field}=?1 WHERE session_id='subtree-child'"),
                 [&original],
             )
             .unwrap();
     }
-    store.inner.connections.writer.lock().unwrap().execute(
+    store.inner.connections.writer.lock().unwrap().as_ref().unwrap().execute(
         "INSERT INTO agent_nodes VALUES ('subtree-root', 'subtree-root', 'subtree-child', '[2]', 'root', '{}')",
         [],
     ).unwrap();
@@ -1449,26 +1526,68 @@ async fn fact_pages_admit_stored_lengths_before_materializing_the_next_body() {
         0,
         "the first forward original obeys the caller's budget"
     );
-    let page = store.read_facts(&id, 0, 8).await.unwrap();
+    let page = store
+        .read_facts(
+            &id,
+            0,
+            8,
+            rsi_agent_store_protocol::MAXIMUM_STORE_FACT_PAGE_BYTES,
+        )
+        .await
+        .unwrap();
     assert_eq!(page.facts.len(), 3);
     assert_eq!(count(), 3);
     drop(page);
-    let page = store.read_facts(&id, 2, 8).await.unwrap();
+    let page = store
+        .read_facts(
+            &id,
+            2,
+            8,
+            rsi_agent_store_protocol::MAXIMUM_STORE_FACT_PAGE_BYTES,
+        )
+        .await
+        .unwrap();
     assert_eq!(page.facts[0].seq(), 3);
     assert_eq!(page.facts.len(), 2);
     assert_eq!(count(), 2);
     drop(page);
-    let page = store.read_facts_before(&id, 0, 8).await.unwrap();
+    let page = store
+        .read_facts_before(
+            &id,
+            0,
+            8,
+            rsi_agent_store_protocol::MAXIMUM_STORE_FACT_PAGE_BYTES,
+        )
+        .await
+        .unwrap();
     assert_eq!(page.facts[0].seq(), 3);
     assert!(page.has_more);
     assert_eq!(count(), 2);
     drop(page);
-    let page = store.read_turn_facts(&id, &turn, 1, 8).await.unwrap();
+    let page = store
+        .read_turn_facts(
+            &id,
+            &turn,
+            1,
+            8,
+            rsi_agent_store_protocol::MAXIMUM_STORE_FACT_PAGE_BYTES,
+        )
+        .await
+        .unwrap();
     assert_eq!(page.facts[0].seq(), 2);
     assert!(page.has_more);
     assert_eq!(count(), 2);
     drop(page);
-    let page = store.read_turn_facts(&id, &turn, 2, 1).await.unwrap();
+    let page = store
+        .read_turn_facts(
+            &id,
+            &turn,
+            2,
+            1,
+            rsi_agent_store_protocol::MAXIMUM_STORE_FACT_PAGE_BYTES,
+        )
+        .await
+        .unwrap();
     assert_eq!(page.facts[0].seq(), 3);
     assert!(page.has_more);
     assert_eq!(count(), 1, "count lookahead must not materialize a body");
@@ -1490,7 +1609,8 @@ async fn control_pages_admit_stored_lengths_before_materializing_the_next_body()
         .await
         .unwrap();
     {
-        let writer = store.inner.connections.writer.lock().unwrap();
+        let mut slot = store.inner.connections.writer.lock().unwrap();
+        let writer = slot.as_mut().unwrap();
         // Valid JSON whitespace exercises the stored-byte bound independently of
         // the much smaller canonical record. No mailbox projection is consulted.
         for seq in 1..=2 {
@@ -1524,13 +1644,23 @@ async fn control_pages_admit_stored_lengths_before_materializing_the_next_body()
             .unwrap();
     }
     let page = store
-        .read_controls(header.session_id(), 0, 8)
+        .read_controls(
+            header.session_id(),
+            0,
+            8,
+            rsi_agent_store_protocol::MAXIMUM_STORE_FACT_PAGE_BYTES,
+        )
         .await
         .unwrap();
     assert_eq!(page.records.len(), 1);
     assert_eq!(page.records[0].seq(), 1);
     let next = store
-        .read_controls(header.session_id(), 1, 8)
+        .read_controls(
+            header.session_id(),
+            1,
+            8,
+            rsi_agent_store_protocol::MAXIMUM_STORE_FACT_PAGE_BYTES,
+        )
         .await
         .unwrap();
     assert_eq!(next.records.len(), 1);
@@ -1617,14 +1747,39 @@ async fn paused_cold_validation_does_not_block_foreground_reads_or_writes() {
     let warm = seed_session(&store, "warm").await;
     drop(store);
     let store = SqliteStore::open(root.path()).unwrap();
-    store.read_facts(&warm, 0, 1).await.unwrap();
+    store
+        .read_facts(
+            &warm,
+            0,
+            1,
+            rsi_agent_store_protocol::MAXIMUM_STORE_FACT_PAGE_BYTES,
+        )
+        .await
+        .unwrap();
     let (entered, release) = pause_next_validation(&store);
     let worker = store.clone();
-    let validation = tokio::spawn(async move { worker.read_facts(&cold, 0, 1).await });
+    let validation = tokio::spawn(async move {
+        worker
+            .read_facts(
+                &cold,
+                0,
+                1,
+                rsi_agent_store_protocol::MAXIMUM_STORE_FACT_PAGE_BYTES,
+            )
+            .await
+    });
     entered.await.unwrap();
     let foreground = tokio::time::timeout(Duration::from_secs(2), async {
         store.header(&warm).await.unwrap();
-        store.read_facts(&warm, 0, 1).await.unwrap();
+        store
+            .read_facts(
+                &warm,
+                0,
+                1,
+                rsi_agent_store_protocol::MAXIMUM_STORE_FACT_PAGE_BYTES,
+            )
+            .await
+            .unwrap();
         store
             .append(AppendBatch {
                 session_id: warm.clone(),
@@ -1693,7 +1848,15 @@ async fn last_waiter_cancellation_preserves_reusable_validation_proof() {
         .unwrap();
     drain_cold_validation(&store).await;
     assert!(store.touch_validated_session(&id));
-    store.read_facts(&id, 0, 1).await.unwrap();
+    store
+        .read_facts(
+            &id,
+            0,
+            1,
+            rsi_agent_store_protocol::MAXIMUM_STORE_FACT_PAGE_BYTES,
+        )
+        .await
+        .unwrap();
     assert_eq!(store.inner.validation_runs.load(Ordering::Relaxed), 1);
 }
 
@@ -1787,7 +1950,15 @@ async fn operational_reads_reuse_proofs_under_bounded_scan_pressure() {
         for misses in expected {
             let previous = store.inner.validation_runs.load(Ordering::Relaxed);
             for id in &sessions {
-                let page = store.read_facts(id, 0, 1).await.unwrap();
+                let page = store
+                    .read_facts(
+                        id,
+                        0,
+                        1,
+                        rsi_agent_store_protocol::MAXIMUM_STORE_FACT_PAGE_BYTES,
+                    )
+                    .await
+                    .unwrap();
                 assert_eq!(page.facts.len(), 1);
             }
             assert_eq!(
@@ -1799,14 +1970,10 @@ async fn operational_reads_reuse_proofs_under_bounded_scan_pressure() {
     }
 }
 
-#[tokio::test]
 #[cfg(unix)]
-async fn cold_control_replay_decodes_each_record_once() {
-    let root = tempfile::tempdir().unwrap();
-    let store = SqliteStore::open(root.path()).unwrap();
-    let id = seed_session(&store, "single-decode").await;
+fn discarded_message_controls(id: &SessionId, count: u64) -> Vec<AgentControlRecord> {
     let mut controls = Vec::new();
-    for seq in (1..=500).step_by(2) {
+    for seq in (1..=count).step_by(2) {
         let message_id = MessageId::new(format!("message-{seq}")).unwrap();
         controls.push(
             AgentControlRecord::new(
@@ -1842,6 +2009,16 @@ async fn cold_control_replay_decodes_each_record_once() {
             .unwrap(),
         );
     }
+    controls
+}
+
+#[tokio::test]
+#[cfg(unix)]
+async fn cold_control_replay_decodes_each_record_once() {
+    let root = tempfile::tempdir().unwrap();
+    let store = SqliteStore::open(root.path()).unwrap();
+    let id = seed_session(&store, "single-decode").await;
+    let controls = discarded_message_controls(&id, 500);
     store
         .commit_agent(AtomicAgentCommit {
             sessions: vec![AtomicSessionAppend {
@@ -1859,7 +2036,15 @@ async fn cold_control_replay_decodes_each_record_once() {
         .unwrap();
     drop(store);
     let store = SqliteStore::open(root.path()).unwrap();
-    store.read_facts(&id, 0, 1).await.unwrap();
+    store
+        .read_facts(
+            &id,
+            0,
+            1,
+            rsi_agent_store_protocol::MAXIMUM_STORE_FACT_PAGE_BYTES,
+        )
+        .await
+        .unwrap();
     store.read_agent_mailbox(&id, None).await.unwrap();
     assert_eq!(store.inner.validation_runs.load(Ordering::Relaxed), 1);
     assert_eq!(store.inner.control_decodes.load(Ordering::Relaxed), 500);
@@ -1888,7 +2073,14 @@ async fn cold_control_replay_decodes_each_record_once() {
         drop(database);
         let store = SqliteStore::open(root.path()).unwrap();
         assert!(matches!(
-            store.read_facts(&id, 0, 1).await,
+            store
+                .read_facts(
+                    &id,
+                    0,
+                    1,
+                    rsi_agent_store_protocol::MAXIMUM_STORE_FACT_PAGE_BYTES
+                )
+                .await,
             Err(StoreError::Corrupt(_))
         ));
         assert_eq!(store.inner.ready_rows_decoded.load(Ordering::Relaxed), 1);
@@ -2056,7 +2248,15 @@ async fn cold_subtree_inspection_and_quiescence_use_the_validation_lane() {
         entered.await.unwrap();
         let progress = tokio::time::timeout(Duration::from_secs(2), async {
             store.header(&other).await.unwrap();
-            store.read_facts(&other, 0, 1).await.unwrap();
+            store
+                .read_facts(
+                    &other,
+                    0,
+                    1,
+                    rsi_agent_store_protocol::MAXIMUM_STORE_FACT_PAGE_BYTES,
+                )
+                .await
+                .unwrap();
             store
                 .append(AppendBatch {
                     session_id: other,
@@ -2080,7 +2280,12 @@ async fn cold_subtree_inspection_and_quiescence_use_the_validation_lane() {
             ));
             assert_eq!(
                 store
-                    .read_facts(parent.session_id(), 0, 1)
+                    .read_facts(
+                        parent.session_id(),
+                        0,
+                        1,
+                        rsi_agent_store_protocol::MAXIMUM_STORE_FACT_PAGE_BYTES
+                    )
                     .await
                     .unwrap()
                     .durable_seq,
@@ -2136,7 +2341,12 @@ async fn quiescence_checks_children_created_by_the_same_commit_without_caching_r
     assert!(!store.touch_validated_session(&child_id));
     assert_eq!(
         store
-            .read_facts(parent.session_id(), 0, 1)
+            .read_facts(
+                parent.session_id(),
+                0,
+                1,
+                rsi_agent_store_protocol::MAXIMUM_STORE_FACT_PAGE_BYTES
+            )
             .await
             .unwrap()
             .durable_seq,
@@ -2236,18 +2446,42 @@ async fn mixed_archive_scans_preserve_hot_validation_proofs_and_allow_writes() {
     drop(store);
     let store = SqliteStore::open(root.path()).unwrap();
     for id in &hot {
-        store.read_facts(id, 0, 1).await.unwrap();
+        store
+            .read_facts(
+                id,
+                0,
+                1,
+                rsi_agent_store_protocol::MAXIMUM_STORE_FACT_PAGE_BYTES,
+            )
+            .await
+            .unwrap();
     }
     let mut fact_seq = 1;
     for cycle in 0..3 {
         let mut hot_misses = 0;
         for chunk in archive.chunks(16) {
             for id in chunk {
-                store.read_facts(id, 0, 1).await.unwrap();
+                store
+                    .read_facts(
+                        id,
+                        0,
+                        1,
+                        rsi_agent_store_protocol::MAXIMUM_STORE_FACT_PAGE_BYTES,
+                    )
+                    .await
+                    .unwrap();
             }
             let before = store.inner.validation_runs.load(Ordering::Relaxed);
             for id in &hot {
-                store.read_facts(id, 0, 1).await.unwrap();
+                store
+                    .read_facts(
+                        id,
+                        0,
+                        1,
+                        rsi_agent_store_protocol::MAXIMUM_STORE_FACT_PAGE_BYTES,
+                    )
+                    .await
+                    .unwrap();
             }
             hot_misses += store.inner.validation_runs.load(Ordering::Relaxed) - before;
             store
@@ -2288,7 +2522,15 @@ async fn prepared_proofs_survive_churn_and_share_saturated_pin_capacity() {
     for index in 0..512 {
         seed_session(&store, &format!("churn-{index}")).await;
     }
-    store.read_facts(&ids[0], 0, 1).await.unwrap();
+    store
+        .read_facts(
+            &ids[0],
+            0,
+            1,
+            rsi_agent_store_protocol::MAXIMUM_STORE_FACT_PAGE_BYTES,
+        )
+        .await
+        .unwrap();
     assert_eq!(store.inner.validation_runs.load(Ordering::Relaxed), before);
     store.validate_session(&ids[256]).await.unwrap();
     let (first, second) = {
@@ -2376,7 +2618,20 @@ async fn prepared_reads_examine_one_pin_regardless_of_unrelated_leases() {
     let id = SessionId::new("pin-work-0").unwrap();
     store.inner.pin_entries_examined.store(0, Ordering::Relaxed);
     for _ in 0..16 {
-        assert_eq!(store.read_facts(&id, 0, 1).await.unwrap().facts.len(), 1);
+        assert_eq!(
+            store
+                .read_facts(
+                    &id,
+                    0,
+                    1,
+                    rsi_agent_store_protocol::MAXIMUM_STORE_FACT_PAGE_BYTES
+                )
+                .await
+                .unwrap()
+                .facts
+                .len(),
+            1
+        );
     }
     assert_eq!(store.inner.pin_entries_examined.load(Ordering::Relaxed), 16);
 }
@@ -2434,7 +2689,7 @@ async fn cold_control_proof_rejects_a_changed_final_prefix_before_read_or_commit
     drop(db);
     let store = SqliteStore::open(root.path()).unwrap();
     assert!(matches!(
-        store.read_facts(&id, 0, 1).await,
+        store.read_facts(&id, 0, 1, rsi_agent_store_protocol::MAXIMUM_STORE_FACT_PAGE_BYTES).await,
         Err(StoreError::Corrupt(message)) if message.contains("control-prefix digest")
     ));
     assert!(!store.touch_validated_session(&id));
@@ -2662,7 +2917,15 @@ async fn warm_reader_case(fact_count: usize, text_bytes: usize, iterations: usiz
         .await
         .unwrap();
     store.prepare_session(&id).await.unwrap();
-    let warm = store.read_facts(&id, 1, fact_count).await.unwrap();
+    let warm = store
+        .read_facts(
+            &id,
+            1,
+            fact_count,
+            rsi_agent_store_protocol::MAXIMUM_STORE_FACT_PAGE_BYTES,
+        )
+        .await
+        .unwrap();
     assert_eq!(warm.facts.len(), fact_count);
     let page_bytes: usize = warm.facts.iter().map(SessionFact::encoded_len).sum();
     drop(warm);
@@ -2671,8 +2934,15 @@ async fn warm_reader_case(fact_count: usize, text_bytes: usize, iterations: usiz
         store.begin_reader_measurements();
         for _ in 0..iterations {
             if mixed {
-                let (page, header) =
-                    tokio::join!(store.read_facts(&id, 1, fact_count), store.header(&id));
+                let (page, header) = tokio::join!(
+                    store.read_facts(
+                        &id,
+                        1,
+                        fact_count,
+                        rsi_agent_store_protocol::MAXIMUM_STORE_FACT_PAGE_BYTES
+                    ),
+                    store.header(&id)
+                );
                 assert_eq!(page.unwrap().facts.len(), fact_count);
                 header.unwrap();
             } else {
@@ -2767,7 +3037,15 @@ async fn cancelled_checkpoint_read_keeps_deferred_admission_in_actual_worker() {
     let root = tempfile::tempdir().unwrap();
     let store = SqliteStore::open(root.path()).unwrap();
     let id = seed_session(&store, "checkpoint-worker-credit").await;
-    let page = store.read_facts(&id, 0, 1).await.unwrap();
+    let page = store
+        .read_facts(
+            &id,
+            0,
+            1,
+            rsi_agent_store_protocol::MAXIMUM_STORE_FACT_PAGE_BYTES,
+        )
+        .await
+        .unwrap();
     store
         .write_context_checkpoint(WriteContextCheckpoint {
             session_id: id.clone(),
@@ -2786,7 +3064,7 @@ async fn cancelled_checkpoint_read_keeps_deferred_admission_in_actual_worker() {
         })
         .await
         .unwrap();
-    let reader = store.inner.connections.reader.lock().unwrap();
+    let readers = store.inner.connections.readers.lock().unwrap();
     let guard = Arc::new(());
     let weak = Arc::downgrade(&guard);
     let pool = rsi_api_protocol::ByteBudget::default();
@@ -2800,7 +3078,7 @@ async fn cancelled_checkpoint_read_keeps_deferred_admission_in_actual_worker() {
     let worker = store.clone();
     let task = tokio::spawn(async move { worker.read_context_checkpoint(&id, reservation).await });
     tokio::time::timeout(std::time::Duration::from_secs(5), async {
-        while store.inner.reader_admission.available_permits() != 0 {
+        while store.inner.reader_admission.available_permits() != 1 {
             tokio::task::yield_now().await;
         }
     })
@@ -2810,12 +3088,12 @@ async fn cancelled_checkpoint_read_keeps_deferred_admission_in_actual_worker() {
     assert!(task.await.unwrap_err().is_cancelled());
     assert!(weak.upgrade().is_some());
     assert_eq!(pool.used(), 0);
-    drop(reader);
+    drop(readers);
     tokio::time::timeout(std::time::Duration::from_secs(5), async {
         while weak.strong_count() != 0 {
             tokio::task::yield_now().await;
         }
-        while store.inner.reader_admission.available_permits() != 1 {
+        while store.inner.reader_admission.available_permits() != 2 {
             tokio::task::yield_now().await;
         }
     })
@@ -2985,7 +3263,15 @@ async fn checkpoint_length_and_body_share_a_snapshot_across_admission() {
     let root = tempfile::tempdir().unwrap();
     let store = SqliteStore::open(root.path()).unwrap();
     let id = seed_session(&store, "checkpoint-read-snapshot").await;
-    let facts = store.read_facts(&id, 0, 1).await.unwrap();
+    let facts = store
+        .read_facts(
+            &id,
+            0,
+            1,
+            rsi_agent_store_protocol::MAXIMUM_STORE_FACT_PAGE_BYTES,
+        )
+        .await
+        .unwrap();
     store
         .write_context_checkpoint(WriteContextCheckpoint {
             session_id: id.clone(),

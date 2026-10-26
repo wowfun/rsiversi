@@ -145,10 +145,128 @@ pub async fn assert_mechanical_store_contract(
         })
         .await
         .expect("append open-turn event");
-    let first = store.read_facts(&session_id, 0, 1).await.unwrap();
+    let first = store
+        .read_facts(
+            &session_id,
+            0,
+            1,
+            rsi_agent_store_protocol::MAXIMUM_STORE_FACT_PAGE_BYTES,
+        )
+        .await
+        .unwrap();
     assert_eq!(first.facts, vec![accepted.clone()]);
     assert!(!first.caught_up());
-    let second = store.read_facts(&session_id, 1, 1).await.unwrap();
+    let bytes = accepted.encoded_len();
+    assert_eq!(
+        store.read_facts(&session_id, 0, 512, bytes - 1).await,
+        Err(StoreError::ReadRequiresCapacity {
+            minimum_bytes: bytes
+        })
+    );
+    let short = store.read_facts(&session_id, 0, 512, bytes).await.unwrap();
+    assert_eq!(short.facts, vec![accepted.clone()]);
+    assert!(!short.caught_up());
+    let backward = store
+        .read_facts_before(&session_id, 0, 512, event.encoded_len())
+        .await
+        .unwrap();
+    assert_eq!(backward.facts, vec![event.clone()]);
+    assert!(backward.has_more);
+    assert_eq!(
+        store
+            .read_facts_before(&session_id, 2, 512, bytes - 1)
+            .await,
+        Err(StoreError::ReadRequiresCapacity {
+            minimum_bytes: bytes
+        })
+    );
+    assert_eq!(
+        store
+            .read_facts_before(&session_id, 2, 512, bytes)
+            .await
+            .unwrap()
+            .facts,
+        vec![accepted.clone()]
+    );
+    assert_eq!(
+        store
+            .read_turn_facts(&session_id, &turn_id, 0, 512, bytes - 1)
+            .await,
+        Err(StoreError::ReadRequiresCapacity {
+            minimum_bytes: bytes
+        })
+    );
+    let short = store
+        .read_turn_facts(&session_id, &turn_id, 0, 512, bytes)
+        .await
+        .unwrap();
+    assert_eq!(short.facts, vec![accepted.clone()]);
+    assert!(short.has_more);
+    for budget in [
+        0,
+        rsi_agent_store_protocol::MAXIMUM_STORE_FACT_PAGE_BYTES + 1,
+    ] {
+        assert!(matches!(
+            store.read_facts(&session_id, 0, 1, budget).await,
+            Err(StoreError::Invalid(_))
+        ));
+        assert!(matches!(
+            store.read_controls(&session_id, 0, 1, budget).await,
+            Err(StoreError::Invalid(_))
+        ));
+        assert!(matches!(
+            store.read_facts_before(&session_id, 0, 1, budget).await,
+            Err(StoreError::Invalid(_))
+        ));
+        assert!(matches!(
+            store
+                .read_turn_facts(&session_id, &turn_id, 0, 1, budget)
+                .await,
+            Err(StoreError::Invalid(_))
+        ));
+    }
+    let missing = SessionId::new("missing-access").unwrap();
+    assert!(matches!(
+        store.session_access(&[]).await,
+        Err(StoreError::Invalid(_))
+    ));
+    let selection: Vec<_> = (0..257)
+        .map(|index| SessionId::new(format!("access-{index}")).unwrap())
+        .collect();
+    assert!(matches!(
+        store.session_access(&selection).await,
+        Err(StoreError::Invalid(_))
+    ));
+    assert_eq!(
+        store.session_access(&selection[..256]).await.unwrap().len(),
+        256
+    );
+    let access = store
+        .session_access(&[missing.clone(), session_id.clone()])
+        .await
+        .unwrap();
+    assert_eq!(
+        access,
+        vec![
+            Err(StoreError::NotFound(missing.to_string())),
+            Ok(rsi_agent_store_protocol::StoreSessionAccess::from(&header))
+        ]
+    );
+    assert!(matches!(
+        store
+            .session_access(&[session_id.clone(), session_id.clone()])
+            .await,
+        Err(StoreError::Invalid(_))
+    ));
+    let second = store
+        .read_facts(
+            &session_id,
+            1,
+            1,
+            rsi_agent_store_protocol::MAXIMUM_STORE_FACT_PAGE_BYTES,
+        )
+        .await
+        .unwrap();
     assert_eq!(second.facts, vec![event.clone()]);
     assert!(second.caught_up());
     let omitted = store
@@ -199,18 +317,37 @@ pub async fn assert_mechanical_store_contract(
             .is_err()
     );
     assert!(store.read_fact_window(&session_id, 0, 1, 0).await.is_err());
-    let newest = store.read_facts_before(&session_id, 0, 1).await.unwrap();
+    let newest = store
+        .read_facts_before(
+            &session_id,
+            0,
+            1,
+            rsi_agent_store_protocol::MAXIMUM_STORE_FACT_PAGE_BYTES,
+        )
+        .await
+        .unwrap();
     assert_eq!(newest.before_seq, 3);
     assert_eq!(newest.facts, vec![event.clone()]);
     assert!(newest.has_more);
     let oldest = store
-        .read_facts_before(&session_id, event.seq(), 1)
+        .read_facts_before(
+            &session_id,
+            event.seq(),
+            1,
+            rsi_agent_store_protocol::MAXIMUM_STORE_FACT_PAGE_BYTES,
+        )
         .await
         .unwrap();
     assert_eq!(oldest.facts, vec![accepted.clone()]);
     assert!(!oldest.has_more);
     let turn = store
-        .read_turn_facts(&session_id, &turn_id, 0, 8)
+        .read_turn_facts(
+            &session_id,
+            &turn_id,
+            0,
+            8,
+            rsi_agent_store_protocol::MAXIMUM_STORE_FACT_PAGE_BYTES,
+        )
         .await
         .unwrap();
     assert_eq!(turn.facts, vec![accepted.clone(), event.clone()]);
@@ -276,7 +413,12 @@ pub async fn assert_mechanical_store_contract(
     ));
     assert_eq!(
         store
-            .read_facts(&session_id, 0, 8)
+            .read_facts(
+                &session_id,
+                0,
+                8,
+                rsi_agent_store_protocol::MAXIMUM_STORE_FACT_PAGE_BYTES
+            )
             .await
             .unwrap()
             .durable_seq,
@@ -284,7 +426,12 @@ pub async fn assert_mechanical_store_contract(
     );
     assert_eq!(
         store
-            .read_controls(&session_id, 0, 8)
+            .read_controls(
+                &session_id,
+                0,
+                8,
+                rsi_agent_store_protocol::MAXIMUM_STORE_FACT_PAGE_BYTES
+            )
             .await
             .unwrap()
             .durable_seq,
@@ -294,6 +441,21 @@ pub async fn assert_mechanical_store_contract(
         .commit_agent(terminal_commit)
         .await
         .expect("close Turn with its exact control horizon");
+    let bytes = first_marker.encoded_len();
+    assert_eq!(
+        store.read_controls(&session_id, 0, 8, bytes - 1).await,
+        Err(StoreError::ReadRequiresCapacity {
+            minimum_bytes: bytes
+        })
+    );
+    assert_eq!(
+        store
+            .read_controls(&session_id, 0, 8, bytes)
+            .await
+            .unwrap()
+            .records,
+        vec![first_marker.clone()]
+    );
     assert!(
         store
             .list_open_turns(&session_id, 0, 8)
@@ -553,7 +715,12 @@ pub async fn assert_mechanical_store_contract(
     assert_eq!(committed.sessions[0].durable_control_seq, 2);
     assert_eq!(
         store
-            .read_controls(&session_id, 0, 8)
+            .read_controls(
+                &session_id,
+                0,
+                8,
+                rsi_agent_store_protocol::MAXIMUM_STORE_FACT_PAGE_BYTES
+            )
             .await
             .unwrap()
             .records,
@@ -912,7 +1079,15 @@ pub async fn assert_mechanical_store_contract(
     assert_eq!((all.resolved_after_seq, all.resolved_terminal_seq), (0, 7));
     assert_eq!(all.effective_turns, 2);
     assert_eq!(all.resolved_terminal_control_seq, 8);
-    let controls_at_terminal = store.read_controls(&session_id, 0, 8).await.unwrap();
+    let controls_at_terminal = store
+        .read_controls(
+            &session_id,
+            0,
+            8,
+            rsi_agent_store_protocol::MAXIMUM_STORE_FACT_PAGE_BYTES,
+        )
+        .await
+        .unwrap();
     assert_eq!(
         controls_at_terminal.durable_seq, 10,
         "later idle controls exist"

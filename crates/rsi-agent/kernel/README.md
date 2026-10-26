@@ -387,22 +387,26 @@ and attached observations with `TurnError::Flush`; later submissions to that
 session receive the same failure. Store diagnostics crossing the Turn seam are
 UTF-8-safe and bounded to the durable Agent diagnostic limit. Ordinary Store
 access failures use `TurnError::Store`; they are not mislabeled as a durable
-flush failure. Recovery terminalizes durably cancelled work
+flush failure. Store corruption, including invalid page or capacity responses,
+crosses the Turn seam as `TurnError::Invariant`. Recovery terminalizes durably cancelled work
 as `Cancelled` and all other unfinished work as `Interrupted`. Effect start
 Facts require their matching intent to have crossed the durable watermark.
 
 `KernelLimits` owns four process-wide admissions independently of per-session
-bounds: total speculative Fact bytes, conservative maximum-page Store-read
-materialization, retained observation bytes, and attached observers. Defaults are
-64 MiB, 64 MiB, 64 MiB, and
-1,024 respectively and configuration may only tighten them. Because the Store
-read contract bounds Fact and control pages at 64 MiB, while the indexed
-mailbox has its own 32 MiB pending-prefix bound plus one selected message; the
-Kernel reserves those bounds before Store I/O. A tightened read budget admits
-one maximum-sized Fact per page; multi-Fact reads require the complete page
-bound. A budget below the maximum checkpoint
-blob bound disables checkpoint reads, maintenance rebuilds, and writes as one
-feature rather than rebuilding a cache that the Kernel cannot later admit.
+bounds: total speculative Fact bytes, Store-read materialization, retained
+observation bytes, and attached observers. Defaults are 64 MiB, 64 MiB, 64 MiB,
+and 1,024 respectively and configuration may only tighten them. Ordinary pages
+first reserve 1 MiB. A typed first-record capacity reply releases that worker and
+permit before joining the FIFO budget queue for the exact reported record size.
+Every page uses a fixed cursor; a second capacity refusal or an invalid reported
+size is Store corruption. The preparation lease remains pinned across this single
+fallback, never a held-permit upgrade. Returned pages must match their requested
+cursor, turn and effective count, including speculative Fact merging. The indexed mailbox
+retains its fixed pending-prefix admission. Checkpoint reads reserve their actual
+encoded length through ByteAdmission: global pressure is a cache miss, while the
+caller's Context admission failure keeps its original meaning. The global permit
+ends when materialization finishes; Context owns subsequent byte retention. Checkpoint writes
+skip only blobs larger than the configured read budget; smaller caches remain usable.
 Indexed turn-boundary and cold Header reads use the same admission. Retry checks
 read and compare the small Header before materializing the acceptance, then
 consume that acceptance without cloning it across another Store round trip.
@@ -459,8 +463,8 @@ Observation consumes
 watch watermarks with `borrow_and_update`, preserving durability advances that
 arrive while the stream is not being polled. Durable observation reads bounded
 pages and emits their Facts incrementally. Before retention or cursor advance,
-both Fact and control pages must echo the requested cursor, respect the requested
-count, and pass their bounded contiguous-page validation. A mismatched response
+both Fact and control pages must echo the requested cursor, respect the effective
+count of the successful attempt (one record after a capacity retry), and pass their bounded contiguous-page validation. A mismatched response
 ends observation without delivering any of that page.
 In-process commits wake only observers of the affected Session; a bounded
 five-second poll also reconciles missed commit acknowledgements. Tree-membership
@@ -487,6 +491,10 @@ turns in the Context-owned checkpoint; each later claim carries its own exact
 acceptance sequence so the executor restores only a checkpoint preceding that
 claim. Store CAS and Context's exact-prefix proof reject
 concurrent tails; a cache failure does not affect the canonical Fact log.
+Checkpoint reads use non-waiting shared byte admission: either concurrent reads
+or a checkpoint larger than a tightened quota cause a cache miss and Fact replay.
+Writes larger than the current quota are declined. No fixed read headroom is
+reserved: a quota-sized checkpoint can be read when the shared pool is idle.
 Startup recovery revalidates accumulated usage and any exhaustion marker
 against the immutable session budget before choosing a repair outcome. Repair
 uses only durable Header/Facts and does not build an Agent composition; the
@@ -563,6 +571,9 @@ Tool calls are excluded. The Kernel reads only that exact child Turn, with a
 captured child tail and stopping at its latest Conversation intent. Store page
 materialization retains the ordinary Store read-byte budget. Earlier large Tool
 results do not consume the reply scan when the final attempt fits in the tail.
+These are independent bounds: pages may contain multiple Facts even at the minimum
+Store-read capacity. A Store returning shorter pages can exhaust the page bound
+before the byte bound; lower global read capacity does not force one-Fact pages.
 Read failures and exhausted scan bounds produce an explicit omission notice;
 optional reply extraction cannot prevent durable terminal settlement.
 Omitted or truncated replies are explicit. Public reply

@@ -622,10 +622,13 @@ impl TurnExecution for AgentKernel {
         let mut facts = Vec::new();
         let mut through_seq = after_seq;
         let mut scanned = 0_usize;
+        let mut limit = limit;
         if after_seq < durable_seq {
-            let page = read_facts_bounded(&self.inner, claim.session_id(), after_seq, limit)
-                .await
-                .map_err(turn_store_error)?;
+            let (page, effective_limit) =
+                read_facts_bounded(&self.inner, claim.session_id(), after_seq, limit)
+                    .await
+                    .map_err(turn_store_error)?;
+            limit = effective_limit;
             scanned = page.facts.len();
             through_seq = page
                 .facts
@@ -675,9 +678,6 @@ impl TurnExecution for AgentKernel {
                 "checkpoint Fact read limit is out of bounds".into(),
             ));
         }
-        if !context_checkpoints_enabled(&self.inner) {
-            return Ok(None);
-        }
         let (session_present, expected_durable) = {
             let state = lock_state(&self.inner);
             match state.sessions.get(claim.session_id()) {
@@ -700,7 +700,7 @@ impl TurnExecution for AgentKernel {
         {
             return Ok(None);
         }
-        let page = read_facts_bounded(&self.inner, claim.session_id(), after_seq, limit)
+        let (page, _) = read_facts_bounded(&self.inner, claim.session_id(), after_seq, limit)
             .await
             .map_err(turn_store_error)?;
         if expected_durable.is_some_and(|expected| page.durable_seq != expected) {
@@ -724,9 +724,6 @@ impl TurnExecution for AgentKernel {
             return Err(TurnError::Invalid(
                 "checkpoint fork Fact read limit is out of bounds".into(),
             ));
-        }
-        if !context_checkpoints_enabled(&self.inner) {
-            return Ok(None);
         }
         let resident_is_stable = {
             let state = lock_state(&self.inner);
@@ -754,20 +751,66 @@ impl TurnExecution for AgentKernel {
         session_id: &SessionId,
         reservation: rsi_api_protocol::ByteAdmission,
     ) -> TurnResult<Option<ContextCheckpoint>> {
-        if !context_checkpoints_enabled(&self.inner) {
-            return Ok(None);
-        }
-        let checkpoint = store_reads::read(
-            &self.inner,
-            session_id,
-            MAXIMUM_CONTEXT_CHECKPOINT_BYTES,
-            true,
-            move |store, id| async move { store.read_context_checkpoint(&id, reservation).await },
-        )
-        .await;
-        let (checkpoint, _permit, _lease) = match checkpoint {
+        let global = self.inner.store_read_admission.clone();
+        let permits = Arc::new(std::sync::Mutex::new(Vec::new()));
+        let retained_permits = permits.clone();
+        let pressured = Arc::new(std::sync::atomic::AtomicBool::new(false));
+        let declined = pressured.clone();
+        let closed = Arc::new(std::sync::atomic::AtomicBool::new(false));
+        let admission_closed = closed.clone();
+        let admission = rsi_api_protocol::ByteAdmission::new(move |bytes| {
+            // ByteAdmission rejects lengths above 64 MiB before invoking this callback.
+            let permit = global
+                .try_acquire_many_owned(u32::try_from(bytes).expect("bounded checkpoint bytes"))
+                .map_err(|error| {
+                    if matches!(error, tokio::sync::TryAcquireError::NoPermits) {
+                        declined.store(true, std::sync::atomic::Ordering::Relaxed);
+                    }
+                    match error {
+                        tokio::sync::TryAcquireError::Closed => {
+                            admission_closed.store(true, std::sync::atomic::Ordering::Relaxed);
+                            rsi_api_protocol::ApiError::Unavailable
+                        }
+                        tokio::sync::TryAcquireError::NoPermits => {
+                            rsi_api_protocol::ApiError::Capacity
+                        }
+                    }
+                })?;
+            let credit = reservation.reserve(bytes)?;
+            retained_permits
+                .lock()
+                .expect("checkpoint permit lock")
+                .push(permit);
+            Ok(credit)
+        });
+        let store = self.inner.store.clone();
+        let id = session_id.clone();
+        let lease = match store.prepare_session(&id).await {
+            Ok(lease) => lease,
+            Err(StoreError::NotFound(_)) => return Ok(None),
+            Err(error) => return Err(turn_store_error(error)),
+        };
+        let checkpoint = tokio::spawn(async move {
+            let _lease = lease;
+            let result = store.read_context_checkpoint(&id, admission).await;
+            drop(permits);
+            result
+        })
+        .await
+        .map_err(|error| TurnError::Invariant(format!("checkpoint read worker failed: {error}")))?;
+        let checkpoint = match checkpoint {
+            Err(_) if closed.load(std::sync::atomic::Ordering::Relaxed) => {
+                return Err(TurnError::Store(
+                    "Kernel Store-read admission closed".into(),
+                ));
+            }
             Ok(value) => value,
             Err(StoreError::NotFound(_)) => return Ok(None),
+            Err(StoreError::ReadCapacity)
+                if pressured.load(std::sync::atomic::Ordering::Relaxed) =>
+            {
+                return Ok(None);
+            }
             Err(error) => return Err(turn_store_error(error)),
         };
         Ok(checkpoint.map(|checkpoint| ContextCheckpoint {
@@ -793,7 +836,7 @@ impl TurnExecution for AgentKernel {
                 "checkpoint header fingerprint changed session identity".into(),
             ));
         }
-        if !context_checkpoints_enabled(&self.inner) {
+        if checkpoint.bytes.len() > self.inner.limits.maximum_store_read_bytes {
             return Ok(false);
         }
         {

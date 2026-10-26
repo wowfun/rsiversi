@@ -136,7 +136,15 @@ async fn ssh_pending_input_needs_live_admission_and_transfers_exact_lease_to_cla
         Some(&replacement),
         "a later retry cannot substitute a running Turn's owner"
     );
-    let controls = store.read_controls(&session, 0, 16).await.unwrap();
+    let controls = store
+        .read_controls(
+            &session,
+            0,
+            16,
+            rsi_agent_store_protocol::MAXIMUM_STORE_FACT_PAGE_BYTES,
+        )
+        .await
+        .unwrap();
     assert_eq!(
         controls
             .records
@@ -188,7 +196,16 @@ async fn ssh_pending_input_does_not_recover_authority_from_durable_coordinates()
         .is_err()
     );
     assert_eq!(
-        store.read_facts(&session, 0, 8).await.unwrap().durable_seq,
+        store
+            .read_facts(
+                &session,
+                0,
+                8,
+                rsi_agent_store_protocol::MAXIMUM_STORE_FACT_PAGE_BYTES
+            )
+            .await
+            .unwrap()
+            .durable_seq,
         0
     );
     let renewed = tuple::lease(

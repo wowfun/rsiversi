@@ -222,7 +222,12 @@ async fn cancellation_retires_an_admitted_tool_after_it_settles() {
     );
     let identity = stack
         .store
-        .read_facts(&submitted.session_id, 0, 64)
+        .read_facts(
+            &submitted.session_id,
+            0,
+            64,
+            rsi_agent_store_protocol::MAXIMUM_STORE_FACT_PAGE_BYTES,
+        )
         .await
         .unwrap()
         .facts
@@ -371,7 +376,12 @@ async fn recovered_pending_tool_keeps_its_generation_pin_through_cancelled_retir
 
     let identity = stack
         .store
-        .read_facts(&submitted.session_id, 0, 64)
+        .read_facts(
+            &submitted.session_id,
+            0,
+            64,
+            rsi_agent_store_protocol::MAXIMUM_STORE_FACT_PAGE_BYTES,
+        )
         .await
         .unwrap()
         .facts

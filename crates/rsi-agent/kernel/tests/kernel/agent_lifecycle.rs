@@ -10,16 +10,20 @@ async fn child_reply_scan_does_not_hold_parent_submission_admission() {
         "large-prefix",
         "large-final",
         "pages",
+        "batched-pages",
     ] {
         let cancel = case == "cancel";
         let fail_read = case == "error";
         let store = Arc::new(FactReadRaceStore::new(Arc::new(MemoryStore::new())));
+        if case == "pages" {
+            store.reply_page_limit.store(1, Ordering::Release);
+        }
         let kernel = AgentKernel::recover_with_clock_and_limits(
             store.clone(),
             composition(),
             Arc::new(FixedClock),
             KernelLimits {
-                maximum_store_read_bytes: if case == "pages" {
+                maximum_store_read_bytes: if matches!(case, "pages" | "batched-pages") {
                     MAXIMUM_SESSION_FACT_BYTES
                 } else {
                     rsi_agent_kernel::DEFAULT_MAXIMUM_STORE_READ_BYTES
@@ -80,9 +84,18 @@ async fn child_reply_scan_does_not_hold_parent_submission_admission() {
         }
         if case == "large-final" {
             publish_public_reply(&kernel, &child, &"x".repeat(4 * 1024 * 1024 + 1)).await;
-        } else if case == "pages" {
+        } else if matches!(case, "pages" | "batched-pages") {
             publish_reply_parts(&kernel, &child, "streamed-model", &vec!["x".into(); 200]).await;
-            let facts = store.inner.read_facts(&child_id, 0, 128).await.unwrap();
+            let facts = store
+                .inner
+                .read_facts(
+                    &child_id,
+                    0,
+                    128,
+                    rsi_agent_store_protocol::MAXIMUM_STORE_FACT_PAGE_BYTES,
+                )
+                .await
+                .unwrap();
             let step_id = facts
                 .facts
                 .iter()
@@ -171,6 +184,18 @@ async fn child_reply_scan_does_not_hold_parent_submission_admission() {
         }
         if case == "pages" {
             assert_eq!(store.reply_pages.load(Ordering::Acquire), 128);
+        }
+        if case == "batched-pages" {
+            assert_eq!(store.reply_pages.load(Ordering::Acquire), 1);
+            let mailbox = store
+                .inner
+                .read_agent_mailbox(parent.session_id(), None)
+                .await
+                .unwrap();
+            assert!(mailbox.pending.iter().any(|entry| {
+                let content = serde_json::to_string(&entry.message.content).unwrap();
+                content.contains(&"x".repeat(200)) && !content.contains("Child reply omitted")
+            }));
         }
         kernel.shutdown(worker).await.unwrap();
     }
@@ -336,7 +361,15 @@ async fn recovery_closes_an_activation_step_before_interrupting_its_turn() {
         restarted.outcome(&session_id, &turn_id).await.unwrap(),
         Some(TurnOutcome::Interrupted { effect: None, .. })
     ));
-    let repaired = store.read_facts(&session_id, 3, 8).await.unwrap();
+    let repaired = store
+        .read_facts(
+            &session_id,
+            3,
+            8,
+            rsi_agent_store_protocol::MAXIMUM_STORE_FACT_PAGE_BYTES,
+        )
+        .await
+        .unwrap();
     assert_eq!(repaired.facts.len(), 2);
     assert!(matches!(
         repaired.facts[0].body(),
@@ -702,7 +735,15 @@ async fn agent_wait_persists_park_and_completion_resume_around_descendant_change
     });
     tokio::time::timeout(std::time::Duration::from_secs(1), async {
         loop {
-            let controls = store.read_controls(&root_id, 0, 64).await.unwrap();
+            let controls = store
+                .read_controls(
+                    &root_id,
+                    0,
+                    64,
+                    rsi_agent_store_protocol::MAXIMUM_STORE_FACT_PAGE_BYTES,
+                )
+                .await
+                .unwrap();
             if controls.records.iter().any(|record| {
                 matches!(
                     record.body(),
@@ -748,7 +789,15 @@ async fn agent_wait_persists_park_and_completion_resume_around_descendant_change
             .phase,
         StoreActivationPhase::Running
     );
-    let controls = store.read_controls(&root_id, 0, 64).await.unwrap();
+    let controls = store
+        .read_controls(
+            &root_id,
+            0,
+            64,
+            rsi_agent_store_protocol::MAXIMUM_STORE_FACT_PAGE_BYTES,
+        )
+        .await
+        .unwrap();
     assert!(controls.records.iter().any(|record| {
         matches!(
             record.body(),
@@ -775,7 +824,15 @@ async fn agent_wait_persists_park_and_completion_resume_around_descendant_change
     });
     tokio::time::timeout(std::time::Duration::from_secs(1), async {
         loop {
-            let controls = store.read_controls(&root_id, 0, 64).await.unwrap();
+            let controls = store
+                .read_controls(
+                    &root_id,
+                    0,
+                    64,
+                    rsi_agent_store_protocol::MAXIMUM_STORE_FACT_PAGE_BYTES,
+                )
+                .await
+                .unwrap();
             if controls
                 .records
                 .iter()
@@ -805,7 +862,15 @@ async fn agent_wait_persists_park_and_completion_resume_around_descendant_change
         completion_waiter.await.unwrap().unwrap(),
         AgentWaitResult::Changed
     );
-    let controls = store.read_controls(&root_id, 0, 64).await.unwrap();
+    let controls = store
+        .read_controls(
+            &root_id,
+            0,
+            64,
+            rsi_agent_store_protocol::MAXIMUM_STORE_FACT_PAGE_BYTES,
+        )
+        .await
+        .unwrap();
     assert!(controls.records.iter().any(|record| {
         matches!(
             record.body(),
@@ -875,7 +940,15 @@ async fn agent_wait_timeout_is_durably_resumed_as_timeout() {
             .unwrap(),
         AgentWaitResult::TimedOut
     );
-    let controls = store.read_controls(&root_id, 0, 16).await.unwrap();
+    let controls = store
+        .read_controls(
+            &root_id,
+            0,
+            16,
+            rsi_agent_store_protocol::MAXIMUM_STORE_FACT_PAGE_BYTES,
+        )
+        .await
+        .unwrap();
     assert!(controls.records.iter().any(|record| {
         matches!(
             record.body(),
@@ -934,7 +1007,15 @@ async fn agent_wait_cancellation_is_typed_and_durably_resumed_as_cancel() {
             .await,
         Err(TurnError::Cancelled)
     );
-    let controls = store.read_controls(&root_id, 0, 16).await.unwrap();
+    let controls = store
+        .read_controls(
+            &root_id,
+            0,
+            16,
+            rsi_agent_store_protocol::MAXIMUM_STORE_FACT_PAGE_BYTES,
+        )
+        .await
+        .unwrap();
     assert!(controls.records.iter().any(|record| matches!(
         record.body(),
         AgentControlRecordBody::WaitResumed {
@@ -989,7 +1070,7 @@ async fn agent_wait_observes_kernel_cancellation_after_durable_parking() {
             kernel
                 .wait_agent(
                     &caller,
-                    std::time::Duration::from_secs(180),
+                    std::time::Duration::from_mins(3),
                     CancellationToken::new(),
                 )
                 .await
@@ -997,7 +1078,15 @@ async fn agent_wait_observes_kernel_cancellation_after_durable_parking() {
     });
     tokio::time::timeout(std::time::Duration::from_secs(5), async {
         loop {
-            let controls = store.read_controls(&root_id, 0, 32).await.unwrap();
+            let controls = store
+                .read_controls(
+                    &root_id,
+                    0,
+                    32,
+                    rsi_agent_store_protocol::MAXIMUM_STORE_FACT_PAGE_BYTES,
+                )
+                .await
+                .unwrap();
             if controls
                 .records
                 .iter()
@@ -1021,7 +1110,15 @@ async fn agent_wait_observes_kernel_cancellation_after_durable_parking() {
             .unwrap(),
         Err(TurnError::Cancelled)
     );
-    let controls = store.read_controls(&root_id, 0, 16).await.unwrap();
+    let controls = store
+        .read_controls(
+            &root_id,
+            0,
+            16,
+            rsi_agent_store_protocol::MAXIMUM_STORE_FACT_PAGE_BYTES,
+        )
+        .await
+        .unwrap();
     assert!(controls.records.iter().any(|record| matches!(
         record.body(),
         AgentControlRecordBody::WaitResumed {
@@ -1103,12 +1200,22 @@ async fn wait_completion_cause_uses_snapshot_without_control_replay() {
     .expect("wait did not reach its post-park descendant observation");
 
     let child_fact_seq = memory
-        .read_facts(&child_id, 0, 8)
+        .read_facts(
+            &child_id,
+            0,
+            8,
+            rsi_agent_store_protocol::MAXIMUM_STORE_FACT_PAGE_BYTES,
+        )
         .await
         .unwrap()
         .durable_seq;
     let child_control_seq = memory
-        .read_controls(&child_id, 0, 8)
+        .read_controls(
+            &child_id,
+            0,
+            8,
+            rsi_agent_store_protocol::MAXIMUM_STORE_FACT_PAGE_BYTES,
+        )
         .await
         .unwrap()
         .durable_seq;
@@ -1177,7 +1284,15 @@ async fn wait_completion_cause_uses_snapshot_without_control_replay() {
         0,
         "classification must not read descendant control pages"
     );
-    let controls = memory.read_controls(&root_id, 0, 16).await.unwrap();
+    let controls = memory
+        .read_controls(
+            &root_id,
+            0,
+            16,
+            rsi_agent_store_protocol::MAXIMUM_STORE_FACT_PAGE_BYTES,
+        )
+        .await
+        .unwrap();
     assert!(controls.records.iter().any(|record| {
         matches!(
             record.body(),
@@ -1484,7 +1599,15 @@ async fn idle_child_admits_human_input_but_rejects_expired_agent_callers() {
             .unwrap()
             .is_none()
     );
-    let facts_before = store.read_facts(child.session_id(), 0, 128).await.unwrap();
+    let facts_before = store
+        .read_facts(
+            child.session_id(),
+            0,
+            128,
+            rsi_agent_store_protocol::MAXIMUM_STORE_FACT_PAGE_BYTES,
+        )
+        .await
+        .unwrap();
     let request = |session, message_id, suffix: &str| ClaimMessage {
         session,
         message_id,
@@ -1509,7 +1632,12 @@ async fn idle_child_admits_human_input_but_rejects_expired_agent_callers() {
 
     assert_eq!(
         store
-            .read_facts(child.session_id(), 0, 128)
+            .read_facts(
+                child.session_id(),
+                0,
+                128,
+                rsi_agent_store_protocol::MAXIMUM_STORE_FACT_PAGE_BYTES
+            )
             .await
             .unwrap()
             .facts,
@@ -1542,7 +1670,7 @@ async fn idle_child_admits_human_input_but_rejects_expired_agent_callers() {
         activation.parent_session_id.as_ref(),
         Some(parent.session_id())
     );
-    assert!(store.read_controls(child.session_id(), 0, 128).await.unwrap().records.iter().any(|record| matches!(record.body(), AgentControlRecordBody::ActivationStarted { activation_id, root_session_id, path, .. } if activation_id == &activation.activation_id && root_session_id == parent.session_id() && path.segments() == [1])));
+    assert!(store.read_controls(child.session_id(), 0, 128, rsi_agent_store_protocol::MAXIMUM_STORE_FACT_PAGE_BYTES).await.unwrap().records.iter().any(|record| matches!(record.body(), AgentControlRecordBody::ActivationStarted { activation_id, root_session_id, path, .. } if activation_id == &activation.activation_id && root_session_id == parent.session_id() && path.segments() == [1])));
     assert_eq!(
         store
             .completion_reservation_count(parent.session_id())
@@ -1600,7 +1728,12 @@ async fn agent_wait_resumes_for_a_message_to_its_own_mailbox() {
     assert_eq!(waiter.await.unwrap().unwrap(), AgentWaitResult::Changed);
     assert!(
         store
-            .read_controls(parent.session_id(), 0, 32)
+            .read_controls(
+                parent.session_id(),
+                0,
+                32,
+                rsi_agent_store_protocol::MAXIMUM_STORE_FACT_PAGE_BYTES
+            )
             .await
             .unwrap()
             .records
@@ -1924,7 +2057,12 @@ async fn concurrent_parent_child_claim_retries_preserve_one_durable_activation()
         assert_eq!(receipt.turn_id.as_str(), "contended-turn");
     }
     let controls = store
-        .read_controls(child.session_id(), 0, 128)
+        .read_controls(
+            child.session_id(),
+            0,
+            128,
+            rsi_agent_store_protocol::MAXIMUM_STORE_FACT_PAGE_BYTES,
+        )
         .await
         .unwrap();
     assert_eq!(controls.records.iter().filter(|record| matches!(record.body(), AgentControlRecordBody::ActivationStarted { activation_id, .. } if activation_id.as_str() == "contended-activation")).count(), 1);
@@ -2057,7 +2195,7 @@ async fn agent_wait_ignores_unrelated_claims_and_skips_empty_mailbox_payloads() 
         let cancellation = cancellation.clone();
         async move {
             kernel
-                .wait_agent(&caller, std::time::Duration::from_secs(60), cancellation)
+                .wait_agent(&caller, std::time::Duration::from_mins(1), cancellation)
                 .await
         }
     });

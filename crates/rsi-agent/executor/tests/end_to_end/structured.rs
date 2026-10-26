@@ -82,7 +82,12 @@ async fn invalid_report_retries_valid_report_stops_before_later_tools_and_missin
             loop {
                 let facts = stack
                     .store
-                    .read_facts(&session, 0, 256)
+                    .read_facts(
+                        &session,
+                        0,
+                        256,
+                        rsi_agent_store_protocol::MAXIMUM_STORE_FACT_PAGE_BYTES,
+                    )
                     .await
                     .unwrap()
                     .facts;

@@ -353,8 +353,9 @@ impl SessionStore for PausedStore {
         session_id: &SessionId,
         after_seq: u64,
         limit: usize,
+        maximum_bytes: usize,
     ) -> StoreResult<StoreFactPage> {
-        let _ = (session_id, after_seq, limit);
+        let _ = (session_id, after_seq, limit, maximum_bytes);
         let _read = Released(self.pending.clone());
         self.pending.fetch_add(1, Ordering::SeqCst);
         self.entered.notify_one();
@@ -365,9 +366,10 @@ impl SessionStore for PausedStore {
         session_id: &SessionId,
         exclusive_before_seq: u64,
         limit: usize,
+        maximum_bytes: usize,
     ) -> StoreResult<StoreBackwardFactPage> {
         self.inner
-            .read_facts_before(session_id, exclusive_before_seq, limit)
+            .read_facts_before(session_id, exclusive_before_seq, limit, maximum_bytes)
             .await
     }
     async fn read_turn_facts(
@@ -376,9 +378,10 @@ impl SessionStore for PausedStore {
         turn_id: &TurnId,
         after_seq: u64,
         limit: usize,
+        maximum_bytes: usize,
     ) -> StoreResult<StoreTurnFactPage> {
         self.inner
-            .read_turn_facts(session_id, turn_id, after_seq, limit)
+            .read_turn_facts(session_id, turn_id, after_seq, limit, maximum_bytes)
             .await
     }
     async fn read_turn_boundary(

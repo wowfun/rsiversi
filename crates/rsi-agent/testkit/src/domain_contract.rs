@@ -174,7 +174,17 @@ pub async fn assert_domain_store_contract(
         first
     );
     assert_eq!(
-        store.read_facts(session, 0, 8).await.unwrap().facts.len(),
+        store
+            .read_facts(
+                session,
+                0,
+                8,
+                rsi_agent_store_protocol::MAXIMUM_STORE_FACT_PAGE_BYTES
+            )
+            .await
+            .unwrap()
+            .facts
+            .len(),
         1
     );
     assert!(

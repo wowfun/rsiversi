@@ -403,7 +403,12 @@ async fn ordinary_input_atomically_supersedes_pending_automatic_input_in_both_st
         assert!(claim(&fixture).await.is_err());
         let controls = fixture
             .store
-            .read_controls(&fixture.session_id, auto.accepted_control_seq, 8)
+            .read_controls(
+                &fixture.session_id,
+                auto.accepted_control_seq,
+                8,
+                rsi_agent_store_protocol::MAXIMUM_STORE_FACT_PAGE_BYTES,
+            )
             .await
             .unwrap();
         assert_eq!(controls.records.len(), 2);
@@ -448,6 +453,7 @@ async fn pause_discards_only_pending_and_preserves_an_already_claimed_turn() {
                     &TurnId::new("automatic-turn").unwrap(),
                     0,
                     64,
+                    rsi_agent_store_protocol::MAXIMUM_STORE_FACT_PAGE_BYTES,
                 )
                 .await
                 .unwrap();
@@ -641,7 +647,12 @@ async fn first_draft_input_publishes_header_baseline_and_acceptance_together() {
     assert_eq!(receipt.accepted_control_seq, 2);
     let controls = fixture
         .store
-        .read_controls(header.session_id(), 0, 8)
+        .read_controls(
+            header.session_id(),
+            0,
+            8,
+            rsi_agent_store_protocol::MAXIMUM_STORE_FACT_PAGE_BYTES,
+        )
         .await
         .unwrap();
     assert_eq!(controls.records.len(), 2);

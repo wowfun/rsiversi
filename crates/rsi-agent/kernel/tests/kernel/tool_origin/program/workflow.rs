@@ -296,15 +296,7 @@ async fn workflow_capacity_rejects_overlap_and_ninth_owner_then_reopens_after_te
         settle_capacity_creator(&f, &caller).await;
         owners.push(run);
     }
-    assert_eq!(
-        f.store
-            .list_active_program_runs(None, 16)
-            .await
-            .unwrap()
-            .runs
-            .len(),
-        8
-    );
+    assert_eq!(active_program_count(&f).await, 8);
     let ninth = workflow_caller_for_root(&f, "capacity-root-ninth").await;
     let before = f.store.read_watermarks(ninth.session_id()).await.unwrap();
     let cas_writes = f.faults.cas_writes.load(Ordering::SeqCst);
@@ -340,15 +332,7 @@ async fn workflow_capacity_rejects_overlap_and_ninth_owner_then_reopens_after_te
     replacement.start().await.unwrap();
     replacement.detach().await.unwrap();
     settle_capacity_creator(&f, &ninth).await;
-    assert_eq!(
-        f.store
-            .list_active_program_runs(None, 16)
-            .await
-            .unwrap()
-            .runs
-            .len(),
-        8
-    );
+    assert_eq!(active_program_count(&f).await, 8);
     replacement
         .finish(ProgramOutcome::Completed, None)
         .await
@@ -2470,4 +2454,13 @@ async fn sqlite_publication_faults_prevent_kernel_acceptance_and_result_referenc
             f.kernel.shutdown(f.workers).await.unwrap();
         }
     }
+}
+
+async fn active_program_count(f: &Fixture) -> usize {
+    f.store
+        .list_active_program_runs(None, 16)
+        .await
+        .unwrap()
+        .runs
+        .len()
 }

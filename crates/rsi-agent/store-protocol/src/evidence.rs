@@ -55,7 +55,9 @@ impl EvidenceOriginal {
         let after = seq.checked_sub(1).ok_or(EvidenceResolveError::Invalid(
             "invalid evidence reference sequence",
         ))?;
-        let mut page = store.read_facts(session, after, 1).await?;
+        let mut page = store
+            .read_facts(session, after, 1, crate::MAXIMUM_STORE_FACT_PAGE_BYTES)
+            .await?;
         let fact = page.facts.pop().filter(|fact| fact.seq() == seq).ok_or(
             EvidenceResolveError::Invalid(
                 "evidence reference target is unavailable in this Session",

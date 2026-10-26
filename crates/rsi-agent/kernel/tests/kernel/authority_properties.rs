@@ -26,7 +26,7 @@ fn generated_resume_issuers_preserve_exact_header_and_reject_foreign_authority()
 }
 #[test]
 fn generated_continuation_sequences_never_rearm_or_regress() {
-    let mut random = 0x525349_u64;
+    let mut random = 0x0052_5349_u64;
     for _case in 0..256 {
         let issuer = ContinuationIssuer::default();
         let foreign = ContinuationIssuer::default();
@@ -45,8 +45,8 @@ fn generated_continuation_sequences_never_rearm_or_regress() {
         let mut live = true;
         for _step in 0..128 {
             random = random
-                .wrapping_mul(6364136223846793005)
-                .wrapping_add(1442695040888963407);
+                .wrapping_mul(6_364_136_223_846_793_005)
+                .wrapping_add(1_442_695_040_888_963_407);
             let operation = (random >> 32) % 5;
             let value = ((random >> 40) & 2047) as u16;
             match operation {

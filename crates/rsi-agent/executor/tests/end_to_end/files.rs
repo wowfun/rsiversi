@@ -250,7 +250,12 @@ async fn scenario(
     let outcome = wait_for_outcome(&turns, &submitted).await;
     let facts = stack
         .store
-        .read_facts(&submitted.session_id, 0, 64)
+        .read_facts(
+            &submitted.session_id,
+            0,
+            64,
+            rsi_agent_store_protocol::MAXIMUM_STORE_FACT_PAGE_BYTES,
+        )
         .await
         .unwrap()
         .facts;

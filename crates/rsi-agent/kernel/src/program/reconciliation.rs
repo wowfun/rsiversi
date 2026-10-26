@@ -1,6 +1,6 @@
 use super::{
-    AtomicAgentCommit, AtomicAgentCommitResult, KernelInner, MAXIMUM_SESSION_FACT_BYTES,
-    read_validated_header_bounded, store_reads,
+    AtomicAgentCommit, AtomicAgentCommitResult, KernelInner, read_validated_header_bounded,
+    store_reads,
 };
 
 impl KernelInner {
@@ -17,12 +17,13 @@ impl KernelInner {
             }
             for expected in &append.controls {
                 let after = expected.seq() - 1;
-                let (page, _permit, _lease) = store_reads::read(
+                let ((page, _limit), _permit, _lease) = store_reads::page(
                     self,
                     &append.session_id,
-                    MAXIMUM_SESSION_FACT_BYTES,
-                    true,
-                    move |store, id| async move { store.read_controls(&id, after, 1).await },
+                    1,
+                    move |store, id, limit, bytes| async move {
+                        store.read_controls(&id, after, limit, bytes).await
+                    },
                 )
                 .await?;
                 page.validate()?;
@@ -34,12 +35,13 @@ impl KernelInner {
             }
             for expected in &append.facts {
                 let after = expected.seq() - 1;
-                let (page, _permit, _lease) = store_reads::read(
+                let ((page, _limit), _permit, _lease) = store_reads::page(
                     self,
                     &append.session_id,
-                    MAXIMUM_SESSION_FACT_BYTES,
-                    true,
-                    move |store, id| async move { store.read_facts(&id, after, 1).await },
+                    1,
+                    move |store, id, limit, bytes| async move {
+                        store.read_facts(&id, after, limit, bytes).await
+                    },
                 )
                 .await?;
                 page.validate()?;

@@ -89,6 +89,7 @@ struct FactReadRaceStore {
     pause_reply_for: Mutex<Option<SessionId>>,
     fail_reply_read: AtomicBool,
     reply_pages: AtomicUsize,
+    reply_page_limit: AtomicUsize,
     reply_read_entered: Notify,
     release_reply_read: Notify,
     stale_domain_read: AtomicBool,
@@ -111,6 +112,8 @@ struct FactReadRaceStore {
     read_captured: Notify,
     release_read: Notify,
     read_error: Mutex<Option<String>>,
+    refuse_fact_page_once: AtomicBool,
+    refuse_control_page_once: AtomicBool,
     fact_page_override: Mutex<Option<StoreFactPage>>,
     control_page_override: Mutex<Option<rsi_agent_store_protocol::StoreControlPage>>,
     fail_agent_creation_after_apply: AtomicBool,
@@ -189,6 +192,7 @@ impl FactReadRaceStore {
             pause_reply_for: Mutex::new(None),
             fail_reply_read: AtomicBool::new(false),
             reply_pages: AtomicUsize::new(0),
+            reply_page_limit: AtomicUsize::new(usize::MAX),
             reply_read_entered: Notify::new(),
             release_reply_read: Notify::new(),
             stale_domain_read: AtomicBool::new(false),
@@ -211,6 +215,8 @@ impl FactReadRaceStore {
             read_captured: Notify::new(),
             release_read: Notify::new(),
             read_error: Mutex::new(None),
+            refuse_fact_page_once: AtomicBool::new(false),
+            refuse_control_page_once: AtomicBool::new(false),
             fact_page_override: Mutex::new(None),
             control_page_override: Mutex::new(None),
             fail_agent_creation_after_apply: AtomicBool::new(false),
@@ -873,8 +879,14 @@ impl SessionStore for FactReadRaceStore {
         session_id: &SessionId,
         after_seq: u64,
         limit: usize,
+        maximum_bytes: usize,
     ) -> rsi_agent_store_protocol::Result<StoreFactPage> {
         self.read_attempts.fetch_add(1, Ordering::AcqRel);
+        if self.refuse_fact_page_once.swap(false, Ordering::AcqRel) {
+            return Err(StoreError::ReadRequiresCapacity {
+                minimum_bytes: maximum_bytes + 1,
+            });
+        }
         if let Some(page) = self.fact_page_override.lock().unwrap().take() {
             return Ok(page);
         }
@@ -886,7 +898,10 @@ impl SessionStore for FactReadRaceStore {
         {
             return Err(StoreError::Io(message));
         }
-        let page = self.inner.read_facts(session_id, after_seq, limit).await?;
+        let page = self
+            .inner
+            .read_facts(session_id, after_seq, limit, maximum_bytes)
+            .await?;
         if self.pause_read.swap(false, Ordering::AcqRel) {
             self.read_captured.notify_one();
             self.release_read.notified().await;
@@ -899,6 +914,7 @@ impl SessionStore for FactReadRaceStore {
         session_id: &SessionId,
         after_seq: u64,
         limit: usize,
+        maximum_bytes: usize,
     ) -> rsi_agent_store_protocol::Result<rsi_agent_store_protocol::StoreControlPage> {
         if let Some(error) = self.control_read_error.lock().unwrap().take() {
             return Err(error);
@@ -906,10 +922,17 @@ impl SessionStore for FactReadRaceStore {
         if self.count_control_reads_for.lock().unwrap().as_ref() == Some(session_id) {
             self.control_read_attempts.fetch_add(1, Ordering::AcqRel);
         }
+        if self.refuse_control_page_once.swap(false, Ordering::AcqRel) {
+            return Err(StoreError::ReadRequiresCapacity {
+                minimum_bytes: maximum_bytes + 1,
+            });
+        }
         if let Some(page) = self.control_page_override.lock().unwrap().take() {
             return Ok(page);
         }
-        self.inner.read_controls(session_id, after_seq, limit).await
+        self.inner
+            .read_controls(session_id, after_seq, limit, maximum_bytes)
+            .await
     }
 
     async fn read_facts_before(
@@ -917,6 +940,7 @@ impl SessionStore for FactReadRaceStore {
         session_id: &SessionId,
         exclusive_before_seq: u64,
         limit: usize,
+        maximum_bytes: usize,
     ) -> rsi_agent_store_protocol::Result<rsi_agent_store_protocol::StoreBackwardFactPage> {
         self.reply_pages.fetch_add(1, Ordering::AcqRel);
         let pause = {
@@ -936,7 +960,12 @@ impl SessionStore for FactReadRaceStore {
             }
         }
         self.inner
-            .read_facts_before(session_id, exclusive_before_seq, limit)
+            .read_facts_before(
+                session_id,
+                exclusive_before_seq,
+                limit.min(self.reply_page_limit.load(Ordering::Acquire)),
+                maximum_bytes,
+            )
             .await
     }
 
@@ -946,9 +975,10 @@ impl SessionStore for FactReadRaceStore {
         turn_id: &TurnId,
         after_seq: u64,
         limit: usize,
+        maximum_bytes: usize,
     ) -> rsi_agent_store_protocol::Result<StoreTurnFactPage> {
         self.inner
-            .read_turn_facts(session_id, turn_id, after_seq, limit)
+            .read_turn_facts(session_id, turn_id, after_seq, limit, maximum_bytes)
             .await
     }
 

@@ -290,7 +290,12 @@ async fn load_section(
 ) -> Result<Selected> {
     let Key(session, intent_seq, section) = key;
     let mut page = store
-        .read_facts(session, intent_seq - 1, 1)
+        .read_facts(
+            session,
+            intent_seq - 1,
+            1,
+            rsi_agent_store_protocol::MAXIMUM_STORE_FACT_PAGE_BYTES,
+        )
         .await
         .map_err(map_store_error)?;
     if stopped.is_cancelled() || retiring.is_cancelled() {

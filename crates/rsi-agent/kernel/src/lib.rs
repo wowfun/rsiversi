@@ -24,10 +24,10 @@ use rsi_agent_session_protocol::{
 };
 use rsi_agent_store_protocol::{
     AgentActivationGuard, AppendBatch, AppendCommit, AtomicAgentCommit, AtomicAgentCommitResult,
-    AtomicSessionAppend, MAXIMUM_CONTEXT_CHECKPOINT_BYTES, MAXIMUM_SESSIONS_PER_READ,
-    MAXIMUM_STORE_BATCH_BYTES, MAXIMUM_STORE_BATCH_FACTS, SessionStore, SessionStoreContract,
-    StoreActivationPhase, StoreAgentChild, StoreAgentMessage, StoreAgentMessageState,
-    StoreAgentSubtreeSnapshot, StoreError, StoredContextCheckpoint, WriteContextCheckpoint,
+    AtomicSessionAppend, MAXIMUM_SESSIONS_PER_READ, MAXIMUM_STORE_BATCH_BYTES,
+    MAXIMUM_STORE_BATCH_FACTS, SessionStore, SessionStoreContract, StoreActivationPhase,
+    StoreAgentChild, StoreAgentMessage, StoreAgentMessageState, StoreAgentSubtreeSnapshot,
+    StoreError, StoredContextCheckpoint, WriteContextCheckpoint,
 };
 use rsi_agent_turn_protocol::{
     AgentCallerAuthority, AgentListScope, AgentNode, AgentNodeState, AgentWaitResult, CancelResult,
@@ -903,11 +903,11 @@ mod turn_state;
 
 use observation::{
     activation_outcome, activation_terminal_controls, agent_root_and_path,
-    bounded_step_message_prefix, completion_message, completion_message_id,
-    context_checkpoints_enabled, control_tail, descendant_session_ids, durable_observation_next,
-    fill_observation_page, list_agent_descendants, list_direct_agent_children, message_receipt,
-    observation_next, observe_agent_wait_change, read_facts_bounded, read_fork_page_from_header,
-    read_header_bounded, read_observed_facts, read_turn_boundary_bounded, read_turn_facts_bounded,
+    bounded_step_message_prefix, completion_message, completion_message_id, control_tail,
+    descendant_session_ids, durable_observation_next, fill_observation_page,
+    list_agent_descendants, list_direct_agent_children, message_receipt, observation_next,
+    observe_agent_wait_change, read_facts_bounded, read_fork_page_from_header, read_header_bounded,
+    read_observed_facts, read_turn_boundary_bounded, read_turn_facts_bounded,
     read_validated_header_bounded, scan_durable_messages,
 };
 use recovery::{

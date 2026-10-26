@@ -115,9 +115,18 @@ async fn controlled_work_publication_is_claim_bound_and_old_observers_keep_their
             .publish_controlled_work(&replacement, next.clone())
             .is_err()
     );
-    drop(reporter);
-    assert_eq!(old.status(), ControlledWorkStatus::Unsettled);
+    reporter.finish(true);
+    assert_eq!(old.status(), ControlledWorkStatus::Settled);
     kernel.publish_controlled_work(&replacement, next).unwrap();
+    assert_eq!(old.status(), ControlledWorkStatus::Settled);
+    assert_eq!(
+        kernel
+            .controlled_work(&submitted.session_id, &submitted.turn_id)
+            .unwrap()
+            .unwrap()
+            .status(),
+        ControlledWorkStatus::Running
+    );
     next_reporter.finish(true);
     assert_eq!(
         kernel
@@ -127,7 +136,7 @@ async fn controlled_work_publication_is_claim_bound_and_old_observers_keep_their
             .status(),
         ControlledWorkStatus::Settled
     );
-    assert_eq!(old.status(), ControlledWorkStatus::Unsettled);
+    assert_eq!(old.status(), ControlledWorkStatus::Settled);
     drop(registration);
     kernel.shutdown(workers).await.unwrap();
 }

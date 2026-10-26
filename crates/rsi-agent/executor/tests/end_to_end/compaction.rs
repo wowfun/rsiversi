@@ -100,7 +100,12 @@ async fn pressure_summary_is_durable_before_conversation_resumes_and_charges_pro
     assert!(!resumed.contains("verified earlier work"));
     let facts = stack
         .store
-        .read_facts(&first.session_id, 0, 512)
+        .read_facts(
+            &first.session_id,
+            0,
+            512,
+            rsi_agent_store_protocol::MAXIMUM_STORE_FACT_PAGE_BYTES,
+        )
         .await
         .unwrap()
         .facts;
@@ -180,7 +185,12 @@ async fn truncated_summary_stops_without_recovery_or_an_ordinary_resubmission() 
     assert_eq!(provider.starts.load(Ordering::SeqCst), 2);
     let facts = stack
         .store
-        .read_facts(&first.session_id, 0, 512)
+        .read_facts(
+            &first.session_id,
+            0,
+            512,
+            rsi_agent_store_protocol::MAXIMUM_STORE_FACT_PAGE_BYTES,
+        )
         .await
         .unwrap()
         .facts;
@@ -242,7 +252,12 @@ async fn naturally_finished_summary_that_expands_the_view_fails_without_resubmis
     assert_eq!(provider.starts.load(Ordering::SeqCst), 2);
     let facts = stack
         .store
-        .read_facts(&first.session_id, 0, 512)
+        .read_facts(
+            &first.session_id,
+            0,
+            512,
+            rsi_agent_store_protocol::MAXIMUM_STORE_FACT_PAGE_BYTES,
+        )
         .await
         .unwrap()
         .facts;
@@ -475,7 +490,12 @@ async fn executor_loss_after_summary_finished_interrupts_original_turn_and_expli
         .unwrap();
     let facts = stack
         .store
-        .read_facts(&first.session_id, 0, 512)
+        .read_facts(
+            &first.session_id,
+            0,
+            512,
+            rsi_agent_store_protocol::MAXIMUM_STORE_FACT_PAGE_BYTES,
+        )
         .await
         .unwrap()
         .facts;

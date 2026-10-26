@@ -1,4 +1,5 @@
 use super::*;
+use rsi_agent_store_protocol::MAXIMUM_STORE_FACT_PAGE_BYTES as FACT_PAGE_BYTES;
 
 #[derive(Debug)]
 struct AuthenticatedEcho(EchoTool);
@@ -67,7 +68,7 @@ async fn frozen_role_hides_tools_before_any_intent_and_does_not_mutate_other_cla
     assert_eq!(calls.load(Ordering::SeqCst), 0);
     let facts = stack
         .store
-        .read_facts(&submitted.session_id, 0, 64)
+        .read_facts(&submitted.session_id, 0, 64, FACT_PAGE_BYTES)
         .await
         .unwrap()
         .facts;
@@ -134,7 +135,7 @@ async fn denied_approval_persists_the_prepared_call_without_starting_the_tool() 
     assert_eq!(fixture.starts.load(Ordering::Acquire), 1);
     let page = stack
         .store
-        .read_facts(&submitted.session_id, 0, 64)
+        .read_facts(&submitted.session_id, 0, 64, FACT_PAGE_BYTES)
         .await
         .unwrap();
     let rejected = page
@@ -199,7 +200,7 @@ async fn executor_persists_intent_and_start_before_model_and_tool_io() {
     assert_eq!(tool_calls.load(Ordering::Acquire), 1);
     let page = stack
         .store
-        .read_facts(&submitted.session_id, 0, 64)
+        .read_facts(&submitted.session_id, 0, 64, FACT_PAGE_BYTES)
         .await
         .unwrap();
     let kinds = page
@@ -296,7 +297,7 @@ async fn adjacent_parallel_safe_tools_overlap_but_publish_results_in_source_orde
     assert_eq!(outcome, TurnOutcome::Completed);
     let page = stack
         .store
-        .read_facts(&submitted.session_id, 0, 64)
+        .read_facts(&submitted.session_id, 0, 64, FACT_PAGE_BYTES)
         .await
         .unwrap();
     let intents = page
@@ -406,7 +407,7 @@ async fn parallel_batch_publishes_successful_siblings_before_propagating_a_failu
     assert!(matches!(outcome, TurnOutcome::Failed { .. }));
     let facts = stack
         .store
-        .read_facts(&submitted.session_id, 0, 64)
+        .read_facts(&submitted.session_id, 0, 64, FACT_PAGE_BYTES)
         .await
         .unwrap()
         .facts;
@@ -472,7 +473,7 @@ async fn parallel_results_above_the_old_cumulative_byte_budget_both_publish() {
     assert!(matches!(outcome, TurnOutcome::Completed));
     let facts = stack
         .store
-        .read_facts(&submitted.session_id, 0, 64)
+        .read_facts(&submitted.session_id, 0, 64, FACT_PAGE_BYTES)
         .await
         .unwrap()
         .facts;
@@ -541,7 +542,7 @@ async fn exclusive_tool_is_a_durable_barrier_between_parallel_safe_runs() {
     assert_eq!(calls.load(Ordering::Acquire), 3);
     let page = stack
         .store
-        .read_facts(&submitted.session_id, 0, 64)
+        .read_facts(&submitted.session_id, 0, 64, FACT_PAGE_BYTES)
         .await
         .unwrap();
     let relevant = page
@@ -628,7 +629,7 @@ async fn exclusive_final_tool_is_rejected_before_effects_when_not_last_in_source
     assert_eq!(calls.load(Ordering::Acquire), 0);
     let page = stack
         .store
-        .read_facts(&submitted.session_id, 0, 64)
+        .read_facts(&submitted.session_id, 0, 64, FACT_PAGE_BYTES)
         .await
         .unwrap();
     assert!(
@@ -667,7 +668,7 @@ async fn unknown_tool_is_rejected_before_any_effect_is_published() {
     ));
     let page = stack
         .store
-        .read_facts(&submitted.session_id, 0, 64)
+        .read_facts(&submitted.session_id, 0, 64, FACT_PAGE_BYTES)
         .await
         .unwrap();
     assert!(
@@ -721,7 +722,7 @@ async fn model_tool_loop_keeps_independent_attempt_settlements() {
     assert_eq!(fixture.requests.lock().unwrap().len(), 2);
     let page = stack
         .store
-        .read_facts(&submitted.session_id, 0, 64)
+        .read_facts(&submitted.session_id, 0, 64, FACT_PAGE_BYTES)
         .await
         .unwrap();
     let kinds = page
@@ -800,7 +801,7 @@ async fn finalizer_failure_replaces_success_with_one_durable_terminal() {
     ));
     let facts = stack
         .store
-        .read_facts(&submitted.session_id, 0, 64)
+        .read_facts(&submitted.session_id, 0, 64, FACT_PAGE_BYTES)
         .await
         .unwrap()
         .facts;
@@ -904,7 +905,7 @@ async fn successful_tool_result_retires_the_retained_identity_after_terminal_dur
     assert_eq!(outcome, TurnOutcome::Completed);
     let facts = stack
         .store
-        .read_facts(&submitted.session_id, 0, 64)
+        .read_facts(&submitted.session_id, 0, 64, FACT_PAGE_BYTES)
         .await
         .unwrap()
         .facts;
@@ -985,7 +986,7 @@ async fn failed_tool_result_is_retired_after_the_terminal_fact_is_durable() {
 
     let facts = stack
         .store
-        .read_facts(&submitted.session_id, 0, 64)
+        .read_facts(&submitted.session_id, 0, 64, FACT_PAGE_BYTES)
         .await
         .unwrap()
         .facts;
@@ -1147,7 +1148,12 @@ async fn next_step_supersedes_two_unadmitted_calls_before_the_next_provider_requ
         }
     }
     assert!(pending.is_empty());
-    let facts = stack.store.read_facts(&id, 0, 128).await.unwrap().facts;
+    let facts = stack
+        .store
+        .read_facts(&id, 0, 128, FACT_PAGE_BYTES)
+        .await
+        .unwrap()
+        .facts;
     assert_eq!(
         facts
             .iter()
@@ -1269,7 +1275,7 @@ async fn uncertain_tool_interrupts_without_model_result_or_replay_and_retires_af
     assert_eq!(provider.starts.load(Ordering::SeqCst), 1);
     let facts = stack
         .store
-        .read_facts(&submitted.session_id, 0, 64)
+        .read_facts(&submitted.session_id, 0, 64, FACT_PAGE_BYTES)
         .await
         .unwrap()
         .facts;

@@ -587,7 +587,12 @@ async fn run_retry_case(
     let (submitted, outcome) = stack.submit_and_wait("retry safely").await;
     let facts = stack
         .store
-        .read_facts(&submitted.session_id, 0, 64)
+        .read_facts(
+            &submitted.session_id,
+            0,
+            64,
+            rsi_agent_store_protocol::MAXIMUM_STORE_FACT_PAGE_BYTES,
+        )
         .await
         .unwrap()
         .facts
@@ -693,7 +698,12 @@ async fn language_regeneration_retries_original_request_five_times_without_histo
     }
     let facts = stack
         .store
-        .read_facts(&submitted.session_id, 0, 128)
+        .read_facts(
+            &submitted.session_id,
+            0,
+            128,
+            rsi_agent_store_protocol::MAXIMUM_STORE_FACT_PAGE_BYTES,
+        )
         .await
         .unwrap()
         .facts;

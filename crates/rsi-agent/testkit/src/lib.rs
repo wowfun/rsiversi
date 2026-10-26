@@ -16,7 +16,6 @@ use rsi_agent_session_protocol::{
 use rsi_agent_store_protocol::{
     AgentActivationGuard, AppendBatch, AppendCommit, AtomicAgentCommit, AtomicAgentCommitResult,
     AtomicSessionAppend, CasObjectRef, MAXIMUM_STORE_BATCH_FACTS, MAXIMUM_STORE_CAS_BYTES,
-    MAXIMUM_STORE_CONTROL_PAGE_BYTES, MAXIMUM_STORE_FACT_PAGE_BYTES,
     MAXIMUM_STORE_MAILBOX_PAGE_BYTES, Result, SessionStore, SessionStoreContract,
     StoreActivationPhase, StoreActiveActivation, StoreAgentChild, StoreAgentChildPage,
     StoreAgentDescendantStatus, StoreAgentMailbox, StoreAgentMailboxSummary, StoreAgentMessage,
@@ -233,7 +232,12 @@ pub async fn append_history_fixture(
                 0
             } else {
                 store
-                    .read_controls(&batch.session_id, 0, 1)
+                    .read_controls(
+                        &batch.session_id,
+                        0,
+                        1,
+                        rsi_agent_store_protocol::MAXIMUM_STORE_FACT_PAGE_BYTES,
+                    )
                     .await?
                     .durable_seq
             };

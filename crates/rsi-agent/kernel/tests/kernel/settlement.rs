@@ -115,7 +115,12 @@ async fn persistent_first_root_failure_preserves_flush_later_pages_and_global_he
     .await;
     tokio::time::timeout(std::time::Duration::from_secs(1), async {
         while !memory
-            .read_facts(&ordinary.session_id, 0, 8)
+            .read_facts(
+                &ordinary.session_id,
+                0,
+                8,
+                rsi_agent_store_protocol::MAXIMUM_STORE_FACT_PAGE_BYTES,
+            )
             .await
             .is_ok_and(|page| page.durable_seq == 1)
         {
@@ -126,7 +131,12 @@ async fn persistent_first_root_failure_preserves_flush_later_pages_and_global_he
     .unwrap();
     assert_eq!(
         memory
-            .read_facts(&ordinary.session_id, 0, 8)
+            .read_facts(
+                &ordinary.session_id,
+                0,
+                8,
+                rsi_agent_store_protocol::MAXIMUM_STORE_FACT_PAGE_BYTES
+            )
             .await
             .unwrap()
             .durable_seq,

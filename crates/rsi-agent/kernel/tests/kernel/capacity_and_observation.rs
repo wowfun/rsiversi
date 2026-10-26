@@ -286,7 +286,15 @@ async fn shutdown_snapshots_flush_waiters_before_terminal_sessions_can_be_evicte
         .await
         .expect("terminal eviction must not invalidate a later shutdown waiter");
     for submitted in [first, second] {
-        let page = store.read_facts(&submitted.session_id, 0, 8).await.unwrap();
+        let page = store
+            .read_facts(
+                &submitted.session_id,
+                0,
+                8,
+                rsi_agent_store_protocol::MAXIMUM_STORE_FACT_PAGE_BYTES,
+            )
+            .await
+            .unwrap();
         assert_eq!(page.durable_seq, 2);
         assert!(matches!(
             page.facts.last().map(SessionFact::body),
@@ -353,7 +361,12 @@ async fn shutdown_fences_publish_before_its_final_flush_snapshot_can_be_extended
     store.release_blocked_append();
     shutdown.await.unwrap().unwrap();
     let page = memory
-        .read_facts(&submitted.session_id, 0, 8)
+        .read_facts(
+            &submitted.session_id,
+            0,
+            8,
+            rsi_agent_store_protocol::MAXIMUM_STORE_FACT_PAGE_BYTES,
+        )
         .await
         .unwrap();
     assert_eq!(page.durable_seq, 2);
@@ -1844,76 +1857,76 @@ async fn retained_observation_capacity_follows_the_last_item_clone_and_resumes_e
         .unwrap();
     let session = SessionId::new("retained-history").unwrap();
     let admitted = rsi_agent_turn_protocol::DEFAULT_MAXIMUM_RETAINED_OBSERVATION_BYTES / bytes;
-    let mut streams = Vec::new();
+    let cursor = ObservationCursor {
+        control_seq: 1,
+        fact_seq: 3,
+    };
+    let mut retained = Vec::new();
     for _ in 0..admitted {
-        streams.push(
-            kernel
-                .observe_session(
-                    &session,
-                    ObservationCursor {
-                        control_seq: 1,
-                        fact_seq: 0,
-                    },
-                )
-                .await
-                .unwrap(),
-        );
-    }
-    assert!(matches!(
-        kernel
+        let mut stream = kernel
             .observe_session(
                 &session,
                 ObservationCursor {
-                    control_seq: 1,
-                    fact_seq: 0
-                }
+                    fact_seq: 0,
+                    ..cursor
+                },
             )
-            .await,
+            .await
+            .unwrap();
+        for _ in 0..3 {
+            drop(stream.next().await.unwrap().unwrap());
+        }
+        let SessionObservation::Fact { fact, .. } = stream.next().await.unwrap().unwrap() else {
+            panic!("Fact history")
+        };
+        assert_eq!(fact.seq(), 4);
+        retained.push((stream, fact));
+    }
+    // Opening only retains the small first page. Exhaustion happens when polling
+    // through it to the large record, and must preserve the exact resume cursor.
+    let mut overflow = kernel
+        .observe_session(
+            &session,
+            ObservationCursor {
+                fact_seq: 0,
+                ..cursor
+            },
+        )
+        .await
+        .unwrap();
+    for _ in 0..3 {
+        drop(overflow.next().await.unwrap().unwrap());
+    }
+    assert!(matches!(
+        overflow.next().await.unwrap(),
         Err(TurnError::Capacity)
     ));
-    let mut stream = streams.pop().unwrap();
-    for _ in 0..3 {
-        drop(stream.next().await.unwrap().unwrap());
-    }
-    let SessionObservation::Fact { fact, .. } = stream.next().await.unwrap().unwrap() else {
-        panic!("Fact history")
-    };
-    assert_eq!(fact.seq(), 4);
+    drop(overflow);
+    let (stream, fact) = retained.pop().unwrap();
     let last_clone = fact.clone();
-    drop(fact);
-    drop(stream);
+    drop((stream, fact));
     assert!(
         matches!(
-            kernel
-                .observe_session(
-                    &session,
-                    ObservationCursor {
-                        control_seq: 1,
-                        fact_seq: 0
-                    }
-                )
-                .await,
+            kernel.observe_session(&session, cursor).await,
             Err(TurnError::Capacity)
         ),
         "dropping the stream must not uncharge a retained item clone"
     );
     drop(last_clone);
-    let replacement = kernel
-        .observe_session(
-            &session,
-            ObservationCursor {
-                control_seq: 1,
-                fact_seq: 0,
-            },
-        )
-        .await
-        .unwrap();
+    let mut replacement = kernel.observe_session(&session, cursor).await.unwrap();
+    for seq in [4, 5] {
+        let SessionObservation::Fact { fact, .. } = replacement.next().await.unwrap().unwrap()
+        else {
+            panic!("Fact history")
+        };
+        assert_eq!(fact.seq(), seq);
+    }
     let mut resumed = kernel
         .observe_session(
             &session,
             ObservationCursor {
-                control_seq: 1,
                 fact_seq: 4,
+                ..cursor
             },
         )
         .await
@@ -1922,8 +1935,7 @@ async fn retained_observation_capacity_follows_the_last_item_clone_and_resumes_e
         panic!("terminal Fact")
     };
     assert_eq!(fact.seq(), 5);
-    drop(replacement);
-    drop(streams);
+    drop((replacement, retained));
 }
 
 #[tokio::test(start_paused = true)]
@@ -2253,7 +2265,7 @@ async fn durable_observation_rejects_mismatched_and_oversized_store_pages() {
     use rsi_agent_session_protocol::{AgentControlRecord, MessageDiscardReason};
     use rsi_agent_store_protocol::StoreControlPage;
     let mut failures = Vec::new();
-    for controls in [false, true] {
+    for (fallback, controls) in [(false, false), (false, true), (true, false), (true, true)] {
         for (name, after_seq, first_seq, count, tail) in [
             ("replayed page", 0, 1, 1, 3),
             ("skipped page", 2, 3, 1, 3),
@@ -2272,6 +2284,11 @@ async fn durable_observation_rejects_mismatched_and_oversized_store_pages() {
                 Arc::new(FixedClock),
                 KernelLimits {
                     maximum_store_read_bytes: MAXIMUM_SESSION_FACT_BYTES,
+                    maximum_retained_observation_bytes: if fallback {
+                        KernelLimits::default().maximum_retained_observation_bytes
+                    } else {
+                        MAXIMUM_SESSION_FACT_BYTES
+                    },
                     ..KernelLimits::default()
                 },
             )
@@ -2307,6 +2324,12 @@ async fn durable_observation_rejects_mismatched_and_oversized_store_pages() {
                         .collect(),
                 });
             }
+            store
+                .refuse_fact_page_once
+                .store(fallback && !controls, Ordering::Release);
+            store
+                .refuse_control_page_once
+                .store(fallback && controls, Ordering::Release);
             let result = kernel
                 .observe_session(
                     &SessionId::new("fault-page").unwrap(),
@@ -2316,8 +2339,13 @@ async fn durable_observation_rejects_mismatched_and_oversized_store_pages() {
                     },
                 )
                 .await;
-            if !matches!(result, Err(TurnError::Invariant(_))) {
-                failures.push((controls, name));
+            if !fallback && name == "ignores requested limit" {
+                assert!(
+                    result.is_ok(),
+                    "a tightened retention budget still admits a small multi-record page"
+                );
+            } else if !matches!(result, Err(TurnError::Invariant(_))) {
+                failures.push((fallback, controls, name));
             }
         }
     }
@@ -2428,4 +2456,57 @@ async fn tree_watches_share_observer_capacity_and_release_it_on_drop() {
     assert_eq!(snapshot.total.current, 0);
     assert_eq!(snapshot.tree.current, 0);
     assert_eq!(snapshot.total.peak, 1);
+}
+
+#[tokio::test(start_paused = true)]
+async fn claim_reads_honor_fallback_count_before_merging_pending_facts() {
+    let store = Arc::new(FactReadRaceStore::new(Arc::new(MemoryStore::new())));
+    let kernel =
+        AgentKernel::recover_with_clock(store.clone(), composition(), Arc::new(FixedClock))
+            .await
+            .unwrap();
+    let workers = kernel.start_workers();
+    submit(&kernel, "fallback-claim", "work").await;
+    let _lease = kernel.register("worker".into()).unwrap();
+    let claim = kernel
+        .claim("worker", CancellationToken::new())
+        .await
+        .unwrap()
+        .unwrap();
+    tool_origin::flush_bodies(&kernel, &claim, vec![start_step(claim.turn_id())]).await;
+    kernel
+        .publish(&claim, vec![touched(claim.turn_id(), "pending")])
+        .await
+        .unwrap();
+    store.refuse_fact_page_once.store(true, Ordering::Release);
+    let page = kernel.read_facts(&claim, 1, 8).await.unwrap();
+    assert_eq!(page.facts.len(), 1);
+    assert_eq!(page.through_seq, 2);
+    assert_eq!(
+        kernel.read_facts(&claim, 2, 8).await.unwrap().through_seq,
+        3
+    );
+    *store.fact_page_override.lock().unwrap() = Some(StoreFactPage {
+        after_seq: 1,
+        durable_seq: 2,
+        facts: vec![SessionFact::new(2, 1, start_step(claim.turn_id())).unwrap()],
+    });
+    assert!(matches!(
+        kernel.read_facts(&claim, 0, 8).await,
+        Err(TurnError::Invariant(_))
+    ));
+    *store.fact_page_override.lock().unwrap() = Some(StoreFactPage {
+        after_seq: 0,
+        durable_seq: 2,
+        facts: vec![
+            accepted_fact(1, claim.turn_id()),
+            SessionFact::new(2, 1, start_step(claim.turn_id())).unwrap(),
+        ],
+    });
+    assert!(matches!(
+        kernel.read_facts(&claim, 0, 1).await,
+        Err(TurnError::Invariant(_))
+    ));
+    kernel.release(&claim).unwrap();
+    kernel.shutdown(workers).await.unwrap();
 }

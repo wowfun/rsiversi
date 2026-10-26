@@ -680,6 +680,7 @@ impl SessionStore for Store {
         session_id: &SessionId,
         exclusive_before_seq: u64,
         limit: usize,
+        maximum_bytes: usize,
     ) -> Result<StoreBackwardFactPage> {
         unreachable!()
     }
@@ -689,6 +690,7 @@ impl SessionStore for Store {
         turn_id: &TurnId,
         after_seq: u64,
         limit: usize,
+        maximum_bytes: usize,
     ) -> Result<StoreTurnFactPage> {
         unreachable!()
     }
@@ -754,6 +756,7 @@ impl SessionStore for Store {
         session_id: &SessionId,
         after_seq: u64,
         limit: usize,
+        maximum_bytes: usize,
     ) -> Result<StoreFactPage> {
         self.calls.fetch_add(1, Ordering::SeqCst);
         self.entered.add_permits(1);

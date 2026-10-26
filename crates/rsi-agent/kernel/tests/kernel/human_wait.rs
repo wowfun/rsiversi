@@ -163,7 +163,12 @@ async fn agent_wait_resume_retries_failures_and_lost_acknowledgements() {
             Some(StoreActivationPhase::Running)
         );
         let controls = memory
-            .read_controls(parent.session_id(), 0, 256)
+            .read_controls(
+                parent.session_id(),
+                0,
+                256,
+                rsi_agent_store_protocol::MAXIMUM_STORE_FACT_PAGE_BYTES,
+            )
             .await
             .unwrap();
         assert_eq!(
@@ -287,7 +292,12 @@ async fn lost_park_ack_is_reconciled_and_preserves_the_original_error() {
         "park cause was masked: {result:?}"
     );
     let controls = memory
-        .read_controls(parent.session_id(), 0, 256)
+        .read_controls(
+            parent.session_id(),
+            0,
+            256,
+            rsi_agent_store_protocol::MAXIMUM_STORE_FACT_PAGE_BYTES,
+        )
         .await
         .unwrap();
     assert_eq!(
@@ -433,7 +443,12 @@ async fn human_resume_retries_storage_failures_without_stranding_or_duplicating_
             Some(StoreActivationPhase::Running)
         );
         let controls = memory
-            .read_controls(claim.session_id(), 0, 256)
+            .read_controls(
+                claim.session_id(),
+                0,
+                256,
+                rsi_agent_store_protocol::MAXIMUM_STORE_FACT_PAGE_BYTES,
+            )
             .await
             .unwrap();
         assert_eq!(
@@ -588,7 +603,12 @@ async fn timed_out_or_aborted_resume_keeps_claim_retirement_owned_until_repaired
             .unwrap();
         assert_eq!(reclaimed.turn_id(), claim.turn_id());
         let controls = memory
-            .read_controls(claim.session_id(), 0, 256)
+            .read_controls(
+                claim.session_id(),
+                0,
+                256,
+                rsi_agent_store_protocol::MAXIMUM_STORE_FACT_PAGE_BYTES,
+            )
             .await
             .unwrap();
         assert!(controls.records.iter().any(|record| matches!(

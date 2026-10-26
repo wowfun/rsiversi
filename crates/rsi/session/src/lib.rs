@@ -888,7 +888,7 @@ impl LocalSessionHandle {
                         self.reference_owner()?
                             .verify(
                                 header.clone(),
-                                reference.clone(),
+                                (*reference).clone(),
                                 self.projection_stopped.clone(),
                             )
                             .await
@@ -1222,7 +1222,12 @@ impl SessionHandle for LocalSessionHandle {
         })?;
         let page = self
             .store
-            .read_controls(self.session_id(), after, 1)
+            .read_controls(
+                self.session_id(),
+                after,
+                1,
+                rsi_agent_store_protocol::MAXIMUM_STORE_FACT_PAGE_BYTES,
+            )
             .await
             .map_err(map_store_error)?;
         let record = page
@@ -1543,7 +1548,12 @@ impl SessionHandle for LocalSessionHandle {
             }
             let page = self
                 .store
-                .read_facts_before(self.session_id(), exclusive_before_seq.unwrap_or(0), limit)
+                .read_facts_before(
+                    self.session_id(),
+                    exclusive_before_seq.unwrap_or(0),
+                    limit,
+                    rsi_agent_store_protocol::MAXIMUM_STORE_FACT_PAGE_BYTES,
+                )
                 .await
                 .map_err(map_store_error)?;
             Ok(SessionHistoryPage {

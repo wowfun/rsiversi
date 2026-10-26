@@ -307,7 +307,12 @@ impl References {
             let _validation = store.prepare_session(&request.recorded_session_id).await?;
             check(&stop)?;
             let facts = store
-                .read_facts(&request.recorded_session_id, request.fact_seq - 1, 1)
+                .read_facts(
+                    &request.recorded_session_id,
+                    request.fact_seq - 1,
+                    1,
+                    rsi_agent_store_protocol::MAXIMUM_STORE_FACT_PAGE_BYTES,
+                )
                 .await?;
             check(&stop)?;
             let reference = {

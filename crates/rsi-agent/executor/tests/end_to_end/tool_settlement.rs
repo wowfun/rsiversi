@@ -123,7 +123,12 @@ async fn serial_and_parallel_results_invoke_settlement_once_per_effect() {
         );
         let facts = stack
             .store
-            .read_facts(&submitted.session_id, 0, 64)
+            .read_facts(
+                &submitted.session_id,
+                0,
+                64,
+                rsi_agent_store_protocol::MAXIMUM_STORE_FACT_PAGE_BYTES,
+            )
             .await
             .unwrap()
             .facts;
@@ -134,7 +139,12 @@ async fn serial_and_parallel_results_invoke_settlement_once_per_effect() {
         assert_eq!(results.len(), expected);
         let controls = stack
             .store
-            .read_controls(&submitted.session_id, 0, 64)
+            .read_controls(
+                &submitted.session_id,
+                0,
+                64,
+                rsi_agent_store_protocol::MAXIMUM_STORE_FACT_PAGE_BYTES,
+            )
             .await
             .unwrap()
             .records;
@@ -392,7 +402,12 @@ async fn retained_settlement(uncertain: bool) {
         ));
         let facts = stack
             .store
-            .read_facts(&submitted.session_id, 0, 64)
+            .read_facts(
+                &submitted.session_id,
+                0,
+                64,
+                rsi_agent_store_protocol::MAXIMUM_STORE_FACT_PAGE_BYTES,
+            )
             .await
             .unwrap()
             .facts;
@@ -468,7 +483,12 @@ async fn conclusion_and_domain_update_share_the_exact_result_commit() {
     assert_eq!(provider.requests.lock().unwrap().len(), 1);
     let facts = stack
         .store
-        .read_facts(&submitted.session_id, 0, 64)
+        .read_facts(
+            &submitted.session_id,
+            0,
+            64,
+            rsi_agent_store_protocol::MAXIMUM_STORE_FACT_PAGE_BYTES,
+        )
         .await
         .unwrap()
         .facts;
@@ -486,7 +506,12 @@ async fn conclusion_and_domain_update_share_the_exact_result_commit() {
         .unwrap();
     let controls = stack
         .store
-        .read_controls(&submitted.session_id, 0, 64)
+        .read_controls(
+            &submitted.session_id,
+            0,
+            64,
+            rsi_agent_store_protocol::MAXIMUM_STORE_FACT_PAGE_BYTES,
+        )
         .await
         .unwrap()
         .records;

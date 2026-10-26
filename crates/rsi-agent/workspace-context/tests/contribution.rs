@@ -460,7 +460,12 @@ async fn workspace_last_good_tombstone_and_dedup_are_atomic_domain_behavior() {
     assert_eq!(enter(&kernel, &claim, "tombstone").await, 1);
     assert_eq!(enter(&kernel, &claim, "unchanged").await, 0);
     let facts = store
-        .read_facts(claim.session_id(), 0, 64)
+        .read_facts(
+            claim.session_id(),
+            0,
+            64,
+            rsi_agent_store_protocol::MAXIMUM_STORE_FACT_PAGE_BYTES,
+        )
         .await
         .unwrap()
         .facts;
@@ -561,7 +566,16 @@ async fn cold_sqlite_resume_uses_new_codec_generation_without_replaying_workspac
         drop(lease);
         kernel.shutdown(workers).await.unwrap();
         drop(kernel);
-        let facts = store.read_facts(&session_id, 0, 64).await.unwrap().facts;
+        let facts = store
+            .read_facts(
+                &session_id,
+                0,
+                64,
+                rsi_agent_store_protocol::MAXIMUM_STORE_FACT_PAGE_BYTES,
+            )
+            .await
+            .unwrap()
+            .facts;
         assert_eq!(
             facts
                 .iter()
@@ -606,7 +620,12 @@ async fn initial_empty_workspace_does_not_emit_replacement_or_tombstone() {
         .await
         .unwrap();
     let facts = store
-        .read_facts(claim.session_id(), 0, 64)
+        .read_facts(
+            claim.session_id(),
+            0,
+            64,
+            rsi_agent_store_protocol::MAXIMUM_STORE_FACT_PAGE_BYTES,
+        )
         .await
         .unwrap()
         .facts;
@@ -885,7 +904,12 @@ async fn fork_rebinds_the_inherited_cursor_and_only_new_human_input_invokes_skil
         &vec!["manual".to_owned()]
     );
     let child_facts = store
-        .read_facts(&child.session_id, 0, 64)
+        .read_facts(
+            &child.session_id,
+            0,
+            64,
+            rsi_agent_store_protocol::MAXIMUM_STORE_FACT_PAGE_BYTES,
+        )
         .await
         .unwrap()
         .facts;

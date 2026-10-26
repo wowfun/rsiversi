@@ -223,7 +223,12 @@ async fn tool_result_and_domain_settle_together_across_faults_and_cancellation()
             assert!(!run.handle.decode(&state[0].snapshot).unwrap());
             assert!(
                 !memory
-                    .read_facts(run.claim.session_id(), 0, 32)
+                    .read_facts(
+                        run.claim.session_id(),
+                        0,
+                        32,
+                        rsi_agent_store_protocol::MAXIMUM_STORE_FACT_PAGE_BYTES
+                    )
                     .await
                     .unwrap()
                     .facts
@@ -282,7 +287,12 @@ async fn tool_result_and_domain_settle_together_across_faults_and_cancellation()
         let span = receipt.commit().fact_span().unwrap();
         assert_eq!(span.count(), 1);
         let facts = memory
-            .read_facts(run.claim.session_id(), 0, 32)
+            .read_facts(
+                run.claim.session_id(),
+                0,
+                32,
+                rsi_agent_store_protocol::MAXIMUM_STORE_FACT_PAGE_BYTES,
+            )
             .await
             .unwrap()
             .facts;
@@ -746,7 +756,12 @@ async fn domain_work_and_mixed_fact_batches_have_no_cumulative_record_limit() {
         .await
         .unwrap();
     let controls = store
-        .read_controls(run.claim.session_id(), 0, 256)
+        .read_controls(
+            run.claim.session_id(),
+            0,
+            256,
+            rsi_agent_store_protocol::MAXIMUM_STORE_FACT_PAGE_BYTES,
+        )
         .await
         .unwrap();
     assert!(matches!(
@@ -822,7 +837,12 @@ async fn domain_work_has_no_elapsed_limit_and_ending_closes_the_open_step() {
         .await
         .unwrap();
     let ending = store
-        .read_facts(run.claim.session_id(), 2, 8)
+        .read_facts(
+            run.claim.session_id(),
+            2,
+            8,
+            rsi_agent_store_protocol::MAXIMUM_STORE_FACT_PAGE_BYTES,
+        )
         .await
         .unwrap();
     assert_eq!(ending.facts.len(), 2);
@@ -858,7 +878,12 @@ async fn failed_direct_ending_keeps_business_closed_and_allows_retry_without_par
     ));
     assert_eq!(
         store
-            .read_facts(run.claim.session_id(), 0, 8)
+            .read_facts(
+                run.claim.session_id(),
+                0,
+                8,
+                rsi_agent_store_protocol::MAXIMUM_STORE_FACT_PAGE_BYTES
+            )
             .await
             .unwrap()
             .facts
@@ -1291,7 +1316,15 @@ async fn first_turn_and_message_atomically_commit_the_actual_draft_baseline() {
             states.states[0].snapshot.state().value(),
             &serde_json::Value::Bool(true)
         );
-        let controls = store.read_controls(&session, 0, 8).await.unwrap();
+        let controls = store
+            .read_controls(
+                &session,
+                0,
+                8,
+                rsi_agent_store_protocol::MAXIMUM_STORE_FACT_PAGE_BYTES,
+            )
+            .await
+            .unwrap();
         let AgentControlRecordBody::DomainStateCommitted { commit } = controls.records[0].body()
         else {
             panic!("first control lost its actual domain baseline");

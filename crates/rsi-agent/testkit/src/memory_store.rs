@@ -2,20 +2,20 @@ use super::{
     AgentControlRecord, AgentControlRecordBody, AppendBatch, AppendCommit, Arc, AtomicAgentCommit,
     AtomicAgentCommitResult, AtomicSessionAppend, BTreeMap, BTreeSet, CasObjectRef, Digest,
     EMPTY_CONTROL_PREFIX_DIGEST, EMPTY_FACT_PREFIX_DIGEST, ForkTurnSelection,
-    MAXIMUM_STORE_CAS_BYTES, MAXIMUM_STORE_CONTROL_PAGE_BYTES, MAXIMUM_STORE_FACT_PAGE_BYTES,
-    MAXIMUM_STORE_MAILBOX_PAGE_BYTES, MemorySession, MemoryState, MemoryStore, MemoryTurnBoundary,
-    MessageId, MessageTarget, Ordering, Result, SessionFact, SessionHeader, SessionId,
-    SessionStore, Sha256, StoreActivationPhase, StoreActiveActivation, StoreAgentChild,
-    StoreAgentChildPage, StoreAgentDescendantStatus, StoreAgentMailbox, StoreAgentMailboxSummary,
-    StoreAgentMessage, StoreAgentMessageState, StoreAgentSessionStatus, StoreAgentSubtreeSnapshot,
-    StoreBackwardFactPage, StoreControlPage, StoreError, StoreFactPage, StoreFactTurnRole,
-    StoreForkBoundary, StoreOpenTurn, StoreOpenTurnPage, StoreReadyMessage,
+    MAXIMUM_STORE_CAS_BYTES, MAXIMUM_STORE_MAILBOX_PAGE_BYTES, MemorySession, MemoryState,
+    MemoryStore, MemoryTurnBoundary, MessageId, MessageTarget, Ordering, Result, SessionFact,
+    SessionHeader, SessionId, SessionStore, Sha256, StoreActivationPhase, StoreActiveActivation,
+    StoreAgentChild, StoreAgentChildPage, StoreAgentDescendantStatus, StoreAgentMailbox,
+    StoreAgentMailboxSummary, StoreAgentMessage, StoreAgentMessageState, StoreAgentSessionStatus,
+    StoreAgentSubtreeSnapshot, StoreBackwardFactPage, StoreControlPage, StoreError, StoreFactPage,
+    StoreFactTurnRole, StoreForkBoundary, StoreOpenTurn, StoreOpenTurnPage, StoreReadyMessage,
     StoreReadyMessageCursor, StoreReadyMessagePage, StoreReadyRootPage, StoreRecentSession,
     StoreRecentSessionCursor, StoreRecentSessionPage, StoreSessionPage, StoreSessionWatermarks,
     StoreTurnBoundary, StoreTurnFactPage, StoreWaitingActivationPage, StoredContextCheckpoint,
     TurnId, WriteContextCheckpoint, advance_control_prefix_digest, advance_fact_prefix_digest,
     async_trait, validate_message_claim_fact, validate_read_limit, validate_session_read_limit,
 };
+use rsi_agent_store_protocol::admit_page_record;
 
 #[cfg(test)]
 #[tokio::test]
@@ -838,8 +838,9 @@ impl SessionStore for MemoryStore {
         session_id: &SessionId,
         after_seq: u64,
         limit: usize,
+        maximum_bytes: usize,
     ) -> Result<StoreFactPage> {
-        validate_read_limit(limit)?;
+        rsi_agent_store_protocol::validate_page_limits(limit, maximum_bytes)?;
         let mut state = self
             .inner
             .lock()
@@ -863,7 +864,7 @@ impl SessionStore for MemoryStore {
             let projected = encoded_bytes
                 .checked_add(fact.encoded_len())
                 .ok_or_else(|| StoreError::Corrupt("Fact page size overflow".into()))?;
-            if !facts.is_empty() && projected > MAXIMUM_STORE_FACT_PAGE_BYTES {
+            if !admit_page_record(projected, maximum_bytes, facts.is_empty())? {
                 break;
             }
             encoded_bytes = projected;
@@ -883,8 +884,9 @@ impl SessionStore for MemoryStore {
         session_id: &SessionId,
         after_seq: u64,
         limit: usize,
+        maximum_bytes: usize,
     ) -> Result<StoreControlPage> {
-        validate_read_limit(limit)?;
+        rsi_agent_store_protocol::validate_page_limits(limit, maximum_bytes)?;
         let state = self
             .inner
             .lock()
@@ -907,7 +909,7 @@ impl SessionStore for MemoryStore {
             let projected = encoded_bytes
                 .checked_add(record.encoded_len())
                 .ok_or_else(|| StoreError::Corrupt("control page size overflow".into()))?;
-            if !records.is_empty() && projected > MAXIMUM_STORE_CONTROL_PAGE_BYTES {
+            if !admit_page_record(projected, maximum_bytes, records.is_empty())? {
                 break;
             }
             encoded_bytes = projected;
@@ -927,8 +929,9 @@ impl SessionStore for MemoryStore {
         session_id: &SessionId,
         exclusive_before_seq: u64,
         limit: usize,
+        maximum_bytes: usize,
     ) -> Result<StoreBackwardFactPage> {
-        validate_read_limit(limit)?;
+        rsi_agent_store_protocol::validate_page_limits(limit, maximum_bytes)?;
         let state = self
             .inner
             .lock()
@@ -960,7 +963,7 @@ impl SessionStore for MemoryStore {
                 .checked_add(fact.encoded_len())
                 .ok_or_else(|| StoreError::Corrupt("backward Fact page size overflow".into()))?;
             if facts.len() == limit
-                || (!facts.is_empty() && projected > MAXIMUM_STORE_FACT_PAGE_BYTES)
+                || !admit_page_record(projected, maximum_bytes, facts.is_empty())?
             {
                 break;
             }
@@ -985,8 +988,9 @@ impl SessionStore for MemoryStore {
         turn_id: &TurnId,
         after_seq: u64,
         limit: usize,
+        maximum_bytes: usize,
     ) -> Result<StoreTurnFactPage> {
-        validate_read_limit(limit)?;
+        rsi_agent_store_protocol::validate_page_limits(limit, maximum_bytes)?;
         let state = self
             .inner
             .lock()
@@ -1019,8 +1023,7 @@ impl SessionStore for MemoryStore {
                 .checked_add(fact.encoded_len())
                 .ok_or_else(|| StoreError::Corrupt("turn Fact page size overflow".into()))?;
             if facts.len() == limit
-                || (!facts.is_empty()
-                    && projected > rsi_agent_store_protocol::MAXIMUM_STORE_FACT_PAGE_BYTES)
+                || !admit_page_record(projected, maximum_bytes, facts.is_empty())?
             {
                 has_more = true;
                 break;

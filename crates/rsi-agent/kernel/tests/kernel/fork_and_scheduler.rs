@@ -1,4 +1,5 @@
 use super::*;
+use rsi_agent_store_protocol::MAXIMUM_STORE_FACT_PAGE_BYTES as FACT_PAGE_BYTES;
 
 #[tokio::test]
 async fn fork_replay_validates_its_immutable_boundary_only_at_the_initial_cursor() {
@@ -511,7 +512,10 @@ async fn recovery_resumes_a_durably_parked_wait_before_interrupting_its_activati
             .unwrap(),
         Some(TurnOutcome::Interrupted { .. })
     ));
-    let controls = store.read_controls(&root_id, 0, 32).await.unwrap();
+    let controls = store
+        .read_controls(&root_id, 0, 32, FACT_PAGE_BYTES)
+        .await
+        .unwrap();
     let resumed = controls.records.iter().position(|record| {
         matches!(
             record.body(),

@@ -5,17 +5,23 @@ pub(super) async fn read_facts_bounded(
     session_id: &SessionId,
     after_seq: u64,
     requested_limit: usize,
-) -> std::result::Result<rsi_agent_store_protocol::StoreFactPage, StoreError> {
-    let (limit, bytes) = store_reads::page_limit(inner, requested_limit);
-    let (page, _permit, _lease) = store_reads::read(
+) -> std::result::Result<(rsi_agent_store_protocol::StoreFactPage, usize), StoreError> {
+    let ((page, limit), _permit, _lease) = store_reads::page(
         inner,
         session_id,
-        bytes,
-        true,
-        move |store, id| async move { store.read_facts(&id, after_seq, limit).await },
+        requested_limit,
+        move |store, id, limit, bytes| async move {
+            store.read_facts(&id, after_seq, limit, bytes).await
+        },
     )
     .await?;
-    Ok(page)
+    page.validate()?;
+    if page.after_seq != after_seq || page.facts.len() > limit {
+        return Err(StoreError::Corrupt(
+            "Fact page differs from requested cursor or count".into(),
+        ));
+    }
+    Ok((page, limit))
 }
 
 pub(super) async fn read_controls_bounded(
@@ -24,15 +30,21 @@ pub(super) async fn read_controls_bounded(
     after_seq: u64,
     requested_limit: usize,
 ) -> std::result::Result<rsi_agent_store_protocol::StoreControlPage, StoreError> {
-    let (limit, bytes) = store_reads::page_limit(inner, requested_limit);
-    let (page, _permit, _lease) = store_reads::read(
+    let ((page, limit), _permit, _lease) = store_reads::page(
         inner,
         session_id,
-        bytes,
-        true,
-        move |store, id| async move { store.read_controls(&id, after_seq, limit).await },
+        requested_limit,
+        move |store, id, limit, bytes| async move {
+            store.read_controls(&id, after_seq, limit, bytes).await
+        },
     )
     .await?;
+    page.validate()?;
+    if page.after_seq != after_seq || page.records.len() > limit {
+        return Err(StoreError::Corrupt(
+            "control page differs from requested cursor or count".into(),
+        ));
+    }
     Ok(page)
 }
 
@@ -142,7 +154,7 @@ pub(super) async fn read_fork_page_from_header(
             terminal_parent_seq: origin.resolved_terminal_seq,
         }));
     }
-    let page = read_facts_bounded(inner, &origin.parent_session_id, after_parent_seq, limit)
+    let (page, _) = read_facts_bounded(inner, &origin.parent_session_id, after_parent_seq, limit)
         .await
         .map_err(turn_store_error)?;
     let facts = page
@@ -524,11 +536,28 @@ pub(super) async fn read_turn_facts_bounded(
     after_seq: u64,
     requested_limit: usize,
 ) -> std::result::Result<rsi_agent_store_protocol::StoreTurnFactPage, StoreError> {
+    let expected_turn = turn_id.clone();
     let turn_id = turn_id.clone();
-    let (limit, bytes) = store_reads::page_limit(inner, requested_limit);
-    let (page, _permit, _lease) = store_reads::read(inner, session_id, bytes, true, move |store, id| async move {
-        store.read_turn_facts(&id, &turn_id, after_seq, limit).await
-    }).await?;
+    let ((page, limit), _permit, _lease) = store_reads::page(
+        inner,
+        session_id,
+        requested_limit,
+        move |store, id, limit, bytes| {
+            let turn_id = turn_id.clone();
+            async move {
+                store
+                    .read_turn_facts(&id, &turn_id, after_seq, limit, bytes)
+                    .await
+            }
+        },
+    )
+    .await?;
+    page.validate()?;
+    if page.after_seq != after_seq || page.turn_id != expected_turn || page.facts.len() > limit {
+        return Err(StoreError::Corrupt(
+            "turn Fact page differs from requested selection or count".into(),
+        ));
+    }
     Ok(page)
 }
 
@@ -577,25 +606,21 @@ pub(super) async fn acquire_store_read_bytes(
         .map_err(|_| StoreError::Io("Kernel Store-read admission closed".into()))
 }
 
-pub(super) const fn context_checkpoints_enabled(inner: &KernelInner) -> bool {
-    inner.limits.maximum_store_read_bytes >= MAXIMUM_CONTEXT_CHECKPOINT_BYTES
-}
-
 pub(super) async fn read_observed_facts(
     inner: &Arc<KernelInner>,
     session: &SessionId,
     cursor: u64,
 ) -> TurnResult<(Vec<ObservedFact>, u64)> {
-    let requested = if inner.limits.maximum_retained_observation_bytes < MAXIMUM_STORE_BATCH_BYTES {
-        1
-    } else {
-        MAXIMUM_FACTS_PER_READ
-    };
-    let (limit, bytes) = store_reads::page_limit(inner, requested);
-    let (page, _read, _lease) =
-        store_reads::read(inner, session, bytes, true, move |store, id| async move {
-            store.read_facts(&id, cursor, limit).await
-        })
+    let limit = MAXIMUM_FACTS_PER_READ;
+    let ((page, limit), _read, _lease) =
+        store_reads::page(
+            inner,
+            session,
+            limit,
+            move |store, id, limit, bytes| async move {
+                store.read_facts(&id, cursor, limit, bytes).await
+            },
+        )
         .await
         .map_err(turn_store_error)?;
     if page.after_seq != cursor || page.facts.len() > limit {
@@ -621,18 +646,17 @@ async fn read_observed_controls(
     session: &SessionId,
     cursor: u64,
 ) -> TurnResult<(Vec<ObservedControl>, u64)> {
-    let requested = if inner.limits.maximum_retained_observation_bytes < MAXIMUM_STORE_BATCH_BYTES {
-        1
-    } else {
-        MAXIMUM_FACTS_PER_READ
-    };
-    let (limit, bytes) = store_reads::page_limit(inner, requested);
-    let (page, _read, _lease) =
-        store_reads::read(inner, session, bytes, true, move |store, id| async move {
-            store.read_controls(&id, cursor, limit).await
-        })
-        .await
-        .map_err(turn_store_error)?;
+    let limit = MAXIMUM_FACTS_PER_READ;
+    let ((page, limit), _read, _lease) = store_reads::page(
+        inner,
+        session,
+        limit,
+        move |store, id, limit, bytes| async move {
+            store.read_controls(&id, cursor, limit, bytes).await
+        },
+    )
+    .await
+    .map_err(turn_store_error)?;
     if page.after_seq != cursor || page.records.len() > limit {
         return Err(TurnError::Invariant(
             "control observation page differs from its requested cursor or limit".into(),

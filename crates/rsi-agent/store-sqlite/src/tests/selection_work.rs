@@ -4,10 +4,26 @@ use rusqlite::{
     trace::{TraceEvent, TraceEventCodes},
 };
 
+pub(super) fn trace_readers(
+    store: &SqliteStore,
+    mask: TraceEventCodes,
+    trace: Option<fn(TraceEvent<'_>)>,
+) {
+    for connection in store.inner.connections.readers.lock().unwrap().iter_mut() {
+        connection.trace_v2(mask, trace);
+    }
+}
+
 static MEASUREMENT: tokio::sync::Mutex<()> = tokio::sync::Mutex::const_new(());
 static VM: AtomicU64 = AtomicU64::new(0);
 static COMPLETED_QUERIES: AtomicU64 = AtomicU64::new(0);
 static SUMMARY_QUERIES: AtomicU64 = AtomicU64::new(0);
+
+fn measured_work() -> u64 {
+    let measured = VM.load(Ordering::Relaxed);
+    assert!(measured > 0, "query trace must observe work");
+    measured
+}
 
 fn count_summary_reads(event: TraceEvent<'_>) {
     if let TraceEvent::Profile(statement, _) = event
@@ -33,7 +49,8 @@ async fn activity_summaries_use_one_query_preserve_order_and_do_not_read_headers
         .collect::<Vec<_>>();
     requested.insert(3, b.clone());
     requested.insert(60, a.clone());
-    store.inner.connections.reader.lock().unwrap().trace_v2(
+    trace_readers(
+        &store,
         TraceEventCodes::SQLITE_TRACE_PROFILE,
         Some(count_summary_reads),
     );
@@ -55,6 +72,14 @@ async fn activity_summaries_use_one_query_preserve_order_and_do_not_read_headers
     assert_eq!(
         queries, 1,
         "a bounded summary batch needs one metadata query"
+    );
+    store.inner.connections.readers.lock().unwrap().reverse();
+    SUMMARY_QUERIES.store(0, Ordering::Relaxed);
+    assert_eq!(store.activity_summaries(&requested).await.unwrap(), rows);
+    assert_eq!(
+        SUMMARY_QUERIES.load(Ordering::Relaxed),
+        1,
+        "the other reader must also be traced"
     );
     SUMMARY_QUERIES.store(0, Ordering::Relaxed);
     assert!(store.activity_summaries(&[]).await.unwrap().is_empty());
@@ -135,13 +160,7 @@ async fn warm_fork_selection_work_does_not_grow_with_unselected_history() {
             .lock()
             .unwrap()
             .trace_v2(TraceEventCodes::SQLITE_TRACE_PROFILE, Some(count));
-        store
-            .inner
-            .connections
-            .reader
-            .lock()
-            .unwrap()
-            .trace_v2(TraceEventCodes::SQLITE_TRACE_PROFILE, Some(count));
+        trace_readers(&store, TraceEventCodes::SQLITE_TRACE_PROFILE, Some(count));
         let mut samples = Vec::new();
         for selection in [
             ForkTurnSelection::None,
@@ -154,7 +173,7 @@ async fn warm_fork_selection_work_does_not_grow_with_unselected_history() {
                 .resolve_fork_boundary(&id, &turn, selection.clone())
                 .await
                 .unwrap();
-            let vm = VM.load(Ordering::Relaxed);
+            let vm = measured_work();
             eprintln!("fork completed={history_size} selection={selection:?} vm={vm}");
             if selection == ForkTurnSelection::None {
                 assert_eq!(boundary.effective_turns, 0);
@@ -169,13 +188,7 @@ async fn warm_fork_selection_work_does_not_grow_with_unselected_history() {
             .lock()
             .unwrap()
             .trace_v2(TraceEventCodes::empty(), None);
-        store
-            .inner
-            .connections
-            .reader
-            .lock()
-            .unwrap()
-            .trace_v2(TraceEventCodes::empty(), None);
+        trace_readers(&store, TraceEventCodes::empty(), None);
         assert_eq!(
             store.inner.validation_runs.load(Ordering::Relaxed),
             validated
@@ -239,20 +252,14 @@ async fn waiting_selection_work_and_pagination_ignore_unrelated_activations() {
         for index in 0..unrelated {
             activation(&store, &format!("a-{index:04}"), false).await;
         }
-        store
-            .inner
-            .connections
-            .reader
-            .lock()
-            .unwrap()
-            .trace_v2(TraceEventCodes::SQLITE_TRACE_PROFILE, Some(count));
+        trace_readers(&store, TraceEventCodes::SQLITE_TRACE_PROFILE, Some(count));
 
         let mut samples = Vec::new();
         let after = SessionId::new("a-0007").unwrap();
         for cursor in [None, Some(&after)] {
             VM.store(0, Ordering::Relaxed);
             let page = store.list_waiting_activations(cursor, 4).await.unwrap();
-            samples.push(VM.load(Ordering::Relaxed));
+            samples.push(measured_work());
             assert!(page.sessions.is_empty());
             assert!(!page.has_more);
         }
@@ -268,20 +275,15 @@ async fn waiting_selection_work_and_pagination_ignore_unrelated_activations() {
         ] {
             VM.store(0, Ordering::Relaxed);
             let page = store.list_waiting_activations(after, 4).await.unwrap();
-            samples.push(VM.load(Ordering::Relaxed));
+            samples.push(measured_work());
             assert_eq!(page.sessions, expected);
             assert_eq!(page.has_more, more);
         }
-        store
-            .inner
-            .connections
-            .reader
-            .lock()
-            .unwrap()
-            .trace_v2(TraceEventCodes::empty(), None);
+        trace_readers(&store, TraceEventCodes::empty(), None);
         eprintln!("waiting unrelated={unrelated} vm={samples:?}");
         work.push(samples);
-        let connection = store.inner.connections.reader.lock().unwrap();
+        let readers = store.inner.connections.readers.lock().unwrap();
+        let connection = readers.last().unwrap();
         for sql in [
             session_store::LIST_WAITING_ACTIVATIONS_FIRST_SQL,
             LIST_WAITING_ACTIVATIONS_AFTER_SQL,
@@ -326,7 +328,15 @@ async fn paused_warm_fork_resolution_leaves_foreground_free_and_survives_waiter_
     });
     entered.await.unwrap();
     let foreground = tokio::time::timeout(Duration::from_secs(2), async {
-        store.read_facts(&warm, 0, 1).await.unwrap();
+        store
+            .read_facts(
+                &warm,
+                0,
+                1,
+                rsi_agent_store_protocol::MAXIMUM_STORE_FACT_PAGE_BYTES,
+            )
+            .await
+            .unwrap();
         assert_eq!(
             store
                 .resolve_fork_boundary(&parent, &turn, ForkTurnSelection::None)
@@ -601,14 +611,18 @@ async fn ready_root_pages_seek_past_duplicates_with_and_without_statistics() {
                     .writer
                     .lock()
                     .unwrap()
+                    .as_ref()
+                    .unwrap()
                     .execute_batch("ANALYZE")
                     .unwrap();
             }
             let plan = store
                 .inner
                 .connections
-                .reader
+                .readers
                 .lock()
+                .unwrap()
+                .last_mut()
                 .unwrap()
                 .query_row(
                     &format!("EXPLAIN QUERY PLAN {LIST_READY_ROOTS_AFTER_SQL}"),
@@ -622,33 +636,21 @@ async fn ready_root_pages_seek_past_duplicates_with_and_without_statistics() {
                 "{plan}"
             );
             eprintln!("ready roots statistics={statistics} duplicates={duplicates} plan={plan}");
-            store
-                .inner
-                .connections
-                .reader
-                .lock()
-                .unwrap()
-                .trace_v2(TraceEventCodes::SQLITE_TRACE_PROFILE, Some(count));
+            trace_readers(&store, TraceEventCodes::SQLITE_TRACE_PROFILE, Some(count));
             VM.store(0, Ordering::Relaxed);
             let first = store.list_ready_roots(None, 1).await.unwrap();
-            work.push(VM.load(Ordering::Relaxed));
+            work.push(measured_work());
             assert_eq!(first.roots, ids[..1]);
             assert!(first.has_more);
             VM.store(0, Ordering::Relaxed);
             let rest = store.list_ready_roots(Some(&ids[0]), 2).await.unwrap();
-            continuation_work.push(VM.load(Ordering::Relaxed));
+            continuation_work.push(measured_work());
             assert_eq!(rest.roots, ids[1..]);
             assert!(!rest.has_more);
             let empty = store.list_ready_roots(Some(&ids[2]), 1).await.unwrap();
             assert!(empty.roots.is_empty());
             assert!(!empty.has_more);
-            store
-                .inner
-                .connections
-                .reader
-                .lock()
-                .unwrap()
-                .trace_v2(TraceEventCodes::empty(), None);
+            trace_readers(&store, TraceEventCodes::empty(), None);
         }
         eprintln!("ready roots statistics={statistics} duplicates=1/64 vm_steps={work:?}");
         assert!(
@@ -694,7 +696,8 @@ async fn ready_root_page_keeps_one_snapshot_while_wal_writer_commits() {
     let entered = Arc::new(tokio::sync::Notify::new());
     let (release, waiter) = std::sync::mpsc::channel();
     *READY_READ_GATE.lock().unwrap() = Some((entered.clone(), waiter));
-    store.inner.connections.reader.lock().unwrap().trace_v2(
+    trace_readers(
+        &store,
         TraceEventCodes::SQLITE_TRACE_PROFILE,
         Some(pause_ready_read),
     );
@@ -718,13 +721,7 @@ async fn ready_root_page_keeps_one_snapshot_while_wal_writer_commits() {
         !page.has_more,
         "later root must not enter the captured page"
     );
-    store
-        .inner
-        .connections
-        .reader
-        .lock()
-        .unwrap()
-        .trace_v2(TraceEventCodes::empty(), None);
+    trace_readers(&store, TraceEventCodes::empty(), None);
     assert_eq!(
         store.list_ready_roots(None, 3).await.unwrap().roots,
         [a, b, c]

@@ -37,7 +37,12 @@ pub(super) async fn latest(cut: &Cut) -> Result<Option<Latest>> {
         while before > interval.after + 1 {
             let page = cut
                 .store()
-                .read_facts_before(&interval.id, before, 32)
+                .read_facts_before(
+                    &interval.id,
+                    before,
+                    32,
+                    rsi_agent_store_protocol::MAXIMUM_STORE_FACT_PAGE_BYTES,
+                )
                 .await
                 .map_err(store_error)?;
             if page.facts.is_empty() {
@@ -165,7 +170,12 @@ fn capacity_unavailable() -> Diagnostic {
 pub(super) async fn request(cut: &Cut, latest: &Latest) -> Result<Diagnostic> {
     let mut page = cut
         .store()
-        .read_facts(&latest.id, latest.intent - 1, 1)
+        .read_facts(
+            &latest.id,
+            latest.intent - 1,
+            1,
+            rsi_agent_store_protocol::MAXIMUM_STORE_FACT_PAGE_BYTES,
+        )
         .await
         .map_err(store_error)?;
     let fact = page

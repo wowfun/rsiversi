@@ -200,7 +200,7 @@ impl AgentKernel {
         locator: &rsi_agent_session_protocol::AgentResultLocator,
         reference: AgentResultRef,
     ) -> TurnResult<rsi_agent_turn_protocol::AgentResult> {
-        let page = read_facts_bounded(
+        let (page, _) = read_facts_bounded(
             &self.inner,
             &locator.child_session_id,
             locator.fact_seq - 1,

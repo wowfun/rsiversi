@@ -580,9 +580,10 @@ impl AgentKernel {
                 &binding.locator == locator && receipt.outcome == ProgramOutcome::Completed
             })
             .ok_or_else(|| invalid("program output differs from exact initial completion"))?;
-        let page = read_facts_bounded(&self.inner, header.session_id(), locator.fact_seq - 1, 1)
-            .await
-            .map_err(turn_store_error)?;
+        let (page, _) =
+            read_facts_bounded(&self.inner, header.session_id(), locator.fact_seq - 1, 1)
+                .await
+                .map_err(turn_store_error)?;
         let fact = page
             .facts
             .first()

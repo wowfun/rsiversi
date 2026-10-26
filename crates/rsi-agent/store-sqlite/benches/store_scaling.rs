@@ -498,7 +498,15 @@ async fn benchmark_operational_working_set(sessions: usize) {
             let id = SessionId::new(format!("session-{index:03}")).unwrap();
             durations.push(
                 timed_async(async {
-                    let page = store.read_facts(&id, 0, 1).await.unwrap();
+                    let page = store
+                        .read_facts(
+                            &id,
+                            0,
+                            1,
+                            rsi_agent_store_protocol::MAXIMUM_STORE_FACT_PAGE_BYTES,
+                        )
+                        .await
+                        .unwrap();
                     returned += page.facts.len();
                     black_box(page);
                 })
@@ -592,7 +600,15 @@ async fn benchmark_control_history(count: u64) {
         let candidate = cold.clone();
         let job = tokio::spawn(async move {
             let started = Instant::now();
-            let page = worker.read_facts(&candidate, 0, 1).await.unwrap();
+            let page = worker
+                .read_facts(
+                    &candidate,
+                    0,
+                    1,
+                    rsi_agent_store_protocol::MAXIMUM_STORE_FACT_PAGE_BYTES,
+                )
+                .await
+                .unwrap();
             (started.elapsed(), page.facts.len())
         });
         // This samples overlap, not a deterministic synchronization assertion.
@@ -606,7 +622,17 @@ async fn benchmark_control_history(count: u64) {
             );
             concurrent_facts.push(
                 timed_async(async {
-                    black_box(store.read_facts(&warm, 0, 1).await.unwrap());
+                    black_box(
+                        store
+                            .read_facts(
+                                &warm,
+                                0,
+                                1,
+                                rsi_agent_store_protocol::MAXIMUM_STORE_FACT_PAGE_BYTES,
+                            )
+                            .await
+                            .unwrap(),
+                    );
                 })
                 .await,
             );
@@ -616,7 +642,17 @@ async fn benchmark_control_history(count: u64) {
         returned += count;
         warm_pages.push(
             timed_async(async {
-                black_box(store.read_facts(&cold, 0, 1).await.unwrap());
+                black_box(
+                    store
+                        .read_facts(
+                            &cold,
+                            0,
+                            1,
+                            rsi_agent_store_protocol::MAXIMUM_STORE_FACT_PAGE_BYTES,
+                        )
+                        .await
+                        .unwrap(),
+                );
             })
             .await,
         );
@@ -708,13 +744,31 @@ async fn benchmark_mixed_lanes() {
     let small = SessionId::new("session-001").unwrap();
     store.validate_session(&large).await.unwrap();
     store.validate_session(&small).await.unwrap();
-    let page = store.read_facts(&large, 0, 4).await.unwrap();
+    let page = store
+        .read_facts(
+            &large,
+            0,
+            4,
+            rsi_agent_store_protocol::MAXIMUM_STORE_FACT_PAGE_BYTES,
+        )
+        .await
+        .unwrap();
     let bytes: usize = page.facts.iter().map(SessionFact::encoded_len).sum();
     drop(page);
     store.begin_store_measurements();
     let pages = async {
         for _ in 0..12 {
-            black_box(store.read_facts(&large, 0, 4).await.unwrap());
+            black_box(
+                store
+                    .read_facts(
+                        &large,
+                        0,
+                        4,
+                        rsi_agent_store_protocol::MAXIMUM_STORE_FACT_PAGE_BYTES,
+                    )
+                    .await
+                    .unwrap(),
+            );
         }
     };
     let headers = async {

@@ -2015,13 +2015,14 @@ pub trait SessionStore: fmt::Debug + Send + Sync + 'static {
     }
     /// Reads at most `limit` contiguous Facts after one cursor.
     ///
-    /// This ordinary page uses the Store-wide aggregate ceiling. Consumers requiring
-    /// a smaller first-body budget use `read_fact_window` instead.
+    /// Checks lengths against `maximum_bytes` before body allocation. An oversized
+    /// first record returns `ReadRequiresCapacity`; later records end a short page.
     async fn read_facts(
         &self,
         session_id: &SessionId,
         after_seq: u64,
         limit: usize,
+        maximum_bytes: usize,
     ) -> Result<StoreFactPage>;
     /// Reads a bounded forward interval, omitting originals larger than the entire
     /// caller budget before body allocation. Omitted coordinates still advance.
@@ -2044,9 +2045,10 @@ pub trait SessionStore: fmt::Debug + Send + Sync + 'static {
         session_id: &SessionId,
         after_seq: u64,
         limit: usize,
+        maximum_bytes: usize,
     ) -> Result<StoreControlPage> {
         let _ = (session_id, after_seq);
-        validate_read_limit(limit)?;
+        validate_page_limits(limit, maximum_bytes)?;
         Err(StoreError::Invalid(
             "this Agent Store does not support Agent-control reads".into(),
         ))
@@ -2060,6 +2062,7 @@ pub trait SessionStore: fmt::Debug + Send + Sync + 'static {
         session_id: &SessionId,
         exclusive_before_seq: u64,
         limit: usize,
+        maximum_bytes: usize,
     ) -> Result<StoreBackwardFactPage>;
     /// Tests one exact Turn's durable model-intent identity without retaining history.
     /// Indexed stores can answer directly; the default consumes bounded Fact pages.
@@ -2071,7 +2074,15 @@ pub trait SessionStore: fmt::Debug + Send + Sync + 'static {
     ) -> Result<bool> {
         let mut after = 0;
         loop {
-            let page = self.read_turn_facts(session_id, turn_id, after, 64).await?;
+            let page = self
+                .read_turn_facts(
+                    session_id,
+                    turn_id,
+                    after,
+                    64,
+                    MAXIMUM_STORE_FACT_PAGE_BYTES,
+                )
+                .await?;
             page.validate()?;
             if page.turn_id != *turn_id || page.after_seq != after || page.facts.len() > 64 {
                 return Err(StoreError::Corrupt(
@@ -2099,6 +2110,7 @@ pub trait SessionStore: fmt::Debug + Send + Sync + 'static {
         turn_id: &TurnId,
         after_seq: u64,
         limit: usize,
+        maximum_bytes: usize,
     ) -> Result<StoreTurnFactPage>;
     /// Reads and validates the indexed acceptance and optional terminal boundary for one turn.
     async fn read_turn_boundary(
@@ -2395,6 +2407,12 @@ pub enum StoreError {
     /// Only an API Capacity refusal maps here; malformed admission is Invalid.
     #[error("Agent Store read byte capacity exhausted")]
     ReadCapacity,
+    /// The first valid record cannot fit this page; no body was materialized.
+    #[error("Agent Store read requires {minimum_bytes} encoded bytes")]
+    ReadRequiresCapacity {
+        /// Exact encoded length of the first record in the requested snapshot.
+        minimum_bytes: usize,
+    },
     /// A complete domain replacement observed another predecessor revision.
     #[error("domain `{domain}` revision conflict: expected {expected}, actual {actual}")]
     DomainRevisionConflict {
@@ -2533,6 +2551,31 @@ pub fn validate_read_limit(limit: usize) -> Result<()> {
         )));
     }
     Ok(())
+}
+
+/// Validates ordinary Fact/control page admission before reading durable state.
+pub fn validate_page_limits(limit: usize, maximum_bytes: usize) -> Result<()> {
+    validate_read_limit(limit)?;
+    if maximum_bytes == 0 || maximum_bytes > MAXIMUM_STORE_FACT_PAGE_BYTES {
+        return Err(StoreError::Invalid(
+            "page byte budget must be within 1..=64 MiB".into(),
+        ));
+    }
+    Ok(())
+}
+
+/// Applies the byte limit to a validated record's projected cumulative page size.
+/// Returns false for a short page, or `ReadRequiresCapacity` for its first record.
+pub fn admit_page_record(projected: usize, maximum: usize, empty: bool) -> Result<bool> {
+    if projected <= maximum {
+        Ok(true)
+    } else if empty {
+        Err(StoreError::ReadRequiresCapacity {
+            minimum_bytes: projected,
+        })
+    } else {
+        Ok(false)
+    }
 }
 
 /// Validates one session enumeration limit.

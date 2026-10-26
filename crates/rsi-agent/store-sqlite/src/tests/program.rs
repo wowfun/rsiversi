@@ -119,7 +119,8 @@ async fn activation_counterpart_lookup_work_is_independent_of_control_history() 
             })
             .await
             .unwrap();
-        let mut connection = store.inner.connections.writer.lock().unwrap();
+        let mut slot = store.inner.connections.writer.lock().unwrap();
+        let connection = slot.as_mut().unwrap();
         let tx = connection.transaction().unwrap();
         for seq in 1..=history {
             let record = AgentControlRecord::new(

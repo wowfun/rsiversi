@@ -1,4 +1,5 @@
 use super::*;
+use rsi_agent_store_protocol::admit_page_record;
 
 pub(super) const LIST_READY_MESSAGES_AFTER_SQL: &str =
     "SELECT r.session_id, r.message_id, r.ready_control_seq, r.timestamp_ms, r.target,
@@ -491,8 +492,9 @@ impl SessionStore for SqliteStore {
         session_id: &SessionId,
         after_seq: u64,
         limit: usize,
+        maximum_bytes: usize,
     ) -> Result<StoreFactPage> {
-        validate_read_limit(limit)?;
+        rsi_agent_store_protocol::validate_page_limits(limit, maximum_bytes)?;
         self.ensure_session_validated(session_id).await?;
         let session_id = session_id.clone();
         #[cfg(any(test, feature = "test-support"))]
@@ -555,7 +557,7 @@ impl SessionStore for SqliteStore {
                         let projected = encoded_bytes
                             .checked_add(encoded_len)
                             .ok_or_else(|| StoreError::Corrupt("Fact page size overflow".into()))?;
-                        if !facts.is_empty() && projected > MAXIMUM_STORE_FACT_PAGE_BYTES {
+                        if !admit_page_record(projected, maximum_bytes, facts.is_empty())? {
                             break;
                         }
                         #[cfg(any(test, feature = "test-support"))]
@@ -607,8 +609,9 @@ impl SessionStore for SqliteStore {
         session_id: &SessionId,
         after_seq: u64,
         limit: usize,
+        maximum_bytes: usize,
     ) -> Result<StoreControlPage> {
-        validate_read_limit(limit)?;
+        rsi_agent_store_protocol::validate_page_limits(limit, maximum_bytes)?;
         self.ensure_session_validated(session_id).await?;
         let session_id = session_id.clone();
         self.with_reader(move |connection| {
@@ -664,7 +667,7 @@ impl SessionStore for SqliteStore {
                 let projected = encoded_bytes
                     .checked_add(encoded_len)
                     .ok_or_else(|| StoreError::Corrupt("control page size overflow".into()))?;
-                if !records.is_empty() && projected > MAXIMUM_STORE_CONTROL_PAGE_BYTES {
+                if !admit_page_record(projected, maximum_bytes, records.is_empty())? {
                     break;
                 }
                 let record: AgentControlRecord = decode_projected_json(
@@ -698,8 +701,9 @@ impl SessionStore for SqliteStore {
         session_id: &SessionId,
         exclusive_before_seq: u64,
         limit: usize,
+        maximum_bytes: usize,
     ) -> Result<StoreBackwardFactPage> {
-        validate_read_limit(limit)?;
+        rsi_agent_store_protocol::validate_page_limits(limit, maximum_bytes)?;
         self.ensure_session_validated(session_id).await?;
         let session_id = session_id.clone();
         #[cfg(any(test, feature = "test-support"))]
@@ -766,7 +770,7 @@ impl SessionStore for SqliteStore {
                     let projected = encoded_bytes
                         .checked_add(encoded_len)
                         .ok_or_else(|| StoreError::Corrupt("Fact page size overflow".into()))?;
-                    if !facts.is_empty() && projected > MAXIMUM_STORE_FACT_PAGE_BYTES {
+                    if !admit_page_record(projected, maximum_bytes, facts.is_empty())? {
                         break;
                     }
                     #[cfg(any(test, feature = "test-support"))]
@@ -806,8 +810,9 @@ impl SessionStore for SqliteStore {
         turn_id: &TurnId,
         after_seq: u64,
         limit: usize,
+        maximum_bytes: usize,
     ) -> Result<StoreTurnFactPage> {
-        validate_read_limit(limit)?;
+        rsi_agent_store_protocol::validate_page_limits(limit, maximum_bytes)?;
         self.ensure_session_validated(session_id).await?;
         let session_id = session_id.clone();
         let turn_id = turn_id.clone();
@@ -884,7 +889,7 @@ impl SessionStore for SqliteStore {
                     let projected = encoded_bytes
                         .checked_add(encoded_len)
                         .ok_or_else(|| StoreError::Corrupt("Fact page size overflow".into()))?;
-                    if !facts.is_empty() && projected > MAXIMUM_STORE_FACT_PAGE_BYTES {
+                    if !admit_page_record(projected, maximum_bytes, facts.is_empty())? {
                         has_more = true;
                         break;
                     }

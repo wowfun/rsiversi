@@ -107,7 +107,12 @@ async fn plugin_context_requires_the_open_step_and_no_active_effect() {
         ));
     }
     let page = store
-        .read_facts(&submitted.session_id, 0, 16)
+        .read_facts(
+            &submitted.session_id,
+            0,
+            16,
+            rsi_agent_store_protocol::MAXIMUM_STORE_FACT_PAGE_BYTES,
+        )
         .await
         .unwrap();
     assert_eq!(
@@ -276,7 +281,12 @@ async fn rejection_is_single_assignment_and_replays_on_both_stores() {
             .await
             .unwrap();
         let page = store
-            .read_facts(&submitted.session_id, published[0].seq() - 1, 16)
+            .read_facts(
+                &submitted.session_id,
+                published[0].seq() - 1,
+                16,
+                rsi_agent_store_protocol::MAXIMUM_STORE_FACT_PAGE_BYTES,
+            )
             .await
             .unwrap();
         let mut expected = bodies.clone();
@@ -301,7 +311,12 @@ async fn rejection_is_single_assignment_and_replays_on_both_stores() {
             rsi_agent_store_sqlite::SqliteStore::verify(root.path()).unwrap();
             let reopened = rsi_agent_store_sqlite::SqliteStore::open(root.path()).unwrap();
             let page = reopened
-                .read_facts(&submitted.session_id, published[0].seq() - 1, 16)
+                .read_facts(
+                    &submitted.session_id,
+                    published[0].seq() - 1,
+                    16,
+                    rsi_agent_store_protocol::MAXIMUM_STORE_FACT_PAGE_BYTES,
+                )
                 .await
                 .unwrap();
             assert_eq!(

@@ -36,7 +36,15 @@ pub(super) async fn repair_unfinished_session(
     }
     let timestamp = clock.now_ms().max(1);
     let mut durable_seq = durable_seq;
-    let mut durable_control_seq = store.read_controls(session_id, 0, 1).await?.durable_seq;
+    let mut durable_control_seq = store
+        .read_controls(
+            session_id,
+            0,
+            1,
+            rsi_agent_store_protocol::MAXIMUM_STORE_FACT_PAGE_BYTES,
+        )
+        .await?
+        .durable_seq;
     for turn_id in turn_order {
         let turn = turns
             .get(&turn_id)
@@ -304,6 +312,7 @@ pub(super) async fn load_control_state(
                                 &open_turn.turn_id,
                                 turn_cursor,
                                 MAXIMUM_FACTS_PER_READ,
+                                rsi_agent_store_protocol::MAXIMUM_STORE_FACT_PAGE_BYTES,
                             )
                             .await?
                     }

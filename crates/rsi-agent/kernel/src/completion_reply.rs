@@ -30,15 +30,19 @@ async fn read_projection(
         .ok_or_else(|| TurnError::Invariant("reply cursor overflow".into()))?;
     let mut scanned = 0usize;
     for _ in 0..SCAN_PAGES {
-        let (limit, bytes) = store_reads::page_limit(inner, MAXIMUM_FACTS_PER_READ);
-        let (page, _permit, _lease) =
-            store_reads::read(inner, session, bytes, true, move |store, id| async move {
-                store.read_facts_before(&id, before, limit).await
-            })
-            .await
-            .map_err(turn_store_error)?;
+        let limit = MAXIMUM_FACTS_PER_READ;
+        let ((page, limit), _permit, _lease) = store_reads::page(
+            inner,
+            session,
+            limit,
+            move |store, id, limit, bytes| async move {
+                store.read_facts_before(&id, before, limit, bytes).await
+            },
+        )
+        .await
+        .map_err(turn_store_error)?;
         page.validate().map_err(turn_store_error)?;
-        if page.before_seq != before {
+        if page.before_seq != before || page.facts.len() > limit {
             return Err(TurnError::Invariant(
                 "reply page changed its requested cursor".into(),
             ));

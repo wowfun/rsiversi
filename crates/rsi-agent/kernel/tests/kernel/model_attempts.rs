@@ -1,5 +1,6 @@
 use super::*;
 use rsi_agent_session_protocol::{ModelAttemptBuilder, ModelAttemptLog, ModelEventPurpose};
+use rsi_agent_store_protocol::MAXIMUM_STORE_FACT_PAGE_BYTES as FACT_PAGE_BYTES;
 use rsi_agent_turn_protocol::ModelLiveStatus;
 
 #[test]
@@ -253,7 +254,12 @@ async fn memory_and_sqlite_enforce_model_coordinates_atomically_across_append_pa
             .await
             .unwrap();
         assert_eq!(
-            store.read_facts(&session, 0, 10).await.unwrap().facts.len(),
+            store
+                .read_facts(&session, 0, 10, FACT_PAGE_BYTES)
+                .await
+                .unwrap()
+                .facts
+                .len(),
             5
         );
     }
@@ -593,7 +599,7 @@ async fn live_pool_reserves_before_dispatch_and_has_cancellable_bounded_admissio
     );
     assert_eq!(
         store
-            .read_facts(second.session_id(), 0, 10)
+            .read_facts(second.session_id(), 0, 10, FACT_PAGE_BYTES)
             .await
             .unwrap()
             .facts

@@ -1,4 +1,5 @@
 use super::*;
+use futures_util::StreamExt as _;
 use rsi_agent_session_protocol::{AgentControlRecord, AgentControlRecordBody, TurnOutcome};
 use rsi_agent_store_protocol::{AtomicAgentCommit, AtomicSessionAppend, PurgeRequest, PurgeTarget};
 use rsi_session_protocol::SessionIngress as _;
@@ -164,8 +165,10 @@ async fn purge_scenario(scenario: u8) {
         Err(SessionError::Api(rsi_api_protocol::ApiError::Unauthorized))
     ));
     let handle = service.attach(header.session_id()).await.unwrap();
-    use futures_util::StreamExt as _;
-    let mut exporting = handle.export(Default::default()).await.unwrap();
+    let mut exporting = handle
+        .export(rsi_session_protocol::export::ExportOptions::default())
+        .await
+        .unwrap();
     assert!(exporting.next().await.unwrap().is_ok());
     let listing = tokio::spawn({
         let handle = handle.clone();
@@ -247,7 +250,12 @@ async fn purge_scenario(scenario: u8) {
                 expected_control_seq: 0,
                 header: Some(first.clone()),
                 facts: store
-                    .read_facts(header.session_id(), 0, 2)
+                    .read_facts(
+                        header.session_id(),
+                        0,
+                        2,
+                        rsi_agent_store_protocol::MAXIMUM_STORE_FACT_PAGE_BYTES,
+                    )
                     .await
                     .unwrap()
                     .facts
@@ -255,7 +263,12 @@ async fn purge_scenario(scenario: u8) {
                     .map(Arc::new)
                     .collect(),
                 controls: store
-                    .read_controls(header.session_id(), 0, 1)
+                    .read_controls(
+                        header.session_id(),
+                        0,
+                        1,
+                        rsi_agent_store_protocol::MAXIMUM_STORE_FACT_PAGE_BYTES,
+                    )
                     .await
                     .unwrap()
                     .records,

@@ -134,7 +134,16 @@ impl rsi_acp_agent::SessionOwner for Owner {
         if cwd.to_str() != Some(header.canonical_cwd()) {
             return Err(Failure::Parameters);
         }
-        let seed = match self.store.read_controls(&id, 0, 1).await {
+        let seed = match self
+            .store
+            .read_controls(
+                &id,
+                0,
+                1,
+                rsi_agent_store_protocol::MAXIMUM_STORE_FACT_PAGE_BYTES,
+            )
+            .await
+        {
             Ok(page) => {
                 let Some(record) = page.records.first() else {
                     return Err(Failure::Backend);

@@ -205,7 +205,7 @@ fn facts(store: Arc<dyn SessionStore>, interval: Interval) -> FactStream {
         let mut after = interval.after;
         while after < interval.through {
             let limit = usize::try_from((interval.through - after).min(32)).expect("bounded page");
-            let page = store.read_facts(&interval.id, after, limit).await.map_err(store_error)?;
+            let page = store.read_facts(&interval.id, after, limit, rsi_agent_store_protocol::MAXIMUM_STORE_FACT_PAGE_BYTES).await.map_err(store_error)?;
             if page.facts.is_empty() { Err(invalid("export history made no progress"))?; }
             for fact in page.facts {
                 if fact.seq() != after + 1 || fact.seq() > interval.through { Err(invalid("export history escaped its cut"))?; }

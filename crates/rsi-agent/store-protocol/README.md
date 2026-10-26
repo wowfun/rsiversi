@@ -256,6 +256,18 @@ target's prepared Header before it can enter either mailbox or ready indexes.
 The Store revalidates that derived root. Memory, SQLite, and offline verification
 enforce the same rule.
 
+Ordinary forward/backward Fact pages, per-turn Fact pages and control pages accept
+an explicit count (1..512) and encoded-byte budget (1..64 MiB). The same snapshot
+checks each stored length before copying or decoding its body. If the first
+valid record exceeds the complete budget, ReadRequiresCapacity reports its exact
+minimum_bytes with no body materialized. Later records that exceed the remaining
+budget end a continuous short page; callers continue by cursor/has_more, never by
+comparing the returned count with the requested count. ReadCapacity remains a
+separate allocation-admission refusal. Oversized durable records remain Corrupt.
+No separate size probe or durable length column is part of this contract.
+`admit_page_record` owns the shared first-record refusal versus short-page rule
+for implementations that have already validated their page limits and lengths.
+
 Forward and backward Session Fact reads, per-turn Fact reads, open-turn
 enumeration, lexical session enumeration, lexical enumeration restricted to
 sessions with open turns, and creation-time-ordered recent-session enumeration

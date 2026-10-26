@@ -286,7 +286,15 @@ async fn inline_capacity_is_per_request_and_recovery_preserves_evidence() {
         reference(seq, &original),
     )
     .await;
-    let facts = store.read_facts(claim.session_id(), 0, 128).await.unwrap();
+    let facts = store
+        .read_facts(
+            claim.session_id(),
+            0,
+            128,
+            rsi_agent_store_protocol::MAXIMUM_STORE_FACT_PAGE_BYTES,
+        )
+        .await
+        .unwrap();
     assert_eq!(
         facts
             .facts

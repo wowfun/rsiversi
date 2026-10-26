@@ -56,7 +56,12 @@ async fn truncated_tool_batch_is_diagnostic_only_and_stops_without_replanning() 
     assert_eq!(fixture.starts.load(Ordering::SeqCst), 1);
     let facts = stack
         .store
-        .read_facts(&first.session_id, 0, 512)
+        .read_facts(
+            &first.session_id,
+            0,
+            512,
+            rsi_agent_store_protocol::MAXIMUM_STORE_FACT_PAGE_BYTES,
+        )
         .await
         .unwrap()
         .facts;
@@ -149,7 +154,12 @@ async fn controlled_cancellation_settles_started_attempt_before_step_and_turn_te
     assert_eq!(result.1, TurnOutcome::Cancelled);
     let facts = stack
         .store
-        .read_facts(&result.0.session_id, 0, 512)
+        .read_facts(
+            &result.0.session_id,
+            0,
+            512,
+            rsi_agent_store_protocol::MAXIMUM_STORE_FACT_PAGE_BYTES,
+        )
         .await
         .unwrap()
         .facts;
@@ -194,7 +204,12 @@ async fn more_than_65536_language_events_use_one_durable_settlement() {
     assert_eq!(outcome, TurnOutcome::Completed);
     let facts = stack
         .store
-        .read_facts(&submitted.session_id, 0, 64)
+        .read_facts(
+            &submitted.session_id,
+            0,
+            64,
+            rsi_agent_store_protocol::MAXIMUM_STORE_FACT_PAGE_BYTES,
+        )
         .await
         .unwrap()
         .facts;

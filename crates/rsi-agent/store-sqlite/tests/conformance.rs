@@ -254,7 +254,14 @@ async fn cold_terminal_index_validation_rejects_missing_and_mismatched_metadata(
             .read_turn_boundary(&session, &TurnId::new("turn-1").unwrap())
             .await;
         let open = store.list_open_turns(&session, 0, 8).await;
-        let facts = store.read_facts(&session, 0, 8).await;
+        let facts = store
+            .read_facts(
+                &session,
+                0,
+                8,
+                rsi_agent_store_protocol::MAXIMUM_STORE_FACT_PAGE_BYTES,
+            )
+            .await;
         if mutation.is_some() {
             if matches!(name, "marker-turn-wrong" | "marker-fact-wrong") {
                 assert!(
@@ -450,17 +457,19 @@ async fn zero_fact_agent_session_is_durable_and_multi_session_conflict_rolls_bac
         .await
         .unwrap();
     assert_eq!(
-        store.read_facts(&child_id, 0, 1).await.unwrap().durable_seq,
-        0
-    );
-    assert_eq!(
         store
-            .read_controls(&child_id, 0, 8)
+            .read_facts(
+                &child_id,
+                0,
+                1,
+                rsi_agent_store_protocol::MAXIMUM_STORE_FACT_PAGE_BYTES
+            )
             .await
             .unwrap()
             .durable_seq,
-        1
+        0
     );
+    assert_eq!(durable_control_seq(&store, &child_id).await, 1);
 
     let parent_message = MessageId::new("atomic-parent-message").unwrap();
     assert!(matches!(
@@ -503,22 +512,8 @@ async fn zero_fact_agent_session_is_durable_and_multi_session_conflict_rolls_bac
             actual: 1
         })
     ));
-    assert_eq!(
-        store
-            .read_controls(&child_id, 0, 8)
-            .await
-            .unwrap()
-            .durable_seq,
-        1
-    );
-    assert_eq!(
-        store
-            .read_controls(&parent_id, 0, 8)
-            .await
-            .unwrap()
-            .durable_seq,
-        0
-    );
+    assert_eq!(durable_control_seq(&store, &child_id).await, 1);
+    assert_eq!(durable_control_seq(&store, &parent_id).await, 0);
 }
 
 #[tokio::test]
@@ -678,7 +673,8 @@ async fn ready_index_schema_rejects_nonwaking_next_step_rows() {
             rusqlite::params![session.as_str(), message.as_str()],
         )
         .unwrap_err();
-    assert!(error.to_string().contains("CHECK constraint failed"));
+    assert!(matches!(error, rusqlite::Error::SqliteFailure(code, _)
+        if code.extended_code == rusqlite::ffi::SQLITE_CONSTRAINT_CHECK));
 }
 
 #[tokio::test]
@@ -769,10 +765,26 @@ async fn append_pagination_conflict_and_reopen_match_the_store_contract() {
     )
     .await
     .unwrap();
-    let first = store.read_facts(&session, 0, 2).await.unwrap();
+    let first = store
+        .read_facts(
+            &session,
+            0,
+            2,
+            rsi_agent_store_protocol::MAXIMUM_STORE_FACT_PAGE_BYTES,
+        )
+        .await
+        .unwrap();
     assert_eq!(first.facts, vec![fact(1), fact(2)]);
     assert!(!first.caught_up());
-    let second = store.read_facts(&session, 2, 2).await.unwrap();
+    let second = store
+        .read_facts(
+            &session,
+            2,
+            2,
+            rsi_agent_store_protocol::MAXIMUM_STORE_FACT_PAGE_BYTES,
+        )
+        .await
+        .unwrap();
     assert_eq!(second.facts, vec![fact(3), terminal_fact(4, 2)]);
     assert!(second.caught_up());
     for name in ["session-2", "session-3"] {
@@ -851,7 +863,12 @@ async fn append_pagination_conflict_and_reopen_match_the_store_contract() {
     assert!(sessions.has_more);
     assert_eq!(
         reopened
-            .read_facts(&SessionId::new("session-1").unwrap(), 0, 8)
+            .read_facts(
+                &SessionId::new("session-1").unwrap(),
+                0,
+                8,
+                rsi_agent_store_protocol::MAXIMUM_STORE_FACT_PAGE_BYTES
+            )
             .await
             .unwrap()
             .durable_seq,
@@ -1025,7 +1042,13 @@ async fn turn_indexes_support_exact_outcome_and_open_turn_queries() {
     .unwrap();
 
     let turn = store
-        .read_turn_facts(&session, &TurnId::new("turn-2").unwrap(), 0, 8)
+        .read_turn_facts(
+            &session,
+            &TurnId::new("turn-2").unwrap(),
+            0,
+            8,
+            rsi_agent_store_protocol::MAXIMUM_STORE_FACT_PAGE_BYTES,
+        )
         .await
         .unwrap();
     assert_eq!(turn.facts, vec![fact(2), terminal_fact(4, 2)]);
@@ -1069,9 +1092,23 @@ async fn oversized_fact_rows_are_rejected_by_sql_length_before_json_decode() {
     drop(connection);
 
     for error in [
-        store.read_facts(&session, 0, 1).await.unwrap_err(),
         store
-            .read_turn_facts(&session, &TurnId::new("turn-1").unwrap(), 0, 1)
+            .read_facts(
+                &session,
+                0,
+                1,
+                rsi_agent_store_protocol::MAXIMUM_STORE_FACT_PAGE_BYTES,
+            )
+            .await
+            .unwrap_err(),
+        store
+            .read_turn_facts(
+                &session,
+                &TurnId::new("turn-1").unwrap(),
+                0,
+                1,
+                rsi_agent_store_protocol::MAXIMUM_STORE_FACT_PAGE_BYTES,
+            )
             .await
             .unwrap_err(),
     ] {
@@ -1156,7 +1193,12 @@ fn dormant_turn_index_corruption_is_lazy_and_explicit_verify_finds_it() {
         Err(StoreError::Corrupt(message)) if message.contains("turn index"))
     );
     assert!(matches!(
-        runtime.block_on(reopened.read_facts(&corrupt, 0, 1)),
+        runtime.block_on(reopened.read_facts(
+            &corrupt,
+            0,
+            1,
+            rsi_agent_store_protocol::MAXIMUM_STORE_FACT_PAGE_BYTES
+        )),
         Err(StoreError::Corrupt(_))
     ));
     drop(reopened);
@@ -1524,7 +1566,12 @@ fn verify_recomputes_every_canonical_fact_prefix_digest() {
     );
     assert_eq!(
         runtime
-            .block_on(reopened.read_facts(&session, 0, 8))
+            .block_on(reopened.read_facts(
+                &session,
+                0,
+                8,
+                rsi_agent_store_protocol::MAXIMUM_STORE_FACT_PAGE_BYTES
+            ))
             .unwrap()
             .facts
             .len(),
@@ -2158,7 +2205,16 @@ async fn current_schema_preflight_reads_the_committed_wal_before_writer_recovery
         header(session.as_str())
     );
     assert_eq!(
-        recovered.read_facts(&session, 0, 8).await.unwrap().facts,
+        recovered
+            .read_facts(
+                &session,
+                0,
+                8,
+                rsi_agent_store_protocol::MAXIMUM_STORE_FACT_PAGE_BYTES
+            )
+            .await
+            .unwrap()
+            .facts,
         vec![fact(1)]
     );
     drop(recovered);
@@ -2614,4 +2670,17 @@ async fn cas_read_distinguishes_capacity_from_invalid_admission_in_both_stores()
             "malformed reservation must release its guard"
         );
     }
+}
+
+async fn durable_control_seq(store: &SqliteStore, id: &SessionId) -> u64 {
+    store
+        .read_controls(
+            id,
+            0,
+            8,
+            rsi_agent_store_protocol::MAXIMUM_STORE_FACT_PAGE_BYTES,
+        )
+        .await
+        .unwrap()
+        .durable_seq
 }

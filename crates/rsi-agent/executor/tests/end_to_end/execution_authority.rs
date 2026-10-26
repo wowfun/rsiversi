@@ -83,7 +83,12 @@ async fn revocation_during_tool_settles_result_and_stops_next_provider_attempt()
     assert_eq!(provider.requests.lock().unwrap().len(), 1);
     let facts = stack
         .store
-        .read_facts(&submitted.session_id, 0, 64)
+        .read_facts(
+            &submitted.session_id,
+            0,
+            64,
+            rsi_agent_store_protocol::MAXIMUM_STORE_FACT_PAGE_BYTES,
+        )
         .await
         .unwrap()
         .facts;

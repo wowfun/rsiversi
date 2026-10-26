@@ -1,4 +1,5 @@
 use super::*;
+use rsi_agent_store_protocol::MAXIMUM_STORE_FACT_PAGE_BYTES as FACT_PAGE_BYTES;
 
 async fn mutation_fixture(
     direct: bool,
@@ -90,7 +91,7 @@ async fn source_release_and_same_id_registration_wait_for_cancelled_commit_waite
         };
         let caller = kernel.agent_caller(&claim).unwrap();
         let before_controls = memory
-            .read_controls(&child, 0, 8)
+            .read_controls(&child, 0, 8, FACT_PAGE_BYTES)
             .await
             .unwrap()
             .records
@@ -133,7 +134,7 @@ async fn source_release_and_same_id_registration_wait_for_cancelled_commit_waite
         );
         assert_eq!(
             memory
-                .read_controls(&child, 0, 8)
+                .read_controls(&child, 0, 8, FACT_PAGE_BYTES)
                 .await
                 .unwrap()
                 .records
@@ -457,7 +458,7 @@ async fn cancelled_spawn_commit_is_recoverable_by_exact_retry() {
     ));
     assert_eq!(
         memory
-            .read_controls(&request.child_session_id, 0, 8)
+            .read_controls(&request.child_session_id, 0, 8, FACT_PAGE_BYTES)
             .await
             .unwrap()
             .records
@@ -491,7 +492,10 @@ async fn terminal_drains_admitted_source_mutation_after_store_commit() {
     let terminal = kernel.finish_turn(&claim, &TurnOutcome::Completed);
     tokio::pin!(terminal);
     assert!(futures_util::poll!(&mut terminal).is_pending());
-    let facts = memory.read_facts(claim.session_id(), 0, 32).await.unwrap();
+    let facts = memory
+        .read_facts(claim.session_id(), 0, 32, FACT_PAGE_BYTES)
+        .await
+        .unwrap();
     assert!(!facts.facts.iter().any(|fact| matches!(
         fact.body(),
         SessionFactBody::StepEnded { .. } | SessionFactBody::TurnTerminal { .. }
@@ -533,7 +537,7 @@ async fn cancelled_source_preparation_cannot_commit_later() {
     observed.release_blocked_header_reads();
     assert_eq!(
         memory
-            .read_controls(&child, 0, 8)
+            .read_controls(&child, 0, 8, FACT_PAGE_BYTES)
             .await
             .unwrap()
             .records
@@ -571,7 +575,7 @@ async fn shutdown_timeout_does_not_abort_an_admitted_target_commit() {
     assert!(send.await.unwrap().is_ok());
     assert_eq!(
         memory
-            .read_controls(&child, 0, 8)
+            .read_controls(&child, 0, 8, FACT_PAGE_BYTES)
             .await
             .unwrap()
             .records
@@ -739,7 +743,11 @@ async fn agent_interrupt_is_visible_only_after_its_owned_commit_returns() {
         .unwrap()
         .unwrap();
     let token = kernel.cancellation(&child_claim).unwrap();
-    let before = memory.read_facts(&child, 0, 32).await.unwrap().durable_seq;
+    let before = memory
+        .read_facts(&child, 0, 32, FACT_PAGE_BYTES)
+        .await
+        .unwrap()
+        .durable_seq;
     let mut observation = kernel.observe(&child, before).await.unwrap();
     observed.pause_next_agent_commit_before_apply();
     let interrupt = tokio::spawn({
@@ -756,7 +764,7 @@ async fn agent_interrupt_is_visible_only_after_its_owned_commit_returns() {
     assert!(!token.is_cancelled());
     assert_eq!(
         memory
-            .read_facts(&child, before, 1)
+            .read_facts(&child, before, 1, FACT_PAGE_BYTES)
             .await
             .unwrap()
             .durable_seq,

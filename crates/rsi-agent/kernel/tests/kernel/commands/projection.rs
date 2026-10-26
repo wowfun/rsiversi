@@ -397,7 +397,12 @@ async fn cold_projection_does_not_hydrate_or_require_unrelated_domain_codecs() {
     assert!(
         !fixture
             .store
-            .read_facts(&fixture.session_id, 0, 16)
+            .read_facts(
+                &fixture.session_id,
+                0,
+                16,
+                rsi_agent_store_protocol::MAXIMUM_STORE_FACT_PAGE_BYTES
+            )
             .await
             .unwrap()
             .facts

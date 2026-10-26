@@ -817,7 +817,12 @@ async fn compaction_does_not_hide_original_history_or_replace_last_conversation(
     bodies.push(accepted);
     let end = append(&store, &header, 0, bodies).await;
     let facts: Vec<_> = store
-        .read_facts(header.session_id(), 0, 32)
+        .read_facts(
+            header.session_id(),
+            0,
+            32,
+            rsi_agent_store_protocol::MAXIMUM_STORE_FACT_PAGE_BYTES,
+        )
         .await
         .unwrap()
         .facts
@@ -893,7 +898,12 @@ async fn compaction_does_not_hide_original_history_or_replace_last_conversation(
     }
     append(&store, &header, end, summary).await;
     let page: Vec<_> = store
-        .read_facts(header.session_id(), end, 32)
+        .read_facts(
+            header.session_id(),
+            end,
+            32,
+            rsi_agent_store_protocol::MAXIMUM_STORE_FACT_PAGE_BYTES,
+        )
         .await
         .unwrap()
         .facts

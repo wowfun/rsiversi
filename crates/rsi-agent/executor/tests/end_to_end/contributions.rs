@@ -84,7 +84,12 @@ async fn provider_retry_reuses_the_committed_sample() {
     }
     let facts = stack
         .store
-        .read_facts(&submitted.session_id, 0, 64)
+        .read_facts(
+            &submitted.session_id,
+            0,
+            64,
+            rsi_agent_store_protocol::MAXIMUM_STORE_FACT_PAGE_BYTES,
+        )
         .await
         .unwrap()
         .facts;
@@ -159,7 +164,12 @@ async fn later_callback_failure_discards_the_entire_stage_before_provider_io() {
     assert_eq!(language.starts.load(Ordering::Acquire), 0);
     let facts = stack
         .store
-        .read_facts(&submitted.session_id, 0, 64)
+        .read_facts(
+            &submitted.session_id,
+            0,
+            64,
+            rsi_agent_store_protocol::MAXIMUM_STORE_FACT_PAGE_BYTES,
+        )
         .await
         .unwrap()
         .facts;
@@ -265,7 +275,12 @@ async fn policy_constraints_accumulate_and_denial_never_starts_the_tool() {
         );
         let facts = stack
             .store
-            .read_facts(&submitted.session_id, 0, 64)
+            .read_facts(
+                &submitted.session_id,
+                0,
+                64,
+                rsi_agent_store_protocol::MAXIMUM_STORE_FACT_PAGE_BYTES,
+            )
             .await
             .unwrap()
             .facts;
@@ -473,7 +488,12 @@ async fn concurrent_command_drops_stale_post_tool_batch_without_failing_or_repla
     );
     let facts = stack
         .store
-        .read_facts(&submitted.session_id, 0, 128)
+        .read_facts(
+            &submitted.session_id,
+            0,
+            128,
+            rsi_agent_store_protocol::MAXIMUM_STORE_FACT_PAGE_BYTES,
+        )
         .await
         .unwrap();
     assert_eq!(
@@ -786,7 +806,12 @@ async fn nondispatched_retry_keeps_selection_and_does_not_claim_new_step_input()
     }
     let facts = stack
         .store
-        .read_facts(&session_id, 0, 128)
+        .read_facts(
+            &session_id,
+            0,
+            128,
+            rsi_agent_store_protocol::MAXIMUM_STORE_FACT_PAGE_BYTES,
+        )
         .await
         .unwrap()
         .facts;
@@ -931,7 +956,12 @@ async fn actual_contribution_is_durable_before_the_first_provider_request() {
     assert_eq!(sample.0.load(Ordering::Acquire), 1);
     let facts = stack
         .store
-        .read_facts(&submitted.session_id, 0, 64)
+        .read_facts(
+            &submitted.session_id,
+            0,
+            64,
+            rsi_agent_store_protocol::MAXIMUM_STORE_FACT_PAGE_BYTES,
+        )
         .await
         .unwrap()
         .facts;

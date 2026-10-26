@@ -311,9 +311,10 @@ Network or shared filesystems that weaken those operations are outside this
 backend's durability and single-writer contract; the Store does not infer their
 behavior from a path string.
 
-SQLite owns one serialized writer, one foreground reader, and one validation
-reader. Both readers are read-only and no-create. Each lane admits at most one
-blocking job; queued async callers do not occupy blocking threads. Cold validation
+SQLite owns one serialized writer, two foreground readers, and one validation
+reader. Readers are read-only and no-create. Foreground admission allows two
+blocking jobs; writer and validation admission each allow one. Queued async
+callers do not occupy blocking threads. Cold validation
 admits at most 256 callers and 256 outstanding jobs without an unbounded outer
 queue. Private validation reads and reusable Session-proof flights share these
 caller and job pools; draining proof flights can temporarily refuse private reads.
@@ -359,8 +360,8 @@ transaction, reusing prepared statements for at most the page limit plus lookahe
 Each continuation seeks the covering `ready_messages_by_root` index with
 `root_session_id > cursor`; `ready_messages` is a materialized table. Its default
 SQLite BINARY collation agrees with Rust's byte ordering of validated identifiers.
-The foreground reader remains held for this bounded page; the contract does not
-promise independent read lanes or a wall-clock latency bound.
+One foreground reader remains held for this bounded page; the other can serve
+an independent read. The contract does not promise a wall-clock latency bound.
 Duplicate messages do not determine selection work, with or without statistics.
 Ready pages join mailbox source metadata by its complete primary key, rejecting
 missing or inconsistent projections without decoding message bodies. Waiting
@@ -373,8 +374,8 @@ checked or inserted only after the file phase completes.
 Every admitted blocking database or CAS job retains the complete Store owner,
 including its writer lease, even after its async waiter is cancelled. A reusable
 Session-proof flight can notify its waiters before dropping its final owner;
-completion of `validate_session` is not a writer-lease release barrier. The three
-connections share that lifetime: clean shutdown closes both readers first
+completion of `validate_session` is not a writer-lease release barrier. The four
+connections share that lifetime: clean shutdown closes all readers first
 and the writer last, checkpointing the WAL into `sessions.sqlite3`, then explicitly
 unlocks and closes the persistent writer-lock file. Ordinary operation never removes the lock path.
 The main
@@ -489,3 +490,14 @@ Compact is a separate offline operation: it requires an existing valid Store,
 refuses unfinished Session/CAS deletions, obtains the same writer lease, uses
 SQLite VACUUM, and reports database-file bytes before and after checkpointing.
 Neither Session purge nor CAS collection promises to shrink the database file.
+
+Ordinary reads use two independently opened, eagerly configured SQLite readers.
+The writer and cold-validation reader retain separate single-slot lanes. Each
+blocking job owns its reader, admission slot and Store until actual completion,
+including cancellation of its async waiter. A panic or a connection left outside
+autocommit closes that entire lane's admission and wakes queued callers with Io;
+unhealthy connections are dropped immediately, releasing transactions and WAL
+read marks, and are never recycled or automatically reopened. Healthy concurrent
+readers return to the pool for ordered shutdown even after lane admission closes. Post-write
+proof maintenance does not run on a condemned connection or replace its lane error. Shutdown
+still drains jobs and closes all readers before the writer and its exclusive lease.

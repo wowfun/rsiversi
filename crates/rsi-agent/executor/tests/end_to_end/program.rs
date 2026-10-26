@@ -193,7 +193,12 @@ async fn check_program_policy(policy: Option<bool>, abandon: bool) {
             loop {
                 let facts = stack
                     .store
-                    .read_facts(header().session_id(), 0, 128)
+                    .read_facts(
+                        header().session_id(),
+                        0,
+                        128,
+                        rsi_agent_store_protocol::MAXIMUM_STORE_FACT_PAGE_BYTES,
+                    )
                     .await
                     .unwrap();
                 let identity = facts
@@ -224,7 +229,12 @@ async fn check_program_policy(policy: Option<bool>, abandon: bool) {
     let ((submitted, outcome), ()) = tokio::join!(stack.submit_and_wait("execute"), release);
     let facts = stack
         .store
-        .read_facts(&submitted.session_id, 0, 128)
+        .read_facts(
+            &submitted.session_id,
+            0,
+            128,
+            rsi_agent_store_protocol::MAXIMUM_STORE_FACT_PAGE_BYTES,
+        )
         .await
         .unwrap()
         .facts;
@@ -396,7 +406,12 @@ async fn nested_uncertainty_reaches_coordinator_as_typed_failure_before_turn_int
     assert!(observed.load(Ordering::SeqCst));
     let facts = stack
         .store
-        .read_facts(&submitted.session_id, 0, 128)
+        .read_facts(
+            &submitted.session_id,
+            0,
+            128,
+            rsi_agent_store_protocol::MAXIMUM_STORE_FACT_PAGE_BYTES,
+        )
         .await
         .unwrap()
         .facts;

@@ -999,13 +999,29 @@ async fn assert_latest_is(store: &MemoryStore, predicate: impl Fn(&SessionFactBo
         .into_iter()
         .next()
         .unwrap();
-    let page = store.read_facts(&session, 0, 64).await.unwrap();
+    let page = store
+        .read_facts(
+            &session,
+            0,
+            64,
+            rsi_agent_store_protocol::MAXIMUM_STORE_FACT_PAGE_BYTES,
+        )
+        .await
+        .unwrap();
     assert!(predicate(page.facts.last().unwrap().body()));
 }
 
 async fn assert_model_started(store: &MemoryStore, expected: &PreparedCallSnapshot) {
     for session in store.list_sessions(None, 64).await.unwrap().sessions {
-        let page = store.read_facts(&session, 0, 512).await.unwrap();
+        let page = store
+            .read_facts(
+                &session,
+                0,
+                512,
+                rsi_agent_store_protocol::MAXIMUM_STORE_FACT_PAGE_BYTES,
+            )
+            .await
+            .unwrap();
         let Some(SessionFactBody::ModelStarted { effect_id, .. }) = page
             .facts
             .last()

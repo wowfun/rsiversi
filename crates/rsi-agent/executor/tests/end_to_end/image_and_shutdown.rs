@@ -63,7 +63,12 @@ async fn image_prepare_cancellation_releases_the_only_execution_lane() {
         assert_eq!(stack.image.starts.load(Ordering::SeqCst), 0);
         let page = stack
             .store
-            .read_facts(&submitted.session_id, 0, 64)
+            .read_facts(
+                &submitted.session_id,
+                0,
+                64,
+                rsi_agent_store_protocol::MAXIMUM_STORE_FACT_PAGE_BYTES,
+            )
             .await
             .unwrap();
         assert!(!page.facts.iter().any(|fact| matches!(
@@ -118,7 +123,12 @@ async fn host_stop_during_image_prepare_never_starts_or_publishes_an_intent() {
     assert_eq!(stack.image.starts.load(Ordering::SeqCst), 0);
     let page = stack
         .store
-        .read_facts(&submitted.session_id, 0, 64)
+        .read_facts(
+            &submitted.session_id,
+            0,
+            64,
+            rsi_agent_store_protocol::MAXIMUM_STORE_FACT_PAGE_BYTES,
+        )
         .await
         .unwrap();
     assert!(!page.facts.iter().any(|fact| matches!(
@@ -224,7 +234,12 @@ async fn image_turn_flushes_each_media_ref_and_preserves_partial_failure() {
 
     let page = stack
         .store
-        .read_facts(&submitted.session_id, 0, 64)
+        .read_facts(
+            &submitted.session_id,
+            0,
+            64,
+            rsi_agent_store_protocol::MAXIMUM_STORE_FACT_PAGE_BYTES,
+        )
         .await
         .unwrap();
     let outputs = page

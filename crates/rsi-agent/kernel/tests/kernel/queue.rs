@@ -215,7 +215,15 @@ async fn queue_replace_preserves_position_old_identity_and_receipts_across_resta
             )
             .await;
         }
-        let before = store.read_controls(&session, 0, 64).await.unwrap();
+        let before = store
+            .read_controls(
+                &session,
+                0,
+                64,
+                rsi_agent_store_protocol::MAXIMUM_STORE_FACT_PAGE_BYTES,
+            )
+            .await
+            .unwrap();
         let request = edit("edit-first", "initial", "initial", replace("successor"));
         let receipt = kernel
             .mutate_queue(&session, request.clone(), None)
@@ -258,7 +266,16 @@ async fn queue_replace_preserves_position_old_identity_and_receipts_across_resta
         assert_eq!(ready.messages[0].message_id.as_str(), "successor");
         assert_eq!(ready.messages[0].control_seq, 1);
         assert_eq!(
-            store.read_controls(&session, 0, 64).await.unwrap().records,
+            store
+                .read_controls(
+                    &session,
+                    0,
+                    64,
+                    rsi_agent_store_protocol::MAXIMUM_STORE_FACT_PAGE_BYTES
+                )
+                .await
+                .unwrap()
+                .records,
             before.records
         );
         let stale = kernel
@@ -508,7 +525,15 @@ async fn queue_withdraw_and_replace_serialize_with_next_step_claims_without_canc
             Outcome::Withdrawn => assert_eq!(count, 0),
             other => panic!("unexpected race result: {other:?}"),
         }
-        let facts = store.read_facts(&session, 0, 64).await.unwrap();
+        let facts = store
+            .read_facts(
+                &session,
+                0,
+                64,
+                rsi_agent_store_protocol::MAXIMUM_STORE_FACT_PAGE_BYTES,
+            )
+            .await
+            .unwrap();
         assert!(
             !facts
                 .facts
@@ -564,7 +589,12 @@ async fn queue_edits_serialize_with_next_turn_claims() {
             }
             assert!(
                 !store
-                    .read_facts(&session, 0, 64)
+                    .read_facts(
+                        &session,
+                        0,
+                        64,
+                        rsi_agent_store_protocol::MAXIMUM_STORE_FACT_PAGE_BYTES
+                    )
                     .await
                     .unwrap()
                     .facts
@@ -730,7 +760,15 @@ async fn queue_edits_preserve_tree_ready_order_and_pinned_fork_prefix() {
             })
             .await
             .unwrap();
-        let prefix = store.read_controls(&root, 0, 64).await.unwrap();
+        let prefix = store
+            .read_controls(
+                &root,
+                0,
+                64,
+                rsi_agent_store_protocol::MAXIMUM_STORE_FACT_PAGE_BYTES,
+            )
+            .await
+            .unwrap();
         let ready_before = store
             .list_ready_messages(&root, None, 64)
             .await
@@ -794,7 +832,12 @@ async fn queue_edits_preserve_tree_ready_order_and_pinned_fork_prefix() {
         );
         assert_eq!(
             store
-                .read_controls(&root, 0, prefix.records.len())
+                .read_controls(
+                    &root,
+                    0,
+                    prefix.records.len(),
+                    rsi_agent_store_protocol::MAXIMUM_STORE_FACT_PAGE_BYTES
+                )
                 .await
                 .unwrap()
                 .records,

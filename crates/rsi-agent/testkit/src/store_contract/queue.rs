@@ -364,7 +364,16 @@ pub async fn assert_queue_store_contract(store: &dyn SessionStore, header: Sessi
     assert_eq!(ready.messages[0].control_seq, 1);
     assert_eq!(ready.messages[0].timestamp_ms, 1001);
     assert_eq!(
-        store.read_controls(&session, 0, 64).await.unwrap().records,
+        store
+            .read_controls(
+                &session,
+                0,
+                64,
+                rsi_agent_store_protocol::MAXIMUM_STORE_FACT_PAGE_BYTES
+            )
+            .await
+            .unwrap()
+            .records,
         controls
     );
     assert_eq!(

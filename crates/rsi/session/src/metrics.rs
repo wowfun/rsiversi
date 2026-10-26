@@ -104,7 +104,12 @@ impl MetricsCache {
                 break;
             }
             let page = store
-                .read_facts(session, scan.reducer.summary().through_seq, 128)
+                .read_facts(
+                    session,
+                    scan.reducer.summary().through_seq,
+                    128,
+                    rsi_agent_store_protocol::MAXIMUM_STORE_FACT_PAGE_BYTES,
+                )
                 .await
                 .map_err(map_store_error)?;
             if page.facts.is_empty() {
@@ -217,7 +222,12 @@ impl MetricsCache {
                 scan.reducer = MetricsReducer::new(header.settings().output_budgets().clone());
             }
             let page = store
-                .read_facts(&id, member_through_seq, 128)
+                .read_facts(
+                    &id,
+                    member_through_seq,
+                    128,
+                    rsi_agent_store_protocol::MAXIMUM_STORE_FACT_PAGE_BYTES,
+                )
                 .await
                 .map_err(map_store_error)?;
             if page.facts.is_empty() {

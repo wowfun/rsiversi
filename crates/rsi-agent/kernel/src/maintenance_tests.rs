@@ -1,63 +1,16 @@
 use super::*;
+use rsi_agent_session_protocol::{
+    AgentPresetId, DomainIdentity, DomainRequestId, DomainRevision, FrozenAgentSettings,
+};
+use rsi_agent_turn_protocol::ContinuationBinding;
 
 #[tokio::test]
 async fn retirement_refuses_every_pending_owner_and_preserves_residency() {
-    use rsi_agent_session_protocol::{
-        AgentPresetId, DomainIdentity, DomainRequestId, DomainRevision, FrozenAgentSettings,
-    };
-    use rsi_agent_turn_protocol::ContinuationBinding;
-    let kernel = AgentKernel::recover(
-        Arc::new(rsi_agent_testkit::MemoryStore::new()),
-        Arc::new(ClaimFixture),
-    )
-    .await
-    .unwrap();
-    let id = SessionId::new("retirement-matrix").unwrap();
+    let (kernel, header, pin) = retirement_fixture().await;
+    let id = header.session_id().clone();
     let first_id = SessionId::new("a-free").unwrap();
     let turn = TurnId::new("pending").unwrap();
-    let header = SessionHeader::new_local(
-        id.clone(),
-        1,
-        "/workspace",
-        AgentPresetId::new("test").unwrap(),
-        FrozenAgentSettings::new(
-            "test",
-            "system",
-            rsi_ai_protocol::ModelRef::new("test", "test").unwrap(),
-            rsi_sandbox::SandboxMode::ReadOnly,
-            false,
-        )
-        .unwrap(),
-    )
-    .unwrap();
-    let pin = ClaimFixture
-        .pin(header.agent_preset_id(), None)
-        .await
-        .unwrap();
-    let baseline = AgentControlRecord::new(
-        1,
-        1,
-        AgentControlRecordBody::TurnBoundaryRecorded {
-            turn_id: turn.clone(),
-            terminal_fact_seq: 1,
-        },
-    )
-    .unwrap();
-    let fact = Arc::new(
-        SessionFact::new(
-            1,
-            1,
-            SessionFactBody::TurnAccepted {
-                turn_id: turn.clone(),
-                text: "pending".into(),
-                model: None,
-                reasoning_effort: None,
-                sandbox: rsi_sandbox::SandboxMode::ReadOnly,
-                require_approval: false,
-            },
-        )
-        .unwrap(),
-    );
+    let (baseline, fact) = retirement_pending_records(&turn);
     for condition in [
         "loading",
         "fresh",
@@ -135,6 +88,12 @@ async fn retirement_refuses_every_pending_owner_and_preserves_residency() {
         // A refused attempt releases every submission guard.
         assert!(TurnService::prepare_retirement(&kernel, std::slice::from_ref(&id)).is_ok());
     }
+}
+
+#[tokio::test]
+async fn retirement_waits_for_continuations_and_releases_residency_explicitly() {
+    let (kernel, header, pin) = retirement_fixture().await;
+    let id = header.session_id().clone();
     let lease = kernel.inner.continuation_issuer.issue(
         header.clone(),
         pin.clone(),
@@ -170,4 +129,66 @@ async fn retirement_refuses_every_pending_owner_and_preserves_residency() {
     assert!(!lock_state(&kernel.inner).sessions.contains_key(&id));
     drop(retirement);
     assert!(TurnService::prepare_retirement(&kernel, std::slice::from_ref(&id)).is_ok());
+}
+
+async fn retirement_fixture() -> (
+    AgentKernel,
+    SessionHeader,
+    rsi_agent_composition_protocol::AgentCompositionPin,
+) {
+    let kernel = AgentKernel::recover(
+        Arc::new(rsi_agent_testkit::MemoryStore::new()),
+        Arc::new(ClaimFixture),
+    )
+    .await
+    .unwrap();
+    let id = SessionId::new("retirement-matrix").unwrap();
+    let header = SessionHeader::new_local(
+        id.clone(),
+        1,
+        "/workspace",
+        AgentPresetId::new("test").unwrap(),
+        FrozenAgentSettings::new(
+            "test",
+            "system",
+            rsi_ai_protocol::ModelRef::new("test", "test").unwrap(),
+            rsi_sandbox::SandboxMode::ReadOnly,
+            false,
+        )
+        .unwrap(),
+    )
+    .unwrap();
+    let pin = ClaimFixture
+        .pin(header.agent_preset_id(), None)
+        .await
+        .unwrap();
+    (kernel, header, pin)
+}
+
+fn retirement_pending_records(turn: &TurnId) -> (AgentControlRecord, Arc<SessionFact>) {
+    let baseline = AgentControlRecord::new(
+        1,
+        1,
+        AgentControlRecordBody::TurnBoundaryRecorded {
+            turn_id: turn.clone(),
+            terminal_fact_seq: 1,
+        },
+    )
+    .unwrap();
+    let fact = Arc::new(
+        SessionFact::new(
+            1,
+            1,
+            SessionFactBody::TurnAccepted {
+                turn_id: turn.clone(),
+                text: "pending".into(),
+                model: None,
+                reasoning_effort: None,
+                sandbox: rsi_sandbox::SandboxMode::ReadOnly,
+                require_approval: false,
+            },
+        )
+        .unwrap(),
+    );
+    (baseline, fact)
 }

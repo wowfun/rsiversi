@@ -124,7 +124,16 @@ async fn memory_store_is_compare_and_append_and_failure_injection_is_precommit()
         "test-agent"
     );
     assert_eq!(
-        store.read_facts(&session, 0, 8).await.unwrap().facts,
+        store
+            .read_facts(
+                &session,
+                0,
+                8,
+                rsi_agent_store_protocol::MAXIMUM_STORE_FACT_PAGE_BYTES
+            )
+            .await
+            .unwrap()
+            .facts,
         vec![fact(1)]
     );
 }
@@ -192,7 +201,15 @@ async fn memory_store_fact_pages_stop_before_the_aggregate_byte_bound() {
             .unwrap();
     }
 
-    let page = store.read_facts(&session, 0, 8).await.unwrap();
+    let page = store
+        .read_facts(
+            &session,
+            0,
+            8,
+            rsi_agent_store_protocol::MAXIMUM_STORE_FACT_PAGE_BYTES,
+        )
+        .await
+        .unwrap();
     assert_eq!(page.facts.len(), 3);
     assert!(!page.caught_up());
     assert!(
@@ -305,7 +322,15 @@ async fn append_retry_and_atomic_staging_retain_the_same_immutable_fact_allocati
         1,
         "transaction staging shares retained history"
     );
-    let page = store.read_facts(header().session_id(), 1, 1).await.unwrap();
+    let page = store
+        .read_facts(
+            header().session_id(),
+            1,
+            1,
+            rsi_agent_store_protocol::MAXIMUM_STORE_FACT_PAGE_BYTES,
+        )
+        .await
+        .unwrap();
     assert_eq!(
         page.facts[0].encoded_len(),
         payload_identity.upgrade().unwrap().encoded_len()

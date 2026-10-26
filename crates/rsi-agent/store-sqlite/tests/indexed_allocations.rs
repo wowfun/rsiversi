@@ -262,7 +262,14 @@ async fn excessive_ready_rows_do_not_grow_aggregate_peak() {
         let store = SqliteStore::open(root.path()).unwrap();
         let before = begin_peak();
         assert!(matches!(
-            store.read_facts(&id, 0, 1).await,
+            store
+                .read_facts(
+                    &id,
+                    0,
+                    1,
+                    rsi_agent_store_protocol::MAXIMUM_STORE_FACT_PAGE_BYTES
+                )
+                .await,
             Err(StoreError::Corrupt(_))
         ));
         let measured = end_peak(before);

@@ -32,7 +32,12 @@ async fn recovery_requires_rejection_source_but_not_execution_settings() {
             ));
             assert_eq!(
                 store
-                    .read_facts(&session, 0, 256)
+                    .read_facts(
+                        &session,
+                        0,
+                        256,
+                        rsi_agent_store_protocol::MAXIMUM_STORE_FACT_PAGE_BYTES
+                    )
                     .await
                     .unwrap()
                     .facts
@@ -323,7 +328,15 @@ async fn recovery_appends_interrupted_for_a_started_external_effect_and_never_re
             reason: "Kernel recovery found a turn without a durable terminal Fact".into(),
         })
     );
-    let repaired = store.read_facts(&session, 3, 8).await.unwrap();
+    let repaired = store
+        .read_facts(
+            &session,
+            3,
+            8,
+            rsi_agent_store_protocol::MAXIMUM_STORE_FACT_PAGE_BYTES,
+        )
+        .await
+        .unwrap();
     assert_eq!(repaired.facts.len(), 1);
     assert!(matches!(
         repaired.facts[0].body(),
@@ -425,7 +438,15 @@ async fn recovery_preserves_a_durable_cancellation_classification() {
         kernel.outcome(&session, &turn).await.unwrap(),
         Some(TurnOutcome::Cancelled)
     );
-    let repaired = store.read_facts(&session, 2, 8).await.unwrap();
+    let repaired = store
+        .read_facts(
+            &session,
+            2,
+            8,
+            rsi_agent_store_protocol::MAXIMUM_STORE_FACT_PAGE_BYTES,
+        )
+        .await
+        .unwrap();
     assert!(matches!(
         repaired.facts.as_slice(),
         [fact]
@@ -469,7 +490,17 @@ async fn recovery_preserves_a_durable_max_tokens_terminal() {
         Some(TurnOutcome::MaxTokens)
     );
     assert_eq!(
-        store.read_facts(&session, 0, 16).await.unwrap().facts.len(),
+        store
+            .read_facts(
+                &session,
+                0,
+                16,
+                rsi_agent_store_protocol::MAXIMUM_STORE_FACT_PAGE_BYTES
+            )
+            .await
+            .unwrap()
+            .facts
+            .len(),
         5
     );
 }
@@ -836,7 +867,16 @@ async fn partial_recovery_restarts_after_the_last_correlated_terminal_without_re
             ..
         }
     ));
-    let first_marker = memory.read_controls(&session, 0, 8).await.unwrap().records;
+    let first_marker = memory
+        .read_controls(
+            &session,
+            0,
+            8,
+            rsi_agent_store_protocol::MAXIMUM_STORE_FACT_PAGE_BYTES,
+        )
+        .await
+        .unwrap()
+        .records;
     assert_eq!(first_marker.len(), 1);
     assert_eq!(
         memory
@@ -860,7 +900,15 @@ async fn partial_recovery_restarts_after_the_last_correlated_terminal_without_re
         AgentKernel::recover_with_clock(memory.clone(), composition(), Arc::new(FixedClock))
             .await
             .unwrap();
-    let controls = memory.read_controls(&session, 0, 8).await.unwrap();
+    let controls = memory
+        .read_controls(
+            &session,
+            0,
+            8,
+            rsi_agent_store_protocol::MAXIMUM_STORE_FACT_PAGE_BYTES,
+        )
+        .await
+        .unwrap();
     assert_eq!(controls.records.len(), 2);
     assert_eq!(controls.records[0], first_marker[0]);
     assert!(

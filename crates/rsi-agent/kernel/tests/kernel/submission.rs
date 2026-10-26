@@ -18,7 +18,16 @@ async fn fresh_submission_returns_only_after_its_acceptance_is_durable() {
         TurnUpdate::Fact { durable_seq: 1, .. }
     ));
     assert_eq!(
-        store.read_facts(&session, 0, 8).await.unwrap().durable_seq,
+        store
+            .read_facts(
+                &session,
+                0,
+                8,
+                rsi_agent_store_protocol::MAXIMUM_STORE_FACT_PAGE_BYTES
+            )
+            .await
+            .unwrap()
+            .durable_seq,
         1
     );
     kernel.shutdown(worker).await.unwrap();
@@ -546,7 +555,12 @@ async fn unavailable_cold_preset_fails_before_fact_log_materialization() {
     assert_eq!(store.open_turn_read_attempts(), 0);
     assert_eq!(
         memory
-            .read_facts(&SessionId::new("session-unavailable-preset").unwrap(), 0, 8,)
+            .read_facts(
+                &SessionId::new("session-unavailable-preset").unwrap(),
+                0,
+                8,
+                rsi_agent_store_protocol::MAXIMUM_STORE_FACT_PAGE_BYTES
+            )
             .await
             .unwrap()
             .facts
@@ -907,7 +921,12 @@ async fn explicit_effect_flush_waits_through_transient_failure_without_reorderin
     assert!(!flush.is_finished());
     assert_eq!(
         store
-            .read_facts(&submitted.session_id, 0, 8)
+            .read_facts(
+                &submitted.session_id,
+                0,
+                8,
+                rsi_agent_store_protocol::MAXIMUM_STORE_FACT_PAGE_BYTES
+            )
             .await
             .unwrap()
             .durable_seq,
@@ -919,7 +938,15 @@ async fn explicit_effect_flush_waits_through_transient_failure_without_reorderin
     tokio::time::advance(std::time::Duration::from_millis(1)).await;
     tokio::task::yield_now().await;
     assert_eq!(flush.await.unwrap().unwrap(), through);
-    let stored = store.read_facts(&submitted.session_id, 0, 8).await.unwrap();
+    let stored = store
+        .read_facts(
+            &submitted.session_id,
+            0,
+            8,
+            rsi_agent_store_protocol::MAXIMUM_STORE_FACT_PAGE_BYTES,
+        )
+        .await
+        .unwrap();
     assert_eq!(stored.facts.len(), 2);
     assert!(matches!(
         stored.facts[0].body(),
@@ -1052,7 +1079,15 @@ async fn cancellation_single_assigns_cancelled_even_if_executor_reports_complete
             .unwrap(),
         Some(TurnOutcome::Cancelled)
     );
-    let stored = store.read_facts(&submitted.session_id, 0, 8).await.unwrap();
+    let stored = store
+        .read_facts(
+            &submitted.session_id,
+            0,
+            8,
+            rsi_agent_store_protocol::MAXIMUM_STORE_FACT_PAGE_BYTES,
+        )
+        .await
+        .unwrap();
     assert!(matches!(
         stored.facts.last().unwrap().body(),
         SessionFactBody::TurnTerminal {
@@ -1283,7 +1318,7 @@ async fn checkpoint_store_failure_remains_typed_at_the_execution_seam() {
 }
 
 #[tokio::test]
-async fn tightened_store_read_budget_disables_checkpoint_maintenance_end_to_end() {
+async fn tightened_store_read_budget_retains_small_checkpoint_maintenance_end_to_end() {
     let store = Arc::new(MemoryStore::new());
     let store_contract: Arc<dyn SessionStore> = store.clone();
     let kernel = AgentKernel::recover_with_clock_and_limits(
@@ -1298,7 +1333,7 @@ async fn tightened_store_read_budget_disables_checkpoint_maintenance_end_to_end(
     .await
     .unwrap();
     let worker = kernel.start_workers();
-    let submitted = submit(&kernel, "session-checkpoint-disabled", "hello").await;
+    let submitted = submit(&kernel, "session-checkpoint-small", "hello").await;
     let _lease = kernel.register("executor".into()).unwrap();
     let claim = kernel
         .claim("executor", CancellationToken::new())
@@ -1325,14 +1360,19 @@ async fn tightened_store_read_budget_disables_checkpoint_maintenance_end_to_end(
             .read_checkpoint_facts(&claim, 0, MAXIMUM_FACTS_PER_READ)
             .await
             .unwrap()
-            .is_none()
+            .is_some()
     );
     let durable = store
-        .read_facts(claim.session_id(), 0, MAXIMUM_FACTS_PER_READ)
+        .read_facts(
+            claim.session_id(),
+            0,
+            MAXIMUM_FACTS_PER_READ,
+            rsi_agent_store_protocol::MAXIMUM_STORE_FACT_PAGE_BYTES,
+        )
         .await
         .unwrap();
     assert!(
-        !kernel
+        kernel
             .write_context_checkpoint(
                 &claim,
                 ContextCheckpoint {
@@ -1340,7 +1380,7 @@ async fn tightened_store_read_budget_disables_checkpoint_maintenance_end_to_end(
                     through_seq,
                     fact_prefix_sha256: fact_prefix_sha256(&durable.facts).unwrap(),
                     bytes: rsi_api_protocol::ByteBudget::default()
-                        .copy(b"disabled-checkpoint".as_slice())
+                        .copy(b"small-checkpoint".as_slice())
                         .unwrap(),
                 },
             )
@@ -1355,8 +1395,27 @@ async fn tightened_store_read_budget_disables_checkpoint_maintenance_end_to_end(
             )
             .await
             .unwrap()
-            .is_none()
+            .is_some()
     );
+    let budget = rsi_api_protocol::ByteBudget::new(1024).unwrap();
+    let checkpoint = kernel
+        .read_context_checkpoint(claim.session_id(), budget.clone().into())
+        .await
+        .unwrap()
+        .unwrap();
+    assert_eq!(checkpoint.bytes.as_ref(), b"small-checkpoint");
+    assert_eq!(budget.used(), b"small-checkpoint".len());
+    assert!(matches!(
+        kernel
+            .read_context_checkpoint(
+                claim.session_id(),
+                rsi_api_protocol::ByteBudget::new(1).unwrap().into()
+            )
+            .await,
+        Err(TurnError::Capacity)
+    ));
+    drop(checkpoint);
+    assert_eq!(budget.used(), 0);
     kernel.shutdown(worker).await.unwrap();
 }
 
@@ -1434,10 +1493,17 @@ async fn claim_fact_read_never_skips_a_prefix_committed_during_store_io() {
 async fn claim_fact_read_does_not_cross_the_live_horizon_captured_before_store_io() {
     let memory = Arc::new(MemoryStore::new());
     let store = Arc::new(FactReadRaceStore::new(memory));
-    let kernel =
-        AgentKernel::recover_with_clock(store.clone(), composition(), Arc::new(FixedClock))
-            .await
-            .unwrap();
+    let kernel = AgentKernel::recover_with_clock_and_limits(
+        store.clone(),
+        composition(),
+        Arc::new(FixedClock),
+        KernelLimits {
+            maximum_store_read_bytes: MAXIMUM_SESSION_FACT_BYTES,
+            ..KernelLimits::default()
+        },
+    )
+    .await
+    .unwrap();
     let worker = kernel.start_workers();
     let submitted = submit(&kernel, "session-captured-live-horizon", "first").await;
     let _lease = kernel.register("executor".into()).unwrap();
@@ -1552,7 +1618,15 @@ async fn executor_cannot_classify_cancellation_without_a_durable_request() {
             .unwrap(),
         Some(TurnOutcome::Failed { code, .. }) if code == "executor.unrequested_cancellation"
     ));
-    let stored = store.read_facts(&submitted.session_id, 0, 8).await.unwrap();
+    let stored = store
+        .read_facts(
+            &submitted.session_id,
+            0,
+            8,
+            rsi_agent_store_protocol::MAXIMUM_STORE_FACT_PAGE_BYTES,
+        )
+        .await
+        .unwrap();
     assert!(matches!(
         stored.facts.last().unwrap().body(),
         SessionFactBody::TurnTerminal {
@@ -1665,7 +1739,15 @@ async fn cancellation_does_not_fire_before_its_fact_is_durable() {
     tokio::task::yield_now().await;
     assert!(cancelling.await.unwrap().unwrap().accepted);
     assert!(cancellation.is_cancelled());
-    let stored = store.read_facts(&submitted.session_id, 0, 8).await.unwrap();
+    let stored = store
+        .read_facts(
+            &submitted.session_id,
+            0,
+            8,
+            rsi_agent_store_protocol::MAXIMUM_STORE_FACT_PAGE_BYTES,
+        )
+        .await
+        .unwrap();
     assert!(matches!(
         stored.facts.last().unwrap().body(),
         SessionFactBody::CancelRequested { .. }
@@ -1746,7 +1828,12 @@ async fn message_admission_waits_for_terminal_control_before_and_after_store_app
         assert_eq!(receipt.accepted_control_seq, 2);
         assert_eq!(receipt.observed_fact_seq, 2);
         let controls = memory
-            .read_controls(&submitted.session_id, 0, 8)
+            .read_controls(
+                &submitted.session_id,
+                0,
+                8,
+                rsi_agent_store_protocol::MAXIMUM_STORE_FACT_PAGE_BYTES,
+            )
             .await
             .unwrap();
         assert_eq!(controls.records.len(), 2);

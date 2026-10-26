@@ -191,44 +191,47 @@ where
             Ordering::Relaxed,
         );
         let mut connection = owner.connections.validation_reader.lock().map_err(|_| {
+            owner.validation_admission.close();
             StoreError::Io("SQLite validation connection mutex was poisoned".into())
         })?;
-        let transaction = connection
-            .transaction_with_behavior(TransactionBehavior::Deferred)
-            .map_err(sql_error)?;
-        #[cfg(any(test, feature = "test-support"))]
-        let steps = owner.validation_vm_steps.clone();
-        transaction
-            .progress_handler(
-                1_000,
-                Some(move || {
-                    #[cfg(any(test, feature = "test-support"))]
-                    steps.fetch_add(1_000, Ordering::Relaxed);
-                    // rusqlite returns INTERRUPT for true, unlike the SQLx reference.
-                    stop.is_cancelled()
-                }),
-            )
-            .map_err(sql_error)?;
-        // Declared after the transaction: unwinding removes the hook before rollback.
-        let progress = ProgressGuard(&transaction);
-        let started = std::time::Instant::now();
-        let result = operation(&transaction);
-        owner.validation_work_ns.fetch_add(
-            u64::try_from(started.elapsed().as_nanos()).unwrap_or(u64::MAX),
-            Ordering::Relaxed,
-        );
-        drop(progress);
-        let result = result?;
-        transaction.commit().map_err(sql_error)?;
-        // A completed, committed read is valid even if its final waiter just left.
-        publish(result)
+        super::run_connection(&mut connection, &owner.validation_admission, |connection| {
+            let transaction = connection
+                .transaction_with_behavior(TransactionBehavior::Deferred)
+                .map_err(sql_error)?;
+            #[cfg(any(test, feature = "test-support"))]
+            let steps = owner.validation_vm_steps.clone();
+            transaction
+                .progress_handler(
+                    1_000,
+                    Some(move || {
+                        #[cfg(any(test, feature = "test-support"))]
+                        steps.fetch_add(1_000, Ordering::Relaxed);
+                        // rusqlite returns INTERRUPT for true, unlike the SQLx reference.
+                        stop.is_cancelled()
+                    }),
+                )
+                .map_err(sql_error)?;
+            // Declared after the transaction: unwinding removes the hook before rollback.
+            let progress = ProgressGuard(&transaction);
+            let started = std::time::Instant::now();
+            let result = operation(&transaction);
+            owner.validation_work_ns.fetch_add(
+                u64::try_from(started.elapsed().as_nanos()).unwrap_or(u64::MAX),
+                Ordering::Relaxed,
+            );
+            drop(progress);
+            let result = result?;
+            transaction.commit().map_err(sql_error)?;
+            // A completed, committed read is valid even if its final waiter just left.
+            publish(result)
+        })
     })
     .await
     .map_err(|error| StoreError::Io(format!("SQLite worker failed: {error}")))?
 }
 
 impl SqliteStore {
-    #[cfg(all(test, unix))]
+    #[cfg(test)]
     pub(super) async fn with_validation<T, F>(&self, operation: F) -> Result<T>
     where
         T: Send + 'static,
@@ -254,10 +257,6 @@ impl SqliteStore {
         read_job(self.inner.clone(), stop.0.clone(), job, operation, publish).await
     }
 
-    #[expect(
-        clippy::too_many_lines,
-        reason = "One shared-flight transition keeps admission, cancellation and proof publication ordered."
-    )]
     pub(super) async fn session_proof(&self, id: &SessionId) -> Result<Proof> {
         if let Some(proof) = self.inner.session_proof(id) {
             self.inner.cold_validation.hit();

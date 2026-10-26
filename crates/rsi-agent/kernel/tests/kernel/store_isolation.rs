@@ -176,10 +176,17 @@ async fn sqlite_preparation_stays_pinned_during_kernel_budget_wait_and_cache_chu
     let second_id = sqlite_history(&store, "prepared-waiter").await;
     drop(store);
     let store = Arc::new(SqliteStore::open(root.path()).unwrap());
-    let kernel =
-        AgentKernel::recover_with_clock(store.clone(), composition(), Arc::new(FixedClock))
-            .await
-            .unwrap();
+    let kernel = AgentKernel::recover_with_clock_and_limits(
+        store.clone(),
+        composition(),
+        Arc::new(FixedClock),
+        KernelLimits {
+            maximum_store_read_bytes: MAXIMUM_SESSION_FACT_BYTES,
+            ..KernelLimits::default()
+        },
+    )
+    .await
+    .unwrap();
     let (entered, release) = store.pause_next_fact_page();
     let first = tokio::spawn({
         let kernel = kernel.clone();
@@ -192,7 +199,9 @@ async fn sqlite_preparation_stays_pinned_during_kernel_budget_wait_and_cache_chu
     let validations = store.validation_counts().0;
     let second = tokio::spawn({
         let kernel = kernel.clone();
-        async move { kernel.observe(&second_id, 0).await }
+        // Domain-state reads reserve 36 MiB, so the paused 1 MiB page blocks
+        // admission after preparation even with adaptive observation pages.
+        async move { kernel.domain_states(&second_id).await }
     });
     tokio::time::timeout(Duration::from_secs(2), async {
         while store.validation_counts().0 == validations {
