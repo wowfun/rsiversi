@@ -262,6 +262,13 @@ struct SyntaxError {
 }
 
 fn analyze_source(source: &str) -> Result<SourceAnalysis, Vec<SyntaxError>> {
+    let normalized;
+    let source = if source.contains("\r\n") {
+        normalized = source.replace("\r\n", "\n");
+        normalized.as_str()
+    } else {
+        source
+    };
     let line_map = LineMap::new(source);
     let parse = SourceFile::parse(source, Edition::CURRENT);
     let errors = parse
@@ -615,6 +622,25 @@ mod tests {
                 .lines,
             1
         );
+    }
+
+    #[test]
+    fn crlf_literals_have_the_same_analysis_and_diagnostics_as_lf() {
+        let source = concat!(
+            "const SQL: &str = \"SELECT\n  count(*)\n\";\n",
+            "const RAW: &str = r#\"first\nsecond\"#;\n",
+            "fn query() {\n    if ready() { run(SQL); }\n}\n",
+        );
+        assert_eq!(
+            analyze_source(&source.replace('\n', "\r\n")).unwrap(),
+            analyze_source(source).unwrap(),
+        );
+        let invalid = format!("{source}fn broken( {{\n");
+        assert_eq!(
+            analyze_source(&invalid.replace('\n', "\r\n")).unwrap_err(),
+            analyze_source(&invalid).unwrap_err(),
+        );
+        assert!(analyze_source("const TEXT: &str = \"bare\rreturn\";").is_err());
     }
 
     #[test]

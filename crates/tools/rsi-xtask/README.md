@@ -103,7 +103,10 @@ named function or method, and the named function or method with the deepest
 control flow. These findings do not fail the command.
 
 Analysis covers source as written, including inactive `cfg` branches, without
-expanding macros or resolving names. Invalid configuration, source enumeration,
+expanding macros or resolving names. CRLF source is normalized to LF before
+parsing, as in Rust compilation, while diagnostic line and column positions
+remain source-relative. The command does not rewrite files.
+Invalid configuration, source enumeration,
 reads, or Rust syntax remain execution errors. Source errors are collected in
 stable path, line, column, and message order, and prevent partial findings or a
 success summary from being printed.

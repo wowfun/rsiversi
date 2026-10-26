@@ -24,6 +24,10 @@ errors are collected before failure so an incomplete scan never emits partial
 findings or a success summary. The private implementation uses
 rust-analyzer's lossless single-file syntax tree so one parse owns both line
 accounting and structure without requiring the repository to build.
+The parser receives Rust's CRLF-to-LF source normalization: checking valid
+multiline literals must not depend on whether a working copy has already
+adopted the repository's LF checkout policy. Normalization is read-only and
+preserves line-relative diagnostics.
 
 Code check is explicitly invoked and is not part of CI, product conformance,
 documentation verification, or another required gate. It analyzes source as
