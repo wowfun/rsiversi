@@ -406,7 +406,9 @@ pub enum AgentMessageContent {
     /// Immutable imported image reference.
     Image { media: MediaRef },
     /// Immutable human-selected conversation data, with no instruction authority.
-    Reference { reference: FrozenReference },
+    /// Boxed so text and image blocks do not reserve the full descriptor inline;
+    /// the serialized reference remains an ordinary object.
+    Reference { reference: Box<FrozenReference> },
 }
 
 /// Authority-neutral origin of one queued message.

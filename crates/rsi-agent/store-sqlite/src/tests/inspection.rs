@@ -497,7 +497,9 @@ async fn full_inspection_checks_frozen_references_in_controls_and_facts() {
         preview: "x".into(),
     };
     reference.validate().unwrap();
-    let content = vec![rsi_agent_session_protocol::AgentMessageContent::Reference { reference }];
+    let content = vec![rsi_agent_session_protocol::AgentMessageContent::Reference {
+        reference: Box::new(reference),
+    }];
     let message_id = MessageId::new("frozen-message").unwrap();
     let message = AgentMessage {
         message_id: message_id.clone(),

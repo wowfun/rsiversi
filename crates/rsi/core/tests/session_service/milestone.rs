@@ -146,7 +146,9 @@ async fn uds_references_keep_exact_retry_cas_and_real_parent_interval_after_rest
             target
                 .submit(message(
                     "bad",
-                    vec![SessionInput::Reference { reference: forged }]
+                    vec![SessionInput::Reference {
+                        reference: Box::new(forged)
+                    }]
                 ))
                 .await
                 .is_err()
@@ -179,7 +181,7 @@ async fn uds_references_keep_exact_retry_cas_and_real_parent_interval_after_rest
     let input = message(
         "exact-reference",
         vec![SessionInput::Reference {
-            reference: frozen.clone(),
+            reference: Box::new(frozen.clone()),
         }],
     );
     let receipt = submit(&target, input.clone()).await;
@@ -188,7 +190,7 @@ async fn uds_references_keep_exact_retry_cas_and_real_parent_interval_after_rest
     assert_eq!(retry.accepted_control_seq, receipt.accepted_control_seq);
     assert_eq!(provider.requests.lock().unwrap().len(), before);
     let facts = target.history_before(None, 128).await.unwrap();
-    let entered = facts.facts.iter().find(|fact| matches!(fact.body(), SessionFactBody::InputMessageEntered {content, ..} if matches!(content.first(),Some(AgentMessageContent::Reference {reference}) if reference == &frozen))).unwrap();
+    let entered = facts.facts.iter().find(|fact| matches!(fact.body(), SessionFactBody::InputMessageEntered {content, ..} if matches!(content.first(),Some(AgentMessageContent::Reference {reference}) if reference.as_ref() == &frozen))).unwrap();
     let request = ReferenceReadRequest {
         recorded_session_id: target.header().await.unwrap().session_id().clone(),
         fact_seq: entered.seq(),
@@ -253,7 +255,9 @@ async fn uds_references_keep_exact_retry_cas_and_real_parent_interval_after_rest
         &target,
         message(
             "after-fork",
-            vec![SessionInput::Reference { reference: later }],
+            vec![SessionInput::Reference {
+                reference: Box::new(later),
+            }],
         ),
     )
     .await;

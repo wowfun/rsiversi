@@ -399,7 +399,9 @@ mod tests {
                             AgentMessageContent::Text {
                                 text: "visible-human".into(),
                             },
-                            AgentMessageContent::Reference { reference: nested },
+                            AgentMessageContent::Reference {
+                                reference: Box::new(nested),
+                            },
                         ],
                     ),
                     input(

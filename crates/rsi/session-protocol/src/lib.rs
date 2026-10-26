@@ -187,7 +187,8 @@ pub enum SessionInput {
     /// Immutable captured conversation data, verified before durable admission.
     Reference {
         /// Exact server-captured descriptor, retained unchanged for retries.
-        reference: rsi_agent_session_protocol::FrozenReference,
+        /// Heap-owned to keep other input blocks compact; serialization is transparent.
+        reference: Box<rsi_agent_session_protocol::FrozenReference>,
     },
     /// Safe UTF-8 text entering model context directly.
     Text {

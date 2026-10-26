@@ -281,7 +281,7 @@ async fn capture_is_immutable_target_bound_and_only_recorded_references_cross_th
                     message_id: MessageId::new("message").unwrap(),
                 },
                 content: vec![AgentMessageContent::Reference {
-                    reference: frozen.clone(),
+                    reference: Box::new(frozen.clone()),
                 }],
             },
             terminal("target-turn"),

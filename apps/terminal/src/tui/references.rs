@@ -33,7 +33,9 @@ impl State {
             self.references
                 .iter()
                 .cloned()
-                .map(|reference| MessageInput::Reference { reference }),
+                .map(|reference| MessageInput::Reference {
+                    reference: Box::new(reference),
+                }),
         );
         content
     }
@@ -242,7 +244,7 @@ impl Client {
         }
         let mut content = self.state.reference_input();
         content.push(MessageInput::Reference {
-            reference: reference.clone(),
+            reference: Box::new(reference.clone()),
         });
         rsi_session_protocol::validate_session_input(&content).map_err(error)?;
         let additional = serde_json::to_vec(&reference).map_err(error)?.len();

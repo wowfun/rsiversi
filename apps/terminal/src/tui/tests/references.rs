@@ -65,7 +65,7 @@ async fn frozen_draft_reference_preserves_cursor_binding_and_submission_identity
     client.submit(MessageDelivery::NextTurn, false);
     let frozen_input = client.submission.request.clone().unwrap();
     assert!(
-        matches!(&frozen_input.content[..],[MessageInput::Text {text},MessageInput::Reference {reference:actual}] if text=="draft suffix" && actual==&reference)
+        matches!(&frozen_input.content[..],[MessageInput::Text {text},MessageInput::Reference {reference:actual}] if text=="draft suffix" && actual.as_ref()==&reference)
     );
     assert!(client.state.references.is_empty());
     client.state.editor.insert("later edit").unwrap();

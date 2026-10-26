@@ -27,7 +27,7 @@ async fn modal_queue_editor_preserves_complete_content_and_unknown_identity_afte
             },
             image,
             Content::Reference {
-                reference: reference.clone(),
+                reference: Box::new(reference.clone()),
             },
             Content::Text {
                 text: "last".into(),

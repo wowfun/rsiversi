@@ -275,7 +275,7 @@ impl GuiApplication {
                 let mut content = Vec::with_capacity(input.images.len() + 1);
                 if !input.text.is_empty() { content.push(SessionInput::Text { text: input.text.clone() }); }
                 content.extend(input.images.iter().cloned().map(|media| SessionInput::Image { media }));
-                content.extend(input.references.iter().cloned().map(|reference| SessionInput::Reference { reference }));
+                content.extend(input.references.iter().cloned().map(|reference| SessionInput::Reference { reference: Box::new(reference) }));
                 let id = MessageId::new(rsi_ui::fresh_identity("message")?).map_err(error)?;
                 let request = SubmitInput {
                     reasoning_effort: None,

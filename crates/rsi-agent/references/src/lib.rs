@@ -335,7 +335,7 @@ impl References {
             drop(facts);
             let (envelope, _publication) =
                 load(&*store, &recorded_header, &reference, &stop, &cache).await?;
-            let mut page = page(reference, &envelope.text, request.offset, request.maximum)?;
+            let mut page = page(*reference, &envelope.text, request.offset, request.maximum)?;
             page.recorded = Some(request);
             page.validate().map_err(invalid)?;
             Ok(page)
