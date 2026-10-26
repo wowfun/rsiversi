@@ -347,10 +347,21 @@ impl TurnExecution for CheckpointFixture {
     async fn read_facts(
         &self,
         _claim: &TurnClaim,
-        _after_seq: u64,
-        _limit: usize,
+        after_seq: u64,
+        limit: usize,
     ) -> rsi_agent_turn_protocol::Result<rsi_agent_turn_protocol::ClaimFactPage> {
-        unreachable!("checkpoint writer uses only maintenance reads")
+        // A Store may return one item even when the requested count is larger.
+        let facts = self
+            .facts
+            .iter()
+            .filter(|fact| fact.seq() > after_seq)
+            .take(limit.min(1))
+            .cloned()
+            .collect::<Vec<_>>();
+        Ok(rsi_agent_turn_protocol::ClaimFactPage {
+            through_seq: facts.last().map_or(after_seq, |fact| fact.seq()),
+            facts,
+        })
     }
 
     async fn read_checkpoint_facts(
@@ -1541,4 +1552,127 @@ fn language_regeneration_has_five_retries_and_bounded_truthful_dispatch_policy()
             }
         }
     }
+}
+
+fn short_page_history(recovered: bool) -> (TurnClaim, CheckpointFixture) {
+    use rsi_agent_session_protocol::{
+        AgentMessageContent, EvidencePart, InputMessageSource, MessageId, RequestEvidence, StepId,
+    };
+    let (original, accepted) = claim();
+    let turn_id = original.turn_id().clone();
+    let step_id = StepId::new("short-page-step").unwrap();
+    let mut facts = vec![
+        Arc::new(accepted),
+        Arc::new(
+            SessionFact::new(
+                2,
+                2,
+                SessionFactBody::StepStarted {
+                    turn_id: turn_id.clone(),
+                    step_id: step_id.clone(),
+                },
+            )
+            .unwrap(),
+        ),
+        Arc::new(
+            SessionFact::new(
+                3,
+                3,
+                SessionFactBody::InputMessageEntered {
+                    turn_id,
+                    step_id,
+                    source: InputMessageSource::Human {
+                        message_id: MessageId::new("short-page-input").unwrap(),
+                    },
+                    content: vec![AgentMessageContent::Text {
+                        text: "large input".into(),
+                    }],
+                },
+            )
+            .unwrap(),
+        ),
+    ];
+    if recovered {
+        let (_, completed) = completed_model_with_tool_call();
+        let mut body = completed[1].body().clone();
+        if let SessionFactBody::ModelIntent { evidence, .. } = &mut body {
+            *evidence = RequestEvidence::Available {
+                configuration: EvidencePart::inline("{}".into()),
+                system: EvidencePart::inline("system".into()),
+                tools: EvidencePart::inline("[]".into()),
+                manifest: vec![],
+            };
+        }
+        facts.push(Arc::new(SessionFact::new(4, 4, body).unwrap()));
+    }
+    let claim = test_claim_issuer().issue(
+        "executor".into(),
+        1,
+        original.session_id().clone(),
+        original.turn_id().clone(),
+        Arc::new(original.header().clone()),
+        1,
+        1,
+        facts.last().unwrap().seq(),
+    );
+    (
+        claim,
+        CheckpointFixture {
+            facts,
+            fork_facts: vec![],
+            writes: Mutex::new(vec![]),
+        },
+    )
+}
+
+#[tokio::test]
+async fn short_fact_pages_do_not_hide_recovered_execution() {
+    for recovered in [false, true] {
+        let (claim, turns) = short_page_history(recovered);
+        assert_eq!(
+            Driver::observation_recovered(
+                &turns,
+                &claim,
+                &CancellationToken::new(),
+                tokio::time::Instant::now() + Duration::from_secs(1)
+            )
+            .await,
+            recovered
+        );
+    }
+    let (claim, mut turns) = short_page_history(true);
+    turns.facts.truncate(2);
+    assert!(
+        Driver::observation_recovered(
+            &turns,
+            &claim,
+            &CancellationToken::new(),
+            tokio::time::Instant::now() + Duration::from_secs(1)
+        )
+        .await
+    );
+}
+
+#[tokio::test]
+async fn replayed_fact_metadata_deduplicates_without_retaining_bodies() {
+    let (claim, turns) = short_page_history(true);
+    let cache = Mutex::new(evidence::EvidenceCache::default());
+    for fact in &turns.facts {
+        cache.lock().unwrap().observe(claim.session_id(), fact);
+    }
+    let SessionFactBody::ModelIntent {
+        evidence: original, ..
+    } = turns.facts.last().unwrap().body()
+    else {
+        panic!("model intent")
+    };
+    let mut deduplicated = original.clone();
+    cache
+        .lock()
+        .unwrap()
+        .deduplicate(claim.session_id(), &mut deduplicated);
+    assert!(deduplicated.parts().iter().all(|(_, part)| matches!(
+        part,
+        rsi_agent_session_protocol::EvidencePart::Reference { seq: 4, .. }
+    )));
 }

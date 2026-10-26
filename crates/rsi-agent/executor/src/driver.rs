@@ -31,8 +31,8 @@ impl Driver {
         let deadline = tokio::time::Instant::now() + observation::OBSERVATION_WAIT;
         let preparation_stop = stop.child_token();
         let preparation_guard = preparation_stop.clone().drop_guard();
-        let recovered =
-            self.observer.is_some() && self.observation_recovered(&claim, stop, deadline).await;
+        let recovered = self.observer.is_some()
+            && Self::observation_recovered(self.turns.as_ref(), &claim, stop, deadline).await;
         let start = rsi_agent_turn_protocol::ExecutionObservationStart {
             header: claim.header().clone(),
             execution: claim.execution().cloned(),
@@ -101,33 +101,38 @@ impl Driver {
         }
     }
 
-    async fn observation_recovered(
-        &self,
+    pub(super) async fn observation_recovered(
+        turns: &dyn TurnExecution,
         claim: &TurnClaim,
         stop: &CancellationToken,
         deadline: tokio::time::Instant,
     ) -> bool {
-        let reading = tokio::time::timeout_at(
-            deadline,
-            self.turns.read_facts(claim, claim.accepted_seq(), 3),
-        );
-        let page = tokio::select! { biased;
-            () = stop.cancelled() => None,
-            result = reading => result.ok().and_then(std::result::Result::ok),
-        };
-        match page {
-            Some(page) => {
-                page.facts.len() > 2
-                    || page.facts.iter().any(|fact| {
-                        !matches!(
-                            fact.body(),
-                            SessionFactBody::StepStarted { .. }
-                                | SessionFactBody::InputMessageEntered { .. }
-                        )
-                    })
+        let mut after = claim.accepted_seq();
+        let mut count = 0;
+        while after < claim.live_seq() {
+            let reading =
+                tokio::time::timeout_at(deadline, turns.read_facts(claim, after, 3 - count));
+            let page = tokio::select! { biased;
+                () = stop.cancelled() => None,
+                result = reading => result.ok().and_then(std::result::Result::ok),
+            };
+            let Some(page) = page else { return true };
+            count += page.facts.len();
+            if count > 2
+                || page.through_seq <= after
+                || page.facts.iter().any(|fact| {
+                    !matches!(
+                        fact.body(),
+                        SessionFactBody::StepStarted { .. }
+                            | SessionFactBody::InputMessageEntered { .. }
+                    )
+                })
+            {
+                return true;
             }
-            None => true,
+            after = page.through_seq;
         }
+        false
     }
 
     async fn run_observed_claim(&self, claim: TurnClaim, stop: &CancellationToken) {
@@ -787,7 +792,6 @@ impl Driver {
                 }
             })?;
         let mut evidence = capture.finish(&snapshot)?;
-        self.warm_evidence(claim).await?;
         self.evidence
             .lock()
             .map_err(|_| fatal("evidence cache lock poisoned"))?
@@ -2172,6 +2176,15 @@ impl Driver {
                 through_seq: page.through_seq,
             })
             .map_err(|error| context_failure("context.invalid", &error))?;
+            {
+                let mut evidence = self
+                    .evidence
+                    .lock()
+                    .map_err(|_| fatal("evidence cache lock poisoned"))?;
+                for fact in &page.facts {
+                    evidence.observe(claim.session_id(), fact);
+                }
+            }
             scan_turn(claim, &mut state, &page.facts)
                 .map_err(|message| failed("executor.invalid_history", message))?;
         }

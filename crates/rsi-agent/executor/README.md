@@ -27,6 +27,9 @@ budget. It samples unfinished controlled work as Running, never Settled, and
 offers the end hook a cancellation-aware final poll. Observation slots cover
 preparation, drive and end; they are reserved before execution-lane admission.
 Shutdown joins all observation tasks after claim lanes, alongside retained-Tool cleanup.
+Recovery classification follows Fact page cursors to the claim's captured horizon;
+a byte-limited short page does not imply a fresh claim. Cancellation, read failure
+or a nonadvancing cursor conservatively classify the claim as recovered.
 
 Tool tracking snapshots the claim's tracker before taking the active-Tool lock.
 Guard creation, confirmation and destruction run outside that map lock; registry
@@ -45,6 +48,9 @@ Request evidence is extracted from the single semantic LanguageRequest supplied
 to Prepare, the language profile used to build it, and the actual returned snapshot. Deduplication retains at most 64
 metadata entries across its sessions, never section bodies. Eviction leaves
 unmatched sections inline; later published evidence repopulates their metadata.
+Claim replay populates this metadata while ingesting its existing history pages;
+deduplication never initiates a second history scan. A checkpoint may skip older
+evidence metadata, in which case the next request retains those sections inline.
 Capture derives digests from its owned
 text and builds a sorted manifest from validated LanguageRequest values; the
 request-content count bound is checked against the manifest limit at compile time.

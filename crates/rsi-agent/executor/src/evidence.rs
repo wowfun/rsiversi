@@ -116,9 +116,6 @@ struct Metadata {
     bytes: u32,
 }
 impl EvidenceCache {
-    pub(super) fn contains(&self, session: &SessionId) -> bool {
-        self.0.iter().any(|entry| &entry.session == session)
-    }
     pub(super) fn deduplicate(&mut self, session: &SessionId, evidence: &mut RequestEvidence) {
         for section in [
             EvidenceSection::Configuration,
@@ -176,36 +173,7 @@ impl EvidenceCache {
     }
 }
 
-impl Driver {
-    pub(super) async fn warm_evidence(
-        &self,
-        claim: &TurnClaim,
-    ) -> std::result::Result<(), DriveFailure> {
-        if self
-            .evidence
-            .lock()
-            .map_err(|_| fatal("evidence cache lock poisoned"))?
-            .contains(claim.session_id())
-        {
-            return Ok(());
-        }
-        // One bounded recent slice suffices even when it contains direct references
-        // to older originals. Kernel revalidates those originals before publication.
-        let page = self
-            .turns
-            .read_facts(claim, claim.live_seq().saturating_sub(128), 128)
-            .await
-            .map_err(fatal)?;
-        let mut cache = self
-            .evidence
-            .lock()
-            .map_err(|_| fatal("evidence cache lock poisoned"))?;
-        for fact in &page.facts {
-            cache.observe(claim.session_id(), fact);
-        }
-        Ok(())
-    }
-}
+impl Driver {}
 
 pub(super) fn budget_fallback(bodies: &[SessionFactBody]) -> Option<Vec<SessionFactBody>> {
     let [
@@ -282,7 +250,7 @@ mod tests {
             );
         }
         assert_eq!(cache.0.len(), 64);
-        assert!(cache.contains(&session));
+        assert!(cache.0.iter().any(|entry| entry.session == session));
         let mut partial = evidence.clone();
         cache.deduplicate(&session, &mut partial);
         for (section, part) in partial.parts() {
