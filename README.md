@@ -60,12 +60,19 @@ git clone https://github.com/wowfun/rsiversi.git
 cd rsiversi
 ```
 
-On Windows, use PowerShell on Windows 11 24H2 or newer, x64, with the checkout
-on fixed local NTFS:
+On Windows 11 24H2 or newer, x64, keep the checkout on fixed local NTFS.
+Use PowerShell:
 
 <!-- rsi-example id=install-windows platform=windows -->
 ```powershell
 powershell -NoProfile -ExecutionPolicy Bypass -File .\scripts\rsiversi.ps1
+```
+
+Or Git Bash on Windows:
+
+<!-- rsi-example id=install-git-bash platform=git-bash -->
+```bash
+bash scripts/rsiversi.sh
 ```
 
 On Linux or WSL:

@@ -25,10 +25,25 @@ cd rsiversi
 The installer builds only `rsi` in release mode and adds its `bin` directory to
 your user PATH. Open a new terminal after installation. No UI selection is needed.
 
+On Windows, use PowerShell:
+
 <!-- rsi-example id=install-windows platform=windows -->
 ```powershell
 powershell -NoProfile -ExecutionPolicy Bypass -File .\scripts\rsiversi.ps1
 ```
+
+Or use Git Bash on Windows:
+
+<!-- rsi-example id=install-git-bash platform=git-bash -->
+```bash
+bash scripts/rsiversi.sh
+```
+
+Both Windows commands use the same native installer and default to
+`%LOCALAPPDATA%\RSIversi`. Restart your terminal application after installation
+so a new Git Bash session inherits the updated Windows user PATH.
+
+On Linux or WSL:
 
 <!-- rsi-example id=install-bash platform=linux -->
 ```bash

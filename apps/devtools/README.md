@@ -1,5 +1,9 @@
 # rsi-app-tools
 
+The source installers reject explicitly empty binary or prefix arguments before
+build or filesystem work. Windows builds inherit the caller's output handles;
+heartbeat messages remain visible, and interrupted waits terminate the owned
+build process tree before disposing the process handle.
 The source installers in `scripts` install only the native `rsi` executable and
 configure the user's PATH. They do not select applications, change homes, install
 plugins or run the product. An existing installation is upgraded through the
@@ -7,6 +11,24 @@ core transaction, rather than overwritten by the bootstrap installer.
 `--binary` / `-Binary` installs an explicitly trusted existing executable;
 `--prefix` / `-Prefix` chooses the installation root, and `--no-path` / `-NoPath`
 supports isolated installation verification.
+The Bash entrypoint supports Linux/WSL and Windows Git Bash (`MINGW*`/`MSYS*`).
+On Git Bash it converts explicit paths with `cygpath` and delegates to the adjacent
+Windows PowerShell installer, preserving argument boundaries and its exit status.
+Bash argument parsing uses exit 2; PowerShell refusals use exit 1. Callers test
+for nonzero status, while delegated execution preserves the child's exact status.
+Windows defaults to `%LOCALAPPDATA%\RSIversi`, including when invoked from Git Bash;
+Linux/WSL defaults to `$HOME/.local`. Windows PATH setup updates the user environment,
+not Bash startup files. Help requires neither PowerShell nor build tools.
+Source builds select the first Cargo executable on PATH.
+Before creating the isolated build environment, the Windows installer coalesces
+inherited variable names that differ only in case, using the value Windows selects.
+This normalization is local to the installer process; it does not change saved
+user or system environment settings.
+Installers emit stage messages to stderr before preparation, building, copying,
+verification and PATH setup. Help emits no progress. Existing binaries skip build
+messages, and `--no-path` reports that PATH setup is skipped. Cargo output remains
+live; Windows also reports elapsed build time every 15 seconds while waiting,
+without estimating a completion percentage.
 Publication atomically refuses any existing destination, including a directory
 created while the staged executable is being checked.
 The Windows installer makes a newly created `bin` directory private to the current

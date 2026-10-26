@@ -15,6 +15,12 @@ if ($Help) {
     Write-Output 'Add interfaces afterwards with rsi plugin install web or desktop.'
     exit 0
 }
+foreach ($name in @('Prefix', 'Binary')) {
+    if ($PSBoundParameters.ContainsKey($name) -and [string]::IsNullOrEmpty($PSBoundParameters[$name])) {
+        [Console]::Error.WriteLine("$name must not be empty.")
+        exit 2
+    }
+}
 $root = Split-Path -Parent $PSScriptRoot
 function File-Digest([string]$Path) {
     $stream = [IO.File]::OpenRead($Path)
@@ -22,18 +28,36 @@ function File-Digest([string]$Path) {
     try { return [BitConverter]::ToString($hash.ComputeHash($stream)) }
     finally { $hash.Dispose(); $stream.Dispose() }
 }
+function Write-InstallProgress([string]$Message) {
+    [Console]::Error.WriteLine("[rsi] $Message")
+}
 $prefixPath = [IO.Path]::GetFullPath($Prefix)
 $binPath = Join-Path $prefixPath 'bin'
+Write-InstallProgress "Preparing installation in $binPath..."
 if (!$Binary) {
-    Push-Location $root
+    Push-Location -LiteralPath $root
     try {
-        $cargo = (Get-Command cargo -CommandType Application).Source
+        Write-InstallProgress 'Preparing release build...'
+        $cargo = (Get-Command cargo -CommandType Application | Select-Object -First 1).Source
+        # MSYS can supply case aliases that .NET Framework's environment dictionary rejects.
+        $inherited = [Environment]::GetEnvironmentVariables()
+        $aliases = @{}
+        foreach ($name in $inherited.Keys) {
+            if (!$aliases.ContainsKey($name)) { $aliases[$name] = @() }
+            $aliases[$name] += $name
+        }
+        foreach ($names in $aliases.Values) {
+            if ($names.Count -lt 2) { continue }
+            $value = [Environment]::GetEnvironmentVariable($names[0])
+            foreach ($name in $names) { [Environment]::SetEnvironmentVariable($name, $null) }
+            [Environment]::SetEnvironmentVariable($names[0], $value)
+        }
         $start = New-Object Diagnostics.ProcessStartInfo
         $start.FileName = $cargo
         $start.Arguments = 'build --locked --release -p rsi-cli'
         $start.WorkingDirectory = $root
         $start.UseShellExecute = $false
-        $start.CreateNoWindow = $true
+        $start.CreateNoWindow = $false
         $start.EnvironmentVariables.Clear()
         $start.EnvironmentVariables['CARGO_HOME'] = if ($env:CARGO_HOME) { $env:CARGO_HOME } else { Join-Path $env:USERPROFILE '.cargo' }
         $start.EnvironmentVariables['RUSTUP_HOME'] = if ($env:RUSTUP_HOME) { $env:RUSTUP_HOME } else { Join-Path $env:USERPROFILE '.rustup' }
@@ -49,18 +73,29 @@ if (!$Binary) {
                 if ($null -ne $value) { $start.EnvironmentVariables[$key] = $value }
             }
         }
-        foreach ($key in @('CARGO_TARGET_DIR', 'RUSTUP_TOOLCHAIN')) {
-            $value = [Environment]::GetEnvironmentVariable($key)
-            if ($null -ne $value) { $start.EnvironmentVariables[$key] = $value }
-        }
         $start.EnvironmentVariables['CI'] = 'true'
+        Write-InstallProgress 'Building rsi (release); the first build may take several minutes...'
+        $timer = [Diagnostics.Stopwatch]::StartNew()
         $build = [Diagnostics.Process]::Start($start)
-        $build.WaitForExit()
-        try { if ($build.ExitCode -ne 0) { throw 'Core build failed; nothing was installed.' } }
-        finally { $build.Dispose() }
+        try {
+            while (!$build.WaitForExit(15000)) {
+                Write-InstallProgress ('Still building rsi ({0}s elapsed)...' -f [math]::Floor($timer.Elapsed.TotalSeconds))
+            }
+            if ($build.ExitCode -ne 0) { throw 'Core build failed; nothing was installed.' }
+            Write-InstallProgress ('Build completed in {0}s.' -f [math]::Floor($timer.Elapsed.TotalSeconds))
+        } finally {
+            $timer.Stop()
+            if (!$build.HasExited) {
+                & "$env:SystemRoot\System32\taskkill.exe" /PID $build.Id /T /F | Out-Null
+                $build.WaitForExit()
+            }
+            $build.Dispose()
+        }
         $target = if ($env:CARGO_TARGET_DIR) { [IO.Path]::GetFullPath($env:CARGO_TARGET_DIR) } else { Join-Path $root 'target' }
         $Binary = Join-Path $target 'release\rsi.exe'
     } finally { Pop-Location }
+} else {
+    Write-InstallProgress "Using existing binary: $Binary"
 }
 $source = Get-Item -LiteralPath $Binary
 if ($source.PSIsContainer -or ($source.Attributes -band [IO.FileAttributes]::ReparsePoint)) {
@@ -88,12 +123,14 @@ $destination = Join-Path $binPath 'rsi.exe'
 if (Test-Path -LiteralPath $destination) {
     throw 'rsi is already installed here. Use rsi core upgrade --local PACKAGE, or choose another prefix.'
 }
+Write-InstallProgress "Installing rsi to $destination..."
 $staged = Join-Path $binPath ('.rsi-install-' + [guid]::NewGuid().ToString('N') + '.exe')
 try {
     Copy-Item -LiteralPath $source.FullName -Destination $staged
     if ((File-Digest $source.FullName) -ne (File-Digest $staged)) {
         throw 'Binary changed while copying.'
     }
+    Write-InstallProgress 'Verifying executable...'
     & $staged --version
     if ($LASTEXITCODE -ne 0) { throw 'Installed executable failed its version check.' }
     [IO.File]::Move($staged, $destination)
@@ -101,12 +138,15 @@ try {
     if (Test-Path -LiteralPath $staged) { Remove-Item -LiteralPath $staged }
 }
 if (!$NoPath) {
+    Write-InstallProgress 'Updating user PATH...'
     $userPath = [Environment]::GetEnvironmentVariable('Path', 'User')
     $entries = @($userPath -split ';' | Where-Object { $_ })
     if ($entries -notcontains $binPath) {
         [Environment]::SetEnvironmentVariable('Path', (($entries + $binPath) -join ';'), 'User')
     }
     if (($env:Path -split ';') -notcontains $binPath) { $env:Path = "$binPath;$env:Path" }
+} else {
+    Write-InstallProgress 'Skipping PATH update (--no-path).'
 }
 Write-Output "Installed $destination"
 Write-Output 'Open a new terminal and run rsi. Install optional packages with rsi plugin install.'

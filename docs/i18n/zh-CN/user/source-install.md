@@ -25,10 +25,24 @@ cd rsiversi
 安装器只构建 release 模式的 `rsi`，并将其 `bin` 目录加入用户 PATH。
 安装后重新打开终端，无需选择 UI。
 
+Windows 上使用 PowerShell：
+
 <!-- rsi-example id=install-windows platform=windows -->
 ```powershell
 powershell -NoProfile -ExecutionPolicy Bypass -File .\scripts\rsiversi.ps1
 ```
+
+也可以在 Windows Git Bash 中执行：
+
+<!-- rsi-example id=install-git-bash platform=git-bash -->
+```bash
+bash scripts/rsiversi.sh
+```
+
+这两个 Windows 命令使用同一个原生安装器，默认安装到 `%LOCALAPPDATA%\RSIversi`。
+安装后重启终端应用，让新的 Git Bash 会话继承更新后的 Windows 用户 PATH。
+
+Linux 或 WSL：
 
 <!-- rsi-example id=install-bash platform=linux -->
 ```bash

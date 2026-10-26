@@ -58,6 +58,13 @@ Windows 使用 Windows 11 24H2 或更新版本的 x64 系统，
 powershell -NoProfile -ExecutionPolicy Bypass -File .\scripts\rsiversi.ps1
 ```
 
+也可以在 Windows Git Bash 中执行：
+
+<!-- rsi-example id=install-git-bash platform=git-bash -->
+```bash
+bash scripts/rsiversi.sh
+```
+
 Linux 或 WSL：
 
 <!-- rsi-example id=install-bash platform=linux -->

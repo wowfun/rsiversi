@@ -1201,7 +1201,7 @@ jobs:
       - uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020
         with:
           node-version: 22.23.2
-      - name: Verify native Windows minimal installer
+      - name: Verify Windows PowerShell and Git Bash installers
         if: ${{ !cancelled() }}
         timeout-minutes: 5
         run: node --test apps/devtools/tests/install.test.mjs

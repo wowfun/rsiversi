@@ -1,9 +1,10 @@
 import assert from 'node:assert/strict';
 import { test } from 'node:test';
 import { spawnSync } from 'node:child_process';
-import { mkdtemp, mkdir, readFile, rm, stat, writeFile } from 'node:fs/promises';
+import { existsSync } from 'node:fs';
+import { copyFile, mkdtemp, mkdir, readFile, rm, stat, writeFile } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
-import { join } from 'node:path';
+import { dirname, join, resolve } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { createHash } from 'node:crypto';
 import { buildEnvironment, parseEnvironmentDeclaration, parse, publishPackage } from '../build.mjs';
@@ -11,6 +12,33 @@ import { assemble } from '../packages.mjs';
 
 const root = fileURLToPath(new URL('../../../', import.meta.url));
 const windows = process.platform === 'win32';
+let gitBashProgram;
+function gitBash() {
+  if (gitBashProgram) return gitBashProgram;
+  const gitPaths = spawnSync('where.exe', ['git.exe'], {encoding:'utf8', timeout:10_000});
+  assert.equal(gitPaths.status, 0, 'Git for Windows must be installed for installer tests');
+  for (const git of gitPaths.stdout.trim().split(/\r?\n/)) {
+    for (const candidate of [resolve(dirname(git), '../bin/bash.exe'), resolve(dirname(git), '../../bin/bash.exe')]) {
+      if (!existsSync(candidate)) continue;
+      const probe = spawnSync(candidate, ['--noprofile', '--norc', '-c', 'uname -s'], {encoding:'utf8', timeout:10_000});
+      if (probe.status === 0 && /^(MINGW|MSYS)/.test(probe.stdout)) return gitBashProgram = candidate;
+    }
+  }
+  assert.fail('Could not locate Git for Windows Bash beside git.exe; do not use the WSL bash launcher');
+}
+function gitBashInstaller(args, cwd, env = process.env, script = join(root, 'scripts/rsiversi.sh')) {
+  return spawnSync(gitBash(), ['--noprofile', '--norc', script.replaceAll('\\', '/'), ...args],
+    {cwd, env, encoding:'utf8', timeout:60_000});
+}
+function gitBashCommand(command, args, cwd, env = process.env) {
+  return spawnSync(gitBash(), ['--noprofile', '--norc', '-c', command, 'installer-test', ...args],
+    {cwd, env, encoding:'utf8', timeout:60_000});
+}
+function gitPath(path) {
+  const converted = gitBashCommand('cygpath -au -- "$1"', [path], root);
+  assert.equal(converted.status, 0, converted.stderr);
+  return converted.stdout.trim();
+}
 function installer(args, cwd, env = process.env) {
   const program = windows ? 'powershell.exe' : 'bash';
   const command = windows
@@ -26,6 +54,8 @@ test('minimal installation preserves the executable, refuses replacement and doe
       : ['--prefix', prefix, '--binary', process.execPath, '--no-path'];
     const first = installer(args, directory);
     assert.equal(first.status, 0, first.stderr);
+    assert.match(first.stderr, /\[rsi\] Preparing installation[\s\S]*Using existing binary[\s\S]*Installing rsi[\s\S]*Verifying executable[\s\S]*Skipping PATH update/);
+    assert.doesNotMatch(first.stderr, /Building rsi|Updating user PATH/);
     const installed = join(prefix, 'bin', windows ? 'rsi.exe' : 'rsi');
     const digest = bytes => createHash('sha256').update(bytes).digest('hex');
     assert.equal(digest(await readFile(installed)), digest(await readFile(process.execPath)));
@@ -41,10 +71,165 @@ test('installer help and retired UI grammar never start a build', () => {
   const help = installer([windows ? '-Help' : '--help'], root);
   assert.equal(help.status, 0, help.stderr);
   assert.match(help.stdout, /Install only rsi/);
+  assert.doesNotMatch(help.stderr, /\[rsi\]/);
   const old = installer(['web'], root);
   assert.notEqual(old.status, 0);
   assert.doesNotMatch(old.stderr, /Compiling|Core build failed/);
   assert.match(old.stderr, windows ? /PositionalParameterNotFound/ : /Usage:/);
+});
+
+test('Git Bash delegates defaults, paths and exit status to the adjacent Windows installer', {skip:!windows}, async () => {
+  const directory = await mkdtemp(join(tmpdir(), 'rsi bash dispatch '));
+  try {
+    const scripts = join(directory, "checkout 中文 ' $value", 'scripts'), tools = join(directory, 'tools');
+    await mkdir(scripts, {recursive:true}); await mkdir(tools);
+    const script = join(scripts, 'rsiversi.sh');
+    await copyFile(join(root, 'scripts/rsiversi.sh'), script);
+    await writeFile(join(tools, 'powershell.exe'), '#!/usr/bin/env bash\nprintf "%s\\0" "$MSYS2_ARG_CONV_EXCL" "$RUSTUP_TOOLCHAIN" "$@"\nprintf "fixture stderr\\n" >&2\nexit 37\n');
+    const command = 'tools=$(cygpath -au -- "$1"); shift; PATH="$tools:/usr/bin" exec /usr/bin/bash "$@"';
+    const environment = {...process.env, MSYS2_ARG_CONV_EXCL:'caller-setting', RUSTUP_TOOLCHAIN:'fixture-toolchain'};
+    const run = args => gitBashCommand(command, [tools, script.replaceAll('\\', '/'), ...args], directory, environment);
+    const defaults = run([]);
+    assert.equal(defaults.status, 37, defaults.stderr);
+    assert.equal(defaults.stderr, '[rsi] Starting Windows installer...\nfixture stderr\n');
+    const invocation = ['*', 'fixture-toolchain', '-NoProfile', '-NonInteractive', '-ExecutionPolicy', 'Bypass',
+      '-File', join(scripts, 'rsiversi.ps1')];
+    assert.deepEqual(defaults.stdout.split('\0').slice(0, -1), invocation);
+    const explicit = run(['--prefix', "relative 中文 ' $value", '--binary', './input.exe', '--no-path']);
+    assert.equal(explicit.status, 37, explicit.stderr);
+    assert.deepEqual(explicit.stdout.split('\0').slice(0, -1), [...invocation,
+      '-Prefix', join(directory, "relative 中文 ' $value"), '-Binary', join(directory, 'input.exe'), '-NoPath']);
+  } finally { await rm(directory, {recursive:true, force:true}); }
+});
+
+test('Git Bash installs native executables with relative, MSYS and Windows paths and Windows defaults', {skip:!windows}, async () => {
+  const directory = await mkdtemp(join(tmpdir(), 'rsi bash install '));
+  try {
+    const binary = join(directory, "binary 中文 ' $name (x) &.exe");
+    await copyFile(process.execPath, binary);
+    const digest = bytes => createHash('sha256').update(bytes).digest('hex');
+    const expected = digest(await readFile(binary));
+    const cases = [
+      {prefix:"relative 中文 ' $() & ; `", binary:binary},
+      {prefix:gitPath(join(directory, 'MSYS prefix')), binary:binary.replaceAll('\\', '/')},
+      {prefix:join(directory, 'Windows prefix'), binary:gitPath(binary)},
+      {prefix:null, binary:binary},
+    ];
+    for (const item of cases) {
+      const environment = {...process.env, LOCALAPPDATA:join(directory, 'local-app-data')};
+      const args = ['--binary', item.binary, '--no-path'];
+      if (item.prefix !== null) args.push('--prefix', item.prefix);
+      const first = gitBashInstaller(args, directory, environment);
+      assert.equal(first.status, 0, first.stderr);
+      const prefix = item.prefix === null ? join(environment.LOCALAPPDATA, 'RSIversi')
+        : item.prefix.startsWith('/') ? join(directory, 'MSYS prefix') : resolve(directory, item.prefix);
+      const installed = join(prefix, 'bin/rsi.exe');
+      assert.equal(digest(await readFile(installed)), expected);
+      const again = gitBashInstaller(args, directory, environment);
+      assert.equal(again.status, 1, again.stderr);
+      assert.match(again.stderr, /already installed/);
+      assert.equal(digest(await readFile(installed)), expected);
+      await assert.rejects(stat(join(prefix, 'config')), {code:'ENOENT'});
+      await assert.rejects(stat(join(prefix, 'state')), {code:'ENOENT'});
+    }
+  } finally { await rm(directory, {recursive:true, force:true}); }
+});
+
+for (const caseAliases of [false, true]) test(`Git Bash source builds preserve Cargo inputs${caseAliases ? ' with inherited case aliases' : ''}`, {skip:!windows}, async () => {
+  const directory = await mkdtemp(join(tmpdir(), 'rsi bash source '));
+  try {
+    const checkout = join(directory, "checkout 中文 ' quote"), scripts = join(checkout, 'scripts');
+    const tools = join(directory, 'tools'), fallback = join(directory, 'unused-tools'), target = join(directory, 'custom target');
+    await mkdir(scripts, {recursive:true}); await mkdir(tools); await mkdir(fallback);
+    await mkdir(join(checkout, 'apps/devtools'), {recursive:true});
+    for (const name of ['rsiversi.sh', 'rsiversi.ps1']) await copyFile(join(root, 'scripts', name), join(scripts, name));
+    await copyFile(join(root, 'apps/devtools/build-environment.txt'), join(checkout, 'apps/devtools/build-environment.txt'));
+    // Node stands in for cargo.exe and executes this fixture's `build` file.
+    await copyFile(process.execPath, join(tools, 'cargo.exe'));
+    await writeFile(join(fallback, 'cargo.exe'), 'This later PATH entry must never run.');
+    await writeFile(join(checkout, 'build'), `
+const fs = require('node:fs'), path = require('node:path');
+const target = process.env.CARGO_TARGET_DIR;
+process.stdout.write('fixture build stdout\\n');
+process.stderr.write('fixture build stderr\\n');
+${caseAliases ? '' : 'Atomics.wait(new Int32Array(new SharedArrayBuffer(4)), 0, 0, 16000);'}
+fs.mkdirSync(path.join(target, 'release'), {recursive:true});
+fs.copyFileSync(process.execPath, path.join(target, 'release/rsi.exe'));
+fs.writeFileSync(path.join(target, 'build-inputs.json'), JSON.stringify({
+  args:process.argv.slice(2), cwd:process.cwd(), target,
+  cargo:process.env.CARGO_HOME, rustup:process.env.RUSTUP_HOME,
+  toolchain:process.env.RUSTUP_TOOLCHAIN, home:process.env.HOME, ci:process.env.CI,
+  credential:process.env.DEEPSEEK_API_KEY ?? null,
+  proxy:process.env.HTTP_PROXY, noProxy:process.env.NO_PROXY,
+  undeclared:process.env.RSI_INSTALL_CASE ?? null,
+}));
+`);
+    const environment = {...process.env, LOCALAPPDATA:join(directory, 'local-app-data'),
+      CARGO_TARGET_DIR:gitPath(target), CARGO_HOME:gitPath(join(directory, 'cargo home')),
+      RUSTUP_HOME:gitPath(join(directory, 'rustup home')), RUSTUP_TOOLCHAIN:'fixture-toolchain',
+      DEEPSEEK_API_KEY:'fixture-secret'};
+    const command = 'tools=$(cygpath -au -- "$1"); fallback=$(cygpath -au -- "$2"); shift 2; export PATH="$tools:$fallback:$PATH"; '
+      + 'unset http_proxy no_proxy rsi_install_case; export HTTP_PROXY=http://upper.invalid NO_PROXY=upper.invalid RSI_INSTALL_CASE=upper; '
+      + (caseAliases ? 'export http_proxy=http://lower.invalid no_proxy=lower.invalid rsi_install_case=lower; ' : '')
+      + 'exec "$@"';
+    const selected = gitBashCommand(command, [tools, fallback, 'powershell.exe', '-NoProfile', '-NonInteractive', '-Command',
+      'ConvertTo-Json -Compress -InputObject @([Environment]::GetEnvironmentVariable("HTTP_PROXY"), [Environment]::GetEnvironmentVariable("NO_PROXY"))'], directory, environment);
+    assert.equal(selected.status, 0, selected.stderr);
+    const result = gitBashCommand(command,
+      [tools, fallback, '/usr/bin/bash', join(scripts, 'rsiversi.sh').replaceAll('\\', '/'), '--no-path'], directory, environment);
+    assert.equal(result.status, 0, result.stderr);
+    assert.match(result.stdout, /fixture build stdout/);
+    assert.match(result.stderr, /fixture build stderr/);
+    assert.match(result.stderr, /\[rsi\] Preparing release build[\s\S]*Building rsi[\s\S]*Build completed in \d+s[\s\S]*Installing rsi[\s\S]*Verifying executable[\s\S]*Skipping PATH update/);
+    if (!caseAliases) assert.match(result.stderr, /Still building rsi \(\d+s elapsed\)/);
+    const inputs = JSON.parse(await readFile(join(target, 'build-inputs.json'), 'utf8'));
+    assert.deepEqual(inputs.args, ['--locked', '--release', '-p', 'rsi-cli']);
+    assert.equal(inputs.cwd, checkout);
+    assert.equal(resolve(inputs.target), target);
+    assert.equal(resolve(inputs.cargo), join(directory, 'cargo home'));
+    assert.equal(resolve(inputs.rustup), join(directory, 'rustup home'));
+    assert.equal(inputs.toolchain, 'fixture-toolchain');
+    assert.equal(inputs.home, join(checkout, 'target/rsi-build/build-home'));
+    assert.equal(inputs.ci, 'true');
+    assert.equal(inputs.credential, null);
+    assert.deepEqual([inputs.proxy, inputs.noProxy], JSON.parse(selected.stdout));
+    assert.equal(inputs.undeclared, null);
+    const installed = join(environment.LOCALAPPDATA, 'RSIversi/bin/rsi.exe');
+    assert.deepEqual(await readFile(installed), await readFile(process.execPath));
+    if (caseAliases) {
+      await writeFile(join(checkout, 'build'), 'process.stdout.write("fixture stdout\\n".repeat(8192), () => process.stderr.write("fixture stderr\\n".repeat(8192), () => { process.exitCode = 23; }));');
+      const failedPrefix = join(directory, 'failed install');
+      const failed = gitBashCommand(command,
+        [tools, fallback, '/usr/bin/bash', join(scripts, 'rsiversi.sh').replaceAll('\\', '/'), '--prefix', failedPrefix, '--no-path'], directory, environment);
+      assert.equal(failed.status, 1, failed.error?.message);
+      assert.equal(failed.stdout, 'fixture stdout\n'.repeat(8192));
+      assert(failed.stderr.includes('fixture stderr\n'.repeat(8192)));
+      assert.match(failed.stderr, /Core build failed; nothing was installed/);
+      assert.doesNotMatch(failed.stderr, /Build completed|Installing rsi|Verifying executable/);
+      await assert.rejects(stat(failedPrefix), {code:'ENOENT'});
+    }
+  } finally { await rm(directory, {recursive:true, force:true}); }
+});
+
+test('Git Bash diagnoses missing tools and rejects invalid arguments without building', {skip:!windows}, async () => {
+  const script = join(root, 'scripts/rsiversi.sh').replaceAll('\\', '/');
+  const command = 'uname() { printf "MSYS_NT-fixture\\n"; }; export -f uname; PATH="$1" exec /usr/bin/bash "$2" "${@:3}"';
+  for (const flag of ['--help', '-h']) {
+    const help = gitBashCommand(command, ['', script, flag], root);
+    assert.equal(help.status, 0, help.stderr);
+    assert.match(help.stdout, /Install only rsi/);
+    assert.doesNotMatch(help.stderr, /\[rsi\]/);
+  }
+  for (const args of [['web'], ['--prefix'], ['--binary'], ['--unknown']]) {
+    const invalid = gitBashCommand(command, ['', script, ...args], root);
+    assert.equal(invalid.status, 2, invalid.stderr);
+    assert.match(invalid.stderr, /Usage:/);
+  }
+  for (const [path, tool] of [['', 'cygpath'], ['/usr/bin', 'powershell.exe']]) {
+    const missing = gitBashCommand(command, [path, script], root);
+    assert.equal(missing.status, 2, missing.stderr);
+    assert.match(missing.stderr, new RegExp(`requires ${tool.replace('.', '\\.')}`));
+  }
 });
 
 test('Windows publication refuses a directory created during the version probe', {skip:!windows}, async () => {
@@ -183,4 +368,15 @@ test('producer and native installer declaration grammars match the shared corpus
       assert.equal(result.status===0,item.valid,item.declaration);
     }
   }
+});
+
+test('explicit empty paths are rejected before installing or building',async()=>{
+  const directory=await mkdtemp(join(tmpdir(),'rsi empty path '));
+  try {
+    for(const option of ['Prefix','Binary']) {
+      const result=installer(windows?['-'+option,'','-NoPath']:['--'+option.toLowerCase(),'','--no-path'],directory);
+      assert.equal(result.status,2,result.stderr);assert.doesNotMatch(result.stderr,/Building rsi/);
+      if(windows){const bash=gitBashInstaller(['--'+option.toLowerCase(),'','--no-path'],directory);assert.equal(bash.status,2,bash.stderr);assert.doesNotMatch(bash.stderr,/Starting Windows installer/)}
+    }
+  }finally{await rm(directory,{recursive:true,force:true})}
 });
