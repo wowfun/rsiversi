@@ -78,10 +78,10 @@ async fn unknown_ssh_mutation_requires_explicit_read_and_never_replays() {
         leaves: None,
         ssh: Some(wire::Client::new(remote.clone())),
         api: remote.clone(),
-        capabilities: Mutex::new(crate::plugins::PluginCapabilities::new(
+        capabilities: crate::PresentationState::new(crate::plugins::PluginCapabilities::new(
             &rsi_api_protocol::OperationCatalog::new(remote.operations.clone()).unwrap(),
         )),
-        state: Mutex::default(),
+        state: crate::PresentationState::default(),
         work: Work::new(rsi_meta::Execution::native(
             tokio::runtime::Handle::current(),
         )),

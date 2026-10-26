@@ -51,9 +51,16 @@ pub(crate) struct Actions {
     acknowledged: BTreeMap<SurfaceId, Projection>,
 }
 impl Actions {
-    pub fn project(&mut self, app: &GuiApplication) -> rsi_api_protocol::Result<serde_json::Value> {
+    pub fn project(&mut self, app: &GuiApplication) -> rsi_api_protocol::Result<()> {
         let panes = app.composer_bases();
+        let previous = self.offered.len();
         self.offered.retain(|key, _| panes.contains_key(key));
+        if previous != self.offered.len() {
+            self.revision = self
+                .revision
+                .checked_add(1)
+                .ok_or(rsi_api_protocol::ApiError::Capacity)?;
+        }
         for (key, basis) in panes {
             if self.offered.get(&key).is_some_and(|old| old.basis == basis) {
                 continue;
@@ -89,7 +96,13 @@ impl Actions {
                 },
             );
         }
-        serde_json::to_value(&self.offered).map_err(|_| rsi_api_protocol::ApiError::Capacity)
+        Ok(())
+    }
+    pub fn content_revision(&self) -> u64 {
+        self.revision
+    }
+    pub fn view(&self) -> serde_json::Value {
+        serde_json::to_value(&self.offered).expect("closed composer actions")
     }
     pub fn acknowledge(&mut self) {
         self.acknowledged.clone_from(&self.offered);

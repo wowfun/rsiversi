@@ -6,6 +6,7 @@ use rsi_api_protocol::{
 use rsi_configuration_api::*;
 use rsi_meta::Execution;
 use std::collections::VecDeque;
+use std::sync::Mutex;
 
 #[derive(Debug)]
 struct ChangingCatalog {
@@ -256,10 +257,10 @@ fn feature(
             leaves: None,
             ssh: None,
             api: remote.clone(),
-            capabilities: Mutex::new(crate::plugins::PluginCapabilities::new(
+            capabilities: crate::PresentationState::new(crate::plugins::PluginCapabilities::new(
                 &rsi_api_protocol::OperationCatalog::new(remote.operations.clone()).unwrap(),
             )),
-            state: Mutex::default(),
+            state: crate::PresentationState::default(),
             work: Work::new(Execution::native(tokio::runtime::Handle::current())),
         }),
         remote,
@@ -381,10 +382,10 @@ async fn abandoned_exa_write_holds_admission_clears_observation_and_is_not_repla
         leaves: None,
         ssh: None,
         api: remote.clone(),
-        capabilities: Mutex::new(crate::plugins::PluginCapabilities::new(
+        capabilities: crate::PresentationState::new(crate::plugins::PluginCapabilities::new(
             &rsi_api_protocol::OperationCatalog::new(remote.operations.clone()).unwrap(),
         )),
-        state: Mutex::default(),
+        state: crate::PresentationState::default(),
         work: Work::new(Execution::native(tokio::runtime::Handle::current())),
     });
     owner.command(PluginsCommand::ExaStatus).await.unwrap();
@@ -455,4 +456,21 @@ async fn selected_source_survives_refresh_and_digest_changes_fence_pagination() 
             .iter()
             .all(|request| request.target == target)
     );
+}
+
+#[tokio::test]
+async fn plugin_snapshot_pairs_revisions_and_skips_unchanged_projection() {
+    let (owner, _) = feature(Vec::new());
+    let (first, _) = owner.snapshot_if_changed(None).unwrap();
+    assert!(owner.snapshot_if_changed(Some(first)).is_none());
+    owner.state.lock().unwrap().diagnostic = Some("changed".into());
+    let (second, view) = owner.snapshot_if_changed(Some(first)).unwrap();
+    assert_ne!(first.0, second.0);
+    assert_eq!(view.diagnostic.as_deref(), Some("changed"));
+    owner.capabilities.lock().unwrap().exa = true;
+    let (third, view) = owner.snapshot_if_changed(Some(second)).unwrap();
+    assert_ne!(second.1, third.1);
+    assert!(view.exa_available);
+    assert!(owner.snapshot_if_changed(Some(third)).is_none());
+    owner.work.close().await;
 }

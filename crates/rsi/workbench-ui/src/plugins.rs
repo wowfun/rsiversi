@@ -1,8 +1,9 @@
 //! Shared finite plugin observations, independent of Local Inspector authority.
 use super::{
-    ActivationPlan, Arc, BoxFuture, ConfigValue, LocalContract, Mutex, PluginFactory,
-    PreparedActivation, Result, Work, error, prepare, watch,
+    ActivationPlan, Arc, BoxFuture, ConfigValue, LocalContract, PluginFactory, PreparedActivation,
+    Result, Work, error, prepare, watch,
 };
+use crate::PresentationState;
 use async_trait::async_trait;
 use rsi_configuration_api::{
     ConfigurationClient, ExaClient, ExaCredentialStatus, McpClient, McpCredentialStatus,
@@ -123,6 +124,10 @@ pub struct PluginsView {
     pub diagnostic: Option<String>,
 }
 #[derive(Debug, Default)]
+#[expect(
+    clippy::struct_excessive_bools,
+    reason = "independent optional capabilities, not mutually exclusive states"
+)]
 struct PluginCapabilities {
     actions: Vec<String>,
     mcp: bool,
@@ -135,15 +140,14 @@ struct PluginCapabilities {
 }
 impl PluginCapabilities {
     fn new(catalog: &rsi_api_protocol::OperationCatalog) -> Self {
-        let available = |specs: &[rsi_api_protocol::OperationSpec]| {
-            PluginsFeature::available_in(catalog, specs)
-        };
-        let mut result = Self::default();
         use rsi_configuration_api::{
             ExaOperation as Exa, McpOperation as Mcp, mcp_ssh::Operation as McpSsh,
             ssh::Operation as Ssh,
         };
-        result.actions = [
+        let available = |specs: &[rsi_api_protocol::OperationSpec]| {
+            PluginsFeature::available_in(catalog, specs)
+        };
+        let actions = [
             ("mcp_refresh", Mcp::Refresh.spec()),
             ("mcp_credential_status", Mcp::CredentialStatus.spec()),
             ("mcp_credential_set", Mcp::CredentialSet.spec()),
@@ -162,28 +166,30 @@ impl PluginCapabilities {
         .filter(|(_, spec)| available(std::slice::from_ref(spec)))
         .map(|(name, _)| name.to_owned())
         .collect();
-        result.mcp = available(&[rsi_configuration_api::McpOperation::Status.spec()]);
-        result.mcp_ssh = available(&[rsi_configuration_api::mcp_ssh::Operation::Get.spec()]);
-        result.exa = available(&[rsi_configuration_api::ExaOperation::Status.spec()]);
-        result.leaves = available(&[rsi_configuration_api::leaf::Operation::Catalog.spec()]);
-        result.ssh = available(&[rsi_configuration_api::ssh::Operation::Catalog.spec()]);
-        result.can_trust = available(&[rsi_configuration_api::ssh::Operation::ConfirmTrust.spec()]);
-        result.can_grant = available(&[rsi_configuration_api::leaf::Operation::Grants.spec()]);
-        result
+        Self {
+            actions,
+            mcp: available(&[rsi_configuration_api::McpOperation::Status.spec()]),
+            mcp_ssh: available(&[rsi_configuration_api::mcp_ssh::Operation::Get.spec()]),
+            exa: available(&[rsi_configuration_api::ExaOperation::Status.spec()]),
+            leaves: available(&[rsi_configuration_api::leaf::Operation::Catalog.spec()]),
+            ssh: available(&[rsi_configuration_api::ssh::Operation::Catalog.spec()]),
+            can_trust: available(&[rsi_configuration_api::ssh::Operation::ConfirmTrust.spec()]),
+            can_grant: available(&[rsi_configuration_api::leaf::Operation::Grants.spec()]),
+        }
     }
 }
 /// Ordinary workbench plugin state over the grant-gated Configuration API.
 #[derive(Debug)]
 pub struct PluginsFeature {
     api: Arc<dyn rsi_api_protocol::ApiClient>,
-    capabilities: Mutex<PluginCapabilities>,
+    capabilities: PresentationState<PluginCapabilities>,
     client: ConfigurationClient,
     mcp: Option<McpClient>,
     mcp_ssh: Option<rsi_configuration_api::mcp_ssh::Client>,
     exa: Option<ExaClient>,
     leaves: Option<rsi_configuration_api::leaf::Client>,
     ssh: Option<rsi_configuration_api::ssh::Client>,
-    state: Mutex<PluginsView>,
+    state: PresentationState<PluginsView>,
     work: Work,
 }
 impl PluginsFeature {
@@ -210,8 +216,24 @@ impl PluginsFeature {
     /// # Panics
     /// Panics if the internal state lock was poisoned by a prior panic.
     pub fn snapshot(&self) -> PluginsView {
-        let mut view = self.state.lock().expect("plugin view poisoned").clone();
+        self.snapshot_if_changed(None).expect("uncached snapshot").1
+    }
+
+    /// Captures a coherent revision/view pair, cloning only when either owner changed.
+    ///
+    /// # Panics
+    /// Panics if a previous mutation poisoned either presentation owner.
+    pub fn snapshot_if_changed(
+        &self,
+        previous: Option<(u64, u64)>,
+    ) -> Option<((u64, u64), PluginsView)> {
+        let state = self.state.lock().expect("plugin view poisoned");
         let capabilities = self.capabilities.lock().expect("plugin capabilities");
+        let revision = (state.content_revision(), capabilities.content_revision());
+        if previous == Some(revision) {
+            return None;
+        }
+        let mut view = state.clone();
         view.actions.clone_from(&capabilities.actions);
         view.mcp_available = capabilities.mcp;
         view.mcp_ssh.available = capabilities.mcp_ssh;
@@ -254,7 +276,7 @@ impl PluginsFeature {
                 view.guidance.push(message.into());
             }
         }
-        view
+        Some((revision, view))
     }
     /// Subscribes to completed read results.
     pub fn changes(&self) -> watch::Receiver<u64> {
@@ -518,7 +540,7 @@ impl PluginFactory for PluginsFeatureFactory {
         };
         let feature = Arc::new(PluginsFeature {
             api: api.clone(),
-            capabilities: Mutex::new(PluginCapabilities::new(&capabilities)),
+            capabilities: PresentationState::new(PluginCapabilities::new(&capabilities)),
             client: ConfigurationClient::new(plan.local::<rsi_api_protocol::ApiClientContract>()?),
             mcp_ssh: Some(rsi_configuration_api::mcp_ssh::Client::new(api.clone())),
             mcp: Some(McpClient::new(
@@ -533,7 +555,7 @@ impl PluginFactory for PluginsFeatureFactory {
             ssh: Some(rsi_configuration_api::ssh::Client::new(
                 plan.local::<rsi_api_protocol::ApiClientContract>()?,
             )),
-            state: Mutex::new(initial),
+            state: PresentationState::new(initial),
             work: Work::new(plan.context().runtime().execution().clone()),
         });
         let supply = plan

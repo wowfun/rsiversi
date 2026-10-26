@@ -77,10 +77,10 @@ fn feature() -> (Arc<PluginsFeature>, Arc<Remote>) {
         leaves: None,
         ssh: None,
         api: remote.clone(),
-        capabilities: Mutex::new(crate::plugins::PluginCapabilities::new(
+        capabilities: crate::PresentationState::new(crate::plugins::PluginCapabilities::new(
             &rsi_api_protocol::OperationCatalog::new(remote.operations.clone()).unwrap(),
         )),
-        state: Mutex::default(),
+        state: crate::PresentationState::default(),
         work: Work::new(rsi_meta::Execution::native(
             tokio::runtime::Handle::current(),
         )),

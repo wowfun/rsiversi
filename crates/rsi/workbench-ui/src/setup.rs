@@ -1,7 +1,8 @@
 use super::{
-    ActivationPlan, Arc, BoxFuture, ConfigValue, LocalContract, Mutex, PluginFactory,
-    PreparedActivation, Result, Work, contribute, error, prepare, watch,
+    ActivationPlan, Arc, BoxFuture, ConfigValue, LocalContract, PluginFactory, PreparedActivation,
+    Result, Work, contribute, error, prepare, watch,
 };
+use crate::PresentationState;
 use async_trait::async_trait;
 use rsi_configuration_api::{
     ConfigurationClient, ManagedProvider, ManagedProvidersClient, ProviderCredentialsClient,
@@ -136,10 +137,33 @@ pub struct SetupFeature {
     providers: ManagedProvidersClient,
     credentials: ProviderCredentialsClient,
     settings: Arc<dyn SettingsAccess>,
-    state: Mutex<State>,
+    state: PresentationState<State>,
     work: Work,
 }
 impl SetupFeature {
+    /// Captures a coherent revision and document projection only when changed.
+    /// # Panics
+    /// Panics if a previous mutation poisoned this presentation owner.
+    pub fn snapshot_if_changed(
+        &self,
+        previous: Option<(u64, u64)>,
+    ) -> Option<((u64, u64), serde_json::Value)> {
+        let state = self.state.lock().expect("setup view poisoned");
+        let revision = (state.content_revision(), 0);
+        if previous == Some(revision) {
+            return None;
+        }
+        Some((
+            revision,
+            serde_json::to_value(&state.view).expect("setup view encoding"),
+        ))
+    }
+
+    /// Synchronous owner revisions for cached GUI section projection.
+    pub fn content_revision(&self) -> (u64, u64) {
+        (self.state.content_revision(), 0)
+    }
+
     /// Captures typed redacted state for native application clients.
     ///
     /// # Panics
@@ -282,7 +306,7 @@ impl SetupFeature {
     async fn refresh(&self) -> Result<()> {
         match self.api.operations().await {
             Ok(capabilities) => {
-                self.state.lock().expect("setup view poisoned").capabilities = Some(capabilities)
+                self.state.lock().expect("setup view poisoned").capabilities = Some(capabilities);
             }
             Err(failure) => {
                 if self
@@ -500,7 +524,7 @@ impl PluginFactory for SetupFeatureFactory {
             providers: ManagedProvidersClient::new(api.clone()),
             credentials: ProviderCredentialsClient::new(api),
             settings: plan.local::<SettingsAccessContract>()?,
-            state: Mutex::default(),
+            state: PresentationState::default(),
             work: Work::new(plan.context().runtime().execution().clone()),
         });
         let _initial = feature.command(SetupCommand::Refresh).await;

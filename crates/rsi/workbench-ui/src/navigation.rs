@@ -2,6 +2,7 @@ use super::{
     ActivationPlan, Arc, BoxFuture, ConfigValue, LocalContract, Mutex, PluginFactory,
     PreparedActivation, Result, Work, contribute, error, prepare, watch,
 };
+use crate::PresentationState;
 use async_trait::async_trait;
 use futures_util::StreamExt;
 use rsi_agent_session_protocol::SessionId;
@@ -130,7 +131,7 @@ struct State {
 pub struct NavigationFeature {
     client: NavigationClient,
     attention: Option<rsi_navigation_api::attention::Client>,
-    state: Mutex<State>,
+    state: PresentationState<State>,
     work: Work,
     serial: tokio::sync::Mutex<()>,
     background_read: Mutex<Option<tokio_util::sync::CancellationToken>>,
@@ -138,6 +139,29 @@ pub struct NavigationFeature {
     stop: tokio_util::sync::CancellationToken,
 }
 impl NavigationFeature {
+    /// Captures a coherent revision and document projection only when changed.
+    /// # Panics
+    /// Panics if a previous mutation poisoned this presentation owner.
+    pub fn snapshot_if_changed(
+        &self,
+        previous: Option<(u64, u64)>,
+    ) -> Option<((u64, u64), serde_json::Value)> {
+        let state = self.state.lock().expect("navigation view poisoned");
+        let revision = (state.content_revision(), 0);
+        if previous == Some(revision) {
+            return None;
+        }
+        Some((
+            revision,
+            serde_json::to_value(&state.view).expect("navigation view encoding"),
+        ))
+    }
+
+    /// Synchronous owner revisions for cached GUI section projection.
+    pub fn content_revision(&self) -> (u64, u64) {
+        (self.state.content_revision(), 0)
+    }
+
     async fn refresh_background(&self, refresh: bool) -> Option<bool> {
         let _serial = self.serial.lock().await;
         let cancel = tokio_util::sync::CancellationToken::new();
@@ -611,7 +635,7 @@ impl PluginFactory for NavigationFeatureFactory {
                 plan.local::<rsi_api_protocol::ApiClientContract>()?,
             )),
             client: NavigationClient::new(plan.local::<rsi_api_protocol::ApiClientContract>()?),
-            state: Mutex::default(),
+            state: PresentationState::default(),
             work: Work::new(plan.context().runtime().execution().clone()),
             serial: tokio::sync::Mutex::new(()),
             background_read: Mutex::new(None),
@@ -897,7 +921,7 @@ mod group_tests {
         let owner = Arc::new(NavigationFeature {
             client: NavigationClient::new(api.clone()),
             attention: None,
-            state: Mutex::default(),
+            state: PresentationState::default(),
             work: Work::new(rsi_meta::Execution::native(
                 tokio::runtime::Handle::current(),
             )),
@@ -1315,5 +1339,18 @@ mod group_tests {
         assert_eq!(owner.view()["groups"]["other"]["stale"], false);
         assert_eq!(owner.view()["groups"]["other"]["continued"], false);
         owner.work.close().await;
+    }
+    #[tokio::test]
+    async fn cached_navigation_pairs_revision_with_the_projected_state() {
+        let (_, feature) = fixture();
+        let (revision, first) = feature.snapshot_if_changed(None).unwrap();
+        assert!(feature.snapshot_if_changed(Some(revision)).is_none());
+        feature.state.lock().unwrap().view.diagnostic = Some("new diagnostic".into());
+        let (next_revision, next) = feature.snapshot_if_changed(Some(revision)).unwrap();
+        assert_ne!(next_revision, revision);
+        assert_ne!(first, next);
+        assert_eq!(next["diagnostic"], "new diagnostic");
+        assert!(feature.snapshot_if_changed(Some(next_revision)).is_none());
+        feature.work.close().await;
     }
 }

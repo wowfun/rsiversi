@@ -42,7 +42,7 @@ pub(crate) struct FrameState {
     pub(crate) id: u64,
     pub(crate) actions: crate::panes::composer::Actions,
     panes: BTreeMap<crate::SurfaceId, PaneView>,
-    sections: Value,
+    sections: Sections,
     #[cfg(test)]
     projections: BTreeMap<crate::SurfaceId, usize>,
     #[cfg(test)]
@@ -62,16 +62,12 @@ impl FrameState {
             .map(|(key, pane)| (*key, pane.stamp(ui)))
             .collect();
         let mut proposed = self.actions.clone();
-        let actions = proposed.project(app)?;
+        proposed.project(app)?;
         let frame = self.capture_views(
             budget,
             base,
             &stamps,
-            || {
-                let mut sections = app.sections();
-                sections["composer_actions"] = actions;
-                sections
-            },
+            |previous| app.capture_sections(previous, &proposed),
             |key, previous| surfaces[&key].frame_view(&app.ui, previous),
         )?;
         self.actions = proposed;
@@ -86,16 +82,33 @@ impl FrameState {
         sections: impl FnOnce() -> Value,
         mut project: impl FnMut(crate::SurfaceId) -> Value,
     ) -> Result<RetainedBytes> {
-        self.capture_views(budget, base, stamps, sections, |key, _| {
-            CachedPane::from_value(project(key))
-        })
+        self.capture_views(
+            budget,
+            base,
+            stamps,
+            |previous| {
+                let mut next = Sections::new();
+                for (key, value) in sections().as_object().expect("test sections") {
+                    let revision = previous.get(key).map_or(0, |old| {
+                        old.stamp.1 + u64::from(old.value.as_ref() != value)
+                    });
+                    capture_section(&mut next, previous, key, (0, revision, 0), || value.clone())?;
+                }
+                Ok(next)
+            },
+            |key, _| CachedPane::from_value(project(key)),
+        )
     }
+    #[expect(
+        clippy::too_many_lines,
+        reason = "frame encoding must succeed before committing any proposed cache entries"
+    )]
     fn capture_views(
         &mut self,
         budget: &ByteBudget,
         base: Option<&str>,
         stamps: &BTreeMap<crate::SurfaceId, PaneStamp>,
-        sections: impl FnOnce() -> Value,
+        sections: impl FnOnce(&Sections) -> Result<Sections>,
         mut project: impl FnMut(crate::SurfaceId, Option<&CachedPane>) -> Result<CachedPane>,
     ) -> Result<RetainedBytes> {
         let base = base.map(frame_id).transpose()?;
@@ -138,7 +151,11 @@ impl FrameState {
                 .value
                 .bytes;
         }
-        let (sections, section_bytes) = capture_sections(sections)?;
+        let sections = sections(&self.sections)?;
+        let section_bytes = 2 + sections
+            .values()
+            .map(|section| section.bytes)
+            .sum::<usize>();
         size += section_bytes;
         if size > MAX_BYTES {
             return Err(ApiError::Capacity);
@@ -175,11 +192,26 @@ impl FrameState {
                 .collect();
             #[cfg(feature = "test-support")]
             let started = std::time::Instant::now();
-            let section_changes = fields(&self.sections, &sections, &[]);
+            let section_changes = sections
+                .iter()
+                .filter_map(|(key, next)| {
+                    let previous = self.sections.get(key);
+                    (previous.is_none_or(|old| {
+                        !Arc::ptr_eq(&old.value, &next.value) && old.value != next.value
+                    }))
+                    .then_some((key.as_str(), next.value.as_ref()))
+                })
+                .collect();
             #[cfg(feature = "test-support")]
             crate::test_support::update(|sample| {
-                sample.section_compared_fields =
-                    sections.as_object().expect("closed sections").len();
+                sample.section_compared_fields = sections
+                    .iter()
+                    .filter(|(key, next)| {
+                        self.sections
+                            .get(*key)
+                            .is_none_or(|old| !Arc::ptr_eq(&old.value, &next.value))
+                    })
+                    .count();
                 sample.section_comparison_ns = started.elapsed().as_nanos();
             });
             reservation.encode(&Patch {
@@ -204,7 +236,7 @@ struct Snapshot<'a> {
     view: View<'a>,
 }
 struct View<'a> {
-    sections: &'a Value,
+    sections: &'a Sections,
     surfaces: BTreeMap<crate::SurfaceId, &'a CachedPane>,
 }
 impl serde::Serialize for View<'_> {
@@ -213,10 +245,10 @@ impl serde::Serialize for View<'_> {
         serializer: S,
     ) -> std::result::Result<S::Ok, S::Error> {
         use serde::ser::SerializeMap as _;
-        let sections = self.sections.as_object().expect("closed view sections");
+        let sections = self.sections;
         let mut view = serializer.serialize_map(Some(sections.len() + 1))?;
         for (key, value) in sections {
-            view.serialize_entry(key, value)?;
+            view.serialize_entry(key, value.value.as_ref())?;
         }
         view.serialize_entry("surfaces", &self.surfaces)?;
         view.end()
@@ -352,24 +384,61 @@ fn frame_id(text: &str) -> Result<u64> {
     }
     Ok(id)
 }
-fn capture_sections(sections: impl FnOnce() -> Value) -> Result<(Value, usize)> {
+#[derive(Clone, Debug)]
+pub(crate) struct CachedSection {
+    stamp: (usize, u64, u64),
+    value: Arc<Value>,
+    bytes: usize,
+}
+impl CachedSection {
+    pub(crate) fn revision(&self, owner: usize) -> Option<(u64, u64)> {
+        (self.stamp.0 == owner).then_some((self.stamp.1, self.stamp.2))
+    }
+}
+pub(crate) type Sections = BTreeMap<String, CachedSection>;
+pub(crate) fn section_values(sections: &Sections) -> Value {
+    sections
+        .iter()
+        .map(|(key, section)| (key.clone(), section.value.as_ref().clone()))
+        .collect::<serde_json::Map<_, _>>()
+        .into()
+}
+pub(crate) fn capture_section(
+    next: &mut Sections,
+    previous: &Sections,
+    name: &str,
+    stamp: (usize, u64, u64),
+    build: impl FnOnce() -> Value,
+) -> Result<()> {
+    if let Some(old) = previous.get(name).filter(|old| old.stamp == stamp) {
+        next.insert(name.into(), old.clone());
+        return Ok(());
+    }
     #[cfg(feature = "test-support")]
     let started = std::time::Instant::now();
-    let sections = sections();
+    let value = build();
     #[cfg(feature = "test-support")]
     crate::test_support::update(|sample| {
         sample.section_materializations += 1;
-        sample.section_materialization_ns = started.elapsed().as_nanos();
+        sample.section_materialization_ns += started.elapsed().as_nanos();
     });
     #[cfg(feature = "test-support")]
     let started = std::time::Instant::now();
-    let section_bytes = encoded_size(&sections)?;
+    let bytes = encoded_size(&value)? + encoded_size(&name)? + 2;
     #[cfg(feature = "test-support")]
     crate::test_support::update(|sample| {
-        sample.section_counted_bytes = section_bytes;
-        sample.section_count_ns = started.elapsed().as_nanos();
+        sample.section_counted_bytes += bytes;
+        sample.section_count_ns += started.elapsed().as_nanos();
     });
-    Ok((sections, section_bytes))
+    next.insert(
+        name.into(),
+        CachedSection {
+            stamp,
+            value: Arc::new(value),
+            bytes,
+        },
+    );
+    Ok(())
 }
 fn encoded_size(value: &impl serde::Serialize) -> Result<usize> {
     rsi_api_protocol::measure_json(value, MAX_BYTES).map_err(|_| ApiError::Capacity)
@@ -558,7 +627,7 @@ mod tests {
         );
         assert!(matches!(excessive, Err(ApiError::Capacity)));
         assert_eq!(frames.id, 1);
-        assert_eq!(frames.sections, json!({}));
+        assert_eq!(section_values(&frames.sections), json!({}));
         let recovered = decoded(
             frames
                 .capture(

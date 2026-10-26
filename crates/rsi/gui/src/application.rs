@@ -9,6 +9,7 @@ use rsi_meta::{
     ActivationPlan, ConfigValue, Execution, FiberState, LocalContract, MetaError, PluginFactory,
     PreparedActivation, ResolvedFactory, UpdateMode,
 };
+use rsi_workbench_ui::PresentationState;
 use serde::{Deserialize, Serialize};
 use std::sync::{Arc, Mutex};
 use tokio::sync::{Semaphore, watch};
@@ -342,6 +343,10 @@ pub(crate) struct SettingsEditor {
 }
 
 #[derive(Debug)]
+#[expect(
+    clippy::struct_excessive_bools,
+    reason = "independent optional API capabilities"
+)]
 pub(crate) struct Capabilities {
     catalog: Option<rsi_api_protocol::OperationCatalog>,
     external: bool,
@@ -392,12 +397,12 @@ impl Capabilities {
 #[derive(Debug)]
 pub struct GuiApplication {
     pub(crate) api: Option<Arc<dyn rsi_api_protocol::ApiClient>>,
-    pub(crate) capabilities: Mutex<Capabilities>,
+    pub(crate) capabilities: PresentationState<Capabilities>,
     pub(crate) automation: Option<rsi_automation_api::Client>,
-    pub(crate) automation_view: Mutex<serde_json::Value>,
+    pub(crate) automation_view: PresentationState<serde_json::Value>,
     pub(crate) automation_work: tokio::sync::Mutex<()>,
     pub(crate) external: Option<Arc<dyn rsi_acp_protocol::service::ExternalConversations>>,
-    pub(crate) external_catalog: Mutex<crate::panes::ExternalCatalog>,
+    pub(crate) external_catalog: PresentationState<crate::panes::ExternalCatalog>,
     pub(crate) plugins: Option<Arc<rsi_workbench_ui::PluginsFeature>>,
     pub(crate) setup: Option<Arc<rsi_workbench_ui::SetupFeature>>,
     pub(crate) directory: Option<Arc<rsi_directory_picker_api::Client>>,
@@ -411,7 +416,8 @@ pub struct GuiApplication {
     pub(crate) workspace: Arc<dyn rsi_workspace_protocol::WorkspaceRegistry>,
     pub(crate) models: Arc<dyn rsi_ai_protocol::LanguageModels>,
     pub(crate) settings: Arc<dyn rsi_settings_protocol::SettingsAccess>,
-    pub(crate) preferences: Mutex<(rsi_client_preferences::Preferences, Option<String>)>,
+    pub(crate) preferences:
+        PresentationState<(rsi_client_preferences::Preferences, Option<String>)>,
     pub(crate) preference_read: tokio::sync::Mutex<()>,
     pub(crate) media: Option<Arc<dyn rsi_media_protocol::Media>>,
     pub(crate) image_work: Arc<Semaphore>,
@@ -419,10 +425,10 @@ pub struct GuiApplication {
     pub(crate) attachment_generation: std::sync::atomic::AtomicU64,
     pub(crate) shell: Arc<Shell>,
     pub(crate) has_files: bool,
-    pub(crate) catalog: Mutex<Catalog>,
+    pub(crate) catalog: PresentationState<Catalog>,
     pub(crate) catalog_work: tokio::sync::Mutex<()>,
-    pub(crate) details: Mutex<crate::panel_registry::PanelRegistry>,
-    pub(crate) notice: Mutex<String>,
+    pub(crate) details: PresentationState<crate::panel_registry::PanelRegistry>,
+    pub(crate) notice: PresentationState<String>,
     pub(crate) execution: Execution,
     changed: watch::Sender<u64>,
     pub(crate) slots: Arc<Semaphore>,
@@ -629,45 +635,157 @@ impl GuiApplication {
             .iter()
             .map(|(key, pane)| (key.to_string(), pane.view(&self.ui)))
             .collect::<serde_json::Map<_, _>>();
-        let mut view = self.sections();
+        let mut view = self.sections()?;
         view.as_object_mut()
             .expect("view sections")
             .insert("surfaces".into(), panes.into());
         reservation.encode(&view)
     }
-    pub(crate) fn sections(&self) -> serde_json::Value {
-        let details = self.details.lock().expect("Web details poisoned");
-        let (external, remote_ui, automation, media) = {
-            let capabilities = self.capabilities.lock().expect("GUI capabilities");
+    pub(crate) fn sections(&self) -> rsi_api_protocol::Result<serde_json::Value> {
+        let mut cache = self.capture_sections(
+            &crate::frames::Sections::new(),
+            &crate::panes::composer::Actions::default(),
+        )?;
+        cache.remove("composer_actions");
+        Ok(crate::frames::section_values(&cache))
+    }
+    #[expect(
+        clippy::too_many_lines,
+        reason = "one declarative mapping binds each section to its owning revisions"
+    )]
+    pub(crate) fn capture_sections(
+        &self,
+        previous: &crate::frames::Sections,
+        actions: &crate::panes::composer::Actions,
+    ) -> rsi_api_protocol::Result<crate::frames::Sections> {
+        let mut next = crate::frames::Sections::new();
+        // FrameState belongs to this application; ownership also distinguishes a
+        // proposed cache if a test or caller captures a different application.
+        let owner = std::ptr::from_ref(self) as usize;
+        macro_rules! section {
+            ($name:literal,$revision:expr,$value:expr) => {{
+                let (first, second) = $revision;
+                crate::frames::capture_section(
+                    &mut next,
+                    previous,
+                    $name,
+                    (owner, first, second),
+                    || serde_json::json!($value),
+                )?;
+            }};
+        }
+        section!(
+            "application_surfaces",
+            (*self.ui.membership_changes().borrow(), 0),
+            self.application_target
+                .as_ref()
+                .and_then(|target| self.ui.surfaces(target).ok())
+                .unwrap_or_default()
+        );
+        macro_rules! feature_section {
+            ($name:literal, $feature:expr) => {
+                if let Some(feature) = $feature {
+                    let cached = previous.get($name);
+                    if let Some(((first, second), view)) = feature
+                        .snapshot_if_changed(cached.and_then(|section| section.revision(owner)))
+                    {
+                        crate::frames::capture_section(
+                            &mut next,
+                            previous,
+                            $name,
+                            (owner, first, second),
+                            || serde_json::json!(view),
+                        )?;
+                    } else {
+                        next.insert($name.into(), cached.expect("unchanged section").clone());
+                    }
+                } else {
+                    section!($name, (0, 0), serde_json::Value::Null);
+                }
+            };
+        }
+        feature_section!("plugins", &self.plugins);
+        feature_section!("setup", &self.setup);
+        feature_section!("navigation", &self.navigation);
+        let (capabilities, external, remote_ui, automation, media) = {
+            let state = self.capabilities.lock().expect("capabilities");
             (
-                capabilities.external,
-                capabilities.remote_ui,
-                capabilities.automation,
-                capabilities.media,
+                state.content_revision(),
+                state.external,
+                state.remote_ui,
+                state.automation,
+                state.media,
             )
         };
-        let preferences = self.preferences.lock().expect("GUI preferences poisoned");
-        serde_json::json!({
-            "application_surfaces": self.application_target.as_ref().and_then(|target| self.ui.surfaces(target).ok()).unwrap_or_default(),
-            "plugins": self.plugins.as_ref().map(|feature| feature.snapshot()),
-            "setup": self.setup.as_ref().map(|feature| feature.view()),
-            "navigation": self.navigation.as_ref().map(|feature| feature.view()),
-            "external_catalog": self.external.as_ref().filter(|_| external).map(|_|self.external_catalog.lock().expect("external catalog").clone()),
-            "catalog": *self.catalog.lock().expect("Web catalog poisoned"),
-            "preferences": preferences.0.web,
-            "appearance": preferences.0.appearance,
-            "preference_error": preferences.1,
-            "panels": details.snapshot(),
-            "has_remote_ui": self.remote_ui.is_some() && remote_ui,
-            "automation": self.automation.as_ref().filter(|_| automation).map(|_|self.automation_view.lock().expect("Automation view").clone()),
-                        "media_limits": crate::panes::images::limits(),
-            "has_media": self.media.is_some() && media,
-            "settings": details.settings.editor,
-            "settings_catalog": details.settings.settings_catalog,
-            "settings_revision": details.settings.settings_window.to_string(),
-            "notice": *self.notice.lock().expect("Web notice poisoned"),
-        })
+        {
+            let state = self.external_catalog.lock().expect("external catalog");
+            section!(
+                "external_catalog",
+                (state.content_revision(), capabilities),
+                self.external.as_ref().filter(|_| external).map(|_| &*state)
+            );
+        }
+        {
+            let state = self.catalog.lock().expect("catalog");
+            section!("catalog", (state.content_revision(), 0), *state);
+        }
+        {
+            let state = self.preferences.lock().expect("preferences");
+            let revision = state.content_revision();
+            section!("preferences", (revision, 0), state.0.web);
+            section!("appearance", (revision, 0), state.0.appearance);
+            section!("preference_error", (revision, 0), state.1);
+        }
+        {
+            let state = self.details.lock().expect("details");
+            let revision = state.content_revision();
+            section!("panels", (revision, 0), state.snapshot());
+            section!("settings", (revision, 0), state.settings.editor);
+            section!(
+                "settings_catalog",
+                (revision, 0),
+                state.settings.settings_catalog
+            );
+            section!(
+                "settings_revision",
+                (revision, 0),
+                state.settings.settings_window.to_string()
+            );
+        }
+        section!(
+            "has_remote_ui",
+            (capabilities, 0),
+            self.remote_ui.is_some() && remote_ui
+        );
+        {
+            let state = self.automation_view.lock().expect("Automation view");
+            section!(
+                "automation",
+                (state.content_revision(), capabilities),
+                self.automation
+                    .as_ref()
+                    .filter(|_| automation)
+                    .map(|_| &*state)
+            );
+        }
+        section!("media_limits", (0, 0), crate::panes::images::limits());
+        section!(
+            "has_media",
+            (capabilities, 0),
+            self.media.is_some() && media
+        );
+        {
+            let state = self.notice.lock().expect("notice");
+            section!("notice", (state.content_revision(), 0), *state);
+        }
+        section!(
+            "composer_actions",
+            (actions.content_revision(), 0),
+            actions.view()
+        );
+        Ok(next)
     }
+
     /// Encodes one incremental presentation frame against the document's exact base.
     /// An absent or mismatched base requests a full snapshot.
     ///
@@ -945,14 +1063,14 @@ impl PluginFactory for GuiApplicationFactory {
         let shell = start_shell(plan.context(), changed.clone(), has_files).await?;
         let app = Arc::new(GuiApplication {
             api: api.clone(),
-            capabilities: Mutex::new(Capabilities::new(capabilities)),
+            capabilities: PresentationState::new(Capabilities::new(capabilities)),
             automation: api.clone().map(rsi_automation_api::Client::new),
-            automation_view: Mutex::new(serde_json::json!({})),
+            automation_view: PresentationState::new(serde_json::json!({})),
             automation_work: tokio::sync::Mutex::new(()),
             external: plan
                 .context()
                 .lookup_local::<rsi_acp_protocol::service::ExternalConversationsContract>(),
-            external_catalog: Mutex::new(crate::panes::ExternalCatalog::default()),
+            external_catalog: PresentationState::new(crate::panes::ExternalCatalog::default()),
             plugins: plan
                 .context()
                 .lookup_local::<rsi_workbench_ui::PluginsFeatureContract>(),
@@ -977,7 +1095,7 @@ impl PluginFactory for GuiApplicationFactory {
             workspace: plan.local::<rsi_workspace_protocol::WorkspaceRegistryContract>()?,
             models: plan.local::<rsi_ai_protocol::LanguageModelsContract>()?,
             settings,
-            preferences: Mutex::new((preferences, None)),
+            preferences: PresentationState::new((preferences, None)),
             preference_read: tokio::sync::Mutex::new(()),
             media: plan
                 .context()
@@ -990,10 +1108,10 @@ impl PluginFactory for GuiApplicationFactory {
             attachment_generation: std::sync::atomic::AtomicU64::new(0),
             shell,
             has_files,
-            catalog: Mutex::new(Catalog::default()),
+            catalog: PresentationState::new(Catalog::default()),
             catalog_work: tokio::sync::Mutex::new(()),
-            details: Mutex::new(crate::panel_registry::PanelRegistry::default()),
-            notice: Mutex::new(notice),
+            details: PresentationState::new(crate::panel_registry::PanelRegistry::default()),
+            notice: PresentationState::new(notice),
             execution: plan.context().runtime().execution().clone(),
             changed,
             slots: Arc::new(Semaphore::new(8)),

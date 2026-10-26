@@ -6,6 +6,7 @@ use rsi_api_protocol::{
 };
 use rsi_configuration_api::{ConfigurationOperation, CredentialOperation, ProvidersOperation};
 use rsi_settings_protocol::{SettingsDescription, SettingsPage, SettingsVersion};
+use std::sync::Mutex;
 use std::sync::atomic::{AtomicUsize, Ordering};
 
 #[derive(Debug)]
@@ -145,7 +146,7 @@ async fn failed_unknown_or_unapplied_provider_writes_never_save_a_default_or_rep
             providers: ManagedProvidersClient::new(remote.clone()),
             credentials: ProviderCredentialsClient::new(remote.clone()),
             settings: settings.clone(),
-            state: Mutex::default(),
+            state: crate::PresentationState::default(),
             work: Work::new(runtime.execution().clone()),
         });
         let view = SetupView {
@@ -261,7 +262,7 @@ async fn setup_refresh_uses_last_catalog_when_discovery_fails() {
         providers: ManagedProvidersClient::new(remote.clone()),
         credentials: ProviderCredentialsClient::new(remote.clone()),
         settings: Arc::new(NoSettings::default()),
-        state: Mutex::default(),
+        state: crate::PresentationState::default(),
         work: Work::new(runtime.execution().clone()),
     };
     remote.discovery_failed.store(true, Ordering::SeqCst);
@@ -270,11 +271,18 @@ async fn setup_refresh_uses_last_catalog_when_discovery_fails() {
     remote.discovery_failed.store(false, Ordering::SeqCst);
     feature.refresh().await.unwrap();
     let first_ticket = feature.snapshot().ticket;
+    let (revision, view) = feature.snapshot_if_changed(None).unwrap();
+    assert_eq!(view["ticket"], first_ticket);
+    assert!(feature.snapshot_if_changed(Some(revision)).is_none());
     remote.discovery_failed.store(true, Ordering::SeqCst);
     feature.refresh().await.unwrap();
     assert_eq!(remote.reads.load(Ordering::SeqCst), 2);
     assert!(feature.snapshot().allowed);
     assert_ne!(feature.snapshot().ticket, first_ticket);
+    let (next_revision, view) = feature.snapshot_if_changed(Some(revision)).unwrap();
+    assert_ne!(next_revision, revision);
+    assert_eq!(view["ticket"], feature.snapshot().ticket);
+    assert!(feature.snapshot_if_changed(Some(next_revision)).is_none());
     assert!(!feature.snapshot().credentials_available);
     feature.work.close().await;
     assert!(runtime.shutdown().await.is_clean());

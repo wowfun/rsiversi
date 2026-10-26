@@ -10,6 +10,7 @@ actions without hiding the corresponding observations. Refresh reads current
 registrations, including replacements in the same Host generation.
 
 Plugin status guidance includes the last completed Host update separately from current health; its observation revision fences pagination. Polling and Busy admission do not manufacture completed attempts.
+Plugin snapshot capture pairs both owner revisions with the view under the state-then-capabilities lock order. An unchanged pair skips view cloning and GUI serialization.
 Transient discovery failures preserve the last successful capability catalog.
 An initial discovery failure publishes an unavailable feature with a diagnostic;
 an explicit refresh can recover it without reactivating the application.
@@ -149,3 +150,14 @@ application have separate outcomes; a committed save with apply failure remains
 committed. Unknown outcomes clear the observation and fence mutations until an
 explicit read. Selecting another server clears its editor binding. Exact stdio
 management and Use remain independently enforced by the Service API.
+
+PresentationState publishes a private content revision synchronously under its
+state lock when mutable access begins. Read-only snapshots preserve the revision;
+conservative invalidation is allowed. Feature content revisions include capability
+state and are independent of asynchronous work notifications. Composite revision
+and snapshot reads hold state and capability locks together, in that order, to
+observe one coherent pair. They identify cached
+GUI projections, never user action authority or durable metadata versions.
+
+Setup and Navigation cached snapshots capture their revision and projection under
+one owner lock, and skip projection when that revision is unchanged.

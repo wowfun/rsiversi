@@ -12,6 +12,7 @@ use tokio::sync::{Semaphore, watch};
 use tokio_util::task::TaskTracker;
 mod navigation;
 mod plugins;
+mod presentation_state;
 mod setup;
 pub use navigation::{
     NavigationCommand, NavigationFeature, NavigationFeatureContract, NavigationFeatureFactory,
@@ -20,6 +21,7 @@ pub use plugins::{
     LeafCommand, LeafView, McpSshCommand, McpSshView, PluginsCommand, PluginsFeature,
     PluginsFeatureContract, PluginsFeatureFactory, PluginsView, SshCommand, SshView,
 };
+pub use presentation_state::{PresentationGuard, PresentationState};
 pub use setup::{
     CredentialView, Receipt, SetupCommand, SetupFeature, SetupFeatureContract, SetupFeatureFactory,
     SetupView,

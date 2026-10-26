@@ -591,3 +591,14 @@ remote surface is selected through the current Session export scope and goes
 through the same Service selection validation as an ordinary catalog selection.
 
 Model preview admission, cross-stream ordering and bounded candidate retention follow the shared [conversation contract](../conversation/README.md).
+
+Incremental frame sections retain their owner identity, content revision, shared
+JSON value and encoded size. Unchanged sections reuse that baseline without
+materialization or byte recount. Section owners advance revisions synchronously
+with mutation. Composite fields from preferences and details are captured under
+one owner guard, including the revision used for those fields. Independent
+feature projections may advance independently within a frame.
+Aggregate watch wakeups and detail request generations are
+not content keys. Composer action removal also advances its content revision.
+The proposed section cache and action set become the baseline only after frame
+encoding succeeds, so capacity failure cannot acknowledge unpublished actions.

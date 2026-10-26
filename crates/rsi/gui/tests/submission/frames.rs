@@ -285,7 +285,15 @@ async fn global_frame_cases(detail_sizes: &[usize], samples: u64, report: bool) 
                 // The complete frame is now the server's sole baseline, including
                 // frame-only composer action authority absent from legacy view().
                 snapshot = complete;
-                assert_eq!(measurement.section_materializations, 1);
+                // Transcript changes own no global section; details own panels and three settings fields.
+                assert_eq!(
+                    measurement.section_materializations,
+                    match scenario {
+                        "unchanged" | "single_block" => 0,
+                        "single_detail" => 4,
+                        _ => unreachable!(),
+                    }
+                );
                 if report {
                     eprintln!(
                         "global_frame {}",
