@@ -537,7 +537,7 @@ pub(super) async fn start_host_coordinated(
         .try_clone()
         .map_err(|error| RsiError::Boot(format!("clone Service Host log: {error}")))?;
     let executable = super::host_runtime::publish_before(paths, source, deadline.into_std())?;
-    let mut command = std::process::Command::new(&executable);
+    let mut command = std::process::Command::new(&executable.path);
     launch::current()?.append_child_options(&mut command);
     command.args([
         "host",
@@ -593,7 +593,7 @@ pub(super) async fn start_host_coordinated(
                     return Err(RsiError::Boot("new core stopped during readiness".into()));
                 }
                 child.disarm();
-                if let Err(error) = super::host_runtime::collect(paths, &executable) {
+                if let Err(error) = executable.collect(paths) {
                     eprintln!("warning: {error}");
                 }
                 return Ok(());
@@ -615,7 +615,7 @@ pub(super) async fn start_host_coordinated(
                 println!("started\t{}", child.id());
             }
             child.disarm();
-            if let Err(error) = super::host_runtime::collect(paths, &executable) {
+            if let Err(error) = executable.collect(paths) {
                 eprintln!("warning: {error}");
             }
             return Ok(());

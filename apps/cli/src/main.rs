@@ -90,10 +90,6 @@ use management::profile_management_error;
 use management::{run_agent_preset, run_agent_store, run_profile};
 
 fn main() -> ExitCode {
-    #[cfg(windows)]
-    if let Some(exit) = source_build::run_batch_helper() {
-        return ExitCode::from(exit);
-    }
     let _generation = match rsi_build_info::GenerationLease::current() {
         Ok(lease) => lease,
         Err(error) => {
@@ -101,6 +97,10 @@ fn main() -> ExitCode {
             return ExitCode::from(2);
         }
     };
+    #[cfg(windows)]
+    if let Some(exit) = source_build::run_batch_helper() {
+        return ExitCode::from(exit);
+    }
     if let Some(exit) = maybe_run_apply_patch_helper(std::env::args_os().skip(1)) {
         return ExitCode::from(exit);
     }

@@ -518,6 +518,9 @@ fn build(
     runner
         .environment
         .insert("RSI_BUILD_FAMILY_SHA256".into(), family.clone().into());
+    runner
+        .environment
+        .insert("RSI_WEB_BUNDLE_ID".into(), family.clone().into());
     runner.environment.insert(
         "CARGO_TARGET_DIR".into(),
         work.join("target").into_os_string(),
@@ -648,15 +651,15 @@ fn environment_declaration(declaration: &str) -> Result<(&str, Option<&str>)> {
     {
         return Err("invalid build environment declaration".into());
     }
-    if let Some(suffix) = suffix {
-        if suffix.split('/').any(|part| {
+    if let Some(suffix) = suffix
+        && suffix.split('/').any(|part| {
             part.is_empty()
                 || !part.bytes().all(|byte| {
                     byte.is_ascii_lowercase() || byte.is_ascii_digit() || b"_-".contains(&byte)
                 })
-        }) {
-            return Err("invalid private build directory".into());
-        }
+        })
+    {
+        return Err("invalid private build directory".into());
     }
     Ok((key, suffix))
 }

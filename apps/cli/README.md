@@ -16,6 +16,19 @@ unavailable model in that Service rather than depend on a different launcher def
 
 The native RSI launcher owns command parsing, process control and Tokio setup. It
 uses the explicit application catalog for native clients and daemon startup.
+An immutable managed publication starts its resident Host from the original
+executable and holds its generation lease through readiness; the child then
+retains its own lease through shutdown. Ordinary build outputs are first copied
+to the private content-addressed Host runtime so the resident process does not
+lock Cargo output. Managed executables must never be copied away from their
+publication marker and lease for daemon startup. After readiness, both startup
+paths collect recognized obsolete private Host artifacts while retaining the
+startup coordinator. Managed generation pinning is independent of that private
+namespace; an absent private artifact directory needs no cleanup.
+Windows batch trampolines use the same managed executable and pin its generation
+before dispatching the batch. Private artifact collection retains executable
+directories still in use by Windows processes. Runtime publication resolves the
+source path before detecting its managed generation on every platform.
 `cargo run --locked -p rsi-cli -- --help` does not activate a backend.
 The native executable always includes the linked application catalog. Web and
 Desktop are installed independently with `rsi plugin install`; application

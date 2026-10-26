@@ -11,23 +11,48 @@ const MAXIMUM_EXECUTABLE: u64 = 4 * 1024 * 1024 * 1024;
 
 #[cfg(windows)]
 pub(super) fn publish(paths: &rsi_host::HostPaths) -> rsi::Result<PathBuf> {
-    publish_before(
+    Ok(publish_before(
         paths,
         None,
         std::time::Instant::now() + rsi::APPLICATION_TRANSITION_TIMEOUT,
-    )
+    )?
+    .path)
+}
+pub(super) struct PublishedRuntime {
+    pub(super) path: PathBuf,
+    generation: Option<rsi_build_info::GenerationLease>,
+}
+impl PublishedRuntime {
+    pub(super) fn collect(&self, paths: &rsi_host::HostPaths) -> rsi::Result<()> {
+        collect(
+            paths,
+            self.generation.is_none().then_some(self.path.as_path()),
+        )
+    }
 }
 pub(super) fn publish_before(
     paths: &rsi_host::HostPaths,
     source: Option<&Path>,
     deadline: std::time::Instant,
-) -> rsi::Result<PathBuf> {
+) -> rsi::Result<PublishedRuntime> {
     let source = source
         .map_or_else(std::env::current_exe, |path| Ok(path.to_owned()))
         .map_err(failure)?;
-    #[cfg(unix)]
     let source = std::fs::canonicalize(source).map_err(failure)?;
-    publish_source_before(paths, &source, deadline)
+    check_deadline(deadline)?;
+    let parent = source
+        .parent()
+        .ok_or_else(|| failure("runtime source has no parent"))?;
+    if let Some(generation) = rsi_build_info::GenerationLease::open(parent).map_err(failure)? {
+        return Ok(PublishedRuntime {
+            path: source,
+            generation: Some(generation),
+        });
+    }
+    Ok(PublishedRuntime {
+        path: publish_source_before(paths, &source, deadline)?,
+        generation: None,
+    })
 }
 fn check_deadline(deadline: std::time::Instant) -> rsi::Result<()> {
     if std::time::Instant::now() >= deadline {
@@ -197,16 +222,23 @@ impl Drop for Staging<'_> {
 }
 
 /// Caller retains the startup coordinator and has verified the new Host's readiness.
-pub(super) fn collect(paths: &rsi_host::HostPaths, running: &Path) -> rsi::Result<()> {
+pub(super) fn collect(paths: &rsi_host::HostPaths, running: Option<&Path>) -> rsi::Result<()> {
     use rsi_files_native_fs::{
         EntryKind, open_absolute_directory_no_follow, open_relative_directory_no_follow,
     };
     let root = paths.state().join("session-host/artifacts");
-    let directory = open_absolute_directory_no_follow(&root).map_err(failure)?;
+    let directory = match open_absolute_directory_no_follow(&root) {
+        Ok(directory) => directory,
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(()),
+        Err(error) => return Err(failure(error)),
+    };
     let current = running
-        .parent()
-        .and_then(Path::file_name)
-        .ok_or_else(|| failure("runtime has no generation"))?;
+        .map(|path| {
+            path.parent()
+                .and_then(Path::file_name)
+                .ok_or_else(|| failure("runtime has no generation"))
+        })
+        .transpose()?;
     let mut unrecognized = 0;
     'generations: for (index, entry) in directory.entries().map_err(failure)?.enumerate() {
         if index >= 4096 {
@@ -247,15 +279,37 @@ pub(super) fn collect(paths: &rsi_host::HostPaths, running: &Path) -> rsi::Resul
             }
             children.push(child_name);
         }
+        #[cfg(windows)]
+        let unused_image = if Some(name.as_os_str()) == current {
+            None
+        } else {
+            use std::os::windows::fs::OpenOptionsExt as _;
+            match std::fs::OpenOptions::new()
+                .read(true)
+                .write(true)
+                .share_mode(0)
+                .open(root.join(&name).join("rsi.exe"))
+            {
+                Ok(file) => Some(file),
+                Err(error) if matches!(error.raw_os_error(), Some(5 | 32)) => continue,
+                Err(error) if error.kind() == std::io::ErrorKind::NotFound => None,
+                Err(error) => return Err(failure(error)),
+            }
+        };
+        // Releasing the probe permits namespace deletion; the startup coordinator
+        // fences publication while an existing running image was detected above.
+        #[cfg(windows)]
+        drop(unused_image);
         for child in children {
-            if name != current || child.to_string_lossy().starts_with("staging-") {
+            if Some(name.as_os_str()) != current || child.to_string_lossy().starts_with("staging-")
+            {
                 generation
                     .remove_child(Path::new(&child))
                     .map_err(failure)?;
             }
         }
         drop(generation);
-        if name != current {
+        if Some(name.as_os_str()) != current {
             directory
                 .remove_empty_directory(Path::new(&name))
                 .map_err(failure)?;
@@ -301,6 +355,76 @@ fn publish_source(paths: &rsi_host::HostPaths, source: &Path) -> rsi::Result<Pat
 #[cfg(test)]
 mod tests {
     use super::*;
+    #[test]
+    fn managed_runtime_stays_in_publication_and_pins_until_handoff() {
+        let temp = tempfile::tempdir().unwrap();
+        let paths = rsi_host::HostPaths::new(
+            temp.path().join("config"),
+            temp.path().join("state"),
+            temp.path().join("cache"),
+        )
+        .unwrap();
+        let bundle = temp.path().join("generations/00000000000000000001/bundle");
+        std::fs::create_dir_all(&bundle).unwrap();
+        std::fs::write(bundle.join(".rsi-generation.lock"), b"").unwrap();
+        let source = bundle.join("rsi.exe");
+        std::fs::write(&source, b"managed executable").unwrap();
+        let deadline = std::time::Instant::now() + rsi::APPLICATION_TRANSITION_TIMEOUT;
+        assert!(publish_before(&paths, Some(&source), deadline).is_err());
+        std::fs::create_dir(temp.path().join("leases")).unwrap();
+        let lease = std::fs::File::create(temp.path().join("leases/00000000000000000001")).unwrap();
+        std::fs::create_dir(bundle.join("nested")).unwrap();
+        let runtime =
+            publish_before(&paths, Some(&bundle.join("nested/../rsi.exe")), deadline).unwrap();
+        assert_eq!(
+            runtime.path.canonicalize().unwrap(),
+            source.canonicalize().unwrap()
+        );
+        assert!(!paths.state().exists());
+        runtime.collect(&paths).unwrap();
+        let ordinary = temp.path().join("ordinary");
+        std::fs::write(&ordinary, b"old Cargo runtime").unwrap();
+        let obsolete = publish_source(&paths, &ordinary).unwrap();
+        assert!(obsolete.exists());
+        runtime.collect(&paths).unwrap();
+        assert!(!obsolete.parent().unwrap().exists());
+        assert_eq!(std::fs::read(&source).unwrap(), b"managed executable");
+        assert!(matches!(
+            lease.try_lock(),
+            Err(std::fs::TryLockError::WouldBlock)
+        ));
+        drop(runtime);
+        lease.try_lock().unwrap();
+    }
+    #[cfg(windows)]
+    #[test]
+    fn collection_preserves_windows_artifacts_held_by_a_running_image() {
+        use std::os::windows::fs::OpenOptionsExt as _;
+        let root = tempfile::tempdir().unwrap();
+        let paths = rsi_host::HostPaths::new(
+            root.path().join("config"),
+            root.path().join("state"),
+            root.path().join("cache"),
+        )
+        .unwrap();
+        let source = root.path().join("source.exe");
+        std::fs::write(&source, b"active helper").unwrap();
+        let active = publish_source(&paths, &source).unwrap();
+        std::fs::write(&source, b"obsolete helper").unwrap();
+        let obsolete = publish_source(&paths, &source).unwrap();
+        let running = std::fs::OpenOptions::new()
+            .read(true)
+            .share_mode(1)
+            .open(&active)
+            .unwrap();
+        collect(&paths, None).unwrap();
+        assert!(active.exists());
+        assert!(!obsolete.exists());
+        drop(running);
+        collect(&paths, None).unwrap();
+        assert!(!active.exists());
+    }
+
     #[test]
     fn expired_publication_deadline_does_not_publish_a_runtime() {
         let root = tempfile::tempdir().unwrap();
@@ -374,7 +498,7 @@ mod tests {
         std::fs::create_dir(&unknown).unwrap();
         std::fs::write(unknown.join("operator-file"), b"preserve").unwrap();
         assert!(
-            collect(&paths, &next)
+            collect(&paths, Some(&next))
                 .unwrap_err()
                 .to_string()
                 .contains("unrecognized")

@@ -64,6 +64,7 @@ fn main() {
         "node" if args == ["--version"] => println!("v26.5.0"),
         "node" if args.iter().any(|a| a == "--version") => println!("12.6.0"),
         "node" if args.first().map(String::as_str) == Some("apps/web/build.mjs") => {
+            assert_eq!(env::var("RSI_WEB_BUNDLE_ID").unwrap(), env::var("RSI_BUILD_FAMILY_SHA256").unwrap());
             let out = PathBuf::from(&args[1]);
             fs::create_dir_all(&out).unwrap();
             fs::write(out.join("index.html"), "fixture document").unwrap();

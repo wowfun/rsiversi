@@ -75,6 +75,10 @@ copied in 64 KiB chunks, then verified before the manifest is written. The packa
 owner's disk bounds cover unstripped debug binaries without making them buffer
 sizes. `RSI_RELEASE_VERSION` labels the package. Requirements come from the
 artifact's actual wire contracts, not a native build family.
+
+`fixture-dist` binds the document bundle identity to its captured build-family
+digest. This lets evidence fixtures verify the exact native/assets publication;
+it does not make that digest a production wire-compatibility requirement.
 Web selects those contract owners from the Worker package's explicit Host-interface
 declaration and verifies that each is a WASM normal dependency. It does not infer
 remote requirements from every codec in the transitive dependency graph.
