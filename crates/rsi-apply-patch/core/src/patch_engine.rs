@@ -14,6 +14,13 @@ mod preflight;
 use parser::{ParsedOperation, parse_patch};
 use preflight::preflight;
 
+#[cfg(feature = "test-support")]
+pub(crate) fn exercise_parser(document: &str) -> Result<(), String> {
+    validate_patch_text(document)
+        .and_then(|()| parse_patch(document).map(|_| ()))
+        .map_err(|error| error.code)
+}
+
 use super::MAXIMUM_APPLY_PATCH_BYTES as MAXIMUM_PATCH_BYTES;
 const MAXIMUM_PATCH_OPERATIONS: usize = 256;
 const MAXIMUM_PATCH_PATH_BYTES: usize = 16 * 1024;

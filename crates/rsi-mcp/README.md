@@ -1,5 +1,8 @@
 # rsi-mcp
 
+The isolated [parser fuzz fixture](../../fixtures/rsi/parser-fuzz/README.md) uses
+the core crate's [parser test contract](core/README.md).
+
 MCP is an opt-in integration above Agent composition, Tools, Credentials, Media
 and Process. It owns remote protocol negotiation and finite discovery; it does not
 own Agent state transitions or grant Tool execution permission. The protocol

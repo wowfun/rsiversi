@@ -74,4 +74,7 @@ retain their explicitly supplied helper and empty environment.
 Private parser properties generate 512 valid Unicode add/update documents from a
 fixed seed, check exact content and line-ending preservation, then mutate framing
 and path boundaries. Failures report the reproducible case number and document;
-these tests need no filesystem effects or public parser API.
+these tests need no filesystem effects. The opt-in `test-support` feature exposes
+parser-only admission with the production byte, UTF-8 and control-character
+checks before grammar parsing, returning the production rejection code. Corpus
+tests assert acceptance and rejection reasons; the seam never mutates files.

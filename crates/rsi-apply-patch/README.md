@@ -16,3 +16,7 @@ returns `ToolError::OutcomeUnknown`. This includes cancellation after start.
 It interrupts the owning Turn without a model-facing error result or automatic
 replay. A complete validated helper response still reports its exact applied
 or rejected effects through the ordinary result contract.
+
+The isolated [parser fuzz fixture](../../fixtures/rsi/parser-fuzz/README.md) uses
+the core crate's [parser test contract](core/README.md).
+It never applies patches or exposes engine types. Production builds leave it off.

@@ -1,0 +1,29 @@
+[package]
+name = "rsi-parser-fuzz"
+version = "0.0.0"
+publish = false
+edition = "2024"
+
+[package.metadata]
+cargo-fuzz = true
+
+[workspace]
+
+[dependencies]
+libfuzzer-sys = "0.4"
+rsi-apply-patch = { path = "../../../crates/rsi-apply-patch/core", features = ["test-support"] }
+rsi-mcp = { path = "../../../crates/rsi-mcp/core", features = ["test-support"] }
+
+[[bin]]
+name = "apply_patch"
+path = "fuzz_targets/apply_patch.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "mcp_frame"
+path = "fuzz_targets/mcp_frame.rs"
+test = false
+doc = false
+bench = false

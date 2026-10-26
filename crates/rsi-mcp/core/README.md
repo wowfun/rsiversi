@@ -1,5 +1,13 @@
 # rsi-mcp
 
+The opt-in `test-support` parser seam returns the JSON-RPC result and the SSE
+messages and terminal error class. It also checks encoding round trips and SSE
+chunk invariance between a complete input and one selected chunk size. The seam
+admits at most twice the frame byte limit and 128 SSE messages; these are test-work
+bounds, not transport-stream limits. Seed bytes live beside the owning tests.
+Deterministic corpus tests assert expected messages and error
+classes independently of those invariants; no transport is opened.
+
 `PrivateMcp` attaches only an already caller-confined managed process, freezes a
 complete bounded catalog and permits only selected tool names. It resolves no
 credentials and publishes nothing to the shared manifest. Failed discovery

@@ -4,6 +4,64 @@ use serde::Serialize;
 use serde_json::Value;
 use std::io::{self, Write};
 struct Limited(Vec<u8>);
+
+#[cfg(feature = "test-support")]
+pub(super) fn exercise_frame_parser(bytes: &[u8], chunk_bytes: usize) -> crate::ParserExercise {
+    if bytes.len() > MAXIMUM_FRAME_BYTES * 2 {
+        return crate::ParserExercise {
+            json: Err(McpError::Capacity),
+            messages: Vec::new(),
+            event_error: Some(McpError::Capacity),
+        };
+    }
+    let parsed = parse(bytes);
+    if bytes.len() > MAXIMUM_FRAME_BYTES {
+        assert!(matches!(parsed, Err(McpError::Capacity)));
+    }
+    if let Ok(value) = &parsed
+        && let Ok(encoded) = encode(value)
+    {
+        assert_eq!(parse(&encoded).unwrap(), *value);
+    }
+    let reference = event_trace(bytes, bytes.len().max(1), 128);
+    assert_eq!(
+        event_trace(bytes, chunk_bytes.clamp(1, 4096), 128),
+        reference,
+        "selected SSE chunk size"
+    );
+    crate::ParserExercise {
+        json: parsed,
+        messages: reference.0,
+        event_error: reference.1,
+    }
+}
+
+#[cfg(any(test, feature = "test-support"))]
+fn event_trace(
+    bytes: &[u8],
+    chunk_bytes: usize,
+    maximum_messages: usize,
+) -> (Vec<Value>, Option<McpError>) {
+    let mut events = Events::default();
+    let mut messages = Vec::new();
+    for mut chunk in bytes.chunks(chunk_bytes) {
+        loop {
+            match events.next(&mut chunk) {
+                Ok(EventStep::Message(value)) => {
+                    if messages.len() == maximum_messages {
+                        return (messages, Some(McpError::Capacity));
+                    }
+                    messages.push(value);
+                }
+                Ok(EventStep::Yield) => {}
+                Ok(EventStep::NeedInput) => break,
+                Err(error) => return (messages, Some(error)),
+            }
+        }
+    }
+    (messages, None)
+}
+
 impl Write for Limited {
     fn write(&mut self, bytes: &[u8]) -> io::Result<usize> {
         if bytes.len() > MAXIMUM_FRAME_BYTES.saturating_sub(self.0.len()) {
@@ -198,6 +256,32 @@ impl Events {
 #[cfg(test)]
 mod tests {
     use super::*;
+    #[test]
+    fn oversized_sse_lines_and_accumulated_data_reject_at_every_chunk_size() {
+        let line = vec![b'x'; MAXIMUM_FRAME_BYTES + 1];
+        let half = "x".repeat(MAXIMUM_FRAME_BYTES / 2);
+        let multiline = format!("data: {half}\ndata: {half}\n");
+        for bytes in [line.as_slice(), multiline.as_bytes()] {
+            for chunk in [1, 7, 4096, bytes.len()] {
+                let (messages, error) = event_trace(bytes, chunk, 256);
+                assert!(messages.is_empty());
+                assert_eq!(error, Some(McpError::Capacity));
+            }
+        }
+    }
+    #[test]
+    fn sse_chunk_oracle_preserves_messages_before_a_terminal_error() {
+        let source = format!(
+            "{}data: invalid\n\n",
+            "data: {\"jsonrpc\":\"2.0\",\"id\":1,\"result\":\"中文\"}\r\n\r\n".repeat(200)
+        );
+        for chunk in [1, 2, 4096, source.len()] {
+            let (messages, error) = event_trace(source.as_bytes(), chunk, 256);
+            assert_eq!(messages.len(), 200);
+            assert!(messages.iter().all(|value| value["result"] == "中文"));
+            assert_eq!(error, Some(McpError::Protocol));
+        }
+    }
     #[test]
     fn named_events_are_filtered_and_event_metadata_resets_at_every_boundary() {
         let source = b"event: ping\nid: keepalive\nretry: 100\ndata: not-json\n\nevent: ping\n\nevent: ping\nevent: message\ndata: {\"jsonrpc\":\"2.0\",\"id\":\"one\",\"result\":{}}\n\nevent:\ndata: {\"jsonrpc\":\"2.0\",\"id\":\"two\",\"result\":{}}\n\ndata: {\"jsonrpc\":\"2.0\",\"id\":\"three\",\"result\":{}}\n\n";

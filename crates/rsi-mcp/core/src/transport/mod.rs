@@ -17,6 +17,11 @@ mod stdio;
 mod subscription;
 mod wire;
 
+#[cfg(feature = "test-support")]
+pub(crate) fn exercise_frame_parser(bytes: &[u8], chunk_bytes: usize) -> crate::ParserExercise {
+    wire::exercise_frame_parser(bytes, chunk_bytes)
+}
+
 pub(crate) const REQUEST_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(30);
 pub(crate) const MAXIMUM_OUTSTANDING_REQUESTS: usize = 9;
 

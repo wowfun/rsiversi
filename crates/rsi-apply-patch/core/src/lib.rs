@@ -7,6 +7,16 @@
 #[cfg(target_os = "linux")]
 mod patch_engine;
 
+/// Bounded parser-only entry for isolated fuzzing; never mutates files.
+#[cfg(all(target_os = "linux", feature = "test-support"))]
+pub fn exercise_patch_parser(bytes: &[u8]) -> Result<(), String> {
+    if bytes.len() > MAXIMUM_APPLY_PATCH_BYTES {
+        return Err("patch_too_large".into());
+    }
+    let document = std::str::from_utf8(bytes).map_err(|_| "invalid_utf8".to_owned())?;
+    patch_engine::exercise_parser(document)
+}
+
 use async_trait::async_trait;
 use rsi_meta::{ActivationPlan, ConfigValue, MetaError, PluginFactory, PreparedActivation};
 use rsi_process::ProcessContract;

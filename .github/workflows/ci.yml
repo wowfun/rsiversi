@@ -103,6 +103,8 @@ jobs:
       - uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6
         with:
           key: lockfiles
+      - name: Check parser fixture dependency parity
+        run: python3 fixtures/rsi/parser-fuzz/check-lock.py
       - name: Verify every workspace lockfile
         timeout-minutes: 20
         run: cargo xtask verify-lockfiles --online
@@ -570,7 +572,7 @@ jobs:
           - os: macos-15
             expected_arch: arm64
     runs-on: ${{ matrix.os }}
-    timeout-minutes: 90
+    timeout-minutes: 100
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
       - name: Verify runner architecture
@@ -631,6 +633,13 @@ jobs:
           cargo clippy --locked -p rsi-api-uds-client --features test-support --all-targets -- -D warnings
           cargo test --locked -p rsi-api-uds-client --features test-support --test client
         timeout-minutes: 5
+
+      - name: Exercise deterministic parser fuzz seeds
+        if: ${{ !cancelled() && steps.base_setup.outcome == 'success' && runner.os == 'Linux' }}
+        run: |
+          cargo clippy --locked -p rsi-apply-patch -p rsi-mcp --features test-support --test parser_corpus --no-deps -- -D warnings
+          cargo test --locked -p rsi-apply-patch -p rsi-mcp --features test-support --test parser_corpus
+        timeout-minutes: 10
 
   rsi-ai:
     strategy:
