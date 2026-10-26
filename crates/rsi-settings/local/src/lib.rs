@@ -739,6 +739,31 @@ mod windows_tests {
         assert_eq!(std::fs::read_dir(directory).unwrap().count(), 3);
     }
     #[tokio::test]
+    async fn native_settings_replaces_an_existing_inherited_file() {
+        let temp = tempfile::tempdir().unwrap();
+        let directory = temp.path().join("private");
+        rsi_files_native_fs::create_absolute_directory_and_sync_no_follow(&directory).unwrap();
+        let path = directory.join("settings.json");
+        std::fs::write(&path, br#"{"other":{"keep":true}}"#).unwrap();
+        let provider = LocalProvider {
+            config: LocalSettingsConfig {
+                path,
+                maximum_document_bytes: 4096,
+            },
+        };
+        provider
+            .compare_and_set(
+                "rsi.client",
+                None,
+                Some(&serde_json::json!({"appearance":{"theme":"light"}})),
+            )
+            .await
+            .unwrap();
+        let document = provider.load().await.unwrap();
+        assert_eq!(document["other"], serde_json::json!({"keep":true}));
+        assert_eq!(document["rsi.client"]["appearance"]["theme"], "light");
+    }
+    #[tokio::test]
     async fn native_settings_writes_refuse_unprotected_parent_before_creating_lock() {
         let temp = tempfile::tempdir().unwrap();
         let config = LocalSettingsConfig {

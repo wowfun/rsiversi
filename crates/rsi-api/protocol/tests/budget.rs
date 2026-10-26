@@ -459,17 +459,19 @@ fn deferred_allocator_failure_preserves_error_and_releases_only_its_owners() {
 
 #[test]
 fn oversized_deferred_read_releases_authority_without_invoking_allocator() {
-    let guard = std::sync::Arc::new(());
-    let weak = std::sync::Arc::downgrade(&guard);
-    let admission = rsi_api_protocol::ByteAdmission::new(move |_| {
-        drop(guard);
-        panic!("oversized read reached allocation authority")
-    });
-    assert!(matches!(
-        admission.reserve(rsi_api_protocol::MAXIMUM_API_BYTES + 1),
-        Err(ApiError::Invalid(_))
-    ));
-    assert!(weak.upgrade().is_none());
+    for bytes in [rsi_api_protocol::MAXIMUM_API_BYTES + 1, usize::MAX] {
+        let guard = std::sync::Arc::new(());
+        let weak = std::sync::Arc::downgrade(&guard);
+        let admission = rsi_api_protocol::ByteAdmission::new(move |_| {
+            drop(guard);
+            panic!("oversized read reached allocation authority")
+        });
+        assert!(matches!(
+            admission.reserve(bytes),
+            Err(ApiError::Invalid(_))
+        ));
+        assert!(weak.upgrade().is_none());
+    }
 }
 
 #[test]
