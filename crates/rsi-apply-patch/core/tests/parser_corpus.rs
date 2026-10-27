@@ -3,12 +3,7 @@
 #[test]
 fn fuzz_seeds_use_the_bounded_production_parser() {
     use rsi_apply_patch::exercise_patch_parser as parse;
-    assert_eq!(
-        parse(include_bytes!(
-            "corpus/unicode.patch"
-        )),
-        Ok(())
-    );
+    assert_eq!(parse(include_bytes!("corpus/unicode.patch")), Ok(()));
     for operation in [
         "*** Delete File: file",
         "*** Update File: file\n*** Move to: moved\n@@\n-old\n+new",
@@ -19,9 +14,7 @@ fn fuzz_seeds_use_the_bounded_production_parser() {
         );
     }
     assert_eq!(
-        parse(include_bytes!(
-            "corpus/traversal.patch"
-        )),
+        parse(include_bytes!("corpus/traversal.patch")),
         Err("invalid_path".into())
     );
     assert_eq!(parse(&[255]), Err("invalid_utf8".into()));

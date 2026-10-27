@@ -5,8 +5,7 @@ use serde_json::json;
 
 #[test]
 fn fuzz_seeds_exercise_json_rpc_and_every_sse_byte_boundary() {
-    let response =
-        include_bytes!("corpus/response.json");
+    let response = include_bytes!("corpus/response.json");
     let event = include_bytes!("corpus/event.txt");
     for chunk in 1..=response.len().max(event.len()) {
         let parsed = exercise_frame_parser(response, chunk);
@@ -51,9 +50,11 @@ fn oversized_multiline_sse_still_reaches_the_transport_parser() {
 
 #[test]
 fn parser_exercise_bounds_work_without_changing_transport_stream_limits() {
-    let source=b"data: {\"jsonrpc\":\"2.0\",\"method\":\"a\"}\n\n".repeat(129);
-    let parsed=exercise_frame_parser(&source,7);
-    assert_eq!(parsed.messages.len(),128);assert_eq!(parsed.event_error,Some(McpError::Capacity));
-    let parsed=exercise_frame_parser(&vec![b'x';rsi_mcp::MAXIMUM_FRAME_BYTES*2+1],1);
-    assert!(parsed.messages.is_empty());assert_eq!(parsed.event_error,Some(McpError::Capacity));
+    let source = b"data: {\"jsonrpc\":\"2.0\",\"method\":\"a\"}\n\n".repeat(129);
+    let parsed = exercise_frame_parser(&source, 7);
+    assert_eq!(parsed.messages.len(), 128);
+    assert_eq!(parsed.event_error, Some(McpError::Capacity));
+    let parsed = exercise_frame_parser(&vec![b'x'; rsi_mcp::MAXIMUM_FRAME_BYTES * 2 + 1], 1);
+    assert!(parsed.messages.is_empty());
+    assert_eq!(parsed.event_error, Some(McpError::Capacity));
 }
