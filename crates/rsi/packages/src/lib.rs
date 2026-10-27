@@ -11,7 +11,7 @@ pub use repository::{
     Repository, RepositoryTarget, SignedRepository, TrustReceipt, VerifiedRepository,
 };
 pub use rsi_api_protocol::ProtocolDescriptor as Interface;
-pub use store::{InstallSource, PackageLease, PackageStore, Resolution, Selection};
+pub use store::{InstallSource, PackageLease, PackagePurge, PackageStore, Resolution, Selection};
 
 /// Maximum bounded encoded manifest, repository or resolution document.
 pub const MAX_DOCUMENT: usize = 1024 * 1024;

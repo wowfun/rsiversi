@@ -1,5 +1,17 @@
 # rsi-packages
 
+Core distribution publishes root-level executable exports `core` and `uninstaller`
+with their platform filenames (`rsi[.exe]`, `rsi-uninstall[.exe]`), plus
+the platform's declared `uninstall.sh` or `uninstall.ps1` payload. Managed
+installation upgrades require the compatible complete set. Legacy single-file
+core packages remain admissible for unrecorded installations; generic manifest
+admission does not confer installation or deletion authority.
+Offline purge obtains the writer lease and every generation lease before removing
+objects and resolution metadata. Busy generations refuse admission. Coordination
+anchors remain; unknown top-level store entries are not purge authority.
+Purge uses the same per-object traversal bounds as staging cleanup and GC, so
+every admitted object can be removed in one pass without a smaller store-wide cap.
+
 This library owns bounded, non-executing package admission and immutable storage
 below the selected state home. Applications supply downloads and source recipes;
 installing a package never runs a compiler, lifecycle script or executable.

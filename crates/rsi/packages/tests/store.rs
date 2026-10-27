@@ -433,3 +433,77 @@ fn manifest_integer_tokens_and_duplicate_fields_are_not_silently_coerced() {
         .is_err()
     );
 }
+
+#[test]
+fn offline_purge_excludes_users_and_writers_and_preserves_unknown_root_files() {
+    let root = tempfile::tempdir().unwrap();
+    let path = root.path().join("packages");
+    let store = PackageStore::open(&path).unwrap();
+    let installed = store
+        .install(
+            &[source(root.path(), "web", b"payload")],
+            &[],
+            &[],
+            "windows-x86_64",
+        )
+        .unwrap();
+    let lease = store.acquire("web").unwrap();
+    assert!(PackageStore::open(&path).unwrap().into_purge().is_err());
+    assert!(
+        path.join("objects")
+            .join(&installed.packages["web"].digest)
+            .exists()
+    );
+    drop(lease);
+    std::fs::write(path.join("user-file"), "keep").unwrap();
+    let purge = PackageStore::open(&path).unwrap().into_purge().unwrap();
+    assert!(
+        store
+            .install(
+                &[source(root.path(), "other", b"new")],
+                &[],
+                &[],
+                "windows-x86_64"
+            )
+            .is_err()
+    );
+    purge.purge().unwrap();
+    assert!(
+        !path
+            .join("objects")
+            .join(&installed.packages["web"].digest)
+            .exists()
+    );
+    assert!(!path.join("resolution.json").exists());
+    assert!(
+        path.join("leases")
+            .join(&installed.packages["web"].digest)
+            .exists()
+    );
+    assert_eq!(std::fs::read(path.join("user-file")).unwrap(), b"keep");
+}
+
+#[test]
+fn offline_purge_removes_multiple_large_abandoned_stages_in_one_pass() {
+    let root = tempfile::tempdir().unwrap();
+    let path = root.path().join("packages");
+    let store = PackageStore::open(&path).unwrap();
+    // Each interrupted stage is within the per-object file limit; together they
+    // exceed the former unrelated 16384-entry cap on the whole store.
+    for object in 0..5 {
+        let stage = path.join("objects").join(format!("stage-{object:032x}"));
+        std::fs::create_dir(&stage).unwrap();
+        for file in 0..3400 {
+            std::fs::write(stage.join(format!("{file}")), []).unwrap();
+        }
+    }
+    store.into_purge().unwrap().purge().unwrap();
+    let remaining: Vec<_> = std::fs::read_dir(path.join("objects"))
+        .unwrap()
+        .map(|entry| entry.unwrap().file_name())
+        .collect();
+    #[cfg(windows)]
+    assert_eq!(remaining, [std::ffi::OsString::from(".rsi-namespace-pin")]);
+    #[cfg(not(windows))]
+    assert!(remaining.is_empty());
+}

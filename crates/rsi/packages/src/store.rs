@@ -99,6 +99,22 @@ impl PackageLease {
     }
 }
 impl PackageStore {
+    /// Obtains exclusive writer and all generation leases before offline removal.
+    pub fn into_purge(self) -> Result<PackagePurge> {
+        let mut locks = vec![self.root.lock("writer.lock", false)?];
+        self.resolution_unlocked()?;
+        for (name, kind) in self.leases.names(MAX_OBJECTS)? {
+            crate::hash(&name)?;
+            if kind != EntryKind::File {
+                return Err(invalid("package lease is not a file"));
+            }
+            locks.push(self.leases.lock(&name, false)?);
+        }
+        Ok(PackagePurge {
+            store: self,
+            _locks: locks,
+        })
+    }
     /// Opens or creates the owned private store; never launches package code.
     pub fn open(root: &Path) -> Result<Self> {
         let root = Dir::open(root, true)?;
@@ -486,6 +502,51 @@ impl PackageStore {
             })
             .collect::<Result<BTreeMap<_, _>>>()?;
         validate_closure(resolution, &manifests)
+    }
+}
+
+/// Exclusive offline package removal authority; locks survive payload deletion.
+#[derive(Debug)]
+pub struct PackagePurge {
+    store: PackageStore,
+    _locks: Vec<File>,
+}
+impl PackagePurge {
+    /// Removes known payloads, preserving lease and namespace anchors.
+    pub fn purge(&self) -> Result<()> {
+        for (name, kind) in self.store.objects.names(MAX_OBJECTS)? {
+            if kind != EntryKind::Directory {
+                return Err(invalid("package object is not a directory"));
+            }
+            if !is_stage(&name) {
+                crate::hash(&name)?;
+            }
+            let mut budget = crate::MAX_FILES * 128 + 2;
+            remove_tree(
+                &self.store.objects.directory,
+                Path::new(&name),
+                0,
+                &mut budget,
+            )?;
+        }
+        self.store.objects.directory.sync_all()?;
+        match self
+            .store
+            .root
+            .directory
+            .child_kind(Path::new("resolution.json"))
+        {
+            Ok(EntryKind::File) => self
+                .store
+                .root
+                .directory
+                .remove_child(Path::new("resolution.json"))?,
+            Err(e) if e.kind() == std::io::ErrorKind::NotFound => {}
+            Err(e) => return Err(e.into()),
+            _ => return Err(invalid("resolution is not an ordinary file")),
+        }
+        self.store.root.directory.sync_all()?;
+        Ok(())
     }
 }
 fn sync_tree(
