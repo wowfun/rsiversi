@@ -22,21 +22,21 @@ cd rsiversi
 
 ## Install the core
 
-The installer builds only `rsi` in release mode and adds its `bin` directory to
-your user PATH. Open a new terminal after installation. No UI selection is needed.
+The installer builds `rsi` and the independent `rsi-uninstall` in release mode and adds its `bin` directory to
+your user PATH. Restart your terminal application after installation. No UI selection is needed.
 
 On Windows, use PowerShell:
 
 <!-- rsi-example id=install-windows platform=windows -->
 ```powershell
-powershell -NoProfile -ExecutionPolicy Bypass -File .\scripts\rsiversi.ps1
+powershell -NoProfile -ExecutionPolicy Bypass -File .\scripts\install.ps1
 ```
 
 Or use Git Bash on Windows:
 
 <!-- rsi-example id=install-git-bash platform=git-bash -->
 ```bash
-bash scripts/rsiversi.sh
+bash scripts/install.sh
 ```
 
 Both Windows commands use the same native installer and default to
@@ -47,7 +47,7 @@ On Linux or WSL:
 
 <!-- rsi-example id=install-bash platform=linux -->
 ```bash
-bash scripts/rsiversi.sh
+bash scripts/install.sh
 ```
 
 <!-- rsi-example id=install-launch platform=all -->
@@ -56,9 +56,69 @@ rsi
 ```
 
 Use `--prefix DIR` / `-Prefix DIR` for another install root, or `--binary FILE` /
-`-Binary FILE` for an explicitly trusted existing executable. The installer
-refuses to overwrite an existing installation. `--no-path` / `-NoPath` leaves
+`-Binary FILE` together with `--uninstaller FILE` / `-Uninstaller FILE` for an
+explicitly trusted prebuilt pair. Source installation builds both executables;
+prebuilt installation does not invoke Cargo. The independent tool and platform
+uninstall script are saved in `<prefix>/libexec/rsi`, outside PATH. The installer
+checks the destination before building and refuses an existing file, directory
+or link. The prefix and its ancestors must not traverse symlinks or junctions;
+pass the resolved real directory explicitly. If `rsi` is already installed, it prints that installation's full path
+and an upgrade command; follow [the upgrade steps below](#upgrade-and-transfer-existing-data)
+or choose another empty prefix. `--no-path` / `-NoPath` leaves
 PATH untouched for isolated verification. It does not open config or state.
+
+## Uninstall or clear runtime data
+
+Set `prefix` below to the actual installation directory before previewing removal.
+Custom installations must pass their custom prefix:
+
+<!-- rsi-example id=uninstall-preview-windows platform=windows -->
+```powershell
+$prefix = Join-Path $env:LOCALAPPDATA "RSIversi"
+powershell -NoProfile -ExecutionPolicy Bypass -File scripts/uninstall.ps1 -Prefix $prefix -DryRun
+```
+
+<!-- rsi-example id=uninstall-preview-linux platform=linux -->
+```bash
+prefix="$HOME/.local"
+bash scripts/uninstall.sh --prefix "$prefix" --dry-run
+```
+
+Remove the preview flag to uninstall. After deleting this checkout, use the
+corresponding script in `<prefix>/libexec/rsi`; it selects that prefix by default.
+Git Bash delegates to PowerShell. Neither launcher runs the installed `rsi`,
+requires Cargo nor downloads tools. Windows actual removal runs a verified temporary copy of the
+uninstaller; dry-run runs the installed tool in place. Linux runs it directly.
+
+Ordinary uninstall preserves the configuration, state and cache homes, including
+shared package and Host runtime copies. `--purge` / `-Purge` removes saved
+credentials, Sessions, generated state, WebView data and caches after displaying
+the affected homes and asking for confirmation. Those homes may also serve other
+installations and development builds. Noninteractive confirmation uses `--yes` /
+`-Yes`. User-authored launch/settings documents, AGENTS.md, skills, agents,
+Profiles, custom presets and addon sources remain, as do external references and
+unknown files. See the [removal contract](../../crates/rsi/installation/README.md).
+
+Use `--config-home`, `--state-home` and `--cache-home` (PowerShell `-ConfigHome`,
+`-StateHome`, `-CacheHome`) to select final homes without loading configuration.
+The eligible Host stops gracefully; embedded Hosts, busy packages and locked
+clients must be closed before retrying. A partial failure retains the uninstall
+tool and reports what remains. Empty coordination anchors intentionally remain.
+
+Missing or corrupt installation records require an explicitly trusted external
+`--uninstaller FILE` / `-Uninstaller FILE` and `--force` / `-Force`. Force authorizes
+the displayed fixed installation files; it does not bypass locks, pending
+recovery, path checks or stop failures. PATH is only undone from exact verified
+receipts, and is retained when the shared bin serves other programs. Linked or
+read-only POSIX startup files require manual PATH setup/removal.
+
+Repeated ordinary removal is a no-op when installation files are absent. Later
+purge requires an external prebuilt uninstaller from a trusted core package,
+because the installed tool was removed. Extract `rsi-uninstall.exe` (Windows) or
+`rsi-uninstall` (Linux) from that package to a directory outside the target prefix,
+then pass the external-tool option with the same prefix and home options. The core
+package build steps below explain how to prepare a package separately; uninstall
+never builds or downloads a tool. A usable main executable is not required.
 
 ## Add Web or Desktop
 
@@ -117,6 +177,27 @@ detaches it. `rsi web stop` stops the browser listener, while `rsi host stop`
 stops the shared service. Continue with [your first conversation](first-conversation.md).
 
 ## Upgrade and transfer existing data
+
+The installer is for first installation only; running it again does not upgrade
+the core. For a local source upgrade, prepare a core package with the existing
+producer (Node.js 22.18 or newer is required for this producer, not the installer):
+
+<!-- rsi-example id=upgrade-core-source platform=all -->
+```bash
+node apps/devtools/build.mjs core "$PWD/.local/packages/core" --replace
+rsi core upgrade --local "$PWD/.local/packages/core"
+```
+
+For a custom prefix, invoke the installed executable at the full path printed by
+the installer instead of `rsi` on PATH. Preserve any global home options used by
+that installation. `--local` takes an absolute package directory containing
+`package.json`, not `target/release/rsi` or `rsi.exe`. The
+[producer contract](../../apps/devtools/README.md) also describes assembling an
+already-built executable and uninstaller without another Cargo invocation.
+Recorded installations upgrade the core, uninstaller, launcher and record as one
+recoverable transaction and reject packages missing compatible uninstall tools.
+Unrecorded legacy installations retain single-executable upgrade behavior; an
+upgrade performed by old code does not silently create an installation record.
 
 Manifest format 2 requires a new core executable. For an existing format-1 store,
 install the new binary to a separate empty prefix first, stop the old Host and

@@ -1,9 +1,8 @@
 use super::{
     CancellationToken, DAEMON_READINESS_TIMEOUT, Duration, FORCE_HOST_STOP_TIMEOUT,
-    HOST_DIAGNOSTICS_INTERVAL, HOST_SHUTDOWN_MARGIN, HostCommand, HostOperation, HostOwnerMode,
-    HostProfileId, JoinHandle, ProfileCatalog, RsiError, SERVICE_HOST_DRAIN_TIMEOUT,
-    ServiceHostDiagnostics, ServiceHostDiagnosticsSnapshot, ServiceHostPaths,
-    StandardServiceDaemon, Stdio, Write, daemon_readiness_timeout_error, launch,
+    HOST_DIAGNOSTICS_INTERVAL, HostCommand, HostOperation, HostOwnerMode, HostProfileId,
+    JoinHandle, ProfileCatalog, RsiError, ServiceHostDiagnostics, ServiceHostDiagnosticsSnapshot,
+    ServiceHostPaths, StandardServiceDaemon, Stdio, Write, daemon_readiness_timeout_error, launch,
     owner_process_is_current, prepare_standard_composition, probe_service_host,
     profile_management_error, report_error, standard_paths,
 };
@@ -37,7 +36,7 @@ pub(super) async fn run_host(command: HostCommand) -> u8 {
         HostOperation::Serve => serve_host_daemon(&command.profile, command.detached_child).await,
         HostOperation::Start => start_host_daemon(&command.profile).await,
         HostOperation::Restart => restart_host_daemon(&command.profile, command.force).await,
-        HostOperation::Stop => stop_host_daemon(command.force).await,
+        HostOperation::Stop => stop_host_daemon(command.force, false).await,
         HostOperation::Status => status_host_daemon().await,
         HostOperation::Reload => reload_host_daemon().await,
     };
@@ -536,8 +535,20 @@ pub(super) async fn start_host_coordinated(
     let stderr = log
         .try_clone()
         .map_err(|error| RsiError::Boot(format!("clone Service Host log: {error}")))?;
+    let origin = match source {
+        Some(source) => rsi_installation::origin::for_executable(source)
+            .map_err(|error| RsiError::Boot(error.to_string()))?,
+        None => rsi_service_host::installation_origin().cloned(),
+    };
     let executable = super::host_runtime::publish_before(paths, source, deadline.into_std())?;
     let mut command = std::process::Command::new(&executable.path);
+    command.env_remove("RSI_INSTALLATION_ORIGIN");
+    if let Some(origin) = origin {
+        command.env(
+            "RSI_INSTALLATION_ORIGIN",
+            serde_json::to_string(&origin).map_err(|e| RsiError::Boot(e.to_string()))?,
+        );
+    }
     launch::current()?.append_child_options(&mut command);
     command.args([
         "host",
@@ -611,7 +622,7 @@ pub(super) async fn start_host_coordinated(
                 .await
                 .map_err(|_| daemon_readiness_timeout_error())?
                 .map_err(|error| RsiError::Boot(format!("daemon readiness probe: {error}")))?;
-            if !attach {
+            if !attach && source.is_none() {
                 println!("started\t{}", child.id());
             }
             child.disarm();
@@ -664,7 +675,7 @@ impl Drop for DaemonChildGuard {
 }
 
 #[cfg(any(target_os = "linux", windows))]
-pub(super) async fn stop_host_daemon(force: bool) -> rsi::Result<()> {
+pub(super) async fn stop_host_daemon(force: bool, quiet: bool) -> rsi::Result<()> {
     let paths = standard_paths()?;
     let host_paths = ServiceHostPaths::from_host_paths(&paths)
         .map_err(|error| RsiError::Boot(error.to_string()))?;
@@ -672,6 +683,16 @@ pub(super) async fn stop_host_daemon(force: bool) -> rsi::Result<()> {
         .read_lifecycle_identity()
         .map_err(|error| RsiError::Boot(error.to_string()))?
         .ok_or_else(|| RsiError::Boot("no Service Host owner metadata exists".into()))?;
+    if !metadata
+        .is_current()
+        .map_err(|error| RsiError::Boot(error.to_string()))?
+    {
+        eprintln!(
+            "Service Host PID {} is not running; stale metadata retained for the next host start",
+            metadata.pid
+        );
+        return Ok(());
+    }
     if metadata.mode != HostOwnerMode::Daemon {
         return Err(RsiError::Boot(
             "the active Service Host is embedded and cannot be stopped as a daemon".into(),
@@ -682,39 +703,37 @@ pub(super) async fn stop_host_daemon(force: bool) -> rsi::Result<()> {
             .force_stop()
             .map_err(|error| RsiError::Boot(error.to_string()))?;
     } else {
-        rsi_service_host::request_lifecycle_identity(
-            &metadata,
-            rsi_service_host::LifecycleOperation::Stop,
-        )
-        .await
-        .map_err(|error| RsiError::Boot(error.to_string()))?;
+        rsi_service_host::stop_gracefully(&metadata)
+            .await
+            .map_err(|error| RsiError::Boot(format!("{error}; if graceful shutdown cannot complete, explicitly use rsi host stop --force")))?;
+        if quiet {
+            eprintln!("stopped\t{}", metadata.pid);
+        } else {
+            println!("stopped\t{}", metadata.pid);
+        }
+        return Ok(());
     }
-    let wait = host_stop_timeout(force);
+    let wait = FORCE_HOST_STOP_TIMEOUT;
     let deadline = tokio::time::Instant::now() + wait;
     loop {
         if !metadata
             .is_current()
             .map_err(|error| RsiError::Boot(error.to_string()))?
         {
-            println!("stopped\t{}", metadata.pid);
+            if quiet {
+                eprintln!("stopped\t{}", metadata.pid);
+            } else {
+                println!("stopped\t{}", metadata.pid);
+            }
             return Ok(());
         }
         if tokio::time::Instant::now() >= deadline {
             return Err(RsiError::Boot(format!(
-                "Service Host did not stop within {} seconds; retry with `rsi host stop --force`",
+                "Service Host did not exit within {} seconds after force-stop; inspect the verified process before retrying",
                 wait.as_secs()
             )));
         }
         tokio::time::sleep(std::time::Duration::from_millis(100)).await;
-    }
-}
-
-#[cfg(any(target_os = "linux", windows))]
-pub(super) fn host_stop_timeout(force: bool) -> Duration {
-    if force {
-        FORCE_HOST_STOP_TIMEOUT
-    } else {
-        SERVICE_HOST_DRAIN_TIMEOUT + HOST_SHUTDOWN_MARGIN
     }
 }
 
@@ -747,7 +766,7 @@ pub(super) async fn restart_host_daemon(
                 "Host restart interrupts unfinished workflows; current count is unavailable. Scripts are not replayed."
             ),
         }
-        stop_host_daemon(force).await?;
+        stop_host_daemon(force, false).await?;
     }
     start_host_daemon(profile_id).await
 }

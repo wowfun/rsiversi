@@ -4672,6 +4672,7 @@ dependencies = [
  "rsi-host",
  "rsi-host-control",
  "rsi-inspector",
+ "rsi-installation",
  "rsi-jobs",
  "rsi-jobs-local",
  "rsi-jobs-tools",
@@ -6130,6 +6131,7 @@ dependencies = [
  "ring",
  "rsi",
  "rsi-acp",
+ "rsi-acp-application",
  "rsi-acp-protocol",
  "rsi-agent-plan-policy",
  "rsi-agent-presets",
@@ -6149,6 +6151,7 @@ dependencies = [
  "rsi-credentials-protocol",
  "rsi-files-native-fs",
  "rsi-host",
+ "rsi-installation",
  "rsi-meta",
  "rsi-meta-profile",
  "rsi-packages",
@@ -6164,6 +6167,7 @@ dependencies = [
  "rsi-tools-protocol",
  "rsi-user-questions-protocol",
  "rsi-web-control",
+ "rsi-workspace-path",
  "rusqlite",
  "rustix 1.1.4",
  "serde",
@@ -6736,6 +6740,27 @@ dependencies = [
  "serde",
  "serde_json",
  "tokio",
+]
+
+[[package]]
+name = "rsi-installation"
+version = "0.0.1"
+dependencies = [
+ "dirs",
+ "getrandom 0.3.4",
+ "hex",
+ "rsi-files-native-fs",
+ "rsi-host",
+ "rsi-packages",
+ "rsi-service-host",
+ "rustix 1.1.4",
+ "serde",
+ "serde_json",
+ "sha2",
+ "tempfile",
+ "tokio",
+ "windows-sys 0.61.2",
+ "winreg 0.55.0",
 ]
 
 [[package]]
@@ -8180,6 +8205,15 @@ dependencies = [
  "serde",
  "serde_json",
  "thiserror 2.0.20",
+]
+
+[[package]]
+name = "rsi-uninstall"
+version = "0.0.1"
+dependencies = [
+ "rsi-host",
+ "rsi-installation",
+ "tokio",
 ]
 
 [[package]]

@@ -65,27 +65,32 @@ Use PowerShell:
 
 <!-- rsi-example id=install-windows platform=windows -->
 ```powershell
-powershell -NoProfile -ExecutionPolicy Bypass -File .\scripts\rsiversi.ps1
+powershell -NoProfile -ExecutionPolicy Bypass -File .\scripts\install.ps1
 ```
 
 Or Git Bash on Windows:
 
 <!-- rsi-example id=install-git-bash platform=git-bash -->
 ```bash
-bash scripts/rsiversi.sh
+bash scripts/install.sh
 ```
 
 On Linux or WSL:
 
 <!-- rsi-example id=install-bash platform=linux -->
 ```bash
-bash scripts/rsiversi.sh
+bash scripts/install.sh
 ```
 
-Open a new terminal and run `rsi` for TUI. Add Web with `rsi plugin install web`,
+Restart your terminal application and run `rsi` for TUI. Add Web with `rsi plugin install web`,
 then run `rsi web`. For local source packages, follow the source-install guide.
 The browser launcher returns after opening its one-time sign-in link; the Host
 remains available to other interfaces.
+
+Use `rsi --help` for the command overview and `rsi APPLICATION --help` for detailed
+options. Installation also saves an independent uninstall launcher; ordinary
+uninstall preserves data. See [uninstall and purge](docs/user/source-install.md#uninstall-or-clear-runtime-data)
+before clearing homes shared by multiple installations.
 
 In **Settings → Models & access**, save a credential, configure its provider,
 then select a default model. Create a conversation and choose a working

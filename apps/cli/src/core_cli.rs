@@ -1,12 +1,8 @@
 //! Explicit core replacement; all executable bytes pass ordinary package admission.
 use super::{HostProfileId, OsString, RsiError};
-use rsi::CoreUpgrade;
+use rsi_installation::upgrade::Upgrade as CoreUpgrade;
 use rsi_service_host::{HostOwnerMode, HostStartupLease, ServiceHostPaths};
-use std::{
-    path::{Path, PathBuf},
-    process::Stdio,
-    time::Duration,
-};
+use std::path::{Path, PathBuf};
 
 use super::cli::CORE_HELP as HELP;
 
@@ -16,7 +12,9 @@ pub(super) fn ensure_no_pending() -> rsi::Result<()> {
         executable
             .parent()
             .ok_or_else(|| error("missing executable parent"))?,
-    )? {
+    )
+    .map_err(error)?
+    {
         return Err(error(
             "a core upgrade needs recovery; run rsi core recover with its original config/state homes",
         ));
@@ -58,7 +56,8 @@ async fn execute(command: Command) -> rsi::Result<()> {
                 .parent()
                 .ok_or_else(|| error("missing installation directory"))?,
             &paths,
-        )?;
+        )
+        .map_err(error)?;
         restore(transaction, &paths, &host, &startup).await?;
         return Ok(());
     }
@@ -78,17 +77,25 @@ async fn execute(command: Command) -> rsi::Result<()> {
     for home in [paths.config(), paths.state()] {
         rsi_files_native_fs::create_absolute_directory_no_follow(home).map_err(error)?;
     }
-    let transaction = CoreUpgrade::prepare(&executable, &candidate, digest, &paths, was_running)?;
-    if let Err(failure) = probe(&transaction.candidate()).await {
-        transaction.finish(false)?;
+    let transaction = CoreUpgrade::prepare(
+        &executable,
+        &candidate,
+        digest,
+        &paths,
+        was_running,
+        &package,
+    )
+    .map_err(error)?;
+    if let Err(failure) = transaction.probe_candidates().await.map_err(error) {
+        transaction.finish(false).map_err(error)?;
         return Err(failure);
     }
-    if was_running && let Err(failure) = super::host_cli::stop_host_daemon(false).await {
-        transaction.finish(false)?;
+    if was_running && let Err(failure) = super::host_cli::stop_host_daemon(false, true).await {
+        transaction.finish(false).map_err(error)?;
         return Err(failure);
     }
     let result = async {
-        transaction.promote()?;
+        transaction.promote().map_err(error)?;
         start(&transaction.executable(), &paths, &startup).await
     }
     .await;
@@ -103,7 +110,7 @@ async fn execute(command: Command) -> rsi::Result<()> {
         };
     }
     let digest = transaction.candidate_digest().to_owned();
-    let receipt = transaction.finish(true)?;
+    let receipt = transaction.finish(true).map_err(error)?;
     println!(
         "{}",
         serde_json::json!({"event":"core_upgraded","sha256":digest,"receipt":receipt})
@@ -145,44 +152,18 @@ async fn restore(
     startup: &HostStartupLease,
 ) -> rsi::Result<()> {
     if active(host)? {
-        super::host_cli::stop_host_daemon(false).await?;
+        super::host_cli::stop_host_daemon(false, true).await?;
     }
-    transaction.rollback()?;
+    transaction.rollback().map_err(error)?;
     if transaction.was_running() {
         start(&transaction.executable(), paths, startup).await?;
     }
-    let receipt = transaction.finish(false)?;
+    let receipt = transaction.finish(false).map_err(error)?;
     println!(
         "{}",
         serde_json::json!({"event":"core_recovered","receipt":receipt})
     );
     Ok(())
-}
-async fn probe(executable: &Path) -> rsi::Result<()> {
-    let mut command = tokio::process::Command::new(executable);
-    command
-        .arg("--version")
-        .env_clear()
-        .envs(rsi::scrub_child_environment(std::env::vars_os()))
-        .stdin(Stdio::null())
-        .stdout(Stdio::null())
-        .stderr(Stdio::null())
-        .kill_on_drop(true);
-    #[cfg(windows)]
-    command.creation_flags(0x0800_0000); // CREATE_NO_WINDOW; no console is needed for a load probe.
-    let mut child = command
-        .spawn()
-        .map_err(|_| error("candidate executable could not start"))?;
-    match tokio::time::timeout(Duration::from_secs(10), child.wait()).await {
-        Ok(Ok(status)) if status.success() => Ok(()),
-        _ => {
-            let _ = child.kill().await;
-            let _ = child.wait().await;
-            Err(error(
-                "candidate executable failed its bounded version probe",
-            ))
-        }
-    }
 }
 fn error(value: impl std::fmt::Display) -> RsiError {
     RsiError::Boot(format!("core: {value}"))

@@ -644,7 +644,7 @@ fn root_readme_translations_require_reciprocity_and_command_parity() {
 #[test]
 fn homepage_commands_reuse_the_source_install_contract() {
     let repository = valid_repository();
-    let example = "<!-- rsi-example id=install-bash platform=git-bash -->\n```bash\nbash scripts/rsiversi.sh setup web\n```\n";
+    let example = "<!-- rsi-example id=install-bash platform=git-bash -->\n```bash\nbash scripts/install.sh setup web\n```\n";
     for (path, link) in [
         (
             "docs/user/source-install.md",
@@ -771,8 +771,8 @@ fn user_translations_require_pairs_links_and_matching_platform_commands() {
         "crates/rsi/README.md",
         "# RSI\n\nOwn the application product.\n",
     );
-    let original = "# Start\n\n[简体中文](../i18n/zh-CN/user/start.md)\n\n<!-- rsi-example id=doctor platform=windows -->\n```powershell\nscripts/rsiversi.ps1 doctor\n```\n";
-    let translated = "# 开始\n\n[English](../../../user/start.md)\n\n<!-- rsi-example id=doctor platform=windows -->\n```powershell\nscripts/rsiversi.ps1 doctor\n```\n";
+    let original = "# Start\n\n[简体中文](../i18n/zh-CN/user/start.md)\n\n<!-- rsi-example id=doctor platform=windows -->\n```powershell\nscripts/install.ps1 doctor\n```\n";
+    let translated = "# 开始\n\n[English](../../../user/start.md)\n\n<!-- rsi-example id=doctor platform=windows -->\n```powershell\nscripts/install.ps1 doctor\n```\n";
     write(repository.path(), "docs/user/start.md", original);
     assert!(stderr(&verify(repository.path())).contains("English/Simplified Chinese pair"));
     write(
@@ -816,7 +816,7 @@ fn user_translations_require_pairs_links_and_matching_platform_commands() {
     write(
         repository.path(),
         "docs/i18n/zh-CN/user/start.md",
-        &translated.replace("scripts/rsiversi.ps1 doctor", "scripts/rsiversi.ps1 setup"),
+        &translated.replace("scripts/install.ps1 doctor", "scripts/install.ps1 setup"),
     );
     assert!(stderr(&verify(repository.path())).contains("command examples differ"));
     write(

@@ -266,8 +266,15 @@ fn built_binary_advertises_the_complete_management_command_tree() {
     let root = binary(&["--help"]);
     assert!(root.status.success());
     let root = String::from_utf8(root.stdout).unwrap();
-    assert!(root.contains("rsi agent-preset <COMMAND>"));
-    assert!(root.contains("--agent-preset ID"));
+    assert!(root.contains("agent-preset    Inspect and manage Agent presets"));
+    assert!(!root.contains("--agent-preset ID"));
+    let application = binary(&["headless", "--help"]);
+    assert!(application.status.success());
+    assert!(
+        String::from_utf8(application.stdout)
+            .unwrap()
+            .contains("--agent-preset ID")
+    );
 
     let preset = binary(&["agent-preset", "--help"]);
     assert!(preset.status.success());
@@ -801,3 +808,44 @@ fn application_bootstrap_accepts_the_system_config_alias_for_preset_validation()
 #[cfg(unix)]
 #[path = "agent_preset/native.rs"]
 mod native;
+
+#[test]
+fn read_only_management_does_not_resolve_installation_provenance() {
+    let root = tempfile::tempdir().unwrap();
+    let output = Command::new(env!("CARGO_BIN_EXE_rsi"))
+        .args(["--config-home"])
+        .arg(root.path().join("config"))
+        .args(["--state-home"])
+        .arg(root.path().join("state"))
+        .args(["--cache-home"])
+        .arg(root.path().join("cache"))
+        .args(["profile", "application", "list"])
+        .env("RSI_INSTALLATION_ORIGIN", "invalid origin must stay unread")
+        .output()
+        .unwrap();
+    assert!(
+        output.status.success(),
+        "{}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    assert!(!String::from_utf8_lossy(&output.stderr).contains("provenance"));
+}
+
+#[test]
+fn unknown_maintenance_help_does_not_initialize_or_reset_homes() {
+    for command in ["core", "config", "import", "plugin", "host"] {
+        let root = tempfile::tempdir().unwrap();
+        let output = Command::new(env!("CARGO_BIN_EXE_rsi"))
+            .args(["--config-home"])
+            .arg(root.path().join("config"))
+            .args(["--state-home"])
+            .arg(root.path().join("state"))
+            .args(["--cache-home"])
+            .arg(root.path().join("cache"))
+            .args(["--reset-state", command, "unknown", "--help"])
+            .output()
+            .unwrap();
+        assert!(!output.status.success());
+        assert_eq!(std::fs::read_dir(root.path()).unwrap().count(), 0);
+    }
+}

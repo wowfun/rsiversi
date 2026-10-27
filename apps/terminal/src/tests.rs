@@ -1128,7 +1128,9 @@ fn removed_workspace_flag_is_unknown_but_literal_input_is_preserved() {
             .as_deref(),
         Some("--trust-workspace")
     );
-    assert!(!HELP.contains("--trust-workspace"));
+    for help in [HEADLESS_HELP, CLI_HELP, TUI_HELP] {
+        assert!(!help.contains("--trust-workspace"));
+    }
 }
 
 #[tokio::test]

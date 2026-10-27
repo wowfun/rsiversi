@@ -155,7 +155,7 @@ fn installed_core_upgrades_recovers_and_preserves_active_host_on_invalid_candida
 
     // Simulate interruption after executable promotion. Recovery runs through the
     // real CLI and retained Host coordinator, and reactivates the previous core.
-    let transaction = rsi::CoreUpgrade::prepare(
+    let transaction = rsi_installation::legacy::CoreUpgrade::prepare(
         &fixture.executable,
         &support::product_binary(),
         &original,
@@ -183,6 +183,260 @@ fn installed_core_upgrades_recovers_and_preserves_active_host_on_invalid_candida
     assert!(!invalid.status.success());
     assert!(String::from_utf8_lossy(&invalid.stderr).contains("candidate executable"));
     assert_eq!(recovered.pid, fixture.metadata().pid);
-    assert!(!rsi::CoreUpgrade::has_pending(fixture.executable.parent().unwrap()).unwrap());
+    assert!(
+        !rsi_installation::legacy::CoreUpgrade::has_pending(fixture.executable.parent().unwrap())
+            .unwrap()
+    );
     fixture.success(&["host", "stop"]);
+}
+
+fn uninstaller() -> PathBuf {
+    std::env::var_os("RSI_TEST_UNINSTALLER").map_or_else(
+        || {
+            support::product_binary()
+                .parent()
+                .unwrap()
+                .join(if cfg!(windows) {
+                    "rsi-uninstall.exe"
+                } else {
+                    "rsi-uninstall"
+                })
+        },
+        PathBuf::from,
+    )
+}
+impl Fixture {
+    fn managed(&self) -> rsi_installation::Layout {
+        use rsi_installation::{
+            Record,
+            record::{Phase, Role},
+        };
+        let layout = rsi_installation::Layout::new(self.root.path()).unwrap();
+        let directory =
+            rsi_files_native_fs::create_absolute_directory_no_follow(&layout.control).unwrap();
+        std::fs::copy(uninstaller(), layout.target(Role::Uninstaller))
+            .expect("build rsi-uninstall before integration tests");
+        let launcher = Path::new(env!("CARGO_MANIFEST_DIR"))
+            .join("../../scripts")
+            .join(Role::Launcher.name());
+        std::fs::copy(launcher, layout.target(Role::Launcher)).unwrap();
+        Record {
+            format: 1,
+            id: "a".repeat(32),
+            prefix: layout.prefix.clone(),
+            phase: Phase::Installed,
+            core: hash(&self.executable),
+            uninstaller: hash(&layout.target(Role::Uninstaller)),
+            launcher: hash(&layout.target(Role::Launcher)),
+            path_edits: vec![],
+        }
+        .save(&directory, false)
+        .unwrap();
+        layout
+    }
+    fn full_manifest(&self, layout: &rsi_installation::Layout) -> PathBuf {
+        let produced = self.root.path().join("produced-core-package");
+        let output = Command::new("node")
+            .arg(Path::new(env!("CARGO_MANIFEST_DIR")).join("../devtools/packages.mjs"))
+            .args(["assemble", "core"])
+            .arg(&produced)
+            .arg(&self.candidate)
+            .arg(layout.target(rsi_installation::record::Role::Uninstaller))
+            .output()
+            .expect("Node is required for the producer-to-consumer package fixture");
+        assert!(
+            output.status.success(),
+            "{}",
+            String::from_utf8_lossy(&output.stderr)
+        );
+        produced
+    }
+    fn interrupt_managed_upgrade(&self, layout: &rsi_installation::Layout) {
+        let inputs = [
+            support::product_binary(),
+            uninstaller(),
+            PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+                .join("../../scripts")
+                .join(rsi_installation::record::LAUNCHER),
+        ];
+        let hashes = inputs.each_ref().map(|path| hash(path));
+        let host = rsi_service_host::ServiceHostPaths::from_host_paths(&self.paths).unwrap();
+        let startup = rsi_service_host::HostStartupLease::try_acquire(&host).unwrap();
+        let transaction = rsi_installation::transaction::Transaction::prepare(
+            layout.clone(),
+            inputs.each_ref().map(PathBuf::as_path),
+            hashes.each_ref().map(String::as_str),
+            &self.paths,
+            true,
+        )
+        .unwrap();
+        transaction.promote().unwrap();
+        drop(transaction);
+        drop(startup);
+    }
+    fn uninstall(&self, prefix: &Path, purge: bool) -> Output {
+        let mut command = Command::new(uninstaller());
+        command
+            .args(["uninstall", "--interface-version", "1", "--prefix"])
+            .arg(prefix)
+            .arg("--config-home")
+            .arg(self.paths.config())
+            .arg("--state-home")
+            .arg(self.paths.state())
+            .arg("--cache-home")
+            .arg(self.paths.cache())
+            .args(["--yes", "--no-path"]);
+        if purge {
+            command.arg("--purge");
+        }
+        command.output().unwrap()
+    }
+}
+#[test]
+fn managed_upgrade_updates_all_roles_and_uninstall_stops_only_its_own_host() {
+    use rsi_installation::record::Role;
+    let fixture = Fixture::new();
+    let layout = fixture.managed();
+    fixture.success(&["config", "init"]);
+    fixture.success(&["host", "start"]);
+    let first = fixture.metadata();
+    assert_eq!(first.format, 3);
+    assert_eq!(first.installation.as_ref().unwrap().prefix, layout.prefix);
+    fixture.manifest();
+    let refused = fixture
+        .command()
+        .args(["core", "upgrade", "--local"])
+        .arg(&fixture.package)
+        .output()
+        .unwrap();
+    assert!(!refused.status.success());
+    assert_eq!(first.pid, fixture.metadata().pid);
+    assert!(!rsi_installation::legacy::CoreUpgrade::has_pending(&layout.bin).unwrap());
+    let produced = fixture.full_manifest(&layout);
+    let upgraded = fixture
+        .command()
+        .args(["core", "upgrade", "--local"])
+        .arg(&produced)
+        .output()
+        .unwrap();
+    assert!(
+        upgraded.status.success(),
+        "{}",
+        String::from_utf8_lossy(&upgraded.stderr)
+    );
+    let event: serde_json::Value = serde_json::from_slice(&upgraded.stdout)
+        .expect("core upgrade stdout contains exactly one JSON receipt");
+    assert_eq!(event["event"], "core_upgraded");
+    let record = layout.record().unwrap().unwrap();
+    assert_eq!(record.core, hash(&fixture.candidate));
+    assert_eq!(record.uninstaller, hash(&layout.target(Role::Uninstaller)));
+    assert_eq!(record.launcher, hash(&layout.target(Role::Launcher)));
+    let second = fixture.metadata();
+    assert_eq!(second.installation.as_ref().unwrap().prefix, layout.prefix);
+    assert_ne!(first.pid, second.pid);
+    // Exercise version dispatch through the real CLI after a v2 publication crash.
+    let before_recovery: Vec<_> = Role::ALL
+        .into_iter()
+        .map(|role| hash(&layout.target(role)))
+        .collect();
+    fixture.interrupt_managed_upgrade(&layout);
+    assert!(
+        !fixture
+            .command()
+            .args(["config", "show"])
+            .output()
+            .unwrap()
+            .status
+            .success()
+    );
+    fixture.success(&["core", "recover"]);
+    assert_eq!(
+        before_recovery,
+        Role::ALL
+            .into_iter()
+            .map(|role| hash(&layout.target(role)))
+            .collect::<Vec<_>>()
+    );
+    let recovered = fixture.metadata();
+    assert_eq!(
+        recovered.installation.as_ref().unwrap().prefix,
+        layout.prefix
+    );
+    assert_ne!(second.pid, recovered.pid);
+    let second = recovered;
+    let removed = fixture.uninstall(&layout.prefix, false);
+    assert!(
+        removed.status.success(),
+        "{}",
+        String::from_utf8_lossy(&removed.stderr)
+    );
+    assert!(!rsi_service_host::owner_process_is_current(&second).unwrap());
+    assert!(fixture.paths.config().join("rsi.toml").exists());
+    assert!(
+        fixture
+            .paths
+            .state()
+            .join("session-host/artifacts")
+            .exists()
+    );
+    for role in Role::ALL {
+        assert!(!layout.target(role).exists());
+    }
+}
+#[test]
+fn same_build_in_another_prefix_does_not_own_a_shared_host_but_purge_stops_it() {
+    let owner = Fixture::new();
+    let owner_layout = owner.managed();
+    owner.success(&["config", "init"]);
+    owner.success(&["host", "start"]);
+    let metadata = owner.metadata();
+    let other = Fixture::new();
+    let other_layout = other.managed();
+    // Deliberately retain the same fixture installation ID and build: prefix still differs.
+    let removed = owner.uninstall(&other_layout.prefix, false);
+    assert!(
+        removed.status.success(),
+        "{}",
+        String::from_utf8_lossy(&removed.stderr)
+    );
+    assert!(rsi_service_host::owner_process_is_current(&metadata).unwrap());
+    let purged = owner.uninstall(&other_layout.prefix, true);
+    assert!(
+        purged.status.success(),
+        "{}",
+        String::from_utf8_lossy(&purged.stderr)
+    );
+    assert!(!rsi_service_host::owner_process_is_current(&metadata).unwrap());
+    assert!(
+        owner_layout
+            .target(rsi_installation::record::Role::Core)
+            .exists()
+    );
+    assert!(owner.paths.config().join("rsi.toml").exists());
+}
+
+#[test]
+fn stale_host_stop_does_not_claim_it_stopped_a_process() {
+    let fixture = Fixture::new();
+    fixture.success(&["config", "init"]);
+    fixture.success(&["host", "start"]);
+    let metadata = fixture.metadata();
+    fixture.success(&["host", "stop"]);
+    let host = rsi_service_host::ServiceHostPaths::from_host_paths(&fixture.paths).unwrap();
+    let owner = rsi_service_host::HostOwnerLease::try_acquire(host.clone()).unwrap();
+    // Recreate a stopped product generation's record, not this test process's build.
+    let directory =
+        rsi_files_native_fs::open_absolute_directory_no_follow(host.owner_directory()).unwrap();
+    rsi_installation::filesystem::write(
+        &directory,
+        "owner.json",
+        &serde_json::to_vec(&metadata).unwrap(),
+        true,
+    )
+    .unwrap();
+    drop(owner);
+    let output = fixture.success(&["host", "stop"]);
+    assert!(output.stdout.is_empty());
+    assert!(String::from_utf8_lossy(&output.stderr).contains("is not running"));
+    assert!(host.owner_metadata().exists());
 }

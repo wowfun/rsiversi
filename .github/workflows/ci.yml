@@ -115,10 +115,14 @@ jobs:
         if: ${{ !cancelled() }}
         timeout-minutes: 5
         run: npm ci --prefix apps/devtools/tools --ignore-scripts --no-audit --no-fund
-      - name: Verify independent packages and minimal installation
-        if: ${{ !cancelled() }}
+      - name: Build independent native maintenance tool
+        id: maintenance_tool
+        timeout-minutes: 10
+        run: cargo build --locked -p rsi-uninstall
+      - name: Verify independent packages, installation and removal
+        if: ${{ !cancelled() && steps.maintenance_tool.outcome == 'success' }}
         timeout-minutes: 5
-        run: node --test apps/devtools/tests/packages.test.mjs apps/devtools/tests/install.test.mjs
+        run: node --test apps/devtools/tests/packages.test.mjs apps/devtools/tests/install.test.mjs apps/devtools/tests/uninstall.test.mjs
 
   rsi-meta-conformance:
     strategy:
@@ -795,7 +799,7 @@ jobs:
         timeout-minutes: 10
       - name: Lint standard rsi
         if: ${{ !cancelled() && steps.native_setup.outcome == 'success' }}
-        run: cargo clippy --locked -p rsi -p rsi-automation -p rsi-automation-api -p rsi-browser -p rsi-cli -p rsi-app-catalog -p rsi-app-tools -p rsi-dev-control -p rsi-build-info -p rsi-acp-application -p rsi-addon-testkit -p rsi-acp-agent -p 'rsi-lsp*' -p rsi-service-ui -p 'rsi-history*' -p rsi-service-host -p rsi-host-control -p rsi-desktop-bridge -p rsi-packages -p rsi-goal -p rsi-schedule -p 'rsi-session*' -p rsi-application -p rsi-gui -p rsi-workbench-ui -p 'rsi-configuration*' -p rsi-managed-providers -p 'rsi-navigation*' -p 'rsi-directory-picker*' -p 'rsi-client*' -p rsi-conversation -p 'rsi-ui*' -p rsi-inspector -p rsi-native-addons-api -p 'rsi-terminal*' -p rsi-serve -p 'rsi-web*' --all-targets -- -D warnings
+        run: cargo clippy --locked -p rsi -p rsi-automation -p rsi-automation-api -p rsi-browser -p rsi-cli -p rsi-app-catalog -p rsi-app-tools -p rsi-dev-control -p rsi-build-info -p rsi-acp-application -p rsi-addon-testkit -p rsi-acp-agent -p 'rsi-lsp*' -p rsi-service-ui -p 'rsi-history*' -p rsi-service-host -p rsi-host-control -p rsi-desktop-bridge -p rsi-packages -p rsi-installation -p rsi-uninstall -p rsi-goal -p rsi-schedule -p 'rsi-session*' -p rsi-application -p rsi-gui -p rsi-workbench-ui -p 'rsi-configuration*' -p rsi-managed-providers -p 'rsi-navigation*' -p 'rsi-directory-picker*' -p 'rsi-client*' -p rsi-conversation -p 'rsi-ui*' -p rsi-inspector -p rsi-native-addons-api -p 'rsi-terminal*' -p rsi-serve -p 'rsi-web*' --all-targets -- -D warnings
         timeout-minutes: 20
       - name: Check GUI test-support contracts
         if: ${{ !cancelled() && steps.native_setup.outcome == 'success' }}
@@ -814,7 +818,7 @@ jobs:
       - name: Compile standard rsi tests
         if: ${{ !cancelled() && steps.native_setup.outcome == 'success' }}
         id: standard_build
-        run: cargo test --locked -p rsi -p rsi-automation -p rsi-automation-api -p rsi-browser -p rsi-cli -p rsi-app-catalog -p rsi-app-tools -p rsi-dev-control -p rsi-build-info -p rsi-acp-application -p rsi-addon-testkit -p rsi-acp-agent -p 'rsi-lsp*' -p rsi-service-ui -p 'rsi-history*' -p rsi-service-host -p rsi-host-control -p rsi-desktop-bridge -p rsi-packages -p rsi-goal -p rsi-schedule -p 'rsi-session*' -p rsi-application -p rsi-gui -p rsi-workbench-ui -p 'rsi-configuration*' -p rsi-managed-providers -p 'rsi-navigation*' -p 'rsi-directory-picker*' -p 'rsi-client*' -p rsi-conversation -p 'rsi-ui*' -p rsi-inspector -p rsi-native-addons-api -p 'rsi-terminal*' -p rsi-serve -p 'rsi-web*' --all-targets --no-run
+        run: cargo test --locked -p rsi -p rsi-automation -p rsi-automation-api -p rsi-browser -p rsi-cli -p rsi-app-catalog -p rsi-app-tools -p rsi-dev-control -p rsi-build-info -p rsi-acp-application -p rsi-addon-testkit -p rsi-acp-agent -p 'rsi-lsp*' -p rsi-service-ui -p 'rsi-history*' -p rsi-service-host -p rsi-host-control -p rsi-desktop-bridge -p rsi-packages -p rsi-installation -p rsi-uninstall -p rsi-goal -p rsi-schedule -p 'rsi-session*' -p rsi-application -p rsi-gui -p rsi-workbench-ui -p 'rsi-configuration*' -p rsi-managed-providers -p 'rsi-navigation*' -p 'rsi-directory-picker*' -p 'rsi-client*' -p rsi-conversation -p 'rsi-ui*' -p rsi-inspector -p rsi-native-addons-api -p 'rsi-terminal*' -p rsi-serve -p 'rsi-web*' --all-targets --no-run
         timeout-minutes: 20
       - name: Exercise standard rsi on Linux
         if: ${{ !cancelled() && steps.native_setup.outcome == 'success' && steps.standard_build.outcome == 'success' && runner.os == 'Linux' }}
@@ -837,7 +841,7 @@ jobs:
               fi
             done
           fi
-          cargo test --locked -p rsi -p rsi-automation -p rsi-automation-api -p rsi-browser -p rsi-cli -p rsi-app-catalog -p rsi-app-tools -p rsi-dev-control -p rsi-build-info -p rsi-acp-application -p rsi-addon-testkit -p rsi-acp-agent -p 'rsi-lsp*' -p rsi-service-ui -p 'rsi-history*' -p rsi-service-host -p rsi-host-control -p rsi-desktop-bridge -p rsi-packages -p rsi-goal -p rsi-schedule -p 'rsi-session*' -p rsi-application -p rsi-gui -p rsi-workbench-ui -p 'rsi-configuration*' -p rsi-managed-providers -p 'rsi-navigation*' -p 'rsi-directory-picker*' -p 'rsi-client*' -p rsi-conversation -p 'rsi-ui*' -p rsi-inspector -p rsi-native-addons-api -p 'rsi-terminal*' -p rsi-serve -p 'rsi-web*' --all-targets --no-fail-fast
+          cargo test --locked -p rsi -p rsi-automation -p rsi-automation-api -p rsi-browser -p rsi-cli -p rsi-app-catalog -p rsi-app-tools -p rsi-dev-control -p rsi-build-info -p rsi-acp-application -p rsi-addon-testkit -p rsi-acp-agent -p 'rsi-lsp*' -p rsi-service-ui -p 'rsi-history*' -p rsi-service-host -p rsi-host-control -p rsi-desktop-bridge -p rsi-packages -p rsi-installation -p rsi-uninstall -p rsi-goal -p rsi-schedule -p 'rsi-session*' -p rsi-application -p rsi-gui -p rsi-workbench-ui -p 'rsi-configuration*' -p rsi-managed-providers -p 'rsi-navigation*' -p 'rsi-directory-picker*' -p 'rsi-client*' -p rsi-conversation -p 'rsi-ui*' -p rsi-inspector -p rsi-native-addons-api -p 'rsi-terminal*' -p rsi-serve -p 'rsi-web*' --all-targets --no-fail-fast
           cargo test --locked -p rsi --test session_service terminals::uds_terminals_require_persistence_isolate_sessions_keep_facts_unchanged_and_retire -- --ignored --exact --list | rg --fixed-strings --line-regexp 'terminals::uds_terminals_require_persistence_isolate_sessions_keep_facts_unchanged_and_retire: test'
           cargo test --locked -p rsi --test session_service terminals::uds_terminals_require_persistence_isolate_sessions_keep_facts_unchanged_and_retire -- --ignored --exact
         timeout-minutes: 35
@@ -957,7 +961,7 @@ jobs:
         if: ${{ !cancelled() && steps.native_setup.outcome == 'success' && steps.standard_build.outcome == 'success' && runner.os == 'macOS' }}
         env:
           RSI_TUI_PTY_REPORT: ${{ runner.temp }}/rsi-pty-evidence
-        run: cargo test --locked -p rsi -p rsi-automation -p rsi-automation-api -p rsi-browser -p rsi-cli -p rsi-app-catalog -p rsi-app-tools -p rsi-dev-control -p rsi-build-info -p rsi-acp-application -p rsi-addon-testkit -p rsi-acp-agent -p 'rsi-lsp*' -p rsi-service-ui -p 'rsi-history*' -p rsi-service-host -p rsi-host-control -p rsi-desktop-bridge -p rsi-packages -p rsi-goal -p rsi-schedule -p 'rsi-session*' -p rsi-application -p rsi-gui -p rsi-workbench-ui -p 'rsi-configuration*' -p rsi-managed-providers -p 'rsi-navigation*' -p 'rsi-directory-picker*' -p 'rsi-client*' -p rsi-conversation -p 'rsi-ui*' -p rsi-inspector -p rsi-native-addons-api -p 'rsi-terminal*' -p rsi-serve -p 'rsi-web*' --all-targets --no-fail-fast -- --nocapture
+        run: cargo test --locked -p rsi -p rsi-automation -p rsi-automation-api -p rsi-browser -p rsi-cli -p rsi-app-catalog -p rsi-app-tools -p rsi-dev-control -p rsi-build-info -p rsi-acp-application -p rsi-addon-testkit -p rsi-acp-agent -p 'rsi-lsp*' -p rsi-service-ui -p 'rsi-history*' -p rsi-service-host -p rsi-host-control -p rsi-desktop-bridge -p rsi-packages -p rsi-installation -p rsi-uninstall -p rsi-goal -p rsi-schedule -p 'rsi-session*' -p rsi-application -p rsi-gui -p rsi-workbench-ui -p 'rsi-configuration*' -p rsi-managed-providers -p 'rsi-navigation*' -p 'rsi-directory-picker*' -p 'rsi-client*' -p rsi-conversation -p 'rsi-ui*' -p rsi-inspector -p rsi-native-addons-api -p 'rsi-terminal*' -p rsi-serve -p 'rsi-web*' --all-targets --no-fail-fast -- --nocapture
         timeout-minutes: 20
 
       - name: Preserve source addon acceptance evidence
@@ -1212,10 +1216,15 @@ jobs:
       - uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020
         with:
           node-version: 22.23.2
-      - name: Verify Windows PowerShell and Git Bash installers
-        if: ${{ !cancelled() }}
+      - name: Build Windows independent maintenance tool
+        id: maintenance_tool
+        if: ${{ !cancelled() && steps.native_toolchain.outcome == 'success' }}
+        timeout-minutes: 10
+        run: cargo build --locked -p rsi-uninstall
+      - name: Verify Windows PowerShell and Git Bash installation and removal
+        if: ${{ !cancelled() && steps.maintenance_tool.outcome == 'success' }}
         timeout-minutes: 5
-        run: node --test apps/devtools/tests/install.test.mjs
+        run: node --test apps/devtools/tests/install.test.mjs apps/devtools/tests/uninstall.test.mjs
       - name: Install Windows browser fixture packages
         if: ${{ !cancelled() }}
         timeout-minutes: 5

@@ -4,11 +4,25 @@ The source installers reject explicitly empty binary or prefix arguments before
 build or filesystem work. Windows builds inherit the caller's output handles;
 heartbeat messages remain visible, and interrupted waits terminate the owned
 build process tree before disposing the process handle.
-The source installers in `scripts` install only the native `rsi` executable and
-configure the user's PATH. They do not select applications, change homes, install
+The `scripts/install.sh` and `scripts/install.ps1` first-install entrypoints install
+the native `rsi`, independent uninstaller and platform uninstall launcher, and
+configure the user's PATH through the versioned native installation operation.
+The [installation owner](../../crates/rsi/installation/README.md) defines records,
+publication, PATH receipts and removal authority. They do not select applications, change homes, install
 plugins or run the product. An existing installation is upgraded through the
 core transaction, rather than overwritten by the bootstrap installer.
-`--binary` / `-Binary` installs an explicitly trusted existing executable;
+After parsing arguments and resolving the destination, installers reject an
+existing destination (including directories and dangling links) or a non-directory
+parent before discovering Cargo, preparing build directories, inspecting the
+source executable or changing PATH. These checks do not execute an existing
+installation. Refusals name the absolute conflicting path and offer another
+prefix; an ordinary existing executable also receives a shell-quoted command
+targeting that exact installation with `core upgrade --local`. Its argument is
+a core package directory containing `package.json`, not a bare executable.
+The [source installation tutorial](../../docs/user/source-install.md) explains
+package preparation. Installers do not add a package producer dependency.
+`--binary` / `-Binary` requires `--uninstaller` / `-Uninstaller` and installs an
+explicitly trusted prebuilt pair without Cargo;
 `--prefix` / `-Prefix` chooses the installation root, and `--no-path` / `-NoPath`
 supports isolated installation verification.
 The Bash entrypoint supports Linux/WSL and Windows Git Bash (`MINGW*`/`MSYS*`).
@@ -24,18 +38,25 @@ Before creating the isolated build environment, the Windows installer coalesces
 inherited variable names that differ only in case, using the value Windows selects.
 This normalization is local to the installer process; it does not change saved
 user or system environment settings.
-Installers emit stage messages to stderr before preparation, building, copying,
+Installers emit stage messages to stderr before preparation and building; the native operation reports copying,
 verification and PATH setup. Help emits no progress. Existing binaries skip build
 messages, and `--no-path` reports that PATH setup is skipped. Cargo output remains
 live; Windows also reports elapsed build time every 15 seconds while waiting,
 without estimating a completion percentage.
 Publication atomically refuses any existing destination, including a directory
-created while the staged executable is being checked.
+created while the staged executable is being checked. A publication collision
+uses the same concise diagnostic as preflight and removes the installer's staged
+file without replacing the competing destination.
 The Windows installer makes a newly created `bin` directory private to the current
 user, SYSTEM and Administrators so it can support core upgrade. Existing directory
 ACLs are preserved; shared installations require administrator-managed updates.
-Installer admission tests use stable PowerShell error IDs, independent of the
-user's display language.
+Installer failures emit concise stderr diagnostics without PowerShell source
+locations or exception stacks. Parameter-binding tests use stable PowerShell
+error IDs, independent of the user's display language.
+PowerShell script output uses UTF-8 independently of the inherited console codepage.
+Relative `CARGO_TARGET_DIR` values resolve against the source checkout, matching Cargo.
+Linux and Windows CI build the native uninstaller before running the installer,
+uninstaller and package behavior suites against isolated prefixes and homes.
 
 `node apps/devtools/build.mjs core|web|desktop|ssh-helper ABSOLUTE_PACKAGE
 [--debug] [--replace]` builds one independent package.
@@ -69,12 +90,14 @@ homes and commands with `--watch`; trusted recipes belong to
 [`rsi.toml`](../../crates/rsi/core/docs/launch.md). There is no separate development
 runtime or source-directory launcher.
 
-`node apps/devtools/packages.mjs assemble KIND OUTPUT INPUT`
+`node apps/devtools/packages.mjs assemble KIND OUTPUT INPUT [UNINSTALLER]`
 assembles already built artifacts. Output must be new. Payloads are hashed and
 copied in 64 KiB chunks, then verified before the manifest is written. The package
 owner's disk bounds cover unstripped debug binaries without making them buffer
 sizes. `RSI_RELEASE_VERSION` labels the package. Requirements come from the
 artifact's actual wire contracts, not a native build family.
+Core requires the uninstaller input and includes the platform uninstall launcher;
+both native exports and the launcher are verified before publication.
 
 `fixture-dist` binds the document bundle identity to its captured build-family
 digest. This lets evidence fixtures verify the exact native/assets publication;
@@ -116,3 +139,7 @@ Build producers share `build-environment.txt` for forwarded tool inputs. Fixture
 captures deliberately replace `CARGO_TARGET_DIR` with their isolated captured
 target and use separate private homes; ordinary package builds use the caller's
 selected Cargo target. These directory choices are not wire identities.
+
+Installation and removal tests require a prebuilt native `rsi-uninstall` at
+`target/debug` or `RSI_TEST_UNINSTALLER`. Build it with `cargo build -p rsi-uninstall`
+before running the isolated Node suites; their fixtures never build during uninstall.

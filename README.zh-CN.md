@@ -55,26 +55,29 @@ Windows 使用 Windows 11 24H2 或更新版本的 x64 系统，
 
 <!-- rsi-example id=install-windows platform=windows -->
 ```powershell
-powershell -NoProfile -ExecutionPolicy Bypass -File .\scripts\rsiversi.ps1
+powershell -NoProfile -ExecutionPolicy Bypass -File .\scripts\install.ps1
 ```
 
 也可以在 Windows Git Bash 中执行：
 
 <!-- rsi-example id=install-git-bash platform=git-bash -->
 ```bash
-bash scripts/rsiversi.sh
+bash scripts/install.sh
 ```
 
 Linux 或 WSL：
 
 <!-- rsi-example id=install-bash platform=linux -->
 ```bash
-bash scripts/rsiversi.sh
+bash scripts/install.sh
 ```
 
-重新打开终端，运行 `rsi` 使用 TUI。添加 Web 时运行 `rsi plugin install web`，
+重启终端应用，运行 `rsi` 使用 TUI。添加 Web 时运行 `rsi plugin install web`，
 然后运行 `rsi web`；本地源码包的构建方式见源码安装教程。
 浏览器启动器打开一次性登录链接后返回，共享 Host 继续为其他界面服务。
+`rsi --help` 显示命令概览，`rsi APPLICATION --help` 显示对应应用的详细参数。
+安装时会保存独立卸载脚本，普通卸载保留用户数据；清理可能被多个安装共享的配置、状态和缓存目录 前，
+请阅读[卸载与清理运行数据](docs/i18n/zh-CN/user/source-install.md#卸载与清理运行数据)。
 
 在 **Settings → Models & access** 中，先保存凭据，再配置对应的模型服务，最后选择默认模型。
 随后新建对话并选择工作目录。[完成第一次对话](docs/i18n/zh-CN/user/first-conversation.md)

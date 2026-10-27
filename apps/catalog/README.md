@@ -22,3 +22,6 @@ without an actionable diagnostic slot, including ACP, add no diagnostic owner.
 Product Serve Profiles use `rsi.application.service` and `rsi.application.serve`.
 An explicit `--assets` argument selects authenticated Web serving; embedded
 `ServeFactory` remains available directly to SDK callers.
+
+The catalog owns public launch help for independently packaged executables.
+Those assets live in this package; each executable owns its internal argument help.

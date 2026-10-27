@@ -1,18 +1,40 @@
 //! Recoverable executable promotion. Process stop/start stays with the launcher.
-use crate::{Result, RsiError, maintenance::Home};
+use crate::{Result, filesystem as fs, record::PENDING};
 use rsi_files_native_fs::EntryKind;
 use rsi_host::HostPaths;
 use serde::{Deserialize, Serialize};
-use sha2::{Digest as _, Sha256};
 use std::{
     fs::File,
-    io::{Read as _, Write as _},
     path::{Path, PathBuf},
 };
 
-const PENDING: &str = ".rsi-core-upgrade.pending.json";
-const LOCK: &str = ".rsi-core-upgrade.lock";
-const MAXIMUM_EXECUTABLE: u64 = rsi_packages::MAX_FILE_BYTES;
+struct Home {
+    path: PathBuf,
+    lease: fs::Lease,
+}
+impl std::ops::Deref for Home {
+    type Target = fs::Lease;
+    fn deref(&self) -> &Self::Target {
+        &self.lease
+    }
+}
+impl Home {
+    fn kind(&self, name: &str) -> Result<Option<EntryKind>> {
+        fs::kind(&self.directory, name)
+    }
+    fn read(&self, name: &str) -> Result<Option<Vec<u8>>> {
+        fs::read(&self.directory, name, fs::DOCUMENT_LIMIT)
+    }
+    fn create(&self, name: &str, bytes: &[u8]) -> Result<()> {
+        fs::write(&self.directory, name, bytes, false)
+    }
+    fn rename(&self, from: &str, to: &str, kind: EntryKind) -> Result<()> {
+        if kind != EntryKind::File {
+            return Err(error("upgrade participant is not a file"));
+        }
+        fs::rename(&self.directory, from, to, false)
+    }
+}
 
 #[derive(Clone, Deserialize, Serialize)]
 #[serde(deny_unknown_fields)]
@@ -37,7 +59,6 @@ struct Journal {
 /// the installation lease but keeps recovery intent and all previous bytes.
 pub struct CoreUpgrade {
     home: Home,
-    _lock: File,
     journal: Journal,
 }
 impl std::fmt::Debug for CoreUpgrade {
@@ -71,7 +92,7 @@ impl CoreUpgrade {
         let parent = executable
             .parent()
             .ok_or_else(|| error("missing installation directory"))?;
-        let (home, lock) = open(parent)?;
+        let home = open(parent)?;
         if home.kind(PENDING)?.is_some() {
             return Err(error(
                 "an upgrade is pending; use rsi core recover with its original homes",
@@ -122,26 +143,18 @@ impl CoreUpgrade {
             return Err(failure);
         }
         home.create(PENDING, &serde_json::to_vec(&journal).map_err(error)?)?;
-        Ok(Self {
-            home,
-            _lock: lock,
-            journal,
-        })
+        Ok(Self { home, journal })
     }
 
     /// Reads bounded recovery intent and verifies the caller's exact home pair.
     pub fn recover(installation: &Path, paths: &HostPaths) -> Result<Self> {
-        let (home, lock) = open(installation)?;
+        let home = open(installation)?;
         let bytes = home
             .read(PENDING)?
             .ok_or_else(|| error("no core upgrade is pending"))?;
         let journal: Journal = serde_json::from_slice(&bytes).map_err(error)?;
         validate(&journal, paths)?;
-        let transaction = Self {
-            home,
-            _lock: lock,
-            journal,
-        };
+        let transaction = Self { home, journal };
         // Every known participant is checked before any recovery mutation.
         transaction.topology()?;
         Ok(transaction)
@@ -392,74 +405,45 @@ fn collect_completed(home: &Home) -> Result<()> {
     }
     home.directory.sync_all().map_err(error)
 }
-fn open(path: &Path) -> Result<(Home, File)> {
-    let home = Home::installation(path)?;
-    let file = match rsi_files_native_fs::create_relative_private_file_no_follow(
-        &home.directory,
-        Path::new(LOCK),
-    ) {
-        Ok(file) => file,
-        Err(failure) if failure.kind() == std::io::ErrorKind::AlreadyExists => {
-            #[cfg(windows)]
-            let file = rsi_files_native_fs::open_relative_private_file_no_follow(
-                &home.directory,
-                Path::new(LOCK),
-            );
-            #[cfg(not(windows))]
-            let file =
-                rsi_files_native_fs::open_relative_file_no_follow(&home.directory, Path::new(LOCK));
-            file.map_err(error)?
+/// Validates one completed legacy receipt and returns its verified fixed artifacts.
+pub(crate) fn receipt_files(
+    directory: &rsi_files_native_fs::Directory,
+    name: &str,
+    bytes: &[u8],
+) -> Result<Vec<String>> {
+    let journal: Journal = serde_json::from_slice(bytes).map_err(error)?;
+    validate_shape(&journal)?;
+    if name != format!(".rsi-core-upgrade-{}.committed.json", journal.id)
+        && name != format!(".rsi-core-upgrade-{}.recovered.json", journal.id)
+    {
+        return Err(error("legacy receipt identity mismatch"));
+    }
+    let mut files = Vec::new();
+    for (file, expected) in [
+        (&journal.previous, &journal.previous_digest),
+        (&journal.candidate, &journal.candidate_digest),
+        (&journal.failed, &journal.candidate_digest),
+    ] {
+        if let Some(actual) = crate::filesystem::digest(directory, file)? {
+            if actual != *expected {
+                return Err(error("legacy upgrade artifact changed; retained"));
+            }
+            files.push(file.clone());
         }
-        Err(failure) => return Err(error(failure)),
-    };
-    file.try_lock()
-        .map_err(|_| error("another core upgrade owns this installation"))?;
-    Ok((home, file))
+    }
+    Ok(files)
+}
+fn open(path: &Path) -> Result<Home> {
+    Ok(Home {
+        path: path.to_owned(),
+        lease: fs::Lease::acquire(path, false, true)?,
+    })
 }
 fn hex(value: &str) -> bool {
-    value.len() == 64
-        && value
-            .bytes()
-            .all(|b| b.is_ascii_digit() || (b'a'..=b'f').contains(&b))
+    crate::record::hex(value, 64)
 }
 fn digest(home: &Home, name: &str) -> Result<Option<String>> {
-    match home.kind(name)? {
-        None => Ok(None),
-        Some(EntryKind::File) => {
-            let mut file =
-                rsi_files_native_fs::open_relative_file_no_follow(&home.directory, Path::new(name))
-                    .map_err(error)?;
-            hash(&mut file, None).map(Some)
-        }
-        _ => Err(error("upgrade participant is not an ordinary file")),
-    }
-}
-fn hash(source: &mut File, mut destination: Option<&mut File>) -> Result<String> {
-    let before = source.metadata().map_err(error)?;
-    if !before.is_file() || before.len() > MAXIMUM_EXECUTABLE {
-        return Err(error("executable exceeds its file bound"));
-    }
-    let mut digest = Sha256::new();
-    let mut total = 0_u64;
-    let mut buffer = vec![0_u8; 64 * 1024].into_boxed_slice();
-    loop {
-        let length = source.read(&mut buffer).map_err(error)?;
-        if length == 0 {
-            break;
-        }
-        total += length as u64;
-        if total > MAXIMUM_EXECUTABLE {
-            return Err(error("executable grew beyond its bound"));
-        }
-        digest.update(&buffer[..length]);
-        if let Some(destination) = destination.as_mut() {
-            destination.write_all(&buffer[..length]).map_err(error)?;
-        }
-    }
-    if total != before.len() {
-        return Err(error("executable changed while copying"));
-    }
-    Ok(hex::encode(digest.finalize()))
+    fs::digest(&home.directory, name)
 }
 fn copy(home: &Home, name: &str, mut source: File, expected: &str) -> Result<()> {
     let mut destination = rsi_files_native_fs::create_relative_private_file_no_follow(
@@ -467,7 +451,7 @@ fn copy(home: &Home, name: &str, mut source: File, expected: &str) -> Result<()>
         Path::new(name),
     )
     .map_err(error)?;
-    if hash(&mut source, Some(&mut destination))? != expected {
+    if fs::stream(&mut source, Some(&mut destination))? != expected {
         return Err(error("candidate digest differs from its admitted package"));
     }
     #[cfg(unix)]
@@ -481,13 +465,14 @@ fn copy(home: &Home, name: &str, mut source: File, expected: &str) -> Result<()>
     drop(destination);
     home.directory.sync_all().map_err(error)
 }
-fn error(value: impl std::fmt::Display) -> RsiError {
-    RsiError::Boot(format!("core upgrade: {value}"))
+fn error(value: impl std::fmt::Display) -> std::io::Error {
+    crate::error(format!("core upgrade: {value}"))
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+    use sha2::{Digest as _, Sha256};
     struct Fixture {
         temporary: tempfile::TempDir,
         paths: HostPaths,

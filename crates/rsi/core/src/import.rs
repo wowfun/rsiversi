@@ -1,10 +1,12 @@
 //! Explicit home transfer. Providers continue to own the imported formats.
-use crate::maintenance::STATE_ENTRIES as STATE;
 use crate::{LaunchConfiguration, Result, RsiError, maintenance::Home};
 use rsi_files_native_fs::{self as fs, Directory, EntryKind};
 use rsi_host::HostPaths;
+use rsi_installation::receipts::{
+    IMPORT_CONFIG as CONFIG, ImportEntry as Entry, ImportJournal as Journal, STATE,
+};
 use rsi_service_host::{HostOwnerLease, HostStartupLease, ServiceHostPaths};
-use serde::{Deserialize, Serialize};
+use serde::Serialize;
 use sha2::{Digest as _, Sha256};
 use std::{
     collections::BTreeSet,
@@ -14,17 +16,6 @@ use std::{
 
 const PENDING: &str = "import.pending.json";
 const STAGING: &str = "import.staging.json";
-const CONFIG: &[&str] = &[
-    "rsi.toml",
-    "settings.json",
-    "application-profiles",
-    "host-profiles",
-    "agent-presets",
-    "credentials",
-    "AGENTS.md",
-    "agents",
-    "skills",
-];
 const MAX_ENTRIES: usize = 16_384;
 const MAX_BYTES: u64 = 16 * 1024 * 1024 * 1024;
 
@@ -39,24 +30,6 @@ pub struct ImportReceipt {
     pub entries: Vec<PathBuf>,
     /// Retained previous destination payloads.
     pub backups: Vec<PathBuf>,
-}
-
-#[derive(Deserialize, Serialize)]
-#[serde(deny_unknown_fields)]
-struct Journal {
-    format: u32,
-    id: String,
-    config: PathBuf,
-    state: PathBuf,
-    entries: Vec<Entry>,
-}
-#[derive(Deserialize, Serialize)]
-#[serde(deny_unknown_fields)]
-struct Entry {
-    config: bool,
-    name: String,
-    old: Option<String>,
-    new: String,
 }
 
 /// Ordinary commands must not activate a partially imported home pair.

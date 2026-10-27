@@ -4,7 +4,7 @@ use crate::{LaunchConfiguration, Result, RsiError};
 use rsi_files_native_fs::{Directory, EntryKind};
 use rsi_host::HostPaths;
 use rsi_service_host::{HostOwnerLease, HostStartupLease, ServiceHostPaths};
-use serde::{Deserialize, Serialize};
+use serde::Serialize;
 use std::{
     collections::BTreeSet,
     io::{Read as _, Write as _},
@@ -13,31 +13,11 @@ use std::{
 
 const PENDING: &str = "reset.pending.json";
 const MAX_JOURNAL: usize = 64 * 1024;
-const CONFIG_ENTRIES: &[&str] = &[
-    "rsi.toml",
-    "settings.json",
-    "application-profiles",
-    "host-profiles",
-];
-pub(super) const STATE_ENTRIES: &[&str] = &[
-    "agent",
-    "media",
-    "acp",
-    "automation",
-    "base.sqlite3",
-    "base.sqlite3-wal",
-    "base.sqlite3-shm",
-];
-
-/// Independent, explicit reset selections. Neither selection includes credentials or packages.
-#[derive(Clone, Copy, Debug, Default, Deserialize, Eq, PartialEq, Serialize)]
-#[serde(deny_unknown_fields)]
-pub struct ResetSelection {
-    /// Archive launch choices, user Profiles and provider Settings.
-    pub config: bool,
-    /// Archive standard session and runtime data.
-    pub state: bool,
-}
+pub use rsi_installation::receipts::ResetSelection;
+use rsi_installation::receipts::{
+    RESET_CONFIG as CONFIG_ENTRIES, ResetEntry as Entry, ResetJournal as Journal,
+    STATE as STATE_ENTRIES,
+};
 
 /// Durable completed reset evidence; backup paths contain the original bytes.
 #[derive(Clone, Debug, Serialize)]
@@ -48,24 +28,6 @@ pub struct ResetReceipt {
     pub selection: ResetSelection,
     /// Existing data archived without interpreting its contents.
     pub backups: Vec<PathBuf>,
-}
-
-#[derive(Clone, Debug, Deserialize, Serialize)]
-#[serde(deny_unknown_fields)]
-struct Journal {
-    format: u8,
-    id: String,
-    config: PathBuf,
-    state: PathBuf,
-    selection: ResetSelection,
-    entries: Vec<Entry>,
-}
-#[derive(Clone, Debug, Deserialize, Serialize)]
-#[serde(deny_unknown_fields)]
-struct Entry {
-    config: bool,
-    name: String,
-    directory: bool,
 }
 
 pub(super) struct Home {
@@ -102,16 +64,6 @@ impl Home {
             #[cfg(windows)]
             namespace: None,
         })
-    }
-    pub(super) fn installation(path: &Path) -> Result<Self> {
-        #[allow(unused_mut)]
-        let mut home = Self::observe(path)?;
-        #[cfg(windows)]
-        {
-            home.directory.verify_private().map_err(|failure| error(format!("core upgrade requires a private current-user installation; shared directory ACLs are preserved: {failure}")))?;
-            home.namespace = Some(home.directory.pin_namespace().map_err(error)?);
-        }
-        Ok(home)
     }
     pub(super) fn kind(&self, name: &str) -> Result<Option<EntryKind>> {
         match self.directory.child_kind(Path::new(name)) {

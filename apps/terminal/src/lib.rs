@@ -59,19 +59,24 @@ use tokio::task::JoinHandle;
 use tokio_util::sync::CancellationToken;
 type Result<T, E = RsiError> = std::result::Result<T, E>;
 
-/// Native application arguments; the launcher handles Profile selection separately.
-pub const HELP: &str = "Session command options (headless):\n  --commands | --command INVOCATION_JSON | --command-status REQUEST_ID\n  --command may precede TASK; list and status do not submit a message.\nUsage:\n\
-  rsi run headless TASK|--stdin [--cwd PATH] [--resume SESSION|--session-id SESSION]\n\
-      [--message-id MESSAGE] [-i|--image PATH]... [--agent-preset ID]\n\
-      [--deployment ID --model ID] [--sandbox read-only|workspace-write|danger-full-access]\n\
-      [--output text|jsonl]\n\
-  rsi run cli [--cwd PATH] [--resume SESSION|--history SESSION|--list|--session-id SESSION]\n\
-      [--agent-preset ID] [--output text|jsonl]\n\
-  rsi run cli --cas-gc-preview LIMIT|--cas-gc JSON|--cas-gc-status OPERATION_ID\n\
-  rsi run cli --purge-preview JSON|--purge JSON|--purge-status OPERATION_ID\n\
-  rsi run cli --export SESSION|latest [-f markdown|md|json] [-i CONTENTS] [-o PATH]\n\
-  rsi run tui [--cwd PATH] [--resume SESSION|--session-id SESSION]\n\
-      [--agent-preset ID]\n";
+/// Headless application options.
+pub const HEADLESS_HELP: &str = "Usage: rsi headless TASK|--stdin [OPTIONS]\n\
+  --cwd PATH  --resume SESSION | --session-id SESSION\n\
+  --message-id MESSAGE  -i/--image PATH  --agent-preset ID\n\
+  --deployment ID --model ID  --sandbox read-only|workspace-write|danger-full-access\n\
+  --output text|jsonl\n\
+  --commands | --command INVOCATION_JSON | --command-status REQUEST_ID\n\
+Session commands may precede TASK; list and status do not submit a message.\n";
+/// Session management options.
+pub const CLI_HELP: &str = "Usage: rsi cli [OPTIONS]\n\
+  --cwd PATH  --resume SESSION | --history SESSION | --list | --session-id SESSION\n\
+  --agent-preset ID  --output text|jsonl\n\
+  --export SESSION|latest [-f markdown|md|json] [-i CONTENTS] [-o PATH]\n\
+  --cas-gc-preview LIMIT | --cas-gc JSON | --cas-gc-status OPERATION_ID\n\
+  --purge-preview JSON | --purge JSON | --purge-status OPERATION_ID\n";
+/// Interactive terminal options.
+pub const TUI_HELP: &str = "Usage: rsi tui [OPTIONS]\n\
+  --cwd PATH  --resume SESSION | --session-id SESSION  --agent-preset ID\n";
 
 #[derive(Clone, Debug)]
 pub(crate) struct SessionCommand {

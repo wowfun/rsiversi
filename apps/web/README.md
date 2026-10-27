@@ -243,7 +243,7 @@ independent XDG roots are appropriate for durable-format work.
 
 For explicit Serve deployments and isolated Web fixtures, open the configured
 origin and paste the JSON receipt from
-`rsi run devices -- register LABEL`. The receipt is used once and removed
+`rsi devices register LABEL`. The receipt is used once and removed
 from the form; only the endpoint identity is saved for an explicit reconnect
 using the HttpOnly cookie. Sign out closes document input, flushes draft writes
 and awaits renderer disposal before draining the Worker application and clearing

@@ -43,3 +43,10 @@ controllers and [Desktop](../../apps/desktop/README.md) provides the Linux and W
 The [Serve contract](../../apps/serve/README.md#local-web-launch) owns local Web
 selection, options, authentication and Host ownership. Remote deployments use
 Serve or an explicit Application Profile.
+
+## Installation maintenance
+
+The [installation library](installation/README.md) owns native installation records,
+PATH receipts, upgrade transactions and deletion authority. The independent
+[uninstaller](../../apps/uninstall/README.md) uses it without product composition;
+[devtools](../../apps/devtools/README.md) owns bootstrap scripts and package delivery.

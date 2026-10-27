@@ -83,11 +83,13 @@ export async function build(options) {
         ? ({x64:'x86_64-unknown-linux-musl', arm64:'aarch64-unknown-linux-musl'}[process.arch]) : null;
       if (kind === 'ssh-helper' && !triple) throw new Error('Unsupported SSH helper CPU.');
       await run('cargo', ['build', '--locked', '-p', packageName, ...(debug ? [] : ['--release']),
+        ...(kind === 'core' ? ['-p', 'rsi-uninstall'] : []),
         ...(triple ? ['--target', triple] : [])], environment);
       input = join(target, ...(triple ? [triple] : []), profile, name + (process.platform === 'win32' ? '.exe' : ''));
     }
     const stage = join(temporary, 'package');
-    const manifest = await assemble(kind, stage, input);
+    const uninstaller = kind === 'core' ? join(target, profile, 'rsi-uninstall' + (process.platform === 'win32' ? '.exe' : '')) : undefined;
+    const manifest = await assemble(kind, stage, input, uninstaller);
     await publishPackage(stage, output, manifest, replace);
     return manifest;
   } finally {

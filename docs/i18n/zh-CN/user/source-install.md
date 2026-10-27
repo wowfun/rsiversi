@@ -22,21 +22,21 @@ cd rsiversi
 
 ## 安装核心
 
-安装器只构建 release 模式的 `rsi`，并将其 `bin` 目录加入用户 PATH。
-安装后重新打开终端，无需选择 UI。
+安装器构建 release 模式的 `rsi` 与独立卸载器 `rsi-uninstall`，并将其 `bin` 目录加入用户 PATH。
+安装后重启终端应用，无需选择 UI。
 
 Windows 上使用 PowerShell：
 
 <!-- rsi-example id=install-windows platform=windows -->
 ```powershell
-powershell -NoProfile -ExecutionPolicy Bypass -File .\scripts\rsiversi.ps1
+powershell -NoProfile -ExecutionPolicy Bypass -File .\scripts\install.ps1
 ```
 
 也可以在 Windows Git Bash 中执行：
 
 <!-- rsi-example id=install-git-bash platform=git-bash -->
 ```bash
-bash scripts/rsiversi.sh
+bash scripts/install.sh
 ```
 
 这两个 Windows 命令使用同一个原生安装器，默认安装到 `%LOCALAPPDATA%\RSIversi`。
@@ -46,7 +46,7 @@ Linux 或 WSL：
 
 <!-- rsi-example id=install-bash platform=linux -->
 ```bash
-bash scripts/rsiversi.sh
+bash scripts/install.sh
 ```
 
 <!-- rsi-example id=install-launch platform=all -->
@@ -55,8 +55,55 @@ rsi
 ```
 
 `--prefix DIR` / `-Prefix DIR` 选择安装根目录，`--binary FILE` / `-Binary FILE`
-使用你明确信任的已有可执行文件。安装器拒绝覆盖现有安装。
+必须搭配 `--uninstaller FILE` / `-Uninstaller FILE`，使用你明确信任的预构建主程序和卸载器。
+源码安装一次构建两个程序；显式二进制安装不调用 Cargo。独立卸载器和对应平台的卸载脚本
+保存在 `<prefix>/libexec/rsi`，不加入 PATH。安装器在构建前检查目标，遇到已有文件、目录
+或链接会立即退出。安装目录及其父级不能经过符号链接或 junction；请显式传入解析后的真实目录。若已有 `rsi`，提示会显示完整安装路径和升级命令；请按
+[下方的升级步骤](#升级与导入已有数据)操作，或选择另一个空的安装目录。
 `--no-path` / `-NoPath` 不修改 PATH，供隔离验证使用。安装不会打开配置或状态。
+
+## 卸载与清理运行数据
+
+先把下方 `prefix` 改为实际安装目录，再预览卸载范围；使用自定义安装目录时不能省略该参数。
+
+<!-- rsi-example id=uninstall-preview-windows platform=windows -->
+```powershell
+$prefix = Join-Path $env:LOCALAPPDATA "RSIversi"
+powershell -NoProfile -ExecutionPolicy Bypass -File scripts/uninstall.ps1 -Prefix $prefix -DryRun
+```
+
+<!-- rsi-example id=uninstall-preview-linux platform=linux -->
+```bash
+prefix="$HOME/.local"
+bash scripts/uninstall.sh --prefix "$prefix" --dry-run
+```
+
+移除预览参数后执行卸载。即使删除源码目录，也可以使用 `<prefix>/libexec/rsi`
+中的对应脚本；它默认选择所在安装目录。Git Bash 委托原生 PowerShell。卸载不运行
+待删除的 `rsi`，不需要 Cargo，也不下载工具。Windows 实际卸载使用经过摘要校验的临时副本，dry-run 原地运行已安装工具；
+Linux 直接运行卸载器。
+
+普通卸载保留配置、状态和缓存，包括共享包及 Host 运行时副本。`--purge` / `-Purge`
+会展示最终配置、状态和缓存目录 并确认后清理保存的凭据、会话、生成状态、WebView 数据和缓存。
+其他安装和开发版本也可能使用这些目录；非交互确认使用 `--yes` / `-Yes`。
+用户编写的启动与 settings 配置、AGENTS.md、skills、agents、Profiles、自定义 presets
+及 addon 源码继续保留，无关文件和外部引用也不会被删除。完整规则见
+[卸载契约](../../../../crates/rsi/installation/README.md)。
+
+使用 `--config-home`、`--state-home`、`--cache-home`（PowerShell 对应 `-ConfigHome`、
+`-StateHome`、`-CacheHome`）直接选择最终目录，不加载配置。属于本安装的 Host 会正常停止；
+嵌入式 Host、使用中的包和锁定文件的客户端需要先关闭再重试。部分失败会保留卸载工具
+并报告剩余工作；用于并发协调的空锁文件会保留。
+
+安装记录缺失或损坏时，需提供明确信任的外部 `--uninstaller FILE` / `-Uninstaller FILE`
+并使用 `--force` / `-Force`。Force 只授权清理展示的固定安装目标，不绕过锁、待恢复事务、
+路径检查或停机失败。PATH 只撤销有可靠记录且仍精确匹配的新增项；共享 bin 仍有其他程序时
+保留 PATH。符号链接或只读的 POSIX 启动文件需要手动配置。
+
+安装文件已不存在时，重复普通卸载成功退出。卸载后的再次 purge 需要从可信 core 包中
+另取 `rsi-uninstall.exe`（Windows）或 `rsi-uninstall`（Linux），复制到目标安装目录外，
+通过上述外部工具参数指定；仍传入相同 prefix 和 home 参数。core 包的构建方法见下方升级步骤，
+获取工具与卸载执行是两个独立步骤；卸载器不会自动构建或下载。无需恢复主程序。
 
 ## 添加 Web 或 Desktop
 
@@ -114,6 +161,23 @@ Windows 和 Linux 上的 TUI 与 Web 共享常驻 Host。关闭 UI 只断开附�
 接下来可阅读[第一次对话](first-conversation.md)。
 
 ## 升级与导入已有数据
+
+安装器只负责首次安装，重复运行不会升级核心。从本地源码升级时，先使用现有
+构建工具准备 core 包（此构建工具需要 Node.js 22.18 或更新版本，安装器本身不需要）：
+
+<!-- rsi-example id=upgrade-core-source platform=all -->
+```bash
+node apps/devtools/build.mjs core "$PWD/.local/packages/core" --replace
+rsi core upgrade --local "$PWD/.local/packages/core"
+```
+
+使用自定义安装目录时，应调用安装器提示中的完整可执行文件路径，而不是 PATH
+上的 `rsi`，并保留该安装使用的全局 home 选项。`--local` 接受包含 `package.json`
+的包目录绝对路径，不能直接传入 `target/release/rsi` 或 `rsi.exe`。
+[构建工具契约](../../../../apps/devtools/README.md)也介绍了如何直接打包已构建的
+主程序和卸载器，无需再次调用 Cargo。有安装记录时，core、卸载器、卸载脚本及记录通过
+同一可恢复事务更新，缺少兼容卸载工具的包会被拒绝。无记录的旧安装继续使用单主程序升级；
+旧程序执行首次升级不会自动建立安装记录。
 
 包清单 format 2 需要新的 core 可执行文件。已有 format-1 包仓库应先把新二进制
 安装到另一个空目录，停止旧 Host 和应用，再用新二进制及相同的 home 选项运行

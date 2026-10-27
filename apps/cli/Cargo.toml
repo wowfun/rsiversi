@@ -23,12 +23,15 @@ path = "../../fixtures/rsi/profile-management/probe.rs"
 paired-web-tests = []
 
 [dependencies]
+rsi-workspace-path = { path = "../../crates/rsi-workspace/path" }
+rsi-installation = { path = "../../crates/rsi/installation" }
 reqwest.workspace = true
 tempfile.workspace = true
 rsi-packages = { path = "../../crates/rsi/packages" }
 async-trait.workspace = true
 rsi-build-info = { path = "../../crates/rsi/build-info" }
 rsi-app-catalog = { path = "../catalog" }
+rsi-acp-app = { package = "rsi-acp-application", path = "../acp" }
 rsi = { path = "../../crates/rsi/core" }
 rsi-configuration-api = { path = "../../crates/rsi/configuration-api" }
 rsi-terminal = { path = "../terminal" }

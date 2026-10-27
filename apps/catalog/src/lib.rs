@@ -10,6 +10,9 @@ use std::sync::{Arc, LazyLock};
 mod executable;
 mod profiles;
 
+/// Public Desktop launch help without loading its executable package.
+pub const DESKTOP_HELP: &str = include_str!("desktop-help.txt");
+
 /// Frozen official application catalog, with invocation-owned local Web inputs.
 #[derive(Clone, Debug, Default)]
 pub struct Catalog {

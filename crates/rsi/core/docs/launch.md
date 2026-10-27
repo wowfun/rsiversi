@@ -155,11 +155,9 @@ Core replacement is an explicit `rsi core upgrade` operation, optionally selecti
 an operator-trusted local package with `--local DIRECTORY`. Network upgrades
 require the executable's compiled repository name and key. A configured mirror
 may change only the URL; unpinned builds require an explicit local package. Package admission
-precedes stopping the selected Host. The installer directory has one native file
-lease. On Windows it must already satisfy the private, current-user-owned
-directory policy; upgrade refuses shared installations without changing their
-ACL. A successful admission retains a `.rsi-namespace-pin` guard alongside the
-transaction lock. Administrators manage shared installations externally. The
+precedes stopping the selected Host. The [installation owner](../../installation/README.md)
+defines fixed-layout records, transaction versions, installation lease order and
+platform filesystem policy. The
 Host startup coordinator remains held across stop, executable
 promotion and readiness. Executable hashes, final config/state homes and bounded
 single-component backup names are recorded before the first rename. The previous
@@ -168,18 +166,20 @@ launcher image; the Host already runs from its immutable artifact copy.
 
 Readiness across core revisions uses frozen Lifecycle v1 and native child
 identity, rather than an old client's product API schema. Failed activation
-restores the previous executable and the previous Host's running state. An
+restores every previous participant and the previous Host's running state. An
 interrupted operation requires `rsi core recover` with the recorded homes; if the
 primary executable name is temporarily absent, run the retained previous binary
 with that command. Unexpected file contents or a different home authority are
 refused before promotion or recovery. Successful transactions retain their
 receipt. Once settled, recorded previous/candidate/failed executable copies are
 reclaimed under the installation lease by their validated receipt names and
-ordinary-file types, without rereading disposable payloads. Windows
+ordinary-file types; v2 additionally verifies each disposable payload digest. Windows
 may retain an executing image until its caller exits; the next upgrade retries
 that cleanup. Before a new transaction, abandoned candidate copies that have no
 journal or receipt are also reclaimed. Pending recovery participants are never
-collected. There is no background updater.
+collected. Runtime publication converts OS-canonical local-drive spelling to the
+bounded native path representation before acquiring directory handles. There is
+no background updater.
 
 `rsi import --config-home OLD_CONFIG --state-home OLD_STATE` explicitly copies
 an existing product home pair into the final homes selected by global options.

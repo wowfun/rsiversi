@@ -15,6 +15,7 @@ name = "session-api-eval"
 path = "eval/session.rs"
 
 [dependencies]
+rsi-installation = { path = "../installation" }
 rsi-host-control = { path = "../host-control" }
 rsi-packages = { path = "../packages" }
 rsi-automation = { path = "../automation" }

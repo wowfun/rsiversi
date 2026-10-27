@@ -2,7 +2,7 @@
 
 The native ApplicationFactory owns ACP stdio, signals and application task cleanup.
 It consumes an ACP attachment supplied by the product connection plugin.
-`rsi run acp` selects this plugin; there is no separate ACP executable.
+`rsi acp` selects this plugin; there is no separate ACP executable.
 
 Stdio uses nonblocking duplicated descriptors so cancelling an idle pipe read
 does not leave a blocking Tokio stdin worker behind. Redirected regular files

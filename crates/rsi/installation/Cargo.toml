@@ -1,0 +1,33 @@
+[package]
+name = "rsi-installation"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+publish = false
+
+[dependencies]
+rsi-files-native-fs = { path = "../../rsi-files/native-fs" }
+rsi-host = { path = "../../rsi-host/core" }
+rsi-service-host = { path = "../service-host" }
+rsi-packages = { path = "../packages" }
+serde.workspace = true
+serde_json.workspace = true
+sha2.workspace = true
+hex.workspace = true
+getrandom.workspace = true
+dirs.workspace = true
+tokio = { workspace = true, features = ["process", "time", "io-util"] }
+
+[target.'cfg(unix)'.dependencies]
+rustix.workspace = true
+
+[target.'cfg(windows)'.dependencies]
+winreg = "0.55"
+windows-sys = { version = "0.61.2", features = ["Win32_UI_WindowsAndMessaging"] }
+
+[dev-dependencies]
+tempfile.workspace = true
+
+[lints]
+workspace = true

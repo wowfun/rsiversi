@@ -38,7 +38,8 @@ pub(super) fn publish_before(
     let source = source
         .map_or_else(std::env::current_exe, |path| Ok(path.to_owned()))
         .map_err(failure)?;
-    let source = std::fs::canonicalize(source).map_err(failure)?;
+    let source =
+        rsi_workspace_path::canonical_native_path(std::fs::canonicalize(source).map_err(failure)?);
     check_deadline(deadline)?;
     let parent = source
         .parent()
@@ -355,6 +356,25 @@ fn publish_source(paths: &rsi_host::HostPaths, source: &Path) -> rsi::Result<Pat
 #[cfg(test)]
 mod tests {
     use super::*;
+    #[test]
+    fn ordinary_runtime_canonicalization_remains_admissible_to_native_handles() {
+        let temporary = tempfile::tempdir().unwrap();
+        let paths = rsi_host::HostPaths::new(
+            temporary.path().join("config"),
+            temporary.path().join("state"),
+            temporary.path().join("cache"),
+        )
+        .unwrap();
+        let source = temporary.path().join("source.exe");
+        std::fs::write(&source, b"runtime bytes").unwrap();
+        let published = publish_before(
+            &paths,
+            Some(&source),
+            std::time::Instant::now() + rsi::APPLICATION_TRANSITION_TIMEOUT,
+        )
+        .unwrap();
+        assert_eq!(std::fs::read(published.path).unwrap(), b"runtime bytes");
+    }
     #[test]
     fn managed_runtime_stays_in_publication_and_pins_until_handoff() {
         let temp = tempfile::tempdir().unwrap();

@@ -13,8 +13,8 @@ use rsi_agent_presets::{AgentPresetHealth, AgentPresetId, AgentPresetRow, Preset
 use rsi_agent_store_sqlite::SqliteStore;
 #[cfg(any(target_os = "linux", windows))]
 use rsi_service_host::{
-    HostOwnerMode, SERVICE_HOST_DRAIN_TIMEOUT, ServiceHostDiagnostics,
-    ServiceHostDiagnosticsSnapshot, ServiceHostPaths, owner_process_is_current,
+    HostOwnerMode, ServiceHostDiagnostics, ServiceHostDiagnosticsSnapshot, ServiceHostPaths,
+    owner_process_is_current,
 };
 use serde::Serialize;
 use std::collections::BTreeMap;
@@ -31,8 +31,6 @@ use tokio::task::JoinHandle;
 #[cfg(any(target_os = "linux", windows))]
 use tokio_util::sync::CancellationToken;
 
-#[cfg(any(target_os = "linux", windows))]
-const HOST_SHUTDOWN_MARGIN: Duration = Duration::from_secs(15);
 #[cfg(any(target_os = "linux", windows))]
 const FORCE_HOST_STOP_TIMEOUT: Duration = Duration::from_secs(5);
 #[cfg(any(target_os = "linux", windows))]
@@ -90,6 +88,13 @@ use management::profile_management_error;
 use management::{run_agent_preset, run_agent_store, run_profile};
 
 fn main() -> ExitCode {
+    if std::env::args_os()
+        .skip(1)
+        .eq([OsString::from("--installation-protocol")])
+    {
+        println!("{}", rsi_installation::PROTOCOL);
+        return ExitCode::SUCCESS;
+    }
     let _generation = match rsi_build_info::GenerationLease::current() {
         Ok(lease) => lease,
         Err(error) => {
@@ -123,61 +128,75 @@ async fn run_main() -> u8 {
         Err(error) => return report_error(&error),
     };
     let default_application = arguments.is_empty();
-    let parsed = cli::parse_cli(arguments.clone());
-    if let Ok(command) = &parsed
-        && let Err(error) = launch::validate_command(&options, command)
-    {
+    let parsed = match cli::parse_cli(arguments) {
+        Ok(parsed) => parsed,
+        Err(error) => return report_error(&error),
+    };
+    if let Err(error) = launch::validate_command(&options, &parsed) {
         return report_error(&error);
     }
-    if let Ok(Parse::Application(invocation)) = &parsed
+    if let Parse::Application(invocation) = &parsed
         && application::print_help(invocation)
     {
         return 0;
     }
     #[cfg(any(target_os = "linux", windows))]
-    if parsed.is_ok()
-        && !matches!(
-            &parsed,
-            Ok(Parse::Core(_)
-                | Parse::Help(_)
-                | Parse::Version
-                | Parse::Host(HostCommand {
-                    operation: HostOperation::Stop | HostOperation::Status,
-                    ..
-                }))
-        )
-        && let Err(error) = core_cli::ensure_no_pending()
+    if !matches!(
+        &parsed,
+        Parse::Core(_)
+            | Parse::Help(_)
+            | Parse::Version
+            | Parse::Host(HostCommand {
+                operation: HostOperation::Stop | HostOperation::Status,
+                ..
+            })
+    ) && let Err(error) = core_cli::ensure_no_pending()
     {
         return report_error(&error);
     }
-    if matches!(parsed, Ok(Parse::Help(_) | Parse::Version)) {
+    if matches!(parsed, Parse::Help(_) | Parse::Version) {
         // Help and version remain independent of path/configuration availability.
     } else if let Err(error) = launch::initialize(options) {
         return report_error(&error);
     }
+    if let Err(error) = rsi_service_host::set_installation_origin_resolver(|| {
+        match rsi_installation::origin::current() {
+            Ok(origin) => origin,
+            Err(error) => {
+                eprintln!("Installation provenance unavailable: {error}");
+                None
+            }
+        }
+    }) {
+        return report_error(&RsiError::Boot(error.to_string()));
+    }
     if matches!(
         &parsed,
-        Ok(Parse::Profile(_) | Parse::AgentPreset(_) | Parse::AgentStore(_))
+        Parse::Profile(_) | Parse::AgentPreset(_) | Parse::AgentStore(_)
     ) && let Err(error) = launch::maintain()
     {
         return report_error(&error);
     }
     #[cfg(unix)]
-    if matches!(&parsed, Ok(Parse::Addon(_)))
+    if matches!(&parsed, Parse::Addon(_))
         && let Err(error) = launch::maintain()
     {
         return report_error(&error);
     }
+    run_command(parsed, default_application).await
+}
+
+async fn run_command(parsed: Parse, default_application: bool) -> u8 {
     match parsed {
-        Ok(Parse::Help(help)) => {
+        Parse::Help(help) => {
             print!("{help}");
             0
         }
-        Ok(Parse::Version) => {
+        Parse::Version => {
             println!("rsi {}", env!("CARGO_PKG_VERSION"));
             0
         }
-        Ok(Parse::Application(mut command)) => {
+        Parse::Application(mut command) => {
             if let Err(error) = launch::maintain() {
                 return report_error(&error);
             }
@@ -193,28 +212,27 @@ async fn run_main() -> u8 {
             }
             run_application(command).await
         }
-        Ok(Parse::Config(arguments)) => launch::run_config(&arguments),
-        Ok(Parse::Import(arguments)) => import_cli::run(&arguments),
+        Parse::Config(arguments) => launch::run_config(&arguments),
+        Parse::Import(arguments) => import_cli::run(&arguments),
         #[cfg(any(target_os = "linux", windows))]
-        Ok(Parse::Core(arguments)) => core_cli::run(&arguments).await,
+        Parse::Core(arguments) => core_cli::run(&arguments).await,
         #[cfg(not(any(target_os = "linux", windows)))]
-        Ok(Parse::Core(_)) => report_error(&RsiError::Boot("core maintenance requires Windows or Linux".into())),
-        Ok(Parse::Plugin(arguments)) => plugin_cli::run(&arguments).await,
-        Ok(Parse::WebControl(stop)) => application::web_control(stop).await,
-        Ok(Parse::Profile(command)) => run_profile(&command).await,
+        Parse::Core(_) => report_error(&RsiError::Boot("core maintenance requires Windows or Linux".into())),
+        Parse::Plugin(arguments) => plugin_cli::run(&arguments).await,
+        Parse::WebControl(stop) => application::web_control(stop).await,
+        Parse::Profile(command) => run_profile(&command).await,
         #[cfg(any(target_os = "linux", windows))]
-        Ok(Parse::Host(command)) => run_host(command).await,
+        Parse::Host(command) => run_host(command).await,
         #[cfg(not(any(target_os = "linux", windows)))]
-        Ok(Parse::HostUnsupported) => report_error(&RsiError::Boot(
+        Parse::HostUnsupported => report_error(&RsiError::Boot(
             "Service Host daemon mode requires Linux process-generation fencing; named applications use embedded mode on this platform".into(),
         )),
-        Ok(Parse::AgentPreset(command)) => run_agent_preset(command).await,
-        Ok(Parse::AgentStore(command)) => run_agent_store(command).await,
+        Parse::AgentPreset(command) => run_agent_preset(command).await,
+        Parse::AgentStore(command) => run_agent_store(command).await,
         #[cfg(unix)]
-        Ok(Parse::Addon(command)) => addon_cli::run(command).await,
+        Parse::Addon(command) => addon_cli::run(command).await,
         #[cfg(not(unix))]
-        Ok(Parse::AddonUnsupported) => report_error(&RsiError::Boot("native addon source management requires Unix".into())),
-        Err(error) => report_error(&error),
+        Parse::AddonUnsupported => report_error(&RsiError::Boot("native addon source management requires Unix".into())),
     }
 }
 

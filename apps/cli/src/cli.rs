@@ -3,46 +3,45 @@ use rsi_application::arguments::utf8;
 
 pub(super) const HELP: &str = "Usage:\n\
   rsi [GLOBAL OPTIONS] [APPLICATION | COMMAND]\n\
-  rsi run PROFILE [-- APPLICATION ARGUMENTS]\n\
-  rsi config <init|show|validate>\n\
-  rsi core <upgrade [--local DIRECTORY]|recover>\n\
-  rsi import <--config-home OLD --state-home OLD [--dry-run]|recover>\n\
-  rsi plugin <list|install NAME...|install --local DIR...|uninstall NAME...|gc>\n\
-  rsi tui [APPLICATION ARGUMENTS]\n\
-  rsi web [--port PORT] [--no-open] [--assets PATH]\n\
-      headless: TASK|--stdin [--cwd PATH] [--resume SESSION|--session-id SESSION]\n\
-                [--message-id MESSAGE] [-i|--image PATH]... [--agent-preset ID]\n\
-                [--deployment ID --model ID] [--sandbox MODE]\n\
-                [--output text|jsonl]\n\
-      cli:  [--cwd PATH] [--resume SESSION|--history SESSION|--list|--session-id SESSION]\n\
-                [--agent-preset ID] [--output text|jsonl]\n\
-  rsi cli --export SESSION|latest [-f markdown|md|json] [-i CONTENTS] [-o PATH]\n\
-      tui:  [--cwd PATH] [--resume SESSION|--session-id SESSION]\n\
-      serve: --bind ADDRESS --origin ORIGIN [--tls-certificate FILE --tls-key FILE|--dev-http]\n\
-      devices: <register LABEL|list|revoke DEVICE_ID>\n\
-      addons: refresh\n\
-      inspector: <runtime [AFTER_FIBER]|profile [OFFSET]|factories [OFFSET]|native>\n\
-  rsi profile <application|host> <COMMAND> [--output text|json]\n\
-  rsi host <start|serve|restart|stop|status|reload> [--profile HOST]\n\
-  rsi addon <list|install|enable|disable|uninstall> [ARGUMENT] [--root ABSOLUTE] [--output text|json]\n\
-  rsi agent-preset <COMMAND> [--output text|json]\n\
-  rsi agent-store verify|compact [--root ABSOLUTE] [--output text|json]\n\n\
+  rsi run PROFILE [-- APPLICATION ARGUMENTS]\n\n\
+Applications:\n\
+  tui             Interactive terminal interface (initial default)\n\
+  cli             Inspect, export and maintain Sessions\n\
+  headless        Run one task or read a task from stdin\n\
+  acp             Serve the Agent Client Protocol over stdio\n\
+  web             Open the browser interface; web stop|status controls it\n\
+  desktop         Open the Desktop application (Windows/Linux plugin)\n\
+  serve           Serve the remote browser/API endpoint\n\
+  devices         Register, list and revoke devices\n\
+  inspector       Inspect the running Host\n\
+\n\
 Commands:\n\
-  run             Run a named application plugin Profile\n\
+  run             Run a named Application Profile (addons: Linux)\n\
+  config          Initialize, show or validate configuration\n\
+  core            Upgrade the core or recover an upgrade (Windows/Linux)\n\
+  import          Import owned data from existing homes\n\
+  plugin          Install and manage application packages\n\
   profile         Inspect and manage Application and Host Profiles\n\
-  host            Control the explicit local Service Host daemon\n\
-  agent-preset    Inspect and manage local Agent presets\n\
-  agent-store     Verify or compact an offline durable Agent Store\n\
-  addon           Manage local native source bytes and explicit selection\n\n\
-Startup option:\n\
-  --config-home DIR  Select the final configuration directory\n\
-  --state-home DIR   Select the final state directory\n\
-  --cache-home DIR   Select the final cache directory\n\
-  --watch            Observe declared configuration and source inputs\n\
-  --reset-config     Back up and restore configuration; preserve credentials\n\
-  --reset-state      Back up owned state; preserve credentials and packages\n\
-                 Place global options before the application or command\n\
-                 Example: rsi --reset-state tui\n";
+  host            Control the local Service Host (Windows/Linux)\n\
+  addon           Manage local native addon sources (Unix)\n\
+  agent-preset    Inspect and manage Agent presets\n\
+  agent-store     Verify or compact an offline Agent Store\n\n\
+Global options:\n\
+  -h, --help        Show help without initializing homes\n\
+  -V, --version     Show the version\n\
+  --config-home DIR Select the final configuration directory\n\
+  --state-home DIR  Select the final state directory\n\
+  --cache-home DIR  Select the final cache directory\n\
+  --watch           Observe declared configuration and source inputs\n\
+  --reset-config    Back up and reset configuration; preserve credentials\n\
+  --reset-state     Back up and reset state; preserve credentials and packages\n\n\
+Place global options before the application or command.\n\
+Bare rsi starts the configured default application.\n\n\
+Examples:\n\
+  rsi tui --help\n\
+  rsi core upgrade --help\n\
+  rsi run PROFILE --help\n\
+  rsi headless \"Explain this project\"\n";
 pub(super) const PROFILE_HELP: &str = "Usage:\n\
   rsi profile <application|host> list [--output text|json]\n\
   rsi profile <application|host> show ID [--output text|json]\n\
@@ -206,6 +205,7 @@ pub(super) fn parse_agent_store(arguments: impl Iterator<Item = OsString>) -> rs
     };
     if arguments
         .iter()
+        .take_while(|argument| argument.as_str() != "--")
         .any(|argument| matches!(argument.as_str(), "-h" | "--help"))
     {
         return Ok(Parse::Help(AGENT_STORE_HELP));
@@ -277,6 +277,7 @@ pub(super) fn parse_agent_preset(arguments: impl Iterator<Item = OsString>) -> r
     let remaining = &arguments[1..];
     if remaining
         .iter()
+        .take_while(|argument| argument.as_str() != "--")
         .any(|argument| matches!(argument.as_str(), "-h" | "--help"))
     {
         return Ok(Parse::Help(if command == "default" {
@@ -496,6 +497,7 @@ pub(super) fn parse_profile_command(
     let arguments = arguments.map(utf8).collect::<rsi::Result<Vec<_>>>()?;
     if arguments
         .iter()
+        .take_while(|argument| argument.as_str() != "--")
         .any(|argument| matches!(argument.as_str(), "-h" | "--help"))
     {
         return Ok(Parse::Help(PROFILE_HELP));
@@ -575,6 +577,7 @@ pub(super) fn parse_host_command(arguments: impl Iterator<Item = OsString>) -> r
     let arguments = arguments.map(utf8).collect::<rsi::Result<Vec<_>>>()?;
     if arguments
         .iter()
+        .take_while(|argument| argument.as_str() != "--")
         .any(|argument| matches!(argument.as_str(), "-h" | "--help"))
     {
         return Ok(Parse::Help(HOST_HELP));
@@ -656,10 +659,131 @@ fn set_host_flag(flag: &mut bool, name: &str) -> rsi::Result<()> {
     Ok(())
 }
 
-pub(super) const CORE_HELP: &str = "Usage: rsi core upgrade [--local PACKAGE_DIRECTORY]\n       rsi core recover\nUpgrade stops the selected Host, retains the old executable, verifies and starts the new core.\nRecovery restores the recorded executable and previous Host running state with the original homes.\n";
+pub(super) const CORE_HELP: &str = "Usage: rsi core upgrade [--local PACKAGE_DIRECTORY]\n       rsi core recover\nUpgrade verifies the core package, stops the selected Host and starts the new core.\nRecorded installations update core, uninstaller, launcher and installation record together.\nUnrecorded executables retain single-file upgrades. Recovery restores previous artifacts and Host state.\n--local requires a core package directory with package.json, not a bare executable.\n";
 pub(super) const IMPORT_HELP: &str = "Usage: rsi [GLOBAL HOMES] import --config-home OLD_CONFIG --state-home OLD_STATE [--dry-run]\n       rsi [GLOBAL HOMES] import recover\nStop both Hosts first. Preflight, stage and back up owned data; preserve unrelated files.\n";
 pub(super) const PLUGIN_HELP: &str = "Usage: rsi plugin list\n       rsi plugin install NAME [NAME ...]\n       rsi plugin install --local DIR [DIR ...]\n       rsi plugin uninstall NAME [NAME ...]\n       rsi plugin gc\nEach local directory contains package.json and its declared files.\n";
 const CONFIG_HELP: &str = "Usage: rsi config init|show|validate\nUse global home options to select the configuration and state directories.\n";
+pub(super) const RUN_HELP: &str = "Usage: rsi [GLOBAL OPTIONS] run PROFILE [-- APPLICATION ARGUMENTS]\nUse rsi APPLICATION --help for a built-in application's options.\nCustom Profile help does not load or execute the Profile.\n";
+
+fn wants_help(arguments: &[OsString]) -> bool {
+    arguments
+        .iter()
+        .take_while(|arg| *arg != "--")
+        .any(|arg| arg == "--help" || arg == "-h")
+}
+
+fn command_usage(command: &str, message: &str) -> RsiError {
+    let help = match command {
+        "config" => CONFIG_HELP,
+        "core" => CORE_HELP,
+        "import" => IMPORT_HELP,
+        "plugin" => PLUGIN_HELP,
+        "host" => HOST_HELP,
+        "profile" => PROFILE_HELP,
+        "agent-store" => AGENT_STORE_HELP,
+        "agent-preset" => AGENT_PRESET_HELP,
+        "addon" => super::addon_cli::HELP,
+        _ => HELP,
+    };
+    RsiError::Boot(format!("{message}\n{help}"))
+}
+
+fn management_help(first: &str, rest: &[OsString]) -> rsi::Result<Option<&'static str>> {
+    if matches!(
+        first,
+        "agent-store" | "agent-preset" | "profile" | "host" | "addon"
+    ) && wants_help(rest)
+    {
+        let token = |index: usize| rest.get(index).and_then(|arg| arg.to_str()).unwrap_or("");
+        let help = |value: &str| matches!(value, "--help" | "-h");
+        let valid = help(token(0))
+            || match first {
+                "agent-store" => matches!(token(0), "verify" | "compact"),
+                "agent-preset" => {
+                    matches!(token(0), "list" | "show" | "path" | "copy" | "delete")
+                        || (token(0) == "default"
+                            && (help(token(1)) || matches!(token(1), "get" | "set" | "clear")))
+                }
+                "profile" => {
+                    matches!(token(0), "application" | "host")
+                        && (help(token(1))
+                            || matches!(token(1), "list" | "show" | "path" | "copy" | "delete")
+                            || (token(0) == "host" && token(1) == "preview")
+                            || (cfg!(unix) && matches!(token(1), "preview-edit" | "commit-edit")))
+                }
+                "host" => matches!(
+                    token(0),
+                    "start" | "serve" | "restart" | "stop" | "status" | "reload"
+                ),
+                "addon" => matches!(
+                    token(0),
+                    "list"
+                        | "install"
+                        | "uninstall"
+                        | "enable"
+                        | "disable"
+                        | "build"
+                        | "watch"
+                        | "refresh"
+                ),
+                _ => false,
+            };
+        if !valid {
+            return Err(command_usage(
+                first,
+                &format!("unknown {first} command path"),
+            ));
+        }
+        return Ok(Some(match first {
+            "agent-store" => AGENT_STORE_HELP,
+            "agent-preset" if token(0) == "default" => AGENT_PRESET_DEFAULT_HELP,
+            "agent-preset" => AGENT_PRESET_HELP,
+            "profile" => PROFILE_HELP,
+            "host" => HOST_HELP,
+            "addon" => super::addon_cli::HELP,
+            _ => unreachable!(),
+        }));
+    }
+    Ok(None)
+}
+
+fn parse_maintenance(first: &str, rest: Vec<OsString>) -> rsi::Result<Parse> {
+    let valid_operation = rest
+        .first()
+        .and_then(|arg| arg.to_str())
+        .is_some_and(|operation| {
+            matches!(operation, "--help" | "-h")
+                || match first {
+                    "config" => matches!(operation, "init" | "show" | "validate"),
+                    "core" => matches!(operation, "upgrade" | "recover"),
+                    "import" => matches!(
+                        operation,
+                        "recover" | "--config-home" | "--state-home" | "--dry-run"
+                    ),
+                    "plugin" => matches!(operation, "list" | "install" | "uninstall" | "gc"),
+                    _ => false,
+                }
+        });
+    if !valid_operation {
+        return Err(command_usage(
+            first,
+            &format!("unknown or missing {first} command path"),
+        ));
+    }
+    let help_requested = wants_help(&rest);
+    let (help, command) = match first {
+        "config" => (CONFIG_HELP, Parse::Config(rest)),
+        "core" => (CORE_HELP, Parse::Core(rest)),
+        "import" => (IMPORT_HELP, Parse::Import(rest)),
+        "plugin" => (PLUGIN_HELP, Parse::Plugin(rest)),
+        _ => unreachable!("matched command"),
+    };
+    Ok(if help_requested {
+        Parse::Help(help)
+    } else {
+        command
+    })
+}
 
 pub(super) fn parse_cli(arguments: impl IntoIterator<Item = OsString>) -> rsi::Result<Parse> {
     let mut arguments = arguments.into_iter();
@@ -676,27 +800,22 @@ pub(super) fn parse_cli(arguments: impl IntoIterator<Item = OsString>) -> rsi::R
     if matches!(first.as_str(), "-V" | "--version") {
         return Ok(Parse::Version);
     }
+    let rest: Vec<_> = arguments.collect();
+    let mut arguments = rest.into_iter();
+    if let Some(help) = management_help(&first, arguments.as_slice())? {
+        return Ok(Parse::Help(help));
+    }
     if matches!(first.as_str(), "config" | "core" | "import" | "plugin") {
-        let rest: Vec<_> = arguments.collect();
-        let help_requested = matches!(rest.as_slice(), [flag] if flag == "--help" || flag == "-h");
-        let (help, command) = match first.as_str() {
-            "config" => (CONFIG_HELP, Parse::Config(rest)),
-            "core" => (CORE_HELP, Parse::Core(rest)),
-            "import" => (IMPORT_HELP, Parse::Import(rest)),
-            "plugin" => (PLUGIN_HELP, Parse::Plugin(rest)),
-            _ => unreachable!("matched command"),
-        };
-        return Ok(if help_requested {
-            Parse::Help(help)
-        } else {
-            command
-        });
+        return parse_maintenance(&first, arguments.collect());
     }
     if first == "web" {
         let rest: Vec<_> = arguments.collect();
         if let Some(operation) = rest.first().and_then(|arg| arg.to_str())
             && matches!(operation, "stop" | "status")
         {
+            if wants_help(&rest) {
+                return Ok(Parse::Help(rsi_serve::WEB_HELP));
+            }
             if rest.len() != 1 {
                 return Err(usage("web stop/status take no application arguments"));
             }
@@ -720,6 +839,9 @@ pub(super) fn parse_cli(arguments: impl IntoIterator<Item = OsString>) -> rsi::R
         let profile = arguments
             .next()
             .ok_or_else(|| usage("run requires an Application Profile name"))?;
+        if profile == "--help" || profile == "-h" {
+            return Ok(Parse::Help(RUN_HELP));
+        }
         let profile =
             ApplicationProfileId::new(utf8(profile)?).map_err(|error| usage(error.to_string()))?;
         return Ok(parse_application(profile, arguments));
@@ -729,7 +851,10 @@ pub(super) fn parse_cli(arguments: impl IntoIterator<Item = OsString>) -> rsi::R
         return super::addon_cli::parse(arguments);
         #[cfg(not(unix))]
         return Ok(
-            if arguments.any(|argument| matches!(argument.to_str(), Some("--help" | "-h"))) {
+            if arguments
+                .take_while(|argument| argument != "--")
+                .any(|argument| matches!(argument.to_str(), Some("--help" | "-h")))
+            {
                 Parse::Help(super::addon_cli::HELP)
             } else {
                 Parse::AddonUnsupported

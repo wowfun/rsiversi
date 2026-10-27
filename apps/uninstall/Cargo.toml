@@ -1,0 +1,15 @@
+[package]
+name = "rsi-uninstall"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+publish = false
+
+[dependencies]
+rsi-installation = { path = "../../crates/rsi/installation" }
+rsi-host = { path = "../../crates/rsi-host/core" }
+tokio = { workspace = true, features = ["macros", "rt-multi-thread"] }
+
+[lints]
+workspace = true

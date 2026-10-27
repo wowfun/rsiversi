@@ -1,5 +1,16 @@
 # rsi-cli
 
+Top-level help groups Usage, Applications, Commands, Global options and Examples.
+Each public entry has one summary; application owners maintain detailed help.
+Nested management help is recognized before home maintenance or path-value
+admission, even when a preceding option lacks its value. Arguments after `--`
+remain literal. Unknown command paths remain errors with the owning command help. Custom Profile help explains
+invocation without loading the Profile. Internal protocol probes stay hidden.
+
+Recorded core installations use the
+[installation owner's transaction](../../crates/rsi/installation/README.md);
+legacy unrecorded executables retain the single-file transaction.
+
 On Windows, persistent-Host integration tests must execute outside Cargo's child
 Job. Compile with `cargo test --no-run --message-format=json`, then execute the
 reported test artifacts from the native caller. CI does this for CLI and catalog
@@ -78,3 +89,14 @@ the database file layout, preserves logical records, and reports database bytes
 before and after; it does not collect CAS. Both commands accept an absolute `--root`
 and `--output text|json`. JSON uses version 1, a command-specific `type`, `status`
 and `root`; compact additionally reports `before_bytes` and `after_bytes`.
+
+The `core_upgrade` integration target also requires a prebuilt `rsi-uninstall`
+(next to the test product binary or selected with `RSI_TEST_UNINSTALLER`). Windows
+Host tests run their compiled test executable outside the Cargo Job.
+
+Core upgrade and recovery emit one JSON receipt on stdout; Host progress goes to
+stderr. `host stop` reports stale metadata without claiming it stopped a dead PID,
+and graceful failure also names its explicit `--force` escape hatch.
+
+The managed core-upgrade fixture uses Node to assemble a real devtools package
+before admitting it through the CLI; build `rsi-uninstall` first.

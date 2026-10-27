@@ -4,7 +4,7 @@ use rsi_native_addons_api::NativeAddonsClient;
 use std::{ffi::OsString, sync::Arc};
 
 /// Explicit staging grammar, without source installation or Host startup.
-pub const HELP: &str = "Native addons application (existing local Service Host):\n  rsi run addons refresh\n  rsi addon refresh\nPrints a staging receipt; existing Sessions keep their pinned generation.\n";
+pub const HELP: &str = "Usage: rsi run addons refresh\nRefresh native addon selections on the existing local Service Host.\nPrints a staging receipt; existing Sessions keep their pinned generation.\n";
 #[derive(Debug)]
 pub(crate) enum Command {
     Refresh,

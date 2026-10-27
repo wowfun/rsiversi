@@ -89,6 +89,33 @@ fn fixture_paths_and_minimal_installers_have_native_ci_coverage() {
         }
     }
     for job in ["lockfiles", "windows-repository-tools"] {
+        let steps = workflow["jobs"][job]["steps"].as_sequence().unwrap();
+        let build = steps
+            .iter()
+            .position(|step| {
+                step["run"]
+                    .as_str()
+                    .is_some_and(|run| run.contains("cargo build --locked -p rsi-uninstall"))
+            })
+            .unwrap();
+        let removal = steps
+            .iter()
+            .position(|step| {
+                step["run"]
+                    .as_str()
+                    .is_some_and(|run| run.contains("apps/devtools/tests/uninstall.test.mjs"))
+            })
+            .unwrap();
+        assert!(
+            build < removal,
+            "{job} must build the native tool before testing removal"
+        );
+        assert!(
+            steps[removal]["if"]
+                .as_str()
+                .unwrap()
+                .contains("steps.maintenance_tool.outcome == 'success'")
+        );
         assert!(
             workflow["jobs"][job]["steps"]
                 .as_sequence()

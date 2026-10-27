@@ -1,7 +1,7 @@
+#[cfg(any(target_os = "linux", windows))]
+use super::host_cli::format_service_host_diagnostics;
 #[cfg(target_os = "linux")]
 use super::host_cli::{DaemonControlEvent, next_daemon_control_event, stop_reload_task};
-#[cfg(any(target_os = "linux", windows))]
-use super::host_cli::{format_service_host_diagnostics, host_stop_timeout};
 use super::*;
 
 #[test]
@@ -12,6 +12,25 @@ fn maintenance_help_is_resolved_before_home_initialization() {
             Parse::Help(_)
         ));
     }
+}
+
+#[test]
+fn nested_help_precedes_option_values_but_respects_literal_arguments() {
+    for arguments in [
+        vec!["core", "upgrade", "--local", "--help"],
+        vec!["plugin", "install", "--local", "--help"],
+        vec!["config", "validate", "-h"],
+        vec!["run", "--help"],
+    ] {
+        assert!(matches!(parse(&arguments).unwrap(), Parse::Help(_)));
+    }
+    for command in ["core", "config", "import", "plugin"] {
+        assert!(parse(&[command, "unknown", "--help"]).is_err());
+    }
+    assert!(!matches!(
+        parse(&["core", "upgrade", "--", "--help"]).unwrap(),
+        Parse::Help(_)
+    ));
 }
 
 #[cfg(any(target_os = "linux", windows))]
@@ -196,12 +215,7 @@ fn host_commands_validate_syntax_but_have_no_daemon_state_on_this_platform() {
 #[cfg(any(target_os = "linux", windows))]
 #[test]
 fn graceful_host_stop_wait_includes_drain_and_shutdown_margin() {
-    assert_eq!(
-        host_stop_timeout(false),
-        SERVICE_HOST_DRAIN_TIMEOUT + HOST_SHUTDOWN_MARGIN
-    );
-    assert!(host_stop_timeout(false) > SERVICE_HOST_DRAIN_TIMEOUT);
-    assert_eq!(host_stop_timeout(true), FORCE_HOST_STOP_TIMEOUT);
+    assert!(FORCE_HOST_STOP_TIMEOUT < rsi_service_host::SERVICE_HOST_STOP_TIMEOUT);
 }
 
 #[cfg(target_os = "linux")]
@@ -330,4 +344,51 @@ fn lifecycle_commands_reject_reset_before_home_initialization() {
         }
     }
     assert!(super::launch::validate_command(&options, &parse(&["tui"]).unwrap()).is_ok());
+}
+
+#[test]
+fn management_help_requires_valid_command_paths_and_never_consumes_literal_help() {
+    for args in [
+        vec!["agent-store", "verify", "--root", "--help"],
+        vec!["agent-preset", "copy", "--from", "--help"],
+        vec!["profile", "host", "show", "--output", "--help"],
+        vec!["host", "start", "--profile", "--help"],
+        vec!["addon", "install", "--root", "--help"],
+        vec!["web", "stop", "--help"],
+    ] {
+        assert!(matches!(parse(&args), Ok(Parse::Help(_))), "{args:?}");
+    }
+    for args in [
+        vec!["agent-store", "unknown", "--help"],
+        vec!["agent-preset", "default", "unknown", "--help"],
+        vec!["profile", "host", "unknown", "--help"],
+        vec!["host", "unknown", "--help"],
+        vec!["addon", "unknown", "--help"],
+        vec!["agent-store", "verify", "--", "--help"],
+        vec!["profile", "host", "show", "--", "--help"],
+    ] {
+        assert!(!matches!(parse(&args), Ok(Parse::Help(_))), "{args:?}");
+    }
+}
+
+#[test]
+fn missing_and_unknown_command_paths_use_the_owning_help() {
+    for (name, expected) in [
+        ("core", cli::CORE_HELP),
+        ("host", cli::HOST_HELP),
+        ("plugin", cli::PLUGIN_HELP),
+    ] {
+        for args in [
+            vec![name],
+            vec![name, "unknown"],
+            vec![name, "unknown", "--help"],
+        ] {
+            let message = parse(&args)
+                .err()
+                .expect("invalid command path")
+                .to_string();
+            assert!(message.contains(expected), "{message}");
+            assert!(!message.contains("Applications:"), "{message}");
+        }
+    }
 }

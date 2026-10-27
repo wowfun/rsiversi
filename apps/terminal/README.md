@@ -88,7 +88,7 @@ The Plugins view displays the shared workbench last-update guidance separately f
 Session without submitting a message. Quoted paths are supported; the default
 file is `rsi-session-<safe-id>.md` (or `.json`) in the client working directory.
 Line mode accepts `:export` with the same arguments. Scripted export uses
-`rsi run cli --export SESSION|latest [-f FORMAT] [-i INCLUDE] [-o PATH]`:
+`rsi cli --export SESSION|latest [-f FORMAT] [-i INCLUDE] [-o PATH]`:
 Each short or long export option accepts a separate value or `=VALUE`.
 without a path the artifact goes to stdout and status/errors go to stderr.
 `latest` selects the newest durable root in the selected workspace. Export is
@@ -624,7 +624,7 @@ Requested policy is not evidence of sandbox enforcement. The bounded raw-request
 window remains available below those fields; decisions keep their exact request
 identity and are never automatically replayed.
 
-Explicit Session cleanup is available through `rsi run cli --purge-preview JSON`,
+Explicit Session cleanup is available through `rsi cli --purge-preview JSON`,
 `--purge JSON`, and `--purge-status OPERATION_ID`. JSON contains `operation_id`
 and sorted `targets` with `session_id`, `header_sha256`, `fact_seq`, `control_seq`.
 Use the exact previewed versions and retain that operation ID when retrying.

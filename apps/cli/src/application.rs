@@ -11,27 +11,26 @@ pub(super) fn print_help(invocation: &ApplicationInvocation) -> bool {
         .take_while(|argument| argument.to_str() != Some("--"))
         .any(|argument| matches!(argument.to_str(), Some("-h" | "--help")))
     {
-        if invocation.profile.as_str() == "web" {
-            print!("{}", rsi_serve::WEB_HELP);
-            return true;
-        }
-        if invocation.profile.as_str() == "desktop" {
-            println!(
-                "Usage: rsi [GLOBAL OPTIONS] desktop [--assets DIRECTORY]\nInstall the Desktop and Web packages with rsi plugin install."
-            );
-            return true;
-        }
-        print!(
-            "{}\n{}\n{}\n{}\n{}",
-            rsi_terminal::HELP,
-            rsi_serve::HELP,
-            rsi_terminal::DEVICES_HELP,
-            rsi_terminal::INSPECTOR_HELP,
-            rsi_terminal::NATIVE_ADDONS_HELP
-        );
+        print!("{}", help(invocation.profile.as_str()));
         return true;
     }
     false
+}
+
+fn help(profile: &str) -> &'static str {
+    match profile {
+        "tui" => rsi_terminal::TUI_HELP,
+        "cli" => rsi_terminal::CLI_HELP,
+        "headless" => rsi_terminal::HEADLESS_HELP,
+        "acp" => rsi_acp_app::HELP,
+        "web" => rsi_serve::WEB_HELP,
+        "serve" => rsi_serve::HELP,
+        "desktop" => rsi_app_catalog::DESKTOP_HELP,
+        "devices" => rsi_terminal::DEVICES_HELP,
+        "inspector" => rsi_terminal::INSPECTOR_HELP,
+        "addons" => rsi_terminal::NATIVE_ADDONS_HELP,
+        _ => super::cli::RUN_HELP,
+    }
 }
 
 pub(super) async fn run_application(invocation: ApplicationInvocation) -> u8 {

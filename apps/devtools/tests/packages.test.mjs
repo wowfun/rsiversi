@@ -18,7 +18,12 @@ test('independent native package and pinned signing preserve exact executable by
     const source = join(root,'input'), repository = join(root,'repository');
     await writeFile(source,'fixture executable');
     await mkdir(repository);
-    const manifest = await assemble('core',join(repository,'core'),source);
+    const manifest = await assemble('core', join(repository,'core'), source, source);
+    const uninstaller = process.platform === 'win32' ? 'rsi-uninstall.exe' : 'rsi-uninstall';
+    const launcher = process.platform === 'win32' ? 'uninstall.ps1' : 'uninstall.sh';
+    assert.deepEqual(manifest.exports.uninstaller,{kind:'executable',path:uninstaller});
+    assert(manifest.files.some(file=>file.path===launcher));
+    assert(manifest.files.some(file=>file.path===uninstaller && file.executable));
     const {privateKey,publicKey} = generateKeyPairSync('ed25519');
     const pem = privateKey.export({type:'pkcs8',format:'pem'});
     const pin = publicKey.export({type:'spki',format:'der'}).subarray(-32).toString('hex');
@@ -30,7 +35,7 @@ test('independent native package and pinned signing preserve exact executable by
     const bytes = await readFile(join(repository,'core','package.json'));
     assert.equal(index.packages.core[manifest.target].digest,createHash('sha256').update(bytes).digest('hex'));
     assert.deepEqual(manifest.requires,[]);
-    await assert.rejects(assemble('core',join(repository,'core'),source),/exist/i);
+    await assert.rejects(assemble('core', join(repository,'core'), source, source),/exist/i);
     await writeFile(join(repository,'core',manifest.files[0].path),'tampered');
     await assert.rejects(signRepository(repository,'fixture',2,pem,pin),/digest/);
   } finally { await cleanup(root); }

@@ -52,3 +52,10 @@ independently of presentation and turn lifetimes. Node and local-origin grants
 remain live product state above Agent and Meta. Results and public Session reads share the immutable Header's
 product protection scope. Reopening an application or reading history issues no
 standing execution authority.
+
+The [installation library](../installation/README.md) owns fixed-layout maintenance
+records, upgrade recovery, PATH receipts and offline deletion. It consumes the
+Service Host owner for stop/lease coordination and the package owner for package
+usage exclusion. The independent [uninstall application](../../../apps/uninstall/README.md)
+parses maintenance requests without linking standard application composition;
+[devtools](../../../apps/devtools/README.md) delivers its versioned tool and launcher.

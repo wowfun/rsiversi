@@ -1,0 +1,2 @@
+Usage: rsi [GLOBAL OPTIONS] desktop [--assets DIRECTORY]
+Open the installed Desktop application. Install Desktop and Web packages with rsi plugin install.

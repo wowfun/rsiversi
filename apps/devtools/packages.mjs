@@ -166,9 +166,11 @@ export function hostInterfacePackages(metadata, entry) {
   });
 }
 
-export async function assemble(kind, output, input) {
+export async function assemble(kind, output, input, uninstaller) {
   if (!['core','web','desktop','ssh-helper'].includes(kind) || !isAbsolute(output) || !isAbsolute(input))
     throw new Error('assemble requires core|web|desktop|ssh-helper and absolute output/input paths');
+  if (kind === 'core' ? !uninstaller || !isAbsolute(uninstaller) : uninstaller !== undefined)
+    throw new Error('core assembly requires an absolute uninstaller input; other packages accept one input');
   if (kind === 'ssh-helper' && process.platform !== 'linux') throw new Error('SSH helper publication requires Linux');
   if (!platforms.has(process.platform) || !architectures.has(process.arch)) throw new Error('Unsupported native target');
   const version = process.env.RSI_RELEASE_VERSION ?? '0.0.1-local';
@@ -187,6 +189,12 @@ export async function assemble(kind, output, input) {
     const filename = `${kind === 'core' ? 'rsi' : `rsi-${kind}`}${process.platform === 'win32' ? '.exe' : ''}`;
     copies.push([input, filename, true]);
     manifest.exports[kind] = {kind:'executable',path:filename};
+    if (kind === 'core') {
+      const tool = `rsi-uninstall${process.platform === 'win32' ? '.exe' : ''}`;
+      const launcher = process.platform === 'win32' ? 'uninstall.ps1' : 'uninstall.sh';
+      copies.push([uninstaller, tool, true], [join(root, 'scripts', launcher), launcher, process.platform !== 'win32']);
+      manifest.exports.uninstaller = {kind:'executable',path:tool};
+    }
     if (kind === 'ssh-helper') manifest.requires.push(await descriptor(join(root,'crates/rsi-ssh/protocol')));
     if (kind === 'desktop') {
       manifest.requires.push(await descriptor(join(root,'crates/rsi/web-control')));
@@ -283,9 +291,9 @@ export async function signRepository(directory, name, sequence, pem, expectedKey
 if (process.argv[1] && resolve(process.argv[1]) === fileURLToPath(import.meta.url)) {
   const [operation,...args] = process.argv.slice(2);
   try {
-    if (operation === 'assemble' && args.length === 3) await assemble(...args);
+    if (operation === 'assemble' && (args.length === 3 || args.length === 4)) await assemble(...args);
     else if (operation === 'sign' && args.length === 3) await signRepository(args[0],args[1],Number(args[2]),
       process.env.RSI_REPOSITORY_SIGNING_KEY,process.env.RSI_PACKAGE_REPOSITORY_KEY);
-    else throw new Error('Usage: packages.mjs assemble KIND OUTPUT INPUT | sign ROOT NAME SEQUENCE');
+    else throw new Error('Usage: packages.mjs assemble KIND OUTPUT INPUT [UNINSTALLER] | sign ROOT NAME SEQUENCE');
   } catch (error) { console.error(error.message); process.exitCode=1; }
 }
