@@ -20,12 +20,19 @@ traversal; accumulated sibling archives cannot block a lookup by capacity.
 Private staging creation, single-component hard-link publication and removal use
 retained directory handles. Publication never replaces an existing destination;
 callers own content verification, synchronization order and recovery. Windows
+also exposes explicit regular-file rename through a retained directory, with
+replacement selected by the caller. It never follows either child path; callers
+own exclusive maintenance admission and do not need to alter a shared parent ACL.
+Windows
 namespace pins support the same operations without reopening absolute names.
 Windows can also privatize one owned child directory relative to a retained
 parent. This explicit mutation returns the admitted child handle.
 Single-component empty-directory removal also uses the retained parent and
 refuses links and nonempty directories. Callers own traversal bounds and must
 release a child's namespace pin before removing its permanent guard.
+Explicit link removal opens the link itself through the retained parent and
+checks its exact long-name spelling on Windows before marking it for deletion. It
+verifies its reparse/link type before unlinking; it never opens the target.
 
 `Directory`, `DirectoryEntries` and `DirectoryEntry` own the native handles and
 enumeration lifetime. No public signature or dereference exposes cap-std's

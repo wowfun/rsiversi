@@ -11,6 +11,13 @@ use std::{
 pub struct Directory(File);
 
 impl Directory {
+    /// Removes a symbolic link itself through retained parent authority.
+    pub fn remove_link(&self, name: &Path) -> std::io::Result<()> {
+        if self.child_kind(name)? != EntryKind::Link {
+            return Err(std::io::Error::other("entry is not a link"));
+        }
+        self.remove_child(name)
+    }
     /// Classify exactly one child without following links or enumerating siblings.
     pub fn child_kind(&self, name: &Path) -> std::io::Result<EntryKind> {
         single_name(name)?;

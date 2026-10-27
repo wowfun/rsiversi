@@ -109,6 +109,7 @@ unsafe extern "system" {
 
 const DIRECTORY_READ: u32 = 0x0010_0081;
 const FILE_READ: u32 = 0x0012_0089;
+const DELETE: u32 = 0x0001_0000;
 const REPARSE: u32 = 0x400;
 const DIRECTORY: u32 = 0x10;
 const FILE_ATTRIBUTE_DEVICE: u32 = 0x40;
@@ -315,6 +316,29 @@ pub(super) fn rename_child(
     replace: bool,
 ) -> io::Result<()> {
     security::PrivateDescriptor::new(true)?.verify(parent)?;
+    rename_admitted_child(parent, source, destination, directory, replace)
+}
+
+pub(super) fn rename_file_in_directory(
+    parent: &File,
+    source: &[u16],
+    destination: &[u16],
+    replace: bool,
+) -> io::Result<()> {
+    let writable = writable_relative(parent, &[], true)?;
+    if identity(parent)? != identity(&writable)? {
+        return Err(io::Error::other("publication parent identity changed"));
+    }
+    rename_admitted_child(&writable, source, destination, false, replace)
+}
+
+fn rename_admitted_child(
+    parent: &File,
+    source: &[u16],
+    destination: &[u16],
+    directory: bool,
+    replace: bool,
+) -> io::Result<()> {
     match relative(parent, destination, directory) {
         Ok(_) => {}
         Err(e) if e.kind() == io::ErrorKind::NotFound => {}
@@ -425,6 +449,29 @@ pub(super) fn link_child(
 
 pub(super) fn remove_child(parent: &File, name: &[u16]) -> io::Result<()> {
     remove_entry(parent, name, false)
+}
+
+pub(super) fn remove_link(parent: &File, name: &[u16]) -> io::Result<()> {
+    let (file, _) =
+        acquire_with_access(parent, name, None, None, FILE_READ | DELETE, FILE_OPEN, 3)?;
+    check_name(&file, name)?;
+    if std::os::windows::fs::MetadataExt::file_attributes(&file.metadata()?) & REPARSE == 0 {
+        return Err(names::invalid("entry is no longer a reparse point"));
+    }
+    let mut status = StatusBlock::default();
+    let delete = 1_u8;
+    // SAFETY: The retained no-follow handle names the reparse object itself and
+    // has DELETE access. Class 13 reads one BOOLEAN from live storage; no target
+    // path is resolved and the synchronous handle outlives the call.
+    nt_result(unsafe {
+        NtSetInformationFile(
+            file.as_raw_handle(),
+            &raw mut status,
+            (&raw const delete).cast(),
+            1,
+            13,
+        )
+    })
 }
 
 pub(super) fn remove_empty_directory(parent: &File, name: &[u16]) -> io::Result<()> {

@@ -111,6 +111,28 @@ pub fn file_version(file: &File) -> io::Result<FileVersion> {
 }
 
 impl Directory {
+    /// Removes a link/reparse child itself, without acquiring its target.
+    pub fn remove_link(&self, name: &Path) -> io::Result<()> {
+        native::remove_link(&self.0, &single_name(name)?)
+    }
+    /// Rename a regular child through retained authority; callers serialize writers.
+    pub fn publish_child(
+        &self,
+        source: &Path,
+        destination: &Path,
+        kind: EntryKind,
+        replace: bool,
+    ) -> io::Result<()> {
+        if kind != EntryKind::File {
+            return Err(names::invalid("publication requires a regular file"));
+        }
+        native::rename_file_in_directory(
+            &self.0,
+            &single_name(source)?,
+            &single_name(destination)?,
+            replace,
+        )
+    }
     /// Classify exactly one child without following links or enumerating siblings.
     pub fn child_kind(&self, name: &Path) -> io::Result<EntryKind> {
         native::child_kind(&self.0, &single_name(name)?)

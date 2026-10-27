@@ -457,6 +457,25 @@ fn junction(path: &Path, target: &Path) {
 }
 
 #[test]
+fn link_removal_requires_exact_spelling_and_preserves_the_target() {
+    let temporary = tempfile::tempdir().unwrap();
+    let base = temporary.path();
+    fs::create_dir(base.join("outside")).unwrap();
+    fs::write(base.join("outside/keep"), "outside").unwrap();
+    junction(&base.join("Setup"), &base.join("outside"));
+    let root = open_absolute_directory_no_follow(base).unwrap();
+    assert!(root.remove_link(Path::new("setup")).is_err());
+    assert_eq!(
+        root.child_kind(Path::new("Setup")).unwrap(),
+        EntryKind::Link
+    );
+    root.remove_link(Path::new("Setup")).unwrap();
+    assert!(fs::symlink_metadata(base.join("Setup")).is_err());
+    assert_eq!(fs::read(base.join("outside/keep")).unwrap(), b"outside");
+    assert!(root.remove_link(Path::new("outside")).is_err());
+}
+
+#[test]
 fn creation_collision_acquires_only_an_existing_no_follow_directory() {
     let temporary = tempfile::tempdir().unwrap();
     let base = temporary.path();
@@ -636,4 +655,38 @@ fn directory_creation_bounds_utf16_without_creating_a_truncated_name() {
         .map(|entry| entry.unwrap().file_name())
         .collect::<Vec<_>>();
     assert_eq!(entries, [std::ffi::OsString::from(maximum)]);
+}
+
+#[test]
+fn retained_directory_publication_accepts_inherited_acl_without_overwriting() {
+    let temporary = tempfile::tempdir().unwrap();
+    let path = temporary.path().join("shared");
+    fs::create_dir(&path).unwrap();
+    let directory = open_absolute_directory_no_follow(&path).unwrap();
+    assert!(directory.verify_private().is_err());
+    let mut file = create_relative_private_file_no_follow(&directory, Path::new("source")).unwrap();
+    file.write_all(b"owned").unwrap();
+    drop(file);
+    fs::write(path.join("occupied"), b"other").unwrap();
+    assert!(
+        directory
+            .publish_child(
+                Path::new("source"),
+                Path::new("occupied"),
+                EntryKind::File,
+                false
+            )
+            .is_err()
+    );
+    assert_eq!(fs::read(path.join("occupied")).unwrap(), b"other");
+    directory
+        .publish_child(
+            Path::new("source"),
+            Path::new("published"),
+            EntryKind::File,
+            false,
+        )
+        .unwrap();
+    assert!(directory.verify_private().is_err());
+    assert_eq!(fs::read(path.join("published")).unwrap(), b"owned");
 }
