@@ -98,6 +98,17 @@ async fn fixture() -> (tempfile::TempDir, Runtime, ServiceHostPaths) {
     .await;
     (directory, runtime, paths)
 }
+fn local_operations(runtime: &Runtime) -> Vec<rsi_api_protocol::OperationId> {
+    runtime
+        .root()
+        .lookup_local::<ApiDispatchContract>()
+        .unwrap()
+        .operations()
+        .unwrap()
+        .into_iter()
+        .map(|operation| operation.id)
+        .collect()
+}
 async fn connect(runtime: &Runtime, paths: &ServiceHostPaths) -> UdsClient {
     let description = runtime
         .root()
@@ -177,8 +188,20 @@ async fn listener_plugin_owns_publication_and_disposes_without_retiring_the_api_
             0o700
         );
     }
+    let before = local_operations(&runtime);
+    assert!(!before.is_empty());
     let client = connect(&runtime, &paths).await;
-    assert_eq!(client.operations().await.unwrap().operations().len(), 3);
+    assert_eq!(
+        client
+            .operations()
+            .await
+            .unwrap()
+            .operations()
+            .iter()
+            .map(|operation| operation.id.clone())
+            .collect::<Vec<_>>(),
+        before
+    );
     let mut waiter = Box::pin(listener.stopped());
     assert!(waiter.as_mut().now_or_never().is_none());
     drop(waiter);
@@ -206,8 +229,10 @@ async fn listener_plugin_owns_publication_and_disposes_without_retiring_the_api_
             .unwrap()
             .operations()
             .unwrap()
-            .len(),
-        3
+            .into_iter()
+            .map(|operation| operation.id)
+            .collect::<Vec<_>>(),
+        before
     );
     assert!(matches!(
         HostOwnerLease::try_acquire(paths.clone()),

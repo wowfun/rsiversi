@@ -56,6 +56,59 @@ pub enum HostSignal {
     Reload,
 }
 
+/// Admitted installation source, distinct from artifact and home identity.
+#[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
+#[serde(deny_unknown_fields)]
+pub struct InstallationOrigin {
+    /// Validated installation record identity.
+    pub id: String,
+    /// Canonical source prefix, not the runtime-copy directory.
+    pub prefix: PathBuf,
+}
+type OriginResolver = fn() -> Option<InstallationOrigin>;
+static ORIGIN_RESOLVER: std::sync::OnceLock<OriginResolver> = std::sync::OnceLock::new();
+static INSTALLATION_ORIGIN: std::sync::OnceLock<Option<InstallationOrigin>> =
+    std::sync::OnceLock::new();
+/// Registers admission before any Host is created; registration performs no I/O.
+pub fn set_installation_origin_resolver(resolver: OriginResolver) -> Result<(), ServiceHostError> {
+    if INSTALLATION_ORIGIN.get().is_some() {
+        return Err(ServiceHostError::Invalid(
+            "installation origin already resolved".into(),
+        ));
+    }
+    ORIGIN_RESOLVER
+        .set(resolver)
+        .map_err(|_| ServiceHostError::Invalid("installation origin resolver already set".into()))
+}
+/// Resolves the launcher's admitted provenance at most once, when a Host needs it.
+pub fn installation_origin() -> Option<&'static InstallationOrigin> {
+    INSTALLATION_ORIGIN
+        .get_or_init(|| ORIGIN_RESOLVER.get().and_then(|resolve| resolve()))
+        .as_ref()
+}
+impl InstallationOrigin {
+    /// Checks structural bounds; the launcher owns record and executable admission.
+    pub fn validate(&self) -> Result<(), ServiceHostError> {
+        if self.id.len() != 32
+            || !self
+                .id
+                .bytes()
+                .all(|b| b.is_ascii_digit() || (b'a'..=b'f').contains(&b))
+            || !self.prefix.is_absolute()
+            || self
+                .prefix
+                .components()
+                .any(|part| matches!(part, std::path::Component::ParentDir))
+            || self.prefix.as_os_str().len() > 4096
+        {
+            return Err(ServiceHostError::Invalid(
+                "invalid installation origin".into(),
+            ));
+        }
+        Ok(())
+    }
+}
+
 /// Strict recoverable process-owner description.
 #[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
 #[serde(deny_unknown_fields)]
@@ -76,6 +129,9 @@ pub struct HostOwnerMetadata {
     /// Digest of the currently accepted Service Profile sources.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub service_revision: Option<String>,
+    /// Validated original installation, when known; never inferred from build id.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub installation: Option<InstallationOrigin>,
     /// Exact wire protocol epoch.
     pub protocol_epoch: u32,
     /// Exact product build identity.
@@ -103,13 +159,18 @@ impl HostOwnerMetadata {
         #[cfg(not(any(target_os = "linux", windows)))]
         let process_start_token = current_process_start_token();
         let metadata = Self {
-            format: 2,
+            format: if installation_origin().is_some() {
+                3
+            } else {
+                2
+            },
             pid: std::process::id(),
             process_start_token,
             mode,
             launch_key: launch_key.into(),
             home_authority: None,
             service_revision: None,
+            installation: installation_origin().cloned(),
             protocol_epoch: SERVICE_HOST_PROTOCOL_EPOCH,
             product_build: service_host_product_build()?.into(),
             host_epoch,
@@ -126,12 +187,23 @@ impl HostOwnerMetadata {
     /// executable. Lifecycle clients must be able to inspect an older live
     /// generation after their own binary has been replaced.
     pub fn validate(&self) -> Result<(), ServiceHostError> {
-        if !matches!((self.format, &self.endpoint_id), (1, None) | (2, Some(_))) {
+        if !matches!(
+            (self.format, &self.endpoint_id),
+            (1, None) | (2 | 3, Some(_))
+        ) {
             return Err(ServiceHostError::Invalid(
                 "unsupported Service Host owner metadata format".into(),
             ));
         }
         validate_process_identity(self.pid, &self.process_start_token)?;
+        if let Some(origin) = &self.installation {
+            origin.validate()?;
+        }
+        if (self.format == 3) != self.installation.is_some() {
+            return Err(ServiceHostError::Invalid(
+                "installation provenance requires owner format 3".into(),
+            ));
+        }
         validate_launch_key(&self.launch_key)?;
         for digest in [&self.home_authority, &self.service_revision]
             .into_iter()
@@ -161,7 +233,7 @@ impl HostOwnerMetadata {
     /// Required operation descriptors are checked by each client after connecting.
     pub fn is_compatible_with_current(&self) -> Result<bool, ServiceHostError> {
         self.validate()?;
-        Ok(self.format == 2 && self.protocol_epoch == SERVICE_HOST_PROTOCOL_EPOCH)
+        Ok(matches!(self.format, 2 | 3) && self.protocol_epoch == SERVICE_HOST_PROTOCOL_EPOCH)
     }
 }
 
@@ -1015,4 +1087,35 @@ fn executable_product_build() -> Result<String, String> {
 #[allow(clippy::needless_pass_by_value)] // Kept as a direct `map_err` adapter.
 pub(crate) fn io_error(error: io::Error) -> ServiceHostError {
     ServiceHostError::Io(error.to_string())
+}
+
+#[cfg(all(test, any(windows, target_os = "linux")))]
+mod origin_tests {
+    use super::*;
+    #[test]
+    fn installation_provenance_requires_exactly_schema_three() {
+        let root = tempfile::tempdir().unwrap();
+        let mut owner = HostOwnerMetadata::current(
+            HostOwnerMode::Embedded,
+            "a".repeat(64),
+            rsi_api_protocol::HostEpoch::generate().unwrap(),
+            rsi_api_protocol::EndpointId::from_bytes([1; 16]),
+            None,
+        )
+        .unwrap();
+        assert_eq!(owner.format, 2);
+        owner.installation = Some(InstallationOrigin {
+            id: "b".repeat(32),
+            prefix: root.path().into(),
+        });
+        assert!(owner.validate().is_err());
+        owner.format = 3;
+        owner.validate().unwrap();
+        owner.installation.as_mut().unwrap().prefix = root.path().join("nested/../alias");
+        assert!(owner.validate().is_err());
+        owner.installation = None;
+        assert!(owner.validate().is_err());
+        owner.format = 2;
+        owner.validate().unwrap();
+    }
 }

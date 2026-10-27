@@ -1,5 +1,16 @@
 # rsi-service-host
 
+Startup provenance may identify a validated installation id and canonical prefix.
+The launcher registers a deferred resolver: admission runs once when provenance
+is needed for Host creation/publication, not for ordinary command parsing or queries.
+When launching an upgraded or recovered executable, admission uses that selected
+source artifact rather than the parent process's old image.
+It remains distinct from home authority and executable digest: two installations
+can share both homes and a build. Lifecycle consumers preserve older metadata
+without provenance and require explicit consent before assuming its origin.
+Reusable graceful-stop coordination fences the process start token, never silently
+escalates to force, and reports PID and operating-system recovery guidance.
+
 This package owns native process ownership and local API publication for the
 standard product. One HostOwnerLease exclusively protects both configuration and
 state homes for embedded and daemon execution. Each home retains its own
@@ -84,9 +95,10 @@ Accepted Service source revisions are republished after Profile convergence
 without changing the home authority, process epoch or existing attachment identity.
 
 The persistent lease, strict owner metadata and detached log live below
-`<state>/session-host/`. Owner metadata schema 2 records EndpointId, HostEpoch,
+`<state>/session-host/`. Owner metadata schema 3 adds admitted installation provenance to the schema-2
+EndpointId, HostEpoch,
 process start identity, mode, launch key, executable build and the absolute daemon
-endpoint. Schema 1 remains structurally readable for lifecycle control of an
+endpoint. Unrecorded binaries continue writing schema 2. Schema 1 remains structurally readable for lifecycle control of an
 older process; it cannot supply a current API connection identity. Compatibility
 checks are separate from structural validation, so a rebuilt lifecycle client
 can still stop an older exact process generation. Linux signals open a pidfd
@@ -160,3 +172,15 @@ status diagnostic. Force-stop remains native process-handle control.
 retaining the same owner lease. It validates the native peer before returning a
 stream; the plugin owns framing, bounded connection admission and shutdown.
 Clients use the recorded owner identity and verify the live native server.
+
+Offline purge holds startup and dual-home owner leases before endpoint cleanup.
+The owner accepts only a validated, stopped lifecycle identity bound to the same
+home authority. On Unix it probes and removes that record's product/control
+sockets, never enumerating the surrounding runtime root. Unknown runtime entries
+remain; missing legacy home authority does not authorize external cleanup.
+
+Graceful stop allows the drain timeout plus 15 seconds for native exit, preserving
+the CLI shutdown budget. Installation origin is admitted by the launcher and
+resolved once only when a Host needs it; it distinguishes same-build installations
+sharing homes and does not replace process-generation or home-lease authority.
+Older owners lacking provenance require confirmation during ordinary uninstall.

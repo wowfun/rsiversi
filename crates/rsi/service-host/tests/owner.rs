@@ -207,7 +207,9 @@ fn metadata_discovery_does_not_require_a_bindable_client_runtime_path() {
     let unbindable_runtime = root.path().join("x".repeat(160));
     let client_paths =
         ServiceHostPaths::from_host_paths_with_runtime(&host, Some(&unbindable_runtime)).unwrap();
-    assert_eq!(client_paths.read_metadata().unwrap(), Some(metadata));
+    let mut published = metadata;
+    published.home_authority = Some(owner_paths.home_authority().unwrap());
+    assert_eq!(client_paths.read_metadata().unwrap(), Some(published));
 }
 
 #[test]
@@ -285,6 +287,7 @@ fn lifecycle_signal_is_fenced_by_the_exact_process_start_token() {
         launch_key: launch_key(),
         home_authority: None,
         service_revision: None,
+        installation: None,
         protocol_epoch: 1,
         product_build: product_build(),
         host_epoch: HostEpoch::generate().unwrap(),
@@ -339,6 +342,7 @@ fn daemon_metadata_rejects_a_relative_socket_path() {
         launch_key: launch_key(),
         home_authority: None,
         service_revision: None,
+        installation: None,
         protocol_epoch: 1,
         product_build: product_build(),
         host_epoch: HostEpoch::generate().unwrap(),
@@ -358,6 +362,7 @@ fn a_missing_process_is_not_detected_by_localized_io_error_text() {
         launch_key: launch_key(),
         home_authority: None,
         service_revision: None,
+        installation: None,
         protocol_epoch: 1,
         product_build: product_build(),
         host_epoch: HostEpoch::generate().unwrap(),

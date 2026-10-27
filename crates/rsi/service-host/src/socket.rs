@@ -127,7 +127,7 @@ fn validate_effective_user_directory(path: &Path, label: &str) -> Result<(), Ser
     Ok(())
 }
 
-fn remove_stale_socket_after_failed_probe(path: &Path) -> Result<(), ServiceHostError> {
+pub(crate) fn remove_stale_socket_after_failed_probe(path: &Path) -> Result<(), ServiceHostError> {
     let metadata = match fs::symlink_metadata(path) {
         Ok(metadata) => metadata,
         Err(error) if error.kind() == io::ErrorKind::NotFound => return Ok(()),

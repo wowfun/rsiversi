@@ -23,6 +23,8 @@ mod local_stream;
 pub use local_stream::{LocalServiceListener, LocalStream, connect_local_service};
 mod owner;
 mod owner_plugin;
+mod stop;
+pub use stop::{SERVICE_HOST_STOP_TIMEOUT, cleanup_stopped_endpoints, stop_gracefully};
 mod questions;
 #[cfg(unix)]
 mod socket;
@@ -37,8 +39,9 @@ pub use local_api::{
 };
 pub use owner::{
     HostOwnerLease, HostOwnerMetadata, HostOwnerMode, HostSignal, HostStartupLease,
-    SERVICE_HOST_PROTOCOL_EPOCH, ServiceHostError, ServiceHostPaths, owner_process_is_current,
-    service_host_executable_build, service_host_product_build, signal_owner,
+    InstallationOrigin, SERVICE_HOST_PROTOCOL_EPOCH, ServiceHostError, ServiceHostPaths,
+    installation_origin, owner_process_is_current, service_host_executable_build,
+    service_host_product_build, set_installation_origin_resolver, signal_owner,
 };
 pub use owner_plugin::{ServiceOwnerContract, ServiceOwnerFactory};
 pub use questions::{QuestionBroker, QuestionBrokerFactory};
