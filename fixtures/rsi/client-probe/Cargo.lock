@@ -1219,6 +1219,7 @@ dependencies = [
  "rsi-approval-protocol",
  "rsi-execution-protocol",
  "rsi-media-protocol",
+ "rsi-meta-contract",
  "rsi-sandbox",
  "rsi-tools-protocol",
  "rsi-workspace-path",
@@ -1286,6 +1287,14 @@ dependencies = [
 ]
 
 [[package]]
+name = "rsi-api-contract-build"
+version = "0.0.1"
+dependencies = [
+ "serde",
+ "serde_json",
+]
+
+[[package]]
 name = "rsi-api-protocol"
 version = "0.0.1"
 dependencies = [
@@ -1294,6 +1303,7 @@ dependencies = [
  "futures-util",
  "getrandom 0.3.4",
  "hex",
+ "rsi-api-contract-build",
  "rsi-credentials-protocol",
  "rsi-meta-contract",
  "serde",
@@ -1601,6 +1611,7 @@ dependencies = [
  "rsi-execution",
  "rsi-meta-contract",
  "rsi-process",
+ "rsi-sandbox",
  "serde",
  "thiserror",
 ]
@@ -1624,6 +1635,7 @@ dependencies = [
  "futures-util",
  "getrandom 0.3.4",
  "rsi-agent-session-protocol",
+ "rsi-api-contract-build",
  "rsi-api-protocol",
  "rsi-execution",
  "rsi-files-protocol",
@@ -1664,6 +1676,7 @@ dependencies = [
  "serde_json",
  "sha2",
  "thiserror",
+ "tokio",
  "tokio-util",
 ]
 

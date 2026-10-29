@@ -2470,6 +2470,7 @@ dependencies = [
  "rsi-automation",
  "rsi-automation-api",
  "rsi-browser",
+ "rsi-build-info",
  "rsi-client",
  "rsi-client-composition",
  "rsi-client-preferences",
@@ -2492,7 +2493,9 @@ dependencies = [
  "rsi-history",
  "rsi-history-api",
  "rsi-host",
+ "rsi-host-control",
  "rsi-inspector",
+ "rsi-installation",
  "rsi-jobs",
  "rsi-jobs-local",
  "rsi-jobs-tools",
@@ -2511,6 +2514,7 @@ dependencies = [
  "rsi-native-addons-api",
  "rsi-navigation",
  "rsi-navigation-api",
+ "rsi-packages",
  "rsi-permission-presets",
  "rsi-process",
  "rsi-process-local",
@@ -2546,6 +2550,7 @@ dependencies = [
  "rsi-user-questions-protocol",
  "rsi-workspace",
  "rsi-workspace-api",
+ "rsi-workspace-default-api",
  "rsi-workspace-protocol",
  "rsi-workspace-review",
  "rsi-workspace-review-api",
@@ -2589,6 +2594,8 @@ dependencies = [
  "rsi-agent-session-protocol",
  "rsi-agent-turn-protocol",
  "rsi-ai-protocol",
+ "rsi-api-contract-build",
+ "rsi-api-protocol",
  "rsi-approval-protocol",
  "rsi-meta",
  "rsi-session-protocol",
@@ -2605,6 +2612,7 @@ dependencies = [
  "async-trait",
  "hex",
  "rsi-acp-protocol",
+ "rsi-api-contract-build",
  "rsi-api-protocol",
  "rsi-meta",
  "serde",
@@ -2905,6 +2913,7 @@ version = "0.0.1"
 dependencies = [
  "async-trait",
  "futures-util",
+ "getrandom 0.3.4",
  "hex",
  "rsi-agent-session-protocol",
  "rsi-agent-store-protocol",
@@ -2965,6 +2974,7 @@ dependencies = [
  "rsi-approval-protocol",
  "rsi-execution-protocol",
  "rsi-media-protocol",
+ "rsi-meta-contract",
  "rsi-sandbox",
  "rsi-tools-protocol",
  "rsi-workspace-path",
@@ -3169,6 +3179,7 @@ version = "0.0.1"
 dependencies = [
  "async-trait",
  "rsi-ai-protocol",
+ "rsi-api-contract-build",
  "rsi-api-protocol",
  "rsi-meta",
  "serde",
@@ -3350,10 +3361,19 @@ dependencies = [
 ]
 
 [[package]]
+name = "rsi-api-contract-build"
+version = "0.0.1"
+dependencies = [
+ "serde",
+ "serde_json",
+]
+
+[[package]]
 name = "rsi-api-device-api"
 version = "0.0.1"
 dependencies = [
  "async-trait",
+ "rsi-api-contract-build",
  "rsi-api-protocol",
  "rsi-credentials-protocol",
  "rsi-meta",
@@ -3374,6 +3394,7 @@ dependencies = [
  "hyper",
  "hyper-util",
  "libc",
+ "rsi-api-local-transport",
  "rsi-api-protocol",
  "rsi-credentials-protocol",
  "rsi-meta",
@@ -3410,6 +3431,15 @@ dependencies = [
 ]
 
 [[package]]
+name = "rsi-api-local-transport"
+version = "0.0.1"
+dependencies = [
+ "rsi-process-native",
+ "tokio",
+ "windows-sys 0.61.2",
+]
+
+[[package]]
 name = "rsi-api-portable"
 version = "0.0.1"
 dependencies = [
@@ -3434,6 +3464,7 @@ dependencies = [
  "futures-util",
  "getrandom 0.3.4",
  "hex",
+ "rsi-api-contract-build",
  "rsi-credentials-protocol",
  "rsi-meta-contract",
  "serde",
@@ -3456,8 +3487,10 @@ dependencies = [
  "hyper",
  "hyper-util",
  "rsi-api-client",
+ "rsi-api-local-transport",
  "rsi-api-protocol",
  "rsi-meta",
+ "rsi-process-native",
  "rustix",
  "serde",
  "serde_json",
@@ -3569,6 +3602,7 @@ dependencies = [
  "base64 0.22.1",
  "rsi-agent-session-protocol",
  "rsi-ai-protocol",
+ "rsi-api-contract-build",
  "rsi-api-protocol",
  "serde",
  "serde_json",
@@ -3661,6 +3695,7 @@ dependencies = [
  "rsi-settings-api",
  "rsi-settings-protocol",
  "rsi-workspace-api",
+ "rsi-workspace-default-api",
  "rsi-workspace-protocol",
  "serde_json",
 ]
@@ -3725,6 +3760,7 @@ dependencies = [
  "async-trait",
  "rsi-agent-session-protocol",
  "rsi-ai-protocol",
+ "rsi-api-contract-build",
  "rsi-api-protocol",
  "rsi-credentials-protocol",
  "rsi-execution-protocol",
@@ -3802,6 +3838,7 @@ name = "rsi-directory-picker-api"
 version = "0.0.1"
 dependencies = [
  "async-trait",
+ "rsi-api-contract-build",
  "rsi-api-protocol",
  "rsi-execution-protocol",
  "rsi-meta",
@@ -3953,6 +3990,7 @@ version = "0.0.1"
 dependencies = [
  "rsi-acp-protocol",
  "rsi-agent-session-protocol",
+ "rsi-api-contract-build",
  "rsi-api-protocol",
  "rsi-conversation",
  "rsi-workspace-protocol",
@@ -3976,14 +4014,46 @@ dependencies = [
 ]
 
 [[package]]
+name = "rsi-host-control"
+version = "0.0.1"
+dependencies = [
+ "rsi-api-contract-build",
+ "rsi-api-protocol",
+ "serde",
+ "serde_json",
+ "tokio",
+]
+
+[[package]]
 name = "rsi-inspector"
 version = "0.0.1"
 dependencies = [
+ "rsi-api-contract-build",
  "rsi-api-protocol",
  "rsi-meta",
  "rsi-meta-profile",
  "serde",
  "serde_json",
+]
+
+[[package]]
+name = "rsi-installation"
+version = "0.0.1"
+dependencies = [
+ "dirs",
+ "getrandom 0.3.4",
+ "hex",
+ "rsi-files-native-fs",
+ "rsi-host",
+ "rsi-packages",
+ "rsi-service-host",
+ "rustix",
+ "serde",
+ "serde_json",
+ "sha2",
+ "tokio",
+ "windows-sys 0.61.2",
+ "winreg 0.55.0",
 ]
 
 [[package]]
@@ -4182,6 +4252,7 @@ dependencies = [
  "bytes",
  "futures-util",
  "hex",
+ "rsi-api-contract-build",
  "rsi-api-protocol",
  "rsi-media-protocol",
  "rsi-meta",
@@ -4317,6 +4388,7 @@ name = "rsi-native-addons-api"
 version = "0.0.1"
 dependencies = [
  "async-trait",
+ "rsi-api-contract-build",
  "rsi-api-protocol",
  "serde",
  "thiserror 2.0.20",
@@ -4355,12 +4427,29 @@ version = "0.0.1"
 dependencies = [
  "rsi-agent-session-protocol",
  "rsi-agent-store-protocol",
+ "rsi-api-contract-build",
  "rsi-api-protocol",
  "rsi-conversation",
  "rsi-session-protocol",
  "rsi-workspace-protocol",
  "serde",
  "serde_json",
+]
+
+[[package]]
+name = "rsi-packages"
+version = "0.0.1"
+dependencies = [
+ "getrandom 0.3.4",
+ "hex",
+ "ring",
+ "rsi-api-protocol",
+ "rsi-files-native-fs",
+ "rustix",
+ "serde",
+ "serde_json",
+ "sha2",
+ "thiserror 2.0.20",
 ]
 
 [[package]]
@@ -4398,6 +4487,7 @@ dependencies = [
  "portable-pty",
  "rsi-meta",
  "rsi-process",
+ "rsi-process-native",
  "rsi-sandbox",
  "rustix",
  "serde",
@@ -4407,10 +4497,19 @@ dependencies = [
 ]
 
 [[package]]
+name = "rsi-process-native"
+version = "0.0.1"
+dependencies = [
+ "tokio",
+ "windows-sys 0.61.2",
+]
+
+[[package]]
 name = "rsi-process-output-api"
 version = "0.0.1"
 dependencies = [
  "async-trait",
+ "rsi-api-contract-build",
  "rsi-api-protocol",
  "rsi-meta",
  "rsi-process",
@@ -4440,6 +4539,7 @@ dependencies = [
  "rsi-meta",
  "rsi-process",
  "rsi-pty-protocol",
+ "rsi-sandbox",
  "sha2",
  "tokio",
  "vt100",
@@ -4453,6 +4553,7 @@ dependencies = [
  "rsi-execution",
  "rsi-meta-contract",
  "rsi-process",
+ "rsi-sandbox",
  "serde",
  "thiserror 2.0.20",
 ]
@@ -4549,12 +4650,13 @@ dependencies = [
  "libc",
  "rsi-agent-session-protocol",
  "rsi-api-http",
+ "rsi-api-local-transport",
  "rsi-api-protocol",
  "rsi-approval-protocol",
- "rsi-build-info",
  "rsi-files-native-fs",
  "rsi-host",
  "rsi-meta",
+ "rsi-process-native",
  "rsi-session-protocol",
  "rsi-storage",
  "rsi-storage-domain",
@@ -4620,6 +4722,7 @@ dependencies = [
  "rsi-agent-session-protocol",
  "rsi-agent-store-protocol",
  "rsi-agent-turn-protocol",
+ "rsi-api-contract-build",
  "rsi-api-protocol",
  "rsi-approval-protocol",
  "rsi-goal",
@@ -4661,6 +4764,7 @@ dependencies = [
  "futures-util",
  "getrandom 0.3.4",
  "rsi-agent-session-protocol",
+ "rsi-api-contract-build",
  "rsi-api-protocol",
  "rsi-execution",
  "rsi-files-protocol",
@@ -4701,6 +4805,7 @@ dependencies = [
  "serde_json",
  "sha2",
  "thiserror 2.0.20",
+ "tokio",
  "tokio-util",
 ]
 
@@ -4776,6 +4881,7 @@ version = "0.0.1"
 dependencies = [
  "async-trait",
  "futures-util",
+ "rsi-api-contract-build",
  "rsi-api-protocol",
  "rsi-meta",
  "rsi-settings-protocol",
@@ -4848,6 +4954,8 @@ name = "rsi-ssh-protocol"
 version = "0.0.1"
 dependencies = [
  "base64 0.22.1",
+ "rsi-api-contract-build",
+ "rsi-api-protocol",
  "rsi-execution",
  "rsi-files-protocol",
  "rsi-process",
@@ -4977,6 +5085,7 @@ version = "0.0.1"
 dependencies = [
  "async-trait",
  "futures-util",
+ "rsi-api-contract-build",
  "rsi-api-protocol",
  "rsi-meta",
  "rsi-ui",
@@ -5049,11 +5158,24 @@ version = "0.0.1"
 dependencies = [
  "async-trait",
  "futures-util",
+ "rsi-api-contract-build",
  "rsi-api-protocol",
  "rsi-meta",
  "rsi-workspace-protocol",
  "serde",
  "serde_json",
+]
+
+[[package]]
+name = "rsi-workspace-default-api"
+version = "0.0.1"
+dependencies = [
+ "async-trait",
+ "rsi-api-contract-build",
+ "rsi-api-protocol",
+ "rsi-meta",
+ "rsi-workspace-protocol",
+ "serde",
 ]
 
 [[package]]
@@ -5112,6 +5234,7 @@ name = "rsi-workspace-review-api"
 version = "0.0.1"
 dependencies = [
  "rsi-agent-session-protocol",
+ "rsi-api-contract-build",
  "rsi-api-protocol",
  "rsi-conversation",
  "rsi-workspace-protocol",
@@ -5208,9 +5331,9 @@ dependencies = [
 
 [[package]]
 name = "rustls-webpki"
-version = "0.103.15"
+version = "0.103.16"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "f3c3cf1d8b1e7d4927e2d154c3fcb02979afb9939629c62cd9048d4f07b60ac2"
+checksum = "4443b1b6d39d7c663139942cc4558262562d2c84123bb6282ef177009ca8b281"
 dependencies = [
  "ring",
  "rustls-pki-types",
@@ -6272,9 +6395,9 @@ dependencies = [
 
 [[package]]
 name = "webpki-roots"
-version = "1.0.9"
+version = "1.0.10"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "7dcd9d09a39985f5344844e66b0c530a33843579125f23e21e9f0f220850f22a"
+checksum = "1c1c8e20c8a38fc7d65abfe74eb7280e4aa667e8eec8bc84996d2874810748d9"
 dependencies = [
  "rustls-pki-types",
 ]
