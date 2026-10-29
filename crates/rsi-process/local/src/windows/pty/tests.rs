@@ -111,26 +111,32 @@ async fn conpty_win32_input_reaches_native_console_key_events() {
     native_key_events("\u{1b}[65;30;97;1;0;1_\u{1b}[231;0;20013;1;0;1_\u{1b}[13;28;13;1;0;1_")
         .await;
 }
+fn literal(path: &std::path::Path) -> String {
+    format!("'{}'", path.to_str().unwrap().replace('\'', "''"))
+}
 async fn native_key_events(input: &str) {
     let directory = tempfile::tempdir().unwrap();
     let service = Service::new(crate::ProcessLocalConfig::default());
     let mut plan = spec(directory.path());
-    plan.process.arguments = [
-        "-NoLogo",
-        "-NoProfile",
-        "-Command",
-        "[Console]::Write('KEYS-READY>');$keys=@();1..3|ForEach-Object{$k=[Console]::ReadKey($true);$keys+=@{character=[int]$k.KeyChar;key=[int]$k.Key;modifiers=[int]$k.Modifiers};[IO.File]::WriteAllText((Join-Path $pwd 'keys.progress.json'),($keys|ConvertTo-Json))};[IO.File]::WriteAllText((Join-Path $pwd 'keys.json'),($keys|ConvertTo-Json))",
-    ].map(Into::into).into();
+    let path = directory.path().join("keys.json");
+    let script = format!(
+        "[Console]::Write('KEYS-READY>');$keys=@();for($i=0;$i-lt 3;$i++){{$k=[Console]::ReadKey($true);$keys+=('[{{0}},{{1}},{{2}}]' -f [int]$k.KeyChar,[int]$k.Key,[int]$k.Modifiers);[IO.File]::WriteAllText({},('['+($keys -join ',')+']'))}};[IO.File]::Move({},{})",
+        literal(&path.with_extension("progress.json")),
+        literal(&path.with_extension("progress.json")),
+        literal(&path),
+    );
+    plan.process.arguments = ["-NoLogo", "-NoProfile", "-Command", &script]
+        .map(Into::into)
+        .into();
     let pty = service.spawn_pty(plan).await.unwrap();
     prompt(&pty).await;
     write(&pty, input).await;
-    let value: serde_json::Value =
-        serde_json::from_str(&receipt(&directory.path().join("keys.json"), &pty).await).unwrap();
-    assert_eq!(value[0]["character"], 97, "{value}");
-    assert_eq!(value[1]["character"], u32::from('中'), "{value}");
-    assert_eq!(value[2]["character"], 13, "{value}");
-    assert_eq!(value[2]["key"], 13, "{value}");
-    assert_eq!(value[2]["modifiers"], 0, "{value}");
+    let value: serde_json::Value = serde_json::from_str(&receipt(&path, &pty).await).unwrap();
+    assert_eq!(value[0][0], 97, "{value}");
+    assert_eq!(value[1][0], u32::from('中'), "{value}");
+    assert_eq!(value[2][0], 13, "{value}");
+    assert_eq!(value[2][1], 13, "{value}");
+    assert_eq!(value[2][2], 0, "{value}");
     pty.wait().await.unwrap();
     service.shutdown().await.unwrap();
 }
@@ -148,20 +154,20 @@ async fn conpty_interactive_unicode_resize_and_exit_preserve_exact_plan() {
     })
     .await
     .unwrap();
-    write(&pty, "$r=@{cwd=$pwd.Path;cols=$Host.UI.RawUI.WindowSize.Width;rows=$Host.UI.RawUI.WindowSize.Height;redirected=[Console]::IsInputRedirected;value=$env:RSI_PTY_TEST;text='中文'};[IO.File]::WriteAllText((Join-Path $pwd 'receipt.json'),($r|ConvertTo-Json));Write-Output ('RSI'+'-DONE')\r").await;
-    let value: serde_json::Value =
-        serde_json::from_str(&receipt(&workspace.join("receipt.json"), &pty).await).unwrap();
+    let path = workspace.join("receipt.txt");
+    write(&pty, &format!("[IO.File]::WriteAllLines({},[string[]]@($pwd.Path,$Host.UI.RawUI.WindowSize.Width,$Host.UI.RawUI.WindowSize.Height,[Console]::IsInputRedirected,$env:RSI_PTY_TEST,'中文'));[Console]::WriteLine('RSI'+'-DONE')\r",literal(&path))).await;
+    let receipt = receipt(&path, &pty).await;
+    let value = receipt.lines().collect::<Vec<_>>();
+    assert_eq!(value.len(), 6, "{receipt}");
     assert_eq!(
-        std::path::Path::new(value["cwd"].as_str().unwrap())
-            .canonicalize()
-            .unwrap(),
+        std::path::Path::new(value[0]).canonicalize().unwrap(),
         workspace.canonicalize().unwrap()
     );
-    assert_eq!(value["cols"], 104);
-    assert_eq!(value["rows"], 31);
-    assert_eq!(value["redirected"], false);
-    assert_eq!(value["value"], "exact");
-    assert_eq!(value["text"], "中文");
+    assert_eq!(value[1], "104");
+    assert_eq!(value[2], "31");
+    assert_eq!(value[3], "False");
+    assert_eq!(value[4], "exact");
+    assert_eq!(value[5], "中文");
     let reading = pty.clone();
     let output = tokio::spawn(async move {
         let mut data = Vec::new();
@@ -174,7 +180,7 @@ async fn conpty_interactive_unicode_resize_and_exit_preserve_exact_plan() {
             }
         }
     });
-    write(&pty, "Write-Output ('RSI'+'-EXIT');exit 7\r").await;
+    write(&pty, "[Console]::WriteLine('RSI'+'-EXIT');exit 7\r").await;
     assert_eq!(
         tokio::time::timeout(Duration::from_secs(10), pty.wait())
             .await
@@ -194,7 +200,7 @@ async fn conpty_ctrl_c_interrupts_foreground_command_without_terminating_shell()
     let service = Service::new(crate::ProcessLocalConfig::default());
     let pty = service.spawn_pty(spec(directory.path())).await.unwrap();
     prompt(&pty).await;
-    write(&pty,"try{[IO.File]::WriteAllText((Join-Path $pwd 'sleep.txt'),'started');Start-Sleep -Seconds 60}finally{[IO.File]::WriteAllText((Join-Path $pwd 'interrupt.txt'),'interrupted')}\r").await;
+    write(&pty,&format!("try{{[IO.File]::WriteAllText({},'started');while($true){{[Threading.Thread]::Sleep(10)}}}}finally{{[IO.File]::WriteAllText({},'interrupted')}}\r",literal(&directory.path().join("sleep.txt")),literal(&directory.path().join("interrupt.txt")))).await;
     receipt(&directory.path().join("sleep.txt"), &pty).await;
     write(&pty, "\u{3}").await;
     assert_eq!(
@@ -228,7 +234,7 @@ async fn conpty_retirement_kills_descendants_with_backpressure_and_cancelled_wai
         .program
         .to_string_lossy()
         .replace('\'', "''");
-    write(&pty,&format!("$c=Start-Process -WindowStyle Hidden -PassThru -FilePath '{shell}' -ArgumentList '-NoProfile','-Command','Start-Sleep -Seconds 60';[IO.File]::WriteAllText((Join-Path $pwd 'child.txt'),[string]$c.Id);while($true){{[Console]::Write(('x'*8192))}}\r")).await;
+    write(&pty,&format!("$s=[Diagnostics.ProcessStartInfo]::new('{shell}','-NoProfile -Command [Threading.Thread]::Sleep(60000)');$s.UseShellExecute=$false;$s.CreateNoWindow=$true;$c=[Diagnostics.Process]::Start($s);[IO.File]::WriteAllText({},[string]$c.Id);while($true){{[Console]::Write(('x'*8192))}}\r",literal(&directory.path().join("child.txt")))).await;
     receipt(&directory.path().join("child.txt"), &pty).await;
     let state = service
         .ptys

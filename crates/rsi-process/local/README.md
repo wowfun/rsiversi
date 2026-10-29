@@ -144,3 +144,7 @@ the generation remains fenced against new admission.
 For PTY output, an acknowledged reader error changes the outcome but confirms that
 the reader released its I/O resources and capture reservation pin. A missing acknowledgement or drain timeout
 also fails settlement, preserving any earlier settlement error.
+
+Windows ConPTY fixtures use PowerShell's native console readers with direct .NET
+file receipts. Receipt creation and descendant startup must not depend on optional
+PowerShell module discovery in the deliberately minimal child environment.
