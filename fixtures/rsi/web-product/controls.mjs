@@ -155,6 +155,12 @@ export async function sessionTools(page) {
   const menu=page.locator('.pane.selected .session-menu');
   if(!await menu.evaluate(node=>node.open))await menu.getByLabel('Session tools',{exact:true}).click();
 }
+export async function restoreDrafts(page) {
+  const menu=page.locator('.conversation-menu');
+  if(!await menu.evaluate(node=>node.open))await menu.locator('summary').click();
+  await menu.getByRole('button',{name:'Restore drafts',exact:true}).click();
+  if(await menu.evaluate(node=>node.open))await menu.locator('summary').click();
+}
 export async function selectSurface(page,key) {
   const tab=page.locator(`#pane-tab-${key}`);
   if(await tab.getAttribute('aria-pressed')==='true')return;

@@ -226,7 +226,7 @@ for (const [name, engine] of [["chromium", chromium], ["firefox", firefox]]) {
     assert.equal(service.provider.requests.length, beforeGoal + 1);
     await capture("goal-paused-claimed", true, ["Resume Goal", "Cancel automatic round"]);
     service.provider.release("UI Goal hold");
-    await goalVisible(pane.locator(".pane-status").filter({ hasText: "Completed" }), "first Goal completed");
+    await goalUntil(async () => await pane.locator(".pane-status").textContent() === "Completed", "first Goal completed");
     await goalVisible(detail.locator(".ui-field").filter({ hasText: "Driver: Disarmed" }), "first Goal driver disarmed");
     await goalVisible(detail.getByRole("button", { name: "Create and start Goal", exact: true }), "Paused first-round settlement projection");
     await detail.getByRole("button", { name: "Resume Goal", exact: true }).click();
@@ -236,7 +236,7 @@ for (const [name, engine] of [["chromium", chromium], ["firefox", firefox]]) {
     await goalVisible(detail.locator(".ui-field").filter({ hasText: "Driver: Waiting" }), "second Goal waiting");
     await capture("goal-resumed", true, ["Pause after current round", "Cancel automatic round"]);
     await detail.getByRole("button", { name: "Cancel automatic round", exact: true }).click();
-    await goalVisible(pane.locator(".pane-status").filter({ hasText: "Cancelled" }), "second Goal cancelled");
+    await goalUntil(async () => await pane.locator(".pane-status").textContent() === "Cancelled", "second Goal cancelled");
     await goalVisible(detail.locator(".ui-field").filter({ hasText: "Driver: Disarmed" }), "cancelled Goal driver disarmed");
     assert.match(await detail.innerText(), /Allocated rounds: 2 \/ 3/);
     await capture("goal-cancelled", true, ["Resume Goal", "Create and start Goal"]);

@@ -6,6 +6,10 @@ The document runtime fixture checks catalog namespace reads within one window,
 while explicit section reads and dismissal continue to fence old frames.
 External navigation checks configured endpoint visibility, reopening and paging,
 and reuse of the same conversation identity after an uncertain start.
+Draft recovery opens a local conversation before entering Conversation options.
+Goal lifecycle probes read
+the current Session status and assert the visible driver and control state;
+the status mirror itself is not a visible workbench label.
 
 The accessibility component fixture mounts the production React activity and
 notice owners with the document styles in Chromium and Firefox. It checks

@@ -1,4 +1,4 @@
-import {disconnect} from './controls.mjs';
+import {disconnect,restoreDrafts} from './controls.mjs';
 import {workspaceForm} from './controls.mjs';
 import {closeDetails} from "./controls.mjs";
 import {paired} from './paired-env.mjs';
@@ -55,8 +55,15 @@ try {
   const connect = async (tab, token) => { await tab.goto(service.origin); await login(tab, token); };
   const pane = tab => tab.getByRole("region", {name:"Main conversation",exact:true});
   const input = tab => pane(tab).getByRole("textbox",{name:/message$/});
+  const openRecovery = async tab => {
+    if (!await pane(tab).isVisible() || !await pane(tab).getAttribute('data-session-id')) {
+      await tab.locator('#workspaces [data-testid=workspace-open]').first().click();
+      await pane(tab).waitFor({state:'visible'});
+    }
+    await restoreDrafts(tab);
+  };
   const restore = async (tab, session) => {
-    await pane(tab).getByRole("button",{name:"Restore drafts",exact:true}).click();
+    await openRecovery(tab);
     const row=pane(tab).locator(".saved-draft").filter({hasText:session});
     await row.getByRole("button",{name:"Open saved conversation",exact:true}).click();
     return row;
@@ -115,8 +122,11 @@ try {
   // A cookie switch cannot authorize an old tab as the new device.
   const deviceB = await context.newPage(); await connect(deviceB,service.register(`${name} saved drafts B`));
   assert.equal(await page.evaluate(async expected => (await fetch("/api/v2/rsi-api-protocol/4/connection/caller/1/read",{method:"POST",headers:{"content-type":"application/json","X-Rsi-Expected-Device":expected},body:"{}"})).status,caller),401);
-  await pane(deviceB).getByRole("button",{name:"Restore drafts",exact:true}).click();
-  assert.equal(await pane(deviceB).locator(".saved-draft").count(),0);
+  await openRecovery(deviceB);
+  const deviceBSession = await sessionId(deviceB);
+  const deviceBDrafts = await pane(deviceB).locator(".saved-draft > span").allTextContents();
+  assert(deviceBDrafts.every(summary => summary.startsWith(`${deviceBSession} ·`)),
+    "a new Device can only see its own newly opened conversation, never the first Device's drafts");
   await disconnect(deviceB); await deviceB.locator("#login").waitFor({state:"visible"}); await deviceB.close();
   // Restart the real Service: the old Fresh Session actually ceases to exist.
   await service.restart(); await page.locator("#login").waitFor({state:"visible"}); await login(page,receipt);

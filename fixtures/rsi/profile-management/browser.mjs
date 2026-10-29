@@ -1,4 +1,5 @@
 import {paired} from '../web-product/paired-env.mjs';
+import {openSettings,disconnect} from '../web-product/controls.mjs';
 import assert from 'node:assert/strict';
 import {createRequire} from 'node:module';
 import {mkdir,readFile,appendFile,writeFile} from 'node:fs/promises';
@@ -29,7 +30,7 @@ for(const [name,engine] of [['chromium',chromium],['firefox',firefox]]) {
     page=await context.newPage();page.setDefaultTimeout(30_000);page.on('pageerror',error=>errors.push(error.message));
     const login=async()=>{await page.locator('#receipt').fill(JSON.stringify(registration));await page.getByRole('button',{name:'Connect',exact:true}).click();await page.locator('#workbench').waitFor({state:'visible'});};
     await page.goto(service.origin);await login();
-    const open=async()=>{await page.getByRole('button',{name:'Settings',exact:true}).click();await page.getByRole('button',{name:'Plugins',exact:true}).click();await page.getByRole('button',{name:'Browse Host Profiles',exact:true}).click();};
+    const open=async()=>{await openSettings(page);await page.getByRole('button',{name:'Plugins',exact:true}).click();await page.getByRole('button',{name:'Browse Host Profiles',exact:true}).click();};
     await open();const panel=page.getByRole('region',{name:'Host Profile management',exact:true});
     await panel.getByRole('button',{name:'Open Profile editable',exact:true}).click();await panel.getByLabel('Plugin leaf',{exact:true}).selectOption(target.leaf);
     assert(await panel.getByRole('button',{name:'Preview disable',exact:true}).isDisabled());
@@ -48,7 +49,7 @@ for(const [name,engine] of [['chromium',chromium],['firefox',firefox]]) {
     await prepared.getByRole('button',{name:'Save reviewed change',exact:true}).click();await receipt.getByText('saved',{exact:true}).waitFor();await receipt.getByText('not selected',{exact:true}).waitFor();
     const saved=await readFile(source,'utf8');assert.match(saved,/kind = "patch"/);await page.screenshot({path:join(report,'saved.png')});
     await receipt.getByRole('button',{name:'Query original receipt',exact:true}).click();await receipt.getByText('saved',{exact:true}).waitFor();assert.equal(await readFile(source,'utf8'),saved);
-    await page.getByRole('button',{name:'Close settings',exact:true}).click();await page.locator('#sign-out').click();await page.locator('#login').waitFor({state:'visible'});await login();await open();
+    await page.getByRole('button',{name:'Close settings',exact:true}).click();await disconnect(page);await page.locator('#login').waitFor({state:'visible'});await login();await open();
     await panel.getByText(/Recover a source receipt/).click();await panel.getByLabel('Original receipt ticket',{exact:true}).selectOption(ticket);await panel.getByRole('button',{name:'Read selected receipt',exact:true}).click();await receipt.getByText('saved',{exact:true}).waitFor();
     await page.setViewportSize({width:430,height:900});await page.screenshot({path:join(report,'narrow.png')});assert(await panel.evaluate(element=>element.scrollWidth<=element.clientWidth+1));
     await page.setViewportSize({width:1440,height:980});await panel.getByRole('button',{name:'Open Profile editable',exact:true}).click();await panel.getByLabel('Plugin leaf',{exact:true}).selectOption(target.leaf);
