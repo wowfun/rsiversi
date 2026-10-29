@@ -386,13 +386,10 @@ mod tests {
             std::env::temp_dir().canonicalize().unwrap(),
         ))
         .unwrap();
-        let home = Home::open(root.path()).unwrap();
+        let path = root.path().join("home");
+        let home = Home::open(&path).unwrap();
         for index in 0..8193 {
-            std::fs::write(
-                root.path().join(format!(".reset-{index}-settings.json")),
-                b"{}",
-            )
-            .unwrap();
+            std::fs::write(path.join(format!(".reset-{index}-settings.json")), b"{}").unwrap();
         }
         assert_eq!(home.kind("missing").unwrap(), None);
         home.create("rsi.toml", b"format = 1").unwrap();
@@ -431,6 +428,7 @@ mod tests {
                 ],
             ),
         ] {
+            rsi_files_native_fs::create_absolute_directory_no_follow(home).unwrap();
             for name in files {
                 let path = home.join(name);
                 std::fs::create_dir_all(path.parent().unwrap()).unwrap();

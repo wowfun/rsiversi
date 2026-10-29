@@ -14,7 +14,12 @@ try{
 }finally{fs.rmSync(directory,{recursive:true,force:true});}
 const observed=[];
 const server=https.createServer(tls,(request,response)=>{
-  observed.push(request.url);if(process.argv[2])fs.writeFileSync(process.argv[2],JSON.stringify(observed));
+  observed.push(request.url);
+  if(process.argv[2]){
+    const pending=process.argv[2]+'.pending';
+    fs.writeFileSync(pending,JSON.stringify(observed));
+    fs.renameSync(pending,process.argv[2]);
+  }
   if(request.url==='/scope/redirect/'){response.writeHead(302,{location:'/escaped/'});response.end();return;}
   response.setHeader('content-type','text/html; charset=utf-8');
   response.end(`<!doctype html><html><head><title>Preview acceptance fixture</title><style>

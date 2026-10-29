@@ -44,8 +44,13 @@ async fn windows_application_bounds_discovery_of_an_owner_without_an_endpoint() 
         .expect("owner discovery must finish within its bounded startup deadline");
         assert!(result.is_err());
         let diagnostic = format!("{:?}", diagnostics.take());
+        let expected = if plugin == "rsi.application.connection" {
+            "owner is active but did not publish a usable endpoint"
+        } else {
+            "another RSIversi application owns these data directories"
+        };
         assert!(
-            diagnostic.contains("owner is active but did not publish a usable endpoint"),
+            diagnostic.contains(expected),
             "{plugin}: result={result:?}; diagnostic={diagnostic}"
         );
         assert!(owner_paths.read_metadata().unwrap().is_none());

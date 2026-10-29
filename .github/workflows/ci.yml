@@ -829,6 +829,7 @@ jobs:
             smoke_status=$?
             tail -c 1048576 "$RUNNER_TEMP/rsi-dev-smoke/logs/build.log" || true
             tail -c 1048576 "$RUNNER_TEMP/rsi-dev-smoke/logs/smoke.jsonl" || true
+            tail -c 1048576 "$RUNNER_TEMP/rsi-dev-smoke/state/rsi/session-host/owner.log" || true
             exit "$smoke_status"
           }
       - name: Build Session API evaluation driver
@@ -876,6 +877,7 @@ jobs:
             ${{ runner.temp }}/rsi-language-addon-evidence
             ${{ runner.temp }}/rsi-browser-evidence
             ${{ runner.temp }}/rsi-dev-smoke/logs
+            ${{ runner.temp }}/rsi-dev-smoke/state/rsi/session-host/owner.log
           if-no-files-found: warn
       - name: Preserve PTY evidence
         if: always()

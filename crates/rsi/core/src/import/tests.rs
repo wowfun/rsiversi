@@ -15,8 +15,8 @@ impl Fixture {
             let directory = root.path().join(name);
             let config = directory.join("config");
             let state = directory.join("state");
-            std::fs::create_dir_all(&config).unwrap();
-            std::fs::create_dir_all(&state).unwrap();
+            rsi_files_native_fs::create_absolute_directory_no_follow(&config).unwrap();
+            rsi_files_native_fs::create_absolute_directory_no_follow(&state).unwrap();
             HostPaths::new(config, state, directory.join("cache")).unwrap()
         };
         let source = paths("source");

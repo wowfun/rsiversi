@@ -381,11 +381,16 @@ fn windows_compile_gate_keeps_independent_lint_and_unsupported_boundary_checks()
             .contains("-p rsi-cli -p rsi-app-catalog --all-targets --no-run --message-format=json")
     );
     assert!(native.contains("if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }"));
-    assert!(native.contains("if (-not $artifacts)"));
-    assert!(native.contains("foreach ($artifact in $artifacts)"));
-    assert!(native.contains("& $artifact.executable"));
-    assert!(native.contains("if ($LASTEXITCODE -ne 0) { $failed = $true }"));
-    assert!(native.contains("if ($failed) { exit 1 }"));
+    assert!(native.contains(".github/scripts/windows-native-tests.ps1 -Manifest"));
+    assert!(native.contains("exit $LASTEXITCODE"));
+    let worker = include_str!("../../../../.github/scripts/windows-native-tests.ps1");
+    assert!(worker.contains("if (-not $artifacts.Count)"));
+    assert!(worker.contains("foreach ($artifact in $artifacts)"));
+    assert!(worker.contains("& $artifact.executable"));
+    assert!(worker.contains("if ($LASTEXITCODE -ne 0) { $result = 1 }"));
+    assert!(worker.contains("exit $result"));
+    assert!(worker.contains("-ExecutionTimeLimit"));
+    assert!(worker.contains("Unregister-ScheduledTask -TaskName $taskName -Confirm:$false"));
     for step in job["steps"]
         .as_array()
         .unwrap()

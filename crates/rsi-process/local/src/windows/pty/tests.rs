@@ -18,7 +18,8 @@ fn spec(path: &std::path::Path) -> PtyProcessSpec {
                 "-NoProfile",
                 "-NoExit",
                 "-Command",
-                "Remove-Module PSReadLine -ErrorAction SilentlyContinue",
+                // Pin ConsoleHost's cooked reader rather than image-specific PSReadLine hooks.
+                "Remove-Module PSReadLine -ErrorAction SilentlyContinue; function global:PSConsoleHostReadLine { $Host.UI.ReadLine() }",
             ]
             .map(Into::into)
             .into(),

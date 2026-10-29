@@ -104,7 +104,9 @@ async fn configured_prices_freeze_at_creation_and_are_copied_into_actual_intents
             .configured_cost
             .totals[0]
             .nanos,
-        1_800
+        1_800,
+        "priced Session evidence: {:#?}",
+        priced.history_before(None, 128).await.unwrap()
     );
     let updated = service.create(create("new-prices")).await.unwrap();
     run_message_to_terminal(&updated, "new-price-turn").await;

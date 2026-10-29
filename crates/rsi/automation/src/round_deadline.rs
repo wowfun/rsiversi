@@ -58,12 +58,12 @@ pub(super) async fn monitor(
     let horizon = handle
         .history_before(None, 1)
         .await
-        .map_err(|error| error.to_string())?
+        .map_err(|error| format!("read round history horizon: {error}"))?
         .durable_seq;
     let facts = handle
         .observe(ObservationCursor::default())
         .await
-        .map_err(|error| error.to_string())?;
+        .map_err(|error| format!("observe round history: {error}"))?;
     monitor_stream(facts, horizon, || async {
         handle
             .history_before(None, 1)

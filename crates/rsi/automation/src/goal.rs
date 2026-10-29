@@ -301,7 +301,7 @@ impl Explorer for GoalExplorer {
         };
         // Errors after admission revoke the exact Goal. Never recreate or resume
         // an uncertain Create; cancellation is a separate idempotent command.
-        let result = if result.is_err() {
+        let result = if let Err(primary) = &result {
             if let Ok(handle) = handle_result
                 && handle.goal_status().await.map_err(|e| e.to_string())?.armed
             {
@@ -320,7 +320,7 @@ impl Explorer for GoalExplorer {
                         action: rsi_agent_goal::GoalAction::Cancel { id: goal_id },
                     })
                     .await
-                    .map_err(|e| e.to_string())?;
+                    .map_err(|error| format!("{primary}; Goal cancellation failed: {error}"))?;
             }
             result
         } else {
