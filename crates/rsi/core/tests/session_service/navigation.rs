@@ -28,7 +28,7 @@ async fn query(running: &RunningRsi, origin: CallOrigin, archived: bool) -> Navi
             running,
             origin,
             NavigationOperation::Query,
-            json!({"filter":NavigationFilter { archived, ..Default::default() },"after":null}),
+            json!({"filter":NavigationFilter { archived: Some(archived), ..Default::default() },"after":null}),
         )
         .await
         .unwrap(),

@@ -5,7 +5,7 @@ fn operation_envelopes_admit_maximal_identifiers_and_escaped_small_requests() {
     let session = SessionId::new("s".repeat(256)).unwrap();
     let filter = NavigationFilter {
         query: "\"".repeat(128),
-        archived: false,
+        archived: Some(false),
         workspace: WorkspaceFilter::Registered {
             id: WorkspaceId::parse("a".repeat(64)).unwrap(),
         },

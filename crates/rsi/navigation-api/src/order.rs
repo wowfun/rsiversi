@@ -189,7 +189,7 @@ impl NavigationClient {
                 super::validation::entry(
                     value,
                     &NavigationFilter {
-                        archived: value.metadata.archived,
+                        archived: Some(value.metadata.archived),
                         ..Default::default()
                     },
                 )?;

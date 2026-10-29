@@ -111,6 +111,10 @@ keep their tickets. A metadata revision change invalidates group cursors without
 automatic re-expansion: each group shows an explicit refresh control before its
 rows or mutations are available again.
 
+Navigation replacements carry the metadata revision displayed when the edit
+began. Both the view owner and Store reject stale revisions; a rename cannot
+overwrite a pin or archive change that arrived while its form was open.
+
 A confirmed navigation replacement remains successful if its follow-up reads fail
 or race another revision. The view explicitly reports that the change was saved
 but refresh is unavailable, clears stale results and invalidates old cursors.

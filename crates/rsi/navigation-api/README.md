@@ -26,7 +26,11 @@ an exact registry lookup; equal paths on different machines remain distinct. Mis
 workspaces. Metadata replacement uses an exact global revision and one complete
 title/archive record. Clients do not replay writes after unknown outcomes.
 
-Navigation wire version 4 exposes immutable execution location and activity time.
+The archive filter is tri-state: false selects active conversations, true selects
+archived conversations, and null selects both. Default queries remain active-only;
+pins, workspace groups and continuation identity use the same exact filter.
+
+Navigation wire version 5 exposes immutable execution location and activity time.
 Query, pinned and metadata replacement requests have a 4 KiB envelope bound;
 summary batches have 32 KiB and coordinate-bearing order-seed requests 128 KiB.
 The version-1 durable metadata document accepts a missing `pinned` field as false;

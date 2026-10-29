@@ -263,7 +263,7 @@ impl Navigation {
                 .records
                 .get(&row.session_id)
                 .unwrap_or(&default_metadata);
-            (metadata.archived == filter.archived
+            (filter.matches_archive(metadata.archived)
                 && !metadata.pinned
                 && matches_query(
                     &query,
@@ -279,7 +279,7 @@ impl Navigation {
             cursor = Some(row.cursor());
             let id = &row.session_id;
             let metadata = document.records.get(id).cloned().unwrap_or_default();
-            if metadata.archived != filter.archived || metadata.pinned {
+            if !filter.matches_archive(metadata.archived) || metadata.pinned {
                 continue;
             }
             let path = row.coordinates.path();
@@ -423,7 +423,9 @@ impl Navigation {
                 let selected = document
                     .records
                     .iter()
-                    .filter(|(_, metadata)| metadata.pinned && metadata.archived == filter.archived)
+                    .filter(|(_, metadata)| {
+                        metadata.pinned && filter.matches_archive(metadata.archived)
+                    })
                     .map(|(id, metadata)| (id.clone(), metadata.clone()))
                     .collect::<Vec<_>>();
                 let ids = selected
