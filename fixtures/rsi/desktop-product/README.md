@@ -49,8 +49,9 @@ Model selection waits for the completed setup action and the exact deployment's
 enabled option; the earlier provider receipt alone does not finish its readback.
 After scenarios close a dialog, the final composer geometry check waits for the
 closed document view; native click delivery alone does not settle a Rust command.
-Appearance checks wait for the new Settings read to replace the previous dialog's
-theme field before editing; reopening the dialog can temporarily retain old fields.
+Appearance checks use General settings and wait for the current read ticket and
+enabled fields before editing. Saving waits for its replacement ticket; React may
+retain the same field nodes across reads.
 Profile receipt recovery waits for the requested root catalog before opening its
 disclosure, then confirms it is open before selecting a receipt; the old leaf
 catalog can remain visible while the asynchronous read changes the layout.
@@ -174,9 +175,13 @@ and waits for that attachment, so later draft/restart checks use the same Sessio
 Install `fixtures/rsi/acp` dependencies first; this scenario requires Node.
 
 
-`--profiles` exercises Local grants, single-leaf preparation, reviewed source
-publication, and original receipt recovery through the native bridge. Its
-editable user Profile is separate from the running service source.
+`--profiles --profile-probe /absolute/profile-leaf-probe` exercises the managed
+Desktop Device principal, single-leaf preparation, reviewed source publication,
+and original receipt recovery through the shared Worker. It requires denied
+source changes and no Local grant editor before the fixture's Local API probe
+grants that exact Device, leaf and operation. Build the probe with
+`cargo run --locked -p rsi-app-tools -- fixture-build profile-leaf-probe /output`.
+Its editable user Profile is separate from the running service source.
 `--attention` exercises exact native question and approval navigation, settlement,
 and removal from Needs attention with a deterministic provider.
 
@@ -243,13 +248,15 @@ WebKitGTK acceptance evidence alongside the other isolated modes.
 
 `--presentation` checks the shared Profile theme/font controls through the native
 Settings bridge, computed text contrast and component geometry, and command-palette
-focus restoration. `--system-theme light|dark` starts the isolated GTK application
+focus restoration. Navigation actions retain their shared 8px corner geometry.
+`--system-theme light|dark` starts the isolated GTK application
 with the corresponding Adwaita palette; the presentation check then requires
 WebKit's system color-scheme query to match that native input. It changes no user
 settings and does not claim native Windows or macOS behavior.
 
-`--queue` uses a held deterministic response to exercise replacement, exact-Turn
-conversion and pending-only withdrawal through the native bridge. It checks one
+`--queue` uses a held deterministic response to exercise replacement and pending-only
+withdrawal through the shared Worker. Inputs freeze their explicit access policy,
+so the fixture requires the steering conversion to be unavailable. It checks one
 current user block, stable slot identity, retained composer text and a surviving
 queued Turn after Stop. This mode is separate from live-provider scenarios.
 

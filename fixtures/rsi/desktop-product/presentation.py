@@ -3,8 +3,15 @@ import json
 
 
 def open_appearance(script, until, open_details):
+    previous = script('return document.querySelector("form[data-settings-ticket]")?.dataset.settingsTicket')
     open_details()
-    until(lambda: script(r'const e=document.querySelector(".settings-modal:modal [aria-label=\"Settings / appearance / theme\"]");return e&&!e.disabled&&e.getClientRects().length>0'))
+    until(lambda: script(r'const e=document.querySelector(".settings-modal:modal [aria-label=\"Settings / appearance / theme\"]"),f=e?.closest("form");return e&&f?.dataset.settingsTicket&&f.dataset.settingsTicket!==arguments[0]&&!e.matches(":disabled")&&e.getClientRects().length>0', [previous]))
+
+
+def save_settings(script, button, until):
+    ticket = script('return document.querySelector("form[data-settings-ticket]").dataset.settingsTicket')
+    button('Save settings')
+    until(lambda: script('const f=document.querySelector("form[data-settings-ticket]");return f&&f.dataset.settingsTicket!==arguments[0]&&!f.querySelector("fieldset").disabled&&!f.querySelector("[role=alert]").textContent', [ticket]))
 
 
 def verify(script, button, fill, until, screenshot, report, system_theme=None):
@@ -14,7 +21,7 @@ def verify(script, button, fill, until, screenshot, report, system_theme=None):
         open_appearance(script, until, lambda: (button('Settings'), button('General')))
         script('const e=document.querySelector("select[aria-label=\\"Settings / appearance / theme\\"]");e.value=[...e.options].find(o=>o.textContent===arguments[0]).value;e.dispatchEvent(new Event("change",{bubbles:true}));return true', [value])
         fill('input[aria-label="Settings / appearance / content_font_size"]', str(size))
-        button('Save settings')
+        save_settings(script, button, until)
         until(lambda: script('return document.documentElement.dataset.theme===arguments[0]&&document.documentElement.dataset.contentSize===String(arguments[1])', [value, size]))
         button('Close settings')
         until(lambda: script('return !document.querySelector(".settings-modal:modal")'))
@@ -27,7 +34,7 @@ def verify(script, button, fill, until, screenshot, report, system_theme=None):
         ''')
         assert result['font'] == f'{size}px', result
         assert result['contrast'] >= 4.5 and result['secondaryContrast'] >= 4.5, result
-        assert result['controlRadius'] == '12px' and result['compactRadius'] == '8px', result
+        assert result['controlRadius'] == '8px' and result['compactRadius'] == '8px', result
         if value != 'system': assert result['scheme'] == value, result
         elif system_theme: assert result['systemDark'] == (system_theme == 'dark'), result
         results.append(result)

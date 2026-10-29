@@ -25,9 +25,7 @@ def verify(script, button, fill, until, screenshot, report, requests):
     until(lambda: script('return [...document.querySelectorAll(".message.user")].filter(e=>e.textContent.includes("Desktop queue edited")).length === 1'))
     assert script('return document.querySelector(".queue-row").dataset.slot') == slot
     assert script('return [...document.querySelectorAll(".message.user")].filter(e=>e.textContent.includes("Desktop queue original")).length') == 0
-    button('Steer now')
-    until(lambda: script('return document.querySelector(".queue-row").textContent.includes("Next step")'))
-    assert script('return document.querySelector(".queue-row").dataset.slot') == slot
+    assert script('return ![...document.querySelector(".queue-row").querySelectorAll("button")].some(e=>e.textContent==="Steer now")')
     button('Withdraw')
     until(lambda: script('return document.querySelectorAll(".queue-row").length === 1'))
     screenshot('queue-before-stop.png')
@@ -37,5 +35,5 @@ def verify(script, button, fill, until, screenshot, report, requests):
     assert script('return document.querySelector(arguments[0]).value', [composer]) == 'Desktop draft remains intact'
     assert not any(item.get('prompt') in ('Desktop queue original', 'Desktop queue edited') for item in requests)
     screenshot('queue-after-stop.png')
-    (report / 'queue.json').write_text(json.dumps({'replacementKeepsSlot': True, 'oneUserBlock': True, 'exactTurnConversion': True, 'pendingOnlyWithdrawal': True, 'stopPreservesQueueAndDraft': True}, indent=2))
+    (report / 'queue.json').write_text(json.dumps({'replacementKeepsSlot': True, 'oneUserBlock': True, 'explicitAccessPreventsSteering': True, 'pendingOnlyWithdrawal': True, 'stopPreservesQueueAndDraft': True}, indent=2))
     fill(composer, '')
