@@ -117,6 +117,7 @@ struct Attachment {
     agent_preset: String,
     protected: bool,
     creation: Option<rsi_session_protocol::CreateSession>,
+    sandbox: rsi_sandbox::SandboxMode,
     defaults: Option<[rsi_settings_protocol::SettingsVersion; 2]>,
     surface: Mutex<Option<Surface>>,
     handle: Arc<dyn SessionHandle>,
@@ -350,6 +351,7 @@ impl Pane {
             "history_more":state.history_more, "active":state.transcript.active, "notice":state.notice(), "pending":pending,
         });
         project(
+            "sandbox":current.sandbox,
             metadata,
             Some(state.history.as_ref().unwrap_or(&state.transcript)),
             Some(&state.transcript),
@@ -959,6 +961,7 @@ impl GuiApplication {
                 self.details
                     .lock()
                     .expect("Web details poisoned")
+            sandbox: header.settings().sandbox(),
                     .detach(index, &old.generation.to_string());
             }
             current.replace(attachment)
