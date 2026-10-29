@@ -52,14 +52,6 @@ fn reset_and_open_with(
     root: &Path,
     open: impl FnOnce(&Path) -> Result<SqliteStore>,
 ) -> std::result::Result<(SqliteStore, SqliteStoreResetReceipt), SqliteStoreResetError> {
-    reset_and_open_progress(root, open, |_| {})
-}
-
-fn reset_and_open_progress(
-    root: &Path,
-    open: impl FnOnce(&Path) -> Result<SqliteStore>,
-    progress: impl FnOnce(&SqliteStoreResetReceipt),
-) -> std::result::Result<(SqliteStore, SqliteStoreResetReceipt), SqliteStoreResetError> {
     let mut receipt = SqliteStoreResetReceipt {
         root: root.to_owned(),
         backup: None,
@@ -109,7 +101,6 @@ fn reset_and_open_progress(
                 return Err(io_error(error));
             }
             receipt.backup = Some(backup);
-            progress(&receipt);
             sync_directory(&container)?;
             sync_directory(parent)?;
             Some(lease)
@@ -155,158 +146,6 @@ fn is_store_reset_target(root: &Path) -> Result<bool> {
     Err(StoreError::Invalid(
         "refusing to reset a nonempty directory without Agent Store layout markers".into(),
     ))
-}
-
-/// Explicit one-shot startup authority. No serialized configuration can create it.
-#[derive(Clone, Debug)]
-pub struct SqliteStoreResetRequest(Arc<Mutex<ResetState>>, Arc<ResetReceipt>);
-
-#[derive(Debug, Default)]
-struct ResetReceipt {
-    // Publication is one-shot even after the launcher consumes the receipt.
-    state: Mutex<(bool, Option<SqliteStoreResetReceipt>)>,
-    ready: tokio::sync::Notify,
-}
-impl ResetReceipt {
-    fn publish(&self, receipt: SqliteStoreResetReceipt) {
-        let mut state = self
-            .state
-            .lock()
-            .unwrap_or_else(std::sync::PoisonError::into_inner);
-        if !state.0 {
-            *state = (true, Some(receipt));
-            self.ready.notify_waiters();
-        }
-    }
-}
-
-#[derive(Debug, Default)]
-struct ResetState {
-    consumed: bool,
-    root: Option<PathBuf>,
-    failure: Option<StoreError>,
-}
-
-impl Default for SqliteStoreResetRequest {
-    fn default() -> Self {
-        Self::new()
-    }
-}
-
-impl SqliteStoreResetRequest {
-    /// Authorizes one reset during initial activation.
-    pub fn new() -> Self {
-        Self(
-            Arc::new(Mutex::new(ResetState::default())),
-            Arc::new(ResetReceipt::default()),
-        )
-    }
-
-    /// Whether the initial reset has yet to begin.
-    /// A consumed failure is not pending; subsequent opens still return that failure.
-    pub fn is_pending(&self) -> bool {
-        !self
-            .0
-            .lock()
-            .unwrap_or_else(std::sync::PoisonError::into_inner)
-            .consumed
-    }
-
-    /// Takes filesystem progress for the launcher's diagnostic, including on failure.
-    pub fn take_receipt(&self) -> Option<SqliteStoreResetReceipt> {
-        self.1
-            .state
-            .lock()
-            .unwrap_or_else(std::sync::PoisonError::into_inner)
-            .1
-            .take()
-    }
-
-    /// Waits for backup progress without waiting for replacement Store initialization.
-    /// Without an old Store, publication instead follows the initialization outcome.
-    /// The single launcher consumer retrieves it with `take_receipt`.
-    pub async fn receipt_ready(&self) {
-        loop {
-            let ready = self.1.ready.notified();
-            if self
-                .1
-                .state
-                .lock()
-                .unwrap_or_else(std::sync::PoisonError::into_inner)
-                .0
-            {
-                return;
-            }
-            ready.await;
-        }
-    }
-
-    pub(super) fn bind(&self, root: &Path) -> Result<()> {
-        let mut state = self
-            .0
-            .lock()
-            .unwrap_or_else(std::sync::PoisonError::into_inner);
-        if !state.consumed {
-            if state.root.as_deref().is_some_and(|bound| bound != root) {
-                return Err(StoreError::Invalid(
-                    "reset requires exactly one SQLite Agent Store root".into(),
-                ));
-            }
-            state.root = Some(root.to_owned());
-        }
-        Ok(())
-    }
-
-    pub(super) fn open(&self, root: &Path) -> Result<SqliteStore> {
-        self.open_with(root, |root| {
-            reset_and_open_progress(
-                root,
-                |root| SqliteStore::open(root),
-                |receipt| self.1.publish(receipt.clone()),
-            )
-        })
-    }
-
-    fn open_with(
-        &self,
-        root: &Path,
-        reset: impl FnOnce(
-            &Path,
-        ) -> std::result::Result<
-            (SqliteStore, SqliteStoreResetReceipt),
-            SqliteStoreResetError,
-        >,
-    ) -> Result<SqliteStore> {
-        self.bind(root)?;
-        let mut state = self
-            .0
-            .lock()
-            .unwrap_or_else(std::sync::PoisonError::into_inner);
-        if let Some(error) = &state.failure {
-            return Err(error.clone());
-        }
-        if state.consumed {
-            drop(state);
-            return SqliteStore::open(root);
-        }
-        state.consumed = true;
-        // Only success clears this latch. Unwinding must not authorize an
-        // ordinary open through the recovered poisoned mutex.
-        state.failure = Some(StoreError::Io("Agent Store reset did not complete".into()));
-        // Publish failures before the move too; moved-root receipts are already visible.
-        match reset(root) {
-            Ok((store, receipt)) => {
-                self.1.publish(receipt);
-                state.failure = None;
-                Ok(store)
-            }
-            Err(error) => {
-                self.1.publish(error.receipt);
-                state.failure = Some(error.source.clone());
-                Err(error.source)
-            }
-        }
-    }
 }
 
 #[cfg(test)]

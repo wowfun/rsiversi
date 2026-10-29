@@ -1097,7 +1097,7 @@ mod program;
 mod program_graph;
 mod queue;
 mod reset;
-pub use reset::{SqliteStoreResetError, SqliteStoreResetReceipt, SqliteStoreResetRequest};
+pub use reset::{SqliteStoreResetError, SqliteStoreResetReceipt};
 mod preparation;
 mod session_store;
 mod suffix;
@@ -1131,7 +1131,6 @@ use validation::{
 #[derive(Clone, Debug, Default)]
 pub struct SqliteStoreFactory {
     startup_failure: Arc<Mutex<Option<SqliteStoreStartupFailure>>>,
-    reset: Option<SqliteStoreResetRequest>,
 }
 
 /// Safe startup diagnostic for the factory's direct composition owner.
@@ -1166,14 +1165,6 @@ pub enum SqliteStoreStartupFailureKind {
 }
 
 impl SqliteStoreFactory {
-    /// Uses one explicit reset request shared across clones and later factories.
-    pub fn with_reset_once(reset: SqliteStoreResetRequest) -> Self {
-        Self {
-            reset: Some(reset),
-            ..Self::default()
-        }
-    }
-
     /// Consumes this factory's latest activation failure, if any.
     pub fn take_startup_failure(&self) -> Option<SqliteStoreStartupFailure> {
         self.startup_failure.lock().ok()?.take()
@@ -1197,11 +1188,6 @@ impl PluginFactory for SqliteStoreFactory {
             StoreError::Unsupported(_) => MetaError::Activation(error.to_string()),
             _ => MetaError::InvalidInput(error.to_string()),
         })?;
-        if let Some(reset) = &self.reset {
-            reset
-                .bind(&config.root)
-                .map_err(|error| MetaError::InvalidInput(error.to_string()))?;
-        }
         let retained = store_config_retained_bytes(&config)?;
         Ok(PreparedActivation::with_state(
             desired.clone(),
@@ -1215,32 +1201,28 @@ impl PluginFactory for SqliteStoreFactory {
         let config = plan.take_state::<SqliteStoreConfig>()?;
         let root = config.root;
         let open_root = root.clone();
-        let reset = self.reset.clone();
-        let store = tokio::task::spawn_blocking(move || match reset {
-            Some(reset) => reset.open(&open_root),
-            None => SqliteStore::open(open_root),
-        })
-        .await
-        .unwrap_or_else(|_| Err(StoreError::Io("SQLite Store worker stopped".into())))
-        .map_err(|error| {
-            let kind = match &error {
-                StoreError::SchemaMismatch { expected, actual } => {
-                    SqliteStoreStartupFailureKind::SchemaMismatch {
-                        expected: *expected,
-                        actual: *actual,
+        let store = tokio::task::spawn_blocking(move || SqliteStore::open(open_root))
+            .await
+            .unwrap_or_else(|_| Err(StoreError::Io("SQLite Store worker stopped".into())))
+            .map_err(|error| {
+                let kind = match &error {
+                    StoreError::SchemaMismatch { expected, actual } => {
+                        SqliteStoreStartupFailureKind::SchemaMismatch {
+                            expected: *expected,
+                            actual: *actual,
+                        }
                     }
+                    StoreError::WriterLocked => SqliteStoreStartupFailureKind::WriterLocked,
+                    StoreError::Unsupported(_) => SqliteStoreStartupFailureKind::Unsupported,
+                    StoreError::Corrupt(_) => SqliteStoreStartupFailureKind::Corrupt,
+                    StoreError::Io(_) => SqliteStoreStartupFailureKind::Io,
+                    _ => SqliteStoreStartupFailureKind::Invalid,
+                };
+                if let Ok(mut diagnostic) = self.startup_failure.lock() {
+                    *diagnostic = Some(SqliteStoreStartupFailure { root, kind });
                 }
-                StoreError::WriterLocked => SqliteStoreStartupFailureKind::WriterLocked,
-                StoreError::Unsupported(_) => SqliteStoreStartupFailureKind::Unsupported,
-                StoreError::Corrupt(_) => SqliteStoreStartupFailureKind::Corrupt,
-                StoreError::Io(_) => SqliteStoreStartupFailureKind::Io,
-                _ => SqliteStoreStartupFailureKind::Invalid,
-            };
-            if let Ok(mut diagnostic) = self.startup_failure.lock() {
-                *diagnostic = Some(SqliteStoreStartupFailure { root, kind });
-            }
-            MetaError::Activation(error.to_string())
-        })?;
+                MetaError::Activation(error.to_string())
+            })?;
         let codecs = plan
             .context()
             .provide_local::<rsi_agent_session_protocol::ReferenceCodecRegistrationContract>(

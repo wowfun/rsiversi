@@ -23,15 +23,12 @@ database. Unrelated nonempty directories are rejected before mutation. A missing
 or empty root initializes directly. This recognition is a guard against mistaken
 configuration, not proof that every file inside a configured root belongs to RSI.
 
-One startup request retains a failed attempt as a failure across clones and
-activation retries. Successful activation alone permits subsequent ordinary
-opens. Backup receipts remain available to the launcher even after fresh-Store
-initialization fails; retrying requires a new explicit startup request. Receipt
-notification is independent of the reset lock and begins at the completed root
-move. The daemon forwards it while initialization continues, because waiting for
-full readiness could lose the backup path when a later startup phase times out.
-When there is no old Store to preserve, there is no early backup receipt;
-the initialization outcome publishes the receipt instead.
+The [unified launch decision](../architecture/2026-10-20-unified-product-launch.md)
+supersedes activation-time reset injection with product-home maintenance before
+startup. The SQLite factory exposes no reset request or one-shot notification
+lifecycle. Standalone reset retains its success or failure receipt, including
+the backup location after replacement initialization fails. Its caller owns any
+explicit retry; ordinary activation cannot silently retry a reset.
 
 ## Alternatives considered
 

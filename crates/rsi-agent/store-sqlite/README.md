@@ -126,10 +126,6 @@ coordinate/length omissions. At most 256 coordinates and the caller's encoded
 byte budget are materialized; session integrity preparation remains a separate
 Store boundary. The Memory testkit implements the same contract before cloning.
 
-One-shot reset requests expose a bounded receipt notification independently of
-the serialized reset operation. A backup location becomes observable immediately
-after the root move, including while subsequent initialization is still pending.
-
 Bounded suffix reads first admit row lengths and then fetch that contiguous
 range in one ascending query within the same snapshot. No rejected Fact body
 is materialized. Integrity-check failures preserve a bounded SQLite diagnostic.
@@ -203,13 +199,11 @@ Lock-file identity is
 checked after acquisition on every platform, so a waiter holding a moved lock
 cannot open the replacement root under the old lease. Reset is a deliberate root
 replacement; ordinary open and verification never move or remove the writer lock.
-The factory accepts an explicit process-local one-shot request, shared by clones,
-with a structured receipt for its direct owner. Configuration cannot request a
-reset. After success subsequent activation uses ordinary open; after failure it
-returns the retained failure without reopening, retrying or making another backup.
-An unwound attempt remains failed too; only successful completion permits ordinary
-opens through that request.
-A fresh explicit startup request is required to retry a failed reset.
+The factory only opens the configured Store; activation and configuration cannot
+request a reset. Standalone reset callers receive the receipt with the result,
+including when opening the replacement fails. Product-home maintenance belongs
+to the [launcher](../../../apps/cli/README.md), before plugin activation.
+
 Explicit `validate_session`, Fact, control, turn, checkpoint, and append access
 validate the selected session's mechanical durable invariants in one snapshot.
 A bounded cache retains 256 Session proofs across a recent FIFO and a reused
