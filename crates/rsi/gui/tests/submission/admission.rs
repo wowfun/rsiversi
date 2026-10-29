@@ -486,8 +486,39 @@ async fn terminal_refusals_and_detach_retry_preserve_exact_ownership() {
     let detach = request(json!({"type":"detach","attachment":"retained"}));
     assert!(!app.terminal(&detach).await.unwrap_err().no_attachment);
     app.terminal(&detach).await.unwrap();
+    app.terminal(&detach).await.unwrap();
     assert_eq!(*backend.terminal_detaches.lock().unwrap(), vec!["retained"]);
     assert!(runtime.shutdown().await.is_clean());
+}
+
+#[tokio::test]
+async fn terminal_close_allows_late_detach_without_restoring_authority() {
+    for close in [
+        json!({"type":"close","terminal":"closed"}),
+        json!({"type":"close_all"}),
+    ] {
+        let (runtime, backend, app, generation) = fixture().await;
+        let request =
+            |value| json!({"pane":"main","generation":generation,"request":value}).to_string();
+        app.terminal(&request(json!({"type":"attach","terminal":"closed"})))
+            .await
+            .unwrap();
+        app.terminal(&request(close)).await.unwrap();
+        app.terminal(&request(json!({"type":"detach","attachment":"closed"})))
+            .await
+            .unwrap();
+        for command in [
+            json!({"type":"read","attachment":"closed","ack":null}),
+            json!({"type":"write","attachment":"closed","bytes":[13]}),
+            json!({"type":"takeover","attachment":"closed"}),
+            json!({"type":"resize","attachment":"closed","size":{"rows":24,"columns":80}}),
+        ] {
+            let error = app.terminal(&request(command)).await.unwrap_err();
+            assert!(error.to_string().contains("does not belong"), "{error}");
+        }
+        assert!(backend.terminal_detaches.lock().unwrap().is_empty());
+        assert!(runtime.shutdown().await.is_clean());
+    }
 }
 
 #[tokio::test]

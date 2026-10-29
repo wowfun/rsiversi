@@ -7308,6 +7308,7 @@ dependencies = [
  "rsi-execution",
  "rsi-meta-contract",
  "rsi-process",
+ "rsi-sandbox",
  "serde",
  "thiserror 2.0.20",
 ]

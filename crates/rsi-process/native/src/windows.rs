@@ -123,7 +123,7 @@ impl Job {
                 .ok_or_else(|| io::Error::other("child PID absent"))?,
         )
     }
-    fn assign(&self, process: RawHandle) -> io::Result<()> {
+    pub(crate) fn assign(&self, process: RawHandle) -> io::Result<()> {
         // SAFETY: The caller retains the suspended Child's process handle through
         // this call. Assignment occurs before resuming its user-code thread.
         if unsafe { AssignProcessToJobObject(self.0.as_raw_handle(), process) } == 0 {

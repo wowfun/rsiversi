@@ -181,7 +181,7 @@ The narrowed Session-target adapter exposes this operation only for its bound
 Session; discovery and previews neither submit a Turn nor authorize execution.
 
 Terminal output long polls use authenticated Subscription admission, leaving Data
-slots available for finite Session reads and submissions. The terminal-output v2
+slots available for finite Session reads and submissions. The terminal-output v3
 wire operation emits one page with a 128 KiB encoded ceiling, then closes. The
 Session client consumes its first page and drops the stream; its public method
 remains a finite read, independent of transcript subscription ACKs. Terminal
@@ -192,6 +192,9 @@ a distinct Data mutation with a 512 KiB encoded request ceiling covering the
 Clients validate operation-specific terminal, attachment, stream, controller and
 input receipt coordinates before exposing replies. Unsupported terminal policy
 and native failures retain the bounded typed terminal error taxonomy.
+Terminal control v2 and output v3 carry the actual process sandbox mode in each
+terminal status. Earlier clients must negotiate a matching Session API rather
+than treating an unconfined manual terminal as the Agent's restricted sandbox.
 
 `mutate-queue` is a Data mutation with an 8 MiB request and 8 KiB reply ceiling;
 `queue-mutation-status` is a Control read with 8 KiB bounds. Both use the existing

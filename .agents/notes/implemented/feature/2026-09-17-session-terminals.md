@@ -19,10 +19,14 @@ Header and freezes the existing workspace/sandbox choice into the native plan.
 GUI Rust owns output cursors, page acknowledgements, input sequences and uncertain
 receipt reconciliation. xterm renders the independent stream and forwards bytes.
 
-The supported native route is Linux Bash under Bubblewrap with ReadOnly or
+The restricted native route is Linux Bash under Bubblewrap with ReadOnly or
 WorkspaceWrite. A typed process-local PTY intent omits only Bubblewrap's new-session
 flag after the native PTY establishes a controlling terminal. Ordinary pipe APIs
 reject this intent. There is no unconfined or pipe fallback.
+
+[Windows manual terminal authority](../architecture/2026-10-28-windows-manual-terminal.md)
+extends this design with an explicitly unconfined native route, independent of
+Agent settings. The Linux restricted route and live ownership rules remain.
 
 The latest DeepSeek Harness attachment becoming writer is useful evidence for
 session terminal lifetime, but does not establish explicit takeover epochs or

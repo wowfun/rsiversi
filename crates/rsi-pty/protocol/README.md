@@ -1,5 +1,8 @@
 # rsi-pty-protocol
 
+Terminal status includes the Sandbox mode actually used to create the process;
+consumers must not infer it from an Agent's settings or the browser's platform.
+
 Typed live terminal scope, bounded operation and attachment contracts. Scope
 possession is trusted in-process authority. Product adapters authenticate and
 narrow Session targets before using it. No type here is a durable Session record.

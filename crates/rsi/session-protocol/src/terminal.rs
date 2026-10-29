@@ -4,11 +4,11 @@ pub use rsi_pty_protocol::{
     PtyError, Reply, Size, Terminal,
 };
 use serde::{Deserialize, Serialize};
-/// A Session creates only its frozen-policy Bash; callers cannot supply a program or environment.
+/// A Session selects its manual shell and policy; callers cannot supply a program or environment.
 #[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
 #[serde(tag = "type", rename_all = "snake_case", deny_unknown_fields)]
 pub enum Request {
-    /// Creates a restricted Bash and its initial writer attachment.
+    /// Creates a manual shell and initial writer: restricted Bash or local Windows user access.
     Create {
         /// Initial character dimensions.
         size: Size,
@@ -170,6 +170,7 @@ mod tests {
 
     fn terminal() -> Terminal {
         Terminal {
+            sandbox: rsi_sandbox::SandboxMode::WorkspaceWrite,
             id: "pty".into(),
             size: Size {
                 rows: 24,

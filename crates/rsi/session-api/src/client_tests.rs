@@ -644,6 +644,7 @@ async fn terminal_output_uses_a_bounded_subscription_and_preserves_typed_failure
     };
     let reply = Reply::Output(OutputPage {
         terminal: Terminal {
+            sandbox: rsi_sandbox::SandboxMode::WorkspaceWrite,
             id: "terminal".into(),
             size: Size {
                 rows: 24,

@@ -501,6 +501,10 @@ does not leave a paste in one-byte round trips. Batch copies total at most three
 times the original input size, even under repeated short writes; each refused
 capacity attempt adds one bounded batch copy.
 
+Detach is idempotent for an absent follower in the exact pane
+generation, including after confirmed terminal close. Missing followers still
+reject read, input, resize and takeover; cleanup never grants execution authority.
+
 Terminal output reads have 32 independent admission slots, matching the PTY
 provider's aggregate follower limit. They share command task ownership and
 shutdown draining, but do not occupy the eight ordinary command slots. Terminal

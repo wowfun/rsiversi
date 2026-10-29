@@ -15,6 +15,17 @@ and observe zero active members before reporting successful cleanup.
 Other platforms expose no Windows primitives. This library adds no Process
 capability or admission authority; the consuming owner supplies those contracts.
 
+Windows ConPTY creation accepts an exact executable, arguments, environment and
+directory. It creates the client suspended, assigns the retained Job and resumes
+the returned primary thread. Non-inherited pipes carry input and output; resize
+and close serialize access to the console handle. The caller drains output while
+closing the console, waits for the client and observes an empty Job before
+releasing admission. These mechanisms manage lifetime, not filesystem access.
+Canonical verbatim executable and working-directory paths are converted to
+Win32 spelling only when both spellings canonicalize to the same object. A path
+that would resolve differently (for example a trailing-dot directory) is refused.
+This preserves exact selection while supporting Windows PowerShell's .NET startup.
+
 `ProcessIdentity` reads PID, creation time and TokenUser SID from one retained
 process handle. `ProcessHandle` checks liveness and can terminate only the exact
 generation explicitly opened for termination. PID reuse never redirects an

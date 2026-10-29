@@ -35,9 +35,10 @@ enabled only where the Process owner publishes the cache capability. CLI and
 Desktop use `capture_standard_bash`, which selects Bash from the absolute Git for Windows installation recorded
 by its installer. It fails clearly if that installation is absent; it never
 substitutes the Windows WSL launcher. On Unix it resolves `/bin/bash`.
-Windows does not advertise the Linux
-apply-patch helper or PTY terminal contribution. These are independent optional
-capabilities, rather than prerequisites for native Windows conversations.
+Windows manual terminals use native PowerShell through ConPTY with explicit
+current-user permissions, independently of Agent tools and sandbox settings.
+Windows does not advertise the Linux apply-patch helper. This optional capability
+is not a prerequisite for native Windows conversations.
 Native Unix MCP profile management is also omitted from the standard Windows
 Service; the private ACP integration owns its own explicit MCP inputs.
 Native application Service entry acquires the Host lease before starting its child

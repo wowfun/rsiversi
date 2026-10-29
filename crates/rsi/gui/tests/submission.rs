@@ -217,6 +217,7 @@ impl SessionHandle for Backend {
                     id: terminal.clone(),
                     stream_epoch: 1,
                     terminal: Terminal {
+                        sandbox: rsi_sandbox::SandboxMode::WorkspaceWrite,
                         id: terminal,
                         size: Size {
                             rows: 24,
@@ -245,6 +246,9 @@ impl SessionHandle for Backend {
                 self.terminal_detaches.lock().unwrap().push(attachment);
                 Ok(Reply::Done)
             }
+            Request::Operate {
+                operation: Operation::Close { .. } | Operation::CloseAll,
+            } => Ok(Reply::Done),
             _ => missing(),
         }
     }

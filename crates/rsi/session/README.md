@@ -233,6 +233,13 @@ fingerprints. Creation revalidates its canonical workspace and confines an expli
 plan. Local shells receive fixed PATH, workspace HOME, SHELL, TERM, LANG and
 disabled HISTFILE. SSH shells receive target account HOME and the target's fixed
 program environment. Neither inherits Service credentials or shell startup files.
+On local Windows, manual terminals instead launch Windows PowerShell with the
+current user's OS permissions, independently of the Agent's saved sandbox mode.
+They use an explicit unconfined ConPTY plan and a selected non-secret Windows
+environment; profiles are disabled. The terminal status exposes its actual
+sandbox mode, and the UI labels full access as current-user permissions. Session
+Agent settings and execution-tool authorization are never changed by terminal
+creation. SSH terminals retain their target's restricted Bash policy.
 Retiring this service retires all scopes even while detached handles remain.
 The registry neither pins an Agent composition nor writes terminal state to Store.
 Closing the last terminal releases its empty scope after admitted operations finish;

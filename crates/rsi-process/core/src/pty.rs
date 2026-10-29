@@ -28,7 +28,7 @@ impl PtySize {
 /// Exact controlling-terminal process request with no ambient environment merge.
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct PtyProcessSpec<P = ConfinedProcess> {
-    /// Restricted Sandbox plan with explicit PTY intent.
+    /// Exact Sandbox plan with explicit PTY intent.
     pub process: P,
     /// Complete child environment.
     pub environment: Vec<(OsString, OsString)>,
@@ -50,7 +50,7 @@ impl<P> PtyProcessSpec<P> {
 }
 
 impl PtyProcessSpec {
-    /// Validates framing and the supported restricted Linux backend.
+    /// Validates framing and supported restricted Linux or unconfined Windows plans.
     pub fn validate(&self) -> Result<()> {
         validate_process_plan(&self.process)?;
         validate_environment(&self.environment)?;
@@ -62,17 +62,21 @@ impl PtyProcessSpec {
                 "PTY termination grace is out of bounds".into(),
             ));
         }
-        if self.process.stdio != rsi_sandbox::ProcessStdio::Pty
-            || self.process.stamp.scratch != rsi_sandbox::SandboxScratch::PrivateTmp
-            || self.process.stamp.network != rsi_sandbox::SandboxNetwork::Host
-            || !matches!(
+        let restricted = self.process.stamp.scratch == rsi_sandbox::SandboxScratch::PrivateTmp
+            && matches!(
                 self.process.stamp.backend,
                 rsi_sandbox::SandboxBackend::Bubblewrap { .. }
             )
-            || !matches!(
+            && matches!(
                 self.process.stamp.requested,
                 rsi_sandbox::SandboxMode::ReadOnly | rsi_sandbox::SandboxMode::WorkspaceWrite
-            )
+            );
+        let windows = cfg!(windows)
+            && self.process.stamp.backend == rsi_sandbox::SandboxBackend::Unconfined
+            && self.process.stamp.requested == rsi_sandbox::SandboxMode::DangerFullAccess;
+        if self.process.stdio != rsi_sandbox::ProcessStdio::Pty
+            || self.process.stamp.network != rsi_sandbox::SandboxNetwork::Host
+            || !(restricted || windows)
         {
             return Err(ProcessError::Unsupported);
         }
@@ -146,7 +150,7 @@ impl ManagedPtyProcess {
 /// Local-only native PTY provider, sharing Process admission and retirement.
 #[async_trait]
 pub trait PtyProcess: fmt::Debug + Send + Sync + 'static {
-    /// Admits one exact restricted PTY plan.
+    /// Admits one exact supported PTY plan.
     async fn spawn(&self, spec: PtyProcessSpec) -> Result<ManagedPtyProcess>;
 }
 /// Typed native PTY authority, never exposed by the output cache API.

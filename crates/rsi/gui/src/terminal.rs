@@ -304,8 +304,14 @@ impl Attachment {
                     .lock()
                     .expect("terminal followers poisoned")
                     .get(id)
-                    .cloned()
-                    .ok_or("Terminal attachment does not belong to this pane")?;
+                    .cloned();
+                let Some(follower) = follower else {
+                    if matches!(command, Command::Detach { .. }) {
+                        return serde_json::to_string(&Reply::Done)
+                            .map_err(|error| TerminalFailure::from(error.to_string()));
+                    }
+                    return Err("Terminal attachment does not belong to this pane".into());
+                };
                 let value = follower
                     .status
                     .lock()

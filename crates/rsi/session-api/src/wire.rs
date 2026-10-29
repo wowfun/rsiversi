@@ -211,14 +211,14 @@ impl Operation {
                 match self {
                     Self::Create | Self::Inspect | Self::Recent => 8,
                     Self::Submit => 5,
-                    Self::MessageStatus => 3,
+                    Self::MessageStatus | Self::TerminalOutput => 3,
                     Self::ModelObserve
                     | Self::ListWorkflows
                     | Self::Jobs
-                    | Self::TerminalOutput
                     | Self::Interactions
                     | Self::Questions
-                    | Self::AnswerQuestion => 2,
+                    | Self::AnswerQuestion
+                    | Self::Terminal => 2,
                     Self::Attach | Self::DraftSnapshot | Self::SelectPreset | Self::Observe => 7,
                     Self::History | Self::ReadMessage => 6,
                     _ => 1,
@@ -522,5 +522,7 @@ mod terminal_admission_tests {
         let spec = Operation::TerminalOutput.spec();
         assert_eq!(spec.class, OperationClass::Subscription);
         assert_eq!(spec.effect, OperationEffect::Read);
+        assert_eq!(spec.id.version(), 3);
+        assert_eq!(Operation::Terminal.spec().id.version(), 2);
     }
 }

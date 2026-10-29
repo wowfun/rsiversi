@@ -122,6 +122,7 @@ fn fixture_with_process(
         inner: Mutex::new(TermState {
             screen_size: size,
             status: Terminal {
+                sandbox: rsi_sandbox::SandboxMode::WorkspaceWrite,
                 id: "pty".into(),
                 size,
                 phase: Phase::Running,

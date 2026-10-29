@@ -1,6 +1,8 @@
-//! Linux controlling PTYs share the ordinary Process registry and cleanup lifetime.
+//! Native PTYs share Process admission and cleanup lifetime.
 use super::Service;
-use rsi_process::{ManagedPtyProcess, ProcessError, PtyProcess, PtyProcessSpec, Result};
+#[cfg(not(windows))]
+use rsi_process::ProcessError;
+use rsi_process::{ManagedPtyProcess, PtyProcess, PtyProcessSpec, Result};
 #[async_trait::async_trait]
 impl PtyProcess for Service {
     async fn spawn(&self, spec: PtyProcessSpec) -> Result<ManagedPtyProcess> {
@@ -9,7 +11,11 @@ impl PtyProcess for Service {
         {
             self.spawn_pty(&spec)
         }
-        #[cfg(not(target_os = "linux"))]
+        #[cfg(windows)]
+        {
+            self.windows.spawn_pty(spec).await
+        }
+        #[cfg(not(any(target_os = "linux", windows)))]
         {
             let _ = spec;
             Err(ProcessError::Unsupported)

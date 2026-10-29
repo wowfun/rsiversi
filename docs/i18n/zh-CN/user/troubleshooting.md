@@ -34,7 +34,10 @@ Web 目录浏览器暂不可用，请手工输入工作目录。
 全权限执行不能代替沙箱验收。工作区审阅需要更强的源码读取隔离，
 因此在 Windows 上暂不可用。
 
-Linux SSH 目标、Web PTY、Browser/Automation、
+Web 手动终端通过 ConPTY 运行原生 PowerShell，使用当前用户的操作系统权限，
+并在终端底部显示。Agent 权限不变。支持交互输入、调整尺寸和进程树清理。
+
+Linux SSH 目标、Browser/Automation、
 已完成进程的输出缓存和 MCP Profile 管理也不在本轮 Windows 支持范围内。
 界面上的部分操作可能返回明确的不可用提示。
 需要这些 Linux 工作流时请使用 Linux/WSL，不要把 Windows 构建成功理解为全部能力都已对齐。

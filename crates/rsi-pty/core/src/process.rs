@@ -10,6 +10,12 @@ pub(super) enum Launch {
     Execution(PtyProcessSpec<PreparedProcess>),
 }
 impl Launch {
+    pub(super) fn sandbox(&self) -> rsi_sandbox::SandboxMode {
+        match self {
+            Self::Native(spec) => spec.process.stamp.requested,
+            Self::Execution(spec) => spec.process.enforcement().requested,
+        }
+    }
     pub(super) fn validate(&self) -> Result<()> {
         match self {
             Self::Native(spec) => spec.validate(),

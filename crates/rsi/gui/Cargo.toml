@@ -47,6 +47,7 @@ rsi-host = { path = "../../rsi-host/core" }
 rsi-meta = { path = "../../rsi-meta/core" }
 rsi-meta-execution = { path = "../../rsi-meta/execution" }
 rsi-session-protocol = { path = "../session-protocol" }
+rsi-sandbox = { path = "../../rsi-sandbox/core" }
 rsi-agent-session-protocol = { path = "../../rsi-agent/session-protocol" }
 rsi-agent-model-selection = { path = "../../rsi-agent/model-selection" }
 rsi-agent-turn-protocol = { path = "../../rsi-agent/turn-protocol" }
@@ -72,7 +73,6 @@ image.workspace = true
 sha2.workspace = true
 rsi-process = { path = "../../rsi-process/core" }
 rsi-files-protocol = { path = "../../rsi-files/protocol" }
-rsi-sandbox = { path = "../../rsi-sandbox/core" }
 tokio = { workspace = true, features = ["rt-multi-thread", "time"] }
 
 [lints]

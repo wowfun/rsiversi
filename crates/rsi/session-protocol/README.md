@@ -301,10 +301,13 @@ and bounded cache policy belong to Session.
 
 ## Live Session terminals
 
-A persisted Session may create Linux Bash terminals only under its frozen
+A persisted Session creates local Windows PowerShell terminals with current-user
+permissions, separately from Agent sandbox settings. Actual terminal permissions
+are returned in status. Linux and SSH Bash terminals require the frozen
 ReadOnly or WorkspaceWrite Bubblewrap policy and canonical workspace. Drafts,
-unsupported platforms/backends and DangerFullAccess return TerminalUnavailable.
-No execution policy is widened or chosen by the client. A service generation
+unsupported platforms/backends and unrestricted Bash return TerminalUnavailable.
+The product selects manual-terminal policy; the client cannot select executable,
+environment or policy. A service generation
 retains at most 256 Session scopes, each with the bounds and controller/receipt
 protocol owned by [PTY](../../rsi-pty/README.md). Pane detach and Kernel eviction
 leave these scopes alive; explicit close, service retirement and Host stop reap
