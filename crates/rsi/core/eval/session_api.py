@@ -52,6 +52,11 @@ def configure(root, task, model, provider):
     settings = coding.configure(root, model)
     if provider:
         provider.configure(root)
+    # Host ownership retains this lock in the config home. Seed it before
+    # freezing every config file so startup and actual config drift stay distinct.
+    owner = root / "config/rsi/session-host"
+    owner.mkdir(mode=0o700)
+    (owner / "owner.lock").touch(mode=0o600)
     return settings
 
 

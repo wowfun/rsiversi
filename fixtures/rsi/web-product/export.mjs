@@ -28,7 +28,7 @@ export async function verifyExport(page,service,report,name) {
     if(args){const artifact=JSON.parse(text);assert.equal(artifact.last_provider_request.availability,'available');assert.equal(artifact.last_provider_request.effect_id,artifact.last_provider_response.effect_id);assert.equal(artifact.last_provider_response.raw,false);assert.deepEqual(Object.keys(artifact).sort(),['header','last_provider_request','last_provider_response','messages','provider_input_evidence']);}
     await download.saveAs(join(report,`${name}-${args?'all.json':'messages.md'}`));
     evidence.push({filename:download.suggestedFilename(),bytes:bytes.length,sha256:createHash('sha256').update(bytes).digest('hex')});
-    await page.getByRole('button',{name:'Export',exact:true,includeHidden:true}).waitFor({state:'attached'});
+    await page.getByRole('menuitem',{name:'Export',exact:true,includeHidden:true}).waitFor({state:'attached'});
   }
   assert.equal(service.provider.requests.length,before,'export must not submit a model request');
   assert.equal(await page.evaluate(()=>navigator.serviceWorker.controller),null,'download worker must not control the application');

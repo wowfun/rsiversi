@@ -4,7 +4,7 @@ use rsi_agent_session_protocol::{
     AgentPresetId, FrozenAgentSettings, SessionFact, SessionFactBody, SessionHeader, SessionId,
     TurnId,
 };
-use rsi_agent_store_protocol::{AppendBatch, SessionStore};
+use rsi_agent_store_protocol::{AppendBatch, MAXIMUM_STORE_FACT_PAGE_BYTES, SessionStore};
 use rsi_agent_store_sqlite::SqliteStore;
 use rsi_ai_protocol::ModelRef;
 use rsi_sandbox::SandboxMode;
@@ -185,7 +185,9 @@ fn built_binary_compact_reports_envelope_and_preserves_a_verifiable_store() {
             }),
         )
         .unwrap();
-    let before = runtime.block_on(store.read_facts(&id, 0, 1)).unwrap();
+    let before = runtime
+        .block_on(store.read_facts(&id, 0, 1, MAXIMUM_STORE_FACT_PAGE_BYTES))
+        .unwrap();
     drop(store);
     let output = Command::new(env!("CARGO_BIN_EXE_rsi"))
         .args([
@@ -209,7 +211,9 @@ fn built_binary_compact_reports_envelope_and_preserves_a_verifiable_store() {
     SqliteStore::verify(&root).unwrap();
     let store = SqliteStore::open(&root).unwrap();
     assert_eq!(
-        runtime.block_on(store.read_facts(&id, 0, 1)).unwrap(),
+        runtime
+            .block_on(store.read_facts(&id, 0, 1, MAXIMUM_STORE_FACT_PAGE_BYTES))
+            .unwrap(),
         before
     );
 }

@@ -1569,6 +1569,7 @@ async fn headless_sigint_bounds_stalled_terminal_observation() {
         domain.clone(),
         Arc::new(UnusedWorkspace),
         domain,
+        None,
         parse_headless(&[
             "task",
             "--resume",

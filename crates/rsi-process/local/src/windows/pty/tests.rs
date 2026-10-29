@@ -35,19 +35,33 @@ fn spec(path: &std::path::Path) -> PtyProcessSpec {
         termination_grace_ms: 100,
     }
 }
-async fn receipt(path: &std::path::Path) -> String {
-    tokio::time::timeout(Duration::from_secs(15), async {
+async fn receipt(path: &std::path::Path, pty: &ManagedPtyProcess) -> String {
+    let mut output = Vec::new();
+    let result = tokio::time::timeout(Duration::from_secs(15), async {
         loop {
             if let Ok(value) = tokio::fs::read_to_string(path).await
                 && !value.is_empty()
             {
                 return value;
             }
-            tokio::time::sleep(Duration::from_millis(20)).await;
+            tokio::select! {
+                () = tokio::time::sleep(Duration::from_millis(20)) => {},
+                page = pty.read() => {
+                    let page = page.unwrap();
+                    output.extend(page.bytes);
+                    assert!(output.len() < 1024 * 1024);
+                    assert!(!page.eof, "shell exited before receipt: {:?}", String::from_utf8_lossy(&output));
+                }
+            }
         }
     })
-    .await
-    .expect("interactive command receipt")
+    .await;
+    result.unwrap_or_else(|_| {
+        panic!(
+            "interactive command receipt: {:?}",
+            String::from_utf8_lossy(&output)
+        )
+    })
 }
 async fn write(pty: &ManagedPtyProcess, text: &str) {
     let mut bytes = text.as_bytes();
@@ -85,6 +99,26 @@ async fn conpty_interactive_unicode_resize_and_exit_preserve_exact_plan() {
     let service = Service::new(crate::ProcessLocalConfig::default());
     let pty = service.spawn_pty(spec(&workspace)).await.unwrap();
     prompt(&pty).await;
+    pty.resize(PtySize {
+        rows: 31,
+        columns: 104,
+    })
+    .await
+    .unwrap();
+    write(&pty, "$r=@{cwd=$pwd.Path;cols=$Host.UI.RawUI.WindowSize.Width;rows=$Host.UI.RawUI.WindowSize.Height;redirected=[Console]::IsInputRedirected;value=$env:RSI_PTY_TEST;text='中文'};[IO.File]::WriteAllText((Join-Path $pwd 'receipt.json'),($r|ConvertTo-Json));Write-Output ('RSI'+'-DONE')\r").await;
+    let value: serde_json::Value =
+        serde_json::from_str(&receipt(&workspace.join("receipt.json"), &pty).await).unwrap();
+    assert_eq!(
+        std::path::Path::new(value["cwd"].as_str().unwrap())
+            .canonicalize()
+            .unwrap(),
+        workspace.canonicalize().unwrap()
+    );
+    assert_eq!(value["cols"], 104);
+    assert_eq!(value["rows"], 31);
+    assert_eq!(value["redirected"], false);
+    assert_eq!(value["value"], "exact");
+    assert_eq!(value["text"], "中文");
     let reading = pty.clone();
     let output = tokio::spawn(async move {
         let mut data = Vec::new();
@@ -97,22 +131,7 @@ async fn conpty_interactive_unicode_resize_and_exit_preserve_exact_plan() {
             }
         }
     });
-    pty.resize(PtySize {
-        rows: 31,
-        columns: 104,
-    })
-    .await
-    .unwrap();
-    write(&pty, "$r=@{cwd=$pwd.Path;cols=$Host.UI.RawUI.WindowSize.Width;rows=$Host.UI.RawUI.WindowSize.Height;redirected=[Console]::IsInputRedirected;value=$env:RSI_PTY_TEST;text='中文'};[IO.File]::WriteAllText((Join-Path $pwd 'receipt.json'),($r|ConvertTo-Json));Write-Output ('RSI'+'-DONE')\r").await;
-    let value: serde_json::Value =
-        serde_json::from_str(&receipt(&workspace.join("receipt.json")).await).unwrap();
-    assert_eq!(value["cwd"], workspace.to_str().unwrap());
-    assert_eq!(value["cols"], 104);
-    assert_eq!(value["rows"], 31);
-    assert_eq!(value["redirected"], false);
-    assert_eq!(value["value"], "exact");
-    assert_eq!(value["text"], "中文");
-    write(&pty, "exit 7\r").await;
+    write(&pty, "Write-Output ('RSI'+'-EXIT');exit 7\r").await;
     assert_eq!(
         tokio::time::timeout(Duration::from_secs(10), pty.wait())
             .await
@@ -122,7 +141,7 @@ async fn conpty_interactive_unicode_resize_and_exit_preserve_exact_plan() {
         Some(7)
     );
     let bytes = output.await.unwrap();
-    assert!(String::from_utf8_lossy(&bytes).contains("RSI-DONE"));
+    assert!(String::from_utf8_lossy(&bytes).contains("RSI-EXIT"));
     service.shutdown().await.unwrap();
     assert!(service.ptys.lock().unwrap().is_empty());
 }
@@ -133,10 +152,10 @@ async fn conpty_ctrl_c_interrupts_foreground_command_without_terminating_shell()
     let pty = service.spawn_pty(spec(directory.path())).await.unwrap();
     prompt(&pty).await;
     write(&pty,"try{[IO.File]::WriteAllText((Join-Path $pwd 'sleep.txt'),'started');Start-Sleep -Seconds 60}finally{[IO.File]::WriteAllText((Join-Path $pwd 'interrupt.txt'),'interrupted')}\r").await;
-    receipt(&directory.path().join("sleep.txt")).await;
+    receipt(&directory.path().join("sleep.txt"), &pty).await;
     write(&pty, "\u{3}").await;
     assert_eq!(
-        receipt(&directory.path().join("interrupt.txt")).await,
+        receipt(&directory.path().join("interrupt.txt"), &pty).await,
         "interrupted"
     );
     assert!(
@@ -167,7 +186,7 @@ async fn conpty_retirement_kills_descendants_with_backpressure_and_cancelled_wai
         .to_string_lossy()
         .replace('\'', "''");
     write(&pty,&format!("$c=Start-Process -WindowStyle Hidden -PassThru -FilePath '{shell}' -ArgumentList '-NoProfile','-Command','Start-Sleep -Seconds 60';[IO.File]::WriteAllText((Join-Path $pwd 'child.txt'),[string]$c.Id);while($true){{[Console]::Write(('x'*8192))}}\r")).await;
-    receipt(&directory.path().join("child.txt")).await;
+    receipt(&directory.path().join("child.txt"), &pty).await;
     let state = service
         .ptys
         .lock()

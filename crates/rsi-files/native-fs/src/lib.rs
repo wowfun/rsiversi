@@ -71,7 +71,10 @@ mod lookup_tests {
     #[test]
     fn child_kind_is_exact_and_does_not_follow_links() {
         let root = tempfile::tempdir().unwrap();
-        let directory = open_absolute_directory_no_follow(root.path()).unwrap();
+        let path = root.path();
+        #[cfg(unix)]
+        let path = &path.canonicalize().unwrap();
+        let directory = open_absolute_directory_no_follow(path).unwrap();
         std::fs::write(root.path().join("file"), b"data").unwrap();
         std::fs::create_dir(root.path().join("directory")).unwrap();
         assert_eq!(

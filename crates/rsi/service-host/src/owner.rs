@@ -387,7 +387,7 @@ pub(crate) fn signal_generation(
     }
     #[cfg(not(any(target_os = "linux", windows)))]
     {
-        let _ = signal;
+        let _ = (pid, process_start_token, signal);
         Err(ServiceHostError::Unsupported)
     }
 }

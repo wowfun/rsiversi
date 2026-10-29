@@ -52,4 +52,3 @@ try {for(const [name,engine] of Object.entries({chromium,firefox})){
  }catch(error){await page.screenshot({path:join(report,name+'-failure.png')});throw error;}finally{await browser.close();}
 }}finally{await scene.close();}
 await writeFile(join(report,'document-results.json'),JSON.stringify(results,null,2));console.log(JSON.stringify(results));
-

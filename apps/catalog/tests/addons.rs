@@ -457,7 +457,11 @@ mod domains {
         }
         async fn activate(&self, plan: ActivationPlan) -> rsi_meta::Result<()> {
             let api = plan.local::<ApiClientContract>()?;
-            if !api.operations().contains(&operation()) {
+            let operations = api
+                .operations()
+                .await
+                .map_err(|error| MetaError::Activation(error.to_string()))?;
+            if !operations.operations().contains(&operation()) {
                 return Err(MetaError::Activation(
                     "addon endpoint is not enabled".into(),
                 ));

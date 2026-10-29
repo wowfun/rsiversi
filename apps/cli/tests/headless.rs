@@ -16,7 +16,7 @@ use rsi_agent_session_protocol::{
     SessionFactBody, SessionId, TurnId, TurnOutcome,
 };
 
-use rsi_agent_store_protocol::SessionStore as _;
+use rsi_agent_store_protocol::{MAXIMUM_STORE_FACT_PAGE_BYTES, SessionStore as _};
 
 use rsi_agent_store_sqlite::SqliteStore;
 use rsi_agent_turn_protocol::{MessageReceipt, ObservationCursor, SessionObservation};
@@ -1565,7 +1565,10 @@ async fn built_binary_sigint_cancels_flushes_and_exits_130() {
     let session = SessionId::new(lines[0]["session_id"].as_str().unwrap()).unwrap();
     let turn = TurnId::new(lines[1]["turn_id"].as_str().unwrap()).unwrap();
     let store = SqliteStore::open(fixture.paths.state().join("agent")).unwrap();
-    let facts = store.read_facts(&session, 0, 256).await.unwrap();
+    let facts = store
+        .read_facts(&session, 0, 256, MAXIMUM_STORE_FACT_PAGE_BYTES)
+        .await
+        .unwrap();
     assert!(facts.caught_up());
     assert!(facts.facts.iter().any(|fact| matches!(fact.body(),
         SessionFactBody::CancelRequested { turn_id, .. } if turn_id == &turn
@@ -1690,7 +1693,10 @@ async fn built_binary_recovers_a_real_sqlite_prefix_after_sigkill() {
 
     let store = SqliteStore::open(fixture.paths.state().join("agent")).unwrap();
     let session_id = SessionId::new(session_id).unwrap();
-    let facts = store.read_facts(&session_id, 0, 256).await.unwrap();
+    let facts = store
+        .read_facts(&session_id, 0, 256, MAXIMUM_STORE_FACT_PAGE_BYTES)
+        .await
+        .unwrap();
     assert!(facts.caught_up());
     assert_sigkill_recovery_order(&facts.facts);
     server.abort();

@@ -242,7 +242,7 @@ async fn real_process_cache_pages_cross_independent_plugins_without_spawn_author
             .is_none()
     );
     assert!(server.shutdown().await.is_clean());
-    assert!(dispatch.operations().unwrap().is_empty());
+    assert!(matches!(dispatch.operations(), Err(ApiError::ShuttingDown)));
 }
 
 #[derive(Debug)]

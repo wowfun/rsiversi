@@ -134,7 +134,6 @@ function NativeSurface({
           <IconChevronDownOutlineRegular />
         </button>
         {selected && <ConversationWidthControls container={column} showHandles={!empty} />}
-        
       </div>
       <PendingInputs data={data} owner={owner} register={ref("queueList")} />
       <PendingInteractions data={data} owner={owner} />

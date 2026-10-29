@@ -371,6 +371,7 @@ jobs:
         run: |
           mkdir -p "$RUNNER_TEMP/rsi-browser-logs"
           exec > >(tee "$RUNNER_TEMP/rsi-browser-logs/web_workflow.log") 2>&1
+          mkdir -p "$RUNNER_TEMP/rsi-web-evidence"
           source "$GITHUB_WORKSPACE/.github/scripts/sandbox-policy.sh" full
           export RSI_PAIRED_BUNDLE="$(cd "$GITHUB_WORKSPACE" && cargo run --quiet --locked -p rsi-app-tools -- fixture-path web)"
           RSI_TEST_NODE="$(command -v node)" RSI_WEB_REPORT="$RUNNER_TEMP/rsi-web-evidence/workflow-dock" node workflow-verify.mjs --dock-only
@@ -1149,7 +1150,7 @@ jobs:
         id: ssh_prerequisites
         run: |
           sudo apt-get update
-          sudo apt-get install --no-install-recommends --yes openssh-server bubblewrap musl-tools libdbus-1-dev pkg-config
+          sudo apt-get install --no-install-recommends --yes openssh-server bubblewrap musl-tools libdbus-1-dev pkg-config ripgrep
           sudo install -d -m 0755 /run/sshd
           python3 "$GITHUB_WORKSPACE/fixtures/rsi/browser-runtime/user_manager.py" prepare "$RUNNER_TEMP/rsi-user-manager.json"
           install -d -m 0700 "$HOME/rsi-ssh-ci"

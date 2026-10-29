@@ -1419,7 +1419,7 @@ async fn ordinary_http_plugin_retires_listener_without_withdrawing_shared_connec
         .root()
         .lookup_local::<rsi_api_protocol::ApiDispatchContract>()
         .unwrap();
-    assert_eq!(dispatcher.operations().unwrap().len(), 3);
+    assert_eq!(dispatcher.operations().unwrap().len(), 4);
     assert_ne!(listener.address().port(), 0);
     let socket = TcpStream::connect(listener.address()).await.unwrap();
     let mut stopped = Box::pin(listener.stopped());
@@ -1432,7 +1432,7 @@ async fn ordinary_http_plugin_retires_listener_without_withdrawing_shared_connec
             .lookup_local::<HttpListenerContract>()
             .is_none()
     );
-    assert_eq!(dispatcher.operations().unwrap().len(), 3);
+    assert_eq!(dispatcher.operations().unwrap().len(), 4);
     assert!(
         runtime
             .root()

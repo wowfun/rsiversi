@@ -194,7 +194,7 @@ struct Evaluation {
 }
 
 pub(super) async fn main() -> std::process::ExitCode {
-    match run().await {
+    match Box::pin(run()).await {
         Ok(report) => {
             let complete = report["goal"]["goal"]["phase"] == "completed";
             println!("{report}");
@@ -250,10 +250,10 @@ async fn run() -> Result<serde_json::Value> {
     let host_paths = ServiceHostPaths::from_host_paths(&paths)?;
     host_paths.validate_daemon_endpoint()?;
     let owner = HostOwnerLease::try_acquire(host_paths)?;
-    let daemon = infrastructure(
+    let daemon = Box::pin(infrastructure(
         "Host startup",
         StandardServiceDaemon::start(composition.clone(), &profile, owner),
-    )
+    ))
     .await??;
     let running = daemon.running();
     let stop = CancellationToken::new();

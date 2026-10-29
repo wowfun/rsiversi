@@ -82,10 +82,9 @@ async fn managed_sdk_build_publishes_bytes_that_the_independent_loader_admits_ex
     let record = report.installed.unwrap().record.unwrap();
     assert_eq!(record.plugin(), "fixture.native-addon");
     assert!(store.snapshot().unwrap().enabled.is_empty());
-    assert!(!root.join("loader").exists());
-    assert!(!root.join("config").exists());
-    assert!(!root.join("state").exists());
-    assert!(!root.join("cache").exists());
+    for name in ["loader", "config", "state", "cache"] {
+        assert!(!root.join(name).exists());
+    }
     assert!(manager.shutdown().await.is_clean());
     let loader = rsi_meta_native_loader::NativeCatalog::new(
         rsi_meta_native_loader::CatalogOptions::new(root.join("loader")),

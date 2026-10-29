@@ -283,10 +283,10 @@ fn enumeration_retains_its_original_authority_after_root_replacement() {
 #[test]
 fn removing_a_link_keeps_the_external_object_and_refuses_regular_files() {
     let temporary = tempfile::tempdir().unwrap();
-    let path = temporary.path();
+    let path = temporary.path().canonicalize().unwrap();
     fs::write(path.join("outside"), b"keep").unwrap();
     symlink(path.join("outside"), path.join("link")).unwrap();
-    let directory = open_absolute_directory_no_follow(path).unwrap();
+    let directory = open_absolute_directory_no_follow(&path).unwrap();
     assert!(directory.remove_link(Path::new("outside")).is_err());
     directory.remove_link(Path::new("link")).unwrap();
     assert_eq!(fs::read(path.join("outside")).unwrap(), b"keep");

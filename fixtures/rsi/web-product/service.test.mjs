@@ -72,7 +72,7 @@ test("recovery and tasks retain leased binary identity without copying it when b
     for (const probe of ["recovery", "tasks"]) {
       const report = join(directory, probe);
       const result = spawnSync(process.execPath, ['--import',pathToFileURL(preload).href,join(import.meta.dirname, `${probe}.mjs`)], {
-        env: { ...process.env, NODE_OPTIONS:'', RSI_APP_TOOLS_BINARY:process.execPath, RSI_WEB_BINARY: binary, RSI_WEB_ASSETS: directory,
+        env: { ...process.env, NODE_OPTIONS:'', RSI_PAIRED_BUNDLE:'', RSI_APP_TOOLS_BINARY:process.execPath, RSI_WEB_BINARY: binary, RSI_WEB_ASSETS: directory,
           RSI_WEB_REPORT: report, RSI_WEB_BROWSER: "chromium", PLAYWRIGHT_BROWSERS_PATH: join(directory, "absent-browsers") },
         encoding: "utf8", timeout: 15_000,
       });

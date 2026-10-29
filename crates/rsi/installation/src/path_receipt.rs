@@ -91,13 +91,13 @@ pub fn apply(edit: &PathEdit, remove: bool) -> Result<()> {
         use rsi_files_native_fs as native;
         let home = home()?;
         let root = native::open_absolute_directory_no_follow(&home)?;
-        if let Ok(meta) = std::fs::symlink_metadata(home.join(&edit.target)) {
-            if !meta.is_file() || meta.file_type().is_symlink() || meta.permissions().readonly() {
-                return Err(error(format!(
-                    "{} is linked or read-only; configure PATH manually",
-                    edit.target
-                )));
-            }
+        if let Ok(meta) = std::fs::symlink_metadata(home.join(&edit.target))
+            && (!meta.is_file() || meta.file_type().is_symlink() || meta.permissions().readonly())
+        {
+            return Err(error(format!(
+                "{} is linked or read-only; configure PATH manually",
+                edit.target
+            )));
         }
         let bytes = fs::read(&root, &edit.target, 1024 * 1024)?.unwrap_or_default();
         let text = String::from_utf8(bytes).map_err(error)?;

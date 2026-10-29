@@ -146,7 +146,7 @@ async fn activation_counterpart_lookup_work_is_independent_of_control_history() 
         tx.commit().unwrap();
         let activation = ActivationId::new(format!("activation-{history}")).unwrap();
         assert_eq!(
-            crate::program_graph::Graph(&connection)
+            crate::program_graph::Graph(connection)
                 .control(&id, ProgramGraphQuery::Sink(&activation))
                 .unwrap()
                 .seq(),

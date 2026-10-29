@@ -347,6 +347,7 @@ async fn factory_retains_only_safe_startup_facts_for_its_owner() {
 #[ignore = "report-only actual SQLite validation VM and full-scan work"]
 #[cfg(unix)]
 async fn online_validation_sql_work() {
+    use rsi_agent_store_protocol::MAXIMUM_STORE_FACT_PAGE_BYTES;
     use rusqlite::{
         StatementStatus,
         trace::{TraceEvent, TraceEventCodes},
@@ -400,12 +401,7 @@ async fn online_validation_sql_work() {
                 for id in &sessions {
                     assert_eq!(
                         store
-                            .read_facts(
-                                id,
-                                0,
-                                1,
-                                rsi_agent_store_protocol::MAXIMUM_STORE_FACT_PAGE_BYTES
-                            )
+                            .read_facts(id, 0, 1, MAXIMUM_STORE_FACT_PAGE_BYTES)
                             .await
                             .unwrap()
                             .facts
@@ -432,7 +428,7 @@ async fn online_validation_sql_work() {
                         sessions.last().unwrap(),
                         0,
                         1,
-                        rsi_agent_store_protocol::MAXIMUM_STORE_FACT_PAGE_BYTES,
+                        MAXIMUM_STORE_FACT_PAGE_BYTES,
                     )
                     .await
                     .unwrap();
@@ -618,7 +614,7 @@ async fn control_projection_replay_enforces_the_individual_control_bound() {
     .unwrap();
     writer.execute("INSERT INTO agent_controls (session_id,seq,control_json) VALUES (?1,1,?2 || printf('%*s',?3,''))",
         params![header.session_id().as_str(), serde_json::to_string(&record).unwrap(), i64::try_from(MAXIMUM_SESSION_FACT_BYTES).unwrap()]).unwrap();
-    let result = crate::validation::validate_agent_indexes(&writer, &header);
+    let result = crate::validation::validate_agent_indexes(writer, &header);
     assert!(
         matches!(result, Err(StoreError::Corrupt(message)) if message.contains("encoded bytes")),
         "activation projection admitted an individually oversized control"

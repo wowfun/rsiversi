@@ -78,6 +78,7 @@ try {
   await verifySshMcp({page,service,report,local,registration,target,checks});
   await page.getByRole('button',{name:'Close settings',exact:true}).click();
   await page.getByTestId('new-conversation').click();
+  await page.getByRole('button',{name:'Choose workspace',exact:true}).click();
   const dialog=page.getByRole('dialog',{name:'Select workspace directory',exact:true});await dialog.waitFor();
   await dialog.getByLabel('Execution location',{exact:true}).selectOption(target.candidate.target);
   await dialog.getByRole('button',{name:'Edit directory path',exact:true}).waitFor();

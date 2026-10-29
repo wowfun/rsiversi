@@ -1,5 +1,5 @@
 use super::*;
-use rsi_api_protocol::{ApiError, ApiOutput, ByteBudget, CallOrigin, OperationSpec};
+use rsi_api_protocol::{ApiError, ApiOutput, ByteBudget, CallOrigin, DeviceId, OperationSpec};
 use rsi_directory_picker_api::Operation;
 use serde_json::{Value, json};
 async fn wire(
@@ -32,6 +32,22 @@ async fn wire_at(
         panic!("finite directory API")
     };
     Ok(serde_json::from_slice(reply.json.as_bytes()).unwrap())
+}
+
+async fn set_configuration_grant(
+    running: &RunningRsi,
+    device: &DeviceId,
+    expected_revision: &str,
+    granted: bool,
+) {
+    wire(
+        running,
+        CallOrigin::Local,
+        rsi_configuration_api::ConfigurationOperation::SetGrant.spec(),
+        json!({"device":device,"expected_revision":expected_revision,"granted":granted}),
+    )
+    .await
+    .unwrap();
 }
 
 #[cfg(target_os = "linux")]
@@ -181,14 +197,7 @@ async fn directory_discovery_and_single_creation_require_actual_configuration_gr
         Err(ApiError::Unauthorized)
     ));
     assert!(!fixture.workspace.join("ungranted").exists());
-    wire(
-        &running,
-        CallOrigin::Local,
-        rsi_configuration_api::ConfigurationOperation::SetGrant.spec(),
-        json!({"device":device.record.id,"expected_revision":"0","granted":true}),
-    )
-    .await
-    .unwrap();
+    set_configuration_grant(&running, &device.record.id, "0", true).await;
     let listing = wire(
         &running,
         origin.clone(),
@@ -211,14 +220,7 @@ async fn directory_discovery_and_single_creation_require_actual_configuration_gr
         fixture.workspace.join("picked").to_str().unwrap()
     );
     assert!(fixture.workspace.join("picked").is_dir());
-    wire(
-        &running,
-        CallOrigin::Local,
-        rsi_configuration_api::ConfigurationOperation::SetGrant.spec(),
-        json!({"device":device.record.id,"expected_revision":"1","granted":false}),
-    )
-    .await
-    .unwrap();
+    set_configuration_grant(&running, &device.record.id, "1", false).await;
     assert!(matches!(
         wire(
             &running,

@@ -2,7 +2,7 @@ import assert from 'node:assert/strict';
 import { test } from 'node:test';
 import { spawnSync } from 'node:child_process';
 import { existsSync } from 'node:fs';
-import { copyFile, mkdtemp, mkdir, readFile, readdir, rm, stat, symlink, writeFile } from 'node:fs/promises';
+import { copyFile, mkdtemp, mkdir, readFile, readdir, realpath, rm, stat, symlink, writeFile } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { dirname, join, resolve } from 'node:path';
 import { fileURLToPath } from 'node:url';
@@ -11,6 +11,7 @@ import { buildEnvironment, parseEnvironmentDeclaration, parse, publishPackage } 
 import { assemble } from '../packages.mjs';
 
 const root = fileURLToPath(new URL('../../../', import.meta.url));
+const temporaryRoot = await realpath(tmpdir());
 const windows = process.platform === 'win32';
 const uninstaller = process.env.RSI_TEST_UNINSTALLER ?? join(root, 'target/debug', windows ? 'rsi-uninstall.exe' : 'rsi-uninstall');
 let gitBashProgram;
@@ -56,7 +57,7 @@ function assertConciseRefusal(result, path) {
 }
 
 test('PowerShell launchers emit UTF-8 even with an inherited CP936 console', {skip:!windows}, async () => {
-  const directory = await mkdtemp(join(tmpdir(), 'rsi encoding '));
+  const directory = await mkdtemp(join(temporaryRoot, 'rsi encoding '));
   try {
     const prefix = join(directory, "中文 ' prefix");
     await mkdir(join(prefix, 'bin'), {recursive:true});
@@ -73,7 +74,7 @@ test('PowerShell launchers emit UTF-8 even with an inherited CP936 console', {sk
 });
 
 test('occupied installation paths are rejected before Cargo, source inspection or filesystem effects', async () => {
-  const directory = await mkdtemp(join(tmpdir(), 'rsi preflight '));
+  const directory = await mkdtemp(join(temporaryRoot, 'rsi preflight '));
   try {
     const checkout = join(directory, 'checkout'), scripts = join(checkout, 'scripts');
     const tools = join(directory, 'tools'), target = join(directory, 'target'), home = join(directory, 'home');
@@ -144,7 +145,7 @@ test('occupied installation paths are rejected before Cargo, source inspection o
   } finally { await rm(directory, {recursive:true, force:true}); }
 });
 test('minimal installation preserves the executable, refuses replacement and does not open product homes', async () => {
-  const directory = await mkdtemp(join(tmpdir(), 'rsi install '));
+  const directory = await mkdtemp(join(temporaryRoot, 'rsi install '));
   try {
     const prefix = join(directory, "prefix 中文 ' $value & ; `");
     const args = windows ? ['-Prefix', prefix, '-Binary', uninstaller, '-NoPath']
@@ -189,7 +190,7 @@ test('installer help and retired UI grammar never start a build', () => {
 });
 
 test('Git Bash delegates defaults, paths and exit status to the adjacent Windows installer', {skip:!windows}, async () => {
-  const directory = await mkdtemp(join(tmpdir(), 'rsi bash dispatch '));
+  const directory = await mkdtemp(join(temporaryRoot, 'rsi bash dispatch '));
   try {
     const scripts = join(directory, "checkout 中文 ' $value", 'scripts'), tools = join(directory, 'tools');
     await mkdir(scripts, {recursive:true}); await mkdir(tools);
@@ -213,7 +214,7 @@ test('Git Bash delegates defaults, paths and exit status to the adjacent Windows
 });
 
 test('Git Bash installs native executables with relative, MSYS and Windows paths and Windows defaults', {skip:!windows}, async () => {
-  const directory = await mkdtemp(join(tmpdir(), 'rsi bash install '));
+  const directory = await mkdtemp(join(temporaryRoot, 'rsi bash install '));
   try {
     const binary = join(directory, "binary 中文 ' $name (x) &.exe");
     await copyFile(uninstaller, binary);
@@ -246,7 +247,7 @@ test('Git Bash installs native executables with relative, MSYS and Windows paths
 });
 
 for (const caseAliases of [false, true]) test(`Git Bash source builds preserve Cargo inputs${caseAliases ? ' with inherited case aliases' : ''}`, {skip:!windows}, async () => {
-  const directory = await mkdtemp(join(tmpdir(), 'rsi bash source '));
+  const directory = await mkdtemp(join(temporaryRoot, 'rsi bash source '));
   try {
     const checkout = join(directory, "checkout 中文 ' quote"), scripts = join(checkout, 'scripts');
     const tools = join(directory, 'tools'), fallback = join(directory, 'unused-tools'), target = caseAliases ? join(checkout, 'relative target') : join(directory, 'custom target');
@@ -344,7 +345,7 @@ test('Git Bash diagnoses missing tools and rejects invalid arguments without bui
 });
 
 test('publication refuses a directory created during the version probe and cleans its stage', async () => {
-  const directory = await mkdtemp(join(tmpdir(), 'rsi install race '));
+  const directory = await mkdtemp(join(temporaryRoot, 'rsi install race '));
   try {
     const binary = join(directory, windows ? 'probe.exe' : 'probe'), prefix = join(directory, 'prefix');
     const destination = join(prefix, 'bin', windows ? 'rsi.exe' : 'rsi');
@@ -372,7 +373,7 @@ echo '{"interface":1,"record":1,"transaction":2}'
   } finally {await rm(directory, {recursive:true, force:true});}
 });
 test('POSIX PATH setup quotes the chosen prefix without evaluating its contents', {skip:windows}, async () => {
-  const directory = await mkdtemp(join(tmpdir(), 'rsi path '));
+  const directory = await mkdtemp(join(temporaryRoot, 'rsi path '));
   try {
     const home = join(directory, 'home');
     await mkdir(home);
@@ -399,7 +400,7 @@ test('independent producer rejects UI aliases and invalid dependency selections 
     {kind:'desktop', output:root, debug:true, replace:false});
 });
 test('source publication replaces only its own package and preserves unrelated output files', async () => {
-  const directory = await mkdtemp(join(tmpdir(), 'rsi producer '));
+  const directory = await mkdtemp(join(temporaryRoot, 'rsi producer '));
   try {
     const input = join(directory, 'input'), output = join(directory, 'output');
     await writeFile(input, 'first');
@@ -447,7 +448,7 @@ test('build subprocesses receive declared tool inputs and a private home, withou
 });
 
 test('POSIX source installer admits SDK environment names and rejects malformed declarations', {skip:windows}, async () => {
-  const directory = await mkdtemp(join(tmpdir(), 'rsi source env '));
+  const directory = await mkdtemp(join(temporaryRoot, 'rsi source env '));
   try {
     const scripts = join(directory, 'scripts'), tools = join(directory, 'tools');
     const devtools = join(directory, 'apps/devtools'), target = join(directory, 'target');
@@ -493,7 +494,7 @@ test('producer and native installer declaration grammars match the shared corpus
 });
 
 test('explicit empty paths are rejected before installing or building',async()=>{
-  const directory=await mkdtemp(join(tmpdir(),'rsi empty path '));
+  const directory=await mkdtemp(join(temporaryRoot,'rsi empty path '));
   try {
     for(const option of ['Prefix','Binary']) {
       const result=installer(windows?['-'+option,'','-NoPath']:['--'+option.toLowerCase(),'','--no-path'],directory);

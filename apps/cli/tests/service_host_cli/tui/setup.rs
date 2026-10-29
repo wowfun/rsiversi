@@ -180,10 +180,7 @@ async fn empty_configuration_is_interactive_through_both_tui_entries() {
         (&["tui"][..], true),
     ] {
         let fixture = CliFixture::new("http://127.0.0.1:1");
-        if !missing_route {
-            std::fs::remove_file(fixture.temporary.path().join("config/rsi/settings.json"))
-                .unwrap();
-        } else {
+        if missing_route {
             std::fs::write(
                 fixture.temporary.path().join("config/rsi/settings.json"),
                 serde_json::to_vec(&serde_json::json!({
@@ -194,6 +191,9 @@ async fn empty_configuration_is_interactive_through_both_tui_entries() {
                 .unwrap(),
             )
             .unwrap();
+        } else {
+            std::fs::remove_file(fixture.temporary.path().join("config/rsi/settings.json"))
+                .unwrap();
         }
         let mut terminal = TerminalClient::launch(&fixture, &[], entry);
         terminal.until("No session attached").await;

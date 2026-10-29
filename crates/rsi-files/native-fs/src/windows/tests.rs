@@ -14,7 +14,10 @@ fn private_archive_does_not_require_content_write_access() {
     let path = temporary.path().join("archive");
     let directory = create_absolute_directory_and_sync_no_follow(&path).unwrap();
     let namespace = directory.pin_namespace().unwrap();
-    fs::write(path.join("source"), b"retained content").unwrap();
+    let mut source =
+        create_relative_private_file_no_follow(&directory, Path::new("source")).unwrap();
+    source.write_all(b"retained content").unwrap();
+    drop(source);
     // Like an executing image, this reader permits reads and deletion but denies
     // content writes. Changing a TokenUser-owned DACL needs neither write data
     // nor append data access.
@@ -23,7 +26,12 @@ fn private_archive_does_not_require_content_write_access() {
         .share_mode(1 | 4) // FILE_SHARE_READ | FILE_SHARE_DELETE
         .open(path.join("source"))
         .unwrap();
-    assert!(verify_private_file(&reader).is_err());
+    assert!(
+        fs::OpenOptions::new()
+            .write(true)
+            .open(path.join("source"))
+            .is_err()
+    );
     drop(set_relative_private_file_permissions_no_follow(&directory, Path::new("source")).unwrap());
     verify_private_file(&reader).unwrap();
     namespace

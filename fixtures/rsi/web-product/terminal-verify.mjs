@@ -41,7 +41,7 @@ for(const[name,engine]of[['chromium',chromium],['firefox',firefox]]){
   });
   await page.goto(service.origin);await page.locator('#receipt').fill(JSON.stringify(service.register(`${name} terminal verification`)));await page.getByRole('button',{name:'Connect',exact:true}).click();await page.locator('#workbench').waitFor({state:'visible'});
   await workspaceForm(page);await page.getByLabel('Directory path').fill(service.workspace);await page.locator('.directory-picker footer').getByRole('button',{name:'Open',exact:true}).click();await page.locator('#workspaces [data-testid=workspace-open]').first().click();
-  const pane=page.locator('[aria-label="Main conversation"]');await pane.getByRole('textbox',{name:'Main message'}).fill('Publish the isolated terminal Session');await pane.getByTestId('composer-send').click();await pane.locator('.pane-status').filter({hasText:'Completed'}).waitFor();
+  const pane=page.locator('[aria-label="Main conversation"]');await pane.getByRole('textbox',{name:'Main message'}).fill('Publish the isolated terminal Session');await pane.getByTestId('composer-send').click();await pane.locator('.pane-status').filter({hasText:'Completed'}).waitFor({state:'attached'});
   const requests=service.provider.requests.length;await verifyTerminals(page,service,directory,name);assert.equal(service.provider.requests.length,requests,'terminal operation invoked the model');
   assert.deepEqual(await page.evaluate(()=>window.terminalStyleViolations),[],'terminal blocked by product CSP');
   await verifyPluginSources(page,service,directory,name);

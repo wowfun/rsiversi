@@ -339,9 +339,9 @@ async fn bounded_refresh_waiters_can_cancel_while_retirement_still_joins_the_nat
     let dispatch = host
         .lookup_local::<rsi_api_protocol::ApiDispatchContract>()
         .unwrap();
-    let operation = rsi_api_protocol::OperationId::new("native-addons", "refresh", 1).unwrap();
+    let operation = refresh_operation(dispatch.as_ref());
     let call = dispatch
-        .admit(&operation, rsi_api_protocol::CallOrigin::Local)
+        .admit(&operation.call(), rsi_api_protocol::CallOrigin::Local)
         .unwrap();
     let bytes = rsi_api_protocol::ByteBudget::new(1024)
         .unwrap()
@@ -383,7 +383,7 @@ async fn bounded_refresh_waiters_can_cancel_while_retirement_still_joins_the_nat
             .operations()
             .unwrap()
             .iter()
-            .any(|value| value.id == operation)
+            .any(|value| value.id == operation.id)
     );
     assert!(futures_util::poll!(shutdown.as_mut()).is_pending());
     assert!(
@@ -419,8 +419,20 @@ async fn can_claim_service_owner(root: &Path) -> bool {
     active
 }
 
+fn refresh_operation(
+    dispatch: &dyn rsi_api_protocol::ApiDispatch,
+) -> rsi_api_protocol::OperationSpec {
+    let id = rsi_api_protocol::OperationId::new("native-addons", "refresh", 1).unwrap();
+    dispatch
+        .operations()
+        .unwrap()
+        .into_iter()
+        .find(|operation| operation.id == id)
+        .unwrap()
+}
+
 async fn refresh_failure(host: &rsi_host::RunningHost) -> rsi_native_addons_api::RefreshFailure {
-    use rsi_api_protocol::{ApiDispatchContract, ApiError, ByteBudget, CallOrigin, OperationId};
+    use rsi_api_protocol::{ApiDispatchContract, ApiError, ByteBudget, CallOrigin};
     let dispatch = host.lookup_local::<ApiDispatchContract>().unwrap();
     let input = ByteBudget::new(1024)
         .unwrap()
@@ -428,7 +440,7 @@ async fn refresh_failure(host: &rsi_host::RunningHost) -> rsi_native_addons_api:
         .unwrap();
     let result = dispatch
         .admit(
-            &OperationId::new("native-addons", "refresh", 1).unwrap(),
+            &refresh_operation(dispatch.as_ref()).call(),
             CallOrigin::Local,
         )
         .unwrap()

@@ -149,24 +149,10 @@ fn request(presentation: u64) -> FrameRequest {
         height: 24,
     }
 }
-#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
-async fn real_native_render_replacement_changes_cells_fences_old_service_and_releases_libraries() {
-    let root = PathBuf::from(env!("CARGO_MANIFEST_DIR"))
-        .join("../..")
-        .canonicalize()
-        .unwrap();
-    let a = artifact(&root, "a");
-    let b = artifact(&root, "b");
-    let temp = tempfile::tempdir().unwrap();
-    let loader = NativeCatalog::new(CatalogOptions::new(temp.path())).unwrap();
-    let runtime = Runtime::default();
-    let original = host(&loader, &a);
-    let profile = ScopedProfile::start(&original, &runtime.root(), program())
-        .await
-        .unwrap();
-    drop(original);
-    let old = profile.lookup_local::<FrameRendererContract>().unwrap();
-    let source = scene();
+async fn assert_invalid_render_requests(
+    renderer: &Arc<dyn rsi_terminal::presentation::FrameRenderer>,
+    source: &[u8],
+) {
     for invalid in [
         FrameRequest {
             width: 0,
@@ -192,14 +178,15 @@ async fn real_native_render_replacement_changes_cells_fences_old_service_and_rel
         },
     ] {
         assert!(matches!(
-            old.render(
-                invalid,
-                Scene::decode(&source).unwrap(),
-                CancellationToken::new()
-            )
-            .await
-            .unwrap_err()
-            .as_str(),
+            renderer
+                .render(
+                    invalid,
+                    Scene::decode(source).unwrap(),
+                    CancellationToken::new()
+                )
+                .await
+                .unwrap_err()
+                .as_str(),
             "terminal dimension bound" | "invalid render request"
         ));
     }
@@ -208,11 +195,33 @@ async fn real_native_render_replacement_changes_cells_fences_old_service_and_rel
         ..Default::default()
     });
     assert_eq!(
-        old.render(request(1), oversized, CancellationToken::new())
+        renderer
+            .render(request(1), oversized, CancellationToken::new())
             .await
             .unwrap_err(),
         "encoded byte bound"
     );
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn real_native_render_replacement_changes_cells_fences_old_service_and_releases_libraries() {
+    let root = PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+        .join("../..")
+        .canonicalize()
+        .unwrap();
+    let a = artifact(&root, "a");
+    let b = artifact(&root, "b");
+    let temp = tempfile::tempdir().unwrap();
+    let loader = NativeCatalog::new(CatalogOptions::new(temp.path())).unwrap();
+    let runtime = Runtime::default();
+    let original = host(&loader, &a);
+    let profile = ScopedProfile::start(&original, &runtime.root(), program())
+        .await
+        .unwrap();
+    drop(original);
+    let old = profile.lookup_local::<FrameRendererContract>().unwrap();
+    let source = scene();
+    assert_invalid_render_requests(&old, &source).await;
     let (cells, map) = old
         .render(
             request(1),
