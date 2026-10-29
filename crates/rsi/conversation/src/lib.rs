@@ -14,7 +14,9 @@ mod request;
 pub use request::RequestPresentation;
 mod cost;
 pub use cost::{ConfiguredCost, CurrencyCost};
-pub use metrics::{AttemptMetrics, ContextUsage, MetricsReducer, SessionMetrics, UsageTotals};
+pub use metrics::{
+    AttemptMetrics, ContextUsage, MetricsReducer, SessionMetrics, SessionTiming, UsageTotals,
+};
 mod model_preview;
 pub use model_preview::{LiveModelPreview, ModelBlockPreview, ModelPreviewState, model_previews};
 mod source;

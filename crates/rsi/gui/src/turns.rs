@@ -3,7 +3,7 @@ use super::Block;
 use rsi_agent_session_protocol::{
     EffectId, ModelEventPurpose, SessionFact, SessionFactBody as Fact, TurnId, TurnOutcome,
 };
-use rsi_ai_protocol::{ContentStart, FinishReason, LanguageEvent};
+use rsi_ai_protocol::{ContentStart, FinishReason, LanguageEvent, TokenUsage};
 use serde::Serialize;
 use std::collections::{BTreeMap, BTreeSet, VecDeque};
 
@@ -19,6 +19,10 @@ pub(crate) struct Turn {
     pub process: Vec<String>,
     pub candidate: Vec<String>,
     pub answer: Vec<String>,
+    pub terminal: Option<String>,
+    pub timestamps: BTreeMap<String, u64>,
+    pub elapsed_ms: Option<u64>,
+    pub usage: Option<TokenUsage>,
     pub partial: bool,
     pub status: String,
     pub running: bool,
@@ -29,6 +33,7 @@ struct Link {
     effect: Option<EffectId>,
     role: &'static str,
     image: bool,
+    timestamp_ms: Option<u64>,
 }
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
 struct Model {
@@ -36,6 +41,7 @@ struct Model {
     conversation: bool,
     tools: bool,
     finished: Option<(u64, bool)>,
+    usage: Option<TokenUsage>,
 }
 #[derive(Clone, Debug, Default)]
 struct State {
@@ -46,6 +52,8 @@ struct State {
     models: BTreeMap<EffectId, Model>,
     tool_seq: u64,
     terminal: Option<(u64, bool, String)>,
+    started_ms: Option<u64>,
+    ended_ms: Option<u64>,
 }
 #[derive(Clone, Debug, Default)]
 pub(crate) struct Index {
@@ -80,6 +88,10 @@ impl Index {
                 effect: Some(effect.clone()),
                 role: block.role,
                 image: false,
+                timestamp_ms: state
+                    .links
+                    .get(&block.key)
+                    .and_then(|link| link.timestamp_ms),
             };
             if state.links.get(&block.key) != Some(&link) {
                 state.links.insert(block.key.clone(), link);
@@ -132,6 +144,7 @@ impl Index {
                             ));
                         }
                         LanguageEvent::Failed { .. } => model.finished = Some((fact.seq(), false)),
+                        LanguageEvent::Usage { usage } => model.usage = Some(*usage),
                         _ => {}
                     }
                 }
@@ -144,6 +157,7 @@ impl Index {
             | Fact::ImageRequested { .. } => {
                 changed |= !state.accepted;
                 state.accepted = true;
+                state.started_ms = Some(fact.timestamp_ms());
             }
             Fact::ToolIntent { .. }
             | Fact::ToolStarted { .. }
@@ -172,6 +186,7 @@ impl Index {
                         matches!(outcome, TurnOutcome::Completed),
                         label.into(),
                     ));
+                    state.ended_ms = Some(fact.timestamp_ms());
                 }
             }
             _ => {}
@@ -186,6 +201,14 @@ impl Index {
                     effect: effect.clone(),
                     role: block.role,
                     image: matches!(fact.body(), Fact::ImageOutput { .. }),
+                    timestamp_ms: if block.first_seq == fact.seq() {
+                        Some(fact.timestamp_ms())
+                    } else {
+                        state
+                            .links
+                            .get(&block.key)
+                            .and_then(|link| link.timestamp_ms)
+                    },
                 };
                 if state.links.get(&block.key) != Some(&link) {
                     state.links.insert(block.key.clone(), link);
@@ -287,6 +310,17 @@ impl State {
             process: vec![],
             candidate: vec![],
             answer: vec![],
+            terminal: None,
+            timestamps: self
+                .links
+                .iter()
+                .filter_map(|(key, link)| link.timestamp_ms.map(|time| (key.clone(), time)))
+                .collect(),
+            elapsed_ms: (!partial)
+                .then_some(self.started_ms.zip(self.ended_ms))
+                .flatten()
+                .and_then(|(start, end)| end.checked_sub(start)),
+            usage: latest.and_then(|(_, model)| model.usage),
             partial,
             running: self.terminal.is_none(),
             foldable: !partial && (self.terminal.is_none() || (successful && !interrupted_model)),
@@ -301,6 +335,13 @@ impl State {
                 continue;
             };
             turn.blocks.push(block.key.clone());
+            if self
+                .terminal
+                .as_ref()
+                .is_some_and(|(seq, _, _)| *seq == block.first_seq)
+            {
+                turn.terminal = Some(block.key.clone());
+            }
             let candidate = link.role == "assistant"
                 && (link.image
                     || latest.is_some_and(|(effect, model)| {
@@ -583,6 +624,18 @@ mod tests {
                 }
             }
         }
+    }
+    #[test]
+    fn terminal_identity_is_explicit_without_removing_chronological_evidence() {
+        let mut t = Transcript::default();
+        apply(&mut t, accepted());
+        apply(&mut t, terminal(TurnOutcome::Completed));
+        let key = rsi_conversation::BlockIdentity::Terminal {
+            turn: &TurnId::new("turn").unwrap(),
+        }
+        .key();
+        assert_eq!(turn(&t).terminal.as_deref(), Some(key.as_str()));
+        assert!(turn(&t).blocks.contains(&key));
     }
     fn turn(transcript: &Transcript) -> &Turn {
         transcript.turns.view.entries.values().next().unwrap()
@@ -1009,5 +1062,45 @@ mod tests {
             assert!(!turn(&t).process.contains(&block.key));
             assert!(!turn(&t).answer.contains(&block.key));
         }
+    }
+    #[test]
+    fn recorded_clocks_duration_and_response_usage_survive_replay() {
+        let mut transcript = ActualTranscript::default();
+        transcript.fact(&SessionFact::new(1, 1_000, accepted()).unwrap());
+        let mut response = complete("answer", "Hello");
+        if let Fact::ModelAttemptSettled { attempt, .. } = &mut response {
+            let mut events: Vec<_> = attempt.events().map(Result::unwrap).collect();
+            events.insert(
+                events.len() - 1,
+                (
+                    0,
+                    LanguageEvent::Usage {
+                        usage: TokenUsage::new(100, 20, Some(80), None, None).unwrap(),
+                    },
+                ),
+            );
+            *attempt =
+                rsi_agent_session_protocol::ModelAttemptLog::from_events(events, true).unwrap();
+        }
+        let fact = SessionFact::new(2, 2_900, response).unwrap();
+        transcript.fact(&fact);
+        transcript.fact(&SessionFact::new(3, 3_000, terminal(TurnOutcome::Completed)).unwrap());
+        let turn = &transcript.turns.view.entries[&TurnId::new("turn").unwrap()];
+        assert_eq!(turn.elapsed_ms, Some(2_000));
+        assert_eq!(turn.timestamps[&turn.answer[0]], 2_900);
+        assert_eq!(turn.usage.unwrap().input_tokens(), 100);
+        let previous = turn.clone();
+        transcript.fact(&fact);
+        assert_eq!(
+            transcript.turns.view.entries[&TurnId::new("turn").unwrap()],
+            previous
+        );
+        let mut partial = ActualTranscript::default();
+        partial.fact(&fact);
+        partial.fact(&SessionFact::new(3, 3_000, terminal(TurnOutcome::Completed)).unwrap());
+        assert_eq!(
+            partial.turns.view.entries[&TurnId::new("turn").unwrap()].elapsed_ms,
+            None
+        );
     }
 }

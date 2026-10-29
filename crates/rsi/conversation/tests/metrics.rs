@@ -283,6 +283,9 @@ fn failed_usage_and_retry_are_counted_once_and_unknown_breakdowns_stay_unknown()
         Some(20)
     );
     assert!(reducer.summary().last_context.is_none());
+    assert_eq!(reducer.summary().timing.model_ms, 20);
+    assert_eq!(reducer.summary().timing.decode_ms, 19);
+    assert_eq!(reducer.summary().timing.decode_output_tokens, 4);
     reducer.observe(&intent(4, "retry")).unwrap();
     reducer
         .observe(&settled(
@@ -437,4 +440,186 @@ fn wrong_settlement_is_atomic_and_fragment_count_does_not_change_attempt_count()
     reducer.observe(&fact(2, body("streaming"))).unwrap();
     assert_eq!(reducer.summary().attempts, 1);
     assert_eq!(reducer.summary().through_seq, 2);
+}
+
+#[test]
+fn timing_uses_recorded_boundaries_and_decode_evidence_without_double_counting() {
+    let mut reducer = MetricsReducer::default();
+    let accepted: SessionFactBody = serde_json::from_value(serde_json::json!({
+        "type":"turn_accepted", "turn_id":"turn", "text":"hello", "model":null,
+        "reasoning_effort":null, "sandbox":"workspace-write", "require_approval":false
+    }))
+    .unwrap();
+    reducer
+        .observe(&SessionFact::new(1, 100, accepted).unwrap())
+        .unwrap();
+    reducer.observe(&intent(2, "timed")).unwrap();
+    reducer
+        .observe(
+            &SessionFact::new(
+                3,
+                200,
+                SessionFactBody::ModelStarted {
+                    turn_id: turn(),
+                    effect_id: effect("timed"),
+                },
+            )
+            .unwrap(),
+        )
+        .unwrap();
+    let completed = settled(
+        4,
+        "timed",
+        Some(TokenUsage::new(100, 20, Some(80), None, None).unwrap()),
+        false,
+        101,
+    );
+    reducer.observe(&completed).unwrap();
+    reducer.observe(&completed).unwrap();
+    let terminal = SessionFact::new(
+        5,
+        500,
+        SessionFactBody::TurnTerminal {
+            turn_id: turn(),
+            outcome: rsi_agent_session_protocol::TurnOutcome::Completed,
+            result: None,
+        },
+    )
+    .unwrap();
+    reducer.observe(&terminal).unwrap();
+    reducer.observe(&terminal).unwrap();
+    let timing = reducer.summary().timing.clone();
+    assert_eq!(timing.turns, 1);
+    assert_eq!(timing.timed_turns, 1);
+    assert_eq!(timing.total_ms, 400);
+    assert_eq!(timing.timed_attempts, 1);
+    assert_eq!(timing.model_ms, 101);
+    assert_eq!(timing.first_token_attempts, 1);
+    assert_eq!(timing.first_token_ms, 1);
+    assert_eq!(timing.decode_ms, 100);
+    assert_eq!(timing.decode_output_tokens, 20);
+    reducer.summary().validate().unwrap();
+    reducer.observe(&intent(6, "missing-start")).unwrap();
+    reducer
+        .observe(&settled(
+            7,
+            "missing-start",
+            Some(TokenUsage::new(10, 2, None, None, None).unwrap()),
+            false,
+            100,
+        ))
+        .unwrap();
+    assert_eq!(reducer.summary().timing, timing);
+}
+
+#[test]
+fn queued_turns_retain_independent_wall_time_boundaries() {
+    let mut reducer = MetricsReducer::default();
+    for (seq, timestamp, id) in [(1, 100, "first"), (2, 150, "queued")] {
+        let body = serde_json::from_value(serde_json::json!({
+            "type":"turn_accepted", "turn_id":id, "text":"hello", "model":null,
+            "reasoning_effort":null, "sandbox":"workspace-write", "require_approval":false
+        }))
+        .unwrap();
+        reducer
+            .observe(&SessionFact::new(seq, timestamp, body).unwrap())
+            .unwrap();
+    }
+    for (seq, timestamp, id) in [(3, 300, "first"), (4, 500, "queued")] {
+        let terminal = SessionFact::new(
+            seq,
+            timestamp,
+            SessionFactBody::TurnTerminal {
+                turn_id: TurnId::new(id).unwrap(),
+                outcome: rsi_agent_session_protocol::TurnOutcome::Completed,
+                result: None,
+            },
+        )
+        .unwrap();
+        reducer.observe(&terminal).unwrap();
+        reducer.observe(&terminal).unwrap();
+    }
+    assert_eq!(reducer.summary().timing.turns, 2);
+    assert_eq!(reducer.summary().timing.timed_turns, 2);
+    assert_eq!(reducer.summary().timing.total_ms, 550);
+}
+
+#[test]
+fn turn_timing_is_bounded_and_terminal_settlement_releases_capacity() {
+    let mut reducer = MetricsReducer::default();
+    let limit = rsi_agent_session_protocol::MAXIMUM_LIVE_TURNS as u64;
+    let accepted = |seq, id| {
+        SessionFact::new(seq, 100, serde_json::from_value(serde_json::json!({
+        "type":"turn_accepted", "turn_id":format!("turn-{id}"), "text":"hello", "model":null,
+        "reasoning_effort":null, "sandbox":"workspace-write", "require_approval":false
+    })).unwrap()).unwrap()
+    };
+    for id in 0..limit {
+        reducer.observe(&accepted(id + 1, id)).unwrap();
+    }
+    let before = serde_json::to_value(&reducer).unwrap();
+    assert!(reducer.observe(&accepted(limit + 1, limit)).is_err());
+    assert_eq!(serde_json::to_value(&reducer).unwrap(), before);
+    reducer
+        .observe(
+            &SessionFact::new(
+                limit + 1,
+                200,
+                SessionFactBody::TurnTerminal {
+                    turn_id: TurnId::new("turn-0").unwrap(),
+                    outcome: rsi_agent_session_protocol::TurnOutcome::Completed,
+                    result: None,
+                },
+            )
+            .unwrap(),
+        )
+        .unwrap();
+    reducer.observe(&accepted(limit + 2, limit)).unwrap();
+    assert_eq!(reducer.summary().timing.turns, limit + 1);
+    assert_eq!(reducer.summary().timing.total_ms, 100);
+}
+
+#[test]
+fn timing_validation_rejects_claims_without_corresponding_evidence() {
+    let mut summary = rsi_conversation::SessionMetrics::default();
+    summary.timing.model_ms = 1;
+    assert!(summary.validate().is_err());
+    summary.timing.model_ms = 0;
+    summary.timing.first_token_attempts = 1;
+    assert!(summary.validate().is_err());
+}
+
+#[test]
+fn timing_overflow_is_atomic() {
+    let mut reducer = MetricsReducer::default();
+    reducer.observe(&intent(1, "large")).unwrap();
+    reducer
+        .observe(&fact(
+            2,
+            SessionFactBody::ModelStarted {
+                turn_id: turn(),
+                effect_id: effect("large"),
+            },
+        ))
+        .unwrap();
+    reducer
+        .observe(&settled(3, "large", None, false, u64::MAX))
+        .unwrap();
+    reducer.observe(&intent(4, "overflow")).unwrap();
+    reducer
+        .observe(&fact(
+            5,
+            SessionFactBody::ModelStarted {
+                turn_id: turn(),
+                effect_id: effect("overflow"),
+            },
+        ))
+        .unwrap();
+    let before = serde_json::to_value(&reducer).unwrap();
+    assert!(
+        reducer
+            .observe(&settled(6, "overflow", None, false, 100))
+            .is_err()
+    );
+    assert_eq!(serde_json::to_value(&reducer).unwrap(), before);
 }

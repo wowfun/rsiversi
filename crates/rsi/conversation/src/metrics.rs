@@ -7,6 +7,22 @@ use rsi_ai_protocol::{
     LanguageEvent, ModelRef, PreparedLanguageSettings, ReasoningEffortId, TokenUsage,
 };
 use serde::{Deserialize, Serialize};
+use std::collections::BTreeMap;
+
+/// Recorded whole-Session timing; counts identify the evidence behind each sum.
+#[derive(Clone, Debug, Default, Eq, PartialEq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct SessionTiming {
+    pub turns: u64,
+    pub timed_turns: u64,
+    pub total_ms: u64,
+    pub timed_attempts: u64,
+    pub model_ms: u64,
+    pub first_token_attempts: u64,
+    pub first_token_ms: u64,
+    pub decode_ms: u64,
+    pub decode_output_tokens: u64,
+}
 
 /// Reported facts of one completed or failed model attempt.
 #[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
@@ -91,6 +107,7 @@ impl ContextUsage {
 #[derive(Clone, Debug, Default, Eq, PartialEq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct SessionMetrics {
+    pub timing: SessionTiming,
     pub through_seq: u64,
     pub attempts: u64,
     pub reported_attempts: u64,
@@ -107,6 +124,19 @@ impl SessionMetrics {
     /// Rejects inconsistent counters, cursors or configured cost totals.
     pub fn validate(&self) -> Result<(), &'static str> {
         self.configured_cost.validate(self.attempts)?;
+        if self.timing.timed_turns > self.timing.turns
+            || self.timing.timed_attempts > self.attempts
+            || self.timing.first_token_attempts > self.timing.timed_attempts
+            || self.timing.decode_output_tokens > self.tokens.output_tokens()
+            || self.timing.first_token_ms > self.timing.model_ms
+            || self.timing.decode_ms > self.timing.model_ms
+            || (self.timing.timed_turns == 0 && self.timing.total_ms != 0)
+            || (self.timing.timed_attempts == 0 && self.timing.model_ms != 0)
+            || (self.timing.first_token_attempts == 0 && self.timing.first_token_ms != 0)
+            || (self.timing.decode_ms == 0 && self.timing.decode_output_tokens != 0)
+        {
+            return Err("invalid Session timing counters");
+        }
         if self.reported_attempts > self.attempts
             || self.failed_attempts > self.attempts
             || self.last_attempt.as_ref().is_some_and(|attempt| {
@@ -133,17 +163,19 @@ struct OpenAttempt {
     config_generation: u64,
     settings: Option<PreparedLanguageSettings>,
     started_ms: Option<u64>,
+    first_token_ms: Option<u64>,
     usage: Option<TokenUsage>,
     purpose: ModelEventPurpose,
     price_quote: Option<rsi_agent_session_protocol::PriceQuote>,
 }
 
-/// Constant-space reducer of one Session's contiguous durable Fact stream.
+/// Bounded reducer of one Session's contiguous durable Fact stream.
 #[derive(Clone, Debug, Default, Serialize)]
 pub struct MetricsReducer {
     summary: SessionMetrics,
     open: Option<OpenAttempt>,
     output_budgets: OutputBudgetTable,
+    turn_starts: BTreeMap<TurnId, u64>,
 }
 
 impl MetricsReducer {
@@ -181,6 +213,9 @@ impl MetricsReducer {
                 | SessionFactBody::ModelStarted { .. }
                 | SessionFactBody::ModelAttemptSettled { .. }
                 | SessionFactBody::TurnTerminal { .. }
+                | SessionFactBody::TurnAccepted { .. }
+                | SessionFactBody::MessageTurnAccepted { .. }
+                | SessionFactBody::ImageRequested { .. }
         ) {
             self.summary.through_seq = fact.seq();
             return Ok(());
@@ -205,7 +240,16 @@ impl MetricsReducer {
         if open.purpose != purpose {
             return Err("metrics model purpose mismatch");
         }
-        if let LanguageEvent::Usage { usage } = event {
+        if let LanguageEvent::ContentDelta { delta, .. } = event {
+            let text = match delta {
+                rsi_ai_protocol::ContentDelta::Text(text)
+                | rsi_ai_protocol::ContentDelta::Reasoning(text)
+                | rsi_ai_protocol::ContentDelta::ToolArguments(text) => text,
+            };
+            if !text.is_empty() {
+                open.first_token_ms.get_or_insert(timestamp_ms);
+            }
+        } else if let LanguageEvent::Usage { usage } = event {
             if open.usage.replace(*usage).is_some() {
                 return Err("duplicate attempt usage");
             }
@@ -223,6 +267,7 @@ impl MetricsReducer {
             LanguageEvent::Finished { .. } | LanguageEvent::Failed { .. }
         ) {
             let open = self.open.take().expect("exact model attempt");
+            self.summary.timing.observe_attempt(&open, timestamp_ms)?;
             let failed = matches!(event, LanguageEvent::Failed { .. });
             if failed {
                 self.summary.failed_attempts = add(self.summary.failed_attempts, 1)?;
@@ -265,6 +310,18 @@ impl MetricsReducer {
     #[allow(clippy::too_many_lines)] // One ordered reducer handles each stage of the same request.
     fn apply(&mut self, fact: &SessionFact) -> Result<(), &'static str> {
         match fact.body() {
+            SessionFactBody::TurnAccepted { turn_id, .. }
+            | SessionFactBody::MessageTurnAccepted { turn_id, .. }
+            | SessionFactBody::ImageRequested { turn_id, .. } => {
+                if !self.turn_starts.contains_key(turn_id) {
+                    if self.turn_starts.len() == rsi_agent_session_protocol::MAXIMUM_LIVE_TURNS {
+                        return Err("too many nonterminal Turns in Session timing");
+                    }
+                    self.summary.timing.turns = add(self.summary.timing.turns, 1)?;
+                    self.turn_starts
+                        .insert(turn_id.clone(), fact.timestamp_ms());
+                }
+            }
             SessionFactBody::ModelIntent {
                 turn_id,
                 effect_id,
@@ -289,6 +346,7 @@ impl MetricsReducer {
                     config_generation: snapshot.config_generation,
                     settings: snapshot.language_settings.clone(),
                     started_ms: None,
+                    first_token_ms: None,
                     usage: None,
                     purpose: purpose.event_purpose(),
                 });
@@ -321,10 +379,16 @@ impl MetricsReducer {
                     )?;
                 }
             }
-            SessionFactBody::TurnTerminal { turn_id, .. }
-                if self.open.as_ref().is_some_and(|open| &open.turn == turn_id) =>
-            {
-                self.open = None;
+            SessionFactBody::TurnTerminal { turn_id, .. } => {
+                if self.open.as_ref().is_some_and(|open| &open.turn == turn_id) {
+                    self.open = None;
+                }
+                if let Some(start) = self.turn_starts.remove(turn_id)
+                    && let Some(elapsed) = fact.timestamp_ms().checked_sub(start)
+                {
+                    self.summary.timing.timed_turns = add(self.summary.timing.timed_turns, 1)?;
+                    self.summary.timing.total_ms = add(self.summary.timing.total_ms, elapsed)?;
+                }
             }
             _ => {}
         }
@@ -340,6 +404,31 @@ impl MetricsReducer {
             .as_mut()
             .filter(|open| &open.turn == turn && &open.effect == effect)
             .ok_or("model event has no matching metrics intent")
+    }
+}
+
+impl SessionTiming {
+    fn observe_attempt(&mut self, open: &OpenAttempt, end: u64) -> Result<(), &'static str> {
+        let Some(start) = open.started_ms else {
+            return Ok(());
+        };
+        let Some(elapsed) = end.checked_sub(start) else {
+            return Ok(());
+        };
+        self.timed_attempts = add(self.timed_attempts, 1)?;
+        self.model_ms = add(self.model_ms, elapsed)?;
+        if let Some(first) = open
+            .first_token_ms
+            .filter(|first| *first >= start && *first <= end)
+        {
+            self.first_token_attempts = add(self.first_token_attempts, 1)?;
+            self.first_token_ms = add(self.first_token_ms, first - start)?;
+            if let Some(usage) = open.usage.filter(|_| end > first) {
+                self.decode_ms = add(self.decode_ms, end - first)?;
+                self.decode_output_tokens = add(self.decode_output_tokens, usage.output_tokens())?;
+            }
+        }
+        Ok(())
     }
 }
 

@@ -246,3 +246,7 @@ operation identity. A foreign failure is malformed evidence, never a recovery
 instruction for another operation. Maintenance identities are validated by the
 Store protocol type when constructed or decoded, including error receipts.
 Store read/publication admission pressure remains a retryable Capacity refusal.
+
+Metrics replies include Session timing counters from the conversation reducer.
+These counters share the reply's fixed Fact watermark and completeness flag;
+clients validate their relationships before exposing the reply.
