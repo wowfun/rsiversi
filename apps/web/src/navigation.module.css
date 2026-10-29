@@ -340,3 +340,18 @@
 :global(.session-row:focus-within .session-recency):where(.scope, .scope *),
 :global(.session-row:has(.session-options[open]) .session-recency):where(.scope, .scope *) { visibility: hidden; }
 @media (hover: none) { :global(.session-recency):where(.scope, .scope *) { display: none; } }
+.external {
+  border-top: 1px solid var(--line);
+  padding-top: 12px;
+  margin-top: 8px;
+}
+.external > summary {
+  color: var(--muted);
+  cursor: pointer;
+  font-size: 12px;
+  padding: 4px;
+}
+.external > section {
+  display: grid;
+  gap: 4px;
+}

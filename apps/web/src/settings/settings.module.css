@@ -4,7 +4,7 @@
     monospace;
   min-height: 300px;
 }
-:global(.registered-settings > form > fieldset):where(.scope, .scope *) {
+:global(.registered-editor > form > fieldset):where(.scope, .scope *) {
   min-width: 0;
   margin: 0;
   padding: 0;

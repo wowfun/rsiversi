@@ -2,6 +2,10 @@
 
 Settings saves wait for a refreshed editor ticket and enabled controls. React
 retains the editor nodes across saves, so node removal is not a completion signal.
+The document runtime fixture checks catalog namespace reads within one window,
+while explicit section reads and dismissal continue to fence old frames.
+External navigation checks configured endpoint visibility, reopening and paging,
+and reuse of the same conversation identity after an uncertain start.
 
 The accessibility component fixture mounts the production React activity and
 notice owners with the document styles in Chromium and Firefox. It checks

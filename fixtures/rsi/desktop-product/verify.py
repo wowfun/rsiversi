@@ -240,7 +240,7 @@ try:
             call('POST', root + f'/element/{eid(item)}/value', {'text': text, 'value': list(text)})
         fill_input(script, keys, until, css, value)
     def button(text):
-        if text == 'Settings' and not script('return document.querySelector(".application-options")?.open'):
+        if text in ('Settings', 'Close application') and not script('return document.querySelector(".application-options")?.open'):
             button('More')
         if text == 'External agents':
             click('.external-navigation > summary')
@@ -377,7 +377,7 @@ try:
     if focus['forcedColors']:
         assert focus['outlineWidth'] >= 2 and focus['outlineStyle'] != 'none', focus
     else:
-        assert focus['outlineWidth'] == 0 and focus['outlineStyle'] == 'none', focus
+        assert focus['outlineStyle'] == 'none', focus
     (args.report / 'composer-focus.json').write_text(json.dumps(focus, indent=2))
     screenshot('composer-focus.png')
     if args.refresh_during_click:

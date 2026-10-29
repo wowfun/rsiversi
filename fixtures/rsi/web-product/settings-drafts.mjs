@@ -24,13 +24,15 @@ try{
   page=await context.newPage();page.on('pageerror',error=>errors.push(error.message));
   await connectWorkbench(page,service,'Settings drafts');
   await openSettings(page);
-  assert.equal(await page.getByRole('banner').count(),0);
+  assert.equal(await page.getByRole('banner').count(),1);
   let advancedOpened=false;
   const section=async name=>{
     const previous=await page.evaluate(()=>document.querySelector('form[data-settings-ticket]')?.dataset.settingsTicket??null);
-    await page.getByRole('navigation',{name:'Settings sections'}).getByRole('button',{name,exact:true}).click();
-    const namespace=name==='Appearance'?'rsi.client':name==='Advanced'&&advancedOpened?'rsi.agent':undefined;
-    if(namespace)await page.waitForFunction(({namespace,previous})=>{const form=document.querySelector('form[data-settings-ticket]');return form?.dataset.settingsNamespace===namespace&&form.dataset.settingsTicket!==previous},{namespace,previous});
+    const button=page.getByRole('navigation',{name:'Settings sections'}).getByRole('button',{name,exact:true});
+    const changing=await button.getAttribute('aria-pressed')!=='true';
+    await button.click();
+    const namespace=name==='General'?'rsi.client':name==='Advanced'&&advancedOpened?'rsi.agent':undefined;
+    if(namespace&&changing)await page.waitForFunction(({namespace,previous})=>{const form=document.querySelector('form[data-settings-ticket]');return form?.dataset.settingsNamespace===namespace&&form.dataset.settingsTicket!==previous},{namespace,previous});
     if(name==='Advanced')advancedOpened=true;
   };
   await section('General');const initial=await (await jsonEditor(page)).inputValue();
@@ -47,7 +49,7 @@ try{
   await section('General');
   const second=await browser.newPage({ignoreHTTPSErrors:true,viewport:{width:1440,height:900}});second.on('pageerror',error=>errors.push(error.message));
   await connectWorkbench(second,service,'Concurrent settings writer');
-  await second.getByRole('button',{name:'Settings',exact:true}).click();
+  await openSettings(second);
   await second.getByRole('navigation',{name:'Settings sections'}).getByRole('button',{name:'General',exact:true}).click();
   const current=JSON.parse(await (await jsonEditor(second)).inputValue());
   current.appearance={...current.appearance,theme:current.appearance?.theme==='dark'?'light':'dark'};

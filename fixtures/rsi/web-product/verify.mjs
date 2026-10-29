@@ -12,6 +12,8 @@ import { verifyMcp } from "./mcp.mjs";
 import { verifyRetrieval } from "./retrieval.mjs";
 import { verifyPlugins } from "./plugins.mjs";
 import { verifySettingsForm } from "./settings-form.mjs";
+import { verifySettingsRuntime } from "./settings-runtime.mjs";
+import { verifyExternalNavigation } from "./external-navigation.mjs";
 import assert from "node:assert/strict";
 import { dirname, resolve, join } from "node:path";
 import { fileURLToPath } from "node:url";
@@ -64,6 +66,8 @@ try {
       await verifyDom(browser, root, report, name);
       await verifyAccessibility(browser, root, report, name);
       await verifySettingsForm(browser, root);
+      await verifySettingsRuntime(browser);
+      await verifyExternalNavigation(browser);
       await writeFile(join(report, `${name}-worker-lifecycle.json`), JSON.stringify(await verifyWorkerLifecycle(browser, root)));
       await writeFile(join(report, `${name}-mount-admission.json`), JSON.stringify(await verifyMountAdmission(browser, root)));
       const context = await browser.newContext({ ignoreHTTPSErrors: true, viewport: { width: 1440, height: 980 } });
@@ -308,12 +312,15 @@ try {
       assert(await approvalSetting.isChecked());
       await caps.fill(capValue('18446744073709551615'));
       await page.getByRole('button', {name:'Save settings',exact:true}).click();
-      await page.locator('.settings-field-error').filter({hasText:'exact numbers'}).waitFor();
+      await page.locator('.settings-field-error').filter({hasText:/invalid/i}).waitFor();
       await page.getByRole('button', {name:'Edit as JSON',exact:true}).click();
       const exactEditor=page.getByRole('textbox', {name:'Settings JSON',exact:true});
-      assert.equal(await page.locator('.settings-field-error').innerText(),'');
+      assert.match(await page.locator('.settings-field-error').innerText(),/invalid/i);
       const exactText=await exactEditor.inputValue();
       assert.match(exactText,/"max_output_tokens":18446744073709551615/);
+      await page.getByRole('button', {name:'Use form',exact:true}).click();
+      await page.getByRole('status').filter({hasText:'exact numbers'}).waitFor();
+      assert(await exactEditor.isVisible());
       await page.screenshot({path:join(report,`${name}-settings-exact-json.png`)});
       await exactEditor.fill(exactText.replace('"max_output_tokens":18446744073709551615','"max_output_tokens":123'));
       await saveSettings(page);
@@ -328,7 +335,8 @@ try {
       await page.getByRole("button", { name: "Allow once", exact: true }).click();
       await left.locator(".pane-status").filter({ hasText: "Completed" }).waitFor({state:'attached'});
       const failedTool = await left.locator(".transcript").innerText();
-      assert.match(failedTool, /bash · command failed/);
+      assert.equal(await left.locator('.message.tool').last().locator('.process-label').innerText(), 'Bash');
+      assert.match(await left.locator('.message.tool').last().locator('.summary-toggle').innerText(), /Failed/);
       assert.match(failedTool, /"command":.*exit 7/);
       assert.match(failedTool, /fixture stdout/);
       assert.match(failedTool, /fixture stderr/);
@@ -402,7 +410,7 @@ try {
       await narrowSend.scrollIntoViewIfNeeded();
       assert.equal(await narrowSend.evaluate(button => {
         const bounds = button.getBoundingClientRect();
-        return document.elementFromPoint(bounds.x + bounds.width / 2, bounds.y + bounds.height / 2) === button;
+        return button.contains(document.elementFromPoint(bounds.x + bounds.width / 2, bounds.y + bounds.height / 2));
       }), true, "narrow composer actions must be reachable by scrolling the workbench");
       await page.screenshot({ path: join(report, `${name}-narrow-actions.png`) });
       assert.equal(await page.evaluate(() => document.documentElement.scrollWidth <= innerWidth), true);

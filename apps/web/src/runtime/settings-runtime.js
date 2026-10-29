@@ -41,7 +41,8 @@ export function createSettingsRuntime(context) {
       request = reading ? {} : undefined;
     if (reading) {
       read = request;
-      dialog.begin(owner, context.view?.settings_revision);
+      if (value.action === "settings_list" || value.window == null)
+        dialog.begin(owner, context.view?.settings_revision);
       if (value.namespace !== "rsi.client")
         advancedSettings.set(value.namespace);
       selecting = true;

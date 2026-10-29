@@ -338,6 +338,12 @@ controls cannot cover disconnect or application close.
 Settings has a fixed 188px navigation and independently scrolling options; its
 800px shell uses the pinned panel radius and elevation, and becomes fullscreen
 with section controls above the options below 768px.
+The workspace sidebar exposes External agents when the Host has configured
+endpoints or retained external conversations. It supports starting, reopening,
+refreshing and paging those conversations. A failed start retains its conversation
+identity for an explicit retry; empty Hosts have no external-agent disclosure.
+The registered editor fills the options column without a native fieldset border
+or inset; its JSON editor retains the same available width.
 General, Models, Plugins, and Advanced share this shell. General contains
 Appearance and Conversation defaults, including the existing default preset
 identity field. Models contains credentials and deployment configuration.
@@ -352,6 +358,8 @@ A Settings frame renders only in its selected Appearance or Advanced section;
 one document owner dispatches section reads, including namespace links from Plugins.
 Opening a section fences its previous frame until the new read revision arrives;
 loading and failed reads share the section host and expose a read-only retry.
+Selecting a namespace from the catalog retains that window revision and accepts
+its loading and editor frames; only an explicit section read opens a new window.
 Late frames cannot replace a different section. Switching editor modes preserves the untouched JSON bytes and does not dirty a
 draft. Save requires valid, bounded JSON. After save or explicit discard, the
 editor waits visibly for a fresh read ticket; a Reload settings action can request

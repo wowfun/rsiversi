@@ -35,6 +35,8 @@ screenshot. Only trusted input events recorded after that fill began can satisfy
 its receipt; an earlier input with the same length cannot. Its forced-colors media
 state is reported without changing system settings. The ordinary composer has no
 inner outline; forced colors requires the visible keyboard outline.
+WebKit may retain a computed outline width while its style is `none`; the ordinary
+focus check uses the rendered outline style.
 Replacing input uses native select-all/backspace keystrokes and waits for the
 empty value before typing. Nonempty composer replacement also requires a trusted
 deletion input event: WebKit's WebDriver `clear` changes the DOM without updating

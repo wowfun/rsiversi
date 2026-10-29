@@ -1,5 +1,5 @@
 import {addWorkspace} from '../web-product/controls.mjs';
-import {detailMode,externalAgents,navigationFilter} from '../web-product/controls.mjs';
+import {detailMode,externalAgents,navigationFilter,disconnect} from '../web-product/controls.mjs';
 import {paired} from '../web-product/paired-env.mjs';
 import assert from 'node:assert/strict';
 import {createRequire} from 'node:module';
@@ -24,7 +24,7 @@ for(const [name,engine] of [['chromium',chromium],['firefox',firefox]]){
     await page.goto(service.origin);await page.locator('#receipt').fill(JSON.stringify(service.register(`${name} ACP UI`)));await page.getByRole('button',{name:'Connect',exact:true}).click();await page.locator('#workbench').waitFor({state:'visible'});
     await addWorkspace(page,service.workspace);await page.getByRole('button',{name:'New conversation in workspace',exact:true}).click();
     await detailMode(page,'standard');await externalAgents(page);const native=page.getByRole('region',{name:'Main conversation',exact:true});await native.getByRole('textbox',{name:'Main message'}).fill('Please start an external delegation');await native.getByTestId("composer-send").click();
-    await native.locator('.pane-status').filter({hasText:'Completed'}).waitFor();await native.getByRole('button',{name:'Open external conversation',exact:true}).waitFor();await page.screenshot({path:join(destination,'delegation.png')});await native.getByRole('button',{name:'Open external conversation',exact:true}).click();
+    await native.locator('.pane-status').filter({hasText:'Completed'}).waitFor({state:'attached'});await native.getByRole('button',{name:'Open external conversation',exact:true}).waitFor();await page.screenshot({path:join(destination,'delegation.png')});await native.getByRole('button',{name:'Open external conversation',exact:true}).click();
     const pane=page.getByRole('region',{name:'External conversation',exact:true});await pane.waitFor({state:'visible'});
     await page.locator('.conversation-menu summary').click();assert.equal(await page.getByRole('button',{name:'Terminal',exact:true}).isDisabled(),true);await page.locator('.conversation-menu summary').click();
     await pane.getByRole('textbox',{name:'External message'}).fill('permission');await pane.getByTestId("composer-send").click();
@@ -55,7 +55,7 @@ for(const [name,engine] of [['chromium',chromium],['firefox',firefox]]){
     await pane.getByRole('button',{name:'Close peer',exact:true}).click();await pane.locator('.external-status').filter({hasText:'Closed'}).waitFor();
     const pids=(await readFile(join(service.workspace,'peer-pids'),'utf8')).trim().split('\n');await waitUntil(async()=>{for(const pid of pids){try{process.kill(Number(pid),0);return false;}catch(error){if(error.code!=='ESRCH')throw error;}}return true;},'external process reaping');
     await pane.getByRole('textbox',{name:'External message'}).fill('must disappear on connection retirement');
-    await page.locator('#sign-out').click();await page.locator('#login').waitFor({state:'visible'});
+    await disconnect(page);await page.locator('#login').waitFor({state:'visible'});
     await page.locator('#receipt').fill(JSON.stringify(service.register(`${name} second principal`)));await page.getByRole('button',{name:'Connect',exact:true}).click();await page.locator('#workbench').waitFor({state:'visible'});
     await externalAgents(page);await page.locator('.external-navigation .nav-item').first().click();await pane.waitFor({state:'visible'});assert.equal(await pane.getByRole('textbox',{name:'External message'}).inputValue(),'');
     assert.deepEqual(errors,[]);assert.equal(service.provider.requests.length,2);results.push({engine:name,version:browser.version(),permissions:4,replay:1200,retained:128,mock_provider_requests:2,delegation_card:true,peers_reaped:pids.length,ok:true});

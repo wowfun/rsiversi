@@ -1,4 +1,4 @@
-import {openSettings} from './controls.mjs';
+import {openSettings,saveSettings} from './controls.mjs';
 import {detailMode} from './controls.mjs';
 import assert from 'node:assert/strict';
 import {join} from 'node:path';
@@ -16,8 +16,7 @@ export async function verifyPresentation(page, pane, service, report, name) {
     await page.getByRole('button',{name:'General',exact:true}).click();
     await page.getByRole('combobox',{name:'Settings / appearance / theme',exact:true}).selectOption({label:theme});
     await page.getByRole('spinbutton',{name:'Settings / appearance / content_font_size',exact:true}).fill(String(size));
-    const old=await page.getByRole('button',{name:'Save settings',exact:true}).elementHandle();
-    await old.click();await page.waitForFunction(old=>!old.isConnected,old);await old.dispose();
+    await saveSettings(page);
     await page.getByRole('button',{name:'Close settings',exact:true}).click();
     await page.waitForFunction(([theme,size])=>document.documentElement.dataset.theme===theme&&document.documentElement.dataset.contentSize===String(size),[theme,size]);
     await peer.waitForFunction(([theme,size])=>document.documentElement.dataset.theme===theme&&document.documentElement.dataset.contentSize===String(size),[theme,size]);
@@ -46,7 +45,7 @@ export async function verifyPresentation(page, pane, service, report, name) {
     await separator.focus();const before=Number(await separator.getAttribute('aria-valuenow'));await separator.press('ArrowRight');
     assert.equal(Number(await separator.getAttribute('aria-valuenow')),before+10);await separator.press('ArrowLeft');
     await page.getByRole('button',{name:'Commands',exact:true}).click();
-    await page.getByRole('combobox',{name:'Search commands'}).fill('appearance');
+    await page.getByRole('combobox',{name:'Search commands'}).fill('settings');
     await page.getByRole('combobox',{name:'Search commands'}).press('Enter');
     await page.getByRole('combobox',{name:'Settings / appearance / theme',exact:true}).waitFor();
     await page.getByRole('button',{name:'Close settings',exact:true}).click();

@@ -24,7 +24,7 @@ for(const[name,engine]of[['chromium',chromium],['firefox',firefox]]){
       constructor(...args){super(...args);this.addEventListener('message',({data})=>{
         if(data.kind!=='reply'||typeof data.result!=='string')return;
         let reply;try{reply=JSON.parse(data.result)}catch{return}
-        if(reply.type==='output'){
+        if(reply?.type==='output'){
           window.terminalWire.pages++;
           if(/\x1b[\]P_^X]/.test(reply.value.text))window.terminalWire.forbidden++;
         }

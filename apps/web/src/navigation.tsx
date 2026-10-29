@@ -2,6 +2,7 @@ import { ConversationRow } from "./navigation-row.tsx";
 import { WorkspaceNavigation } from "./navigation-workspaces.tsx";
 import {NavigationOptions, type ConversationFilter} from "./navigation-options.tsx";
 import { AttentionNavigation } from "./navigation-attention.tsx";
+import { ExternalNavigation } from "./navigation-external.tsx";
 import {
   IconSearchOutlineRegular,
   IconProjectAddOutlineRegular,
@@ -321,6 +322,7 @@ export function Navigation() {
           </div>
         </>
       )}
+      <ExternalNavigation />
       {edit && (
         <form
           className="rename-session"

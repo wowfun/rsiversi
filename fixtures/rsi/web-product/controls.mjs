@@ -163,7 +163,7 @@ export async function selectSurface(page,key) {
 }
 
 export async function disconnect(page) {
-  await page.getByRole('button',{name:'Commands',exact:true}).click();
+  await page.keyboard.press('ControlOrMeta+k');
   const search=page.getByRole('combobox',{name:'Search commands',exact:true});
   await search.fill('Disconnect');await search.press('Enter');
 }
