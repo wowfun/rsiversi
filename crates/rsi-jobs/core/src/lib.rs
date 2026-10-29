@@ -446,6 +446,8 @@ pub struct JobSubmission {
 }
 
 /// Producer-owned control transferred to Jobs before identifier publication.
+/// Synchronous methods must return promptly from retained in-memory state, without
+/// blocking I/O or waiting for completion. `wait` owns asynchronous settlement.
 #[async_trait]
 pub trait JobControl: fmt::Debug + Send + Sync + 'static {
     /// Reads raw retained producer output at one whole-stream offset.
