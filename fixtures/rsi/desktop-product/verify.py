@@ -24,7 +24,7 @@ from tasks import ProviderControl, verify as verify_tasks
 from workflow import configure as configure_workflow, provider_reply as workflow_reply, verify as verify_workflow
 from plan_review import provider_reply as plan_reply, verify as verify_plan_review
 from pressure import verify_writes
-from controls import COMPOSER_FOCUS, fill as fill_input, asset_pressure, file_has_bytes, configure_live_limits
+from controls import BUTTON_TARGET, COMPOSER_FOCUS, fill as fill_input, asset_pressure, file_has_bytes, configure_live_limits
 from external import configure as configure_external, verify as verify_external, provider_reply as external_reply, delegation as verify_delegation
 from profiles import verify as verify_profiles
 from history import verify as verify_history
@@ -273,7 +273,7 @@ try:
             button('Add files or run commands')
         if text == 'Terminal': script('document.querySelector(".conversation-menu").open=true;return true')
         def attempt():
-            item = script(r'return [...document.querySelectorAll("button, summary")].find(b=>(arguments[0]==="Send"?b.dataset.testid==="composer-send":(b.getAttribute("aria-label")||b.textContent.trim())===arguments[0])&&!b.disabled&&b.getBoundingClientRect().width>0&&b.getBoundingClientRect().height>0)||null', [text])
+            item = script(BUTTON_TARGET, [text])
             if item is None: return False
             try:
                 call('POST', root + f'/element/{eid(item)}/click', {})

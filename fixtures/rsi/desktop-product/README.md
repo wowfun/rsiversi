@@ -20,7 +20,9 @@ the deterministic provider, select a model, create a conversation and submit it.
 Use a short report path on a native Unix filesystem: the Service Host socket is
 under its isolated state home and must fit the platform's Unix socket path limit.
 Registered settings stay inside the Settings dialog and close with that dialog.
-Button clicks relocate only after WebDriver explicitly reports a stale element
+Button selection requires an enabled, visible control with an unobstructed center
+hit, including when a closed menu retains a same-label descendant's layout box.
+Clicks relocate only after WebDriver explicitly reports a stale element
 before dispatch; ambiguous click failures are never replayed.
 Workflow resource controls must be visible and enabled before dispatch. A
 completed run and a rendered result button can still coexist with a pending

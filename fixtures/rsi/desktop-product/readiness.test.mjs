@@ -5,7 +5,19 @@ import {chromium, firefox} from '../web-product/node_modules/playwright/index.mj
 const focus = await readFile(new URL('./focus-input.js', import.meta.url), 'utf8');
 const composerFocus = await readFile(new URL('./composer-focus.js', import.meta.url), 'utf8');
 const assets = await readFile(new URL('./asset-pressure.js', import.meta.url), 'utf8');
+const buttonTarget = await readFile(new URL('./button-target.js', import.meta.url), 'utf8');
 for (const [name, engine] of Object.entries({chromium, firefox})) {
+  test(`${name}: native button selection excludes hidden duplicates and covered controls`, async () => {
+    const browser=await engine.launch({headless:true});
+    try {
+      const page=await browser.newPage();
+      await page.setContent('<details><summary>Menu</summary><button>Workspace files</button></details><fieldset disabled><button>Workspace files</button></fieldset><div inert><button>Workspace files</button></div><button id="visible">Workspace files</button>');
+      const check=()=>page.evaluate(source=>new Function(source)('Workspace files')?.id??null,buttonTarget);
+      assert.equal(await check(),'visible');
+      await page.evaluate(()=>{const cover=document.createElement('div');cover.style='position:fixed;inset:0;z-index:999';document.body.append(cover)});
+      assert.equal(await check(),null);
+    } finally {await browser.close();}
+  });
   test(`${name}: composer evidence rejects an earlier same-length trusted input`, async () => {
     const browser=await engine.launch({headless:true});
     try {
