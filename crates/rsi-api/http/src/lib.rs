@@ -18,6 +18,7 @@ pub use local::LocalHttpService;
 mod delivery;
 mod diagnostics;
 pub use diagnostics::{HttpDiagnostics, HttpDiagnosticsSnapshot};
+mod error;
 mod h2_tasks;
 mod plugin;
 mod policy;
