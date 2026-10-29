@@ -217,7 +217,10 @@ async fn run_command(parsed: Parse, default_application: bool) -> u8 {
         #[cfg(any(target_os = "linux", windows))]
         Parse::Core(arguments) => core_cli::run(&arguments).await,
         #[cfg(not(any(target_os = "linux", windows)))]
-        Parse::Core(_) => report_error(&RsiError::Boot("core maintenance requires Windows or Linux".into())),
+        Parse::Core(arguments) => {
+            drop(arguments);
+            report_error(&RsiError::Boot("core maintenance requires Windows or Linux".into()))
+        },
         Parse::Plugin(arguments) => plugin_cli::run(&arguments).await,
         Parse::WebControl(stop) => application::web_control(stop).await,
         Parse::Profile(command) => run_profile(&command).await,

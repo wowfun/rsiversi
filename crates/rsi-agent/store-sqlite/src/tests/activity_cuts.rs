@@ -2,7 +2,7 @@ use super::*;
 
 #[tokio::test]
 async fn cuts_keep_per_item_corruption_separate_from_valid_sessions() {
-    let root = tempfile::tempdir().unwrap();
+    let root = private_tempdir();
     let store = SqliteStore::open(root.path()).unwrap();
     let good = seed_session(&store, "cut-good").await;
     let bad = seed_session(&store, "cut-corrupt").await;
@@ -33,7 +33,7 @@ async fn cuts_keep_per_item_corruption_separate_from_valid_sessions() {
 
 #[tokio::test]
 async fn admitted_cut_keeps_proofs_after_cache_eviction_without_owning_pin_slots() {
-    let root = tempfile::tempdir().unwrap();
+    let root = private_tempdir();
     let store = SqliteStore::open(root.path()).unwrap();
     let mut ids = Vec::new();
     for index in 0..64 {
@@ -78,7 +78,7 @@ async fn admitted_cut_keeps_proofs_after_cache_eviction_without_owning_pin_slots
 #[cfg(feature = "test-support")]
 #[tokio::test]
 async fn warm_access_and_cut_batches_have_three_measured_reader_operations() {
-    let root = tempfile::tempdir().unwrap();
+    let root = private_tempdir();
     let store = SqliteStore::open(root.path()).unwrap();
     let mut ids = Vec::new();
     for index in 0..128 {

@@ -342,6 +342,16 @@ impl Service {
                 if request.stdio == rsi_sandbox::ProcessStdio::Pty {
                     arguments.retain(|argument| argument != "--new-session");
                 }
+                if !source_reader
+                    && request.program.starts_with("/tmp")
+                    && !request.program.starts_with(&workspace)
+                {
+                    arguments.extend([
+                        "--ro-bind".into(),
+                        target_program.clone(),
+                        target_program.clone(),
+                    ]);
+                }
                 arguments.extend([
                     match (request.mode, request.stdio) {
                         (SandboxMode::WorkspaceWrite, rsi_sandbox::ProcessStdio::Pty) => {

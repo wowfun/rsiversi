@@ -1,10 +1,12 @@
 use rsi::{ApplicationProfileId, ProfileCatalog, standard_application_host};
 use rsi_host::HostPaths;
 use std::collections::BTreeMap;
+#[cfg(any(target_os = "linux", windows))]
+mod support;
 
 #[cfg(windows)]
 #[tokio::test]
-async fn windows_application_reports_occupied_owner_without_endpoint_discovery_wait() {
+async fn windows_application_bounds_discovery_of_an_owner_without_an_endpoint() {
     let temporary = tempfile::tempdir().unwrap();
     let paths = HostPaths::new(
         temporary.path().join("config"),
@@ -31,7 +33,7 @@ async fn windows_application_reports_occupied_owner_without_endpoint_discovery_w
         )
         .unwrap();
         let result = tokio::time::timeout(
-            std::time::Duration::from_secs(2),
+            std::time::Duration::from_secs(20),
             host.start(rsi_host::Profile::new(vec![rsi_host::ProfileEntry::new(
                 "connection",
                 plugin,
@@ -39,11 +41,11 @@ async fn windows_application_reports_occupied_owner_without_endpoint_discovery_w
             )])),
         )
         .await
-        .expect("Windows must report the owner conflict without waiting for a daemon endpoint");
+        .expect("owner discovery must finish within its bounded startup deadline");
         assert!(result.is_err());
         let diagnostic = format!("{:?}", diagnostics.take());
         assert!(
-            diagnostic.contains("stop the other Web, TUI, ACP"),
+            diagnostic.contains("owner is active but did not publish a usable endpoint"),
             "{plugin}: result={result:?}; diagnostic={diagnostic}"
         );
         assert!(owner_paths.read_metadata().unwrap().is_none());
@@ -255,17 +257,13 @@ async fn serve_profile_owns_one_runtime_authenticates_http_and_releases_its_list
         temporary.path().join("cache"),
     )
     .unwrap();
-    let profile = ProfileCatalog::new(paths.clone(), rsi_app_catalog::metadata())
-        .application(&ApplicationProfileId::new("serve").unwrap())
-        .unwrap();
-    let (host, diagnostics) = standard_application_host(
-        rsi_app_catalog::compose(rsi::StandardComposition::new(
+    let (host, program) = support::embedded_serve(
+        rsi::StandardComposition::new(
             paths.clone(),
             BTreeMap::new(),
             None,
             rsi_app_catalog::metadata(),
-        ))
-        .unwrap(),
+        ),
         [
             "--bind",
             "127.0.0.1:0",
@@ -275,12 +273,8 @@ async fn serve_profile_owns_one_runtime_authenticates_http_and_releases_its_list
         ]
         .map(Into::into)
         .to_vec(),
-    )
-    .unwrap();
-    let running = host
-        .start_program(profile.program().unwrap())
-        .await
-        .unwrap_or_else(|error| panic!("{error}; {:?}", diagnostics.take()));
+    );
+    let running = host.start_program(program).await.unwrap();
     let count = |id: &str| {
         running.runtime_snapshot().fibers.into_iter().filter(|fiber| fiber.state == rsi_meta::FiberState::Active && matches!(&fiber.factory, rsi_meta::FactoryIdentity::Linked { plugin, .. } if plugin.as_str() == id)).count()
     };

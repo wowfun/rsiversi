@@ -240,8 +240,11 @@ try:
             call('POST', root + f'/element/{eid(item)}/value', {'text': text, 'value': list(text)})
         fill_input(script, keys, until, css, value)
     def button(text):
-        if text == 'Settings' and not script('return document.querySelector("#settings-open")?.getBoundingClientRect().height > 0'):
+        if text == 'Settings' and not script('return document.querySelector(".application-options")?.open'):
             button('More')
+        if text == 'External agents':
+            click('.external-navigation > summary')
+            return
         if text == 'Close details':
             item=script('return document.querySelector("[data-dockkit-float-active=true] [data-dockkit-float-close], [data-dockkit-pane-active=true] [aria-selected=true] [data-dockkit-tab-close]")')
             assert item, 'No active resource close control'

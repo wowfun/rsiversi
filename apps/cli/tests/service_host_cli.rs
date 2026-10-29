@@ -221,25 +221,28 @@ async fn named_headless_uses_explicit_daemon_and_lifecycle_commands() {
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
-async fn host_profile_preview_matches_the_settings_backed_daemon_launch_key() {
+async fn host_profile_preview_of_the_running_artifact_matches_the_daemon_launch_key() {
     let (endpoint, provider) = provider().await;
-    let fixture = CliFixture::new(&endpoint);
+    let mut fixture = CliFixture::new(&endpoint);
     fixture.configure_agent_preset_root();
 
+    fixture.assert_success(&["host", "start", "--profile", "fixture"]);
+    let owner: serde_json::Value = serde_json::from_slice(
+        &std::fs::read(
+            fixture
+                .temporary
+                .path()
+                .join("state/rsi/session-host/owner.json"),
+        )
+        .unwrap(),
+    )
+    .unwrap();
+    let pid = owner["pid"].as_u64().unwrap();
+    fixture.binary = std::fs::read_link(format!("/proc/{pid}/exe")).unwrap();
     let preview =
         fixture.assert_success(&["profile", "host", "preview", "fixture", "--output", "json"]);
     let preview: serde_json::Value = serde_json::from_slice(&preview.stdout).unwrap();
-    let preview_key = preview["launch_key"].as_str().unwrap();
-
-    fixture.assert_success(&["host", "start", "--profile", "fixture"]);
-    let status = fixture.assert_success(&["host", "status"]);
-    let status = String::from_utf8(status.stdout).unwrap();
-    let daemon_key = status
-        .trim()
-        .split('\t')
-        .find_map(|field| field.strip_prefix("key="))
-        .unwrap();
-    assert_eq!(preview_key, daemon_key);
+    assert_eq!(preview["launch_key"], owner["launch_key"]);
 
     fixture.assert_success(&["host", "stop"]);
     provider.abort();
@@ -614,7 +617,7 @@ async fn durable_queue_steering_cancel_and_observation_survive_client_reattachme
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
-async fn embedded_eof_interrupts_active_work_but_retains_queued_and_promoted_input() {
+async fn resident_host_shutdown_interrupts_active_work_but_retains_queued_and_promoted_input() {
     let (endpoint, provider, task) = gated_provider("bash").await;
     let fixture = CliFixture::new(&endpoint);
     let mut client = JsonClient::start(&fixture, &["--session-id", "eof-retained"]);
@@ -633,6 +636,7 @@ async fn embedded_eof_interrupts_active_work_but_retains_queued_and_promoted_inp
         client.until(|v| v["type"] == "message").await;
     }
     client.finish().await;
+    fixture.assert_success(&["host", "stop"]);
     let mut resumed = JsonClient::start(&fixture, &["--resume", "eof-retained"]);
     resumed.until(|v| v["type"] == "session").await;
     // Resuming the Host schedules preserved input immediately, possibly before inspection.
@@ -842,6 +846,7 @@ async fn host_restart_interrupts_a_human_wait_without_recreating_its_question() 
         .await;
     let id = interaction["data"]["questions"][0]["id"].clone();
     client.finish().await;
+    fixture.assert_success(&["host", "stop"]);
     let mut resumed = JsonClient::start(&fixture, &["--resume", "question-restart"]);
     resumed
         .until(|v| v["type"] == "fact" && v["fact"]["type"] == "turn_terminal")

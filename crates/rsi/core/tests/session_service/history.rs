@@ -378,7 +378,13 @@ async fn history_search_rereads_original_freezes_into_an_unpublished_draft_and_r
     let Reply::Frozen { reference: again } = call(&running, freeze()).await.unwrap() else {
         panic!("frozen")
     };
-    assert_eq!(reference, again);
+    assert_ne!(reference.snapshot.capture_id, again.snapshot.capture_id);
+    let mut same_capture = again;
+    same_capture
+        .snapshot
+        .capture_id
+        .clone_from(&reference.snapshot.capture_id);
+    assert_eq!(reference, same_capture);
     let Reply::Hits { coverage, .. } = call(&running, search()).await.unwrap() else {
         panic!("hits")
     };

@@ -217,15 +217,17 @@ pub(super) async fn run_host_profile_preview(command: &ProfileCommand) -> u8 {
         Ok(document) => document,
         Err(error) => return report_error(&profile_management_error(error)),
     };
-    #[cfg(target_os = "linux")]
+    #[cfg(any(target_os = "linux", windows))]
     let coding = match super::standard_coding_tools() {
         Ok(coding) => coding,
         Err(error) => return report_error(&error),
     };
-    #[cfg(not(target_os = "linux"))]
+    #[cfg(not(any(target_os = "linux", windows)))]
     let coding = None;
     let composition = match rsi::capture_standard_home().and_then(|home| {
+        let listeners = rsi_serve::service_addons(paths.clone())?;
         StandardComposition::new(paths, BTreeMap::new(), coding, rsi_app_catalog::metadata())
+            .with_addons(listeners)
             .with_user_home(home)?
             .with_documents_directory(rsi::capture_standard_documents()?)
     }) {

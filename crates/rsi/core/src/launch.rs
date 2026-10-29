@@ -475,7 +475,10 @@ mod tests {
             Export, ExportKind, FileRecord, InstallSource, Manifest, PackageStore, Provenance,
         };
         use sha2::{Digest as _, Sha256};
-        let root = tempfile::tempdir_in(std::env::temp_dir().canonicalize().unwrap()).unwrap();
+        let root = tempfile::tempdir_in(rsi_workspace_protocol::canonical_native_path(
+            std::env::temp_dir().canonicalize().unwrap(),
+        ))
+        .unwrap();
         let paths = HostPaths::new(
             root.path().join("config"),
             root.path().join("state"),
@@ -610,7 +613,10 @@ mod tests {
 
     #[test]
     fn missing_explicit_home_does_not_silently_use_daily_configuration() {
-        let root = tempfile::tempdir_in(std::env::temp_dir().canonicalize().unwrap()).unwrap();
+        let root = tempfile::tempdir_in(rsi_workspace_protocol::canonical_native_path(
+            std::env::temp_dir().canonicalize().unwrap(),
+        ))
+        .unwrap();
         assert_eq!(
             LaunchConfiguration::load(root.path(), false).unwrap(),
             LaunchConfiguration::default()

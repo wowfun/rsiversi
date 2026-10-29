@@ -4,6 +4,7 @@ use rsi_agent_composition::AgentCompositionSource as _;
 use rsi_host::HostPaths;
 use rsi_meta_native_loader::{CatalogOptions, NativeCatalog};
 use std::{collections::BTreeMap, fs, path::Path, sync::Arc};
+mod support;
 
 #[path = "native_addons/bootstrap.rs"]
 mod bootstrap;

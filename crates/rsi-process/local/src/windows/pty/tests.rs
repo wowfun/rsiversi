@@ -13,7 +13,15 @@ fn spec(path: &std::path::Path) -> PtyProcessSpec {
                 .join("System32/WindowsPowerShell/v1.0/powershell.exe")
                 .canonicalize()
                 .unwrap(),
-            arguments: vec!["-NoLogo".into(), "-NoProfile".into()],
+            arguments: [
+                "-NoLogo",
+                "-NoProfile",
+                "-NoExit",
+                "-Command",
+                "Remove-Module PSReadLine -ErrorAction SilentlyContinue",
+            ]
+            .map(Into::into)
+            .into(),
             cwd: path.canonicalize().unwrap(),
             stamp: EnforcementStamp {
                 requested: SandboxMode::DangerFullAccess,

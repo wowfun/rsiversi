@@ -86,7 +86,10 @@ struct Fixture {
 }
 
 fn fixture(endpoint: &str) -> Fixture {
-    let temporary = tempfile::tempdir_in(std::env::temp_dir().canonicalize().unwrap()).unwrap();
+    let temporary = tempfile::tempdir_in(rsi_workspace_path::canonical_native_path(
+        std::env::temp_dir().canonicalize().unwrap(),
+    ))
+    .unwrap();
     let config = temporary.path().join("xdg-config/rsi");
     let state = temporary.path().join("xdg-state/rsi");
     let cache = temporary.path().join("xdg-cache/rsi");
@@ -1112,7 +1115,10 @@ async fn built_binary_treats_help_after_separator_as_the_literal_task() {
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn built_binary_patch_helper_requires_the_sole_marker_and_uses_one_line_protocol() {
     let binary = env!("CARGO_BIN_EXE_rsi");
-    let workspace = tempfile::tempdir_in(std::env::temp_dir().canonicalize().unwrap()).unwrap();
+    let workspace = tempfile::tempdir_in(rsi_workspace_path::canonical_native_path(
+        std::env::temp_dir().canonicalize().unwrap(),
+    ))
+    .unwrap();
     let patch = concat!(
         "{\"version\":2,\"evidence_bytes\":32768}\n",
         "*** Begin Patch\n",

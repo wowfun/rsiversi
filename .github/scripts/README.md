@@ -2,6 +2,14 @@
 
 Workflow steps source `standard-packages.sh` and pass its Bash array as quoted
 arguments to Cargo. Package patterns are Cargo selectors, not shell globs.
+Jobs that use `rg` for test discovery install ripgrep explicitly on Linux.
+
+Windows resident-Host tests run compiled artifacts through an ephemeral scheduled
+task under the current user. Both Cargo and the Actions runner can impose Jobs
+that forbid the Host's required breakaway. The task receives only the toolchain
+environment, writes its output and exit status to a unique temporary directory,
+has a bounded lifetime and is unregistered in `finally`. The same runner executes
+the opt-in frontend watch test after checking its exact compiled test name.
 
 `sandbox-policy.py prepare STATE full|apparmor` records the existing Linux sysctl
 values before changing them. The full profile changes only supported userns and

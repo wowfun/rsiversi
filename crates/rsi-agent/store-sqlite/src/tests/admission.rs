@@ -2,7 +2,7 @@ use super::*;
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn independent_readers_progress_and_cancelled_workers_retain_their_slots() {
-    let root = tempfile::tempdir().unwrap();
+    let root = private_tempdir();
     let store = SqliteStore::open(root.path()).unwrap();
     let (entered, started) = tokio::sync::oneshot::channel();
     let (release, blocked) = std::sync::mpsc::channel();
@@ -49,7 +49,7 @@ async fn independent_readers_progress_and_cancelled_workers_retain_their_slots()
 async fn unhealthy_connections_close_admission_instead_of_being_recycled() {
     for panic in [false, true] {
         for writer in [false, true] {
-            let root = tempfile::tempdir().unwrap();
+            let root = private_tempdir();
             let store = SqliteStore::open(root.path()).unwrap();
             store.validate_references().await.unwrap();
             let operation = move |connection: &mut Connection| -> Result<()> {
@@ -85,7 +85,7 @@ async fn unhealthy_connections_close_admission_instead_of_being_recycled() {
 
 #[tokio::test]
 async fn first_record_capacity_refusal_materializes_no_fact_body() {
-    let root = tempfile::tempdir().unwrap();
+    let root = private_tempdir();
     let store = SqliteStore::open(root.path()).unwrap();
     let header = test_header("bounded-page");
     let id = header.session_id().clone();
@@ -134,7 +134,7 @@ async fn first_record_capacity_refusal_materializes_no_fact_body() {
 #[tokio::test]
 async fn unhealthy_writer_preserves_lane_failure_when_proof_reads_are_unavailable() {
     use rusqlite::hooks::{AuthAction, AuthContext, Authorization};
-    let root = tempfile::tempdir().unwrap();
+    let root = private_tempdir();
     let store = SqliteStore::open(root.path()).unwrap();
     store.validate_references().await.unwrap();
     let result = store
@@ -163,7 +163,7 @@ async fn unhealthy_writer_preserves_lane_failure_when_proof_reads_are_unavailabl
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn validation_panic_wakes_queued_reads_without_dispatching_them() {
     use std::{future::Future as _, task::Poll};
-    let root = tempfile::tempdir().unwrap();
+    let root = private_tempdir();
     let store = SqliteStore::open(root.path()).unwrap();
     let owner = store.clone();
     let (entered, started) = tokio::sync::oneshot::channel();
@@ -213,7 +213,7 @@ async fn validation_panic_wakes_queued_reads_without_dispatching_them() {
 
 #[tokio::test]
 async fn native_store_mechanical_byte_and_access_contract() {
-    let root = tempfile::tempdir().unwrap();
+    let root = private_tempdir();
     let store = SqliteStore::open(root.path()).unwrap();
     let turn = TurnId::new("turn-1").unwrap();
     Box::pin(rsi_agent_testkit::assert_mechanical_store_contract(
@@ -245,7 +245,7 @@ async fn native_store_mechanical_byte_and_access_contract() {
 
 #[tokio::test]
 async fn condemned_writer_releases_its_write_transaction_before_store_drop() {
-    let root = tempfile::tempdir().unwrap();
+    let root = private_tempdir();
     let store = SqliteStore::open(root.path()).unwrap();
     assert!(
         store
@@ -265,7 +265,7 @@ async fn condemned_writer_releases_its_write_transaction_before_store_drop() {
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn healthy_concurrent_reader_is_retained_for_ordered_shutdown() {
-    let root = tempfile::tempdir().unwrap();
+    let root = private_tempdir();
     let store = SqliteStore::open(root.path()).unwrap();
     let (entered, started) = tokio::sync::oneshot::channel();
     let (release, blocked) = std::sync::mpsc::channel();

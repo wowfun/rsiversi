@@ -11,6 +11,8 @@ The product launcher connects to the already selected local Host. Its ordinary
 listeners. Control frames are bounded, native-peer authenticated and fenced by
 Host epoch plus the `rsi.web.control` descriptor. Applications do not create an
 additional Store or rotate credentials when attaching.
+Invalid Web/Serve arguments are rejected before activation and retain a bounded
+application diagnostic, so the CLI can report the specific rejected option.
 
 `rsi web` starts or reuses one loopback listener, prints a fresh one-use ticket,
 opens the browser in the caller's desktop environment and returns. Omitting

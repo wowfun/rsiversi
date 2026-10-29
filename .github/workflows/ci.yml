@@ -640,6 +640,11 @@ jobs:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
       - name: Verify runner architecture
         run: test "$(uname -m)" = "${{ matrix.expected_arch }}"
+      - name: Install Linux test discovery tools
+        if: runner.os == 'Linux'
+        run: |
+          sudo apt-get update
+          sudo apt-get install --no-install-recommends --yes ripgrep
       - uses: dtolnay/rust-toolchain@6c977a6ca4077a0ceb28ffbe03f59d46e9ac8772 # master 2026-08-15
         with:
           toolchain: 1.97.0
@@ -764,6 +769,7 @@ jobs:
         if: ${{ !cancelled() && steps.native_setup.outcome == 'success' }}
         id: standard_build
         run: |
+          cargo build --locked -p rsi-uninstall
           source "$GITHUB_WORKSPACE/.github/scripts/standard-packages.sh"
           cargo test --locked "${RSI_STANDARD_PACKAGE_ARGS[@]}" --all-targets --no-run
         timeout-minutes: 20
@@ -1031,19 +1037,12 @@ jobs:
         timeout-minutes: 30
         shell: pwsh
         run: |
-          # Cargo's Windows child Job prevents persistent Host breakaway. Build
-          # exactly once, then run those test artifacts under the native runner.
+          cargo build --locked -p rsi-uninstall
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
           cargo test --locked -p rsi-cli -p rsi-app-catalog --all-targets --no-run --message-format=json > "$env:RUNNER_TEMP/rsi-native-tests.jsonl"
           if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
-          $artifacts = Get-Content "$env:RUNNER_TEMP/rsi-native-tests.jsonl" | ForEach-Object { $_ | ConvertFrom-Json } |
-            Where-Object { $_.reason -eq 'compiler-artifact' -and $_.profile.test -and $_.executable }
-          if (-not $artifacts) { throw 'No native test artifacts were produced' }
-          $failed = $false
-          foreach ($artifact in $artifacts) {
-            & $artifact.executable
-            if ($LASTEXITCODE -ne 0) { $failed = $true }
-          }
-          if ($failed) { exit 1 }
+          & .github/scripts/windows-native-tests.ps1 -Manifest "$env:RUNNER_TEMP/rsi-native-tests.jsonl"
+          exit $LASTEXITCODE
       - uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020 # v7.0.0
         with:
           node-version: 22.23.2
@@ -1053,14 +1052,7 @@ jobs:
         shell: pwsh
         run: |
           $env:RSI_TEST_NODE = (Get-Command node).Source
-          $artifact = Get-Content "$env:RUNNER_TEMP/rsi-native-tests.jsonl" |
-            ForEach-Object { $_ | ConvertFrom-Json } |
-            Where-Object { $_.reason -eq 'compiler-artifact' -and $_.target.name -eq 'resident_listeners' -and $_.profile.test -and $_.executable } |
-            Select-Object -Last 1
-          if (-not $artifact) { throw 'Missing compiled resident listener tests' }
-          $listing = & $artifact.executable frontend::ordinary_product_watched_smoke --ignored --exact --list
-          if ($LASTEXITCODE -ne 0 -or $listing -notcontains 'frontend::ordinary_product_watched_smoke: test') { throw 'Missing exact frontend watch test' }
-          & $artifact.executable frontend::ordinary_product_watched_smoke --ignored --exact
+          & .github/scripts/windows-native-tests.ps1 -Manifest "$env:RUNNER_TEMP/rsi-native-tests.jsonl" -ExactTest frontend::ordinary_product_watched_smoke -TimeoutSeconds 240
           exit $LASTEXITCODE
       - name: Test the standard product default Windows targets
         if: ${{ !cancelled() && steps.native_toolchain.outcome == 'success' }}

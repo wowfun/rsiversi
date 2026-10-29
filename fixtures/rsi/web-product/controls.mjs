@@ -4,6 +4,15 @@ export async function openSettings(page) {
   if(!await trigger.isVisible())await page.locator('.application-options > summary').click();
   await trigger.click();
 }
+export async function saveSettings(page) {
+  const form=page.locator('form[data-settings-ticket]');
+  const ticket=await form.getAttribute('data-settings-ticket');
+  await form.getByRole('button',{name:'Save settings',exact:true}).click();
+  await page.waitForFunction(ticket=>{
+    const form=document.querySelector('form[data-settings-ticket]');
+    return form&&form.dataset.settingsTicket!==ticket&&!form.querySelector('fieldset').disabled&&!form.querySelector('[role=alert]').textContent;
+  },ticket);
+}
 import {errors} from 'playwright';
 import {assertNoNotices} from './task-checks.mjs';
 export async function navigationOptions(page) {
@@ -114,8 +123,7 @@ export async function closeDetails(page) {
   const active=page.locator('.resource-dock:not([hidden]) [data-dockkit-pane-active=true] [data-dockkit-tab][aria-selected=true]:visible');
   const tab=await active.count()?active:page.locator('[data-dockkit-tab][aria-selected=true]:visible').last();
   const closing=await tab.elementHandle();
-  await tab.click({button:'right'});
-  await page.getByRole('menuitem',{name:'Close resource tab',exact:true}).click();
+  await tab.locator('[data-dockkit-tab-close]').click();
   await page.waitForFunction(element=>!element.isConnected,closing);
   await closing.dispose();
 }

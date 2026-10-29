@@ -48,7 +48,7 @@ async fn inspection_rejects_corrupt_scalar_text_without_filtering_pending_messag
         "UPDATE agent_messages SET target = CAST(X'ff' AS TEXT) WHERE message_id = 'message-2'",
         "UPDATE agent_messages SET bound_turn_id = printf('%1000000s', '') WHERE message_id = 'message-2'",
     ] {
-        let root = tempfile::tempdir().unwrap();
+        let root = private_tempdir();
         let store = SqliteStore::open(root.path()).unwrap();
         let id = ready_fixture(&store).await;
         let before = store.inspect_session(&id).await.unwrap();
@@ -86,7 +86,7 @@ async fn ready_projection_bounds_source_and_rejects_corrupt_lookahead_without_fi
         "UPDATE agent_messages SET target = 'next_step' WHERE message_id = 'message-2'",
         "UPDATE agent_messages SET wake_required = 0 WHERE message_id = 'message-2'",
     ] {
-        let root = tempfile::tempdir().unwrap();
+        let root = private_tempdir();
         let store = SqliteStore::open(root.path()).unwrap();
         let id = ready_fixture(&store).await;
         let first = store.list_ready_messages(&id, None, 1).await.unwrap();
@@ -109,7 +109,7 @@ async fn ready_projection_bounds_source_and_rejects_corrupt_lookahead_without_fi
 #[tokio::test]
 async fn ready_projection_classifies_metadata_without_reading_message_bodies() {
     use rsi_agent_session_protocol::AgentMessageSourceKind;
-    let root = tempfile::tempdir().unwrap();
+    let root = private_tempdir();
     let store = SqliteStore::open(root.path()).unwrap();
     let id = ready_fixture(&store).await;
     let database = Connection::open(root.path().join("sessions.sqlite3")).unwrap();
@@ -162,7 +162,7 @@ fn exact_schema_rejects_missing_or_changed_waiting_predicate() {
         "",
         "CREATE INDEX active_activations_waiting ON active_activations (session_id) WHERE phase = 'running'",
     ] {
-        let root = tempfile::tempdir().unwrap();
+        let root = private_tempdir();
         drop(SqliteStore::open(root.path()).unwrap());
         let path = root.path().join("sessions.sqlite3");
         let connection = Connection::open(&path).unwrap();

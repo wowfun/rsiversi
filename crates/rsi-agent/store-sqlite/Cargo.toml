@@ -28,6 +28,7 @@ tokio-util = { workspace = true, features = ["rt"] }
 rsi-files-native-fs = { path = "../../rsi-files/native-fs" }
 
 [dev-dependencies]
+rsi-workspace-path = { path = "../../rsi-workspace/path" }
 rusqlite = { workspace = true, features = ["trace"] }
 rsi-agent-testkit = { path = "../testkit" }
 rsi-ai-protocol = { path = "../../rsi-ai/protocol" }

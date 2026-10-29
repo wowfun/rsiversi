@@ -93,11 +93,15 @@ async fn start(invocation: ApplicationInvocation) -> rsi::Result<u8> {
                     .map_err(|error| RsiError::Boot(error.to_string()))??;
             composition = composition.with_launch_service(service);
         }
-        let mut web = web_environment()?;
+        let web = web_environment()?;
         #[cfg(any(target_os = "linux", windows))]
-        if watch {
-            web.frontend = super::source_build::frontend(&paths, &configuration)?;
-        }
+        let web = {
+            let mut web = web;
+            if watch {
+                web.frontend = super::source_build::frontend(&paths, &configuration)?;
+            }
+            web
+        };
         let application = rsi::ApplicationComposition::new(
             composition,
             std::sync::Arc::new(rsi_app_catalog::Catalog::new(web)),
@@ -120,8 +124,7 @@ async fn start(invocation: ApplicationInvocation) -> rsi::Result<u8> {
         } else {
             Ok(None)
         };
-        #[cfg(not(any(target_os = "linux", windows)))]
-        let observation: rsi::Result<Option<()>> = Ok(None);
+        #[cfg(any(target_os = "linux", windows))]
         let mut observation = match observation {
             Ok(observation) => observation,
             Err(error) => {
@@ -179,6 +182,7 @@ async fn start(invocation: ApplicationInvocation) -> rsi::Result<u8> {
                 return Err(RsiError::Run("Service Host disconnected during observation".into()));
             }
         };
+        #[cfg(any(target_os = "linux", windows))]
         drop(observation);
         if let Some(result) = result {
             return result.map_err(|error| match error {

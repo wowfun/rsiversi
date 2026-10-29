@@ -2073,6 +2073,10 @@ fn register_contracts(builder: &mut StandardAddonBuilder) -> rsi_host::Result<()
     builder.register_local_contract::<LanguageRegistrarContract>()?;
     builder.register_local_contract::<ImageRegistrarContract>()?;
     builder.register_local_contract::<SessionStoreContract>()?;
+    builder.register_local_contract::<rsi_session_protocol::SessionPurgeCleanupContract>()?;
+    builder
+        .register_local_contract::<rsi_agent_session_protocol::ReferenceCodecRegistrationContract>(
+        )?;
     builder.register_local_contract::<rsi_agent_context::ContextBudgetContract>()?;
     builder.register_local_contract::<rsi_agent_references::ReferencesContract>()?;
     builder.register_local_contract::<rsi_history::HistoryContract>()?;

@@ -1,5 +1,8 @@
 # Web product verification
 
+Settings saves wait for a refreshed editor ticket and enabled controls. React
+retains the editor nodes across saves, so node removal is not a completion signal.
+
 The accessibility component fixture mounts the production React activity and
 notice owners with the document styles in Chromium and Firefox. It checks
 visible activity labels and accessible names, compact rows for conversations absent
@@ -608,7 +611,8 @@ cleanup. Run it with explicit
 It owns temporary HOME/XDG paths and uses no live model provider.
 
 The default queue scenario holds an actual Rust Turn at its deterministic provider,
-replaces one queued input, converts it into the displayed Turn, withdraws it and
+replaces one queued input, verifies that its explicit access policy prevents
+conversion into steering, withdraws it and
 then stops the original Turn. It checks that a second queued input actually
 executes and that the ordinary draft survives. IndexedDB probes independently
 verify opaque queue requests across an unknown reply and reopen. Native addon

@@ -1640,7 +1640,8 @@ async fn fresh_preset_failure_precedes_workspace_registration() {
         })
         .await;
 
-    assert!(matches!(result, Err(SessionError::Backend(_))));
+    assert!(matches!(result, Err(SessionError::Invalid(message))
+        if message.contains("missing-preset") && message.contains("unavailable")));
     assert_eq!(workspace.registrations.load(Ordering::Acquire), 0);
 }
 

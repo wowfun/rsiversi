@@ -1,4 +1,4 @@
-import {openSettings} from './controls.mjs';
+import {openSettings,saveSettings} from './controls.mjs';
 import assert from 'node:assert/strict';
 import {join} from 'node:path';
 import {writeFile} from 'node:fs/promises';
@@ -13,8 +13,8 @@ export async function verifyMcp(page,pane,report,browser) {
     const edit=async config=>{
       await panel.getByRole('button',{name:'Edit HTTP endpoints',exact:true}).click();
       await page.getByRole('button',{name:'Edit as JSON',exact:true}).click();
-      const editor=page.getByRole('textbox',{name:'Settings JSON',exact:true});await editor.fill(JSON.stringify(config));const old=await editor.elementHandle();
-      await page.getByRole('button',{name:'Save settings',exact:true}).click();await page.waitForFunction(element=>!element.isConnected,old);await old.dispose();
+      const editor=page.getByRole('textbox',{name:'Settings JSON',exact:true});await editor.fill(JSON.stringify(config));
+      await saveSettings(page);
       await page.getByRole('button',{name:'Plugins',exact:true}).click();
     };
     await edit({servers:[{id:'fixture',enabled:true,tools:['echo'],transport:{kind:'streamable_http',url:fixture.url,credential:{owner:'rsi.mcp',slot:'browser-fixture'}}}]});

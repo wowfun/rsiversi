@@ -212,6 +212,9 @@ preview. EndpointId persists in Base Storage independently of Session history.
 The Service also owns an isolated UI registry, Session contributions and the
 authenticated UI API. Its explicit Session binder creates ordinary child Profiles
 from semantic Session scopes; no request can name a Context or Local contract key.
+Each Service isolates the Store's reference-codec registry alongside its Store
+contract, so Services sharing a Runtime cannot collide or consume each other's codecs.
+Its Session purge cleanup hook is likewise scoped to that Service's navigation owner.
 Application UI registries remain in their own Local mappings. Service Portable UI
 sources are opt-in Profile entries with an explicit injected service key, using
 the same staged native catalog and existing Meta retirement rules.
@@ -237,9 +240,9 @@ The application disposes its connection subtree before shutting down its Runtime
 Embedded connections use the same negotiated Output client as remote connections.
 An absent completed-output cache leaves conversation available and returns the
 [Output domain's unavailable result](../../rsi-process/output-api/README.md) on reads.
-On Windows, an occupied owner lease returns its actionable conflict immediately:
-there is no local daemon endpoint to await. Linux discovery retains its bounded
-wait for an existing daemon or starting owner.
+Linux and Windows discovery wait at most 15 seconds for an occupied owner to
+publish a usable endpoint, then report the owner conflict without stealing its
+lease. Both platforms support resident daemon endpoints.
 
 `StandardServiceDaemon::start_in` mounts the publishing daemon in a caller-owned
 Runtime with the same isolated child-Profile lifetime. It consumes the exact

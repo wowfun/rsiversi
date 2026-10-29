@@ -7,7 +7,10 @@ struct Fixture {
 }
 impl Fixture {
     fn new() -> Self {
-        let root = tempfile::tempdir_in(std::env::temp_dir().canonicalize().unwrap()).unwrap();
+        let root = tempfile::tempdir_in(rsi_workspace_protocol::canonical_native_path(
+            std::env::temp_dir().canonicalize().unwrap(),
+        ))
+        .unwrap();
         let paths = |name: &str| {
             let directory = root.path().join(name);
             let config = directory.join("config");

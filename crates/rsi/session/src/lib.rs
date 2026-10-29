@@ -479,7 +479,17 @@ impl LocalSessionService {
         };
         let draft = AgentSessionDraft::new(header, composition)
             .await
-            .map_err(|error| SessionError::Backend(error.to_string()))?;
+            .map_err(|error| {
+                use rsi_agent_composition_protocol::AgentCompositionError as Error;
+                match error {
+                    Error::Unavailable { .. } | Error::InvalidInput(_) => {
+                        SessionError::Invalid(error.to_string())
+                    }
+                    Error::Capacity => SessionError::Capacity,
+                    Error::ShuttingDown => SessionError::ShuttingDown,
+                    _ => SessionError::Backend(error.to_string()),
+                }
+            })?;
         self.handle_from_state(HandleState::Fresh(Box::new(draft)), Some(lease))
     }
 }

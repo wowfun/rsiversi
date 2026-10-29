@@ -33,6 +33,10 @@ physical directory.
 
 An unsupported Media or Agent Store capability becomes Session API unavailability,
 not invalid caller input; backend diagnostics do not cross that projection.
+Fresh Session preparation rejects an unavailable requested Agent preset as a
+bounded invalid-input diagnostic before publishing any durable Session. Composition
+capacity and shutdown retain their admission errors rather than becoming an unknown
+mutation outcome.
 
 Metrics acquisition supplies each Session's immutable output budget table to its
 reducer, including separate child tables during tree scans. It never derives a

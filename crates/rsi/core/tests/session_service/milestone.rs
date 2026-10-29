@@ -130,7 +130,10 @@ async fn uds_references_keep_exact_retry_cas_and_real_parent_interval_after_rest
     for kind in 0..4 {
         let mut forged = frozen.clone();
         match kind {
-            0 => forged.preview.push('x'),
+            0 => {
+                let first = forged.preview.chars().next().unwrap().len_utf8();
+                forged.preview.replace_range(..first, "X");
+            }
             1 => {
                 let rsi_agent_session_protocol::ReferenceSource::Native { binding } =
                     &mut forged.metadata.source

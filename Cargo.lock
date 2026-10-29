@@ -5284,6 +5284,7 @@ dependencies = [
  "rsi-files-native-fs",
  "rsi-meta",
  "rsi-sandbox",
+ "rsi-workspace-path",
  "rusqlite",
  "same-file",
  "serde",

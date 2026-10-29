@@ -688,7 +688,12 @@ plugin = "rsi.application.tui"
     }
     fn start_presentation(fixture: &CliFixture, arguments: &[&str], native: bool) -> Self {
         Self::write_profile(fixture, native);
-        Self::launch(fixture, arguments, &["run", "test-tui"])
+        let entry: &[&str] = if native {
+            &["--watch", "run", "test-tui"]
+        } else {
+            &["run", "test-tui"]
+        };
+        Self::launch(fixture, arguments, entry)
     }
     fn launch(fixture: &CliFixture, arguments: &[&str], entry: &[&str]) -> Self {
         Self::launch_environment(fixture, arguments, entry, &[])
@@ -1333,6 +1338,7 @@ async fn native_presentation_reloads_in_the_running_tui_without_losing_draft_or_
     home.until("Draft retained; nothing was sent").await;
     home.send(b"\x03");
     home.finish().await;
+    fixture.assert_success(&["host", "stop"]);
     std::fs::write(settings_path, saved_settings).unwrap();
     let mut terminal =
         TerminalClient::start_presentation(&fixture, &["--session-id", "native-hot-reload"], true);

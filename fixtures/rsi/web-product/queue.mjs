@@ -24,9 +24,9 @@ export async function verifyQueue(page,pane,service,report,name) {
   assert.equal(await pane.locator('.message.user').filter({hasText:'Queue original editable input'}).count(),0);
   assert.equal(await pane.locator('.message.user').filter({hasText:'Queue replacement content'}).count(),1);
   assert.equal(await composer.inputValue(),'Ordinary composer draft survives every queue operation');
-  await rows.first().getByRole('button',{name:'Steer now',exact:true}).click();
-  await rows.first().filter({hasText:'Next step'}).waitFor();
-  assert.equal(await rows.first().getAttribute('data-slot'),initialSlot);
+  // The composer freezes the selected access policy on every next-Turn input.
+  // Converting it to steering would silently discard that policy.
+  assert.equal(await rows.first().getByRole('button',{name:'Steer now',exact:true}).count(),0);
   await rows.first().getByRole('button',{name:'Withdraw',exact:true}).click();
   await waitUntil(async()=>await rows.count()===1,'withdraw removes only selected slot');
   assert.equal(await composer.inputValue(),'Ordinary composer draft survives every queue operation');
@@ -39,5 +39,5 @@ export async function verifyQueue(page,pane,service,report,name) {
   await page.screenshot({path:join(report,`${name}-queue-after-stop.png`)});
   await pane.getByRole('button',{name:'Stop',exact:true}).click();
   await pane.locator('.pane-status').filter({hasText:'Cancelled'}).waitFor({state:'attached'});
-  await writeFile(join(report,`${name}-queue.json`),JSON.stringify({replacementKeepsSlot:true,oneUserBlock:true,convertExactDisplayedTurn:true,withdrawPendingOnly:true,stopPreservesSuccessorTurn:true,composerPreserved:true,requests:service.provider.requests.filter(request=>request.prompt.includes('queue survivor') || request.prompt.includes('Queue replacement'))},null,2));
+  await writeFile(join(report,`${name}-queue.json`),JSON.stringify({replacementKeepsSlot:true,oneUserBlock:true,explicitAccessPreventsSteering:true,withdrawPendingOnly:true,stopPreservesSuccessorTurn:true,composerPreserved:true,requests:service.provider.requests.filter(request=>request.prompt.includes('queue survivor') || request.prompt.includes('Queue replacement'))},null,2));
 }

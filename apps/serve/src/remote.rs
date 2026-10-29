@@ -18,6 +18,7 @@ use tokio_util::{sync::CancellationToken, task::TaskTracker};
 pub struct RemoteFactory {
     web: Option<Arc<crate::WebLaunch>>,
     arguments: Vec<OsString>,
+    diagnostic: Mutex<Option<RsiError>>,
 }
 impl RemoteFactory {
     /// Foreground authenticated Serve attachment.
@@ -25,6 +26,7 @@ impl RemoteFactory {
         Self {
             web: None,
             arguments,
+            diagnostic: Mutex::new(None),
         }
     }
     /// Short browser launch attachment.
@@ -32,6 +34,7 @@ impl RemoteFactory {
         Self {
             web: Some(web),
             arguments: Vec::new(),
+            diagnostic: Mutex::new(None),
         }
     }
     fn command(&self, config: &ConfigValue) -> rsi::Result<Command> {
@@ -72,7 +75,15 @@ impl RemoteFactory {
 }
 impl rsi_application::ApplicationDiagnostic for RemoteFactory {
     fn take_diagnostic(&self) -> Option<RsiError> {
-        self.web.as_ref().and_then(|web| web.take_diagnostic())
+        self.web
+            .as_ref()
+            .and_then(|web| web.take_diagnostic())
+            .or_else(|| {
+                self.diagnostic
+                    .lock()
+                    .unwrap_or_else(std::sync::PoisonError::into_inner)
+                    .take()
+            })
     }
 }
 #[async_trait]
@@ -80,8 +91,20 @@ impl PluginFactory for RemoteFactory {
     fn prepare(&self, config: &ConfigValue) -> rsi_meta::Result<PreparedActivation> {
         Ok(PreparedActivation::with_state(
             ConfigValue::Null,
-            self.command(config)
-                .map_err(|e| MetaError::InvalidInput(e.to_string()))?,
+            self.command(config).map_err(|error| {
+                let mut message = error.to_string();
+                let mut end = message.len().min(4096);
+                while !message.is_char_boundary(end) {
+                    end -= 1;
+                }
+                message.truncate(end);
+                *self
+                    .diagnostic
+                    .lock()
+                    .unwrap_or_else(std::sync::PoisonError::into_inner) =
+                    Some(RsiError::Boot(message.clone()));
+                MetaError::InvalidInput(message)
+            })?,
             32 * 1024,
         )
         .requiring_local::<RemoteServiceContract>())

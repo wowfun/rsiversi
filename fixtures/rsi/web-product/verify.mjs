@@ -1,5 +1,5 @@
 import {disconnect} from './controls.mjs';
-import {workspaceForm,navigationOptions} from './controls.mjs';
+import {workspaceForm,navigationOptions,openSettings,saveSettings} from './controls.mjs';
 import {closeDetails,details,openResource,resources,sourceInspectionGeometry} from "./controls.mjs";
 import {detailMode,navigationFilter,selectSurface,sessionTools} from './controls.mjs';
 import {recordNavigationEvidence} from './navigation-evidence.mjs';
@@ -187,11 +187,15 @@ try {
       await page.screenshot({ path: join(report, `${name}-markdown.png`) });
       await verifyImages(page, right, service, report, name);
       await verifyTree(page, right, service, report, name);
-      const effort = right.getByRole("combobox", { name: "Compare reasoning effort", exact: true });
-      await effort.waitFor();
-      assert.deepEqual(await effort.locator("option").evaluateAll(options => options.map(option => option.value)), ["", "low", "high"]);
+      const effort = async value => {
+        await right.getByRole('button',{name:/^Select model, current /}).click();
+        await page.getByRole('menuitem',{name:/^Effort /}).click();
+        const options=page.getByRole('menuitemradio');
+        assert.deepEqual(await options.allTextContents(), ['Default (Low)','Low','High']);
+        await options.filter({hasText:value==='high'?/^High$/:/^Default/}).click();
+      };
       const beforeEffort = service.provider.requests.length;
-      await effort.selectOption("high");
+      await effort('high');
       await right.locator('[data-producer="rsi.model-selection.view"] pre').filter({ hasText: '"reasoning_effort": "high"' }).waitFor({ state: "attached" });
       assert.equal(service.provider.requests.length, beforeEffort, "changing effort must not submit a message");
       await right.getByRole("textbox", { name: "Compare message" }).fill("Verify the declared high effort choice");
@@ -199,7 +203,7 @@ try {
       await right.locator(".message-text").filter({ hasText: "Reviewed: Verify the declared high effort choice" }).waitFor();
       assert.equal(service.provider.requests.at(-1).reasoning_effort, "high");
       await page.screenshot({ path: join(report, `${name}-model-effort.png`) });
-      await effort.selectOption("");
+      await effort('');
       await right.locator('[data-producer="rsi.model-selection.view"] pre').filter({ hasText: '"reasoning_effort": null' }).waitFor({ state: "attached" });
       assert.equal(service.provider.requests.length, beforeEffort + 1);
 
@@ -278,7 +282,7 @@ try {
 
       assert.match(await left.locator(".transcript").innerText(), /\bsegment 0\b/);
       assert.match(await left.locator(".transcript").innerText(), /Stream complete\./);
-      await page.getByRole("button", { name: "Settings", exact: true }).click();
+      await openSettings(page);
       await page.getByRole("button", { name: "Advanced", exact: true }).click();
       await page.getByRole("button", { name: "rsi.agent", exact: true }).click();
       await page.locator(".settings-applies").filter({ hasText: "Applies to new conversations" }).waitFor();
@@ -300,10 +304,7 @@ try {
       await caps.fill(capValue('123'));
       await page.screenshot({path:join(report,`${name}-settings-typed.png`)});
       await page.setViewportSize({width:420,height:860});await page.screenshot({path:join(report,`${name}-settings-typed-narrow.png`)});await page.setViewportSize({width:1440,height:980});
-      const savingEditor = await approvalSetting.elementHandle();
-      await page.getByRole("button", { name: "Save settings", exact: true }).click();
-      await page.waitForFunction(previous => !previous.isConnected, savingEditor);
-      await savingEditor.dispose();
+      await saveSettings(page);
       assert(await approvalSetting.isChecked());
       await caps.fill(capValue('18446744073709551615'));
       await page.getByRole('button', {name:'Save settings',exact:true}).click();
@@ -315,9 +316,7 @@ try {
       assert.match(exactText,/"max_output_tokens":18446744073709551615/);
       await page.screenshot({path:join(report,`${name}-settings-exact-json.png`)});
       await exactEditor.fill(exactText.replace('"max_output_tokens":18446744073709551615','"max_output_tokens":123'));
-      const savingExact=await exactEditor.elementHandle();
-      await page.getByRole('button', {name:'Save settings',exact:true}).click();
-      await page.waitForFunction(previous=>!previous.isConnected,savingExact);await savingExact.dispose();
+      await saveSettings(page);
       assert(await approvalSetting.isChecked());
       assert.equal(JSON.parse(await caps.inputValue())[0].max_output_tokens,123);
       await page.getByRole("button", { name: "Close settings", exact: true }).click();
@@ -410,16 +409,13 @@ try {
       await selectSurface(page,"compare");
       assert.match(await right.locator(".transcript").innerText(), /Review the right workspace/);
       await page.setViewportSize({ width: 1440, height: 980 });
-      await page.getByRole("button", { name: "Settings", exact: true }).click();
+      await openSettings(page);
       await page.getByRole("button", { name: "Advanced", exact: true }).click();
       await page.getByRole("button", { name: "rsi.client", exact: true }).click();
       await page.locator(".registered-settings .hint").filter({ hasText: "GUI preferences apply live across this Profile" }).waitFor();
       const preferenceEditor = page.getByRole("combobox", { name: "Settings / web / submit_key",exact:true });
       await preferenceEditor.selectOption({label:"enter"});
-      const previousPreferences = await preferenceEditor.elementHandle();
-      await page.getByRole("button", { name: "Save settings", exact: true }).click();
-      await page.waitForFunction(previous => !previous.isConnected, previousPreferences);
-      await previousPreferences.dispose();
+      await saveSettings(page);
       await page.getByRole("button", { name: "Close settings", exact: true }).click();
       assert.match(await left.locator(".composer-hint").innerText(), /Enter to send · Shift Enter for a new line/);
       await page.evaluate(() => document.addEventListener("rsi-disconnected", event => { window.closedResources = event.detail; }, { once: true }));

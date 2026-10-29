@@ -36,7 +36,7 @@ fn count_summary_reads(event: TraceEvent<'_>) {
 #[tokio::test]
 async fn activity_summaries_use_one_query_preserve_order_and_do_not_read_headers() {
     let _measurement = MEASUREMENT.lock().await;
-    let root = tempfile::tempdir().unwrap();
+    let root = private_tempdir();
     let store = SqliteStore::open(root.path()).unwrap();
     let a = seed_session(&store, "a").await;
     let b = seed_session(&store, "b").await;
@@ -149,7 +149,7 @@ async fn warm_fork_selection_work_does_not_grow_with_unselected_history() {
     let _measurement = MEASUREMENT.lock().await;
     let mut work = Vec::new();
     for history_size in [32, 512] {
-        let root = tempfile::tempdir().unwrap();
+        let root = private_tempdir();
         let store = SqliteStore::open(root.path()).unwrap();
         let (id, turn) = completed_history(&store, history_size).await;
         let validated = store.inner.validation_runs.load(Ordering::Relaxed);
@@ -251,7 +251,7 @@ async fn waiting_selection_work_and_pagination_ignore_unrelated_activations() {
     let _measurement = MEASUREMENT.lock().await;
     let mut work = Vec::new();
     for unrelated in [16, 256] {
-        let root = tempfile::tempdir().unwrap();
+        let root = private_tempdir();
         let store = SqliteStore::open(root.path()).unwrap();
         for index in 0..unrelated {
             activation(&store, &format!("a-{index:04}"), false).await;
@@ -315,7 +315,7 @@ async fn waiting_selection_work_and_pagination_ignore_unrelated_activations() {
 
 #[tokio::test]
 async fn paused_warm_fork_resolution_leaves_foreground_free_and_survives_waiter_cancellation() {
-    let root = tempfile::tempdir().unwrap();
+    let root = private_tempdir();
     let store = SqliteStore::open(root.path()).unwrap();
     let (parent, turn) = completed_history(&store, 32).await;
     let warm = seed_session(&store, "unrelated").await;
@@ -382,7 +382,7 @@ async fn paused_warm_fork_resolution_leaves_foreground_free_and_survives_waiter_
 
 #[tokio::test]
 async fn fork_boundaries_reuse_exact_identities_across_append_but_not_reopen() {
-    let root = tempfile::tempdir().unwrap();
+    let root = private_tempdir();
     let store = SqliteStore::open(root.path()).unwrap();
     let (id, turn) = completed_history(&store, 4).await;
     let all = store
@@ -473,7 +473,7 @@ async fn fork_boundaries_reuse_exact_identities_across_append_but_not_reopen() {
 
 #[tokio::test]
 async fn fork_boundary_cache_is_bounded_evicts_and_does_not_hold_pins() {
-    let root = tempfile::tempdir().unwrap();
+    let root = private_tempdir();
     let store = SqliteStore::open(root.path()).unwrap();
     let (id, _) = completed_history(&store, 258).await;
     let turn = |index: u64| test_fact(index * 2 + 1).body().turn_id().clone();
@@ -524,7 +524,7 @@ async fn fork_boundary_cache_is_bounded_evicts_and_does_not_hold_pins() {
 
 #[tokio::test]
 async fn poisoned_fork_cache_falls_back_to_validated_resolution() {
-    let root = tempfile::tempdir().unwrap();
+    let root = private_tempdir();
     let store = SqliteStore::open(root.path()).unwrap();
     let (id, turn) = completed_history(&store, 2).await;
     let worker = store.clone();
@@ -598,7 +598,7 @@ async fn ready_root_pages_seek_past_duplicates_with_and_without_statistics() {
         let mut work = Vec::new();
         let mut continuation_work = Vec::new();
         for duplicates in [1_u64, 64] {
-            let root = tempfile::tempdir().unwrap();
+            let root = private_tempdir();
             let store = SqliteStore::open(root.path()).unwrap();
             let mut ids = Vec::new();
             for (name, count) in [
@@ -692,7 +692,7 @@ fn pause_ready_read(event: TraceEvent<'_>) {
 #[tokio::test]
 async fn ready_root_page_keeps_one_snapshot_while_wal_writer_commits() {
     let _measurement = MEASUREMENT.lock().await;
-    let root = tempfile::tempdir().unwrap();
+    let root = private_tempdir();
     let store = SqliteStore::open(root.path()).unwrap();
     let a = seed_ready_root(&store, "a", 4).await;
     let b = seed_session(&store, "b").await;

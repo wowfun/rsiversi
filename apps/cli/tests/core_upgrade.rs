@@ -16,7 +16,10 @@ struct Fixture {
 }
 impl Fixture {
     fn new() -> Self {
-        let root = tempfile::tempdir().unwrap();
+        let root = tempfile::tempdir_in(rsi_workspace_path::canonical_native_path(
+            std::env::temp_dir().canonicalize().unwrap(),
+        ))
+        .unwrap();
         let bin = root.path().join("bin");
         let package = root.path().join("package");
         rsi_files_native_fs::create_absolute_directory_no_follow(&bin).unwrap();

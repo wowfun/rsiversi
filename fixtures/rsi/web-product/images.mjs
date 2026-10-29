@@ -6,7 +6,9 @@ import { writeFile } from 'node:fs/promises';
 
 export async function verifyImages(page, pane, service, report, name) {
   // setInputFiles bypasses the disabled attachment control; await the bound draft first.
-  await pane.getByTestId('composer-send').click({trial:true});
+  const input=await pane.locator('input[type="file"]').elementHandle();
+  await page.waitForFunction(element=>!element.matches(':disabled'),input);
+  await input.dispose();
   const before = service.provider.requests.length;
   const picker = pane.locator('input[type="file"]');
   await picker.setInputFiles([

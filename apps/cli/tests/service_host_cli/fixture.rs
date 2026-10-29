@@ -8,7 +8,7 @@ struct CliFixture {
 
 impl CliFixture {
     fn new(endpoint: &str) -> Self {
-        let temporary = tempfile::tempdir().unwrap();
+        let temporary = tempfile::tempdir_in(rsi_workspace_path::canonical_native_path(std::env::temp_dir().canonicalize().unwrap())).unwrap();
         let config = temporary.path().join("config/rsi");
         let workspace = temporary.path().join("workspace");
         std::fs::create_dir_all(&config).unwrap();

@@ -7,7 +7,7 @@ async fn program_contract(
 }
 #[tokio::test]
 async fn program_records_share_memory_sqlite_bounds_and_survive_reopen() {
-    let root = tempfile::tempdir().unwrap();
+    let root = private_tempdir();
     let store = SqliteStore::open(root.path()).unwrap();
     let (id, run) = program_contract(&store).await;
     let before = store.read_program_records(&id, &run).await.unwrap();
@@ -21,7 +21,7 @@ async fn program_records_share_memory_sqlite_bounds_and_survive_reopen() {
 }
 #[tokio::test]
 async fn program_index_corruption_is_rejected_before_selected_record_read() {
-    let root = tempfile::tempdir().unwrap();
+    let root = private_tempdir();
     let store = SqliteStore::open(root.path()).unwrap();
     let (id, run) = program_contract(&store).await;
     let first = store
@@ -42,7 +42,7 @@ async fn program_index_corruption_is_rejected_before_selected_record_read() {
 
 #[tokio::test]
 async fn program_notice_graph_rejects_coordinated_control_and_mailbox_corruption() {
-    let root = tempfile::tempdir().unwrap();
+    let root = private_tempdir();
     let store = SqliteStore::open(root.path()).unwrap();
     let (id, _) = program_contract(&store).await;
     drop(store);
@@ -106,7 +106,7 @@ async fn activation_counterpart_lookup_work_is_independent_of_control_history() 
     use rusqlite::StatementStatus;
     let mut work = Vec::new();
     for history in [1, 5000] {
-        let root = tempfile::tempdir().unwrap();
+        let root = private_tempdir();
         let store = SqliteStore::open(root.path()).unwrap();
         let header = test_header("counterpart-history");
         let id = header.session_id().clone();
@@ -184,7 +184,7 @@ async fn activation_counterpart_lookup_work_is_independent_of_control_history() 
 
 #[tokio::test]
 async fn workflow_history_rejects_acceptance_projection_corruption() {
-    let root = tempfile::tempdir().unwrap();
+    let root = private_tempdir();
     let store = SqliteStore::open(root.path()).unwrap();
     let (id, run) = program_contract(&store).await;
     drop(store);

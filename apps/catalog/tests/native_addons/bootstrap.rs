@@ -517,19 +517,11 @@ async fn remote_server(
     )
     .unwrap();
     let server_composition = composition(server_root);
-    let program = rsi::ProfileCatalog::new(
-        server_composition.paths().clone(),
-        rsi_app_catalog::metadata(),
-    )
-    .application(&rsi::ApplicationProfileId::new("serve").unwrap())
-    .unwrap()
-    .program()
-    .unwrap();
     let reserve = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
     let address = reserve.local_addr().unwrap();
     drop(reserve);
-    let (server, _) = rsi::standard_application_host(
-        rsi_app_catalog::compose(server_composition).unwrap(),
+    let (server, program) = super::support::embedded_serve(
+        server_composition,
         vec![
             "--bind".into(),
             address.to_string().into(),
@@ -537,8 +529,7 @@ async fn remote_server(
             format!("http://{address}").into(),
             "--dev-http".into(),
         ],
-    )
-    .unwrap();
+    );
     let server = server.start_program(program).await.unwrap();
     let address = server
         .lookup_local::<rsi_api_http::HttpListenerContract>()
