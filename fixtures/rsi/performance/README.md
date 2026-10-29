@@ -2,7 +2,8 @@
 
 The weekly/manual `performance-evidence` workflow runs optimized Linux Store,
 GUI and terminal jobs with separate Cargo caches. Its independent parser-fuzz
-job checks the locked fixture workspace without running a campaign.
+job checks the locked fixture workspace and runs the bounded campaigns described
+by the [parser fixture](../parser-fuzz/README.md).
 `python3 fixtures/rsi/performance/run.py store|gui|tui OUTPUT` runs the
 same selection locally from the repository root. It records the exact commit,
 dirty-state flag, toolchain, runner/platform, commands and raw sample logs.
@@ -29,3 +30,8 @@ case identities fail validation; inherited Store matrix overrides are cleared.
 
 Measurement rows must have the owning schema and nonzero work counts. Zero CPU
 or queue durations remain valid samples on coarse timers; they are not a timing gate.
+
+The admission tests run through `python3 fixtures/tools/python-tests.py
+fixtures/rsi/performance` in ordinary CI as well as before measurement collection.
+They isolate platform discovery from mocked subprocess execution, so Linux and
+Windows exercise the same failed-probe and incomplete-evidence behavior.

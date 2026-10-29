@@ -94,7 +94,7 @@ jobs:
 
   lockfiles:
     runs-on: ubuntu-24.04
-    timeout-minutes: 40
+    timeout-minutes: 50
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
       - uses: dtolnay/rust-toolchain@6c977a6ca4077a0ceb28ffbe03f59d46e9ac8772 # master 2026-08-15
@@ -297,6 +297,7 @@ jobs:
           mkdir -p "$GITHUB_WORKSPACE/target/rsi-tools/pnpm"
           cp ../../../apps/devtools/tools/package{,-lock}.json "$GITHUB_WORKSPACE/target/rsi-tools/pnpm/"
           npm ci --prefix "$GITHUB_WORKSPACE/target/rsi-tools/pnpm" --ignore-scripts --no-audit --no-fund
+          cargo test --locked -p rsi-app-tools --test frontend_install -- --ignored --list | rg ": test$"
           cargo test --locked -p rsi-app-tools --test frontend_install -- --ignored
           pnpm -C ../../../apps/web install --frozen-lockfile --ignore-scripts --store-dir "$GITHUB_WORKSPACE/target/rsi-app/pnpm-store"
           pnpm -C ../../../apps/web typecheck
@@ -316,20 +317,10 @@ jobs:
         if: ${{ !cancelled() && steps.standard_dev_build.outcome == 'success' }}
         timeout-minutes: 10
         run: |
-          declare -A previous_policy
-          restore_policy() {
-            for key in "${!previous_policy[@]}"; do sudo sysctl -w "$key=${previous_policy[$key]}"; done
-          }
-          trap restore_policy EXIT
-          for setting in kernel.unprivileged_userns_clone=1 kernel.apparmor_restrict_unprivileged_userns=0; do
-            key=${setting%%=*}
-            if [[ -e /proc/sys/${key//.//} ]]; then
-              previous_policy[$key]=$(sysctl -n "$key")
-              sudo sysctl -w "$setting"
-            fi
-          done
+          source "$GITHUB_WORKSPACE/.github/scripts/sandbox-policy.sh" full
           export RSI_TEST_NODE="$(command -v node)"
           cargo test --locked -p rsi-cli --test resident_listeners ordinary_product_runtime_smoke -- --exact
+          cargo test --locked -p rsi-cli --test resident_listeners frontend::ordinary_product_watched_smoke -- --ignored --exact --list | rg --fixed-strings --line-regexp 'frontend::ordinary_product_watched_smoke: test'
           cargo test --locked -p rsi-cli --test resident_listeners frontend::ordinary_product_watched_smoke -- --ignored --exact
 
       - name: Exercise the product Web application over TLS and HTTP/2
@@ -342,20 +333,7 @@ jobs:
         run: |
           mkdir -p "$RUNNER_TEMP/rsi-browser-logs"
           exec > >(tee "$RUNNER_TEMP/rsi-browser-logs/web_product.log") 2>&1
-          declare -A previous_policy
-          restore_policy() {
-            for key in "${!previous_policy[@]}"; do
-              sudo sysctl -w "$key=${previous_policy[$key]}"
-            done
-          }
-          trap restore_policy EXIT
-          for setting in kernel.unprivileged_userns_clone=1 kernel.apparmor_restrict_unprivileged_userns=0; do
-            key=${setting%%=*}
-            if [[ -e /proc/sys/${key//.//} ]]; then
-              previous_policy[$key]=$(sysctl -n "$key")
-              sudo sysctl -w "$setting"
-            fi
-          done
+          source "$GITHUB_WORKSPACE/.github/scripts/sandbox-policy.sh" full
           export RSI_PAIRED_BUNDLE="$(cd "$GITHUB_WORKSPACE" && cargo run --quiet --locked -p rsi-app-tools -- fixture-path web)"
           npm test
           RSI_WEB_REPORT="$RUNNER_TEMP/rsi-web-evidence/alignment" node ui-alignment.mjs
@@ -364,13 +342,25 @@ jobs:
           RSI_REPORT_DIR="$RUNNER_TEMP/rsi-web-evidence/navigation-order" node navigation-order.mjs
           RSI_REPORT_DIR="$RUNNER_TEMP/rsi-web-evidence/device-storage" node device-storage.mjs
           RSI_REPORT_DIR="$RUNNER_TEMP/rsi-web-evidence/review-lifecycle" node review-lifecycle.mjs
+          RSI_REPORT_DIR="$RUNNER_TEMP/rsi-web-evidence/history-picker" node history-picker.mjs
+          RSI_REPORT_DIR="$RUNNER_TEMP/rsi-web-evidence/workspace-navigation" node workspace-navigation.mjs
+          RSI_REPORT_DIR="$RUNNER_TEMP/rsi-web-evidence/workspace-model-settings" node workspace-model-settings.mjs
+          RSI_REPORT_DIR="$RUNNER_TEMP/rsi-web-evidence/starting-transcript" node starting-transcript.mjs
+          RSI_REPORT_DIR="$RUNNER_TEMP/rsi-web-evidence/process-transcript" node process-transcript.mjs
+          RSI_REPORT_DIR="$RUNNER_TEMP/rsi-web-evidence/composer-controls" node composer-controls.mjs
+          RSI_REPORT_DIR="$RUNNER_TEMP/rsi-web-evidence/composer-initialization" node composer-initialization.mjs
+          RSI_REPORT_DIR="$RUNNER_TEMP/rsi-web-evidence/markdown" node markdown.mjs
+          RSI_REPORT_DIR="$RUNNER_TEMP/rsi-web-evidence/review-regressions" node presentation-invariants.mjs
+          RSI_REPORT_DIR="$RUNNER_TEMP/rsi-web-evidence/review-composer" node review-composer.mjs
+          RSI_REPORT_DIR="$RUNNER_TEMP/rsi-web-evidence/responsiveness" node responsiveness.mjs
           RSI_REPORT_DIR="$RUNNER_TEMP/rsi-web-evidence/settings-drafts" node settings-drafts.mjs
           RSI_REPORT_DIR="$RUNNER_TEMP/rsi-web-evidence/restore-tabs" node restore-tabs.mjs
           RSI_WEB_REPORT="$RUNNER_TEMP/rsi-web-evidence/workbench" node workbench.mjs
           cd ../../..
           node fixtures/rsi/workbench-reference/settings-goldens.mjs --report "$RUNNER_TEMP/rsi-web-evidence/settings-goldens"
           git clone --filter=blob:none --no-checkout https://github.com/deepseek-ai/deepseek-harness "$RUNNER_TEMP/rsi-workbench-reference"
-          git -C "$RUNNER_TEMP/rsi-workbench-reference" checkout --detach 4878cdabd87d4041bdaff61d04c966883b9fd07a
+          git -C "$RUNNER_TEMP/rsi-workbench-reference" checkout --detach 22ddee3792402c3e70ec5f86a63c3e3e895a2f60
+          RSI_DSH_REFERENCE="$RUNNER_TEMP/rsi-workbench-reference" node --test apps/web/tests/provenance.test.mjs
           RSI_DSH_REFERENCE="$RUNNER_TEMP/rsi-workbench-reference" node fixtures/rsi/workbench-reference/verify.mjs --report "$RUNNER_TEMP/rsi-web-evidence/workbench-reference"
 
       - name: Exercise canonical Workflow Dock and Node cleanup
@@ -381,20 +371,7 @@ jobs:
         run: |
           mkdir -p "$RUNNER_TEMP/rsi-browser-logs"
           exec > >(tee "$RUNNER_TEMP/rsi-browser-logs/web_workflow.log") 2>&1
-          declare -A previous_policy
-          restore_policy() {
-            for key in "${!previous_policy[@]}"; do
-              sudo sysctl -w "$key=${previous_policy[$key]}"
-            done
-          }
-          trap restore_policy EXIT
-          for setting in kernel.unprivileged_userns_clone=1 kernel.apparmor_restrict_unprivileged_userns=0; do
-            key=${setting%%=*}
-            if [[ -e /proc/sys/${key//.//} ]]; then
-              previous_policy[$key]=$(sysctl -n "$key")
-              sudo sysctl -w "$setting"
-            fi
-          done
+          source "$GITHUB_WORKSPACE/.github/scripts/sandbox-policy.sh" full
           export RSI_PAIRED_BUNDLE="$(cd "$GITHUB_WORKSPACE" && cargo run --quiet --locked -p rsi-app-tools -- fixture-path web)"
           RSI_TEST_NODE="$(command -v node)" RSI_WEB_REPORT="$RUNNER_TEMP/rsi-web-evidence/workflow-dock" node workflow-verify.mjs --dock-only
 
@@ -432,20 +409,7 @@ jobs:
         run: |
           mkdir -p "$RUNNER_TEMP/rsi-browser-logs"
           exec > >(tee "$RUNNER_TEMP/rsi-browser-logs/web_integrations.log") 2>&1
-          declare -A previous_policy
-          restore_policy() {
-            for key in "${!previous_policy[@]}"; do
-              sudo sysctl -w "$key=${previous_policy[$key]}"
-            done
-          }
-          trap restore_policy EXIT
-          for setting in kernel.unprivileged_userns_clone=1 kernel.apparmor_restrict_unprivileged_userns=0; do
-            key=${setting%%=*}
-            if [[ -e /proc/sys/${key//.//} ]]; then
-              previous_policy[$key]=$(sysctl -n "$key")
-              sudo sysctl -w "$setting"
-            fi
-          done
+          source "$GITHUB_WORKSPACE/.github/scripts/sandbox-policy.sh" full
           export RSI_PAIRED_BUNDLE="$(cd "$GITHUB_WORKSPACE" && cargo run --quiet --locked -p rsi-app-tools -- fixture-path web)"
           cd ../../..
           cargo run --locked -p rsi-app-tools -- fixture-build profile-leaf-probe "$RUNNER_TEMP/rsi-profile-probe"
@@ -486,20 +450,7 @@ jobs:
           export RSI_WEB_ASSETS="$(cd "$GITHUB_WORKSPACE" && cargo run --quiet --locked -p rsi-app-tools -- fixture-path web)/assets"
           test -x "$RSI_WEB_BINARY"
           test -d "$RSI_WEB_ASSETS"
-          declare -A previous_policy
-          restore_policy() {
-            for key in "${!previous_policy[@]}"; do
-              sudo sysctl -w "$key=${previous_policy[$key]}"
-            done
-          }
-          trap restore_policy EXIT
-          for setting in kernel.unprivileged_userns_clone=1 kernel.apparmor_restrict_unprivileged_userns=0; do
-            key=${setting%%=*}
-            if [[ -e /proc/sys/${key//.//} ]]; then
-              previous_policy[$key]=$(sysctl -n "$key")
-              sudo sysctl -w "$setting"
-            fi
-          done
+          source "$GITHUB_WORKSPACE/.github/scripts/sandbox-policy.sh" full
           node terminal-verify.mjs
       - name: Exercise Session export downloads
         if: ${{ !cancelled() && steps.web_build.outcome == 'success' && steps.web_harness.outcome == 'success' }}
@@ -508,10 +459,7 @@ jobs:
         env:
           RSI_WEB_REPORT: ${{ runner.temp }}/rsi-web-export-evidence
         run: |
-          setting=kernel.apparmor_restrict_unprivileged_userns
-          previous=$(sysctl -n "$setting")
-          trap 'sudo sysctl -w "$setting=$previous"' EXIT
-          sudo sysctl -w "$setting=0"
+          source "$GITHUB_WORKSPACE/.github/scripts/sandbox-policy.sh" apparmor
           node export-verify.mjs
       - name: Preserve paired addon evidence
         if: always()
@@ -578,7 +526,7 @@ jobs:
           - os: macos-15
             expected_arch: arm64
     runs-on: ${{ matrix.os }}
-    timeout-minutes: 100
+    timeout-minutes: 110
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
       - name: Verify runner architecture
@@ -604,30 +552,25 @@ jobs:
         if: ${{ !cancelled() && steps.base_setup.outcome == 'success' }}
         run: cargo test --locked -p rsi-host -p 'rsi-api*' -p 'rsi-storage*' -p 'rsi-settings*' -p 'rsi-credentials*' -p 'rsi-media*' -p 'rsi-approval*' -p 'rsi-user-questions*' -p 'rsi-permission*' -p 'rsi-sandbox*' -p 'rsi-process*' -p 'rsi-pty*' -p 'rsi-commands*' -p 'rsi-jobs*' -p rsi-projection -p 'rsi-tools*' -p rsi-shell-bash -p rsi-apply-patch -p 'rsi-workspace*' -p 'rsi-files*' -p 'rsi-mcp*' -p 'rsi-retrieval*' -p rsi-acp -p rsi-acp-protocol -p rsi-acp-journal -p rsi-acp-client -p rsi-acp-host -p rsi-acp-api -p rsi-acp-tools --all-targets --no-fail-fast
         timeout-minutes: 30
+      - name: Exercise ACP client phase budgets
+        if: ${{ !cancelled() && steps.base_setup.outcome == 'success' && runner.os == 'Linux' }}
+        timeout-minutes: 5
+        run: |
+          set -o pipefail
+          cargo test --locked -p rsi-acp-host --test host host_does_not_shorten_client_setup_and_close_phase_budgets -- --ignored --exact --list | rg --fixed-strings --line-regexp 'host_does_not_shorten_client_setup_and_close_phase_budgets: test'
+          cargo test --locked -p rsi-acp-host --test host host_does_not_shorten_client_setup_and_close_phase_budgets -- --ignored --exact
       - name: Exercise Linux Bubblewrap enforcement
         if: ${{ !cancelled() && steps.base_setup.outcome == 'success' && runner.os == 'Linux' }}
         run: |
-          declare -A previous_policy
-          restore_policy() {
-            for key in "${!previous_policy[@]}"; do
-              sudo sysctl -w "$key=${previous_policy[$key]}"
-            done
-          }
-          trap restore_policy EXIT
-          if [[ "${{ runner.os }}" == Linux ]]; then
-            for setting in kernel.unprivileged_userns_clone=1 kernel.apparmor_restrict_unprivileged_userns=0; do
-              key=${setting%%=*}
-              if [[ -e /proc/sys/${key//.//} ]]; then
-                previous_policy[$key]=$(sysctl -n "$key")
-                sudo sysctl -w "$setting"
-              fi
-            done
-          fi
+          set -o pipefail
+          source "$GITHUB_WORKSPACE/.github/scripts/sandbox-policy.sh" full
           cargo test --locked -p rsi-sandbox-local --test local native_bubblewrap_enforces_read_only_and_workspace_write_plans -- --ignored --exact --list | rg --fixed-strings --line-regexp 'native_bubblewrap_enforces_read_only_and_workspace_write_plans: test'
           cargo test --locked -p rsi-sandbox-local --test local native_bubblewrap_enforces_read_only_and_workspace_write_plans -- --ignored --exact
           cargo test --locked -p rsi-process-local --test process pty::native_pty_has_job_control_confines_writes_and_reaps_on_provider_retirement -- --ignored --exact --list | rg --fixed-strings --line-regexp 'pty::native_pty_has_job_control_confines_writes_and_reaps_on_provider_retirement: test'
           cargo test --locked -p rsi-process-local --test process pty::native_pty_has_job_control_confines_writes_and_reaps_on_provider_retirement -- --ignored --exact
-        timeout-minutes: 5
+          cargo test --locked -p rsi-workspace-review --lib tests::native_sandbox_private_git_comparison -- --ignored --exact --list | rg --fixed-strings --line-regexp 'tests::native_sandbox_private_git_comparison: test'
+          cargo test --locked -p rsi-workspace-review --lib tests::native_sandbox_private_git_comparison -- --ignored --exact
+        timeout-minutes: 10
       - name: Exercise Tool JSON feature-unification boundary
         if: ${{ !cancelled() && steps.base_setup.outcome == 'success' && runner.os == 'Linux' }}
         run: cargo test --locked -p rsi-tools-protocol --all-targets --no-fail-fast --features serde_json/arbitrary_precision
@@ -723,7 +666,9 @@ jobs:
       - name: Exercise native Program duplex runtime
         if: runner.os == 'Linux'
         timeout-minutes: 5
-        run: RSI_TEST_NODE="$(command -v node)" cargo test --locked -p rsi-agent-program --test runtime -- --ignored
+        run: |
+          cargo test --locked -p rsi-agent-program --test runtime -- --ignored --list | rg ": test$"
+          RSI_TEST_NODE="$(command -v node)" cargo test --locked -p rsi-agent-program --test runtime -- --ignored
 
   rsi:
     env:
@@ -782,10 +727,7 @@ jobs:
           cargo clippy --locked --manifest-path fixtures/rsi/lsp-addon/Cargo.toml --all-targets -- -D warnings
           cargo test --locked --manifest-path fixtures/rsi/lsp-addon/Cargo.toml
           if [[ "$RUNNER_OS" == Linux ]]; then
-            setting=kernel.apparmor_restrict_unprivileged_userns
-            previous=$(sysctl -n "$setting")
-            trap 'sudo sysctl -w "$setting=$previous"' EXIT
-            sudo sysctl -w "$setting=0"
+            source "$GITHUB_WORKSPACE/.github/scripts/sandbox-policy.sh" apparmor
             rustup component add rust-analyzer
             cargo build --locked --manifest-path fixtures/rsi/lsp-addon/Cargo.toml
             python3 fixtures/rsi/lsp-addon/verify.py --binary "$CARGO_TARGET_DIR/debug/rsi-language-addon-example" --analyzer "$(rustup which rust-analyzer)" --report "$RUNNER_TEMP/rsi-language-addon-evidence"
@@ -799,7 +741,9 @@ jobs:
         timeout-minutes: 10
       - name: Lint standard rsi
         if: ${{ !cancelled() && steps.native_setup.outcome == 'success' }}
-        run: cargo clippy --locked -p rsi -p rsi-automation -p rsi-automation-api -p rsi-browser -p rsi-cli -p rsi-app-catalog -p rsi-app-tools -p rsi-dev-control -p rsi-build-info -p rsi-acp-application -p rsi-addon-testkit -p rsi-acp-agent -p 'rsi-lsp*' -p rsi-service-ui -p 'rsi-history*' -p rsi-service-host -p rsi-host-control -p rsi-desktop-bridge -p rsi-packages -p rsi-installation -p rsi-uninstall -p rsi-goal -p rsi-schedule -p 'rsi-session*' -p rsi-application -p rsi-gui -p rsi-workbench-ui -p 'rsi-configuration*' -p rsi-managed-providers -p 'rsi-navigation*' -p 'rsi-directory-picker*' -p 'rsi-client*' -p rsi-conversation -p 'rsi-ui*' -p rsi-inspector -p rsi-native-addons-api -p 'rsi-terminal*' -p rsi-serve -p 'rsi-web*' --all-targets -- -D warnings
+        run: |
+          source "$GITHUB_WORKSPACE/.github/scripts/standard-packages.sh"
+          cargo clippy --locked "${RSI_STANDARD_PACKAGE_ARGS[@]}" --all-targets -- -D warnings
         timeout-minutes: 20
       - name: Check GUI test-support contracts
         if: ${{ !cancelled() && steps.native_setup.outcome == 'success' }}
@@ -818,30 +762,18 @@ jobs:
       - name: Compile standard rsi tests
         if: ${{ !cancelled() && steps.native_setup.outcome == 'success' }}
         id: standard_build
-        run: cargo test --locked -p rsi -p rsi-automation -p rsi-automation-api -p rsi-browser -p rsi-cli -p rsi-app-catalog -p rsi-app-tools -p rsi-dev-control -p rsi-build-info -p rsi-acp-application -p rsi-addon-testkit -p rsi-acp-agent -p 'rsi-lsp*' -p rsi-service-ui -p 'rsi-history*' -p rsi-service-host -p rsi-host-control -p rsi-desktop-bridge -p rsi-packages -p rsi-installation -p rsi-uninstall -p rsi-goal -p rsi-schedule -p 'rsi-session*' -p rsi-application -p rsi-gui -p rsi-workbench-ui -p 'rsi-configuration*' -p rsi-managed-providers -p 'rsi-navigation*' -p 'rsi-directory-picker*' -p 'rsi-client*' -p rsi-conversation -p 'rsi-ui*' -p rsi-inspector -p rsi-native-addons-api -p 'rsi-terminal*' -p rsi-serve -p 'rsi-web*' --all-targets --no-run
+        run: |
+          source "$GITHUB_WORKSPACE/.github/scripts/standard-packages.sh"
+          cargo test --locked "${RSI_STANDARD_PACKAGE_ARGS[@]}" --all-targets --no-run
         timeout-minutes: 20
       - name: Exercise standard rsi on Linux
         if: ${{ !cancelled() && steps.native_setup.outcome == 'success' && steps.standard_build.outcome == 'success' && runner.os == 'Linux' }}
         env:
           RSI_TUI_PTY_REPORT: ${{ runner.temp }}/rsi-pty-evidence
         run: |
-          declare -A previous_policy
-          restore_policy() {
-            for key in "${!previous_policy[@]}"; do
-              sudo sysctl -w "$key=${previous_policy[$key]}"
-            done
-          }
-          trap restore_policy EXIT
-          if [[ "${{ runner.os }}" == Linux ]]; then
-            for setting in kernel.unprivileged_userns_clone=1 kernel.apparmor_restrict_unprivileged_userns=0; do
-              key=${setting%%=*}
-              if [[ -e /proc/sys/${key//.//} ]]; then
-                previous_policy[$key]=$(sysctl -n "$key")
-                sudo sysctl -w "$setting"
-              fi
-            done
-          fi
-          cargo test --locked -p rsi -p rsi-automation -p rsi-automation-api -p rsi-browser -p rsi-cli -p rsi-app-catalog -p rsi-app-tools -p rsi-dev-control -p rsi-build-info -p rsi-acp-application -p rsi-addon-testkit -p rsi-acp-agent -p 'rsi-lsp*' -p rsi-service-ui -p 'rsi-history*' -p rsi-service-host -p rsi-host-control -p rsi-desktop-bridge -p rsi-packages -p rsi-installation -p rsi-uninstall -p rsi-goal -p rsi-schedule -p 'rsi-session*' -p rsi-application -p rsi-gui -p rsi-workbench-ui -p 'rsi-configuration*' -p rsi-managed-providers -p 'rsi-navigation*' -p 'rsi-directory-picker*' -p 'rsi-client*' -p rsi-conversation -p 'rsi-ui*' -p rsi-inspector -p rsi-native-addons-api -p 'rsi-terminal*' -p rsi-serve -p 'rsi-web*' --all-targets --no-fail-fast
+          source "$GITHUB_WORKSPACE/.github/scripts/sandbox-policy.sh" full
+          source "$GITHUB_WORKSPACE/.github/scripts/standard-packages.sh"
+          cargo test --locked "${RSI_STANDARD_PACKAGE_ARGS[@]}" --all-targets --no-fail-fast
           cargo test --locked -p rsi --test session_service terminals::uds_terminals_require_persistence_isolate_sessions_keep_facts_unchanged_and_retire -- --ignored --exact --list | rg --fixed-strings --line-regexp 'terminals::uds_terminals_require_persistence_isolate_sessions_keep_facts_unchanged_and_retire: test'
           cargo test --locked -p rsi --test session_service terminals::uds_terminals_require_persistence_isolate_sessions_keep_facts_unchanged_and_retire -- --ignored --exact
         timeout-minutes: 35
@@ -872,44 +804,20 @@ jobs:
         timeout-minutes: 20
         run: |
           set -o pipefail
-          declare -A browser_previous_policy
-          restore_browser_policy() {
-            for key in "${!browser_previous_policy[@]}"; do
-              sudo sysctl -w "$key=${browser_previous_policy[$key]}"
-            done
-          }
-          trap restore_browser_policy EXIT
-          for setting in kernel.unprivileged_userns_clone=1 kernel.apparmor_restrict_unprivileged_userns=0; do
-            key=${setting%%=*}
-            if [[ -e /proc/sys/${key//.//} ]]; then
-              browser_previous_policy[$key]=$(sysctl -n "$key")
-              sudo sysctl -w "$setting"
-            fi
-          done
+          source "$GITHUB_WORKSPACE/.github/scripts/sandbox-policy.sh" full
           mkdir -p "$RUNNER_TEMP/rsi-browser-evidence"
           cargo test --locked -p rsi-browser --features test-support --test native -- --ignored --exact native_preview_check_and_retirement --list | rg --fixed-strings --line-regexp 'native_preview_check_and_retirement: test'
           RSI_TEST_BROWSER_SCREENSHOT="$RUNNER_TEMP/rsi-browser-evidence/native.png" cargo test --locked -p rsi-browser --features test-support --test native -- --ignored --exact native_preview_check_and_retirement --nocapture 2>&1 | tee "$RUNNER_TEMP/rsi-browser-evidence/native.log"
           cargo test --locked -p rsi-browser --features test-support --test retirement -- --ignored --exact native_abrupt_owner_death_reaps_the_entire_cgroup --list | rg --fixed-strings --line-regexp 'native_abrupt_owner_death_reaps_the_entire_cgroup: test'
           cargo test --locked -p rsi-browser --features test-support --test retirement
           cargo test --locked -p rsi-browser --features test-support --test retirement -- --ignored --exact native_abrupt_owner_death_reaps_the_entire_cgroup --nocapture 2>&1 | tee "$RUNNER_TEMP/rsi-browser-evidence/retirement.log"
+          cargo test --locked -p rsi --test session_service browser::session_browser_real_http_ws_nodes_images_and_presentation_detach -- --ignored --exact --list | rg --fixed-strings --line-regexp 'browser::session_browser_real_http_ws_nodes_images_and_presentation_detach: test'
+          cargo test --locked -p rsi --test session_service browser::session_browser_real_http_ws_nodes_images_and_presentation_detach -- --ignored --exact
       - name: Exercise development TUI smoke
         if: ${{ !cancelled() && runner.os == 'Linux' && steps.standard_build.outcome == 'success' }}
         timeout-minutes: 20
         run: |
-          declare -A previous_policy
-          restore_policy() {
-            for key in "${!previous_policy[@]}"; do
-              sudo sysctl -w "$key=${previous_policy[$key]}"
-            done
-          }
-          trap restore_policy EXIT
-          for setting in kernel.unprivileged_userns_clone=1 kernel.apparmor_restrict_unprivileged_userns=0; do
-            key=${setting%%=*}
-            if [[ -e /proc/sys/${key//.//} ]]; then
-              previous_policy[$key]=$(sysctl -n "$key")
-              sudo sysctl -w "$setting"
-            fi
-          done
+          source "$GITHUB_WORKSPACE/.github/scripts/sandbox-policy.sh" full
           cargo run --locked -p rsi-app-tools -- fixture-dev tui --smoke --directory "$RUNNER_TEMP/rsi-dev-smoke" || {
             smoke_status=$?
             tail -c 1048576 "$RUNNER_TEMP/rsi-dev-smoke/logs/build.log" || true
@@ -929,22 +837,7 @@ jobs:
         if: runner.os == 'Linux' && !cancelled() && steps.session_eval_build.outcome == 'success'
         timeout-minutes: 45
         run: |
-          declare -A previous_policy
-          restore_policy() {
-            for key in "${!previous_policy[@]}"; do
-              sudo sysctl -w "$key=${previous_policy[$key]}"
-            done
-          }
-          trap restore_policy EXIT
-          if [[ "${{ runner.os }}" == Linux ]]; then
-            for setting in kernel.unprivileged_userns_clone=1 kernel.apparmor_restrict_unprivileged_userns=0; do
-              key=${setting%%=*}
-              if [[ -e /proc/sys/${key//.//} ]]; then
-                previous_policy[$key]=$(sysctl -n "$key")
-                sudo sysctl -w "$setting"
-              fi
-            done
-          fi
+          source "$GITHUB_WORKSPACE/.github/scripts/sandbox-policy.sh" full
           df -h "$RUNNER_TEMP" "$GITHUB_WORKSPACE"
           free -h
           python3 crates/rsi/core/eval/session_api.py --self-test --pressure --output "$RUNNER_TEMP/rsi-session-api-evaluation"
@@ -961,7 +854,9 @@ jobs:
         if: ${{ !cancelled() && steps.native_setup.outcome == 'success' && steps.standard_build.outcome == 'success' && runner.os == 'macOS' }}
         env:
           RSI_TUI_PTY_REPORT: ${{ runner.temp }}/rsi-pty-evidence
-        run: cargo test --locked -p rsi -p rsi-automation -p rsi-automation-api -p rsi-browser -p rsi-cli -p rsi-app-catalog -p rsi-app-tools -p rsi-dev-control -p rsi-build-info -p rsi-acp-application -p rsi-addon-testkit -p rsi-acp-agent -p 'rsi-lsp*' -p rsi-service-ui -p 'rsi-history*' -p rsi-service-host -p rsi-host-control -p rsi-desktop-bridge -p rsi-packages -p rsi-installation -p rsi-uninstall -p rsi-goal -p rsi-schedule -p 'rsi-session*' -p rsi-application -p rsi-gui -p rsi-workbench-ui -p 'rsi-configuration*' -p rsi-managed-providers -p 'rsi-navigation*' -p 'rsi-directory-picker*' -p 'rsi-client*' -p rsi-conversation -p 'rsi-ui*' -p rsi-inspector -p rsi-native-addons-api -p 'rsi-terminal*' -p rsi-serve -p 'rsi-web*' --all-targets --no-fail-fast -- --nocapture
+        run: |
+          source "$GITHUB_WORKSPACE/.github/scripts/standard-packages.sh"
+          cargo test --locked "${RSI_STANDARD_PACKAGE_ARGS[@]}" --all-targets --no-fail-fast -- --nocapture
         timeout-minutes: 20
 
       - name: Preserve source addon acceptance evidence
@@ -1019,6 +914,9 @@ jobs:
       - name: Verify Browser fixture lifecycle and native gate failure propagation
         run: |
           python3 fixtures/tools/python-tests.py fixtures/rsi/browser-runtime
+          python3 fixtures/tools/python-tests.py fixtures/rsi/performance
+          python3 fixtures/tools/python-tests.py fixtures/rsi/parser-fuzz
+          python3 fixtures/tools/python-tests.py .github/scripts
           node --test crates/rsi/browser/runtime/*.test.mjs
         timeout-minutes: 5
 
@@ -1109,7 +1007,7 @@ jobs:
       - name: Test native Windows Process, Files, Credentials and ACP behavior
         if: ${{ !cancelled() && steps.native_toolchain.outcome == 'success' }}
         timeout-minutes: 20
-        run: cargo test --locked -p rsi-process-local -p rsi-files -p rsi-credentials-local -p rsi-acp-application --all-targets --no-fail-fast
+        run: cargo test --locked -p rsi-process-local -p rsi-sandbox-local -p rsi-files -p rsi-credentials-local -p rsi-acp-application --all-targets --no-fail-fast
       - name: Test native Windows process identity guards
         if: ${{ !cancelled() && steps.native_toolchain.outcome == 'success' }}
         timeout-minutes: 5
@@ -1159,6 +1057,8 @@ jobs:
             Where-Object { $_.reason -eq 'compiler-artifact' -and $_.target.name -eq 'resident_listeners' -and $_.profile.test -and $_.executable } |
             Select-Object -Last 1
           if (-not $artifact) { throw 'Missing compiled resident listener tests' }
+          $listing = & $artifact.executable frontend::ordinary_product_watched_smoke --ignored --exact --list
+          if ($LASTEXITCODE -ne 0 -or $listing -notcontains 'frontend::ordinary_product_watched_smoke: test') { throw 'Missing exact frontend watch test' }
           & $artifact.executable frontend::ordinary_product_watched_smoke --ignored --exact
           exit $LASTEXITCODE
       - name: Test the standard product default Windows targets
@@ -1184,7 +1084,7 @@ jobs:
 
   windows-repository-tools:
     runs-on: windows-2025
-    timeout-minutes: 80
+    timeout-minutes: 90
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1
         timeout-minutes: 5
@@ -1290,10 +1190,7 @@ jobs:
         timeout-minutes: 5
         if: ${{ !cancelled() && steps.ssh_setup.outcome == 'success' && steps.ssh_prerequisites.outcome == 'success' }}
         run: |
-          setting=kernel.apparmor_restrict_unprivileged_userns
-          previous=$(sysctl -n "$setting")
-          trap 'sudo sysctl -w "$setting=$previous"' EXIT
-          sudo sysctl -w "$setting=0"
+          source "$GITHUB_WORKSPACE/.github/scripts/sandbox-policy.sh" apparmor
           test -f /sys/fs/cgroup/cgroup.controllers
           test "$(systemctl --user show --property=ServiceWatchdogs --value)" = yes
           systemd-run --user --pipe --wait --collect --expand-environment=no /usr/bin/true
@@ -1302,64 +1199,49 @@ jobs:
         timeout-minutes: 5
         if: ${{ !cancelled() && steps.ssh_setup.outcome == 'success' && steps.ssh_helper_build.outcome == 'success' && steps.ssh_native.outcome == 'success' }}
         run: |
-          setting=kernel.apparmor_restrict_unprivileged_userns
-          previous=$(sysctl -n "$setting")
-          trap 'sudo sysctl -w "$setting=$previous"' EXIT
-          sudo sysctl -w "$setting=0"
+          source "$GITHUB_WORKSPACE/.github/scripts/sandbox-policy.sh" apparmor
+          cargo test --locked -p rsi-ssh-client --test openssh -- --ignored --list | rg ": test$"
           cargo test --locked -p rsi-ssh-client --test openssh -- --ignored --nocapture
       - name: Verify SSH cache on the default stack
         timeout-minutes: 5
         if: ${{ !cancelled() && steps.ssh_setup.outcome == 'success' && steps.ssh_helper_build.outcome == 'success' && steps.ssh_native.outcome == 'success' }}
         run: |
-          setting=kernel.apparmor_restrict_unprivileged_userns
-          previous=$(sysctl -n "$setting")
-          trap 'sudo sysctl -w "$setting=$previous"' EXIT
-          sudo sysctl -w "$setting=0"
+          source "$GITHUB_WORKSPACE/.github/scripts/sandbox-policy.sh" apparmor
+          env -u RUST_MIN_STACK cargo test --locked -p rsi-ssh-helper --lib --test cache -- --ignored --list | rg ": test$"
           env -u RUST_MIN_STACK cargo test --locked -p rsi-ssh-helper --lib --test cache -- --ignored --nocapture
       - name: Verify target native lifecycle
         timeout-minutes: 5
         if: ${{ !cancelled() && steps.ssh_setup.outcome == 'success' && steps.ssh_helper_build.outcome == 'success' && steps.ssh_native.outcome == 'success' }}
         run: |
-          setting=kernel.apparmor_restrict_unprivileged_userns
-          previous=$(sysctl -n "$setting")
-          trap 'sudo sysctl -w "$setting=$previous"' EXIT
-          sudo sysctl -w "$setting=0"
+          source "$GITHUB_WORKSPACE/.github/scripts/sandbox-policy.sh" apparmor
+          cargo test --locked -p rsi-ssh-helper-app --test native -- --ignored --list | rg ": test$"
           cargo test --locked -p rsi-ssh-helper-app --test native -- --ignored --nocapture
       - name: Verify cache and execution
         timeout-minutes: 10
         if: ${{ !cancelled() && steps.ssh_setup.outcome == 'success' && steps.ssh_helper_build.outcome == 'success' && steps.ssh_native.outcome == 'success' }}
         run: |
-          setting=kernel.apparmor_restrict_unprivileged_userns
-          previous=$(sysctl -n "$setting")
-          trap 'sudo sysctl -w "$setting=$previous"' EXIT
-          sudo sysctl -w "$setting=0"
+          source "$GITHUB_WORKSPACE/.github/scripts/sandbox-policy.sh" apparmor
+          cargo test --locked -p rsi-ssh-helper --test execution -- --ignored --list | rg ": test$"
           cargo test --locked -p rsi-ssh-helper --test execution -- --ignored --nocapture
       - name: Verify watchdog and cgroup cleanup
         timeout-minutes: 3
         if: ${{ !cancelled() && steps.ssh_setup.outcome == 'success' && steps.ssh_helper_build.outcome == 'success' && steps.ssh_native.outcome == 'success' }}
         run: |
-          setting=kernel.apparmor_restrict_unprivileged_userns
-          previous=$(sysctl -n "$setting")
-          trap 'sudo sysctl -w "$setting=$previous"' EXIT
-          sudo sysctl -w "$setting=0"
+          source "$GITHUB_WORKSPACE/.github/scripts/sandbox-policy.sh" apparmor
+          cargo test --locked -p rsi-ssh-helper --test lifecycle native_watchdog_and_cgroup_cleanup -- --ignored --exact --list | rg --fixed-strings --line-regexp 'native_watchdog_and_cgroup_cleanup: test'
           cargo test --locked -p rsi-ssh-helper --test lifecycle native_watchdog_and_cgroup_cleanup -- --ignored --exact --nocapture
       - name: Verify source-reader sandbox
         timeout-minutes: 5
         if: ${{ !cancelled() && steps.ssh_setup.outcome == 'success' && steps.ssh_helper_build.outcome == 'success' && steps.ssh_native.outcome == 'success' }}
         run: |
-          setting=kernel.apparmor_restrict_unprivileged_userns
-          previous=$(sysctl -n "$setting")
-          trap 'sudo sysctl -w "$setting=$previous"' EXIT
-          sudo sysctl -w "$setting=0"
+          source "$GITHUB_WORKSPACE/.github/scripts/sandbox-policy.sh" apparmor
+          cargo test --locked -p rsi-sandbox-local --test local native_source_reader_reads_tmp_ancestors_without_write_or_host_network_access -- --ignored --exact --list | rg --fixed-strings --line-regexp 'native_source_reader_reads_tmp_ancestors_without_write_or_host_network_access: test'
           cargo test --locked -p rsi-sandbox-local --test local native_source_reader_reads_tmp_ancestors_without_write_or_host_network_access -- --ignored --exact
       - name: Verify native execution source-reader and PTY leases
         timeout-minutes: 10
         if: ${{ !cancelled() && steps.ssh_setup.outcome == 'success' && steps.ssh_helper_build.outcome == 'success' && steps.ssh_native.outcome == 'success' }}
         run: |
-          setting=kernel.apparmor_restrict_unprivileged_userns
-          previous=$(sysctl -n "$setting")
-          trap 'sudo sysctl -w "$setting=$previous"' EXIT
-          sudo sysctl -w "$setting=0"
+          source "$GITHUB_WORKSPACE/.github/scripts/sandbox-policy.sh" apparmor
           listing=$(cargo test --locked -p rsi-execution-local --test native -- --list)
           for test in source_reader_lease_keeps_tmp_ancestors_visible_and_read_only native_pty_executes_and_resizes_through_the_same_lease; do
             printf '%s\n' "$listing" | grep -Fx "$test: test"
@@ -1369,10 +1251,8 @@ jobs:
         timeout-minutes: 30
         if: ${{ !cancelled() && steps.ssh_setup.outcome == 'success' && steps.ssh_helper_build.outcome == 'success' && steps.ssh_native.outcome == 'success' }}
         run: |
-          setting=kernel.apparmor_restrict_unprivileged_userns
-          previous=$(sysctl -n "$setting")
-          trap 'sudo sysctl -w "$setting=$previous"' EXIT
-          sudo sysctl -w "$setting=0"
+          source "$GITHUB_WORKSPACE/.github/scripts/sandbox-policy.sh" apparmor
+          cargo test --locked -p rsi-ssh-helper-app --test ssh -- --ignored --list | rg ": test$"
           cargo test --locked -p rsi-ssh-helper-app --test ssh -- --ignored --nocapture
       - name: Restore owned Linux user manager state
         if: ${{ always() && runner.os == 'Linux' }}
@@ -1444,14 +1324,7 @@ jobs:
         id: sandbox
         timeout-minutes: 10
         run: |
-          : > "$RUNNER_TEMP/rsi-desktop-sandbox-policy"
-          for setting in kernel.unprivileged_userns_clone=1 kernel.apparmor_restrict_unprivileged_userns=0; do
-            key=${setting%%=*}
-            if [[ -e /proc/sys/${key//.//} ]]; then
-              printf '%s=%s\n' "$key" "$(sysctl -n "$key")" >> "$RUNNER_TEMP/rsi-desktop-sandbox-policy"
-              sudo sysctl -w "$setting"
-            fi
-          done
+          python3 "$GITHUB_WORKSPACE/.github/scripts/sandbox-policy.py" prepare "$RUNNER_TEMP/rsi-desktop-sandbox-policy.json" full
           cargo test --locked -p rsi-sandbox-local --test local native_bubblewrap_enforces_read_only_and_workspace_write_plans -- --ignored --exact --list | rg --fixed-strings --line-regexp 'native_bubblewrap_enforces_read_only_and_workspace_write_plans: test'
           cargo test --locked -p rsi-sandbox-local --test local native_bubblewrap_enforces_read_only_and_workspace_write_plans -- --ignored --exact
       - name: Install pinned frontend package manager
@@ -1496,6 +1369,7 @@ jobs:
           cargo test --locked -p rsi-browser --features test-support --test native -- --ignored --exact native_preview_check_and_retirement --nocapture 2>&1 | tee "$RUNNER_TEMP/rsi-desktop-automation-evidence/native.log"
           cargo test --locked -p rsi --test session_service -- --ignored --exact automation::prepare_visual_fixture --list | rg --fixed-strings --line-regexp 'automation::prepare_visual_fixture: test'
           for surface in web desktop tui; do
+            RSI_TEST_AUTOMATION_VISUAL_ROOT="$RUNNER_TEMP/rsi-automation-$surface-seed" RSI_TEST_AUTOMATION_VISUAL_PNG="$RSI_TEST_BROWSER_SCREENSHOT" cargo test --locked -p rsi --test session_service -- --ignored --exact --list | grep -F 'session_service: test'
             RSI_TEST_AUTOMATION_VISUAL_ROOT="$RUNNER_TEMP/rsi-automation-$surface-seed" RSI_TEST_AUTOMATION_VISUAL_PNG="$RSI_TEST_BROWSER_SCREENSHOT" cargo test --locked -p rsi --test session_service -- --ignored --exact automation::prepare_visual_fixture
           done
           RSI_WEB_BINARY="$RUNNER_TEMP/rsi-desktop-dist/bundle/rsi" RSI_WEB_ASSETS="$RUNNER_TEMP/rsi-desktop-dist/bundle/assets" RSI_AUTOMATION_WEB_SEED="$RUNNER_TEMP/rsi-automation-web-seed" RSI_AUTOMATION_WEB_REPORT="$RUNNER_TEMP/rsi-desktop-automation-evidence/web" node fixtures/rsi/web-product/automation-verify.mjs
@@ -1537,10 +1411,7 @@ jobs:
         run: python3 fixtures/rsi/browser-runtime/user_manager.py restore "$RUNNER_TEMP/rsi-user-manager.json"
       - name: Restore native sandbox runner policy
         if: always()
-        run: |
-          if [[ -f "$RUNNER_TEMP/rsi-desktop-sandbox-policy" ]]; then
-            while IFS= read -r setting; do sudo sysctl -w "$setting"; done < "$RUNNER_TEMP/rsi-desktop-sandbox-policy"
-          fi
+        run: python3 "$GITHUB_WORKSPACE/.github/scripts/sandbox-policy.py" restore "$RUNNER_TEMP/rsi-desktop-sandbox-policy.json"
       - name: Test desktop diagnostics
         if: ${{ !cancelled() }}
         timeout-minutes: 5

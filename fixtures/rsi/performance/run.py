@@ -110,7 +110,7 @@ def main(argv=None):
         if key.startswith("RSI_STORE_BENCH_"):
             del env[key]
     env.update(RSI_STORE_BENCH_EVIDENCE=str(output / "store"), RSI_STORE_BENCH_COUNTS="1000,10000", RSI_TUI_PERFORMANCE_REPORT=str(output / "cells.json"))
-    metadata = dict(format=1, surface=surface, commit=capture("git", "rev-parse", "HEAD"), dirty=bool(capture("git", "status", "--porcelain", "--untracked-files=no")), rust=capture("rustc", "-Vv"), cargo=capture("cargo", "-V"), platform=platform.platform(), runner=os.environ.get("RUNNER_NAME", "local"), cpu_count=os.cpu_count(), commands=commands, timing_gate=False, results=[])
+    metadata = dict(format=1, surface=surface, commit=capture("git", "rev-parse", "HEAD"), dirty=bool(capture("git", "status", "--porcelain", "--untracked-files=normal")), rust=capture("rustc", "-Vv"), cargo=capture("cargo", "-V"), platform=platform.platform(), runner=os.environ.get("RUNNER_NAME", "local"), cpu_count=os.cpu_count(), commands=commands, timing_gate=False, results=[])
     (output / "metadata.json").write_text(json.dumps(metadata, indent=2), encoding="utf-8")
     for index, command in enumerate(commands):
         with (output / f"probe-{index}.log").open("w", encoding="utf-8") as log:

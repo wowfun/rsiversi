@@ -19,6 +19,21 @@ deadline-owner tests and the real HTTP transport probes remain separate evidence
 The fixture lock shares product dependency resolutions. Performance output lives
 outside Cargo caches and must contain actual measurements as well as successful
 process exits; otherwise a removed test filter could silently erase coverage.
+Admission unit tests also run in ordinary CI with nonempty discovery. Their
+platform probe is isolated from subprocess mocks because Python's platform
+discovery itself can execute subprocesses on Linux.
+
+Scheduled parser campaigns use pinned tooling, bounded inputs that include production-limit rejection cases,
+and temporary generated corpus. Only bounded failure inputs and provenance are
+retained; a corpus cache would add durable unreviewed state without a measured
+benefit. The campaign remains separate from ordinary deterministic corpus tests.
+Filtered native acceptance tests require their exact name before execution;
+unfiltered target suites require nonempty ignored-test discovery. These checks
+prevent empty runs from silently passing as evidence.
+CI package selectors and scoped sandbox policy share small workflow-owned
+helpers. Workflow contract tests check delegation and ordering; the helper tests
+own preparation and EXIT restoration mechanics. The policy helper retains a recoverable ownership record across partial
+setup or restoration failure instead of duplicating shell restoration loops.
 
 ## Alternatives considered
 
@@ -27,6 +42,9 @@ Fuzzing full tools would mix grammar coverage with filesystem/provider failures.
 Replacing HTTP integration waits with paused time would stop measuring real socket
 delivery. A single wall-clock number on an uncontrolled runner cannot justify a
 dependency upgrade or an algorithm rewrite.
+An additional generic test inventory or orchestration framework would duplicate
+the owning test commands. A persistent fuzz corpus and a direct libfuzzer runner
+add machinery unnecessary for the existing bounded weekly campaigns.
 
 ## Consequences
 

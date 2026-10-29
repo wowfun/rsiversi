@@ -1,0 +1,42 @@
+# Sourced by the standard product jobs; preserve Cargo selector arguments.
+RSI_STANDARD_PACKAGE_ARGS=(
+  -p rsi
+  -p rsi-automation
+  -p rsi-automation-api
+  -p rsi-browser
+  -p rsi-cli
+  -p rsi-app-catalog
+  -p rsi-app-tools
+  -p rsi-dev-control
+  -p rsi-build-info
+  -p rsi-acp-application
+  -p rsi-addon-testkit
+  -p rsi-acp-agent
+  -p 'rsi-lsp*'
+  -p rsi-service-ui
+  -p 'rsi-history*'
+  -p rsi-service-host
+  -p rsi-host-control
+  -p rsi-desktop-bridge
+  -p rsi-packages
+  -p rsi-installation
+  -p rsi-uninstall
+  -p rsi-goal
+  -p rsi-schedule
+  -p 'rsi-session*'
+  -p rsi-application
+  -p rsi-gui
+  -p rsi-workbench-ui
+  -p 'rsi-configuration*'
+  -p rsi-managed-providers
+  -p 'rsi-navigation*'
+  -p 'rsi-directory-picker*'
+  -p 'rsi-client*'
+  -p rsi-conversation
+  -p 'rsi-ui*'
+  -p rsi-inspector
+  -p rsi-native-addons-api
+  -p 'rsi-terminal*'
+  -p rsi-serve
+  -p 'rsi-web*'
+)

@@ -24,9 +24,32 @@ jobs:
       - name: Install native dependencies
         run: sudo apt-get update && sudo apt-get install --no-install-recommends --yes libdbus-1-dev pkg-config
       - name: Type-check product-aligned parser fuzz targets
+        id: parser_check
         run: |
           python3 fixtures/rsi/parser-fuzz/check-lock.py
           cargo check --locked --manifest-path fixtures/rsi/parser-fuzz/Cargo.toml --bins
+      - name: Prepare pinned fuzz tooling and test campaign ownership
+        id: fuzz_setup
+        run: |
+          rustup toolchain install nightly-2026-10-24 --profile minimal --component rust-src
+          cargo install cargo-fuzz --locked --version 0.13.2
+          python3 fixtures/tools/python-tests.py fixtures/rsi/parser-fuzz
+      - name: Fuzz apply-patch grammar
+        if: ${{ !cancelled() && steps.parser_check.outcome == 'success' && steps.fuzz_setup.outcome == 'success' }}
+        run: python3 fixtures/rsi/parser-fuzz/campaign.py apply_patch "${{ runner.temp }}/parser-fuzz/apply_patch"
+      - name: Fuzz MCP framing
+        if: ${{ !cancelled() && steps.parser_check.outcome == 'success' && steps.fuzz_setup.outcome == 'success' }}
+        run: python3 fixtures/rsi/parser-fuzz/campaign.py mcp_frame "${{ runner.temp }}/parser-fuzz/mcp_frame"
+      - uses: actions/upload-artifact@bbbca2ddaa5d8feaa63e36b76fdaad77386f024f
+        if: always()
+        with:
+          name: parser-fuzz-${{ github.sha }}
+          path: |
+            ${{ runner.temp }}/parser-fuzz/apply_patch/metadata.json
+            ${{ runner.temp }}/parser-fuzz/apply_patch/failure.bin
+            ${{ runner.temp }}/parser-fuzz/mcp_frame/metadata.json
+            ${{ runner.temp }}/parser-fuzz/mcp_frame/failure.bin
+          if-no-files-found: warn
   measure:
     runs-on: ubuntu-24.04
     timeout-minutes: 90
@@ -46,7 +69,7 @@ jobs:
       - name: Install native dependencies
         run: sudo apt-get update && sudo apt-get install --no-install-recommends --yes libdbus-1-dev pkg-config
       - name: Verify evidence admission
-        run: python3 -m unittest discover -s fixtures/rsi/performance -p 'test_*.py'
+        run: python3 fixtures/tools/python-tests.py fixtures/rsi/performance
       - name: Collect raw measurements and provenance
         run: python3 fixtures/rsi/performance/run.py ${{ matrix.surface }} ${{ runner.temp }}/performance-evidence/${{ matrix.surface }}
       - uses: actions/upload-artifact@bbbca2ddaa5d8feaa63e36b76fdaad77386f024f
