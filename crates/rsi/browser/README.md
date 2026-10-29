@@ -51,7 +51,8 @@ share. Charges survive through write callback and drain. Proxy reads pause under
 stdout backpressure; overflow fails the scope closed.
 
 Fixed Node, Chromium and dependency paths/digests are operator-supplied. Checker
-pins Playwright 1.63.0; exploration pins @playwright/mcp 0.0.80. No download or
+pins Playwright 1.63.0; exploration pins @playwright/mcp 0.0.80, and the private
+WebSocket bridge pins ws 8.22.0. No download or
 unconfined fallback occurs at activation. Each isolated process scope defaults to 1 GiB memory, 256 processes and a
 ten-minute runtime maximum; Browser and its client occupy separate scopes. A missing enforcement mechanism
 is NotReady, not an invitation to weaken the plan.

@@ -6,6 +6,6 @@
   "dependencies": {
     "playwright": "1.63.0",
     "@playwright/mcp": "0.0.80",
-    "ws": "8.18.3"
+    "ws": "8.22.0"
   }
 }
