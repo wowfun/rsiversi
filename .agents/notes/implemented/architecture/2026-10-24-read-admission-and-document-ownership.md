@@ -21,6 +21,10 @@ their permits. SQLite owns two independent foreground connections and closes an
 unhealthy lane instead of recycling uncertain transaction state. Checkpoints
 reserve actual bytes; global quota exhaustion is a cache miss. Ordered compact access
 projections batch selected authorization reads while caller authority remains held.
+Activity uses the required access projection and proof-retaining batches of durable
+cuts, reducing reader dispatch without skipping history validation. Access still
+decodes bounded Headers in SQLite. Stable operation labels identify measured lane
+work; return types and page sizes do not identify caller traffic classes.
 
 Each document connection owns bounded open and cleanup responsibilities. The
 resource-open receipt identifies a view incarnation independently of frame arrival.

@@ -23,6 +23,58 @@ pub(super) fn advance_activity(
     Ok(())
 }
 impl SqliteStore {
+    pub(super) async fn activity_cuts(
+        &self,
+        sessions: &[SessionId],
+    ) -> Result<Vec<Result<rsi_agent_store_protocol::StoreActivityCut>>> {
+        rsi_agent_store_protocol::validate_activity_cut_selection(sessions)?;
+        // Keep the proofs alive through the reader job, independently of LRU eviction.
+        // Acquiring multiple bounded pin leases here could wait on our own permits.
+        let mut proofs = Vec::with_capacity(sessions.len());
+        for session in sessions {
+            proofs.push(self.session_proof(session).await);
+        }
+        let sessions = sessions.to_vec();
+        #[cfg(test)]
+        let pause = self.inner.activity_cut_pause.lock().unwrap().take();
+        self.with_reader_named(super::StoreOperation::ActivityCuts, move |connection| {
+            #[cfg(test)]
+            if let Some((entered, release)) = pause {
+                let _ = entered.send(());
+                let _ = release.recv();
+            }
+            let transaction = connection.transaction().map_err(sql_error)?;
+            let result = {
+                let values = (0..sessions.len()).map(|index| format!("({index},?{})", index + 1)).collect::<Vec<_>>().join(",");
+                let sql = format!("WITH requested(ordinal, id) AS (VALUES {values})
+                    SELECT sessions.durable_seq,
+                        EXISTS(SELECT 1 FROM turns WHERE turns.session_id=requested.id AND terminal_seq IS NULL)
+                    FROM requested LEFT JOIN sessions ON sessions.session_id=requested.id
+                        AND NOT EXISTS(SELECT 1 FROM session_tombstones WHERE session_id=requested.id)
+                    ORDER BY requested.ordinal");
+                let mut statement = transaction.prepare(&sql).map_err(sql_error)?;
+                let mut rows = statement.query(rusqlite::params_from_iter(sessions.iter().map(SessionId::as_str))).map_err(sql_error)?;
+                let mut result = Vec::with_capacity(sessions.len());
+                for (session, proof) in sessions.iter().zip(&proofs) {
+                    let row = rows.next().map_err(sql_error)?.ok_or_else(|| StoreError::Corrupt("missing activity cut slot".into()))?;
+                    let has_open_turn = row.get::<_, bool>(1).map_err(sql_error)?;
+                    result.push(match proof {
+                        Err(error) => Err(error.clone()),
+                        Ok(_) if matches!(row.get_ref(0).map_err(sql_error)?, rusqlite::types::ValueRef::Null) => Err(StoreError::NotFound(session.to_string())),
+                        Ok(_) => decode_u64("durable sequence", row.get(0).map_err(sql_error)?).map(|durable_fact_seq| rsi_agent_store_protocol::StoreActivityCut {
+                            session_id: session.clone(),
+                            durable_fact_seq,
+                            has_open_turn,
+                        }),
+                    });
+                }
+                result
+            };
+            transaction.commit().map_err(sql_error)?;
+            Ok(result)
+        }).await
+    }
+
     pub(super) async fn activity_summaries(
         &self,
         sessions: &[SessionId],

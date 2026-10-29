@@ -23,6 +23,12 @@ read-generation selection: existing residents retain their pin; cold views do
 not hydrate execution or require unrelated codecs. Concurrent resident publication
 takes precedence even after failed cold resolution. Store pages must match the
 requested horizon in addition to satisfying their own structural invariants.
+Overlapping captures share domain-state reads and producer execution only for
+the same Header, exact composition pin and requested durable watermarks. The
+weak registry removes completed work before publication; it retains no completed
+snapshot cache. Each caller keeps admission and its own deadline, while a shared
+flight retains its creator's original deadline. Its last waiter cancels it.
+Immutable snapshot entries share their allocation without changing serialization.
 
 The [Session contract](../../../../crates/rsi/session-protocol/README.md) owns complete
 subscriptions and final-clone canonical byte retention. Draft state is captured
@@ -45,6 +51,10 @@ extension-specific recovery problem. Fact-only invalidation misses command
 commits. Reusing resume preparation makes an unrelated missing codec hide all
 views. Retaining a lease for an idle observer prevents draft expiry. Reusing the
 old stream binding after preset selection admits mixed Header identity.
+Digest-only coalescing can merge distinct generation owners. A completed cache
+would extend snapshot and generation retention beyond the work it saves; weak
+in-flight sharing avoids that cost. Latest-pending replacement, useful for
+configuration convergence, cannot replace exact-cursor projection requests.
 
 ## Consequences
 

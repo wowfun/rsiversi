@@ -623,11 +623,49 @@ impl SessionStore for MemoryStore {
         }
     }
 
+    async fn session_activity_cuts(
+        &self,
+        sessions: &[SessionId],
+    ) -> Result<Vec<Result<rsi_agent_store_protocol::StoreActivityCut>>> {
+        rsi_agent_store_protocol::validate_activity_cut_selection(sessions)?;
+        self.activity_cut_reads.fetch_add(1, Ordering::Relaxed);
+        let pause = self.activity_cut_pause.lock().unwrap().take();
+        if let Some((entered, blocked)) = pause {
+            let _ = entered.send(());
+            let _ = blocked.await;
+        }
+        if let Some(error) = self.activity_cut_failure.lock().unwrap().take() {
+            return Err(error);
+        }
+        let state = self
+            .inner
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        Ok(sessions
+            .iter()
+            .map(|id| {
+                state
+                    .sessions
+                    .get(id)
+                    .map(|session| rsi_agent_store_protocol::StoreActivityCut {
+                        session_id: id.clone(),
+                        durable_fact_seq: session.facts.last().map_or(0, |fact| fact.seq()),
+                        has_open_turn: session
+                            .turns
+                            .values()
+                            .any(|turn| turn.terminal_seq.is_none()),
+                    })
+                    .ok_or_else(|| StoreError::NotFound(id.to_string()))
+            })
+            .collect())
+    }
+
     async fn session_access(
         &self,
         sessions: &[SessionId],
     ) -> Result<Vec<Result<rsi_agent_store_protocol::StoreSessionAccess>>> {
         rsi_agent_store_protocol::validate_access_selection(sessions)?;
+        self.access_reads.fetch_add(1, Ordering::Relaxed);
         let state = self
             .inner
             .lock()
@@ -647,6 +685,7 @@ impl SessionStore for MemoryStore {
     }
 
     async fn header(&self, session_id: &SessionId) -> Result<SessionHeader> {
+        self.header_reads.fetch_add(1, Ordering::Relaxed);
         self.inner
             .lock()
             .unwrap_or_else(std::sync::PoisonError::into_inner)

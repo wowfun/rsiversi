@@ -1,11 +1,42 @@
 //! Bounded extension reads retain the authoritative Session generation without a claim.
 
 use super::*;
+use futures_util::future::{BoxFuture, Shared, WeakShared};
 use rsi_agent_composition_protocol::{SessionProjectionAdapter, SessionProjectionContext};
 use rsi_agent_session_protocol::{DomainStateView, ProjectionCursor, SessionProjectionSnapshot};
 use rsi_agent_turn_protocol::SessionProjections;
 
 pub(super) const MAXIMUM_CAPTURES: usize = 16;
+
+type Capture = BoxFuture<'static, TurnResult<SessionProjectionSnapshot>>;
+pub(super) struct Flight {
+    identity: Arc<()>,
+    session: SessionId,
+    header: String,
+    pin: AgentCompositionPin,
+    fact_seq: u64,
+    control_seq: u64,
+    capture: WeakShared<Capture>,
+}
+struct FlightCleanup {
+    registry: Weak<Mutex<Vec<Flight>>>,
+    identity: Arc<()>,
+}
+impl Drop for FlightCleanup {
+    fn drop(&mut self) {
+        if let Some(registry) = self.registry.upgrade() {
+            // Drop the pin outside the registry: generation cleanup is not ours to poll.
+            let removed = {
+                let mut entries = registry.lock().expect("projection flights");
+                entries
+                    .iter()
+                    .position(|entry| Arc::ptr_eq(&entry.identity, &self.identity))
+                    .map(|index| entries.swap_remove(index))
+            };
+            drop(removed);
+        }
+    }
+}
 
 enum Selection {
     Resident(Arc<SessionHeader>, AgentCompositionPin),
@@ -105,17 +136,92 @@ impl SessionProjections for AgentKernel {
             .clone()
             .try_acquire_owned()
             .map_err(|_| TurnError::ProjectionCapacity)?;
-        let cancellation = self.inner.submission_admission.closed.child_token();
-        let _guard = cancellation.clone().drop_guard();
+        let deadline = tokio::time::Instant::now() + Duration::from_secs(30);
         tokio::select! {
             biased;
-            () = cancellation.cancelled() => Err(TurnError::ShuttingDown),
-            result = tokio::time::timeout(Duration::from_secs(30), self.capture_projection(session_id, cancellation.clone())) => result.map_err(|_| TurnError::Invalid("Session projection capture deadline elapsed".into()))?,
+            () = self.inner.submission_admission.closed.cancelled() => Err(TurnError::ShuttingDown),
+            result = tokio::time::timeout_at(deadline, self.shared_projection(session_id, deadline)) => result.map_err(|_| capture_timeout())?,
         }
     }
 }
 
 impl AgentKernel {
+    async fn shared_projection(
+        &self,
+        session: &SessionId,
+        deadline: tokio::time::Instant,
+    ) -> TurnResult<SessionProjectionSnapshot> {
+        let (header, pin) = self.projection_generation(session).await?;
+        let fingerprint = header
+            .fingerprint()
+            .map_err(|error| TurnError::Invalid(error.to_string()))?;
+        let demand = self
+            .inner
+            .store
+            .read_watermarks(session)
+            .await
+            .map_err(turn_store_error)?;
+        let capture: Shared<Capture> = {
+            let mut entries = self
+                .inner
+                .projection_flights
+                .lock()
+                .expect("projection flights");
+            let existing = entries
+                .iter()
+                .find(|entry| {
+                    entry.session == *session
+                        && entry.header == fingerprint
+                        && entry.pin.same_generation(&pin)
+                        && entry.fact_seq == demand.durable_fact_seq
+                        && entry.control_seq == demand.durable_control_seq
+                })
+                .and_then(|entry| entry.capture.upgrade());
+            if let Some(capture) = existing {
+                capture
+            } else {
+                // Cancellation may release caller admission before its final cleanup locks
+                // this registry. Bound those retiring entries as well as live captures.
+                if entries.len() >= MAXIMUM_CAPTURES {
+                    return Err(TurnError::ProjectionCapacity);
+                }
+                let identity = Arc::new(());
+                // Construct the guard outside the async body so an unpolled flight is cleaned too.
+                let cleanup = FlightCleanup {
+                    registry: Arc::downgrade(&self.inner.projection_flights),
+                    identity: identity.clone(),
+                };
+                let kernel = self.clone();
+                let session_id = session.clone();
+                let capture_pin = pin.clone();
+                let cancellation = self.inner.submission_admission.closed.child_token();
+                let cancel = cancellation.clone().drop_guard();
+                let capture = async move {
+                    let _cancel = cancel;
+                    let result = tokio::select! {
+                        biased;
+                        () = cancellation.cancelled() => Err(TurnError::ShuttingDown),
+                        result = tokio::time::timeout_at(deadline, kernel.capture_projection(&session_id, header, capture_pin, demand.durable_fact_seq, demand.durable_control_seq, cancellation.clone())) => result.map_err(|_| capture_timeout()).and_then(std::convert::identity),
+                    };
+                    // Remove before publishing Ready; outstanding waiters may retain Shared output.
+                    drop(cleanup);
+                    result
+                }.boxed().shared();
+                entries.push(Flight {
+                    identity,
+                    session: session.clone(),
+                    header: fingerprint,
+                    pin,
+                    fact_seq: demand.durable_fact_seq,
+                    control_seq: demand.durable_control_seq,
+                    capture: capture.downgrade().expect("unpolled capture"),
+                });
+                capture
+            }
+        };
+        capture.await
+    }
+
     pub(super) async fn projection_generation(
         &self,
         session_id: &SessionId,
@@ -149,12 +255,22 @@ impl AgentKernel {
     async fn capture_projection(
         &self,
         session_id: &SessionId,
+        header: Arc<SessionHeader>,
+        pin: AgentCompositionPin,
+        minimum_fact_seq: u64,
+        minimum_control_seq: u64,
         cancellation: CancellationToken,
     ) -> TurnResult<SessionProjectionSnapshot> {
-        let (header, pin) = self.projection_generation(session_id).await?;
         let page = observation::read_domain_states_bounded(&self.inner, session_id, None)
             .await
             .map_err(turn_store_error)?;
+        if page.durable_fact_seq < minimum_fact_seq
+            || page.durable_control_seq < minimum_control_seq
+        {
+            return Err(TurnError::Invalid(
+                "projection capture precedes requested durable watermarks".into(),
+            ));
+        }
         let context = SessionProjectionContext::new(
             header,
             ProjectionCursor::Durable {
@@ -179,4 +295,8 @@ impl AgentKernel {
             .await
             .map_err(|error| TurnError::Invalid(error.to_string()))
     }
+}
+
+fn capture_timeout() -> TurnError {
+    TurnError::Invalid("Session projection capture deadline elapsed".into())
 }

@@ -159,6 +159,8 @@ async fn warm_fork_selection_work_does_not_grow_with_unselected_history() {
             .validation_reader
             .lock()
             .unwrap()
+            .as_mut()
+            .expect("idle validation reader")
             .trace_v2(TraceEventCodes::SQLITE_TRACE_PROFILE, Some(count));
         trace_readers(&store, TraceEventCodes::SQLITE_TRACE_PROFILE, Some(count));
         let mut samples = Vec::new();
@@ -187,6 +189,8 @@ async fn warm_fork_selection_work_does_not_grow_with_unselected_history() {
             .validation_reader
             .lock()
             .unwrap()
+            .as_mut()
+            .expect("idle validation reader")
             .trace_v2(TraceEventCodes::empty(), None);
         trace_readers(&store, TraceEventCodes::empty(), None);
         assert_eq!(

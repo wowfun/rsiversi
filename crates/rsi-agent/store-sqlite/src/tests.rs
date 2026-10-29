@@ -1,5 +1,8 @@
 use super::*;
 #[cfg(any(unix, windows))]
+#[path = "tests/activity_cuts.rs"]
+mod activity_cuts;
+#[cfg(any(unix, windows))]
 #[path = "tests/admission.rs"]
 mod admission;
 #[cfg(any(unix, windows))]
@@ -384,6 +387,8 @@ async fn online_validation_sql_work() {
                 .validation_reader
                 .lock()
                 .unwrap()
+                .as_mut()
+                .expect("idle validation reader")
                 .trace_v2(TraceEventCodes::SQLITE_TRACE_PROFILE, Some(count));
             for cycle in 0..3 {
                 VM.store(0, Ordering::Relaxed);
@@ -1723,7 +1728,7 @@ fn pause_next_validation(
     (entered_rx, release_tx)
 }
 
-#[cfg(unix)]
+#[cfg(any(unix, windows))]
 pub(super) async fn seed_session(store: &SqliteStore, name: &str) -> SessionId {
     let id = SessionId::new(name).unwrap();
     store
@@ -2859,13 +2864,15 @@ async fn store_measurements_include_successful_and_failed_cas_workers() {
 
 #[cfg(feature = "test-support")]
 #[tokio::test]
-#[cfg(unix)]
 async fn warm_reader_measurements_cover_workers_without_revalidation() {
     warm_reader_case(4, 1024, 2, false).await;
 }
 
 #[cfg(feature = "test-support")]
-#[cfg(unix)]
+#[expect(
+    clippy::too_many_lines,
+    reason = "Keep warm fixture setup and operation measurement assertions together"
+)]
 async fn warm_reader_case(fact_count: usize, text_bytes: usize, iterations: usize, report: bool) {
     let root = tempfile::tempdir().unwrap();
     let store = SqliteStore::open(root.path()).unwrap();
@@ -2951,6 +2958,20 @@ async fn warm_reader_case(fact_count: usize, text_bytes: usize, iterations: usiz
         }
         let samples = store.take_reader_measurements();
         assert_eq!(samples.len(), iterations * if mixed { 2 } else { 1 });
+        assert_eq!(
+            samples
+                .iter()
+                .filter(|sample| sample.operation == StoreOperation::Header)
+                .count(),
+            iterations
+        );
+        assert_eq!(
+            samples
+                .iter()
+                .filter(|sample| sample.operation == StoreOperation::FactPage)
+                .count(),
+            if mixed { iterations } else { 0 }
+        );
         assert!(
             samples
                 .iter()

@@ -1,5 +1,15 @@
 # rsi-agent-kernel
 
+Projection captures admit at most 16 callers, each with a 30-second deadline
+including generation selection. Pending captures share a domain read and pure
+producer execution only for the same Session, Header, exact generation pin and
+requested durable watermarks. Those watermarks are a lower bound; the returned
+cursor is the actual captured current cut. Completed captures are never cached.
+Each flight expires by its creator's deadline. Cancelling one waiter preserves
+other waiters; dropping the final waiter cancels producer work. Shutdown cancels
+all captures. Generation selection remains per caller and drafts keep their own
+retained generation. Sharing adds no detached work or uncharged result cache.
+
 Retirement excludes admitted command preparation as well as submitted work.
 Command registration and retirement share the submission and Kernel-state
 admission order; a command cannot enter behind an accepted retirement reservation.

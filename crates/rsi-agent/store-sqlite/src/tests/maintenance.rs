@@ -197,6 +197,9 @@ async fn access_batch_keeps_retiring_and_purged_errors_in_selection_order() {
         assert_eq!(rows.len(), 2);
         assert_eq!(rows[0].as_ref().unwrap().session_id, selection[0]);
         assert!(matches!(&rows[1], Err(StoreError::NotFound(id)) if id == selection[1].as_str()));
+        let cuts = store.session_activity_cuts(&selection).await.unwrap();
+        assert_eq!(cuts[0].as_ref().unwrap().session_id, selection[0]);
+        assert!(matches!(&cuts[1], Err(StoreError::NotFound(id)) if id == selection[1].as_str()));
     }
 }
 

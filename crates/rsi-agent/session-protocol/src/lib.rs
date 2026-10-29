@@ -17,6 +17,9 @@ use sha2::{Digest, Sha256};
 use std::fmt;
 use thiserror::Error;
 
+/// Maximum concurrent nonterminal Turns in one Session.
+pub const MAXIMUM_LIVE_TURNS: usize = 256;
+
 mod model_attempt;
 mod queue;
 pub use model_attempt::{

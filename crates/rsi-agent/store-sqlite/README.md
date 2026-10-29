@@ -1,5 +1,21 @@
 # rsi-agent-store-sqlite
 
+Diagnostic lane samples label the owning mechanical operation explicitly.
+Labels distinguish access batches, activity cuts, Headers, Fact pages, domain
+states and durable watermarks without inferring caller purpose from a result type or page
+size. Admission, scheduling, worker and JSON-decode durations remain report-only;
+deterministic tests assert operation and decode counts. Reader concurrency stays
+at two pending evidence that a different policy improves the mixed workload.
+`RSI_STORE_BENCH_ACTIVITY_ONLY=1` compares sequential and batched activity reads
+on the same validated 128-Session fixture. `RSI_STORE_BENCH_EVIDENCE` retains the
+bounded raw lane samples; cold validation is reported separately from warm reads.
+
+An activity-cut batch obtains up to 64 canonical-history proofs sequentially
+before its single snapshot query. Warm proofs reuse the cache; a fully cold batch
+can require 64 validation jobs, with latency dependent on each Session's history.
+The batch retains those proofs through the query independently of cache eviction,
+without acquiring multiple bounded pin leases that could exhaust its own permits.
+
 Session maintenance persists operation receipts and retirement tombstones outside
 Session-owned rows. Reference coverage is per canonical record and includes its
 content digest; a source snapshot must agree with this projection before deletion.

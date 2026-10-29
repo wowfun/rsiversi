@@ -93,6 +93,8 @@ struct FactReadRaceStore {
     reply_read_entered: Notify,
     release_reply_read: Notify,
     stale_domain_read: AtomicBool,
+    projection_reads: AtomicUsize,
+    watermark_reads: tokio::sync::Semaphore,
     pause_domain_read: AtomicBool,
     domain_read_entered: Notify,
     release_domain_read: Notify,
@@ -196,6 +198,8 @@ impl FactReadRaceStore {
             reply_read_entered: Notify::new(),
             release_reply_read: Notify::new(),
             stale_domain_read: AtomicBool::new(false),
+            projection_reads: AtomicUsize::new(0),
+            watermark_reads: tokio::sync::Semaphore::new(0),
             pause_domain_read: AtomicBool::new(false),
             domain_read_entered: Notify::new(),
             release_domain_read: Notify::new(),
@@ -473,6 +477,24 @@ impl FactReadRaceStore {
 
 #[async_trait]
 impl SessionStore for FactReadRaceStore {
+    async fn session_access(
+        &self,
+        sessions: &[SessionId],
+    ) -> rsi_agent_store_protocol::Result<
+        Vec<rsi_agent_store_protocol::Result<rsi_agent_store_protocol::StoreSessionAccess>>,
+    > {
+        self.inner.session_access(sessions).await
+    }
+
+    async fn session_activity_cuts(
+        &self,
+        sessions: &[SessionId],
+    ) -> rsi_agent_store_protocol::Result<
+        Vec<rsi_agent_store_protocol::Result<rsi_agent_store_protocol::StoreActivityCut>>,
+    > {
+        self.inner.session_activity_cuts(sessions).await
+    }
+
     async fn session_activity_summaries(
         &self,
         sessions: &[SessionId],
@@ -625,7 +647,9 @@ impl SessionStore for FactReadRaceStore {
                 return Err(fault.take().unwrap().1);
             }
         }
-        self.inner.read_watermarks(id).await
+        let result = self.inner.read_watermarks(id).await;
+        self.watermark_reads.add_permits(1);
+        result
     }
 
     async fn read_domain_states(
@@ -633,6 +657,7 @@ impl SessionStore for FactReadRaceStore {
         session_id: &SessionId,
         horizon: Option<u64>,
     ) -> rsi_agent_store_protocol::Result<rsi_agent_store_protocol::StoreDomainStatePage> {
+        self.projection_reads.fetch_add(1, Ordering::SeqCst);
         if self.pause_domain_read.swap(false, Ordering::AcqRel) {
             self.domain_read_entered.notify_one();
             self.release_domain_read.notified().await;

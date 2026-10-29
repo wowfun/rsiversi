@@ -68,7 +68,7 @@ async fn activity_revocation_during_collection_refuses_protected_and_device_deli
             .await
             .unwrap();
         let roster = Arc::new(Roster {
-            id,
+            ids: vec![id],
             present: std::sync::atomic::AtomicBool::new(true),
             revision: std::sync::atomic::AtomicU64::new(0),
         });
@@ -131,9 +131,132 @@ async fn activity_revocation_during_collection_refuses_protected_and_device_deli
 
 #[derive(Debug)]
 struct Roster {
-    id: SessionId,
+    ids: Vec<SessionId>,
     present: std::sync::atomic::AtomicBool,
     revision: std::sync::atomic::AtomicU64,
+}
+
+#[tokio::test]
+#[expect(
+    clippy::too_many_lines,
+    reason = "One maximum-roster fixture verifies batching, cache refresh, revision races and batch failure recovery"
+)]
+async fn maximum_activity_roster_uses_one_access_and_two_cut_batches() {
+    let store = Arc::new(MemoryStore::new());
+    let ids = (0..128)
+        .map(|index| SessionId::new(format!("activity-{index:03}")).unwrap())
+        .collect::<Vec<_>>();
+    for id in &ids {
+        let header = SessionHeader::new_local(
+            id.clone(),
+            1,
+            std::env::current_dir().unwrap().to_str().unwrap(),
+            AgentPresetId::new("removed-preset").unwrap(),
+            test_settings(),
+        )
+        .unwrap();
+        store
+            .append(AppendBatch {
+                session_id: id.clone(),
+                expected_seq: 0,
+                header: Some(header),
+                facts: vec![Arc::new(
+                    SessionFact::new(
+                        1,
+                        1,
+                        SessionFactBody::TurnAccepted {
+                            reasoning_effort: None,
+                            turn_id: TurnId::new("turn").unwrap(),
+                            text: "accepted".into(),
+                            model: None,
+                            sandbox: SandboxMode::WorkspaceWrite,
+                            require_approval: false,
+                        },
+                    )
+                    .unwrap(),
+                )],
+            })
+            .await
+            .unwrap();
+    }
+    let roster = Arc::new(Roster {
+        ids: ids[64..].to_vec(),
+        present: std::sync::atomic::AtomicBool::new(true),
+        revision: std::sync::atomic::AtomicU64::new(0),
+    });
+    let service = LocalSessionService::new(
+        rsi_meta::Execution::native(tokio::runtime::Handle::current()),
+        Arc::new(UnavailableCommands),
+        roster.clone(),
+        Arc::new(UnavailableTurns::default()),
+        store.clone(),
+        rsi_agent_context::ContextBudget::default(),
+        Arc::new(UnavailableComposition),
+        Arc::new(UnavailableWorkspace),
+        Arc::new(UnavailableSettings),
+        Arc::new(UnavailableLanguage),
+        Arc::new(UnavailableImage),
+        Arc::new(UnavailableMedia),
+        Arc::new(TreeApprovals::default()),
+    );
+    for id in &ids[..64] {
+        drop(service.attach(id).await.unwrap());
+    }
+    let before = store.activity_read_counts();
+    let open_reads = store.open_turn_read_count();
+    let page = service.activity().await.unwrap();
+    assert_eq!(page.entries.len(), 128);
+    let after = store.activity_read_counts();
+    assert_eq!(
+        (after.0 - before.0, after.1 - before.1, after.2 - before.2),
+        (2, 1, 0)
+    );
+    assert_eq!(store.open_turn_read_count(), open_reads);
+    service.activity().await.unwrap();
+    assert_eq!(store.activity_read_counts().0, after.0);
+    roster.revision.fetch_add(1, Ordering::AcqRel);
+    service.activity().await.unwrap();
+    assert_eq!(store.activity_read_counts().0, after.0 + 2);
+    service.activity().await.unwrap();
+    assert_eq!(store.activity_read_counts().0, after.0 + 2);
+    roster.revision.fetch_add(1, Ordering::AcqRel);
+    let (entered, release) = store.pause_next_activity_cuts();
+    let mut reading = Box::pin(service.activity());
+    assert!(futures_util::poll!(reading.as_mut()).is_pending());
+    entered.await.unwrap();
+    roster.revision.fetch_add(1, Ordering::AcqRel);
+    release.send(()).unwrap();
+    reading.await.unwrap();
+    let raced = store.activity_read_counts().0;
+    service.activity().await.unwrap();
+    assert_eq!(
+        store.activity_read_counts().0,
+        raced + 2,
+        "a revision race must not populate cut cache"
+    );
+    roster.revision.fetch_add(1, Ordering::AcqRel);
+    store.fail_next_activity_cuts(rsi_agent_store_protocol::StoreError::Io(
+        "injected cut failure".into(),
+    ));
+    let failed = service.activity().await.unwrap();
+    assert_eq!(
+        failed
+            .entries
+            .iter()
+            .filter(|entry| entry.fact_seq == "0" && entry.status == ActivityStatus::Unknown)
+            .count(),
+        64
+    );
+    assert!(
+        service
+            .activity()
+            .await
+            .unwrap()
+            .entries
+            .iter()
+            .all(|entry| entry.fact_seq == "1")
+    );
+    service.stop().await.unwrap();
 }
 #[async_trait]
 impl SessionProjections for Roster {
@@ -143,10 +266,13 @@ impl SessionProjections for Roster {
     fn resident_activity(&self) -> TurnResult<ResidentActivityPage> {
         Ok(ResidentActivityPage {
             entries: if self.present.load(Ordering::SeqCst) {
-                vec![ResidentActivity {
-                    session: self.id.clone(),
-                    running: true,
-                }]
+                self.ids
+                    .iter()
+                    .map(|id| ResidentActivity {
+                        session: id.clone(),
+                        running: true,
+                    })
+                    .collect()
             } else {
                 vec![]
             },
@@ -212,7 +338,7 @@ async fn activity_distinguishes_current_owner_from_durable_open_turn_and_bounds_
             .unwrap();
     }
     let roster = Arc::new(Roster {
-        id: id.clone(),
+        ids: vec![id.clone()],
         present: std::sync::atomic::AtomicBool::new(true),
         revision: std::sync::atomic::AtomicU64::new(0),
     });
@@ -246,19 +372,19 @@ async fn activity_distinguishes_current_owner_from_durable_open_turn_and_bounds_
         approvals.clone(),
     );
     let mut page = service.activity().await.unwrap();
-    let reads = store.open_turn_read_count();
+    let reads = store.activity_read_counts().0;
     for _ in 0..16 {
         service.activity().await.unwrap();
     }
     assert_eq!(
-        store.open_turn_read_count(),
+        store.activity_read_counts().0,
         reads,
         "idle attention must not revisit Store metadata"
     );
     roster.revision.fetch_add(1, Ordering::AcqRel);
     service.activity().await.unwrap();
     assert_eq!(
-        store.open_turn_read_count(),
+        store.activity_read_counts().0,
         reads + 1,
         "a changed commit revision invalidates the durable cut"
     );

@@ -6,7 +6,13 @@ impl LocalSessionService {
         &self,
         header: &rsi_agent_session_protocol::SessionHeader,
     ) -> Result<tokio_util::sync::CancellationToken> {
-        match header.protection() {
+        self.protect_scope(header.protection())
+    }
+    pub(super) fn protect_scope(
+        &self,
+        scope: Option<&rsi_agent_session_protocol::SessionProtectionScope>,
+    ) -> Result<tokio_util::sync::CancellationToken> {
+        match scope {
             None => Ok(tokio_util::sync::CancellationToken::new()),
             Some(scope) => self
                 .protection

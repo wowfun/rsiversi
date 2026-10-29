@@ -35,6 +35,11 @@ use std::collections::{BTreeMap, BTreeSet};
 use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::{Arc, Mutex};
 
+type ActivityCutPause = (
+    tokio::sync::oneshot::Sender<()>,
+    tokio::sync::oneshot::Receiver<()>,
+);
+
 /// Deterministic in-memory implementation of the mechanical Store seam.
 #[derive(Debug, Default)]
 pub struct MemoryStore {
@@ -43,6 +48,11 @@ pub struct MemoryStore {
     fork_boundary_resolutions: AtomicUsize,
     fail_agent_children: Mutex<Option<SessionId>>,
     open_turn_reads: AtomicUsize,
+    activity_cut_reads: AtomicUsize,
+    access_reads: AtomicUsize,
+    header_reads: AtomicUsize,
+    activity_cut_failure: Mutex<Option<StoreError>>,
+    activity_cut_pause: Mutex<Option<ActivityCutPause>>,
 }
 
 #[derive(Clone, Debug, Default)]
@@ -117,6 +127,43 @@ impl MemoryStore {
     /// Counts bounded open-Turn metadata reads, including missing-session queries.
     pub fn open_turn_read_count(&self) -> usize {
         self.open_turn_reads.load(Ordering::Acquire)
+    }
+    /// Returns activity-cut, access-batch and individual Header call counts.
+    pub fn activity_read_counts(&self) -> (usize, usize, usize) {
+        (
+            self.activity_cut_reads.load(Ordering::Acquire),
+            self.access_reads.load(Ordering::Acquire),
+            self.header_reads.load(Ordering::Acquire),
+        )
+    }
+    /// Refuses the next admitted activity-cut batch before reading state.
+    ///
+    /// # Panics
+    /// Panics if the fixture mutex was poisoned.
+    pub fn fail_next_activity_cuts(&self, error: StoreError) {
+        *self.activity_cut_failure.lock().unwrap() = Some(error);
+    }
+    /// Pauses one activity-cut batch before its state snapshot; sending or dropping
+    /// the returned sender releases it. The receiver observes entry into the pause.
+    ///
+    /// # Panics
+    /// Panics if a pause is already installed or the fixture mutex was poisoned.
+    pub fn pause_next_activity_cuts(
+        &self,
+    ) -> (
+        tokio::sync::oneshot::Receiver<()>,
+        tokio::sync::oneshot::Sender<()>,
+    ) {
+        let (entered, started) = tokio::sync::oneshot::channel();
+        let (release, blocked) = tokio::sync::oneshot::channel();
+        assert!(
+            self.activity_cut_pause
+                .lock()
+                .unwrap()
+                .replace((entered, blocked))
+                .is_none()
+        );
+        (started, release)
     }
 
     /// Returns how many immutable fork-boundary resolutions this fixture served.

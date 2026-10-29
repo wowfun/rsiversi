@@ -2,7 +2,7 @@
 
 use crate::{ContributionId, DomainStateValue, Result, SessionError, SessionId};
 use serde::{Deserialize, Serialize};
-use std::collections::BTreeSet;
+use std::{collections::BTreeSet, sync::Arc};
 
 /// Maximum distinct producer outcomes in one projection snapshot.
 pub const MAXIMUM_SESSION_PROJECTIONS: usize = 64;
@@ -164,7 +164,8 @@ pub struct SessionProjectionSnapshot {
     header_sha256: String,
     generation_sha256: String,
     cursor: ProjectionCursor,
-    entries: Vec<ProjectionEntry>,
+    #[serde(serialize_with = "serialize_entries")]
+    entries: Arc<[ProjectionEntry]>,
 }
 impl SessionProjectionSnapshot {
     /// Validates unique producer identity and the complete encoded envelope.
@@ -194,7 +195,7 @@ impl SessionProjectionSnapshot {
             header_sha256,
             generation_sha256,
             cursor,
-            entries,
+            entries: entries.into(),
         };
         let bytes = snapshot.encoded_len()?;
         if bytes > MAXIMUM_SESSION_PROJECTION_BYTES {
@@ -230,6 +231,12 @@ impl SessionProjectionSnapshot {
     pub fn encoded_len(&self) -> Result<usize> {
         crate::compact_json_len(self)
     }
+}
+fn serialize_entries<S: serde::Serializer>(
+    entries: &Arc<[ProjectionEntry]>,
+    serializer: S,
+) -> std::result::Result<S::Ok, S::Error> {
+    entries.as_ref().serialize(serializer)
 }
 impl<'de> Deserialize<'de> for SessionProjectionSnapshot {
     fn deserialize<D: serde::Deserializer<'de>>(

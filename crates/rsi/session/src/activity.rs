@@ -60,37 +60,62 @@ impl LocalSessionService {
                 result.map_err(|_| SessionError::Invalid("activity read deadline elapsed".into()))?,
         }
     }
-    async fn activity_cut(
+    async fn activity_cuts(
         &self,
-        session: &SessionId,
-    ) -> std::result::Result<(u64, bool), StoreError> {
+        sessions: &[SessionId],
+    ) -> BTreeMap<SessionId, std::result::Result<(u64, bool), StoreError>> {
         let revision = self.projection_service.activity_revision();
-        if let Some(revision) = revision {
+        let mut cuts = BTreeMap::new();
+        let missing = {
             let cache = self.activity.cached.lock().expect("activity cache");
-            if let Some(cached) = cache
-                .get(session)
-                .filter(|cached| cached.revision == revision)
-            {
-                return Ok((cached.sequence, cached.open));
+            sessions
+                .iter()
+                .filter_map(|session| {
+                    if let Some(cached) = cache
+                        .get(session)
+                        .filter(|cached| Some(cached.revision) == revision)
+                    {
+                        cuts.insert(session.clone(), Ok((cached.sequence, cached.open)));
+                        None
+                    } else {
+                        Some(session.clone())
+                    }
+                })
+                .collect::<Vec<_>>()
+        };
+        for batch in missing.chunks(64) {
+            let rows = match self.store.session_activity_cuts(batch).await {
+                Ok(rows) => rows,
+                Err(error) => vec![Err(error); batch.len()],
+            };
+            for (session, row) in batch.iter().zip(rows) {
+                cuts.insert(
+                    session.clone(),
+                    row.map(|row| (row.durable_fact_seq, row.has_open_turn)),
+                );
             }
         }
-        let page = self.store.list_open_turns(session, 0, 1).await?;
-        let result = (page.durable_seq, !page.turns.is_empty());
-        if let Some(revision) = revision {
-            self.cache_activity(
-                session,
-                Cached {
-                    revision,
-                    sequence: result.0,
-                    open: result.1,
-                },
-            );
+        if let Some(revision) = revision
+            .filter(|revision| Some(*revision) == self.projection_service.activity_revision())
+        {
+            for session in missing {
+                if let Some(Ok((sequence, open))) = cuts.get(&session) {
+                    self.cache_activity(
+                        &session,
+                        Cached {
+                            revision,
+                            sequence: *sequence,
+                            open: *open,
+                        },
+                    );
+                }
+            }
         }
-        Ok(result)
+        cuts
     }
     fn cache_activity(&self, session: &SessionId, cached: Cached) {
         let mut cache = self.activity.cached.lock().expect("activity cache");
-        if cache.len() >= 128 {
+        if cache.len() >= 128 && !cache.contains_key(session) {
             cache.pop_first();
         }
         cache.insert(session.clone(), cached);
@@ -101,12 +126,21 @@ impl LocalSessionService {
         locations: &rsi_execution::ExecutionLocations,
     ) -> Result<Vec<tokio_util::sync::CancellationToken>> {
         let mut leases = Vec::new();
-        for id in selected.keys().cloned().collect::<Vec<_>>() {
-            let allowed = match self.store.header(&id).await {
-                Ok(header) => match self.protect_header(&header) {
+        let ids = selected.keys().cloned().collect::<Vec<_>>();
+        if ids.is_empty() {
+            return Ok(leases);
+        }
+        let rows = self
+            .store
+            .session_access(&ids)
+            .await
+            .map_err(super::map_store_error)?;
+        for (id, row) in ids.iter().zip(rows) {
+            let allowed = match row {
+                Ok(row) => match self.protect_scope(row.protection.as_ref()) {
                     Ok(lease) => {
                         leases.push(lease);
-                        true
+                        locations.contains(&row.location)
                     }
                     Err(rsi_session_protocol::SessionError::Api(
                         rsi_api_protocol::ApiError::Unauthorized,
@@ -117,20 +151,7 @@ impl LocalSessionService {
                 Err(error) => return Err(super::map_store_error(error)),
             };
             if !allowed {
-                selected.remove(&id);
-            }
-        }
-        let ids: Vec<_> = selected.keys().cloned().collect();
-        for batch in ids.chunks(64) {
-            let rows = self
-                .store
-                .session_activity_summaries(batch)
-                .await
-                .map_err(super::map_store_error)?;
-            for (id, row) in batch.iter().zip(rows) {
-                if row.is_none_or(|row| !locations.contains(row.coordinates.location())) {
-                    selected.remove(id);
-                }
+                selected.remove(id);
             }
         }
         Ok(leases)
@@ -167,9 +188,10 @@ impl LocalSessionService {
             None => Vec::new(),
         };
         let interactions = reservation.retain(approvals, questions)?;
+        let mut cuts = self.activity_cuts(&ids).await;
         let mut entries = Vec::new();
         for (session, running) in selected {
-            let (fact_seq, status) = match self.activity_cut(&session).await {
+            let (fact_seq, status) = match cuts.remove(&session).expect("selected activity cut") {
                 Ok((sequence, open)) => (
                     sequence.to_string(),
                     if !open {

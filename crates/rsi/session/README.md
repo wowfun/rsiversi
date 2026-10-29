@@ -133,8 +133,12 @@ operations, including streams and Header reads. Returned handles retain that
 caller and consult Execution admission for every new operation. Reconciliation
 of an existing draft shares its state, not the original caller's authority.
 Recent enumeration applies a retained visibility grant inside the Store's
-creation-ordered page query. Activity visibility uses batched scalar summaries,
-without decoding full Headers. Storage and authority failures remain explicit.
+creation-ordered page query. Activity visibility uses one bounded access batch
+for location/protection; a Store may decode Headers to produce those fields.
+Durable activity cuts use batches of at most 64 Sessions after cache lookup.
+Each batch has one durable read snapshot. Cut failures produce Unknown activity;
+access failures remain explicit, and publication rechecks caller and protection
+revocation. A revision change during cut collection prevents cache publication.
 Stream publication checks current authorization for each item and releases that
 short-lived admission before yielding ownership to a consumer. A suspended
 consumer cannot hold the shared operation pool; the next item rechecks revocation.

@@ -206,7 +206,7 @@ impl SessionStore for SqliteStore {
 
     async fn read_watermarks(&self, session_id: &SessionId) -> Result<StoreSessionWatermarks> {
         let session_id = session_id.clone();
-        self.with_reader(move |connection| {
+        self.with_reader_named(StoreOperation::Watermarks, move |connection| {
             let (fact, control) = connection
                 .query_row(
                     "SELECT durable_seq, control_seq FROM sessions WHERE session_id NOT IN (SELECT session_id FROM session_tombstones) AND session_id = ?1",
@@ -360,13 +360,20 @@ impl SessionStore for SqliteStore {
         self.ensure_not_retired(session_id).await
     }
 
+    async fn session_activity_cuts(
+        &self,
+        sessions: &[SessionId],
+    ) -> Result<Vec<Result<rsi_agent_store_protocol::StoreActivityCut>>> {
+        self.activity_cuts(sessions).await
+    }
+
     async fn session_access(
         &self,
         sessions: &[SessionId],
     ) -> Result<Vec<Result<rsi_agent_store_protocol::StoreSessionAccess>>> {
         rsi_agent_store_protocol::validate_access_selection(sessions)?;
         let sessions = sessions.to_vec();
-        self.with_reader(move |connection| {
+        self.with_reader_named(StoreOperation::AccessBatch, move |connection| {
             let transaction = connection.transaction().map_err(sql_error)?;
             let result = sessions
                 .iter()
@@ -385,7 +392,7 @@ impl SessionStore for SqliteStore {
 
     async fn header(&self, session_id: &SessionId) -> Result<SessionHeader> {
         let session_id = session_id.clone();
-        self.with_reader(move |connection| {
+        self.with_reader_named(StoreOperation::Header, move |connection| {
             let transaction = connection.transaction().map_err(sql_error)?;
             reference_index::available(&transaction, &session_id)?;
             read_session_header_row(&transaction, &session_id).map(|(header, _)| header)
@@ -400,7 +407,7 @@ impl SessionStore for SqliteStore {
     ) -> Result<rsi_agent_store_protocol::StoreDomainStatePage> {
         self.ensure_session_validated(session_id).await?;
         let session_id = session_id.clone();
-        self.with_reader(move |connection| {
+        self.with_reader_named(StoreOperation::DomainStates, move |connection| {
             let transaction = connection
                 .transaction_with_behavior(TransactionBehavior::Deferred)
                 .map_err(sql_error)?;
@@ -502,7 +509,7 @@ impl SessionStore for SqliteStore {
         #[cfg(feature = "test-support")]
         let barrier = Arc::clone(&self.inner.fact_page_barrier);
         let page = self
-            .with_reader(move |connection| {
+            .with_reader_named(StoreOperation::FactPage, move |connection| {
                 let transaction = connection
                     .transaction_with_behavior(TransactionBehavior::Deferred)
                     .map_err(sql_error)?;
@@ -708,7 +715,7 @@ impl SessionStore for SqliteStore {
         let session_id = session_id.clone();
         #[cfg(any(test, feature = "test-support"))]
         let materializations = Arc::clone(&self.inner.fact_materializations);
-        self.with_reader(move |connection| {
+        self.with_reader_named(StoreOperation::FactPage, move |connection| {
             let transaction = connection
                 .transaction_with_behavior(TransactionBehavior::Deferred)
                 .map_err(sql_error)?;
@@ -818,7 +825,7 @@ impl SessionStore for SqliteStore {
         let turn_id = turn_id.clone();
         #[cfg(any(test, feature = "test-support"))]
         let materializations = Arc::clone(&self.inner.fact_materializations);
-        self.with_reader(move |connection| {
+        self.with_reader_named(StoreOperation::FactPage, move |connection| {
             let transaction = connection
                 .transaction_with_behavior(TransactionBehavior::Deferred)
                 .map_err(sql_error)?;
