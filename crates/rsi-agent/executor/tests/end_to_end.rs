@@ -1509,6 +1509,27 @@ impl BaseStack {
             .unwrap()
     }
 
+    // Call only after the deterministic provider and executor have joined.
+    // Restart the service's Kernel owner so its durable recovery boundary, rather
+    // than executor replacement, repairs the interrupted Turn.
+    async fn restart_kernel(&mut self) {
+        assert!(self.kernel_fiber.dispose().await.is_clean());
+        self.kernel_fiber = self
+            .runtime
+            .root()
+            .apply(
+                ResolvedFactory::linked(
+                    "rsi.agent.kernel",
+                    "kernel-restarted",
+                    UpdateMode::Replayable,
+                    Arc::new(KernelFactory),
+                ),
+                Value::Null,
+            )
+            .await
+            .unwrap();
+    }
+
     async fn activate_executor(&self, executor_id: &str) -> FiberHandle {
         self.activate_executor_with_config(json!({"executor_id": executor_id}))
             .await
