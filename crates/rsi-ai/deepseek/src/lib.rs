@@ -376,6 +376,32 @@ struct DeepSeekPluginConfig {
     reasoning_efforts: BTreeMap<String, rsi_ai_protocol::ReasoningEffortProfile>,
 }
 
+impl DeepSeekPluginConfig {
+    fn apply_efforts(&self, mut adapter: DeepSeekConfig) -> Result<DeepSeekConfig, AiError> {
+        for model in self.language_models.keys() {
+            if !self.reasoning_efforts.contains_key(model)
+                && matches!(model.as_str(), "deepseek-flash" | "deepseek-v4-pro")
+            {
+                let supported = ["off", "low", "high", "max"]
+                    .into_iter()
+                    .map(rsi_ai_protocol::ReasoningEffortId::new)
+                    .collect::<std::result::Result<Vec<_>, _>>()
+                    .map_err(rsi_ai_transport::invalid_request_error)?;
+                let default = supported[2].clone();
+                adapter = adapter.with_reasoning_efforts(
+                    model,
+                    rsi_ai_protocol::ReasoningEffortProfile::new(supported, Some(default))
+                        .map_err(rsi_ai_transport::invalid_request_error)?,
+                )?;
+            }
+        }
+        for (model, efforts) in &self.reasoning_efforts {
+            adapter = adapter.with_reasoning_efforts(model, efforts.clone())?;
+        }
+        Ok(adapter)
+    }
+}
+
 #[derive(Debug)]
 struct PreparedDeepSeekPlugin {
     config: DeepSeekPluginConfig,
@@ -459,11 +485,9 @@ impl rsi_meta::PluginFactory for DeepSeekFactory {
                 .with_model_profile(model, *limits)
                 .map_err(|error| rsi_meta::MetaError::InvalidInput(error.to_string()))?;
         }
-        for (model, efforts) in &config.reasoning_efforts {
-            adapter = adapter
-                .with_reasoning_efforts(model, efforts.clone())
-                .map_err(|error| rsi_meta::MetaError::InvalidInput(error.to_string()))?;
-        }
+        adapter = config
+            .apply_efforts(adapter)
+            .map_err(|error| rsi_meta::MetaError::InvalidInput(error.to_string()))?;
         let retained = serde_json::to_vec(desired)
             .map_err(|error| rsi_meta::MetaError::InvalidInput(error.to_string()))?
             .len();
@@ -542,5 +566,63 @@ impl rsi_meta::PluginFactory for DeepSeekFactory {
                 })
             }),
         )
+    }
+}
+
+#[cfg(test)]
+mod profile_tests {
+    use super::*;
+    #[test]
+    fn official_efforts_apply_only_without_an_explicit_declaration() {
+        for model in ["deepseek-flash", "deepseek-v4-pro", "custom-model"] {
+            for explicit in [false, true] {
+                let mut config: DeepSeekPluginConfig = serde_json::from_value(serde_json::json!({
+                    "deployment":"test", "endpoint":"https://api.deepseek.com",
+                    "credential":{"owner":"test","slot":"default"},
+                    "language_models": {model: {"context_window_tokens":1_048_576,"default_output_reserve_tokens":4096,"max_output_reserve_tokens":256_000}}
+                })).unwrap();
+                if explicit {
+                    config.reasoning_efforts.insert(
+                        model.into(),
+                        rsi_ai_protocol::ReasoningEffortProfile::default(),
+                    );
+                }
+                let adapter = DeepSeekConfig::default()
+                    .with_default_output_tokens(model, 4096)
+                    .unwrap()
+                    .with_model_profile(model, config.language_models[model])
+                    .unwrap();
+                let adapter = DeepSeekAdapter::new(
+                    config.apply_efforts(adapter).unwrap(),
+                    Arc::new(rsi_ai_transport::ReqwestTransport::new().unwrap()),
+                );
+                let profile = adapter.describe(model).unwrap();
+                let expected = if explicit || model == "custom-model" {
+                    vec![]
+                } else {
+                    vec!["off", "low", "high", "max"]
+                };
+                assert_eq!(
+                    profile
+                        .reasoning_efforts()
+                        .supported()
+                        .iter()
+                        .map(rsi_ai_protocol::ReasoningEffortId::as_str)
+                        .collect::<Vec<_>>(),
+                    expected
+                );
+                assert_eq!(
+                    profile
+                        .reasoning_efforts()
+                        .default_effort()
+                        .map(rsi_ai_protocol::ReasoningEffortId::as_str),
+                    if expected.is_empty() {
+                        None
+                    } else {
+                        Some("high")
+                    }
+                );
+            }
+        }
     }
 }
