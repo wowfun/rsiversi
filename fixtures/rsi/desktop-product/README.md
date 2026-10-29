@@ -19,6 +19,8 @@ explicit config/state/cache homes and a launch document selecting its fixture Se
 the deterministic provider, select a model, create a conversation and submit it.
 Use a short report path on a native Unix filesystem: the Service Host socket is
 under its isolated state home and must fit the platform's Unix socket path limit.
+CI keeps every evidence root, including each mode in a loop, short enough for
+that derived socket path and uploads those roots after failures.
 Registered settings stay inside the Settings dialog and close with that dialog.
 Button selection requires an enabled, visible control with an unobstructed center
 hit, including when a closed menu retains a same-label descendant's layout box.
@@ -299,7 +301,14 @@ profile edit, including whitespace around an empty steps array, without WebKit.
 owner in the isolated daemon and reads the actual Automation API through the
 paired native bootstrap and Worker. The seed is prepared with the opt-in core
 `automation::prepare_visual_fixture` test and a canonical checker PNG. The
-scenario verifies the fixed failed predicate, screenshot and manual new-attempt
+managed Desktop Device initially sees no attempts. Build the fixture's Local
+grant helper with `cargo build --locked -p rsi-cli --example desktop-automation-grant`
+and pass its absolute path as `--automation-grant-probe`. The scenario reads the
+Device identity from the Profile UI, then the helper uses the isolated Host's
+public UDS Automation API to grant that Device view/cancel/resume for the exact
+`visual` source and rule. It preserves the policy revision check and does not
+edit live policy storage.
+The scenario verifies the fixed failed predicate, screenshot and manual new-attempt
 identity. It uses anonymous nonexistent fixture destinations for the new check;
 its policy-blocked result is separate from the original assertion failure.
 The JSON report derives verdicts and mutation identity from observed native

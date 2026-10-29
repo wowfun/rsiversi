@@ -1358,18 +1358,19 @@ jobs:
         timeout-minutes: 30
         run: |
           set -o pipefail
-          mkdir -p "$RUNNER_TEMP/rsi-desktop-automation-evidence"
-          export RSI_TEST_BROWSER_SCREENSHOT="$RUNNER_TEMP/rsi-desktop-automation-evidence/native.png"
+          mkdir -p "$RUNNER_TEMP/rsi-auto-evidence"
+          export RSI_TEST_BROWSER_SCREENSHOT="$RUNNER_TEMP/rsi-auto-evidence/native.png"
           cargo test --locked -p rsi-browser --features test-support --test native -- --ignored --exact native_preview_check_and_retirement --list | rg --fixed-strings --line-regexp 'native_preview_check_and_retirement: test'
-          cargo test --locked -p rsi-browser --features test-support --test native -- --ignored --exact native_preview_check_and_retirement --nocapture 2>&1 | tee "$RUNNER_TEMP/rsi-desktop-automation-evidence/native.log"
+          cargo test --locked -p rsi-browser --features test-support --test native -- --ignored --exact native_preview_check_and_retirement --nocapture 2>&1 | tee "$RUNNER_TEMP/rsi-auto-evidence/native.log"
           cargo test --locked -p rsi --test session_service -- --ignored --exact automation::prepare_visual_fixture --list | rg --fixed-strings --line-regexp 'automation::prepare_visual_fixture: test'
           for surface in web desktop tui; do
             RSI_TEST_AUTOMATION_VISUAL_ROOT="$RUNNER_TEMP/rsi-automation-$surface-seed" RSI_TEST_AUTOMATION_VISUAL_PNG="$RSI_TEST_BROWSER_SCREENSHOT" cargo test --locked -p rsi --test session_service -- --ignored --exact automation::prepare_visual_fixture
           done
-          RSI_WEB_BINARY="$RUNNER_TEMP/rsi-desktop-dist/bundle/rsi" RSI_WEB_ASSETS="$RUNNER_TEMP/rsi-desktop-dist/bundle/assets" RSI_AUTOMATION_WEB_SEED="$RUNNER_TEMP/rsi-automation-web-seed" RSI_AUTOMATION_WEB_REPORT="$RUNNER_TEMP/rsi-desktop-automation-evidence/web" node fixtures/rsi/web-product/automation-verify.mjs
-          dbus-run-session -- xvfb-run -a -s "-screen 0 1440x1000x24" python3 fixtures/rsi/desktop-product/verify.py --binary "$RUNNER_TEMP/rsi-desktop-dist/bundle/rsi-desktop" --driver /usr/bin/WebKitWebDriver --assets "$RUNNER_TEMP/rsi-desktop-dist/bundle/assets" --report "$RUNNER_TEMP/rsi-desktop-automation-evidence/desktop" --automation-fixture "$RUNNER_TEMP/rsi-automation-desktop-seed"
+          RSI_WEB_BINARY="$RUNNER_TEMP/rsi-desktop-dist/bundle/rsi" RSI_WEB_ASSETS="$RUNNER_TEMP/rsi-desktop-dist/bundle/assets" RSI_AUTOMATION_WEB_SEED="$RUNNER_TEMP/rsi-automation-web-seed" RSI_AUTOMATION_WEB_REPORT="$RUNNER_TEMP/rsi-auto-evidence/web" node fixtures/rsi/web-product/automation-verify.mjs
+          cargo build --locked -p rsi-cli --example desktop-automation-grant
+          dbus-run-session -- xvfb-run -a -s "-screen 0 1440x1000x24" python3 fixtures/rsi/desktop-product/verify.py --binary "$RUNNER_TEMP/rsi-desktop-dist/bundle/rsi-desktop" --driver /usr/bin/WebKitWebDriver --assets "$RUNNER_TEMP/rsi-desktop-dist/bundle/assets" --report "$RUNNER_TEMP/rsi-auto-evidence/desktop" --automation-fixture "$RUNNER_TEMP/rsi-automation-desktop-seed" --automation-grant-probe "$GITHUB_WORKSPACE/target/debug/examples/desktop-automation-grant"
           cargo test --locked -p rsi-cli --test service_host_cli -- --ignored --exact tui::automation::model_free_home_reads_automation_and_current_readiness --list | rg --fixed-strings --line-regexp 'tui::automation::model_free_home_reads_automation_and_current_readiness: test'
-          RSI_TEST_AUTOMATION_BINARY="$RUNNER_TEMP/rsi-desktop-dist/bundle/rsi" RSI_TEST_AUTOMATION_SEED="$RUNNER_TEMP/rsi-automation-tui-seed" RSI_TUI_PTY_REPORT="$RUNNER_TEMP/rsi-desktop-automation-evidence/tui.json" cargo test --locked -p rsi-cli --test service_host_cli -- --ignored --exact tui::automation::model_free_home_reads_automation_and_current_readiness
+          RSI_TEST_AUTOMATION_BINARY="$RUNNER_TEMP/rsi-desktop-dist/bundle/rsi" RSI_TEST_AUTOMATION_SEED="$RUNNER_TEMP/rsi-automation-tui-seed" RSI_TUI_PTY_REPORT="$RUNNER_TEMP/rsi-auto-evidence/tui.json" cargo test --locked -p rsi-cli --test service_host_cli -- --ignored --exact tui::automation::model_free_home_reads_automation_and_current_readiness
       - name: Exercise actual WebKitGTK first conversation
         if: ${{ !cancelled() && steps.build.outcome == 'success' && steps.foreign.outcome == 'success' && steps.sandbox.outcome == 'success' }}
         timeout-minutes: 10
@@ -1387,7 +1388,7 @@ jobs:
             mode_args=("--$mode")
             if [[ "$mode" == language ]]; then mode_args+=("$RSI_RUST_ANALYZER"); fi
             if [[ "$mode" == profiles ]]; then mode_args+=(--profile-probe "$GITHUB_WORKSPACE/target/debug/examples/profile-leaf-probe"); fi
-            dbus-run-session -- xvfb-run -a -s "-screen 0 2560x1440x24" python3 fixtures/rsi/desktop-product/verify.py --binary "$RUNNER_TEMP/rsi-desktop-dist/bundle/rsi-desktop" --driver /usr/bin/WebKitWebDriver --assets "$RUNNER_TEMP/rsi-desktop-dist/bundle/assets" --report "$RUNNER_TEMP/rsi-desktop-$mode-evidence" "${mode_args[@]}"
+            dbus-run-session -- xvfb-run -a -s "-screen 0 2560x1440x24" python3 fixtures/rsi/desktop-product/verify.py --binary "$RUNNER_TEMP/rsi-desktop-dist/bundle/rsi-desktop" --driver /usr/bin/WebKitWebDriver --assets "$RUNNER_TEMP/rsi-desktop-dist/bundle/assets" --report "$RUNNER_TEMP/rsi-desk-$mode" "${mode_args[@]}"
           done
       - name: Exercise missing frame acknowledgement
         if: ${{ !cancelled() && steps.build.outcome == 'success' }}
@@ -1420,6 +1421,8 @@ jobs:
           path: |
             ${{ runner.temp }}/rsi-desktop-evidence
             ${{ runner.temp }}/rsi-desktop-*-evidence
+            ${{ runner.temp }}/rsi-auto-evidence
+            ${{ runner.temp }}/rsi-desk-*
             ${{ runner.temp }}/rsi-desktop-terminal-evidence
             ${{ runner.temp }}/rsi-desktop-close-evidence
             ${{ runner.temp }}/rsi-desktop-dist/bundle/receipt.json

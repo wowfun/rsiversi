@@ -14,6 +14,57 @@ fn repository() -> &'static Path {
 }
 
 #[test]
+fn desktop_ci_report_paths_fit_the_native_socket_and_retain_evidence() {
+    let source = fs::read_to_string(repository().join(".github/workflows/ci.yml")).unwrap();
+    let workflow: yaml_serde::Value = yaml_serde::from_str(&source).unwrap();
+    let steps = workflow["jobs"]["rsi-desktop"]["steps"]
+        .as_sequence()
+        .unwrap();
+    for step in steps {
+        let run = step["run"].as_str().unwrap_or_default();
+        let modes = run
+            .lines()
+            .find_map(|line| {
+                line.trim()
+                    .strip_prefix("for mode in ")
+                    .and_then(|line| line.strip_suffix("; do"))
+            })
+            .unwrap_or("");
+        for line in run
+            .lines()
+            .filter(|line| line.contains("desktop-product/verify.py"))
+        {
+            let report = line
+                .split_once("--report \"")
+                .unwrap()
+                .1
+                .split('"')
+                .next()
+                .unwrap();
+            for mode in modes.split_whitespace().chain(std::iter::once("")) {
+                let path = report
+                    .replace("$RUNNER_TEMP", "/home/runner/work/_temp")
+                    .replace("$mode", mode);
+                let socket = format!("{path}/xdg_state_home/rsi/session-host/runtime/host.sock");
+                assert!(socket.len() < 108, "Linux sockaddr_un cannot hold {socket}");
+            }
+        }
+    }
+    let archive = steps
+        .iter()
+        .find(|step| step["with"]["name"] == "rsi-desktop-evidence")
+        .unwrap();
+    let paths = archive["with"]["path"].as_str().unwrap();
+    for root in ["rsi-auto-evidence", "rsi-desk-*"] {
+        assert!(
+            paths
+                .lines()
+                .any(|line| line == format!("${{{{ runner.temp }}}}/{root}"))
+        );
+    }
+}
+
+#[test]
 fn ci_executes_offline_install_policy_and_an_isolated_ordinary_runtime_smoke() {
     let source = fs::read_to_string(repository().join(".github/workflows/ci.yml")).unwrap();
     let workflow: yaml_serde::Value = yaml_serde::from_str(&source).unwrap();

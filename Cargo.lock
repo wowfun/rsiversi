@@ -6147,6 +6147,7 @@ dependencies = [
  "rsi-api-uds-client",
  "rsi-app-catalog",
  "rsi-application",
+ "rsi-automation-api",
  "rsi-build-info",
  "rsi-configuration-api",
  "rsi-credentials-local",
