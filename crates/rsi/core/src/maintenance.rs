@@ -431,8 +431,16 @@ mod tests {
             rsi_files_native_fs::create_absolute_directory_no_follow(home).unwrap();
             for name in files {
                 let path = home.join(name);
-                std::fs::create_dir_all(path.parent().unwrap()).unwrap();
-                std::fs::write(path, name).unwrap();
+                let parent = rsi_files_native_fs::create_absolute_directory_no_follow(
+                    path.parent().unwrap(),
+                )
+                .unwrap();
+                let mut file = rsi_files_native_fs::create_relative_private_file_no_follow(
+                    &parent,
+                    Path::new(path.file_name().unwrap()),
+                )
+                .unwrap();
+                file.write_all(name.as_bytes()).unwrap();
             }
         }
         let receipts = maintain_product_homes(

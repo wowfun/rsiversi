@@ -105,6 +105,8 @@ Fixed participant lookups do not enumerate sibling backups, so retained reset
 history cannot exhaust the operation's directory-entry budget.
 On Windows an existing entry must belong to TokenUser; its inherited ACL is
 made private before archival, without changing ownership or file contents.
+Maintenance fixtures create payload files and directories through the native
+private creators so elevated test tokens also satisfy this ownership contract.
 
 Source package builds are leases of the ordinary Host management plugin. A
 request freezes the absolute source root, resolved native executable, arguments,
