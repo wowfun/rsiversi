@@ -67,8 +67,9 @@ async fn receipt(path: &std::path::Path, pty: &ManagedPtyProcess) -> String {
     .await;
     result.unwrap_or_else(|_| {
         panic!(
-            "interactive command receipt: {:?}",
-            String::from_utf8_lossy(&output)
+            "interactive command receipt: {:?}; progress: {:?}",
+            String::from_utf8_lossy(&output),
+            std::fs::read_to_string(path.with_extension("progress.json"))
         )
     })
 }
@@ -103,6 +104,14 @@ async fn prompt(pty: &ManagedPtyProcess) {
 }
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn conpty_input_reaches_native_console_key_events() {
+    native_key_events("a中\r").await;
+}
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn conpty_win32_input_reaches_native_console_key_events() {
+    native_key_events("\u{1b}[65;30;97;1;0;1_\u{1b}[231;0;20013;1;0;1_\u{1b}[13;28;13;1;0;1_")
+        .await;
+}
+async fn native_key_events(input: &str) {
     let directory = tempfile::tempdir().unwrap();
     let service = Service::new(crate::ProcessLocalConfig::default());
     let mut plan = spec(directory.path());
@@ -110,10 +119,11 @@ async fn conpty_input_reaches_native_console_key_events() {
         "-NoLogo",
         "-NoProfile",
         "-Command",
-        "$keys=@(1..3|ForEach-Object{$k=[Console]::ReadKey($true);@{character=[int]$k.KeyChar;key=[int]$k.Key;modifiers=[int]$k.Modifiers}});[IO.File]::WriteAllText((Join-Path $pwd 'keys.json'),($keys|ConvertTo-Json))",
+        "[Console]::Write('KEYS-READY>');$keys=@();1..3|ForEach-Object{$k=[Console]::ReadKey($true);$keys+=@{character=[int]$k.KeyChar;key=[int]$k.Key;modifiers=[int]$k.Modifiers};[IO.File]::WriteAllText((Join-Path $pwd 'keys.progress.json'),($keys|ConvertTo-Json))};[IO.File]::WriteAllText((Join-Path $pwd 'keys.json'),($keys|ConvertTo-Json))",
     ].map(Into::into).into();
     let pty = service.spawn_pty(plan).await.unwrap();
-    write(&pty, "a中\r").await;
+    prompt(&pty).await;
+    write(&pty, input).await;
     let value: serde_json::Value =
         serde_json::from_str(&receipt(&directory.path().join("keys.json"), &pty).await).unwrap();
     assert_eq!(value[0]["character"], 97, "{value}");
