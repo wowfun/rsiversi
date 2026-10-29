@@ -1,3 +1,4 @@
+import {addWorkspace} from '../web-product/controls.mjs';
 import {closeDetails,detailMode,resourceSelector,resources} from '../web-product/controls.mjs';
 import assert from "node:assert/strict";
 import { createHash } from "node:crypto";
@@ -44,10 +45,8 @@ for (const [name, engine] of [["chromium", chromium], ["firefox", firefox]]) {
     await page.locator("#receipt").fill(JSON.stringify(service.register(`${name} addon acceptance`)));
     await page.getByRole("button", { name: "Connect", exact: true }).click();
     await page.locator("#workbench").waitFor({ state: "visible" });
-    await page.locator(".workspace-add summary").click();
-    await page.locator("#workspace-path").fill(service.workspace);
-    await page.getByRole("button", { name: "Add workspace", exact: true }).click();
-    await page.locator("#workspaces [data-testid=workspace-open]").first().click();
+    await addWorkspace(page,service.workspace);
+    await page.getByRole('button',{name:'New conversation in workspace',exact:true}).click();
     const pane = page.getByRole("region", { name: "Main conversation", exact: true });
     await detailMode(page,"verbose");const extensions = pane.locator(".session-extensions");
     const plan = extensions.locator('[data-producer="rsi.plan-policy.view"] pre');

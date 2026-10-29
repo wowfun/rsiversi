@@ -1,3 +1,5 @@
+import {disconnect} from './controls.mjs';
+import {workspaceForm} from './controls.mjs';
 import {paired} from './paired-env.mjs';
 import assert from 'node:assert/strict';
 import {mkdir,writeFile} from 'node:fs/promises';
@@ -17,12 +19,12 @@ for(const[name,engine]of[['chromium',chromium],['firefox',firefox]]){
  try{
   const context=await browser.newContext({ignoreHTTPSErrors:true,viewport:{width:1440,height:980}});page=await context.newPage();page.setDefaultTimeout(30000);page.on('pageerror',error=>errors.push(error.message));page.on('console',message=>{if(message.type()==='error')errors.push(message.text())});page.on('requestfailed',request=>requests.push(`${request.method()} ${new URL(request.url()).pathname}: ${request.failure()?.errorText}`));
   await page.goto(service.origin);await page.locator('#receipt').fill(JSON.stringify(service.register(`${name} export verification`)));await page.getByRole('button',{name:'Connect',exact:true}).click();await page.locator('#workbench').waitFor({state:'visible'});
-  await page.locator('.workspace-add summary').click();await page.locator('#workspace-path').fill(service.workspace);await page.getByRole('button',{name:'Add workspace',exact:true}).click();await page.locator('#workspaces [data-testid=workspace-open]').first().click();
+  await workspaceForm(page);await page.getByLabel('Directory path').fill(service.workspace);await page.locator('.directory-picker footer').getByRole('button',{name:'Open',exact:true}).click();await page.locator('#workspaces [data-testid=workspace-open]').first().click();
   await verifyExport(page,service,directory,name);
   const streamTrace=[];
   try {await writeFile(join(directory,'download-stream.json'),JSON.stringify(await verifyDownloadStream(browser,resolve(import.meta.dirname,'../../..'),event=>streamTrace.push(event))));}
   finally {await writeFile(join(directory,'download-stream-trace.json'),JSON.stringify(streamTrace));}
-  await page.locator('#sign-out').click();await page.locator('#login').waitFor({state:'visible'});
+  await disconnect(page);await page.locator('#login').waitFor({state:'visible'});
   // Downloads hand navigation to the manager and logout aborts live subscriptions.
   // Preserve network diagnostics; artifact completion and JS/CSP errors are the gates.
   await writeFile(join(directory,'network.json'),JSON.stringify(requests));assert.deepEqual(errors,[]);

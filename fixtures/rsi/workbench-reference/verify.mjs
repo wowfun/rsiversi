@@ -8,7 +8,7 @@ import {createHash} from 'node:crypto';
 import assert from 'node:assert/strict';
 const report=resolve(process.argv[process.argv.indexOf('--report')+1]);await mkdir(report,{recursive:false});
 const repository=resolve(process.env.RSI_DSH_REFERENCE ?? '.references/rsi/deepseek-harness'),revision=execFileSync('git',['-C',repository,'rev-parse','HEAD'],{encoding:'utf8'}).trim();
-assert.equal(revision,'4878cdabd87d4041bdaff61d04c966883b9fd07a');
+assert.equal(revision,'22ddee3792402c3e70ec5f86a63c3e3e895a2f60');
 const reference=join(repository,'packages/client'),web=resolve('apps/web'),fixture=resolve('fixtures/rsi/workbench-reference');
 const primitives=join(reference,'ui-primitives/src');
 const sources={};
@@ -22,9 +22,12 @@ try{
   await writeFile(join(root,'primitives.ts'),['Tooltip','MenuSurface','focus','useModalLayer','keyboard-composition','icons/index'].map(name=>`export * from ${JSON.stringify(join(primitives,name+(name.includes('icons')||['Tooltip','MenuSurface'].includes(name)?'.tsx':'.ts')))};`).join('\n'));
   await writeFile(join(root,'theme.css'),variant==='reference'?
    ['base','design-platform','gradient-shadow-text'].map(name=>`@import ${JSON.stringify(join(reference,`ui-theme/src/styles/${name}.css`))};`).join('\n'):
-   `@import ${JSON.stringify(join(web,'styles.css'))};\n@import ${JSON.stringify(join(web,'src/workbench.css'))};\n@import ${JSON.stringify(join(web,'vendor/dsh/dockkit-tokens.css'))};`);
+   `@import ${JSON.stringify(join(web,'vendor/dsh/theme-base.css'))};\n@import ${JSON.stringify(join(web,'styles.css'))};\n@import ${JSON.stringify(join(web,'vendor/dsh/dockkit-tokens.css'))};`);
+  await writeFile(join(root,'reference-style.ts'),'export default {scope:""}');
   const config={configFile:false,root,logLevel:'warn',esbuild:{jsx:'automatic'},resolve:{alias:[
+   {find:'@fixture/resource-style',replacement:variant==='reference'?join(root,'reference-style.ts'):join(web,'src/resources.module.css')},
    {find:'@fixture/dock',replacement:variant==='reference'?join(reference,'ui-dockkit/src'):join(web,'vendor/dsh/dockkit')},
+   {find:'@fixture/icons',replacement:variant==='reference'?join(primitives,'icons/artwork.ts'):join(web,'vendor/dsh/dockkit-primitives/icons/artwork.ts')},
    {find:'@fixture/theme',replacement:join(root,'theme.css')},{find:'@deepseek-ai/dsh-client-ui-primitives',replacement:join(root,'primitives.ts')},
    ...['react-dom','react','clsx'].map(name=>({find:name,replacement:join(web,'node_modules',name)}))]},build:{outDir:join(root,'dist'),emptyOutDir:true}};
   await build(config);const server=await preview({...config,preview:{host:'127.0.0.1',port:0}});

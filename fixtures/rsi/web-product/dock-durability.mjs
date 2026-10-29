@@ -1,3 +1,4 @@
+import {navigationMode} from './controls.mjs';
 // Actual public product controls; IndexedDB faults affect only this isolated browser.
 import {paired} from './paired-env.mjs';
 import {startService,waitUntil} from './service.mjs';
@@ -15,7 +16,7 @@ async function record(page,kind="session-dock"){return page.evaluate(async kind=
   try{return await new Promise((resolve,reject)=>{const r=db.transaction('layouts').objectStore('layouts').getAll();r.onsuccess=()=>resolve(r.result.find(r=>kind==='shell'?r.value.version===3:r.value.kind===kind));r.onerror=()=>reject(r.error)})}finally{db.close()}
 },kind)}
 async function menu(page,id,action){await page.locator(`[data-dockkit-tab="${id}"]`).click({button:'right'});await page.getByRole('menuitem',{name:action,exact:true}).click()}
-async function resumed(page,service,id){await page.goto(service.origin);await page.getByRole('button',{name:'Reconnect with this browser',exact:true}).click();await page.locator('#workbench').waitFor({state:'visible'});await page.getByLabel('Navigation view',{exact:true}).selectOption('flat');await page.locator(`[data-session-id="${id}"] [data-testid=conversation-open]`).click();await page.waitForFunction(id=>document.querySelector('.resource-dock')?.dataset.session===id,id);await resources(page)}
+async function resumed(page,service,id){await page.goto(service.origin);await page.getByRole('button',{name:'Reconnect with this browser',exact:true}).click();await page.locator('#workbench').waitFor({state:'visible'});await navigationMode(page,'flat');await page.locator(`[data-session-id="${id}"] [data-testid=conversation-open]`).click();await page.waitForFunction(id=>document.querySelector('.resource-dock')?.dataset.session===id,id);await resources(page)}
 try{
  service=await startService({binary:paired.binary,assets:paired.assets,report});
  browser=await chromium.launch();const context=await browser.newContext({ignoreHTTPSErrors:true,viewport:{width:1440,height:900}});
@@ -28,7 +29,7 @@ try{
  page=await context.newPage();page.setDefaultTimeout(15000);page.on('pageerror',e=>errors.push(e.message));
  await connectWorkbench(page,service,'Layout durability');await openWorkspace(page,service);
  await page.getByLabel('Main message',{exact:true}).fill('Durable resource layout');await page.getByTestId('composer-send').click();await page.waitForFunction(()=>document.querySelector('.pane.selected .pane-status')?.textContent==='Completed');
- const session=(await page.locator('.pane.selected .pane-session').innerText()).split(' · ').at(-1);
+ const session=(await page.locator('.pane.selected').getAttribute('data-session-id'));
  await resources(page);
  peer=await context.newPage();peer.setDefaultTimeout(15000);peer.on('pageerror',e=>errors.push(e.message));await resumed(peer,service,session);
  await Promise.all([page,peer].map(p=>p.getByRole('button',{name:'Workspace files',exact:true}).click()));

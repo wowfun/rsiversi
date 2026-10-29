@@ -16,28 +16,40 @@ try{
   await Promise.all([one.goto(origin),two.goto(origin)]);
   await one.evaluate(async()=>{
     const {defaultLayout}=await import('/presentation-layout.js');
+    const {emptyDock}=await import('/src/dock-state.ts');
+    const {conversationWidth,...oldLayout}=defaultLayout;
     await new Promise((resolve,reject)=>{
-      const opening=indexedDB.open('rsi.presentation',1);
-      opening.onupgradeneeded=()=>opening.result.createObjectStore('layouts',{keyPath:'key'});
+      const opening=indexedDB.open('rsi.presentation',2);
+      opening.onupgradeneeded=()=>{for(const bucket of ['layouts','preferences','orders'])opening.result.createObjectStore(bucket,{keyPath:'key'});};
       opening.onerror=()=>reject(opening.error);
       opening.onsuccess=()=>{
-        const db=opening.result,tx=db.transaction('layouts','readwrite');tx.objectStore('layouts').put({key:'fixture-principal',used:1,layout:defaultLayout});
+        const db=opening.result,tx=db.transaction(['layouts','preferences','orders'],'readwrite');
+        tx.objectStore('layouts').put({key:'fixture-principal',used:1,revision:'8',value:{...oldLayout,version:3,navigationWidth:301}});
+        window.retainedDock={key:JSON.stringify(['fixture-principal','dock:retained']),used:2,revision:'11',value:emptyDock()};
+        tx.objectStore('layouts').put(window.retainedDock);
+        tx.objectStore('preferences').put({key:'unrelated',used:3,revision:'6',value:{view:'flat',sessionOrder:'manual',workspaceOrder:'updated'}});
+        tx.objectStore('orders').put({key:'unrelated',used:3,revision:'7',value:{ids:['saved-order']}});
         tx.oncomplete=()=>{db.close();resolve();};tx.onerror=()=>reject(tx.error);
       };
     });
   });
   const open=page=>page.evaluate(async()=>{
-    const {DeviceStore}=await import('/device-store.js');window.store=await DeviceStore.open('fixture-principal');window.invalidated=0;
+    const {DeviceStore}=await import('/device-store.js');window.versionChanged=0;window.store=await DeviceStore.open('fixture-principal',{onVersionChange:()=>window.versionChanged++});window.invalidated=0;
     window.store.subscribe('layouts','',()=>window.invalidated++);
     return window.store.read('layouts');
   });
-  const before=await open(one);await open(two);assert.equal(before.revision,'1');
+  const before=await open(one);await open(two);assert.equal(before.revision,'0');assert.equal(before.value.version,4);
+  const preserved=await one.evaluate(async()=>{
+    const read=(bucket,key)=>new Promise((resolve,reject)=>{const tx=store.database.transaction(bucket,'readonly'),q=tx.objectStore(bucket).get(key);tx.oncomplete=()=>resolve(q.result);tx.onabort=()=>reject(tx.error)});
+    return {dock:JSON.stringify(await read('layouts',retainedDock.key))===JSON.stringify(retainedDock),preferences:await read('preferences','unrelated'),order:await read('orders','unrelated')};
+  });
+  assert.equal(preserved.dock,true);assert.equal(preserved.preferences.value.view,'flat');assert.deepEqual(preserved.order.value.ids,['saved-order']);
   await Promise.all([
     one.evaluate(()=>store.apply('layouts',{kind:'patch',patch:{navigationWidth:310}})),
     two.evaluate(()=>store.apply('layouts',{kind:'patch',patch:{resourcesWidth:.4}})),
   ]);
   const after=await one.evaluate(()=>store.read('layouts'));
-  assert.equal(after.revision,'3');assert.equal(after.value.navigationWidth,310);assert.equal(after.value.resourcesWidth,.4);
+  assert.equal(after.revision,'2');assert.equal(after.value.navigationWidth,310);assert.equal(after.value.resourcesWidth,.4);
   await two.waitForFunction(()=>invalidated>=2);
   await Promise.all([
     one.evaluate(()=>store.apply('layouts',{kind:'workspace',id:'one',expanded:true})),
@@ -109,12 +121,27 @@ try{
     const value=await other.read('orders','sessions');await other.apply('preferences',{kind:'patch',patch:{view:'flat'}});other.close();
     const db=await new Promise((resolve,reject)=>{const q=indexedDB.open('fixture-drafts',1);q.onupgradeneeded=()=>q.result.createObjectStore('drafts');q.onsuccess=()=>resolve(q.result);q.onerror=()=>reject(q.error);});
     await new Promise((resolve,reject)=>{const tx=db.transaction('drafts','readwrite');tx.objectStore('drafts').put('unchanged draft','draft');tx.oncomplete=resolve;tx.onerror=()=>reject(tx.error);});
-    await new Promise((resolve,reject)=>{const tx=store.database.transaction('layouts','readwrite');tx.objectStore('layouts').put({key:store.key,value:{damaged:true},used:1,revision:'9'});tx.oncomplete=resolve;tx.onerror=()=>reject(tx.error);});
+    await new Promise((resolve,reject)=>{const tx=store.database.transaction('layouts','readwrite');tx.objectStore('layouts').put({key:store.key,value:{damaged:true},used:-1,revision:'invalid'});tx.oncomplete=resolve;tx.onerror=()=>reject(tx.error);});
     let corrupt;try{await store.read('layouts');}catch(e){corrupt=e.message;}
     const draft=await new Promise((resolve,reject)=>{const request=db.transaction('drafts').objectStore('drafts').get('draft');request.onsuccess=()=>resolve(request.result);request.onerror=()=>reject(request.error);});db.close();
-    return {value,corrupt,draft,preferences:await store.read('preferences')};
+    const reset=await store.apply('layouts',{kind:'reset'}),saved=await store.apply('layouts',{kind:'patch',patch:{conversationWidth:1200}});
+    let scopeRejected=false;try{await store.apply('layouts',{kind:'reset'},'dock:retained')}catch{scopeRejected=true}
+    return {value,corrupt,draft,reset,saved,scopeRejected,preferences:await store.read('preferences'),dock:await store.read('layouts','dock:retained')};
   });
-  assert.deepEqual(isolation.value.value.ids,[]);assert.match(isolation.corrupt,/layout/);assert.equal(isolation.draft,'unchanged draft');assert.equal(isolation.preferences.value.view,'workspace');
-  const evidence={browser:browser.version(),module:'current apps/web/device-store.js',schema:2,realIndexedDb:true,windows:2,migratedRevision:before.revision,concurrentRevision:after.revision,workspaceIntents:expanded.value.workspaces.length,completeMembers:order.value.ids.length,abortedWritesPreserved:true,multiStoreAtomicRollback:true,automaticReconciliationPreservesUpdated:true,broadcastInvalidation:true,principalIsolation:true,draftIsolation:true};
+  assert.deepEqual(isolation.value.value.ids,[]);assert.match(isolation.corrupt,/record/);assert.equal(isolation.draft,'unchanged draft');assert.equal(isolation.preferences.value.view,'workspace');
+  assert.equal(isolation.reset.value.conversationWidth,null);assert.equal(isolation.saved.value.conversationWidth,1200);assert.equal(isolation.scopeRejected,true);assert.equal(isolation.dock.revision,'11');
+  await one.evaluate(()=>new Promise((resolve,reject)=>{const opening=indexedDB.open('rsi.presentation',4);opening.onsuccess=()=>{opening.result.close();resolve()};opening.onerror=()=>reject(opening.error)}));
+  assert.deepEqual(await one.evaluate(()=>({closed:store.closed,changed:versionChanged})),{closed:true,changed:1});
+  assert.deepEqual(await two.evaluate(()=>({closed:store.closed,changed:versionChanged})),{closed:true,changed:1});
+  const blockedContext=await browser.newContext(),blockedPage=await blockedContext.newPage();await blockedPage.goto(origin);
+  const blocked=await blockedPage.evaluate(async()=>{
+    const {DeviceStore}=await import('/device-store.js');
+    const old=await new Promise((resolve,reject)=>{const q=indexedDB.open('rsi.presentation',2);q.onsuccess=()=>resolve(q.result);q.onerror=()=>reject(q.error)});
+    let error;try{await DeviceStore.open('retry')}catch(e){error=e.message}
+    old.close();
+    const retry=await DeviceStore.open('retry'),version=retry.database.version;retry.close();return {error,version};
+  });
+  assert.match(blocked.error,/blocked/);assert.equal(blocked.version,3);await blockedContext.close();
+  const evidence={browser:browser.version(),module:'current apps/web/device-store.js',schema:3,realIndexedDb:true,windows:2,resetRevision:before.revision,concurrentRevision:after.revision,workspaceIntents:expanded.value.workspaces.length,completeMembers:order.value.ids.length,abortedWritesPreserved:true,multiStoreAtomicRollback:true,automaticReconciliationPreservesUpdated:true,broadcastInvalidation:true,principalIsolation:true,draftIsolation:true,upgradePreservesDockPreferencesOrders:preserved,corruptSelectedRecordRepaired:true,versionChangeClosesOwners:true,blockedOpenRetry:blocked};
   await mkdir(report,{recursive:true});await writeFile(join(report,'result.json'),JSON.stringify(evidence,null,2)+'\n');console.log(JSON.stringify(evidence));
 }finally{await browser?.close();await server.close();}

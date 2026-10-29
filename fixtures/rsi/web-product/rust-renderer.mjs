@@ -1,3 +1,5 @@
+import {disconnect} from './controls.mjs';
+import {workspaceForm} from './controls.mjs';
 import {closeDetails,details} from "./controls.mjs";
 import {openResource} from './controls.mjs';
 import './paired-env.mjs';
@@ -94,13 +96,13 @@ try {
   await abiPage.screenshot({ path: join(report, "four-rust-wasm-mounts.png") });
   assert.equal(await abiPage.evaluate(() => window.finishRustFixture()), 0);
   await abiPage.close();
-  await page.locator(".workspace-add summary").click();
-      await page.locator("#workspace-path").fill(service.workspace);
-  await page.getByRole("button", { name: "Add workspace", exact: true }).click();
+  await workspaceForm(page);
+      await page.getByLabel("Directory path").fill(service.workspace);
+  await page.locator('.directory-picker footer').getByRole('button',{name:'Open',exact:true}).click();
   await page.locator("#workspaces [data-testid=workspace-open]").first().click();
   const pane = page.getByRole("region", { name: "Main conversation", exact: true });
   await pane.locator(".pane-session").filter({ hasText: service.workspace }).waitFor({state:"attached"});
-  const session = (await pane.locator(".pane-session").innerText()).split(" · ").at(-1);
+  const session = (await pane.getAttribute('data-session-id'));
   for (let cycle = 0; cycle < 3; cycle++) {
     await openResource(page,"Service extensions");
     await details(page).getByRole("button", { name: "Native Session model", exact: true }).click();
@@ -120,7 +122,7 @@ try {
   }
   assert.equal(await page.evaluate(() => window.workerStarts), 1);
   await page.evaluate(() => { document.addEventListener("rsi-disconnected", event => { window.closedResources = event.detail; }, { once: true }); });
-  await page.getByRole("button", { name: "Sign out", exact: true }).click();
+  await disconnect(page);
   await page.locator("#login").waitFor({ state: "visible" });
   assert.deepEqual(await page.evaluate(() => window.closedResources), { pending_timers: 0, active_alarms: 0, active_requests: 0 });
   assert.deepEqual(errors, []);

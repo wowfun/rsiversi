@@ -42,7 +42,7 @@ test("renderer watch uses ordinary Web launch and a disjoint relative package re
       configure(value) { config=value.config; }});
     const document = await readFile(join(config,'rsi.toml'),'utf8');
     assert.match(document, /\[sources\.web\]/);
-    assert.match(document, /inputs = \["assets\/standard.js","assets\/lazy.js","assets\/ui-renderers.json"\]/);
+    assert.match(document, /inputs = \["assets\/standard.js","assets\/file-preview.js","assets\/ui-renderers.json"\]/);
     assert.match(document, /output = "web-package\/package.json"/);
     assert.equal(service.origin,'http://127.0.0.1:43210');
     assert.equal(service.developmentHttp,true);

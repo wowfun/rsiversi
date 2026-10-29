@@ -1,3 +1,4 @@
+import {openSettings} from './controls.mjs';
 import './paired-env.mjs';
 import {openBrowserPage, connectWorkbench} from './browser-fixture.mjs';
 import {cleanupAll} from './cleanup.mjs';
@@ -21,7 +22,7 @@ for(const [name,engine] of [['chromium',chromium],['firefox',firefox]]) {
   }});
   ({browser, page} = await openBrowserPage(engine, errors));
   await connectWorkbench(page, service, 'profile status observation');
-    await page.getByRole('button',{name:'Settings',exact:true}).click();await page.getByRole('button',{name:'Plugins',exact:true}).click();
+    await openSettings(page);await page.getByRole('button',{name:'Plugins',exact:true}).click();
     const panel=page.getByRole('region',{name:'Plugins',exact:true});await panel.locator('.plugin-row').first().waitFor();
     const before=await panel.locator('.plugin-revisions').innerText();
     const refresh=async pattern=>{

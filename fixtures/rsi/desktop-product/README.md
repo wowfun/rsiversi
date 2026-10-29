@@ -17,6 +17,9 @@ from the checkout root before starting the native application.
 Linux Tauri window under `dbus-run-session -- xvfb-run -a`. It creates isolated
 explicit config/state/cache homes and a launch document selecting its fixture Service, then uses actual WebDriver input to configure
 the deterministic provider, select a model, create a conversation and submit it.
+Use a short report path on a native Unix filesystem: the Service Host socket is
+under its isolated state home and must fit the platform's Unix socket path limit.
+Registered settings stay inside the Settings dialog and close with that dialog.
 Button clicks relocate only after WebDriver explicitly reports a stale element
 before dispatch; ambiguous click failures are never replayed.
 Workflow resource controls must be visible and enabled before dispatch. A
@@ -24,6 +27,12 @@ completed run and a rendered result button can still coexist with a pending
 detail read, which temporarily disables the control.
 Input readiness includes enabled ancestors, visibility, an unobstructed hit point
 and actual focus before any native keystroke. A readiness timeout dispatches none.
+The ordinary conversation run also records the composer's native focus state,
+trusted input receipt and computed outline before sending, with a focused
+screenshot. Only trusted input events recorded after that fill began can satisfy
+its receipt; an earlier input with the same length cannot. Its forced-colors media
+state is reported without changing system settings. The ordinary composer has no
+inner outline; forced colors requires the visible keyboard outline.
 Replacing input uses native select-all/backspace keystrokes and waits for the
 empty value before typing. Nonempty composer replacement also requires a trusted
 deletion input event: WebKit's WebDriver `clear` changes the DOM without updating
@@ -113,7 +122,7 @@ This scenario starts after document admission; it does not cover a close request
 before the document installs its listener. That startup interval currently lacks
 a dedicated product fixture.
 `--refresh-during-click` forces a draft input refresh during native mouse down
-on Send. It checks preserved text-node identity, exactly one real click and the
+on Send. It checks preserved glyph/label child identity, exactly one real click and the
 resulting submission; this gates the WebKit draft-save/click interleaving.
 
 `--tasks` additionally drives recorded inline patch evidence, Goal pause/resume/
@@ -241,7 +250,7 @@ current user block, stable slot identity, retained composer text and a surviving
 queued Turn after Stop. This mode is separate from live-provider scenarios.
 
 `--ui-alignment` exercises the native clipboard, real directory creation, and the
-five Web viewport widths with all three theme choices through Settings. Its Xvfb
+seven Web viewport widths with all three theme choices through Settings. Its Xvfb
 screen must be at least 1920 pixels wide; CI provides 2560×1440. Captures are
 manual comparison evidence, not screenshot baselines. `--reload` performs an
 actual WebDriver document refresh, reselects the retained Session, and verifies

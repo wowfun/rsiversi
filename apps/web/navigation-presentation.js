@@ -33,3 +33,17 @@ export class GroupRestoration {
     try { await load(); } finally { this.pending.delete(key); }
   }
 }
+
+export function conversationRecency(timestamp, now=Date.now()) {
+  const value=Number(timestamp);
+  if(!Number.isFinite(value)||value<0)return '';
+  const seconds=Math.max(0,Math.floor((now-value)/1000));
+  if(seconds<60)return 'now';
+  if(seconds<3600)return `${Math.floor(seconds/60)}min`;
+  if(seconds<86400)return `${Math.floor(seconds/3600)}h`;
+  return `${Math.floor(seconds/86400)}d`;
+}
+
+export function visibleConversations(entries, expanded, selected) {
+  return expanded ? entries : entries.filter((entry, index) => index < 5 || entry.session === selected);
+}

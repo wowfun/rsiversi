@@ -1,0 +1,52 @@
+.models {font-size:13px;line-height:20px;color:var(--ink);}
+.models h2 {font-size:16px;line-height:24px;margin:0 0 14px;}
+.intro {color:var(--muted);margin:0 0 26px;}
+.card {border:1px solid var(--line);border-radius:16px;padding:12px 14px;margin-bottom:12px;}
+.cardHeading {display:flex;gap:6px;align-items:center;min-height:28px;}
+.cardHeading strong {font-size:14px;min-width:0;overflow-wrap:anywhere;}
+.cardHeading>button {margin-left:auto;}
+.identity {color:var(--muted);font-size:12px;margin-left:8px;font-weight:400;}
+.dot {width:8px;height:8px;flex:none;border-radius:50%;background:#d78b37;}
+.dot[data-state=Applied] {background:#26c466;}
+.add {display:flex;justify-content:center;align-items:center;gap:8px;border:1px dashed var(--line);border-radius:14px;width:100%;padding:12px;background:transparent;font-size:14px;}
+.add:hover {background:var(--hover);}
+.editor {background:var(--dsw-alias-bg-module-platform);padding:16px;border-radius:14px;min-width:0;margin-top:12px;}
+.editor fieldset {border:0;margin:0;padding:0;min-width:0;display:flex;flex-direction:column;gap:16px;}
+.editor label,.defaultModel {display:flex;flex-direction:column;gap:6px;color:var(--muted);font-size:12px;font-weight:600;}
+.editor input:not([type=checkbox]),.editor select,.defaultModel select {box-sizing:border-box;width:100%;min-width:0;border:1px solid var(--line);background:var(--dsw-alias-bg-layer-1);border-radius:9px;color:var(--ink);font-size:13px;padding:7px 10px;height:34px;}
+.editor select {max-width:260px;}
+.editor input::placeholder {color:var(--muted);opacity:.65;}
+.editor input,.editor select,.defaultModel select {font-weight:400;}
+.editorTitle {display:flex;align-items:center;gap:8px;}
+.editorTitle span {color:var(--muted);font-size:12px;}
+.editor details {border-top:1px solid var(--line);padding-top:12px;}
+.editor summary {font-size:12px;cursor:pointer;color:var(--muted);font-weight:600;}
+.advanced {display:flex;flex-direction:column;gap:12px;padding-top:16px;}
+.editor footer {display:flex;justify-content:flex-end;gap:8px;margin-top:16px;}
+.segments {display:flex;background:var(--hover);padding:3px;border-radius:9px;max-width:400px;}
+.segments button {flex:1;border:1px solid transparent;padding:6px 8px;background:transparent;color:var(--muted);font-size:13px;font-weight:600;}
+.segments button[aria-pressed=true] {background:var(--dsw-alias-bg-layer-1);border-color:var(--line);color:var(--ink);border-radius:6px;}
+.modelsHeading {display:flex;align-items:center;justify-content:space-between;gap:8px;border-top:1px solid var(--line);padding-top:12px;}
+.model {border:1px solid var(--line);border-radius:12px;padding:6px;}
+.modelHeading {display:flex;align-items:center;gap:6px;}
+.modelHeading>input {flex:1;}
+.modelHeading>button {display:flex;padding:6px;flex:none;border:0;background:transparent;color:var(--muted);}
+.modelHeading svg {width:16px;height:16px;}
+.limits {display:grid;grid-template-columns:1fr 1fr;gap:10px;padding:12px 4px 4px;}
+.empty {border:1px dashed var(--line);border-radius:12px;padding:16px;text-align:center;color:var(--muted);font-size:12px;margin:0;}
+.hint {font-size:12px;color:var(--muted);margin:0;}
+.error,.danger {color:var(--error)!important;}
+.error {overflow-wrap:anywhere;margin:12px 0 0;}
+.check {flex-direction:row!important;align-items:center;gap:6px!important;}
+.check input {width:16px;height:16px;}
+.checks {display:flex;gap:16px;flex-wrap:wrap;}
+.candidates {max-height:180px;overflow:auto;border:1px solid var(--line);border-radius:8px;}
+.candidates button {display:flex;width:100%;justify-content:space-between;text-align:left;padding:8px;border:0;background:transparent;gap:8px;font-size:12px;overflow-wrap:anywhere;}
+.candidates button:hover {background:var(--hover);}
+.connection label {margin-top:10px;}
+.defaultModel {margin-top:24px;}
+.confirm {padding:24px;border:1px solid var(--line);border-radius:16px;background:var(--dsw-specific-menu);color:var(--ink);width:360px;max-width:calc(100vw - 32px);}
+.confirm h2 {font-size:16px;}
+.confirm p {font-size:14px;line-height:22px;}
+.confirm footer {display:flex;justify-content:flex-end;gap:8px;}
+@media(max-width:480px) {.editor {padding:12px;}.limits {grid-template-columns:1fr;}.segments button {font-size:12px;}.identity {display:block;margin:0;}}

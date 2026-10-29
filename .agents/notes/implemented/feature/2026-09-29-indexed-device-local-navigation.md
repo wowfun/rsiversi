@@ -14,6 +14,10 @@ Store owns canonical execution-coordinate and activity indexes, updated with the
 canonical append transaction. A shared explicit record whitelist defines activity;
 recovery, queue maintenance and compaction do not refresh it. Navigation owns
 bounded indexed queries and one complete compact manual-order snapshot.
+The GUI uses this projection for Session navigation and native history-picker
+sources. It retains no second recent-Session catalog or pagination command:
+fetching an unused list adds Service work and can fail an otherwise valid refresh.
+The independent Session recent-list API remains available to its other consumers.
 
 SSH visibility must enter that snapshot before limits and cursor selection.
 Filtering the finished page leaks a hidden row through `newest`/continuation and

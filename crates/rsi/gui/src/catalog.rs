@@ -2,7 +2,7 @@
 mod settings;
 pub(crate) use settings::PreferenceRefreshDelay;
 
-use crate::application::{Command, GuiApplication, Recent, Result, error};
+use crate::application::{Command, GuiApplication, Result, error};
 
 impl GuiApplication {
     pub(crate) async fn refresh(&self, command: Command) -> Result<()> {
@@ -36,35 +36,6 @@ impl GuiApplication {
             catalog.workspace_cursor = page.next;
             catalog.workspaces = page.records;
             catalog.workspace_order_seed = seed;
-        }
-        if matches!(command, Command::Refresh | Command::SessionsNext)
-            && self.available(&[rsi_session_api::Operation::Recent.spec()])
-        {
-            let after = if matches!(command, Command::SessionsNext) {
-                self.catalog
-                    .lock()
-                    .expect("Web catalog poisoned")
-                    .session_cursor
-                    .clone()
-            } else {
-                None
-            };
-            let page = rsi_client::read_with_capacity_retry(&self.execution, || {
-                self.session.list_recent(after.as_ref(), 20)
-            })
-            .await
-            .map_err(error)?;
-            let mut catalog = self.catalog.lock().expect("Web catalog poisoned");
-            catalog.sessions_more = page.has_more;
-            catalog.session_cursor.clone_from(&page.next);
-            catalog.sessions = page
-                .sessions
-                .iter()
-                .map(|session| Recent {
-                    id: session.header.session_id().to_string(),
-                    path: session.header.canonical_cwd().into(),
-                })
-                .collect();
         }
         if matches!(command, Command::Refresh | Command::ModelsNext)
             && self.available(&[rsi_ai_models_api::operation()])
@@ -110,10 +81,6 @@ impl GuiApplication {
             catalog.workspaces.clear();
             catalog.workspaces_more = false;
             catalog.workspace_order_seed = None;
-        }
-        if !self.available(&[rsi_session_api::Operation::Recent.spec()]) {
-            catalog.sessions.clear();
-            catalog.sessions_more = false;
         }
         if !self.available(&[rsi_ai_models_api::operation()]) {
             catalog.models.clear();

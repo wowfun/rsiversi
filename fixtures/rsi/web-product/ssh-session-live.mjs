@@ -1,3 +1,4 @@
+import {openSettings} from './controls.mjs';
 // Explicitly invoked by the SSH product fixture after Local trust and Device Use.
 import assert from 'node:assert/strict';
 import {readFile,writeFile} from 'node:fs/promises';
@@ -26,7 +27,7 @@ export async function verifySshSession({page,service,report,dialog,target,checks
     }
     return (await pane.locator('.pane-status').innerText()).includes('Completed');
   },'real DeepSeek SSH tools and settlement',180000);
-  const session=(await pane.locator('.pane-session').innerText()).split(' · ').at(-1);
+  const session=(await pane.getAttribute('data-session-id'));
   const records=service.run(["run",'evidence-cli','--resume',session,'--output','jsonl'],{input:':history\n'.repeat(8)+':exit\n'}).stdout.trim().split('\n').map(line=>JSON.parse(line));
   const facts=records.flatMap(record=>record.fact?[record.fact]:[]).sort((a,b)=>a.seq-b.seq);
   await writeFile(join(report,'ssh-session-facts.json'),JSON.stringify(facts,null,2));
@@ -76,7 +77,7 @@ export async function verifySshSession({page,service,report,dialog,target,checks
   await terminal.getByRole('button',{name:'Terminate terminal',exact:true}).click();
   await terminal.getByRole('button',{name:'Hide terminal panel',exact:true}).click();
   checks.push('SSH terminal through Session API accepts input, renders output and reports actual exit');
-  await page.getByRole('button',{name:'Settings',exact:true}).click();
+  await openSettings(page);
   await page.getByRole('button',{name:'Plugins',exact:true}).click();
   return session;
 }

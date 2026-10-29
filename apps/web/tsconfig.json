@@ -14,10 +14,12 @@
     "allowImportingTsExtensions": true,
     "noEmit": true,
     "types": [
-      "vite/client"
+      "vite/client",
+      "node"
     ],
     "baseUrl": ".",
     "paths": {
+      "/mounts.js": ["mounts.js"],
       "@rsi/dsh-slots": [
         "vendor/dsh/slots/index.ts"
       ],
@@ -30,6 +32,7 @@
   "include": [
     "src",
     "vendor/dsh",
-    "vite.config.ts"
+    "tests/*.types.ts",
+    "vite.config.mjs"
   ]
 }

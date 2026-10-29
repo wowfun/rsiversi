@@ -1,3 +1,4 @@
+import {openSettings} from './controls.mjs';
 import {paired} from './paired-env.mjs';
 import {startService,waitUntil} from './service.mjs';
 import {connectWorkbench,openWorkspace} from './browser-fixture.mjs';
@@ -32,7 +33,7 @@ try{
  await contribution.getByRole('button',{name:'Read file',exact:true}).click();await contribution.locator('pre').filter({hasText:'Independent panel bytes'}).waitFor();
  await page.screenshot({path:join(report,'files-panel.png')});
  const first=await page.locator('[data-dockkit-tab]').first().getAttribute('data-dockkit-tab');
- await page.getByRole('button',{name:'Settings',exact:true}).click();await page.getByRole('dialog',{name:'Settings',exact:true}).waitFor();
+ await openSettings(page);await page.getByRole('dialog',{name:'Settings',exact:true}).waitFor();
  const geometry=await page.getByRole('dialog',{name:'Settings',exact:true}).boundingBox();assert.equal(geometry.width,800);assert.equal(geometry.height,800);
  await page.screenshot({path:join(report,'settings-independent.png')});await page.getByRole('button',{name:'Close settings',exact:true}).click();
  await contribution.locator('pre').filter({hasText:'Independent panel bytes'}).waitFor();checks.push('Settings preserves the resource presentation');
@@ -91,7 +92,7 @@ try{
    await page.locator('.resource-dock:not([hidden])').waitFor({state:'visible'});
    const geometry=await page.evaluate(()=>{
      const box=selector=>{const rect=document.querySelector(selector)?.getBoundingClientRect();return rect?{x:rect.x,y:rect.y,width:rect.width,height:rect.height}:null};
-     const control=document.querySelector('#sign-out'),r=control.getBoundingClientRect();return {connectionControlHit:control.contains(document.elementFromPoint(r.x+r.width/2,r.y+r.height/2)),overflow:document.documentElement.scrollWidth-innerWidth,resources:box('.resource-dock:not([hidden])'),navigation:box('.workbench>.sidebar,.navigation-rail'),main:box('.workspace-main')};
+     const control=document.querySelector('[aria-label=Commands]'),r=control.getBoundingClientRect();return {connectionControlHit:control.contains(document.elementFromPoint(r.x+r.width/2,r.y+r.height/2)),overflow:document.documentElement.scrollWidth-innerWidth,resources:box('.resource-dock:not([hidden])'),navigation:box('.workbench>.sidebar,.navigation-rail'),main:box('.workspace-main')};
    });
    assert(geometry.overflow<=1,JSON.stringify(geometry));
    if(width>=1024)assert(Math.abs(geometry.resources.width-Math.min(width*.45,width-geometry.navigation.width-400))<=2,JSON.stringify(geometry));

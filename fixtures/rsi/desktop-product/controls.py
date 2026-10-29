@@ -2,6 +2,7 @@
 from pathlib import Path
 
 FOCUS_INPUT = (Path(__file__).with_name('focus-input.js')).read_text()
+COMPOSER_FOCUS = (Path(__file__).with_name('composer-focus.js')).read_text()
 ASSET_PRESSURE = (Path(__file__).with_name('asset-pressure.js')).read_text()
 
 
@@ -30,6 +31,7 @@ def file_has_bytes(path, expected):
 
 
 def configure_live_limits(script, fill_input, limits):
-    script('return [...document.querySelectorAll("summary")].find(e=>e.textContent.trim()==="Context and output limits").click()')
+    script('return document.querySelector(\'[aria-label="Model settings 1"]\').click()')
+    labels = dict(context_window_tokens="Context window", default_output_reserve_tokens="Default output tokens", max_output_reserve_tokens="Max output tokens")
     for field, value in limits.items():
-        fill_input(f'[aria-label="{field} 1"]', str(value))
+        fill_input(f'[aria-label="{labels[field]} 1"]', str(value))

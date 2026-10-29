@@ -1,18 +1,15 @@
 import test from "node:test";
 import assert from "node:assert/strict";
-import {readFile} from "node:fs/promises";
-import vm from "node:vm";
 import {DocumentConnection} from "../document-connection.js";
-
-const source = await readFile(new URL("../app.js", import.meta.url), "utf8");
-const functions = source.slice(source.indexOf("async function acknowledgeNativeClose("), source.indexOf('$("sign-out").addEventListener'));
+import {createDocumentClose} from '../src/runtime/document-close.js';
 function fixture(connection) {
-  const calls = [], failures = [];
-  const context = vm.createContext({connection, nativeCloseAttempt: 1, panes: new Map(), notify(){},
-    desktopCall: async operation => {calls.push(operation);},
-    failWorker: message => {failures.push(message);}});
-  vm.runInContext(functions, context);
-  return {context, calls, failures};
+ const calls=[],failures=[];
+ const context={connection,panes:new Map(),notify(){},desktopCall:async operation=>{calls.push(operation)},failWorker:message=>{failures.push(message)},$:()=>({})};
+ const closer=createDocumentClose({get connection(){return context.connection},get panes(){return context.panes},get nativeCall(){return context.desktopCall},nativeDocument:true,notify:context.notify,failWorker:context.failWorker,setClosing(value){context.$('sign-out').disabled=value},disconnected(){}});
+ Object.assign(context,closer);
+ Object.defineProperty(context,'nativeCloseAttempt',{get:()=>closer.attempt,set:value=>{closer.attempt=value}});
+ context.nativeCloseAttempt=1;
+ return {context,calls,failures};
 }
 for (const phase of ["Draining", "Failed"]) test(`native close waits for ${phase} cleanup and acknowledges once`, async () => {
   let release;
@@ -91,6 +88,16 @@ test("failed local draft persistence after Host loss cancels native exit", async
   assert.deepEqual(calls.map(call=>call.ready),[false]);
 });
 
+test('stalled draft persistence after Host loss cancels native exit at the stage deadline', async t=>{
+  t.mock.timers.enable({apis:['setTimeout']});
+  const {context,calls}=fixture({phase:'Failed',closing:true,settled:async()=>{}});
+  context.panes.set('main',{flush:()=>new Promise(()=>{})});
+  const closing=context.disconnectDocument();
+  t.mock.timers.tick(30_000);
+  await closing;
+  assert.deepEqual(calls.map(call=>call.ready),[false]);
+});
+
 test("Worker failure during a rejected draft flush still cancels native exit", async () => {
   let reject;
   const failed = new Promise((_,no)=>{reject=no;});
@@ -102,4 +109,18 @@ test("Worker failure during a rejected draft flush still cancels native exit", a
   await transport.onmessage({data:{kind:"failed",error:"Host disconnected"}});
   reject(new Error("disk full"));await closing;
   assert.deepEqual(calls.map(call=>call.ready),[false]);
+});
+
+
+test('overlapping close requests acknowledge every identity exactly once after cleanup', async()=>{
+  let release; const cleaning=new Promise(resolve=>{release=resolve});
+  const owner={phase:'Draining',closing:true,settled:()=>cleaning};
+  const {context,calls}=fixture(owner);
+  const first=context.disconnectDocument();
+  context.nativeCloseAttempt=2;
+  const second=context.disconnectDocument();
+  await Promise.resolve();assert.equal(calls.length,0);
+  owner.phase='Closed';release();await Promise.all([first,second]);
+  assert.deepEqual(calls.map(call=>[call.attempt,call.ready]),[[1,true],[2,true]]);
+  await context.disconnectDocument();assert.equal(calls.length,2);
 });

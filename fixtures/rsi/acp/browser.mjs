@@ -1,3 +1,4 @@
+import {addWorkspace} from '../web-product/controls.mjs';
 import {detailMode,externalAgents,navigationFilter} from '../web-product/controls.mjs';
 import {paired} from '../web-product/paired-env.mjs';
 import assert from 'node:assert/strict';
@@ -21,7 +22,7 @@ for(const [name,engine] of [['chromium',chromium],['firefox',firefox]]){
   try{
     const context=await browser.newContext({ignoreHTTPSErrors:true,viewport:{width:1440,height:980}});page=await context.newPage();page.setDefaultTimeout(45_000);page.on('pageerror',error=>errors.push(error.message));
     await page.goto(service.origin);await page.locator('#receipt').fill(JSON.stringify(service.register(`${name} ACP UI`)));await page.getByRole('button',{name:'Connect',exact:true}).click();await page.locator('#workbench').waitFor({state:'visible'});
-    await page.locator('.workspace-add summary').click();await page.locator('#workspace-path').fill(service.workspace);await page.getByRole('button',{name:'Add workspace',exact:true}).click();await page.locator('#workspaces [data-testid=workspace-open]').first().click();
+    await addWorkspace(page,service.workspace);await page.getByRole('button',{name:'New conversation in workspace',exact:true}).click();
     await detailMode(page,'standard');await externalAgents(page);const native=page.getByRole('region',{name:'Main conversation',exact:true});await native.getByRole('textbox',{name:'Main message'}).fill('Please start an external delegation');await native.getByTestId("composer-send").click();
     await native.locator('.pane-status').filter({hasText:'Completed'}).waitFor();await native.getByRole('button',{name:'Open external conversation',exact:true}).waitFor();await page.screenshot({path:join(destination,'delegation.png')});await native.getByRole('button',{name:'Open external conversation',exact:true}).click();
     const pane=page.getByRole('region',{name:'External conversation',exact:true});await pane.waitFor({state:'visible'});
@@ -43,7 +44,7 @@ for(const [name,engine] of [['chromium',chromium],['firefox',firefox]]){
     await pane.getByRole('textbox',{name:'External message'}).fill('again');await pane.getByTestId("composer-send").click();await pane.getByRole('heading',{name:'Independent SDK permission'}).waitFor();await pane.getByRole('button',{name:'Always · allow always',exact:true}).click();await pane.locator('.external-status').filter({hasText:'completed'}).waitFor();
     await navigationFilter(page,'all');const before=await readFile(join(service.workspace,'new-count'),'utf8');assert.equal(before,'new\n');
     await pane.getByRole('textbox',{name:'External message'}).fill('retained external draft');
-    await page.locator('#workspaces [data-testid=workspace-open]').first().click();
+    await page.getByRole('button',{name:'New conversation in workspace',exact:true}).click();
     await page.getByRole('region',{name:'Main conversation',exact:true}).waitFor({state:'visible'});
     await externalAgents(page);await page.getByRole('button',{name:'Refresh external conversations',exact:true}).click();await externalAgents(page);await page.locator('.external-navigation .nav-item').first().click();await pane.waitFor({state:'visible'});assert.equal(await pane.getByRole('textbox',{name:'External message'}).inputValue(),'retained external draft');assert.equal(await readFile(join(service.workspace,'new-count'),'utf8'),before);
     await pane.getByRole('button',{name:'Close peer',exact:true}).click();await pane.locator('.external-status').filter({hasText:'Closed'}).waitFor();

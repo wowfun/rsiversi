@@ -64,7 +64,7 @@ Workspace grouping uses exact registered paths. Archive changes visibility witho
 detaching a resident Session. Empty-draft reuse requires the current owned, matching,
 unpublished attachment, no pending submission and unchanged captured defaults.
 
-The [document](../../../../apps/web/README.md) uses one pinned React runtime
+The [document](../../../../apps/web/docs/presentation.md) uses one pinned React runtime
 and selected DSH SlotCore/binding/primitives with exact
 [vendoring provenance](../../../../apps/web/vendor/dsh/provenance.json).
 Workspace/Session navigation, transcript detail, Session resources and global
@@ -102,6 +102,10 @@ selected DOM composition closure. It does not claim DSH Host/plugin compatibilit
 dynamic desktop library replacement, or a shipped DSH TUI.
 
 ## Consequences
+
+The [DSH-aligned React decision](2026-10-27-dsh-aligned-react-workbench.md)
+supersedes the retained first-party Session DOM island for maintainability.
+Independent renderer/terminal ownership and the plugin authorities remain.
 
 Tauri's owned response handoff requires a copy of shared retained bytes, and Wry
 buffers requests before the owner callback. Logical request/frame bounds therefore

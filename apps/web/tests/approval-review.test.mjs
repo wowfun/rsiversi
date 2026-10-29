@@ -1,3 +1,4 @@
+import {createInteraction, interactionKey} from '../src/runtime/interaction.js';
 import test from 'node:test';
 import assert from 'node:assert/strict';
 import {approvalFields,approvalArguments,approvalReason,approvalJson,decisionAction} from '../approval-review.js';
@@ -55,24 +56,46 @@ test('human decisions refuse duplicate clicks and recover only known admission r
   assert.match(reports[3],/outcome unknown.*Refresh request/);
 });
 
-test('request refresh coalesces clicks and keeps decisions disabled until fresh presentation', async () => {
-  const {readFile} = await import('node:fs/promises'); const {default:vm} = await import('node:vm');
-  const source = await readFile(new URL('../app.js', import.meta.url), 'utf8');
-  const start = source.indexOf('function interactionRefresh(');
-  const end = source.indexOf('const settingsDialog =', start);
-  let resolve, reject, calls=0;
-  const controls=[{disabled:false},{disabled:true},{disabled:false}];
-  const scope = {button:(_label,run)=>({run}), form:{setAttribute(){},querySelectorAll:()=>controls},
-    failure:{}, base:{}, command:()=>{calls++;return new Promise((done,fail)=>{resolve=done;reject=fail;});}};
-  vm.runInNewContext(source.slice(start,end)+';this.refresh=interactionRefresh(form,base,"owner",failure,command);',scope);
-  const first=scope.refresh.run(); await scope.refresh.run();
-  assert.equal(calls,1); assert.equal(scope.refresh.disabled,true);
-  assert.ok(controls.every(choice=>choice.disabled));
-  resolve(); await first; assert.equal(scope.refresh.disabled,false);
-  for (const disabled of [false,true]) {
-    controls.forEach(choice=>{choice.disabled=disabled;});
-    const refreshing=scope.refresh.run(); reject(new Error('offline')); await refreshing;
-    assert.ok(controls.every(choice=>choice.disabled===disabled));
-    assert.match(scope.failure.textContent,/Pending-state read failed/);
-  }
+test('request refresh coalesces clicks, fences decisions and requires fresh presentation', async () => {
+ let resolve,reject,calls=0;
+ const state=createInteraction({refreshCommand:{action:'inspect_interaction'},command:()=>{calls++;return new Promise((done,fail)=>{resolve=done;reject=fail})}});
+ const first=state.refresh();await state.refresh();await state.decide({action:'approve'});
+ assert.equal(calls,1);assert.equal(state.disabled,true);resolve();await first;
+ assert.equal(state.refreshing,false);assert.equal(state.disabled,true);await state.decide({action:'approve'});assert.equal(calls,1);
+ for(const locked of [false,true]){
+  const next=createInteraction({refreshCommand:{},command:()=>new Promise((done,fail)=>{reject=fail})});next.locked=locked;
+  const refreshing=next.refresh();reject(Error('offline'));await refreshing;
+  assert.equal(next.disabled,locked);assert.match(next.error,/Pending-state read failed/);
+ }
+});
+
+test('passive tickets keep pending and unknown decisions locked; explicit fresh reads release them', async () => {
+  let reject, calls=0;
+  const send=()=>{calls++;return new Promise((_,fail)=>{reject=fail})};
+  const binding={command:send,refreshCommand:{action:'inspect_interaction'},ticket:'1'};
+  const state=createInteraction(binding);
+  const decision=state.decide({action:'approve'});
+  state.update({...binding,ticket:'2'});
+  assert(state.disabled);await state.decide({action:'approve'});assert.equal(calls,1);
+  reject(Error('lost reply'));await decision;
+  state.update({...binding,ticket:'3'});assert(state.disabled);
+  state.update({...binding,command:async()=>{},ticket:'4'});
+  await state.refresh();assert(state.disabled);
+  state.update({...binding,ticket:'5'});assert.equal(state.disabled,false);
+  const retry=state.decide({action:'approve'});assert.equal(calls,2);reject(Error('lost'));await retry;
+  const data={pane:'main',generation:'1',kind:'approval',request:{id:'a',subject:{session_id:'s'}},ticket:'1'};
+  assert.equal(interactionKey(data),interactionKey({...data,ticket:'2'}));
+  assert.notEqual(interactionKey(data),interactionKey({...data,request:{...data.request,subject:{session_id:'child'}}}));
+});
+
+test('a failed repeated refresh cannot lend authority to a later passive ticket',async()=>{
+  const binding={command:async()=>{},refreshCommand:{action:'inspect_interaction'},ticket:'1'};
+  const state=createInteraction(binding);
+  await state.decide({action:'approve'});
+  await state.refresh();
+  state.update({...binding,command:async()=>{throw Error('offline')}});
+  await state.refresh();
+  state.update({...binding,ticket:'2'});
+  assert.equal(state.disabled,true);
+  assert.match(state.error,/offline/);
 });

@@ -1,38 +1,32 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
-import {openHistoryPicker} from '../history-picker.js';
-class Node {
-  constructor(tag){this.tag=tag;this.children=[];this.events={};this.dataset={};this.value='';}
-  append(...nodes){this.children.push(...nodes);}
-  replaceChildren(...nodes){this.children=nodes;}
-  setAttribute(name,value){this[name]=value;}
-  addEventListener(name,run){this.events[name]=run;}
-  querySelectorAll(tag){return this.children.flatMap(child=>[...(child.tag===tag?[child]:[]),...child.querySelectorAll(tag)]);}
-  focus(){} remove(){} showModal(){this.open=true;} close(){this.open=false;this.events.close?.();}
+import {createHistoryPicker} from '../src/runtime/history-picker.js';
+const scope={workspace:'workspace',conversation:{id:'source',kind:'native'}};
+const hit={preview:'text',original:{record:{kind:'assistant',sequence:'1'},end:8}};
+const reference={snapshot:{capture_id:'pending'},preview:'text'};
+const progress={visible_sources:1,pending_sources:0,discovery_complete:true};
+function setup(override={}) {
+ const released=[],added=[],requests=[];
+ const picker=createHistoryPicker({context:{workspace:'workspace',session:'target'},workspaces:[],sources:[],active:()=>true,changed(){},closed(){},
+  release:async value=>released.push(value),add:value=>added.push(value),
+  request:async request=>{requests.push(request);return request.operation==='query'?{progress,matches:[{scope,hit,reference_allowed:true}]}:request.operation==='read'?{offset:2,next_offset:8,text:'中abc',has_more:false}:{reference};},...override});
+ return {picker,released,added,requests};
 }
-const flush=()=>new Promise(resolve=>setImmediate(resolve));
-test('replacing a frozen history preview releases it without waiting for dialog close',async()=>{
-  const previous=globalThis.document;
-  globalThis.document={createElement:tag=>new Node(tag),body:new Node('body')};
-  try {
-    const released=[], reference={snapshot:{capture_id:'pending'},preview:'text'};
-    const pane={index:'main',generation:'1',editor:{references:[]},historyContext:{workspace:'workspace',session:'target'},
-      input:{focus(){}},async releaseReference(value){released.push(value);}};
-    const progress={visible_sources:1,pending_sources:0,discovery_complete:true};
-    const hit={preview:'text',original:{record:{kind:'assistant',sequence:1},end:4}};
-    const scope={workspace:'workspace',conversation:{id:'source',kind:'native'}};
-    const call=async(_method,payload)=>{
-      const op=JSON.parse(payload).operation.request.operation;
-      return JSON.stringify(op==='discover'?{progress}:op==='query'?{progress,matches:[{scope,hit,label:'Source',reference_allowed:true}]}:
-        op==='read'?{offset:0,next_offset:4,text:'text',has_more:false}:{reference});
-    };
-    const button=(text,run)=>Object.assign(new Node('button'),{textContent:text,run});
-    openHistoryPicker(pane,{},call,button); await flush();
-    const click=async text=>{const node=pane.referenceDialog.querySelectorAll('button').find(node=>node.textContent===text);assert(node,text);node.run();await flush();};
-    await click('Search text'); await click('Open original');
-    const original=pane.referenceDialog.querySelectorAll('textarea')[0];original.selectionStart=0;original.selectionEnd=4;
-    await click('Freeze selected fragment'); assert.equal(released.length,0);
-    await click('Search text'); assert.deepEqual(released,[reference]);
-    pane.referenceDialog.close(); assert.equal(released.length,1);
-  }finally{globalThis.document=previous;}
+test('replacing a frozen history preview releases it once without waiting for close',async()=>{
+ const {picker,released}=setup();await picker.read(scope,hit);await picker.freeze(0,1);
+ assert.deepEqual(released,[]);await picker.search();assert.deepEqual(released,[reference]);picker.close();assert.equal(released.length,1);
+});
+test('selected original offsets use UTF-8 bytes; adding transfers ownership',async()=>{
+ const {picker,released,added,requests}=setup();await picker.read(scope,hit);await picker.freeze(1,3);
+ assert.deepEqual(requests.at(-1),{operation:'freeze',scope,hit,target:'target',start:5,end:7});
+ picker.add();picker.close();assert.deepEqual(added,[reference]);assert.deepEqual(released,[]);
+});
+test('a freeze completing after retirement is released and cannot reopen the dialog',async()=>{
+ let resolve;const {picker,released}=setup({request:request=>request.operation==='freeze'?new Promise(done=>resolve=done):Promise.resolve({offset:0,text:'text'})});
+ await picker.read(scope,hit);const pending=picker.freeze(0,2);picker.close();resolve({reference});await pending;
+ assert.deepEqual(released,[reference]);assert.equal(picker.body,undefined);
+});
+test('protected originals and empty selections cannot freeze',async()=>{
+ const {picker,requests}=setup();await picker.read(scope,hit,0,false);await picker.freeze(0,1);assert.equal(requests.length,1);
+ await picker.read(scope,hit);await picker.freeze(1,1);assert.equal(requests.length,2);assert.match(picker.status,/nonempty/);
 });

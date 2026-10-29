@@ -2,7 +2,7 @@ import { lane, limits } from "./admission.js";
 import { ResourceOwner } from "./src/resource-owner.mjs";
 
 // Bound the document waiter; an expired native operation may still own work.
-function closeStage(operation, stage) {
+export function closeStage(operation, stage) {
   let timer;
   const deadline = new Promise((_, reject) => {
     timer = setTimeout(() => reject(new Error(`${stage} did not complete within 30 seconds`)), 30_000);

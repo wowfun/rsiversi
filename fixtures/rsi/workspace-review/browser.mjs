@@ -1,3 +1,4 @@
+import {addWorkspace} from '../web-product/controls.mjs';
 import {paired} from '../web-product/paired-env.mjs';
 import {liveLimits, readDeepseekKey, deepseekProfile} from '../web-product/live-limits.mjs';
 import {resources,details} from '../web-product/controls.mjs';
@@ -23,7 +24,7 @@ for(const [name,engine]of(liveFile?[['chromium',chromium]]:[['chromium',chromium
  try{
   const context=await browser.newContext({ignoreHTTPSErrors:true,viewport:{width:1440,height:980}});page=await context.newPage();page.setDefaultTimeout(30_000);page.on('pageerror',e=>errors.push(e.message));
   await page.goto(service.origin);await page.locator('#receipt').fill(JSON.stringify(service.register(`${name} workspace review`)));await page.getByRole('button',{name:'Connect',exact:true}).click();await page.locator('#workbench').waitFor({state:'visible'});
-  await page.locator('.workspace-add summary').click();await page.locator('#workspace-path').fill(service.workspace);await page.getByRole('button',{name:'Add workspace',exact:true}).click();await page.locator('#workspaces [data-testid=workspace-open]').first().click();
+  await addWorkspace(page,service.workspace);await page.getByRole('button',{name:'New conversation in workspace',exact:true}).click();
   const pane=page.getByRole('region',{name:'Main conversation',exact:true});await pane.getByRole('textbox',{name:'Main message',exact:true}).fill(liveFile?'This is a workspace review integration test. Use apply_patch exactly once to replace the only line before in card.txt with after · 界 followed by a newline. Do not use any other tool and do not create other files. Then reply REVIEW_LIVE_DONE.':'Please record an inline patch');await pane.getByTestId('composer-send').click();
   await waitUntil(async()=>{const review=page.locator('.pending button').filter({hasText:'Review:'});if(await review.count()){await review.first().click();await page.getByRole('button',{name:'Allow once',exact:true}).click();}return (await pane.locator('.pane-status').innerText())==='Completed';},'native patch settlement',liveFile?180_000:30_000);
   assert.equal(await readFile(join(service.workspace,'card.txt'),'utf8'),'after · 界\n');

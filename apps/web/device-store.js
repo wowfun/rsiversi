@@ -119,27 +119,26 @@ export class DeviceStore {
       if(keys(data,'bucket,key,revision') && budgets[data.bucket] && identity(data.key) && revision(data.revision))this.notify(data.bucket,data.key);
     });
   }
-  static async open(key) {
+  static async open(key,{onVersionChange=()=>{}}={}) {
     if(!identity(key))throw new Error('Invalid presentation identity');
     return new Promise((resolve,reject)=>{
-      const opening=indexedDB.open('rsi.presentation',2);
+      const opening=indexedDB.open('rsi.presentation',3);
       opening.onupgradeneeded=event=>{
         const db=opening.result,tx=opening.transaction;
-        let legacy;
-        if(event.oldVersion===1 && db.objectStoreNames.contains('layouts')){legacy=tx.objectStore('layouts');legacy.name='legacy-layouts-v1';}
+        if(event.oldVersion<2 && db.objectStoreNames.contains('layouts'))db.deleteObjectStore('layouts');
+        if(db.objectStoreNames.contains('legacy-layouts-v1'))db.deleteObjectStore('legacy-layouts-v1');
         for(const bucket of Object.keys(budgets))if(!db.objectStoreNames.contains(bucket))db.createObjectStore(bucket,{keyPath:'key'});
-        if(legacy){
-          const store=tx.objectStore('layouts'),read=legacy.getAll(undefined,65);
+        if(event.oldVersion===2){
+          const store=tx.objectStore('layouts'),read=store.getAllKeys(undefined,budgets.layouts.count+1);
           read.onsuccess=()=>{
             try{
-              if(read.result.length>64)throw new Error('Too many legacy layouts');
-              const records=read.result.map(record=>{
-                if(!keys(record,'key,layout,used'))throw new Error('Invalid legacy layout');
-                return {key:record.key,value:validateLayout(record.layout),used:record.used,revision:'1'};
-              });
-              if(records.length)boundedRecords('layouts',records,records[0].key,records[0].value,records[0].used);
-              for(const record of records)store.put(record);
-            }catch{/* Retain the original store for recovery; active layouts start empty. */}
+              if(read.result.length>budgets.layouts.count)throw new Error('Too many saved layouts');
+              for(const key of read.result){
+                let scoped;try{scoped=JSON.parse(key)}catch{/* Unscoped workbench key. */}
+                const dock=Array.isArray(scoped)&&scoped.length===2&&identity(scoped[0])&&typeof scoped[1]==='string'&&scoped[1].startsWith('dock:');
+                if(!dock)store.delete(key);
+              }
+            }catch{tx.abort();}
           };
         }
       };
@@ -149,7 +148,7 @@ export class DeviceStore {
       opening.onsuccess=()=>{
         if(blocked){opening.result.close();return;}
         const owner=new DeviceStore(opening.result,key);
-        opening.result.onversionchange=()=>owner.close();resolve(owner);
+        opening.result.onversionchange=()=>{owner.close();onVersionChange();};resolve(owner);
       };
     });
   }
@@ -196,10 +195,12 @@ export class DeviceStore {
           const current=index=>{const {bucket,key,scope}=selected[index],record=snapshots[index].find(record=>record.key===key);return record?record.value:defaults(bucket,scope)};
           const preferences=manualPreference?validate('preferences',current(1)):null;
           selected.forEach(({bucket,intent,key,scope},index)=>{
-            const records=snapshots[index],value=current(index);
+            let records=snapshots[index];const value=current(index);
+            const reset=bucket==='layouts'&&keys(intent,'kind')&&intent.kind==='reset';
+            if(reset){if(scope!=='')throw new Error('Reset layout only applies to the workbench');records=records.filter(record=>record.key!==key);}
             const observe=manualPreference && (bucket==='preferences' || preferences[manualPreference]!=='manual');
-            const applied=observe?validate(bucket,value):applyIntent(bucket,value,intent);
-            const next=boundedValidatedRecords(bucket,records,key,applied,Date.now(),applied===value);
+            const applied=reset?defaults(bucket):observe?validate(bucket,value):applyIntent(bucket,value,intent);
+            const next=boundedValidatedRecords(bucket,records,key,applied,Date.now(),!reset&&applied===value);
             results[index]=next.replacement;
             if(!next.changed)return;
             changed.add(index);

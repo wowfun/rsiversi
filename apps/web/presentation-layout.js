@@ -1,10 +1,11 @@
 // Device layout only. Submission durability belongs to drafts.js and Rust.
-export const defaultLayout = Object.freeze({version:3,navigationWidth:280,resourcesWidth:.45,navigation:'expanded',resourcesClosed:true,detail:'standard',workspaces:[]});
+export const defaultLayout = Object.freeze({version:4,navigationWidth:280,resourcesWidth:.45,conversationWidth:null,navigation:'expanded',resourcesClosed:true,detail:'standard',workspaces:[]});
 export function parseLayout(value) {
   const fallback = () => {throw new Error('Invalid layout');};
   if (!value || typeof value !== 'object' || Array.isArray(value)) return fallback();
-  if (Object.keys(value).sort().join() !== Object.keys(defaultLayout).sort().join() || value.version!==3 ||
+  if (Object.keys(value).sort().join() !== Object.keys(defaultLayout).sort().join() || value.version!==4 ||
       !Number.isFinite(value.navigationWidth) || !Number.isFinite(value.resourcesWidth) ||
+      (value.conversationWidth!==null && (!Number.isSafeInteger(value.conversationWidth) || value.conversationWidth<640)) ||
       !['expanded','rail','hidden'].includes(value.navigation) || typeof value.resourcesClosed!=='boolean' ||
       !['compact','standard','detailed','verbose'].includes(value.detail) || !Array.isArray(value.workspaces) || value.workspaces.length>16) return fallback();
   const ids=new Set();
@@ -20,4 +21,10 @@ export function workspacePreference(layout,id,expanded) {
 
 export function validateLayout(value) {
   try {return parseLayout(value);} catch {return structuredClone(defaultLayout);}
+}
+
+export function conversationWidth(preferred,column) {
+  if(!Number.isFinite(column) || column<0)throw new Error('Invalid conversation column');
+  if(preferred!==null && (!Number.isSafeInteger(preferred) || preferred<640))throw new Error('Invalid conversation width');
+  return Math.min(column,preferred??Math.max(680,Math.min(920,column*.64)));
 }

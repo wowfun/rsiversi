@@ -11,10 +11,16 @@ const scenes=[[16,0],[64,0],[128,0],[128,8000]];
 for(const [name,engine] of [['chromium',chromium],['firefox',firefox]]) for(const variant of ['baseline','current']) {
   const directory=join(documents,variant), files=new Map();
   for(const entry of await readdir(directory,{withFileTypes:true})) if(entry.isFile()) files.set('/'+entry.name,await readFile(join(directory,entry.name)));
-  const server=createServer((request,response)=>{const path=new URL(request.url,'http://localhost').pathname,bytes=files.get(path==='/'?'/index.html':path);if(!bytes){response.writeHead(404).end();return}response.setHeader('Content-Type',path==='/'?'text/html':path.endsWith('.css')?'text/css':path.endsWith('.js')?'text/javascript':'application/octet-stream');response.end(bytes)});
+  const server=createServer((request,response)=>{
+    const path=new URL(request.url,'http://localhost').pathname,bytes=files.get(path==='/'?'/index.html':path);
+    if(!bytes){response.writeHead(404).end();return}
+    const type=path==='/'?'text/html':path.endsWith('.css')?'text/css':path.endsWith('.js')?'text/javascript':path.endsWith('.svg')?'image/svg+xml':path.endsWith('.wasm')?'application/wasm':'application/octet-stream';
+    response.setHeader('Content-Type',type);response.end(bytes);
+  });
   await new Promise(resolve=>server.listen(0,'127.0.0.1',resolve));
   const browser=await engine.launch(),page=await browser.newPage({viewport:{width:1440,height:980}}),errors=[];
   page.on('pageerror',error=>errors.push(error.message));
+  page.on('console',message=>{if(message.type()==='error')errors.push(message.text())});
   const cdp=name==='chromium'?await page.context().newCDPSession(page):null,resources=[];
   if(cdp) await cdp.send('Performance.enable');
   try {
@@ -36,7 +42,12 @@ for(const [name,engine] of [['chromium',chromium],['firefox',firefox]]) for(cons
     const samples=await page.evaluate(()=>window.rsiPerformance.samples);
     const row={browser:name,version:browser.version(),variant,trajectory,resources,samples,summary:scenes.map(([blocks,bytes])=>{const values=samples.filter(sample=>sample.blocks===blocks && (bytes ? sample.text_bytes===blocks*bytes : sample.text_bytes<1_000_000)).map(sample=>sample.input_to_paint_ms).sort((a,b)=>a-b);assert.equal(values.length,50,"each scene needs all 10 runs of 5 input samples");return {blocks,near_limit:bytes!==0,samples:values.length,p95_ms:values[Math.ceil(values.length*.95)-1]}})};
     results.push(row);await writeFile(join(report,`${name}-${variant}.json`),JSON.stringify(row,null,2));
-  } catch(error) {await page.screenshot({path:join(report,`${name}-${variant}-failure.png`)}).catch(()=>{});throw error}
+  } catch(error) {
+    const document=await page.locator('body').innerHTML();
+    await writeFile(join(report,`${name}-${variant}-failure.json`),JSON.stringify({error:String(error),pageErrors:errors,document},null,2));
+    await page.screenshot({path:join(report,`${name}-${variant}-failure.png`)}).catch(()=>{});
+    throw error;
+  }
   finally {await browser.close();await new Promise(resolve=>server.close(resolve))}
 }
 await writeFile(join(report,'summary.json'),JSON.stringify(results.map(({samples,...row})=>row),null,2));

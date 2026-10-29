@@ -602,6 +602,30 @@ async fn stop_requires_an_acknowledged_exact_active_turn() {
 }
 
 #[tokio::test]
+async fn new_conversation_keeps_surface_usable_after_cleanup_failure() {
+    let (runtime, backend, app, generation) = fixture().await;
+    let session = super::sources::view(&app)["surfaces"]["main"]["session"].clone();
+    app.terminal(&json!({"pane":"main","generation":generation,"request":{"type":"attach","terminal":"old"}}).to_string()).await.unwrap();
+    *backend.terminal_detach_failure.lock().unwrap() = Some(
+        rsi_session_protocol::SessionError::Api(rsi_api_protocol::ApiError::OutcomeUnknown),
+    );
+    assert!(
+        app.command(r#"{"action":"new_conversation","pane":"main"}"#)
+            .await
+            .is_err()
+    );
+    assert!(super::sources::view(&app)["surfaces"]["main"].is_null());
+    app.command(&json!({"action":"open","pane":"main","session":session}).to_string())
+        .await
+        .unwrap();
+    assert_ne!(
+        super::sources::view(&app)["surfaces"]["main"]["generation"],
+        generation
+    );
+    assert!(runtime.shutdown().await.is_clean());
+}
+
+#[tokio::test]
 async fn committed_switch_reports_retired_cleanup_separately() {
     let (runtime, backend, app, generation) = fixture().await;
     app.terminal(&json!({"pane":"main","generation":generation,"request":{"type":"attach","terminal":"old"}}).to_string()).await.unwrap();

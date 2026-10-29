@@ -1,3 +1,4 @@
+import css from "./automation.module.css"
 import {useEffect,useState} from 'react'
 import {Button} from './button.tsx'
 import {input,useView} from './bridge.ts'
@@ -25,7 +26,7 @@ export function Automation({close}:{close:()=>void}){
   const attempt=view?.attempt
   const page=view?.page,receipt=view?.mutation
   const mutation=async(operation:'cancel'|'resume')=>{if(!attempt)return;await command({operation,id:attempt.id,request_id:crypto.randomUUID(),...(operation==='resume'?{rule_revision:attempt.current_rule_revision}:{})});await command({operation:'list',after:'0',watermark:null,limit:50});await readAttempt(attempt.id)}
-  return <section className="automation-panel" aria-label="Deployment checks">
+  return <section className={`automation-panel ${css.scope}`} aria-label="Deployment checks">
     <div className="automation-heading"><div><span className="eyebrow">Standing preview rules</span><h2>Deployment checks</h2><p>Fixed assertions determine acceptance. Exploration reports explain observed failures.</p></div><div className="automation-controls"><Button disabled={busy} onClick={()=>void refresh()}>Refresh</Button><Button onClick={close}>Close</Button></div></div>
     <p role="status">Browser: {view?.status?.readiness?.replaceAll('_',' ')??'Checking availability'}</p>
     {error&&<p role="alert" className="notice">{error}</p>}

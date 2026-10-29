@@ -28,6 +28,8 @@ mod queue;
 mod remote_ui;
 #[path = "submission/settings.rs"]
 mod settings;
+#[path = "submission/setup.rs"]
+mod setup;
 #[path = "submission/sources.rs"]
 mod sources;
 #[path = "submission/task_panels.rs"]
@@ -79,6 +81,8 @@ fn missing<T>() -> rsi_session_protocol::Result<T> {
 }
 #[derive(Debug, Default)]
 struct Backend {
+    metrics: Mutex<Option<rsi_session_protocol::MetricsRead>>,
+    metrics_gate: Mutex<Option<Arc<admission::HeaderGate>>>,
     workspace_lists: std::sync::atomic::AtomicUsize,
     pending_approvals: Mutex<Option<Vec<rsi_approval_protocol::ApprovalRequest>>>,
     export_gate: Mutex<Option<Arc<admission::HeaderGate>>>,
@@ -534,9 +538,16 @@ impl SessionHandle for Backend {
         ))
     }
     async fn metrics(&self) -> rsi_session_protocol::Result<rsi_session_protocol::MetricsRead> {
-        Err(rsi_session_protocol::SessionError::NotFound(
-            "fixture metrics".into(),
-        ))
+        let gate = self.metrics_gate.lock().unwrap().clone();
+        if let Some(gate) = gate {
+            gate.entered.cancel();
+            gate.release.cancelled().await;
+        }
+        self.metrics
+            .lock()
+            .unwrap()
+            .clone()
+            .ok_or_else(|| rsi_session_protocol::SessionError::NotFound("fixture metrics".into()))
     }
     async fn inspect(
         &self,

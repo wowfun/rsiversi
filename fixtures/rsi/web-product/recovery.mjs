@@ -1,3 +1,5 @@
+import {disconnect} from './controls.mjs';
+import {workspaceForm} from './controls.mjs';
 import {closeDetails} from "./controls.mjs";
 import {paired} from './paired-env.mjs';
 import assert from "node:assert/strict";
@@ -59,7 +61,7 @@ try {
     await row.getByRole("button",{name:"Open saved conversation",exact:true}).click();
     return row;
   };
-  const sessionId = async tab => (await pane(tab).locator(".pane-session").innerText()).split(" · ").at(-1);
+  const sessionId = async tab => (await pane(tab).getAttribute('data-session-id'));
   const waitRecord = async (tab, session, predicate) => {
     const deadline=Date.now()+30_000;
     while(Date.now()<deadline) { const record=await tab.evaluate(session=>window.savedRecord(session),session); if(predicate(record)) return record; await pause(25); }
@@ -68,9 +70,9 @@ try {
   const waitText = (tab,session,text) => waitRecord(tab,session,record=>record?.text===text);
   await connect(page,receipt);
   const caller = await page.evaluate(async () => (await (await fetch("/api/v2/rsi-api-protocol/4/connection/caller/1/read",{method:"POST",headers:{"content-type":"application/json"},body:"{}"})).json()).device_id);
-  await page.locator(".workspace-add summary").click();
-      await page.locator("#workspace-path").fill(service.workspace);
-  await page.getByRole("button",{name:"Add workspace",exact:true}).click();
+  await workspaceForm(page);
+      await page.getByLabel("Directory path").fill(service.workspace);
+  await page.locator('.directory-picker footer').getByRole('button',{name:'Open',exact:true}).click();
   await page.locator("#workspaces [data-testid=workspace-open]").first().click();
   await input(page).waitFor({state:"visible"});
   await input(page).fill("Saved before the first message");
@@ -108,14 +110,14 @@ try {
   await input(page).fill("Local-only input after a failed save");
   await pane(page).getByText(/Input is not saved/).waitFor();
   await page.evaluate(()=>{window.failDraftWrites=false;});
-  await other.getByRole("button",{name:"Sign out",exact:true}).click();
+  await disconnect(other);
   await other.locator("#login").waitFor({state:"visible"}); await other.close();
   // A cookie switch cannot authorize an old tab as the new device.
   const deviceB = await context.newPage(); await connect(deviceB,service.register(`${name} saved drafts B`));
   assert.equal(await page.evaluate(async expected => (await fetch("/api/v2/rsi-api-protocol/4/connection/caller/1/read",{method:"POST",headers:{"content-type":"application/json","X-Rsi-Expected-Device":expected},body:"{}"})).status,caller),401);
   await pane(deviceB).getByRole("button",{name:"Restore drafts",exact:true}).click();
   assert.equal(await pane(deviceB).locator(".saved-draft").count(),0);
-  await deviceB.getByRole("button",{name:"Sign out",exact:true}).click(); await deviceB.locator("#login").waitFor({state:"visible"}); await deviceB.close();
+  await disconnect(deviceB); await deviceB.locator("#login").waitFor({state:"visible"}); await deviceB.close();
   // Restart the real Service: the old Fresh Session actually ceases to exist.
   await service.restart(); await page.locator("#login").waitFor({state:"visible"}); await login(page,receipt);
   const expired=await restore(page,fresh);
@@ -156,7 +158,7 @@ try {
   assert.equal(service.provider.requests.length,1);
   assert.equal(await input(page).inputValue(),"");
   await page.screenshot({path:join(report,"reconciled-durable.png")});
-  await page.getByRole("button",{name:"Sign out",exact:true}).click(); await page.locator("#login").waitFor({state:"visible"});
+  await disconnect(page); await page.locator("#login").waitFor({state:"visible"});
   // Opening corrupt storage must report degradation before any composer is opened.
   await page.evaluate(async () => {
     const db=await new Promise((resolve,reject)=>{const request=indexedDB.open("rsi.composer",5);request.onsuccess=()=>resolve(request.result);request.onerror=()=>reject(request.error);});
@@ -172,7 +174,7 @@ try {
     return rect.left>=0 && rect.right<=innerWidth && rect.top>=0 && rect.bottom<=innerHeight;
   }),"storage warning remains visible on narrow screens");
   await page.screenshot({path:join(report,"storage-unavailable-narrow.png"),fullPage:true});
-  await page.getByRole("button",{name:"Sign out",exact:true}).click(); await page.locator("#login").waitFor({state:"visible"});
+  await disconnect(page); await page.locator("#login").waitFor({state:"visible"});
   const result={status:"passed",browser:browser.version(),freshReattached:fresh,freshRecreated:replacement,originalMessage:pending.pending.id,providerRequests:1,canonicalImages:1,cases:["reload live Fresh","canonical image restoration","two-tab conflict UI","device cookie fence and namespace isolation","real Service restart expires Fresh","failed-save local input survives expired recovery and explicit conflict resolution","explicit atomic recreation","lost reply reload queries original message without replay","storage failure is visible immediately after connection"]};
   await writeFile(join(report,"result.json"),JSON.stringify(result,null,2)); console.log(JSON.stringify(result));
 } catch(error) {

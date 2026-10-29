@@ -1,3 +1,4 @@
+import css from "./resources.module.css"
 import {useEffect,useLayoutEffect,useMemo,useRef,useState,useSyncExternalStore,type ReactNode} from 'react'
 import {DockLayout} from '../vendor/dsh/dockkit/components/DockSurface.tsx'
 import type {DockIntents,DockLabels} from '../vendor/dsh/dockkit/contract/adapter.ts'
@@ -34,8 +35,10 @@ export function openTerminals() { window.dispatchEvent(new Event('rsi:terminals'
 export function ResourceDocks({launcher}:{launcher:ReactNode}) {
   const surfaces=useView(view=>view?.surfaces),selected=useSelected(value=>value)
   const owner=input.resourceOwner()
-  if(!owner)return null
-  return <>{Object.entries(surfaces??{}).map(([pane,surface])=>surface&&surface.kind!=='external'&&<SessionDock key={`${owner.id}:${pane}:${surface.generation}`} owner={owner} pane={pane} surface={surface} active={pane===selected} launcher={launcher}/>)}</>
+  const {layout}=useLayout()
+  const active=surfaces?.[selected]
+  const fallback=!owner||!active||active.kind==='external'
+  return <>{fallback&&<section className={`${css.scope} resource-dock`} hidden={layout.resourcesClosed} aria-label="Resource workbench"><div className="resource-launcher">{launcher}</div></section>}{owner&&Object.entries(surfaces??{}).map(([pane,surface])=>surface&&surface.kind!=='external'&&<SessionDock key={`${owner.id}:${pane}:${surface.generation}`} owner={owner} pane={pane} surface={surface} active={pane===selected} launcher={launcher}/>)}</>
 }
 export function ResourceCleanupNotice() {
   useView(view=>!!view)
@@ -208,7 +211,7 @@ function SessionDock({owner,pane,surface,active,launcher}:{owner:ResourceOwner;p
   void revision
   const displayed=useMemo(()=>displayDock(doc.state,viewport.width,viewport.height,narrow),[doc.state,viewport.width,viewport.height,narrow])
   const fullscreen=doc.state.mode==='fullscreen'||narrow
-  return <section className={`resource-dock${fullscreen?' resource-fullscreen':''}`} hidden={!active||layout.resourcesClosed} aria-label="Resource workbench" data-session={surface.session} onKeyDown={event=>{
+  return <section className={`${css.scope} resource-dock${fullscreen?' resource-fullscreen':''}`} hidden={!active||layout.resourcesClosed} aria-label="Resource workbench" data-session={surface.session} onKeyDown={event=>{
       if(!(event.ctrlKey||event.metaKey)||event.altKey||event.nativeEvent.isComposing||(event.target as HTMLElement).closest('input,textarea,[contenteditable=true]'))return
       if(event.key.toLowerCase()==='z'){event.preventDefault();apply(event.shiftKey?'redo':'undo')}
     }}>

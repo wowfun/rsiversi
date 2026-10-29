@@ -187,8 +187,9 @@ without adding a linked Worker factory or rebuilding the application.
 Markdown events are cached per retained block and invalidated only when its
 source text changes. Eviction drops the cache with the block; unavailable or
 over-budget Markdown retains an explicit cached plain-text result. Retained
-Markdown capacity is limited to eight times each block's source bytes plus 512
-bytes, within the existing 128-block / 1 MiB source budget.
+Markdown capacity is limited to eight times each block's source bytes plus 16 KiB,
+within the existing 128-block / 1 MiB source budget (at most 8.5 MiB of cached
+events). The fixed allowance accommodates ordinary short tables and code blocks.
 
 The incremental frame baseline caches each block's immutable JSON and encoded
 length by its own revision identity. Every visible block mutation replaces that
@@ -202,23 +203,32 @@ changes still deliver a frame and participate in renderer mounting and ACK.
 Assistant text may carry a restricted Markdown event stream alongside its exact
 retained source. The application uses at most 64 KiB input, 4,096 events and 32 nested
 elements per block. Encoded events may occupy at most four times source bytes
-plus 256 bytes; exceeding any bound preserves the complete retained plain text.
+plus 16 KiB; exceeding any bound preserves the complete retained plain text.
+Across the retained transcript, events therefore add at most 4.5 MiB of JSON.
 Markdown and frame size checks use the shared bounded JSON counting writer,
 without allocating an encoded buffer just to measure its length. This limits
 aggregate frame expansion with the existing transcript budget.
-Headings, paragraphs, lists, quotes, emphasis, code and absolute HTTP(S) links
-are supported. Raw HTML is text; Markdown images show their alt text without
+Headings, paragraphs, lists, quotes, emphasis, GFM tables with closed cell
+alignment, code and absolute HTTP(S) links are supported. Fenced code retains
+only its first language token: at most 32 ASCII letters, digits, `_`, `+`, `-`,
+`.` or `#`, normalized to lowercase. Other info strings do not enter the wire.
+Tables and language labels share the existing event, depth, source, encoded and
+retained-memory limits; over-budget tables remain plain text. Raw HTML is text;
+Markdown images show their alt text without
 fetching a URL. Tool/file/source contents keep their plain-text presentations.
 The document constructs only the closed element set with text nodes, and links
 open with no opener or referrer. Markdown does not grant script or media access.
+Parsing remains in Rust for Web Worker and Desktop. The document never reparses
+transcript source with a JavaScript Markdown parser. Code presentation may add
+bounded syntax tokens, language, wrap and copy controls without interpreting HTML.
 Input composition suppresses keyboard submission until composition has ended.
 Composer Enter behavior comes from the ordinary [client preferences](../client-preferences/README.md)
 Settings contribution and is captured when the application connects.
 
 The application imports browser-selected raster files through its composed Media
-capability. One non-queued image operation is admitted per application, at most
+capability. One non-queued upload is admitted per application, at most
 16 MiB source bytes per import. Composer ownership and durable retention belong to the
-[document draft contract](../../../apps/web/README.md). Image import returns
+[document draft contract](../../../apps/web/docs/persistence.md). Image import returns
 one canonical reference to the captured document record; it is durable independently
 of submission and is never automatically replayed after reply loss.
 
@@ -226,7 +236,7 @@ Fresh Sessions created by Web use the default Agent preset. Their saved creation
 intent has `agent_preset_id: null`; the document validates this producer contract
 when admitting durable draft records.
 
-Repeated workspace selection may reuse only the selected application's owned,
+Repeated new-conversation actions in a workspace may reuse only the selected application's owned,
 unpublished revision-zero draft with matching WorkspaceId/Header and unchanged
 agent/default-preset Settings versions. The document offers its exact binding only
 after an empty text/image record has flushed and has no pending request or active
@@ -297,9 +307,11 @@ Each surface has its own model, transcript, history page and interactions. Compo
 records persist independently in the document. Replacing one attachment does not
 dispose the other. The Shell permits four surfaces to allow both old and replacement
 generations during simultaneous switches; each pane admits one switch at a time.
-History is a bounded separate page, preserving live observation. Workspace,
-recent-Session and model catalog next-page actions replace their bounded page;
-they do not accumulate an unbounded client catalog.
+History is a bounded separate page, preserving live observation. Workspace and
+model catalog next-page actions replace their bounded page; they do not accumulate
+an unbounded client catalog. Session navigation and native history-picker sources
+use the navigation projection. GUI refresh does not fetch a second recent-Session
+catalog, and the document command grammar has no recent-Session pagination action.
 Workspace ordering separately reads the registry's atomic complete order seed.
 Its 1,024-record / 128 KiB limit bounds the complete tree; oversized membership
 preserves ordinary pages while device ordering pauses. Reaching the last page
@@ -570,6 +582,8 @@ delivery action; stale or absent delivery tickets do not block their preparation
 Queue preparation accepts only its queue payload. Mixed composer text, images or
 references are rejected rather than silently discarded.
 
+Workspace registration refreshes the catalog without creating a Session or
+requiring model configuration. Creating a conversation remains a separate command.
 Directory dialogs and workspace registration explicitly retain the selected
 execution location. Remote paths never pass through a Local registration default.
 Directory dialogs use the composed shared picker client. Closing a list cancels
@@ -650,3 +664,21 @@ Aggregate watch wakeups and detail request generations are
 not content keys. Composer action removal also advances its content revision.
 The proposed section cache and action set become the baseline only after frame
 encoding succeeds, so capacity failure cannot acknowledge unpublished actions.
+
+`new_conversation` retires only the selected attachment and replaces it with an
+empty surface, including when completed cleanup reports an error. That error remains
+observable while the replacement accepts a new attachment. It does not create a
+Session or require a model. The document
+flushes the previous bound draft before issuing this command.
+
+Turn presentation includes the typed terminal block identity. For complete,
+successful turns with a retained answer, the conversation tab represents that
+terminal once in the turn heading. Activity and incomplete or unsuccessful
+turns retain the chronological terminal and its source details.
+
+The Turn index carries durable block timestamps, boundary elapsed time and reported
+usage for the latest conversation model response. This response usage is not
+presented as a complete Turn total. A generation-bound `metrics` command reads the existing
+Session metrics API, preserves its watermark/completeness, and publishes only to
+the still-current attachment. It does not infer whole-Session totals from loaded
+blocks or block streaming progress on a metrics read.

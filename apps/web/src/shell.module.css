@@ -1,0 +1,601 @@
+:global(.connection-state):where(.scope, .scope *) {
+  margin-left: auto;
+  font-size: 0.8rem;
+  color: var(--muted);
+}
+:global(.connection-state.connected):where(.scope, .scope *)::before {
+  content: "";
+  display: inline-block;
+  width: 7px;
+  height: 7px;
+  background: var(--teal);
+  border-radius: 50%;
+  margin-right: 8px;
+}
+:global(.login):where(.scope, .scope *) {
+  max-width: 900px;
+  padding: 0 30px;
+  display: grid;
+  grid-template-columns: 1fr 1.25fr;
+  align-items: start;
+}
+:global(.login-heading p):where(.scope, .scope *) {
+  color: var(--muted);
+  line-height: 1.7;
+}
+:global(.login-form textarea):where(.scope, .scope *) {
+  font-family: Consolas, monospace;
+  font-size: 0.8rem;
+}
+:global(.sidebar-footer button):where(.scope, .scope *) {
+  padding-left: 0;
+}
+:global(.sidebar-footer span):where(.scope, .scope *) {
+  font-size: 0.63rem;
+  color: var(--muted);
+}
+@media (max-width: 1120px) {
+  :global(.workbench):where(.scope, .scope *) {
+    grid-template-columns: 210px minmax(0, 1fr);
+  }
+  :global(.sidebar):where(.scope, .scope *) {
+    padding: 18px 12px;
+  }
+}
+@media (max-width: 850px) {
+  :global(.login):where(.scope, .scope *) {
+    gap: 30px;
+  }
+  :global(.app-header):where(.scope, .scope *) {
+    padding: 0 20px;
+  }
+}
+@media (max-width: 560px) {
+  :global(.app-header):where(.scope, .scope *) {
+    height: 58px;
+    gap: 14px;
+    padding: 0 14px;
+  }
+  :global(.connection-state):where(.scope, .scope *) {
+    font-size: 0.68rem;
+  }
+  :global(.sidebar):where(.scope, .scope *) {
+    max-height: 215px;
+    border-right: 0;
+    border-bottom: 1px solid var(--line);
+    display: block;
+  }
+  :global(.sidebar-footer):where(.scope, .scope *) {
+    padding: 4px 0;
+  }
+  :global(.sidebar-footer span):where(.scope, .scope *) {
+    display: none;
+  }
+  :global(.workbench):where(.scope, .scope *) {
+    height: calc(100dvh - 58px);
+    grid-template-columns: 1fr;
+    overflow: auto;
+    min-height: 0;
+  }
+  :global(.login):where(.scope, .scope *) {
+    display: block;
+    margin: 45px auto;
+    padding: 0 20px;
+  }
+  :global(.login-heading):where(.scope, .scope *) {
+    margin-bottom: 26px;
+  }
+  :global(.login-form):where(.scope, .scope *) {
+    padding: 20px;
+  }
+}
+:global(.license-dialog):where(.scope, .scope *) {
+  inset: auto;
+  transform: none;
+  margin: auto;
+  box-shadow: 0 20px 80px var(--shadow);
+}
+:global(.command-palette):where(.scope, .scope *) {
+  width: min(560px, calc(100vw - 32px));
+  padding: 20px;
+  max-height: 70dvh;
+  box-shadow: 0 20px 80px var(--shadow);
+}
+:global(.command-palette input):where(.scope, .scope *) {
+  width: 100%;
+  margin: 16px 0;
+}
+:global(.command-palette [role="listbox"]):where(.scope, .scope *) {
+  display: grid;
+  gap: 4px;
+  overflow: auto;
+  max-height: 45dvh;
+}
+:global(.command-palette [role="option"]):where(.scope, .scope *) {
+  text-align: left;
+  border-color: transparent;
+}
+:global(.command-palette [aria-selected="true"]):where(.scope, .scope *) {
+  background: var(--blue);
+  color: var(--ink);
+}
+:global(.navigation-drawer > .sidebar):where(.scope, .scope *) {
+  border: 0;
+  padding: 16px 0;
+  max-height: none;
+  min-height: calc(100% - 52px);
+}
+:global(.app-header):where(.scope, .scope *) {
+  display: flex;
+  align-items: center;
+  border-bottom: 1px solid var(--line);
+  height: 48px;
+  min-height: 48px;
+  padding: 0 20px;
+  background: var(--paper);
+  gap: 16px;
+}
+:global(.wordmark):where(.scope, .scope *) {
+  color: var(--ink);
+  text-decoration: none;
+  display: inline-flex;
+  align-items: center;
+  gap: 8px;
+  flex-shrink: 0;
+  white-space: nowrap;
+  font: 650 16px/1 system-ui;
+  letter-spacing: normal;
+}
+:global(.brand-logo):where(.scope, .scope *) {
+  display: block;
+  width: 32px;
+  height: 32px;
+  flex-shrink: 0;
+  object-fit: contain;
+}
+:global(.connected-header .connection-state):where(.scope, .scope *) {
+  font-size: 11px;
+}
+:global(.connected-header .wordmark):where(.scope, .scope *) {
+  display: none;
+}
+:global(.shell-actions):where(.scope, .scope *) {
+  display: flex;
+  gap: 3px;
+  align-items: center;
+}
+:global(.shell-actions button):where(.scope, .scope *) {
+  font-size: 11px;
+  padding: 6px;
+}
+:global(.login-chrome:empty):where(.scope, .scope *) {
+  display: none;
+}
+:global(.connection-controls-host):where(.scope, .scope *) {
+  margin-left: auto;
+  min-width: 0;
+}
+:global(.connection-controls-host > div):where(.scope, .scope *) {
+  min-width: 0;
+}
+:global(.connected-header):where(.scope, .scope *) {
+  position: static;
+  height: auto;
+  min-height: 36px;
+  background: transparent;
+  border: 0;
+  z-index: 4;
+  padding: 0 4px;
+  gap: 6px;
+  flex-wrap: wrap;
+}
+:global(.resource-cleanup-notice):where(.scope, .scope *) {
+  max-height: min(30dvh, 18rem);
+  overflow: auto;
+  flex-shrink: 0;
+  box-sizing: border-box;
+  padding: 8px;
+  border: 1px solid var(--line);
+  overflow-wrap: anywhere;
+}
+:global(.workbench.navigation-rail):where(.scope, .scope *) {
+  --left-width: 56px;
+}
+:global(.workbench.navigation-hidden):where(.scope, .scope *) {
+  --left-width: 0px;
+}
+:global(.workbench.resources-closed):where(.scope, .scope *),
+:global(.workbench.showing-settings):where(.scope, .scope *) {
+  --right-width: 0px;
+}
+:global(.workbench > .sidebar):where(.scope, .scope *),
+:global(.workbench > .navigation-rail):where(.scope, .scope *) {
+  grid-column: 1;
+}
+:global(.workbench > .resources):where(.scope, .scope *) {
+  grid-column: 3;
+}
+:global(.sidebar):where(.scope, .scope *) {
+  border-right: 1px solid var(--line);
+  overflow: auto;
+  display: flex;
+  flex-direction: column;
+  overflow-x: hidden;
+  position: relative;
+  background: var(--mist);
+  padding: 16px 10px 12px;
+  gap: 12px;
+  font-size: 13px;
+  min-height: 0;
+}
+:global(.sidebar-brand):where(.scope, .scope *) {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  min-height: 32px;
+  flex-shrink: 0;
+  margin-bottom: 12px;
+}
+:global(.sidebar-brand > span):where(.scope, .scope *) {
+  color: var(--muted);
+  font-size: 12px;
+}
+:global(.sidebar-brand > button):where(.scope, .scope *) {
+  margin-left: auto;
+}
+:global(.new-conversation):where(.scope, .scope *) {
+  width: 100%;
+  background: var(--active) !important;
+  border: 1px solid var(--line) !important;
+  min-height: 36px;
+}
+:global(.workbench > .navigation-rail):where(.scope, .scope *) {
+  display: flex;
+  align-items: center;
+  flex-direction: column;
+  gap: 18px;
+  padding: 18px 6px;
+  background: var(--mist);
+  border-right: 1px solid var(--line);
+}
+:global(.workbench > .navigation-rail .wordmark):where(.scope, .scope *) {
+  justify-content: center;
+}
+.railToggle {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  flex: none;
+  width: 36px;
+  height: 36px;
+  padding: 0;
+  border: 0;
+  border-radius: var(--dsw-radius-md);
+  background: transparent;
+  color: var(--dsw-alias-label-primary);
+}
+.railMark {
+  display: inline-flex;
+}
+.railToggle .railPanel {
+  display: none;
+}
+.railToggle:focus-visible {
+  outline-offset: -2px;
+}
+.railToggle:focus-visible .railMark {
+  display: none;
+}
+.railToggle:focus-visible .railPanel {
+  display: block;
+}
+@media (hover: hover) {
+  .railToggle:hover {
+    background: var(--dsw-alias-interactive-bg-hover);
+  }
+  .railToggle:hover .railMark {
+    display: none;
+  }
+  .railToggle:hover .railPanel {
+    display: block;
+  }
+}
+:global(.workbench > .navigation-rail > button:last-child):where(
+  .scope,
+  .scope *
+) {
+  margin-top: auto;
+}
+:global(.sidebar-footer):where(.scope, .scope *) {
+  align-items: center;
+  justify-content: space-between;
+  margin-top: auto;
+  display: flex;
+  flex-wrap: wrap;
+  gap: 8px;
+  padding-top: 18px;
+}
+:global(.sidebar-footer button):where(.scope, .scope *) {
+  font-size: 12px;
+}
+:global(.sidebar > select):where(.scope, .scope *) {
+  font-size: 12px;
+  padding: 6px;
+  background: transparent;
+}
+:global(.panel-resize):where(.scope, .scope *) {
+  position: absolute;
+  inset: 0 0 0 auto;
+  width: 8px;
+  cursor: col-resize;
+  touch-action: none;
+  z-index: 2;
+}
+:global(.resources > .panel-resize):where(.scope, .scope *) {
+  left: 0;
+  right: auto;
+}
+:global(.panel-resize:focus-visible):where(.scope, .scope *) {
+  outline: none;
+}
+:global(.panel-resize:focus-visible):where(.scope, .scope *)::after {
+  content: "";
+  position: absolute;
+  inset: 0 0 0 auto;
+  width: 2px;
+  background: var(--teal);
+  pointer-events: none;
+}
+:global(.resources > .panel-resize:focus-visible):where(.scope, .scope *)::after {
+  left: 0;
+  right: auto;
+}
+@media (forced-colors: active) {
+  :global(.panel-resize:focus-visible):where(.scope, .scope *)::after {
+    background: Highlight;
+    forced-color-adjust: none;
+  }
+}
+:global(.preference-error):where(.scope, .scope *) {
+  padding: 8px 20px;
+  background: var(--warning-bg);
+  color: var(--warning);
+  font-size: 12px;
+}
+:global(.notice):where(.scope, .scope *) {
+  padding: 12px 26px;
+  background: var(--warning-bg);
+  color: var(--warning);
+  border-bottom: 1px solid var(--line);
+  overflow-wrap: anywhere;
+  max-height: 120px;
+  overflow: auto;
+  flex-shrink: 0;
+  font-size: 12px;
+}
+:global(.login):where(.scope, .scope *) {
+  width: min(850px, 100%);
+  margin: 10vh auto 40px;
+  overflow: auto;
+  gap: 48px;
+}
+:global(.login h1):where(.scope, .scope *) {
+  font: 600 34px/1.15 system-ui;
+  letter-spacing: -1px;
+}
+:global(.login-form):where(.scope, .scope *) {
+  display: flex;
+  flex-direction: column;
+  gap: 12px;
+  background: var(--paper);
+  padding: 28px;
+  border: 1px solid var(--line);
+  box-shadow: none;
+  border-radius: 20px;
+}
+:global(.login-heading p):where(.scope, .scope *) {
+  font-size: 13px;
+}
+:global(.license-dialog pre):where(.scope, .scope *) {
+  white-space: pre-wrap;
+  font-size: 11px;
+}
+@media (max-width: 767px) {
+  :global(.workbench):where(.scope, .scope *) {
+    flex-direction: column;
+  }
+  :global(.connected-header):where(.scope, .scope *) {
+    right: 6px;
+  }
+  :global(.shell-actions button):where(.scope, .scope *) {
+    font-size: 10px;
+    padding: 5px;
+  }
+  :global(.connected-header .connection-state):where(.scope, .scope *) {
+    font-size: 10px;
+  }
+  :global(.login):where(.scope, .scope *) {
+    grid-template-columns: 1fr;
+    max-width: 500px;
+    margin: 5vh auto;
+    gap: 20px;
+  }
+  :global(.login h1):where(.scope, .scope *) {
+    font-size: 28px;
+  }
+  :global(.sidebar):where(.scope, .scope *) {
+    max-height: none;
+  }
+  :global(.sidebar-footer):where(.scope, .scope *) {
+    margin-top: auto;
+  }
+}
+@container (max-width:560px) {
+  :global(.connected-header):where(.scope, .scope *) {
+    justify-content: flex-end;
+  }
+}
+:global(.workbench):where(.scope, .scope *) {
+  --left-width: var(--navigation-width, 280px);
+  flex: 1;
+  height: auto;
+  min-height: 0;
+  display: grid;
+  --right-width: min(
+    calc(100vw - var(--left-width) - 400px),
+    clamp(300px, var(--resources-width, 45vw), 70vw)
+  );
+  grid-template-columns: var(--left-width) minmax(400px, 1fr) var(--right-width);
+}
+:global(.workbench.resources-closed):where(.scope, .scope *) {
+  --right-width: 0px;
+}
+:global(.resources):where(.scope, .scope *) {
+  position: relative;
+  min-width: 0;
+  border-left: 1px solid var(--line);
+  padding: 0;
+  overflow: visible;
+  min-height: 0;
+  background: var(--secondary-surface);
+}
+:global(.resources-closed > .resources):where(.scope, .scope *) {
+  border: 0;
+}
+:global(.resources-closed > .resources > .panel-resize):where(
+  .scope,
+  .scope *
+) {
+  display: none;
+}
+:global(.navigation-drawer):where(.scope, .scope *) {
+  margin: 0;
+  inset: 0 auto 0 0;
+  height: 100dvh;
+  max-height: 100dvh;
+  padding: 18px 12px;
+  border-radius: 0 var(--radius-panel) var(--radius-panel) 0;
+  overflow: auto;
+  width: 280px;
+  max-width: 100vw;
+}
+@media (max-width: 767px) {
+  :global(.workbench):where(.scope, .scope *) {
+    display: flex;
+  }
+  :global(.resources):where(.scope, .scope *) {
+    display: block;
+    position: static;
+    height: 0;
+    padding: 0;
+    border: 0;
+  }
+  :global(.resources > .panel-resize):where(.scope, .scope *) {
+    display: none;
+  }
+}
+:global(.settings-modal):where(.scope, .scope *) {
+  font-family: var(--dsw-font-family);
+  --dsw-elevation-prominent:
+    0 0 0 0.5px var(--dsw-elevation-stroke-color), 0 3px 8px 0 rgb(0 0 0 / 4%),
+    0 0 20px 0 rgb(0 0 0 / 5%);
+}
+:global(.automation-modal):where(.scope, .scope *) {
+  width: min(1100px, calc(100vw - 40px));
+  max-height: calc(100dvh - 40px);
+  padding: 24px;
+  border-radius: 12px;
+  overflow: auto;
+}
+:global(.notice p):where(.scope, .scope *) {
+  margin: 0;
+}
+:global(.notice p + p):where(.scope, .scope *) {
+  margin-top: 6px;
+}
+.sidebar:global(.sidebar) {
+  padding: 6px 8px;
+  font-size: 14px;
+  gap: 0;
+  background: var(--dsw-specific-sidebar-fill);
+}
+.sidebar :global(.sidebar-brand) {
+  height: 60px;
+  min-height: 60px;
+  padding: 8px 0 8px 4px;
+  margin: 0;
+  gap: 8px;
+}
+.sidebar :global(.new-conversation) {
+  height: 38px;
+  min-height: 38px;
+  width: calc(100% - 4px);
+  margin: 0 2px 12px;
+  gap: 6px;
+  padding: 8px 12px;
+  border: 0.5px solid var(--dsw-alias-border-l3) !important;
+  border-radius: 8px;
+  background: var(--dsw-alias-button-elevated-fill) !important;
+  font-size: 14px;
+  font-weight: 500;
+}
+.footer:global(.sidebar-footer) {
+  margin-top: auto;
+  padding: 8px 0 4px;
+  display: flex;
+  flex-wrap: nowrap;
+  align-items: center;
+  gap: 4px;
+  min-height: 50px;
+}
+.shortcuts { display: flex; flex-direction: column; gap: 4px; padding-bottom: 16px; }
+.shortcuts > button { justify-content: start; height: 36px; padding: 6px 12px; gap: 8px; font-size: 14px; font-weight: 400; }
+.footer > button {
+  flex: 1;
+  justify-content: start;
+  height: 42px;
+  font-size: 14px;
+  gap: 8px;
+}
+.footerOptions {
+  position: relative;
+  width: 100%;
+}
+.footerOptions summary {
+  display: flex;
+  align-items: center;
+  justify-content: flex-start;
+  gap: 8px;
+  padding: 0 8px;
+  width: 100%;
+  height: 36px;
+  border-radius: 8px;
+  list-style: none;
+  cursor: pointer;
+}
+.footerOptions summary::-webkit-details-marker {
+  display: none;
+}
+.footerOptions summary:hover {
+  background: var(--hover);
+}
+.menu {
+  position: absolute;
+  bottom: 100%;
+  left: 0;
+  z-index: 12;
+  display: flex;
+  flex-direction: column;
+  min-width: 200px;
+  padding: 8px;
+  border-radius: 12px;
+  background: var(--dsw-alias-bg-layer-2);
+  border: 1px solid var(--line);
+  box-shadow: var(--dsw-elevation-prominent);
+}
+.menu > button {
+  justify-content: start;
+}
+.resourcesIcon {
+  transform: rotate(180deg);
+}

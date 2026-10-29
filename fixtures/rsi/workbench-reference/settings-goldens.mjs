@@ -13,7 +13,7 @@ await writeFile(join(root,'index.html'),'<html><head><meta charset="utf-8"></hea
 const config={configFile:false,root,logLevel:'warn',esbuild:{jsx:'automatic'},resolve:{alias:[{find:'@fixture/web',replacement:web},...['react-dom','react','clsx'].map(name=>({find:name,replacement:join(web,'node_modules',name)}))]},build:{outDir:join(root,'dist'),emptyOutDir:true}};
 await build(config);const server=await preview({...config,preview:{host:'127.0.0.1',port:0}}),browser=await chromium.launch();const scenes=[];
 try{
- for(const [width,height]of [[1440,900],[1024,768],[767,900],[390,844]])for(const theme of ['light','dark']){
+ for(const [width,height]of [[1440,900],[1920,900],[1024,768],[1023,900],[768,900],[767,900],[390,844]])for(const theme of ['light','dark']){
   const context=await browser.newContext({viewport:{width,height},deviceScaleFactor:1,colorScheme:theme,reducedMotion:'reduce'}),page=await context.newPage(),errors=[];
   page.on('pageerror',e=>errors.push(e.message));await page.goto(server.resolvedUrls.local[0]+`?theme=${theme}`);
   await page.getByRole('button',{name:'Plugins',exact:true}).click();await page.getByLabel('SSH MCP server name',{exact:true}).waitFor();await page.mouse.move(0,0);

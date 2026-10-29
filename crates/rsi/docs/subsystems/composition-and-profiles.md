@@ -208,7 +208,8 @@ is global because Jobs identities outlive Agent generations. The model-facing
 contributions activated inside an unpublished Tool catalog and atomically
 sealed with one preset generation. Windows exposes native Files and Git for
 Windows Bash through managed Job Object processes. Its catalog omits the Linux
-apply-patch and PTY contributions; restricted process sandbox policies continue
+apply-patch contribution. Manual PowerShell terminals use ConPTY with explicitly
+unconfined user authority, separate from Agent tools; restricted process sandbox policies continue
 to refuse when their native enforcement backend is unavailable.
 The Session Jobs finalizer cancels and reports all unfinished turn work before
 the terminal Fact; unreported background completion blocks a successful turn.

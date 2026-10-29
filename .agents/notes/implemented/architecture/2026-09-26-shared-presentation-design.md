@@ -33,6 +33,10 @@ unneeded branded assets and unrelated vendor changes.
 
 ## Consequences
 
+The [DSH-aligned React decision](2026-10-27-dsh-aligned-react-workbench.md)
+supersedes the reference revision and non-brand theme scope while preserving
+these platform boundaries and shared interaction principles.
+
 Profile-owned appearance applies live across clients. Layout stays in a separate
 bounded per-device store so geometry eviction cannot remove drafts or credentials.
 The existing DSH source remains pinned with per-file revision and digest provenance;

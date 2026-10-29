@@ -1,3 +1,4 @@
+import {disconnect} from './controls.mjs';
 import {closeDetails,detailMode,resources} from "./controls.mjs";
 // Explicit opt-in: actual DeepSeek, real MCP transport, durable CAS and product UI.
 import assert from 'node:assert/strict';
@@ -47,7 +48,7 @@ try {
   assert.match(transcript, /MCP_IMAGE_CONFIRMED/);
   assert.equal(mcp.evidence.calls, 1);
   assert.equal(live.service.provider.requests.length, 0, 'no mock model calls');
-  const session = (await pane.locator('.pane-session').innerText()).split(' · ').at(-1);
+  const session = (await pane.getAttribute('data-session-id'));
   const records = live.service.run(["run",'evidence-cli','--resume',session,'--output','jsonl'], {input:':history\n'.repeat(8)+':exit\n'}).stdout.trim().split('\n').map(line => JSON.parse(line));
   const facts = records.flatMap(record => record.fact ? [record.fact] : []).sort((a,b) => a.seq - b.seq);
   assert(facts.length > 0 && facts[0].seq === 1);
@@ -88,7 +89,7 @@ try {
   await page.waitForFunction(()=>!document.querySelector('.resource-dock')?.classList.contains('resource-fullscreen'));
   await resources(page);
   await closeDetails(page);
-  await page.locator('#sign-out').click();
+  await disconnect(page);
   await page.locator('#login').waitFor({state:'visible'});
   await writeFile(join(live.report,'result.json'), JSON.stringify({status:'passed',model:live.model,browser:browser.version(),session,mcp:mcp.evidence,checks,mock_model_requests:0,clean_sign_out:true},null,2));
 } catch (error) {

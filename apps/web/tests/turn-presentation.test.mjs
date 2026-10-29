@@ -3,6 +3,10 @@ import assert from 'node:assert/strict';
 import {turnVisibility} from '../turn-presentation.js';
 import * as presentation from '../turn-presentation.js';
 const turn={status:'Completed',partial:false,foldable:true,running:false,process:['thinking','earlier'],candidate:[],answer:['answer']};
+test('back-to-bottom requires overflow and distance beyond the tail threshold',()=>{
+  for(const [scrollHeight,clientHeight,scrollTop,expected] of [[500,500,0,false],[1000,500,500,false],[1000,500,430,false],[1000,500,429,true],[500,500,-100,false]])
+    assert.equal(presentation.awayFromBottom({scrollHeight,clientHeight,scrollTop}),expected);
+});
 test('detail modes preserve partial and unsuccessful content and visible streaming candidates',()=>{
   assert.deepEqual([...turnVisibility(turn,'standard',false).hidden],turn.process);
   assert.equal(turnVisibility(turn,'verbose',false).hidden.size,0);
@@ -13,61 +17,8 @@ test('detail modes preserve partial and unsuccessful content and visible streami
   assert.equal(turnVisibility({...turn,status:'Running',running:true},'detailed',false).expanded,true);
 });
 
-test('unchanged Turn patches do not mutate block visibility or classes', async () => {
-  const {TurnPresentation} = await import('../turn-presentation.js');
-  let writes = 0;
-  const classes = new Set();
-  let hidden = false;
-  const node = {
-    get hidden() { return hidden; },
-    set hidden(value) { writes++; hidden = value; },
-    classList: {
-      contains: name => classes.has(name),
-      toggle(name, value) {
-        writes++;
-        if (value) classes.add(name); else classes.delete(name);
-      },
-    },
-  };
-  const view = {entries: {one: {
-    id: 'one', status: 'Completed', partial: false, foldable:true, running:false,
-    blocks: ['answer'], process: [], candidate: [], answer: ['answer'],
-  }}};
-  const blocks = new Map([['answer', {node}]]);
-  const adapter = new TurnPresentation({}, () => {});
-  adapter.apply(view, blocks, 'detailed');
-  assert(classes.has('turn-expanded'));
-  writes = 0;
-  adapter.apply(view, blocks, 'detailed');
-  assert.equal(writes, 0);
-  adapter.apply({entries: {}}, blocks, 'standard');
-  assert(!classes.has('turn-expanded'));
-});
-
-test('summary disclosure follows actual process visibility in running and failed turns', async () => {
-  const {TurnPresentation} = await import('../turn-presentation.js');
-  const classes = new Set();
-  const node = {hidden: false, classList: {
-    contains: name => classes.has(name),
-    toggle(name, value) { if (value) classes.add(name); else classes.delete(name); },
-  }};
-  let expanded;
-  const row = {
-    nextSibling: node,
-    getAttribute() { return expanded; },
-    setAttribute(_name, value) { expanded = value; },
-  };
-  const adapter = new TurnPresentation({}, () => {});
-  adapter.rows.set('one', row);
-  for (const [status, visible] of [['Running',true], ['Completed',false], ['Cancelled',true]]) {
-    adapter.apply({entries: {one: {
-      id:'one', status, partial:false, running:status==='Running',foldable:status!=='Cancelled', blocks:['step'], process:['step'], answer:[], candidate:[],
-    }}}, new Map([['step',{node}]]), 'standard');
-    assert.equal(node.hidden, !visible);
-    assert.equal(expanded, String(visible));
-    assert(row.textContent.startsWith(visible ? '▾' : '▸'));
-  }
-});
+// DOM mutation, summary disclosure and identity invariants run against the real
+// React transcript in fixtures/rsi/web-product/frame-commit.mjs.
 
 test('display labels do not control folding',()=>{
   assert.deepEqual(turnVisibility({...turn,status:'All done'},'standard',false),turnVisibility(turn,'standard',false));
@@ -89,4 +40,11 @@ test('tail following skips per-message geometry while reading preserves a visibl
   assert.equal(container.scrollTop,130);
   container.scrollTop=500;
   assert.equal(presentation.readingPosition(container,true).atEnd,false);
+});
+
+test('only a complete successful answer replaces its typed terminal with the turn heading',()=>{
+  const completed={...turn,terminal:'terminal'};
+  assert(turnVisibility(completed,'standard',false).hidden.has('terminal'));
+  for(const changes of [{foldable:false},{running:true},{answer:[]}])assert(!turnVisibility({...completed,...changes},'standard',false).hidden.has('terminal'));
+  assert(!turnVisibility(completed,'verbose',false).hidden.has('terminal'));
 });

@@ -9,7 +9,7 @@ import {TerminalInput} from './terminal-input.mjs'
 import {terminalDocument} from './terminal-style.ts'
 import {ResourceOwner} from './resource-owner.mjs'
 
-type Status={id:string;size:{rows:number;columns:number};phase:{state:string;exit_code?:number|null;signal?:number|null};controller:string|null;controller_epoch:number}
+type Status={id:string;sandbox:'read-only'|'workspace-write'|'danger-full-access';size:{rows:number;columns:number};phase:{state:string;exit_code?:number|null;signal?:number|null};controller:string|null;controller_epoch:number}
 export type Follower={terminal:Status;id:string}
 type Reply={type:string;value:any;ack?:string}
 function terminalTheme(){const style=getComputedStyle(document.documentElement);return {background:style.getPropertyValue('--secondary-surface').trim(),foreground:style.getPropertyValue('--ink').trim(),cursor:style.getPropertyValue('--teal').trim(),selectionBackground:style.getPropertyValue('--active').trim()}}
@@ -86,10 +86,10 @@ export function Terminals({owner,pane,surface,hide,initial,created,onOpen}:{owne
   const phase=status?.phase.state==='exited'?`Exited ${status.phase.exit_code??`(signal ${status.phase.signal??'unknown'})`}`:status?.phase.state==='failed'?'Stopped with an error':writer?'You have control':status?'Read only':'No terminal selected'
   return <section className="terminal-panel" aria-label="Session terminals">
     <div className="terminal-toolbar"><strong>Terminal</strong><span className={`terminal-authority ${writer?'is-writer':''}`} role="status">{phase}</span><div className="terminal-actions"><Button size="sm" disabled={busy} onClick={()=>onOpen?onOpen():void action(()=>attach())}>New terminal</Button><Button size="sm" disabled={busy} onClick={()=>void action(refresh)}>Refresh</Button>{follower&&status?.phase.state==='running'&&<Button size="sm" disabled={busy} onClick={()=>void action(async()=>{const reply=await operate({type:'takeover',attachment:follower.id});follower.terminal=reply.value;current.current=follower;setStatus(reply.value);installWriter(follower,reply.value);resizeCurrent.current?.();display.current?.focus()})}>Take control</Button>}{follower&&<Button size="sm" disabled={busy} onClick={()=>void action(async()=>{await operate({type:'close',terminal:follower.terminal.id});pump.current?.stop();detach();current.current=undefined;setFollower(undefined);setStatus(undefined);await refresh()})}>Terminate terminal</Button>}<Button size="sm" onClick={hide} aria-label="Hide terminal panel">×</Button></div></div>
-    {!initial&&roster.length>0&&<nav className="terminal-tabs" aria-label="Open terminals">{roster.map((terminal,index)=><Button size="sm" key={terminal.id} aria-pressed={follower?.terminal.id===terminal.id} title={terminal.id} disabled={busy} onClick={()=>onOpen?onOpen(terminal.id):void action(()=>attach(terminal.id))}>Bash {index+1} · {terminal.phase.state}</Button>)}</nav>}
+    {!initial&&roster.length>0&&<nav className="terminal-tabs" aria-label="Open terminals">{roster.map((terminal,index)=><Button size="sm" key={terminal.id} aria-pressed={follower?.terminal.id===terminal.id} title={terminal.id} disabled={busy} onClick={()=>onOpen?onOpen(terminal.id):void action(()=>attach(terminal.id))}>Terminal {index+1} · {terminal.phase.state}</Button>)}</nav>}
     {notice&&<p className="terminal-notice" role="alert">{notice}</p>}
     <div className="terminal-screen" ref={screen} hidden={!follower}/>
-    {!follower&&<div className="terminal-empty"><p>Run commands in this Session’s workspace.</p><p className="hint">New terminals use this Session’s saved sandbox policy. Hiding this panel leaves shells running.</p></div>}
-    <footer className="terminal-footer"><span title={surface.path}>{surface.path}</span><span>{status?`${status.size.columns} × ${status.size.rows}`:'Bash · ANSI/VT100'}</span></footer>
+    {!follower&&<div className="terminal-empty"><p>Run commands in this Session’s workspace.</p><p className="hint">Hiding this panel leaves shells running.</p></div>}
+    <footer className="terminal-footer"><span title={surface.path}>{surface.path}</span>{status&&<span aria-label="Terminal permissions" title="Manual terminal permissions. Agent permissions are unchanged.">{status.sandbox==='danger-full-access'?'Current user permissions':status.sandbox==='workspace-write'?'Workspace Write':'Read only'}</span>}<span>{status?`${status.size.columns} × ${status.size.rows}`:'ANSI/VT100'}</span></footer>
   </section>
 }

@@ -63,6 +63,9 @@ pub(crate) enum Command {
         source: rsi_conversation::ExternalSource,
         start: usize,
     },
+    NewConversation {
+        pane: crate::SurfaceId,
+    },
     AddSurface {
         pane: crate::SurfaceId,
     },
@@ -122,13 +125,18 @@ pub(crate) enum Command {
     },
     Refresh,
     WorkspacesNext,
-    SessionsNext,
     ModelsNext,
+    InitializeWorkspace,
+    RenameWorkspace {
+        workspace: rsi_workspace_protocol::WorkspaceId,
+        name: rsi_workspace_protocol::WorkspaceName,
+    },
+    DeleteWorkspace {
+        workspace: rsi_workspace_protocol::WorkspaceId,
+    },
     RegisterWorkspace {
         location: rsi_directory_picker_api::ExecutionLocation,
         path: String,
-        #[serde(default)]
-        pane: Option<crate::SurfaceId>,
     },
     Open {
         pane: crate::SurfaceId,
@@ -152,6 +160,10 @@ pub(crate) enum Command {
         reasoning_effort: Option<rsi_ai_protocol::ReasoningEffortId>,
     },
     ModelRefresh {
+        pane: crate::SurfaceId,
+        generation: String,
+    },
+    Metrics {
         pane: crate::SurfaceId,
         generation: String,
     },
@@ -266,6 +278,7 @@ impl Command {
             | Self::Create { pane, .. }
             | Self::Model { pane, .. }
             | Self::ModelRefresh { pane, .. }
+            | Self::Metrics { pane, .. }
             | Self::Cancel { pane, .. }
             | Self::History { pane, .. }
             | Self::Commands { pane, .. }
@@ -275,12 +288,16 @@ impl Command {
             | Self::Live { pane, .. }
             | Self::Answer { pane, .. }
             | Self::Approve { pane, .. } => Some(*pane),
-            Self::RegisterWorkspace { pane, .. } => *pane,
-            Self::Automation { .. }
+            Self::InitializeWorkspace
+            | Self::RenameWorkspace { .. }
+            | Self::DeleteWorkspace { .. }
+            | Self::RegisterWorkspace { .. }
+            | Self::Automation { .. }
             | Self::ApplicationUiSurface { .. }
             | Self::ExternalCatalog { .. }
             | Self::UiSurface { .. }
             | Self::ReopenRemoteSurface { .. }
+            | Self::NewConversation { .. }
             | Self::AddSurface { .. }
             | Self::CloseSurface { .. }
             | Self::Setup { .. }
@@ -294,7 +311,6 @@ impl Command {
             | Self::UiInvoke { .. }
             | Self::Refresh
             | Self::WorkspacesNext
-            | Self::SessionsNext
             | Self::ModelsNext
             | Self::InspectImage { .. }
             | Self::InspectSource { .. }
@@ -318,19 +334,10 @@ pub(crate) struct Catalog {
     pub workspaces: Vec<rsi_workspace_protocol::WorkspaceRecord>,
     pub workspaces_more: bool,
     pub workspace_order_seed: Option<rsi_workspace_protocol::WorkspaceOrderSeed>,
-    pub sessions: Vec<Recent>,
-    pub sessions_more: bool,
     pub models: Vec<rsi_ai_protocol::ModelRef>,
     pub models_more: bool,
     #[serde(skip)]
     pub workspace_cursor: Option<rsi_workspace_protocol::WorkspaceCursor>,
-    #[serde(skip)]
-    pub session_cursor: Option<rsi_session_protocol::RecentSessionCursor>,
-}
-#[derive(Debug, Serialize)]
-pub(crate) struct Recent {
-    pub id: String,
-    pub path: String,
 }
 
 #[derive(Debug, Serialize)]
@@ -414,6 +421,7 @@ pub struct GuiApplication {
     pub(crate) plugins: Option<Arc<rsi_workbench_ui::PluginsFeature>>,
     pub(crate) setup: Option<Arc<rsi_workbench_ui::SetupFeature>>,
     pub(crate) directory: Option<Arc<rsi_directory_picker_api::Client>>,
+    pub(crate) workspace_default: Option<Arc<rsi_workspace_default_api::Client>>,
     pub(crate) directory_reads: Mutex<std::collections::BTreeMap<String, CancellationToken>>,
     pub(crate) navigation: Option<Arc<rsi_workbench_ui::NavigationFeature>>,
     pub(crate) ui: Arc<rsi_ui::Ui>,
@@ -896,6 +904,7 @@ impl GuiApplication {
                 source,
                 start,
             } => self.external_source(pane, &generation, source, start).await,
+            Command::NewConversation { pane } => self.new_conversation(pane).await,
             Command::AddSurface { pane } => self.add_surface(pane),
             Command::CloseSurface { pane } => self.close_surface(pane).await,
             Command::Plugins { command } => {
@@ -906,12 +915,18 @@ impl GuiApplication {
                     .await
             }
             Command::Setup { command } => {
+                let status_only = matches!(
+                    command,
+                    rsi_workbench_ui::SetupCommand::CredentialStatus { .. }
+                );
                 self.setup
                     .as_ref()
                     .ok_or("Model setup is unavailable on this connection")?
                     .command(command)
                     .await?;
-                self.refresh(Command::Refresh).await?;
+                if !status_only {
+                    self.refresh(Command::Refresh).await?;
+                }
                 Ok(())
             }
             Command::Navigate { command } => {
@@ -963,32 +978,56 @@ impl GuiApplication {
                 name,
                 input,
             } => self.ui_invoke(&ticket, name, input).await,
-            Command::Refresh
-            | Command::WorkspacesNext
-            | Command::SessionsNext
-            | Command::ModelsNext => self.refresh(command).await,
-            Command::RegisterWorkspace {
-                location,
-                path,
-                pane,
-            } => {
+            Command::Refresh | Command::WorkspacesNext | Command::ModelsNext => {
+                self.refresh(command).await
+            }
+            Command::InitializeWorkspace => {
+                if let Some(client) = &self.workspace_default {
+                    client.initialize().await.map_err(error)?;
+                    self.refresh(Command::Refresh).await?;
+                }
+                Ok(())
+            }
+            Command::RenameWorkspace { workspace, name } => {
+                self.workspace
+                    .rename(&workspace, name)
+                    .await
+                    .map_err(error)?;
+                self.refresh(Command::Refresh).await
+            }
+            Command::DeleteWorkspace { workspace } => {
+                self.workspace
+                    .delete_registration(&workspace)
+                    .await
+                    .map_err(error)?;
+                self.refresh(Command::Refresh).await?;
+                if let Some(navigation) = &self.navigation {
+                    navigation
+                        .command(rsi_workbench_ui::NavigationCommand::CloseGroup {
+                            workspace: rsi_navigation_api::WorkspaceFilter::Registered {
+                                id: workspace,
+                            },
+                        })
+                        .await?;
+                    navigation
+                        .command(rsi_workbench_ui::NavigationCommand::Group {
+                            workspace: rsi_navigation_api::WorkspaceFilter::Unregistered,
+                            ticket: None,
+                        })
+                        .await?;
+                    navigation.invalidate();
+                }
+                Ok(())
+            }
+            Command::RegisterWorkspace { location, path } => {
                 if path.len() > 16 * 1024 {
                     return Err("Workspace path exceeds its limit".into());
                 }
-                let workspace = self
-                    .workspace
+                self.workspace
                     .register_at(&location, std::path::Path::new(&path))
                     .await
                     .map_err(error)?;
                 self.refresh(Command::Refresh).await?;
-                if let Some(pane) = pane {
-                    self.pane_command(Command::Create {
-                        pane,
-                        workspace: workspace.id,
-                        reuse: None,
-                    })
-                    .await?;
-                }
                 Ok(())
             }
             Command::SettingsRead { namespace, window } => {
@@ -1090,6 +1129,9 @@ impl PluginFactory for GuiApplicationFactory {
             setup: plan
                 .context()
                 .lookup_local::<rsi_workbench_ui::SetupFeatureContract>(),
+            workspace_default: plan
+                .context()
+                .lookup_local::<rsi_workspace_default_api::ClientContract>(),
             directory_reads: Mutex::default(),
             directory: plan
                 .context()

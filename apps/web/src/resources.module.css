@@ -1,0 +1,293 @@
+:global(.resource-content form):where(.scope, .scope *) {
+  display: flex;
+  flex-direction: column;
+  gap: 13px;
+}
+:global(.resource-content textarea):where(.scope, .scope *) {
+  width: 100%;
+}
+:global(.question-field):where(.scope, .scope *) {
+  display: flex;
+  flex-direction: column;
+  gap: 9px;
+}
+:global(.question-field .actions button):where(.scope, .scope *) {
+  font-size: 0.76rem;
+}
+:global(.block-sources .source-reference):where(.scope, .scope *) {
+  display: block;
+  margin-block: 0.4rem;
+  overflow-wrap: anywhere;
+  text-align: start;
+}
+:global(.source-list):where(.scope, .scope *) {
+  max-height: min(50dvh, 30rem);
+  overflow: auto;
+  overscroll-behavior: contain;
+  margin-block: 1rem;
+}
+:global(.image-preview):where(.scope, .scope *) {
+  display: block;
+  max-width: 100%;
+  max-height: 55dvh;
+  object-fit: contain;
+  margin: 12px auto;
+}
+:global(.terminal-panel):where(.scope, .scope *) {
+  display: flex;
+  flex-direction: column;
+  flex-shrink: 0;
+  border-top: 1px solid var(--line);
+  background: var(--secondary-surface);
+}
+:global(.terminal-toolbar):where(.scope, .scope *) {
+  display: flex;
+  align-items: center;
+  gap: 12px;
+  padding: 8px 14px;
+  font-size: 12px;
+}
+:global(.terminal-toolbar strong):where(.scope, .scope *) {
+  font-weight: 600;
+}
+:global(.terminal-authority):where(.scope, .scope *) {
+  color: var(--muted);
+  font-size: 11px;
+}
+:global(.terminal-authority.is-writer):where(.scope, .scope *) {
+  color: var(--success);
+}
+:global(.terminal-actions):where(.scope, .scope *) {
+  display: flex;
+  gap: 4px;
+  flex-wrap: wrap;
+  margin-left: auto;
+}
+:global(.terminal-tabs):where(.scope, .scope *) {
+  display: flex;
+  gap: 4px;
+  padding: 0 12px 5px;
+  overflow-x: auto;
+  flex-shrink: 0;
+}
+:global(.terminal-tabs button):where(.scope, .scope *) {
+  white-space: nowrap;
+}
+:global(.terminal-tabs button[aria-pressed="true"]):where(.scope, .scope *) {
+  background: var(--blue);
+  color: var(--teal);
+}
+:global(.terminal-screen):where(.scope, .scope *) {
+  flex: 1;
+  min-height: 0;
+  overflow: hidden;
+  padding: 4px 12px;
+}
+:global(.terminal-screen[hidden]):where(.scope, .scope *) {
+  display: none;
+}
+:global(.terminal-screen .xterm):where(.scope, .scope *) {
+  height: 100%;
+}
+:global(.terminal-empty):where(.scope, .scope *) {
+  flex: 1;
+  padding: 18px 24px;
+  font-size: 13px;
+}
+:global(.terminal-empty .hint):where(.scope, .scope *) {
+  max-width: 440px;
+  line-height: 1.6;
+}
+:global(.terminal-notice):where(.scope, .scope *) {
+  margin: 0;
+  padding: 6px 14px;
+  color: var(--error);
+  font-size: 11px;
+  flex-shrink: 0;
+}
+:global(.terminal-footer):where(.scope, .scope *) {
+  display: flex;
+  justify-content: space-between;
+  gap: 20px;
+  border-top: 1px solid var(--line);
+  padding: 5px 14px;
+  font:
+    10px/1.4 Consolas,
+    monospace;
+  color: var(--muted);
+  flex-shrink: 0;
+}
+:global(.terminal-footer span:first-child):where(.scope, .scope *) {
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+:global(.terminal-footer span:last-child):where(.scope, .scope *) {
+  white-space: nowrap;
+}
+@media (max-width: 760px) {
+  :global(.terminal-panel):where(.scope, .scope *) {
+    height: 300px;
+  }
+  :global(.terminal-toolbar):where(.scope, .scope *) {
+    gap: 6px;
+  }
+  :global(.terminal-actions):where(.scope, .scope *) {
+    width: 100%;
+    margin-left: 0;
+  }
+  :global(.terminal-actions button):where(.scope, .scope *) {
+    font-size: 10px;
+  }
+}
+:global(.resource-path):where(.scope, .scope *) {
+  font-size: 11px;
+  color: var(--muted);
+  overflow-wrap: anywhere;
+}
+:global(.resource-buttons):where(.scope, .scope *) {
+  display: grid;
+  gap: 8px;
+  margin-top: 24px;
+}
+:global(.resource-buttons button):where(.scope, .scope *) {
+  justify-content: start;
+  font-size: 12px;
+}
+:global(.session-facts):where(.scope, .scope *) {
+  font-size: 11px;
+  border-top: 1px solid var(--line);
+  margin-top: 24px;
+  padding-top: 16px;
+}
+:global(.session-facts dt):where(.scope, .scope *) {
+  margin-top: 12px;
+  color: var(--muted);
+}
+:global(.session-facts dd):where(.scope, .scope *) {
+  margin: 5px 0;
+  overflow-wrap: anywhere;
+}
+:global(.resource-dock):where(.scope, .scope *) {
+  height: 100%;
+  min-height: 0;
+  display: flex;
+  flex-direction: column;
+  position: relative;
+}
+:global(.resource-dock[hidden]):where(.scope, .scope *) {
+  display: none;
+}
+:global(.resource-dock > [data-dockkit-surface]):where(.scope, .scope *) {
+  flex: 1;
+  min-height: 0;
+}
+:global(.resource-launcher):where(.scope, .scope *) {
+  padding: 56px 16px 20px;
+  overflow: auto;
+  min-height: 0;
+  flex: 1;
+}
+:global(.resource-dock > .resource-launcher + [data-dockkit-surface]):where(
+  .scope,
+  .scope *
+) {
+  flex: 0 0 40px;
+}
+:global(.resource-host):where(.scope, .scope *),
+:global(.resource-content):where(.scope, .scope *) {
+  height: 100%;
+  min-height: 0;
+  overflow: auto;
+}
+:global(.resource-content):where(.scope, .scope *) {
+  padding: 16px;
+}
+:global(.resource-content pre):where(.scope, .scope *) {
+  white-space: pre-wrap;
+  overflow-wrap: anywhere;
+}
+:global(.resource-notice):where(.scope, .scope *) {
+  padding: 8px 12px;
+  color: var(--error);
+  font-size: 12px;
+}
+:global(.resource-unavailable):where(.scope, .scope *) {
+  padding: 24px;
+}
+:global(.resource-fullscreen):where(.scope, .scope *) {
+  position: fixed;
+  inset: 0;
+  z-index: 25;
+  background: var(--secondary-surface);
+}
+:global(.terminal-list):where(.scope, .scope *) {
+  display: grid;
+  gap: 8px;
+  margin-top: 24px;
+}
+:global(.terminal-panel):where(.scope, .scope *) {
+  height: 100%;
+  max-height: none;
+  min-height: 0;
+  flex: 1;
+}
+:global(.terminal-toolbar):where(.scope, .scope *) {
+  flex-wrap: wrap;
+}
+:global(.resource-dock):where(.scope, .scope *) {
+  font-family: var(--dsw-font-family);
+}
+:global(.resource-dock):where(.scope, .scope *),
+:global(.resource-dock *):where(.scope, .scope *) {
+  --dsw-elevation-prominent:
+    0 0 0 0.5px var(--dsw-elevation-stroke-color), 0 3px 8px 0 rgb(0 0 0 / 4%),
+    0 0 20px 0 rgb(0 0 0 / 5%);
+}
+:global(.approval-review):where(.scope, .scope *) {
+  min-width: 0;
+  overflow-wrap: anywhere;
+}
+:global(.approval-action):where(.scope, .scope *) {
+  font-size: 18px;
+  line-height: 1.4;
+}
+:global(.approval-evidence):where(.scope, .scope *) {
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) minmax(0, 1fr);
+  gap: 8px 16px;
+}
+:global(.approval-evidence dt):where(.scope, .scope *) {
+  color: var(--muted);
+}
+:global(.approval-evidence dd):where(.scope, .scope *) {
+  margin: 0;
+  overflow-wrap: anywhere;
+}
+:global(.approval-argument pre):where(.scope, .scope *),
+:global(.approval-raw pre):where(.scope, .scope *) {
+  white-space: pre-wrap;
+  overflow-wrap: anywhere;
+  max-height: 40vh;
+  overflow: auto;
+}
+:global(.approval-review h3):where(.scope, .scope *) {
+  font-size: 14px;
+  margin-top: 20px;
+}
+:global(.approval-raw):where(.scope, .scope *) {
+  margin: 16px 0;
+}
+:global(.approval-reason):where(.scope, .scope *) {
+  font-size: 15px;
+  line-height: 1.6;
+}
+@media (max-width: 540px) {
+  :global(.approval-evidence):where(.scope, .scope *) {
+    grid-template-columns: minmax(0, 1fr);
+    gap: 4px;
+  }
+  :global(.approval-evidence dd):where(.scope, .scope *) {
+    margin-bottom: 8px;
+  }
+}

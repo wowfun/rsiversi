@@ -152,7 +152,7 @@ export function useDeviceNavigation(nav:Navigation|undefined,workspaces:{id:stri
   },[ready,preferences.sessionOrder,ticket])
   const complete=nav?.order?.seed.membership
   const manual=preferences.sessionOrder==='manual' && complete?.kind==='available' && !nav?.filter.query
-  const selected=manual?new Map(complete.members.filter(member=>!member.pinned && member.archived===nav?.filter.archived).map(member=>[member.session,member])):new Map()
+  const selected=manual?new Map(complete.members.filter(member=>!member.pinned && (nav?.filter.archived===null||member.archived===nav?.filter.archived)).map(member=>[member.session,member])):new Map()
   const all=ordered.filter(id=>selected.has(id)),requested=all.slice(offset,offset+64),requestKey=JSON.stringify(requested)
   useEffect(()=>{setOffset(value=>Math.min(value,Math.max(0,Math.floor((all.length-1)/64)*64)))},[all.length])
   useEffect(()=>{

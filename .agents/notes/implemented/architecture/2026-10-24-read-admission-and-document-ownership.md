@@ -38,6 +38,14 @@ connection teardown retires remaining responsibilities. Settings has one local
 window with separate sections and preserves exact JSON drafts. A fresh ticket can
 resume a retained draft only at the same actual Settings version. Conflicting
 versions require explicit discard rather than silently rebasing user edits.
+Image preview has two read slots independently of upload. Exact-ticket pending
+work and completed image reuse have different identities: ticket cancellation
+must not contaminate another display, while immutable completed bytes can be
+reused. Display references pin URLs; cache and flight reservations share one
+canonical-byte limit. API body scratch and actual local file allocation remain
+separate budgets because a declared reference length cannot prove CAS file size.
+Ordinary and connection-storage notices likewise have distinct lifetimes in one
+observable snapshot, with React as their only DOM writer.
 
 Presentation owners advance revisions synchronously under the state lock.
 Successful frame encoding commits section caches and action authority together.
@@ -65,6 +73,10 @@ local persistence makes network health a prerequisite for dismissal. A backgroun
 change notification is unsuitable as a content-cache revision because publication
 can lag the state write. Global cache invalidation is retained only where an owner
 cannot cheaply distinguish its related fields.
+Globally serializing image work rejects unrelated previews and blocks upload.
+Unbounded keyed promises merely move that problem into retained memory. Evicting
+a displayed URL misrepresents released capacity. Charging only a caller-declared
+length before CAS verification understates the allocation at the storage boundary.
 
 Removing the compiled managed-lease requirement would hide an invalid artifact
 layout and weaken collection safety. Copying a marker into a runtime cache would

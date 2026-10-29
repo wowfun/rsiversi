@@ -1,5 +1,68 @@
 // Shared semantic entry points for product fixtures; every change uses real controls.
+export async function openSettings(page) {
+  const trigger=page.locator('#settings-open');
+  if(!await trigger.isVisible())await page.locator('.application-options > summary').click();
+  await trigger.click();
+}
 import {errors} from 'playwright';
+import {assertNoNotices} from './task-checks.mjs';
+export async function navigationOptions(page) {
+  const summary=page.locator('.navigation-options > summary');
+  if(!await summary.evaluate(node=>node.parentElement.open))await summary.click();
+}
+export async function workspaceForm(page) {
+  await page.getByRole('button',{name:'Choose workspace',exact:true}).click();
+  const dialog=page.getByRole('dialog',{name:'Select workspace directory',exact:true});
+  await dialog.locator('.directory-columns[aria-busy=false]').waitFor();
+  const edit=dialog.getByRole('button',{name:'Edit directory path',exact:true});
+  if(await edit.isVisible())await edit.click();
+  await dialog.getByRole('textbox',{name:'Directory path',exact:true}).waitFor();
+}
+export async function addWorkspace(page,path) {
+  await workspaceForm(page);
+  const dialog=page.getByRole('dialog',{name:'Select workspace directory',exact:true});
+  await dialog.getByRole('textbox',{name:'Directory path',exact:true}).fill(path);
+  await dialog.locator('footer').getByRole('button',{name:'Open',exact:true}).click();
+  await dialog.waitFor({state:'detached'});
+}
+export async function addModelProvider(page,{id,endpoint,model,provider='openai-compatible',secret,limits}) {
+  await page.getByRole('button',{name:'Add model provider',exact:true}).click();
+  const editor=page.getByRole('form',{name:'Add model provider',exact:true});
+  if(provider==='openai-compatible') {
+    await editor.getByRole('button',{name:'Custom model API',exact:true}).click();
+    await editor.getByRole('textbox',{name:'Provider ID',exact:true}).first().fill(id);
+    await editor.getByRole('textbox',{name:'Base URL',exact:true}).fill(endpoint);
+  }
+  if(secret)await editor.getByRole('textbox',{name:'API key',exact:true}).fill(secret);
+  await editor.getByText('Customized settings',{exact:true}).click();
+  if(provider==='deepseek') {
+    await editor.getByRole('textbox',{name:'Base URL',exact:true}).fill(endpoint);
+    await editor.getByRole('combobox',{name:'API protocol',exact:true}).selectOption('chat-completions');
+  } else await editor.getByRole('textbox',{name:'Request path',exact:true}).fill('/v1/chat/completions');
+  await editor.getByText('Connection identifiers',{exact:true}).click();
+  await editor.locator('details details').getByRole('textbox',{name:'Provider ID',exact:true}).fill(id);
+  // The deterministic and opt-in environment credentials are installed in this slot.
+  if(!secret)await editor.getByRole('textbox',{name:'Credential slot',exact:true}).fill('default');
+  if(!await editor.getByRole('textbox',{name:'Model ID 1',exact:true}).count())await editor.getByRole('button',{name:'Add model',exact:true}).click();
+  await editor.getByRole('textbox',{name:'Model ID 1',exact:true}).fill(model);
+  if(limits) {
+    await editor.getByRole('button',{name:'Model settings 1',exact:true}).click();
+    for(const [field,label] of Object.entries({context_window_tokens:'Context window',default_output_reserve_tokens:'Default output tokens',max_output_reserve_tokens:'Max output tokens'})) {
+      if(limits[field]!=null)await editor.getByLabel(`${label} 1`,{exact:true}).fill(String(limits[field]));
+    }
+  }
+  await editor.getByRole('button',{name:'Create provider',exact:true}).click();
+  await editor.waitFor({state:'detached',timeout:60000});
+  const selected=page.getByRole('combobox',{name:'Default model',exact:true});
+  await selected.waitFor();
+  if(await selected.inputValue()!==JSON.stringify({deployment:id,model}))await selected.selectOption({label:`${model} · ${id}`});
+  await page.waitForFunction(label=>{const select=document.querySelector('[aria-label="Default model"]');return select&&!select.disabled&&select.selectedOptions[0]?.textContent===label;},`${model} · ${id}`);
+  await assertNoNotices(page);
+}
+export async function navigationMode(page,value) {
+  await navigationOptions(page);
+  await page.getByRole('menuitemradio',{name:({flat:'Single list',workspace:'By workspace',workspace_tree:'By workspace tree',manual:'Manual',updated:'Recently updated'})[value],exact:true}).click();
+}
 export async function resources(page) {
   const toggle=page.getByRole('button',{name:'Toggle resources',exact:true});
   if(await toggle.getAttribute('aria-expanded')!=='true')await toggle.click();
@@ -67,9 +130,8 @@ export async function openResource(page,name) {
   await button.click();
 }
 export async function navigationFilter(page,value) {
-  const filter=page.getByRole('combobox',{name:'Conversation filter',exact:true});
-  if(!await filter.isVisible())await page.getByRole('button',{name:'Filter conversations',exact:true}).click();
-  await filter.selectOption(value);
+  await navigationOptions(page);
+  await page.getByRole('menuitemradio',{name:({active:'Hide archived',all:'All conversations',archived:'Archived only',attention:'Needs attention'})[value],exact:true}).click();
 }
 export async function detailMode(page,value) {
   const menu=page.locator('.conversation-menu');
@@ -81,9 +143,19 @@ export async function externalAgents(page) {
   const menu=page.locator('.external-navigation');
   if(!await menu.evaluate(node=>node.open))await menu.locator('summary').click();
 }
+export async function sessionTools(page) {
+  const menu=page.locator('.pane.selected .session-menu');
+  if(!await menu.evaluate(node=>node.open))await menu.getByLabel('Session tools',{exact:true}).click();
+}
 export async function selectSurface(page,key) {
   const tab=page.locator(`#pane-tab-${key}`);
   if(await tab.getAttribute('aria-pressed')==='true')return;
   if(await tab.isVisible())await tab.click();
   else {const menu=page.locator('.conversation-menu');await menu.locator('summary').click();await page.getByLabel('Active conversation',{exact:true}).selectOption(key);await menu.locator('summary').click();}
+}
+
+export async function disconnect(page) {
+  await page.getByRole('button',{name:'Commands',exact:true}).click();
+  const search=page.getByRole('combobox',{name:'Search commands',exact:true});
+  await search.fill('Disconnect');await search.press('Enter');
 }

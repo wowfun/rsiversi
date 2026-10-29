@@ -1,3 +1,4 @@
+import {disconnect} from './controls.mjs';
 import {paired} from './paired-env.mjs';
 import assert from 'node:assert/strict';
 import {mkdir,writeFile,stat} from 'node:fs/promises';
@@ -46,7 +47,7 @@ for(const [name,engine] of Object.entries({chromium,firefox})){
     await refreshGroup.waitFor();await refreshGroup.click();await refreshGroup.waitFor({state:'detached'});
     assert.equal(await page.getByTestId('workspace-group').filter({hasText:'ui-folder'}).getByTestId('conversation-row').count(),0);
     checks.push({pin:true,explicitGroupRefresh:true});
-    for(const width of [390,768,1024,1440,1920])for(const theme of ['light','dark','system']){
+    for(const width of [390,767,768,1023,1024,1440,1920])for(const theme of ['light','dark','system']){
       await page.setViewportSize({width,height:900});
       // Apply through the real Settings owner; same device preference is also used by Desktop.
       await page.getByRole('button',{name:'Commands',exact:true}).click();await page.getByRole('combobox',{name:'Search commands'}).fill('appearance');await page.getByRole('combobox',{name:'Search commands'}).press('Enter');
@@ -87,7 +88,8 @@ for(const [name,engine] of Object.entries({chromium,firefox})){
       IDBDatabase.prototype.transaction=function(...args){if(this.name==='rsi.presentation')throw new DOMException('fixture layout failure','UnknownError');return transaction.apply(this,args)};
     });
     await page.reload();await page.getByRole('button',{name:'Reconnect with this browser',exact:true}).click();await page.locator('#workbench').waitFor({state:'visible'});
-    await page.getByRole('alert').filter({hasText:'Layout preferences could not be loaded'}).waitFor();
+    await page.getByRole('alert').filter({hasText:'Saved layout could not be loaded'}).waitFor();
+    await page.getByRole('button',{name:'Reset layout',exact:true}).waitFor();
     for(const width of [390,1440]) {
       await page.setViewportSize({width,height:900});
       await page.waitForFunction(width=>!!document.querySelector('.workbench>.sidebar')===(width>=1024),width);
@@ -107,7 +109,7 @@ for(const [name,engine] of Object.entries({chromium,firefox})){
     await page.waitForFunction(()=>document.querySelector('[aria-label="Main message"]').value==='draft remains');
     await page.getByRole('button',{name:'Toggle resources',exact:true}).click();
     checks.push({layoutSaveFailureVisible:true,layoutSaveRecovery:true,layoutLoadFailureVisible:true,independentDraftRestoration:true});
-    await page.getByRole('button',{name:'Sign out',exact:true}).click();await page.locator('#workbench').waitFor({state:'hidden'});
+    await disconnect(page);await page.locator('#workbench').waitFor({state:'hidden'});
     await writeFile(join(directory,'result.json'),JSON.stringify({family:paired.family,browser:await browser.version(),checks,errors},null,2));
   }catch(error){if(page){await page.screenshot({path:join(directory,'failure.png')}).catch(()=>{});await writeFile(join(directory,'failure.html'),await page.content()).catch(()=>{});}await writeFile(join(directory,'failure.json'),JSON.stringify({error:String(error),errors}));throw error;}
   finally{await cleanupAll(()=>browser.close(),()=>service?.close());}

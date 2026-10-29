@@ -24,7 +24,7 @@ from tasks import ProviderControl, verify as verify_tasks
 from workflow import configure as configure_workflow, provider_reply as workflow_reply, verify as verify_workflow
 from plan_review import provider_reply as plan_reply, verify as verify_plan_review
 from pressure import verify_writes
-from controls import fill as fill_input, asset_pressure, file_has_bytes, configure_live_limits
+from controls import COMPOSER_FOCUS, fill as fill_input, asset_pressure, file_has_bytes, configure_live_limits
 from external import configure as configure_external, verify as verify_external, provider_reply as external_reply, delegation as verify_delegation
 from profiles import verify as verify_profiles
 from history import verify as verify_history
@@ -240,14 +240,18 @@ try:
             call('POST', root + f'/element/{eid(item)}/value', {'text': text, 'value': list(text)})
         fill_input(script, keys, until, css, value)
     def button(text):
-        if text == 'Close details' and not script('return document.querySelector("#detail").open'):
+        if text == 'Close details':
             item=script('return document.querySelector("[data-dockkit-float-active=true] [data-dockkit-float-close], [data-dockkit-pane-active=true] [aria-selected=true] [data-dockkit-tab-close]")')
             assert item, 'No active resource close control'
-            tab=script('return arguments[0].closest("[data-dockkit-content]").dataset.dockkitContent',[item])
+            tab=script('return arguments[0].dataset.dockkitTabClose || arguments[0].closest("[data-dockkit-content]").dataset.dockkitContent',[item])
             call('POST',root+f'/element/{eid(item)}/click',{})
             until(lambda: script('return !document.querySelector(`[data-dockkit-content="${arguments[0]}"]`)',[tab]))
             return
-        if text in ('Workspace files', 'Workspace changes', 'Service extensions', 'Session commands', 'Goal'):
+        if text in ('Session commands', 'Earlier history', 'Back to live', 'Service extensions'):
+            menu = script('return document.querySelector(".pane.selected .session-menu:not([open]) > summary")')
+            if menu:
+                call('POST',root+f'/element/{eid(menu)}/click',{})
+        if text in ('Workspace files', 'Workspace changes', 'Goal'):
             if script(r'return document.querySelector("[aria-label=\"Toggle resources\"]").getAttribute("aria-expanded")!=="true"'):
                 button('Toggle resources')
             if not script('return [...document.querySelectorAll("button")].some(b=>b.textContent.trim()===arguments[0]&&b.getBoundingClientRect().height>0)',[text]):
@@ -275,7 +279,6 @@ try:
         if text == 'Terminal':
             until(lambda: script('return [...document.querySelectorAll("[data-dockkit-tab][aria-selected=true]")].some(e=>e.textContent.includes("Resources"))'))
             script('document.querySelector(".conversation-menu").open=false;return true')
-        if text == 'Close details': until(lambda: script('return !document.querySelector("#detail").open'))
     def painted():
         script(r'window.fixturePaint=false;requestAnimationFrame(()=>requestAnimationFrame(()=>window.fixturePaint=true));return true')
         until(lambda: script(r'return window.fixturePaint'))
@@ -305,29 +308,36 @@ try:
     if args.profiles:
         verify_profiles(script, button, lambda item: call('POST', root + f'/element/{eid(item)}/click', {}), until, screenshot, editable_source, args.report)
     if args.external: verify_external(script, button, fill, until, screenshot, workspace, args.report)
-    script(r'return document.querySelector(".nav-add summary")')
-    item = script(r'return [...document.querySelectorAll("summary")].find(b=>b.textContent.trim()==="Add workspace")')
-    call('POST', root + f'/element/{eid(item)}/click', {})
-    fill('[aria-label="Server directory"]', str(workspace.resolve())); button('Add workspace')
-    until(lambda: script(r'return document.querySelector("#workspaces [data-testid=workspace-open]")'))
-    button('Settings')
+    button('Choose workspace')
+    until(lambda: script('return document.querySelector(".directory-columns[aria-busy=false]")'))
+    edit = script(r'return document.querySelector("[aria-label=\"Edit directory path\"]")')
+    if edit: call('POST', root + f'/element/{eid(edit)}/click', {})
+    fill('[aria-label="Directory path"]', str(workspace.resolve()))
+    click('.directory-picker footer button:last-child')
+    until(lambda: script('return !document.querySelector(".directory-picker")'))
+    button('Settings'); button('Models'); button('Add model provider')
+    def summary(label):
+        item = until(lambda: script('return [...document.querySelectorAll("summary")].find(e=>e.textContent.trim()===arguments[0])', [label]))
+        call('POST', root + f'/element/{eid(item)}/click', {})
     if not secret:
-        script(r'const e=document.querySelector("select[aria-label=Provider]");e.value="openai-compatible";e.dispatchEvent(new Event("change",{bubbles:true}));return true')
-    button('Check credential')
-    until(lambda: script(r'return document.querySelector(".credential-status")?.textContent.startsWith("configured")'))
-    fill('[aria-label="Deployment name"]', 'desktop-provider')
-    fill('[aria-label="Provider endpoint"]', 'https://api.deepseek.com' if secret else f'http://127.0.0.1:{provider.server_port}')
+        button('Custom model API')
+        fill('[aria-label="Provider ID"]', 'desktop-provider')
+        fill('[aria-label="Base URL"]', f'http://127.0.0.1:{provider.server_port}')
+    summary('Customized settings')
     if secret:
-        script(r'const e=document.querySelector("select[aria-label=\"DeepSeek protocol\"]");e.value="chat-completions";e.dispatchEvent(new Event("change",{bubbles:true}));return true')
+        fill('[aria-label="Base URL"]', 'https://api.deepseek.com')
+        script(r'const e=document.querySelector("select[aria-label=\"API protocol\"]");e.value="chat-completions";e.dispatchEvent(new Event("change",{bubbles:true}));return true')
     else: fill('[aria-label="Request path"]', '/v1/chat/completions')
-    fill('[aria-label="Model identifier 1"]', args.live_model or 'fixture-model')
+    summary('Connection identifiers')
+    fill('details details [aria-label="Provider ID"]', 'desktop-provider')
+    fill('[aria-label="Credential slot"]', 'default')
+    if not secret: button('Add model')
+    fill('[aria-label="Model ID 1"]', args.live_model or 'fixture-model')
     if secret: configure_live_limits(script, fill, limits)
-    button('Apply provider')
-    until(lambda: script(r'return document.body.textContent.includes("Desired 1 · Applied 1")'))
+    button('Create provider')
+    until(lambda: script(r'return !document.querySelector("form[aria-label=\"Add model provider\"]")'))
     model_label = f'{args.live_model or "fixture-model"} · desktop-provider'
-    until(lambda: script(r'const e=document.querySelector("select[aria-label=\"Default model\"]");return e&&!e.disabled&&[...e.options].some(o=>o.textContent===arguments[0])', [model_label]))
-    script(r'const e=document.querySelector("select[aria-label=\"Default model\"]"),option=[...e.options].find(o=>o.textContent===arguments[0]);if(e.disabled||!option)throw new Error("Default model is not ready");e.value=option.value;e.dispatchEvent(new Event("change",{bubbles:true}));return true', [model_label])
-    until(lambda: script(r'return document.body.textContent.includes("default_model · confirmed")&&!document.querySelector("select[aria-label=\"Default model\"]").disabled'))
+    until(lambda: script(r'const e=document.querySelector("select[aria-label=\"Default model\"]");return e&&!e.disabled&&e.selectedOptions[0]?.textContent===arguments[0]', [model_label]))
     screenshot('setup.png')
     button('Plugins')
     until(lambda: script(r'return document.querySelector(".plugin-row")'))
@@ -347,13 +357,24 @@ try:
     flags = until(lambda: script(r'return [...document.querySelectorAll("input[type=checkbox]")].filter(e=>e.getAttribute("aria-label")?.startsWith("Settings / web_")).map(e=>({label:e.getAttribute("aria-label"),checked:e.checked}))'))
     assert len(flags) == 2 and all(not flag['checked'] for flag in flags), flags
     screenshot('retrieval-settings.png')
-    button('Close details')
     (args.report / 'plugins.json').write_text(json.dumps({'status':'passed','revisions':revisions,'retrievalDefaultFlags':flags,'exaStatusRead':True}, indent=2))
-    button('Close settings'); click('#workspaces [data-testid=workspace-open]')
+    button('Close settings'); click('[aria-label="New conversation in workspace"]')
     until(lambda: script(r'return document.querySelector("textarea[aria-label=\"Main message\"]")'))
-    if secret: button('Verbose')
+    if secret:
+        click('.conversation-menu > summary')
+        script(r'const e=document.querySelector("[aria-label=\"Detail level\"]");e.value="verbose";e.dispatchEvent(new Event("change",{bubbles:true}));return true')
+        click('.conversation-menu > summary')
     prompt = 'This is an isolated desktop integration test. Use the available bash tool to write exactly 12 UTF-8 bytes: "rsi-live-ok" followed by one LF newline to milestone.txt in the current workspace, then use bash to read it back. Do not modify any other file. Reply LIVE_GUI_VERIFIED only after the tool has read the file successfully.' if secret else '桌面首次对话：请确认收到。'
+    input_events_before = script('return window.fixtureInputEvents.length')
     fill('textarea[aria-label="Main message"]', prompt)
+    focus = script(COMPOSER_FOCUS, [input_events_before])
+    assert focus['focused'] and focus['focusVisible'] and focus['trustedInput'], focus
+    if focus['forcedColors']:
+        assert focus['outlineWidth'] >= 2 and focus['outlineStyle'] != 'none', focus
+    else:
+        assert focus['outlineWidth'] == 0 and focus['outlineStyle'] == 'none', focus
+    (args.report / 'composer-focus.json').write_text(json.dumps(focus, indent=2))
+    screenshot('composer-focus.png')
     if args.refresh_during_click:
         script(r'''window.fixturePress={refreshed:false,clicks:0};const b=[...document.querySelectorAll('button')].find(e=>e.dataset.testid==='composer-send');b.addEventListener('mousedown',()=>{const before=b.firstChild;document.querySelector('textarea[aria-label="Main message"]').dispatchEvent(new Event('input',{bubbles:true}));window.fixturePress.refreshed=true;window.fixturePress.sameTextNode=b.firstChild===before},{once:true});b.addEventListener('click',()=>{window.fixturePress.clicks++},{capture:true});return true''')
     button('Send')

@@ -220,7 +220,7 @@ export async function startService({ binary, assets, report, configure, onReques
     await new Promise(resolve => reservation.close(resolve));
     if (watchAssets) {
       const directory = dirname(assets), output = join(directory, "web-package");
-      const inputs = ['standard.js','lazy.js','ui-renderers.json'].map(name => `${basename(assets)}/${name}`);
+      const inputs = ['standard.js','file-preview.js','ui-renderers.json'].map(name => `${basename(assets)}/${name}`);
       await writeFile(join(config, "rsi.toml"), `${await readFile(join(config, "rsi.toml"), "utf8")}\n[sources.web]\ndirectory = ${JSON.stringify(directory)}\ncommand = ${JSON.stringify([process.execPath, join(import.meta.dirname, "source-package.mjs"), assets, output])}\ninputs = ${JSON.stringify(inputs)}\noutput = "web-package/package.json"\n`);
     }
     const startProcess = async () => {

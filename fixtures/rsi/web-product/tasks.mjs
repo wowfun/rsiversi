@@ -1,3 +1,5 @@
+import {disconnect} from './controls.mjs';
+import {workspaceForm} from './controls.mjs';
 import {closeDetails,openResource,resourceSelector} from "./controls.mjs";
 import {detailMode,resources} from './controls.mjs';
 import {paired} from './paired-env.mjs';
@@ -138,9 +140,9 @@ for (const [name, engine] of [["chromium", chromium], ["firefox", firefox]]) {
     await page.getByLabel("Device registration receipt").fill(JSON.stringify(service.register(`${name} task evidence`)));
     await page.getByRole("button", { name: "Connect", exact: true }).click();
     await page.locator("#workbench").waitFor({ state: "visible" });
-    await page.locator(".workspace-add summary").click();
-    await page.getByLabel("Server directory").fill(service.workspace);
-    await page.locator("#workspace-form").getByRole("button", { name: "Add workspace", exact: true }).click();
+    await workspaceForm(page);
+    await page.getByLabel("Directory path").fill(service.workspace);
+    await page.locator('.directory-picker footer').getByRole('button',{name:'Open',exact:true}).click();
     await page.locator("#workspaces [data-testid=workspace-open]").click();
     await detailMode(page,'verbose');
     const paneSelector = '[aria-label="Main conversation"]';
@@ -268,7 +270,7 @@ for (const [name, engine] of [["chromium", chromium], ["firefox", firefox]]) {
     await capture("jobs-revoked", true, ["Refresh current Turn"]);
     await assertNoNotices(page);
     await close();
-    await page.locator("#sign-out").click();
+    await disconnect(page);
     await page.locator("#login").waitFor({ state: "visible" });
     assert.deepEqual(errors, []);
     results.push({ browser: name, version: browser.version(), binary_sha256: paired.sha256, ok: true,

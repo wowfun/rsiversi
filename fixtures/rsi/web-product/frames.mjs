@@ -4,39 +4,39 @@ import { workerConformance } from "./worker-conformance.mjs";
 
 export async function verifyFrameDom(page, report, browser) {
   const result = await page.evaluate(async () => {
-    $("workbench").hidden = false;
-    const block = (key, text) => ({ key, text, role: "assistant", title: "Assistant", sources: 0, clipped: false });
-    const pane = index => ({ generation: "1", session: `frame-session-${index}`, path: "/workspace", draft: "",
-      model: { deployment: "test", model: "model" }, transcript: { blocks: [block("a", "First block"), block("b", "Second block")], status: "Ready" }, pending: [], notice: "" });
-    const snapshot = { surfaces: {main:pane(0),compare:pane(1)}, notice: "", catalog: { workspaces: [], sessions: [], models: [] } };
-    await presentFrame({ kind: "snapshot", frame_id: "1", view: snapshot }, window.testRendererOffer);
-    const first = panes.get("main").blocks.get("a").node, second = panes.get("main").blocks.get("b").node;
-    const right = panes.get("compare").blocks.get("a").node;
-    await Promise.all([...panes.values()].map(pane => pane.binding));
-    select("compare"); panes.get("compare").input.focus();
-    const patched = await presentFrame({ kind: "patch", frame_id: "2", base_frame_id: "1", sections: {}, surfaces: [{ surface: "main", fields: {}, transcript: { fields: {}, upsert: [block("b", "Updated second")], remove: [] } }] }, window.testRendererOffer);
-    const identities = first === panes.get("main").blocks.get("a").node && second === panes.get("main").blocks.get("b").node && right === panes.get("compare").blocks.get("a").node;
-    const focus = document.activeElement === panes.get("compare").input;
-    const stale = await presentFrame({ kind: "patch", frame_id: "4", base_frame_id: "3", sections: { notice: "must not appear" }, surfaces: [] }, window.testRendererOffer);
-    const retained = frameId === "2" && view.notice === "" && panes.get("main").blocks.get("b").text.textContent === "Updated second";
-    const reordered = await presentFrame({ kind: "patch", frame_id: "3", base_frame_id: "2", sections: {}, surfaces: [{ surface: "main", fields: {}, transcript: { fields: {}, upsert: [block("c", "New block")], remove: ["a"], order: ["c", "b"] } }] }, window.testRendererOffer);
-    const order = [...panes.get("main").transcript.querySelectorAll(".message-text")].map(node => node.textContent);
-    const replacement = pane(0); replacement.generation = "2";
-    await presentFrame({ kind: "snapshot", frame_id: "5", view: { ...snapshot, surfaces: {main:replacement,compare:pane(1)} } }, window.testRendererOffer);
-    const replaced = second !== panes.get("main").blocks.get("b").node;
-    replacement.active="displayed-turn";
-    await presentFrame({kind:"snapshot",frame_id:"6",view:{...snapshot,surfaces:{main:replacement,compare:pane(1)}}},window.testRendererOffer);
-    const acknowledgedStop=structuredClone(panes.get("main").stopBinding);
-    const originalRender=connection.render.bind(connection);let release;
-    connection.render=()=>new Promise(resolve=>{release=resolve});
-    const applying=presentFrame({kind:"patch",frame_id:"7",base_frame_id:"6",sections:{},surfaces:[{surface:"main",fields:{active:"new-turn"}}]},window.testRendererOffer);
-    const stopFenced=panes.get("main").cancel.disabled && !panes.get("main").stopBinding;
+    const {runtime,view}=fixture,panes=runtime.panes;
+    const present=(frame)=>runtime.presentFrame(frame,{});
+    const block=(key,text)=>({key,text,role:'assistant',title:'Assistant',sources:0,clipped:false});
+    const pane=index=>({...structuredClone(view.surfaces.main),generation:'patch-1',session:`frame-session-${index}`,transcript:{blocks:[block('a','First block'),block('b','Second block')],status:'Ready'}});
+    const snapshot={...view,surfaces:{main:pane(0),compare:pane(1)}};
+    await present({kind:'snapshot',frame_id:'100',view:snapshot});
+    const first=panes.get('main').blocks.get('a').node,second=panes.get('main').blocks.get('b').node,right=panes.get('compare').blocks.get('a').node;
+    await Promise.all([...panes.values()].map(pane=>pane.binding));
+    runtime.select('compare');await new Promise(resolve=>requestAnimationFrame(resolve));panes.get('compare').input.focus();
+    const patched=await present({kind:'patch',frame_id:'101',base_frame_id:'100',sections:{},surfaces:[{surface:'main',fields:{},transcript:{fields:{},upsert:[block('b','Updated second')],remove:[]}}]});
+    const identities=first===panes.get('main').blocks.get('a').node&&second===panes.get('main').blocks.get('b').node&&right===panes.get('compare').blocks.get('a').node;
+    const focus=document.activeElement===panes.get('compare').input;
+    const stale=await present({kind:'patch',frame_id:'104',base_frame_id:'103',sections:{notice:'must not appear'},surfaces:[]});
+    const retained=runtime.view.notice===''&&panes.get('main').blocks.get('b').text.textContent==='Updated second';
+    const reordered=await present({kind:'patch',frame_id:'102',base_frame_id:'101',sections:{},surfaces:[{surface:'main',fields:{},transcript:{fields:{},upsert:[block('c','New block')],remove:['a'],order:['c','b']}}]});
+    const order=[...panes.get('main').transcript.querySelectorAll('.message-text')].map(node=>node.textContent);
+    const replacement=pane(0);replacement.generation='patch-2';
+    await present({kind:'snapshot',frame_id:'105',view:{...snapshot,surfaces:{main:replacement,compare:pane(1)}}});
+    const replaced=second!==panes.get('main').blocks.get('b').node;
+    replacement.active='displayed-turn';
+    await present({kind:'snapshot',frame_id:'106',view:{...snapshot,surfaces:{main:replacement,compare:pane(1)}}});
+    const acknowledgedStop=structuredClone(panes.get('main').stopBinding);
+    const connection=runtime.connection,originalRender=connection.render.bind(connection);let release,entered;
+    const rendering=new Promise(resolve=>entered=resolve);
+    connection.render=()=>new Promise(resolve=>{release=resolve;entered()});
+    const applying=present({kind:'patch',frame_id:'107',base_frame_id:'106',sections:{},surfaces:[{surface:'main',fields:{active:'new-turn'}}]});
+    await rendering;
+    const stopFenced=panes.get('main').cancel.disabled&&!panes.get('main').stopBinding;
     release(undefined);await applying;connection.render=originalRender;
-    const nextStop=panes.get("main").stopBinding.turn_id;
-
-    return { patched: patched.accepted, identities, focus, stale, retained, reordered: reordered.accepted, order, replaced, acknowledgedStop, stopFenced, nextStop };
+    const nextStop=panes.get('main').stopBinding.turn_id;
+    return {patched:patched.accepted,identities,focus,stale,retained,reordered:reordered.accepted,order,replaced,acknowledgedStop,stopFenced,nextStop};
   });
-  assert.deepEqual(result, { patched: true, identities: true, focus: true, stale: false, retained: true, reordered: true, order: ["New block", "Updated second"], replaced: true, acknowledgedStop:{generation:"2",turn_id:"displayed-turn"},stopFenced:true,nextStop:"new-turn" });
+  assert.deepEqual(result, { patched: true, identities: true, focus: true, stale: false, retained: true, reordered: true, order: ["New block", "Updated second"], replaced: true, acknowledgedStop:{generation:"patch-2",turn_id:"displayed-turn"},stopFenced:true,nextStop:"new-turn" });
   await page.screenshot({ path: join(report, `${browser}-incremental-frame-dom.png`) });
 }
 

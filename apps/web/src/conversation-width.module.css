@@ -1,0 +1,45 @@
+.controls {
+  position: absolute;
+  inset: 0;
+  pointer-events: none;
+  z-index: 2;
+}
+.handle {
+  position: absolute;
+  inset-block: 0;
+  width: max(8px, calc((100% - var(--conversation-width)) / 2 - 48px));
+  pointer-events: auto;
+  touch-action: none;
+  cursor: col-resize;
+  border-radius: 4px;
+}
+.handle[data-side='left'] {
+  right: calc(50% + var(--conversation-width) / 2 + 24px);
+}
+.handle[data-side='right'] {
+  left: calc(50% + var(--conversation-width) / 2 + 24px);
+}
+.handle::after {
+  content: '';
+  position: absolute;
+  top: 40%;
+  height: 64px;
+  width: 3px;
+  background: var(--dsw-alias-border-l2);
+  border-radius: 2px;
+  opacity: 0;
+}
+.handle[data-side='left']::after {
+  right: 6px;
+}
+.handle[data-side='right']::after {
+  left: 6px;
+}
+.handle:hover::after,
+.handle:focus-visible::after {
+  opacity: 1;
+}
+.handle:focus-visible {
+  outline: 2px solid var(--teal);
+  outline-offset: 2px;
+}

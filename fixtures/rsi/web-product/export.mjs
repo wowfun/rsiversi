@@ -11,13 +11,13 @@ export async function verifyExport(page,service,report,name) {
   await page.waitForFunction(()=>document.querySelector('.pane-status')?.textContent==='Completed');
   const before=service.provider.requests.length;
   const evidence=[];
-  const extras=page.locator('.composer-extras');
+  const extras=page.getByRole('button',{name:'Add files or run commands'});
   for (const [args,filename] of [["'../export fixture.json' -f json -i h,m,pie,lpr,last-provider-response",'export fixture.json'],['','']]) {
     const promised=page.waitForEvent('download');
     if(args){await input.fill(`/export ${args}`);await page.getByTestId('composer-send').click();}
     else {
-      if(!await extras.evaluate(node=>node.open))await extras.locator('summary').click();
-      await page.getByRole('button',{name:'Export',exact:true}).click();
+      if(await extras.getAttribute('aria-expanded')!=='true')await extras.click();
+      await page.getByRole('menuitem',{name:'Export',exact:true}).click();
     }
     const download=await promised;
     assert.equal(await download.failure(),null);

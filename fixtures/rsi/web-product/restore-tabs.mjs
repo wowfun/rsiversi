@@ -1,3 +1,4 @@
+import {navigationMode} from './controls.mjs';
 import {finishFixture} from './cleanup.mjs';
 import {paired} from './paired-env.mjs';
 import {startService} from './service.mjs';
@@ -36,7 +37,7 @@ try{
   const session=await page.locator('.pane.selected').getAttribute('data-session-id');
   await page.reload();
   await page.locator('#reconnect').click();await page.locator('#workbench').waitFor({state:'visible'});
-  await page.getByLabel('Navigation view',{exact:true}).selectOption('flat');
+  await navigationMode(page,'flat');
   await page.locator(`[data-testid="conversation-row"][data-session-id="${session}"]`).getByTestId('conversation-open').click();
   await page.waitForFunction(()=>document.querySelectorAll('.resource-content .ui-contribution').length===16);
   const replies=await page.evaluate(()=>window.resourceReplies);

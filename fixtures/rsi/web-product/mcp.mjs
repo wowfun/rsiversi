@@ -1,3 +1,4 @@
+import {openSettings} from './controls.mjs';
 import assert from 'node:assert/strict';
 import {join} from 'node:path';
 import {writeFile} from 'node:fs/promises';
@@ -7,7 +8,7 @@ export async function verifyMcp(page,pane,report,browser) {
   const draft=pane.getByRole('textbox',{name:'Main message',exact:true});
   try {
     await draft.fill('Retained while configuring MCP');
-    await page.getByRole('button',{name:'Settings',exact:true}).click();await page.getByRole('button',{name:'Plugins',exact:true}).click();
+    await openSettings(page);await page.getByRole('button',{name:'Plugins',exact:true}).click();
     const panel=page.getByRole('region',{name:'MCP connections',exact:true});await panel.waitFor();
     const edit=async config=>{
       await panel.getByRole('button',{name:'Edit HTTP endpoints',exact:true}).click();

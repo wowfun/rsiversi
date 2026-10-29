@@ -84,7 +84,7 @@ for(const [name,engine] of [['chromium',chromium],['firefox',firefox]]) {
     await page.screenshot({path:join(folder,'child-wide.png')});
     await clickDetails(page,'Latest workflows');
     await closeDetails(page);
-    const root=(await pane.locator('.pane-session').innerText()).split(' · ').at(-1);
+    const root=(await pane.getAttribute('data-session-id'));
     await waitUntil(()=>page.evaluate(()=>window.workflowInvocations.every(row=>row.reply)),'initial Workflow control replies');
     const initialInvocations=await page.evaluate(()=>window.workflowInvocations);
     assert(initialInvocations.length&&initialInvocations.every(row=>row.reply.ok),'initial Workflow controls must acknowledge without errors');

@@ -1,3 +1,4 @@
+import {openSettings} from './controls.mjs';
 import {detailMode} from './controls.mjs';
 import assert from 'node:assert/strict';
 import {join} from 'node:path';
@@ -11,8 +12,8 @@ export async function verifyPresentation(page, pane, service, report, name) {
   await peer.locator('#reconnect').click();
   await peer.locator('#workbench').waitFor({state:'visible'});
   async function save(theme,size) {
-    await page.getByRole('button',{name:'Settings',exact:true}).click();
-    await page.getByRole('button',{name:'Appearance',exact:true}).click();
+    await openSettings(page);
+    await page.getByRole('button',{name:'General',exact:true}).click();
     await page.getByRole('combobox',{name:'Settings / appearance / theme',exact:true}).selectOption({label:theme});
     await page.getByRole('spinbutton',{name:'Settings / appearance / content_font_size',exact:true}).fill(String(size));
     const old=await page.getByRole('button',{name:'Save settings',exact:true}).elementHandle();
@@ -38,9 +39,9 @@ export async function verifyPresentation(page, pane, service, report, name) {
     await save('light',12);await inspect('theme-light');
     await save('system',14);await page.emulateMedia({colorScheme:'dark'});await inspect('theme-system-dark');
     await page.emulateMedia({colorScheme:'light'});
-    await page.getByRole('button',{name:'Toggle navigation',exact:true}).click();
+    await page.getByRole('button',{name:'Collapse navigation',exact:true}).click();
     assert.equal(await page.locator('.workbench>.sidebar').count(),0);
-    await page.getByRole('button',{name:'Toggle navigation',exact:true}).click();
+    await page.getByRole('button',{name:'Expand navigation',exact:true}).click();
     const separator=page.getByRole('separator',{name:'Resize navigation'});
     await separator.focus();const before=Number(await separator.getAttribute('aria-valuenow'));await separator.press('ArrowRight');
     assert.equal(Number(await separator.getAttribute('aria-valuenow')),before+10);await separator.press('ArrowLeft');

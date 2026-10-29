@@ -6,7 +6,7 @@ from presentation import open_appearance
 def verify(script, button, fill, until, screenshot, call, root, report, workspace):
     evidence=[]
     button('Copy code')
-    until(lambda: script('return [...document.querySelectorAll(".copy-code")].some(button=>button.textContent==="Copied")'))
+    until(lambda: script('return Boolean(document.querySelector(".copy-code[aria-label=\\"Copied\\"]"))'))
     evidence.append({'nativeClipboard':True})
     button('Choose workspace')
     until(lambda: script('return Boolean(document.querySelector(".directory-column"))'))
@@ -23,14 +23,14 @@ def verify(script, button, fill, until, screenshot, call, root, report, workspac
     button('Cancel')
     until(lambda: script('return !document.querySelector(".directory-picker")'))
     evidence.append({'directoryCreate':True})
-    for width in (390,768,1024,1440,1920):
+    for width in (390,767,768,1023,1024,1440,1920):
         call('POST',root+'/window/rect',{'width':width,'height':900})
         until(lambda: script('return innerWidth')==width)
         for theme in ('light','dark','system'):
             button('Commands');fill('[aria-label="Search commands"]','appearance')
             open_appearance(script, until, lambda: button('Appearance and input preferences'))
             script('const e=document.querySelector("select[aria-label=\\"Settings / appearance / theme\\"]");e.value=[...e.options].find(o=>o.textContent===arguments[0]).value;e.dispatchEvent(new Event("change",{bubbles:true}));return true',[theme])
-            button('Save settings');until(lambda:script('return document.documentElement.dataset.theme===arguments[0]',[theme]));button('Close details')
+            button('Save settings');until(lambda:script('return document.documentElement.dataset.theme===arguments[0]',[theme]));button('Close settings')
             geometry=script('const c=document.querySelector(".pane.selected .composer").getBoundingClientRect(),b=document.querySelector(".pane.selected [data-testid=\\"composer-send\\"]"),r=b.getBoundingClientRect();return {width:innerWidth,theme:document.documentElement.dataset.theme,scheme:getComputedStyle(document.documentElement).colorScheme,composer:c.toJSON(),overflow:document.documentElement.scrollWidth-innerWidth,sendHit:b.contains(document.elementFromPoint(r.x+r.width/2,r.y+r.height/2))}')
             assert geometry['overflow']<=1 and geometry['sendHit'] and geometry['composer']['x']>=0,geometry
             evidence.append(geometry);screenshot(f'layout-{width}-{theme}.png')

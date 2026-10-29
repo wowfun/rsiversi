@@ -1,3 +1,5 @@
+import {openSettings} from './controls.mjs';
+import {addModelProvider} from './controls.mjs';
 import './paired-env.mjs';
 import assert from 'node:assert/strict';
 import { spawn } from 'node:child_process';
@@ -8,6 +10,7 @@ import { join, resolve } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { chromium, firefox } from 'playwright';
 import { boundedRun, deadline } from './service.mjs';
+import { finishFixture } from './cleanup.mjs';
 
 // Real built product, static bundle, Worker and cookies. No live provider or user state.
 export async function verifyLocalLaunch(binary, assets, engines = [['chromium', chromium], ['firefox', firefox]]) {
@@ -20,17 +23,22 @@ export async function verifyLocalLaunch(binary, assets, engines = [['chromium', 
     for (const [key, leaf] of [['HOME','home'],['XDG_CONFIG_HOME','config'],['XDG_STATE_HOME','state'],['XDG_CACHE_HOME','cache'],['XDG_RUNTIME_DIR','run']]) {
       env[key] = join(root, leaf); await mkdir(env[key], {mode:0o700});
     }
-    let child, browser, connectingPage;
+    let child, browser, connectingPage, primary;
     let providerCalls = 0;
     const provider = http.createServer((_, response) => { providerCalls++; response.writeHead(500).end(); });
     await new Promise(resolve => provider.listen(0, '127.0.0.1', resolve));
-    const run = args => boundedRun(executable, args, {env, cwd:root});
+    const run = args => boundedRun(executable, args, {env, cwd:root,encoding:'utf8'});
     async function stop() {
-      if (!child || child.exitCode !== null) return;
-      const exited = new Promise(resolve => child.once('exit', resolve));
-      child.kill('SIGINT');
-      await deadline(exited, 'local Web shutdown', 20_000);
-      assert.equal(child.exitCode, 0);
+      if (child && child.exitCode === null && child.signalCode === null) {
+        const exited = new Promise(resolve => child.once('exit', (code,signal)=>resolve({code,signal})));
+        child.kill('SIGINT');
+        const result=await deadline(exited, 'local Web shutdown', 20_000);
+        // Node uses TerminateProcess on Windows; native close is verified separately.
+        if(!(process.platform==='win32' && result.signal==='SIGINT'))assert.equal(result.code,0);
+      }
+      // The launcher may already have exited after attaching its resident Host.
+      // Restart that authority to exercise a new generation's configuration grant.
+      if(run(['host','status']).stdout.trim()!=='stopped')run(['host','stop']);
     }
     async function start() {
       child = spawn(executable, ['web','--port','0','--no-open','--assets',assets], {env, cwd:root, stdio:['ignore','pipe','pipe']});
@@ -66,22 +74,9 @@ export async function verifyLocalLaunch(binary, assets, engines = [['chromium', 
       await page.goto(link);
       await connected(page);
       const first = await identity(page);
-      await page.locator('#settings-open').click();
-      await page.getByLabel('API key', {exact:true}).waitFor({state:'visible'});
-      assert.equal(await page.getByLabel('API key', {exact:true}).isEnabled(), true);
-      await page.getByLabel('API key', {exact:true}).fill('isolated-fixture-secret');
-      await page.getByRole('button', {name:'Save credential',exact:true}).click();
-      await page.waitForFunction(() => document.querySelector('.setup-receipts [data-outcome=confirmed]')?.textContent.includes('credential-set'));
-      assert.equal(await page.locator('.permission-note').count(), 0);
-      await page.getByLabel('Provider',{exact:true}).selectOption('openai-compatible');
-      await page.getByLabel('Deployment name').fill('local-fixture');
-      await page.getByLabel('Provider endpoint').fill(`http://127.0.0.1:${provider.address().port}`);
-      await page.getByLabel('Request path').fill('/v1/chat/completions');
-      await page.getByLabel('Model identifier 1',{exact:true}).fill('fixture-model');
-      await page.getByRole('button',{name:'Apply provider',exact:true}).click();
-      await page.getByText('Desired 1 · Applied 1',{exact:true}).waitFor();
-      await page.getByLabel('Default model',{exact:true}).selectOption({label:'fixture-model · local-fixture'});
-      await page.getByText('default_model · confirmed',{exact:true}).waitFor();
+      await openSettings(page);
+      await page.getByRole('button',{name:'Models',exact:true}).click();
+      await addModelProvider(page,{id:'local-fixture',endpoint:`http://127.0.0.1:${provider.address().port}`,model:'fixture-model',secret:'isolated-fixture-secret'});
       await page.reload();
       await connected(page);
       assert.deepEqual(await identity(page), first);
@@ -133,7 +128,7 @@ export async function verifyLocalLaunch(binary, assets, engines = [['chromium', 
       await denied.getByRole('button',{name:'Connect',exact:true}).click();
       await connected(denied);
       await stranger.close();
-      await page.getByRole('button',{name:'Settings',exact:true}).click();
+      await openSettings(page);
       await page.getByRole('button',{name:'Plugins',exact:true}).click();
       const panel = page.getByRole('region',{name:'Plugins',exact:true});
       await panel.locator('.plugin-rows .plugin-row').first().waitFor();
@@ -166,7 +161,8 @@ export async function verifyLocalLaunch(binary, assets, engines = [['chromium', 
       assert.equal(recoveries, 1);
       await context.unroute('**/api/v2/browser-bootstrap');
       assert.deepEqual(await identity(reopened), first);
-      assert(JSON.parse(run(["run",'devices','configuration','list']).stdout).devices.includes(first.device_id));
+      const restoredGrants=JSON.parse(run(["run",'devices','configuration','list']).stdout);
+      assert(restoredGrants.devices.includes(first.device_id),JSON.stringify({device:first.device_id,initial:grants,restored:restoredGrants}));
       assert.equal(providerCalls, 0, 'configuration must not invoke a provider');
       assert.deepEqual(errors, []);
       await context.close();
@@ -179,11 +175,22 @@ export async function verifyLocalLaunch(binary, assets, engines = [['chromium', 
         await connectingPage.screenshot({path:join(report,`${name}-local-launch-failure.png`)}).catch(()=>{});
       }
       // A navigation failure can include its URL in Playwright's diagnostic.
-      throw new Error(String(error.stack ?? error).replace(/rsi-launch=[a-f0-9]{64}/g, 'rsi-launch=[redacted]'));
+      primary=new Error(String(error.stack ?? error).replace(/rsi-launch=[a-f0-9]{64}/g, 'rsi-launch=[redacted]'));
+      throw primary;
     } finally {
-      await new Promise(resolve => provider.close(resolve));
-      await browser?.close();
-      try { await stop(); } finally { if (child?.exitCode === null) child.kill('SIGKILL'); await rm(root,{recursive:true,force:true}); }
+      await finishFixture(primary,
+        ()=>new Promise(resolve => provider.close(resolve)),
+        ()=>browser?.close(),
+        async()=>{
+          let failure;
+          try {await stop();} catch(error) {failure=error;}
+          if(child?.exitCode===null && child?.signalCode===null)child.kill('SIGKILL');
+          // The launch process can leave its separately owned Host alive on Windows.
+          // Stop that exact isolated authority before deleting its home.
+          if(run(['host','status']).stdout.trim()!=='stopped')run(['host','stop']);
+          if(failure)throw failure;
+          await rm(root,{recursive:true,force:true,maxRetries:5,retryDelay:100});
+        });
     }
   }
   return results;

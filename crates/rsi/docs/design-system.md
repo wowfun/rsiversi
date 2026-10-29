@@ -54,7 +54,7 @@ grouped content, cards and enclosing panels each have a consistent shape.
 Interaction states retain their geometry. Focus is visible independently of
 hover. Motion explains change and respects reduced-motion preferences.
 
-The [Web document](../../../apps/web/README.md) owns exact GUI styles,
+The [Web presentation](../../../apps/web/docs/presentation.md) owns exact GUI styles,
 responsive behavior and presentation preferences. The terminal retains the
 terminal's background and font, using spacing, rules and selection to express
 hierarchy. Its [presentation library](../terminal-ui/README.md) owns semantic

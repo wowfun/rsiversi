@@ -95,6 +95,8 @@ impl SubmissionState {
 
 #[derive(Debug)]
 struct Attachment {
+    metrics: Mutex<Option<rsi_session_protocol::MetricsRead>>,
+    metrics_work: tokio::sync::Mutex<()>,
     export: export::State,
     terminal_followers: Mutex<BTreeMap<String, Arc<terminal::Follower>>>,
     terminal_closed: std::sync::atomic::AtomicBool,
@@ -115,9 +117,9 @@ struct Attachment {
     workspace: rsi_workspace_protocol::WorkspaceId,
     header: String,
     agent_preset: String,
+    sandbox: rsi_sandbox::SandboxMode,
     protected: bool,
     creation: Option<rsi_session_protocol::CreateSession>,
-    sandbox: rsi_sandbox::SandboxMode,
     defaults: Option<[rsi_settings_protocol::SettingsVersion; 2]>,
     surface: Mutex<Option<Surface>>,
     handle: Arc<dyn SessionHandle>,
@@ -327,6 +329,11 @@ impl Pane {
             let preview = current.resource.lock().expect("GUI resource poisoned");
             (preview.revision.to_string(), preview.value.clone())
         };
+        let metrics = current
+            .metrics
+            .lock()
+            .expect("GUI metrics poisoned")
+            .clone();
         let metadata = serde_json::json!({
             "kind":"native","conversation":rsi_conversation::ConversationIdentity::Native(current.id.clone()),
             "capabilities":rsi_conversation::ConversationCapabilities::native(
@@ -344,14 +351,16 @@ impl Pane {
             "protected":current.protected, "header":current.header, "agent_preset":current.agent_preset, "creation":current.creation,
             "projections":state.projections, "projection_notice":state.projection_notice,
             "model":selection.model,"reasoning_effort":selection.reasoning_effort,
+            "sandbox":current.sandbox,
             "effort_profile":profile.map(rsi_ai_protocol::LanguageProfile::reasoning_efforts),
             "model_command":current.submission.model_command.view(),
+            "context_capacity_tokens": metrics.as_ref().and_then(|value| value.summary.last_context.as_ref()).map(rsi_conversation::ContextUsage::input_capacity),
+            "metrics":metrics,
             "queue":null,
             "transcript":null, "historical":state.history.is_some(),
             "history_more":state.history_more, "active":state.transcript.active, "notice":state.notice(), "pending":pending,
         });
         project(
-            "sandbox":current.sandbox,
             metadata,
             Some(state.history.as_ref().unwrap_or(&state.transcript)),
             Some(&state.transcript),
@@ -507,6 +516,13 @@ impl GuiApplication {
             .cloned()
             .ok_or_else(|| "Unknown or retiring GUI surface".into())
     }
+    pub(crate) async fn new_conversation(&self, id: crate::SurfaceId) -> Result<()> {
+        self.pane(id)?;
+        let cleanup = self.close_surface(id).await;
+        let replacement = self.add_surface(id);
+        cleanup.and(replacement)
+    }
+
     pub(crate) fn add_surface(&self, id: crate::SurfaceId) -> Result<()> {
         let mut surfaces = self.panes.lock().expect("GUI surfaces poisoned");
         if surfaces.contains_key(&id) {
@@ -710,6 +726,18 @@ impl GuiApplication {
             Command::ModelRefresh { pane, generation } => {
                 self.refresh_model(pane, &generation).await
             }
+            Command::Metrics { pane, generation } => {
+                let owner = self.pane(pane)?;
+                let attached = owner.attachment(&generation)?;
+                let _work = attached.metrics_work.lock().await;
+                owner.attachment(&generation)?;
+                let metrics = attached.handle.metrics().await.map_err(error)?;
+                owner.attachment(&generation)?;
+                *attached.metrics.lock().expect("GUI metrics poisoned") = Some(metrics);
+                owner.changed();
+                self.changed();
+                Ok(())
+            }
             Command::Cancel {
                 pane,
                 generation,
@@ -912,6 +940,8 @@ impl GuiApplication {
         renderer.bind_submission(draft.clone());
         renderer.seed(transcript, before, more);
         let attachment = Arc::new(Attachment {
+            metrics: Mutex::new(None),
+            metrics_work: tokio::sync::Mutex::new(()),
             export: export::State::default(),
             terminal_followers: Mutex::new(BTreeMap::new()),
             terminal_closed: std::sync::atomic::AtomicBool::new(false),
@@ -931,6 +961,7 @@ impl GuiApplication {
             workspace: rsi_workspace_protocol::WorkspaceId::from_coordinates(header.coordinates()),
             header: header.fingerprint().map_err(error)?,
             agent_preset: header.agent_preset_id().to_string(),
+            sandbox: header.settings().sandbox(),
             protected: header.protection().is_some(),
             creation,
             defaults: match (before_defaults, self.defaults_stamp().await) {
@@ -961,7 +992,6 @@ impl GuiApplication {
                 self.details
                     .lock()
                     .expect("Web details poisoned")
-            sandbox: header.settings().sandbox(),
                     .detach(index, &old.generation.to_string());
             }
             current.replace(attachment)

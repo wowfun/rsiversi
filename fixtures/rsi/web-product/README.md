@@ -1,5 +1,22 @@
 # Web product verification
 
+The accessibility component fixture mounts the production React activity and
+notice owners with the document styles in Chromium and Firefox. It checks
+visible activity labels and accessible names, compact rows for conversations absent
+from the attention snapshot while preserving explicit unknown states, separate persistent storage and
+ordinary notices, borderless composer focus in ordinary themes and a system-color
+outline in forced colors. It also checks transparent resize hit areas during hover
+and drag, keyboard boundary indicators and pointer/arrow-key resizing on both
+sides. This is component/CSS evidence, separate from Worker/HTTP verification.
+The document projection fixture preserves completion option nodes during arrow
+selection and checks current transcript visibility without per-block scroll
+geometry reads. Initial inline-card visibility waits for the first intersection
+observations, including when render, scroll or resize schedules an earlier frame.
+Image DOM checks mount the actual React details and connection-owned image cache.
+They cover parallel reads, release of a removed interest before its reply, stable
+canonical URLs across tickets, explicit retry and URL disposal on retirement.
+The cache's capacity, byte accounting and LRU invariants have adjacent Node tests.
+
 The review lifecycle fixture exercises current React resource owners against real
 IndexedDB, including delayed opens and window replacement. It also covers
 Settings editor mode switches, exact JSON retention, UTF-8 byte limits
@@ -9,6 +26,12 @@ uses the unified Settings window and verifies disclosure Escape/outside dismissa
 focus return, Verbose inline source actions, modal Escape, transcript keyboard regions and responsive geometry. These are
 document/runtime checks; `plan-live.mjs` separately exercises an explicitly selected
 real provider through the paired Worker and native service.
+The opt-in alignment live fixture uses one isolated text file and a configured
+DeepSeek model to check rendered table/code output, an actual read-only file Tool,
+Stop and a subsequent successful turn. It records durable Facts and provider usage,
+checks the original file bytes, and closes its browser and Service before scanning
+text evidence for the supplied key. It requires the explicit live environment,
+model, limits and report variables used by the other live fixtures.
 Windows UI alignment verifies known-path workspace entry; native directory
 browsing/creation retains its Unix-only contract. Live DeepSeek profiles bind the
 request's default output cap to the explicitly supplied default output reserve,
@@ -20,6 +43,17 @@ isolated Host through its normal command. It is not graceful application-exit
 evidence; document disconnect and Host drain have their own assertions.
 Before deleting an isolated home, cleanup retains its Host diagnostic log when
 it is at most 1 MiB, including failures before service readiness.
+
+`workspace-model-settings.mjs` exercises workspace hover, rename and delete,
+provider edits, discovery selection and partial-save retry against the real React
+document with deterministic transport replies in Chromium and Firefox. Set
+`RSI_REPORT_DIR` for its screenshots and results. `model-settings-live.mjs` is an
+opt-in shipped Worker/Service check: it starts with no providers, uses the key
+from `RSI_LIVE_ENV_FILE` through the UI, discovers models, configures DeepSeek,
+and sends one short request. It verifies persistence after a Service restart and
+registration-only workspace deletion while preserving a file and Session history.
+Set `RSI_WEB_BINARY`, `RSI_WEB_ASSETS` and `RSI_WEB_REPORT` explicitly. It uses an
+isolated home and loopback development HTTP, and closes its Service and browser.
 Windows fixtures create the native filesystem's exact protected private ACL
 (TokenUser owner; explicit full control for SYSTEM, Administrators and TokenUser)
 on their newly created configuration directory before writing settings. They
@@ -94,8 +128,16 @@ Windows and Linux without a POSIX shell or OpenSSL installation.
 
 The document projection and download checks load the shipped Desktop bridge
 module; its marker selects browser/native conveniences without granting authority.
-The document projection checks load shipped modules through the same routed
-ES-module harness. `external-drafts-dom.mjs`, called by `dom.mjs`, exercises real
+The document projection checks compile an authored entry against the real product
+module graph using `source-fixture.mjs`; they never extract or rewrite production
+functions. All authored fixture roots resolve from their module location, so the
+repository and CI fixture working directories load the same product graph.
+`RSI_REPORT_DIR=/absolute/report node fixtures/rsi/web-product/presentation-invariants.mjs`
+checks folded delegation/source actions, summary reading state, action errors,
+layout retry persistence, resource snapshot identity, disclosure dismissal and
+light/dark text contrast in Chromium and Firefox. The Markdown fixture verifies
+plain streaming code and highlighting after settlement.
+`external-drafts-dom.mjs`, called by `dom.mjs`, exercises real
 composer controls, shared drafts, unknown outcomes and capacity recovery in
 desktop and narrow viewports. A MutationObserver checks that repeated frames and
 unchanged input do not rewrite the live alert region. Accepted edits in a sibling
@@ -248,6 +290,9 @@ diagnostics retain at most 64 entries with bounded fields and count omissions.
 product scenarios in both browsers (or `RSI_WEB_BROWSER`). It omits the separate
 renderer, recovery, task, preview and plan probes and their native/Wasm fixture
 builds. The default command continues to run those probes too.
+Its Files cases create raw POSIX byte names and symlinks, so the complete primary
+runner requires Unix. On Windows, use the focused workbench, UI-alignment and
+document/Worker fixtures; a partial primary run is not full-suite evidence.
 Pairing rejection requires the listener activation diagnostic, no readiness,
 and a still-unbound requested port. A generic mention of Web or assets does not
 count as proof that malformed bundle admission was exercised.
@@ -291,12 +336,19 @@ The fixture checks Shift+Enter and a real plain-Enter submission in that mode.
 Image cases import generated PNGs as separate binary bodies through authenticated
 HTTP, reorder their references, inspect the actual provider request's image hashes
 and dimensions, and reopen an exact durable source using the same object URL as
-the draft preview. Removal starts no model call. Both sign-outs verify that every
+the draft preview. Two real Worker reads must reach the browser's HTTP request
+barrier before either request is dispatched; an upload must finish while both
+are held. Releasing them continues the browser's original HTTP/2 requests. The
+separate Rust Media API test holds two reads inside its provider; browser request
+overlap is not presented as provider execution overlap. Removal starts
+no model call. Both sign-outs verify that every
 document-created URL was revoked. Synthetic document cases separately exercise
-object-count/byte retention, LRU reuse/eviction, late-read fencing and edited
+shared cache/read byte retention, display pins, exact-ticket pending deduplication,
+bounded parallel reads, LRU reuse/eviction, late-read fencing and edited
 attachment preservation during unresolved submission; they do not validate Media
 bytes. Rust public-application tests cover import ownership, limits, image-only
-unknown retries, frozen request boundaries, and detail/application cancellation.
+unknown retries, frozen request boundaries, detail/application cancellation, and
+read-slot/byte admission retained through the final returned byte clone or slice.
 
 Persistent composer checks use real IndexedDB transactions in two documents,
 including revision conflicts, record reincarnation, origin quotas, opaque u64
@@ -308,6 +360,9 @@ They also hold draft loading after a Session header changes. Switching acceptanc
 waits for the enabled composer before checking exact saved text, since the header
 can arrive while IndexedDB is still loading the draft.
 They also check cached UTF-8 accounting without re-encoding inactive editors.
+Normal autosaves remain silent, with unchanged composer, textarea and Send-button
+geometry while persistence is held and after it completes. Failures and pending
+request recovery retain visible controls.
 These use the shipped document methods with a controlled Worker reply, not a
 live Session or provider. `recovery.mjs` owns
 a separately leased publication and Service, restores a live Fresh Session and its
@@ -388,9 +443,16 @@ configuration owner's separate authenticated API fixtures.
 The opt-in `prepare-performance.mjs` creates instrumented copies of an explicitly
 supplied baseline document source directory and the current document source.
 Both use the current pinned build dependencies and generated assets; source and
-scene hashes are recorded. Preparation copies the generated assets once, uses
+scene hashes are recorded. Instrumentation format 2 identifies each original entry
+by path and SHA-256 (`app.js` for the baseline, `src/main.tsx` for current source).
+Preparation copies the generated assets once, uses
 that frozen copy for both variants, and records every source, generated asset
-and final output hash together with the build dependency lockfile. Vite preserves
+and final output hash together with the build dependency lockfile. Each source
+copy retains its `apps/web` position in an isolated repository shape. The shared
+descriptor reader and Rust-owned wire/bundle declarations are frozen once and
+copied into both variants, with their hashes included in the evidence. Dependency
+directories are excluded on Windows and Unix; only current pinned Web dependencies
+are linked into the copies. Vite preserves
 the generated assets while replacing the compiled document outputs. From the
 repository root, run `RSI_WEB_ASSETS=/absolute/bundle/assets node
 fixtures/rsi/web-product/prepare-performance.mjs /absolute/baseline/document-source
@@ -557,10 +619,16 @@ as a frozen `RSI_WEB_BINARY`; artifacts from a different family are rejected.
 pins, primary Enter/Queue, Stop draft retention, code copying and browser refresh
 with reconnect. It captures 390/768/1024/1440/1920-pixel viewports under light,
 dark and system appearance. Screenshot files are human comparison evidence, not
-pixel goldens. The document-island checks separately observe Turn reclassification,
-unchanged DOM child identity and subpixel-bounded reading-anchor preservation.
+pixel goldens. The React document checks separately observe Turn reclassification,
+unchanged DOM child identity and bounded to one CSS pixel reading-anchor preservation.
 Shared `controls.mjs` opens the actual Resources, detail and navigation controls;
 fixtures identify conversation rows by Session ID rather than visible title text.
+The same helpers open the directory picker and onboard a provider through
+Models → Add model provider, waiting for the editor to close and the selected
+default to become usable. Credential status is automatic; fixtures do not rely
+on diagnostic receipt text as a form-completion signal.
+`RSI_WEB_STALE_DEFAULT=1` runs the workbench onboarding scenario with a removed
+default route, proving Settings can install and select a replacement.
 
 
 The UI alignment probe also checks explicit workspace refresh after a metadata
@@ -573,8 +641,8 @@ and loads show a notice, in-memory layout remains usable, and draft restoration
 continues from its independent database. Recovering a later save clears its
 notice; a failed load remains explicit for that connection.
 
-The document-only fixture exposes the same imported presentation helpers as the
-product bootstrap, including lazy reading-position capture. It runs in both
+The document-only fixture mounts the product root with explicit transport and
+renderer ports, including the real lazy reading-position capture. It runs in both
 browsers as part of the default fixture test entry. Controlled transport gates
 check that a native-close event during authentication waits for storage and the
 disconnect receipt, and that failed teardown blocks creation of a replacement
@@ -758,3 +826,50 @@ stylesheet at 1440 px and 390 px, checks the last Retry control by keyboard, and
 retains screenshots. Set `RSI_REVIEW_PREVIEW=1` with `RSI_REPORT_DIR` to keep that
 isolated component scene available at the printed local URL for manual inspection.
 This scene verifies cleanup layout; it is not a full connected-workbench capture.
+
+`responsiveness.mjs` uses the real document factory with isolated transport ports.
+It checks tablet navigation and desktop preference behavior, the rail logo's
+hover/focus swap and click/keyboard expansion in both themes, modal initial focus
+and return focus, and a frame containing sixty settled code blocks. That frame
+must ACK its plain-text presentation before optional tokenization runs. This is
+source/DOM evidence; real Service and provider coverage remains in the paired
+product and opt-in live fixtures.
+Conversation identity assertions read the pane's `data-session-id`; coordinates
+inside a closed tools menu are not visible text. Presentation assertions either
+open that menu or inspect its text content explicitly.
+
+CI runs the workspace, model settings, starting transcript and composer document
+fixtures in both Chromium and Firefox. The workspace navigation document fixture checks the grouped options menu,
+keyboard focus, tri-state archive filtering, model-independent directory
+registration, Show more expansion semantics, and the resource launcher before
+a Session exists. The presentation-invariants fixture also checks that tab-strip
+scroll offsets survive selection but release removed panes after repeated churn.
+Source fixtures bind Vite's public HTTP server to a loopback, kernel-assigned
+port, so independent fixtures can run concurrently without competing for a
+default development port. Their helper test checks concurrent listeners and CSP.
+Authored source fixtures are immutable during a run and disable filesystem
+watching; supervised development owns the separate HMR tests.
+The starting
+conversation fixture checks saved text across reload and model setup, the first
+send's durable handoff, concurrent-window conflicts, underlined transcript tabs,
+message geometry, stable docked composer geometry while statistics arrive or
+change, and light/dark/narrow screenshots in Chromium and Firefox.
+These isolated transport fixtures use production React and IndexedDB; native
+first-use initialization and directory browsing have separate owner tests.
+
+`process-transcript.mjs` checks DSH-style process disclosures, live trailing
+status, typed failure badges, activity rings and the More menu in Chromium and
+Firefox. It covers streaming frame retention, independent row expansion,
+settlement folding, reduced motion and narrow-screen geometry without a provider.
+
+`composer-controls.mjs` checks starting-draft handoff without submission, the add
+menu, permissions and reasoning choices. `composer-initialization.mjs` separately
+checks initial effort metadata, stable empty-draft geometry, and scroll-based
+Back to bottom visibility in Chromium and Firefox. Set `RSI_REPORT_DIR` for
+its screenshots and measurements. The composer controls fixture also covers
+command menus, model effort selection, access confirmation and frozen-request
+locking, focus restoration and narrow popup bounds in Chromium and Firefox.
+It uses the actual document and isolated transport. `composer-controls-live.mjs`
+is opt-in through `RSI_LIVE_ENV_FILE`, `RSI_WEB_BINARY`, `RSI_WEB_ASSETS` and
+`RSI_WEB_REPORT`; it verifies a real DeepSeek effort selection and sandbox mode
+in persisted Session facts, with screenshots from the shipped package.
