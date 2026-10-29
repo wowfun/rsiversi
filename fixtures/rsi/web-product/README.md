@@ -48,6 +48,9 @@ mode; TLS remains the automated default. Windows fixture process teardown uses
 Node's TerminateProcess, records that limitation, then independently stops the
 isolated Host through its normal command. It is not graceful application-exit
 evidence; document disconnect and Host drain have their own assertions.
+On Unix, watched frontend fixtures use SIGINT, matching the foreground Ctrl+C
+contract. Ordinary Serve fixtures use SIGTERM. Both require exit code zero
+within the shutdown deadline before the isolated Host is stopped.
 Before deleting an isolated home, cleanup retains its Host diagnostic log when
 it is at most 1 MiB, including failures before service readiness.
 

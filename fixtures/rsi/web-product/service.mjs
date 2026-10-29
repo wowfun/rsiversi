@@ -152,7 +152,7 @@ export async function startService({ binary, assets, report, configure, onReques
   async function stopProcess() {
     let failure;
     try { if (child && child.exitCode === null) {
-      child.kill("SIGTERM");
+      child.kill(watchAssets && process.platform !== 'win32' ? "SIGINT" : "SIGTERM");
       let result;
       try { result = await deadline(stopped, "service stop", 20_000); }
       catch { child.kill("SIGKILL"); await stopped; throw new Error("Service exceeded clean shutdown deadline"); }
