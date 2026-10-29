@@ -53,6 +53,13 @@ the retained parent handle. An I/O failure can leave earlier newly created
 parents; the helper does not remove pre-existing or partially created trees.
 Embedded NUL bytes are rejected during root preflight, before creating a parent.
 
+On both Unix and Windows, `create_absolute_directory_and_sync_no_follow` uses
+the same no-follow acquisition and additionally syncs each directory it creates
+and the retained parent whose namespace changed. It preserves existing permissions
+and does not reopen absolute paths for synchronization. A sync failure propagates
+and may leave a created prefix; unchanged directories and later child publication
+remain the caller's responsibility.
+
 An explicit `resolve_absolute_root_alias` path operation canonicalizes only the
 first component below `/` and preserves the untouched suffix. Callers choose
 whether an absent first component may remain unresolved for later creation.
@@ -139,11 +146,8 @@ File replacement uses `FileRenameInformationEx` with replace and POSIX semantics
 delete-sharing readers retain the old object while new opens observe the published
 file. Handles that exclude delete sharing still prevent replacement. Directory
 publication and non-replacing publication retain their ordinary rename semantics.
-The durable Windows creation entry point syncs each newly created directory and
-the retained parent whose namespace it changed. An unchanged final directory is
-not a newly published namespace; the consumer owns later child-publication flushes.
-Existing higher ancestors are not mutated or reopened for write access. A failed
-sync propagates and may leave a created prefix; it never confirms publication.
+Windows directory creation does not mutate existing higher ancestors or reopen
+them for write access.
 `NamespaceLease` requires the exact private TokenUser policy and pins a writable
 directory handle without delete sharing. It also creates or admits the empty
 private `.rsi-namespace-pin` file and retains it without delete sharing. The

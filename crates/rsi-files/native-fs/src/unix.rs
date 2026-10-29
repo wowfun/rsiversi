@@ -147,17 +147,23 @@ fn validate_absolute_root(path: &Path) -> std::io::Result<()> {
 
 /// Acquire an absolute directory by opening each path component without following links.
 pub fn open_absolute_directory_no_follow(path: &Path) -> std::io::Result<Directory> {
-    acquire_absolute_directory(path, false)
+    acquire_absolute_directory(path, false, false)
 }
 
 /// Acquire a root without links, creating missing private directory components.
 /// Existing permissions are preserved; created permissions are 0700 subject to umask.
 /// Invalid components fail before mutation. An I/O failure may leave created parents.
 pub fn create_absolute_directory_no_follow(path: &Path) -> std::io::Result<Directory> {
-    acquire_absolute_directory(path, true)
+    acquire_absolute_directory(path, true, false)
 }
 
-fn acquire_absolute_directory(path: &Path, create: bool) -> std::io::Result<Directory> {
+/// Create missing private directories and sync each changed namespace through its handle.
+/// Existing permissions are preserved; a failed sync may leave a created prefix.
+pub fn create_absolute_directory_and_sync_no_follow(path: &Path) -> std::io::Result<Directory> {
+    acquire_absolute_directory(path, true, true)
+}
+
+fn acquire_absolute_directory(path: &Path, create: bool, sync: bool) -> std::io::Result<Directory> {
     use rustix::fs::{Mode, OFlags, mkdirat, openat};
     use std::path::Component;
 
@@ -176,11 +182,22 @@ fn acquire_absolute_directory(path: &Path, create: bool) -> std::io::Result<Dire
                 let next = open_relative_directory_no_follow(&directory, Path::new(component));
                 directory = match next {
                     Err(error) if create && error.kind() == std::io::ErrorKind::NotFound => {
-                        match mkdirat(&directory, component, Mode::RUSR | Mode::WUSR | Mode::XUSR) {
-                            Ok(()) | Err(rustix::io::Errno::EXIST) => {}
+                        let created = match mkdirat(
+                            &directory,
+                            component,
+                            Mode::RUSR | Mode::WUSR | Mode::XUSR,
+                        ) {
+                            Ok(()) => true,
+                            Err(rustix::io::Errno::EXIST) => false,
                             Err(error) => return Err(error.into()),
+                        };
+                        let child =
+                            open_relative_directory_no_follow(&directory, Path::new(component))?;
+                        if sync && created {
+                            child.0.sync_all()?;
+                            directory.0.sync_all()?;
                         }
-                        open_relative_directory_no_follow(&directory, Path::new(component))?
+                        child
                     }
                     result => result?,
                 };
