@@ -1381,12 +1381,12 @@ jobs:
         if: ${{ !cancelled() && steps.build.outcome == 'success' && steps.sandbox.outcome == 'success' }}
         timeout-minutes: 15
         run: |
-          cargo run --locked -p rsi-app-tools -- fixture-build profile-leaf-probe "$RUNNER_TEMP/rsi-desktop-profile-probe"
+          cargo build --locked -p rsi-cli --example profile-leaf-probe
           export RSI_RUST_ANALYZER="$(rustup which rust-analyzer)"
           for mode in external profiles history language workspace-review attention typed-results plan-review ui-alignment presentation queue reload; do
             mode_args=("--$mode")
             if [[ "$mode" == language ]]; then mode_args+=("$RSI_RUST_ANALYZER"); fi
-            if [[ "$mode" == profiles ]]; then mode_args+=(--profile-probe "$RUNNER_TEMP/rsi-desktop-profile-probe/profile-leaf-probe"); fi
+            if [[ "$mode" == profiles ]]; then mode_args+=(--profile-probe "$GITHUB_WORKSPACE/target/debug/examples/profile-leaf-probe"); fi
             dbus-run-session -- xvfb-run -a -s "-screen 0 2560x1440x24" python3 fixtures/rsi/desktop-product/verify.py --binary "$RUNNER_TEMP/rsi-desktop-dist/bundle/rsi-desktop" --driver /usr/bin/WebKitWebDriver --assets "$RUNNER_TEMP/rsi-desktop-dist/bundle/assets" --report "$RUNNER_TEMP/rsi-desktop-$mode-evidence" "${mode_args[@]}"
           done
       - name: Exercise missing frame acknowledgement

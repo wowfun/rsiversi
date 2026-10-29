@@ -181,8 +181,9 @@ Install `fixtures/rsi/acp` dependencies first; this scenario requires Node.
 Desktop Device principal, single-leaf preparation, reviewed source publication,
 and original receipt recovery through the shared Worker. It requires denied
 source changes and no Local grant editor before the fixture's Local API probe
-grants that exact Device, leaf and operation. Build the probe with
-`cargo run --locked -p rsi-app-tools -- fixture-build profile-leaf-probe /output`.
+grants that exact Device, leaf and operation. Build the probe from the same source
+checkout with `cargo build --locked -p rsi-cli --example profile-leaf-probe`, then
+pass `target/debug/examples/profile-leaf-probe` as an absolute path.
 Its editable user Profile is separate from the running service source.
 `--attention` exercises exact native question and approval navigation, settlement,
 and removal from Needs attention with a deterministic provider.
