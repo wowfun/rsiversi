@@ -39,6 +39,9 @@ checks the bounded pending suffix and the Store's durable intent lookup while
 holding Session admission. Reuse fails before live publication; completed
 identities do not accumulate in resident Turn state. The Store's uniqueness
 constraint independently protects direct append paths.
+An active effect's map key is its sole in-memory identity. Transitions still
+require that key, the matching effect kind and the expected started state;
+model purpose, Tool result identity and image ordering remain separate checks.
 
 Fact publication prepares its sealed receipt before reserving process capacity
 or mutating the live Session. Only complete acceptance exposes that receipt;

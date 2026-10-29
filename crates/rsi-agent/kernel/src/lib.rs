@@ -707,18 +707,15 @@ struct TreeClaimLane {
 enum ActiveEffect {
     Model {
         purpose: rsi_agent_session_protocol::ModelEventPurpose,
-        effect_id: EffectId,
         started: bool,
     },
     Image {
-        effect_id: EffectId,
         started: bool,
         next_index: u32,
     },
     Tool {
         name: String,
         source_selection: Arc<rsi_agent_session_protocol::ModelSelection>,
-        effect_id: EffectId,
         identity: rsi_tools_protocol::ToolResultIdentity,
         started: bool,
         parallel_safe: bool,
