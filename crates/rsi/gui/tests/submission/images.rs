@@ -62,7 +62,7 @@ impl Media for Reader {
         self.active.fetch_add(1, Ordering::SeqCst);
         let _active = Active(&self.active);
         if self.block_read.load(Ordering::SeqCst) {
-            std::future::pending::<()>().await;
+            self.release.notified().await;
         }
         self.objects
             .lock()
@@ -281,11 +281,9 @@ async fn preview_uses_exact_media_and_cancels_with_its_detail_or_application() {
     backend.media.block_read.store(true, Ordering::SeqCst);
     let reading = app.read_image(&selection);
     until(|| backend.media.active.load(Ordering::SeqCst) == 1).await;
-    assert!(
-        app.import_image(rsi_gui::SurfaceId::MAIN, &generation, png(3))
-            .await
-            .is_err()
-    );
+    app.import_image(rsi_gui::SurfaceId::MAIN, &generation, png(3))
+        .await
+        .unwrap();
     super::sources::close_panel(&app).await;
     assert!(reading.await.is_err());
     assert_eq!(backend.media.active.load(Ordering::SeqCst), 0);
@@ -322,4 +320,169 @@ async fn preview_uses_exact_media_and_cancels_with_its_detail_or_application() {
     assert!(reading.await.is_err());
     assert_eq!(backend.media.active.load(Ordering::SeqCst), 0);
     assert!(backend.cancel.lock().unwrap().is_empty());
+}
+
+#[tokio::test]
+async fn two_preview_reads_enter_before_release_and_upload_keeps_its_own_slot() {
+    let (runtime, backend, app) = sources::fixture().await;
+    let generation = view(&app)["surfaces"]["main"]["generation"]
+        .as_str()
+        .unwrap()
+        .to_owned();
+    let mut panels = Vec::new();
+    for width in [2, 3] {
+        let media = app
+            .import_image(rsi_gui::SurfaceId::MAIN, &generation, png(width))
+            .await
+            .unwrap();
+        cmd(
+            &app,
+            json!({"action":"inspect_image","pane":"main","generation":generation,"media":media}),
+        )
+        .await;
+        panels.push(sources::panel(&app));
+    }
+    let selections = panels
+        .iter()
+        .map(|panel| json!({"kind":"source","ticket":panel["image_detail"]["ticket"]}).to_string())
+        .collect::<Vec<_>>();
+    backend.media.block_read.store(true, Ordering::SeqCst);
+    let first = app.read_image(&selections[0]);
+    let second = app.read_image(&selections[1]);
+    // No read has been released: reaching two proves genuine backend overlap.
+    until(|| backend.media.active.load(Ordering::SeqCst) == 2).await;
+    assert!(
+        app.read_image(&selections[1])
+            .await
+            .unwrap_err()
+            .contains("reads are busy")
+    );
+    let reads = backend.media.reads.load(Ordering::SeqCst);
+    app.import_image(rsi_gui::SurfaceId::MAIN, &generation, png(4))
+        .await
+        .unwrap();
+    assert_eq!(backend.media.active.load(Ordering::SeqCst), 2);
+    assert_eq!(backend.media.reads.load(Ordering::SeqCst), reads);
+    cmd(&app, json!({"action":"close_detail","view":panels[0]["view"],"expected_open_revision":panels[0]["open_revision"]})).await;
+    assert!(first.await.is_err());
+    assert_eq!(backend.media.active.load(Ordering::SeqCst), 1);
+    backend.media.release.notify_one();
+    assert_eq!(second.await.unwrap().bytes, png(3));
+    assert_eq!(backend.media.active.load(Ordering::SeqCst), 0);
+    assert!(runtime.shutdown().await.is_clean());
+}
+
+#[tokio::test]
+async fn preview_admission_follows_the_last_returned_clone_or_slice() {
+    let (runtime, _, app) = sources::fixture().await;
+    let generation = view(&app)["surfaces"]["main"]["generation"]
+        .as_str()
+        .unwrap()
+        .to_owned();
+    let media = app
+        .import_image(rsi_gui::SurfaceId::MAIN, &generation, png(2))
+        .await
+        .unwrap();
+    cmd(
+        &app,
+        json!({"action":"inspect_image","pane":"main","generation":generation,"media":media}),
+    )
+    .await;
+    let selection =
+        json!({"kind":"source","ticket":sources::panel(&app)["image_detail"]["ticket"]})
+            .to_string();
+    let first = app.read_image(&selection).await.unwrap();
+    let copy = first.bytes.clone();
+    let slice = copy.slice(1..2);
+    let second = app.read_image(&selection).await.unwrap();
+    drop(first);
+    drop(copy);
+    assert!(
+        app.read_image(&selection)
+            .await
+            .unwrap_err()
+            .contains("reads are busy")
+    );
+    drop(slice);
+    assert!(app.read_image(&selection).await.is_ok());
+    drop(second);
+    assert!(runtime.shutdown().await.is_clean());
+}
+
+#[tokio::test]
+async fn preview_byte_budget_rejects_before_backend_work_and_recovers_after_body_drop() {
+    let (runtime, backend, app) = sources::fixture().await;
+    let generation = view(&app)["surfaces"]["main"]["generation"]
+        .as_str()
+        .unwrap()
+        .to_owned();
+    // The mock Media provider owns these immutable canonical-body fixtures.
+    let bytes = Bytes::from(vec![0; 17 * 1024 * 1024]);
+    let reference = MediaRef {
+        id: MediaId::new(format!("{:x}", Sha256::digest(&bytes))).unwrap(),
+        mime: "image/png".into(),
+        bytes: bytes.len() as u64,
+        width: 1,
+        height: 1,
+    };
+    backend.media.objects.lock().unwrap().insert(
+        reference.id.clone(),
+        StoredMedia {
+            reference: reference.clone(),
+            bytes,
+        },
+    );
+    cmd(
+        &app,
+        json!({"action":"inspect_image","pane":"main","generation":generation,"media":reference}),
+    )
+    .await;
+    let selection =
+        json!({"kind":"source","ticket":sources::panel(&app)["image_detail"]["ticket"]})
+            .to_string();
+    let stored = app.read_image(&selection).await.unwrap();
+    assert!(
+        app.read_image(&selection)
+            .await
+            .unwrap_err()
+            .contains("bytes are busy")
+    );
+    assert_eq!(backend.media.reads.load(Ordering::SeqCst), 1);
+    drop(stored);
+    assert!(app.read_image(&selection).await.is_ok());
+    assert_eq!(backend.media.reads.load(Ordering::SeqCst), 2);
+    assert!(runtime.shutdown().await.is_clean());
+}
+
+#[tokio::test]
+async fn dropping_a_preview_waiter_leaves_owned_work_until_detail_cancellation() {
+    let (runtime, backend, app) = sources::fixture().await;
+    let generation = view(&app)["surfaces"]["main"]["generation"]
+        .as_str()
+        .unwrap()
+        .to_owned();
+    let media = app
+        .import_image(rsi_gui::SurfaceId::MAIN, &generation, png(2))
+        .await
+        .unwrap();
+    let inspect =
+        json!({"action":"inspect_image","pane":"main","generation":generation,"media":media});
+    cmd(&app, inspect.clone()).await;
+    let selection =
+        json!({"kind":"source","ticket":sources::panel(&app)["image_detail"]["ticket"]})
+            .to_string();
+    backend.media.block_read.store(true, Ordering::SeqCst);
+    let reading = app.read_image(&selection);
+    until(|| backend.media.active.load(Ordering::SeqCst) == 1).await;
+    drop(reading);
+    assert_eq!(backend.media.active.load(Ordering::SeqCst), 1);
+    sources::close_panel(&app).await;
+    until(|| backend.media.active.load(Ordering::SeqCst) == 0).await;
+    backend.media.block_read.store(false, Ordering::SeqCst);
+    cmd(&app, inspect).await;
+    let replacement =
+        json!({"kind":"source","ticket":sources::panel(&app)["image_detail"]["ticket"]})
+            .to_string();
+    assert!(app.read_image(&replacement).await.is_ok());
+    assert!(runtime.shutdown().await.is_clean());
 }

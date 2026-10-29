@@ -232,8 +232,17 @@ a draft reference or a displayed source. Media owns canonical PNG validation and
 URLs and filenames are never read capabilities. Binary input and output travel
 separately from JSON views. Source bytes are bounded before copying into WASM;
 canonical response receive leases remain owned until the document transfer is
-created. The document retains at most eight object URLs / 32 MiB of canonical
-bytes, evicts least-recently-used previews and revokes all URLs on disconnect.
+created. Two preview reads may run concurrently, independently of one upload.
+Read slots and the GUI's 32 MiB canonical-byte admission remain with returned
+immutable bytes through their final clone or slice. The document shares eight
+objects / 32 MiB between cached URLs and active read reservations, with at most
+eight waiting request descriptions. Only unreferenced LRU entries may be evicted;
+capacity retained by displayed images produces an explicit retryable refusal.
+Pending reads share only an exact connection, image and detail ticket; completed
+objects may be reused by another ticket on that connection. Display disposal
+unpins its cache entry and drops queued interest. Blob conversion has a separate
+32 MiB temporary allowance; transfer buffers are released after conversion.
+Disconnect revokes all URLs and fences pending results.
 Only a requested preview is decoded for display. Closing/replacing that display
 fences late responses; application retirement cancels and drains image work.
 These are presentation retention limits, not total browser decoder or RSS limits.

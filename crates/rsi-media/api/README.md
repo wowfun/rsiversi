@@ -9,9 +9,12 @@ Read accepts an exact canonical `MediaRef` and returns that metadata plus the
 separate PNG bytes. Client reads revalidate metadata, length and SHA-256 before
 exposing a body, preserving its receive lease through clones and slices.
 
-Both operations use the Data lane. Read reserves at most 32 MiB plus 1 KiB for
-the response before provider work. Its separate 64 MiB scratch pool admits the
-provider's canonical object and bounded envelope before reading. The local
+Both operations use the Data lane. Read admits the measured response under its
+32 MiB plus 1 KiB ceiling before encoding. Its separate 64 MiB scratch pool admits the
+provider's canonical body before reading, reserving 32 MiB per read so two reads
+can overlap. The local backend independently reserves the actual file length,
+including its bounded envelope; a caller-declared length cannot replace that
+allocation check. The local
 backend retains one file allocation; response encoding copies into its separately
 reserved wire allocation. Import transfers the admitted source allocation into
 Media without copying it. Codec working-memory admission belongs to Media.

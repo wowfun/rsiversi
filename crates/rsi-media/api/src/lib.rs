@@ -59,9 +59,10 @@ impl ApiHandler for Handler {
             Operation::Read => {
                 let reference: MediaRef = serde_json::from_slice(input.as_bytes())
                     .map_err(|_| ApiError::Invalid("invalid canonical Media reference".into()))?;
+                // The backend separately admits its actual envelope allocation.
+                // This pool bounds canonical bodies, independently of declared length.
                 let _scratch = self.scratch.reserve(
-                    usize::try_from(MAXIMUM_IMAGE_DESCRIPTOR_BYTES).expect("canonical image bound")
-                        + 4097,
+                    usize::try_from(MAXIMUM_IMAGE_DESCRIPTOR_BYTES).expect("canonical image bound"),
                 )?;
                 match self.media.read(&reference).await {
                     Ok(stored) => {

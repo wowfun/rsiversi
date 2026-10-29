@@ -428,7 +428,9 @@ pub struct GuiApplication {
         PresentationState<(rsi_client_preferences::Preferences, Option<String>)>,
     pub(crate) preference_read: tokio::sync::Mutex<()>,
     pub(crate) media: Option<Arc<dyn rsi_media_protocol::Media>>,
-    pub(crate) image_work: Arc<Semaphore>,
+    pub(crate) image_uploads: Arc<Semaphore>,
+    pub(crate) image_reads: Arc<Semaphore>,
+    pub(crate) image_bytes: ByteBudget,
     pub(crate) panes: Mutex<std::collections::BTreeMap<crate::SurfaceId, Arc<crate::panes::Pane>>>,
     pub(crate) attachment_generation: std::sync::atomic::AtomicU64,
     pub(crate) shell: Arc<Shell>,
@@ -617,7 +619,7 @@ impl GuiApplication {
     /// Reports non-queued image admission before a platform copies source bytes.
     /// The import itself acquires the authoritative permit.
     pub fn image_import_available(&self) -> bool {
-        !self.stop.is_cancelled() && self.image_work.available_permits() > 0
+        !self.stop.is_cancelled() && self.image_uploads.available_permits() > 0
     }
     /// Subscribes to coalesced projection changes; this is independent of domain cursors.
     pub fn changes(&self) -> watch::Receiver<u64> {
@@ -1111,7 +1113,10 @@ impl PluginFactory for GuiApplicationFactory {
             media: plan
                 .context()
                 .lookup_local::<rsi_media_protocol::MediaContract>(),
-            image_work: Arc::new(Semaphore::new(1)),
+            image_uploads: Arc::new(Semaphore::new(1)),
+            image_reads: Arc::new(Semaphore::new(crate::panes::images::PREVIEW_CONCURRENCY)),
+            image_bytes: ByteBudget::new(crate::panes::images::MAXIMUM_PREVIEW_BYTES)
+                .expect("constant image preview budget"),
             panes: Mutex::new(std::collections::BTreeMap::from([(
                 crate::SurfaceId::MAIN,
                 Arc::new(crate::panes::Pane::default()),

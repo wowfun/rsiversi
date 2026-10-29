@@ -4,10 +4,10 @@ use async_trait::async_trait;
 use image::{ImageBuffer, ImageFormat, Rgba};
 use rsi_api_protocol::{
     ApiClient, ApiClientContract, ApiDispatch, ApiDispatchContract, ApiError, ApiOutput,
-    ByteBudget, CallOrigin, ConnectionDescription, EndpointId, HostEpoch, OperationClass,
-    OperationSpec, RetainedBytes,
+    ApiRegistrarContract, ByteBudget, CallOrigin, ConnectionDescription, EndpointId, HostEpoch,
+    OperationClass, OperationSpec, RetainedBytes,
 };
-use rsi_media_api::{MediaApiFactory, MediaClient, MediaClientFactory};
+use rsi_media_api::{MediaApi, MediaApiFactory, MediaClient, MediaClientFactory};
 use rsi_media_protocol::{Media, MediaBackendContract, MediaContract, MediaError, MediaRef};
 use rsi_meta::{
     ActivationPlan, PluginFactory, PreparedActivation, ResolvedFactory, Runtime, UpdateMode,
@@ -195,6 +195,117 @@ async fn import_pair(media: &dyn Media) -> MediaRef {
     first
 }
 
+#[derive(Debug)]
+struct GatedMedia {
+    inner: Arc<dyn Media>,
+    active: AtomicUsize,
+    release: tokio::sync::Semaphore,
+}
+struct ActiveRead<'a>(&'a AtomicUsize);
+impl Drop for ActiveRead<'_> {
+    fn drop(&mut self) {
+        self.0.fetch_sub(1, Ordering::SeqCst);
+    }
+}
+#[async_trait]
+impl Media for GatedMedia {
+    async fn import_image_with_options(
+        &self,
+        bytes: bytes::Bytes,
+        options: rsi_media_protocol::ImageImportOptions,
+    ) -> rsi_media_protocol::Result<MediaRef> {
+        self.inner.import_image_with_options(bytes, options).await
+    }
+    async fn read(
+        &self,
+        reference: &MediaRef,
+    ) -> rsi_media_protocol::Result<rsi_media_protocol::StoredMedia> {
+        self.active.fetch_add(1, Ordering::SeqCst);
+        let _active = ActiveRead(&self.active);
+        self.release.acquire().await.unwrap().forget();
+        self.inner.read(reference).await
+    }
+}
+async fn active_reads(media: &GatedMedia, expected: usize) {
+    tokio::time::timeout(std::time::Duration::from_secs(5), async {
+        while media.active.load(Ordering::SeqCst) != expected {
+            tokio::task::yield_now().await;
+        }
+    })
+    .await
+    .unwrap();
+}
+
+#[tokio::test]
+async fn two_api_reads_reach_the_provider_before_release_and_cancellation_restores_capacity() {
+    let temporary = tempfile::tempdir().unwrap();
+    let server = server(temporary.path()).await;
+    let inner = server.root().lookup_local::<MediaContract>().unwrap();
+    let reference = import_pair(inner.as_ref()).await;
+    let media = Arc::new(GatedMedia {
+        inner,
+        active: AtomicUsize::new(0),
+        release: tokio::sync::Semaphore::new(0),
+    });
+    let runtime = Runtime::default();
+    runtime
+        .root()
+        .apply(linked("api", Arc::new(rsi_api::ApiFactory)), Value::Null)
+        .await
+        .unwrap();
+    let registrar = runtime
+        .root()
+        .lookup_local::<ApiRegistrarContract>()
+        .unwrap();
+    let _api = MediaApi::register(registrar.as_ref(), media.clone()).unwrap();
+    let dispatch = runtime
+        .root()
+        .lookup_local::<ApiDispatchContract>()
+        .unwrap();
+    let read = rsi_media_api::Operation::Read.spec();
+    let invoke = |reference: &MediaRef| {
+        let invocation = dispatch.admit(&read.call(), CallOrigin::Local).unwrap();
+        let input = invocation.input_budget().encode(reference, 1024).unwrap();
+        invocation.invoke(input)
+    };
+    let first = invoke(&reference);
+    let second = invoke(&reference);
+    active_reads(&media, 2).await;
+    assert!(matches!(invoke(&reference).await, Err(ApiError::Capacity)));
+    drop(first);
+    active_reads(&media, 1).await;
+    let replacement = invoke(&reference);
+    active_reads(&media, 2).await;
+    media.release.add_permits(2);
+    let (ApiOutput::Reply(first), ApiOutput::Reply(second)) =
+        (second.await.unwrap(), replacement.await.unwrap())
+    else {
+        panic!("finite read replies")
+    };
+    assert_eq!(first.binary.as_ref().unwrap().len() as u64, reference.bytes);
+    // Replies retain wire allocations, but no longer consume provider scratch.
+    let third = invoke(&reference);
+    let fourth = invoke(&reference);
+    active_reads(&media, 2).await;
+    drop(third);
+    drop(fourth);
+    active_reads(&media, 0).await;
+    let mut wrong = reference.clone();
+    wrong.bytes = 1;
+    let corrupt = invoke(&wrong);
+    active_reads(&media, 1).await;
+    media.release.add_permits(1);
+    assert!(matches!(corrupt.await, Err(ApiError::Domain(_))));
+    assert_eq!(
+        second.binary.as_ref().unwrap().len() as u64,
+        reference.bytes
+    );
+    drop(first);
+    drop(second);
+    assert!(runtime.shutdown().await.is_clean());
+    assert!(server.shutdown().await.is_clean());
+}
+
 #[tokio::test]
 async fn real_cas_and_independent_plugins_preserve_publication_retention_and_restart() {
     let temporary = tempfile::tempdir().unwrap();
@@ -241,7 +352,7 @@ async fn real_cas_and_independent_plugins_preserve_publication_retention_and_res
     ));
     assert!(client.shutdown().await.is_clean());
     assert!(server.shutdown().await.is_clean());
-    assert!(dispatch.operations().unwrap().is_empty());
+    assert!(matches!(dispatch.operations(), Err(ApiError::ShuttingDown)));
     let reopened = self::server(temporary.path()).await;
     let media = reopened.root().lookup_local::<MediaContract>().unwrap();
     assert_eq!(media.read(&reference).await.unwrap().reference, reference);
