@@ -1,5 +1,14 @@
 # rsi-workspace-protocol
 
+Registrations may carry a custom display name and their registration time in
+Unix milliseconds. Absent metadata means the path supplies the name and the
+creation time is unknown; readers never synthesize a historical timestamp.
+Names are trimmed, nonempty UTF-8 strings of at most 256 bytes without control
+characters. Rename replaces only the display name, retaining identity,
+coordinates, creation time and insertion order. New native registrations record
+their creation time. Rename and deletion require the same location admission as
+registration and retain admitted commits through durable publication.
+
 Registrations carry mandatory validated execution coordinates. Their identity
 includes the owning machine and canonical path; decoding and validation never
 probe the receiving client's filesystem. A path alone cannot identify an SSH

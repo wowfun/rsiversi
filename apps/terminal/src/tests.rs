@@ -1447,6 +1447,13 @@ impl rsi_ai_protocol::LanguageModels for UnknownThenAcceptedHandle {
 pub(crate) struct UnusedWorkspace;
 #[async_trait::async_trait]
 impl rsi_workspace_protocol::WorkspaceRegistry for UnusedWorkspace {
+    async fn rename(
+        &self,
+        _id: &rsi_workspace_protocol::WorkspaceId,
+        _name: rsi_workspace_protocol::WorkspaceName,
+    ) -> rsi_workspace_protocol::Result<rsi_workspace_protocol::WorkspaceRecord> {
+        unreachable!("rename is not used by this fixture")
+    }
     async fn order_seed(
         &self,
     ) -> rsi_workspace_protocol::Result<rsi_workspace_protocol::WorkspaceOrderSeed> {

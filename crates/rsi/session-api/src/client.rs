@@ -355,6 +355,8 @@ impl SessionService for SessionClient {
         }
         let header = created.draft.header;
         let workspace = rsi_workspace_protocol::WorkspaceRecord {
+            name: None,
+            created_at_ms: None,
             id: request.workspace_id,
             coordinates: header.coordinates().clone(),
         };

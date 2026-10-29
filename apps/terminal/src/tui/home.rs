@@ -371,6 +371,13 @@ mod tests {
     struct Workspace;
     #[async_trait::async_trait]
     impl rsi_workspace_protocol::WorkspaceRegistry for Workspace {
+        async fn rename(
+            &self,
+            _id: &rsi_workspace_protocol::WorkspaceId,
+            _name: rsi_workspace_protocol::WorkspaceName,
+        ) -> rsi_workspace_protocol::Result<rsi_workspace_protocol::WorkspaceRecord> {
+            unreachable!("rename is not used by this fixture")
+        }
         async fn order_seed(
             &self,
         ) -> rsi_workspace_protocol::Result<rsi_workspace_protocol::WorkspaceOrderSeed> {
@@ -382,6 +389,8 @@ mod tests {
             path: &std::path::Path,
         ) -> rsi_workspace_protocol::Result<rsi_workspace_protocol::WorkspaceRecord> {
             Ok(rsi_workspace_protocol::WorkspaceRecord {
+                name: None,
+                created_at_ms: None,
                 id: rsi_workspace_protocol::WorkspaceId::parse("a".repeat(64)).unwrap(),
                 coordinates: rsi_workspace_protocol::ExecutionCoordinates::new(
                     rsi_workspace_protocol::ExecutionLocation::Local,

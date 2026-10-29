@@ -22,6 +22,30 @@ struct Provider {
 }
 #[async_trait]
 impl WorkspaceRegistry for Provider {
+    async fn rename(&self, id: &WorkspaceId, name: WorkspaceName) -> Result<WorkspaceRecord> {
+        self.writes.fetch_add(1, Ordering::SeqCst);
+        if self.bad_record {
+            let coordinates = ExecutionCoordinates::new(
+                ExecutionLocation::Local,
+                if cfg!(windows) {
+                    "C:/project"
+                } else {
+                    "/project"
+                },
+            )
+            .unwrap();
+            Ok(WorkspaceRecord {
+                id: id.clone(),
+                coordinates,
+                name: Some(name),
+                created_at_ms: None,
+            })
+        } else {
+            Err(WorkspaceError::Storage(
+                "rename reply was lost after write".into(),
+            ))
+        }
+    }
     async fn order_seed(
         &self,
     ) -> rsi_workspace_protocol::Result<rsi_workspace_protocol::WorkspaceOrderSeed> {
@@ -47,6 +71,8 @@ impl WorkspaceRegistry for Provider {
         self.writes.fetch_add(1, Ordering::SeqCst);
         if self.bad_record {
             Ok(WorkspaceRecord {
+                name: None,
+                created_at_ms: None,
                 id: WorkspaceId::parse("0".repeat(64)).unwrap(),
                 coordinates: rsi_workspace_protocol::ExecutionCoordinates::new(
                     rsi_workspace_protocol::ExecutionLocation::Local,
@@ -134,6 +160,13 @@ async fn commit_result_loss_and_invalid_registration_reply_stay_unknown_without_
             Err(WorkspaceError::Api(ApiError::OutcomeUnknown))
         ));
         assert_eq!(provider.writes.load(Ordering::SeqCst), 2);
+        assert!(matches!(
+            client
+                .rename(&id, WorkspaceName::parse("Renamed").unwrap())
+                .await,
+            Err(WorkspaceError::Api(ApiError::OutcomeUnknown))
+        ));
+        assert_eq!(provider.writes.load(Ordering::SeqCst), 3);
         endpoint.close().await;
         registry.close().await;
     }

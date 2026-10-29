@@ -1,4 +1,4 @@
-use crate::wire::{Failure, IdRequest, ListRequest, Operation, RegisterRequest};
+use crate::wire::{Failure, IdRequest, ListRequest, Operation, RegisterRequest, RenameRequest};
 use async_trait::async_trait;
 use rsi_api_protocol::{ApiClient, ApiClientContract, ApiError, call_json};
 use rsi_meta::{ActivationPlan, ConfigValue, PluginFactory, PreparedActivation};
@@ -88,6 +88,22 @@ impl WorkspaceRegistry for WorkspaceClient {
     async fn status(&self, id: &WorkspaceId) -> Result<WorkspaceStatus> {
         self.call(Operation::Status, &IdRequest { id: id.clone() })
             .await
+    }
+    async fn rename(
+        &self,
+        id: &WorkspaceId,
+        name: rsi_workspace_protocol::WorkspaceName,
+    ) -> Result<WorkspaceRecord> {
+        let request = RenameRequest {
+            id: id.clone(),
+            name,
+        };
+        let record: WorkspaceRecord = self.call(Operation::Rename, &request).await?;
+        record.validate().map_err(crate::wire::invalid_record)?;
+        if record.id != *id || record.name.as_ref() != Some(&request.name) {
+            return Err(WorkspaceError::Api(ApiError::OutcomeUnknown));
+        }
+        Ok(record)
     }
     async fn delete_registration(&self, id: &WorkspaceId) -> Result<bool> {
         self.call(Operation::Delete, &IdRequest { id: id.clone() })

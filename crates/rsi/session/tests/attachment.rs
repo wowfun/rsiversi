@@ -329,6 +329,13 @@ struct UnavailableWorkspace;
 
 #[async_trait]
 impl WorkspaceRegistry for UnavailableWorkspace {
+    async fn rename(
+        &self,
+        _id: &rsi_workspace_protocol::WorkspaceId,
+        _name: rsi_workspace_protocol::WorkspaceName,
+    ) -> rsi_workspace_protocol::Result<rsi_workspace_protocol::WorkspaceRecord> {
+        unreachable!("rename is not used by this fixture")
+    }
     async fn order_seed(
         &self,
     ) -> rsi_workspace_protocol::Result<rsi_workspace_protocol::WorkspaceOrderSeed> {
@@ -370,6 +377,13 @@ struct RejectingWorkspace {
 
 #[async_trait]
 impl WorkspaceRegistry for RejectingWorkspace {
+    async fn rename(
+        &self,
+        _id: &rsi_workspace_protocol::WorkspaceId,
+        _name: rsi_workspace_protocol::WorkspaceName,
+    ) -> rsi_workspace_protocol::Result<rsi_workspace_protocol::WorkspaceRecord> {
+        unreachable!("rename is not used by this fixture")
+    }
     async fn order_seed(
         &self,
     ) -> rsi_workspace_protocol::Result<rsi_workspace_protocol::WorkspaceOrderSeed> {
@@ -784,6 +798,13 @@ fn workspace_id() -> WorkspaceId {
 
 #[async_trait]
 impl WorkspaceRegistry for AvailableWorkspace {
+    async fn rename(
+        &self,
+        _id: &rsi_workspace_protocol::WorkspaceId,
+        _name: rsi_workspace_protocol::WorkspaceName,
+    ) -> rsi_workspace_protocol::Result<rsi_workspace_protocol::WorkspaceRecord> {
+        unreachable!("rename is not used by this fixture")
+    }
     async fn order_seed(
         &self,
     ) -> rsi_workspace_protocol::Result<rsi_workspace_protocol::WorkspaceOrderSeed> {
@@ -795,6 +816,8 @@ impl WorkspaceRegistry for AvailableWorkspace {
             return Err(rsi_workspace_protocol::WorkspaceError::Unknown(id.clone()));
         }
         Ok(WorkspaceRecord {
+            name: None,
+            created_at_ms: None,
             id: id.clone(),
             coordinates: rsi_workspace_protocol::ExecutionCoordinates::new(
                 rsi_workspace_protocol::ExecutionLocation::Local,
@@ -820,6 +843,8 @@ impl WorkspaceRegistry for AvailableWorkspace {
         path: &Path,
     ) -> rsi_workspace_protocol::Result<WorkspaceRecord> {
         Ok(WorkspaceRecord {
+            name: None,
+            created_at_ms: None,
             id: WorkspaceId::parse("a".repeat(64)).unwrap(),
             coordinates: rsi_workspace_protocol::ExecutionCoordinates::new(
                 rsi_workspace_protocol::ExecutionLocation::Local,

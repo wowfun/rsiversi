@@ -356,6 +356,10 @@ impl rsi_storage_domain::DomainFacility for FaultFacility {
     }
 }
 #[tokio::test]
+#[expect(
+    clippy::too_many_lines,
+    reason = "one fault-injected registration and recovery lifecycle"
+)]
 async fn failed_registration_leaves_a_reserved_gap_and_invalid_allocation_is_rejected() {
     let temporary = tempfile::tempdir().unwrap();
     for name in ["failed", "kept"] {
@@ -411,10 +415,44 @@ async fn failed_registration_leaves_a_reserved_gap_and_invalid_allocation_is_rej
         domain.values.lock().await["allocation"],
         json!({"high_water":1})
     );
-    let kept = registry
+    let original = registry
         .get_or_create(&temporary.path().join("kept"))
         .await
         .unwrap();
+    assert!(original.created_at_ms.is_some());
+    let kept = registry
+        .rename(
+            &original.id,
+            rsi_workspace_protocol::WorkspaceName::parse("Renamed project").unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(kept.coordinates, original.coordinates);
+    assert_eq!(kept.created_at_ms, original.created_at_ms);
+    assert_eq!(
+        registry
+            .get_or_create(&temporary.path().join("kept"))
+            .await
+            .unwrap(),
+        kept
+    );
+    assert_eq!(
+        domain.values.lock().await[kept.id.as_str()]["record"]["name"],
+        "Renamed project"
+    );
+    domain
+        .fail_registration
+        .store(true, std::sync::atomic::Ordering::SeqCst);
+    assert!(
+        registry
+            .rename(
+                &kept.id,
+                rsi_workspace_protocol::WorkspaceName::parse("Failed rename").unwrap()
+            )
+            .await
+            .is_err()
+    );
+    assert_eq!(registry.get(&kept.id).await.unwrap(), kept);
     assert_eq!(
         registry
             .list(
@@ -429,6 +467,33 @@ async fn failed_registration_leaves_a_reserved_gap_and_invalid_allocation_is_rej
     assert_storage_errors(registry.as_ref(), &domain, temporary.path(), &kept).await;
     drop(registry);
     assert!(fiber.dispose().await.is_clean());
+    let restored = runtime
+        .root()
+        .apply(
+            linked("workspace", Arc::new(WorkspaceFactory)),
+            json!({"backend":"test"}),
+        )
+        .await
+        .unwrap();
+    let registry = runtime
+        .root()
+        .lookup_local::<WorkspaceRegistryContract>()
+        .unwrap();
+    assert_eq!(registry.get(&kept.id).await.unwrap(), kept);
+    fs::write(temporary.path().join("kept/keep.txt"), b"keep").unwrap();
+    assert!(registry.delete_registration(&kept.id).await.unwrap());
+    assert_eq!(
+        fs::read(temporary.path().join("kept/keep.txt")).unwrap(),
+        b"keep"
+    );
+    assert!(registry.get(&kept.id).await.is_err());
+    drop(registry);
+    assert!(restored.dispose().await.is_clean());
+    domain
+        .values
+        .lock()
+        .await
+        .insert(kept.id.to_string(), json!({"order":2,"record":kept}));
     assert_invalid_allocation(&runtime, &domain).await;
     assert_exhaustion_and_divergence(&runtime, &domain, temporary.path(), &kept).await;
     assert!(runtime.shutdown().await.is_clean());
