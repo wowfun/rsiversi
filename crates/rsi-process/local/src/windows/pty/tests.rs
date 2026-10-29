@@ -94,11 +94,35 @@ async fn prompt(pty: &ManagedPtyProcess) {
         }
     })
     .await;
+    eprintln!("PowerShell startup: {:?}", String::from_utf8_lossy(&bytes));
     assert!(
         result.is_ok(),
         "PowerShell prompt over ConPTY: {:?}",
         String::from_utf8_lossy(&bytes)
     );
+}
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn conpty_input_reaches_native_console_key_events() {
+    let directory = tempfile::tempdir().unwrap();
+    let service = Service::new(crate::ProcessLocalConfig::default());
+    let mut plan = spec(directory.path());
+    plan.process.arguments = [
+        "-NoLogo",
+        "-NoProfile",
+        "-Command",
+        "$keys=@(1..3|ForEach-Object{$k=[Console]::ReadKey($true);@{character=[int]$k.KeyChar;key=[int]$k.Key;modifiers=[int]$k.Modifiers}});[IO.File]::WriteAllText((Join-Path $pwd 'keys.json'),($keys|ConvertTo-Json))",
+    ].map(Into::into).into();
+    let pty = service.spawn_pty(plan).await.unwrap();
+    write(&pty, "a中\r").await;
+    let value: serde_json::Value =
+        serde_json::from_str(&receipt(&directory.path().join("keys.json"), &pty).await).unwrap();
+    assert_eq!(value[0]["character"], 97, "{value}");
+    assert_eq!(value[1]["character"], u32::from('中'), "{value}");
+    assert_eq!(value[2]["character"], 13, "{value}");
+    assert_eq!(value[2]["key"], 13, "{value}");
+    assert_eq!(value[2]["modifiers"], 0, "{value}");
+    pty.wait().await.unwrap();
+    service.shutdown().await.unwrap();
 }
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn conpty_interactive_unicode_resize_and_exit_preserve_exact_plan() {

@@ -1001,6 +1001,20 @@ jobs:
         timeout-minutes: 5
         with:
           workspaces: . -> target
+      - name: Test native Windows Process behavior
+        if: ${{ !cancelled() && steps.native_toolchain.outcome == 'success' }}
+        timeout-minutes: 20
+        shell: pwsh
+        run: |
+          cargo test --locked -p rsi-process-local --all-targets --no-fail-fast
+          $nativeResult = $LASTEXITCODE
+          if ($nativeResult -ne 0) {
+            cargo test --locked -p rsi-process-local --lib --no-run --message-format=json > "$env:RUNNER_TEMP/rsi-process-diagnostic.jsonl"
+            if ($LASTEXITCODE -eq 0) {
+              & .github/scripts/windows-native-tests.ps1 -Manifest "$env:RUNNER_TEMP/rsi-process-diagnostic.jsonl" -TimeoutSeconds 120
+            }
+          }
+          exit $nativeResult
       - name: Compile every Windows workspace target
         if: ${{ !cancelled() && steps.native_toolchain.outcome == 'success' }}
         timeout-minutes: 50
@@ -1013,10 +1027,10 @@ jobs:
         if: ${{ !cancelled() && steps.native_toolchain.outcome == 'success' }}
         timeout-minutes: 10
         run: cargo test --locked -p rsi-files-native-fs --all-targets
-      - name: Test native Windows Process, Files, Credentials and ACP behavior
+      - name: Test native Windows Sandbox, Files, Credentials and ACP behavior
         if: ${{ !cancelled() && steps.native_toolchain.outcome == 'success' }}
         timeout-minutes: 20
-        run: cargo test --locked -p rsi-process-local -p rsi-sandbox-local -p rsi-files -p rsi-credentials-local -p rsi-acp-application --all-targets --no-fail-fast
+        run: cargo test --locked -p rsi-sandbox-local -p rsi-files -p rsi-credentials-local -p rsi-acp-application --all-targets --no-fail-fast
       - name: Test native Windows process identity guards
         if: ${{ !cancelled() && steps.native_toolchain.outcome == 'success' }}
         timeout-minutes: 5
