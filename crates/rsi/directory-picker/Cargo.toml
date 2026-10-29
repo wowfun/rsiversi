@@ -20,7 +20,7 @@ rsi-configuration-access = { path = "../configuration-access" }
 tokio = { workspace = true, features = ["sync", "time", "rt"] }
 tokio-util.workspace = true
 
-[target.'cfg(unix)'.dependencies]
+[target.'cfg(any(unix, windows))'.dependencies]
 rsi-files-native-fs = { path = "../../rsi-files/native-fs" }
 
 [dev-dependencies]

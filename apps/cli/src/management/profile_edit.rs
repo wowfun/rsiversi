@@ -35,7 +35,8 @@ async fn edit(command: &ProfileCommand) -> rsi::Result<Value> {
     let coding = None;
     let composition =
         StandardComposition::new(paths, BTreeMap::new(), coding, rsi_app_catalog::metadata())
-            .with_user_home(rsi::capture_standard_home()?)?;
+            .with_user_home(rsi::capture_standard_home()?)?
+            .with_documents_directory(rsi::capture_standard_documents()?)?;
     let presets = AgentPresetManager::open_standard_preview(&composition).await?;
     let result = (|| {
         let composition = composition.with_agent_presets(&presets)?;

@@ -19,6 +19,7 @@ rsi-acp-api = { path = "../../rsi-acp/api" }
 rsi-media-api = { path = "../../rsi-media/api" }
 rsi-automation-api = { path = "../automation-api" }
 rsi-directory-picker-api = { path = "../directory-picker-api" }
+rsi-workspace-default-api = { path = "../workspace-default-api" }
 async-stream.workspace = true
 rsi-history-api = { path = "../history-api" }
 rsi-navigation-api = { path = "../navigation-api" }
@@ -63,6 +64,7 @@ tokio = { workspace = true, features = ["sync", "macros"] }
 tokio-util.workspace = true
 
 [dev-dependencies]
+rsi-configuration-api = { path = "../configuration-api" }
 base64.workspace = true
 rsi-goal = { path = "../goal" }
 rsi-agent-goal = { path = "../../rsi-agent/goal" }

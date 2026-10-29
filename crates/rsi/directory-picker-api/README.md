@@ -17,6 +17,10 @@ marked so display filtering does not imply an exhaustive visible directory.
 Each entry has a physical absolute target path, name and symlink/hidden flags.
 Broken/cyclic links and nondirectories are not selectable. A user may enter a
 deeper path directly when a list is truncated.
+Paths may use Unix roots or Windows local drive roots. Windows physical replies
+use `C:/` roots and forward slashes; breadcrumbs exclude the root. Validation is
+independent of the client platform. UNC and device namespaces are outside this
+contract. The native owner also validates its platform grammar and filesystem.
 
 Create accepts a parent and a single nonempty name fragment (at most 255 bytes),
 rejecting separators, NUL, dot and dot-dot, and rejects existing targets. It neither
@@ -24,6 +28,6 @@ recursively creates parents nor overwrites. The result is a physical directory
 path suitable for Workspace registration. Unknown creation outcomes require
 explicit readback and must not be retried automatically.
 
-Non-Unix Hosts expose Unsupported through the same capability, allowing manual
+Hosts outside Unix and Windows expose Unsupported through the same capability, allowing manual
 path registration without failing required client activation. Clients validate
 closed replies, input/output bounds and request identity before presentation.

@@ -4729,6 +4729,7 @@ dependencies = [
  "rsi-user-questions-protocol",
  "rsi-workspace",
  "rsi-workspace-api",
+ "rsi-workspace-default-api",
  "rsi-workspace-protocol",
  "rsi-workspace-review",
  "rsi-workspace-review-api",
@@ -6229,6 +6230,7 @@ dependencies = [
  "rsi-settings-api",
  "rsi-settings-protocol",
  "rsi-workspace-api",
+ "rsi-workspace-default-api",
  "rsi-workspace-protocol",
  "serde_json",
 ]
@@ -6609,6 +6611,7 @@ dependencies = [
  "rsi-client",
  "rsi-client-composition",
  "rsi-client-preferences",
+ "rsi-configuration-api",
  "rsi-conversation",
  "rsi-directory-picker-api",
  "rsi-files-protocol",
@@ -6636,6 +6639,7 @@ dependencies = [
  "rsi-user-questions-protocol",
  "rsi-workbench-ui",
  "rsi-workspace-api",
+ "rsi-workspace-default-api",
  "rsi-workspace-protocol",
  "serde",
  "serde_json",
@@ -6856,6 +6860,7 @@ version = "0.0.1"
 dependencies = [
  "async-trait",
  "futures-util",
+ "http",
  "rsi-ai-deepseek",
  "rsi-ai-openai",
  "rsi-ai-openai-compatible",
@@ -8323,6 +8328,7 @@ dependencies = [
  "async-trait",
  "futures-util",
  "rsi-agent-session-protocol",
+ "rsi-ai-models-api",
  "rsi-ai-protocol",
  "rsi-api-protocol",
  "rsi-configuration-api",
@@ -8386,6 +8392,19 @@ dependencies = [
  "tempfile",
  "tokio",
  "tokio-util",
+]
+
+[[package]]
+name = "rsi-workspace-default-api"
+version = "0.0.1"
+dependencies = [
+ "async-trait",
+ "rsi-api-contract-build",
+ "rsi-api-protocol",
+ "rsi-meta",
+ "rsi-workspace-protocol",
+ "serde",
+ "tokio",
 ]
 
 [[package]]

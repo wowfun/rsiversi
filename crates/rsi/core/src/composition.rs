@@ -169,6 +169,7 @@ pub struct StandardComposition {
     applications: crate::ApplicationCatalogMetadata,
     paths: HostPaths,
     user_home: Option<PathBuf>,
+    documents_directory: Option<PathBuf>,
     captured_environment: BTreeMap<String, SecretValue>,
     credential_store: Arc<dyn SecretStore>,
     pub(crate) agent_store_factory: rsi_agent_store_sqlite::SqliteStoreFactory,
@@ -946,6 +947,7 @@ impl StandardComposition {
             )),
             agent_store_factory: rsi_agent_store_sqlite::SqliteStoreFactory::default(),
             user_home: None,
+            documents_directory: None,
             paths,
             captured_environment,
             coding_tools,
@@ -990,6 +992,21 @@ impl StandardComposition {
     /// Frozen application metadata supplied by the executable's catalog owner.
     pub const fn application_metadata(&self) -> &crate::ApplicationCatalogMetadata {
         &self.applications
+    }
+
+    /// Supplies the captured Documents directory for model-free first-use initialization.
+    pub fn with_documents_directory(mut self, directory: Option<PathBuf>) -> crate::Result<Self> {
+        let directory = directory
+            .map(|path| {
+                rsi_workspace_protocol::validate_workspace_path(&path)
+                    .map_err(|error| crate::RsiError::Boot(error.to_string()))?;
+                rsi_files_native_fs::resolve_absolute_root_alias(&path, true).map_err(|error| {
+                    crate::RsiError::Boot(format!("Invalid Documents path: {error}"))
+                })
+            })
+            .transpose()?;
+        self.documents_directory = directory;
+        Ok(self)
     }
 
     /// Supplies the launcher's captured home for the optional personal skill root.
@@ -1453,7 +1470,11 @@ impl StandardComposition {
                 ProfileEntry::new("rsi-session", SESSION_FACTORY, Value::Null),
             ],
         ))?;
-        crate::api_composition::register(&mut builder, self.user_home.clone())?;
+        crate::api_composition::register(
+            &mut builder,
+            self.user_home.clone(),
+            self.documents_directory.clone(),
+        )?;
         #[cfg(target_os = "linux")]
         {
             builder.register_local_contract::<rsi_automation::AutomationContract>()?;

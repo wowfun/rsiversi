@@ -1,0 +1,23 @@
+[package]
+name = "rsi-workspace-default-api"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+publish = false
+
+[dependencies]
+async-trait.workspace = true
+rsi-meta = { path = "../../rsi-meta/core" }
+rsi-api-protocol = { path = "../../rsi-api/protocol" }
+rsi-workspace-protocol = { path = "../../rsi-workspace/protocol" }
+serde.workspace = true
+
+[build-dependencies]
+rsi-api-contract-build = { path = "../../rsi-api/contract-build" }
+
+[dev-dependencies]
+tokio = { workspace = true, features = ["macros", "rt"] }
+
+[lints]
+workspace = true

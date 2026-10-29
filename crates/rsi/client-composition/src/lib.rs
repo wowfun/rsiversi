@@ -21,7 +21,12 @@ pub fn domain_clients(platform: &str) -> rsi_host::Result<(HostBuilder, Vec<Prof
     builder.register_local_contract::<rsi_media_protocol::MediaContract>()?;
     builder.register_local_contract::<rsi_media_protocol::MediaReadContract>()?;
     builder.register_local_contract::<rsi_directory_picker_api::ClientContract>()?;
-    let factories: [(&str, Arc<dyn PluginFactory>); 9] = [
+    builder.register_local_contract::<rsi_workspace_default_api::ClientContract>()?;
+    let factories: [(&str, Arc<dyn PluginFactory>); 10] = [
+        (
+            "rsi.workspace-default.client",
+            Arc::new(rsi_workspace_default_api::ClientFactory),
+        ),
         (
             "rsi.directory-picker.client",
             Arc::new(rsi_directory_picker_api::ClientFactory),

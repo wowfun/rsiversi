@@ -98,7 +98,7 @@ impl ProvidersOperation {
                     Self::Read => "read",
                     Self::Replace => "replace",
                 },
-                1,
+                if matches!(self, Self::Discover) { 2 } else { 1 },
             )
             .expect("static operation"),
             access: OperationAccess::Authenticated,

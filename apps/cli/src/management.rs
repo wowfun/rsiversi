@@ -226,7 +226,8 @@ pub(super) async fn run_host_profile_preview(command: &ProfileCommand) -> u8 {
     let coding = None;
     let composition = match rsi::capture_standard_home().and_then(|home| {
         StandardComposition::new(paths, BTreeMap::new(), coding, rsi_app_catalog::metadata())
-            .with_user_home(home)
+            .with_user_home(home)?
+            .with_documents_directory(rsi::capture_standard_documents()?)
     }) {
         Ok(composition) => composition,
         Err(error) => return report_error(&error),
@@ -403,7 +404,8 @@ pub(super) async fn run_agent_preset(command: AgentPresetCommand) -> u8 {
     let coding = None;
     let composition = match rsi::capture_standard_home().and_then(|home| {
         StandardComposition::new(paths, BTreeMap::new(), coding, rsi_app_catalog::metadata())
-            .with_user_home(home)
+            .with_user_home(home)?
+            .with_documents_directory(rsi::capture_standard_documents()?)
     }) {
         Ok(composition) => composition,
         Err(error) => return report_error(&error),

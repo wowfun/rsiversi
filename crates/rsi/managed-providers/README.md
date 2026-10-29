@@ -11,6 +11,10 @@ resolves the secret at the Host and performs one cancellable HTTP GET with redir
 disabled and a 30-second whole-operation deadline. Concrete providers own URL
 and response translation; candidates are bounded to 4,096 within 4 MiB.
 Discovery returns no raw response body or secret and changes no durable state.
+An explicit discovery input may carry a transient API key instead of resolving
+the saved reference. It retains the same configuration authority, destination
+policy, bounds and cancellation; it is never persisted or included in the
+returned request identity or presentation snapshots.
 Its configuration lease lasts until the request completes or is cancelled.
 The lease shares one of eight configuration slots and a revocation drain fence;
 it is not an exclusive writer lock. Discovery can occupy at most two slots.

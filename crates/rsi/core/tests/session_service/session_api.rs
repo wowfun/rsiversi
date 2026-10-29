@@ -12,6 +12,7 @@ use rsi_credentials_protocol::{CredentialRef, SecretValue};
 use rsi_meta::{
     ActivationPlan, PluginFactory, PreparedActivation, ResolvedFactory, Runtime, UpdateMode,
 };
+use rsi_session_api::Operation;
 use rsi_session_protocol::{CreateSession, SessionContract, SessionIngressContract};
 use serde_json::{Value, json};
 use std::{sync::Arc, time::Duration};
@@ -323,7 +324,14 @@ async fn target_grants(api: Arc<HttpClient>, session_id: &SessionId) {
         api,
         session_id.clone(),
     ));
-    assert_eq!(grant.operations().len(), 39);
+    let catalog = grant.operations().await.unwrap();
+    let granted = grant.allowed_keys();
+    assert_eq!(catalog.operations().len(), granted.len());
+    assert!(catalog.contains_all(&granted));
+    assert!(catalog.contains_all(&[Operation::ReleaseReference.spec().key()]));
+    for excluded in [Operation::Create, Operation::Purge, Operation::CasGc] {
+        assert!(!catalog.contains_all(&[excluded.spec().key()]));
+    }
     let handle = rsi_session_api::SessionClient::attach_target(grant.clone(), session_id)
         .await
         .unwrap();
@@ -466,7 +474,8 @@ async fn lost_submission(api: Arc<HttpClient>, session: &SessionId) {
     );
 }
 async fn reject_untrusted_origin(api: &dyn ApiClient, create: &CreateSession) {
-    let operation = api
+    let catalog = api.operations().await.unwrap();
+    let operation = catalog
         .operations()
         .iter()
         .find(|op| op.id.domain() == "session" && op.id.name() == "create")

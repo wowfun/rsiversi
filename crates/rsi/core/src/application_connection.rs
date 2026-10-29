@@ -249,6 +249,7 @@ pub fn standard_application_host(
 pub const BASE_APPLICATION_PLUGINS: &[&str] = &[
     CONNECTION,
     "rsi.directory-picker.client",
+    "rsi.workspace-default.client",
     "rsi.credentials.local",
     "rsi.application.http",
     #[cfg(any(target_os = "linux", windows))]
@@ -271,6 +272,10 @@ pub fn base_application_catalog(
     register_contracts(&mut builder)?;
     for (id, factory) in [
         (CONNECTION, connection.clone() as Arc<dyn PluginFactory>),
+        (
+            "rsi.workspace-default.client",
+            Arc::new(rsi_workspace_default_api::ClientFactory),
+        ),
         (
             "rsi.directory-picker.client",
             Arc::new(rsi_directory_picker_api::ClientFactory),
@@ -320,6 +325,9 @@ fn boot(error: impl std::fmt::Display) -> RsiError {
 
 fn register_contracts(builder: &mut crate::StandardAddonBuilder) -> crate::Result<()> {
     let scope = crate::AddonScope::Application;
+    builder
+        .register_local_contract_at::<rsi_workspace_default_api::ClientContract>(scope)
+        .map_err(boot)?;
     builder
         .register_local_contract_at::<rsi_directory_picker_api::ClientContract>(scope)
         .map_err(boot)?;

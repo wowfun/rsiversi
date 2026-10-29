@@ -22,6 +22,7 @@ pub fn product_protocols() -> Vec<rsi_api_protocol::ProtocolDescriptor> {
         rsi_automation_api::protocol_descriptor(),
         rsi_configuration_api::protocol_descriptor(),
         rsi_directory_picker_api::protocol_descriptor(),
+        rsi_workspace_default_api::protocol_descriptor(),
         rsi_history_api::protocol_descriptor(),
         rsi_inspector::protocol_descriptor(),
         rsi_media_api::protocol_descriptor(),

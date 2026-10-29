@@ -985,7 +985,7 @@ async fn discovery_is_authorized_bounded_and_does_not_publish_routes() {
             .authenticate(&device.token)
             .unwrap(),
     );
-    let request = json!({"provider":"deepseek","endpoint":endpoint,"slot":"discovery"});
+    let request = json!({"request":{"provider":"deepseek","endpoint":endpoint,"slot":"discovery"},"secret":null});
     assert!(matches!(
         wire(
             &running,
@@ -997,7 +997,7 @@ async fn discovery_is_authorized_bounded_and_does_not_publish_routes() {
         Err(ApiError::Unauthorized)
     ));
     let mut malformed = request.clone();
-    malformed["endpoint"] = json!("invalid-url");
+    malformed["request"]["endpoint"] = json!("invalid-url");
     assert!(matches!(
         wire(
             &running,
@@ -1027,11 +1027,24 @@ async fn discovery_is_authorized_bounded_and_does_not_publish_routes() {
     assert_eq!(result["models"][0]["id"], "candidate-only");
     assert_eq!(result["models"][0]["context_window_tokens"], Value::Null);
     assert!(!result.to_string().contains("discovery-private-secret"));
+    let transient = wire(&running, CallOrigin::Local, ProvidersOperation::Discover.spec(),
+        json!({"request":{"provider":"deepseek","endpoint":endpoint,"slot":"never-saved"},"secret":"discovery-private-secret"})).await.unwrap();
+    assert_eq!(transient["models"][0]["id"], "candidate-only");
+    assert!(!transient.to_string().contains("discovery-private-secret"));
+    let status = wire(
+        &running,
+        CallOrigin::Local,
+        CredentialOperation::Status.spec(),
+        json!({"provider":"deepseek","slot":"never-saved"}),
+    )
+    .await
+    .unwrap();
+    assert_ne!(status["availability"]["kind"], "available");
     let equal = wire(
         &running,
         CallOrigin::Local,
         ProvidersOperation::Discover.spec(),
-        json!({"provider":"deepseek", "endpoint":format!("{endpoint}/equal"), "slot":"discovery"}),
+        json!({"request":{"provider":"deepseek", "endpoint":format!("{endpoint}/equal"), "slot":"discovery"},"secret":null}),
     )
     .await
     .unwrap();
@@ -1047,7 +1060,7 @@ async fn discovery_is_authorized_bounded_and_does_not_publish_routes() {
         .await
         .unwrap();
         for suffix in ["", "/", "/v1", "/v1/"] {
-            let discovered = wire(&running, CallOrigin::Local, ProvidersOperation::Discover.spec(), json!({"provider":provider,"endpoint":format!("{endpoint}{suffix}"),"slot":"discovery"})).await.unwrap();
+            let discovered = wire(&running, CallOrigin::Local, ProvidersOperation::Discover.spec(), json!({"request":{"provider":provider,"endpoint":format!("{endpoint}{suffix}"),"slot":"discovery"},"secret":null})).await.unwrap();
             assert_eq!(
                 discovered["models"][0]["id"], "candidate-only",
                 "{provider} {suffix}"
@@ -1085,7 +1098,7 @@ async fn discovery_is_authorized_bounded_and_does_not_publish_routes() {
         "rate-limited",
     ] {
         let mut request = request.clone();
-        request["endpoint"] = json!(format!("{endpoint}/{path}"));
+        request["request"]["endpoint"] = json!(format!("{endpoint}/{path}"));
         let error = wire(
             &running,
             CallOrigin::Local,
@@ -1104,7 +1117,7 @@ async fn discovery_is_authorized_bounded_and_does_not_publish_routes() {
         assert!(!error.to_string().contains("private-upstream-diagnostic"));
     }
     let mut expanded = request;
-    expanded["endpoint"] = json!(format!("{endpoint}/expanded"));
+    expanded["request"]["endpoint"] = json!(format!("{endpoint}/expanded"));
     assert_eq!(
         wire(
             &running,
@@ -1262,7 +1275,7 @@ async fn host_shutdown_cancels_discovery_before_draining_configuration_leases() 
         &running,
         CallOrigin::Local,
         ProvidersOperation::Discover.spec(),
-        json!({"provider":"deepseek","endpoint":endpoint,"slot":"discovery"}),
+        json!({"request":{"provider":"deepseek","endpoint":endpoint,"slot":"discovery"},"secret":null}),
     ));
     tokio::time::timeout(std::time::Duration::from_secs(5), async {
         tokio::select! {

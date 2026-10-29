@@ -90,6 +90,11 @@ most 30 seconds. An enabled target without an observed instance is still pending
 only a target that is absent from a completed Profile may skip the wait. A failed
 or timed-out owner activation closes that Host and reports a boot failure; failed
 provider convergence remains a repairable management diagnostic.
+Startup failures retain a bounded, redacted Profile observation before shutdown:
+the Profile health, non-active instance identities and dependency states, and
+required owners that have not been observed. They do not print plugin configuration
+or raw activation errors. Shutdown must not replace this evidence with disposed
+states.
 The ordinary [navigation owner](../navigation/README.md) stores title/archive
 metadata in backend `base` and serves authenticated bounded Session queries.
 
@@ -882,3 +887,9 @@ an embedded Host cannot start the owner, listener or browser. Configure the
 absolute private directory and pinned runtime, enable the existing leaf, then
 start the selected Host daemon. [Automation](../automation/README.md) owns rules,
 grants, intake diagnostics and manual redelivery.
+
+The standard CLI captures the OS Documents directory before composition and
+supplies the product-owned [default workspace policy](../workspace-default-api/README.md).
+Library compositions provide this directory explicitly; they never infer a
+workspace from process CWD. The generic Workspace registry retains its own
+registration and filesystem admission rules.

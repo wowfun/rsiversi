@@ -256,6 +256,7 @@ async fn prepare_standard_composition(
         rsi_app_catalog::metadata(),
     )
     .with_user_home(rsi::capture_standard_home()?)?
+    .with_documents_directory(rsi::capture_standard_documents()?)?
     .with_watch_policy(rsi_meta_profile::SourceWatchPolicy::leased())
     .with_addons(listener_addons);
     let presets = if let Some(parent) = parent {

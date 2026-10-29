@@ -50,10 +50,13 @@ dispatcher never receives that `Backend` as a mutation result. Writer lock timeo
 remains `Capacity`; uncertain writes or malformed replies remain `OutcomeUnknown`.
 Set and unset return an
 exact operation receipt; there is no remote resolve, implicit provider apply or
-default selection. Secret serialization is restricted to the immediate set request.
+default selection. Secret serialization is restricted to immediate set or explicit
+transient discovery requests; it never enters a response or retained setup view.
 
-`providers/discover/1` takes a closed provider kind, endpoint and owner-local
-credential slot before a deployment exists. It returns at most 4,096 candidate
+`providers/discover/2` takes a closed request identity (provider kind, endpoint and
+owner-local credential slot) and an optional transient key before a deployment
+exists. A supplied key is used only for this read; otherwise the slot is resolved.
+The reply echoes only the non-secret identity. It returns at most 4,096 candidate
 model identifiers with optional display names and token capacities, within
 4 MiB. Discovery requires configuration authority and performs provider I/O;
 it does not register routes or persist configuration. The ordinary Models API

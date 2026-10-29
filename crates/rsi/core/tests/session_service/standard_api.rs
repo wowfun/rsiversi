@@ -313,6 +313,7 @@ async fn standard_api_plugins_share_durable_identity_and_serve_independent_domai
             "configuration",
             "devices",
             "directory-picker",
+            "workspace-default",
             "exa-credential",
             "external-conversation",
             "files",
@@ -693,6 +694,7 @@ impl rsi_meta::PluginFactory for SourceGate {
             !plan
                 .local::<ApiDispatchContract>()?
                 .operations()
+                .unwrap()
                 .iter()
                 .any(|spec| spec.id.domain() == "providers")
         );

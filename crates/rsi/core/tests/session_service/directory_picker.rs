@@ -156,7 +156,10 @@ async fn directory_discovery_and_single_creation_require_actual_configuration_gr
     )
     .await
     .unwrap();
-    assert_eq!(status, json!({"supported":cfg!(unix),"allowed":false}));
+    assert_eq!(
+        status,
+        json!({"supported":cfg!(any(unix, windows)),"allowed":false})
+    );
     assert!(matches!(
         wire(
             &running,

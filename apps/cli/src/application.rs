@@ -76,6 +76,7 @@ async fn start(invocation: ApplicationInvocation) -> rsi::Result<u8> {
             rsi_app_catalog::metadata(),
         )
         .with_user_home(rsi::capture_standard_home()?)?
+        .with_documents_directory(rsi::capture_standard_documents()?)?
         .with_source_watch(watch);
         #[cfg(any(target_os = "linux", windows))]
         {
