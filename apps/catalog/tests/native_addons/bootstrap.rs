@@ -180,6 +180,45 @@ async fn linked_argument_preflight_precedes_native_store_creation() {
     assert!(!paths.cache().exists());
 }
 
+#[cfg(target_os = "linux")]
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn daemon_bootstrap_defers_enabled_native_service_factories_until_staging() {
+    let temp = tempfile::tempdir().unwrap();
+    let root = temp.path().canonicalize().unwrap();
+    let [artifact, _] = generations::artifacts(&root);
+    let manifest = source(&root.join("source"), "fixture.native-addon");
+    let text = fs::read_to_string(&manifest)
+        .unwrap()
+        .replace("scope = 'agent'", "scope = 'service'");
+    fs::write(&manifest, text).unwrap();
+    fs::copy(artifact, root.join("source/artifact.bin")).unwrap();
+    let store = NativeAddonStore::open(root.join("config/native-addons")).unwrap();
+    store.install(&manifest).unwrap();
+    store.enable("fixture.addon").unwrap();
+    let (composition, _) = application_fixture(&root, "service");
+    let profile =
+        rsi::ProfileCatalog::new(composition.paths().clone(), rsi_app_catalog::metadata())
+            .host(&rsi::HostProfileId::new("dev").unwrap())
+            .unwrap();
+    let paths = rsi_service_host::ServiceHostPaths::from_host_paths(composition.paths()).unwrap();
+    let owner = rsi_service_host::HostOwnerLease::try_acquire(paths.clone()).unwrap();
+    let daemon = tokio::time::timeout(
+        std::time::Duration::from_secs(20),
+        rsi::StandardServiceDaemon::start(composition, &profile, owner),
+    )
+    .await
+    .expect("daemon bootstrap is bounded")
+    .unwrap();
+    assert!(paths.read_metadata().unwrap().is_some());
+    let stop = tokio_util::sync::CancellationToken::new();
+    stop.cancel();
+    tokio::time::timeout(std::time::Duration::from_secs(20), daemon.run(stop))
+        .await
+        .expect("daemon cleanup is bounded")
+        .unwrap();
+    drop(rsi_service_host::HostOwnerLease::try_acquire(paths).unwrap());
+}
+
 #[tokio::test]
 async fn invalid_linked_service_preflight_creates_no_product_directories() {
     let temp = tempfile::tempdir().unwrap();

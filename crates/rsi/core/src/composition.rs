@@ -1162,6 +1162,31 @@ impl StandardComposition {
         &self,
         profile: &HostProfileDocument,
     ) -> crate::Result<StandardHostPreview> {
+        let (host, launch_key, factories) = self.host_identity(profile)?;
+        let profile = match &profile.path {
+            Some(path) => host.preview_file(path),
+            None => host.preview(rsi_host::Profile::default()),
+        }
+        .map_err(|error| crate::RsiError::Boot(error.to_string()))?;
+        Ok(StandardHostPreview {
+            launch_key,
+            profile,
+            factories,
+        })
+    }
+
+    pub(crate) fn host_launch_key(
+        &self,
+        profile: &HostProfileDocument,
+    ) -> crate::Result<HostLaunchKey> {
+        self.preflight_service(crate::service_program(profile), None)?;
+        self.host_identity(profile).map(|(_, key, _)| key)
+    }
+
+    fn host_identity(
+        &self,
+        profile: &HostProfileDocument,
+    ) -> crate::Result<(Host, HostLaunchKey, Vec<AddonFactoryDescription>)> {
         let (host, presets, factories) = self
             .build_internal(false, None)
             .map_err(|error| crate::RsiError::Boot(error.to_string()))?;
@@ -1183,16 +1208,7 @@ impl StandardComposition {
                 }),
         )
         .map_err(|error| crate::RsiError::Boot(error.to_string()))?;
-        let profile = match &profile.path {
-            Some(path) => host.preview_file(path),
-            None => host.preview(rsi_host::Profile::default()),
-        }
-        .map_err(|error| crate::RsiError::Boot(error.to_string()))?;
-        Ok(StandardHostPreview {
-            launch_key,
-            profile,
-            factories,
-        })
+        Ok((host, launch_key, factories))
     }
 
     /// Builds the generic Host without reading a Host Profile or activating plugins.

@@ -527,6 +527,10 @@ blocking refresh and retain its owner to completion.
 On Unix, `start_application` starts one stable linked bootstrap in the Host's Runtime.
 Linked argument/configuration preflight precedes staging directory creation;
 complete native-aware preflight follows staging. Actual Service activation
+derives its launch identity without resolving native factories against the linked
+catalog. Daemon and embedded startup defer enabled native Service factories to
+the same staging owner, then validate them against the published catalog.
+Service activation
 preflights linked configuration before opening the application preset Profile,
 even when reusing an existing staging owner, then
 materializes builtin preset assets before starting its child; preview and catalog
