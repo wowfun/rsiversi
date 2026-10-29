@@ -37,8 +37,7 @@ MCP_SECRET={{kind='literal',value='private-fixture-secret'}}
 
 
 def verify(script, button, fill, until, screenshot, workspace, report):
-    button('Filter conversations')
-    script(r'''const e=document.querySelector('[aria-label="Conversation filter"]');e.value='attention';e.dispatchEvent(new Event('change',{bubbles:true}));return true''')
+    button('Navigation options'); button('Needs attention')
     button('External agents');button('Start sdk-agent')
     until(lambda: script('return !!document.querySelector(".external-composer")'))
     fill('[aria-label="External message"]', 'permission')
@@ -79,7 +78,7 @@ def verify(script, button, fill, until, screenshot, workspace, report):
             continue
         raise AssertionError(f'ACP peer {pid} was not reaped')
     (report / 'external.json').write_text(json.dumps({'sdk':'1.4.0','permission_options':4,'permission_requested_again':True,'cancel':True,'replay':1200,'retained':128,'peers_reaped':len(pids)},indent=2))
-    script(r'''const e=document.querySelector('[aria-label="Conversation filter"]');e.value='all';e.dispatchEvent(new Event('change',{bubbles:true}));return true''')
+    button('Navigation options'); button('All conversations')
 
 
 def provider_reply(body):

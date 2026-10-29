@@ -50,6 +50,7 @@ async fn fullscreen_queue_editor_preserves_draft_and_withdraws_the_successor() {
         1,
         "withdrawn successor never reaches a provider"
     );
+    fixture.assert_success(&["host", "stop"]);
     let store =
         rsi_agent_store_sqlite::SqliteStore::open(fixture.temporary.path().join("state/rsi/agent"))
             .unwrap();

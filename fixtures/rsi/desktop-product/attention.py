@@ -18,8 +18,7 @@ def provider_reply(body):
 
 
 def verify(script, button, fill, until, screenshot, report):
-    button('Filter conversations')
-    script(r'''const e=document.querySelector('[aria-label="Conversation filter"]');e.value='attention';e.dispatchEvent(new Event('change',{bubbles:true}));return true''')
+    button('Navigation options'); button('Needs attention')
     fill('textarea[aria-label="Main message"]', 'desktop attention question')
     button('Send')
     # require_approval covers ask_user itself before its question can be published.

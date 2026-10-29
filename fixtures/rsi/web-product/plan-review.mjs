@@ -56,7 +56,7 @@ for(const [name,engine] of [['chromium',chromium],['firefox',firefox]]) {
     await page.setViewportSize({width:420,height:860});await page.waitForFunction(()=>document.querySelector('.resource-dock').classList.contains('resource-fullscreen'));await resources(page);await dialog.getByRole('button',{name:'Approve and execute',exact:true}).scrollIntoViewIfNeeded();
     assert(await dialog.evaluate(el=>el.scrollWidth<=el.clientWidth+1));await page.screenshot({path:join(path,'review-narrow.png')});
     await dialog.getByLabel('Optional review feedback',{exact:true}).fill('Verified in the actual browser.');
-    await dialog.getByRole('button',{name:'Approve and execute',exact:true}).click();await page.getByLabel('Optional review feedback',{exact:true}).waitFor({state:'hidden'});await pane.locator('.pane-status').filter({hasText:'Completed'}).waitFor();
+    await dialog.getByRole('button',{name:'Approve and execute',exact:true}).click();await page.getByLabel('Optional review feedback',{exact:true}).waitFor({state:'hidden'});await pane.locator('.pane-status').filter({hasText:'Completed'}).waitFor({state:'attached'});
     assert.equal(requests.length,3);assert(JSON.stringify(requests[2].messages).includes('Plan mode is disabled'));
     assert(JSON.stringify(requests[2].messages).includes('Verified in the actual browser.'));
     await page.setViewportSize({width:1440,height:980});await page.screenshot({path:join(path,'approved.png')});await assertNoNotices(page);assert.deepEqual(errors,[]);

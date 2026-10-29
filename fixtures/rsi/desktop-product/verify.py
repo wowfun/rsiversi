@@ -240,6 +240,8 @@ try:
             call('POST', root + f'/element/{eid(item)}/value', {'text': text, 'value': list(text)})
         fill_input(script, keys, until, css, value)
     def button(text):
+        if text == 'Settings' and not script('return document.querySelector("#settings-open")?.getBoundingClientRect().height > 0'):
+            button('More')
         if text == 'Close details':
             item=script('return document.querySelector("[data-dockkit-float-active=true] [data-dockkit-float-close], [data-dockkit-pane-active=true] [aria-selected=true] [data-dockkit-tab-close]")')
             assert item, 'No active resource close control'
@@ -261,11 +263,11 @@ try:
         if text in ('Compact','Standard','Detailed','Verbose'):
             script(r'''document.querySelector('.conversation-menu').open=true;const e=document.querySelector('[aria-label="Detail level"]');e.value=arguments[0];e.dispatchEvent(new Event('change',{bubbles:true}));document.querySelector('.conversation-menu').open=false;return true''',[text.lower()])
             return
-        if text in ('@ File path','Reference session','Add images','Search history','Export'):
-            script('document.querySelector(".pane.selected .composer-extras").open=true;return true')
+        if text in ('File','Conversation','Images','Search history','Export'):
+            button('Add files or run commands')
         if text == 'Terminal': script('document.querySelector(".conversation-menu").open=true;return true')
         def attempt():
-            item = script(r'return [...document.querySelectorAll(arguments[0]==="External agents"?".external-navigation>summary":"button")].find(b=>(arguments[0]==="Send"?b.dataset.testid==="composer-send":(b.getAttribute("aria-label")||b.textContent.trim())===arguments[0])&&!b.disabled&&b.getBoundingClientRect().width>0&&b.getBoundingClientRect().height>0)||null', [text])
+            item = script(r'return [...document.querySelectorAll("button, summary")].find(b=>(arguments[0]==="Send"?b.dataset.testid==="composer-send":(b.getAttribute("aria-label")||b.textContent.trim())===arguments[0])&&!b.disabled&&b.getBoundingClientRect().width>0&&b.getBoundingClientRect().height>0)||null', [text])
             if item is None: return False
             try:
                 call('POST', root + f'/element/{eid(item)}/click', {})
@@ -309,9 +311,9 @@ try:
         verify_profiles(script, button, lambda item: call('POST', root + f'/element/{eid(item)}/click', {}), until, screenshot, editable_source, args.report)
     if args.external: verify_external(script, button, fill, until, screenshot, workspace, args.report)
     button('Choose workspace')
-    until(lambda: script('return document.querySelector(".directory-columns[aria-busy=false]")'))
+    until(lambda: script('return document.querySelector(".directory-columns[aria-busy=false] .directory-column, .directory-path input")'))
     edit = script(r'return document.querySelector("[aria-label=\"Edit directory path\"]")')
-    if edit: call('POST', root + f'/element/{eid(edit)}/click', {})
+    if edit: button('Edit directory path')
     fill('[aria-label="Directory path"]', str(workspace.resolve()))
     click('.directory-picker footer button:last-child')
     until(lambda: script('return !document.querySelector(".directory-picker")'))

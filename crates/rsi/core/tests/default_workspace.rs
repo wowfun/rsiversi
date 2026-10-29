@@ -6,7 +6,7 @@ use std::collections::BTreeMap;
 
 #[test]
 fn reserved_application_factories_match_the_linked_catalog() {
-    let temp = tempfile::tempdir().unwrap();
+    let temp = tempfile::tempdir_in(std::env::temp_dir().canonicalize().unwrap()).unwrap();
     let root = temp.path();
     let composition = StandardComposition::new(
         HostPaths::new(root.join("config"), root.join("state"), root.join("cache")).unwrap(),
@@ -62,7 +62,7 @@ async fn initialize(host: &rsi_host::RunningHost) -> serde_json::Value {
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 async fn model_free_initialization_is_idempotent_and_removal_survives_restart() {
-    let temp = tempfile::tempdir().unwrap();
+    let temp = tempfile::tempdir_in(std::env::temp_dir().canonicalize().unwrap()).unwrap();
     let root = temp.path();
     let profile = root.join("profile.toml");
     std::fs::write(&profile, "format = 1\nsteps = []\n").unwrap();
@@ -124,7 +124,7 @@ async fn model_free_initialization_is_idempotent_and_removal_survives_restart() 
 
 #[tokio::test]
 async fn directory_failure_is_retryable_and_existing_workspace_suppresses_creation() {
-    let temp = tempfile::tempdir().unwrap();
+    let temp = tempfile::tempdir_in(std::env::temp_dir().canonicalize().unwrap()).unwrap();
     let root = temp.path();
     let profile = root.join("profile.toml");
     std::fs::write(&profile, "format = 1\nsteps = []\n").unwrap();
@@ -165,7 +165,7 @@ async fn directory_failure_is_retryable_and_existing_workspace_suppresses_creati
 
 #[test]
 fn invalid_documents_spelling_fails_before_initialization() {
-    let root = tempfile::tempdir().unwrap();
+    let root = tempfile::tempdir_in(std::env::temp_dir().canonicalize().unwrap()).unwrap();
     let composition = StandardComposition::new(
         HostPaths::new(
             root.path().join("config"),

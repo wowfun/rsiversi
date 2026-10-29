@@ -219,7 +219,7 @@ async fn standalone_service_stages_before_resolving_and_follows_native_replaceme
     fs::write(&profile, "format = 1\n[[steps]]\nkind = 'plugin'\nid = 'native'\nplugin = 'fixture.native-addon'\nconfig = { label = 'standalone' }\n").unwrap();
     let paths =
         rsi_service_host::ServiceHostPaths::from_host_paths(composition(&root).paths()).unwrap();
-    let running = rsi::RunningRsi::boot(composition(&root), &profile)
+    let running = rsi::RunningRsi::boot(composition(&root).with_source_watch(true), &profile)
         .await
         .unwrap();
     assert!(root.join("cache/native-addons").is_dir());

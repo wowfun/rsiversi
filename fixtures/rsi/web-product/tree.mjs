@@ -7,7 +7,7 @@ export async function verifyTree(page, pane, service, report, browser) {
   await pane.getByRole("textbox", { name: "Compare message" }).fill("Please inspect a child task");
   await pane.getByTestId("composer-send").click();
   await pane.locator(".message.assistant").filter({ hasText: "Reviewed: Subagent activation completed." }).waitFor();
-  await pane.locator(".pane-status").filter({ hasText: "Completed" }).waitFor();
+  await pane.locator(".pane-status").filter({ hasText: "Completed" }).waitFor({state:'attached'});
   await openResource(page,"Agent tree");
   const detail = details(page);
   await detail.getByRole("button", { name: "Inspect agent tree", exact: true }).click();

@@ -49,6 +49,7 @@ fn gate() -> Arc<Gate> {
 }
 fn spec(effect: OperationEffect) -> OperationSpec {
     OperationSpec {
+        protocol: connection_protocol(),
         id: OperationId::new("worker", "probe", 1).unwrap(),
         class: OperationClass::Data,
         effect,
@@ -332,7 +333,7 @@ async fn plugin_probe(execution: Execution) {
         .unwrap();
     let operation = spec(OperationEffect::Read);
     let registration = registrar.register(operation.clone(), gate()).unwrap();
-    assert_eq!(dispatch.operations(), vec![operation.clone()]);
+    assert_eq!(dispatch.operations().unwrap(), vec![operation.clone()]);
     fiber.dispose().await;
     assert!(
         runtime

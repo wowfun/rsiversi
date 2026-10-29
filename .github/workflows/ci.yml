@@ -1370,7 +1370,6 @@ jobs:
           cargo test --locked -p rsi-browser --features test-support --test native -- --ignored --exact native_preview_check_and_retirement --nocapture 2>&1 | tee "$RUNNER_TEMP/rsi-desktop-automation-evidence/native.log"
           cargo test --locked -p rsi --test session_service -- --ignored --exact automation::prepare_visual_fixture --list | rg --fixed-strings --line-regexp 'automation::prepare_visual_fixture: test'
           for surface in web desktop tui; do
-            RSI_TEST_AUTOMATION_VISUAL_ROOT="$RUNNER_TEMP/rsi-automation-$surface-seed" RSI_TEST_AUTOMATION_VISUAL_PNG="$RSI_TEST_BROWSER_SCREENSHOT" cargo test --locked -p rsi --test session_service -- --ignored --exact --list | grep -F 'session_service: test'
             RSI_TEST_AUTOMATION_VISUAL_ROOT="$RUNNER_TEMP/rsi-automation-$surface-seed" RSI_TEST_AUTOMATION_VISUAL_PNG="$RSI_TEST_BROWSER_SCREENSHOT" cargo test --locked -p rsi --test session_service -- --ignored --exact automation::prepare_visual_fixture
           done
           RSI_WEB_BINARY="$RUNNER_TEMP/rsi-desktop-dist/bundle/rsi" RSI_WEB_ASSETS="$RUNNER_TEMP/rsi-desktop-dist/bundle/assets" RSI_AUTOMATION_WEB_SEED="$RUNNER_TEMP/rsi-automation-web-seed" RSI_AUTOMATION_WEB_REPORT="$RUNNER_TEMP/rsi-desktop-automation-evidence/web" node fixtures/rsi/web-product/automation-verify.mjs

@@ -25,7 +25,7 @@ async fn manager(root: &Path) -> NativeAddonBuildManager {
 
 #[test]
 fn watched_build_cannot_silently_replace_its_captured_command() {
-    let root = tempfile::tempdir().unwrap();
+    let root = tempfile::tempdir_in(std::env::temp_dir().canonicalize().unwrap()).unwrap();
     let path = manifest(root.path(), "cp input artifact.bin\n");
     let build = NativeAddonBuild::open(&path).unwrap();
     let original = fs::read_to_string(&path).unwrap();
@@ -44,7 +44,7 @@ fn watched_build_cannot_silently_replace_its_captured_command() {
 #[tokio::test]
 async fn explicit_build_installs_settled_output_without_enabling_and_failed_build_keeps_old_record()
 {
-    let temp = tempfile::tempdir().unwrap();
+    let temp = tempfile::tempdir_in(std::env::temp_dir().canonicalize().unwrap()).unwrap();
     let root = temp.path().canonicalize().unwrap();
     let path = manifest(
         &root.join("source"),
@@ -105,7 +105,7 @@ mod native;
 
 #[tokio::test]
 async fn package_manifest_builds_from_an_explicit_workspace_root_and_pins_both_directories() {
-    let temp = tempfile::tempdir().unwrap();
+    let temp = tempfile::tempdir_in(std::env::temp_dir().canonicalize().unwrap()).unwrap();
     let root = temp.path().canonicalize().unwrap();
     let workspace = root.join("workspace");
     fs::create_dir_all(workspace.join("plugin")).unwrap();

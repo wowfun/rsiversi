@@ -314,7 +314,7 @@ mod tests {
             url: format!("http://{address}/"),
             public_key: hex::encode(key.public_key()),
         };
-        let home = tempfile::tempdir().unwrap();
+        let home = tempfile::tempdir_in(std::env::temp_dir().canonicalize().unwrap()).unwrap();
         let store = PackageStore::open(&home.path().join("packages")).unwrap();
         let first = install(
             &store,
@@ -455,7 +455,7 @@ mod tests {
             url: format!("http://{address}/"),
             public_key: hex::encode(key.public_key()),
         };
-        let home = tempfile::tempdir().unwrap();
+        let home = tempfile::tempdir_in(std::env::temp_dir().canonicalize().unwrap()).unwrap();
         let store = PackageStore::open(&home.path().join("packages")).unwrap();
         let first = install(
             &store,

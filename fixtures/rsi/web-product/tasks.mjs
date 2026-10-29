@@ -263,7 +263,7 @@ for (const [name, engine] of [["chromium", chromium], ["firefox", firefox]]) {
     assert.equal(service.provider.requests.length, requestsBeforeRead);
     await capture("jobs-completed-unreported", true, ["Refresh current Turn"]);
     service.provider.release("observe background job");
-    await pane.locator(".pane-status").filter({ hasText: "Failed" }).waitFor();
+    await pane.locator(".pane-status").filter({ hasText: "Failed" }).waitFor({state:'attached'});
     await pane.locator(".transcript").getByText("background jobs completed without an explicit report: job-1", { exact: true }).waitFor();
     await detail.getByRole("button", { name: "Refresh current Turn", exact: true }).click();
     await detail.getByText("No active Turn. Jobs are unavailable after their Turn finishes.", { exact: true }).waitFor();

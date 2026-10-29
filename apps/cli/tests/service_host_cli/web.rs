@@ -54,6 +54,20 @@ async fn web_alias_and_profile_serve_default_assets_with_stable_authorized_ident
     let paired = paired.canonicalize().unwrap();
     let _lease = rsi_build_info::GenerationLease::open(&paired).unwrap();
     fixture.binary = paired.join(if cfg!(windows) { "rsi.exe" } else { "rsi" });
+    let package = fixture.temporary.path().join("web-package");
+    let assembled = std::process::Command::new("node")
+        .arg(std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("../devtools/packages.mjs"))
+        .args(["assemble", "web"])
+        .arg(&package)
+        .arg(paired.join("assets"))
+        .output()
+        .unwrap();
+    assert!(
+        assembled.status.success(),
+        "{}",
+        String::from_utf8_lossy(&assembled.stderr)
+    );
+    fixture.assert_success(&["plugin", "install", "--local", package.to_str().unwrap()]);
     let mut first = None;
     for args in [
         vec!["web", "--port", "0", "--no-open"],

@@ -34,7 +34,7 @@ try {
   const submit=async prompt=>{await input.fill(prompt);await pane.getByTestId('composer-send').click();await page.waitForFunction(()=>document.querySelector('[aria-label="Main message"]').value==='');};
   const complete=async(marker,stage)=>{
     await pane.locator('.message.assistant').filter({hasText:marker}).waitFor({timeout:240000});
-    await pane.locator('.pane-status').filter({hasText:'Completed'}).waitFor({timeout:240000});
+    await pane.locator('.pane-status').filter({hasText:'Completed'}).waitFor({state:'attached',timeout:240000});
     const session=await pane.getAttribute('data-session-id'),facts=await service.readSessionFacts(session);
     const usage=requireProviderUsage(facts);await writeFile(join(report,`${stage}-facts.json`),JSON.stringify(facts,null,2));
     await writeFile(join(report,`${stage}-transcript.txt`),await pane.locator('.transcript').innerText());

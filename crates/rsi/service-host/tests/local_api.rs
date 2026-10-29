@@ -372,6 +372,7 @@ async fn local_listener_reports_shared_protocol_failures_and_identity_rejections
 }
 
 #[tokio::test]
+#[cfg(target_os = "linux")] // Lifecycle requests require native process-generation verification.
 async fn lifecycle_is_independent_from_product_compatibility_and_fences_the_epoch() {
     use rsi_service_host::{
         HostOwnerMetadata, HostOwnerMode, LifecycleControlContract, LifecycleFactory,

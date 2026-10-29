@@ -13,7 +13,7 @@ export async function navigationOptions(page) {
 export async function workspaceForm(page) {
   await page.getByRole('button',{name:'Choose workspace',exact:true}).click();
   const dialog=page.getByRole('dialog',{name:'Select workspace directory',exact:true});
-  await dialog.locator('.directory-columns[aria-busy=false]').waitFor();
+  await dialog.locator('.directory-columns[aria-busy=false] .directory-column, .directory-path input').first().waitFor();
   const edit=dialog.getByRole('button',{name:'Edit directory path',exact:true});
   if(await edit.isVisible())await edit.click();
   await dialog.getByRole('textbox',{name:'Directory path',exact:true}).waitFor();

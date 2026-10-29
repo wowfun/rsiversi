@@ -226,6 +226,7 @@ pub async fn connect_or_embed_service_host(
     connect_local_service_host(parent, composition, host_profile, launch_key, paths).await
 }
 
+#[cfg_attr(not(any(target_os = "linux", windows)), allow(clippy::unused_async))] // Unsupported platforms preserve the asynchronous connection interface.
 pub(crate) async fn connect_resident_service_host(
     parent: &rsi_meta::Context,
     composition: StandardComposition,

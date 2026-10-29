@@ -81,6 +81,7 @@ pub(crate) fn fingerprint(root: &Directory, inputs: &[PathBuf]) -> Result<String
     capture(root, inputs, true)
 }
 /// Cheap observation hint only; publication always requires a full fingerprint.
+#[cfg(any(test, target_os = "linux", windows))]
 pub(crate) fn metadata_fingerprint(root: &Directory, inputs: &[PathBuf]) -> Result<String> {
     capture(root, inputs, false)
 }

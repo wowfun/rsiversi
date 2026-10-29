@@ -12,7 +12,7 @@ export async function verifyPluginSources(page,service,report,browser) {
   await panel.locator('.plugin-revisions').filter({hasText:'ready'}).waitFor();
   await panel.locator('.plugin-rows .plugin-row').first().waitFor();
   await page.screenshot({path:join(report,`${browser}-plugins-preset.png`)});
-  await panel.getByRole('button',{name:'Session resident generation',exact:true}).click();
+  await panel.getByRole('button',{name:'Plugins used by this conversation',exact:true}).click();
   await panel.getByText('Source: session',{exact:true}).waitFor();
   await panel.locator('.plugin-revisions').filter({hasText:/ready|not resident/}).waitFor();
   assert(!(await panel.innerText()).includes(service.workspace),'diagnostics leaked workspace');

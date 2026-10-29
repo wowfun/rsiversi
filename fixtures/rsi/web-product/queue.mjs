@@ -38,6 +38,6 @@ export async function verifyQueue(page,pane,service,report,name) {
   assert.equal(await composer.inputValue(),'Ordinary composer draft survives every queue operation');
   await page.screenshot({path:join(report,`${name}-queue-after-stop.png`)});
   await pane.getByRole('button',{name:'Stop',exact:true}).click();
-  await pane.locator('.pane-status').filter({hasText:'Cancelled'}).waitFor();
+  await pane.locator('.pane-status').filter({hasText:'Cancelled'}).waitFor({state:'attached'});
   await writeFile(join(report,`${name}-queue.json`),JSON.stringify({replacementKeepsSlot:true,oneUserBlock:true,convertExactDisplayedTurn:true,withdrawPendingOnly:true,stopPreservesSuccessorTurn:true,composerPreserved:true,requests:service.provider.requests.filter(request=>request.prompt.includes('queue survivor') || request.prompt.includes('Queue replacement'))},null,2));
 }

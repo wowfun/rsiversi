@@ -27,6 +27,8 @@ completed run and a rendered result button can still coexist with a pending
 detail read, which temporarily disables the control.
 Input readiness includes enabled ancestors, visibility, an unobstructed hit point
 and actual focus before any native keystroke. A readiness timeout dispatches none.
+Directory selection waits for a completed listing or the known-path form; the
+initial empty, non-busy render does not establish browsing readiness.
 The ordinary conversation run also records the composer's native focus state,
 trusted input receipt and computed outline before sending, with a focused
 screenshot. Only trusted input events recorded after that fill began can satisfy

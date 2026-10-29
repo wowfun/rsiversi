@@ -86,13 +86,18 @@ struct Fixture {
 }
 
 fn fixture(endpoint: &str) -> Fixture {
-    let temporary = tempfile::tempdir().unwrap();
+    let temporary = tempfile::tempdir_in(std::env::temp_dir().canonicalize().unwrap()).unwrap();
     let config = temporary.path().join("xdg-config/rsi");
     let state = temporary.path().join("xdg-state/rsi");
     let cache = temporary.path().join("xdg-cache/rsi");
     let workspace = temporary.path().join("workspace");
     std::fs::create_dir_all(&config).unwrap();
     std::fs::create_dir_all(&workspace).unwrap();
+    std::fs::write(
+        config.join("rsi.toml"),
+        "format = 1\n[service]\nkind = 'catalog'\nid = 'test'\n",
+    )
+    .unwrap();
     std::fs::write(
         config.join("settings.json"),
         serde_json::to_vec_pretty(&serde_json::json!({
@@ -214,6 +219,40 @@ fn binary_command(binary: &str, fixture: &Fixture) -> tokio::process::Command {
         .env("XDG_CACHE_HOME", fixture.paths.cache().parent().unwrap())
         .env("RSI_OPENAI_COMPATIBLE_API_KEY", "fixture-secret");
     command
+}
+
+impl Fixture {
+    #[cfg_attr(not(any(target_os = "linux", windows)), allow(clippy::unused_async))]
+    async fn stop_resident_host(&self) {
+        #[cfg(any(target_os = "linux", windows))]
+        {
+            let output = binary_command(env!("CARGO_BIN_EXE_rsi"), self)
+                .args(["host", "stop"])
+                .observed_output()
+                .await
+                .unwrap();
+            assert!(
+                output.status.success(),
+                "{}",
+                String::from_utf8_lossy(&output.stderr)
+            );
+        }
+    }
+}
+
+impl Drop for Fixture {
+    fn drop(&mut self) {
+        #[cfg(any(target_os = "linux", windows))]
+        {
+            if !self.paths.state().join("session-host/owner.json").exists() {
+                return;
+            }
+            let _ = binary_command(env!("CARGO_BIN_EXE_rsi"), self)
+                .args(["host", "stop", "--force"])
+                .as_std_mut()
+                .output();
+        }
+    }
 }
 
 async fn chat() -> Response {
@@ -1073,7 +1112,7 @@ async fn built_binary_treats_help_after_separator_as_the_literal_task() {
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn built_binary_patch_helper_requires_the_sole_marker_and_uses_one_line_protocol() {
     let binary = env!("CARGO_BIN_EXE_rsi");
-    let workspace = tempfile::tempdir().unwrap();
+    let workspace = tempfile::tempdir_in(std::env::temp_dir().canonicalize().unwrap()).unwrap();
     let patch = concat!(
         "{\"version\":2,\"evidence_bytes\":32768}\n",
         "*** Begin Patch\n",
@@ -1560,10 +1599,11 @@ async fn built_binary_sigint_cancels_flushes_and_exits_130() {
         "SIGINT output: {lines:#?}"
     );
     // Presentation has a one-second cancellation grace, even with a draining
-    // consumer. Read the embedded service's durable outcome after it has exited;
+    // consumer. Drain the resident service before reading its durable outcome;
     // a missing presentation tail is not evidence of an unflushed cancellation.
     let session = SessionId::new(lines[0]["session_id"].as_str().unwrap()).unwrap();
     let turn = TurnId::new(lines[1]["turn_id"].as_str().unwrap()).unwrap();
+    fixture.stop_resident_host().await;
     let store = SqliteStore::open(fixture.paths.state().join("agent")).unwrap();
     let facts = store
         .read_facts(&session, 0, 256, MAXIMUM_STORE_FACT_PAGE_BYTES)
@@ -1669,6 +1709,15 @@ async fn built_binary_recovers_a_real_sqlite_prefix_after_sigkill() {
     let killed = child.wait(std::time::Duration::from_secs(5)).await.unwrap();
     assert!(!killed.status.success());
 
+    // On resident platforms the application is only a client. Crash the exact
+    // owning Host as well so this scenario crosses the Store recovery boundary.
+    #[cfg(target_os = "linux")]
+    {
+        let paths = rsi_service_host::ServiceHostPaths::from_host_paths(&fixture.paths).unwrap();
+        let owner = paths.read_metadata().unwrap().unwrap();
+        rsi_service_host::signal_owner(&owner, rsi_service_host::HostSignal::ForceStop).unwrap();
+    }
+
     let resumed = binary_command(env!("CARGO_BIN_EXE_rsi"), &fixture)
         .args([
             "run",
@@ -1691,6 +1740,7 @@ async fn built_binary_recovers_a_real_sqlite_prefix_after_sigkill() {
     );
     assert_eq!(calls.load(Ordering::SeqCst), 2);
 
+    fixture.stop_resident_host().await;
     let store = SqliteStore::open(fixture.paths.state().join("agent")).unwrap();
     let session_id = SessionId::new(session_id).unwrap();
     let facts = store

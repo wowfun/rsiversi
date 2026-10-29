@@ -19,7 +19,12 @@ async fn wait_health(control: &dyn rsi::NativeAddonControl, health: NativeAddonH
         }
     })
     .await
-    .unwrap();
+    .unwrap_or_else(|error| {
+        panic!(
+            "waiting for {health:?}: {error}; status: {:?}",
+            control.inspect()
+        )
+    });
 }
 
 #[tokio::test]
@@ -171,6 +176,7 @@ async fn standard_source_stages_before_pin_and_switches_real_native_code_only_af
     store.install(&manifest).unwrap();
     store.enable("fixture.addon").unwrap();
     let host = composition(&root)
+        .with_source_watch(true)
         .build()
         .unwrap()
         .start(rsi_host::Profile::default())
@@ -266,7 +272,7 @@ async fn polling_does_not_reexecute_an_unchanged_failed_candidate_and_preview_ke
     let manifest = source(&root.join("source"), "fixture.deliberately-wrong-identity");
     fs::copy(artifact, root.join("source/artifact.bin")).unwrap();
     settings(&root);
-    let composition = composition(&root);
+    let composition = composition(&root).with_source_watch(true);
     let profile =
         rsi::ProfileCatalog::new(composition.paths().clone(), rsi_app_catalog::metadata())
             .host(&rsi::HostProfileId::new("standard").unwrap())
@@ -378,13 +384,10 @@ async fn bounded_refresh_waiters_can_cancel_while_retirement_still_joins_the_nat
         }
     }).await.unwrap();
     assert!(control.inspect().active_callbacks > 0);
-    assert!(
-        !dispatch
-            .operations()
-            .unwrap()
-            .iter()
-            .any(|value| value.id == operation.id)
-    );
+    assert!(matches!(
+        dispatch.operations(),
+        Err(rsi_api_protocol::ApiError::ShuttingDown)
+    ));
     assert!(futures_util::poll!(shutdown.as_mut()).is_pending());
     assert!(
         !can_claim_service_owner(&root).await,

@@ -55,7 +55,7 @@ for(const [name,engine] of [['chromium',chromium],['firefox',firefox]]) {
     await closeDetails(page);
     await input.fill('WORKFLOW_FIXTURE_COMPLETE');await pane.getByTestId('composer-send').click();
     await waitUntil(()=>programEvidence(service.workspace).controls.some(({record})=>record.type==='program_run'&&record.event.event==='terminal'),'canonical completion',90000);
-    await pane.locator('.pane-status').getByText('Completed',{exact:true}).waitFor();
+    await pane.locator('.pane-status').getByText('Completed',{exact:true}).waitFor({state:'attached'});
     if (!dockOnly) {
     const invocation=pane.locator('.message-title.summary-toggle').filter({hasText:'run_workflow'}).first();
     if(await invocation.getAttribute('aria-expanded')==='false')await invocation.click();
@@ -122,7 +122,7 @@ for(const [name,engine] of [['chromium',chromium],['firefox',firefox]]) {
     await input.fill('WORKFLOW_FIXTURE_CANCEL');await pane.getByTestId('composer-send').click();
     await waitUntil(async()=>(await nativePrograms(service)).length===1,'one live Node');
     const identity=(await nativePrograms(service))[0];
-    await pane.locator('.pane-status').getByText('Completed',{exact:true}).waitFor();
+    await pane.locator('.pane-status').getByText('Completed',{exact:true}).waitFor({state:'attached'});
     await openResource(page,'Workflows');
     await clickDetails(page,'Latest workflows');
     await clickDetails(page,'Open workflow');
