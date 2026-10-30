@@ -1,4 +1,4 @@
-import {addWorkspace} from '../web-product/controls.mjs';
+import {addWorkspace,openSettings,sessionTools} from '../web-product/controls.mjs';
 import {closeDetails,detailMode,resourceSelector,resources} from '../web-product/controls.mjs';
 import assert from "node:assert/strict";
 import { createHash } from "node:crypto";
@@ -22,7 +22,7 @@ const results = [];
 for (const [name, engine] of [["chromium", chromium], ["firefox", firefox]]) {
   const destination = join(report, name); await mkdir(destination, { recursive: true });
   const requests = [];
-  const service = await startService({ binary, assets, report: destination,
+  const service = await startService({ binary, assets, report: destination, embedded: true,
     async configure({ config }) {
       const preset = join(config, "agent-presets/workbench"); await mkdir(preset, { recursive: true });
       await writeFile(join(preset, "agent.profile.toml"), profile);
@@ -50,29 +50,37 @@ for (const [name, engine] of [["chromium", chromium], ["firefox", firefox]]) {
     const pane = page.getByRole("region", { name: "Main conversation", exact: true });
     await detailMode(page,"verbose");const extensions = pane.locator(".session-extensions");
     const plan = extensions.locator('[data-producer="rsi.plan-policy.view"] pre');
-    await extensions.locator("summary").click();
-    await plan.filter({ hasText: '"enabled": false' }).waitFor();
+    await plan.filter({ hasText: '"enabled": false' }).waitFor({state:'attached'});
     assert.equal(requests.length, 0);
     await pane.getByRole("textbox", { name: "Main message" }).fill("/plan on");
     await pane.getByTestId("composer-send").click();
-    await plan.filter({ hasText: '"enabled": true' }).waitFor();
-    assert.match(await extensions.locator(".hint").first().innerText(), /Draft · revision 1/);
+    await pane.locator('.command-receipt').filter({hasText:'Draft changed · revision 1'}).waitFor();
+    await plan.filter({ hasText: '"enabled": true' }).waitFor({state:'attached'});
+    assert.equal(await extensions.locator(".hint").first().textContent(), 'Draft state');
+    assert.deepEqual(JSON.parse(await extensions.locator('.projection-coordinates pre').textContent()), {kind:'draft',revision:1});
     assert.equal(requests.length, 0);
     await page.screenshot({ path: join(destination, "draft.png") });
     await pane.getByRole("textbox", { name: "Main message" }).fill("Inspect independent addon");
     await pane.getByTestId("composer-send").click();
-    await pane.locator(".pane-status").filter({ hasText: "Completed" }).waitFor();
+    await pane.locator(".pane-status").filter({ hasText: "Completed" }).waitFor({state:'attached'});
     assert.deepEqual(requests, [{ planEnabled: true, independentTool: true }]);
     await pane.getByRole("textbox", { name: "Main message" }).fill("/plan off");
     await pane.getByTestId("composer-send").click();
+    await pane.locator('.command-receipt').filter({hasText:'Committed · control'}).waitFor();
+    await sessionTools(page);
+    await extensions.locator(':scope > summary').click();
     await plan.filter({ hasText: '"enabled": false' }).waitFor();
-    assert.match(await extensions.locator(".hint").first().innerText(), /Durable/);
+    assert.equal(await extensions.locator(".hint").first().innerText(), 'Recorded session state');
+    const cursor = JSON.parse(await extensions.locator('.projection-coordinates pre').textContent());
+    assert.equal(cursor.kind, 'durable');
+    assert(cursor.fact_seq > 0 && Number.isSafeInteger(cursor.control_seq));
     assert.equal(requests.length, 1);
     await page.screenshot({ path: join(destination, "durable.png") });
+    await pane.getByLabel('Session tools',{exact:true}).click();
     await detailMode(page,'verbose');
     await pane.getByRole("textbox", { name: "Main message" }).fill("Please record a typed addon result");
     await pane.getByTestId("composer-send").click();
-    await pane.locator(".pane-status").filter({ hasText: "Completed" }).waitFor();
+    await pane.locator(".pane-status").filter({ hasText: "Completed" }).waitFor({state:'attached'});
     await pane.locator(".message.tool").last().getByRole("button", { name: "Card details", exact: true }).click();
     await page.getByRole("button", { name: "Recorded result", exact: true }).click();
     const resultCard = page.locator(`${resourceSelector} .ui-contribution`);
@@ -90,9 +98,8 @@ for (const [name, engine] of [["chromium", chromium], ["firefox", firefox]]) {
     await page.setViewportSize({ width: 1440, height: 980 });
     await page.locator('.resource-dock.resource-fullscreen').waitFor({ state: 'detached' });
     await closeDetails(page);
-    await page.getByRole("button", { name: "Settings", exact: true }).click();
-    await page.getByText("Additional settings", { exact: true }).click();
-    await page.getByRole("button", { name: "Open registered settings", exact: true }).click();
+    await openSettings(page);
+    await page.getByRole("button", { name: "Advanced", exact: true }).click();
     await page.getByRole("button", { name: "fixture.workbench", exact: true }).click();
     await page.getByRole("textbox", { name: "Settings / note", exact: true }).fill("public browser settings");
     await page.getByRole("button", { name: "Edit as JSON", exact: true }).click();

@@ -22,6 +22,44 @@ function certificateOrPrivateDirectory(program,args,options) {
   return {status:0,stdout:'',stderr:''};
 }
 
+test("embedded browser owns its Service and invokes device Profiles directly", async t => {
+  const report = await mkdtemp(join(tmpdir(), "rsi-embedded-adapter-"));
+  let service;
+  const calls = [];
+  try {
+    t.mock.method(cp, 'spawnSync', (program, args, options) => {
+      if (program !== 'embedder') return certificateOrPrivateDirectory(program, args, options);
+      calls.push(args);
+      assert.deepEqual(args.slice(0, 2), ['--profile', 'devices']);
+      return {status:0, stdout:JSON.stringify(args[2] === 'register' ? {id:'device'} : {revision:'1'}), stderr:''};
+    });
+    t.mock.method(cp, 'spawn', (program, args) => {
+      assert.equal(program, 'embedder');
+      assert.deepEqual(args.slice(0, 2), ['--profile', 'browser-fixture']);
+      assert(!args.includes('--assets'));
+      const child = Object.assign(new EventEmitter(), {stdout:new PassThrough(), stderr:new PassThrough(),exitCode:null});
+      child.kill = () => { child.exitCode=0; child.emit('exit',0,null); };
+      setImmediate(()=>child.stdout.write('{"event":"serving"}\n'));
+      return child;
+    });
+    syncBuiltinESMExports();
+    service = await startService({binary:'embedder', assets:report, report, embedded:true,
+      async configure({config}) {
+        const profile = await readFile(join(config, 'application-profiles/browser-fixture/application.profile.toml'), 'utf8');
+        assert.match(profile, /plugin = "rsi.web.assets"/);
+        assert.match(profile, /plugin = "fixture.browser.serve"/);
+      }});
+    assert.deepEqual(service.register('embedded'), {id:'device'});
+    await service.close(); service = undefined;
+    assert.deepEqual(calls.map(args=>args.slice(2)), [
+      ['register','embedded'], ['configuration','list'], ['configuration','grant','device','1'],
+    ]);
+  } finally {
+    try { await service?.close(); }
+    finally { t.mock.restoreAll(); syncBuiltinESMExports(); await rm(report,{recursive:true,force:true}); }
+  }
+});
+
 test("renderer watch uses ordinary Web launch and a disjoint relative package recipe", async t => {
   const directory = await mkdtemp(join(tmpdir(), "rsi-renderer-recipe-"));
   let service;

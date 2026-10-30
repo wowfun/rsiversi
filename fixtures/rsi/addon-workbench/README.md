@@ -24,6 +24,9 @@ change the standard product's Responses default or establish live model behavior
 The `workbench-addon` Cargo example is a minimal embedder of the same declaration
 through `standard_application_host`. It accepts explicit Application Profiles,
 uses an inert credential store, and exposes no custom product launcher branches.
+Its browser Profile explicitly composes verified assets and a fixture-owned
+direct Serve factory with the embedded Service. The fixture adapter invokes
+`--profile` for this embedder; application shutdown retires its owned Service.
 Build it with `cargo build --locked -p rsi-cli --example workbench-addon`. Freeze that
 executable before starting any clients. Set `RSI_WORKBENCH_BINARY` to that absolute
 path and `RSI_TUI_PTY_REPORT` to an evidence directory, then run
@@ -40,7 +43,9 @@ checks the capture before and after compilation, and retains the publication pin
 while its browser clients run. Its separate receipt records the example hash and
 family; ordinary Cargo examples cannot be combined with product Web assets.
 It uses real Chromium and Firefox, authenticated HTTP and the product Worker,
-records the actual provider's plan state and addon Tool declaration, exercises
+records the actual provider's plan state and addon Tool declaration, checks
+the visible draft command receipt with its draft projection coordinates and the
+durable extension view under Session tools after publication, exercises
 the addon Settings editor, verifies typed input survives the explicit JSON-mode
 switch, and captures the generic extension UI. Device writes
 to this source-owned addon namespace are rejected by the product's closed remote
