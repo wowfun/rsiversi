@@ -320,6 +320,7 @@ mod tests {
         live.lock_shared().unwrap();
         collect(root.path()).unwrap();
         assert!(path.exists());
+        live.unlock().unwrap();
         drop(live);
         collect(root.path()).unwrap();
         assert!(!path.exists());
@@ -484,6 +485,7 @@ mod tests {
                 && removed.contains(&"00000000000000000005".into())
         );
         assert!(root.join("generations/00000000000000000001").exists());
+        live.unlock().unwrap();
         drop(live);
         assert_eq!(collect(root).unwrap(), ["00000000000000000001"]);
         for number in 7..10 {

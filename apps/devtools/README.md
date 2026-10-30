@@ -128,6 +128,9 @@ stops its resident Host before retiring the fixture homes.
 Run Node producer and installer behavior tests with `node --test
 apps/devtools/tests/*.test.mjs`, and Rust fixture tests with `cargo test --locked
 -p rsi-app-tools`. Real source builds and platform integrations are opt-in.
+In concurrent process tests, explicitly unlock fixture-owned files before
+asserting immediate acquisition or collection: an unrelated child between fork
+and exec can temporarily retain a descriptor after its parent closes it.
 
 All build entrypoints reject malformed environment declarations; Windows SDK
 names containing parentheses are valid even when a POSIX producer has no value
