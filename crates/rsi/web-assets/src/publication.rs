@@ -40,6 +40,20 @@ pub enum AssetError {
 /// Renderer publication result.
 pub type AssetResult<T> = std::result::Result<T, AssetError>;
 
+pub(super) fn renderer_catalog(manifest: &HttpAsset) -> AssetResult<RendererCatalog> {
+    if manifest.bytes.len() > rsi_ui_protocol::MAXIMUM_VIEW_BYTES {
+        return Err(AssetError::Invalid(
+            "renderer manifest exceeds limit".into(),
+        ));
+    }
+    let catalog: RendererCatalog = serde_json::from_slice(manifest.bytes.as_bytes())
+        .map_err(|_| AssetError::Invalid("renderer manifest JSON".into()))?;
+    catalog
+        .validate()
+        .map_err(|error| AssetError::Invalid(error.to_string()))?;
+    Ok(catalog)
+}
+
 #[derive(Debug)]
 struct Bundle {
     revision: String,
@@ -67,16 +81,7 @@ impl Bundle {
         let catalog = files
             .get(&format!("/{MANIFEST}"))
             .map(|manifest| {
-                if manifest.bytes.len() > rsi_ui_protocol::MAXIMUM_VIEW_BYTES {
-                    return Err(AssetError::Invalid(
-                        "renderer manifest exceeds limit".into(),
-                    ));
-                }
-                let catalog: RendererCatalog = serde_json::from_slice(manifest.bytes.as_bytes())
-                    .map_err(|_| AssetError::Invalid("renderer manifest JSON".into()))?;
-                catalog
-                    .validate()
-                    .map_err(|error| AssetError::Invalid(error.to_string()))?;
+                let catalog = renderer_catalog(manifest)?;
                 for renderer in &catalog.renderers {
                     for file in &renderer.files {
                         if BOOTSTRAP.contains(&file.name.as_str()) || file.name == MANIFEST {
@@ -269,6 +274,7 @@ impl WebAssetControl {
             files,
             watch: false,
             pairing: None,
+            discover_renderers: false,
         })
     }
     /// Stages an independently verified product bundle with the owning default file set.
@@ -278,6 +284,7 @@ impl WebAssetControl {
             files: super::default_files(),
             watch: false,
             pairing: Some(super::pairing::Identity::Internal),
+            discover_renderers: true,
         })
     }
     fn stage_config(self: &Arc<Self>, config: Config) -> AssetResult<StageTicket> {
@@ -547,8 +554,18 @@ impl WebAssetControl {
     }
     async fn stamp(
         self: &Arc<Self>,
-        config: Config,
+        mut config: Config,
     ) -> AssetResult<Vec<(u64, std::time::SystemTime)>> {
+        if config.discover_renderers {
+            let state = self.state.lock().expect("Web assets poisoned");
+            if let Some(current) = &state.current {
+                config.files = current
+                    .files
+                    .keys()
+                    .map(|name| name[1..].to_owned())
+                    .collect();
+            }
+        }
         let token = self.tasks.token();
         self.execution
             .prepare(move || {

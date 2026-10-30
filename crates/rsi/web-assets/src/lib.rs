@@ -42,6 +42,8 @@ struct Config {
     watch: bool,
     #[serde(skip)]
     pairing: Option<pairing::Identity>,
+    #[serde(skip)]
+    discover_renderers: bool,
 }
 fn default_files() -> Vec<String> {
     manifest::DEFAULT_FILES
@@ -150,11 +152,13 @@ fn load(
 ) -> AssetResult<LoadedAssets> {
     let directory = open_directory(&config.directory).map_err(io_error)?;
     let mut files = BTreeMap::new();
-    for name in &config.files {
+    let mut pending = std::collections::VecDeque::from(config.files.clone());
+    let mut admitted = config.clone();
+    while let Some(name) = pending.pop_front() {
         if stop.is_cancelled() {
             return Err(AssetError::Closed);
         }
-        let mut file = open_file(&directory, &config.directory, name).map_err(io_error)?;
+        let mut file = open_file(&directory, &config.directory, &name).map_err(io_error)?;
         let metadata = file.metadata().map_err(io_error)?;
         if !metadata.is_file() || metadata.len() > MAXIMUM_API_BYTES as u64 {
             return Err(AssetError::Invalid(
@@ -165,6 +169,7 @@ fn load(
         if let Some(old) = previous.and_then(|files| files.get(&format!("/{name}"))) {
             if old.bytes.len() == size && identical(&mut file, old.bytes.as_bytes(), stop)? {
                 files.insert(format!("/{name}"), old.clone());
+                discover_renderer_files(config, &mut admitted, &mut pending, &name, old)?;
                 continue;
             }
             file.rewind().map_err(io_error)?;
@@ -183,26 +188,25 @@ fn load(
         let bytes = reserved
             .retain_vec(bytes)
             .map_err(|_| AssetError::Capacity)?;
-        files.insert(
-            format!("/{name}"),
-            HttpAsset {
-                policy: match name.as_str() {
-                    "preview-local.html" => rsi_api_http::DocumentPolicy::SandboxLocal,
-                    "preview-online.html" => rsi_api_http::DocumentPolicy::SandboxHttps,
-                    "index.html" => rsi_api_http::DocumentPolicy::Application {
-                        frame_paths: vec![
-                            "/preview-local.html".into(),
-                            "/preview-online.html".into(),
-                            "/downloads/".into(),
-                            "/download-worker.js".into(),
-                        ],
-                    },
-                    _ => rsi_api_http::DocumentPolicy::default(),
+        let asset = HttpAsset {
+            policy: match name.as_str() {
+                "preview-local.html" => rsi_api_http::DocumentPolicy::SandboxLocal,
+                "preview-online.html" => rsi_api_http::DocumentPolicy::SandboxHttps,
+                "index.html" => rsi_api_http::DocumentPolicy::Application {
+                    frame_paths: vec![
+                        "/preview-local.html".into(),
+                        "/preview-online.html".into(),
+                        "/downloads/".into(),
+                        "/download-worker.js".into(),
+                    ],
                 },
-                kind: kind(name).expect("validated extension"),
-                bytes,
+                _ => rsi_api_http::DocumentPolicy::default(),
             },
-        );
+            kind: kind(&name).expect("validated extension"),
+            bytes,
+        };
+        discover_renderer_files(config, &mut admitted, &mut pending, &name, &asset)?;
+        files.insert(format!("/{name}"), asset);
     }
     let desktop_bridge = config
         .pairing
@@ -213,6 +217,29 @@ fn load(
         files,
         desktop_bridge,
     })
+}
+fn discover_renderer_files(
+    config: &Config,
+    admitted: &mut Config,
+    pending: &mut std::collections::VecDeque<String>,
+    name: &str,
+    asset: &HttpAsset,
+) -> AssetResult<()> {
+    if !config.discover_renderers || name != "ui-renderers.json" {
+        return Ok(());
+    }
+    let catalog = publication::renderer_catalog(asset)?;
+    for renderer in catalog.renderers {
+        for file in renderer.files {
+            if !admitted.files.contains(&file.name) {
+                admitted.files.push(file.name.clone());
+                pending.push_back(file.name);
+            }
+        }
+    }
+    admitted
+        .validate()
+        .map_err(|error| AssetError::Invalid(error.to_string()))
 }
 fn identical(file: &mut File, expected: &[u8], stop: &CancellationToken) -> AssetResult<bool> {
     let mut buffer = [0_u8; 8192];

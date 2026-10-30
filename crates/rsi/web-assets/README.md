@@ -4,6 +4,11 @@
 receipt and bootstrap hashes. It does not compare against a core build family.
 The package admission owner separately verifies distributor signatures and
 required wire interfaces; a local directory conveys no distributor provenance.
+When its `files` option is omitted, verified product admission loads the compiled
+file set plus the complete graph declared in the bounded `ui-renderers.json`.
+The same filename, file-count and retained-byte limits apply to that union;
+renderer declarations cannot replace bootstrap files. An explicit `files` list
+remains closed. Verified staging uses the same default graph admission.
 
 WebAssetsFactory is an ordinary native provider of immutable HttpAssets. It reads
 an explicit absolute bundle directory and a closed list of flat filenames at

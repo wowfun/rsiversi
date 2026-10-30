@@ -32,10 +32,6 @@ let service;
 let page;
 try {
   service = await startService({ binary, assets, report, configure: async ({ config, run }) => {
-    const profile = join(config, "application-profiles/browser-fixture/application.profile.toml");
-    const all = ["index.html", "app.js", "worker.js", "admission.js", "download-worker.js", "download-frame.js", "styles.css", "rsi_web.js", "rsi_web_bg.wasm", "mounts.js", "drafts.js", "standard.js", "file-preview.js", "preview-local.html", "preview-online.html", "ui-renderers.json", ...files];
-    const text = await readFile(profile, "utf8");
-    await writeFile(profile, text.replace(`directory = ${JSON.stringify(assets)}`, `directory = ${JSON.stringify(assets)}, files = ${JSON.stringify(all)}`));
     const source = join(config, "native-ui-source"); await mkdir(source);
     await cp(process.env.RSI_NATIVE_UI_ARTIFACT, join(source, "artifact.bin"));
     const manifest = join(source, "addon.toml");

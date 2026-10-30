@@ -262,6 +262,102 @@ fn renderer(root: &Path, source: &[u8]) {
 }
 
 #[tokio::test]
+async fn default_verified_admission_and_staging_load_declared_renderer_extensions() {
+    use sha2::{Digest as _, Sha256};
+    for explicit in [false, true] {
+        let root = bundle();
+        renderer(root.path(), b"initial renderer");
+        let append =
+            |name: &str, bytes: &[u8]| {
+                let path = root.path().join("ui-renderers.json");
+                let mut catalog: serde_json::Value =
+                    serde_json::from_slice(&std::fs::read(&path).unwrap()).unwrap();
+                catalog["renderers"][0]["files"].as_array_mut().unwrap().push(
+                serde_json::json!({"name": name, "sha256": hex::encode(Sha256::digest(bytes))}),
+            );
+                std::fs::write(root.path().join(name), bytes).unwrap();
+                std::fs::write(path, serde_json::to_vec(&catalog).unwrap()).unwrap();
+            };
+        append("extension.wasm", b"renderer module");
+        let mut builder = HostBuilder::without_paths("renderer-extension");
+        builder
+            .register_local_contract::<HttpAssetsContract>()
+            .unwrap();
+        builder
+            .register_local_contract::<WebAssetControlContract>()
+            .unwrap();
+        builder
+            .register_linked(
+                "assets",
+                "1",
+                UpdateMode::RestartRequired,
+                Arc::new(rsi_web_assets::VerifiedWebAssetsFactory),
+            )
+            .unwrap();
+        let mut config = serde_json::json!({"directory": root.path()});
+        if explicit {
+            config["files"] = serde_json::json!(files(root.path()));
+        }
+        let result = builder
+            .build()
+            .unwrap()
+            .start(Profile::new(vec![ProfileEntry::new(
+                "assets", "assets", config,
+            )]))
+            .await;
+        if explicit {
+            assert!(result.is_err(), "explicit file admission remains closed");
+            continue;
+        }
+        let running = result.unwrap();
+        let assets = running.lookup_local::<HttpAssetsContract>().unwrap();
+        let control = running.lookup_local::<WebAssetControlContract>().unwrap();
+        let revision = control.revision().unwrap();
+        let lease = control.acquire(&revision).unwrap();
+        assert!(assets.get("/extension.wasm").unwrap().is_none());
+        assert_eq!(
+            assets
+                .get(&lease.url("extension.wasm").unwrap())
+                .unwrap()
+                .unwrap()
+                .bytes
+                .as_bytes(),
+            b"renderer module"
+        );
+        append("lazy.js", b"lazy renderer module");
+        let next = control
+            .stage_verified(root.path().to_owned())
+            .unwrap()
+            .wait()
+            .await
+            .unwrap()
+            .publish(&revision)
+            .unwrap();
+        let next_lease = control.acquire(&next).unwrap();
+        assert_eq!(
+            assets
+                .get(&next_lease.url("lazy.js").unwrap())
+                .unwrap()
+                .unwrap()
+                .bytes
+                .as_bytes(),
+            b"lazy renderer module"
+        );
+        std::fs::write(root.path().join("extension.wasm"), b"tampered").unwrap();
+        assert!(
+            control
+                .stage_verified(root.path().to_owned())
+                .unwrap()
+                .wait()
+                .await
+                .is_err()
+        );
+        assert_eq!(control.revision().unwrap(), next);
+        assert!(running.shutdown().await.is_clean());
+    }
+}
+
+#[tokio::test]
 async fn paired_renderer_updates_retire_and_restart_without_changing_receipt() {
     let root = bundle();
     renderer(root.path(), b"initial renderer");
