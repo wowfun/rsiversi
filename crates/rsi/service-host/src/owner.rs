@@ -698,9 +698,17 @@ impl HostStartupLease {
 
 #[derive(Debug)]
 struct HomeLock {
-    _file: File,
+    file: File,
     #[cfg(windows)]
     _namespace: rsi_files_native_fs::NamespaceLease,
+}
+
+impl Drop for HomeLock {
+    fn drop(&mut self) {
+        // A concurrent fork can retain this open-file description until exec.
+        // Retiring our sole lease releases ownership before closing the handle.
+        let _ = self.file.unlock();
+    }
 }
 
 fn acquire_home_locks(
@@ -773,7 +781,7 @@ impl HomeLock {
         }
         validate_open_regular_file(&path, &file, "home lease")?;
         Ok(Self {
-            _file: file,
+            file,
             #[cfg(windows)]
             _namespace: namespace,
         })

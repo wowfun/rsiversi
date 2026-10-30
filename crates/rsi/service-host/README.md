@@ -22,6 +22,9 @@ owner leases before provider activation; no inherited standard stream acts as
 an ownership capability. Linux and Windows provide resident daemon endpoints.
 Native identity checks fence process generations; foreground embedded ownership
 remains available to library embedders.
+Home lease retirement explicitly unlocks before closing its file, so an unrelated
+child paused between fork and exec cannot extend the parent's ownership through
+an inherited close-on-exec descriptor.
 The local-stream API compiles on Unix and Windows; resident product daemon
 admission remains restricted to Linux and Windows.
 
