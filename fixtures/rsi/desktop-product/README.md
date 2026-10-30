@@ -31,6 +31,9 @@ completed run and a rendered result button can still coexist with a pending
 detail read, which temporarily disables the control.
 Input readiness includes enabled ancestors, visibility, an unobstructed hit point
 and actual focus before any native keystroke. A readiness timeout dispatches none.
+If WebDriver rejects a handle as stale while resolving focus or reading the
+pre-input state, readiness reacquires the current input before dispatch. Other
+errors propagate, and an error from native keystrokes never triggers a replay.
 Directory selection waits for a completed listing or the known-path form; the
 initial empty, non-busy render does not establish browsing readiness.
 The ordinary conversation run also records the composer's native focus state,

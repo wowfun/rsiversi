@@ -95,6 +95,46 @@ class InputControlTest(unittest.TestCase):
             fill(script, keys, lambda read: read(), 'input', 'value')
         keys.assert_called_once_with(item, '\ue009a\ue000\ue003')
 
+    def test_stale_pre_input_handles_are_reacquired_without_replaying_keys(self):
+        for stage in ['focus', 'state']:
+            with self.subTest(stage=stage):
+                item = {'element-6066': 'current'}
+                value = 'before'
+                attempts = 0
+                calls = []
+                def script(source, arguments):
+                    nonlocal attempts
+                    if source == FOCUS_INPUT and arguments[-1] == 'value':
+                        return value
+                    current = 'focus' if source == FOCUS_INPUT else 'state'
+                    if current == stage:
+                        attempts += 1
+                        if attempts % 2:
+                            raise RuntimeError({'value': {'error': 'stale element reference', 'message': 'Stale element found when trying to create the node handle'}})
+                    return item if current == 'focus' else {'value': value, 'events': 0}
+                def keys(target, text):
+                    nonlocal value
+                    self.assertEqual(target, item)
+                    calls.append(text)
+                    value = '' if text.startswith('\ue009') else text
+                def until(read):
+                    for _ in range(5):
+                        result = read()
+                        if result:
+                            return result
+                    raise TimeoutError('input never became ready')
+                fill(script, keys, until, 'input', 'replacement')
+                self.assertEqual(calls, ['\ue009a\ue000\ue003', 'replacement'])
+
+    def test_other_readiness_errors_are_not_retried(self):
+        error = RuntimeError({'value': {'error': 'javascript error', 'message': 'fixture failure'}})
+        script, keys = Mock(side_effect=error), Mock()
+        with self.assertRaises(RuntimeError) as caught:
+            fill(script, keys, lambda read: read(), 'input', 'replacement')
+        self.assertIs(caught.exception, error)
+        script.assert_called_once()
+        keys.assert_not_called()
+
 
 if __name__ == '__main__':
     unittest.main()
