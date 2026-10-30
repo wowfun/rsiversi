@@ -23,7 +23,7 @@ try {
   const pane=page.getByRole('region',{name:'Main conversation',exact:true}),input=pane.getByRole('textbox',{name:'Main message',exact:true});
   for(const mode of ['ordinary','program']) {
     if(mode==='program') {
-      const previous=await pane.locator('.pane-session').innerText();
+      const previous=await pane.locator('.pane-session').textContent();
       await navigationFilter(page,'all');
       await page.locator('#workspaces [data-testid=workspace-open]').first().click();
       await page.waitForFunction(previous=>document.querySelector('[aria-label="Main conversation"] .pane-session')?.textContent!==previous,previous);
@@ -41,7 +41,7 @@ try {
       await page.waitForTimeout(100);
     }
     const transcript=await pane.locator('.transcript').innerText();await writeFile(join(report,`${mode}-transcript.txt`),transcript);assert.equal(await pane.locator('.pane-status').innerText(),'Completed',transcript.slice(-4096));
-    const elapsed_ms=Date.now()-started,session=(await pane.locator('.pane-session').innerText()).split(' · ').at(-1);
+    const elapsed_ms=Date.now()-started,session=(await pane.getAttribute('data-session-id'));
     const records=service.run(["run",'evidence-cli','--resume',session,'--output','jsonl'],{input:':history\n'.repeat(128)+':exit\n'}).stdout.trim().split('\n').map(line=>JSON.parse(line));
     const facts=records.flatMap(record=>record.fact?[record.fact]:[]).sort((a,b)=>a.seq-b.seq);await writeFile(join(report,`${mode}-facts.json`),JSON.stringify(facts,null,2));
     const intents=facts.filter(f=>f.type==='tool_intent'),reads=intents.filter(f=>f.name==='file_read');assert.equal(reads.length,4);

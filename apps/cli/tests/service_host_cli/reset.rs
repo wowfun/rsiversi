@@ -84,6 +84,8 @@ fn reset_help_preserves_broken_configuration_and_store() {
 
 #[test]
 fn reset_does_not_follow_a_profile_to_an_external_store() {
+    use std::io::Write as _;
+
     let fixture = CliFixture::new("http://127.0.0.1:1");
     let before = seed(&fixture);
     let external = fixture.temporary.path().join("external-store");
@@ -93,7 +95,6 @@ fn reset_does_not_follow_a_profile_to_an_external_store() {
         .temporary
         .path()
         .join("config/rsi/host-profiles/fixture/host.profile.toml");
-    use std::io::Write as _;
     writeln!(
         std::fs::OpenOptions::new()
             .append(true)

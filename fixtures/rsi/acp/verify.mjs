@@ -1,6 +1,6 @@
 import {liveLimits,readDeepseekKey,deepseekProfile} from '../web-product/live-limits.mjs';
 import assert from 'node:assert/strict';
-import { spawn } from 'node:child_process';
+import { spawn, spawnSync } from 'node:child_process';
 import { once } from 'node:events';
 import { createServer } from 'node:http';
 import { mkdir, readFile, writeFile, mkdtemp, chmod } from 'node:fs/promises';
@@ -49,6 +49,7 @@ if (live) {
   endpoint = `http://127.0.0.1:${server.address().port}`;
 }
 await writeFile(join(config, 'settings.json'), JSON.stringify({ 'rsi.agent': { default_model: { deployment: live ? 'live' : 'fixture', model }, require_approval: true } }));
+await writeFile(join(config, 'rsi.toml'), 'format = 1\n[service]\nkind = "catalog"\nid = "fixture"\n');
 await mkdir(join(config, 'host-profiles/fixture'), { recursive: true });
 await mkdir(join(config, 'application-profiles/test-acp'), { recursive: true });
 await writeFile(join(config, 'host-profiles/fixture/host.profile.toml'), profile ?? `format = 1
@@ -157,6 +158,12 @@ try {
     child.kill('SIGTERM');
     const force = setTimeout(() => child.kill('SIGKILL'), 5_000);
     try { await stopped; } finally { clearTimeout(force); }
+  }
+  const hostStop = spawnSync(resolve(values.binary), ['host','stop'], {cwd:workspace,env:environment,encoding:'utf8',timeout:45_000});
+  if (hostStop.status !== 0) {
+    report.ok = false;
+    report.cleanup_error = String(hostStop.error?.message ?? hostStop.stderr).replaceAll(credential, '[REDACTED]');
+    process.exitCode = 1;
   }
   server?.closeAllConnections();
   if (server) await new Promise(resolve => server.close(resolve));

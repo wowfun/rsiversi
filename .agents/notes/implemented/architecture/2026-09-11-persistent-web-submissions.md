@@ -25,7 +25,7 @@ remain available in the recovery list even when the old Session cannot reopen.
 The connection API supplies the authenticated caller identity. Browser requests
 pin that device identity and HTTP checks it against the current authentication
 before dispatch or cookie removal. The document selects storage only after this
-identity is established. The [Web contract](../../../../apps/web/README.md)
+identity is established. The [Web contract](../../../../apps/web/docs/persistence.md)
 owns current persistence, limits and recovery behavior; the
 [HTTP contract](../../../../crates/rsi-api/http/README.md) owns the request fence.
 

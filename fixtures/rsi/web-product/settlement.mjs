@@ -1,3 +1,4 @@
+import {workspaceForm} from './controls.mjs';
 import {paired} from './paired-env.mjs';
 import assert from 'node:assert/strict';
 import {mkdir, writeFile} from 'node:fs/promises';
@@ -24,9 +25,9 @@ try {
   await page.getByLabel('Device registration receipt').fill(receipt);
   await page.getByRole('button',{name:'Connect',exact:true}).click();
   await page.locator('#workbench').waitFor({state:'visible'});
-  await page.locator('.workspace-add summary').click();
-  await page.getByLabel('Server directory').fill(service.workspace);
-  await page.locator('#workspace-form').getByRole('button',{name:'Add workspace',exact:true}).click();
+  await workspaceForm(page);
+  await page.getByLabel('Directory path').fill(service.workspace);
+  await page.locator('.directory-picker footer').getByRole('button',{name:'Open',exact:true}).click();
   await page.locator('#workspaces [data-testid=workspace-open]').click();
   await detailMode(page,'verbose');
   const pane = page.locator('[aria-label="Main conversation"]');
@@ -34,7 +35,7 @@ try {
   await pane.getByRole('textbox',{name:'Main message',exact:true}).fill('SETTLEMENT_OUTPUT_LIMIT');
   await pane.getByTestId('composer-send').click();
   await transcript.getByText('流式预览 🦀 · first boundary',{exact:true}).waitFor();
-  const session = (await pane.locator('.pane-session').innerText()).split(' · ').at(-1);
+  const session = (await pane.getAttribute('data-session-id'));
   const capture = async label => {
     for (const [size,viewport] of [['desktop',{width:1440,height:980}],['narrow',{width:390,height:844}]]) {
       await page.setViewportSize(viewport);

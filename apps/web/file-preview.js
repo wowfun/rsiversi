@@ -1,21 +1,9 @@
 import { mount as mountStandard } from './standard.js';
 import { boundedImage, imageBudget, maximumImagePixels } from './image-bounds.js';
-import { createHighlighterCoreSync } from 'shiki/core';
-import { createJavaScriptRegexEngine } from 'shiki/engine/javascript';
-import theme from 'shiki/themes/github-light.mjs';
-import rust from 'shiki/langs/rust.mjs';
-import typescript from 'shiki/langs/typescript.mjs';
-import javascript from 'shiki/langs/javascript.mjs';
-import python from 'shiki/langs/python.mjs';
-import json from 'shiki/langs/json.mjs';
-import yaml from 'shiki/langs/yaml.mjs';
-import toml from 'shiki/langs/toml.mjs';
-import shell from 'shiki/langs/shellscript.mjs';
-import html from 'shiki/langs/html.mjs';
-import css from 'shiki/langs/css.mjs';
+import {highlightCode,colorToken} from './code-highlight.js';
 
 const maximum = 32 * 1024 * 1024;
-let retained = 0, highlighter;
+let retained = 0;
 const decoder = new TextDecoder('utf-8', { fatal: true });
 const aliases = { rs:'rust',ts:'typescript',tsx:'typescript',js:'javascript',jsx:'javascript',py:'python',json:'json',yaml:'yaml',yml:'yaml',toml:'toml',sh:'shellscript',bash:'shellscript',html:'html',htm:'html',css:'css' };
 function node(tag, cls, text) { const item=document.createElement(tag); if(cls)item.className=cls;if(text!==undefined)item.textContent=text;return item; }
@@ -23,18 +11,14 @@ function language(label) { const suffix=label.toLowerCase().split('.').pop();ret
 function code(text, lang, numbered=true) {
   const pre=node('pre','file-code'), content=node('code');pre.append(content);pre.dataset.language=lang;
   // Very long lines and large documents remain inspectable without synchronous regex work.
-  let tokens;
-  if(text.length<=256*1024 && text.split('\n').every(line=>line.length<=4096)) {
-    highlighter ??= createHighlighterCoreSync({themes:[theme],langs:[rust,typescript,javascript,python,json,yaml,toml,shell,html,css],engine:createJavaScriptRegexEngine()});
-    if(highlighter.getLoadedLanguages().includes(aliases[lang]??lang)) tokens=highlighter.codeToTokens(text,{lang:aliases[lang]??lang,theme:'github-light'}).tokens;
-  }
+  const tokens=highlightCode(text,lang);
   const lines=tokens??text.split('\n').map(line=>[{content:line}]);
   if(lines.length>20000){content.textContent=text;return pre;}
   for(const [index,line] of lines.entries()) {
     const row=node('span','file-code-line');
     if(numbered){const number=node('span','file-line-number',String(index+1));number.setAttribute('aria-hidden','true');row.append(number);}
     const value=node('span','file-code-content');
-    for(const token of line){const part=node('span','file-token',token.content);if(token.color&&/^#[0-9a-f]{6,8}$/i.test(token.color))part.style.color=token.color;value.append(part);}
+    for(const token of line){const part=node('span','file-token',token.content);colorToken(part,token);value.append(part);}
     row.append(value);content.append(row);if(index+1<lines.length)content.append(document.createTextNode('\n'));
   }
   return pre;

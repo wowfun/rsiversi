@@ -22,6 +22,44 @@ function certificateOrPrivateDirectory(program,args,options) {
   return {status:0,stdout:'',stderr:''};
 }
 
+test("embedded browser owns its Service and invokes device Profiles directly", async t => {
+  const report = await mkdtemp(join(tmpdir(), "rsi-embedded-adapter-"));
+  let service;
+  const calls = [];
+  try {
+    t.mock.method(cp, 'spawnSync', (program, args, options) => {
+      if (program !== 'embedder') return certificateOrPrivateDirectory(program, args, options);
+      calls.push(args);
+      assert.deepEqual(args.slice(0, 2), ['--profile', 'devices']);
+      return {status:0, stdout:JSON.stringify(args[2] === 'register' ? {id:'device'} : {revision:'1'}), stderr:''};
+    });
+    t.mock.method(cp, 'spawn', (program, args) => {
+      assert.equal(program, 'embedder');
+      assert.deepEqual(args.slice(0, 2), ['--profile', 'browser-fixture']);
+      assert(!args.includes('--assets'));
+      const child = Object.assign(new EventEmitter(), {stdout:new PassThrough(), stderr:new PassThrough(),exitCode:null});
+      child.kill = () => { child.exitCode=0; child.emit('exit',0,null); };
+      setImmediate(()=>child.stdout.write('{"event":"serving"}\n'));
+      return child;
+    });
+    syncBuiltinESMExports();
+    service = await startService({binary:'embedder', assets:report, report, embedded:true,
+      async configure({config}) {
+        const profile = await readFile(join(config, 'application-profiles/browser-fixture/application.profile.toml'), 'utf8');
+        assert.match(profile, /plugin = "rsi.web.assets"/);
+        assert.match(profile, /plugin = "fixture.browser.serve"/);
+      }});
+    assert.deepEqual(service.register('embedded'), {id:'device'});
+    await service.close(); service = undefined;
+    assert.deepEqual(calls.map(args=>args.slice(2)), [
+      ['register','embedded'], ['configuration','list'], ['configuration','grant','device','1'],
+    ]);
+  } finally {
+    try { await service?.close(); }
+    finally { t.mock.restoreAll(); syncBuiltinESMExports(); await rm(report,{recursive:true,force:true}); }
+  }
+});
+
 test("renderer watch uses ordinary Web launch and a disjoint relative package recipe", async t => {
   const directory = await mkdtemp(join(tmpdir(), "rsi-renderer-recipe-"));
   let service;
@@ -42,7 +80,7 @@ test("renderer watch uses ordinary Web launch and a disjoint relative package re
       configure(value) { config=value.config; }});
     const document = await readFile(join(config,'rsi.toml'),'utf8');
     assert.match(document, /\[sources\.web\]/);
-    assert.match(document, /inputs = \["assets\/standard.js","assets\/lazy.js","assets\/ui-renderers.json"\]/);
+    assert.match(document, /inputs = \["assets\/standard.js","assets\/file-preview.js","assets\/ui-renderers.json"\]/);
     assert.match(document, /output = "web-package\/package.json"/);
     assert.equal(service.origin,'http://127.0.0.1:43210');
     assert.equal(service.developmentHttp,true);
@@ -72,7 +110,7 @@ test("recovery and tasks retain leased binary identity without copying it when b
     for (const probe of ["recovery", "tasks"]) {
       const report = join(directory, probe);
       const result = spawnSync(process.execPath, ['--import',pathToFileURL(preload).href,join(import.meta.dirname, `${probe}.mjs`)], {
-        env: { ...process.env, NODE_OPTIONS:'', RSI_APP_TOOLS_BINARY:process.execPath, RSI_WEB_BINARY: binary, RSI_WEB_ASSETS: directory,
+        env: { ...process.env, NODE_OPTIONS:'', RSI_PAIRED_BUNDLE:'', RSI_APP_TOOLS_BINARY:process.execPath, RSI_WEB_BINARY: binary, RSI_WEB_ASSETS: directory,
           RSI_WEB_REPORT: report, RSI_WEB_BROWSER: "chromium", PLAYWRIGHT_BROWSERS_PATH: join(directory, "absent-browsers") },
         encoding: "utf8", timeout: 15_000,
       });

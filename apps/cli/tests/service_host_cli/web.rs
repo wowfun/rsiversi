@@ -54,6 +54,20 @@ async fn web_alias_and_profile_serve_default_assets_with_stable_authorized_ident
     let paired = paired.canonicalize().unwrap();
     let _lease = rsi_build_info::GenerationLease::open(&paired).unwrap();
     fixture.binary = paired.join(if cfg!(windows) { "rsi.exe" } else { "rsi" });
+    let package = fixture.temporary.path().join("web-package");
+    let assembled = std::process::Command::new("node")
+        .arg(std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("../devtools/packages.mjs"))
+        .args(["assemble", "web"])
+        .arg(&package)
+        .arg(paired.join("assets"))
+        .output()
+        .unwrap();
+    assert!(
+        assembled.status.success(),
+        "{}",
+        String::from_utf8_lossy(&assembled.stderr)
+    );
+    fixture.assert_success(&["plugin", "install", "--local", package.to_str().unwrap()]);
     let mut first = None;
     for args in [
         vec!["web", "--port", "0", "--no-open"],
@@ -104,10 +118,11 @@ async fn web_alias_and_profile_serve_default_assets_with_stable_authorized_ident
             String::from_utf8_lossy(&grants.stdout)
                 .contains(current["device_id"].as_str().unwrap())
         );
-        let conflict = fixture.run(&["web", "--port", "0", "--no-open"]);
+        let reserved = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let different_port = reserved.local_addr().unwrap().port().to_string();
+        let conflict = fixture.run(&["web", "--port", &different_port, "--no-open"]);
         assert!(!conflict.status.success());
         assert!(!String::from_utf8_lossy(&conflict.stdout).contains("rsi web:"));
-        fixture.assert_success(&["host", "stop"]);
         let output =
             tokio::time::timeout(std::time::Duration::from_secs(20), child.wait_with_output())
                 .await
@@ -119,6 +134,7 @@ async fn web_alias_and_profile_serve_default_assets_with_stable_authorized_ident
             String::from_utf8_lossy(&output.stderr)
         );
     }
+    fixture.assert_success(&["host", "stop"]);
 }
 
 #[test]
@@ -134,12 +150,11 @@ fn web_help_and_failures_do_not_announce_readiness() {
     assert!(!failure.status.success());
     assert!(!String::from_utf8_lossy(&failure.stdout).contains("rsi web:"));
     let message = String::from_utf8_lossy(&failure.stderr);
-    assert!(message.contains("no build family"), "{message}");
+    assert!(message.contains("invalid renderer bundle"), "{message}");
     assert!(
-        message.contains("cargo run -p rsi-app-tools -- fixture-dist web"),
+        message.contains("cannot read a regular Web bundle asset"),
         "{message}"
     );
-    assert!(!fixture.temporary.path().join("state").exists());
     let invalid = fixture.run(&["web", "--port", "invalid"]);
     assert!(!invalid.status.success());
     assert!(String::from_utf8_lossy(&invalid.stderr).contains("--port"));

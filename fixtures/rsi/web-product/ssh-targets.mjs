@@ -1,3 +1,4 @@
+import {openSettings} from './controls.mjs';
 // Real SSH, generated keys and Local public API trust; no source-owned user identities.
 import {paired} from './paired-env.mjs';
 import {liveFixture} from './live-fixture.mjs';
@@ -47,7 +48,7 @@ try {
   const registration=service.register('SSH target product verification');
   deviceApi=await requests.newContext({ignoreHTTPSErrors:true,extraHTTPHeaders:{authorization:`Bearer ${registration.token}`,'x-rsi-wire-version':'2'}});
   await page.goto(service.origin);await page.locator('#receipt').fill(JSON.stringify(registration));await page.getByRole('button',{name:'Connect',exact:true}).click();await page.locator('#workbench').waitFor({state:'visible'});
-  await page.getByRole('button',{name:'Settings',exact:true}).click();await page.getByRole('button',{name:'Plugins',exact:true}).click();
+  await openSettings(page);await page.getByRole('button',{name:'Plugins',exact:true}).click();
   const panel=page.getByRole('region',{name:'SSH targets',exact:true});await panel.getByRole('button',{name:'Refresh SSH targets',exact:true}).click();
   await panel.locator('summary').filter({hasText:'Add an SSH target'}).click();
   await panel.getByLabel('Target name',{exact:true}).fill('Isolated Linux SSH');await panel.getByLabel('Hostname or IP address',{exact:true}).fill('127.0.0.1');await panel.getByLabel('SSH account',{exact:true}).fill(user);await panel.getByLabel('SSH port',{exact:true}).fill(String(port));
@@ -77,6 +78,7 @@ try {
   await verifySshMcp({page,service,report,local,registration,target,checks});
   await page.getByRole('button',{name:'Close settings',exact:true}).click();
   await page.getByTestId('new-conversation').click();
+  await page.getByRole('button',{name:'Choose workspace',exact:true}).click();
   const dialog=page.getByRole('dialog',{name:'Select workspace directory',exact:true});await dialog.waitFor();
   await dialog.getByLabel('Execution location',{exact:true}).selectOption(target.candidate.target);
   await dialog.getByRole('button',{name:'Edit directory path',exact:true}).waitFor();
@@ -93,7 +95,7 @@ try {
   }
   await page.setViewportSize({width:1440,height:900});
   if(liveMode)session=await verifySshSession({page,service,report,dialog,target,checks});
-  else {await dialog.getByRole('button',{name:'Cancel',exact:true}).click();await page.getByRole('button',{name:'Settings',exact:true}).click();await page.getByRole('button',{name:'Plugins',exact:true}).click();}
+  else {await dialog.getByRole('button',{name:'Cancel',exact:true}).click();await openSettings(page);await page.getByRole('button',{name:'Plugins',exact:true}).click();}
   const connection={selection:{host_epoch:catalog.host_epoch,target:target.candidate.target,revision:target.revision},expected_connection_epoch:oldEpoch};
   await card.getByRole('button',{name:'Reconnect target',exact:true}).click();
   await waitUntil(()=>{const current=local({operation:'ssh_catalog'}).targets[0];return current.connected && current.connection_epoch!==oldEpoch},'fresh connection epoch',60000);

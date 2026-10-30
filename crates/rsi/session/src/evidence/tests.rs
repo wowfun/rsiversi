@@ -630,6 +630,24 @@ async fn byte_capacity_is_reclaimed_only_from_idle_selected_sources() {
 #[async_trait::async_trait]
 #[allow(unused_variables)]
 impl SessionStore for Store {
+    async fn session_access(
+        &self,
+        sessions: &[SessionId],
+    ) -> rsi_agent_store_protocol::Result<
+        Vec<rsi_agent_store_protocol::Result<rsi_agent_store_protocol::StoreSessionAccess>>,
+    > {
+        unreachable!()
+    }
+
+    async fn session_activity_cuts(
+        &self,
+        sessions: &[SessionId],
+    ) -> rsi_agent_store_protocol::Result<
+        Vec<rsi_agent_store_protocol::Result<rsi_agent_store_protocol::StoreActivityCut>>,
+    > {
+        unreachable!()
+    }
+
     async fn session_activity_summaries(
         &self,
         sessions: &[SessionId],

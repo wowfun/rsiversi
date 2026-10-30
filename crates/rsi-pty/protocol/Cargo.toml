@@ -10,6 +10,7 @@ rsi-execution = { path = "../../rsi-execution/core" }
 async-trait.workspace = true
 rsi-meta-contract = { path = "../../rsi-meta/contract" }
 rsi-process = { path = "../../rsi-process/core" }
+rsi-sandbox = { path = "../../rsi-sandbox/core" }
 serde.workspace = true
 thiserror.workspace = true
 [lints]

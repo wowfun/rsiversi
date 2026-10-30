@@ -16,6 +16,8 @@ pub enum Operation {
     OrderSeed,
     /// Register operation.
     Register,
+    /// Replace the display name.
+    Rename,
     /// Status operation.
     Status,
     /// Delete operation.
@@ -23,11 +25,12 @@ pub enum Operation {
 }
 impl Operation {
     /// All operation identities owned by this protocol.
-    pub const ALL: [Self; 6] = [
+    pub const ALL: [Self; 7] = [
         Self::Get,
         Self::List,
         Self::OrderSeed,
         Self::Register,
+        Self::Rename,
         Self::Status,
         Self::Delete,
     ];
@@ -41,17 +44,18 @@ impl Operation {
             Self::List => ("list", OperationEffect::Read),
             Self::OrderSeed => ("order_seed", OperationEffect::Read),
             Self::Register => ("register", OperationEffect::Mutation),
+            Self::Rename => ("rename", OperationEffect::Mutation),
             Self::Status => ("status", OperationEffect::Read),
             Self::Delete => ("delete", OperationEffect::Mutation),
         };
         OperationSpec {
             protocol: rsi_api_protocol::wire_contract!(),
-            id: OperationId::new("workspace", name, 3).expect("constant operation"),
+            id: OperationId::new("workspace", name, 4).expect("constant operation"),
             class: OperationClass::Data,
             effect,
             access: rsi_api_protocol::OperationAccess::Authenticated,
             encoding: RequestEncoding::Json,
-            maximum_request_bytes: if matches!(self, Self::Register) {
+            maximum_request_bytes: if matches!(self, Self::Register | Self::Rename) {
                 128 * 1024
             } else {
                 128
@@ -82,6 +86,12 @@ pub(crate) struct ListRequest {
 pub(crate) struct RegisterRequest {
     pub location: rsi_workspace_protocol::ExecutionLocation,
     pub path: PathBuf,
+}
+#[derive(Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub(crate) struct RenameRequest {
+    pub id: WorkspaceId,
+    pub name: rsi_workspace_protocol::WorkspaceName,
 }
 
 #[derive(Serialize, Deserialize)]

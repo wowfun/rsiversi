@@ -174,11 +174,11 @@ async fn tree_control_requires_validation_even_when_metadata_is_readable() {
     assert_eq!(kernel.session_header(&id).await.unwrap().session_id(), &id);
     assert!(matches!(
         kernel.tree_sessions(&id).await,
-        Err(TurnError::Store(_))
+        Err(TurnError::Invariant(message)) if message.contains("injected mechanical validation failure")
     ));
     assert!(matches!(
         kernel.prepare_resume(&id).await,
-        Err(TurnError::Store(_))
+        Err(TurnError::Invariant(message)) if message.contains("injected mechanical validation failure")
     ));
 }
 

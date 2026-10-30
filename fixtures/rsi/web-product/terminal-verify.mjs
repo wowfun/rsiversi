@@ -1,3 +1,5 @@
+import {disconnect} from './controls.mjs';
+import {workspaceForm} from './controls.mjs';
 import './paired-env.mjs';
 import assert from 'node:assert/strict';
 import {mkdir,writeFile} from 'node:fs/promises';
@@ -22,7 +24,7 @@ for(const[name,engine]of[['chromium',chromium],['firefox',firefox]]){
       constructor(...args){super(...args);this.addEventListener('message',({data})=>{
         if(data.kind!=='reply'||typeof data.result!=='string')return;
         let reply;try{reply=JSON.parse(data.result)}catch{return}
-        if(reply.type==='output'){
+        if(reply?.type==='output'){
           window.terminalWire.pages++;
           if(/\x1b[\]P_^X]/.test(reply.value.text))window.terminalWire.forbidden++;
         }
@@ -38,12 +40,12 @@ for(const[name,engine]of[['chromium',chromium],['firefox',firefox]]){
     };
   });
   await page.goto(service.origin);await page.locator('#receipt').fill(JSON.stringify(service.register(`${name} terminal verification`)));await page.getByRole('button',{name:'Connect',exact:true}).click();await page.locator('#workbench').waitFor({state:'visible'});
-  await page.locator('.workspace-add summary').click();await page.locator('#workspace-path').fill(service.workspace);await page.getByRole('button',{name:'Add workspace',exact:true}).click();await page.locator('#workspaces [data-testid=workspace-open]').first().click();
-  const pane=page.locator('[aria-label="Main conversation"]');await pane.getByRole('textbox',{name:'Main message'}).fill('Publish the isolated terminal Session');await pane.getByTestId('composer-send').click();await pane.locator('.pane-status').filter({hasText:'Completed'}).waitFor();
+  await workspaceForm(page);await page.getByLabel('Directory path').fill(service.workspace);await page.locator('.directory-picker footer').getByRole('button',{name:'Open',exact:true}).click();await page.locator('#workspaces [data-testid=workspace-open]').first().click();
+  const pane=page.locator('[aria-label="Main conversation"]');await pane.getByRole('textbox',{name:'Main message'}).fill('Publish the isolated terminal Session');await pane.getByTestId('composer-send').click();await pane.locator('.pane-status').filter({hasText:'Completed'}).waitFor({state:'attached'});
   const requests=service.provider.requests.length;await verifyTerminals(page,service,directory,name);assert.equal(service.provider.requests.length,requests,'terminal operation invoked the model');
   assert.deepEqual(await page.evaluate(()=>window.terminalStyleViolations),[],'terminal blocked by product CSP');
   await verifyPluginSources(page,service,directory,name);
-  await page.locator('#sign-out').click();await page.locator('#login').waitFor({state:'visible'});assert.deepEqual(errors,[]);await writeFile(join(directory,'result.json'),JSON.stringify({status:'passed',browser:browser.version(),terminal_model_requests:0},null,2));
+  await disconnect(page);await page.locator('#login').waitFor({state:'visible'});assert.deepEqual(errors,[]);await writeFile(join(directory,'result.json'),JSON.stringify({status:'passed',browser:browser.version(),terminal_model_requests:0},null,2));
  }catch(error){await page?.screenshot({path:join(directory,'failure.png')});await writeFile(join(directory,'failure.txt'),String(error));throw error;}
  finally{await browser.close();await service.close();}
 }

@@ -389,3 +389,61 @@ fn changed_model_fact(sample: u64) -> SessionFact {
     )
     .unwrap()
 }
+
+#[tokio::test]
+async fn new_conversation_retires_attachment_without_creating_a_session() {
+    let (runtime, _backend, app) = sources::fixture().await;
+    let initial = frame(&app, None);
+    let original = initial["view"]["surfaces"]["main"].clone();
+    app.command(r#"{"action":"new_conversation","pane":"main"}"#)
+        .await
+        .unwrap();
+    let empty = frame(&app, Some("1"));
+    assert!(empty["view"]["surfaces"]["main"].is_null());
+    assert!(app.command(&json!({"action":"model","pane":"main","generation":original["generation"],"model":{"deployment":"stale","model":"stale"}}).to_string()).await.is_err());
+    assert!(runtime.shutdown().await.is_clean());
+}
+
+#[tokio::test]
+async fn metrics_preserve_partial_watermark_and_reject_retired_attachment() {
+    let (runtime, backend, app) = sources::fixture().await;
+    let initial = sources::view(&app)["surfaces"]["main"].clone();
+    *backend.metrics.lock().unwrap() = Some(MetricsRead {
+        current_model: ModelSelectionRead {
+            selection: ModelSelection::baseline(backend.header().await.unwrap().settings()),
+            availability: ModelAvailability::Unavailable {
+                reason: "fixture".into(),
+            },
+        },
+        session_id: SessionId::new(initial["session"].as_str().unwrap()).unwrap(),
+        watermark: 10,
+        complete: false,
+        summary: rsi_conversation::SessionMetrics {
+            through_seq: 5,
+            ..Default::default()
+        },
+    });
+    let command =
+        json!({"action":"metrics","pane":"main","generation":initial["generation"]}).to_string();
+    app.command(&command).await.unwrap();
+    let metrics = sources::view(&app)["surfaces"]["main"]["metrics"].clone();
+    assert_eq!(metrics["watermark"], 10);
+    assert_eq!(metrics["summary"]["through_seq"], 5);
+    assert_eq!(metrics["complete"], false);
+    let gate = Arc::new(admission::HeaderGate::default());
+    *backend.metrics_gate.lock().unwrap() = Some(gate.clone());
+    let reading = {
+        let app = app.clone();
+        tokio::spawn(async move { app.command(&command).await })
+    };
+    tokio::time::timeout(std::time::Duration::from_secs(3), gate.entered.cancelled())
+        .await
+        .unwrap();
+    app.command(r#"{"action":"new_conversation","pane":"main"}"#)
+        .await
+        .unwrap();
+    gate.release.cancel();
+    assert!(reading.await.unwrap().is_err());
+    assert!(sources::view(&app)["surfaces"]["main"].is_null());
+    assert!(runtime.shutdown().await.is_clean());
+}

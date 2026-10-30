@@ -147,6 +147,7 @@ impl AgentKernel {
                 programs: Mutex::new(BTreeMap::new()),
                 program_generation: format!("{:x}", Sha256::digest(program_generation)),
                 projection_admission: Arc::new(Semaphore::new(projection::MAXIMUM_CAPTURES)),
+                projection_flights: Arc::default(),
                 ready_activation: Mutex::new(ready::ReadySchedulerState::default()),
                 claim_changed: Notify::new(),
                 session_changes: SessionWatchHub::default(),

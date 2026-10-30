@@ -14,6 +14,57 @@ fn repository() -> &'static Path {
 }
 
 #[test]
+fn desktop_ci_report_paths_fit_the_native_socket_and_retain_evidence() {
+    let source = fs::read_to_string(repository().join(".github/workflows/ci.yml")).unwrap();
+    let workflow: yaml_serde::Value = yaml_serde::from_str(&source).unwrap();
+    let steps = workflow["jobs"]["rsi-desktop"]["steps"]
+        .as_sequence()
+        .unwrap();
+    for step in steps {
+        let run = step["run"].as_str().unwrap_or_default();
+        let modes = run
+            .lines()
+            .find_map(|line| {
+                line.trim()
+                    .strip_prefix("for mode in ")
+                    .and_then(|line| line.strip_suffix("; do"))
+            })
+            .unwrap_or("");
+        for line in run
+            .lines()
+            .filter(|line| line.contains("desktop-product/verify.py"))
+        {
+            let report = line
+                .split_once("--report \"")
+                .unwrap()
+                .1
+                .split('"')
+                .next()
+                .unwrap();
+            for mode in modes.split_whitespace().chain(std::iter::once("")) {
+                let path = report
+                    .replace("$RUNNER_TEMP", "/home/runner/work/_temp")
+                    .replace("$mode", mode);
+                let socket = format!("{path}/xdg_state_home/rsi/session-host/runtime/host.sock");
+                assert!(socket.len() < 108, "Linux sockaddr_un cannot hold {socket}");
+            }
+        }
+    }
+    let archive = steps
+        .iter()
+        .find(|step| step["with"]["name"] == "rsi-desktop-evidence")
+        .unwrap();
+    let paths = archive["with"]["path"].as_str().unwrap();
+    for root in ["rsi-auto-evidence", "rsi-desk-*"] {
+        assert!(
+            paths
+                .lines()
+                .any(|line| line == format!("${{{{ runner.temp }}}}/{root}"))
+        );
+    }
+}
+
+#[test]
 fn ci_executes_offline_install_policy_and_an_isolated_ordinary_runtime_smoke() {
     let source = fs::read_to_string(repository().join(".github/workflows/ci.yml")).unwrap();
     let workflow: yaml_serde::Value = yaml_serde::from_str(&source).unwrap();
@@ -56,7 +107,7 @@ fn ci_executes_offline_install_policy_and_an_isolated_ordinary_runtime_smoke() {
     assert!(run.contains(
         "--test resident_listeners frontend::ordinary_product_watched_smoke -- --ignored --exact"
     ));
-    assert!(run.contains("trap restore_policy EXIT"));
+    assert!(run.contains("source \"$GITHUB_WORKSPACE/.github/scripts/sandbox-policy.sh\" full"));
     assert!(!run.contains("API_KEY"));
 }
 
@@ -270,7 +321,9 @@ fn ci_pins_rsi_meta_conformance_to_linux_x86_64_and_macos_arm64() {
 
 #[test]
 fn ci_exercises_every_agent_package_and_formats_the_repository_once() {
-    let workflow = fs::read_to_string(repository().join(".github/workflows/ci.yml")).unwrap();
+    let workflow = fs::read_to_string(repository().join(".github/workflows/ci.yml"))
+        .unwrap()
+        .replace("\r\n", "\n");
     assert!(
         workflow.contains("cargo clippy --locked -p 'rsi-agent*' --all-targets -- -D warnings")
     );
@@ -379,11 +432,16 @@ fn windows_compile_gate_keeps_independent_lint_and_unsupported_boundary_checks()
             .contains("-p rsi-cli -p rsi-app-catalog --all-targets --no-run --message-format=json")
     );
     assert!(native.contains("if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }"));
-    assert!(native.contains("if (-not $artifacts)"));
-    assert!(native.contains("foreach ($artifact in $artifacts)"));
-    assert!(native.contains("& $artifact.executable"));
-    assert!(native.contains("if ($LASTEXITCODE -ne 0) { $failed = $true }"));
-    assert!(native.contains("if ($failed) { exit 1 }"));
+    assert!(native.contains(".github/scripts/windows-native-tests.ps1 -Manifest"));
+    assert!(native.contains("exit $LASTEXITCODE"));
+    let worker = include_str!("../../../../.github/scripts/windows-native-tests.ps1");
+    assert!(worker.contains("if (-not $artifacts.Count)"));
+    assert!(worker.contains("foreach ($artifact in $artifacts)"));
+    assert!(worker.contains("& $artifact.executable"));
+    assert!(worker.contains("if ($LASTEXITCODE -ne 0) { $result = 1 }"));
+    assert!(worker.contains("exit $result"));
+    assert!(worker.contains("-ExecutionTimeLimit"));
+    assert!(worker.contains("Unregister-ScheduledTask -TaskName $taskName -Confirm:$false"));
     for step in job["steps"]
         .as_array()
         .unwrap()
@@ -593,6 +651,23 @@ fn workspace_metadata() -> serde_json::Value {
 }
 
 fn cargo_package_patterns(command: &str, check: &str) -> Vec<String> {
+    let expanded;
+    let command = if command
+        .contains("source \"$GITHUB_WORKSPACE/.github/scripts/standard-packages.sh\"")
+    {
+        let source = fs::read_to_string(repository().join(".github/scripts/standard-packages.sh"))
+            .unwrap()
+            .replace("\r\n", "\n");
+        let selectors = source
+            .split_once("RSI_STANDARD_PACKAGE_ARGS=(\n")
+            .and_then(|(_, body)| body.split_once("\n)"))
+            .map(|(body, _)| body.split_whitespace().collect::<Vec<_>>().join(" "))
+            .expect("standard package helper has one literal argument array");
+        expanded = command.replace("\"${RSI_STANDARD_PACKAGE_ARGS[@]}\"", &selectors);
+        &expanded
+    } else {
+        command
+    };
     command
         .lines()
         .flat_map(|line| {
@@ -668,6 +743,13 @@ fn whole_package_coverage_requires_execution_and_the_matching_check() {
     assert_eq!(
         cargo_package_patterns("cargo test -p 'rsi-execution*' --all-targets", "test"),
         ["rsi-execution*"]
+    );
+    let helper = "source \"$GITHUB_WORKSPACE/.github/scripts/standard-packages.sh\"";
+    let command = "cargo test --locked \"${RSI_STANDARD_PACKAGE_ARGS[@]}\" --all-targets";
+    assert!(cargo_package_patterns(command, "test").is_empty());
+    assert!(cargo_package_patterns(&format!("{helper}\n{command} --no-run"), "test").is_empty());
+    assert!(
+        cargo_package_patterns(&format!("{helper}\n{command}"), "test").contains(&"rsi".to_owned())
     );
 }
 
@@ -952,16 +1034,123 @@ fn ci_frontend_smoke_retains_the_required_sandbox_policy_until_exit() {
     let smoke = run
         .find("cargo run --locked -p rsi-app-tools -- fixture-dev tui --smoke")
         .unwrap();
-    for setup in [
-        "trap restore_policy EXIT",
-        "kernel.unprivileged_userns_clone=1",
-        "kernel.apparmor_restrict_unprivileged_userns=0",
+    let setup = "source \"$GITHUB_WORKSPACE/.github/scripts/sandbox-policy.sh\" full";
+    assert!(
+        run.find(setup).is_some_and(|index| index < smoke),
+        "development smoke needs scoped backend policy: {setup}"
+    );
+}
+
+#[test]
+fn ci_native_acceptance_requires_exact_tests_and_owning_runtime() {
+    let source = fs::read_to_string(repository().join(".github/workflows/ci.yml")).unwrap();
+    let workflow: yaml_serde::Value = yaml_serde::from_str(&source).unwrap();
+    for (job, name) in [
+        (
+            "rsi-base",
+            "host_does_not_shorten_client_setup_and_close_phase_budgets",
+        ),
+        ("rsi-base", "tests::native_sandbox_private_git_comparison"),
+        (
+            "rsi",
+            "browser::session_browser_real_http_ws_nodes_images_and_presentation_detach",
+        ),
     ] {
-        assert!(
-            run.find(setup).is_some_and(|index| index < smoke),
-            "development smoke needs scoped backend policy: {setup}"
+        let steps = workflow["jobs"][job]["steps"].as_sequence().unwrap();
+        let step = steps
+            .iter()
+            .find(|step| step["run"].as_str().is_some_and(|run| run.contains(name)))
+            .unwrap();
+        let command = step["run"].as_str().unwrap();
+        let listing = format!(
+            "{name} -- --ignored --exact --list | rg --fixed-strings --line-regexp '{name}: test'"
         );
+        let execution = format!("{name} -- --ignored --exact\n");
+        assert!(command.find(&listing).unwrap() < command.find(&execution).unwrap());
+        assert!(
+            step["if"]
+                .as_str()
+                .unwrap()
+                .contains("runner.os == 'Linux'")
+        );
+        assert!(step["continue-on-error"].is_null());
+        if job == "rsi" {
+            assert!(
+                step["if"]
+                    .as_str()
+                    .unwrap()
+                    .contains("steps.browser_runtime_setup.outcome == 'success'")
+            );
+        }
     }
+}
+
+#[test]
+fn ci_standard_package_selection_is_shared_without_shell_glob_expansion() {
+    let source = fs::read_to_string(repository().join(".github/workflows/ci.yml")).unwrap();
+    let workflow: yaml_serde::Value = yaml_serde::from_str(&source).unwrap();
+    let steps = workflow["jobs"]["rsi"]["steps"].as_sequence().unwrap();
+    for name in [
+        "Lint standard rsi",
+        "Compile standard rsi tests",
+        "Exercise standard rsi on Linux",
+        "Exercise standard rsi on macOS",
+    ] {
+        let step = steps
+            .iter()
+            .find(|step| step["name"].as_str() == Some(name))
+            .unwrap();
+        let command = step["run"].as_str().unwrap();
+        assert!(
+            command.contains("source \"$GITHUB_WORKSPACE/.github/scripts/standard-packages.sh\"")
+        );
+        assert!(command.contains("\"${RSI_STANDARD_PACKAGE_ARGS[@]}\""));
+    }
+}
+
+#[test]
+fn scheduled_parser_campaigns_retain_only_provenance_and_fixed_failure_inputs() {
+    let source =
+        fs::read_to_string(repository().join(".github/workflows/performance-evidence.yml"))
+            .unwrap();
+    let workflow: yaml_serde::Value = yaml_serde::from_str(&source).unwrap();
+    let steps = workflow["jobs"]["parser-check"]["steps"]
+        .as_sequence()
+        .unwrap();
+    for target in ["apply_patch", "mcp_frame"] {
+        let step = steps
+            .iter()
+            .find(|step| {
+                step["run"]
+                    .as_str()
+                    .is_some_and(|run| run.contains(&format!("campaign.py {target} ")))
+            })
+            .unwrap();
+        assert!(step["if"].as_str().unwrap().contains("!cancelled()"));
+        assert!(
+            step["if"]
+                .as_str()
+                .unwrap()
+                .contains("steps.fuzz_setup.outcome == 'success'")
+        );
+        assert!(step["continue-on-error"].is_null());
+    }
+    let upload = steps
+        .iter()
+        .find(|step| {
+            step["uses"]
+                .as_str()
+                .is_some_and(|uses| uses.starts_with("actions/upload-artifact@"))
+        })
+        .unwrap();
+    assert_eq!(upload["if"].as_str(), Some("always()"));
+    let paths: Vec<_> = upload["with"]["path"].as_str().unwrap().lines().collect();
+    assert_eq!(paths.len(), 4);
+    assert!(
+        paths
+            .iter()
+            .all(|path| path.ends_with("/metadata.json") || path.ends_with("/failure.bin"))
+    );
 }
 
 #[test]
@@ -1252,11 +1441,19 @@ fn paired_web_consumers_have_independent_failure_domains() {
             consumer["run"]
                 .as_str()
                 .unwrap()
-                .contains("trap restore_policy EXIT")
+                .contains("source \"$GITHUB_WORKSPACE/.github/scripts/sandbox-policy.sh\" full")
         );
     }
     let product = step("web_product")["run"].as_str().unwrap();
-    for probe in ["navigation-order.mjs", "device-storage.mjs"] {
+    for probe in [
+        "navigation-order.mjs",
+        "device-storage.mjs",
+        "workspace-navigation.mjs",
+        "workspace-model-settings.mjs",
+        "starting-transcript.mjs",
+        "composer-controls.mjs",
+        "composer-initialization.mjs",
+    ] {
         assert!(
             product.contains(&format!("node {probe}")),
             "missing deterministic product probe {probe}"
@@ -1809,7 +2006,12 @@ fn ssh_native_checks_report_independent_failures_after_required_setup() {
         assert!(step["continue-on-error"].is_null());
         assert!(step["timeout-minutes"].as_u64().is_some());
         assert_eq!(
-            step["run"].as_str().unwrap().matches("cargo test").count(),
+            step["run"]
+                .as_str()
+                .unwrap()
+                .lines()
+                .filter(|line| line.contains("cargo test") && !line.contains("--list"))
+                .count(),
             1
         );
     }

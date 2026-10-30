@@ -4,6 +4,7 @@ use super::{
 };
 use crate::PresentationState;
 use async_trait::async_trait;
+use rsi_ai_protocol::LanguageModels;
 use rsi_configuration_api::{
     ConfigurationClient, ManagedProvider, ManagedProvidersClient, ProviderCredentialsClient,
     ProviderKind, ProvidersSnapshot,
@@ -19,6 +20,11 @@ use serde_json::{Value, json};
 pub enum SetupCommand {
     /// Refresh current authority, provider convergence and default selections.
     Refresh,
+    /// Explicit model discovery with optional transient authentication.
+    DiscoverModels {
+        /// Request identity and a key excluded from all snapshots.
+        input: rsi_configuration_api::DiscoveryInput,
+    },
     /// Inspect one provider-owned credential slot.
     CredentialStatus {
         /// Provider family.
@@ -113,10 +119,14 @@ pub struct SetupView {
     pub providers: Option<ProvidersSnapshot>,
     /// Current non-secret Agent defaults.
     pub agent: Value,
+    /// Committed capabilities of this snapshot's exact default model, when available.
+    pub default_model_description: Option<rsi_ai_protocol::LanguageModelDescription>,
     /// Current preset selection and roots.
     pub presets: Value,
     /// Most recently inspected credential status.
     pub credential: Option<CredentialView>,
+    /// Most recent explicit model discovery; contains no authentication secret.
+    pub discovery: Option<rsi_configuration_api::DiscoverySnapshot>,
     /// Recent independent operation receipts.
     pub receipts: Vec<Receipt>,
     /// Most recent bounded operation failure.
@@ -354,8 +364,28 @@ impl SetupFeature {
         } else {
             (None, None)
         };
+        let default_model_description = if available(rsi_ai_models_api::describe_operation()) {
+            match agent
+                .as_ref()
+                .and_then(|snapshot| snapshot.value.get("default_model"))
+            {
+                Some(value) if !value.is_null() => match serde_json::from_value(value.clone()) {
+                    Ok(model) => rsi_ai_models_api::ModelsClient::new(self.api.clone())
+                        .describe_model(&model)
+                        .await
+                        .map(Some)
+                        .map_err(error),
+                    Err(failure) => Err(error(failure)),
+                },
+                _ => Ok(None),
+            }
+        } else {
+            Ok(None)
+        };
         let mut state = self.state.lock().expect("setup view poisoned");
         state.view.ticket = rsi_ui::fresh_identity("setup")?;
+        state.view.default_model_description =
+            default_model_description.as_ref().ok().cloned().flatten();
         state.view.allowed = allowed;
         state.view.credentials_available = [
             rsi_configuration_api::CredentialOperation::Status.spec(),
@@ -402,6 +432,24 @@ impl SetupFeature {
     async fn execute(&self, command: SetupCommand) -> Result<()> {
         match command {
             SetupCommand::Refresh => self.refresh().await,
+            SetupCommand::DiscoverModels { input } => {
+                self.state
+                    .lock()
+                    .expect("setup view poisoned")
+                    .view
+                    .discovery = None;
+                let result = self
+                    .providers
+                    .discover_with_secret(input.request, input.secret)
+                    .await
+                    .map_err(error)?;
+                self.state
+                    .lock()
+                    .expect("setup view poisoned")
+                    .view
+                    .discovery = Some(result);
+                Ok(())
+            }
             SetupCommand::CredentialStatus { provider, slot } => {
                 self.credential_status(provider, slot).await
             }

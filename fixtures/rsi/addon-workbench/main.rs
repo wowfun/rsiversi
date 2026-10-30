@@ -39,16 +39,29 @@ async fn run() -> Result<u8, Box<dyn std::error::Error>> {
     )
     .with_addons(addon::addons(Arc::new(addon::Evidence::default())))
     .with_credential_store(Arc::new(EmptyStore));
-    let (host, diagnostics) = rsi::standard_application_host(
-        rsi_app_catalog::compose(composition)?,
-        arguments.collect(),
+    let arguments: Vec<_> = arguments.collect();
+    let serve = Arc::new(rsi_serve::ServeFactory::with_web_assets(arguments.clone()));
+    let mut browser = rsi::StandardAddonBuilder::new("fixture.browser");
+    browser.register_factory(
+        rsi::AddonScope::Application,
+        "fixture.browser.serve",
+        "1",
+        rsi_meta::UpdateMode::RestartRequired,
+        serve.clone(),
     )?;
+    let composition = rsi::ApplicationComposition::new(
+        composition,
+        Arc::new(rsi_app_catalog::Catalog::default()),
+        rsi::StandardAddonSet::new([browser.build()?])?,
+    )?;
+    let (host, diagnostics) = rsi::standard_application_host(composition, arguments)?;
     let running = host
         .start_program(profile.program()?)
         .await
         .map_err(|error| {
             diagnostics
                 .take()
+                .or_else(|| serve.take_diagnostic())
                 .map_or_else(|| error.to_string(), |error| error.to_string())
         })?;
     let result = running

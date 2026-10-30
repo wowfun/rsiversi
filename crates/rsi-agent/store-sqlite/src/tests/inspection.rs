@@ -52,7 +52,7 @@ async fn inspect(
 
 #[tokio::test(start_paused = true)]
 async fn inspection_worker_allows_runtime_timer_to_cancel_a_running_scan() {
-    let root = tempfile::tempdir().unwrap();
+    let root = private_tempdir();
     let store = SqliteStore::open(root.path()).unwrap();
     for body in [b"first".as_slice(), b"second"] {
         store.put_cas(Arc::from(body)).await.unwrap();
@@ -102,7 +102,7 @@ async fn inspection_worker_allows_runtime_timer_to_cancel_a_running_scan() {
 
 #[tokio::test]
 async fn inspection_is_read_only_reports_retained_files_and_hashes_exact_bodies() {
-    let root = tempfile::tempdir().unwrap();
+    let root = private_tempdir();
     let store = SqliteStore::open(root.path()).unwrap();
     let reference = store
         .put_cas(Arc::from(b"retained capture".as_slice()))
@@ -150,7 +150,7 @@ async fn inspection_is_read_only_reports_retained_files_and_hashes_exact_bodies(
 
 #[tokio::test]
 async fn inspection_detects_missing_length_and_digest_errors_without_hiding_other_rows() {
-    let root = tempfile::tempdir().unwrap();
+    let root = private_tempdir();
     let store = SqliteStore::open(root.path()).unwrap();
     let mut objects = Vec::new();
     for body in [b"missing".as_slice(), b"shorter", b"digest"] {
@@ -183,7 +183,7 @@ async fn inspection_detects_missing_length_and_digest_errors_without_hiding_othe
 
 #[tokio::test]
 async fn inspection_bounds_corrupt_keys_and_continues_across_negative_rowids_and_pages() {
-    let root = tempfile::tempdir().unwrap();
+    let root = private_tempdir();
     let store = SqliteStore::open(root.path()).unwrap();
     drop(store);
     let connection = Connection::open(root.path().join("sessions.sqlite3")).unwrap();
@@ -284,7 +284,7 @@ async fn inspection_bounds_corrupt_keys_and_continues_across_negative_rowids_and
 
 #[tokio::test]
 async fn full_inspection_checks_canonical_program_references_beyond_sqlite_verify() {
-    let root = tempfile::tempdir().unwrap();
+    let root = private_tempdir();
     let store = SqliteStore::open(root.path()).unwrap();
     Box::pin(rsi_agent_testkit::assert_program_store_contract(
         &store,
@@ -332,7 +332,7 @@ async fn full_inspection_checks_canonical_program_references_beyond_sqlite_verif
 
 #[tokio::test]
 async fn inspection_reports_stop_and_cancellation_and_safely_restarts() {
-    let root = tempfile::tempdir().unwrap();
+    let root = private_tempdir();
     let store = SqliteStore::open(root.path()).unwrap();
     for body in [b"one".as_slice(), b"two"] {
         store.put_cas(Arc::from(body)).await.unwrap();
@@ -370,7 +370,7 @@ async fn inspection_reports_stop_and_cancellation_and_safely_restarts() {
 
 #[tokio::test]
 async fn inspection_refuses_active_writer_wal_and_missing_root_without_creation() {
-    let root = tempfile::tempdir().unwrap();
+    let root = private_tempdir();
     let store = SqliteStore::open(root.path()).unwrap();
     let error = SqliteStore::inspect_cas(
         root.path(),
@@ -416,7 +416,7 @@ async fn inspection_refuses_active_writer_wal_and_missing_root_without_creation(
 #[cfg(unix)]
 #[tokio::test]
 async fn inspection_never_follows_leaf_or_cas_root_symlinks() {
-    let root = tempfile::tempdir().unwrap();
+    let root = private_tempdir();
     let store = SqliteStore::open(root.path()).unwrap();
     let object = store.put_cas(Arc::from(b"body".as_slice())).await.unwrap();
     drop(store);
@@ -454,7 +454,7 @@ async fn full_inspection_checks_frozen_references_in_controls_and_facts() {
         ReferenceCapture, ReferenceContentKind, ReferenceMetadata, ReferenceRecord,
         ReferenceSelection, ReferenceSnapshotRef, ReferenceSource,
     };
-    let root = tempfile::tempdir().unwrap();
+    let root = private_tempdir();
     let store = SqliteStore::open(root.path()).unwrap();
     let id = seed_session(&store, "frozen-inspection").await;
     let prepared = store
@@ -577,7 +577,7 @@ async fn full_inspection_checks_frozen_references_in_controls_and_facts() {
 #[cfg(unix)]
 #[tokio::test]
 async fn inspection_bounds_multibyte_filename_previews() {
-    let root = tempfile::tempdir().unwrap();
+    let root = private_tempdir();
     drop(SqliteStore::open(root.path()).unwrap());
     let name = "界".repeat(66);
     fs::write(root.path().join("cas").join(name), b"unowned").unwrap();

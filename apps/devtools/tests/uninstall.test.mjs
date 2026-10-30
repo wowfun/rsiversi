@@ -1,13 +1,14 @@
 import assert from 'node:assert/strict';
 import {test} from 'node:test';
 import {spawnSync} from 'node:child_process';
-import {mkdtemp,mkdir,writeFile,readFile,rm,readdir,symlink,chmod} from 'node:fs/promises';
+import {mkdtemp,mkdir,writeFile,readFile,rm,readdir,realpath,symlink,chmod} from 'node:fs/promises';
 import {existsSync} from 'node:fs';
 import {tmpdir} from 'node:os';
 import {join,resolve,dirname} from 'node:path';
 import {fileURLToPath} from 'node:url';
 
 const root=fileURLToPath(new URL('../../../',import.meta.url));
+const temporaryRoot=await realpath(tmpdir());
 const windows=process.platform==='win32';
 const tool=process.env.RSI_TEST_UNINSTALLER??join(root,'target/debug',windows?'rsi-uninstall.exe':'rsi-uninstall');
 const suffix=windows?'ps1':'sh';
@@ -16,7 +17,7 @@ function script(name,args,cwd) {
 }
 const flag=name=>windows?'-'+name:'--'+name.replace(/[A-Z]/g,(letter,index)=>(index?'-':'')+letter.toLowerCase());
 async function fixture() {
-  const directory=await mkdtemp(join(tmpdir(),'rsi uninstall 中文 '));
+  const directory=await mkdtemp(join(temporaryRoot,'rsi uninstall 中文 '));
   const prefix=join(directory,"prefix ' & $value"),config=join(directory,'config'),state=join(directory,'state'),cache=join(directory,'cache');
   for(const path of [config,state,cache])await mkdir(path);
   const args=[flag('Prefix'),prefix,flag('ConfigHome'),config,flag('StateHome'),state,flag('CacheHome'),cache,flag('NoPath')];
@@ -162,7 +163,7 @@ test('POSIX PATH removal preserves user edits, shared bins and linked startup fi
 });
 
 test('protocol probe creates nothing and native uninstall rejects install-only arguments',async()=>{
-  const directory=await mkdtemp(join(tmpdir(),'rsi-probe-'));try{
+  const directory=await mkdtemp(join(temporaryRoot,'rsi-probe-'));try{
     const result=spawnSync(tool,['--installation-protocol'],{cwd:directory,encoding:'utf8'});
     assert.equal(result.status,0,result.stderr);
     assert.deepEqual(JSON.parse(result.stdout),{interface:1,record:1,transaction:2});

@@ -1,3 +1,5 @@
+import {disconnect} from './controls.mjs';
+import {workspaceForm} from './controls.mjs';
 import {closeDetails,openResource,resourceSelector} from "./controls.mjs";
 import {detailMode,resources} from './controls.mjs';
 import {paired} from './paired-env.mjs';
@@ -138,9 +140,9 @@ for (const [name, engine] of [["chromium", chromium], ["firefox", firefox]]) {
     await page.getByLabel("Device registration receipt").fill(JSON.stringify(service.register(`${name} task evidence`)));
     await page.getByRole("button", { name: "Connect", exact: true }).click();
     await page.locator("#workbench").waitFor({ state: "visible" });
-    await page.locator(".workspace-add summary").click();
-    await page.getByLabel("Server directory").fill(service.workspace);
-    await page.locator("#workspace-form").getByRole("button", { name: "Add workspace", exact: true }).click();
+    await workspaceForm(page);
+    await page.getByLabel("Directory path").fill(service.workspace);
+    await page.locator('.directory-picker footer').getByRole('button',{name:'Open',exact:true}).click();
     await page.locator("#workspaces [data-testid=workspace-open]").click();
     await detailMode(page,'verbose');
     const paneSelector = '[aria-label="Main conversation"]';
@@ -224,7 +226,7 @@ for (const [name, engine] of [["chromium", chromium], ["firefox", firefox]]) {
     assert.equal(service.provider.requests.length, beforeGoal + 1);
     await capture("goal-paused-claimed", true, ["Resume Goal", "Cancel automatic round"]);
     service.provider.release("UI Goal hold");
-    await goalVisible(pane.locator(".pane-status").filter({ hasText: "Completed" }), "first Goal completed");
+    await goalUntil(async () => await pane.locator(".pane-status").textContent() === "Completed", "first Goal completed");
     await goalVisible(detail.locator(".ui-field").filter({ hasText: "Driver: Disarmed" }), "first Goal driver disarmed");
     await goalVisible(detail.getByRole("button", { name: "Create and start Goal", exact: true }), "Paused first-round settlement projection");
     await detail.getByRole("button", { name: "Resume Goal", exact: true }).click();
@@ -234,7 +236,7 @@ for (const [name, engine] of [["chromium", chromium], ["firefox", firefox]]) {
     await goalVisible(detail.locator(".ui-field").filter({ hasText: "Driver: Waiting" }), "second Goal waiting");
     await capture("goal-resumed", true, ["Pause after current round", "Cancel automatic round"]);
     await detail.getByRole("button", { name: "Cancel automatic round", exact: true }).click();
-    await goalVisible(pane.locator(".pane-status").filter({ hasText: "Cancelled" }), "second Goal cancelled");
+    await goalUntil(async () => await pane.locator(".pane-status").textContent() === "Cancelled", "second Goal cancelled");
     await goalVisible(detail.locator(".ui-field").filter({ hasText: "Driver: Disarmed" }), "cancelled Goal driver disarmed");
     assert.match(await detail.innerText(), /Allocated rounds: 2 \/ 3/);
     await capture("goal-cancelled", true, ["Resume Goal", "Create and start Goal"]);
@@ -261,14 +263,14 @@ for (const [name, engine] of [["chromium", chromium], ["firefox", firefox]]) {
     assert.equal(service.provider.requests.length, requestsBeforeRead);
     await capture("jobs-completed-unreported", true, ["Refresh current Turn"]);
     service.provider.release("observe background job");
-    await pane.locator(".pane-status").filter({ hasText: "Failed" }).waitFor();
+    await pane.locator(".pane-status").filter({ hasText: "Failed" }).waitFor({state:'attached'});
     await pane.locator(".transcript").getByText("background jobs completed without an explicit report: job-1", { exact: true }).waitFor();
     await detail.getByRole("button", { name: "Refresh current Turn", exact: true }).click();
     await detail.getByText("No active Turn. Jobs are unavailable after their Turn finishes.", { exact: true }).waitFor();
     await capture("jobs-revoked", true, ["Refresh current Turn"]);
     await assertNoNotices(page);
     await close();
-    await page.locator("#sign-out").click();
+    await disconnect(page);
     await page.locator("#login").waitFor({ state: "visible" });
     assert.deepEqual(errors, []);
     results.push({ browser: name, version: browser.version(), binary_sha256: paired.sha256, ok: true,

@@ -401,8 +401,8 @@ fn validate_reply(request: &Request, value: &Value) -> Result<()> {
             }
         }
         Request::Policy => {
-            number("revision")?;
-            if !object.get("rules").is_some_and(Value::is_object)
+            if object.get("revision").and_then(Value::as_u64).is_none()
+                || !object.get("rules").is_some_and(Value::is_object)
                 || !object.get("grants").is_some_and(Value::is_array)
             {
                 return Err(invalid());
@@ -692,6 +692,30 @@ mod tests {
             reply: value,
             calls: std::sync::atomic::AtomicUsize::new(0),
         })
+    }
+    #[tokio::test]
+    async fn policy_reads_preserve_the_owner_configuration_revision() {
+        let mut policy = serde_json::json!({
+            "revision": u64::MAX, "rules": {}, "grants": [], "retired": []
+        });
+        let api = replies(policy.clone());
+        assert_eq!(
+            Client::new(api).call(Request::Policy).await.unwrap(),
+            policy
+        );
+        for revision in [
+            serde_json::json!("1"),
+            serde_json::json!(-1),
+            serde_json::json!(1.5),
+            Value::Null,
+        ] {
+            policy["revision"] = revision;
+            let api = replies(policy.clone());
+            assert!(matches!(
+                Client::new(api).call(Request::Policy).await,
+                Err(ApiError::Invalid(_))
+            ));
+        }
     }
     #[tokio::test]
     async fn malformed_mutation_replies_are_uncertain_without_retrying() {

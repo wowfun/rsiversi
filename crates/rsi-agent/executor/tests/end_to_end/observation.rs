@@ -373,7 +373,7 @@ async fn predecessor_observation_conflict_does_not_fail_a_valid_turn() {
         None
     );
     assert_eq!(fixture.starts.load(Ordering::Acquire), 0);
-    reporter.finish(false);
+    reporter.finish(true);
     tokio::time::timeout(Duration::from_secs(2), entered.notified())
         .await
         .unwrap();

@@ -1,4 +1,25 @@
 use super::*;
+
+fn private_tempdir() -> tempfile::TempDir {
+    let base =
+        rsi_workspace_path::canonical_native_path(std::env::temp_dir().canonicalize().unwrap());
+    let root = tempfile::tempdir_in(base).unwrap();
+    #[cfg(windows)]
+    {
+        // An elevated token's default owner can be Administrators. Create this
+        // empty fixture root with the same explicit TokenUser policy as a Store.
+        std::fs::remove_dir(root.path()).unwrap();
+        let path = filesystem::normalized_root_path(root.path()).unwrap();
+        rsi_files_native_fs::create_absolute_directory_no_follow(&path)
+            .unwrap()
+            .verify_private()
+            .unwrap();
+    }
+    root
+}
+#[cfg(any(unix, windows))]
+#[path = "tests/activity_cuts.rs"]
+mod activity_cuts;
 #[cfg(any(unix, windows))]
 #[path = "tests/admission.rs"]
 mod admission;
@@ -9,7 +30,7 @@ mod maintenance;
 #[cfg(windows)]
 #[test]
 fn windows_archival_reset_refuses_before_filesystem_effects() {
-    let temp = tempfile::tempdir().unwrap();
+    let temp = private_tempdir();
     let root = temp.path().join("missing");
     assert!(matches!(
         SqliteStore::reset_and_open(&root).unwrap_err().source,
@@ -41,7 +62,7 @@ async fn cas_publication_faults_never_admit_metadata_and_retry_resynchronizes() 
         Step::NamespaceSync,
     ] {
         for phase in [Phase::Before, Phase::After] {
-            let root = tempfile::tempdir().unwrap();
+            let root = private_tempdir();
             let store = SqliteStore::open(root.path()).unwrap();
             let bytes: Arc<[u8]> = Arc::from(b"immutable publication body".as_slice());
             let digest = hex::encode(Sha256::digest(&bytes));
@@ -101,7 +122,7 @@ async fn cas_publication_faults_never_admit_metadata_and_retry_resynchronizes() 
 #[tokio::test]
 #[cfg(unix)]
 async fn cas_existing_corrupt_or_linked_target_is_never_replaced() {
-    let root = tempfile::tempdir().unwrap();
+    let root = private_tempdir();
     let store = SqliteStore::open(root.path()).unwrap();
     let bytes: Arc<[u8]> = Arc::from(b"right".as_slice());
     let target = root
@@ -156,7 +177,7 @@ async fn cas_existing_corrupt_or_linked_target_is_never_replaced() {
 #[tokio::test]
 #[cfg(unix)]
 async fn previous_session_format_is_rejected_without_rewriting_database_bytes() {
-    let root = tempfile::tempdir().unwrap();
+    let root = private_tempdir();
     let store = SqliteStore::open(root.path()).unwrap();
     let id = seed_session(&store, "previous-format").await;
     drop(store);
@@ -216,7 +237,7 @@ mod ready_metadata;
 #[tokio::test]
 #[cfg(unix)]
 async fn bounded_reference_suffix_uses_the_1024_fact_limit_and_exact_horizon() {
-    let root = tempfile::tempdir().unwrap();
+    let root = private_tempdir();
     let store = SqliteStore::open(root.path()).unwrap();
     let session = seed_history(&store, "reference-suffix", 1100, 0).await;
     let page = store
@@ -243,7 +264,7 @@ async fn bounded_reference_suffix_uses_the_1024_fact_limit_and_exact_horizon() {
 #[tokio::test]
 #[cfg(unix)]
 async fn forward_window_skips_large_holes_but_stops_before_aggregate_overflow() {
-    let root = tempfile::tempdir().unwrap();
+    let root = private_tempdir();
     let store = SqliteStore::open(root.path()).unwrap();
     let id = SessionId::new("window-holes").unwrap();
     let mut facts = (1..=5).map(test_fact).collect::<Vec<_>>();
@@ -290,7 +311,7 @@ async fn forward_window_skips_large_holes_but_stops_before_aggregate_overflow() 
 #[tokio::test]
 #[cfg(unix)]
 async fn factory_retains_only_safe_startup_facts_for_its_owner() {
-    let root = tempfile::tempdir().unwrap();
+    let root = private_tempdir();
     drop(SqliteStore::open(root.path()).unwrap());
     let connection = Connection::open(root.path().join("sessions.sqlite3")).unwrap();
     connection
@@ -329,7 +350,7 @@ async fn factory_retains_only_safe_startup_facts_for_its_owner() {
             .take_startup_failure()
             .is_none()
     );
-    let valid = tempfile::tempdir().unwrap();
+    let valid = private_tempdir();
     let active = runtime
         .root()
         .apply(resolved, serde_json::json!({"root":valid.path()}))
@@ -344,6 +365,7 @@ async fn factory_retains_only_safe_startup_facts_for_its_owner() {
 #[ignore = "report-only actual SQLite validation VM and full-scan work"]
 #[cfg(unix)]
 async fn online_validation_sql_work() {
+    use rsi_agent_store_protocol::MAXIMUM_STORE_FACT_PAGE_BYTES;
     use rusqlite::{
         StatementStatus,
         trace::{TraceEvent, TraceEventCodes},
@@ -364,7 +386,7 @@ async fn online_validation_sql_work() {
     }
     for (facts, controls) in [(1, 0), (1000, 0), (1000, 1000)] {
         for size in [256, 257, 512] {
-            let root = tempfile::tempdir().unwrap();
+            let root = private_tempdir();
             let store = SqliteStore::open(root.path()).unwrap();
             let mut sessions = Vec::new();
             for index in 0..size {
@@ -384,6 +406,8 @@ async fn online_validation_sql_work() {
                 .validation_reader
                 .lock()
                 .unwrap()
+                .as_mut()
+                .expect("idle validation reader")
                 .trace_v2(TraceEventCodes::SQLITE_TRACE_PROFILE, Some(count));
             for cycle in 0..3 {
                 VM.store(0, Ordering::Relaxed);
@@ -395,12 +419,7 @@ async fn online_validation_sql_work() {
                 for id in &sessions {
                     assert_eq!(
                         store
-                            .read_facts(
-                                id,
-                                0,
-                                1,
-                                rsi_agent_store_protocol::MAXIMUM_STORE_FACT_PAGE_BYTES
-                            )
+                            .read_facts(id, 0, 1, MAXIMUM_STORE_FACT_PAGE_BYTES)
                             .await
                             .unwrap()
                             .facts
@@ -427,7 +446,7 @@ async fn online_validation_sql_work() {
                         sessions.last().unwrap(),
                         0,
                         1,
-                        rsi_agent_store_protocol::MAXIMUM_STORE_FACT_PAGE_BYTES,
+                        MAXIMUM_STORE_FACT_PAGE_BYTES,
                     )
                     .await
                     .unwrap();
@@ -449,7 +468,7 @@ async fn online_validation_sql_work() {
 #[cfg(unix)]
 async fn offline_validation_pages_every_session_and_rejects_late_corruption() {
     for count in [0, 256, 257, 513] {
-        let root = tempfile::tempdir().unwrap();
+        let root = private_tempdir();
         let store = SqliteStore::open(root.path()).unwrap();
         for index in 0..count {
             let header = test_header(&format!("page-{index:04}"));
@@ -588,7 +607,7 @@ fn test_fact(sequence: u64) -> SessionFact {
 #[tokio::test]
 #[cfg(unix)]
 async fn control_projection_replay_enforces_the_individual_control_bound() {
-    let root = tempfile::tempdir().unwrap();
+    let root = private_tempdir();
     let store = SqliteStore::open(root.path()).unwrap();
     let header = test_header("activation-control-bound");
     store
@@ -613,7 +632,7 @@ async fn control_projection_replay_enforces_the_individual_control_bound() {
     .unwrap();
     writer.execute("INSERT INTO agent_controls (session_id,seq,control_json) VALUES (?1,1,?2 || printf('%*s',?3,''))",
         params![header.session_id().as_str(), serde_json::to_string(&record).unwrap(), i64::try_from(MAXIMUM_SESSION_FACT_BYTES).unwrap()]).unwrap();
-    let result = crate::validation::validate_agent_indexes(&writer, &header);
+    let result = crate::validation::validate_agent_indexes(writer, &header);
     assert!(
         matches!(result, Err(StoreError::Corrupt(message)) if message.contains("encoded bytes")),
         "activation projection admitted an individually oversized control"
@@ -623,7 +642,7 @@ async fn control_projection_replay_enforces_the_individual_control_bound() {
 #[tokio::test]
 #[cfg(unix)]
 async fn poisoned_proof_cache_does_not_override_a_committed_write() {
-    let root = tempfile::tempdir().unwrap();
+    let root = private_tempdir();
     let store = SqliteStore::open(root.path()).unwrap();
     let cache = store.inner.validated_sessions.clone();
     assert!(
@@ -724,7 +743,7 @@ fn cache_insertion_returns_the_retained_proof_and_reuses_it_on_hits() {
 #[test]
 #[cfg(unix)]
 fn recent_session_cursor_seeks_both_columns_of_the_ordering_index() {
-    let root = tempfile::tempdir().unwrap();
+    let root = private_tempdir();
     let store = SqliteStore::open(root.path()).unwrap();
     let readers = store.inner.connections.readers.lock().unwrap();
     let connection = readers.last().unwrap();
@@ -745,7 +764,7 @@ fn recent_session_cursor_seeks_both_columns_of_the_ordering_index() {
 #[test]
 #[cfg(unix)]
 fn agent_cursor_queries_seek_their_complete_ordering_keys() {
-    let root = tempfile::tempdir().unwrap();
+    let root = private_tempdir();
     let store = SqliteStore::open(root.path()).unwrap();
     let readers = store.inner.connections.readers.lock().unwrap();
     let connection = readers.last().unwrap();
@@ -796,7 +815,7 @@ fn agent_cursor_queries_seek_their_complete_ordering_keys() {
 #[tokio::test]
 #[cfg(unix)]
 async fn concurrent_first_access_runs_one_session_validation() {
-    let root = tempfile::tempdir().unwrap();
+    let root = private_tempdir();
     let session_id = SessionId::new("session-single-flight").unwrap();
     let store = SqliteStore::open(root.path()).unwrap();
     store
@@ -833,7 +852,7 @@ async fn concurrent_first_access_runs_one_session_validation() {
 #[tokio::test]
 #[cfg(unix)]
 async fn repeated_recent_listing_does_not_validate_history() {
-    let root = tempfile::tempdir().unwrap();
+    let root = private_tempdir();
     let store = SqliteStore::open(root.path()).unwrap();
     let session_id = SessionId::new("session-recent-cache").unwrap();
     store
@@ -881,7 +900,7 @@ async fn repeated_recent_listing_does_not_validate_history() {
 #[tokio::test]
 #[cfg(unix)]
 async fn validated_session_eviction_causes_exactly_one_safe_revalidation() {
-    let root = tempfile::tempdir().unwrap();
+    let root = private_tempdir();
     let store = SqliteStore::open(root.path()).unwrap();
     let first = SessionId::new("session-000").unwrap();
     store
@@ -918,7 +937,7 @@ async fn validated_session_eviction_causes_exactly_one_safe_revalidation() {
 #[tokio::test]
 #[cfg(unix)]
 async fn reader_observes_complete_snapshots_across_an_uncommitted_writer() {
-    let root = tempfile::tempdir().unwrap();
+    let root = private_tempdir();
     let session_id = SessionId::new("session-snapshot").unwrap();
     let store = SqliteStore::open(root.path()).unwrap();
     store
@@ -1024,7 +1043,7 @@ async fn reader_observes_complete_snapshots_across_an_uncommitted_writer() {
 #[cfg(unix)]
 async fn cancelled_blocking_jobs_retain_the_root_writer_lease() {
     for kind in ["reader", "validation", "writer", "cas", "publication"] {
-        let root = tempfile::tempdir().unwrap();
+        let root = private_tempdir();
         let store = SqliteStore::open(root.path()).unwrap();
         let owner = Arc::downgrade(&store.inner);
         let (entered_tx, entered_rx) = tokio::sync::oneshot::channel();
@@ -1079,7 +1098,7 @@ async fn cancelled_blocking_jobs_retain_the_root_writer_lease() {
 #[tokio::test]
 #[cfg(unix)]
 async fn cas_publication_does_not_occupy_the_payload_read_lane() {
-    let root = tempfile::tempdir().unwrap();
+    let root = private_tempdir();
     let store = SqliteStore::open(root.path()).unwrap();
     let reference = store
         .put_cas(Arc::from(b"independent payload".as_slice()))
@@ -1122,7 +1141,7 @@ async fn cas_publication_does_not_occupy_the_payload_read_lane() {
 #[test]
 #[cfg(unix)]
 fn null_schema_definition_is_corruption() {
-    let root = tempfile::tempdir().unwrap();
+    let root = private_tempdir();
     drop(SqliteStore::open(root.path()).unwrap());
     let connection = Connection::open(root.path().join("sessions.sqlite3")).unwrap();
     connection.execute_batch("PRAGMA writable_schema=ON; UPDATE sqlite_master SET sql=NULL WHERE type='index' AND name='agent_messages_pending'").unwrap();
@@ -1140,7 +1159,7 @@ fn null_schema_definition_is_corruption() {
 #[tokio::test]
 #[cfg(unix)]
 async fn missing_subtree_session_is_corruption() {
-    let root = tempfile::tempdir().unwrap();
+    let root = private_tempdir();
     let store = SqliteStore::open(root.path()).unwrap();
     let header = test_header("orphan-root");
     store
@@ -1176,7 +1195,7 @@ fn schema_literals_are_compared_without_normalization() {
             format!("{literal} "),
             format!("{literal};"),
         ] {
-            let root = tempfile::tempdir().unwrap();
+            let root = private_tempdir();
             drop(SqliteStore::open(root.path()).unwrap());
             SqliteStore::verify(root.path()).unwrap();
             let db = Connection::open(root.path().join("sessions.sqlite3")).unwrap();
@@ -1218,7 +1237,7 @@ async fn cold_subtree_and_quiescence_reject_a_descendant_missing_its_indexes() {
         "ready_messages",
         "active_activations",
     ] {
-        let root = tempfile::tempdir().unwrap();
+        let root = private_tempdir();
         let parent = test_header("cold-proof-parent");
         let child_id = SessionId::new("cold-proof-child").unwrap();
         let child = test_child_header(&parent, child_id.as_str());
@@ -1345,7 +1364,7 @@ async fn cold_subtree_and_quiescence_reject_a_descendant_missing_its_indexes() {
 #[tokio::test]
 #[cfg(unix)]
 async fn subtree_snapshot_rejects_cycles_and_oversized_lineage_fields() {
-    let root = tempfile::tempdir().unwrap();
+    let root = private_tempdir();
     let store = SqliteStore::open(root.path()).unwrap();
     let parent = test_header("subtree-root");
     for header in [parent.clone(), test_child_header(&parent, "subtree-child")] {
@@ -1428,7 +1447,7 @@ async fn subtree_snapshot_rejects_cycles_and_oversized_lineage_fields() {
 )]
 #[cfg(unix)]
 async fn fact_pages_admit_stored_lengths_before_materializing_the_next_body() {
-    let root = tempfile::tempdir().unwrap();
+    let root = private_tempdir();
     let store = SqliteStore::open(root.path()).unwrap();
     let id = SessionId::new("length-admission").unwrap();
     let turn = TurnId::new("turn-1").unwrap();
@@ -1596,7 +1615,7 @@ async fn fact_pages_admit_stored_lengths_before_materializing_the_next_body() {
 #[tokio::test]
 #[cfg(unix)]
 async fn control_pages_admit_stored_lengths_before_materializing_the_next_body() {
-    let root = tempfile::tempdir().unwrap();
+    let root = private_tempdir();
     let store = SqliteStore::open(root.path()).unwrap();
     let header = test_header("control-length-admission");
     store
@@ -1670,7 +1689,7 @@ async fn control_pages_admit_stored_lengths_before_materializing_the_next_body()
 #[tokio::test]
 #[cfg(unix)]
 async fn metadata_catalog_larger_than_validation_cache_never_validates_history() {
-    let root = tempfile::tempdir().unwrap();
+    let root = private_tempdir();
     let store = SqliteStore::open(root.path()).unwrap();
     for index in 0..512 {
         let id = SessionId::new(format!("metadata-{index:03}")).unwrap();
@@ -1723,7 +1742,7 @@ fn pause_next_validation(
     (entered_rx, release_tx)
 }
 
-#[cfg(unix)]
+#[cfg(any(unix, windows))]
 pub(super) async fn seed_session(store: &SqliteStore, name: &str) -> SessionId {
     let id = SessionId::new(name).unwrap();
     store
@@ -1741,7 +1760,7 @@ pub(super) async fn seed_session(store: &SqliteStore, name: &str) -> SessionId {
 #[tokio::test]
 #[cfg(unix)]
 async fn paused_cold_validation_does_not_block_foreground_reads_or_writes() {
-    let root = tempfile::tempdir().unwrap();
+    let root = private_tempdir();
     let store = SqliteStore::open(root.path()).unwrap();
     let cold = seed_session(&store, "cold").await;
     let warm = seed_session(&store, "warm").await;
@@ -1823,7 +1842,7 @@ async fn drain_cold_validation(store: &SqliteStore) {
 #[tokio::test]
 #[cfg(unix)]
 async fn last_waiter_cancellation_preserves_reusable_validation_proof() {
-    let root = tempfile::tempdir().unwrap();
+    let root = private_tempdir();
     let store = SqliteStore::open(root.path()).unwrap();
     let id = seed_session(&store, "cancelled-validator").await;
     drop(store);
@@ -1863,7 +1882,7 @@ async fn last_waiter_cancellation_preserves_reusable_validation_proof() {
 #[tokio::test]
 #[cfg(unix)]
 async fn one_cancelled_waiter_preserves_shared_work_for_another() {
-    let root = tempfile::tempdir().unwrap();
+    let root = private_tempdir();
     let store = SqliteStore::open(root.path()).unwrap();
     let id = seed_session(&store, "shared-validator").await;
     drop(store);
@@ -1906,7 +1925,7 @@ async fn one_cancelled_waiter_preserves_shared_work_for_another() {
 #[tokio::test]
 #[cfg(unix)]
 async fn queued_reusable_validation_survives_last_waiter_cancellation() {
-    let root = tempfile::tempdir().unwrap();
+    let root = private_tempdir();
     let store = SqliteStore::open(root.path()).unwrap();
     let id = seed_session(&store, "queued-validator").await;
     drop(store);
@@ -1939,7 +1958,7 @@ async fn operational_reads_reuse_proofs_under_bounded_scan_pressure() {
         (257, [257, 193, 4, 4, 4]),
         (512, [512, 448, 321, 448, 259]),
     ] {
-        let root = tempfile::tempdir().unwrap();
+        let root = private_tempdir();
         let store = SqliteStore::open(root.path()).unwrap();
         let mut sessions = Vec::new();
         for index in 0..count {
@@ -2015,7 +2034,7 @@ fn discarded_message_controls(id: &SessionId, count: u64) -> Vec<AgentControlRec
 #[tokio::test]
 #[cfg(unix)]
 async fn cold_control_replay_decodes_each_record_once() {
-    let root = tempfile::tempdir().unwrap();
+    let root = private_tempdir();
     let store = SqliteStore::open(root.path()).unwrap();
     let id = seed_session(&store, "single-decode").await;
     let controls = discarded_message_controls(&id, 500);
@@ -2114,7 +2133,7 @@ async fn assert_one_header_read_for_control_validation(store: &SqliteStore, id: 
 #[tokio::test]
 #[cfg(unix)]
 async fn cold_activation_replay_reads_the_immutable_header_once() {
-    let root = tempfile::tempdir().unwrap();
+    let root = private_tempdir();
     let store = SqliteStore::open(root.path()).unwrap();
     let id = seed_session(&store, "activation-header-reads").await;
     let controls = (1..=500)
@@ -2199,7 +2218,7 @@ fn test_child_header(parent: &SessionHeader, id: &str) -> SessionHeader {
 #[cfg(unix)]
 async fn cold_subtree_inspection_and_quiescence_use_the_validation_lane() {
     for operation in ["subtree", "inspection", "quiescence"] {
-        let root = tempfile::tempdir().unwrap();
+        let root = private_tempdir();
         let store = SqliteStore::open(root.path()).unwrap();
         let parent = test_header("tree-root");
         seed_session(&store, parent.session_id().as_str()).await;
@@ -2301,7 +2320,7 @@ async fn cold_subtree_inspection_and_quiescence_use_the_validation_lane() {
 #[tokio::test]
 #[cfg(unix)]
 async fn quiescence_checks_children_created_by_the_same_commit_without_caching_rollback() {
-    let root = tempfile::tempdir().unwrap();
+    let root = private_tempdir();
     let store = SqliteStore::open(root.path()).unwrap();
     let parent = test_header("new-child-guard");
     seed_session(&store, parent.session_id().as_str()).await;
@@ -2433,7 +2452,7 @@ async fn seed_history(
 #[tokio::test]
 #[cfg(unix)]
 async fn mixed_archive_scans_preserve_hot_validation_proofs_and_allow_writes() {
-    let root = tempfile::tempdir().unwrap();
+    let root = private_tempdir();
     let store = SqliteStore::open(root.path()).unwrap();
     let mut hot = Vec::new();
     let mut archive = Vec::new();
@@ -2504,7 +2523,7 @@ async fn mixed_archive_scans_preserve_hot_validation_proofs_and_allow_writes() {
 #[tokio::test]
 #[cfg(unix)]
 async fn prepared_proofs_survive_churn_and_share_saturated_pin_capacity() {
-    let root = tempfile::tempdir().unwrap();
+    let root = private_tempdir();
     let store = SqliteStore::open(root.path()).unwrap();
     let mut ids = Vec::new();
     for index in 0..257 {
@@ -2584,7 +2603,7 @@ async fn prepared_proofs_survive_churn_and_share_saturated_pin_capacity() {
 #[tokio::test]
 #[cfg(unix)]
 async fn watermarks_are_one_cold_metadata_read_without_payload_replay() {
-    let root = tempfile::tempdir().unwrap();
+    let root = private_tempdir();
     let store = SqliteStore::open(root.path()).unwrap();
     let id = seed_history(&store, "scalar", 10, 500).await;
     drop(store);
@@ -2608,7 +2627,7 @@ async fn watermarks_are_one_cold_metadata_read_without_payload_replay() {
 #[tokio::test]
 #[cfg(unix)]
 async fn prepared_reads_examine_one_pin_regardless_of_unrelated_leases() {
-    let root = tempfile::tempdir().unwrap();
+    let root = private_tempdir();
     let store = SqliteStore::open(root.path()).unwrap();
     let mut leases = Vec::new();
     for index in 0..VALIDATED_SESSION_CACHE_CAPACITY {
@@ -2639,7 +2658,7 @@ async fn prepared_reads_examine_one_pin_regardless_of_unrelated_leases() {
 #[tokio::test]
 #[cfg(unix)]
 async fn prepared_proof_survives_its_own_validated_tail_advances() {
-    let root = tempfile::tempdir().unwrap();
+    let root = private_tempdir();
     let store = SqliteStore::open(root.path()).unwrap();
     let id = seed_session(&store, "advancing-proof").await;
     let lease = store.prepare_session(&id).await.unwrap();
@@ -2672,7 +2691,7 @@ async fn prepared_proof_survives_its_own_validated_tail_advances() {
 #[tokio::test]
 #[cfg(unix)]
 async fn cold_control_proof_rejects_a_changed_final_prefix_before_read_or_commit() {
-    let root = tempfile::tempdir().unwrap();
+    let root = private_tempdir();
     let store = SqliteStore::open(root.path()).unwrap();
     let id = seed_session(&store, "changed-control-prefix").await;
     store
@@ -2717,7 +2736,7 @@ async fn cold_control_proof_rejects_a_changed_final_prefix_before_read_or_commit
 #[tokio::test]
 #[cfg(unix)]
 async fn scalar_watermarks_never_authorize_a_corrupt_session_commit() {
-    let root = tempfile::tempdir().unwrap();
+    let root = private_tempdir();
     let store = SqliteStore::open(root.path()).unwrap();
     let id = seed_session(&store, "unvalidated-cursors").await;
     drop(store);
@@ -2750,7 +2769,7 @@ async fn scalar_watermarks_never_authorize_a_corrupt_session_commit() {
 #[tokio::test]
 #[cfg(unix)]
 async fn unrelated_pin_notifications_preserve_distinct_session_waiter_order() {
-    let root = tempfile::tempdir().unwrap();
+    let root = private_tempdir();
     let store = SqliteStore::open(root.path()).unwrap();
     let mut ids = vec![];
     for index in 0..258 {
@@ -2799,7 +2818,7 @@ async fn measure_warm_fact_pages_and_small_metadata() {
 #[tokio::test]
 #[cfg(unix)]
 async fn store_measurements_include_successful_and_failed_cas_workers() {
-    let root = tempfile::tempdir().unwrap();
+    let root = private_tempdir();
     let store = SqliteStore::open(root.path()).unwrap();
     let bytes: Arc<[u8]> = Arc::from(b"measured CAS body".as_slice());
     store.begin_store_measurements();
@@ -2859,15 +2878,17 @@ async fn store_measurements_include_successful_and_failed_cas_workers() {
 
 #[cfg(feature = "test-support")]
 #[tokio::test]
-#[cfg(unix)]
 async fn warm_reader_measurements_cover_workers_without_revalidation() {
     warm_reader_case(4, 1024, 2, false).await;
 }
 
 #[cfg(feature = "test-support")]
-#[cfg(unix)]
+#[expect(
+    clippy::too_many_lines,
+    reason = "Keep warm fixture setup and operation measurement assertions together"
+)]
 async fn warm_reader_case(fact_count: usize, text_bytes: usize, iterations: usize, report: bool) {
-    let root = tempfile::tempdir().unwrap();
+    let root = private_tempdir();
     let store = SqliteStore::open(root.path()).unwrap();
     let id = seed_session(&store, "warm-mixed-reader").await;
     let facts = (2..=u64::try_from(fact_count).unwrap() + 1)
@@ -2951,6 +2972,20 @@ async fn warm_reader_case(fact_count: usize, text_bytes: usize, iterations: usiz
         }
         let samples = store.take_reader_measurements();
         assert_eq!(samples.len(), iterations * if mixed { 2 } else { 1 });
+        assert_eq!(
+            samples
+                .iter()
+                .filter(|sample| sample.operation == StoreOperation::Header)
+                .count(),
+            iterations
+        );
+        assert_eq!(
+            samples
+                .iter()
+                .filter(|sample| sample.operation == StoreOperation::FactPage)
+                .count(),
+            if mixed { iterations } else { 0 }
+        );
         assert!(
             samples
                 .iter()
@@ -2977,7 +3012,7 @@ mod program;
 #[tokio::test]
 #[cfg(unix)]
 async fn warm_subtree_reads_no_full_headers_and_cold_owner_corruption_is_rejected() {
-    let root = tempfile::tempdir().unwrap();
+    let root = private_tempdir();
     let store = SqliteStore::open(root.path()).unwrap();
     let parent = test_header("owner-projection-root");
     let child = test_child_header(&parent, "owner-projection-child");
@@ -3034,7 +3069,7 @@ async fn warm_subtree_reads_no_full_headers_and_cold_owner_corruption_is_rejecte
 )]
 #[cfg(unix)]
 async fn cancelled_checkpoint_read_keeps_deferred_admission_in_actual_worker() {
-    let root = tempfile::tempdir().unwrap();
+    let root = private_tempdir();
     let store = SqliteStore::open(root.path()).unwrap();
     let id = seed_session(&store, "checkpoint-worker-credit").await;
     let page = store
@@ -3115,7 +3150,7 @@ async fn cancelled_checkpoint_read_keeps_deferred_admission_in_actual_worker() {
 #[cfg(unix)]
 async fn report_cold_history_cancellation_and_small_session_progress() {
     for count in [512u64, 4096, 16384] {
-        let root = tempfile::tempdir().unwrap();
+        let root = private_tempdir();
         let store = SqliteStore::open(root.path()).unwrap();
         let id = seed_session(&store, "long-cancel-history").await;
         let small = seed_session(&store, "small-after-cancel").await;
@@ -3224,7 +3259,7 @@ async fn report_cold_history_cancellation_and_small_session_progress() {
 #[tokio::test]
 #[cfg(unix)]
 async fn queued_proof_reuses_subtree_validation_published_before_lane_admission() {
-    let root = tempfile::tempdir().unwrap();
+    let root = private_tempdir();
     let store = SqliteStore::open(root.path()).unwrap();
     let id = seed_session(&store, "queued-subtree-proof").await;
     drop(store);
@@ -3260,7 +3295,7 @@ async fn queued_proof_reuses_subtree_validation_published_before_lane_admission(
 #[tokio::test]
 #[cfg(unix)]
 async fn checkpoint_length_and_body_share_a_snapshot_across_admission() {
-    let root = tempfile::tempdir().unwrap();
+    let root = private_tempdir();
     let store = SqliteStore::open(root.path()).unwrap();
     let id = seed_session(&store, "checkpoint-read-snapshot").await;
     let facts = store
@@ -3342,7 +3377,7 @@ async fn checkpoint_length_and_body_share_a_snapshot_across_admission() {
 #[test]
 #[cfg(unix)]
 fn cas_process_crash_refuses_unrestricted_child_selector() {
-    let root = tempfile::tempdir().unwrap();
+    let root = private_tempdir();
     let output = std::process::Command::new(std::env::current_exe().unwrap())
         .args(["tests::cas_crash_child", "--nocapture", "--ignored"])
         .env("RSI_CAS_CRASH_TEST_ROOT", root.path())
@@ -3365,7 +3400,7 @@ fn cas_process_crash_refuses_unrestricted_child_selector() {
 #[tokio::test]
 async fn cas_reuse_flushes_an_existing_read_only_file_on_unix() {
     use std::os::unix::fs::PermissionsExt as _;
-    let root = tempfile::tempdir().unwrap();
+    let root = private_tempdir();
     let store = SqliteStore::open(root.path()).unwrap();
     let bytes: Arc<[u8]> = Arc::from(b"read-only existing CAS body".as_slice());
     let object = store.put_cas(bytes.clone()).await.unwrap();
@@ -3425,7 +3460,7 @@ async fn cas_process_crash_reopens_without_admitting_unconfirmed_metadata() {
     let bytes: Arc<[u8]> = Arc::from(b"crash boundary body".as_slice());
     let digest = hex::encode(Sha256::digest(&bytes));
     for point in ["file", "link", "namespace", "metadata"] {
-        let root = tempfile::tempdir().unwrap();
+        let root = private_tempdir();
         let output = std::process::Command::new(std::env::current_exe().unwrap())
             .args([
                 "tests::cas_crash_child",
@@ -3484,7 +3519,7 @@ async fn recent_page_uses_one_bounded_header_query() {
             READS.fetch_add(1, Ordering::Relaxed);
         }
     }
-    let root = tempfile::tempdir().unwrap();
+    let root = private_tempdir();
     let store = SqliteStore::open(root.path()).unwrap();
     for index in 0..12 {
         let header = test_header(&format!("recent-query-{index:02}"));

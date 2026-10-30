@@ -18,5 +18,8 @@ it uses the ordinary debug example. Supply
 `RSI_PAIRED_BUNDLE` pointing to a complete product publication and an explicit
 report directory. It exercises Chromium and Firefox, reviewed publication, original
 receipt recovery, stale source, grant revocation, and a narrow viewport.
-The Linux desktop fixture consumes the same source UI through its native bridge.
+The browser fixture enters Profile management through the shared Settings window
+and reconnects through the document's Disconnect command.
+The Linux desktop fixture uses the same Local probe to grant its managed Device
+one exact source operation, then consumes the source UI through the shared Worker.
 All default evidence uses isolated user state and a deterministic provider.

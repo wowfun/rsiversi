@@ -161,6 +161,10 @@ describe wire compatibility, not executable equality. Local automatic owner reus
 retains its independent home authority, process identity, Host epoch and
 launch-key checks; executable build identity does not substitute for interfaces.
 
+Finite responses and SSE errors share the HTTP-local encoding of redacted API
+error codes. HTTP status and SSE framing remain transport-specific; Domain errors
+transfer their retained payload unchanged through their distinct response forms.
+
 Finite JSON replies retain exact Rust JSON bytes. Binary replies use
 `application/vnd.rsi.binary`: an eight-byte big-endian metadata length, an
 eight-byte big-endian binary length, then those exact payloads. Subscriptions use

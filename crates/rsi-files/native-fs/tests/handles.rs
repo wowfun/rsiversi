@@ -155,28 +155,39 @@ fn file_handle_is_read_only_and_fifo_open_has_nonblocking_flags() {
 
 #[test]
 fn creating_private_roots_rejects_traversal_before_mutation_and_never_follows_links() {
+    for create in [
+        create_absolute_directory_no_follow,
+        create_absolute_directory_and_sync_no_follow,
+    ] {
+        check_private_root_creation(create);
+    }
+}
+
+fn check_private_root_creation(create: fn(&Path) -> std::io::Result<Directory>) {
     use std::os::unix::fs::PermissionsExt as _;
     let temporary = tempfile::tempdir().unwrap();
     let base = temporary.path().canonicalize().unwrap();
     let path = base.join("new/private/store");
-    let root = create_absolute_directory_no_follow(&path).unwrap();
+    let root = create(&path).unwrap();
     assert_eq!(
         fs::metadata(&path).unwrap().permissions().mode() & 0o777,
         0o700
     );
     fs::write(path.join("value"), b"owned").unwrap();
     fs::set_permissions(&path, fs::Permissions::from_mode(0o750)).unwrap();
-    drop(create_absolute_directory_no_follow(&path).unwrap());
+    drop(create(&path).unwrap());
     assert_eq!(
         fs::metadata(&path).unwrap().permissions().mode() & 0o777,
         0o750
     );
-    assert!(create_absolute_directory_no_follow(&base.join("not-created/../escape")).is_err());
+    assert!(create(&base.join("not-created/../escape")).is_err());
     assert!(!base.join("not-created").exists());
-    assert!(create_absolute_directory_no_follow(Path::new("relative")).is_err());
+    assert!(create(Path::new("relative")).is_err());
+    assert!(create(&base.join("not-created/nul\0suffix")).is_err());
+    assert!(!base.join("not-created").exists());
     fs::create_dir(base.join("outside")).unwrap();
     symlink(base.join("outside"), base.join("alias")).unwrap();
-    assert!(create_absolute_directory_no_follow(&base.join("alias/escaped")).is_err());
+    assert!(create(&base.join("alias/escaped")).is_err());
     assert!(!base.join("outside/escaped").exists());
     fs::rename(&path, path.with_file_name("moved")).unwrap();
     symlink(base.join("outside"), &path).unwrap();
@@ -272,10 +283,10 @@ fn enumeration_retains_its_original_authority_after_root_replacement() {
 #[test]
 fn removing_a_link_keeps_the_external_object_and_refuses_regular_files() {
     let temporary = tempfile::tempdir().unwrap();
-    let path = temporary.path();
+    let path = temporary.path().canonicalize().unwrap();
     fs::write(path.join("outside"), b"keep").unwrap();
     symlink(path.join("outside"), path.join("link")).unwrap();
-    let directory = open_absolute_directory_no_follow(path).unwrap();
+    let directory = open_absolute_directory_no_follow(&path).unwrap();
     assert!(directory.remove_link(Path::new("outside")).is_err());
     directory.remove_link(Path::new("link")).unwrap();
     assert_eq!(fs::read(path.join("outside")).unwrap(), b"keep");

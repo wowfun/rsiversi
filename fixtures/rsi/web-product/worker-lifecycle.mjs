@@ -26,6 +26,7 @@ export async function verifyWorkerLifecycle(browser, root) {
       if (input === "block") { postMessage({kind:"fixture_blocked"}); await new Promise(resolve => blocked.push(resolve)); }
       else rejectCommit(new Error("fixture commit failed"));
     }
+    export async function resource_open() {}
     export async function disconnect() { blocked.splice(0).forEach(resolve => resolve()); rejectCommit?.(new Error("retired")); return resource_snapshot(); }
     export function resource_snapshot() { return JSON.stringify({pending_timers:0,active_alarms:0,active_requests:0}); }
     export async function ui_source() {}
@@ -139,7 +140,7 @@ export async function verifyWorkerLifecycle(browser, root) {
     });
     for (const result of pairing) {
       assert.equal(result.connected, false, 'pairing must reject before Profile connection');
-      assert.match(result.reply.error, result.mode === 'document' ? /document and Worker families differ/ : /Worker family differs from its bootstrap/);
+      assert.match(result.reply.error, result.mode === 'document' ? /document and Worker families differ/ : /Worker identity differs from its bootstrap/);
     }
     return {lifecycle: results, pairing};
   } finally {

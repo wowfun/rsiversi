@@ -64,6 +64,8 @@ pub enum NavigationCommand {
         session: SessionId,
         /// Complete title/archive record.
         metadata: SessionMetadata,
+        /// Metadata revision displayed when this edit began.
+        metadata_revision: String,
     },
 }
 #[derive(Clone, Debug, Serialize)]
@@ -473,10 +475,14 @@ impl NavigationFeature {
                 ticket,
                 session,
                 metadata,
+                metadata_revision,
             } => {
                 let (revision, filter) = {
                     let state = self.state.lock().expect("navigation view poisoned");
-                    if state.view.ticket.is_empty() || state.view.ticket != ticket {
+                    if state.view.ticket.is_empty()
+                        || state.view.ticket != ticket
+                        || state.view.metadata_revision != metadata_revision
+                    {
                         return Err("Navigation changed; refresh before editing".into());
                     }
                     (
@@ -1132,6 +1138,37 @@ mod group_tests {
     }
 
     #[tokio::test]
+    async fn stale_rename_revision_cannot_overwrite_new_metadata() {
+        let (api, owner) = fixture();
+        owner
+            .command(NavigationCommand::Query {
+                filter: NavigationFilter::default(),
+            })
+            .await
+            .unwrap();
+        let view = owner.view();
+        let revision = view["metadata_revision"].as_str().unwrap().to_owned();
+        // A metadata refresh keeps the query ticket but retires the edit's revision.
+        owner.state.lock().unwrap().view.metadata_revision = "newer".into();
+        assert!(
+            owner
+                .command(NavigationCommand::Replace {
+                    ticket: view["ticket"].as_str().unwrap().to_owned(),
+                    session: SessionId::new("edited").unwrap(),
+                    metadata: SessionMetadata::default(),
+                    metadata_revision: revision,
+                })
+                .await
+                .unwrap_err()
+                .contains("Navigation changed")
+        );
+        assert_eq!(
+            api.replacements.load(std::sync::atomic::Ordering::SeqCst),
+            0
+        );
+    }
+
+    #[tokio::test]
     async fn committed_replacement_survives_refresh_revision_race_without_retry() {
         let (api, owner) = fixture();
         owner
@@ -1149,6 +1186,10 @@ mod group_tests {
                 ticket: ticket.clone(),
                 session: SessionId::new("edited").unwrap(),
                 metadata: SessionMetadata::default(),
+                metadata_revision: owner.view()["metadata_revision"]
+                    .as_str()
+                    .unwrap()
+                    .to_owned(),
             })
             .await
             .unwrap();
@@ -1169,7 +1210,8 @@ mod group_tests {
                 .command(NavigationCommand::Replace {
                     ticket,
                     session: SessionId::new("edited").unwrap(),
-                    metadata: SessionMetadata::default()
+                    metadata: SessionMetadata::default(),
+                    metadata_revision: "stale".into(),
                 })
                 .await
                 .is_err()

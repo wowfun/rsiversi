@@ -112,6 +112,8 @@ impl SqliteStore {
 /// diagnostic samples, not deterministic performance gates or pure `SQLite` CPU time.
 #[derive(Clone, Copy, Debug, serde::Serialize)]
 pub struct LaneMeasurement {
+    /// Stable owning mechanical operation, independent of Rust type names.
+    pub operation: super::StoreOperation,
     /// Diagnostic Rust result type for distinguishing operation samples.
     /// This label is neither unique nor stable across compiler versions.
     pub result_type: &'static str,
@@ -136,6 +138,7 @@ impl LaneProbe {
         measurements: Option<Measurements>,
         queued: std::time::Instant,
         dispatched: std::time::Instant,
+        operation: super::StoreOperation,
         result_type: &'static str,
     ) -> Option<Self> {
         let measurements = measurements?;
@@ -148,6 +151,7 @@ impl LaneProbe {
             measurements,
             started,
             value: LaneMeasurement {
+                operation,
                 result_type,
                 admission_ns: dispatched.duration_since(queued).as_nanos(),
                 scheduling_ns: started.duration_since(dispatched).as_nanos(),

@@ -1,4 +1,4 @@
-use crate::wire::{IdRequest, ListRequest, Operation, RegisterRequest, result};
+use crate::wire::{IdRequest, ListRequest, Operation, RegisterRequest, RenameRequest, result};
 use async_trait::async_trait;
 use rsi_api_protocol::{ApiRegistrar, ApiRegistrarContract, ApiRegistration, Result, json_handler};
 use rsi_meta::{ActivationPlan, ConfigValue, MetaError, PluginFactory, PreparedActivation};
@@ -59,6 +59,14 @@ impl WorkspaceApi {
             json_handler(move |context, input: IdRequest| {
                 let service = service.scoped(context.origin);
                 async move { result(service.status(&input.id).await) }
+            }),
+        )?);
+        let service = workspace.clone();
+        registrations.push(registrar.register(
+            Operation::Rename.spec(),
+            json_handler(move |context, input: RenameRequest| {
+                let service = service.scoped(context.origin);
+                async move { result(service.rename(&input.id, input.name).await) }
             }),
         )?);
         registrations.push(registrar.register(

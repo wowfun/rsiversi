@@ -1,6 +1,6 @@
 # rsi-automation-api
 
-The version-one Automation operations negotiate through the ordinary API client.
+Automation operations negotiate through the ordinary API client.
 The Automation owner authorizes actual transport origins, never request fields.
 Identifiers and cursors are canonical decimal strings. Pages contain at most 50
 summaries, an exclusive scan cursor and a fixed watermark; filtering cannot stall
@@ -13,6 +13,9 @@ after an uncertain response. Cancel/Resume receipts contain exactly `id` and
 `state`; malformed mutation replies retain the unknown-outcome contract. Blocked
 check results cannot carry snapshots or assertion evidence. Policy reads/writes and detailed diagnostics are
 Local-only; authenticated Devices need per-rule View, Cancel or Resume grants.
+Policy reads and replacements carry the owner's configuration document unchanged,
+including its numeric unsigned 64-bit `revision`. The separate `expected_revision`
+coordinate and mutation receipt revision use canonical decimal strings.
 
 Control requests and responses obey the API foundation's 128 KiB bound. Policy
 replacement also uses control admission; larger policies must be reduced before

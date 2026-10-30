@@ -481,7 +481,8 @@ mod tests {
     }
     impl Fixture {
         fn new() -> Self {
-            let temporary = tempfile::tempdir().unwrap();
+            let temporary =
+                tempfile::tempdir_in(std::env::temp_dir().canonicalize().unwrap()).unwrap();
             let root = temporary.path();
             let paths = HostPaths::new(root.join("config"), root.join("state"), root.join("cache"))
                 .unwrap();

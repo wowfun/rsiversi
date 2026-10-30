@@ -16,6 +16,8 @@ const MAXIMUM_COMMAND: usize = 32 * 1024;
 #[derive(Deserialize)]
 #[serde(deny_unknown_fields)]
 struct Prepare {
+    #[serde(default)]
+    sandbox: Option<rsi_sandbox::SandboxMode>,
     pane: crate::SurfaceId,
     generation: String,
     #[serde(default)]
@@ -230,12 +232,13 @@ impl GuiApplication {
             }
             let input: Prepare = serde_json::from_str(source).map_err(error)?;
             if input.queue.is_some()
-                && (!input.text.is_empty()
+                && (input.sandbox.is_some()
+                    || !input.text.is_empty()
                     || !input.images.is_empty()
                     || !input.references.is_empty())
             {
                 return Err(
-                    "Queue preparation cannot include composer text, images or references".into(),
+                    "Queue preparation cannot include composer text, images, references or access overrides".into(),
                 );
             }
             if input.text.len() > 1024 * 1024
@@ -272,6 +275,9 @@ impl GuiApplication {
                 let delivery = app.composer_delivery(input.pane, &input.generation,
                     input.action_revision.as_deref().ok_or("Missing displayed action revision")?,
                     input.action.ok_or("Missing displayed delivery action")?)?;
+                if delivery == MessageDelivery::Steer && input.sandbox.is_some() {
+                    return Err("Steering retains the active Turn's access policy".into());
+                }
                 let mut content = Vec::with_capacity(input.images.len() + 1);
                 if !input.text.is_empty() { content.push(SessionInput::Text { text: input.text.clone() }); }
                 content.extend(input.images.iter().cloned().map(|media| SessionInput::Image { media }));
@@ -282,7 +288,7 @@ impl GuiApplication {
                     message_id: id.clone(), content: content.try_into().map_err(error)?,
                     delivery,
                     model: None,
-                    sandbox: None,
+                    sandbox: input.sandbox,
                 };
                 ("message", id.to_string(), Request::Message { input: request }, MAXIMUM_MESSAGE)
             };
@@ -323,7 +329,7 @@ impl GuiApplication {
             match &frozen.request {
                 Request::Queue { input } => input.validate().map_err(error)?,
                 Request::Message { input } => {
-                    if input.sandbox.is_some()
+                    if (input.delivery == MessageDelivery::Steer && input.sandbox.is_some())
                         || input.model.is_some()
                         || input.reasoning_effort.is_some()
                         || !matches!(

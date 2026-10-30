@@ -249,6 +249,24 @@ impl Drop for Released {
 }
 #[async_trait::async_trait]
 impl SessionStore for PausedStore {
+    async fn session_access(
+        &self,
+        sessions: &[SessionId],
+    ) -> rsi_agent_store_protocol::Result<
+        Vec<rsi_agent_store_protocol::Result<rsi_agent_store_protocol::StoreSessionAccess>>,
+    > {
+        self.inner.session_access(sessions).await
+    }
+
+    async fn session_activity_cuts(
+        &self,
+        sessions: &[SessionId],
+    ) -> rsi_agent_store_protocol::Result<
+        Vec<rsi_agent_store_protocol::Result<rsi_agent_store_protocol::StoreActivityCut>>,
+    > {
+        self.inner.session_activity_cuts(sessions).await
+    }
+
     async fn session_activity_summaries(
         &self,
         sessions: &[SessionId],

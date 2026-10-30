@@ -35,6 +35,17 @@ Setup exposes typed snapshots to native consumers and the same redacted JSON
 projection to GUI consumers. Discovery candidates are ephemeral and never imply
 provider application or default selection. Each retained write keeps its own
 receipt; cancelled presentation does not undo an admitted credential write.
+Setup refresh also reads the exact configured default model's committed
+description through the negotiated read-only Models API. The description is
+published with the settings snapshot before a Session exists. Missing capability
+or model clears it; a failed description read clears stale metadata while
+retaining the freshly read settings. Description metadata is advisory: its failure
+does not fail Setup refresh or prevent repairing a missing default model.
+Credential status reads update only the Setup projection. The provider editor
+coalesces slot edits before checking status; these reads do not refresh workspace,
+conversation or model catalogs.
+The editor retains at most one status read, cancels a pending check when saving,
+and awaits an already admitted read before starting credential/provider writes.
 
 Ordinary Application plugins own configuration and navigation presentation state
 over the connected Host's typed APIs. They contribute application-scoped status
@@ -110,6 +121,10 @@ Newest pages may refresh to include newly durable Sessions; identical results
 keep their tickets. A metadata revision change invalidates group cursors without
 automatic re-expansion: each group shows an explicit refresh control before its
 rows or mutations are available again.
+
+Navigation replacements carry the metadata revision displayed when the edit
+began. Both the view owner and Store reject stale revisions; a rename cannot
+overwrite a pin or archive change that arrived while its form was open.
 
 A confirmed navigation replacement remains successful if its follow-up reads fail
 or race another revision. The view explicitly reports that the change was saved

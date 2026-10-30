@@ -49,8 +49,12 @@ impl ApiClient for Remote {
                 binary: None,
             }));
         }
-        assert_eq!(operation, &ProvidersOperation::Replace.spec());
-        self.writes.fetch_add(1, Ordering::SeqCst);
+        if operation == &rsi_ai_models_api::describe_operation() {
+            self.reads.fetch_add(1, Ordering::SeqCst);
+        } else {
+            assert_eq!(operation, &ProvidersOperation::Replace.spec());
+            self.writes.fetch_add(1, Ordering::SeqCst);
+        }
         let value = self
             .result
             .lock()
@@ -64,6 +68,136 @@ impl ApiClient for Remote {
             binary: None,
         }))
     }
+}
+
+#[derive(Debug)]
+struct DefaultSettings(Mutex<Value>);
+#[async_trait::async_trait]
+impl SettingsAccess for DefaultSettings {
+    async fn list(&self, _: Option<&str>, _: usize) -> rsi_settings_protocol::Result<SettingsPage> {
+        unreachable!()
+    }
+    async fn describe(&self, _: &str) -> rsi_settings_protocol::Result<SettingsDescription> {
+        unreachable!()
+    }
+    async fn read(&self, namespace: &str) -> rsi_settings_protocol::Result<SettingsSnapshot> {
+        Ok(SettingsSnapshot {
+            scope_id: rsi_settings_protocol::SettingsScopeId::parse("a".repeat(32)).unwrap(),
+            revision: 1,
+            value: if namespace == "rsi.agent" {
+                self.0.lock().unwrap().clone()
+            } else {
+                json!({})
+            },
+        })
+    }
+    async fn replace(
+        &self,
+        _: &str,
+        _: &SettingsVersion,
+        _: Value,
+    ) -> rsi_settings_protocol::Result<SettingsSnapshot> {
+        unreachable!()
+    }
+    async fn clear(
+        &self,
+        _: &str,
+        _: &SettingsVersion,
+    ) -> rsi_settings_protocol::Result<SettingsSnapshot> {
+        unreachable!()
+    }
+}
+
+#[tokio::test]
+async fn setup_describes_default_model_before_a_session_and_clears_stale_capabilities() {
+    use rsi_ai_protocol::{
+        ImageToolResultCapability, LanguageModelDescription, LanguageProfile, ModelRef,
+        ReasoningEffortId, ReasoningEffortProfile, ToolDialect,
+    };
+    let model = ModelRef::new("custom", "exact-model").unwrap();
+    let profile = LanguageProfile::new(
+        10000,
+        1000,
+        2000,
+        ToolDialect::ChatCompletions,
+        false,
+        ImageToolResultCapability::No,
+        vec![],
+    )
+    .unwrap()
+    .with_reasoning_efforts(
+        ReasoningEffortProfile::new(
+            vec![ReasoningEffortId::new("high").unwrap()],
+            Some(ReasoningEffortId::new("high").unwrap()),
+        )
+        .unwrap(),
+    );
+    let description = LanguageModelDescription::new(
+        model.clone(),
+        profile,
+        1,
+        "fixture",
+        "chat",
+        "https",
+        "fixture",
+    )
+    .unwrap();
+    let remote = Arc::new(Remote {
+        description: ConnectionDescription {
+            wire_version: rsi_api_protocol::API_WIRE_VERSION,
+            endpoint_id: EndpointId::from_bytes([1; 16]),
+            host_epoch: HostEpoch::from_bytes([2; 16]),
+        },
+        operations: vec![
+            rsi_settings_api::Operation::Read.spec(),
+            rsi_ai_models_api::describe_operation(),
+        ],
+        result: Mutex::new(Some(Ok(json!(description)))),
+        writes: 0.into(),
+        discovery_failed: false.into(),
+        reads: 0.into(),
+    });
+    let settings = Arc::new(DefaultSettings(Mutex::new(
+        json!({"default_model":model,"reasoning_effort":"high"}),
+    )));
+    let runtime = rsi_meta::Runtime::default();
+    let feature = Arc::new(SetupFeature {
+        api: remote.clone(),
+        authority: ConfigurationClient::new(remote.clone()),
+        providers: ManagedProvidersClient::new(remote.clone()),
+        credentials: ProviderCredentialsClient::new(remote.clone()),
+        settings: settings.clone(),
+        state: PresentationState::default(),
+        work: Work::new(runtime.execution().clone()),
+    });
+    feature.command(SetupCommand::Refresh).await.unwrap();
+    assert_eq!(
+        feature.snapshot().default_model_description,
+        Some(description.clone())
+    );
+    assert_eq!(
+        feature.view()["default_model_description"]["profile"]["reasoning_efforts"]["default"],
+        "high"
+    );
+    assert_eq!(remote.writes.load(Ordering::SeqCst), 0);
+    *settings.0.lock().unwrap() =
+        json!({"default_model":{"deployment":"custom","model":"replacement"}});
+    *remote.result.lock().unwrap() = Some(Ok(json!(description)));
+    feature.command(SetupCommand::Refresh).await.unwrap();
+    assert!(feature.snapshot().default_model_description.is_none());
+    assert_eq!(
+        feature.view()["agent"]["default_model"]["model"],
+        "replacement"
+    );
+    *remote.result.lock().unwrap() = Some(Err(ApiError::Capacity));
+    feature.command(SetupCommand::Refresh).await.unwrap();
+    assert!(feature.snapshot().default_model_description.is_none());
+    *settings.0.lock().unwrap() = json!({});
+    feature.command(SetupCommand::Refresh).await.unwrap();
+    assert_eq!(remote.reads.load(Ordering::SeqCst), 3);
+    assert!(feature.snapshot().default_model_description.is_none());
+    feature.work.close().await;
+    assert!(runtime.shutdown().await.is_clean());
 }
 #[derive(Debug, Default)]
 struct NoSettings(AtomicUsize);

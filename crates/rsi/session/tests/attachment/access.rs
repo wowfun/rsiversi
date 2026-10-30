@@ -457,9 +457,18 @@ async fn input_canonicalization_and_submission_share_one_exact_target_lease() {
 struct RemoteWorkspace(rsi_execution::ExecutionCoordinates);
 #[async_trait]
 impl WorkspaceRegistry for RemoteWorkspace {
+    async fn rename(
+        &self,
+        _id: &rsi_workspace_protocol::WorkspaceId,
+        _name: rsi_workspace_protocol::WorkspaceName,
+    ) -> rsi_workspace_protocol::Result<rsi_workspace_protocol::WorkspaceRecord> {
+        unreachable!("rename is not used by this fixture")
+    }
     async fn get(&self, id: &WorkspaceId) -> rsi_workspace_protocol::Result<WorkspaceRecord> {
         assert_eq!(id, &workspace_id());
         Ok(WorkspaceRecord {
+            name: None,
+            created_at_ms: None,
             id: id.clone(),
             coordinates: self.0.clone(),
         })

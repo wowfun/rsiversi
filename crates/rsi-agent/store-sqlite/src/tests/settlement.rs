@@ -44,7 +44,7 @@ pub(super) fn commit(sessions: Vec<AtomicSessionAppend>) -> AtomicAgentCommit {
 
 #[tokio::test]
 async fn settlement_projection_is_atomic_persistent_and_validated() {
-    let root = tempfile::tempdir().unwrap();
+    let root = private_tempdir();
     let store = SqliteStore::open(root.path()).unwrap();
     let id = seed_session(&store, "settlement").await;
     let other = seed_session(&store, "conflict").await;

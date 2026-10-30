@@ -47,12 +47,44 @@ fn deserialization_rejects_noncanonical_workspace_identities() {
 }
 
 #[test]
+fn custom_names_are_bounded_and_absent_metadata_stays_unknown() {
+    use rsi_workspace_protocol::{
+        ExecutionCoordinates, ExecutionLocation, WorkspaceName, WorkspaceRecord,
+    };
+    for name in [
+        String::new(),
+        " padded ".into(),
+        "line\nbreak".into(),
+        "a".repeat(257),
+        "中".repeat(86),
+    ] {
+        assert!(serde_json::from_value::<WorkspaceName>(serde_json::json!(name)).is_err());
+    }
+    WorkspaceName::parse("项目 Project").unwrap();
+    let coordinates = ExecutionCoordinates::new(
+        ExecutionLocation::Local,
+        if cfg!(windows) {
+            "C:/project"
+        } else {
+            "/project"
+        },
+    )
+    .unwrap();
+    let record: WorkspaceRecord = serde_json::from_value(serde_json::json!({"id":WorkspaceId::from_coordinates(&coordinates),"coordinates":coordinates})).unwrap();
+    record.validate().unwrap();
+    assert!(record.name.is_none());
+    assert!(record.created_at_ms.is_none());
+}
+
+#[test]
 fn external_records_bound_paths_and_keep_host_paths_opaque() {
     use rsi_workspace_protocol::{
         MAXIMUM_WORKSPACE_PATH_BYTES, WorkspaceRecord, validate_workspace_path,
     };
     let path = std::path::PathBuf::from(r"C:\server\project");
     let mut record = WorkspaceRecord {
+        name: None,
+        created_at_ms: None,
         id: WorkspaceId::from_canonical_path(&path).unwrap(),
         coordinates: rsi_workspace_protocol::ExecutionCoordinates::new(
             rsi_workspace_protocol::ExecutionLocation::Local,

@@ -81,11 +81,13 @@ pub(super) fn configured(
         public_key: option_env!("RSI_PACKAGE_REPOSITORY_KEY")?.into(),
     })).ok_or_else(|| error("this build has no release repository identity; configure [repository] in rsi.toml or use plugin install --local DIR"))
 }
+#[cfg(any(target_os = "linux", windows))]
 pub(super) fn configured_core(
     value: Option<rsi::LaunchRepository>,
 ) -> rsi::Result<rsi::LaunchRepository> {
     core_repository(configured(None).ok(), value)
 }
+#[cfg(any(target_os = "linux", windows, test))]
 fn core_repository(
     pinned: Option<rsi::LaunchRepository>,
     configured: Option<rsi::LaunchRepository>,
@@ -155,7 +157,10 @@ pub(super) async fn install(
     let mut pending: Vec<_> = names.into_iter().map(|name| (name, None)).collect();
     let mut seen = BTreeMap::new();
     let mut sources = Vec::new();
-    let staging = tempfile::tempdir().map_err(error)?;
+    let staging = tempfile::tempdir_in(rsi_workspace_path::canonical_native_path(
+        std::env::temp_dir().canonicalize().map_err(error)?,
+    ))
+    .map_err(error)?;
     let mut total = 0_u64;
     while let Some((name, required)) = pending.pop() {
         let selection = index
@@ -314,7 +319,10 @@ mod tests {
             url: format!("http://{address}/"),
             public_key: hex::encode(key.public_key()),
         };
-        let home = tempfile::tempdir().unwrap();
+        let home = tempfile::tempdir_in(rsi_workspace_path::canonical_native_path(
+            std::env::temp_dir().canonicalize().unwrap(),
+        ))
+        .unwrap();
         let store = PackageStore::open(&home.path().join("packages")).unwrap();
         let first = install(
             &store,
@@ -455,7 +463,10 @@ mod tests {
             url: format!("http://{address}/"),
             public_key: hex::encode(key.public_key()),
         };
-        let home = tempfile::tempdir().unwrap();
+        let home = tempfile::tempdir_in(rsi_workspace_path::canonical_native_path(
+            std::env::temp_dir().canonicalize().unwrap(),
+        ))
+        .unwrap();
         let store = PackageStore::open(&home.path().join("packages")).unwrap();
         let first = install(
             &store,

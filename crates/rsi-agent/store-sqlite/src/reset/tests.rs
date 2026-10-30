@@ -59,20 +59,15 @@ fn reset_archives_current_and_old_schema_bytes_without_opening_them() {
 }
 
 #[test]
-fn missing_store_and_repeated_request_do_not_create_backups() {
+fn missing_store_initializes_without_a_backup() {
     let temporary = tempfile::tempdir().unwrap();
     let root = temporary.path().join("agent");
-    let request = SqliteStoreResetRequest::new();
-    drop(request.open(&root).unwrap());
-    assert!(request.take_receipt().unwrap().backup.is_none());
-    fs::write(root.join("retained"), b"after first boot").unwrap();
-    drop(request.clone().open(&root).unwrap());
-    assert!(request.take_receipt().is_none());
-    assert_eq!(
-        fs::read(root.join("retained")).unwrap(),
-        b"after first boot"
-    );
+    let (store, receipt) = SqliteStore::reset_and_open(&root).unwrap();
+    assert!(receipt.backup.is_none());
+    assert_eq!(receipt.root, root);
+    assert!(root.join("sessions.sqlite3").is_file());
     assert_eq!(fs::read_dir(temporary.path()).unwrap().count(), 1);
+    drop(store);
 }
 
 #[test]
@@ -218,116 +213,4 @@ fn empty_store_initializes_without_a_backup() {
     let (_, receipt) = SqliteStore::reset_and_open(&root).unwrap();
     assert!(receipt.backup.is_none());
     assert_eq!(fs::read_dir(temporary.path()).unwrap().count(), 1);
-}
-
-#[test]
-fn unwound_request_cannot_fall_back_to_an_ordinary_open() {
-    for after_backup in [false, true] {
-        let temporary = tempfile::tempdir().unwrap();
-        let root = temporary.path().join("agent");
-        drop(SqliteStore::open(&root).unwrap());
-        let before = fs::read(root.join("sessions.sqlite3")).unwrap();
-        let request = SqliteStoreResetRequest::new();
-        let panic = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
-            request.open_with(&root, |root| {
-                assert!(after_backup, "injected panic before backup");
-                reset_and_open_progress(
-                    root,
-                    |_| panic!("injected panic after backup"),
-                    |receipt| request.1.publish(receipt.clone()),
-                )
-            })
-        }));
-        assert!(panic.is_err());
-        let error = request.clone().open(&root).unwrap_err();
-        assert!(
-            error.to_string().contains("reset did not complete"),
-            "{error}"
-        );
-        if after_backup {
-            let backup = request.take_receipt().unwrap().backup.unwrap();
-            assert_eq!(fs::read(backup.join("sessions.sqlite3")).unwrap(), before);
-            assert!(!root.exists());
-        } else {
-            assert!(request.take_receipt().is_none());
-            assert_eq!(fs::read(root.join("sessions.sqlite3")).unwrap(), before);
-        }
-    }
-}
-
-#[test]
-fn failed_request_does_not_fall_back_to_an_ordinary_open() {
-    let temporary = tempfile::tempdir().unwrap();
-    let root = temporary.path().join("agent");
-    let store = SqliteStore::open(&root).unwrap();
-    let request = SqliteStoreResetRequest::new();
-    assert!(matches!(request.open(&root), Err(StoreError::WriterLocked)));
-    drop(store);
-    assert!(matches!(
-        request.clone().open(&root),
-        Err(StoreError::WriterLocked)
-    ));
-    assert_eq!(fs::read_dir(temporary.path()).unwrap().count(), 1);
-}
-
-#[test]
-fn request_failure_after_backup_cannot_create_an_empty_store_on_retry() {
-    let temporary = tempfile::tempdir().unwrap();
-    let root = temporary.path().join("agent");
-    drop(SqliteStore::open(&root).unwrap());
-    let before = fs::read(root.join("sessions.sqlite3")).unwrap();
-    let request = SqliteStoreResetRequest::new();
-    let first = request
-        .open_with(&root, |root| {
-            reset_and_open_with(root, |_| {
-                Err(StoreError::Io("injected new Store failure".into()))
-            })
-        })
-        .unwrap_err();
-    let backup = request.take_receipt().unwrap().backup.unwrap();
-    assert_eq!(fs::read(backup.join("sessions.sqlite3")).unwrap(), before);
-    assert!(!root.exists());
-    assert_eq!(
-        request.open(&root).unwrap_err().to_string(),
-        first.to_string()
-    );
-    assert!(!root.exists());
-    assert!(request.take_receipt().is_none());
-    assert_eq!(fs::read_dir(temporary.path()).unwrap().count(), 1);
-}
-
-#[tokio::test]
-async fn reset_receipt_is_available_while_replacement_initialization_is_blocked() {
-    let temporary = tempfile::tempdir().unwrap();
-    let root = temporary.path().join("agent");
-    drop(SqliteStore::open(&root).unwrap());
-    let request = SqliteStoreResetRequest::new();
-    let opening = request.clone();
-    let path = root.clone();
-    let (release, wait) = std::sync::mpsc::channel();
-    let work = tokio::task::spawn_blocking(move || {
-        opening.open_with(&path, |root| {
-            reset_and_open_progress(
-                root,
-                |_| {
-                    wait.recv().unwrap();
-                    Err(StoreError::Io("cold startup failed after backup".into()))
-                },
-                |receipt| opening.1.publish(receipt.clone()),
-            )
-        })
-    });
-    tokio::time::timeout(Duration::from_secs(5), request.receipt_ready())
-        .await
-        .unwrap();
-    let receipt = request.take_receipt().unwrap();
-    assert_eq!(receipt.root, root);
-    assert!(receipt.backup.unwrap().join("sessions.sqlite3").exists());
-    assert!(
-        !work.is_finished(),
-        "receipt must precede completion of reset/open"
-    );
-    release.send(()).unwrap();
-    assert!(work.await.unwrap().is_err());
-    assert!(request.take_receipt().is_none(), "one receipt per reset");
 }

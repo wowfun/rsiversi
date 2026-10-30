@@ -56,6 +56,17 @@ its qualifying Finished or Failed terminal event, including tool-only and
 reasoning-only attempts; Context-compaction settlements do not count.
 Other control and Fact kinds do not count.
 
+Access batches are a required Store operation: 1..=256 unique Session identities
+return ordered per-item location/protection results from one metadata snapshot.
+Activity-cut batches likewise require 1..=64 unique identities and return each
+Session's durable Fact tail and whether an open Turn exists. Successful cuts in
+one batch share one read snapshot; separate batches need not share a horizon.
+Providers establish canonical-history validation before reading Turn indexes.
+Missing, retired or corrupt Sessions are per-item errors; failure to admit or
+read the batch is an outer error. Neither operation grants product authority.
+Invalid selection diagnostics identify the access or activity-cut operation and
+its cardinality and uniqueness requirements.
+
 Complete ordering membership is a separate single-snapshot query returning at
 most 1024 identities within 128 KiB of encoded JSON. Overflow returns an explicit
 TooLarge result, never a truncated list masquerading as complete membership.

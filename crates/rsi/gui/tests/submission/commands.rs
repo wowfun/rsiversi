@@ -40,6 +40,14 @@ async fn queue_preparation_rejects_mixed_composer_payload() {
             .contains("composer")
     );
     assert!(backend.queue_requests.lock().unwrap().is_empty());
+    let input = json!({"pane":"main","generation":generation,"sandbox":"read-only",
+        "queue":{"action":"withdraw","slot_id":"original","expected_message_id":"original"}});
+    assert!(
+        app.prepare_submission(&input.to_string())
+            .await
+            .unwrap_err()
+            .contains("access overrides")
+    );
     assert!(runtime.shutdown().await.is_clean());
 }
 #[tokio::test]

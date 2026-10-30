@@ -265,6 +265,14 @@ dependencies = [
 ]
 
 [[package]]
+name = "rsi-api-contract-build"
+version = "0.0.1"
+dependencies = [
+ "serde",
+ "serde_json",
+]
+
+[[package]]
 name = "rsi-api-protocol"
 version = "0.0.1"
 dependencies = [
@@ -273,6 +281,7 @@ dependencies = [
  "futures-util",
  "getrandom",
  "hex",
+ "rsi-api-contract-build",
  "rsi-credentials-protocol",
  "rsi-meta-contract",
  "serde",

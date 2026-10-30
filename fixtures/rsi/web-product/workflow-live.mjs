@@ -59,7 +59,7 @@ try {
   await page.waitForFunction(() => document.querySelector('[aria-label="Main message"]')?.value === '');
   let processIdentity;
   if (cancellation) {
-    await pane.locator('.pane-status').getByText('Completed', {exact:true}).waitFor();
+    await pane.locator('.pane-status').getByText('Completed', {exact:true}).waitFor({state:'attached'});
     const pending = programEvidence(service.workspace);
     const accepted = pending.controls.find(({record})=>record.type==='program_run' && record.event.event==='accepted'); assert(accepted);
     const progress = pending.controls.find(({record})=>record.type==='program_run' && record.event.event==='progress'); assert(progress);

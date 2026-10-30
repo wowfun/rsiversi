@@ -7,28 +7,41 @@ struct Fixture {
 }
 impl Fixture {
     fn new() -> Self {
-        let root = tempfile::tempdir().unwrap();
+        let root = tempfile::tempdir_in(rsi_workspace_protocol::canonical_native_path(
+            std::env::temp_dir().canonicalize().unwrap(),
+        ))
+        .unwrap();
         let paths = |name: &str| {
             let directory = root.path().join(name);
             let config = directory.join("config");
             let state = directory.join("state");
-            std::fs::create_dir_all(&config).unwrap();
-            std::fs::create_dir_all(&state).unwrap();
+            rsi_files_native_fs::create_absolute_directory_no_follow(&config).unwrap();
+            rsi_files_native_fs::create_absolute_directory_no_follow(&state).unwrap();
             HostPaths::new(config, state, directory.join("cache")).unwrap()
         };
         let source = paths("source");
         let destination = paths("destination");
         for (paths, value) in [(&source, "new"), (&destination, "old")] {
-            std::fs::write(
-                paths.config().join("settings.json"),
-                format!(r#"{{"rsi.example":{{"label":"{value}"}}}}"#),
-            )
-            .unwrap();
-            std::fs::create_dir(paths.config().join("skills")).unwrap();
-            std::fs::write(paths.config().join("skills/tool"), value).unwrap();
-            std::fs::create_dir(paths.state().join("automation")).unwrap();
-            std::fs::write(paths.state().join("automation/fixture"), value).unwrap();
-            std::fs::write(paths.state().join("unrelated"), value).unwrap();
+            for (path, bytes) in [
+                (
+                    paths.config().join("settings.json"),
+                    format!(r#"{{"rsi.example":{{"label":"{value}"}}}}"#),
+                ),
+                (paths.config().join("skills/tool"), value.to_owned()),
+                (paths.state().join("automation/fixture"), value.to_owned()),
+                (paths.state().join("unrelated"), value.to_owned()),
+            ] {
+                let parent = rsi_files_native_fs::create_absolute_directory_no_follow(
+                    path.parent().unwrap(),
+                )
+                .unwrap();
+                let mut file = rsi_files_native_fs::create_relative_private_file_no_follow(
+                    &parent,
+                    Path::new(path.file_name().unwrap()),
+                )
+                .unwrap();
+                std::io::Write::write_all(&mut file, bytes.as_bytes()).unwrap();
+            }
         }
         Self {
             root,

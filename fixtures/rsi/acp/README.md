@@ -7,7 +7,8 @@ protocol driver, Session adapter or private composition implementation.
 Install with `npm ci --prefix fixtures/rsi/acp`. Run `node
 fixtures/rsi/acp/verify.mjs --binary target/debug/rsi --output OUTPUT`. The
 default fixture starts an isolated deterministic provider and fresh product
-configuration. Live verification is opt-in with `--live-env .local/dev/.env`;
+configuration. Its `rsi.toml` selects the fixture Service Profile for the resident
+Host, which is stopped after the stdio client exits. Live verification is opt-in with `--live-env .local/dev/.env`;
 only `DEEPSEEK_API_KEY` is read, and reports contain no credential values.
 Live mode also requires `RSI_LIVE_MODEL` and the three explicit
 `DEEPSEEK_*_TOKENS` limits described by the [Web fixture](../web-product/README.md).

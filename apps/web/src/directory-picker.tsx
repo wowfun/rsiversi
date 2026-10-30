@@ -1,3 +1,4 @@
+import css from "./directory-picker.module.css"
 import {useEffect,useRef,useState} from 'react'
 import {input,useView,type ExecutionLocation} from './bridge.ts'
 import {Modal} from './presentation.tsx'
@@ -69,13 +70,14 @@ function DirectoryPicker({close}:{close:()=>void}) {
         const listing=await directory<Listing>({action:'list',location,path,request_id:id})
         physical=listing.path
       }
-      await input.open({action:'register_workspace',location,path:physical});close()
+      await input.command({action:'register_workspace',location,path:physical});close()
     }
     catch(error){if(alive.current){setStatus(error instanceof Error?error.message:String(error));setBusy(undefined)}}
   }
   const closing=()=>{if(busy!=='create'&&busy!=='open')close()}
-  const crumbs=current?[{label:'/',path:'/'},...current.breadcrumbs.map((label,index)=>({label,path:'/'+current.breadcrumbs.slice(0,index+1).join('/')}))]:[]
-  return <Modal label="Select workspace directory" className="directory-picker" close={closing}>
+  const root=current?.path.match(/^[A-Z]:\//)?.[0]??'/'
+  const crumbs=current?[{label:root,path:root},...current.breadcrumbs.map((label,index)=>({label,path:root+current.breadcrumbs.slice(0,index+1).join('/')}))]:[]
+  return <Modal label="Select workspace directory" className={`directory-picker ${css.scope}`} close={closing} initialFocus='[aria-label="Directory path"]'>
     <header><h2>Select workspace directory</h2>
       <label>Execution location<select aria-label="Execution location" value={selected} disabled={!!busy} onChange={event=>setSelected(event.target.value)}><option value="local">Local Service</option>{selected!=='local'&&!targets?.some(target=>target.candidate.target===selected&&target.permissions.use_target)&&<option value={selected}>Selected SSH target · unavailable</option>}{targets?.filter(target=>target.permissions.use_target).map(target=><option key={target.candidate.target} value={target.candidate.target}>{target.candidate.name}{target.connected?'':' · disconnected'}</option>)}</select></label>
       {editing?<form className="directory-path" onSubmit={event=>{event.preventDefault();if(available)void browse(path);else void open()}}><input autoFocus aria-label="Directory path" value={path} onChange={event=>setPath(event.target.value)} maxLength={16384} placeholder="/path/to/project"/><Button type="submit" disabled={!!busy}>{available?'Go':'Open'}</Button></form>:<div className="directory-location"><nav className="directory-breadcrumbs" aria-label="Directory breadcrumbs">

@@ -8,6 +8,77 @@ use rsi_session_protocol::{
 };
 use rsi_workspace_protocol::{WorkspaceCursor, WorkspacePage, WorkspaceRecord, WorkspaceStatus};
 
+#[tokio::test]
+async fn archive_selection_includes_both_partitions_only_when_requested() {
+    let owner = owner().await;
+    owner.state.lock().unwrap().document = Arc::new(Document {
+        accounting: None,
+        revision: 1,
+        records: [
+            (
+                SessionId::new("row-300").unwrap(),
+                SessionMetadata {
+                    archived: true,
+                    ..Default::default()
+                },
+            ),
+            (
+                SessionId::new("row-299").unwrap(),
+                SessionMetadata {
+                    pinned: true,
+                    ..Default::default()
+                },
+            ),
+        ]
+        .into(),
+    });
+    assert_eq!(NavigationFilter::default().archived, Some(false));
+    for (archived, expected, pins) in [(Some(false), 298, 1), (Some(true), 1, 0), (None, 299, 1)] {
+        let filter = NavigationFilter {
+            archived,
+            ..Default::default()
+        };
+        let mut after = None;
+        let mut entries = Vec::new();
+        loop {
+            let page = owner
+                .query(&CallOrigin::Local, filter.clone(), after)
+                .unwrap()
+                .await
+                .unwrap();
+            assert!(
+                page.entries
+                    .iter()
+                    .all(|entry| filter.matches_archive(entry.metadata.archived))
+            );
+            entries.extend(page.entries);
+            after = page.next;
+            if after.is_none() {
+                break;
+            }
+        }
+        assert_eq!(entries.len(), expected);
+        assert_eq!(
+            entries
+                .iter()
+                .filter(|entry| entry.metadata.archived)
+                .count(),
+            usize::from(archived != Some(false))
+        );
+        assert_eq!(
+            owner
+                .pinned(CallOrigin::Local, filter)
+                .unwrap()
+                .await
+                .unwrap()
+                .entries
+                .len(),
+            pins
+        );
+    }
+    owner.close().await;
+}
+
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn finite_read_tracking_can_be_polled_without_an_entered_tokio_runtime() {
     let owner = owner().await;
@@ -139,6 +210,13 @@ struct Workspaces {
 }
 #[async_trait]
 impl WorkspaceRegistry for Workspaces {
+    async fn rename(
+        &self,
+        _id: &rsi_workspace_protocol::WorkspaceId,
+        _name: rsi_workspace_protocol::WorkspaceName,
+    ) -> rsi_workspace_protocol::Result<rsi_workspace_protocol::WorkspaceRecord> {
+        unreachable!("rename is not used by this fixture")
+    }
     async fn order_seed(
         &self,
     ) -> rsi_workspace_protocol::Result<rsi_workspace_protocol::WorkspaceOrderSeed> {
@@ -438,7 +516,7 @@ async fn empty_search_page_advances_last_scanned_position_and_fences_query_and_e
         },
         {
             let mut c = cursor.clone();
-            c.filter.archived = true;
+            c.filter.archived = Some(true);
             c
         },
     ] {

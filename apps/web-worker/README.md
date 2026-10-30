@@ -28,7 +28,7 @@ wake the existing frame producer instead of adding a second frame queue.
 
 Image bytes are bounded before copying into WASM. Canonical response receive
 leases remain owned until the document transfer is created. The document owns
-bounded preview URLs and persistent editing under its [contract](../web/README.md).
+bounded preview URLs and persistent editing under its [persistence contract](../web/docs/persistence.md).
 Worker shutdown cancels asset observation and joins it before connection cleanup.
 Production transport uses TLS/H2; loopback HTTP requires explicit development
 opt-in at both ends.
@@ -53,4 +53,4 @@ cargo build --locked -p rsi-web --target wasm32-unknown-unknown
 This compiles the Worker without publishing a complete paired Web application.
 Use the [development guide](../../docs/development.md) to run the standard paired
 debug product. Rust and Worker changes require rebuilding and restarting that
-supervisor; the [Web contract](../web/README.md) owns pairing and reload behavior.
+supervisor; the [Web runtime contract](../web/docs/runtime.md) owns pairing and reload behavior.

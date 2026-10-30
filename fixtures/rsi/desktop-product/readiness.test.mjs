@@ -3,8 +3,44 @@ import {readFile} from 'node:fs/promises';
 import test from 'node:test';
 import {chromium, firefox} from '../web-product/node_modules/playwright/index.mjs';
 const focus = await readFile(new URL('./focus-input.js', import.meta.url), 'utf8');
+const composerFocus = await readFile(new URL('./composer-focus.js', import.meta.url), 'utf8');
 const assets = await readFile(new URL('./asset-pressure.js', import.meta.url), 'utf8');
+const buttonTarget = await readFile(new URL('./button-target.js', import.meta.url), 'utf8');
 for (const [name, engine] of Object.entries({chromium, firefox})) {
+  test(`${name}: native button selection excludes hidden duplicates and covered controls`, async () => {
+    const browser=await engine.launch({headless:true});
+    try {
+      const page=await browser.newPage();
+      await page.setContent('<details><summary>Menu</summary><button>Workspace files</button></details><fieldset disabled><button>Workspace files</button></fieldset><div inert><button>Workspace files</button></div><button id="visible">Workspace files</button>');
+      const check=()=>page.evaluate(source=>new Function(source)('Workspace files')?.id??null,buttonTarget);
+      assert.equal(await check(),'visible');
+      await page.evaluate(()=>{const cover=document.createElement('div');cover.style='position:fixed;inset:0;z-index:999';document.body.append(cover)});
+      assert.equal(await check(),null);
+    } finally {await browser.close();}
+  });
+  test(`${name}: composer evidence rejects an earlier same-length trusted input`, async () => {
+    const browser=await engine.launch({headless:true});
+    try {
+      const page=await browser.newPage();
+      await page.setContent('<textarea aria-label="Main message" style="outline:2px solid blue"></textarea>');
+      await page.evaluate(()=>{
+        window.fixtureInputEvents=[];
+        document.addEventListener('input',event=>window.fixtureInputEvents.push({length:event.target.value.length,trusted:event.isTrusted}));
+      });
+      const check=after=>page.evaluate(({source,after})=>new Function(source)(after),{source:composerFocus,after});
+      await page.getByRole('textbox').focus();await page.keyboard.type('same');
+      assert.equal((await check(0)).trustedInput,true);
+      const before=await page.evaluate(()=>window.fixtureInputEvents.length);
+      await page.getByRole('textbox').evaluate(input=>{input.value='next';});
+      assert.equal((await check(before)).trustedInput,false,'an earlier event cannot prove the current fill');
+      await page.getByRole('textbox').evaluate(input=>input.dispatchEvent(new Event('input',{bubbles:true})));
+      assert.equal((await check(before)).trustedInput,false,'a new untrusted event is insufficient');
+      await page.keyboard.press('ControlOrMeta+A');await page.keyboard.press('Backspace');await page.keyboard.type('next');
+      const current=await check(before);
+      assert.equal(current.trustedInput,true);assert.equal(current.focused,true);
+      assert.equal(current.focusVisible,true);assert.equal(current.outlineWidth,2);
+    } finally {await browser.close();}
+  });
   test(`${name}: only the focused current input admits native typing`, async () => {
     const browser = await engine.launch({headless: true});
     try {

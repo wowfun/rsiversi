@@ -16,7 +16,7 @@ struct Fixture {
 }
 impl Fixture {
     fn new() -> Self {
-        let temporary = tempfile::tempdir().unwrap();
+        let temporary = tempfile::tempdir_in(std::env::temp_dir().canonicalize().unwrap()).unwrap();
         let layout = Layout::new(&temporary.path().join("prefix")).unwrap();
         let homes = HostPaths::new(
             temporary.path().join("config"),

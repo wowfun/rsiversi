@@ -180,13 +180,7 @@ async fn actual_host_inspection_is_redacted_paginated_local_and_withdrawn() {
     assert_local_access_and_requests(&local).await;
     drop(client);
     assert!(host.shutdown().await.is_clean());
-    assert!(
-        !dispatch
-            .operations()
-            .unwrap()
-            .iter()
-            .any(|value| value.id.domain() == "inspector")
-    );
+    assert!(matches!(dispatch.operations(), Err(ApiError::ShuttingDown)));
     let client = InspectorClient::new(local);
     assert!(client.runtime(&RuntimeRequest::default()).await.is_err());
 }

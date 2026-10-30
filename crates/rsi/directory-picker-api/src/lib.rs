@@ -135,9 +135,18 @@ pub struct Created {
     /// Physical result.
     pub path: String,
 }
-/// Validates UTF-8 absolute Unix paths without performing filesystem I/O.
+/// Validates absolute Unix or local-drive UTF-8 paths without filesystem I/O.
 pub fn validate_path(path: &str) -> Result<()> {
-    if !path.starts_with('/') || path.len() > MAXIMUM_PATH || path.contains('\0') {
+    let drive = path.as_bytes();
+    let windows = drive.len() >= 3
+        && drive[0].is_ascii_alphabetic()
+        && drive[1] == b':'
+        && matches!(drive[2], b'/' | b'\\');
+    if (!path.starts_with('/') && !windows)
+        || path.starts_with("//")
+        || path.len() > MAXIMUM_PATH
+        || path.contains('\0')
+    {
         Err(Failure::Invalid)
     } else {
         Ok(())
@@ -155,13 +164,28 @@ pub fn validate_name(name: &str) -> Result<()> {
         Ok(())
     }
 }
+/// Canonical reply components, excluding the Unix or Windows drive root.
+/// Callers must validate the absolute path before extracting components.
+pub fn path_components(path: &str) -> Vec<String> {
+    path.get(if path.starts_with('/') { 1 } else { 3 }..)
+        .unwrap_or("")
+        .split('/')
+        .filter(|part| !part.is_empty())
+        .map(str::to_owned)
+        .collect()
+}
 fn validate_physical(path: &str) -> Result<()> {
     validate_path(path)?;
-    if path != "/"
-        && path[1..]
-            .split('/')
-            .any(|part| matches!(part, "" | "." | ".."))
+    let windows = !path.starts_with('/');
+    if windows
+        && (!path.as_bytes()[0].is_ascii_uppercase()
+            || path.as_bytes()[2] != b'/'
+            || path.contains('\\'))
     {
+        return Err(Failure::Invalid);
+    }
+    let tail = &path[if windows { 3 } else { 1 }..];
+    if !tail.is_empty() && tail.split('/').any(|part| matches!(part, "" | "." | "..")) {
         return Err(Failure::Invalid);
     }
     Ok(())
@@ -175,13 +199,7 @@ impl Listing {
         }
         if self.requested != request.path
             || self.entries.len() > MAXIMUM_ENTRIES
-            || self.breadcrumbs
-                != self
-                    .path
-                    .split('/')
-                    .filter(|part| !part.is_empty())
-                    .map(str::to_owned)
-                    .collect::<Vec<_>>()
+            || self.breadcrumbs != path_components(&self.path)
         {
             return Err(Failure::Invalid);
         }
@@ -364,6 +382,46 @@ impl Created {
 #[cfg(test)]
 mod tests {
     use super::*;
+    #[test]
+    fn drive_reply_validation_is_independent_of_the_client_platform() {
+        let request = ListRequest {
+            path: Some("c:\\projects".into()),
+        };
+        assert!(validate_path(request.path.as_deref().unwrap()).is_ok());
+        let mut value = Listing {
+            requested: request.path.clone(),
+            path: "C:/projects".into(),
+            home: Some("C:/".into()),
+            breadcrumbs: vec!["projects".into()],
+            entries: vec![Entry {
+                name: "project".into(),
+                path: "C:/projects/project".into(),
+                hidden: false,
+                symlink: false,
+            }],
+            truncated: false,
+            unrepresentable: false,
+        };
+        value.validate(&request).unwrap();
+        value.entries[0].path = "D:/project".into();
+        assert!(value.validate(&request).is_err());
+        for invalid in [
+            "C:relative",
+            "//server/share",
+            "\\\\server\\share",
+            "\\\\?\\C:\\",
+        ] {
+            assert!(validate_path(invalid).is_err());
+        }
+        for invalid in [
+            "c:/projects",
+            "C:\\projects",
+            "C:/../projects",
+            "C://projects",
+        ] {
+            assert!(validate_physical(invalid).is_err());
+        }
+    }
     fn listing() -> Listing {
         Listing {
             requested: Some("/alias".into()),

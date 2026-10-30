@@ -19,6 +19,7 @@ rsi-acp-api = { path = "../../rsi-acp/api" }
 rsi-media-api = { path = "../../rsi-media/api" }
 rsi-automation-api = { path = "../automation-api" }
 rsi-directory-picker-api = { path = "../directory-picker-api" }
+rsi-workspace-default-api = { path = "../workspace-default-api" }
 async-stream.workspace = true
 rsi-history-api = { path = "../history-api" }
 rsi-navigation-api = { path = "../navigation-api" }
@@ -46,6 +47,7 @@ rsi-host = { path = "../../rsi-host/core" }
 rsi-meta = { path = "../../rsi-meta/core" }
 rsi-meta-execution = { path = "../../rsi-meta/execution" }
 rsi-session-protocol = { path = "../session-protocol" }
+rsi-sandbox = { path = "../../rsi-sandbox/core" }
 rsi-agent-session-protocol = { path = "../../rsi-agent/session-protocol" }
 rsi-agent-model-selection = { path = "../../rsi-agent/model-selection" }
 rsi-agent-turn-protocol = { path = "../../rsi-agent/turn-protocol" }
@@ -63,6 +65,7 @@ tokio = { workspace = true, features = ["sync", "macros"] }
 tokio-util.workspace = true
 
 [dev-dependencies]
+rsi-configuration-api = { path = "../configuration-api" }
 base64.workspace = true
 rsi-goal = { path = "../goal" }
 rsi-agent-goal = { path = "../../rsi-agent/goal" }
@@ -70,7 +73,6 @@ image.workspace = true
 sha2.workspace = true
 rsi-process = { path = "../../rsi-process/core" }
 rsi-files-protocol = { path = "../../rsi-files/protocol" }
-rsi-sandbox = { path = "../../rsi-sandbox/core" }
 tokio = { workspace = true, features = ["rt-multi-thread", "time"] }
 
 [lints]

@@ -1,3 +1,4 @@
+import {addWorkspace} from '../web-product/controls.mjs';
 import {paired} from '../web-product/paired-env.mjs';
 import assert from 'node:assert/strict';
 import {createRequire} from 'node:module';
@@ -11,11 +12,11 @@ for(const [name,engine]of[['chromium',chromium],['firefox',firefox]]){
  try{
   const context=await browser.newContext({ignoreHTTPSErrors:true,viewport:{width:1440,height:980}});page=await context.newPage();page.setDefaultTimeout(30_000);page.on('pageerror',e=>errors.push(e.message));
   await page.goto(service.origin);await page.locator('#receipt').fill(JSON.stringify(service.register(`${name} history`)));await page.getByRole('button',{name:'Connect',exact:true}).click();await page.locator('#workbench').waitFor({state:'visible'});
-  await page.locator('.workspace-add summary').click();await page.locator('#workspace-path').fill(service.workspace);await page.getByRole('button',{name:'Add workspace',exact:true}).click();await page.locator('#workspaces [data-testid=workspace-open]').first().click();
+  await addWorkspace(page,service.workspace);await page.getByRole('button',{name:'New conversation in workspace',exact:true}).click();
   const pane=page.getByRole('region',{name:'Main conversation',exact:true});const input=pane.getByRole('textbox',{name:'Main message',exact:true});const text='archived anchor 中文🦀材料';await input.fill(text);await pane.getByTestId('composer-send').click();await pane.locator('.transcript').getByText(`Reviewed: ${text}`,{exact:false}).waitFor();
   await pane.locator('.pane-status').filter({hasText:'Completed'}).waitFor();
   const source=(await pane.locator('.pane-session').innerText()).split(' · ').at(-1);
-  await page.locator('#workspaces [data-testid=workspace-open]').first().click();await input.fill('preserved draft');
+  await page.getByRole('button',{name:'New conversation in workspace',exact:true}).click();await input.fill('preserved draft');
   const target=(await pane.locator('.pane-session').innerText()).split(' · ').at(-1);assert.notEqual(source,target);
   await pane.locator(".composer-extras").evaluate(node=>node.open=true);await pane.getByRole('button',{name:'Search history',exact:true}).click();const dialog=page.getByRole('dialog',{name:'Search conversation text',exact:true});await dialog.getByLabel('History search range',{exact:true}).selectOption('conversation');await dialog.getByLabel('History conversation ID',{exact:true}).fill(source);await dialog.getByLabel('History text query',{exact:true}).fill('anchor');
   await dialog.getByRole('button',{name:'Continue indexing',exact:true}).click();await dialog.getByRole('status').filter({hasText:'Discovery reached the end of this pass.'}).waitFor();

@@ -741,6 +741,7 @@ mod tests {
                 }
                 Ok(Reply::Output(OutputPage {
                     terminal: Terminal {
+                        sandbox: rsi_sandbox::SandboxMode::WorkspaceWrite,
                         id: terminal,
                         size: Size {
                             rows: 24,

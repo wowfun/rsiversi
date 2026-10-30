@@ -24,6 +24,7 @@ impl Startup {
         LaunchConfiguration::load(self.paths.config(), self.options.homes.config.is_some())
     }
 
+    #[cfg(any(target_os = "linux", windows))]
     pub fn append_child_options(&self, command: &mut std::process::Command) {
         // Preserve default-document semantics while freezing explicit roots.
         for (flag, selected, resolved) in [

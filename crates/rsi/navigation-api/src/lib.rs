@@ -73,17 +73,30 @@ impl WorkspaceFilter {
     }
 }
 /// Exact query identity retained by continuation cursors.
-#[derive(Clone, Debug, Default, Eq, PartialEq, Serialize, Deserialize)]
+#[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct NavigationFilter {
     /// Case-insensitive title, path or `SessionId` substring, at most 128 bytes.
     pub query: String,
-    /// Whether to show archived or active navigation records.
-    pub archived: bool,
+    /// Some(false) selects active, Some(true) archived, and None both.
+    pub archived: Option<bool>,
     /// Exact registered, unregistered or all-workspace partition.
     pub workspace: WorkspaceFilter,
 }
+impl Default for NavigationFilter {
+    fn default() -> Self {
+        Self {
+            query: String::new(),
+            archived: Some(false),
+            workspace: WorkspaceFilter::default(),
+        }
+    }
+}
 impl NavigationFilter {
+    /// Whether one record belongs to this archive selection.
+    pub fn matches_archive(&self, archived: bool) -> bool {
+        self.archived.is_none_or(|selected| selected == archived)
+    }
     /// Validates bounded query input before any scan.
     pub fn validate(&self) -> Result<()> {
         if self.query.len() > 128 || self.query.chars().any(char::is_control) {

@@ -613,67 +613,21 @@ fn reply(message: ApiMessage) -> Response<Body> {
 }
 
 pub(crate) fn failure(error: ApiError) -> Response<Body> {
-    let (status, bytes, mime) = match error {
-        ApiError::UnknownOperation => (
-            StatusCode::NOT_FOUND,
-            Bytes::from_static(b"{\"code\":\"unknown_operation\"}"),
-            "application/json",
-        ),
-        ApiError::OperationRetiring => (
-            StatusCode::CONFLICT,
-            Bytes::from_static(b"{\"code\":\"operation_retiring\"}"),
-            "application/json",
-        ),
-        ApiError::ProtocolMismatch => (
-            StatusCode::CONFLICT,
-            Bytes::from_static(b"{\"code\":\"protocol_mismatch\"}"),
-            "application/json",
-        ),
-        ApiError::CallShapeMismatch => (
-            StatusCode::CONFLICT,
-            Bytes::from_static(b"{\"code\":\"call_shape_mismatch\"}"),
-            "application/json",
-        ),
-        ApiError::OutcomeUnknown => (
-            StatusCode::INTERNAL_SERVER_ERROR,
-            Bytes::from_static(b"{\"code\":\"outcome_unknown\"}"),
-            "application/json",
-        ),
-        ApiError::Unauthorized => (
-            StatusCode::UNAUTHORIZED,
-            Bytes::from_static(b"{\"code\":\"unauthorized\"}"),
-            "application/json",
-        ),
-        ApiError::Capacity => (
-            StatusCode::TOO_MANY_REQUESTS,
-            Bytes::from_static(b"{\"code\":\"capacity\"}"),
-            "application/json",
-        ),
-        ApiError::ShuttingDown => (
-            StatusCode::CONFLICT,
-            Bytes::from_static(b"{\"code\":\"generation_retired\"}"),
-            "application/json",
-        ),
-        ApiError::Unavailable => (
-            StatusCode::NOT_FOUND,
-            Bytes::from_static(b"{\"code\":\"unavailable\"}"),
-            "application/json",
-        ),
-        ApiError::Invalid(_) => (
-            StatusCode::BAD_REQUEST,
-            Bytes::from_static(b"{\"code\":\"invalid\"}"),
-            "application/json",
-        ),
-        ApiError::Backend(_) => (
-            StatusCode::INTERNAL_SERVER_ERROR,
-            Bytes::from_static(b"{\"code\":\"backend\"}"),
-            "application/json",
-        ),
-        ApiError::Domain(bytes) => (
-            StatusCode::UNPROCESSABLE_ENTITY,
-            bytes.into_bytes(),
-            "application/vnd.rsi.domain-error+json",
-        ),
+    let status = match &error {
+        ApiError::UnknownOperation | ApiError::Unavailable => StatusCode::NOT_FOUND,
+        ApiError::OperationRetiring
+        | ApiError::ProtocolMismatch
+        | ApiError::CallShapeMismatch
+        | ApiError::ShuttingDown => StatusCode::CONFLICT,
+        ApiError::OutcomeUnknown | ApiError::Backend(_) => StatusCode::INTERNAL_SERVER_ERROR,
+        ApiError::Unauthorized => StatusCode::UNAUTHORIZED,
+        ApiError::Capacity => StatusCode::TOO_MANY_REQUESTS,
+        ApiError::Invalid(_) => StatusCode::BAD_REQUEST,
+        ApiError::Domain(_) => StatusCode::UNPROCESSABLE_ENTITY,
+    };
+    let (bytes, mime) = match error {
+        ApiError::Domain(bytes) => (bytes.into_bytes(), "application/vnd.rsi.domain-error+json"),
+        error => (crate::error::json(&error), "application/json"),
     };
     let length = bytes.len();
     let mut response = Response::new(full(bytes));

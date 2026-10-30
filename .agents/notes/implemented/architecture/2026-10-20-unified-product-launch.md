@@ -91,7 +91,11 @@ the platform has no resident launcher.
 
 Product resets have one exclusive maintenance entry. The obsolete composition
 reset injection is removed; standalone SQLite reset remains owned and tested by
-the Store adapter. Whole-topology reset preflight prevents discovering a known
+the Store adapter. This includes the public factory reset option and one-shot
+request wrapper: retaining them would keep an unused second startup authority
+and receipt lifecycle. The standalone receipt, writer exclusion and archival
+preservation contract remain independent of product startup.
+Whole-topology reset preflight prevents discovering a known
 ambiguous later participant after moving an earlier one. Import likewise carries
 validated classifications through a single rename-only settlement under leases;
 a new recovery invocation re-admits all durable bytes. This reduces redundant

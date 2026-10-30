@@ -85,6 +85,32 @@ pub const MAXIMUM_WORKSPACES_PER_PAGE: usize = 256;
 /// Maximum UTF-8 bytes in a host workspace path.
 pub const MAXIMUM_WORKSPACE_PATH_BYTES: usize = rsi_workspace_path::MAXIMUM_HOST_PATH_BYTES;
 
+/// Validated custom display name, independent of filesystem identity.
+#[derive(Clone, Debug, Eq, PartialEq, Serialize)]
+#[serde(transparent)]
+pub struct WorkspaceName(String);
+impl WorkspaceName {
+    /// Validates a trimmed, bounded name at an input boundary.
+    pub fn parse(value: impl Into<String>) -> Result<Self> {
+        let value = value.into();
+        if value.is_empty()
+            || value.len() > 256
+            || value.trim() != value
+            || value.chars().any(char::is_control)
+        {
+            return Err(WorkspaceError::InvalidInput("workspace name must be trimmed, nonempty and at most 256 bytes without control characters".into()));
+        }
+        Ok(Self(value))
+    }
+}
+impl<'de> Deserialize<'de> for WorkspaceName {
+    fn deserialize<D: serde::Deserializer<'de>>(
+        deserializer: D,
+    ) -> std::result::Result<Self, D::Error> {
+        Self::parse(String::deserialize(deserializer)?).map_err(serde::de::Error::custom)
+    }
+}
+
 /// Bounds a path before native access or retaining an external record.
 pub fn validate_workspace_path(path: &Path) -> Result<&str> {
     let text = path
@@ -140,6 +166,12 @@ pub struct WorkspaceRecord {
     pub id: WorkspaceId,
     /// Machine and canonical physical absolute directory.
     pub coordinates: ExecutionCoordinates,
+    /// Custom display name; absence uses the directory name.
+    #[serde(default)]
+    pub name: Option<WorkspaceName>,
+    /// Recorded registration time; absence means unknown.
+    #[serde(default)]
+    pub created_at_ms: Option<u64>,
 }
 
 impl WorkspaceRecord {
@@ -148,11 +180,21 @@ impl WorkspaceRecord {
         Self {
             id: WorkspaceId::from_coordinates(&coordinates),
             coordinates,
+            name: None,
+            created_at_ms: None,
         }
     }
 
     /// Validates a remote record without interpreting the host's path on this device.
     pub fn validate(&self) -> Result<()> {
+        if self
+            .created_at_ms
+            .is_some_and(|time| time > 8_640_000_000_000_000)
+        {
+            return Err(WorkspaceError::Corrupt(
+                "workspace creation time is out of range".into(),
+            ));
+        }
         let expected = WorkspaceId::from_coordinates(&self.coordinates);
         if expected != self.id {
             return Err(WorkspaceError::Corrupt(
@@ -253,6 +295,8 @@ pub trait WorkspaceRegistry: fmt::Debug + Send + Sync + 'static {
     ) -> Result<WorkspaceRecord>;
     /// Returns current filesystem status without mutating state.
     async fn status(&self, id: &WorkspaceId) -> Result<WorkspaceStatus>;
+    /// Replaces only the custom display name, preserving identity and user files.
+    async fn rename(&self, id: &WorkspaceId, name: WorkspaceName) -> Result<WorkspaceRecord>;
     /// Deletes only the registration and returns whether it existed.
     async fn delete_registration(&self, id: &WorkspaceId) -> Result<bool>;
 }

@@ -58,7 +58,7 @@ a development socket would change an unrelated ownership boundary.
 
 Debug symbol demangling can exceed retained asset capacity even though execution
 code fits. Preserving original symbol names avoids raising the product bound.
-The [Web build](../../../../apps/web/README.md) uses native provider admission
+The [Web build](../../../../apps/web/docs/runtime.md) uses native provider admission
 as its oracle because duplicating the file and byte policy would drift; this
 intentionally adds a native preflight build.
 

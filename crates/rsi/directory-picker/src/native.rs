@@ -5,6 +5,7 @@ use rsi_directory_picker_api::{
 use rsi_files_native_fs::{
     Directory as Dir, create_directory_no_follow, open_absolute_directory_no_follow,
 };
+#[cfg(unix)]
 use std::os::unix::fs::MetadataExt as _;
 use std::{
     collections::BTreeMap,
@@ -19,6 +20,10 @@ fn io(error: std::io::Error) -> Failure {
 }
 fn path_text(path: &Path) -> Result<String> {
     let value = path.to_str().ok_or(Failure::Invalid)?;
+    #[cfg(windows)]
+    let normalized = value.replace('\\', "/");
+    #[cfg(windows)]
+    let value = normalized.as_str();
     validate_path(value)?;
     Ok(value.into())
 }
@@ -31,15 +36,138 @@ fn check(stop: &CancellationToken) -> Result<()> {
 }
 fn physical(path: &Path, stop: &CancellationToken) -> Result<PathBuf> {
     check(stop)?;
-    std::fs::canonicalize(path).map_err(io)
+    if !path.is_absolute() {
+        return Err(Failure::Invalid);
+    }
+    #[cfg(unix)]
+    {
+        std::fs::canonicalize(path).map_err(io)
+    }
+    #[cfg(windows)]
+    {
+        let text = path.to_str().ok_or(Failure::Invalid)?;
+        let mut normalized = text.replace('\\', "/");
+        while normalized.len() > 3 && normalized.ends_with('/') {
+            normalized.pop();
+        }
+        if normalized.len() >= 3
+            && normalized.as_bytes()[0].is_ascii_alphabetic()
+            && normalized.as_bytes()[1] == b':'
+        {
+            normalized.replace_range(..1, &normalized[..1].to_ascii_uppercase());
+        }
+        // The shared owner refuses UNC, device paths and every reparse component.
+        let normalized = PathBuf::from(normalized);
+        rsi_files_native_fs::validate_absolute_path(&normalized).map_err(io)?;
+        Ok(normalized)
+    }
+}
+
+#[cfg(all(test, windows))]
+mod windows_tests {
+    use super::*;
+    #[test]
+    fn trailing_separators_keep_the_same_directory_and_drive_root() {
+        let root = tempfile::tempdir().unwrap();
+        let expected = list(
+            ListRequest { path: None },
+            Some(root.path().into()),
+            CancellationToken::new(),
+        )
+        .unwrap();
+        for suffix in ["/", "//", "\\"] {
+            let path = format!("{}{suffix}", expected.path);
+            validate_path(&path).unwrap();
+            let listing = list(
+                ListRequest {
+                    path: Some(path.clone()),
+                },
+                None,
+                CancellationToken::new(),
+            )
+            .unwrap();
+            assert_eq!(listing.path, expected.path);
+            assert_eq!(listing.requested, Some(path));
+        }
+        assert_eq!(
+            physical(Path::new("c:/"), &CancellationToken::new()).unwrap(),
+            PathBuf::from("C:/")
+        );
+    }
+    #[test]
+    fn drive_paths_list_create_and_cancel_without_model_or_aliases() {
+        let root = tempfile::tempdir().unwrap();
+        for name in ["zebra", ".hidden", "中文", "Alpha"] {
+            std::fs::create_dir(root.path().join(name)).unwrap();
+        }
+        let listing = list(
+            ListRequest { path: None },
+            Some(root.path().into()),
+            CancellationToken::new(),
+        )
+        .unwrap();
+        assert_eq!(
+            listing
+                .entries
+                .iter()
+                .map(|entry| entry.name.as_str())
+                .collect::<Vec<_>>(),
+            [".hidden", "Alpha", "zebra", "中文"]
+        );
+        assert!(listing.entries[0].hidden);
+        assert!(!listing.path.contains('\\'));
+        assert!(listing.path.as_bytes()[0].is_ascii_uppercase());
+        let request = CreateRequest {
+            parent: listing.path.clone(),
+            name: "created".into(),
+        };
+        let created = create(request.clone(), CancellationToken::new()).unwrap();
+        created.validate(&request).unwrap();
+        assert!(root.path().join("created").is_dir());
+        assert!(create(request, CancellationToken::new()).is_err());
+        for path in [
+            "C:relative",
+            "\\\\server\\share",
+            "\\\\?\\C:\\",
+            "C:/../escape",
+        ] {
+            assert!(
+                list(
+                    ListRequest {
+                        path: Some(path.into())
+                    },
+                    None,
+                    CancellationToken::new()
+                )
+                .is_err()
+            );
+        }
+        let stop = CancellationToken::new();
+        stop.cancel();
+        assert_eq!(
+            list(
+                ListRequest {
+                    path: Some(listing.path)
+                },
+                None,
+                stop
+            )
+            .unwrap_err(),
+            Failure::Cancelled
+        );
+    }
 }
 fn identity(directory: &Dir, path: &Path) -> Result<()> {
-    let owned = directory.dir_metadata().map_err(io)?;
-    let named = open_absolute_directory_no_follow(path)
-        .map_err(io)?
-        .dir_metadata()
-        .map_err(io)?;
-    if owned.dev() != named.dev() || owned.ino() != named.ino() {
+    let named = open_absolute_directory_no_follow(path).map_err(io)?;
+    #[cfg(unix)]
+    let same = {
+        let owned = directory.dir_metadata().map_err(io)?;
+        let named = named.dir_metadata().map_err(io)?;
+        owned.dev() == named.dev() && owned.ino() == named.ino()
+    };
+    #[cfg(windows)]
+    let same = directory.version().map_err(io)?.identity == named.version().map_err(io)?.identity;
+    if !same {
         return Err(Failure::Io {
             message: "directory changed; read it again".into(),
         });
@@ -74,11 +202,7 @@ pub(super) fn list(
         requested: request.path,
         path: path.clone(),
         home,
-        breadcrumbs: path
-            .split('/')
-            .filter(|part| !part.is_empty())
-            .map(str::to_owned)
-            .collect(),
+        breadcrumbs: rsi_directory_picker_api::path_components(&path),
         entries: Vec::new(),
         truncated: false,
         unrepresentable: false,
@@ -95,6 +219,10 @@ pub(super) fn list(
         check(&stop)?;
         let kind = entry.file_type().map_err(io)?;
         if !kind.is_dir() && !kind.is_symlink() {
+            continue;
+        }
+        #[cfg(windows)]
+        if kind.is_symlink() {
             continue;
         }
         let name = entry.file_name();
@@ -189,7 +317,7 @@ fn create_at(
         .map_err(|_| Failure::OutcomeUnknown)
 }
 
-#[cfg(test)]
+#[cfg(all(test, unix))]
 mod tests {
     use super::*;
     #[cfg(target_os = "linux")]

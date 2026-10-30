@@ -1,5 +1,6 @@
 const selector = arguments[0], label = selector.match(/aria-label="([^"]+)"/)?.[1];
 const input = document.querySelector(selector) || [...document.querySelectorAll('label')].find(e => e.firstChild?.textContent.trim() === label)?.control;
+if (arguments[1] === 'value') return input?.value;
 if (!input || input.matches(':disabled') || input.readOnly) return null;
 input.scrollIntoView({block: 'center'});
 const rect = input.getBoundingClientRect();

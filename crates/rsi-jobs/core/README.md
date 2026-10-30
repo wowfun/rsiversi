@@ -1,5 +1,11 @@
 # rsi-jobs
 
+Producer `JobControl::read`, `peek` and `cancel` are prompt synchronous operations
+over retained in-memory state. They must not perform blocking I/O or wait for
+terminal completion; cancellation only signals the producer. Completion and
+reaping belong to asynchronous `wait`. Registry locks are released before
+invoking producer controls, including their destructors.
+
 `peek` samples bounded producer tails without reporting, reader retention,
 waiting, cancellation or scope acquisition. It requires the exact opaque scope,
 job ID and originating invocation ID. Missing/compacted output returns `None`.

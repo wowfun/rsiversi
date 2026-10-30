@@ -367,6 +367,42 @@ pub async fn assert_mechanical_store_contract(
         Err(StoreError::TurnNotFound { .. })
     ));
     let open = store.list_open_turns(&session_id, 0, 8).await.unwrap();
+    assert!(matches!(
+        store.session_activity_cuts(&[]).await,
+        Err(StoreError::Invalid(_))
+    ));
+    assert!(matches!(
+        store.session_activity_cuts(&selection[..65]).await,
+        Err(StoreError::Invalid(_))
+    ));
+    assert!(matches!(
+        store
+            .session_activity_cuts(&[session_id.clone(), session_id.clone()])
+            .await,
+        Err(StoreError::Invalid(_))
+    ));
+    assert_eq!(
+        store
+            .session_activity_cuts(&selection[..64])
+            .await
+            .unwrap()
+            .len(),
+        64
+    );
+    assert_eq!(
+        store
+            .session_activity_cuts(&[missing.clone(), session_id.clone()])
+            .await
+            .unwrap(),
+        vec![
+            Err(StoreError::NotFound(missing.to_string())),
+            Ok(rsi_agent_store_protocol::StoreActivityCut {
+                session_id: session_id.clone(),
+                durable_fact_seq: 2,
+                has_open_turn: true
+            }),
+        ]
+    );
     assert_eq!(open.turns.len(), 1);
     assert_eq!(open.turns[0].turn_id, turn_id);
     let open_sessions = store.list_open_sessions(None, 8).await.unwrap();
@@ -468,6 +504,17 @@ pub async fn assert_mechanical_store_contract(
         .read_turn_boundary(&session_id, &turn_id)
         .await
         .unwrap();
+    assert_eq!(
+        store
+            .session_activity_cuts(std::slice::from_ref(&session_id))
+            .await
+            .unwrap(),
+        vec![Ok(rsi_agent_store_protocol::StoreActivityCut {
+            session_id: session_id.clone(),
+            durable_fact_seq: 3,
+            has_open_turn: false
+        }),]
+    );
     assert_eq!(closed_boundary.turn_id(), &turn_id);
     assert_eq!(closed_boundary.accepted(), &accepted);
     assert_eq!(closed_boundary.terminal(), Some(&terminal));

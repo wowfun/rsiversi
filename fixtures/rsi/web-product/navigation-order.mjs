@@ -1,3 +1,4 @@
+import {workspaceForm,navigationMode} from './controls.mjs';
 // Product path: authenticated browser, Rust Worker, Host, Store and 65 durable Sessions.
 import {paired} from './paired-env.mjs';
 import {startService} from './service.mjs';
@@ -10,6 +11,9 @@ const report=process.env.RSI_REPORT_DIR;
 assert(report,'RSI_REPORT_DIR must name a new isolated evidence directory');
 await mkdir(report,{recursive:true});
 let service,browser,page;const errors=[],sessions=[],checks=[];
+async function mode(label,value) {
+  await navigationMode(page,value);
+}
 try{
   service=await startService({binary:paired.binary,assets:paired.assets,report});
   browser=await chromium.launch();const context=await browser.newContext({ignoreHTTPSErrors:true,viewport:{width:1440,height:900},deviceScaleFactor:1});
@@ -27,15 +31,22 @@ try{
   await connectWorkbench(page,service,'Indexed navigation');await openWorkspace(page,service);
   const pane=page.getByRole('region',{name:'Main conversation',exact:true});
   for(let index=0;index<65;index++){
-    if(index)await page.getByTestId('workspace-open').first().click();
+    if(index){
+      await page.getByTestId('workspace-open').first().click();
+      await page.waitForFunction(previous=>{
+        const pane=document.querySelector('.pane.selected');
+        return pane?.dataset.sessionId && pane.dataset.sessionId!==previous && !pane.querySelector('textarea').disabled;
+      },sessions.at(-1));
+    }
     await pane.getByLabel('Main message',{exact:true}).fill(`Navigation member ${String(index).padStart(3,'0')}`);
     await pane.getByTestId('composer-send').click();
     await page.waitForFunction(()=>document.querySelector('.pane.selected .pane-status')?.textContent==='Completed');
-    const session=(await pane.locator('.pane-session').innerText()).split(' · ').at(-1);
+    const session=(await pane.getAttribute('data-session-id'));
+    assert(session,'a completed conversation has a durable identity');
     assert(!sessions.includes(session));sessions.push(session);if(sessions.length%16===0)console.log(JSON.stringify({durableSessions:sessions.length}));
   }
-  await page.getByLabel('Navigation view',{exact:true}).selectOption('flat');
-  await page.getByLabel('Conversation order',{exact:true}).selectOption('manual');
+  await mode('Navigation view','flat');
+  await mode('Conversation order','manual');
   await page.getByRole('button',{name:'Next 64',exact:true}).waitFor();
   await page.waitForFunction(()=>document.querySelector('.manual-pagination')?.textContent.includes('/ 65'));
   await page.waitForFunction(()=>document.querySelectorAll('#sessions [data-testid=conversation-row]').length===64);
@@ -57,23 +68,23 @@ try{
   await peer.waitForFunction(id=>document.querySelector('#sessions [data-testid=conversation-row]')?.dataset.sessionId===id,sessions[0]);
   checks.push({crossWindowOrder:true,realDrag:true});
   await peer.close();
-  for(const theme of ['light','dark'])for(const [width,height] of [[1440,900],[1024,768],[767,900],[390,844]]){
+  for(const theme of ['light','dark'])for(const [width,height] of [[1440,900],[1024,768],[1023,900],[900,900],[768,900],[767,900],[390,844]]){
     await page.emulateMedia({colorScheme:theme});await page.setViewportSize({width,height});
-    if(width<1024){await page.getByRole('button',{name:'Toggle navigation',exact:true}).click();await page.getByRole('dialog',{name:'Workspace navigation',exact:true}).waitFor();}
-    await page.waitForFunction(()=>document.querySelector('[aria-label=\"Navigation view\"]')?.value==='flat' && document.querySelector('[aria-label=\"Conversation order\"]')?.value==='manual' && document.querySelector('.manual-pagination') && document.querySelectorAll('#sessions [data-testid=conversation-row]').length===64);
+    if(width<1024){await page.getByRole('button',{name:width<768?'Toggle navigation':'Expand navigation',exact:true}).click();await page.getByRole('dialog',{name:'Workspace navigation',exact:true}).waitFor();}
+    await page.waitForFunction(()=>document.querySelector('.manual-pagination') && document.querySelectorAll('#sessions [data-testid=conversation-row]').length===64);
     const geometry=await page.evaluate(()=>{const list=document.querySelector('#sessions'),sidebar=list.closest('.sidebar');return {overflow:document.documentElement.scrollWidth-innerWidth,sidebarOverflow:sidebar.scrollWidth-sidebar.clientWidth,listOverflow:list.scrollWidth-list.clientWidth,direction:getComputedStyle(list).flexDirection,manualRows:list.querySelectorAll('[data-testid=conversation-row]').length,blankTitles:[...list.querySelectorAll('[data-testid=conversation-open] strong')].filter(row=>!row.textContent.trim()).length};});
     assert(geometry.overflow<=1,JSON.stringify(geometry));assert.equal(geometry.manualRows,64);assert.equal(geometry.blankTitles,0);assert.equal(geometry.direction,'column');assert(geometry.sidebarOverflow<=1,JSON.stringify(geometry));assert(geometry.listOverflow<=1,JSON.stringify(geometry));
     await page.screenshot({path:join(report,`navigation-${width}-${theme}.png`)});checks.push({width,height,theme,...geometry});
     if(width<1024)await page.keyboard.press('Escape');
   }
   await page.setViewportSize({width:1440,height:900});
-  await page.getByLabel('Conversation order',{exact:true}).selectOption('updated');
+  await mode('Conversation order','updated');
   await page.locator('.manual-pagination').waitFor({state:'detached'});
-  await page.getByLabel('Navigation view',{exact:true}).selectOption('workspace');
+  await mode('Navigation view','workspace');
   for(let index=0;index<64;index++) {
     const directory=join(service.workspace,`sibling-${String(index).padStart(2,'0')}`);await mkdir(directory);
-    if(!await page.locator('.workspace-add').evaluate(node=>node.open))await page.locator('.workspace-add summary').click();
-    await page.getByLabel('Server directory').fill(directory);await page.getByRole('button',{name:'Add workspace',exact:true}).click();
+    await workspaceForm(page);
+    await page.getByLabel('Directory path').fill(directory);await page.locator('.directory-picker footer').getByRole('button',{name:'Open',exact:true}).click();
     await page.waitForFunction(count=>document.querySelectorAll('#workspaces [data-testid=workspace-open]').length===count,index+2);
   }
   assert.equal(await page.locator('#workspaces [data-testid=workspace-open]').count(),65);
@@ -81,7 +92,7 @@ try{
   await sourceWorkspace.locator('.workspace-toggle').focus();await page.keyboard.press('Alt+Home');
   await page.waitForFunction(()=>document.querySelector('#workspaces .workspace-row .workspace-toggle[title$="sibling-63"]')===document.querySelector('#workspaces .workspace-row .workspace-toggle[title*="sibling-"]'));
   checks.push({completeWorkspaces:65,workspaceKeyboard:true});
-  await page.getByLabel('Navigation view',{exact:true}).selectOption('workspace_tree');
+  await mode('Navigation view','workspace_tree');
   await page.locator('.workspace-location').waitFor();
   await page.screenshot({path:join(report,'workspace-tree.png')});
   await writeFile(join(report,'bridge-errors.json'),JSON.stringify(await page.evaluate(()=>window.bridgeErrors),null,2));

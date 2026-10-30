@@ -1,6 +1,7 @@
 import { loopbackAddress } from './development-control.mjs';
 import { upstreamAssetPattern } from './bundle-contract.mjs';
 
+/** @param {(websocket: boolean) => import('vite').ProxyOptions} options */
 export function proxyConfiguration(options) {
   return Object.fromEntries(['^/api/v2/', '^/rsi-renderers/[a-f0-9]{64}/[a-zA-Z0-9._-]+(?:\\?|$)', upstreamAssetPattern].map((path,index) => [path, options(index === 0)]));
 }

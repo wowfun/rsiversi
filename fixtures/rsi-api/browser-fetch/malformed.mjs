@@ -100,7 +100,11 @@ export async function malformedProbe(browser, glue, wasm, catalog) {
     await page.goto(`http://127.0.0.1:${server.address().port}/`);
     const result = await executeWorker(page, glue, wasm, "run_malformed_probe");
     assert.equal(result.malformed_cases, 27);
-    assert.equal(result.transport_calls.length, 31);
+    const expectedPaths = catalog
+      .filter(operation => operation.id.domain === "fault" || ["describe", "caller"].includes(operation.id.name))
+      .map(({protocol, id, class: lane, effect}) => `/api/v2/${protocol.name}/${protocol.version}/${id.domain}/${id.name}/${id.version}/${lane === "subscription" ? "stream" : effect}`);
+    expectedPaths.push("/api/v2/login");
+    assert.deepEqual(result.transport_calls.map(([path]) => path).sort(), [...expectedPaths].sort());
     const retransmissions = [];
     for (const [path, count] of result.transport_calls) {
       assert.equal(count, 1, `RSI replayed request ${path}`);
@@ -110,7 +114,7 @@ export async function malformedProbe(browser, glue, wasm, catalog) {
         retransmissions.push({ path, fetch_calls: count, http_deliveries: delivered });
       } else assert.equal(delivered, 1, `unexpected HTTP replay ${path}`);
     }
-    assert.equal(calls.size, 31);
+    assert.deepEqual([...calls.keys()].sort(), [...expectedPaths].sort());
     assert.equal(redirects, 0, "browser followed a forbidden redirect");
     delete result.transport_calls;
     const callerFaults=[];

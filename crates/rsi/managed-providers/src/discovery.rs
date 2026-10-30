@@ -30,6 +30,13 @@ impl Discovery {
         self.slots.close();
     }
     async fn run(&self, request: DiscoveryRequest) -> Result<DiscoverySnapshot> {
+        self.run_with_secret(request, None).await
+    }
+    async fn run_with_secret(
+        &self,
+        request: DiscoveryRequest,
+        supplied: Option<rsi_credentials_protocol::SecretValue>,
+    ) -> Result<DiscoverySnapshot> {
         if self.stop.is_cancelled() {
             return Err(ApiError::ShuttingDown);
         }
@@ -40,36 +47,28 @@ impl Discovery {
         let work = async {
             let reference = CredentialRef::new(request.provider.owner(), &request.slot)
                 .map_err(|_| ApiError::Invalid("invalid discovery credential".into()))?;
-            let credential = self
-                .credentials
-                .resolve(&reference)
-                .await
-                .map_err(|error| credential_error(&error))?;
+            let secret = match supplied {
+                Some(secret) => secret,
+                None => {
+                    self.credentials
+                        .resolve(&reference)
+                        .await
+                        .map_err(|error| credential_error(&error))?
+                        .secret
+                }
+            };
             let transport = self.transport.as_ref();
             let models = match request.provider {
                 ProviderKind::Openai => {
-                    rsi_ai_openai::discovery::discover_models(
-                        transport,
-                        &request.endpoint,
-                        &credential.secret,
-                    )
-                    .await
+                    rsi_ai_openai::discovery::discover_models(transport, &request.endpoint, &secret)
+                        .await
                 }
                 ProviderKind::Deepseek => {
-                    rsi_ai_deepseek::discover_models(
-                        transport,
-                        &request.endpoint,
-                        &credential.secret,
-                    )
-                    .await
+                    rsi_ai_deepseek::discover_models(transport, &request.endpoint, &secret).await
                 }
                 ProviderKind::OpenaiCompatible => {
-                    rsi_ai_openai_compatible::discover_models(
-                        transport,
-                        &request.endpoint,
-                        &credential.secret,
-                    )
-                    .await
+                    rsi_ai_openai_compatible::discover_models(transport, &request.endpoint, &secret)
+                        .await
                 }
             }
             .map_err(|error| provider_error(&error))?;
@@ -106,6 +105,17 @@ fn provider_error(error: &rsi_ai_protocol::AiError) -> ApiError {
     }
 }
 impl ManagedProviders {
+    /// Discovers with a transient key without saving credentials or configuration.
+    pub async fn discover_with_secret(
+        &self,
+        origin: &CallOrigin,
+        request: DiscoveryRequest,
+        secret: Option<rsi_credentials_protocol::SecretValue>,
+    ) -> Result<DiscoverySnapshot> {
+        let _lease = self.access.admit(origin)?;
+        request.validate()?;
+        self.discovery.run_with_secret(request, secret).await
+    }
     /// Resolves one provider-owned secret under configuration authority and bounded admission.
     pub async fn discover(
         &self,
@@ -127,6 +137,52 @@ mod tests {
     use std::sync::Mutex;
     #[derive(Debug)]
     struct Credentials;
+    #[derive(Debug)]
+    struct NoSavedCredential;
+    #[async_trait]
+    impl CredentialsResolve for NoSavedCredential {
+        async fn resolve(
+            &self,
+            _: &CredentialRef,
+        ) -> rsi_credentials_protocol::Result<ResolvedCredential> {
+            panic!("transient discovery must not read saved credentials")
+        }
+    }
+    #[derive(Debug)]
+    struct TransientTransport;
+    #[async_trait]
+    impl HttpTransport for TransientTransport {
+        async fn execute(
+            &self,
+            request: HttpRequest,
+            _: CancellationToken,
+        ) -> std::result::Result<HttpResponse, TransportError> {
+            assert_eq!(request.headers()["authorization"], "Bearer transient-only");
+            Ok(HttpResponse {
+                status: 200,
+                headers: http::HeaderMap::new(),
+                body: Box::pin(futures_util::stream::once(async {
+                    Ok(b"{\"data\":[{\"id\":\"candidate\"}]}".as_slice().into())
+                })),
+            })
+        }
+    }
+    #[tokio::test]
+    async fn transient_discovery_bypasses_saved_credentials_and_never_echoes_the_key() {
+        let owner = Discovery::new(Arc::new(NoSavedCredential), Arc::new(TransientTransport));
+        let result = owner
+            .run_with_secret(request(), Some(SecretValue::new("transient-only").unwrap()))
+            .await
+            .unwrap();
+        assert_eq!(result.models[0].id, "candidate");
+        assert_eq!(result.request, request());
+        assert!(
+            !serde_json::to_string(&result)
+                .unwrap()
+                .contains("transient-only")
+        );
+        assert_eq!(owner.slots.available_permits(), 2);
+    }
     #[async_trait]
     impl CredentialsResolve for Credentials {
         async fn resolve(

@@ -28,7 +28,7 @@ Keeping that workflow explicit avoids adding fixture Profile admission to the
 ordinary product control channel merely to consolidate launcher code.
 
 The supervised Web overlay binds before native Origin admission and preserves
-the ordinary browser authority fence. Its [Web contract](../../../../apps/web/README.md)
+the ordinary browser authority fence. Its [Web contract](../../../../apps/web/docs/runtime.md)
 owns source overlay and pairing; the [control protocol](../../../../apps/dev-control/README.md)
 owns readiness and shutdown sequencing. A single parent deadline per handshake
 stage avoids competing child clocks; EOF supplies an existing authoritative stop

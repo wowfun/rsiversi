@@ -35,7 +35,7 @@ directory-handle mechanics; callers retain their own trust and authorization pol
 
 [`rsi-pty`](../crates/rsi-pty/README.md) owns live terminal scopes, bounded ANSI/VT100
 screens and attachment/controller state. Process owns the native PTY, byte I/O
-and reaping. Sandbox owns its explicit restricted PTY plan. The standard product
+and reaping. Sandbox owns its explicit PTY enforcement plan. The standard product
 binds terminal scopes to persisted Session authority and service-generation
 lifetime; the Agent Kernel and durable Session format do not own terminals.
 

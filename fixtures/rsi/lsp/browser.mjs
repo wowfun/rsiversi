@@ -1,3 +1,4 @@
+import {addWorkspace} from '../web-product/controls.mjs';
 import {resources,details} from '../web-product/controls.mjs';
 import {paired} from '../web-product/paired-env.mjs';
 import assert from 'node:assert/strict';
@@ -14,7 +15,7 @@ for(const [name,engine]of (process.env.RSI_LSP_BROWSER==='chromium'?[['chromium'
  try{
   const context=await browser.newContext({ignoreHTTPSErrors:true,viewport:{width:1440,height:980}});page=await context.newPage();await page.addInitScript(()=>{window.languageTrace=[];const trace=value=>{if(window.languageTrace.length===128)window.languageTrace.shift();window.languageTrace.push(value);};const post=Worker.prototype.postMessage;Worker.prototype.postMessage=function(data,...args){if(!this.languageObserved){this.languageObserved=true;this.addEventListener('message',e=>{const text=JSON.stringify(e.data);if(text.includes('ui_detail'))trace({received:text.slice(text.indexOf('ui_detail'),text.indexOf('ui_detail')+6000)});});}if(JSON.stringify(data).includes('ui_invoke'))trace(data);return post.call(this,data,...args);};document.addEventListener('click',event=>{if(event.target.tagName==='BUTTON'&&event.target.closest('dialog'))trace({clicked:event.target.textContent,fields:[...document.querySelectorAll('dialog input')].map(e=>[e.getAttribute('aria-label'),e.value])});});});page.setDefaultTimeout(45_000);page.on('pageerror',e=>errors.push(e.message));page.on('request',r=>{const body=r.postData();if(body?.includes('ui_invoke'))calls.push({url:r.url(),body});});
   await page.goto(service.origin);await page.locator('#receipt').fill(JSON.stringify(service.register(`${name} language`)));await page.getByRole('button',{name:'Connect',exact:true}).click();await page.locator('#workbench').waitFor({state:'visible'});
-  await page.locator('.workspace-add summary').click();await page.locator('#workspace-path').fill(service.workspace);await page.getByRole('button',{name:'Add workspace',exact:true}).click();await page.locator('#workspaces [data-testid=workspace-open]').first().click();
+  await addWorkspace(page,service.workspace);await page.getByRole('button',{name:'New conversation in workspace',exact:true}).click();
   await resources(page);await page.getByRole('button',{name:'Service extensions',exact:true}).click();const detail=details(page);await detail.getByRole('button',{name:'Code intelligence',exact:true}).click();
   async function repeatIndexingRead() {
    const retry=detail.getByRole('button',{name:'Repeat query',exact:true});

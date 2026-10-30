@@ -13,89 +13,67 @@ import {createRoot} from 'react-dom/client';
 import {ResourceDocks,ResourceCleanupNotice} from './src/resource-dock.tsx';
 import {ResourceOwner} from './src/resource-owner.mjs';
 import {installDisclosures} from './disclosure.js';
-import {settingsEditor,MAXIMUM_SETTINGS_BYTES} from './settings-editor.js';
-import {settingsDrafts} from './settings-drafts.js';
-import {settingsFocus} from './settings-focus.js';
+import {flushSync} from 'react-dom';
+import {createSettingsFields} from './src/runtime/settings-fields.js';
+import {createSettingsDraft} from './src/runtime/settings-draft.js';
+import {RegisteredDraft} from './src/settings/registered.tsx';
+import {MAXIMUM_SETTINGS_BYTES} from './settings-json.js';
 import {Button} from './src/button.tsx';
+import {Notices} from './src/notices.tsx';
 import {DeviceStore,applyIntent} from './device-store.js';
 import {PresentationStore} from './presentation-store.js';
 import {useDeviceNavigation} from './src/navigation-device.ts';
 import {emptyDock,dockIntent} from './src/dock-state.ts';
 import {presentationIdentity,LayoutContext,usePresentation,useViewport,useNarrow,useResourceVisibility,ResizeHandle} from './src/presentation.tsx';
 import {defaultLayout} from './presentation-layout.js';
+import {ConversationWidthControls} from './src/conversation-width.tsx';
 import {source,installActions} from './src/bridge.ts';
 import {resources,resourceHosts,publishResources,clearResources} from './src/resource-hosts.ts';
 window.modules={defaultLayout,DeviceStore,emptyDock,dockIntent,resources,resourceHosts,publishResources,clearResources};
-window.settingsChecks=()=>{
- const schema={type:'object',properties:{name:{type:'string'}}};
- const exact='{"unknown":9007199254740993,"negative":-0,"decimal":1.0}';
- const precise=settingsEditor(schema,exact);document.body.append(precise.element);
- if(precise.json()!==exact)throw Error('Exact JSON changed');
- precise.element.querySelector('button').click();
- if(precise.json()!==exact)throw Error('Rejected form switch changed exact JSON');
- precise.element.remove();
- const huge=settingsEditor(schema,JSON.stringify({name:'x'.repeat(MAXIMUM_SETTINGS_BYTES)}));document.body.append(huge.element);
- if(!huge.element.querySelector('textarea').readOnly||!huge.element.querySelector('button').disabled||huge.canSave())throw Error('Initial bound bypass');
- huge.element.remove();
- const editor=settingsEditor(schema,'{"name":"small"}');document.body.append(editor.element);
- let modeInputs=0;editor.element.addEventListener('input',()=>modeInputs++);
- editor.element.querySelector('button').click();const text=editor.element.querySelector('textarea.settings-text');
- if(modeInputs||text.value!=='{"name":"small"}')throw Error('Mode switch changed or dirtied untouched JSON');
- text.value='{';text.dispatchEvent(new Event('input',{bubbles:true}));if(editor.canSave())throw Error('Invalid JSON enabled Save');
- text.value=JSON.stringify({name:'界'.repeat(MAXIMUM_SETTINGS_BYTES/2)});text.dispatchEvent(new Event('input',{bubbles:true}));
- if(editor.canSave()||!editor.element.querySelector('button').disabled)throw Error('UTF-8 bound bypass');
- let refused=false;try{editor.json()}catch{refused=true}if(!refused)throw Error('Oversized submission admitted');
- text.value='{"name":"restored"}';text.dispatchEvent(new Event('input',{bubbles:true}));editor.element.querySelector('button').click();
- if(!editor.canSave()||JSON.parse(editor.json()).name!=='restored')throw Error('Reduced edit did not recover');
- editor.element.remove();
- const readonly=settingsEditor(schema,'{"name":"fixed"}',true);document.body.append(readonly.element);
- readonly.element.querySelector('button').click();readonly.element.querySelector('button').click();
- if(!readonly.element.querySelector('input').matches(':disabled')||readonly.canSave())throw Error('Rebuilt fields escaped read-only state');
- readonly.element.remove();return {exactJson:true,initialBound:true,utf8EditBound:true,recovery:true,readOnlyRebuild:true};
+window.mountConversationWidth=()=>{
+ const node=document.createElement('div');node.style.cssText="position:fixed;inset:0;z-index:9999";document.body.append(node);const root=createRoot(node);window.widthIntents=[];
+ function Scene(){const [layout,setLayout]=React.useState({...defaultLayout,conversationWidth:1200}),[container,setContainer]=React.useState(null);
+  return <LayoutContext.Provider value={{layout,expand:()=>{},update:patch=>{window.widthIntents.push(patch);setLayout(value=>({...value,...patch}))}}}><section id="width-column" ref={setContainer} style={{width:'100%',height:600,position:'relative'}}><ConversationWidthControls container={container}/></section></LayoutContext.Provider>;
+ }
+ root.render(<Scene/>);return ()=>{root.unmount();node.remove()};
 };
 
+window.settingsChecks=()=>{
+ const schema={type:'object',properties:{name:{type:'string'}}},exact='{"unknown":9007199254740993,"negative":-0,"decimal":1.0}';
+ const precise=createSettingsFields(schema,exact,false,()=>{});precise.toggle();if(precise.json()!==exact)throw Error('Rejected form switch changed exact JSON');
+ const huge=createSettingsFields(schema,JSON.stringify({name:'x'.repeat(MAXIMUM_SETTINGS_BYTES)}),false,()=>{});if(!huge.locked||huge.canSave())throw Error('Initial bound bypass');
+ let dirty=0;const editor=createSettingsFields(schema,'{"name":"small"}',false,edited=>dirty+=Number(!!edited));editor.toggle();if(dirty||editor.json()!=='{"name":"small"}')throw Error('Mode switch dirtied JSON');
+ editor.editJson('{');if(editor.canSave())throw Error('Invalid JSON enabled Save');
+ editor.editJson(JSON.stringify({name:'界'.repeat(MAXIMUM_SETTINGS_BYTES/2)}));if(editor.canSave())throw Error('UTF-8 bound bypass');
+ let refused=false;try{editor.json()}catch{refused=true}if(!refused)throw Error('Oversized submission admitted');
+ editor.editJson('{"name":"restored"}');editor.toggle();if(!editor.canSave()||JSON.parse(editor.json()).name!=='restored')throw Error('Reduced edit did not recover');
+ const readonly=createSettingsFields(schema,'{"name":"fixed"}',true,()=>{});readonly.toggle();readonly.toggle();if(!readonly.locked||readonly.canSave())throw Error('Rebuilt fields escaped read-only state');
+ return {exactJson:true,initialBound:true,utf8EditBound:true,recovery:true,readOnlyRebuild:true};
+};
 window.settingsDraftChecks=async()=>{
- const calls=[];let settle;
- const drafts=settingsDrafts(command=>{calls.push(command);return new Promise(resolve=>{settle=resolve})});
+ const calls=[],drafts=new Map();let settle;
+ const command=value=>{calls.push(value);return new Promise(resolve=>settle=resolve)};
  const editor=(namespace,ticket,revision='1')=>({namespace,ticket,version:['scope',revision],text:'{"name":"saved"}',description:{writable:true,defaults:{},metadata:{schema:{type:'object',properties:{name:{type:'string'}}},sensitive_fields:[],applies:'live',description:'Draft fixture'}}});
- const a=editor('rsi.client','a'),b=editor('rsi.agent','b');
- const host=document.createElement('section');document.body.append(host);
- const show=value=>{const restore=settingsFocus(host),form=drafts.render(value);host.replaceChildren(form);restore();return form};
- const focused=()=>{if(!host.contains(document.activeElement))throw Error("Settings lost keyboard focus")};
- const readyFocus=stage=>{focused();if(!document.activeElement.matches('button:not(:disabled),input:not(:disabled),textarea:not(:disabled),select:not(:disabled)'))throw Error("Ready Settings must focus an enabled control at "+stage+": "+document.activeElement.outerHTML.slice(0,160))};
- let form=show(a);form.querySelector('fieldset button').click();
- let text=form.querySelector('textarea');const exact='{"large":9007199254740993,"negative":-0,"decimal":1.0}';
- text.value=exact;text.dispatchEvent(new Event('input',{bubbles:true}));show(b);form=show({...a,ticket:'a2'});
- if(form.querySelector('textarea')!==text||text.value!==exact)throw Error('Section return discarded the exact draft');
- form=show({...a,ticket:'a3',version:['scope','2']});
- if(!form.querySelector('[type=submit]').disabled||text.value!==exact)throw Error('Stale draft silently rebased');
- form=show({...a,ticket:'reconciled'});
- if(form.querySelector('[role=alert]').textContent||form.querySelector('[type=submit]').disabled)throw Error('Reconciled draft kept a stale conflict');
- form=show({...a,ticket:'a3',version:['scope','2']});
- const discard=[...form.querySelectorAll('button')].find(button=>button.textContent==='Discard edits and reload');discard.focus();discard.click();focused();
- show({...a,ticket:'a4',version:['scope','2']});settle();await new Promise(resolve=>setTimeout(resolve,0));
- if(form.querySelector('[type=submit]').disabled)throw Error('Explicit reload did not recover');readyFocus('discard');
- form.querySelector('input[type="text"]').value='changed';form.querySelector('input[type="text"]').dispatchEvent(new Event('input',{bubbles:true}));form.querySelector('[type=submit]').focus();form.requestSubmit();focused();
- if(!form.querySelector('fieldset').disabled)throw Error('Save allowed edits during publication');
- show({...a,ticket:'a5',version:['scope','3']});settle();await new Promise(resolve=>setTimeout(resolve,0));
- if(form.querySelector('[type=submit]').disabled)throw Error('Frame-before-ack save did not recover');readyFocus('frame-before-ack');
- form.requestSubmit();settle();await new Promise(resolve=>setTimeout(resolve,0));
- if(!form.querySelector('[type=submit]').disabled)throw Error('Acknowledged save reused old ticket');
- if(!form.querySelector('[role=alert]').textContent.includes('Waiting for refreshed settings'))throw Error('Waiting save is invisible');
- const recover=[...form.querySelectorAll('button')].find(button=>button.textContent==='Reload settings');
- if(!recover||recover.disabled)throw Error('Waiting save has no safe recovery');recover.click();settle();await new Promise(resolve=>setTimeout(resolve,0));
- if(calls.at(-1).action!=='settings_read'||!form.querySelector('[type=submit]').disabled)throw Error('Recovery replayed save or reused ticket');
- show({...a,ticket:'a6',version:['scope','4']});
- if(form.querySelector('[type=submit]').disabled)throw Error('Ack-before-frame save did not recover');readyFocus('ack-before-frame');
- form.querySelector('input[type="text"]').value='draft';form.querySelector('input[type="text"]').dispatchEvent(new Event('input',{bubbles:true}));
- show({...a,ticket:'a7',version:['scope','5']});
- [...form.querySelectorAll('button')].find(button=>button.textContent==='Discard edits and reload').click();settle();await new Promise(resolve=>setTimeout(resolve,0));
- if(!form.querySelector('[type=submit]').disabled)throw Error('Discard unlocked before refresh');
- show({...a,ticket:'a8',version:['scope','5']});
- if(form.querySelector('input[type="text"]').value!=='saved'||form.querySelector('[type=submit]').disabled)throw Error('Same-version refreshed discard retained edits: '+JSON.stringify({inputs:[...form.querySelectorAll('input')].map(input=>[input.type,input.value]),disabled:form.querySelector('[type=submit]').disabled,notice:form.querySelector('[role=alert]').textContent}));
- const restore=settingsFocus(host);host.replaceChildren(document.createTextNode('Loading settings…'));restore();focused();show(a);readyFocus('loading');
- drafts.clear();if(show(a)===form)throw Error('Closed window retained draft owner');host.remove();
- return {exactDraft:true,versionConflict:true,explicitDiscard:true,saveFrameOrders:true,focusRetained:true,conflictCleared:true,calls:calls.map(call=>call.action)};
+ const a=editor('rsi.client','a'),b=editor('rsi.agent','b'),host=document.createElement('section');document.body.append(host);const root=createRoot(host);let current;
+ const show=value=>{flushSync(()=>{current=drafts.get(value.namespace);if(!current){current=createSettingsDraft(value,command);drafts.set(value.namespace,current)}else current.update(value);root.render(<RegisteredDraft draft={current}/>)});return host.querySelector('form')};
+ const update=work=>flushSync(work),done=async()=>{settle();await new Promise(resolve=>setTimeout(resolve,0))};
+ const readyFocus=stage=>{if(!host.contains(document.activeElement)||!document.activeElement.matches('button:not(:disabled),input:not(:disabled),textarea:not(:disabled),select:not(:disabled)'))throw Error('Settings lost ready focus at '+stage+': '+document.activeElement.outerHTML.slice(0,160))};
+ try{
+  let form=show(a);update(()=>current.fields.toggle());let text=form.querySelector('textarea.settings-text');const exact='{"large":9007199254740993,"negative":-0,"decimal":1.0}';
+  update(()=>current.fields.editJson(exact));show(b);form=show({...a,ticket:'a2'});if(form.querySelector('textarea.settings-text').value!==exact)throw Error('Section return discarded exact draft');
+  form=show({...a,ticket:'a3',version:['scope','2']});if(!form.querySelector('[type=submit]').disabled||current.fields.json()!==exact)throw Error('Stale draft silently rebased');
+  show({...a,ticket:'reconciled'});if(current.error||!current.canSave)throw Error('Reconciled draft kept a stale conflict');
+  form=show({...a,ticket:'a3',version:['scope','2']});const discard=[...form.querySelectorAll('button')].find(button=>button.textContent==='Discard edits and reload');discard.focus();update(()=>discard.click());
+  show({...a,ticket:'a4',version:['scope','2']});await done();if(!current.canSave)throw Error('Explicit reload did not recover');readyFocus('discard');
+  update(()=>current.fields.edit(current.fields.fields.parts[0].field,'changed'));form.querySelector('[type=submit]').focus();update(()=>form.requestSubmit());if(!form.querySelector('fieldset').disabled)throw Error('Save allowed edits during publication');
+  show({...a,ticket:'a5',version:['scope','3']});await done();if(!current.canSave)throw Error('Frame-before-ack save did not recover');readyFocus('frame-before-ack');
+  update(()=>form.requestSubmit());await done();if(current.canSave||!current.error.includes('Waiting for refreshed settings'))throw Error('Acknowledged save reused old ticket');
+  const recover=[...form.querySelectorAll('button')].find(button=>button.textContent==='Reload settings');if(!recover||recover.disabled)throw Error('Waiting save has no recovery');update(()=>recover.click());await done();
+  if(calls.at(-1).action!=='settings_read'||current.canSave)throw Error('Recovery replayed save');show({...a,ticket:'a6',version:['scope','4']});if(!current.canSave)throw Error('Ack-before-frame save did not recover');readyFocus('ack-before-frame');
+  update(()=>current.fields.edit(current.fields.fields.parts[0].field,'draft'));show({...a,ticket:'a7',version:['scope','5']});update(()=>current.reload());await done();if(current.canSave)throw Error('Discard unlocked before refresh');
+  show({...a,ticket:'a8',version:['scope','5']});if(JSON.parse(current.fields.json()).name!=='saved'||!current.canSave)throw Error('Same-version discard retained edits');
+  return {exactDraft:true,versionConflict:true,explicitDiscard:true,saveFrameOrders:true,focusRetained:true,conflictCleared:true,calls:calls.map(call=>call.action)};
+ }finally{root.unmount();host.remove();for(const draft of drafts.values())draft.retire()}
 };
 window.mountCleanup=async()=>{
  const owner=new ResourceOwner(async()=>{throw Error('Input is busy')});
@@ -106,26 +84,26 @@ window.mountCleanup=async()=>{
  root.render(<ResourceCleanupNotice/>);window.unmountCleanup=()=>{root.unmount();node.remove()};
 };
 window.mountCleanupFlood=async()=>{
- await import('./src/workbench.css');
+ await import('./styles.css');const shell=(await import('./src/shell.module.css')).default;
  window.cleanupCalls=0;
  const owner=new ResourceOwner(async()=>{window.cleanupCalls++;throw Error('Input is busy. '+ '原始资源仍等待清理。'.repeat(8))});
  for(let i=0;i<64;i++)owner.reservePanel('session-'+Math.floor(i/16),{view:String(i+1),open_revision:'2'},'Workspace files '+(i+1)).commit();
  await new Promise(resolve=>setTimeout(resolve,0));
  installActions({resources:()=>owner});source.set({surfaces:{},application_surfaces:[]});
- const node=document.createElement('div');node.id='root';document.body.append(node);const root=createRoot(node);
+ const node=document.createElement('div');node.id='root';node.className=shell.scope;document.body.append(node);const root=createRoot(node);
  root.render(<><header><strong>RSIversi · cleanup recovery</strong></header><ResourceCleanupNotice/><main id="workbench" className="workbench navigation-hidden resources-closed"><section style={{gridColumn:2,minHeight:0,padding:16,display:'flex',flexDirection:'column'}}><h1>Conversation remains available</h1><p>64 retained cleanup failures, four Sessions. Retry controls stay inside their own scroll area.</p><label style={{marginTop:'auto'}}>Main message<textarea aria-label="Main message" placeholder="Continue the conversation"/></label></section></main></>);
  window.unmountCleanupFlood=()=>{root.unmount();node.remove()};
 };
 window.mountDisclosures=()=>{
  const node=document.createElement('section');document.body.append(node);const root=createRoot(node),stop=installDisclosures(document);
- root.render(<><details className="session-options"><summary>Conversation options</summary><Button onClick={()=>{node.querySelector('output').textContent='action received'}}>Pin conversation</Button><Button onClick={()=>new Promise(resolve=>{window.finishMenuAction=resolve})}>Slow action</Button><Button onClick={async()=>{throw Error("Action failed")}}>Failing action</Button><select aria-label="Menu selection" defaultValue="a"><option value="a">A</option><option value="b">B</option></select></details><p id="notice" hidden/><input aria-label="Outside menu"/><output>no action</output><div className="mode-verbose"><details className="source-menu" open><summary style={{display:'none'}}>Inline sources</summary><Button onClick={()=>{node.querySelector('output').textContent='inline one'}}>Inline one</Button><Button onClick={()=>{node.querySelector('output').textContent='inline two'}}>Inline two</Button></details></div><dialog id="verbose-dialog"><button>Modal action</button></dialog></>);
+ root.render(<><details className="session-options"><summary>Conversation options</summary><Button onClick={()=>{node.querySelector('output').textContent='action received'}}>Pin conversation</Button><Button onClick={()=>new Promise(resolve=>{window.finishMenuAction=resolve})}>Slow action</Button><Button onClick={async()=>{throw Error("Action failed")}}>Failing action</Button><select aria-label="Menu selection" defaultValue="a"><option value="a">A</option><option value="b">B</option></select></details><Notices/><input aria-label="Outside menu"/><output>no action</output><div className="mode-verbose"><details className="source-menu" open><summary style={{display:'none'}}>Inline sources</summary><Button onClick={()=>{node.querySelector('output').textContent='inline one'}}>Inline one</Button><Button onClick={()=>{node.querySelector('output').textContent='inline two'}}>Inline two</Button></details></div><dialog id="verbose-dialog"><button>Modal action</button></dialog></>);
  return ()=>{stop();root.unmount();node.remove()};
 };
 window.stalePresentationReply=async(mode)=>{
  const original=PresentationStore.open,actEnvironment=window.IS_REACT_ACT_ENVIRONMENT;
  window.IS_REACT_ACT_ENVIRONMENT=true;
- let saved=defaultLayout,current,notify,readReply,pauseRead=false;const writes=[];
- const store={load:()=>{const value=saved;return pauseRead?new Promise(resolve=>{readReply=()=>resolve(value)}):Promise.resolve(value)},apply:intent=>{saved=applyIntent('layouts',saved,intent);const value=saved;return new Promise((resolve,reject)=>writes.push({resolve:()=>resolve(value),reject}))},subscribe:callback=>{notify=callback;return()=>{}},close(){}};
+ let saved=defaultLayout,current,notify,readReply,failedSave,pauseRead=false;const writes=[];
+ const store={load:()=>{const value=saved;return pauseRead?new Promise(resolve=>{readReply=()=>resolve(value)}):Promise.resolve(value)},apply:intent=>new Promise((resolve,reject)=>writes.push({resolve,reject})).then(()=>{saved=applyIntent('layouts',saved,intent);return saved}),subscribe:callback=>{notify=callback;return()=>{}},close(){}};
  PresentationStore.open=async()=>store;
  presentationIdentity.set('presentation-race:'+mode);source.set({surfaces:{},application_surfaces:[]});
  const node=document.createElement('main');document.body.append(node);const root=createRoot(node);
@@ -145,10 +123,17 @@ window.stalePresentationReply=async(mode)=>{
    await React.act(async()=>current.update({navigationWidth:300}));
    await React.act(async()=>current.update({navigationWidth:310}));
    await React.act(async()=>mode==='write-error'?writes[0].reject(Error('old save failed')):writes[0].resolve());
+   if(mode==='write-error'){
+    failedSave={width:current.layout.navigationWidth,notice:current.storageNotice,persisted:saved.navigationWidth,writes:writes.length};
+    await React.act(async()=>current.retry());
+    if(writes.length!==2)throw Error('Explicit retry did not submit the pending layout intent');
+    await React.act(async()=>writes[1].resolve());
+   }
   }
-  return {width:current.layout.navigationWidth,notice:current.storageNotice};
+  return {width:current.layout.navigationWidth,notice:current.storageNotice,persisted:saved.navigationWidth,failedSave};
  }finally{
-  await React.act(async()=>{for(const write of writes)write.resolve();readReply?.()});
+  for(const write of writes)await React.act(async()=>write.resolve());
+  await React.act(async()=>readReply?.());
   await React.act(async()=>root.unmount());node.remove();PresentationStore.open=original;window.IS_REACT_ACT_ENVIRONMENT=actEnvironment;
  }
 };
@@ -181,7 +166,7 @@ window.staleNavigationRead=async(kind)=>{
 };
 window.mountResize=()=>{
  const node=document.createElement('main');node.id='workbench';document.body.append(node);const root=createRoot(node);
- function Resizer(){const viewport=useViewport();const [ratio,setRatio]=React.useState(.45);return <><output>{ratio}</output><ResizeHandle name="resources" value={ratio*viewport.width} min={300} max={viewport.width*.7} reverse onChange={value=>setRatio(value/viewport.width)}/></>}
+ function Resizer(){const viewport=useViewport();const [ratio,setRatio]=React.useState(.45);return <section style={{width:ratio*viewport.width,height:40,position:'relative'}}><output>{ratio}</output><ResizeHandle name="resources" value={ratio*viewport.width} min={300} max={viewport.width*.7} reverse onChange={value=>setRatio(value/viewport.width)}/></section>}
  root.render(<Resizer/>);return ()=>{root.unmount();node.remove()};
 };
 window.mountVisibility=()=>{
@@ -230,7 +215,7 @@ window.mountExtension=async(action,seed)=>{
 };
 if(new URLSearchParams(location.search).has('cleanup'))await window.mountCleanupFlood();
 `;
-const server=await createServer({configFile:false,root,optimizeDeps:{entries:[]},esbuild:{jsx:'automatic'},server:{host:'127.0.0.1',port:0},plugins:[{name:'review-fixture',resolveId(id){if(id==='/review-test.tsx')return entry},load(id){if(id===entry)return code},configureServer(server){server.middlewares.use('/review.html',(_req,res)=>{res.setHeader('Content-Type','text/html');res.end('<!doctype html><title>Review lifecycle</title><script type="module" src="/review-test.tsx"></script>')})}}]});
+const server=await createServer({configFile:false,root,cacheDir:join(root,'node_modules/.vite-review-fixture'),optimizeDeps:{entries:[],noDiscovery:true,include:['react','react-dom','react-dom/client','react/jsx-runtime','react/jsx-dev-runtime','use-sync-external-store/shim','use-sync-external-store/shim/with-selector','clsx','@xterm/xterm','@xterm/addon-fit']},esbuild:{jsx:'automatic'},server:{host:'127.0.0.1',port:0},plugins:[{name:'review-fixture',resolveId(id){if(id==='/review-test.tsx')return entry},load(id){if(id===entry)return code},configureServer(server){server.middlewares.use('/review.html',(_req,res)=>{res.setHeader('Content-Type','text/html');res.end('<!doctype html><title>Review lifecycle</title><script type="module" src="/review-test.tsx"></script>')})}}]});
 let browser;const errors=[],checks=[];
 if(process.env.RSI_REVIEW_PREVIEW){
  await server.listen();console.log(`http://127.0.0.1:${server.httpServer.address().port}/review.html?cleanup=1`);
@@ -242,7 +227,12 @@ try{
  checks.push({settingsEditor:await page.evaluate(()=>window.settingsChecks()),settingsDrafts:await page.evaluate(()=>window.settingsDraftChecks())});
  for(const mode of ['write','read','write-error','reload']){
   const presentation=await page.evaluate(mode=>window.stalePresentationReply(mode),mode);
-  assert.equal(presentation.width,310);assert.equal(presentation.notice,'');checks.push({stalePresentationReply:mode,...presentation});
+  assert.equal(presentation.width,310);assert.equal(presentation.notice,'');
+  if(mode==='write-error'){
+   assert.equal(presentation.failedSave.width,310);assert.match(presentation.failedSave.notice,/could not be saved.*Retry layout/);
+   assert.equal(presentation.failedSave.persisted,280);assert.equal(presentation.failedSave.writes,1);assert.equal(presentation.persisted,310);
+  }
+  checks.push({stalePresentationReply:mode,...presentation});
  }
  for(const kind of ['sessionOrder','workspaceOrder']){
   const navigation=await page.evaluate(kind=>window.staleNavigationRead(kind),kind);
@@ -284,10 +274,11 @@ try{
   const {resourceHosts,resources,publishResources,clearResources}=modules;let changes=0;
   const stop=resources.subscribe(()=>changes++),host={body:document.createElement('div'),title:'Files',entry:{view:'one',session:'test',pane:'main',generation:'1',floating:false,reopen:{action:'ui_block',key:'key'}},key:'first'};
   resourceHosts.set('one',host);publishResources();const snapshot=resources.getSnapshot();
-  for(let i=0;i<100;i++){host.key=String(i);publishResources()}
+  for(let i=0;i<100;i++)publishResources();
   const stable=resources.getSnapshot()===snapshot,contentChanges=changes;
-  host.title='New title';publishResources();host.entry.floating=true;publishResources();clearResources();stop();return {stable,contentChanges,changes};
- });assert.deepEqual(hosts,{stable:true,contentChanges:1,changes:4});checks.push(hosts);
+  host.key='second';publishResources();host.model={kind:'ui',data:{error:'Fixture detail'},command:async()=>{}};publishResources();
+  host.title='New title';publishResources();host.entry={...host.entry,floating:true};publishResources();clearResources();stop();return {stable,contentChanges,changes};
+ });assert.deepEqual(hosts,{stable:true,contentChanges:1,changes:6});checks.push(hosts);
  const storage=await page.evaluate(async()=>{
   const {DeviceStore,emptyDock}=modules,a=await DeviceStore.open('review'),b=await DeviceStore.open('review');
   await Promise.all([a.apply('layouts',{kind:'dock',operation:'open',coordinate:{action:'resources'},title:'Resources'},'dock:session'),b.apply('layouts',{kind:'dock',operation:'open',coordinate:{action:'ui_block',key:'one'},title:'One'},'dock:session')]);
@@ -373,13 +364,33 @@ try{
     opening.onsuccess=()=>{const db=opening.result,tx=db.transaction('layouts','readwrite');for(const record of records)tx.objectStore('layouts').put(record);tx.oncomplete=()=>{db.close();resolve()};tx.onabort=()=>reject(tx.error)};
    });
    const owner=await modules.DeviceStore.open('legacy'),before=await owner.read('layouts');
-   const archived=await new Promise((resolve,reject)=>{const tx=owner.database.transaction('legacy-layouts-v1','readonly'),read=tx.objectStore('legacy-layouts-v1').getAll();tx.oncomplete=()=>resolve(read.result);tx.onabort=()=>reject(tx.error)});
+   const removed=!owner.database.objectStoreNames.contains('legacy-layouts-v1');
    const saved=await owner.apply('layouts',{kind:'patch',patch:{navigationWidth:311}});owner.close();
    const reopened=await modules.DeviceStore.open('legacy'),after=await reopened.read('layouts');reopened.close();
-   return {revision:before.revision,retained:JSON.stringify(archived)===JSON.stringify([...records].sort((a,b)=>a.key<b.key?-1:1)),archived:archived.length,after:after.revision,saved:saved.revision,width:after.value.navigationWidth};
+   return {revision:before.revision,removed,after:after.revision,saved:saved.revision,width:after.value.navigationWidth};
   },legacy);
-  assert.equal(result.revision,legacy==='valid'?'1':'0');assert.equal(result.retained,true);assert.equal(result.after,result.saved);assert.equal(result.width,311);checks.push({legacy,...result});await migration.close();
+  assert.equal(result.revision,'0');assert.equal(result.removed,true);assert.equal(result.after,result.saved);assert.equal(result.width,311);checks.push({legacy,...result});await migration.close();
  }
+ await page.setViewportSize({width:1400,height:900});
+ await page.evaluate(()=>{window.unmountWidth=window.mountConversationWidth()});
+ const widthHandle=page.getByRole('separator',{name:'Resize conversation (right)'});
+ try{await widthHandle.waitFor({timeout:5000})}catch(error){await mkdir(report,{recursive:true});await writeFile(join(report,'width-failure.json'),JSON.stringify(await page.evaluate(()=>({html:document.querySelector('#width-column')?.outerHTML,rect:document.querySelector('#width-column')?.getBoundingClientRect().toJSON(),text:document.body.innerText})),null,2));throw error}
+ const widthValue=()=>page.locator('#width-column').evaluate(node=>parseFloat(node.style.getPropertyValue('--conversation-width')));
+ assert.equal(await widthValue(),1200);
+ await widthHandle.click();assert.equal(await page.evaluate(()=>widthIntents.length),0);
+ await page.setViewportSize({width:1000,height:800});
+ await page.waitForFunction(()=>parseFloat(document.querySelector('#width-column').style.getPropertyValue('--conversation-width'))===1000);
+ assert.equal(await page.evaluate(()=>widthIntents.length),0);
+ await page.setViewportSize({width:1400,height:900});await page.waitForFunction(()=>document.querySelector('#width-column').style.getPropertyValue('--conversation-width')==='1200px');
+ await widthHandle.focus();await widthHandle.press('Home');assert.equal(await widthValue(),640);
+ await widthHandle.press('ArrowRight');assert.equal(await widthValue(),650);
+ const widthBox=await widthHandle.boundingBox();await page.mouse.move(widthBox.x+widthBox.width/2,widthBox.y+20);await page.mouse.down();await page.mouse.move(widthBox.x+widthBox.width/2+40,widthBox.y+20);await page.mouse.up();
+ await page.waitForFunction(()=>widthIntents.at(-1).conversationWidth===730);
+ const committed=await page.evaluate(()=>widthIntents.length);
+ const cancelBox=await widthHandle.boundingBox();await page.mouse.move(cancelBox.x+cancelBox.width/2,cancelBox.y+20);await page.mouse.down();await page.mouse.move(cancelBox.x+cancelBox.width/2+25,cancelBox.y+20);await widthHandle.press('Escape');await page.mouse.up();
+ assert.equal(await page.evaluate(()=>widthIntents.length),committed);assert.equal(await widthValue(),730);
+ await page.setViewportSize({width:390,height:844});await widthHandle.waitFor({state:'detached'});assert.equal(await page.evaluate(()=>widthIntents.length),committed);
+ await page.evaluate(()=>unmountWidth());checks.push({conversationWidth:{keyboard:true,pointer:true,cancel:true,pressOnlyPreservesPreference:true,viewportDoesNotPersist:true}});
  await page.setViewportSize({width:1400,height:900});
  await page.evaluate(()=>{window.unmountResize=window.mountResize()});
  const handle=page.getByRole('separator',{name:'Resize resources'});
@@ -433,7 +444,8 @@ try{
   assert(geometry.height<=844*.3+1&&geometry.scroll>geometry.height&&geometry.main>300&&geometry.bottom<=844&&geometry.width<=width,JSON.stringify(geometry));
   await page.screenshot({path:join(report,`cleanup-${width}.png`)});
   const last=flood.getByRole('button',{name:/^Retry cleanup for /}).last();await last.focus();
-  assert(await last.evaluate(node=>{const button=node.getBoundingClientRect(),alert=node.closest('[role=alert]').getBoundingClientRect();return button.top>=alert.top&&button.bottom<=alert.bottom}));
+  const focused=await last.evaluate(node=>{const button=node.getBoundingClientRect(),alert=node.closest('[role=alert]').getBoundingClientRect();return {top:button.top,bottom:button.bottom,alertTop:alert.top,alertBottom:alert.bottom}});
+  assert(focused.top>=focused.alertTop&&focused.bottom<=focused.alertBottom,JSON.stringify(focused));
   await page.screenshot({path:join(report,`cleanup-last-${width}.png`)});
   await page.keyboard.press('Enter');await page.waitForFunction(()=>window.cleanupCalls>64);
   checks.push({boundedCleanup:{width,...geometry}});

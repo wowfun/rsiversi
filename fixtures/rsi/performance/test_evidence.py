@@ -1,12 +1,37 @@
 import json
 from pathlib import Path
 import tempfile
+import subprocess
 import unittest
 from unittest.mock import patch
 import run
 
 
 class Evidence(unittest.TestCase):
+    def setUp(self):
+        # platform.platform() may itself invoke subprocess.run on Linux.
+        platform = patch.object(run.platform, "platform", return_value="fixture-platform")
+        platform.start()
+        self.addCleanup(platform.stop)
+
+    def test_untracked_source_marks_evidence_dirty(self):
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            subprocess.run(['git', 'init', '-q', str(root)], check=True)
+            (root / 'source.rs').write_text('untracked source')
+            original = run.capture
+            def capture(*args):
+                return original(*args) if args[:2] == ('git', 'status') else 'fixture'
+            execute = subprocess.run
+            def probe(args, **kwargs):
+                if args[0] == 'git':
+                    return execute(args, **kwargs)
+                return type('Result', (), {'returncode': 7})()
+            with patch.object(run, 'root', root), patch.object(run, 'capture', side_effect=capture), patch.object(run.subprocess, 'run', side_effect=probe):
+                destination = root / 'report'
+                run.main(['tui', str(destination)])
+                self.assertTrue(json.loads((destination / 'metadata.json').read_text())['dirty'])
+
     def test_zero_tests_and_empty_reports_fail_despite_exit_zero(self):
         with tempfile.TemporaryDirectory() as temporary:
             root = Path(temporary)

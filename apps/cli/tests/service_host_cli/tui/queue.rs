@@ -1,5 +1,5 @@
 use super::*;
-use rsi_agent_store_protocol::SessionStore as _;
+use rsi_agent_store_protocol::{MAXIMUM_STORE_CONTROL_PAGE_BYTES, SessionStore as _};
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 async fn fullscreen_queue_editor_preserves_draft_and_withdraws_the_successor() {
@@ -50,11 +50,15 @@ async fn fullscreen_queue_editor_preserves_draft_and_withdraws_the_successor() {
         1,
         "withdrawn successor never reaches a provider"
     );
+    fixture.assert_success(&["host", "stop"]);
     let store =
         rsi_agent_store_sqlite::SqliteStore::open(fixture.temporary.path().join("state/rsi/agent"))
             .unwrap();
     let session = rsi_agent_session_protocol::SessionId::new("tui-queue-edit").unwrap();
-    let controls = store.read_controls(&session, 0, 64).await.unwrap();
+    let controls = store
+        .read_controls(&session, 0, 64, MAXIMUM_STORE_CONTROL_PAGE_BYTES)
+        .await
+        .unwrap();
     let serialized = serde_json::to_string(&controls.records).unwrap();
     assert!(
         serialized.contains("message_successor") && serialized.contains("queue_mutation_recorded")

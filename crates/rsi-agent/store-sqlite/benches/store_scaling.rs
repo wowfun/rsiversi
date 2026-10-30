@@ -60,6 +60,10 @@ async fn run() {
 
     #[cfg(feature = "test-support")]
     {
+        if std::env::var_os("RSI_STORE_BENCH_ACTIVITY_ONLY").is_some() {
+            benchmark_activity_batches().await;
+            return;
+        }
         benchmark_cas_publication().await;
         if std::env::var_os("RSI_STORE_BENCH_CAS_ONLY").is_some() {
             return;
@@ -704,6 +708,59 @@ fn save_measurements(
 }
 
 #[cfg(feature = "test-support")]
+async fn benchmark_activity_batches() {
+    let root = tempfile::tempdir().unwrap();
+    let store = SqliteStore::open(root.path()).unwrap();
+    let ids = (0..128)
+        .map(|index| SessionId::new(format!("session-{index:03}")).unwrap())
+        .collect::<Vec<_>>();
+    for index in 0..128 {
+        append_session(&store, index, 2, 256, true).await;
+    }
+    for id in &ids {
+        store.validate_session(id).await.unwrap();
+    }
+    // Compare the former per-Session algorithm with batching on the same warm fixture.
+    // This is a report, never a wall-clock admission gate.
+    for batched in [false, true] {
+        store.begin_store_measurements();
+        let mut elapsed = Vec::new();
+        for _ in 0..12 {
+            elapsed.push(
+                timed_async(async {
+                    if batched {
+                        black_box(store.session_access(&ids).await.unwrap());
+                        for batch in ids.chunks(64) {
+                            black_box(store.session_activity_cuts(batch).await.unwrap());
+                        }
+                    } else {
+                        for id in &ids {
+                            black_box(store.header(id).await.unwrap());
+                        }
+                        for id in &ids {
+                            black_box(store.list_open_turns(id, 0, 1).await.unwrap());
+                        }
+                    }
+                })
+                .await,
+            );
+        }
+        let case = if batched {
+            "activity-batched"
+        } else {
+            "activity-sequential"
+        };
+        report(case, &elapsed);
+        let measurements = store.take_store_measurements();
+        println!(
+            "{case} iterations=12 sessions=128 reader_operations={}",
+            measurements.reader.len()
+        );
+        save_measurements(case, &measurements);
+    }
+}
+
+#[cfg(feature = "test-support")]
 async fn benchmark_cas_publication() {
     for bytes in [64, 64 * 1024, 1024 * 1024] {
         let root = tempfile::tempdir().unwrap();
@@ -732,6 +789,10 @@ async fn benchmark_cas_publication() {
 }
 
 #[cfg(feature = "test-support")]
+#[expect(
+    clippy::too_many_lines,
+    reason = "Keep the three concurrent workloads and their shared measurement interval together"
+)]
 async fn benchmark_mixed_lanes() {
     let root = tempfile::tempdir().unwrap();
     let store = SqliteStore::open(root.path()).unwrap();
@@ -774,6 +835,19 @@ async fn benchmark_mixed_lanes() {
     let headers = async {
         for _ in 0..100 {
             black_box(store.header(&small).await.unwrap());
+            black_box(
+                store
+                    .session_access(std::slice::from_ref(&small))
+                    .await
+                    .unwrap(),
+            );
+            black_box(
+                store
+                    .session_activity_cuts(std::slice::from_ref(&small))
+                    .await
+                    .unwrap(),
+            );
+            black_box(store.read_watermarks(&small).await.unwrap());
             tokio::task::yield_now().await;
         }
     };
@@ -829,7 +903,7 @@ async fn benchmark_mixed_lanes() {
     let started = Instant::now();
     tokio::join!(pages, headers, writes);
     println!(
-        "mixed_lanes encoded_page_bytes={bytes} large_reads=12 small_reads=100 writes=100 elapsed_ns={} cold_metrics={}",
+        "mixed_lanes encoded_page_bytes={bytes} large_reads=12 small_read_groups=100 operations_per_group=4 writes=100 elapsed_ns={} cold_metrics={}",
         started.elapsed().as_nanos(),
         serde_json::to_string(&store.cold_validation_metrics()).unwrap()
     );

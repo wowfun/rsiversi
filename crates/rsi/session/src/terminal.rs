@@ -205,18 +205,6 @@ impl LocalSessionHandle {
                 if persisted != *header {
                     return Err(unavailable("Session Header is no longer current"));
                 }
-                if !cfg!(target_os = "linux")
-                    || !matches!(
-                        header.settings().sandbox(),
-                        rsi_sandbox::SandboxMode::ReadOnly
-                            | rsi_sandbox::SandboxMode::WorkspaceWrite
-                    )
-                {
-                    return Err(unavailable(
-                        "Linux Bash with ReadOnly or WorkspaceWrite Bubblewrap is required",
-                    ));
-                }
-
                 let launch = self.prepare_terminal(terminals, &header, size).await?;
                 let scope = terminals
                     .scope(&self.session_id, true)?
@@ -258,7 +246,13 @@ impl LocalSessionHandle {
         size: rsi_pty_protocol::Size,
     ) -> Result<TerminalLaunch> {
         let workspace = PathBuf::from(header.canonical_cwd());
-        let environment = vec![
+        let lease = self.execution_lease()?;
+        let local = lease.as_ref().is_none_or(|lease| {
+            *lease.binding().location() == rsi_execution::ExecutionLocation::Local
+        });
+        let windows = cfg!(windows) && local;
+        let mode = terminal_mode(local, header.settings().sandbox())?;
+        let mut environment = vec![
             ("PATH".into(), "/usr/local/bin:/usr/bin:/bin".into()),
             ("HOME".into(), workspace.clone().into_os_string()),
             ("SHELL".into(), "/bin/bash".into()),
@@ -266,15 +260,21 @@ impl LocalSessionHandle {
             ("LANG".into(), "C.UTF-8".into()),
             ("HISTFILE".into(), "/dev/null".into()),
         ];
-        let request = rsi_sandbox::ProcessRequest {
+        let mut request = rsi_sandbox::ProcessRequest {
             stdio: rsi_sandbox::ProcessStdio::Pty,
-            mode: header.settings().sandbox(),
+            mode,
             program: PathBuf::from("/bin/bash"),
             arguments: vec!["--noprofile".into(), "--norc".into(), "-i".into()],
             cwd: workspace.clone(),
             workspace,
         };
-        if let Some(lease) = self.execution_lease()? {
+        if windows {
+            let (program, selected) = windows_shell()?;
+            request.program = program;
+            request.arguments = vec!["-NoLogo".into(), "-NoProfile".into()];
+            environment = selected;
+        }
+        if let Some(lease) = lease {
             let coordinates = lease
                 .canonicalize(header.canonical_cwd())
                 .await
@@ -325,11 +325,102 @@ fn unavailable(message: &str) -> SessionError {
     PtyError::Unavailable(message.into()).into()
 }
 
+fn terminal_mode(local: bool, agent: rsi_sandbox::SandboxMode) -> Result<rsi_sandbox::SandboxMode> {
+    use rsi_sandbox::SandboxMode;
+    if local && cfg!(windows) {
+        return Ok(SandboxMode::DangerFullAccess);
+    }
+    if local && !cfg!(target_os = "linux")
+        || !matches!(agent, SandboxMode::ReadOnly | SandboxMode::WorkspaceWrite)
+    {
+        return Err(unavailable(
+            "this target requires Linux Bash with ReadOnly or WorkspaceWrite Bubblewrap",
+        ));
+    }
+    Ok(agent)
+}
+
+// Product-owned shell selection: never copy the Host's credential environment.
+fn windows_shell() -> Result<(PathBuf, Vec<(std::ffi::OsString, std::ffi::OsString)>)> {
+    let root = std::env::var_os("SystemRoot")
+        .map(PathBuf::from)
+        .filter(|root| root.is_absolute())
+        .ok_or_else(|| unavailable("Windows SystemRoot is unavailable"))?;
+    let program = root.join("System32/WindowsPowerShell/v1.0/powershell.exe");
+    if !program.is_file() {
+        return Err(unavailable("Windows PowerShell is unavailable"));
+    }
+    let environment = WINDOWS_TERMINAL_ENV
+        .iter()
+        .filter_map(|name| std::env::var_os(name).map(|value| ((*name).into(), value)))
+        .chain(std::iter::once(("TERM".into(), "xterm-256color".into())))
+        .collect();
+    Ok((program, environment))
+}
+const WINDOWS_TERMINAL_ENV: &[&str] = &[
+    "SystemRoot",
+    "SystemDrive",
+    "windir",
+    "ComSpec",
+    "PATH",
+    "PATHEXT",
+    "USERPROFILE",
+    "APPDATA",
+    "LOCALAPPDATA",
+    "TEMP",
+    "TMP",
+    "HOMEDRIVE",
+    "HOMEPATH",
+    "USERNAME",
+    "USERDOMAIN",
+    "ProgramFiles",
+    "ProgramFiles(x86)",
+    "ProgramData",
+    "PSModulePath",
+];
+
 #[cfg(test)]
 mod tests {
     use super::*;
     use async_trait::async_trait;
     use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
+
+    #[test]
+    fn manual_terminal_policy_is_local_to_the_target() {
+        use rsi_sandbox::SandboxMode;
+        for agent in [
+            SandboxMode::ReadOnly,
+            SandboxMode::WorkspaceWrite,
+            SandboxMode::DangerFullAccess,
+        ] {
+            if cfg!(windows) {
+                assert_eq!(
+                    terminal_mode(true, agent).unwrap(),
+                    SandboxMode::DangerFullAccess
+                );
+            }
+            if agent == SandboxMode::DangerFullAccess {
+                assert!(terminal_mode(false, agent).is_err());
+            } else {
+                assert_eq!(terminal_mode(false, agent).unwrap(), agent);
+            }
+        }
+    }
+    #[cfg(windows)]
+    #[test]
+    fn windows_terminal_selects_native_shell_and_only_noncredential_environment() {
+        let (program, environment) = windows_shell().unwrap();
+        assert!(program.is_absolute());
+        assert_eq!(program.file_name().unwrap(), "powershell.exe");
+        assert!(environment.iter().all(|(name, _)| name == "TERM"
+            || WINDOWS_TERMINAL_ENV.iter().any(|allowed| name == allowed)));
+        assert!(
+            !environment
+                .iter()
+                .any(|(name, _)| name.to_string_lossy().contains("KEY")
+                    || name.to_string_lossy().contains("TOKEN"))
+        );
+    }
 
     #[derive(Debug)]
     struct Scope {

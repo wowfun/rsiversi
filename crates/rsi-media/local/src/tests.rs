@@ -179,6 +179,34 @@ fn cancelled_waiter_cannot_release_a_queued_blocking_io_slot() {
     cancelled_blocking_waiter(false);
 }
 
+#[tokio::test]
+async fn concurrent_reads_charge_each_complete_file_until_its_last_slice_drops() {
+    let temporary = tempfile::tempdir().unwrap();
+    let (mut backend, reference) = fixture(temporary.path(), 4096);
+    let file_bytes = usize::try_from(
+        std::fs::metadata(object_path(temporary.path(), &reference.id))
+            .unwrap()
+            .len(),
+    )
+    .unwrap();
+    backend.reads = ByteBudget::new(file_bytes * 2).unwrap();
+    backend.io = Arc::new(tokio::sync::Semaphore::new(2));
+    let (first, second) = tokio::join!(backend.get(&reference.id), backend.get(&reference.id));
+    let (first, second) = (first.unwrap(), second.unwrap());
+    assert_eq!(backend.reads.used(), file_bytes * 2);
+    let slice = first.bytes.slice(1..2);
+    drop(first);
+    assert!(matches!(
+        backend.get(&reference.id).await,
+        Err(MediaError::AdmissionFull(_))
+    ));
+    drop(slice);
+    assert_eq!(backend.reads.used(), file_bytes);
+    assert!(backend.get(&reference.id).await.is_ok());
+    drop(second);
+    assert_eq!(backend.reads.used(), 0);
+}
+
 #[test]
 fn cancelled_put_waiter_cannot_release_a_queued_blocking_io_slot() {
     cancelled_blocking_waiter(true);

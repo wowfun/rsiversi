@@ -1,0 +1,98 @@
+/* Shared by transcript and independently published file-preview renderers. */
+.code-token {
+  color: var(--code-light, inherit);
+}
+:root[data-theme="dark"] .code-token {
+  color: var(--code-dark, inherit);
+}
+@media (prefers-color-scheme: dark) {
+  :root:not([data-theme="light"]):not([data-theme="dark"]) .code-token {
+    color: var(--code-dark, inherit);
+  }
+}
+.code-block {
+  margin: 16px 0;
+  border-radius: var(--dsw-radius-lg, 16px);
+  overflow: hidden;
+  background: var(--dsw-alias-markdown-code-block);
+}
+.code-toolbar {
+  display: flex;
+  align-items: center;
+  gap: 12px;
+  padding: 9px 14px;
+  font: 11px/18px var(--dsw-font-family);
+  color: var(--muted);
+  background: var(--dsw-alias-markdown-code-block-banner);
+}
+.code-language {
+  margin-right: auto;
+}
+.code-toolbar button {
+  position: static;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  border: 0;
+  background: transparent;
+  padding: 4px;
+  color: inherit;
+  font: inherit;
+}
+.code-toolbar button:hover {
+  background: var(--hover);
+}
+.markdown .code-block pre.transcript-code {
+  position: static;
+  margin: 0;
+  padding: 16px;
+  background: transparent;
+  border: 0;
+  border-radius: 0;
+  white-space: pre;
+  overflow: auto;
+  font: 11px/19px var(--ds-font-family-code);
+}
+.markdown .code-block pre.transcript-code.wrap {
+  white-space: pre-wrap;
+  overflow-wrap: anywhere;
+}
+.transcript-code > code {
+  font: inherit;
+}
+.markdown-table {
+  max-width: 100%;
+  overflow-x: auto;
+  overscroll-behavior-x: contain;
+  margin-block: 16px;
+}
+.markdown-table table {
+  border-collapse: collapse;
+  min-width: 100%;
+  font: 13px/22px var(--dsw-font-family);
+}
+.markdown-table th,
+.markdown-table td {
+  border: 0;
+  border-bottom: 0.5px solid var(--dsw-alias-border-l2);
+  padding: 10px 16px;
+  text-align: left;
+  min-width: 100px;
+}
+.markdown-table th {
+  font-weight: 500;
+  background: transparent;
+  border-bottom-color: var(--dsw-alias-border-l3);
+}
+.markdown-table tr > :first-child {
+  padding-left: 0;
+}
+.markdown-table tr > :last-child {
+  padding-right: 0;
+}
+.markdown-table [data-align="center"] {
+  text-align: center;
+}
+.markdown-table [data-align="right"] {
+  text-align: right;
+}

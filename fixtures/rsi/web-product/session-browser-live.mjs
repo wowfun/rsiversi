@@ -1,3 +1,4 @@
+import {navigationMode} from './controls.mjs';
 // Explicit opt-in: real DeepSeek, confined Chromium, production UI and durable Facts.
 import assert from 'node:assert/strict';
 import {readFile,appendFile,writeFile} from 'node:fs/promises';
@@ -29,7 +30,7 @@ async function recoverNetwork(id,networkStart){
   await page.screenshot({path:join(live.report,`network-change-${recoveries.length}.png`)});
   await page.getByRole('button',{name:'Reconnect with this browser',exact:true}).click();
   await page.locator('#workbench').waitFor({state:'visible'});
-  await page.getByLabel('Navigation view',{exact:true}).selectOption('flat');
+  await navigationMode(page,'flat');
   await page.locator(`[data-session-id="${id}"] [data-testid=conversation-open]`).click();
   await waitUntil(()=>page.getByRole('region',{name:'Main conversation',exact:true}).getAttribute('data-session-id').then(current=>current===id),'reopen exact Session');
   return true;
@@ -85,7 +86,7 @@ try{
   await waitUntil(()=>panel.getByAltText('Current Session browser screenshot').evaluate(img=>img.naturalWidth===1280),'canonical UI image');
   await panel.getByAltText('Current Session browser screenshot').scrollIntoViewIfNeeded();await page.screenshot({path:join(live.report,'browser-wide.png')});
   await page.setViewportSize({width:420,height:860});await page.waitForFunction(()=>document.querySelector('.resource-dock')?.classList.contains('resource-fullscreen'));await resources(page);await panel.waitFor({state:'visible'});await panel.getByAltText('Current Session browser screenshot').scrollIntoViewIfNeeded();assert(await page.evaluate(()=>document.documentElement.scrollWidth<=innerWidth+1));await page.screenshot({path:join(live.report,'browser-narrow.png')});assert(await panel.evaluate(el=>el.scrollWidth<=el.clientWidth+1));await page.setViewportSize({width:1440,height:980});await closeDetails(page);
-  await pane.locator('.composer-extras').evaluate(el=>el.open=true);await pane.getByRole('button',{name:'Search history',exact:true}).click();
+  await pane.getByRole('button',{name:'Add files or run commands'}).click();await page.getByRole('menuitem',{name:'Search history',exact:true}).click();
   const search=page.getByRole('dialog',{name:'Search conversation text',exact:true});await search.getByLabel('History text query').fill('HISTORY_NEEDLE_1008');
   for(let step=0;step<8;step++){await search.getByRole('button',{name:'Search text',exact:true}).click();await waitUntil(()=>search.getByRole('button',{name:'Search text',exact:true}).isEnabled(),'history query');if(await search.getByRole('button',{name:'Open original',exact:true}).count())break;await search.getByRole('button',{name:'Continue indexing',exact:true}).click();await waitUntil(()=>search.getByRole('button',{name:'Search text',exact:true}).isEnabled(),'history indexing');}
   await search.getByRole('button',{name:'Open original',exact:true}).first().click();const original=search.getByLabel('Verified original text');await original.waitFor();

@@ -5,6 +5,35 @@
 #![allow(clippy::missing_errors_doc)]
 
 use async_trait::async_trait;
+
+/// Mechanical operation labels for diagnostic Store lane measurements.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+#[cfg_attr(feature = "test-support", derive(serde::Serialize))]
+#[cfg_attr(feature = "test-support", serde(rename_all = "snake_case"))]
+pub enum StoreOperation {
+    /// Other bounded read operations.
+    Other,
+    /// Immutable Header read.
+    Header,
+    /// Ordered location/protection batch.
+    AccessBatch,
+    /// Validated durable activity-cut batch.
+    ActivityCuts,
+    /// Bounded Fact page.
+    FactPage,
+    /// Bounded backward Fact suffix.
+    FactSuffix,
+    /// Current or historical domain-state page.
+    DomainStates,
+    /// Durable stream cursors.
+    Watermarks,
+    /// Writer operation.
+    Write,
+    /// Cold canonical-history validation.
+    Validation,
+    /// Content-addressed file operation.
+    Cas,
+}
 use rsi_agent_session_protocol::{
     ActivationId, AgentControlRecord, AgentControlRecordBody, AgentMessage, AgentMessageSource,
     EMPTY_CONTROL_PREFIX_DIGEST, EMPTY_FACT_PREFIX_DIGEST, ForkTurnSelection,
@@ -419,7 +448,7 @@ pub struct SqliteStore {
     inner: Arc<StoreInner>,
 }
 
-#[cfg(feature = "test-support")]
+#[cfg(any(test, feature = "test-support"))]
 type FactPagePause = (
     tokio::sync::oneshot::Sender<()>,
     std::sync::mpsc::Receiver<()>,
@@ -510,6 +539,8 @@ struct StoreInner {
     >,
     #[cfg(feature = "test-support")]
     fact_page_barrier: Arc<Mutex<Option<FactPagePause>>>,
+    #[cfg(test)]
+    activity_cut_pause: Mutex<Option<FactPagePause>>,
     #[cfg(feature = "test-support")]
     reader_measurements: Arc<Mutex<Option<Vec<test_support::LaneMeasurement>>>>,
     #[cfg(feature = "test-support")]
@@ -807,6 +838,8 @@ impl SqliteStore {
                 validation_barrier: Mutex::new(None),
                 #[cfg(feature = "test-support")]
                 fact_page_barrier: Arc::new(Mutex::new(None)),
+                #[cfg(test)]
+                activity_cut_pause: Mutex::new(None),
                 #[cfg(feature = "test-support")]
                 reader_measurements: Arc::new(Mutex::new(None)),
                 #[cfg(feature = "test-support")]
@@ -844,6 +877,7 @@ impl SqliteStore {
     async fn with_database<T, F>(
         admission: Arc<Semaphore>,
         closed_message: &'static str,
+        kind: StoreOperation,
         #[cfg(feature = "test-support")] measurements: Option<
             Arc<Mutex<Option<Vec<test_support::LaneMeasurement>>>>,
         >,
@@ -853,6 +887,8 @@ impl SqliteStore {
         T: Send + 'static,
         F: FnOnce() -> Result<T> + Send + 'static,
     {
+        #[cfg(not(feature = "test-support"))]
+        let _ = kind;
         #[cfg(feature = "test-support")]
         let queued = std::time::Instant::now();
         let permit = admission
@@ -869,6 +905,7 @@ impl SqliteStore {
                 measurements,
                 queued,
                 dispatched,
+                kind,
                 std::any::type_name::<T>(),
             );
             let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(operation))
@@ -893,6 +930,7 @@ impl SqliteStore {
         Self::with_database(
             Arc::clone(&self.inner.writer_admission),
             "SQLite writer admission closed",
+            StoreOperation::Write,
             #[cfg(feature = "test-support")]
             Some(self.inner.writer_measurements.clone()),
             move || {
@@ -918,10 +956,20 @@ impl SqliteStore {
         T: Send + 'static,
         F: FnOnce(&mut Connection) -> Result<T> + Send + 'static,
     {
+        self.with_reader_named(StoreOperation::Other, operation)
+            .await
+    }
+
+    async fn with_reader_named<T, F>(&self, kind: StoreOperation, operation: F) -> Result<T>
+    where
+        T: Send + 'static,
+        F: FnOnce(&mut Connection) -> Result<T> + Send + 'static,
+    {
         let owner = Arc::clone(&self.inner);
         Self::with_database(
             Arc::clone(&self.inner.reader_admission),
             "SQLite reader admission closed",
+            kind,
             #[cfg(feature = "test-support")]
             Some(self.inner.reader_measurements.clone()),
             move || {
@@ -1053,6 +1101,7 @@ impl SqliteStore {
                 Some(measurements),
                 queued,
                 dispatched,
+                StoreOperation::Cas,
                 std::any::type_name::<T>(),
             );
             let result = operation();
@@ -1097,7 +1146,7 @@ mod program;
 mod program_graph;
 mod queue;
 mod reset;
-pub use reset::{SqliteStoreResetError, SqliteStoreResetReceipt, SqliteStoreResetRequest};
+pub use reset::{SqliteStoreResetError, SqliteStoreResetReceipt};
 mod preparation;
 mod session_store;
 mod suffix;
@@ -1131,7 +1180,6 @@ use validation::{
 #[derive(Clone, Debug, Default)]
 pub struct SqliteStoreFactory {
     startup_failure: Arc<Mutex<Option<SqliteStoreStartupFailure>>>,
-    reset: Option<SqliteStoreResetRequest>,
 }
 
 /// Safe startup diagnostic for the factory's direct composition owner.
@@ -1166,14 +1214,6 @@ pub enum SqliteStoreStartupFailureKind {
 }
 
 impl SqliteStoreFactory {
-    /// Uses one explicit reset request shared across clones and later factories.
-    pub fn with_reset_once(reset: SqliteStoreResetRequest) -> Self {
-        Self {
-            reset: Some(reset),
-            ..Self::default()
-        }
-    }
-
     /// Consumes this factory's latest activation failure, if any.
     pub fn take_startup_failure(&self) -> Option<SqliteStoreStartupFailure> {
         self.startup_failure.lock().ok()?.take()
@@ -1197,11 +1237,6 @@ impl PluginFactory for SqliteStoreFactory {
             StoreError::Unsupported(_) => MetaError::Activation(error.to_string()),
             _ => MetaError::InvalidInput(error.to_string()),
         })?;
-        if let Some(reset) = &self.reset {
-            reset
-                .bind(&config.root)
-                .map_err(|error| MetaError::InvalidInput(error.to_string()))?;
-        }
         let retained = store_config_retained_bytes(&config)?;
         Ok(PreparedActivation::with_state(
             desired.clone(),
@@ -1215,32 +1250,28 @@ impl PluginFactory for SqliteStoreFactory {
         let config = plan.take_state::<SqliteStoreConfig>()?;
         let root = config.root;
         let open_root = root.clone();
-        let reset = self.reset.clone();
-        let store = tokio::task::spawn_blocking(move || match reset {
-            Some(reset) => reset.open(&open_root),
-            None => SqliteStore::open(open_root),
-        })
-        .await
-        .unwrap_or_else(|_| Err(StoreError::Io("SQLite Store worker stopped".into())))
-        .map_err(|error| {
-            let kind = match &error {
-                StoreError::SchemaMismatch { expected, actual } => {
-                    SqliteStoreStartupFailureKind::SchemaMismatch {
-                        expected: *expected,
-                        actual: *actual,
+        let store = tokio::task::spawn_blocking(move || SqliteStore::open(open_root))
+            .await
+            .unwrap_or_else(|_| Err(StoreError::Io("SQLite Store worker stopped".into())))
+            .map_err(|error| {
+                let kind = match &error {
+                    StoreError::SchemaMismatch { expected, actual } => {
+                        SqliteStoreStartupFailureKind::SchemaMismatch {
+                            expected: *expected,
+                            actual: *actual,
+                        }
                     }
+                    StoreError::WriterLocked => SqliteStoreStartupFailureKind::WriterLocked,
+                    StoreError::Unsupported(_) => SqliteStoreStartupFailureKind::Unsupported,
+                    StoreError::Corrupt(_) => SqliteStoreStartupFailureKind::Corrupt,
+                    StoreError::Io(_) => SqliteStoreStartupFailureKind::Io,
+                    _ => SqliteStoreStartupFailureKind::Invalid,
+                };
+                if let Ok(mut diagnostic) = self.startup_failure.lock() {
+                    *diagnostic = Some(SqliteStoreStartupFailure { root, kind });
                 }
-                StoreError::WriterLocked => SqliteStoreStartupFailureKind::WriterLocked,
-                StoreError::Unsupported(_) => SqliteStoreStartupFailureKind::Unsupported,
-                StoreError::Corrupt(_) => SqliteStoreStartupFailureKind::Corrupt,
-                StoreError::Io(_) => SqliteStoreStartupFailureKind::Io,
-                _ => SqliteStoreStartupFailureKind::Invalid,
-            };
-            if let Ok(mut diagnostic) = self.startup_failure.lock() {
-                *diagnostic = Some(SqliteStoreStartupFailure { root, kind });
-            }
-            MetaError::Activation(error.to_string())
-        })?;
+                MetaError::Activation(error.to_string())
+            })?;
         let codecs = plan
             .context()
             .provide_local::<rsi_agent_session_protocol::ReferenceCodecRegistrationContract>(

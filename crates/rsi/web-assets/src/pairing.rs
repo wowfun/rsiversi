@@ -31,6 +31,7 @@ impl PluginFactory for VerifiedWebAssetsFactory {
             .map_err(|_| MetaError::InvalidInput("invalid Web assets configuration".into()))?;
         config.validate()?;
         config.pairing = Some(Identity::Internal);
+        config.discover_renderers = desired.get("files").is_none();
         Ok(PreparedActivation::with_state(
             ConfigValue::Null,
             config,
@@ -99,6 +100,7 @@ impl PluginFactory for PairedWebAssetsFactory {
             .map_err(|_| self.diagnosed("invalid Web assets configuration"))?;
         config.validate().map_err(|e| self.diagnosed(e))?;
         config.pairing = Some(Identity::Exact(family.to_owned()));
+        config.discover_renderers = desired.get("files").is_none();
         Ok(PreparedActivation::with_state(
             ConfigValue::Null,
             config,
@@ -198,6 +200,7 @@ pub fn pairing_receipt(
         files: BOOTSTRAP.iter().map(|s| (*s).to_owned()).collect(),
         watch: false,
         pairing: None,
+        discover_renderers: false,
     };
     config
         .validate()

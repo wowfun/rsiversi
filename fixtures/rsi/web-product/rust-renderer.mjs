@@ -1,3 +1,5 @@
+import {disconnect} from './controls.mjs';
+import {workspaceForm} from './controls.mjs';
 import {closeDetails,details} from "./controls.mjs";
 import {openResource} from './controls.mjs';
 import './paired-env.mjs';
@@ -30,10 +32,6 @@ let service;
 let page;
 try {
   service = await startService({ binary, assets, report, configure: async ({ config, run }) => {
-    const profile = join(config, "application-profiles/browser-fixture/application.profile.toml");
-    const all = ["index.html", "app.js", "worker.js", "admission.js", "download-worker.js", "download-frame.js", "styles.css", "rsi_web.js", "rsi_web_bg.wasm", "mounts.js", "drafts.js", "standard.js", "file-preview.js", "preview-local.html", "preview-online.html", "ui-renderers.json", ...files];
-    const text = await readFile(profile, "utf8");
-    await writeFile(profile, text.replace(`directory = ${JSON.stringify(assets)}`, `directory = ${JSON.stringify(assets)}, files = ${JSON.stringify(all)}`));
     const source = join(config, "native-ui-source"); await mkdir(source);
     await cp(process.env.RSI_NATIVE_UI_ARTIFACT, join(source, "artifact.bin"));
     const manifest = join(source, "addon.toml");
@@ -94,13 +92,13 @@ try {
   await abiPage.screenshot({ path: join(report, "four-rust-wasm-mounts.png") });
   assert.equal(await abiPage.evaluate(() => window.finishRustFixture()), 0);
   await abiPage.close();
-  await page.locator(".workspace-add summary").click();
-      await page.locator("#workspace-path").fill(service.workspace);
-  await page.getByRole("button", { name: "Add workspace", exact: true }).click();
+  await workspaceForm(page);
+      await page.getByLabel("Directory path").fill(service.workspace);
+  await page.locator('.directory-picker footer').getByRole('button',{name:'Open',exact:true}).click();
   await page.locator("#workspaces [data-testid=workspace-open]").first().click();
   const pane = page.getByRole("region", { name: "Main conversation", exact: true });
   await pane.locator(".pane-session").filter({ hasText: service.workspace }).waitFor({state:"attached"});
-  const session = (await pane.locator(".pane-session").innerText()).split(" · ").at(-1);
+  const session = (await pane.getAttribute('data-session-id'));
   for (let cycle = 0; cycle < 3; cycle++) {
     await openResource(page,"Service extensions");
     await details(page).getByRole("button", { name: "Native Session model", exact: true }).click();
@@ -120,7 +118,7 @@ try {
   }
   assert.equal(await page.evaluate(() => window.workerStarts), 1);
   await page.evaluate(() => { document.addEventListener("rsi-disconnected", event => { window.closedResources = event.detail; }, { once: true }); });
-  await page.getByRole("button", { name: "Sign out", exact: true }).click();
+  await disconnect(page);
   await page.locator("#login").waitFor({ state: "visible" });
   assert.deepEqual(await page.evaluate(() => window.closedResources), { pending_timers: 0, active_alarms: 0, active_requests: 0 });
   assert.deepEqual(errors, []);

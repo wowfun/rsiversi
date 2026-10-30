@@ -1,3 +1,4 @@
+import {openSettings} from './controls.mjs';
 import {finishFixture} from './cleanup.mjs';
 import {paired} from './paired-env.mjs';
 import {startService} from './service.mjs';
@@ -22,32 +23,34 @@ try{
   browser=await chromium.launch();const context=await browser.newContext({ignoreHTTPSErrors:true,viewport:{width:1440,height:900}});
   page=await context.newPage();page.on('pageerror',error=>errors.push(error.message));
   await connectWorkbench(page,service,'Settings drafts');
-  await page.getByRole('button',{name:'Settings',exact:true}).click();
-  assert.equal(await page.getByRole('banner').count(),0);
+  await openSettings(page);
+  assert.equal(await page.getByRole('banner').count(),1);
   let advancedOpened=false;
   const section=async name=>{
     const previous=await page.evaluate(()=>document.querySelector('form[data-settings-ticket]')?.dataset.settingsTicket??null);
-    await page.getByRole('navigation',{name:'Settings sections'}).getByRole('button',{name,exact:true}).click();
-    const namespace=name==='Appearance'?'rsi.client':name==='Advanced'&&advancedOpened?'rsi.agent':undefined;
-    if(namespace)await page.waitForFunction(({namespace,previous})=>{const form=document.querySelector('form[data-settings-ticket]');return form?.dataset.settingsNamespace===namespace&&form.dataset.settingsTicket!==previous},{namespace,previous});
+    const button=page.getByRole('navigation',{name:'Settings sections'}).getByRole('button',{name,exact:true});
+    const changing=await button.getAttribute('aria-pressed')!=='true';
+    await button.click();
+    const namespace=name==='General'?'rsi.client':name==='Advanced'&&advancedOpened?'rsi.agent':undefined;
+    if(namespace&&changing)await page.waitForFunction(({namespace,previous})=>{const form=document.querySelector('form[data-settings-ticket]');return form?.dataset.settingsNamespace===namespace&&form.dataset.settingsTicket!==previous},{namespace,previous});
     if(name==='Advanced')advancedOpened=true;
   };
-  await section('Appearance');const initial=await (await jsonEditor(page)).inputValue();
+  await section('General');const initial=await (await jsonEditor(page)).inputValue();
   const appearance='{"exact":9007199254740993,"negative":-0,"decimal":1.0}';
   await (await jsonEditor(page)).fill(appearance);
-  await section('Models & access');await section('Appearance');
+  await section('Models');await section('General');
   assert.equal(await (await jsonEditor(page)).inputValue(),appearance);
   checks.push('Models round trip preserves exact Appearance draft');
   await section('Advanced');await page.getByRole('button',{name:'rsi.agent',exact:true}).click();
   const advanced='{"exact":9007199254740995,"negative":-0}';await (await jsonEditor(page)).fill(advanced);
-  await section('Appearance');assert.equal(await (await jsonEditor(page)).inputValue(),appearance);
+  await section('General');assert.equal(await (await jsonEditor(page)).inputValue(),appearance);
   await section('Advanced');assert.equal(await (await jsonEditor(page)).inputValue(),advanced);
   checks.push('Appearance and Advanced retain separate exact drafts');
-  await section('Appearance');
+  await section('General');
   const second=await browser.newPage({ignoreHTTPSErrors:true,viewport:{width:1440,height:900}});second.on('pageerror',error=>errors.push(error.message));
   await connectWorkbench(second,service,'Concurrent settings writer');
-  await second.getByRole('button',{name:'Settings',exact:true}).click();
-  await second.getByRole('navigation',{name:'Settings sections'}).getByRole('button',{name:'Appearance',exact:true}).click();
+  await openSettings(second);
+  await second.getByRole('navigation',{name:'Settings sections'}).getByRole('button',{name:'General',exact:true}).click();
   const current=JSON.parse(await (await jsonEditor(second)).inputValue());
   current.appearance={...current.appearance,theme:current.appearance?.theme==='dark'?'light':'dark'};
   await (await jsonEditor(second)).fill(JSON.stringify(current));
@@ -55,7 +58,7 @@ try{
   await second.keyboard.press('Enter');
   await second.getByRole('button',{name:'Edit as JSON',exact:true}).waitFor();
   await second.waitForFunction(()=>document.activeElement.matches('button:not(:disabled),input:not(:disabled),textarea:not(:disabled),select:not(:disabled)')&&document.activeElement.closest('[data-settings-ticket]'));
-  await section('Advanced');await section('Appearance');
+  await section('Advanced');await section('General');
   assert.equal(await (await jsonEditor(page)).inputValue(),appearance);
   await page.getByRole('alert').filter({hasText:'Settings changed while this draft was open'}).waitFor();
   assert(await page.getByRole('button',{name:'Save settings',exact:true}).isDisabled());
@@ -74,7 +77,7 @@ try{
   checks.push('Concurrent version change retains the draft and refuses a silent rebase');
   await page.screenshot({path:join(report,'reloaded.png')});
   await page.getByRole('button',{name:'Close settings',exact:true}).click();
-  await page.getByRole('button',{name:'Settings',exact:true}).click();
+  await openSettings(page);
   const links=[['Web retrieval settings','rsi.retrieval']];
   if(process.platform!=='win32')links.unshift(['Edit HTTP endpoints','rsi.mcp']);
   for(const [link,namespace] of links){

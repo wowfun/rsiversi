@@ -27,11 +27,21 @@ fn projection_values_are_complete_bounded_and_failures_are_isolated_entries() {
     )
     .unwrap();
     let wire = serde_json::to_value(&snapshot).unwrap();
+    let shared = snapshot.clone();
+    assert!(std::ptr::eq(snapshot.entries(), shared.entries()));
+    assert_eq!(serde_json::to_value(&shared).unwrap(), wire);
+    assert_eq!(
+        shared.encoded_len().unwrap(),
+        serde_json::to_vec(&shared).unwrap().len()
+    );
     assert_eq!(
         serde_json::from_value::<SessionProjectionSnapshot>(wire.clone()).unwrap(),
         snapshot
     );
     assert_eq!(snapshot.entries().len(), 2);
+    let mut unknown = wire.clone();
+    unknown["unrecognized"] = json!(true);
+    assert!(serde_json::from_value::<SessionProjectionSnapshot>(unknown).is_err());
     let mut changed = wire.clone();
     changed["entries"][1] = changed["entries"][0].clone();
     assert!(serde_json::from_value::<SessionProjectionSnapshot>(changed).is_err());

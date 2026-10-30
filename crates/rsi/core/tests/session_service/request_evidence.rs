@@ -200,9 +200,15 @@ async fn evidence_matches_actual_request_reuses_original_sections_and_survives_r
     let SessionFactBody::ModelIntent { evidence, .. } = last.body() else {
         unreachable!()
     };
-    assert!(
-        matches!(evidence.part(EvidenceSection::Tools),Some(EvidencePart::Reference {seq,..}) if *seq == original_seq)
+    // A cold executor may resume from a checkpoint past the original metadata.
+    // The durable section must stay byte-identical whether stored inline or reused.
+    assert_eq!(
+        section(&handle, last.seq(), EvidenceSection::Tools).await,
+        tools
     );
+    if let Some(EvidencePart::Reference { seq, .. }) = evidence.part(EvidenceSection::Tools) {
+        assert_eq!(*seq, original_seq);
+    }
     assert_eq!(requests.lock().unwrap().len(), 3);
     assert!(running.shutdown().await.is_clean());
     server.abort();

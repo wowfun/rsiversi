@@ -3,9 +3,14 @@ use rsi_host::{ProfileEntry, ProfileFragment};
 use rsi_meta::UpdateMode;
 use serde_json::{Value, json};
 
+#[expect(
+    clippy::too_many_lines,
+    reason = "explicit ordered API catalog registrations"
+)]
 pub(crate) fn register(
     builder: &mut crate::StandardAddonBuilder,
     home: Option<std::path::PathBuf>,
+    documents: Option<std::path::PathBuf>,
 ) -> rsi_host::Result<()> {
     use rsi_api_protocol::{
         ApiDispatchContract, ApiRegistrarContract, ConnectionDescriptionContract,
@@ -103,6 +108,18 @@ pub(crate) fn register(
         "rsi.directory-picker",
         "rsi.directory-picker",
         directory_config,
+    ));
+    let defaults_config = json!({"documents":documents});
+    builder.register_linked(
+        "rsi.workspace-default",
+        env!("CARGO_PKG_VERSION"),
+        UpdateMode::RestartRequired,
+        std::sync::Arc::new(crate::default_workspace::Factory { documents }),
+    )?;
+    entries.push(ProfileEntry::new(
+        "rsi.workspace-default",
+        "rsi.workspace-default",
+        defaults_config,
     ));
     builder.register_fragment(ProfileFragment::new("rsi.standard.api", entries))?;
     Ok(())

@@ -21,7 +21,7 @@ well-formed header naming that exact Origin. Duplicate headers are rejected,
 including duplicate equal values. The document transport selects POST even when its payload is absent;
 ordinary initial immutable asset GETs may omit Origin. A malformed header is
 never treated as an absent one.
-The [shared Web document](../../../../apps/web/README.md) selects native mode
+The [shared Web document](../../../../apps/web/docs/runtime.md) selects native mode
 for the two exact platform locations. Its transport, automatic connection,
 clipboard, close recovery and export use the same predicate. A protocol-only
 check would select the Worker on Windows even with correct native admission.

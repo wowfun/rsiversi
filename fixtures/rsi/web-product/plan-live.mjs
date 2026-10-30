@@ -32,7 +32,7 @@ try {
   }
   const transcript=await pane.locator('.transcript').innerText();await writeFile(join(report,'transcript.txt'),transcript);
   assert.equal(await pane.locator('.pane-status').innerText(),'Completed',transcript.slice(-4096));assert.equal(approvals,1);assert.match(transcript,/LIVE_PLAN_STRUCTURED_42/);
-  const session=(await pane.locator('.pane-session').innerText()).split(' · ').at(-1);
+  const session=(await pane.getAttribute('data-session-id'));
   const facts=await service.readSessionFacts(session);await writeFile(join(report,'facts.json'),JSON.stringify(facts,null,2));
   const calls=name=>facts.filter(f=>f.type==='tool_intent' && f.name===name).map(intent=>({intent,result:facts.find(f=>f.type==='tool_result' && f.effect_id===intent.effect_id)}));
   for(const name of ['plan_write','request_plan_execution','spawn_agent','read_agent_result'])assert(calls(name).some(call=>call.result && !call.result.result.is_error),`successful ${name} evidence missing`);

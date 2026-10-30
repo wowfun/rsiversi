@@ -189,7 +189,7 @@ pub use plugins::{
     PluginUpdateFailure, PluginUpdateOrigin, PluginUpdateOutcome, PluginWatcher,
 };
 mod providers;
-pub use discovery::{DiscoveryRequest, DiscoverySnapshot};
+pub use discovery::{DiscoveryInput, DiscoveryRequest, DiscoverySnapshot};
 pub use providers::{
     ManagedProvider, ManagedProvidersClient, ProviderKind, ProvidersOperation, ProvidersSnapshot,
 };

@@ -36,7 +36,7 @@ fn source(root: &std::path::Path, name: &str, bytes: &[u8]) -> InstallSource {
 
 #[test]
 fn producer_fence_rejects_after_staging_without_changing_selection() {
-    let root = tempfile::tempdir().unwrap();
+    let root = tempfile::tempdir_in(std::env::temp_dir().canonicalize().unwrap()).unwrap();
     let store = PackageStore::open(&root.path().join("packages")).unwrap();
     let initial = store
         .install(
@@ -63,7 +63,7 @@ fn producer_fence_rejects_after_staging_without_changing_selection() {
 
 #[test]
 fn installation_recovers_an_abandoned_stage_without_a_manifest() {
-    let root = tempfile::tempdir().unwrap();
+    let root = tempfile::tempdir_in(std::env::temp_dir().canonicalize().unwrap()).unwrap();
     let path = root.path().join("packages");
     let store = PackageStore::open(&path).unwrap();
     let stage = path
@@ -84,7 +84,7 @@ fn installation_recovers_an_abandoned_stage_without_a_manifest() {
 
 #[test]
 fn debug_executable_lengths_are_admitted_with_a_finite_disk_bound() {
-    let root = tempfile::tempdir().unwrap();
+    let root = tempfile::tempdir_in(std::env::temp_dir().canonicalize().unwrap()).unwrap();
     let source = source(root.path(), "core", b"length declaration");
     let mut manifest: Manifest = serde_json::from_slice(&source.manifest).unwrap();
     manifest.files[0].bytes = 1_601_116_312; // Measured ordinary Linux debug CLI.
@@ -95,7 +95,7 @@ fn debug_executable_lengths_are_admitted_with_a_finite_disk_bound() {
 
 #[test]
 fn update_keeps_leased_bytes_and_failed_install_keeps_resolution() {
-    let root = tempfile::tempdir().unwrap();
+    let root = tempfile::tempdir_in(std::env::temp_dir().canonicalize().unwrap()).unwrap();
     let store = PackageStore::open(&root.path().join("packages")).unwrap();
     let first = source(root.path(), "web", b"first");
     let initial = store.install(&[first], &[], &[], "windows-x86_64").unwrap();
@@ -157,7 +157,7 @@ fn update_keeps_leased_bytes_and_failed_install_keeps_resolution() {
 
 #[test]
 fn exact_dependencies_publish_together_and_cannot_be_partially_updated() {
-    let root = tempfile::tempdir().unwrap();
+    let root = tempfile::tempdir_in(std::env::temp_dir().canonicalize().unwrap()).unwrap();
     let store = PackageStore::open(&root.path().join("packages")).unwrap();
     let dependency = source(root.path(), "worker", b"worker");
     let digest = hex::encode(Sha256::digest(&dependency.manifest));
@@ -210,7 +210,7 @@ fn exact_dependencies_publish_together_and_cannot_be_partially_updated() {
 
 #[test]
 fn manifest_rejects_escaping_case_aliases_devices_and_missing_interfaces() {
-    let root = tempfile::tempdir().unwrap();
+    let root = tempfile::tempdir_in(std::env::temp_dir().canonicalize().unwrap()).unwrap();
     let source = source(root.path(), "web", b"test");
     let base = Manifest::parse(&source.manifest).unwrap();
     for name in [
@@ -244,7 +244,7 @@ fn manifest_rejects_escaping_case_aliases_devices_and_missing_interfaces() {
 
 #[test]
 fn interrupted_stages_do_not_exhaust_recovery_enumeration() {
-    let root = tempfile::tempdir().unwrap();
+    let root = tempfile::tempdir_in(std::env::temp_dir().canonicalize().unwrap()).unwrap();
     let path = root.path().join("packages");
     let store = PackageStore::open(&path).unwrap();
     for index in 0..257 {
@@ -266,7 +266,7 @@ fn interrupted_stages_do_not_exhaust_recovery_enumeration() {
 
 #[test]
 fn read_only_acquisition_shares_the_coordinator_and_pins_before_gc() {
-    let root = tempfile::tempdir().unwrap();
+    let root = tempfile::tempdir_in(std::env::temp_dir().canonicalize().unwrap()).unwrap();
     let path = root.path().join("packages");
     let store = PackageStore::open(&path).unwrap();
     store
@@ -292,7 +292,7 @@ fn read_only_acquisition_shares_the_coordinator_and_pins_before_gc() {
 #[test]
 fn signed_admission_requires_verified_manifest_and_retains_failed_download_high_water() {
     use ring::signature::KeyPair as _;
-    let root = tempfile::tempdir().unwrap();
+    let root = tempfile::tempdir_in(std::env::temp_dir().canonicalize().unwrap()).unwrap();
     let store = PackageStore::open(&root.path().join("packages")).unwrap();
     let key = ring::signature::Ed25519KeyPair::from_seed_unchecked(&[9; 32]).unwrap();
     let public = key.public_key().as_ref().try_into().unwrap();
@@ -371,7 +371,7 @@ fn signed_admission_requires_verified_manifest_and_retains_failed_download_high_
 #[cfg(unix)]
 #[test]
 fn retained_store_parent_does_not_follow_a_replaced_root() {
-    let root = tempfile::tempdir().unwrap();
+    let root = tempfile::tempdir_in(std::env::temp_dir().canonicalize().unwrap()).unwrap();
     let selected = root.path().join("packages");
     let store = PackageStore::open(&selected).unwrap();
     store
@@ -404,7 +404,7 @@ fn publisher_and_consumer_share_manifest_acceptance_cases() {
 
 #[test]
 fn unknown_object_is_retained_with_actionable_recovery() {
-    let root = tempfile::tempdir().unwrap();
+    let root = tempfile::tempdir_in(std::env::temp_dir().canonicalize().unwrap()).unwrap();
     let path = root.path().join("packages");
     let store = PackageStore::open(&path).unwrap();
     std::fs::create_dir(path.join("objects/operator-backup")).unwrap();
@@ -420,7 +420,7 @@ fn unknown_object_is_retained_with_actionable_recovery() {
 
 #[test]
 fn manifest_integer_tokens_and_duplicate_fields_are_not_silently_coerced() {
-    let root = tempfile::tempdir().unwrap();
+    let root = tempfile::tempdir_in(std::env::temp_dir().canonicalize().unwrap()).unwrap();
     let input = source(root.path(), "web", b"test");
     let bytes = String::from_utf8(input.manifest).unwrap();
     assert!(Manifest::parse(bytes.replace("\"format\":2", "\"format\":2.0").as_bytes()).is_err());
@@ -436,7 +436,7 @@ fn manifest_integer_tokens_and_duplicate_fields_are_not_silently_coerced() {
 
 #[test]
 fn offline_purge_excludes_users_and_writers_and_preserves_unknown_root_files() {
-    let root = tempfile::tempdir().unwrap();
+    let root = tempfile::tempdir_in(std::env::temp_dir().canonicalize().unwrap()).unwrap();
     let path = root.path().join("packages");
     let store = PackageStore::open(&path).unwrap();
     let installed = store
@@ -485,7 +485,7 @@ fn offline_purge_excludes_users_and_writers_and_preserves_unknown_root_files() {
 
 #[test]
 fn offline_purge_removes_multiple_large_abandoned_stages_in_one_pass() {
-    let root = tempfile::tempdir().unwrap();
+    let root = tempfile::tempdir_in(std::env::temp_dir().canonicalize().unwrap()).unwrap();
     let path = root.path().join("packages");
     let store = PackageStore::open(&path).unwrap();
     // Each interrupted stage is within the per-object file limit; together they

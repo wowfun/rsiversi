@@ -1,6 +1,11 @@
 import {test} from 'node:test';
 import assert from 'node:assert/strict';
-import {navigationPresentation,GroupRestoration} from '../navigation-presentation.js';
+import {navigationPresentation,GroupRestoration,conversationRecency} from '../navigation-presentation.js';
+test('conversation recency handles future clocks and minute/hour/day boundaries',()=>{
+  const now=1_000_000_000;
+  for(const [age,label] of [[-1,'now'],[59_999,'now'],[60_000,'1min'],[3_600_000,'1h'],[86_400_000,'1d']])assert.equal(conversationRecency(String(now-age),now),label);
+  assert.equal(conversationRecency('bad',now),'');
+});
 const row=id=>({session:id,created_at_ms:'1700000000000',path:'/same',metadata:{title:null}});
 test('untitled rows use creation time and distinguish same-time IDs across duplicate pages',()=>{
   const first=row('same-prefix-first'),second=row('same-prefix-second');
@@ -10,10 +15,12 @@ test('untitled rows use creation time and distinguish same-time IDs across dupli
   assert.equal(titles.get('named'),'Named');
   assert.match(titles.get('invalid'),/^Created /);
 });
-test('attention absent from the native index remains unknown',()=>{
-  const {attention}=navigationPresentation([],{entries:[{position:{conversation:{kind:'external',id:'a'}},status:'running'},{position:{conversation:{kind:'native',id:'b'}},status:'waiting'}]});
-  assert.equal(attention.get('a')??'unknown','unknown');
+test('absent native attention stays distinct from an observed unknown state',()=>{
+  const {attention}=navigationPresentation([],{entries:[{position:{conversation:{kind:'external',id:'a'}},status:'running'},{position:{conversation:{kind:'native',id:'b'}},status:'waiting'},{position:{conversation:{kind:'native',id:'c'}},status:'unknown'}]});
+  assert.equal(attention.get('a'),undefined);
   assert.equal(attention.get('b'),'waiting');
+  assert.equal(attention.get('c'),'unknown');
+  assert.equal(attention.get('unobserved'),undefined);
 });
 test('large groups read each entry once and produce unique titles',()=>{
   let reads=0;

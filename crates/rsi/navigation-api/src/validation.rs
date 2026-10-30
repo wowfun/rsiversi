@@ -14,7 +14,7 @@ pub(super) fn entry(value: &NavigationEntry, filter: &NavigationFilter) -> Resul
         .map_err(|_| ApiError::Invalid("invalid navigation coordinates".into()))?;
     if created == 0
         || activity < created
-        || value.metadata.archived != filter.archived
+        || !filter.matches_archive(value.metadata.archived)
         || !filter.workspace.matches(value.workspace.as_ref())
         || value
             .workspace
@@ -121,7 +121,7 @@ pub(super) fn pins(page: &PinnedPage, filter: &NavigationFilter) -> Result<()> {
             }
         };
         metadata.validate()?;
-        if !metadata.pinned || metadata.archived != filter.archived || !seen.insert(id) {
+        if !metadata.pinned || !filter.matches_archive(metadata.archived) || !seen.insert(id) {
             return Err(ApiError::Invalid("invalid pinned metadata".into()));
         }
     }

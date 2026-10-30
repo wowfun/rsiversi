@@ -415,6 +415,7 @@ impl Scope {
         let id = self.shared.id("pty")?;
         let attachment = self.shared.id("view")?;
         let status = Terminal {
+            sandbox: spec.sandbox(),
             id: id.clone(),
             size,
             phase: Phase::Running,

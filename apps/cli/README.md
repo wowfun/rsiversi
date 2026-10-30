@@ -10,11 +10,15 @@ invocation without loading the Profile. Internal protocol probes stay hidden.
 Recorded core installations use the
 [installation owner's transaction](../../crates/rsi/installation/README.md);
 legacy unrecorded executables retain the single-file transaction.
+Package downloads stage under the canonical native temporary directory before
+the package owner's no-follow admission, including macOS aliases and Windows
+verbatim paths.
 
-On Windows, persistent-Host integration tests must execute outside Cargo's child
-Job. Compile with `cargo test --no-run --message-format=json`, then execute the
-reported test artifacts from the native caller. CI does this for CLI and catalog
-targets. A launcher whose Job forbids breakaway receives an explicit startup
+On Windows, persistent-Host integration tests must execute outside a child Job
+that forbids breakaway. Compile with `cargo test --no-run --message-format=json`,
+then execute the reported artifacts from an unrestricted native caller. CI uses
+the [bounded task helper](../../.github/scripts/README.md) for CLI and catalog
+targets because its runner also owns a Job. A restricted launcher receives an explicit startup
 error; the product never substitutes a transient embedded service.
 
 For artifact acceptance, set `RSI_TEST_PRODUCT_BINARY` to the absolute installed
@@ -81,6 +85,9 @@ There is no debug-only launch grammar or source-tree UI selector.
 The [launch maintenance contract](../../crates/rsi/core/docs/launch.md) owns
 global config/state resets, explicit import and recoverable core replacement.
 Application help is resolved before home initialization or maintenance.
+Host Profile preview includes the product's resident listener factories. Its
+launch key includes the exact coding-helper executable path; previewing the
+running immutable artifact reproduces the daemon's key.
 
 `rsi agent-store verify` audits an existing, cleanly closed Store without creating it.
 `rsi agent-store compact` obtains the exclusive Store writer lease, refuses pending

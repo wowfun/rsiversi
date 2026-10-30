@@ -241,6 +241,13 @@ async fn exercise_workspace(
     second: &std::path::Path,
 ) {
     let one = workspace.get_or_create(first).await.unwrap();
+    let one = workspace
+        .rename(
+            &one.id,
+            rsi_workspace_protocol::WorkspaceName::parse("HTTP project").unwrap(),
+        )
+        .await
+        .unwrap();
     assert_eq!(
         workspace.get_or_create(&first.join(".")).await.unwrap(),
         one

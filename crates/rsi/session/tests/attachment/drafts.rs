@@ -358,7 +358,7 @@ async fn failed_preparation_releases_its_reserved_slot_for_the_next_attempt() {
             service
                 .create(request(directory.path(), format!("failed-{index}")))
                 .await,
-            Err(SessionError::Backend(_))
+            Err(SessionError::Invalid(message)) if message.contains("missing-preset") && message.contains("unavailable")
         ));
     }
     service.stop().await.unwrap();

@@ -5,6 +5,25 @@ use super::{
 };
 use rsi_ai_protocol::{DiscoveredModel, validate_discovered_models};
 
+/// Discovery-only input; the optional key never belongs to a snapshot.
+#[derive(Debug, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct DiscoveryInput {
+    /// Non-secret identity echoed by the reply.
+    pub request: DiscoveryRequest,
+    /// Optional ephemeral credential, never saved by discovery.
+    #[serde(default, deserialize_with = "discovery_secret")]
+    pub secret: Option<rsi_credentials_protocol::SecretValue>,
+}
+fn discovery_secret<'de, D: serde::Deserializer<'de>>(
+    decoder: D,
+) -> std::result::Result<Option<rsi_credentials_protocol::SecretValue>, D::Error> {
+    Option::<String>::deserialize(decoder)?
+        .map(rsi_credentials_protocol::SecretValue::new)
+        .transpose()
+        .map_err(serde::de::Error::custom)
+}
+
 /// A non-secret configuration draft, valid before a deployment exists.
 #[derive(Clone, Debug, Serialize, Deserialize, PartialEq, Eq)]
 #[serde(deny_unknown_fields)]
@@ -62,11 +81,19 @@ impl DiscoverySnapshot {
 impl ManagedProvidersClient {
     /// Discovers once; caller cancellation drops the waiter and never applies candidates.
     pub async fn discover(&self, request: DiscoveryRequest) -> Result<DiscoverySnapshot> {
+        self.discover_with_secret(request, None).await
+    }
+    /// Uses a transient key for this read without editing stored credentials.
+    pub async fn discover_with_secret(
+        &self,
+        request: DiscoveryRequest,
+        secret: Option<rsi_credentials_protocol::SecretValue>,
+    ) -> Result<DiscoverySnapshot> {
         request.validate()?;
         let snapshot = match call_json::<_, DiscoverySnapshot, Never>(
             self.api.as_ref(),
             &ProvidersOperation::Discover.spec(),
-            &request,
+            &serde_json::json!({"request": &request, "secret": secret.as_ref().map(rsi_credentials_protocol::SecretValue::expose_secret)}),
         )
         .await?
         {
@@ -81,6 +108,22 @@ impl ManagedProvidersClient {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn discovery_input_debug_redacts_transient_credential() {
+        let input: DiscoveryInput = serde_json::from_value(serde_json::json!({
+            "request": {"provider":"openai", "endpoint":"https://api.openai.com", "slot":"default"},
+            "secret":"discovery-input-only-secret"
+        }))
+        .unwrap();
+        let debug = format!("{input:?}");
+        assert!(debug.contains("<redacted>"));
+        assert!(!debug.contains("discovery-input-only-secret"));
+        assert_eq!(
+            input.secret.unwrap().expose_secret(),
+            "discovery-input-only-secret"
+        );
+    }
 
     #[test]
     fn decoded_replies_check_identity_and_candidate_semantics() {

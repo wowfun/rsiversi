@@ -194,10 +194,16 @@ impl WorkspaceRegistry for Service {
                 "canonical path has a conflicting identity".into(),
             ));
         }
-        let record = WorkspaceRecord {
-            id: id.clone(),
-            coordinates,
-        };
+        let mut record = WorkspaceRecord::new(coordinates);
+        record.created_at_ms = Some(
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .map_err(|_| WorkspaceError::Storage("system clock precedes Unix epoch".into()))?
+                .as_millis()
+                .try_into()
+                .map_err(|_| WorkspaceError::Storage("system clock is out of range".into()))?,
+        );
+        record.validate()?;
         let order = state
             .next_order
             .checked_add(1)
@@ -231,6 +237,53 @@ impl WorkspaceRegistry for Service {
                 let mut state = state.write().await;
                 state.order.insert(order, id.clone());
                 state.records.insert(id, (order, record.clone()));
+                Ok(record)
+            })
+            .await
+            .map_err(|error| {
+                WorkspaceError::Storage(format!("workspace commit task failed: {error}"))
+            })?
+    }
+
+    async fn rename(
+        &self,
+        id: &WorkspaceId,
+        name: rsi_workspace_protocol::WorkspaceName,
+    ) -> Result<WorkspaceRecord> {
+        let commit = Arc::clone(&self.commit).lock_owned().await;
+        let state = self.state.read().await;
+        self.ensure_available()?;
+        let (order, current) = state
+            .records
+            .get(id)
+            .ok_or_else(|| WorkspaceError::Unknown(id.clone()))?;
+        let permit = self.admit(current.coordinates.location())?;
+        let order = *order;
+        let mut record = current.clone();
+        record.name = Some(name);
+        if &record == current {
+            return Ok(record);
+        }
+        drop(state);
+        let value = serde_json::to_value(DurableWorkspaceRecord {
+            order,
+            record: record.clone(),
+        })
+        .map_err(|error| WorkspaceError::Storage(error.to_string()))?;
+        let domain = self.domain.clone();
+        let state = self.state.clone();
+        self.execution
+            .spawn(async move {
+                let (_commit, _permit) = (commit, permit);
+                domain
+                    .put(record.id.as_str(), value)
+                    .await
+                    .map_err(storage_error)?;
+                state
+                    .write()
+                    .await
+                    .records
+                    .insert(record.id.clone(), (order, record.clone()));
                 Ok(record)
             })
             .await

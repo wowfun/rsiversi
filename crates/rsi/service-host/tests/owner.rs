@@ -74,6 +74,59 @@ fn embedded_and_daemon_modes_share_one_persistent_owner_lease() {
 }
 
 #[test]
+#[allow(
+    unsafe_code,
+    reason = "A controlled pre-exec barrier reproduces inherited lease descriptors"
+)]
+fn retiring_owner_releases_its_lease_before_an_unrelated_child_execs() {
+    use std::io::{Read as _, Write as _};
+    use std::os::unix::net::UnixStream;
+    use std::os::{fd::AsRawFd as _, unix::process::CommandExt as _};
+    use std::process::Command;
+
+    let root = TempDir::new().unwrap();
+    let paths = paths(&root);
+    let owner = HostOwnerLease::try_acquire(paths.clone()).unwrap();
+    let (mut entered, child_entered) = UnixStream::pair().unwrap();
+    let (mut release, child_release) = UnixStream::pair().unwrap();
+    entered
+        .set_read_timeout(Some(std::time::Duration::from_secs(5)))
+        .unwrap();
+    let child = std::thread::spawn(move || {
+        let entered_fd = child_entered.as_raw_fd();
+        let release_fd = child_release.as_raw_fd();
+        let mut command = Command::new("/bin/true");
+        // SAFETY: after fork the callback uses only async-signal-safe read/write
+        // on inherited, live socket descriptors and stack storage. Both streams
+        // stay owned here until spawn has passed the exec barrier.
+        unsafe {
+            command.pre_exec(move || {
+                let mut byte = 1_u8;
+                if libc::write(entered_fd, std::ptr::from_ref(&byte).cast(), 1) != 1
+                    || libc::read(release_fd, std::ptr::from_mut(&mut byte).cast(), 1) != 1
+                {
+                    return Err(std::io::Error::from_raw_os_error(libc::EIO));
+                }
+                Ok(())
+            });
+        }
+        command.status()
+    });
+    let reached_fork = entered.read_exact(&mut [0]);
+    drop(owner);
+    let next = HostOwnerLease::try_acquire(paths);
+    let released = release.write_all(&[1]);
+    let exited = child.join().unwrap();
+    reached_fork.unwrap();
+    released.unwrap();
+    assert!(exited.unwrap().success());
+    assert!(
+        next.is_ok(),
+        "a pre-exec child retained retired ownership: {next:?}"
+    );
+}
+
+#[test]
 fn metadata_is_strict_private_and_removed_only_by_its_generation() {
     let root = TempDir::new().unwrap();
     let paths = paths(&root);

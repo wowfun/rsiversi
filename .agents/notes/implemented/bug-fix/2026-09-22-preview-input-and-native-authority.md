@@ -20,7 +20,7 @@ while product closing already uses native window events and Application actions.
 
 ## Decision
 
-The [preview renderer](../../../../apps/web/README.md) checks encoded image
+The [preview renderer](../../../../apps/web/docs/renderers.md) checks encoded image
 headers before assigning supplied images to a browser decoder, including raster
 signatures disguised by non-image MIME labels. Markup data image/font references
 join the same admitted resource package; response CSP excludes raw data images.

@@ -6,7 +6,10 @@ use std::{
 
 #[test]
 fn plugin_download_uses_the_cli_runtime_and_reports_http_failure_without_panicking() {
-    let fixture = tempfile::tempdir().unwrap();
+    let fixture = tempfile::tempdir_in(rsi_workspace_path::canonical_native_path(
+        std::env::temp_dir().canonicalize().unwrap(),
+    ))
+    .unwrap();
     let config = fixture.path().join("config");
     let state = fixture.path().join("state");
     let cache = fixture.path().join("cache");

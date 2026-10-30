@@ -1,0 +1,545 @@
+:global(.pane-heading):where(.scope, .scope *) {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+}
+:global(.pane-name):where(.scope, .scope *) {
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+:global(.pane-session):where(.scope, .scope *) {
+  margin: 0;
+  padding: 6px 8px;
+  color: var(--muted);
+  font-size: 11px;
+  overflow-wrap: anywhere;
+  white-space: normal;
+}
+:global(.message):where(.scope, .scope *) {
+  overflow-wrap: anywhere;
+}
+:global(.message-text):where(.scope, .scope *) {
+  white-space: pre-wrap;
+  margin: 0;
+  overflow-wrap: anywhere;
+}
+:global(.message-text.markdown):where(.scope, .scope *) {
+  white-space: normal;
+}
+:global(.message.user .message-title):where(.scope, .scope *) {
+  color: var(--muted);
+}
+:global(.message.tool .message-text):where(.scope, .scope *) {
+  font:
+    0.73rem/1.6 Consolas,
+    "Liberation Mono",
+    monospace;
+}
+:global(.message.reasoning .message-text):where(.scope, .scope *) {
+  color: var(--muted);
+  font-size: 0.8rem;
+}
+:global(.message.metadata .message-title):where(.scope, .scope *) {
+  font-weight: 400;
+  margin: 0;
+}
+:global(.omitted):where(.scope, .scope *) {
+  font-size: 0.74rem;
+  color: var(--warning);
+  padding: 9px 0;
+}
+:global(.pending):where(.scope, .scope *) {
+  display: flex;
+  flex-direction: column;
+  gap: 5px;
+  padding: 0 18px;
+  max-height: 150px;
+  overflow: auto;
+}
+:global(.pending:empty):where(.scope, .scope *) {
+  display: none;
+}
+:global(.pending button):where(.scope, .scope *) {
+  background: var(--warning-bg);
+  border-color: var(--line);
+  color: var(--warning);
+  text-align: left;
+  font-size: 0.78rem;
+  overflow-wrap: anywhere;
+}
+:global(.composer-bar):where(.scope, .scope *) {
+  justify-content: space-between;
+}
+:global(.composer select):where(.scope, .scope *) {
+  max-width: 45%;
+  font-size: 0.69rem;
+  border-color: transparent;
+  padding: 5px;
+}
+:global(.pane-notice):where(.scope, .scope *) {
+  font-size: 0.73rem;
+  color: var(--warning);
+  padding: 0 18px;
+  max-height: 60px;
+  overflow: auto;
+}
+:global(.session-commands):where(.scope, .scope *) {
+  padding: 0 18px;
+  max-height: 180px;
+  overflow: auto;
+  font-size: 0.72rem;
+  flex-shrink: 0;
+}
+:global(.session-commands button):where(.scope, .scope *) {
+  font-size: 0.72rem;
+  margin: 4px 8px 4px 0;
+}
+:global(.command-description):where(.scope, .scope *) {
+  color: var(--muted);
+  overflow-wrap: anywhere;
+}
+:global(.command-receipt):where(.scope, .scope *) {
+  color: var(--muted);
+  overflow-wrap: anywhere;
+}
+@media (max-width: 1120px) {
+  :global(.pane-header):where(.scope, .scope *) {
+    padding: 16px 14px;
+  }
+  :global(.transcript):where(.scope, .scope *) {
+    padding: 20px 14px;
+  }
+  :global(.composer):where(.scope, .scope *) {
+    margin: 10px;
+  }
+  :global(.composer-bar):where(.scope, .scope *) {
+    flex-wrap: wrap;
+  }
+  :global(.composer select):where(.scope, .scope *) {
+    max-width: 100%;
+  }
+  :global(.composer-bar .actions):where(.scope, .scope *) {
+    margin-left: auto;
+  }
+}
+@media (max-width: 850px) {
+  :global(.pane):where(.scope, .scope *) {
+    width: 100%;
+  }
+  :global(.pane:not(.selected)):where(.scope, .scope *) {
+    display: none;
+  }
+}
+:global(.session-extensions summary):where(.scope, .scope *) {
+  cursor: pointer;
+}
+:global(.extension-value):where(.scope, .scope *) {
+  margin-top: 12px;
+}
+:global(.extension-value pre):where(.scope, .scope *) {
+  margin: 6px 0;
+  white-space: pre-wrap;
+  overflow-wrap: anywhere;
+}
+:global(.extension-error):where(.scope, .scope *) {
+  color: var(--error);
+}
+:global(.draft-references):where(.scope, .scope *) {
+  display: grid;
+  gap: 0.4rem;
+  margin-block: 0.5rem;
+}
+:global(.reference-row):where(.scope, .scope *) {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 0.4rem;
+  padding: 0.5rem;
+  border: 1px solid var(--line);
+  border-radius: 0.4rem;
+}
+:global(.reference-origin):where(.scope, .scope *) {
+  overflow-wrap: anywhere;
+  flex: 1 1 16rem;
+}
+:global(.reference-dialog input):where(.scope, .scope *),
+:global(.reference-dialog select):where(.scope, .scope *) {
+  box-sizing: border-box;
+  width: 100%;
+  margin-block: 0.4rem;
+}
+:global(.reference-preview-content pre):where(.scope, .scope *) {
+  white-space: pre-wrap;
+  overflow-wrap: anywhere;
+  max-height: 45vh;
+  overflow: auto;
+}
+:global(.reference-preview-content button):where(.scope, .scope *) {
+  margin: 0.25rem 0.5rem 0.25rem 0;
+}
+:global(.file-picker-dialog input):where(.scope, .scope *) {
+  box-sizing: border-box;
+  width: 100%;
+  margin-block: 0.4rem;
+}
+:global(.file-picker-content pre):where(.scope, .scope *) {
+  white-space: pre-wrap;
+  overflow-wrap: anywhere;
+  max-height: 40vh;
+  overflow: auto;
+}
+:global(.file-choice-list):where(.scope, .scope *) {
+  display: grid;
+  gap: 0.25rem;
+  margin-block: 0.5rem;
+}
+:global(.file-choice-list button):where(.scope, .scope *) {
+  text-align: start;
+  overflow-wrap: anywhere;
+}
+:global(.file-picker-content > button):where(.scope, .scope *) {
+  margin: 0.25rem 0.5rem 0.25rem 0;
+}
+:global(.inline-card):where(.scope, .scope *) {
+  min-width: 0;
+  margin-block: 12px;
+  padding: 12px;
+  border: 1px solid var(--teal);
+  border-radius: 6px;
+}
+:global(.inline-card[hidden]):where(.scope, .scope *) {
+  display: none;
+}
+:global(.inline-card .ui-text):where(.scope, .scope *) {
+  max-height: 24rem;
+  overflow: auto;
+  white-space: pre-wrap;
+  overflow-wrap: anywhere;
+  font-size: 0.8rem;
+}
+:global(.draft-images):where(.scope, .scope *) {
+  max-height: 9rem;
+  overflow: auto;
+}
+:global(.draft-image):where(.scope, .scope *) {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 4px;
+  padding: 5px 12px;
+  font-size: 0.75rem;
+}
+:global(.draft-image > span):where(.scope, .scope *) {
+  width: 100%;
+}
+:global(.draft-image button):where(.scope, .scope *) {
+  font-size: 0.7rem;
+  padding: 3px 6px;
+}
+:global(.draft-status):where(.scope, .scope *) {
+  padding: 0 12px;
+  min-height: 1.5rem;
+  max-height: 9rem;
+  overflow: auto;
+  font-size: 0.75rem;
+  overflow-wrap: anywhere;
+}
+:global(.draft-status > .hint):where(.scope, .scope *) {
+  margin: 0;
+  line-height: 1.5rem;
+}
+:global(.draft-status button):where(.scope, .scope *) {
+  margin: 0 5px 8px 0;
+  font-size: 0.72rem;
+}
+:global(.draft-recovery):where(.scope, .scope *) {
+  flex-shrink: 0;
+  max-height: 30vh;
+  overflow: auto;
+  margin: 0 18px;
+  padding: 10px;
+  border: 1px solid var(--teal);
+  border-radius: 6px;
+}
+:global(.saved-draft):where(.scope, .scope *) {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 6px;
+  padding: 9px 0;
+  border-top: 1px solid var(--line);
+  font-size: 0.75rem;
+}
+:global(.saved-draft > span):where(.scope, .scope *) {
+  width: 100%;
+  overflow-wrap: anywhere;
+}
+:global(.saved-draft button):where(.scope, .scope *) {
+  font-size: 0.7rem;
+}
+:global(.saved-draft textarea):where(.scope, .scope *) {
+  width: 100%;
+  max-height: 12rem;
+  font-size: 0.75rem;
+}
+:global(.frozen-images:not(:empty)):where(.scope, .scope *) {
+  padding: 0 12px;
+}
+:global(.input-completions):where(.scope, .scope *) {
+  border-bottom: 1px solid var(--line);
+  padding: 8px;
+}
+:global(.completion-options):where(.scope, .scope *) {
+  max-height: 26vh;
+  overflow: auto;
+}
+:global(.completion-group):where(.scope, .scope *) {
+  padding: 7px 8px 4px;
+  font-size: 0.7rem;
+  font-weight: 700;
+  color: var(--muted);
+}
+:global(.completion-option):where(.scope, .scope *) {
+  display: flex;
+  align-items: baseline;
+  gap: 12px;
+  width: 100%;
+  text-align: left;
+  border: 0;
+  padding: 7px 9px;
+  background: transparent;
+}
+:global(.completion-option[aria-selected="true"]):where(.scope, .scope *) {
+  background: var(--blue);
+  box-shadow: inset 3px 0 var(--teal);
+}
+:global(.completion-description):where(.scope, .scope *) {
+  color: var(--muted);
+  font-size: 0.75rem;
+  overflow-wrap: anywhere;
+  min-width: 0;
+}
+:global(.completion-tools):where(.scope, .scope *) {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  flex-wrap: wrap;
+  border-top: 1px solid var(--line);
+  padding: 6px 2px 0;
+}
+:global(.completion-tools .hint):where(.scope, .scope *) {
+  flex: 1;
+}
+:global(.input-resource-preview):where(.scope, .scope *) {
+  padding: 10px 14px;
+  border-bottom: 1px solid var(--line);
+}
+:global(.resource-preview-title):where(.scope, .scope *) {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 10px;
+}
+:global(.resource-preview-text):where(.scope, .scope *) {
+  max-height: 28vh;
+  overflow: auto;
+  white-space: pre-wrap;
+  overflow-wrap: anywhere;
+  font-size: 0.78rem;
+}
+:global(.history-dialog):where(.scope, .scope *) {
+  width: min(52rem, calc(100vw - 2rem));
+}
+:global(.history-dialog > input):where(.scope, .scope *),
+:global(.history-dialog > select):where(.scope, .scope *),
+:global(.history-results textarea):where(.scope, .scope *) {
+  width: 100%;
+  min-width: 0;
+  box-sizing: border-box;
+  margin-block: 0.3rem;
+}
+:global(.history-results):where(.scope, .scope *) {
+  min-width: 0;
+}
+:global(.history-results pre):where(.scope, .scope *) {
+  white-space: pre-wrap;
+  overflow-wrap: anywhere;
+}
+:global(.history-results textarea):where(.scope, .scope *) {
+  resize: none;
+}
+:global(.projection-coordinates):where(.scope, .scope *) {
+  margin-block: 0.5rem;
+  padding: 0.6rem;
+  border: 1px solid var(--line);
+  border-radius: 0.5rem;
+}
+:global(.projection-coordinates summary):where(.scope, .scope *) {
+  cursor: pointer;
+}
+:global(.projection-coordinates pre):where(.scope, .scope *) {
+  white-space: pre-wrap;
+  overflow-wrap: anywhere;
+  font-size: 0.8rem;
+}
+:global(.external-status):where(.scope, .scope *) {
+  font-size: 11px;
+  padding: 7px 10px;
+  border-left: 3px solid var(--teal);
+  background: var(--blue);
+  overflow-wrap: anywhere;
+}
+:global(.external-status[data-connected="false"]):where(.scope, .scope *) {
+  border-color: var(--muted);
+  background: var(--mist);
+}
+:global(.external-permission:focus):where(.scope, .scope *) {
+  outline: 2px solid var(--teal);
+  outline-offset: 2px;
+}
+:global(.external-controls):where(.scope, .scope *) {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 5px;
+  padding: 0 24px 12px;
+  flex-shrink: 0;
+}
+:global(.external-controls button):where(.scope, .scope *) {
+  font-size: 11px;
+}
+:global(.external-permissions):where(.scope, .scope *) {
+  max-height: 28vh;
+  overflow: auto;
+  flex-shrink: 0;
+}
+:global(.external-permission):where(.scope, .scope *) {
+  margin: 0 24px 12px;
+  padding: 12px;
+  border: 1px solid var(--teal);
+  border-radius: 8px;
+  background: var(--blue);
+}
+:global(.external-permission h3):where(.scope, .scope *) {
+  font-size: 12px;
+  margin: 0 0 8px;
+}
+:global(.external-permission .actions):where(.scope, .scope *) {
+  flex-wrap: wrap;
+}
+:global(.external-transcript):where(.scope, .scope *) {
+  flex: 1;
+  min-height: 80px;
+  overflow: auto;
+}
+:global(.external-record):where(.scope, .scope *) {
+  padding: 14px 0;
+  border-bottom: 1px solid var(--line);
+}
+:global(.external-record-label):where(.scope, .scope *) {
+  font-size: 11px;
+  font-weight: 600;
+  color: var(--muted);
+}
+:global(.external-record pre):where(.scope, .scope *),
+:global(.external-source pre):where(.scope, .scope *) {
+  white-space: pre-wrap;
+  overflow-wrap: anywhere;
+  font: 13px/1.6 inherit;
+  margin: 8px 0;
+}
+:global(.external-record button):where(.scope, .scope *) {
+  font-size: 10px;
+}
+:global(.external-source):where(.scope, .scope *) {
+  margin: 0 24px;
+  max-height: 28vh;
+  overflow: auto;
+  border-top: 1px solid var(--line);
+}
+:global(.external-source h3):where(.scope, .scope *) {
+  font-size: 12px;
+}
+:global(.external-composer):where(.scope, .scope *) {
+  flex-shrink: 0;
+}
+:global(.external-composer textarea):where(.scope, .scope *) {
+  width: 100%;
+  max-height: 25vh;
+}
+:global(.external-pane > .settings-error):where(.scope, .scope *) {
+  margin: 8px 24px;
+  font-size: 12px;
+  overflow-wrap: anywhere;
+}
+@media (max-width: 540px) {
+  :global(.external-controls):where(.scope, .scope *) {
+    padding: 0 14px 8px;
+  }
+  :global(.external-permission):where(.scope, .scope *) {
+    margin: 0 14px 8px;
+  }
+  :global(.external-source):where(.scope, .scope *) {
+    margin: 0 14px;
+  }
+}
+:global(.queue-heading):where(.scope, .scope *) {
+  display: block;
+  margin-bottom: 4px;
+  font-size: 12px;
+}
+:global(.queue-row):where(.scope, .scope *) {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  padding: 4px 0;
+}
+:global(.queue-summary):where(.scope, .scope *) {
+  flex: 1;
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  font-size: 12px;
+  color: var(--muted);
+}
+:global(.queue-row button):where(.scope, .scope *) {
+  white-space: nowrap;
+}
+:global(.queue-editor):where(.scope, .scope *) {
+  width: min(680px, calc(100vw - 32px));
+  max-height: 85vh;
+  padding: 24px;
+  color: var(--ink);
+  background: var(--paper);
+  border: 1px solid var(--line);
+  border-radius: var(--radius-panel);
+}
+:global(.queue-editor):where(.scope, .scope *)::backdrop {
+  background: rgb(0 0 0 / 40%);
+}
+:global(.queue-fields):where(.scope, .scope *) {
+  display: grid;
+  gap: 16px;
+  margin-top: 16px;
+}
+:global(.queue-field label):where(.scope, .scope *) {
+  display: grid;
+  gap: 6px;
+}
+:global(.queue-text):where(.scope, .scope *) {
+  width: 100%;
+  min-height: 100px;
+  padding: 10px;
+  resize: none;
+  font: inherit;
+  color: inherit;
+  background: var(--secondary-surface);
+  border: 1px solid var(--line);
+  border-radius: var(--radius-control);
+}
+:global(.queue-editor-actions):where(.scope, .scope *) {
+  display: flex;
+  gap: 8px;
+  justify-content: flex-end;
+  margin-top: 16px;
+}

@@ -134,7 +134,8 @@ async function startProvider(onRequest) {
     async close() { const closed = new Promise(resolve => server.close(resolve)); for (const socket of sockets) socket.destroy(); await closed; } };
 }
 
-export async function startService({ binary, assets, report, configure, onRequest, deepseekKey, watchAssets = false, developmentHttp = false }) {
+export async function startService({ binary, assets, report, configure, onRequest, deepseekKey, watchAssets = false, developmentHttp = false, embedded = false }) {
+  assert(!(embedded && watchAssets), "embedded fixture uses an explicit application Profile");
   const temporary = await mkdtemp(join(tmpdir(), "rsi-web-"));
   const provider = await startProvider(onRequest);
   let child; let stopped; let hostStarted = false;
@@ -142,7 +143,13 @@ export async function startService({ binary, assets, report, configure, onReques
   const workspace = join(temporary, "workspace");
   const inherited = Object.fromEntries(["PATH", "LANG", "RUSTUP_HOME", "CARGO_HOME"].filter(key => process.env[key]).map(key => [key, process.env[key]]));
   const env = { ...inherited, HOME: join(temporary, "home"), XDG_CONFIG_HOME: join(temporary, "config"), XDG_STATE_HOME: join(temporary, "state"), XDG_CACHE_HOME: join(temporary, "cache"), XDG_RUNTIME_DIR: join(temporary, "runtime"), DBUS_SESSION_BUS_ADDRESS: `unix:path=${temporary}/absent-session-bus`, RSI_OPENAI_COMPATIBLE_API_KEY: "isolated-fixture-secret" };
-  const run = (args, {input} = {}) => boundedRun(binary, args, { cwd: workspace, env, encoding: "utf8", timeout: 30_000, input });
+  const run = (args, {input} = {}) => {
+    if (embedded) {
+      assert.equal(args[0], "run", "embedder supports explicit Profile invocations");
+      args = ["--profile", ...args.slice(1)];
+    }
+    return boundedRun(binary, args, { cwd: workspace, env, encoding: "utf8", timeout: 30_000, input });
+  };
   // Only the explicitly invoked live fixture supplies this value. Default tests
   // remain keyless even when the developer's process has a real provider key.
   if (deepseekKey !== undefined) {
@@ -152,7 +159,7 @@ export async function startService({ binary, assets, report, configure, onReques
   async function stopProcess() {
     let failure;
     try { if (child && child.exitCode === null) {
-      child.kill("SIGTERM");
+      child.kill(watchAssets && process.platform !== 'win32' ? "SIGINT" : "SIGTERM");
       let result;
       try { result = await deadline(stopped, "service stop", 20_000); }
       catch { child.kill("SIGKILL"); await stopped; throw new Error("Service exceeded clean shutdown deadline"); }
@@ -210,7 +217,9 @@ export async function startService({ binary, assets, report, configure, onReques
     await writeFile(join(config, "rsi.toml"), "format = 1\n[service]\nkind = 'catalog'\nid = 'fixture'\n");
     await writeFile(join(config, "settings.json"), JSON.stringify({ "rsi.agent": { default_model: { deployment: "fixture", model: "fixture-model" } } }));
     await writeFile(join(host, "host.profile.toml"), `format = 1\n[[steps]]\nkind = "plugin"\nid = "provider"\nplugin = "rsi.ai.provider.openai-compatible"\n[steps.config]\ndeployment = "fixture"\nendpoint = "${provider.origin}"\npath = "/v1/chat/completions"\nallow_image_input = true\ncredential = { owner = "rsi.ai.provider.openai-compatible", slot = "default" }\n[steps.config.language_models.fixture-model]\ncontext_window_tokens = 128000\ndefault_output_reserve_tokens = 4096\nmax_output_reserve_tokens = 16384\n[steps.config.reasoning_efforts.fixture-model]\nsupported = ["low", "high"]\ndefault = "low"\n`);
-    await writeFile(join(application, "application.profile.toml"), `format = 1\n[[steps]]\nkind = "plugin"\nid = "service"\nplugin = "rsi.application.service"\nconfig = { host_profile = "fixture" }\n[[steps]]\nkind = "plugin"\nid = "http"\nplugin = "rsi.application.serve"\n`);
+    const assetStep = embedded ? `[[steps]]\nkind = "plugin"\nid = "assets"\nplugin = "rsi.web.assets"\nconfig = { directory = ${JSON.stringify(assets)} }\n` : "";
+    const servePlugin = embedded ? "fixture.browser.serve" : "rsi.application.serve";
+    await writeFile(join(application, "application.profile.toml"), `format = 1\n[[steps]]\nkind = "plugin"\nid = "service"\nplugin = "rsi.application.service"\nconfig = { host_profile = "fixture" }\n${assetStep}[[steps]]\nkind = "plugin"\nid = "http"\nplugin = "${servePlugin}"\n`);
     await configure?.({ config, workspace, run, provider });
     const certificate = join(temporary, "certificate.pem"); const key = join(temporary, "key.pem");
     if (!developmentHttp) boundedRun("openssl", ["req", "-x509", "-newkey", "rsa:2048", "-nodes", "-days", "1", "-subj", "/CN=localhost", "-addext", "subjectAltName=IP:127.0.0.1,DNS:localhost", "-keyout", key, "-out", certificate]);
@@ -220,14 +229,14 @@ export async function startService({ binary, assets, report, configure, onReques
     await new Promise(resolve => reservation.close(resolve));
     if (watchAssets) {
       const directory = dirname(assets), output = join(directory, "web-package");
-      const inputs = ['standard.js','lazy.js','ui-renderers.json'].map(name => `${basename(assets)}/${name}`);
+      const inputs = ['standard.js','file-preview.js','ui-renderers.json'].map(name => `${basename(assets)}/${name}`);
       await writeFile(join(config, "rsi.toml"), `${await readFile(join(config, "rsi.toml"), "utf8")}\n[sources.web]\ndirectory = ${JSON.stringify(directory)}\ncommand = ${JSON.stringify([process.execPath, join(import.meta.dirname, "source-package.mjs"), assets, output])}\ninputs = ${JSON.stringify(inputs)}\noutput = "web-package/package.json"\n`);
     }
     const startProcess = async () => {
-    hostStarted = true;
+    hostStarted = !embedded;
     const argumentsValue = watchAssets
       ? ["--watch", "web", "--port", "0", "--no-open"]
-      : ["run", "browser-fixture", "--assets", assets, "--bind", address, "--origin", origin, ...(developmentHttp ? ['--dev-http'] : ["--tls-certificate", certificate, "--tls-key", key])];
+      : [embedded ? "--profile" : "run", "browser-fixture", ...(embedded ? [] : ["--assets", assets]), "--bind", address, "--origin", origin, ...(developmentHttp ? ['--dev-http'] : ["--tls-certificate", certificate, "--tls-key", key])];
     child = spawn(binary, argumentsValue, { cwd: workspace, env, stdio: ["ignore", "pipe", "pipe"] });
     stopped = once(child, "exit");
     child.stderr.on("data", chunk => { stderr += chunk.toString(); if (stderr.length > 1024 * 1024) { stderr = stderr.slice(0, 1024 * 1024); child.kill("SIGTERM"); } });

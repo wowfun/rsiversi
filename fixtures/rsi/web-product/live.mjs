@@ -1,3 +1,6 @@
+import {openSettings} from './controls.mjs';
+import {disconnect} from './controls.mjs';
+import {addWorkspace,addModelProvider} from './controls.mjs';
 import {detailMode} from './controls.mjs';
 import './paired-env.mjs';
 // Explicit opt-in only: no key is read by the deterministic suite.
@@ -32,23 +35,11 @@ try {
   });
   await page.goto(service.origin);await page.getByLabel('Device registration receipt').fill(JSON.stringify(service.register('isolated live GUI')));
   await page.getByRole('button',{name:'Connect',exact:true}).click();await page.locator('#workbench').waitFor({state:'visible'});
-  await page.locator('.workspace-add summary').click();await page.getByLabel('Server directory').fill(service.workspace);
-  await page.locator('#workspace-form').getByRole('button',{name:'Add workspace',exact:true}).click();
-  await page.getByRole('button',{name:'Settings',exact:true}).click();
-  await page.getByRole('button',{name:'Check credential',exact:true}).click();
-  await page.locator('.credential-status').getByText('configured',{exact:true}).waitFor();
-  await page.waitForFunction(()=>!document.querySelector('input[aria-label="API key"]').disabled);
-  assert(await page.getByRole('button',{name:'Save credential',exact:true}).isEnabled());
-  await page.getByLabel('Deployment name').fill('live-deepseek');await page.getByLabel('Provider endpoint').fill('https://api.deepseek.com');
-  await page.getByLabel('DeepSeek protocol').selectOption('chat-completions');await page.getByLabel('Model identifier 1',{exact:true}).fill(process.env.RSI_LIVE_MODEL);
-  await page.getByText('Context and output limits',{exact:true}).click();
-  for(const [field,value] of Object.entries(limits)) await page.getByLabel(`${field} 1`,{exact:true}).fill(String(value));
-  await page.getByRole('button',{name:'Apply provider',exact:true}).click();await page.getByText('Desired 1 · Applied 1',{exact:true}).waitFor();
-  await page.getByLabel('Default model',{exact:true}).selectOption({label:`${process.env.RSI_LIVE_MODEL} · live-deepseek`});
-  await page.getByText('default_model · confirmed',{exact:true}).waitFor();
-  // The receipt is published before the remaining setup readback finishes.
-  await page.waitForFunction(()=>!document.querySelector('select[aria-label="Default model"]').disabled);
-  await page.getByRole('button',{name:'Close settings',exact:true}).click();await page.locator('#workspaces [data-testid=workspace-open]').click();
+  await addWorkspace(page,service.workspace);
+  await openSettings(page);
+  await page.getByRole('button',{name:'Models',exact:true}).click();
+  await addModelProvider(page,{id:'live-deepseek',endpoint:'https://api.deepseek.com',provider:'deepseek',model:process.env.RSI_LIVE_MODEL,limits});
+  await page.getByRole('button',{name:'Close settings',exact:true}).click();await page.getByRole('button',{name:'New conversation in workspace',exact:true}).click();
   await detailMode(page,'verbose');
   const input=page.getByLabel('Main message',{exact:true});
   await input.fill('This is an isolated GUI integration test. Use the available bash tool to write exactly 12 UTF-8 bytes: "rsi-live-ok" followed by one LF newline to milestone.txt in the current workspace, then use bash to read that file back. Do not modify any other file. Reply LIVE_GUI_VERIFIED only after the tool has read the file successfully.');
@@ -73,7 +64,7 @@ try {
   await page.screenshot({path:join(report,'live-conversation.png'),fullPage:true});
   await writeFile(join(report,'transcript.txt'),transcript);
   await assertNoNotices(page);
-  await page.locator('#sign-out').click();await page.locator('#login').waitFor({state:'visible'});assert.deepEqual(errors,[]);
+  await disconnect(page);await page.locator('#login').waitFor({state:'visible'});assert.deepEqual(errors,[]);
   await writeFile(join(report,'result.json'),JSON.stringify({ok:true,browser:browserName,version:browser.version(),model:process.env.RSI_LIVE_MODEL,limits,protocol:'chat-completions',elapsed_ms:Date.now()-started,approvals,file_bytes:bytes.length,file_text:bytes.toString(),mock_requests:0,clean_sign_out:true},null,2));
 } catch(error) {
   if(page) {await page.screenshot({path:join(report,'failure.png'),fullPage:true}).catch(()=>{});await writeFile(join(report,'failure.txt'),String(error).replaceAll(key,'[REDACTED]'));await writeFile(join(report,'failure-network.json'),JSON.stringify({errors,networkFailures,omittedNetworkFailures},null,2).replaceAll(key,'[REDACTED]'));}

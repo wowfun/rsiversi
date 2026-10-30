@@ -314,14 +314,13 @@ async fn completed_receipts_cross_the_document_boundary_as_exact_json_strings() 
 }
 
 #[tokio::test]
-async fn crafted_frozen_messages_cannot_change_sandbox_or_delivery_policy() {
+async fn crafted_frozen_messages_reject_invalid_sandbox_or_delivery_policy() {
     let (runtime, backend, app, generation) = fixture().await;
     let prepared = prepare(&app, &generation, "bounded input", vec![], false).await;
     let source: serde_json::Value =
         serde_json::from_str(prepared["opaque"].as_str().unwrap()).unwrap();
     let mut sandbox = source.clone();
-    sandbox["request"]["input"]["sandbox"] =
-        serde_json::to_value(rsi_sandbox::SandboxMode::DangerFullAccess).unwrap();
+    sandbox["request"]["input"]["sandbox"] = json!("unrestricted");
     let mut steer_model = source.clone();
     steer_model["request"]["input"]["delivery"] = json!("steer");
     steer_model["request"]["input"]["model"] = json!({"deployment":"test","model":"model"});
@@ -383,6 +382,43 @@ async fn crafted_frozen_messages_cannot_change_sandbox_or_delivery_policy() {
     }
     assert_eq!(backend.requests.lock().unwrap().len(), 2);
     assert!(runtime.shutdown().await.is_clean());
+}
+
+#[tokio::test]
+async fn composer_freezes_access_for_next_turn_and_rejects_steer_override() {
+    for mode in ["read-only", "workspace-write", "danger-full-access"] {
+        let (runtime, backend, app, generation) = fixture().await;
+        backend.resolution.store(2, Ordering::SeqCst);
+        let frame: serde_json::Value =
+            serde_json::from_slice(app.next_frame(None).unwrap().as_bytes()).unwrap();
+        app.acknowledge_frame(frame["frame_id"].as_str().unwrap())
+            .unwrap();
+        let input = json!({"pane":"main","generation":generation,"text":"access test","sandbox":mode,"action":"queue","action_revision":frame["view"]["composer_actions"]["main"]["revision"]});
+        let prepared: serde_json::Value =
+            serde_json::from_str(&app.prepare_submission(&input.to_string()).await.unwrap())
+                .unwrap();
+        let frozen: serde_json::Value =
+            serde_json::from_str(prepared["opaque"].as_str().unwrap()).unwrap();
+        assert_eq!(frozen["request"]["input"]["sandbox"], mode);
+        assert_eq!(
+            dispatch(&app, &generation, &prepared, "dispatch").await["status"],
+            "complete"
+        );
+        assert_eq!(
+            serde_json::to_value(backend.requests.lock().unwrap()[0].sandbox).unwrap(),
+            mode
+        );
+        let mut crafted = frozen;
+        crafted["request"]["input"]["delivery"] = json!("steer");
+        let mut invalid = prepared;
+        invalid["opaque"] = json!(crafted.to_string());
+        assert_eq!(
+            dispatch(&app, &generation, &invalid, "dispatch").await["status"],
+            "not_admitted"
+        );
+        assert_eq!(backend.requests.lock().unwrap().len(), 1);
+        assert!(runtime.shutdown().await.is_clean());
+    }
 }
 
 #[derive(Debug)]
@@ -486,8 +522,39 @@ async fn terminal_refusals_and_detach_retry_preserve_exact_ownership() {
     let detach = request(json!({"type":"detach","attachment":"retained"}));
     assert!(!app.terminal(&detach).await.unwrap_err().no_attachment);
     app.terminal(&detach).await.unwrap();
+    app.terminal(&detach).await.unwrap();
     assert_eq!(*backend.terminal_detaches.lock().unwrap(), vec!["retained"]);
     assert!(runtime.shutdown().await.is_clean());
+}
+
+#[tokio::test]
+async fn terminal_close_allows_late_detach_without_restoring_authority() {
+    for close in [
+        json!({"type":"close","terminal":"closed"}),
+        json!({"type":"close_all"}),
+    ] {
+        let (runtime, backend, app, generation) = fixture().await;
+        let request =
+            |value| json!({"pane":"main","generation":generation,"request":value}).to_string();
+        app.terminal(&request(json!({"type":"attach","terminal":"closed"})))
+            .await
+            .unwrap();
+        app.terminal(&request(close)).await.unwrap();
+        app.terminal(&request(json!({"type":"detach","attachment":"closed"})))
+            .await
+            .unwrap();
+        for command in [
+            json!({"type":"read","attachment":"closed","ack":null}),
+            json!({"type":"write","attachment":"closed","bytes":[13]}),
+            json!({"type":"takeover","attachment":"closed"}),
+            json!({"type":"resize","attachment":"closed","size":{"rows":24,"columns":80}}),
+        ] {
+            let error = app.terminal(&request(command)).await.unwrap_err();
+            assert!(error.to_string().contains("does not belong"), "{error}");
+        }
+        assert!(backend.terminal_detaches.lock().unwrap().is_empty());
+        assert!(runtime.shutdown().await.is_clean());
+    }
 }
 
 #[tokio::test]
@@ -530,6 +597,30 @@ async fn stop_requires_an_acknowledged_exact_active_turn() {
     assert_eq!(
         *backend.cancel.lock().unwrap(),
         vec![CancelTarget::Turn(turn)]
+    );
+    assert!(runtime.shutdown().await.is_clean());
+}
+
+#[tokio::test]
+async fn new_conversation_keeps_surface_usable_after_cleanup_failure() {
+    let (runtime, backend, app, generation) = fixture().await;
+    let session = super::sources::view(&app)["surfaces"]["main"]["session"].clone();
+    app.terminal(&json!({"pane":"main","generation":generation,"request":{"type":"attach","terminal":"old"}}).to_string()).await.unwrap();
+    *backend.terminal_detach_failure.lock().unwrap() = Some(
+        rsi_session_protocol::SessionError::Api(rsi_api_protocol::ApiError::OutcomeUnknown),
+    );
+    assert!(
+        app.command(r#"{"action":"new_conversation","pane":"main"}"#)
+            .await
+            .is_err()
+    );
+    assert!(super::sources::view(&app)["surfaces"]["main"].is_null());
+    app.command(&json!({"action":"open","pane":"main","session":session}).to_string())
+        .await
+        .unwrap();
+    assert_ne!(
+        super::sources::view(&app)["surfaces"]["main"]["generation"],
+        generation
     );
     assert!(runtime.shutdown().await.is_clean());
 }

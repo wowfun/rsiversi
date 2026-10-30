@@ -95,6 +95,8 @@ pub enum Phase {
 #[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct Terminal {
+    /// Actual process policy, independent of the consumer's Agent settings.
+    pub sandbox: rsi_sandbox::SandboxMode,
     /// Opaque live terminal identity.
     pub id: String,
     /// Current character dimensions.

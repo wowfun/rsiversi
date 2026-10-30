@@ -16,7 +16,7 @@ impl SqliteStore {
         let session_id = session_id.clone();
         #[cfg(any(test, feature = "test-support"))]
         let materializations = self.inner.fact_materializations.clone();
-        self.with_reader(move |connection| {
+        self.with_reader_named(super::StoreOperation::FactSuffix, move |connection| {
             let transaction = connection.transaction_with_behavior(TransactionBehavior::Deferred).map_err(sql_error)?;
             let (through, digest) = transaction.query_row(
                 "SELECT durable_seq, CASE WHEN length(CAST(fact_prefix_sha256 AS BLOB)) = 64 THEN fact_prefix_sha256 ELSE '' END FROM (SELECT * FROM sessions WHERE session_id NOT IN (SELECT session_id FROM session_tombstones)) AS sessions WHERE session_id = ?1",

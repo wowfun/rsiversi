@@ -1942,13 +1942,18 @@ pub trait SessionStore: fmt::Debug + Send + Sync + 'static {
     /// Reads bounded immutable metadata without scanning session history.
     async fn header(&self, session_id: &SessionId) -> Result<SessionHeader>;
     /// Reads ordered per-item access projections from one metadata snapshot.
+    /// Returns exactly one result per input identity, in input order, including
+    /// failures and repeated identities; implementations never omit a slot.
     async fn session_access(
         &self,
         sessions: &[SessionId],
-    ) -> Result<Vec<Result<StoreSessionAccess>>> {
-        validate_access_selection(sessions)?;
-        Err(StoreError::Unsupported("Session access batches".into()))
-    }
+    ) -> Result<Vec<Result<StoreSessionAccess>>>;
+    /// Reads ordered validated activity cuts from one durable snapshot.
+    /// The selection contains 1..=64 unique identities; item failures preserve slots.
+    async fn session_activity_cuts(
+        &self,
+        sessions: &[SessionId],
+    ) -> Result<Vec<Result<StoreActivityCut>>>;
 
     /// Reads the complete bounded domain set at the current or explicit control horizon.
     async fn read_domain_states(
@@ -2528,17 +2533,41 @@ impl From<&SessionHeader> for StoreSessionAccess {
 }
 /// Checks batch selection without changing caller order.
 pub fn validate_access_selection(sessions: &[SessionId]) -> Result<()> {
+    validate_unique_selection(sessions, "access", 256)
+}
+
+/// Durable activity for one selected Session at the batch's read snapshot.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct StoreActivityCut {
+    /// Exact selected identity.
+    pub session_id: SessionId,
+    /// Last durable Fact sequence, including zero for an empty Session.
+    pub durable_fact_seq: u64,
+    /// Whether any accepted Turn has no durable terminal Fact.
+    pub has_open_turn: bool,
+}
+
+/// Checks activity-cut admission without changing caller order.
+pub fn validate_activity_cut_selection(sessions: &[SessionId]) -> Result<()> {
+    validate_unique_selection(sessions, "activity-cut", 64)
+}
+
+fn validate_unique_selection(
+    sessions: &[SessionId],
+    operation: &str,
+    maximum: usize,
+) -> Result<()> {
     if sessions.is_empty()
-        || sessions.len() > 256
+        || sessions.len() > maximum
         || sessions
             .iter()
             .collect::<std::collections::BTreeSet<_>>()
             .len()
             != sessions.len()
     {
-        return Err(StoreError::Invalid(
-            "access selection must contain 1..=256 unique Sessions".into(),
-        ));
+        return Err(StoreError::Invalid(format!(
+            "{operation} selection must contain 1..={maximum} unique Sessions"
+        )));
     }
     Ok(())
 }
@@ -2628,6 +2657,32 @@ mod tests {
 
     use super::*;
     use rsi_agent_session_protocol::{AgentMessageContent, MessageOptions};
+
+    #[test]
+    fn batch_selection_errors_identify_the_operation_and_bound() {
+        for (validate, operation, maximum) in [
+            (
+                validate_access_selection as fn(&[SessionId]) -> Result<()>,
+                "access",
+                256,
+            ),
+            (validate_activity_cut_selection, "activity-cut", 64),
+        ] {
+            let sessions: Vec<_> = (0..=maximum)
+                .map(|index| SessionId::new(format!("selection-{index}")).unwrap())
+                .collect();
+            let duplicate = [sessions[0].clone(), sessions[0].clone()];
+            for invalid in [&[][..], &duplicate, &sessions] {
+                assert_eq!(
+                    validate(invalid),
+                    Err(StoreError::Invalid(format!(
+                        "{operation} selection must contain 1..={maximum} unique Sessions"
+                    )))
+                );
+            }
+            assert_eq!(validate(&sessions[..maximum]), Ok(()));
+        }
+    }
 
     fn cancellation_fact(sequence: u64) -> SessionFact {
         SessionFact::new(

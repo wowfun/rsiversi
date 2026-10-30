@@ -1,4 +1,4 @@
-const selector='details.composer-extras,details.delivery-menu,details.conversation-menu,details.session-options,details.source-menu:not(.mode-verbose .source-menu)';
+const selector='details.application-options,details.delivery-menu,details.conversation-menu,details.session-menu,details.navigation-options,details.session-options,details.source-menu:not(.mode-verbose .source-menu)';
 export function closeDisclosure(target, restore=false) {
   const details=target?.closest?.(selector);
   if(!details?.open)return false;

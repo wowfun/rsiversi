@@ -17,17 +17,40 @@ from the checkout root before starting the native application.
 Linux Tauri window under `dbus-run-session -- xvfb-run -a`. It creates isolated
 explicit config/state/cache homes and a launch document selecting its fixture Service, then uses actual WebDriver input to configure
 the deterministic provider, select a model, create a conversation and submit it.
-Button clicks relocate only after WebDriver explicitly reports a stale element
+Use a short report path on a native Unix filesystem: the Service Host socket is
+under its isolated state home and must fit the platform's Unix socket path limit.
+CI keeps every evidence root, including each mode in a loop, short enough for
+that derived socket path and uploads those roots after failures.
+Registered settings stay inside the Settings dialog and close with that dialog.
+Button selection requires an enabled, visible control with an unobstructed center
+hit, including when a closed menu retains a same-label descendant's layout box.
+Clicks relocate only after WebDriver explicitly reports a stale element
 before dispatch; ambiguous click failures are never replayed.
 Workflow resource controls must be visible and enabled before dispatch. A
 completed run and a rendered result button can still coexist with a pending
 detail read, which temporarily disables the control.
 Input readiness includes enabled ancestors, visibility, an unobstructed hit point
 and actual focus before any native keystroke. A readiness timeout dispatches none.
+If WebDriver rejects a handle as stale while resolving focus or reading the
+pre-input state, readiness reacquires the current input before dispatch. Other
+errors propagate, and an error from native keystrokes never triggers a replay.
+Directory selection waits for a completed listing or the known-path form; the
+initial empty, non-busy render does not establish browsing readiness.
+The ordinary conversation run also records the composer's native focus state,
+trusted input receipt and computed outline before sending, with a focused
+screenshot. Only trusted input events recorded after that fill began can satisfy
+its receipt; an earlier input with the same length cannot. Its forced-colors media
+state is reported without changing system settings. The ordinary composer has no
+inner outline; forced colors requires the visible keyboard outline.
+WebKit may retain a computed outline width while its style is `none`; the ordinary
+focus check uses the rendered outline style.
 Replacing input uses native select-all/backspace keystrokes and waits for the
 empty value before typing. Nonempty composer replacement also requires a trusted
 deletion input event: WebKit's WebDriver `clear` changes the DOM without updating
 the draft editor through its input listener.
+Value reads resolve the current input after each native gesture, and typing
+acquires focus again after deletion. A rendered replacement must not leave the
+fixture polling an obsolete WebDriver handle; neither gesture is replayed.
 The history scenario resets its isolated workspace index and inspects the selected
 source's coverage before and after discovery. Query/discovery progress does not
 stand in for per-source indexing coverage; the [History API](../../../crates/rsi/history-api/README.md)
@@ -36,8 +59,9 @@ Model selection waits for the completed setup action and the exact deployment's
 enabled option; the earlier provider receipt alone does not finish its readback.
 After scenarios close a dialog, the final composer geometry check waits for the
 closed document view; native click delivery alone does not settle a Rust command.
-Appearance checks wait for the new Settings read to replace the previous dialog's
-theme field before editing; reopening the dialog can temporarily retain old fields.
+Appearance checks use General settings and wait for the current read ticket and
+enabled fields before editing. Saving waits for its replacement ticket; React may
+retain the same field nodes across reads.
 Profile receipt recovery waits for the requested root catalog before opening its
 disclosure, then confirms it is open before selecting a receipt; the old leaf
 catalog can remain visible while the asynchronous read changes the layout.
@@ -113,7 +137,7 @@ This scenario starts after document admission; it does not cover a close request
 before the document installs its listener. That startup interval currently lacks
 a dedicated product fixture.
 `--refresh-during-click` forces a draft input refresh during native mouse down
-on Send. It checks preserved text-node identity, exactly one real click and the
+on Send. It checks preserved glyph/label child identity, exactly one real click and the
 resulting submission; this gates the WebKit draft-save/click interleaving.
 
 `--tasks` additionally drives recorded inline patch evidence, Goal pause/resume/
@@ -161,9 +185,14 @@ and waits for that attachment, so later draft/restart checks use the same Sessio
 Install `fixtures/rsi/acp` dependencies first; this scenario requires Node.
 
 
-`--profiles` exercises Local grants, single-leaf preparation, reviewed source
-publication, and original receipt recovery through the native bridge. Its
-editable user Profile is separate from the running service source.
+`--profiles --profile-probe /absolute/profile-leaf-probe` exercises the managed
+Desktop Device principal, single-leaf preparation, reviewed source publication,
+and original receipt recovery through the shared Worker. It requires denied
+source changes and no Local grant editor before the fixture's Local API probe
+grants that exact Device, leaf and operation. Build the probe from the same source
+checkout with `cargo build --locked -p rsi-cli --example profile-leaf-probe`, then
+pass `target/debug/examples/profile-leaf-probe` as an absolute path.
+Its editable user Profile is separate from the running service source.
 `--attention` exercises exact native question and approval navigation, settlement,
 and removal from Needs attention with a deterministic provider.
 
@@ -230,18 +259,20 @@ WebKitGTK acceptance evidence alongside the other isolated modes.
 
 `--presentation` checks the shared Profile theme/font controls through the native
 Settings bridge, computed text contrast and component geometry, and command-palette
-focus restoration. `--system-theme light|dark` starts the isolated GTK application
+focus restoration. Navigation actions retain their shared 8px corner geometry.
+`--system-theme light|dark` starts the isolated GTK application
 with the corresponding Adwaita palette; the presentation check then requires
 WebKit's system color-scheme query to match that native input. It changes no user
 settings and does not claim native Windows or macOS behavior.
 
-`--queue` uses a held deterministic response to exercise replacement, exact-Turn
-conversion and pending-only withdrawal through the native bridge. It checks one
+`--queue` uses a held deterministic response to exercise replacement and pending-only
+withdrawal through the shared Worker. Inputs freeze their explicit access policy,
+so the fixture requires the steering conversion to be unavailable. It checks one
 current user block, stable slot identity, retained composer text and a surviving
 queued Turn after Stop. This mode is separate from live-provider scenarios.
 
 `--ui-alignment` exercises the native clipboard, real directory creation, and the
-five Web viewport widths with all three theme choices through Settings. Its Xvfb
+seven Web viewport widths with all three theme choices through Settings. Its Xvfb
 screen must be at least 1920 pixels wide; CI provides 2560×1440. Captures are
 manual comparison evidence, not screenshot baselines. `--reload` performs an
 actual WebDriver document refresh, reselects the retained Session, and verifies
@@ -276,7 +307,14 @@ profile edit, including whitespace around an empty steps array, without WebKit.
 owner in the isolated daemon and reads the actual Automation API through the
 paired native bootstrap and Worker. The seed is prepared with the opt-in core
 `automation::prepare_visual_fixture` test and a canonical checker PNG. The
-scenario verifies the fixed failed predicate, screenshot and manual new-attempt
+managed Desktop Device initially sees no attempts. Build the fixture's Local
+grant helper with `cargo build --locked -p rsi-cli --example desktop-automation-grant`
+and pass its absolute path as `--automation-grant-probe`. The scenario reads the
+Device identity from the Profile UI, then the helper uses the isolated Host's
+public UDS Automation API to grant that Device view/cancel/resume for the exact
+`visual` source and rule. It preserves the policy revision check and does not
+edit live policy storage.
+The scenario verifies the fixed failed predicate, screenshot and manual new-attempt
 identity. It uses anonymous nonexistent fixture destinations for the new check;
 its policy-blocked result is separate from the original assertion failure.
 The JSON report derives verdicts and mutation identity from observed native

@@ -34,6 +34,7 @@ pub fn malformed_specs() -> Vec<OperationSpec> {
             ("mutate", OperationEffect::Mutation),
         ] {
             operations.push(OperationSpec {
+                protocol: connection_protocol(),
                 id: OperationId::new("fault", format!("{prefix}-{name}"), 1).unwrap(),
                 class: OperationClass::Data,
                 effect,
@@ -46,6 +47,7 @@ pub fn malformed_specs() -> Vec<OperationSpec> {
     }
     for name in MALFORMED_STREAMS {
         operations.push(OperationSpec {
+            protocol: connection_protocol(),
             id: OperationId::new("fault", name.to_string(), 1).unwrap(),
             class: OperationClass::Subscription,
             effect: OperationEffect::Read,
@@ -72,6 +74,7 @@ pub const NAMES: &[&str] = &[
 pub fn spec(name: &str) -> OperationSpec {
     assert!(NAMES.contains(&name));
     OperationSpec {
+        protocol: connection_protocol(),
         id: OperationId::new("fetch", name, 1).unwrap(),
         class: match name {
             "events" | "idle" => OperationClass::Subscription,

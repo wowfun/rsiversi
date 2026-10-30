@@ -11,7 +11,7 @@ also leaves the client unable to tell whether the decision was received.
 
 Web and TUI show the prepared action and supplied execution evidence with bounded
 argument and raw-request windows. Requested sandbox policy is presentation data,
-not proof that an effect was sandboxed. The [Web contract](../../../../apps/web/README.md)
+not proof that an effect was sandboxed. The [Web contract](../../../../apps/web/docs/presentation.md)
 owns dialog behavior. TUI reads pending state when opening each approval and keeps
 its review until a known decision result. After an uncertain reply the decisions remain disabled;
 Refresh request reads current pending state from the Session owner, without

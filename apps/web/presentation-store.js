@@ -9,7 +9,7 @@ export function presentationKey(endpoint, principal) {
 
 export class PresentationStore {
   constructor(owner) { this.owner = owner; }
-  static async open(key) { return new PresentationStore(await DeviceStore.open(key)); }
+  static async open(key,options) { return new PresentationStore(await DeviceStore.open(key,options)); }
   async load() { return (await this.owner.read('layouts')).value; }
   async apply(intent) { return (await this.owner.apply('layouts', intent)).value; }
   subscribe(callback) { return this.owner.subscribe('layouts', '', callback); }

@@ -49,6 +49,7 @@ mod application_bootstrap;
 pub use application_bootstrap::start_application;
 mod api_composition;
 mod client_composition;
+mod default_workspace;
 #[cfg(any(target_os = "linux", windows))]
 pub use client_composition::{probe_service_host, workflow_restart_impact};
 #[cfg(any(target_os = "linux", windows))]
@@ -155,11 +156,50 @@ const STARTUP_OWNERS: &[&str] = &[
     "rsi.history.api",
     "rsi.attention",
     "rsi.navigation",
+    "rsi.workspace-default",
     "rsi-mcp-api",
     "rsi-workspace-review",
     "rsi.workspace-review.api",
     "automation",
 ];
+
+fn startup_diagnostic(status: &rsi_host::ProfileStatus) -> String {
+    let mut rows = Vec::new();
+    let mut total = 0;
+    for instance in status.observed() {
+        if matches!(instance.state(), rsi_host::ProfileInstanceState::Active) {
+            continue;
+        }
+        total += 1;
+        if rows.len() < 16 {
+            // Profile states contain dependency identities, never configuration or
+            // raw plugin failures. Keep this product diagnostic bounded as well.
+            let state = format!("{:?}", instance.state());
+            let bounded: String = state.chars().take(512).collect();
+            rows.push(format!(
+                "{}={bounded}{}",
+                instance.id(),
+                if bounded.len() < state.len() {
+                    "…"
+                } else {
+                    ""
+                }
+            ));
+        }
+    }
+    if total > rows.len() {
+        rows.push(format!("{} more non-active instances", total - rows.len()));
+    }
+    for &id in STARTUP_OWNERS {
+        if !status.observed().iter().any(|row| row.id().as_str() == id)
+            && (status.health() != rsi_host::ProfileHealth::Converged
+                || status.target().iter().any(|row| row.id().as_str() == id))
+        {
+            rows.push(format!("{id}=not observed"));
+        }
+    }
+    format!("Profile {:?}; {}", status.health(), rows.join("; "))
+}
 
 /// Running standard Host and its application-facing operations.
 #[derive(Debug)]
@@ -334,14 +374,13 @@ impl RunningRsi {
         })
         .await;
         if !matches!(ready, Ok(Ok(()))) {
+            let diagnostic = startup_diagnostic(&changes.borrow());
             let _ = host.shutdown().await;
-            return Err(RsiError::Boot(
-                match ready {
-                    Ok(Err(error)) => error,
-                    _ => "required product startup timed out",
-                }
-                .into(),
-            ));
+            let reason = match ready {
+                Ok(Err(error)) => error,
+                _ => "required product startup timed out",
+            };
+            return Err(RsiError::Boot(format!("{reason}; {diagnostic}")));
         }
         let Some(paths) = host.paths().cloned() else {
             let _outcome = host.shutdown().await;
@@ -567,6 +606,11 @@ fn personal_home(value: Option<std::ffi::OsString>) -> Option<PathBuf> {
     value.map(PathBuf::from).filter(|path| path.is_absolute())
 }
 
+/// Captures the operating system Documents directory without creating it.
+pub fn capture_standard_documents() -> Result<Option<PathBuf>> {
+    Ok(dirs::document_dir().filter(|path| path.is_absolute() && path.to_str().is_some()))
+}
+
 /// Resolves platform locations through the shared installation owner without creating homes.
 pub fn standard_paths() -> Result<HostPaths> {
     rsi_installation::standard_paths().map_err(|error| RsiError::Boot(error.to_string()))
@@ -658,11 +702,20 @@ mod tests {
         }
     }
 
-    #[tokio::test]
+    #[tokio::test(start_paused = true)]
+    #[expect(
+        clippy::too_many_lines,
+        reason = "one boot admission lifecycle for each required owner"
+    )]
     async fn converged_profile_waits_for_enabled_navigation_api_owners() {
         use rsi_host::{HostBuilder, Profile, ProfileEntry, ProfileProgram};
         use std::sync::Arc;
-        for id in ["rsi.attention", "rsi.navigation", "automation"] {
+        for id in [
+            "rsi.attention",
+            "rsi.navigation",
+            "rsi.workspace-default",
+            "automation",
+        ] {
             let temporary = tempfile::tempdir().unwrap();
             let paths = HostPaths::new(
                 temporary.path().join("config"),
@@ -709,7 +762,7 @@ mod tests {
             entries.push(ProfileEntry::new(
                 id,
                 "fixture.pending-api",
-                serde_json::Value::Null,
+                serde_json::json!({"credential": "startup-diagnostic-secret"}),
             ));
             entries.push(ProfileEntry::new(
                 "fixture.session",
@@ -749,7 +802,17 @@ mod tests {
                 futures_util::poll!(&mut boot).is_pending(),
                 "startup must wait for enabled {id}"
             );
-            drop(boot);
+            tokio::time::advance(std::time::Duration::from_secs(30)).await;
+            let error = boot.await.unwrap_err().to_string();
+            assert!(
+                error.contains("required product startup timed out"),
+                "{error}"
+            );
+            assert!(error.contains(id), "{error}");
+            assert!(error.contains("Pending"), "{error}");
+            assert!(error.contains("fixture.startup-gate"), "{error}");
+            assert!(!error.contains("Disposed"), "{error}");
+            assert!(!error.contains("startup-diagnostic-secret"), "{error}");
             assert!(runtime.shutdown().await.is_clean());
         }
     }

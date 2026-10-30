@@ -2,18 +2,35 @@ use super::GuiApplication;
 use crate::application::{Result, error};
 use bytes::Bytes;
 use futures_util::future::BoxFuture;
+use rsi_api_protocol::ByteReservation;
 use rsi_media_protocol::{MediaRef, StoredMedia};
 use serde::Deserialize;
 use std::sync::Arc;
+use tokio::sync::OwnedSemaphorePermit;
 
 pub(crate) const MAXIMUM_IMAGES: usize = 8;
 pub(crate) const MAXIMUM_UPLOAD_BYTES: usize = 16 * 1024 * 1024;
 const MAXIMUM_PREVIEW_OBJECTS: usize = 8;
-const MAXIMUM_PREVIEW_BYTES: usize = 32 * 1024 * 1024;
+pub(crate) const MAXIMUM_PREVIEW_BYTES: usize = 32 * 1024 * 1024;
+pub(crate) const PREVIEW_CONCURRENCY: usize = 2;
 
 pub(crate) fn limits() -> serde_json::Value {
     serde_json::json!({"images":MAXIMUM_IMAGES,"upload_bytes":MAXIMUM_UPLOAD_BYTES,
-        "preview_objects":MAXIMUM_PREVIEW_OBJECTS,"preview_bytes":MAXIMUM_PREVIEW_BYTES})
+        "preview_objects":MAXIMUM_PREVIEW_OBJECTS,"preview_bytes":MAXIMUM_PREVIEW_BYTES,
+        "preview_concurrency":PREVIEW_CONCURRENCY})
+}
+
+// Preserve the original receive/file allocation owner while pinning GUI admission
+// through the final byte clone, including the platform's transfer-buffer copy.
+struct PreviewBody {
+    bytes: Bytes,
+    _bytes: ByteReservation,
+    _read: OwnedSemaphorePermit,
+}
+impl AsRef<[u8]> for PreviewBody {
+    fn as_ref(&self) -> &[u8] {
+        &self.bytes
+    }
 }
 
 #[derive(Deserialize)]
@@ -40,10 +57,10 @@ impl GuiApplication {
             }
             let media = self.media.clone().ok_or("Image import is unavailable")?;
             let work = self
-                .image_work
+                .image_uploads
                 .clone()
                 .try_acquire_owned()
-                .map_err(|_| "An image operation is still in progress")?;
+                .map_err(|_| "An image upload is still in progress")?;
             let attached = self.pane(pane)?.attachment(generation)?;
             Ok((media, work, attached))
         })();
@@ -96,11 +113,6 @@ impl GuiApplication {
             let selection: Preview =
                 serde_json::from_str(source).map_err(|_| "Invalid image selection")?;
             let media = self.media.clone().ok_or("Image preview is unavailable")?;
-            let work = self
-                .image_work
-                .clone()
-                .try_acquire_owned()
-                .map_err(|_| "An image operation is still in progress")?;
             let (reference, stop) = match selection {
                 Preview::Source { ticket } => {
                     let registry = self.details.lock().expect("Web details poisoned");
@@ -121,18 +133,36 @@ impl GuiApplication {
                     (reference, details.stop.clone())
                 }
             };
-            Ok((media, work, reference, stop))
+            let work = self
+                .image_reads
+                .clone()
+                .try_acquire_owned()
+                .map_err(|_| "Image preview reads are busy")?;
+            let length =
+                usize::try_from(reference.bytes).map_err(|_| "Image exceeds the preview budget")?;
+            let bytes = self
+                .image_bytes
+                .reserve(length)
+                .map_err(|_| "Image preview bytes are busy")?;
+            Ok((media, work, bytes, reference, stop))
         })();
-        let (media, work, reference, stop) = match admitted {
+        let (media, work, bytes, reference, stop) = match admitted {
             Ok(value) => value,
             Err(error) => return Box::pin(async { Err(error) }),
         };
         self.admit(false, None, move |_| async move {
-            let _work = work;
-            tokio::select! { biased;
+            let stored = tokio::select! { biased;
                 () = stop.cancelled() => Err("Image preview closed".into()),
                 result = media.read(&reference) => result.map_err(error),
-            }
+            }?;
+            Ok(StoredMedia {
+                reference: stored.reference,
+                bytes: Bytes::from_owner(PreviewBody {
+                    bytes: stored.bytes,
+                    _bytes: bytes,
+                    _read: work,
+                }),
+            })
         })
     }
 }

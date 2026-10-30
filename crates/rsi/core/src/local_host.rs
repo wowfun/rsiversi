@@ -220,12 +220,15 @@ pub async fn connect_or_embed_service_host(
     if composition.host_launcher.is_some() {
         return connect_resident_service_host(parent, composition).await;
     }
-    let preview = composition.preview_host(host_profile)?;
-    let launch_key = preview.launch_key.as_str().to_owned();
+    let launch_key = composition
+        .host_launch_key(host_profile)?
+        .as_str()
+        .to_owned();
     let paths = ServiceHostPaths::from_host_paths(composition.paths()).map_err(host_error)?;
     connect_local_service_host(parent, composition, host_profile, launch_key, paths).await
 }
 
+#[cfg_attr(not(any(target_os = "linux", windows)), allow(clippy::unused_async))] // Unsupported platforms preserve the asynchronous connection interface.
 pub(crate) async fn connect_resident_service_host(
     parent: &rsi_meta::Context,
     composition: StandardComposition,
@@ -498,8 +501,10 @@ impl StandardServiceDaemon {
         owner_lease: HostOwnerLease,
         parent: Option<&rsi_meta::Context>,
     ) -> crate::Result<Self> {
-        let preview = composition.preview_host(host_profile)?;
-        let launch_key = preview.launch_key.as_str().to_owned();
+        let launch_key = composition
+            .host_launch_key(host_profile)?
+            .as_str()
+            .to_owned();
         let paths = ServiceHostPaths::from_host_paths(composition.paths()).map_err(host_error)?;
         if owner_lease.paths() != &paths {
             return Err(RsiError::Boot(

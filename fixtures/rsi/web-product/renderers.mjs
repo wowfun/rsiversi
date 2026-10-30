@@ -1,3 +1,5 @@
+import {disconnect} from './controls.mjs';
+import {workspaceForm} from './controls.mjs';
 import {closeDetails} from "./controls.mjs";
 import {resources as showResources} from './controls.mjs';
 import './paired-env.mjs';
@@ -18,11 +20,10 @@ const assets = join(directory, "assets");
 const report = process.env.RSI_WEB_REPORT ?? join(directory, "report");
 await mkdir(report, { recursive: true });
 await cp(process.env.RSI_WEB_ASSETS, assets, { recursive: true });
-const base = (await readFile(join(root, "apps/web/standard.js"), "utf8")).replace("export async function mount", "async function standardMount");
+const base = await readFile(join(root, "apps/web/standard.js"), "utf8");
 async function writeGeneration(label, gate = false, fail = false) {
-  const renderer = `${base}\nexport async function mount(root, snapshot, host, signal) {\n${gate ? "if (!window.candidateStarted) { window.candidateStarted = true; await new Promise(resolve => { window.finishCandidate = resolve; }); }" : ""}\n${fail ? 'throw new Error("intentional candidate mount failure");' : `const mounted = await standardMount(root, snapshot, host, signal);\nroot.dataset.rendererRevision = ${JSON.stringify(label)};\nwindow.oldLazy = () => import("./lazy.js").then(module => module.label);\nreturn { update: mounted.update, async dispose() { await new Promise(resolve => setTimeout(resolve, 150)); await mounted.dispose(); } };`}\n}\n`;
-  const lazy = `export const label = ${JSON.stringify(label)};\n`;
-  const files = [{ name: "standard.js", bytes: renderer }, { name: "lazy.js", bytes: lazy }];
+  const renderer = `import {mount as standardMount} from "./file-preview.js";\nexport const label = ${JSON.stringify(label)};\nexport async function mount(root, snapshot, host, signal) {\n${gate ? "if (!window.candidateStarted) { window.candidateStarted = true; await new Promise(resolve => { window.finishCandidate = resolve; }); }" : ""}\n${fail ? 'throw new Error("intentional candidate mount failure");' : `const mounted = await standardMount(root, snapshot, host, signal);\nroot.dataset.rendererRevision = ${JSON.stringify(label)};\nwindow.oldLazy = () => import("./standard.js").then(module => module.label);\nreturn { update: mounted.update, async dispose() { await new Promise(resolve => setTimeout(resolve, 150)); await mounted.dispose(); } };`}\n}\n`;
+  const files = [{ name: "file-preview.js", bytes: base }, { name: "standard.js", bytes: renderer }];
   for (const file of files) await writeFile(join(assets, file.name), file.bytes);
   await writeFile(join(assets, "ui-renderers.json"), JSON.stringify({ format: 1, renderers: [{ id: "rsi.standard", abi: 1, entry: "standard.js", files: files.map(file => ({ name: file.name, sha256: createHash("sha256").update(file.bytes).digest("hex") })), schemas: [{ name: "rsi.standard.view", version: 1 }], capabilities: ["invoke", "focus"], surfaces: ["dialog", "pane"] }] }));
 }
@@ -73,22 +74,22 @@ try {
   await page.goto(service.launchUrl);
   phase = 'initial connection';
   await page.locator("#workbench").waitFor({ state: "visible" });
-  await page.locator(".workspace-add summary").click();
-      await page.locator("#workspace-path").fill(service.workspace);
-  await page.getByRole("button", { name: "Add workspace", exact: true }).click();
+  await workspaceForm(page);
+      await page.getByLabel("Directory path").fill(service.workspace);
+  await page.locator('.directory-picker footer').getByRole('button',{name:'Open',exact:true}).click();
   await page.locator("#workspaces [data-testid=workspace-open]").first().click();
   const pane = page.getByRole("region", { name: "Main conversation", exact: true });
   await pane.getByRole("textbox", { name: "Main message" }).fill("hold this turn");
   await pane.getByTestId("composer-send").click();
   await pane.locator(".transcript").filter({ hasText: "Waiting for cancellation" }).waitFor();
   await pane.getByRole("textbox", { name: "Main message" }).fill("resident draft 界");
-  const session = await pane.locator(".pane-session").innerText();
+  const session = await pane.locator(".pane-session").textContent();
   await showResources(page);await page.getByRole("button", { name: "Workspace files", exact: true }).click();
   const form = page.locator(".ui-contribution");
   await form.getByRole("textbox", { name: "Workspace-relative path", exact: true }).fill("kept form draft");
   await page.locator('[data-renderer-revision="A"]').waitFor();
   assert.equal(modules.length, 1);
-  const oldLazy = modules[0].replace("standard.js", "lazy.js");
+  const oldLazy = modules[0].replace("standard.js", "file-preview.js");
   await writeGeneration("B", true);
   phase = 'gated candidate replacement';
   await page.waitForFunction(() => window.candidateStarted);
@@ -99,7 +100,7 @@ try {
   await page.locator('[data-renderer-revision="B"]').waitFor();
   assert.equal(await form.getByRole("textbox", { name: "Workspace-relative path", exact: true }).inputValue(), "kept form draft");
   assert.equal(await pane.getByRole("textbox", { name: "Main message" }).inputValue(), "resident draft 界");
-  assert.equal(await pane.locator(".pane-session").innerText(), session);
+  assert.equal(await pane.locator(".pane-session").textContent(), session);
   assert.equal(await page.evaluate(() => window.workerStarts), 1);
   assert.equal(service.provider.requests.length, 1);
   await waitUntil(() => page.evaluate(async url => (await fetch(url)).status === 404, oldLazy), "retired renderer graph release");
@@ -145,7 +146,7 @@ try {
   await pane.locator(".transcript").filter({ hasText: "Waiting for cancellation" }).waitFor();
   await pane.getByRole("button", { name: "Stop", exact: true }).click();
   await page.evaluate(() => { document.addEventListener("rsi-disconnected", event => { window.closedResources = event.detail; }, { once: true }); });
-  await page.getByRole("button", { name: "Sign out", exact: true }).click();
+  await disconnect(page);
   await page.locator("#login").waitFor({ state: "visible" });
   const resources = await page.evaluate(() => window.closedResources);
   const connections = await page.evaluate(() => window.rendererConnections);
@@ -164,7 +165,7 @@ try {
       const profile = join(config, "application-profiles/browser-fixture/application.profile.toml");
       const content = await readFile(profile, "utf8");
       const files = ["index.html", "preview-local.html", "preview-online.html", "app.js", "worker.js", "admission.js", "download-worker.js", "download-frame.js", "styles.css", "rsi_web.js", "rsi_web_bg.wasm", "mounts.js", "drafts.js"];
-      if (mode === "broken") files.push("standard.js", "ui-renderers.json", "lazy.js");
+      if (mode === "broken") files.push("standard.js", "file-preview.js", "ui-renderers.json");
       await writeFile(profile, content.replace(`directory = ${JSON.stringify(assets)}`, `directory = ${JSON.stringify(assets)}, files = ${JSON.stringify(files)}`));
     } });
     const cold = await context.newPage();
@@ -174,9 +175,9 @@ try {
     await cold.locator("#receipt").fill(JSON.stringify(service.register(`${mode} renderer`)));
     await cold.getByRole("button", { name: "Connect", exact: true }).click();
     await cold.locator("#workbench").waitFor({ state: "visible" });
-    await cold.locator(".workspace-add summary").click();
-    await cold.locator("#workspace-path").fill(service.workspace);
-    await cold.getByRole("button", { name: "Add workspace", exact: true }).click();
+    await workspaceForm(cold);
+    await cold.getByLabel("Directory path").fill(service.workspace);
+    await cold.locator('.directory-picker footer').getByRole('button',{name:'Open',exact:true}).click();
     await cold.locator("#workspaces [data-testid=workspace-open]").first().click();
     const coldPane = cold.getByRole("region", { name: "Main conversation", exact: true });
     await showResources(cold);await cold.getByRole("button", { name: "Workspace files", exact: true }).click();
@@ -189,14 +190,14 @@ try {
     await coldPane.getByRole("button", { name: "Stop", exact: true }).click();
     assert.equal(await cold.evaluate(() => window.workerStarts), 1);
     await cold.evaluate(() => document.addEventListener("rsi-disconnected", event => { window.closedResources = event.detail; }, { once: true }));
-    await cold.getByRole("button", { name: "Sign out", exact: true }).click();
+    await disconnect(cold);
     await cold.locator("#login").waitFor({ state: "visible" });
     assert.deepEqual(await cold.evaluate(() => window.closedResources), resources);
     await cold.close();
     await service.close(); service = undefined;
   }
   assert.deepEqual(errors, []);
-  const result = { browser: browser.version(), status: "passed", workerStarts: 2, connections, lostCommitRequests, modelRequests, preservedSession: session, modules, resources, cases: ["A-to-B actual imports", "old lazy import while B mounts", "old graph expires after commit", "resident draft and pending turn", "form draft survives code replacement", "failed C preserves B", "server commit with lost reply closes actual WASM owner without replay", "explicit reconnect renders D and accepts and cancels a new Session turn", "cold static catalog keeps Worker, Session actions and clean shutdown", "cold broken executable rejects first mount without losing Worker or Session input"] };
+  const result = { browser: browser.version(), status: "passed", workerStarts: 2, connections, lostCommitRequests, modelRequests, preservedSession: session, modules, resources, cases: ["A-to-B actual imports", "retained relative import while B mounts", "old graph expires after commit", "resident draft and pending turn", "form draft survives code replacement", "failed C preserves B", "server commit with lost reply closes actual WASM owner without replay", "explicit reconnect renders D and accepts and cancels a new Session turn", "cold static catalog keeps Worker, Session actions and clean shutdown", "cold broken executable rejects first mount without losing Worker or Session input"] };
   await writeFile(join(report, "result.json"), JSON.stringify(result, null, 2));
   console.log(JSON.stringify(result));
 } catch (error) {

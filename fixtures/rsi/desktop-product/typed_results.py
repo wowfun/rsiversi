@@ -11,8 +11,7 @@ def provider_reply(body):
 
 
 def verify(script, button, click, fill, until, screenshot, report):
-    button('Filter conversations')
-    script(r'''const e=document.querySelector('[aria-label="Conversation filter"]');e.value='attention';e.dispatchEvent(new Event('change',{bubbles:true}));return true''')
+    button('Navigation options'); button('Needs attention')
     button('Verbose')
     fill('textarea[aria-label="Main message"]', 'desktop typed profile catalog')
     button('Send')

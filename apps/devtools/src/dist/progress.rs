@@ -355,6 +355,7 @@ mod tests {
             contender.try_lock(),
             Err(std::fs::TryLockError::WouldBlock)
         ));
+        owner.unlock().unwrap();
         drop(owner);
         contender.try_lock().unwrap();
     }

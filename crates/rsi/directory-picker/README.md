@@ -21,6 +21,12 @@ Files mechanics. Creating holds the parent handle and verifies its identity agai
 the returned physical path. Replacement after a successful mkdir reports an
 unknown outcome; no rollback can safely delete that name. Entries with names or
 resolved targets that cannot be expressed as UTF-8 are skipped with a notice.
+Windows uses shared fixed-local-NTFS, no-reparse directory handles with volume/file
+identity checks before and after enumeration or creation. Replies normalize drive
+roots to uppercase and separators to forward slashes, removing trailing separators
+except the drive root. UNC, device paths and
+reparse entries are not selectable. Both platforms retain the same bounds, grant
+leases, cancellation and unknown-mutation-outcome rules.
 
 At most two actual Local filesystem tasks or target helper exchanges run. Each caller waits at most five
 seconds; dropping a caller or reaching its deadline stops scheduling new I/O.
@@ -29,7 +35,7 @@ return. Retirement closes admission, cancels further I/O and waits for those
 actual tasks, including release of their grant leases and capacity permits.
 The tracking token is released last, after resource destructors finish. Target processes retain their lane through cancellation and native
 settlement; a lost mutation reply is never retried. A read timeout is explicit; creation timeout is outcome unknown.
-There is no automatic creation retry. Non-Unix builds register status and return
+There is no automatic creation retry. Builds outside Unix and Windows register status and return
 Unsupported without requiring a native implementation.
 
 The factory's configuration echoes its captured `home` (including null) exactly.

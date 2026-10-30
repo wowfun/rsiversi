@@ -8,6 +8,11 @@ mod windows;
 pub use windows::Job;
 #[cfg(windows)]
 #[allow(unsafe_code)]
+mod conpty;
+#[cfg(windows)]
+pub use conpty::{Console, ConsoleChild};
+#[cfg(windows)]
+#[allow(unsafe_code)]
 mod identity;
 #[cfg(windows)]
 pub use identity::{ProcessHandle, ProcessIdentity};

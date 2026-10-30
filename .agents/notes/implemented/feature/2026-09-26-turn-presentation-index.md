@@ -17,6 +17,9 @@ English status labels cannot change visibility.
 It preserves human steering and boundary rows in chronological position. Detail mode
 belongs to device-local layout; Verbose absorbs the separate Trajectory switch.
 This narrowly supersedes the independent Chat/Trajectory presentation choice.
+The later [conversation-start decision](2026-10-28-model-independent-conversation-start.md)
+partially supersedes that choice with tabs over the same index and one successful
+terminal heading; chronological boundary evidence remains available in Activity.
 
 ## Alternatives considered
 

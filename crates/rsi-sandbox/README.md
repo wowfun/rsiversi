@@ -72,6 +72,11 @@ wrapper; only the PTY plan omits Bubblewrap's `--new-session`. Namespace,
 `--die-with-parent`, filesystem and scratch boundaries remain in the plan.
 PTY terminal sessions are live resources, not durable enforcement stamps.
 
+Windows also permits explicit `DangerFullAccess` PTY requests. The returned
+plan preserves PTY intent and reports unconfined filesystem and host network
+access. ReadOnly and WorkspaceWrite continue to fail closed when no enforcing
+backend exists; no restricted request is converted into full access.
+
 Linux PTY plans pin the workspace directory when confined and carry that handle
 into the child before Bubblewrap resolves its bind-fd source. Replacing the
 pathname between confinement and child launch cannot substitute the launch

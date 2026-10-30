@@ -408,3 +408,28 @@ test("transport failure while draining rejects pending replies and finishes the 
   await closing;
   assert.equal(f.calls.filter(call => call.method === "disconnect").length, 0);
 });
+
+
+// Exercise the presenter as well as the connection: rejection is a renderer
+// verdict in an acknowledged frame, while thrown updates retire the connection.
+for (const thrown of [false, true]) test(`renderer ${thrown ? 'exception fails' : 'offer rejection preserves'} the connection`, async () => {
+  const {createFramePresenter} = await import('../src/runtime/frame-presenter.js');
+  const {FrameTicket} = await import('../src/runtime/frame-ticket.js');
+  let presenter;
+  const f = await fixture({onFrame:(frame, assets)=>presenter.presentFrame(frame, assets)});
+  const verdict = {revision:'candidate',accept:false,error:'candidate unavailable'}, notices=[];
+  f.mounts.render = async()=>{if(thrown)throw new Error('update failed');return verdict};
+  const context = {connection:f.owner,view:undefined,panes:new Map(),rendererSlots:[],
+    $:()=>({isConnected:true}),notify:message=>notices.push(message),render:next=>{context.view=next},
+    presentation:{begin:(epoch,id,fail)=>new FrameTicket(epoch,id,fail),async commit(ticket,render,hosts){render();ticket.requireHosts(hosts);ticket.commit(ticket.epoch,ticket.frameId);await ticket.committed}}};
+  presenter=createFramePresenter(context);
+  await f.transport.onmessage({data:{kind:'view',view:{kind:'snapshot',frame_id:'1',view:{surfaces:{}}},assets:{}}});
+  if(thrown){assert.equal(f.owner.phase,'Failed');assert.equal(f.calls.some(call=>call.kind==='ack'),false);}
+  else {
+    assert.equal(f.owner.phase,'Ready');assert.equal(notices.length,1);
+    assert.deepEqual(f.calls.find(call=>call.kind==='ack'),{kind:'ack',frame_id:'1',resync:false,renderer:verdict});
+    await f.transport.onmessage({data:{kind:'view',view:{kind:'patch',frame_id:'2',base_frame_id:'1',sections:{},surfaces:[]},assets:{}}});
+    assert.equal(f.calls.filter(call=>call.kind==='ack').length,2);
+  }
+  await f.owner.retire();
+});

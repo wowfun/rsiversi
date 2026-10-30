@@ -192,17 +192,12 @@ pub(super) fn apply_model_body(turn: &mut TurnControl, body: &SessionFactBody) -
                 effect_id.clone(),
                 ActiveEffect::Model {
                     purpose: purpose.event_purpose(),
-                    effect_id: effect_id.clone(),
                     started: false,
                 },
             );
         }
         SessionFactBody::ModelStarted { effect_id, .. } => match turn.effects.get_mut(effect_id) {
-            Some(ActiveEffect::Model {
-                effect_id: current,
-                started,
-                ..
-            }) if current == effect_id && !*started => *started = true,
+            Some(ActiveEffect::Model { started, .. }) if !*started => *started = true,
             _ => return Err(TurnError::Invalid("model start has no exact intent".into())),
         },
         SessionFactBody::ModelAttemptSettled {
@@ -213,10 +208,9 @@ pub(super) fn apply_model_body(turn: &mut TurnControl, body: &SessionFactBody) -
         } => {
             match turn.effects.get(effect_id) {
                 Some(ActiveEffect::Model {
-                    effect_id: current,
                     started: true,
                     purpose: expected,
-                }) if current == effect_id && expected == purpose => {}
+                }) if expected == purpose => {}
                 _ => {
                     return Err(TurnError::Invalid(
                         "model settlement has no exact started attempt".into(),
@@ -254,28 +248,22 @@ pub(super) fn apply_image_body(turn: &mut TurnControl, body: &SessionFactBody) -
             turn.effects.insert(
                 effect_id.clone(),
                 ActiveEffect::Image {
-                    effect_id: effect_id.clone(),
                     started: false,
                     next_index: 0,
                 },
             );
         }
         SessionFactBody::ImageStarted { effect_id, .. } => match turn.effects.get_mut(effect_id) {
-            Some(ActiveEffect::Image {
-                effect_id: current,
-                started,
-                ..
-            }) if current == effect_id && !*started => *started = true,
+            Some(ActiveEffect::Image { started, .. }) if !*started => *started = true,
             _ => return Err(TurnError::Invalid("Image start has no exact intent".into())),
         },
         SessionFactBody::ImageOutput {
             effect_id, index, ..
         } => match turn.effects.get_mut(effect_id) {
             Some(ActiveEffect::Image {
-                effect_id: current,
                 started: true,
                 next_index,
-            }) if current == effect_id && *index == *next_index => {
+            }) if *index == *next_index => {
                 *next_index = next_index
                     .checked_add(1)
                     .ok_or_else(|| TurnError::Invalid("Image output index exhausted".into()))?;
@@ -387,7 +375,6 @@ pub(super) fn apply_tool_body(turn: &mut TurnControl, body: &SessionFactBody) ->
                     ActiveEffect::Tool {
                         name: name.clone(),
                         source_selection: Arc::new(source_selection),
-                        effect_id: effect_id.clone(),
                         identity: identity.clone(),
                         started: false,
                         parallel_safe: *parallel_safe,
@@ -407,11 +394,10 @@ pub(super) fn apply_tool_body(turn: &mut TurnControl, body: &SessionFactBody) ->
             ..
         } => match turn.effects.get_mut(effect_id) {
             Some(ActiveEffect::Tool {
-                effect_id: current,
                 identity: current_identity,
                 started,
                 ..
-            }) if current == effect_id && current_identity == identity && !*started => {
+            }) if current_identity == identity && !*started => {
                 *started = true;
             }
             _ => return Err(TurnError::Invalid("Tool start has no exact intent".into())),
@@ -422,11 +408,10 @@ pub(super) fn apply_tool_body(turn: &mut TurnControl, body: &SessionFactBody) ->
             ..
         } => match turn.effects.get(effect_id) {
             Some(ActiveEffect::Tool {
-                effect_id: current,
                 identity: current_identity,
                 started: true,
                 ..
-            }) if current == effect_id && current_identity == identity => {
+            }) if current_identity == identity => {
                 if turn.effects.values().any(|effect| matches!(effect, ActiveEffect::Tool { origin: ToolOrigin::Program { parent_effect_id, .. }, .. } if parent_effect_id == effect_id)) {
                     return Err(TurnError::Invalid("coordinator result precedes nested Tool settlement".into()));
                 }

@@ -30,7 +30,7 @@ pub(crate) fn response(mut source: ApiStream, revoked: CancellationToken) -> Res
                 Err(error) => {
                     let (prefix, bytes) = match error {
                         ApiError::Domain(bytes) => (b"event: domain-error\ndata: ".as_slice(), bytes.into_bytes()),
-                        error => (b"event: error\ndata: ".as_slice(), error_json(&error)),
+                        error => (b"event: error\ndata: ".as_slice(), crate::error::json(&error)),
                     };
                     yield Ok(Frame::data(Bytes::from_static(prefix)));
                     yield Ok(Frame::data(bytes));
@@ -48,22 +48,6 @@ pub(crate) fn response(mut source: ApiStream, revoked: CancellationToken) -> Res
         http::HeaderValue::from_static("text/event-stream"),
     );
     response
-}
-
-fn error_json(error: &ApiError) -> Bytes {
-    Bytes::from_static(match error {
-        ApiError::UnknownOperation => b"{\"code\":\"unknown_operation\"}",
-        ApiError::OperationRetiring => b"{\"code\":\"operation_retiring\"}",
-        ApiError::ProtocolMismatch => b"{\"code\":\"protocol_mismatch\"}",
-        ApiError::CallShapeMismatch => b"{\"code\":\"call_shape_mismatch\"}",
-        ApiError::OutcomeUnknown => b"{\"code\":\"outcome_unknown\"}",
-        ApiError::Unauthorized => b"{\"code\":\"unauthorized\"}",
-        ApiError::Capacity => b"{\"code\":\"capacity\"}",
-        ApiError::ShuttingDown => b"{\"code\":\"generation_retired\"}",
-        ApiError::Unavailable => b"{\"code\":\"unavailable\"}",
-        ApiError::Invalid(_) => b"{\"code\":\"invalid\"}",
-        ApiError::Backend(_) | ApiError::Domain(_) => b"{\"code\":\"backend\"}",
-    })
 }
 
 #[cfg(test)]

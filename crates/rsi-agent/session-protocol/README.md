@@ -1,5 +1,8 @@
 # rsi-agent-session-protocol
 
+`MAXIMUM_LIVE_TURNS` bounds concurrent nonterminal Turns in one Session. Kernel
+admission and durable timing projections share this cardinality limit.
+
 Live prefix transport appends canonical base64 pages at an exact raw byte offset.
 The receiver retains immutable compact blocks and a grammar cursor, validating
 only newly appended events. Each revision ends at an event boundary and declares

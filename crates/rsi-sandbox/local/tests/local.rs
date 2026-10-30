@@ -2,10 +2,11 @@ use async_trait::async_trait;
 use rsi_meta::{ResolvedFactory, Runtime, UpdateMode};
 #[cfg(unix)]
 use rsi_sandbox::MAXIMUM_SANDBOX_WRAPPER_BYTES;
+#[cfg(unix)]
 use rsi_sandbox::{
-    ProcessRequest, SandboxBackend, SandboxContract, SandboxError, SandboxFileSystem, SandboxMode,
-    SandboxNetwork, SandboxScratch,
+    ProcessRequest, SandboxBackend, SandboxError, SandboxFileSystem, SandboxNetwork, SandboxScratch,
 };
+use rsi_sandbox::{SandboxContract, SandboxMode};
 use rsi_sandbox_local::{SandboxLocalFactory, SandboxProbe};
 use serde_json::json;
 use std::path::{Path, PathBuf};
@@ -145,7 +146,7 @@ async fn foreign_policy_paths_are_rejected_before_native_resolution() {
                 .confine(ProcessRequest {
                     stdio: rsi_sandbox::ProcessStdio::Pipes,
                     mode,
-                    program: std::env::current_exe().unwrap(),
+                    program: std::fs::canonicalize("/bin/sh").unwrap(),
                     arguments: vec![],
                     cwd: if field == "cwd" {
                         foreign.clone()
@@ -173,6 +174,7 @@ struct Probe {
 }
 
 #[derive(Debug)]
+#[cfg(unix)]
 struct FailingThenAvailableProbe {
     calls: Mutex<Vec<Vec<u8>>>,
 }
@@ -207,6 +209,7 @@ impl SandboxProbe for SlowUnavailableProbe {
 }
 
 #[async_trait]
+#[cfg(unix)]
 impl SandboxProbe for FailingThenAvailableProbe {
     async fn available(&self, path: &Path, _arguments: &[&str]) -> rsi_sandbox::Result<bool> {
         let bytes = std::fs::read(path).unwrap();
@@ -237,6 +240,7 @@ impl SandboxProbe for Probe {
 }
 
 #[tokio::test]
+#[cfg(unix)]
 async fn bubblewrap_precedes_landlock_and_stamp_matches_selected_wrapper() {
     let temporary = tempfile::tempdir().unwrap();
     let bwrap = temporary.path().join("bwrap");
@@ -291,6 +295,11 @@ async fn bubblewrap_precedes_landlock_and_stamp_matches_selected_wrapper() {
 }
 
 #[tokio::test]
+#[cfg(unix)]
+#[expect(
+    clippy::too_many_lines,
+    reason = "One plan fixture checks private mounts, executable visibility, and protected roots together"
+)]
 async fn bubblewrap_private_mounts_precede_descendant_bind_and_unsafe_roots_are_rejected() {
     let temporary = tempfile::tempdir().unwrap();
     let bwrap = temporary.path().join("bwrap");
@@ -361,6 +370,29 @@ async fn bubblewrap_private_mounts_precede_descendant_bind_and_unsafe_roots_are_
         .position(|triple| triple[0] == "--ro-bind" && triple[1] == workspace)
         .expect("read-only workspace below /tmp must be rebound after the private tmpfs");
     assert!(read_only_tmpfs < read_only_bind);
+    let helpers = tempfile::tempdir_in("/tmp").unwrap();
+    let helper = helpers.path().join("helper");
+    std::fs::copy(&shell, &helper).unwrap();
+    for mode in [SandboxMode::ReadOnly, SandboxMode::WorkspaceWrite] {
+        let plan = sandbox
+            .confine(ProcessRequest {
+                stdio: rsi_sandbox::ProcessStdio::Pipes,
+                mode,
+                program: helper.clone(),
+                arguments: vec![],
+                cwd: workspace.clone(),
+                workspace: workspace.clone(),
+            })
+            .await
+            .unwrap();
+        let mount = plan
+            .arguments
+            .windows(3)
+            .position(|args| args[0] == "--ro-bind" && args[1] == helper && args[2] == helper)
+            .expect("the helper remains visible as one read-only file");
+        assert!(tmpfs < mount);
+        assert!(!plan.arguments.iter().any(|arg| arg == helpers.path()));
+    }
     for mode in [SandboxMode::ReadOnly, SandboxMode::WorkspaceWrite] {
         assert!(matches!(
             sandbox
@@ -395,6 +427,7 @@ async fn bubblewrap_private_mounts_precede_descendant_bind_and_unsafe_roots_are_
 }
 
 #[tokio::test]
+#[cfg(unix)]
 async fn landlock_rejects_the_filesystem_root_as_a_restricted_workspace() {
     let temporary = tempfile::tempdir().unwrap();
     let landlock = temporary.path().join("landlock-run");
@@ -490,6 +523,7 @@ async fn restricted_plan_preserves_non_utf8_workspace_bytes() {
 }
 
 #[tokio::test]
+#[cfg(unix)]
 async fn failed_probe_falls_through_to_the_next_explicit_candidate() {
     let temporary = tempfile::tempdir().unwrap();
     let first = temporary.path().join("first-bwrap");
@@ -606,6 +640,7 @@ async fn symlink_fifo_and_oversized_candidates_are_rejected_before_copy_or_probe
 }
 
 #[tokio::test]
+#[cfg(unix)]
 async fn missing_backend_fails_restricted_mode_but_explicit_bypass_is_truthful() {
     let temporary = tempfile::tempdir().unwrap();
     let probe = Arc::new(Probe {
@@ -883,7 +918,11 @@ async fn native_bubblewrap_enforces_read_only_and_workspace_write_plans() {
     std::fs::write(&outside_marker, b"unchanged").unwrap();
     let setsid = PathBuf::from("/usr/bin/setsid");
     assert!(setsid.is_file(), "native setsid is unavailable");
-    let shell = std::fs::canonicalize("/bin/sh").unwrap();
+    let helpers = tempfile::tempdir_in("/tmp").unwrap();
+    let shell = helpers.path().join("helper");
+    std::fs::copy(std::fs::canonicalize("/bin/sh").unwrap(), &shell).unwrap();
+    let neighboring_secret = helpers.path().join("host-only");
+    std::fs::write(&neighboring_secret, b"hidden").unwrap();
     let runtime = Runtime::default();
     let fiber = runtime
         .root()
@@ -930,6 +969,7 @@ async fn native_bubblewrap_enforces_read_only_and_workspace_write_plans() {
             &format!(
                 r#"set -eu
                 test ! -e '{}'
+                test ! -e '{}'
                 test -r /proc/self/status
                 test ! -e /proc/{}
                 capabilities=missing
@@ -947,7 +987,7 @@ async fn native_bubblewrap_enforces_read_only_and_workspace_write_plans() {
                 if printf changed > '{}'; then exit 42; fi
                 printf allowed > allowed
                 /usr/bin/setsid /bin/sh -c 'printf nested > nested'"#,
-                host_tmp_marker.display(), std::process::id(), outside_marker.display()
+                host_tmp_marker.display(), neighboring_secret.display(), std::process::id(), outside_marker.display()
             ),
         ))
         .await

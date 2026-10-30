@@ -1,3 +1,5 @@
+import {disconnect} from './controls.mjs';
+import {workspaceForm} from './controls.mjs';
 import {liveLimits,readDeepseekKey,deepseekProfile} from './live-limits.mjs';
 import {assistantText} from './model-attempt.mjs';
 import {detailMode} from './controls.mjs';
@@ -53,14 +55,14 @@ try {
  }});
  const context=await browser.newContext({ignoreHTTPSErrors:true,viewport:{width:1440,height:980}});page=await context.newPage();page.setDefaultTimeout(30000);page.on('pageerror',error=>errors.push(error.message));
  await page.goto(service.origin);await page.locator('#receipt').fill(JSON.stringify(service.register('preview live verification')));await page.getByRole('button',{name:'Connect',exact:true}).click();await page.locator('#workbench').waitFor({state:'visible'});
- await page.locator('.workspace-add summary').click();await page.getByLabel('Server directory').fill(service.workspace);await page.getByRole('button',{name:'Add workspace',exact:true}).click();await page.locator('#workspaces [data-testid=workspace-open]').first().click();await detailMode(page,'verbose');
+ await workspaceForm(page);await page.getByLabel('Directory path').fill(service.workspace);await page.locator('.directory-picker footer').getByRole('button',{name:'Open',exact:true}).click();await page.locator('#workspaces [data-testid=workspace-open]').first().click();await detailMode(page,'verbose');
  const main=page.getByRole('region',{name:'Main conversation',exact:true}),input=main.getByRole('textbox',{name:'Main message',exact:true});
  await input.fill('@live');await main.getByRole('option').filter({hasText:'live-reviewer'}).waitFor();await main.getByRole('button',{name:'Preview agent',exact:true}).click();await main.locator('.resource-preview-text').filter({hasText:tokens[0]}).waitFor();await page.screenshot({path:join(report,'live-agent-definition.png')});await main.getByRole('button',{name:'Close preview',exact:true}).click();await input.press('Escape');
  const children=[];let parent;
  for(let version=1;version<=2;version++){
   if(version===2)await writeFile(join(service.workspace,'.agents/agents/live-reviewer.md'),definition(2));
   await complete(main,input,`@live-reviewer This is isolated acceptance phase ${version}. Use spawn_agent exactly once with role live-reviewer and task_name phase-${version}, message "Review whether a pure function returning 42 is deterministic". Omit fork_turns, model and reasoning_effort so the role defaults and completed history apply. Use wait_agent if needed to observe completion. Do not create other children or edit files. Quote the child's entire reply verbatim, including its role/source identifier, then summarize its result.`);
-  parent=(await main.locator('.pane-session').innerText()).split(' · ').at(-1);
+  parent=(await main.getAttribute('data-session-id'));
   let parentFacts=facts(parent);const intent=parentFacts.find(fact=>fact.type==='tool_intent'&&fact.name==='spawn_agent'&&fact.arguments.task_name===`phase-${version}`);assert(intent,'live spawn ToolIntent absent');
   const result=parentFacts.find(fact=>fact.type==='tool_result'&&fact.effect_id===intent.effect_id);assert(result&&!result.result.is_error,'live spawn failed');const child=result.result.value.session_id;assert(child);
   let childFacts;await waitUntil(()=>{childFacts=facts(child);return childFacts.some(fact=>fact.type==='turn_terminal')},'live child completion',120000);
@@ -83,7 +85,7 @@ try {
   assert(parentAnswer.includes(token),'main agent did not quote the child reply');
  }
  assert.equal(service.provider.requests.length,0);assert.deepEqual(errors,[]);assert.equal(await page.locator('#notice').innerText(),'');
- await page.locator('#sign-out').click();await page.locator('#login').waitFor({state:'visible'});
+ await disconnect(page);await page.locator('#login').waitFor({state:'visible'});
  await writeFile(join(report,'result.json'),JSON.stringify({status:'passed',model,parent,children,definition_versions:2,next_spawn_refresh:true,empty_allow:true,real_tool_created_html:true,interactive_preview:true,mock_model_requests:0,approvals,browser_name:browserName,browser:browser.version()},null,2));
 }catch(error){if(page){await page.screenshot({path:join(report,'failure.png')}).catch(()=>{});await writeFile(join(report,'failure.html'),(await page.content().catch(()=>'' )).replaceAll(key,'[REDACTED]'));}throw new Error(String(error).replaceAll(key,'[REDACTED]'));}
 finally{

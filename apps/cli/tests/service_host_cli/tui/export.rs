@@ -34,12 +34,12 @@ async fn fullscreen_export_quotes_paths_and_keeps_model_context_unchanged() {
     })
     .await
     .unwrap();
-    let text = std::fs::read_to_string(fixture.workspace.join("nested/tui file.json")).unwrap();
     terminal
         .until_screen("second export notice", |screen| {
             screen.contains("Exported") && screen.contains("tui file.json")
         })
         .await;
+    let text = std::fs::read_to_string(fixture.workspace.join("nested/tui file.json")).unwrap();
     assert!(text.contains("hello from daemon") && !text.contains("/export"));
     assert_eq!(requests.lock().unwrap().len(), 1);
     terminal.send(b"/quit\r");

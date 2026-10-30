@@ -2,24 +2,24 @@
 
 The [Workspace contract](../protocol/README.md) owns the shared domain types and semantics.
 
-The ordinary endpoint plugin registers version 2 Workspace get, list, registration,
-status, order-seed and deletion operations through the generic API registrar. Closed DTOs,
+The ordinary endpoint plugin registers version 4 Workspace get, list, registration,
+rename, status, order-seed and deletion operations through the generic API registrar. Closed DTOs,
 bounds and read/mutation policy belong here. The endpoint requires a Workspace
 registry and grants no additional filesystem authority; registration requires an
 absolute path on that registry's host. Deletion removes only the registration.
 
 The ordinary client plugin requires one negotiated API client and publishes the
-Workspace registry contract. It requires all six exact operation descriptors
+Workspace registry contract. It requires all seven exact operation descriptors
 before publication. Record identities, paths and page cursors are validated at the
 wire boundary; host paths remain opaque to the client OS. Failed semantic
-validation after a registration mutation reports an unknown outcome. API failures
+validation after registration or rename reports an unknown outcome. API failures
 retain their original classification; domain errors use closed bounded codes.
 Native storage or commit-task failure remains infrastructure failure. After
 mutation dispatch it cannot prove that the durable registration was unchanged.
 
 Requests use at most 128 KiB, single records at most 128 KiB, and pages at most
 32 MiB for up to 256 paths including JSON escapes. All operations use the Data
-lane. Registration and deletion transfer mutation ownership to the dispatcher.
+lane. Registration, rename and deletion transfer mutation ownership to the dispatcher.
 Plugin retirement fences its routes and drains admitted work before dependencies
 withdraw. Neither plugin depends on Session or native filesystem implementations.
 

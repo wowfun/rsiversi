@@ -91,6 +91,8 @@ PTY intent is explicit, typed and process-local. Ordinary pipe execution rejects
 PTY plans. The Linux local PTY path consumes the
 [restricted Sandbox PTY plan](../../rsi-sandbox/README.md).
 portable-pty establishes setsid and TIOCSCTTY before executing that wrapper.
+Windows accepts an explicit unconfined PTY plan through ConPTY. This is a
+separate supported enforcement stamp, never a fallback for a restricted plan.
 Process owns native I/O, resize, termination and reaping; live terminal state
 belongs to [PTY](../../rsi-pty/README.md).
 

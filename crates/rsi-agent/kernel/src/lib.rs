@@ -61,8 +61,7 @@ use tokio::time::Instant;
 use tokio_util::sync::CancellationToken;
 use tokio_util::task::TaskTracker;
 
-/// Maximum nonterminal turns retained by one session.
-pub const MAXIMUM_LIVE_TURNS: usize = 256;
+pub use rsi_agent_session_protocol::MAXIMUM_LIVE_TURNS;
 /// Maximum sessions with live or speculative state retained by one Kernel.
 pub const MAXIMUM_ACTIVE_SESSIONS: usize = 256;
 /// Maximum speculative Fact bytes retained between durable commits.
@@ -262,6 +261,7 @@ struct KernelInner {
     program_bytes: rsi_api_protocol::ByteBudget,
     programs: Mutex<BTreeMap<SessionId, Weak<program::LiveRun>>>,
     projection_admission: Arc<Semaphore>,
+    projection_flights: Arc<Mutex<Vec<projection::Flight>>>,
     ready_activation: Mutex<ready::ReadySchedulerState>,
     claim_changed: Notify,
     session_changes: SessionWatchHub,
@@ -707,18 +707,15 @@ struct TreeClaimLane {
 enum ActiveEffect {
     Model {
         purpose: rsi_agent_session_protocol::ModelEventPurpose,
-        effect_id: EffectId,
         started: bool,
     },
     Image {
-        effect_id: EffectId,
         started: bool,
         next_index: u32,
     },
     Tool {
         name: String,
         source_selection: Arc<rsi_agent_session_protocol::ModelSelection>,
-        effect_id: EffectId,
         identity: rsi_tools_protocol::ToolResultIdentity,
         started: bool,
         parallel_safe: bool,

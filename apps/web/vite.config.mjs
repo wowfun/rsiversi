@@ -1,12 +1,19 @@
+// @ts-check
 import { proxyConfiguration } from './development-proxy.mjs';
 import { loopbackAddress } from './development-control.mjs';
 import { defineConfig } from 'vite';
 import react from '@vitejs/plugin-react';
 import { fileURLToPath } from 'node:url';
+import { relative } from 'node:path';
+import { documentReloadRequired } from './development-reload.mjs';
 import { xtermDocumentOverride } from './xterm-document.mjs';
 import { desktopBridgeDescriptor } from './wire-descriptors.mjs';
 
+/** @param {string} path */
 const local = path => fileURLToPath(new URL(path, import.meta.url));
+/** @param {Pick<import('vite').ConfigEnv, 'command'>} environment
+ * @param {{supervised?: boolean}} options
+ * @returns {import('vite').UserConfig} */
 export function documentConfiguration({command}, {supervised = false} = {}) {
   const upstream = process.env.RSI_DEV_UPSTREAM;
   if (command === 'serve' && !upstream && !supervised) throw new Error('Start product development through rsi --watch web with a configured frontend recipe; isolated browser fixtures use fixture-dev web');
@@ -17,7 +24,15 @@ export function documentConfiguration({command}, {supervised = false} = {}) {
       __RSI_BUILD_FAMILY__: JSON.stringify(process.env.RSI_BUILD_FAMILY_SHA256 ?? process.env.RSI_DEV_BUILD_FAMILY ?? ""),
       __RSI_DESKTOP_BRIDGE__: JSON.stringify(desktopBridgeDescriptor()),
     },
-    plugins:[xtermDocumentOverride(),react(),{name:'rsi-bootstrap-restart',handleHotUpdate(context){if(/\/(?:app\.js|worker\.js|admission\.js|drafts\.js|mounts\.js|src\/(?:main\.tsx|slots\.tsx|bridge\.ts))$/.test(context.file)){context.server.ws.send({type:'full-reload'});return []}}}],
+    plugins:[xtermDocumentOverride(),react(),{
+      name:'rsi-bootstrap-restart',
+      handleHotUpdate(context) {
+        if (documentReloadRequired(relative(local('./'), context.file))) {
+          context.server.ws.send({type:'full-reload'});
+          return [];
+        }
+      },
+    }],
     optimizeDeps:{exclude:['@xterm/xterm']},
     resolve:{alias:{'@rsi/dsh-slots':local('./vendor/dsh/slots/index.ts'),'@rsi/dsh-store-contract':local('./vendor/dsh/store-contract.ts')}},
     server:{host:'127.0.0.1',strictPort:true,fs:{strict:true,allow:[local('./')],deny:['**/.git/**','**/.env*','**/target/**','**/Cargo.toml','**/Cargo.lock','**/*.rs']},

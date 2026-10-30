@@ -13,19 +13,19 @@ use rsi_directory_picker_api::{
 use rsi_execution::{ExecutionResolver, ExecutionResolverContract};
 use rsi_meta::{ActivationPlan, ConfigValue, MetaError, PluginFactory, PreparedActivation};
 use std::{path::PathBuf, sync::Arc};
-#[cfg(unix)]
+#[cfg(any(unix, windows))]
 use std::{sync::Mutex, time::Duration};
-#[cfg(unix)]
+#[cfg(any(unix, windows))]
 use tokio::sync::Semaphore;
-#[cfg(unix)]
+#[cfg(any(unix, windows))]
 use tokio_util::{sync::CancellationToken, task::TaskTracker};
-#[cfg(unix)]
+#[cfg(any(unix, windows))]
 mod native;
-#[cfg(unix)]
+#[cfg(any(unix, windows))]
 mod target;
-#[cfg(unix)]
+#[cfg(any(unix, windows))]
 pub use target::maybe_run_directory_picker_helper;
-#[cfg(unix)]
+#[cfg(any(unix, windows))]
 #[derive(Debug)]
 struct Work {
     closed: Mutex<bool>,
@@ -34,15 +34,15 @@ struct Work {
     stop: CancellationToken,
     deadline: Duration,
 }
-#[cfg(unix)]
+#[cfg(any(unix, windows))]
 struct CancelOnDrop(CancellationToken);
-#[cfg(unix)]
+#[cfg(any(unix, windows))]
 impl Drop for CancelOnDrop {
     fn drop(&mut self) {
         self.0.cancel();
     }
 }
-#[cfg(unix)]
+#[cfg(any(unix, windows))]
 impl Work {
     fn new(deadline: Duration) -> Self {
         Self {
@@ -179,13 +179,13 @@ mod status_tests {
 struct Owner {
     access: Arc<ConfigurationAccess>,
     execution: Arc<dyn ExecutionResolver>,
-    #[cfg(unix)]
+    #[cfg(any(unix, windows))]
     home: Option<PathBuf>,
-    #[cfg(unix)]
+    #[cfg(any(unix, windows))]
     work: Work,
 }
 impl Owner {
-    #[cfg(not(unix))]
+    #[cfg(not(any(unix, windows)))]
     fn unsupported<T>(
         &self,
         origin: &CallOrigin,
@@ -199,7 +199,7 @@ impl Owner {
         std::future::ready(admission.map(|()| Err(Failure::Unsupported)))
     }
 
-    #[cfg(not(unix))]
+    #[cfg(not(any(unix, windows)))]
     fn list(
         &self,
         origin: &CallOrigin,
@@ -210,7 +210,7 @@ impl Owner {
         self.unsupported(origin, location)
     }
 
-    #[cfg(not(unix))]
+    #[cfg(not(any(unix, windows)))]
     fn create(
         &self,
         origin: &CallOrigin,
@@ -221,7 +221,7 @@ impl Owner {
         self.unsupported(origin, location)
     }
 
-    #[cfg(unix)]
+    #[cfg(any(unix, windows))]
     async fn list(
         &self,
         origin: &CallOrigin,
@@ -248,7 +248,7 @@ impl Owner {
             .run(grant, false, move |stop| native::list(request, home, stop))
             .await
     }
-    #[cfg(unix)]
+    #[cfg(any(unix, windows))]
     async fn create(
         &self,
         origin: &CallOrigin,
@@ -305,9 +305,9 @@ impl PluginFactory for DirectoryPickerFactory {
         let owner = Arc::new(Owner {
             access: plan.local::<ConfigurationAccessContract>()?,
             execution: plan.local::<ExecutionResolverContract>()?,
-            #[cfg(unix)]
+            #[cfg(any(unix, windows))]
             home: self.home.clone(),
-            #[cfg(unix)]
+            #[cfg(any(unix, windows))]
             work: Work::new(Duration::from_secs(5)),
         });
         let registrar = plan.local::<ApiRegistrarContract>()?;
@@ -320,7 +320,7 @@ impl PluginFactory for DirectoryPickerFactory {
                     async move {
                         Ok(Ok::<_, Failure>(Status {
                             supported: match request.location {
-                                ExecutionLocation::Local => cfg!(unix),
+                                ExecutionLocation::Local => cfg!(any(unix, windows)),
                                 ExecutionLocation::Ssh { .. } => cfg!(target_os = "linux"),
                             },
                             allowed: if request.location == ExecutionLocation::Local {
@@ -368,7 +368,7 @@ impl PluginFactory for DirectoryPickerFactory {
             Box::new(move || {
                 Box::pin(async move {
                     drop((status, list, create));
-                    #[cfg(unix)]
+                    #[cfg(any(unix, windows))]
                     owner.work.close().await;
                     drop(owner);
                     Ok(())
@@ -377,7 +377,7 @@ impl PluginFactory for DirectoryPickerFactory {
         )
     }
 }
-#[cfg(all(test, unix))]
+#[cfg(all(test, any(unix, windows)))]
 mod tests {
     use super::*;
     #[tokio::test]

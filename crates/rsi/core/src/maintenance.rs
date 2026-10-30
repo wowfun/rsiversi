@@ -382,14 +382,14 @@ mod tests {
 
     #[test]
     fn archived_siblings_do_not_exhaust_exact_maintenance_lookups() {
-        let root = tempfile::tempdir().unwrap();
-        let home = Home::open(root.path()).unwrap();
+        let root = tempfile::tempdir_in(rsi_workspace_protocol::canonical_native_path(
+            std::env::temp_dir().canonicalize().unwrap(),
+        ))
+        .unwrap();
+        let path = root.path().join("home");
+        let home = Home::open(&path).unwrap();
         for index in 0..8193 {
-            std::fs::write(
-                root.path().join(format!(".reset-{index}-settings.json")),
-                b"{}",
-            )
-            .unwrap();
+            std::fs::write(path.join(format!(".reset-{index}-settings.json")), b"{}").unwrap();
         }
         assert_eq!(home.kind("missing").unwrap(), None);
         home.create("rsi.toml", b"format = 1").unwrap();
@@ -402,7 +402,10 @@ mod tests {
 
     #[test]
     fn both_resets_preserve_credentials_packages_and_unmanaged_inputs() {
-        let root = tempfile::tempdir().unwrap();
+        let root = tempfile::tempdir_in(rsi_workspace_protocol::canonical_native_path(
+            std::env::temp_dir().canonicalize().unwrap(),
+        ))
+        .unwrap();
         let paths = paths(root.path());
         for (home, files) in [
             (
@@ -425,10 +428,19 @@ mod tests {
                 ],
             ),
         ] {
+            rsi_files_native_fs::create_absolute_directory_no_follow(home).unwrap();
             for name in files {
                 let path = home.join(name);
-                std::fs::create_dir_all(path.parent().unwrap()).unwrap();
-                std::fs::write(path, name).unwrap();
+                let parent = rsi_files_native_fs::create_absolute_directory_no_follow(
+                    path.parent().unwrap(),
+                )
+                .unwrap();
+                let mut file = rsi_files_native_fs::create_relative_private_file_no_follow(
+                    &parent,
+                    Path::new(path.file_name().unwrap()),
+                )
+                .unwrap();
+                file.write_all(name.as_bytes()).unwrap();
             }
         }
         let receipts = maintain_product_homes(
@@ -460,7 +472,10 @@ mod tests {
 
     #[test]
     fn reset_refuses_active_owner_before_mutating_configuration() {
-        let root = tempfile::tempdir().unwrap();
+        let root = tempfile::tempdir_in(rsi_workspace_protocol::canonical_native_path(
+            std::env::temp_dir().canonicalize().unwrap(),
+        ))
+        .unwrap();
         let paths = paths(root.path());
         let _owner =
             HostOwnerLease::try_acquire(ServiceHostPaths::from_host_paths(&paths).unwrap())
@@ -485,7 +500,10 @@ mod tests {
 
     #[test]
     fn interrupted_reset_recovers_each_home_without_rearchiving() {
-        let root = tempfile::tempdir().unwrap();
+        let root = tempfile::tempdir_in(rsi_workspace_protocol::canonical_native_path(
+            std::env::temp_dir().canonicalize().unwrap(),
+        ))
+        .unwrap();
         let paths = paths(root.path());
         let config = Home::open(paths.config()).unwrap();
         let state = Home::open(paths.state()).unwrap();
@@ -549,7 +567,10 @@ mod tests {
 
     #[test]
     fn journals_cannot_select_external_or_preserved_entries() {
-        let root = tempfile::tempdir().unwrap();
+        let root = tempfile::tempdir_in(rsi_workspace_protocol::canonical_native_path(
+            std::env::temp_dir().canonicalize().unwrap(),
+        ))
+        .unwrap();
         let paths = paths(root.path());
         let mut journal = Journal {
             format: 1,

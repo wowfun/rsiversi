@@ -16,15 +16,19 @@ struct Fixture {
 }
 impl Fixture {
     fn new() -> Self {
-        let root = tempfile::tempdir().unwrap();
+        let root = tempfile::tempdir_in(rsi_workspace_path::canonical_native_path(
+            std::env::temp_dir().canonicalize().unwrap(),
+        ))
+        .unwrap();
         let bin = root.path().join("bin");
         let package = root.path().join("package");
-        rsi_files_native_fs::create_absolute_directory_no_follow(&bin).unwrap();
+        let directory = rsi_files_native_fs::create_absolute_directory_no_follow(&bin).unwrap();
         std::fs::create_dir(&package).unwrap();
         let filename = if cfg!(windows) { "rsi.exe" } else { "rsi" };
         let executable = bin.join(filename);
         let candidate = package.join(filename);
-        std::fs::copy(support::product_binary(), &executable).unwrap();
+        rsi_installation::filesystem::copy(&directory, filename, &support::product_binary(), true)
+            .unwrap();
         std::fs::copy(&executable, &candidate).unwrap();
         // ELF and PE permit an uninterpreted trailing overlay. The executable
         // behavior stays the same while its independently verified artifact changes.
@@ -214,12 +218,26 @@ impl Fixture {
         let layout = rsi_installation::Layout::new(self.root.path()).unwrap();
         let directory =
             rsi_files_native_fs::create_absolute_directory_no_follow(&layout.control).unwrap();
-        std::fs::copy(uninstaller(), layout.target(Role::Uninstaller))
-            .expect("build rsi-uninstall before integration tests");
+        rsi_installation::filesystem::copy(
+            &directory,
+            Role::Uninstaller.name(),
+            &uninstaller(),
+            true,
+        )
+        .expect("build rsi-uninstall before integration tests");
         let launcher = Path::new(env!("CARGO_MANIFEST_DIR"))
             .join("../../scripts")
-            .join(Role::Launcher.name());
-        std::fs::copy(launcher, layout.target(Role::Launcher)).unwrap();
+            .join(Role::Launcher.name())
+            .canonicalize()
+            .map(rsi_workspace_path::canonical_native_path)
+            .unwrap();
+        rsi_installation::filesystem::copy(
+            &directory,
+            Role::Launcher.name(),
+            &launcher,
+            cfg!(unix),
+        )
+        .unwrap();
         Record {
             format: 1,
             id: "a".repeat(32),
@@ -257,7 +275,10 @@ impl Fixture {
             uninstaller(),
             PathBuf::from(env!("CARGO_MANIFEST_DIR"))
                 .join("../../scripts")
-                .join(rsi_installation::record::LAUNCHER),
+                .join(rsi_installation::record::LAUNCHER)
+                .canonicalize()
+                .map(rsi_workspace_path::canonical_native_path)
+                .unwrap(),
         ];
         let hashes = inputs.each_ref().map(|path| hash(path));
         let host = rsi_service_host::ServiceHostPaths::from_host_paths(&self.paths).unwrap();

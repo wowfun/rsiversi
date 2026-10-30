@@ -21,7 +21,7 @@ fn strict_policy(store: &SqliteStore) -> bool {
 
 #[tokio::test]
 async fn refused_maintenance_preserves_reference_policy() {
-    let root = tempfile::tempdir().unwrap();
+    let root = private_tempdir();
     let store = SqliteStore::open(root.path()).unwrap();
     let mut request = seed(&store, "refused-policy", 1).await;
     request.targets[0].fact_seq += 1;
@@ -53,7 +53,7 @@ async fn refused_maintenance_preserves_reference_policy() {
 
 #[tokio::test]
 async fn completed_purge_retains_only_execution_locations_for_recovery() {
-    let root = tempfile::tempdir().unwrap();
+    let root = private_tempdir();
     let store = SqliteStore::open(root.path()).unwrap();
     let request = seed(&store, "minimal-binding", 1).await;
     store.begin_purge(request.clone()).await.unwrap().unwrap();
@@ -92,7 +92,7 @@ async fn completed_purge_retains_only_execution_locations_for_recovery() {
 
 #[tokio::test]
 async fn corrupted_retirement_location_binding_refuses_recovery() {
-    let root = tempfile::tempdir().unwrap();
+    let root = private_tempdir();
     let store = SqliteStore::open(root.path()).unwrap();
     let request = seed(&store, "corrupt-binding", 1).await;
     store.begin_purge(request.clone()).await.unwrap().unwrap();
@@ -121,7 +121,7 @@ async fn corrupted_retirement_location_binding_refuses_recovery() {
 
 #[tokio::test]
 async fn reference_proof_survives_a_known_refusal_without_writes() {
-    let root = tempfile::tempdir().unwrap();
+    let root = private_tempdir();
     let store = SqliteStore::open(root.path()).unwrap();
     seed(&store, "proof-refusal", 1).await;
     store.validate_references().await.unwrap();
@@ -156,7 +156,7 @@ async fn reference_proof_survives_a_known_refusal_without_writes() {
 
 #[tokio::test]
 async fn complete_non_strict_writes_preserve_the_reference_audit() {
-    let root = tempfile::tempdir().unwrap();
+    let root = private_tempdir();
     let store = SqliteStore::open(root.path()).unwrap();
     seed(&store, "first-proof", 1).await;
     store.validate_references().await.unwrap();
@@ -174,7 +174,7 @@ async fn complete_non_strict_writes_preserve_the_reference_audit() {
 
 #[tokio::test]
 async fn access_batch_keeps_retiring_and_purged_errors_in_selection_order() {
-    let root = tempfile::tempdir().unwrap();
+    let root = private_tempdir();
     let store = SqliteStore::open(root.path()).unwrap();
     let retired = seed(&store, "retired-access", 1).await;
     let live = seed(&store, "live-access", 1).await;
@@ -197,12 +197,15 @@ async fn access_batch_keeps_retiring_and_purged_errors_in_selection_order() {
         assert_eq!(rows.len(), 2);
         assert_eq!(rows[0].as_ref().unwrap().session_id, selection[0]);
         assert!(matches!(&rows[1], Err(StoreError::NotFound(id)) if id == selection[1].as_str()));
+        let cuts = store.session_activity_cuts(&selection).await.unwrap();
+        assert_eq!(cuts[0].as_ref().unwrap().session_id, selection[0]);
+        assert!(matches!(&cuts[1], Err(StoreError::NotFound(id)) if id == selection[1].as_str()));
     }
 }
 
 #[tokio::test]
 async fn warm_integrity_proof_does_not_dispatch_an_extra_reader_after_purge() {
-    let root = tempfile::tempdir().unwrap();
+    let root = private_tempdir();
     let store = SqliteStore::open(root.path()).unwrap();
     let retired = seed(&store, "retired-proof", 1).await;
     let live = seed(&store, "live-proof", 1).await;
@@ -226,7 +229,7 @@ async fn cached_integrity_never_exposes_retiring_secondary_rows() {
     use rsi_agent_session_protocol::{
         DomainRequestId, ProgramRunId, QueueOperationId, QueueSlotId,
     };
-    let root = tempfile::tempdir().unwrap();
+    let root = private_tempdir();
     let store = SqliteStore::open(root.path()).unwrap();
     let request = seed(&store, "retiring-reads", 160).await;
     let id = &request.targets[0].session_id;
@@ -261,7 +264,7 @@ async fn cached_integrity_never_exposes_retiring_secondary_rows() {
 
 #[test]
 fn pending_recovery_uses_partial_indexes() {
-    let root = tempfile::tempdir().unwrap();
+    let root = private_tempdir();
     let store = SqliteStore::open(root.path()).unwrap();
     let mut slot = store.inner.connections.writer.lock().unwrap();
     let connection = slot.as_mut().unwrap();
@@ -277,7 +280,7 @@ fn pending_recovery_uses_partial_indexes() {
 
 #[tokio::test]
 async fn garbage_collection_disposes_corrupt_unreferenced_bytes() {
-    let root = tempfile::tempdir().unwrap();
+    let root = private_tempdir();
     let store = SqliteStore::open(root.path()).unwrap();
     for (index, damaged) in [b"different".as_slice(), b"x".as_slice()]
         .into_iter()
@@ -327,7 +330,7 @@ async fn coverage_authenticates_stored_json_bytes_including_whitespace() {
         ("facts", "fact_json"),
         ("agent_controls", "control_json"),
     ] {
-        let root = tempfile::tempdir().unwrap();
+        let root = private_tempdir();
         let store = SqliteStore::open(root.path()).unwrap();
         let request = seed(&store, "encoded-coverage", 1).await;
         let changed = {
@@ -353,7 +356,7 @@ async fn coverage_authenticates_stored_json_bytes_including_whitespace() {
 
 #[tokio::test]
 async fn rolled_back_writes_preserve_coverage_but_committed_errors_do_not() {
-    let root = tempfile::tempdir().unwrap();
+    let root = private_tempdir();
     let store = SqliteStore::open(root.path()).unwrap();
     seed(&store, "rollback-proof", 1).await;
     store.validate_references().await.unwrap();
@@ -387,7 +390,7 @@ async fn rolled_back_writes_preserve_coverage_but_committed_errors_do_not() {
 
 #[tokio::test]
 async fn proof_stamp_cannot_skip_an_external_commit_between_entry_observations() {
-    let root = tempfile::tempdir().unwrap();
+    let root = private_tempdir();
     let store = SqliteStore::open(root.path()).unwrap();
     seed(&store, "stamp-gap", 1).await;
     store.validate_references().await.unwrap();
@@ -411,7 +414,7 @@ async fn proof_stamp_cannot_skip_an_external_commit_between_entry_observations()
 
 #[tokio::test]
 async fn reference_audit_is_not_reused_after_reopen_or_external_database_changes() {
-    let root = tempfile::tempdir().unwrap();
+    let root = private_tempdir();
     let store = SqliteStore::open(root.path()).unwrap();
     seed(&store, "external-change", 1).await;
     assert!(store.preview_cas_gc(1).await.unwrap().is_empty());
@@ -441,7 +444,7 @@ async fn reference_audit_is_not_reused_after_reopen_or_external_database_changes
 
 #[tokio::test]
 async fn reference_audit_is_shared_across_gc_and_strict_appends_but_not_untracked_changes() {
-    let root = tempfile::tempdir().unwrap();
+    let root = private_tempdir();
     let store = SqliteStore::open(root.path()).unwrap();
     seed(&store, "surviving-history", 30).await;
     for i in 0..16 {
@@ -481,7 +484,7 @@ async fn reference_audit_is_shared_across_gc_and_strict_appends_but_not_untracke
 }
 #[test]
 fn purge_selection_uses_session_and_operation_indexes_without_a_global_sort() {
-    let root = tempfile::tempdir().unwrap();
+    let root = private_tempdir();
     let store = SqliteStore::open(root.path()).unwrap();
     let mut slot = store.inner.connections.writer.lock().unwrap();
     let connection = slot.as_mut().unwrap();
@@ -502,7 +505,7 @@ fn purge_selection_uses_session_and_operation_indexes_without_a_global_sort() {
 
 #[tokio::test]
 async fn maximum_checkpoint_purges_in_bounded_batches_and_offline_maintenance_recovers() {
-    let root = tempfile::tempdir().unwrap();
+    let root = private_tempdir();
     let store = SqliteStore::open(root.path()).unwrap();
     let mut request = seed(&store, &"a".repeat(256), 1).await;
     request.operation_id =
@@ -641,7 +644,7 @@ async fn seed_header(store: &dyn SessionStore, header: SessionHeader, turns: u64
 }
 #[tokio::test]
 async fn purge_restarts_between_bounded_batches_and_rejects_old_proofs_and_resurrection() {
-    let root = tempfile::tempdir().unwrap();
+    let root = private_tempdir();
     let store = SqliteStore::open(root.path()).unwrap();
     let request = seed(&store, "bounded-purge", 160).await;
     let id = request.targets[0].session_id.clone();
@@ -734,7 +737,7 @@ async fn purge_restarts_between_bounded_batches_and_rejects_old_proofs_and_resur
 }
 #[tokio::test]
 async fn purge_refuses_changed_versions_and_extra_reference_edges_before_retirement() {
-    let root = tempfile::tempdir().unwrap();
+    let root = private_tempdir();
     let store = SqliteStore::open(root.path()).unwrap();
     let request = seed(&store, "changed-purge", 1).await;
     assert!(
@@ -795,7 +798,7 @@ async fn purge_blockers_are_exact_and_refusals_do_not_latch_cached_proof_checks(
         AgentPath, ForkOrigin, ForkTurnSelection, SessionProtectionScope,
     };
     use rsi_agent_store_protocol::PurgeBlocker;
-    let root = tempfile::tempdir().unwrap();
+    let root = private_tempdir();
     let store = SqliteStore::open(root.path()).unwrap();
     let parent = seed(&store, "parent", 1).await;
     let child_header = test_header("child")
@@ -907,7 +910,7 @@ async fn purge_blockers_are_exact_and_refusals_do_not_latch_cached_proof_checks(
 #[tokio::test]
 async fn cas_collection_respects_publication_ownership_and_old_receipts_cannot_delete_republication()
  {
-    let root = tempfile::tempdir().unwrap();
+    let root = private_tempdir();
     let store = SqliteStore::open(root.path()).unwrap();
     let bytes: Arc<[u8]> = Arc::from(b"retained publication".as_slice());
     let prepared = store.put_cas(bytes.clone()).await.unwrap();
@@ -945,7 +948,7 @@ async fn cas_collection_respects_publication_ownership_and_old_receipts_cannot_d
 }
 #[tokio::test]
 async fn interrupted_cas_deletion_rejects_readers_and_publishers_and_resumes_after_restart() {
-    let root = tempfile::tempdir().unwrap();
+    let root = private_tempdir();
     let store = SqliteStore::open(root.path()).unwrap();
     let bytes: Arc<[u8]> = Arc::from(b"deleting".as_slice());
     let prepared = store.put_cas(bytes.clone()).await.unwrap();
@@ -990,7 +993,7 @@ async fn interrupted_cas_deletion_rejects_readers_and_publishers_and_resumes_aft
 }
 #[tokio::test]
 async fn interrupted_purge_revalidates_surviving_canonical_reference_records() {
-    let root = tempfile::tempdir().unwrap();
+    let root = private_tempdir();
     let store = SqliteStore::open(root.path()).unwrap();
     let request = seed(&store, "retiring-corruption", 160).await;
     store.begin_purge(request.clone()).await.unwrap().unwrap();
@@ -1016,7 +1019,7 @@ async fn interrupted_purge_revalidates_surviving_canonical_reference_records() {
 
 #[tokio::test]
 async fn reference_rebuild_and_compact_are_explicit_and_exclusive() {
-    let root = tempfile::tempdir().unwrap();
+    let root = private_tempdir();
     let store = SqliteStore::open(root.path()).unwrap();
     let request = seed(&store, "rebuild", 12).await;
     assert!(matches!(
@@ -1077,7 +1080,7 @@ async fn generated_memory_sqlite_paging_and_reopen_agree() {
             .wrapping_mul(6_364_136_223_846_793_005)
             .wrapping_add(1);
         let turns = 1 + (random >> 32) % 16;
-        let root = tempfile::tempdir().unwrap();
+        let root = private_tempdir();
         let store = SqliteStore::open(root.path()).unwrap();
         let memory = rsi_agent_testkit::MemoryStore::default();
         let id = format!("generated-{case}");
@@ -1141,7 +1144,7 @@ async fn generated_memory_sqlite_paging_and_reopen_agree() {
 }
 #[tokio::test]
 async fn cas_unlink_failure_keeps_deleting_and_missing_namespace_resume_is_idempotent() {
-    let root = tempfile::tempdir().unwrap();
+    let root = private_tempdir();
     let store = SqliteStore::open(root.path()).unwrap();
     let prepared = store
         .put_cas(Arc::from(b"gc-fault".as_slice()))
@@ -1172,7 +1175,7 @@ async fn cas_unlink_failure_keeps_deleting_and_missing_namespace_resume_is_idemp
 
 #[tokio::test]
 async fn mixed_program_references_validate_rebuild_and_preserve_cas_roots() {
-    let root = tempfile::tempdir().unwrap();
+    let root = private_tempdir();
     let store = SqliteStore::open(root.path()).unwrap();
     let header = test_header("mixed-program");
     let (id, _) = Box::pin(rsi_agent_testkit::assert_program_store_contract(
@@ -1219,7 +1222,7 @@ async fn mixed_program_references_validate_rebuild_and_preserve_cas_roots() {
 
 #[tokio::test]
 async fn offline_verify_explicitly_refuses_pending_retirement() {
-    let root = tempfile::tempdir().unwrap();
+    let root = private_tempdir();
     let store = SqliteStore::open(root.path()).unwrap();
     let request = seed(&store, "pending-verify", 1).await;
     store.begin_purge(request).await.unwrap().unwrap();
@@ -1240,7 +1243,7 @@ async fn offline_verify_explicitly_refuses_pending_retirement() {
 
 #[tokio::test]
 async fn purge_batches_do_not_replay_unrelated_history_and_reject_extra_retiring_coverage() {
-    let root = tempfile::tempdir().unwrap();
+    let root = private_tempdir();
     let store = SqliteStore::open(root.path()).unwrap();
     assert!(matches!(
         store.purge_batch("unknown").await,
@@ -1283,7 +1286,7 @@ async fn purge_batches_do_not_replay_unrelated_history_and_reject_extra_retiring
 
 #[tokio::test]
 async fn batches_defer_unselected_corruption_and_failed_barriers_preserve_policy() {
-    let root = tempfile::tempdir().unwrap();
+    let root = private_tempdir();
     let store = SqliteStore::open(root.path()).unwrap();
     let request = seed(&store, "bounded-verification", 600).await;
     store
@@ -1373,7 +1376,7 @@ async fn batches_defer_unselected_corruption_and_failed_barriers_preserve_policy
 
 #[tokio::test]
 async fn cas_lease_checks_metadata_without_payload_io_and_read_still_authenticates() {
-    let root = tempfile::tempdir().unwrap();
+    let root = private_tempdir();
     let store = SqliteStore::open(root.path()).unwrap();
     let prepared = store
         .put_cas(Arc::from(b"verified".as_slice()))
@@ -1394,7 +1397,7 @@ async fn cas_lease_checks_metadata_without_payload_io_and_read_still_authenticat
 
 #[test]
 fn tombstone_not_in_uses_the_existing_primary_key_without_materialization() {
-    let root = tempfile::tempdir().unwrap();
+    let root = private_tempdir();
     let store = SqliteStore::open(root.path()).unwrap();
     let mut slot = store.inner.connections.writer.lock().unwrap();
     let connection = slot.as_mut().unwrap();
@@ -1415,7 +1418,7 @@ fn tombstone_not_in_uses_the_existing_primary_key_without_materialization() {
 
 #[tokio::test]
 async fn pending_operations_can_be_discovered_paged_and_resumed_after_restart() {
-    let root = tempfile::tempdir().unwrap();
+    let root = private_tempdir();
     let store = SqliteStore::open(root.path()).unwrap();
     for id in ["a", "b"] {
         let request = seed(&store, id, 1).await;
@@ -1478,7 +1481,7 @@ async fn pending_operations_can_be_discovered_paged_and_resumed_after_restart() 
 
 #[tokio::test]
 async fn batch_rejects_tombstone_receipt_disagreement_before_mutation() {
-    let root = tempfile::tempdir().unwrap();
+    let root = private_tempdir();
     let store = SqliteStore::open(root.path()).unwrap();
     let request = seed(&store, "state-mismatch", 1).await;
     let original = store.begin_purge(request.clone()).await.unwrap().unwrap();
@@ -1508,7 +1511,7 @@ async fn batch_rejects_tombstone_receipt_disagreement_before_mutation() {
 
 #[tokio::test]
 async fn append_coverage_hashes_exact_persisted_header_fact_and_control_bytes() {
-    let root = tempfile::tempdir().unwrap();
+    let root = private_tempdir();
     let store = SqliteStore::open(root.path()).unwrap();
     seed(&store, "exact-coverage", 3).await;
     let mut slot = store.inner.connections.writer.lock().unwrap();
@@ -1532,7 +1535,7 @@ async fn append_coverage_hashes_exact_persisted_header_fact_and_control_bytes() 
 }
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn cold_audit_queues_a_concurrent_writer_and_publishes_before_releasing_it() {
-    let root = tempfile::tempdir().unwrap();
+    let root = private_tempdir();
     let store = Arc::new(SqliteStore::open(root.path()).unwrap());
     seed(store.as_ref(), "busy-audit", 2).await;
     let (started, entered) = tokio::sync::oneshot::channel();
@@ -1599,7 +1602,7 @@ async fn cold_audit_queues_a_concurrent_writer_and_publishes_before_releasing_it
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn first_purge_admission_does_not_release_the_writer_after_cold_audit() {
-    let root = tempfile::tempdir().unwrap();
+    let root = private_tempdir();
     let store = Arc::new(SqliteStore::open(root.path()).unwrap());
     let request = seed(store.as_ref(), "atomic-audit", 2).await;
     let (started, entered) = tokio::sync::oneshot::channel();

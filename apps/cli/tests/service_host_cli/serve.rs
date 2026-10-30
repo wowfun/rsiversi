@@ -88,7 +88,8 @@ async fn foreground_serve_supports_local_clients_reload_and_exact_host_stop() {
         .unwrap()
         .unwrap();
     assert!(
-        output.status.success(),
+        !output.status.success()
+            && String::from_utf8_lossy(&output.stderr).contains("Host listener stopped"),
         "{}",
         String::from_utf8_lossy(&output.stderr)
     );
@@ -193,9 +194,16 @@ fn reload_executor_and_keep_listener(
         "executor reload replaced an independent listener"
     );
     fixture.assert_success(&["host", "status"]);
+    let mut current: serde_json::Value =
+        serde_json::from_slice(&std::fs::read(metadata_path).unwrap()).unwrap();
+    let mut previous: serde_json::Value = serde_json::from_slice(&owner).unwrap();
+    assert_ne!(
+        current.as_object_mut().unwrap().remove("service_revision"),
+        previous.as_object_mut().unwrap().remove("service_revision"),
+        "reload must publish the new Service revision"
+    );
     assert_eq!(
-        std::fs::read(metadata_path).unwrap(),
-        owner,
+        current, previous,
         "reload changed process or endpoint identity"
     );
 }

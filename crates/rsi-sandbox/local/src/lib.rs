@@ -299,6 +299,10 @@ impl Sandbox for Service {
     }
 }
 impl Service {
+    #[expect(
+        clippy::too_many_lines,
+        reason = "one exhaustive platform admission decision"
+    )]
     fn confine_view(
         &self,
         request: ProcessRequest,
@@ -307,13 +311,14 @@ impl Service {
         let (program, cwd, workspace) = validate_request(&request)?;
         if request.stdio == rsi_sandbox::ProcessStdio::Pty
             && request.mode == SandboxMode::DangerFullAccess
+            && !cfg!(windows)
         {
             return Err(SandboxError::Unsupported(request.mode));
         }
         if request.mode == SandboxMode::DangerFullAccess {
             return Ok(ConfinedProcess {
                 owner: None,
-                stdio: rsi_sandbox::ProcessStdio::Pipes,
+                stdio: request.stdio,
                 program,
                 arguments: request.arguments.into_iter().map(OsString::from).collect(),
                 cwd,
@@ -336,6 +341,16 @@ impl Service {
                 let mut arguments = bubblewrap_prefix(source_reader);
                 if request.stdio == rsi_sandbox::ProcessStdio::Pty {
                     arguments.retain(|argument| argument != "--new-session");
+                }
+                if !source_reader
+                    && request.program.starts_with("/tmp")
+                    && !request.program.starts_with(&workspace)
+                {
+                    arguments.extend([
+                        "--ro-bind".into(),
+                        target_program.clone(),
+                        target_program.clone(),
+                    ]);
                 }
                 arguments.extend([
                     match (request.mode, request.stdio) {
@@ -944,6 +959,45 @@ const fn mode_name(mode: SandboxMode) -> &'static str {
 mod tests {
     use super::*;
     use std::sync::atomic::{AtomicUsize, Ordering};
+
+    #[cfg(windows)]
+    #[tokio::test]
+    async fn windows_pty_preserves_explicit_full_access_and_refuses_restricted_requests() {
+        let directory = tempfile::tempdir().unwrap();
+        let service = Service {
+            generation: rsi_sandbox::SandboxGeneration::default(),
+            backend: None,
+            _staged: None,
+        };
+        for mode in [
+            SandboxMode::DangerFullAccess,
+            SandboxMode::ReadOnly,
+            SandboxMode::WorkspaceWrite,
+        ] {
+            let result = service
+                .confine(ProcessRequest {
+                    stdio: rsi_sandbox::ProcessStdio::Pty,
+                    mode,
+                    program: PathBuf::from(std::env::var_os("SystemRoot").unwrap())
+                        .join("System32/cmd.exe"),
+                    arguments: vec![],
+                    cwd: directory.path().to_owned(),
+                    workspace: directory.path().to_owned(),
+                })
+                .await;
+            if mode == SandboxMode::DangerFullAccess {
+                let plan = result.unwrap();
+                assert_eq!(plan.stdio, rsi_sandbox::ProcessStdio::Pty);
+                assert_eq!(plan.stamp.requested, mode);
+                assert_eq!(plan.stamp.backend, SandboxBackend::Unconfined);
+            } else {
+                assert!(
+                    result.is_err(),
+                    "a restricted Windows request must never become an unconfined PTY"
+                );
+            }
+        }
+    }
 
     #[derive(Debug)]
     struct AvailableProbe {

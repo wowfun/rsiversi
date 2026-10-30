@@ -1,6 +1,7 @@
 """Automation projection and mutation through the actual native API/Worker family."""
 import json
 import re
+import subprocess
 
 
 def configure(host, seed):
@@ -10,7 +11,15 @@ def configure(host, seed):
         output.write('\n[[steps]]\nkind="patch"\ntarget="automation"\nconfig_json=' + json.dumps(json.dumps({'directory': str(seed.resolve()), 'runtime': runtime})) + '\n[[steps]]\nkind="patch"\ntarget="automation"\nenabled=true\n')
 
 
-def verify(script, button, click, until, screenshot, report):
+def verify(script, button, click, until, screenshot, report, probe, env):
+    button('Settings')
+    button('Plugins')
+    button('Browse Host Profiles')
+    button('Open Profile fixture')
+    caller = until(lambda: script(r'return [...document.querySelectorAll(".profile-leaves > p")].find(e=>e.textContent.startsWith("Caller:"))?.textContent'))
+    device = re.match(r'Caller: device ([0-9a-f]{32})(?:\s|$)', caller)
+    assert device, caller
+    button('Close settings')
     script(r'''window.fixtureAutomation={attempts:{},requests:[],frames:0,mutation:null};
 fixtureTransport.observers.push((kind,data,request)=>{
  if(kind==='call'&&data.method==='command'){
@@ -26,6 +35,12 @@ fixtureTransport.observers.push((kind,data,request)=>{
  }
 });return true''')
     button('Deployment checks')
+    until(lambda: script('return document.querySelector(".automation-panel")?.textContent.includes("No visible deployment attempts.")'))
+    grant = subprocess.run([str(probe.resolve()), device[1]], env=env, text=True,
+                           capture_output=True, timeout=30, check=False)
+    assert grant.returncode == 0, grant.stderr
+    assert int(json.loads(grant.stdout)['revision']) > 0
+    button('Refresh')
     until(lambda: script('return document.querySelector(".automation-panel")?.textContent.includes("assertion failed")'))
     until(lambda: script('const b=document.querySelector(".automation-row:not(:disabled)"); return !!b&&b.getBoundingClientRect().height>0'))
     click(".automation-row:not(:disabled)")
@@ -62,6 +77,6 @@ fixtureTransport.observers.push((kind,data,request)=>{
     assert transport['nativeBridge'] and transport['frames'] > 0
     assert all(request.get('ok') is True for request in transport['requests'])
     assert any(request.get('request',{}).get('operation') == 'resume' for request in transport['requests'])
-    (report / 'automation.json').write_text(json.dumps({'ok': True, 'transport': transport, 'image': image, 'mutation': receipt, 'originalAttempt': reread, 'newAttempt': current}, indent=2))
+    (report / 'automation.json').write_text(json.dumps({'ok': True, 'device_requires_local_grant': True, 'device': device[1], 'transport': transport, 'image': image, 'mutation': receipt, 'originalAttempt': reread, 'newAttempt': current}, indent=2))
     # Close the actual modal using its button, without dispatching another mutation.
     button('Close')

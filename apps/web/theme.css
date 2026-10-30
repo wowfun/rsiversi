@@ -1,0 +1,67 @@
+@import './vendor/dsh/theme-base.css';
+@import './vendor/dsh/dockkit-tokens.css';
+
+/* Global renderer aliases resolve to the same platform tokens as first-party UI. */
+:root {
+  /* Text roles need contrast on both base and tinted surfaces; indicators retain DSH fills. */
+  --rsi-text-accent:var(--dsw-static-deepseek-600);
+  --rsi-text-success:#197544;
+  --rsi-text-warning:#8a5b22;
+  --dsw-menu-backdrop-filter:blur(40px) saturate(150%);
+  --mist:var(--dsw-specific-sidebar-fill);
+  --paper:var(--dsw-alias-bg-base);
+  --ink:var(--dsw-alias-label-primary);
+  --muted:var(--dsw-alias-label-secondary);
+  --teal:var(--rsi-text-accent);
+  --blue:var(--dsw-alias-state-business-tertiary);
+  --line:var(--dsw-alias-border-l3);
+  --error:var(--rsi-text-error);
+  --rsi-text-error:#b4232f;
+  --success:var(--rsi-text-success);
+  --warning:var(--rsi-text-warning);
+  --warning-bg:var(--dsw-alias-state-warn-tertiary);
+  --user-fill:var(--dsw-specific-bubble);
+  --composer-fill:var(--dsw-specific-input-major);
+  --hover:var(--dsw-alias-interactive-bg-hover);
+  --active:var(--dsw-alias-interactive-bg-active);
+  --action-fill:var(--dsw-alias-button-primary-fill);
+  --action-hover:var(--dsw-alias-button-primary-hover);
+  --on-action:var(--dsw-alias-label-primary-foreground);
+  --secondary-surface:var(--dsw-alias-bg-layer-1);
+  --shadow:var(--dsw-alias-bg-mask-2);
+  --radius-detail:var(--dsw-radius-xs);
+  --radius-compact:var(--dsw-radius-sm);
+  --radius-control:var(--dsw-radius-md);
+  --radius-content:var(--dsw-radius-lg);
+  --radius-card:var(--dsw-radius-xl);
+  --radius-panel:var(--dsw-radius-panel);
+  --content-size:14px;
+  color-scheme:light;
+  font-family:var(--dsh-font-family-text-default);
+  font-size:14px;
+  font-synthesis:none;
+  color:var(--ink);
+  background:var(--paper);
+}
+:root[data-theme=dark] {
+  color-scheme:dark;
+  --rsi-text-accent:var(--dsw-static-deepseek-300);
+  --rsi-text-success:var(--dsw-static-green-400);
+  --rsi-text-warning:var(--dsw-static-amber-400);
+  --rsi-text-error:#ffb3b8;
+}
+@media(prefers-color-scheme:dark) {
+  :root:not([data-theme=light]):not([data-theme=dark]) {
+    color-scheme:dark;
+    --rsi-text-accent:var(--dsw-static-deepseek-300);
+    --rsi-text-success:var(--dsw-static-green-400);
+    --rsi-text-warning:var(--dsw-static-amber-400);
+  --rsi-text-error:#ffb3b8;
+  }
+}
+:root[data-content-size="12"] {--content-size:12px}
+:root[data-content-size="13"] {--content-size:13px}
+:root[data-content-size="14"] {--content-size:14px}
+:root[data-content-size="15"] {--content-size:15px}
+:root[data-content-size="16"] {--content-size:16px}
+:root[data-content-size="17"] {--content-size:17px}

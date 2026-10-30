@@ -15,6 +15,11 @@ as `reasoning.effort = none`. Other declared IDs keep their exact spelling.
 Prepared settings retain the adapter's `off` identity. `max` is never aliased
 to `xhigh`.
 
+Configured `deepseek-flash` and `deepseek-v4-pro` profiles declare `off`, `low`,
+`high` and `max`, defaulting to `high`. Explicit `reasoning_efforts` replaces
+that declaration, including an empty profile. Other model IDs require an explicit
+effort declaration; capabilities are not inferred from a name prefix.
+
 Responses reuses the bounded shared serializer and event parser with stateless
 history: no previous-response identity, background operation or stored-response
 recovery is advertised. Plain reasoning events remain distinct from visible

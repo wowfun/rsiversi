@@ -446,7 +446,7 @@ impl PluginFactory for GateFactory {
 #[tokio::test]
 async fn executor_loss_after_summary_finished_interrupts_original_turn_and_explicit_resume_reuses_summary()
  {
-    let stack = BaseStack::activate().await;
+    let mut stack = BaseStack::activate().await;
     let provider = fixture(
         &stack,
         vec![
@@ -507,6 +507,13 @@ async fn executor_loss_after_summary_finished_interrupts_original_turn_and_expli
         }
     ));
     assert!(executor.dispose().await.is_clean());
+    drop(turns);
+    stack.restart_kernel().await;
+    let turns = stack
+        .runtime
+        .root()
+        .lookup_local::<TurnServiceContract>()
+        .unwrap();
     let replacement = stack.activate_executor("after-summary-crash").await;
     assert!(matches!(
         wait_for_outcome(&turns, &second).await,
@@ -536,7 +543,7 @@ async fn executor_shutdown_with_cancelled_summary_output_is_interrupted_not_user
 }
 
 async fn interrupted_summary(finish_on_cancellation: bool) {
-    let stack = BaseStack::activate().await;
+    let mut stack = BaseStack::activate().await;
     let entered = Arc::new(Notify::new());
     let release = Arc::new(Notify::new());
     let provider = fixture(
@@ -577,6 +584,13 @@ async fn interrupted_summary(finish_on_cancellation: bool) {
         .await
         .unwrap();
     assert!(executor.dispose().await.is_clean());
+    drop(turns);
+    stack.restart_kernel().await;
+    let turns = stack
+        .runtime
+        .root()
+        .lookup_local::<TurnServiceContract>()
+        .unwrap();
     let replacement = stack.activate_executor("after-partial-summary").await;
     assert!(matches!(
         wait_for_outcome(&turns, &second).await,

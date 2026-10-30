@@ -5,6 +5,7 @@ import {createHash} from 'node:crypto';
 import {readFileSync} from 'node:fs';
 import {createRequire} from 'node:module';
 import {dirname, resolve} from 'node:path';
+/** @returns {import('vite').Plugin} */
 export function xtermDocumentOverride() {
   const require=createRequire(import.meta.url);
   const manifest=require.resolve('@xterm/xterm/package.json');

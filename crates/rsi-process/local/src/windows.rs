@@ -15,6 +15,7 @@ use tokio::{
     sync::{Notify, OwnedSemaphorePermit, Semaphore},
 };
 mod duplex;
+mod pty;
 use rsi_process_native as native;
 
 #[derive(Debug)]
@@ -25,6 +26,7 @@ pub(super) struct Service {
     maximum_active: usize,
     capture: Arc<Semaphore>,
     children: Mutex<BTreeMap<u64, Arc<Child>>>,
+    ptys: Mutex<BTreeMap<u64, Arc<pty::Control>>>,
     changed: Notify,
     timeout: Duration,
 }
@@ -41,6 +43,7 @@ impl Service {
             maximum_active: config.maximum_active_processes,
             capture: Arc::new(Semaphore::new(config.maximum_capture_bytes)),
             children: Mutex::new(BTreeMap::new()),
+            ptys: Mutex::new(BTreeMap::new()),
             changed: Notify::new(),
             timeout: Duration::from_millis(config.shutdown_timeout_ms),
         })
@@ -209,6 +212,9 @@ impl Service {
         self.accepting.store(false, Ordering::Release);
         self.active.close();
         self.capture.close();
+        for child in self.ptys.lock().expect("Windows PTY registry").values() {
+            child.terminate();
+        }
         for child in self
             .children
             .lock()
@@ -224,7 +230,7 @@ impl Service {
                     .children
                     .lock()
                     .expect("Windows Process registry")
-                        .is_empty() && self.active.available_permits() == self.maximum_active
+                        .is_empty() && self.ptys.lock().expect("Windows PTY registry").is_empty() && self.active.available_permits() == self.maximum_active
                 {
                     return;
                 }
@@ -237,6 +243,9 @@ impl Service {
 }
 impl Drop for Service {
     fn drop(&mut self) {
+        for child in self.ptys.get_mut().expect("Windows PTY registry").values() {
+            child.terminate();
+        }
         for child in self
             .children
             .get_mut()

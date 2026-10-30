@@ -1,3 +1,6 @@
+import {openSettings} from './controls.mjs';
+import {disconnect} from './controls.mjs';
+import {addWorkspace,addModelProvider,navigationOptions} from './controls.mjs';
 import {detailMode,navigationFilter,selectSurface} from './controls.mjs';
 import './paired-env.mjs';
 import assert from 'node:assert/strict';
@@ -11,13 +14,14 @@ const report=process.env.RSI_WEB_REPORT;
 if(!report || !process.env.RSI_WEB_ASSETS || !process.env.RSI_WEB_BINARY) throw new Error('Set explicit RSI_WEB_REPORT, RSI_WEB_ASSETS and RSI_WEB_BINARY');
 await mkdir(report,{recursive:true});
 const binary=process.env.RSI_WEB_BINARY;
+const staleDefault=process.env.RSI_WEB_STALE_DEFAULT==='1';
 for(const [name,engine] of Object.entries({chromium,firefox})) {
   if(process.env.RSI_WEB_BROWSER && process.env.RSI_WEB_BROWSER!==name) continue;
   const directory=join(report,name);await mkdir(directory,{recursive:true});
   let endpoint;
   const service=await startService({binary,assets:process.env.RSI_WEB_ASSETS,report:directory,configure:async({config,provider})=>{
     endpoint=provider.origin;
-    await writeFile(join(config,'settings.json'),JSON.stringify({'rsi.agent':{}}));
+    await writeFile(join(config,'settings.json'),JSON.stringify({'rsi.agent':staleDefault?{default_model:{deployment:'removed-provider',model:'unavailable-model'}}:{}}));
     await writeFile(join(config,'host-profiles/fixture/host.profile.toml'),'format = 1\nsteps = []\n');
   }});
   const browser=await engine.launch();
@@ -36,37 +40,24 @@ for(const [name,engine] of Object.entries({chromium,firefox})) {
     await page.getByLabel('Device registration receipt').fill(JSON.stringify(service.register(`${name}-workbench`)));
     await page.getByRole('button',{name:'Connect',exact:true}).click();
     await page.locator('#workbench').waitFor({state:'visible',timeout:30000});
-    await page.locator('.setup-prompt').waitFor({state:'visible'});
-    await page.getByText('Add workspace',{exact:true}).first().click();
-    await page.getByLabel('Server directory').fill(service.workspace);
-    await page.locator('#workspace-form').getByRole('button',{name:'Add workspace',exact:true}).click();
-    await page.locator('#workspaces [data-testid=workspace-open]').waitFor();
-    await page.getByRole('button',{name:'Settings',exact:true}).click();
-    await page.getByLabel('Provider',{exact:true}).selectOption('openai-compatible');
-    await page.getByRole('button',{name:'Check credential',exact:true}).click();
-    await page.locator('.credential-status').getByText('configured',{exact:true}).waitFor();
-    await page.getByLabel('Deployment name').fill('first-provider');
-    await page.getByLabel('Provider endpoint').fill(endpoint);
-    await page.getByLabel('Request path').fill('/v1/chat/completions');
-    await page.getByLabel('Model identifier 1',{exact:true}).fill('fixture-model');
-    await page.getByRole('button',{name:'Apply provider',exact:true}).click();
-    await page.getByText('Desired 1 · Applied 1',{exact:true}).waitFor({timeout:30000});
-    await page.getByLabel('Default model',{exact:true}).selectOption({label:'fixture-model · first-provider'});
-    await page.getByText('default_model · confirmed',{exact:true}).waitFor();
-    await page.getByLabel('Default model',{exact:true}).waitFor({state:'visible'});
-    await page.waitForFunction(()=>!document.querySelector('[aria-label="Default model"]').disabled);
+    if(!staleDefault)await page.getByRole('button',{name:'Choose model',exact:true}).waitFor();
+    await addWorkspace(page,service.workspace);
+    await openSettings(page);
+    await page.getByRole('button',{name:'Models',exact:true}).click();
+    await addModelProvider(page,{id:'first-provider',endpoint,model:'fixture-model'});
     await page.evaluate(()=>new Promise(resolve=>requestAnimationFrame(()=>requestAnimationFrame(resolve))));
     await page.screenshot({path:join(directory,'setup.png'),fullPage:true});
     await page.getByRole('button',{name:'Close settings',exact:true}).click();
-    await page.locator('#workspaces [data-testid=workspace-open]').click();
+    await page.getByRole('button',{name:'New conversation in workspace',exact:true}).click();
     const input=page.getByLabel('Main message',{exact:true});
     await input.waitFor();
     await page.waitForFunction(()=>!document.querySelector('[aria-label="Main message"]').disabled);
-    const emptyIdentity=await page.locator('.pane-session').innerText();
+    const emptyIdentity=await page.locator('.pane.selected').getAttribute('data-session-id');
+    assert(emptyIdentity);
     const emptyEditor=await input.elementHandle();
-    await page.locator('#workspaces [data-testid=workspace-open]').click();
+    await page.getByRole('button',{name:'New conversation in workspace',exact:true}).click();
     await page.waitForFunction(()=>!document.querySelector('[aria-label="Main message"]').disabled);
-    assert.equal(await page.locator('.pane-session').innerText(),emptyIdentity,'matching owned empty draft is reused');
+    assert.equal(await page.locator('.pane.selected').getAttribute('data-session-id'),emptyIdentity,'matching owned empty draft is reused');
     assert(await emptyEditor.evaluate(node=>node===document.querySelector('[aria-label="Main message"]')),'reuse keeps the editor DOM identity');
     await emptyEditor.dispose();
     await input.fill('First conversation from an empty configuration.');
@@ -74,7 +65,8 @@ for(const [name,engine] of Object.entries({chromium,firefox})) {
     await page.locator('.message.assistant').filter({hasText:'Reviewed:'}).waitFor({timeout:30000});
     await page.waitForFunction(()=>document.querySelector('.pane.selected .pane-status')?.textContent==='Completed');
     const queries=await page.evaluate(()=>window.navigationQueries);
-    await page.getByRole('button',{name:'Refresh workspaces and conversations',exact:true}).click();
+    await navigationOptions(page);
+    await page.getByRole('menuitem',{name:'Refresh',exact:true}).click();
     await page.waitForFunction(before=>window.navigationQueries>before,queries);
     await page.evaluate(()=>new Promise(resolve=>requestAnimationFrame(()=>requestAnimationFrame(resolve))));
     await page.locator('#sessions .session-row').waitFor();
@@ -117,10 +109,10 @@ for(const [name,engine] of Object.entries({chromium,firefox})) {
       assert(!geometry.overflow && geometry.input>100 && geometry.send>30 && geometry.hit,JSON.stringify({width,geometry}));
       await page.screenshot({path:join(directory,`responsive-${width}.png`)});
     }
-    await page.getByRole('button',{name:'Sign out',exact:true}).click();
+    await disconnect(page);
     await page.locator('#login').waitFor({state:'visible'});
     assert.deepEqual(errors,[]);
-    await writeFile(join(directory,'result.json'),JSON.stringify({browser:browser.version(),emptyConfiguration:true,providerApply:true,defaultModel:true,conversation:true,rename:true,archiveDoesNotDetach:true,keyedCompare:true,responsiveHitTesting:true,errors}));
+    await writeFile(join(directory,'result.json'),JSON.stringify({browser:browser.version(),emptyConfiguration:!staleDefault,staleDefaultRecovery:staleDefault,providerApply:true,defaultModel:true,conversation:true,rename:true,archiveDoesNotDetach:true,keyedCompare:true,responsiveHitTesting:true,errors}));
   } catch(error) {if(page){await page.screenshot({path:join(directory,'failure.png')}).catch(()=>{});await writeFile(join(directory,'failure.html'),await page.content()).catch(()=>{})}await writeFile(join(directory,'errors.json'),JSON.stringify({error:String(error),pageErrors:errors}));throw error}
   finally {await browser.close();await service.close()}
 }

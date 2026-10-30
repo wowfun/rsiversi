@@ -231,6 +231,46 @@ fn overlapping_tool_intents_require_every_definition_to_be_parallel_safe() {
     apply_tool_body(&mut turn, &first).unwrap();
     apply_tool_body(&mut turn, &second).unwrap();
     assert_eq!(turn.effects.len(), 2);
+    let SessionFactBody::ToolIntent {
+        effect_id,
+        identity,
+        ..
+    } = &first
+    else {
+        unreachable!();
+    };
+    let start = |effect_id, identity| SessionFactBody::ToolStarted {
+        turn_id: turn_id.clone(),
+        effect_id,
+        identity,
+    };
+    assert!(
+        apply_tool_body(
+            &mut turn,
+            &start(EffectId::new("missing-effect").unwrap(), identity.clone(),)
+        )
+        .is_err()
+    );
+    let SessionFactBody::ToolIntent {
+        identity: other, ..
+    } = &second
+    else {
+        unreachable!();
+    };
+    assert!(apply_tool_body(&mut turn, &start(effect_id.clone(), other.clone())).is_err());
+    assert!(
+        turn_state::apply_model_body(
+            &mut turn,
+            &SessionFactBody::ModelStarted {
+                turn_id: turn_id.clone(),
+                effect_id: effect_id.clone(),
+            }
+        )
+        .is_err()
+    );
+    let valid = start(effect_id.clone(), identity.clone());
+    apply_tool_body(&mut turn, &valid).unwrap();
+    assert!(apply_tool_body(&mut turn, &valid).is_err());
     assert!(matches!(
         apply_tool_body(&mut turn, &exclusive),
         Err(TurnError::Invalid(message))

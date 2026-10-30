@@ -19,6 +19,7 @@ test('ACP live startup uses the explicit model and provider credential without c
       cp.spawn=(binary,args,{env})=>{
         try {
           const config=join(env.XDG_CONFIG_HOME,'rsi');
+          assert.match(readFileSync(join(config,'rsi.toml'),'utf8'),/\\[service\\][\\s\\S]*id = "fixture"/);
           const route=JSON.parse(readFileSync(join(config,'settings.json'),'utf8'))['rsi.agent'].default_model;
           assert.deepEqual(route,{deployment:'live',model:'fixture.v1'});
           assert.equal(env.DEEPSEEK_API_KEY,'synthetic-live-key');

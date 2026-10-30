@@ -1,4 +1,5 @@
 use super::*;
+use std::time::Duration;
 
 #[derive(Debug)]
 struct UnknownFinalizer {
@@ -300,199 +301,124 @@ async fn cancellation_retires_an_admitted_tool_after_it_settles() {
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
-#[allow(clippy::too_many_lines)] // Keep executor replacement, durable recovery, terminal eviction, and generation ownership in one scenario.
-async fn recovered_pending_tool_keeps_its_generation_pin_through_cancelled_retirement() {
-    let stack = BaseStack::activate().await;
-    let tools = Arc::clone(&stack.tool_registrar);
-    let entered = Arc::new(Notify::new());
-    let release = CancellationToken::new();
-    let tool_lease = tools
-        .register(ToolRegistration {
-            output: None,
-            definition: ToolDefinition::new("echo", "delayed", json!({"type":"object"})).unwrap(),
-            timeout: rsi_tools_protocol::ToolTimeoutPolicy::Execution { timeout_ms: 2_000 },
-            executor: Arc::new(NonCooperativeTool {
-                entered: Arc::clone(&entered),
-                release: release.clone(),
-            }),
-        })
-        .unwrap();
-    let fixture = Arc::new(LanguageFixture {
-        outcomes: Mutex::new(VecDeque::from([StartOutcome::Stream(tool_script())])),
-        requests: Mutex::new(vec![]),
-        starts: Arc::new(AtomicUsize::new(0)),
-        store: stack.store.clone(),
-        retry_policy: RetryPolicy::default(),
-    });
-    let language_fiber = stack
-        .activate_language("test.language.recovered-tool", fixture)
-        .await;
-    let first_executor = stack.activate_executor("executor-before-recovery").await;
-    let turns = stack
-        .runtime
-        .root()
-        .lookup_local::<TurnServiceContract>()
-        .unwrap();
-    let submitted = turns
-        .submit(SubmitTurn {
-            reasoning_effort: None,
-            turn_id: client_turn_id(),
-            session: stack.fresh(header()).await,
-            text: "recover the pending tool".into(),
-            model: None,
-            sandbox: None,
+#[allow(clippy::too_many_lines)] // Follow both cancellation and successful Tool completion through the same fenced handoff.
+async fn unconfirmed_executor_cleanup_blocks_replacement_after_tool_settlement() {
+    for cancel in [false, true] {
+        let stack = BaseStack::activate().await;
+        let tools = Arc::clone(&stack.tool_registrar);
+        let entered = Arc::new(Notify::new());
+        let release = CancellationToken::new();
+        let tool_lease = tools
+            .register(ToolRegistration {
+                output: None,
+                definition: ToolDefinition::new("echo", "delayed", json!({"type":"object"}))
+                    .unwrap(),
+                timeout: rsi_tools_protocol::ToolTimeoutPolicy::Execution { timeout_ms: 2_000 },
+                executor: Arc::new(NonCooperativeTool {
+                    entered: Arc::clone(&entered),
+                    release: release.clone(),
+                }),
+            })
+            .unwrap();
+        let fixture = Arc::new(LanguageFixture {
+            outcomes: Mutex::new(VecDeque::from([StartOutcome::Stream(tool_script())])),
+            requests: Mutex::new(vec![]),
+            starts: Arc::new(AtomicUsize::new(0)),
+            store: stack.store.clone(),
+            retry_policy: RetryPolicy::default(),
+        });
+        let language = stack
+            .activate_language("test.language.fenced-tool", fixture.clone())
+            .await;
+        let first = stack.activate_executor("executor-before-fence").await;
+        let turns = stack
+            .runtime
+            .root()
+            .lookup_local::<TurnServiceContract>()
+            .unwrap();
+        let submitted = stack
+            .submit_fresh(&turns, "session-e2e", "retain pending tool")
+            .await;
+        tokio::time::timeout(Duration::from_secs(3), entered.notified())
+            .await
+            .unwrap();
+        let work = turns
+            .controlled_work(&submitted.session_id, &submitted.turn_id)
+            .unwrap()
+            .unwrap();
+        assert!(first.dispose().await.is_clean());
+        assert_eq!(
+            work.status(),
+            rsi_agent_turn_protocol::ControlledWorkStatus::Unsettled
+        );
+        let replacement = stack.activate_executor("executor-after-fence").await;
+        if cancel {
+            stack.cancel_current().await;
+        }
+        let tool_runtime = stack.tool_runtime();
+        drop(stack.composition.pin.lock().unwrap().take());
+        assert_eq!(stack.composition.owner_drops.load(Ordering::Acquire), 0);
+        let identity = stack
+            .store
+            .read_facts(
+                &submitted.session_id,
+                0,
+                64,
+                rsi_agent_store_protocol::MAXIMUM_STORE_FACT_PAGE_BYTES,
+            )
+            .await
+            .unwrap()
+            .facts
+            .into_iter()
+            .find_map(|fact| match fact.into_body() {
+                SessionFactBody::ToolStarted { identity, .. } => Some(identity),
+                _ => None,
+            })
+            .unwrap();
+        assert!(matches!(
+            tool_runtime.query(&identity).unwrap(),
+            RetainedToolResult::Pending
+        ));
+        release.cancel();
+        tokio::time::timeout(Duration::from_secs(1), async {
+            while matches!(
+                tool_runtime.query(&identity).unwrap(),
+                RetainedToolResult::Pending
+            ) {
+                tokio::task::yield_now().await;
+            }
         })
         .await
         .unwrap();
-    tokio::time::timeout(std::time::Duration::from_secs(3), entered.notified())
-        .await
-        .expect("the Tool did not start before its fixture deadline");
-    assert!(first_executor.dispose().await.is_clean());
-
-    let second_executor = stack.activate_executor("executor-after-recovery").await;
-    let tool_runtime = stack.tool_runtime();
-    stack.cancel_current().await;
-    drop(stack.composition.pin.lock().unwrap().take());
-    let outcome = tokio::time::timeout(std::time::Duration::from_secs(4), async {
-        loop {
-            if let Some(outcome) = turns
+        // Permit several claim-admission retries after the Tool has settled.
+        tokio::time::sleep(Duration::from_millis(100)).await;
+        assert_eq!(
+            work.status(),
+            rsi_agent_turn_protocol::ControlledWorkStatus::Unsettled
+        );
+        assert_eq!(
+            turns
                 .outcome(&submitted.session_id, &submitted.turn_id)
                 .await
-                .unwrap()
-            {
-                break outcome;
-            }
-            tokio::task::yield_now().await;
-        }
-    })
-    .await
-    .expect("the inherited cancellation did not terminate recovery");
-    assert!(matches!(outcome, TurnOutcome::Cancelled));
-    assert_eq!(
-        stack.composition.owner_drops.load(Ordering::Acquire),
-        0,
-        "terminal eviction released the recovered Tool's generation while it was pending"
-    );
-
-    let identity = stack
-        .store
-        .read_facts(
-            &submitted.session_id,
-            0,
-            64,
-            rsi_agent_store_protocol::MAXIMUM_STORE_FACT_PAGE_BYTES,
-        )
-        .await
-        .unwrap()
-        .facts
-        .into_iter()
-        .find_map(|fact| match fact.into_body() {
-            SessionFactBody::ToolStarted { identity, .. } => Some(identity),
-            _ => None,
-        })
-        .expect("durable recovered ToolStarted identity");
-    release.cancel();
-    tokio::time::timeout(std::time::Duration::from_secs(1), async {
-        while tool_runtime.query(&identity).unwrap() != RetainedToolResult::Absent {
-            tokio::task::yield_now().await;
-        }
-    })
-    .await
-    .expect("recovered Tool identity was not retired after settlement");
-    tokio::time::timeout(std::time::Duration::from_secs(1), async {
-        while stack.composition.owner_drops.load(Ordering::Acquire) != 1 {
-            tokio::task::yield_now().await;
-        }
-    })
-    .await
-    .expect("recovered Tool's final generation pin was not released after settlement");
-
-    drop((tool_runtime, turns, tool_lease, tools));
-    stack.dispose(language_fiber, second_executor).await;
-}
-
-#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
-async fn successfully_recovered_tool_releases_its_tracking_pin_after_commit() {
-    let stack = BaseStack::activate().await;
-    let tools = Arc::clone(&stack.tool_registrar);
-    let entered = Arc::new(Notify::new());
-    let release = CancellationToken::new();
-    let tool_lease = tools
-        .register(ToolRegistration {
-            output: None,
-            definition: ToolDefinition::new("echo", "delayed", json!({"type":"object"})).unwrap(),
-            timeout: rsi_tools_protocol::ToolTimeoutPolicy::Execution { timeout_ms: 2_000 },
-            executor: Arc::new(NonCooperativeTool {
-                entered: Arc::clone(&entered),
-                release: release.clone(),
-            }),
-        })
-        .unwrap();
-    let fixture = Arc::new(LanguageFixture {
-        outcomes: Mutex::new(VecDeque::from([
-            StartOutcome::Stream(tool_script()),
-            StartOutcome::Stream(answer_script()),
-        ])),
-        requests: Mutex::new(vec![]),
-        starts: Arc::new(AtomicUsize::new(0)),
-        store: stack.store.clone(),
-        retry_policy: RetryPolicy::default(),
-    });
-    let language_fiber = stack
-        .activate_language("test.language.successfully-recovered-tool", fixture)
-        .await;
-    let first_executor = stack
-        .activate_executor("executor-before-successful-recovery")
-        .await;
-    let turns = stack
-        .runtime
-        .root()
-        .lookup_local::<TurnServiceContract>()
-        .unwrap();
-    let submitted = turns
-        .submit(SubmitTurn {
-            reasoning_effort: None,
-            turn_id: client_turn_id(),
-            session: stack.fresh(header()).await,
-            text: "recover and finish the pending tool".into(),
-            model: None,
-            sandbox: None,
-        })
-        .await
-        .unwrap();
-    entered.notified().await;
-    assert!(first_executor.dispose().await.is_clean());
-
-    let second_executor = stack
-        .activate_executor("executor-after-successful-recovery")
-        .await;
-    drop(stack.composition.pin.lock().unwrap().take());
-    release.cancel();
-    let outcome = tokio::time::timeout(std::time::Duration::from_secs(2), async {
-        loop {
-            if let Some(outcome) = turns
-                .outcome(&submitted.session_id, &submitted.turn_id)
-                .await
-                .unwrap()
-            {
-                break outcome;
-            }
-            tokio::task::yield_now().await;
-        }
-    })
-    .await
-    .expect("successfully recovered Tool did not complete the turn");
-    assert_eq!(outcome, TurnOutcome::Completed);
-    tokio::time::timeout(std::time::Duration::from_secs(1), async {
-        while stack.composition.owner_drops.load(Ordering::Acquire) != 1 {
-            tokio::task::yield_now().await;
-        }
-    })
-    .await
-    .expect("a committed recovered Tool left its tracking generation pin resident");
-
-    drop((turns, tool_lease, tools));
-    stack.dispose(language_fiber, second_executor).await;
+                .unwrap(),
+            None
+        );
+        assert_eq!(
+            fixture.starts.load(Ordering::Acquire),
+            1,
+            "replacement must not issue another model effect"
+        );
+        assert!(
+            !matches!(
+                tool_runtime.query(&identity).unwrap(),
+                RetainedToolResult::Absent
+            ),
+            "uncommitted retained evidence must survive refused takeover"
+        );
+        assert_eq!(stack.composition.owner_drops.load(Ordering::Acquire), 0);
+        drop((tool_runtime, turns, tool_lease, tools));
+        stack.dispose(language, replacement).await;
+    }
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]

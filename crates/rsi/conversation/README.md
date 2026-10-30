@@ -152,3 +152,15 @@ of its ModelStarted Fact. That exact Fact makes the candidate visible without
 waiting for another model delta; history backfills cannot admit stale candidates.
 Committed history replaces the preview by exact effect and original content index;
 abandoned previews and candidates are discarded.
+
+Session timing is an ordered, bounded reduction alongside token usage. It retains
+one start per nonterminal Turn, bounded by the session protocol's
+`MAXIMUM_LIVE_TURNS`; terminal settlement releases that entry. Queued acceptances
+cannot replace another Turn's start.
+It counts accepted Turns and sums recorded accepted-to-terminal wall time, including
+waits. Model time uses recorded ModelStarted-to-terminal offsets. TTFT is the first
+nonempty text, reasoning or tool-arguments delta after that start. Decode rate
+uses output tokens only for the same attempts that have a positive first-delta-to-
+terminal interval. Missing starts or deltas remain unreported; failures with valid
+evidence participate, and replay cannot count them twice. Checked sums and counter
+relationships are validated at the metrics API boundary.

@@ -314,13 +314,26 @@ async fn settlement_and_live_commit_require_exact_started_identity_and_durable_s
             .is_err()
     );
     tool_origin::flush_bodies(&kernel, &claim, vec![bodies.remove(0)]).await;
+    for invalid in [
+        SessionFactBody::ModelStarted {
+            turn_id: claim.turn_id().clone(),
+            effect_id: EffectId::new("missing-effect").unwrap(),
+        },
+        SessionFactBody::ImageStarted {
+            turn_id: claim.turn_id().clone(),
+            effect_id: effect.clone(),
+        },
+    ] {
+        assert!(kernel.publish(&claim, vec![invalid]).await.is_err());
+    }
     assert!(
         kernel
             .publish(&claim, vec![settlement.clone()])
             .await
             .is_err()
     );
-    tool_origin::flush_bodies(&kernel, &claim, bodies).await;
+    tool_origin::flush_bodies(&kernel, &claim, bodies.clone()).await;
+    assert!(kernel.publish(&claim, bodies).await.is_err());
     live.started().unwrap();
     assert!(live.started().is_err());
     let mut builder = ModelAttemptBuilder::new();

@@ -35,7 +35,11 @@ separate from the shipped Sandbox backend; full-access execution is not a substi
 for a successful sandbox check. Workspace review requires a strong source reader and
 is unavailable on Windows.
 
-Linux SSH targets, Web PTY, Browser/Automation,
+Manual Web terminals use native PowerShell through ConPTY with the current user's
+OS permissions. The terminal footer shows this access; Agent permissions are
+unchanged. Interactive input, resize and process-tree cleanup are supported.
+
+Linux SSH targets, Browser/Automation,
 completed process output cache and MCP Profile management are
 also outside this Windows release scope. A visible action may return a specific
 unavailable diagnostic. Use Linux/WSL for those supported Linux workflows; do not

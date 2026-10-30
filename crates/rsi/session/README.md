@@ -33,6 +33,10 @@ physical directory.
 
 An unsupported Media or Agent Store capability becomes Session API unavailability,
 not invalid caller input; backend diagnostics do not cross that projection.
+Fresh Session preparation rejects an unavailable requested Agent preset as a
+bounded invalid-input diagnostic before publishing any durable Session. Composition
+capacity and shutdown retain their admission errors rather than becoming an unknown
+mutation outcome.
 
 Metrics acquisition supplies each Session's immutable output budget table to its
 reducer, including separate child tables during tree scans. It never derives a
@@ -133,8 +137,12 @@ operations, including streams and Header reads. Returned handles retain that
 caller and consult Execution admission for every new operation. Reconciliation
 of an existing draft shares its state, not the original caller's authority.
 Recent enumeration applies a retained visibility grant inside the Store's
-creation-ordered page query. Activity visibility uses batched scalar summaries,
-without decoding full Headers. Storage and authority failures remain explicit.
+creation-ordered page query. Activity visibility uses one bounded access batch
+for location/protection; a Store may decode Headers to produce those fields.
+Durable activity cuts use batches of at most 64 Sessions after cache lookup.
+Each batch has one durable read snapshot. Cut failures produce Unknown activity;
+access failures remain explicit, and publication rechecks caller and protection
+revocation. A revision change during cut collection prevents cache publication.
 Stream publication checks current authorization for each item and releases that
 short-lived admission before yielding ownership to a consumer. A suspended
 consumer cannot hold the shared operation pool; the next item rechecks revocation.
@@ -229,6 +237,13 @@ fingerprints. Creation revalidates its canonical workspace and confines an expli
 plan. Local shells receive fixed PATH, workspace HOME, SHELL, TERM, LANG and
 disabled HISTFILE. SSH shells receive target account HOME and the target's fixed
 program environment. Neither inherits Service credentials or shell startup files.
+On local Windows, manual terminals instead launch Windows PowerShell with the
+current user's OS permissions, independently of the Agent's saved sandbox mode.
+They use an explicit unconfined ConPTY plan and a selected non-secret Windows
+environment; profiles are disabled. The terminal status exposes its actual
+sandbox mode, and the UI labels full access as current-user permissions. Session
+Agent settings and execution-tool authorization are never changed by terminal
+creation. SSH terminals retain their target's restricted Bash policy.
 Retiring this service retires all scopes even while detached handles remain.
 The registry neither pins an Agent composition nor writes terminal state to Store.
 Closing the last terminal releases its empty scope after admitted operations finish;

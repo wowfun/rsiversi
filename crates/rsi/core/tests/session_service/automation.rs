@@ -379,7 +379,12 @@ async fn exercise_frozen_protected_goal(fail_after_report: bool) {
         let attempt = owner.ledger.get(receipt.attempt_id).unwrap();
         let failure = result.is_err();
         let report: rsi_agent_goal::GoalState =
-            serde_json::from_str(attempt.report.as_deref().unwrap()).unwrap();
+            serde_json::from_str(attempt.report.as_deref().unwrap()).unwrap_or_else(|error| {
+                panic!(
+                    "invalid Goal report: {error}; result={result:?}; report={:?}",
+                    attempt.report
+                )
+            });
         let goal = report.goal.unwrap();
         assert_eq!(goal.phase, rsi_agent_goal::GoalPhase::Blocked);
         assert_eq!(

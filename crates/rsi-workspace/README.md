@@ -46,7 +46,7 @@ never evidence that a directory is missing. Native canonicalization stays with
 Workspace's native filesystem boundary. Registrations contain no reusable grant.
 
 Workspace's API plugins own their versioned request DTOs, operation bounds and
-client proxy. The version-3 endpoint consumes trusted ingress and the API registrar; the client
+client proxy. The version-4 endpoint consumes trusted ingress and the API registrar; the client
 publishes the same Workspace contract over a negotiated connection. Generic
 transports do not classify Workspace operations. Transport failures preserve the
 API error taxonomy, including authentication and uncertain mutation outcomes.

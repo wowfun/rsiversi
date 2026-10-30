@@ -50,8 +50,16 @@ console-control delivery. Direct-child reaping, zero active Job members and pipe
 joins precede settlement. A naturally exited leader with surviving descendants
 also closes the Job before publishing its outcome. Startup and retirement retain
 the same active/capture admission budgets; failures are not cleanup receipts.
-Windows currently provides native unconfined pipe plans; PTY/restricted plans and
-the optional completed-output cache remain separate capabilities.
+Windows provides native unconfined pipe and ConPTY plans. Restricted plans and
+the optional completed-output cache remain unavailable. ConPTY shares the active
+process and capture budgets, bounds output buffering and input admission, and
+limits each input write to 500 ms. Cleanup drains console output while closing
+ConPTY, joins I/O and reaps the client and its Job before releasing admission.
+The two-second output delivery grace is not a deadline for the synchronous native
+console-close call. If Windows does not finish closing it, the provider retains
+ownership and admission; shutdown reports its timeout instead of claiming cleanup.
+As with Windows pipe execution, termination kills the Job immediately; the
+Unix TERM-to-KILL grace does not apply to ConPTY.
 Other non-Unix targets compile but reject spawn as unsupported. The
 provider does not claim to contain a descendant that deliberately leaves the
 managed process group; restricted Bubblewrap execution provides the stronger
@@ -136,3 +144,7 @@ the generation remains fenced against new admission.
 For PTY output, an acknowledged reader error changes the outcome but confirms that
 the reader released its I/O resources and capture reservation pin. A missing acknowledgement or drain timeout
 also fails settlement, preserving any earlier settlement error.
+
+Windows ConPTY fixtures use PowerShell's native console readers with direct .NET
+file receipts. Receipt creation and descendant startup must not depend on optional
+PowerShell module discovery in the deliberately minimal child environment.

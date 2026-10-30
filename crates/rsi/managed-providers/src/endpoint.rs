@@ -20,11 +20,11 @@ pub(super) fn register(
     let discover = registrar.register(
         ProvidersOperation::Discover.spec(),
         json_handler(
-            move |context, input: rsi_configuration_api::DiscoveryRequest| {
+            move |context, input: rsi_configuration_api::DiscoveryInput| {
                 let service = discovery.clone();
                 async move {
                     service
-                        .discover(&context.origin, input)
+                        .discover_with_secret(&context.origin, input.request, input.secret)
                         .await
                         .map(Ok::<_, Never>)
                 }

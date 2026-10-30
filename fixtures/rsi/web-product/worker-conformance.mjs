@@ -59,7 +59,7 @@ export async function workerConformance({ buildFamily, receipt }) {
       throw new Error(`${name} was accepted`);
     }
     await call('command', JSON.stringify({ action: 'refresh' }));
-    const resources = await call('disconnect', false);
+    const resources = await call('disconnect', true);
     if (resources.active_requests !== 0 || resources.pending_timers !== 0 || resources.active_alarms !== 0) {
       throw new Error(`Worker did not drain: ${JSON.stringify(resources)}`);
     }

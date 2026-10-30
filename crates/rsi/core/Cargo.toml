@@ -15,6 +15,7 @@ name = "session-api-eval"
 path = "eval/session.rs"
 
 [dependencies]
+dirs.workspace = true
 rsi-installation = { path = "../installation" }
 rsi-host-control = { path = "../host-control" }
 rsi-packages = { path = "../packages" }
@@ -25,6 +26,7 @@ rsi-execution-local = { path = "../../rsi-execution/local" }
 rsi-execution = { path = "../../rsi-execution/core" }
 rsi-execution-protocol = { path = "../../rsi-execution/protocol" }
 rsi-directory-picker-api = { path = "../directory-picker-api" }
+rsi-workspace-default-api = { path = "../workspace-default-api" }
 rsi-directory-picker = { path = "../directory-picker" }
 rsi-lsp = { path = "../../rsi-lsp/core" }
 rsi-lsp-ui = { path = "../lsp-ui" }
@@ -182,7 +184,6 @@ libc.workspace = true
 rustix = { workspace = true, features = ["process"] }
 
 [target.'cfg(windows)'.dependencies]
-dirs.workspace = true
 winreg = "0.55.0"
 rsi-files-native-fs = { path = "../../rsi-files/native-fs" }
 rsi-api-uds-client = { path = "../../rsi-api/uds-client" }

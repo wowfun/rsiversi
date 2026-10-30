@@ -180,6 +180,45 @@ async fn linked_argument_preflight_precedes_native_store_creation() {
     assert!(!paths.cache().exists());
 }
 
+#[cfg(target_os = "linux")]
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn daemon_bootstrap_defers_enabled_native_service_factories_until_staging() {
+    let temp = tempfile::tempdir().unwrap();
+    let root = temp.path().canonicalize().unwrap();
+    let [artifact, _] = generations::artifacts(&root);
+    let manifest = source(&root.join("source"), "fixture.native-addon");
+    let text = fs::read_to_string(&manifest)
+        .unwrap()
+        .replace("scope = 'agent'", "scope = 'service'");
+    fs::write(&manifest, text).unwrap();
+    fs::copy(artifact, root.join("source/artifact.bin")).unwrap();
+    let store = NativeAddonStore::open(root.join("config/native-addons")).unwrap();
+    store.install(&manifest).unwrap();
+    store.enable("fixture.addon").unwrap();
+    let (composition, _) = application_fixture(&root, "service");
+    let profile =
+        rsi::ProfileCatalog::new(composition.paths().clone(), rsi_app_catalog::metadata())
+            .host(&rsi::HostProfileId::new("dev").unwrap())
+            .unwrap();
+    let paths = rsi_service_host::ServiceHostPaths::from_host_paths(composition.paths()).unwrap();
+    let owner = rsi_service_host::HostOwnerLease::try_acquire(paths.clone()).unwrap();
+    let daemon = tokio::time::timeout(
+        std::time::Duration::from_secs(20),
+        rsi::StandardServiceDaemon::start(composition, &profile, owner),
+    )
+    .await
+    .expect("daemon bootstrap is bounded")
+    .unwrap();
+    assert!(paths.read_metadata().unwrap().is_some());
+    let stop = tokio_util::sync::CancellationToken::new();
+    stop.cancel();
+    tokio::time::timeout(std::time::Duration::from_secs(20), daemon.run(stop))
+        .await
+        .expect("daemon cleanup is bounded")
+        .unwrap();
+    drop(rsi_service_host::HostOwnerLease::try_acquire(paths).unwrap());
+}
+
 #[tokio::test]
 async fn invalid_linked_service_preflight_creates_no_product_directories() {
     let temp = tempfile::tempdir().unwrap();
@@ -219,7 +258,7 @@ async fn standalone_service_stages_before_resolving_and_follows_native_replaceme
     fs::write(&profile, "format = 1\n[[steps]]\nkind = 'plugin'\nid = 'native'\nplugin = 'fixture.native-addon'\nconfig = { label = 'standalone' }\n").unwrap();
     let paths =
         rsi_service_host::ServiceHostPaths::from_host_paths(composition(&root).paths()).unwrap();
-    let running = rsi::RunningRsi::boot(composition(&root), &profile)
+    let running = rsi::RunningRsi::boot(composition(&root).with_source_watch(true), &profile)
         .await
         .unwrap();
     assert!(root.join("cache/native-addons").is_dir());
@@ -517,19 +556,11 @@ async fn remote_server(
     )
     .unwrap();
     let server_composition = composition(server_root);
-    let program = rsi::ProfileCatalog::new(
-        server_composition.paths().clone(),
-        rsi_app_catalog::metadata(),
-    )
-    .application(&rsi::ApplicationProfileId::new("serve").unwrap())
-    .unwrap()
-    .program()
-    .unwrap();
     let reserve = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
     let address = reserve.local_addr().unwrap();
     drop(reserve);
-    let (server, _) = rsi::standard_application_host(
-        rsi_app_catalog::compose(server_composition).unwrap(),
+    let (server, program) = super::support::embedded_serve(
+        server_composition,
         vec![
             "--bind".into(),
             address.to_string().into(),
@@ -537,8 +568,7 @@ async fn remote_server(
             format!("http://{address}").into(),
             "--dev-http".into(),
         ],
-    )
-    .unwrap();
+    );
     let server = server.start_program(program).await.unwrap();
     let address = server
         .lookup_local::<rsi_api_http::HttpListenerContract>()

@@ -1,8 +1,17 @@
-"""Reviewed Host source changes through the actual Local GUI and native bridge."""
+"""Reviewed Host source changes by the managed Desktop Device after a Local grant."""
 import json
+import re
+import subprocess
 
 
-def verify(script, button, click, until, screenshot, source, report):
+def verify(script, button, click, until, screenshot, source, report, probe, env):
+    def local(request):
+        result = subprocess.run([str(probe.resolve())], input=json.dumps(request), env=env,
+                                text=True, capture_output=True, timeout=30, check=True)
+        value = json.loads(result.stdout)
+        assert 'Ok' in value, value
+        return value['Ok']
+
     original = source.read_bytes()
     button('Settings')
     button('Plugins')
@@ -10,12 +19,17 @@ def verify(script, button, click, until, screenshot, source, report):
     button('Open Profile editable')
     until(lambda: script(r'return [...document.querySelectorAll(".profile-leaves option")].some(e=>e.value==="rsi-inspector-api")'))
     script(r'const e=document.querySelector(".profile-leaves select");e.value="rsi-inspector-api";e.dispatchEvent(new Event("change",{bubbles:true}));return true')
-    until(lambda: script(r'return document.querySelector(".profile-leaves h4")?.textContent.includes("Profile editable")&&[...document.querySelectorAll(".profile-leaves summary")].some(e=>e.textContent==="Grant an exact change")'))
+    until(lambda: script(r'return document.querySelector(".profile-leaves h4")?.textContent.includes("Profile editable")&&[...document.querySelectorAll(".profile-leaves button")].some(e=>e.textContent==="Preview disable")'))
     script(r'document.querySelector(".profile-leaves").scrollIntoView({block:"start"});return true')
-    grant = script(r'return [...document.querySelectorAll(".profile-leaves summary")].find(e=>e.textContent==="Grant an exact change")')
-    click(grant)
-    button('Read grant revision')
-    button('Grant this exact change')
+    caller = script(r'return [...document.querySelectorAll(".profile-leaves > p")].find(e=>e.textContent.startsWith("Caller:"))?.textContent')
+    device = re.match(r'Caller: device ([0-9a-f]{32})(?:\s|$)', caller or '')
+    assert device, caller
+    assert script(r'return ![...document.querySelectorAll(".profile-leaves summary")].some(e=>e.textContent==="Grant an exact change")')
+    assert script(r'return [...document.querySelectorAll(".profile-leaves button")].find(e=>e.textContent==="Preview disable").disabled')
+    target = next(leaf['target'] for leaf in local({'operation':'catalog','query':{'profile':'editable','after':None}})['leaves'] if leaf['target']['leaf'] == 'rsi-inspector-api')
+    scope = {'principal':{'kind':'device','id':device[1]},'scope':{'kind':'profile','target':target,'operation':'disable'}}
+    local({'operation':'set_grant','request':{'expected':local({'operation':'grants'})['revision'],'scope':scope,'granted':True}})
+    button('Refresh source choices')
     button('Preview disable')
     until(lambda: script(r'return !!document.querySelector("[aria-label=\"Prepared rsi-inspector-api\"]")'))
     assert source.read_bytes() == original
@@ -41,4 +55,4 @@ def verify(script, button, click, until, screenshot, source, report):
     until(lambda: script(r'return document.querySelector("[aria-label=\"Profile source receipt\"]")?.textContent.includes("saved")'))
     assert source.read_bytes() == saved
     button('Close settings')
-    (report / 'profiles.json').write_text(json.dumps({'status':'passed','local_grant':True,'prepared_before_write':True,'saved_once':True,'application':'not_selected','original_receipt_after_reopen':True},indent=2))
+    (report / 'profiles.json').write_text(json.dumps({'status':'passed','device_requires_local_grant':True,'prepared_before_write':True,'saved_once':True,'application':'not_selected','original_receipt_after_reopen':True},indent=2))
