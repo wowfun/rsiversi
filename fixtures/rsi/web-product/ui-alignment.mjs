@@ -1,4 +1,4 @@
-import {disconnect} from './controls.mjs';
+import {disconnect,saveSettings} from './controls.mjs';
 import {paired} from './paired-env.mjs';
 import assert from 'node:assert/strict';
 import {mkdir,writeFile,stat} from 'node:fs/promises';
@@ -50,9 +50,9 @@ for(const [name,engine] of Object.entries({chromium,firefox})){
     for(const width of [390,767,768,1023,1024,1440,1920])for(const theme of ['light','dark','system']){
       await page.setViewportSize({width,height:900});
       // Apply through the real Settings owner; same device preference is also used by Desktop.
-      await page.getByRole('button',{name:'Commands',exact:true}).click();await page.getByRole('combobox',{name:'Search commands'}).fill('appearance');await page.getByRole('combobox',{name:'Search commands'}).press('Enter');
+      await page.getByRole('button',{name:'Commands',exact:true}).click();await page.getByRole('combobox',{name:'Search commands'}).fill('settings');await page.getByRole('option',{name:'Open Settings',exact:true}).click();await page.getByRole('button',{name:'General',exact:true}).click();
       await page.getByRole('combobox',{name:'Settings / appearance / theme',exact:true}).selectOption({label:theme});
-      await page.getByRole('button',{name:'Save settings',exact:true}).click();await page.waitForFunction(theme=>document.documentElement.dataset.theme===theme,theme);await page.getByRole('button',{name:'Close settings',exact:true}).click();await page.getByRole('dialog',{name:'Settings',exact:true}).waitFor({state:'hidden'});
+      await saveSettings(page);await page.waitForFunction(theme=>document.documentElement.dataset.theme===theme,theme);await page.getByRole('button',{name:'Close settings',exact:true}).click();await page.getByRole('dialog',{name:'Settings',exact:true}).waitFor({state:'hidden'});
       const options=page.locator('.pane.selected details.conversation-menu');
       if(await options.count()) {
         await options.locator('summary').click();await options.locator('summary').press('Escape');
@@ -94,10 +94,10 @@ for(const [name,engine] of Object.entries({chromium,firefox})){
       await page.setViewportSize({width,height:900});
       await page.waitForFunction(width=>!!document.querySelector('.workbench>.sidebar')===(width>=1024),width);
       await page.screenshot({path:join(directory,`alert-${width}.png`)});
-      const geometry=await page.evaluate(()=>{
+      const geometry=await page.getByRole('button',{name:'Commands',exact:true}).evaluate(control=>{
         const header=document.querySelector('.connected-header').getBoundingClientRect();
         const alert=document.querySelector('.preference-error').getBoundingClientRect();
-        const control=document.querySelector('[aria-label="Toggle resources"]'),rect=control.getBoundingClientRect();
+        const rect=control.getBoundingClientRect();
         return {headerTop:header.top,headerBottom:header.bottom,alertTop:alert.top,alertBottom:alert.bottom,controlHit:control.contains(document.elementFromPoint(rect.x+rect.width/2,rect.y+rect.height/2))};
       });
       assert(geometry.headerBottom<=geometry.alertTop||geometry.alertBottom<=geometry.headerTop,`Toolbar overlaps alert at ${width}px: ${JSON.stringify(geometry)}`);
