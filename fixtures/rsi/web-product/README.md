@@ -700,13 +700,16 @@ facts and transport/build identity; credentials are redacted on cleanup.
 `review-lifecycle.mjs` also delays a restored navigation read across another
 window's Updated selection, checking that automatic reconciliation preserves the
 committed mode and empty saved order for both Session and workspace navigation.
-Controlled storage replies separately verify that older layout reads, saves and
-errors cannot overwrite a newer local intent, and overlapping invalidations are
-followed by a fresh read. These are React lifecycle checks, not transport evidence.
+Controlled storage replies separately verify that older layout reads and saves
+cannot overwrite a newer local intent, and overlapping invalidations are followed
+by a fresh read. A failed serialized save keeps the latest intent and displays
+recovery; explicit retry must commit that intent before clearing the notice.
+These are React lifecycle checks, not transport evidence.
 It runs current React and storage modules through an isolated
 Vite server in Chromium. It retires Dock initialization during open, read and
-reopen; verifies no late focus/subscription installation; checks content-only host
-snapshot stability; and inspects actual IndexedDB writes during concurrent intents.
+reopen; verifies no late focus/subscription installation; checks unchanged host
+snapshot stability and detail-model publication; and inspects actual IndexedDB
+writes during concurrent intents.
 At 16 tabs and 64 history entries, it counts coordinate copies to reject a second
 history replay during intent persistence. A second connection then injects an
 invalid inverse; the next intent must reject it without changing its revision.

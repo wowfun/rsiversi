@@ -223,8 +223,9 @@ before resource retirement publishes their combined failure or success.
 Terminal cleanup detaches followers and never terminates shells.
 Asynchronous Dock setup belongs to one effect lifetime. Retirement prevents late
 storage reads or reopen replies from publishing or installing subscriptions.
-Resource host notifications describe membership and tab metadata; content-only
-renderer frames retain the same external-store snapshot.
+Resource host notifications publish membership, tab metadata and replacements of
+the detail key or model used by React. Republishing unchanged host state retains
+the same external-store snapshot; renderer-owned DOM changes alone do not replace it.
 
 Retrying layout storage retains the current in-memory layout and replays unsaved
 field and workspace intents before loading the stored result. Pending edits are

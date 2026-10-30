@@ -8,13 +8,14 @@ import {chromium} from 'playwright';
 import {mkdir,writeFile} from 'node:fs/promises';
 import {join} from 'node:path';
 import assert from 'node:assert/strict';
+import {defaultLayout} from '../../../apps/web/presentation-layout.js';
 const report=process.env.RSI_REPORT_DIR;assert(report);await mkdir(report,{recursive:false});
 let service,browser,page,peer;const checks=[],errors=[];
 const tabs=page=>page.locator('[data-dockkit-tab]');
-async function record(page,kind="session-dock"){return page.evaluate(async kind=>{
-  const db=await new Promise((resolve,reject)=>{const r=indexedDB.open('rsi.presentation',2);r.onsuccess=()=>resolve(r.result);r.onerror=()=>reject(r.error)});
-  try{return await new Promise((resolve,reject)=>{const r=db.transaction('layouts').objectStore('layouts').getAll();r.onsuccess=()=>resolve(r.result.find(r=>kind==='shell'?r.value.version===3:r.value.kind===kind));r.onerror=()=>reject(r.error)})}finally{db.close()}
-},kind)}
+async function record(page,kind="session-dock"){return page.evaluate(async({kind,shellVersion})=>{
+  const db=await new Promise((resolve,reject)=>{const r=indexedDB.open('rsi.presentation');r.onsuccess=()=>resolve(r.result);r.onerror=()=>reject(r.error)});
+  try{return await new Promise((resolve,reject)=>{const r=db.transaction('layouts').objectStore('layouts').getAll();r.onsuccess=()=>resolve(r.result.find(r=>kind==='shell'?r.value.version===shellVersion:r.value.kind===kind));r.onerror=()=>reject(r.error)})}finally{db.close()}
+},{kind,shellVersion:defaultLayout.version})}
 async function menu(page,id,action){await page.locator(`[data-dockkit-tab="${id}"]`).click({button:'right'});await page.getByRole('menuitem',{name:action,exact:true}).click()}
 async function resumed(page,service,id){await page.goto(service.origin);await page.getByRole('button',{name:'Reconnect with this browser',exact:true}).click();await page.locator('#workbench').waitFor({state:'visible'});await navigationMode(page,'flat');await page.locator(`[data-session-id="${id}"] [data-testid=conversation-open]`).click();await page.waitForFunction(id=>document.querySelector('.resource-dock')?.dataset.session===id,id);await resources(page)}
 try{
@@ -48,6 +49,7 @@ try{
  await menu(page,first,'Float');await page.getByRole('button',{name:'Dock resource',exact:true}).waitFor();
  await peer.getByRole('button',{name:'Dock resource',exact:true}).waitFor();
  const desktop=await record(page),shell=await record(page,'shell');
+ assert.ok(shell,'Shell layout is saved before viewport-only projection checks');
  await page.setViewportSize({width:390,height:844});await page.waitForFunction(()=>document.querySelector('.resource-dock').classList.contains('resource-fullscreen'));await resources(page);await page.locator('[data-dockkit-float]').waitFor({state:'visible'});
  await page.screenshot({path:join(report,'float-390.png')});
  const bounds=await page.locator('[data-dockkit-float]').boundingBox();assert(bounds.x>=0&&bounds.y>=0&&bounds.x+bounds.width<=391&&bounds.y+bounds.height<=845,JSON.stringify(bounds));

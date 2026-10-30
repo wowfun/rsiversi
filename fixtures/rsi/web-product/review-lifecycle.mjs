@@ -102,8 +102,8 @@ window.mountDisclosures=()=>{
 window.stalePresentationReply=async(mode)=>{
  const original=PresentationStore.open,actEnvironment=window.IS_REACT_ACT_ENVIRONMENT;
  window.IS_REACT_ACT_ENVIRONMENT=true;
- let saved=defaultLayout,current,notify,readReply,pauseRead=false;const writes=[];
- const store={load:()=>{const value=saved;return pauseRead?new Promise(resolve=>{readReply=()=>resolve(value)}):Promise.resolve(value)},apply:intent=>{saved=applyIntent('layouts',saved,intent);const value=saved;return new Promise((resolve,reject)=>writes.push({resolve:()=>resolve(value),reject}))},subscribe:callback=>{notify=callback;return()=>{}},close(){}};
+ let saved=defaultLayout,current,notify,readReply,failedSave,pauseRead=false;const writes=[];
+ const store={load:()=>{const value=saved;return pauseRead?new Promise(resolve=>{readReply=()=>resolve(value)}):Promise.resolve(value)},apply:intent=>new Promise((resolve,reject)=>writes.push({resolve,reject})).then(()=>{saved=applyIntent('layouts',saved,intent);return saved}),subscribe:callback=>{notify=callback;return()=>{}},close(){}};
  PresentationStore.open=async()=>store;
  presentationIdentity.set('presentation-race:'+mode);source.set({surfaces:{},application_surfaces:[]});
  const node=document.createElement('main');document.body.append(node);const root=createRoot(node);
@@ -123,10 +123,17 @@ window.stalePresentationReply=async(mode)=>{
    await React.act(async()=>current.update({navigationWidth:300}));
    await React.act(async()=>current.update({navigationWidth:310}));
    await React.act(async()=>mode==='write-error'?writes[0].reject(Error('old save failed')):writes[0].resolve());
+   if(mode==='write-error'){
+    failedSave={width:current.layout.navigationWidth,notice:current.storageNotice,persisted:saved.navigationWidth,writes:writes.length};
+    await React.act(async()=>current.retry());
+    if(writes.length!==2)throw Error('Explicit retry did not submit the pending layout intent');
+    await React.act(async()=>writes[1].resolve());
+   }
   }
-  return {width:current.layout.navigationWidth,notice:current.storageNotice};
+  return {width:current.layout.navigationWidth,notice:current.storageNotice,persisted:saved.navigationWidth,failedSave};
  }finally{
-  await React.act(async()=>{for(const write of writes)write.resolve();readReply?.()});
+  for(const write of writes)await React.act(async()=>write.resolve());
+  await React.act(async()=>readReply?.());
   await React.act(async()=>root.unmount());node.remove();PresentationStore.open=original;window.IS_REACT_ACT_ENVIRONMENT=actEnvironment;
  }
 };
@@ -159,7 +166,7 @@ window.staleNavigationRead=async(kind)=>{
 };
 window.mountResize=()=>{
  const node=document.createElement('main');node.id='workbench';document.body.append(node);const root=createRoot(node);
- function Resizer(){const viewport=useViewport();const [ratio,setRatio]=React.useState(.45);return <><output>{ratio}</output><ResizeHandle name="resources" value={ratio*viewport.width} min={300} max={viewport.width*.7} reverse onChange={value=>setRatio(value/viewport.width)}/></>}
+ function Resizer(){const viewport=useViewport();const [ratio,setRatio]=React.useState(.45);return <section style={{width:ratio*viewport.width,height:40,position:'relative'}}><output>{ratio}</output><ResizeHandle name="resources" value={ratio*viewport.width} min={300} max={viewport.width*.7} reverse onChange={value=>setRatio(value/viewport.width)}/></section>}
  root.render(<Resizer/>);return ()=>{root.unmount();node.remove()};
 };
 window.mountVisibility=()=>{
@@ -220,7 +227,12 @@ try{
  checks.push({settingsEditor:await page.evaluate(()=>window.settingsChecks()),settingsDrafts:await page.evaluate(()=>window.settingsDraftChecks())});
  for(const mode of ['write','read','write-error','reload']){
   const presentation=await page.evaluate(mode=>window.stalePresentationReply(mode),mode);
-  assert.equal(presentation.width,310);assert.equal(presentation.notice,'');checks.push({stalePresentationReply:mode,...presentation});
+  assert.equal(presentation.width,310);assert.equal(presentation.notice,'');
+  if(mode==='write-error'){
+   assert.equal(presentation.failedSave.width,310);assert.match(presentation.failedSave.notice,/could not be saved.*Retry layout/);
+   assert.equal(presentation.failedSave.persisted,280);assert.equal(presentation.failedSave.writes,1);assert.equal(presentation.persisted,310);
+  }
+  checks.push({stalePresentationReply:mode,...presentation});
  }
  for(const kind of ['sessionOrder','workspaceOrder']){
   const navigation=await page.evaluate(kind=>window.staleNavigationRead(kind),kind);
@@ -262,10 +274,11 @@ try{
   const {resourceHosts,resources,publishResources,clearResources}=modules;let changes=0;
   const stop=resources.subscribe(()=>changes++),host={body:document.createElement('div'),title:'Files',entry:{view:'one',session:'test',pane:'main',generation:'1',floating:false,reopen:{action:'ui_block',key:'key'}},key:'first'};
   resourceHosts.set('one',host);publishResources();const snapshot=resources.getSnapshot();
-  for(let i=0;i<100;i++){host.key=String(i);publishResources()}
+  for(let i=0;i<100;i++)publishResources();
   const stable=resources.getSnapshot()===snapshot,contentChanges=changes;
-  host.title='New title';publishResources();host.entry.floating=true;publishResources();clearResources();stop();return {stable,contentChanges,changes};
- });assert.deepEqual(hosts,{stable:true,contentChanges:1,changes:4});checks.push(hosts);
+  host.key='second';publishResources();host.model={kind:'ui',data:{error:'Fixture detail'},command:async()=>{}};publishResources();
+  host.title='New title';publishResources();host.entry={...host.entry,floating:true};publishResources();clearResources();stop();return {stable,contentChanges,changes};
+ });assert.deepEqual(hosts,{stable:true,contentChanges:1,changes:6});checks.push(hosts);
  const storage=await page.evaluate(async()=>{
   const {DeviceStore,emptyDock}=modules,a=await DeviceStore.open('review'),b=await DeviceStore.open('review');
   await Promise.all([a.apply('layouts',{kind:'dock',operation:'open',coordinate:{action:'resources'},title:'Resources'},'dock:session'),b.apply('layouts',{kind:'dock',operation:'open',coordinate:{action:'ui_block',key:'one'},title:'One'},'dock:session')]);
