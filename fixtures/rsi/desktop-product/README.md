@@ -45,6 +45,9 @@ Replacing input uses native select-all/backspace keystrokes and waits for the
 empty value before typing. Nonempty composer replacement also requires a trusted
 deletion input event: WebKit's WebDriver `clear` changes the DOM without updating
 the draft editor through its input listener.
+Value reads resolve the current input after each native gesture, and typing
+acquires focus again after deletion. A rendered replacement must not leave the
+fixture polling an obsolete WebDriver handle; neither gesture is replayed.
 The history scenario resets its isolated workspace index and inspects the selected
 source's coverage before and after discovery. Query/discovery progress does not
 stand in for per-source indexing coverage; the [History API](../../../crates/rsi/history-api/README.md)

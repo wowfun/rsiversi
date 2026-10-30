@@ -11,12 +11,13 @@ def fill(script, keys, until, css, value):
     item = until(lambda: script(FOCUS_INPUT, [css]))
     before = script('return {value:arguments[0].value,events:window.fixtureInputEvents?.length??0}', [item])
     keys(item, '\ue009a\ue000\ue003')
-    until(lambda: script('return arguments[0].value', [item]) == '')
+    until(lambda: script(FOCUS_INPUT, [css, 'value']) == '')
     if css == 'textarea[aria-label="Main message"]' and before['value']:
         until(lambda: script('return window.fixtureInputEvents.slice(arguments[0]).some(e=>e.trusted&&e.length===0)', [before['events']]))
     if value:
+        item = until(lambda: script(FOCUS_INPUT, [css]))
         keys(item, value)
-    until(lambda: script('return arguments[0].value', [item]) == value)
+    until(lambda: script(FOCUS_INPUT, [css, 'value']) == value)
 
 
 def asset_pressure(script, until):

@@ -32,6 +32,8 @@ class InputControlTest(unittest.TestCase):
         keys = Mock()
         def script(source, arguments):
             if source == FOCUS_INPUT:
+                if arguments[-1] == 'value':
+                    return value
                 return item if focused else None
             if source.startswith('return {value:'):
                 return {'value': value, 'events': 0}
@@ -58,6 +60,32 @@ class InputControlTest(unittest.TestCase):
         with self.assertRaises(TimeoutError):
             fill(Mock(return_value=None), keys, until, 'input', 'value')
         keys.assert_not_called()
+
+    def test_rendered_replacements_are_reacquired_without_replaying_keys(self):
+        item = {'element-6066': 'before'}
+        original = item
+        value = 'previous'
+        calls = []
+        def script(source, arguments):
+            if source == FOCUS_INPUT:
+                if arguments[-1] == 'value':
+                    return value
+                return item
+            if arguments == ['input']:
+                return value
+            if arguments != [item]:
+                raise RuntimeError('stale element reference')
+            if source.startswith('return {value:'):
+                return {'value': value, 'events': 0}
+            return value
+        def keys(target, text):
+            nonlocal item, value
+            self.assertEqual(target, item)
+            calls.append((target, text))
+            value = '' if text.startswith('\ue009') else text
+            item = {'element-6066': f'render-{len(calls)}'}
+        fill(script, keys, lambda read: read(), 'input', 'new value')
+        self.assertEqual(calls, [(original, '\ue009a\ue000\ue003'), ({'element-6066':'render-1'}, 'new value')])
 
     def test_ambiguous_native_input_failure_is_not_replayed(self):
         item = {'element-6066': 'deployment'}
