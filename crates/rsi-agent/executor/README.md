@@ -127,6 +127,29 @@ payload validation and encoding; Executor also compares the resulting position
 with independent Store metadata and enforces the claim's acceptance fence.
 An incompatible cache is optional and triggers replay. There is no default
 builder fallback or independent latest-generation lookup in the executor.
+Checkpoint maintenance records admission, coalescing, capacity, closure, rebuild
+and write outcomes in process-local saturating counters keyed first by phase,
+then by outcome (absent keys mean zero), and the latest record.
+Declined ownership and a write returning false remain declines; storage,
+capacity, invalid context, cancellation and timeout retain distinct categories.
+An evidence-budget refusal is a decline. A successful rebuild and its subsequent
+write have separate phase records, even when the write fails.
+Capacity never initiates raw-history fallback. Recovery records elapsed time,
+canonical/fork page calls, returned facts, their encoded byte lengths and sequence
+lag from the restored checkpoint to the claim horizon (not Turn lag or disk I/O).
+The bounded last-success history retains a Session's last successful write across
+later failures. It is process-generation evidence, not durable health state.
+Queue depth and in-flight fields sample the scheduler at admission or maintenance
+completion (at interruption, the last sample); they are not a live activity gauge.
+Structured stderr summaries are event-triggered at most once per 30 seconds,
+with an immediate transition into degradation and a final writer summary.
+Scheduling and routine declines do not change health; a successful write or
+recovery rearms the degradation edge. A rebuild alone does not clear a failed
+write. Each line is at
+most 4096 bytes and includes omitted-event counts; it never contains fact bodies,
+prompts or arbitrary error messages. Writes occur outside scheduler/diagnostic
+locks and failures cannot change execution outcomes. A synchronous stderr sink
+can still block; these diagnostics do not promise nonblocking I/O.
 For one parallel-safe run, the executor publishes the complete source-ordered
 intent batch and crosses one durability barrier, then publishes the matching
 source-ordered start batch and crosses one durability barrier before invoking

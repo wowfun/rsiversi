@@ -273,6 +273,7 @@ struct CheckpointFixture {
     facts: Vec<Arc<SessionFact>>,
     fork_facts: Vec<Arc<SessionFact>>,
     writes: Mutex<Vec<ContextCheckpoint>>,
+    fault: u8,
 }
 
 #[async_trait]
@@ -370,6 +371,14 @@ impl TurnExecution for CheckpointFixture {
         after_seq: u64,
         limit: usize,
     ) -> rsi_agent_turn_protocol::Result<Option<rsi_agent_turn_protocol::ClaimFactPage>> {
+        match self.fault {
+            1 => return Err(TurnError::Capacity),
+            2 => return Err(TurnError::Store("secret error content".into())),
+            3 => return Ok(None),
+            4 => std::future::pending::<()>().await,
+            5 => return Err(TurnError::Cancelled),
+            _ => {}
+        }
         let facts = self
             .facts
             .iter()
@@ -409,6 +418,12 @@ impl TurnExecution for CheckpointFixture {
         _claim: &TurnClaim,
         checkpoint: ContextCheckpoint,
     ) -> rsi_agent_turn_protocol::Result<bool> {
+        if self.fault == 6 {
+            return Ok(false);
+        }
+        if self.fault == 7 {
+            return Err(TurnError::Store("secret write error".into()));
+        }
         self.writes.lock().unwrap().push(checkpoint);
         Ok(true)
     }
@@ -982,6 +997,7 @@ async fn checkpoint_writer_drains_a_coalesced_request_after_close() {
         ],
         fork_facts: vec![],
         writes: Mutex::new(Vec::new()),
+        fault: 0,
     });
     let turns: Arc<dyn TurnExecution> = fixture.clone();
     let scheduler = Arc::new(CheckpointScheduler::new());
@@ -993,11 +1009,11 @@ async fn checkpoint_writer_drains_a_coalesced_request_after_close() {
     );
     assert_eq!(
         scheduler.schedule(request.clone()),
-        checkpoint::ScheduleOutcome::Scheduled
+        checkpoint_diagnostics::Outcome::Scheduled
     );
     assert_eq!(
         scheduler.schedule(request),
-        checkpoint::ScheduleOutcome::Coalesced
+        checkpoint_diagnostics::Outcome::Coalesced
     );
     let checkpoint_task = tokio::spawn(run_checkpoint_writer(turns, Arc::clone(&scheduler)));
     scheduler.close();
@@ -1047,6 +1063,7 @@ async fn first_fork_checkpoint_includes_the_terminal_parent_prefix() {
         facts: child_facts,
         fork_facts: parent_facts,
         writes: Mutex::new(Vec::new()),
+        fault: 0,
     });
     let turns: Arc<dyn TurnExecution> = fixture.clone();
     let scheduler = Arc::new(CheckpointScheduler::new());
@@ -1057,7 +1074,7 @@ async fn first_fork_checkpoint_includes_the_terminal_parent_prefix() {
             context_pin(),
             rsi_agent_context::ContextBudget::default()
         )),
-        checkpoint::ScheduleOutcome::Scheduled
+        checkpoint_diagnostics::Outcome::Scheduled
     );
     let checkpoint_task = tokio::spawn(run_checkpoint_writer(turns, Arc::clone(&scheduler)));
     scheduler.close();
@@ -1621,6 +1638,7 @@ fn short_page_history(recovered: bool) -> (TurnClaim, CheckpointFixture) {
             facts,
             fork_facts: vec![],
             writes: Mutex::new(vec![]),
+            fault: 0,
         },
     )
 }
@@ -1675,4 +1693,58 @@ async fn replayed_fact_metadata_deduplicates_without_retaining_bodies() {
         part,
         rsi_agent_session_protocol::EvidencePart::Reference { seq: 4, .. }
     )));
+}
+
+#[tokio::test(start_paused = true)]
+async fn checkpoint_writer_preserves_failure_phase_and_declines() {
+    use crate::checkpoint_diagnostics::Outcome;
+    for (fault, outcome) in [
+        (1, Outcome::Capacity),
+        (2, Outcome::Storage),
+        (3, Outcome::Declined),
+        (4, Outcome::Timeout),
+        (5, Outcome::Cancelled),
+        (6, Outcome::Declined),
+        (7, Outcome::Storage),
+    ] {
+        let (claim, _) = claim();
+        let fixture = Arc::new(CheckpointFixture {
+            facts: completed_turn_facts(claim.turn_id().clone(), "checkpoint test"),
+            fork_facts: vec![],
+            writes: Mutex::new(vec![]),
+            fault,
+        });
+        let turns: Arc<dyn TurnExecution> = fixture.clone();
+        let scheduler = Arc::new(CheckpointScheduler::new());
+        scheduler.schedule(CheckpointRequest::new(
+            claim,
+            ContextLimits::default(),
+            context_pin(),
+            rsi_agent_context::ContextBudget::default(),
+        ));
+        scheduler.close();
+        run_checkpoint_writer(turns, scheduler.clone()).await;
+        let phase = if fault >= 6 {
+            checkpoint_diagnostics::Phase::Write
+        } else {
+            checkpoint_diagnostics::Phase::Rebuild
+        };
+        assert_eq!(
+            scheduler.diagnostics.count(phase, outcome),
+            1,
+            "fault {fault}"
+        );
+        let last = scheduler.diagnostics.last();
+        assert_eq!(last.phase, phase);
+        assert!(!last.in_flight);
+        assert_eq!(last.pending_sessions, 0);
+        assert_eq!(scheduler.diagnostics.count(phase, Outcome::Ready), 0);
+        assert_eq!(
+            scheduler
+                .diagnostics
+                .count(checkpoint_diagnostics::Phase::Rebuild, Outcome::Ready),
+            u64::from(fault >= 6)
+        );
+        assert!(fixture.writes.lock().unwrap().is_empty());
+    }
 }

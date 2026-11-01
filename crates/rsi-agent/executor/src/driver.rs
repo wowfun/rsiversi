@@ -2128,6 +2128,28 @@ impl Driver {
         claim: &TurnClaim,
         fold: &mut ModelContextState,
     ) -> std::result::Result<ScannedTurn, DriveFailure> {
+        let mut operation = self.checkpoints.diagnostics.operation(
+            claim.session_id(),
+            crate::checkpoint_diagnostics::Phase::Recovery,
+        );
+        operation.record.scan.sequence_lag = claim.live_seq();
+        let result = self
+            .load_claim_measured(claim, fold, &mut operation.record.scan)
+            .await;
+        operation.record.outcome = if result.is_ok() {
+            crate::checkpoint_diagnostics::Outcome::Ready
+        } else {
+            crate::checkpoint_diagnostics::Outcome::Failed
+        };
+        result
+    }
+
+    async fn load_claim_measured(
+        &self,
+        claim: &TurnClaim,
+        fold: &mut ModelContextState,
+        scan: &mut crate::checkpoint_diagnostics::Scan,
+    ) -> std::result::Result<ScannedTurn, DriveFailure> {
         let mut state = ScannedTurn::default();
         let mut cursor = 0;
         let mut restored_checkpoint = false;
@@ -2161,9 +2183,11 @@ impl Driver {
             *fold = restored;
             cursor = checkpoint.through_seq;
             restored_checkpoint = true;
+            scan.checkpoint_seq = cursor;
+            scan.sequence_lag = claim.live_seq().saturating_sub(cursor);
         }
         if !restored_checkpoint {
-            self.load_fork_seed(claim, fold).await?;
+            self.load_fork_seed(claim, fold, scan).await?;
         }
         loop {
             let page = self
@@ -2175,6 +2199,7 @@ impl Driver {
                 )
                 .await
                 .map_err(fatal)?;
+            scan.page(false, &page.facts);
             if page.through_seq == cursor {
                 return Ok(state);
             }
@@ -2202,6 +2227,7 @@ impl Driver {
         &self,
         claim: &TurnClaim,
         fold: &mut ModelContextState,
+        scan: &mut crate::checkpoint_diagnostics::Scan,
     ) -> std::result::Result<(), DriveFailure> {
         let Some(origin) = claim.header().fork_origin() else {
             return Ok(());
@@ -2223,6 +2249,7 @@ impl Driver {
                         "forked session has no inherited-history reader",
                     )
                 })?;
+            scan.page(true, &page.facts);
             if page.through_parent_seq == cursor {
                 if cursor != page.terminal_parent_seq {
                     return Err(failed(
