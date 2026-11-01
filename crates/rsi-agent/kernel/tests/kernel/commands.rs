@@ -190,8 +190,22 @@ struct Fixture {
 }
 
 impl Fixture {
-    #[allow(clippy::too_many_lines)] // One fixture exposes ordinary, reserve, settle and projection registrations from the same generation.
     async fn start(store: Arc<dyn SessionStore>, blocked: bool) -> Self {
+        Self::start_with_domain(
+            store,
+            blocked,
+            DomainIdentity::new("fixture.toggle", 1).unwrap(),
+            Arc::new(SourceOnlyTools),
+        )
+        .await
+    }
+    #[allow(clippy::too_many_lines)] // One fixture registers commands and issues real continuation authority.
+    async fn start_with_domain(
+        store: Arc<dyn SessionStore>,
+        blocked: bool,
+        identity: DomainIdentity,
+        tools: Arc<dyn ToolRuntime>,
+    ) -> Self {
         let runtime = Runtime::default();
         let (_owner, context) = rsi_agent_testkit::activate_contribution_owner(&runtime.root())
             .await
@@ -202,7 +216,7 @@ impl Fixture {
             .register("command fixture", || Ok(()), Ok)
             .unwrap();
         let definition = DomainDefinition::new(
-            DomainIdentity::new("fixture.toggle", 1).unwrap(),
+            identity,
             &false,
             |_| Ok(()),
             rsi_agent_composition_protocol::DomainReferencePolicy::None,
@@ -274,7 +288,7 @@ impl Fixture {
         let pin = AgentCompositionPin::new(
             AgentPresetId::new("test-agent").unwrap(),
             "c".repeat(64),
-            Arc::new(SourceOnlyTools),
+            tools,
             Arc::new(rsi_agent_context::DefaultContextBuilder::default()),
             domains,
             commands,

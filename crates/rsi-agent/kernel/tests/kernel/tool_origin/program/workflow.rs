@@ -206,7 +206,7 @@ async fn workflow_caller_for_root(
     start_workflow_tool(&f.kernel, &claim).await
 }
 
-async fn start_workflow_tool(
+pub(crate) async fn start_workflow_tool(
     kernel: &AgentKernel,
     claim: &TurnClaim,
 ) -> rsi_agent_turn_protocol::AgentCallerAuthority {

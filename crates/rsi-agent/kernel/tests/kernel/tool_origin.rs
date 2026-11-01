@@ -662,4 +662,4 @@ async fn named_spawn_resolves_once_and_retries_use_the_durable_seed() {
 }
 
 #[path = "tool_origin/program.rs"]
-mod program;
+pub(crate) mod program;

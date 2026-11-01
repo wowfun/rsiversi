@@ -35,8 +35,12 @@ Local Callable tools use the ordinary policy, approval, budget and durable effec
 paths. Recursive programs, Agent controls, human interactions and Portable tools
 are unavailable. Plan mode denies the coordinator before its start.
 
-`run_workflow` accepts a script and foreground/background observation mode. The
-foreground observation lasts 30 seconds by default (at most 60); reaching it
+`run_workflow` accepts a script and foreground/background observation mode. Its
+automatic-round allowlist uses the exact codec versions exported by the Goal and
+Schedule owners. Kernel admits a non-human creator only when its authenticated
+continuation domain intersects that allowlist; a matching name with a different
+codec does not grant authority.
+The foreground observation lasts 30 seconds by default (at most 60); reaching it
 requests durable detachment. Background observation detaches before the
 Node latch opens. Neither mode gives the independently owned run a total elapsed
 deadline. A separate Jobs scope uses the Session and immutable run identities in the program namespace;
@@ -67,6 +71,8 @@ boundary. A registered, disabled plan-policy domain is required for creation;
 any mutation of its captured revision revokes the run.
 Initial human root Turns and finite built-in Goal/Schedule rounds may create one
 run; child or completion Turns cannot create successors.
+The allowed automatic domains use their owners' current exact codec identities;
+matching a domain name alone does not grant workflow creation authority.
 
 `workflow_read` returns run state, child counts, latest phase/progress, result
 binding and curated result as revision-bound JSON fragments. The complete rendered

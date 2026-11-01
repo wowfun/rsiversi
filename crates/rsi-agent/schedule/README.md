@@ -4,6 +4,8 @@ Schedule owns a bounded reminder domain, pure reserve/settle commands, model
 Tools and a projection. Its live native Host controller is supplied through a
 Local contract; domain state and projection never grant execution authority.
 The domain resets on fork. Restart retains intent but creates no live timers.
+`SCHEDULE_CODEC_VERSION` owns the exact codec shared by domain registration and
+workflow continuation admission.
 
 Only a Tool in an initial human-origin root Turn may create, resume or delete
 reminders. An automatic Goal/Schedule round and a child cannot create or replenish

@@ -332,7 +332,8 @@ impl PluginFactory for ScheduleFactory {
     }
     async fn activate(&self, plan: ActivationPlan) -> rsi_meta::Result<()> {
         let definition = DomainDefinition::new(
-            DomainIdentity::new(SCHEDULE_DOMAIN, 1).map_err(activation)?,
+            DomainIdentity::new(SCHEDULE_DOMAIN, crate::SCHEDULE_CODEC_VERSION)
+                .map_err(activation)?,
             &ScheduleState::default(),
             ScheduleState::validate,
             rsi_agent_composition_protocol::DomainReferencePolicy::None,

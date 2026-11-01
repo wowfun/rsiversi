@@ -5056,6 +5056,8 @@ dependencies = [
  "getrandom 0.3.4",
  "rsi-agent-composition-protocol",
  "rsi-agent-context",
+ "rsi-agent-goal",
+ "rsi-agent-schedule",
  "rsi-agent-session-protocol",
  "rsi-agent-store-protocol",
  "rsi-agent-store-sqlite",

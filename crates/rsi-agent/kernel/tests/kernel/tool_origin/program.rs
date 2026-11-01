@@ -3,7 +3,7 @@ use rsi_agent_session_protocol::ToolOrigin;
 use rsi_tools_protocol::ToolProgramRole;
 
 #[derive(Debug)]
-struct ProgramTools;
+pub(crate) struct ProgramTools;
 #[async_trait]
 impl ToolRuntime for ProgramTools {
     fn visit_definitions(&self, visitor: &mut dyn FnMut(&rsi_tools_protocol::ToolDefinition)) {
@@ -421,4 +421,4 @@ async fn nested_program_calls_bind_frozen_catalog_parent_and_ordinals_and_stay_o
 }
 
 #[path = "program/workflow.rs"]
-mod workflow;
+pub(crate) mod workflow;

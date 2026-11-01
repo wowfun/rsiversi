@@ -5,6 +5,8 @@ mod state;
 pub use state::*;
 /// Durable reminder domain identity.
 pub const SCHEDULE_DOMAIN: &str = "rsi.schedule";
+/// Current durable reminder codec, shared with exact-version authority consumers.
+pub const SCHEDULE_CODEC_VERSION: u32 = 1;
 /// Internal atomic reservation command.
 pub const SCHEDULE_RESERVE: &str = "rsi.schedule.reserve";
 /// Internal terminal settlement command.

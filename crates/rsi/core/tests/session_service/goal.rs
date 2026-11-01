@@ -315,6 +315,99 @@ async fn real_report_tool_completes_only_after_its_source_turn() {
     provider.abort();
 }
 
+async fn workflow_chat(Json(request): Json<serde_json::Value>) -> Response {
+    if request["messages"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .any(|message| message["role"] == "tool")
+    {
+        return chat().await;
+    }
+    let arguments = serde_json::json!({"script":"return {goalWorkflow: 42};"}).to_string();
+    let call = serde_json::json!({"choices":[{"delta":{"role":"assistant","tool_calls":[{"index":0,"id":"goal-workflow","type":"function","function":{"name":"run_workflow","arguments":arguments}}]},"finish_reason":null}]});
+    let finish = serde_json::json!({"choices":[{"delta":{},"finish_reason":"tool_calls"}],"usage":{"prompt_tokens":2,"completion_tokens":1}});
+    Response::builder()
+        .status(StatusCode::OK)
+        .header("content-type", "text/event-stream")
+        .body(Body::from(format!(
+            "data: {call}\n\ndata: {finish}\n\ndata: [DONE]\n\n"
+        )))
+        .unwrap()
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+#[ignore = "requires explicit RSI_TEST_NODE native integration"]
+async fn finite_goal_round_creates_and_completes_one_real_workflow() {
+    use rsi_agent_session_protocol::{AgentPresetId, ProgramOutcome};
+    let node =
+        std::fs::canonicalize(std::env::var_os("RSI_TEST_NODE").expect("explicit Node")).unwrap();
+    let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let fixture = fixture(&format!("http://{}", listener.local_addr().unwrap()));
+    let profile = std::fs::read_to_string(&fixture.profile).unwrap();
+    std::fs::write(
+        &fixture.profile,
+        format!(
+            "{profile}\n[[steps]]\nkind='plugin'\nid='fixture-program'\nplugin='rsi.agent.program.runtime'\nconfig={{node={}}}\n",
+            serde_json::to_string(&node).unwrap(),
+        ),
+    )
+    .unwrap();
+    let provider = tokio::spawn(async move {
+        axum::serve(
+            listener,
+            Router::new().route("/v1/chat/completions", post(workflow_chat)),
+        )
+        .await
+        .unwrap();
+    });
+    let running = RunningRsi::boot(composition(fixture.paths.clone()), &fixture.profile)
+        .await
+        .unwrap();
+    let handle = running
+        .session_service()
+        .unwrap()
+        .create(CreateSession {
+            workspace_id: running
+                .workspace_registry()
+                .unwrap()
+                .get_or_create(&fixture.workspace)
+                .await
+                .unwrap()
+                .id,
+            session_id: SessionId::new("goal-workflow").unwrap(),
+            agent_preset_id: Some(AgentPresetId::new("workflow").unwrap()),
+        })
+        .await
+        .unwrap();
+    start(&handle, 1).await;
+    assert_eq!(stopped(&handle).await.stage, GoalDriverStage::Disarmed);
+    let history = handle.history_before(None, 128).await.unwrap();
+    assert!(!history.has_more);
+    let workflows = handle
+        .list_workflows(rsi_session_protocol::WorkflowList {
+            cursor: None,
+            limit: 16,
+        })
+        .await
+        .unwrap();
+    let completed = workflows
+        .runs
+        .iter()
+        .filter(|run| run.outcome == Some(ProgramOutcome::Completed))
+        .count();
+    let goal = state(&handle).await.goal.unwrap();
+    assert_eq!(goal.allocated_rounds, 1);
+    assert!(running.shutdown().await.is_clean());
+    provider.abort();
+    assert_eq!(
+        completed, 1,
+        "a finite Goal round must complete its workflow: {:?}",
+        history.facts
+    );
+    assert_eq!(workflows.runs.len(), 1);
+}
+
 #[derive(Default)]
 struct Gate {
     entered: tokio::sync::Notify,

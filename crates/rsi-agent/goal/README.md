@@ -4,6 +4,8 @@ The Agent composition Goal plugin owns one bounded optional Goal domain,
 effect-free state commands, ordinary-request context, pure projections and the
 `report_goal` Tool. It holds no Store writer, Turn service or scheduling loop.
 The Host controller owns live continuation authority and aggregate driving.
+`GOAL_DOMAIN` and `GOAL_CODEC_VERSION` define the exact durable identity used by
+registration, snapshot decoding and consumers that admit Goal continuations.
 
 A Goal freezes its resolved positive safe-integer round maximum (at most
 9,007,199,254,740,991). Omitted creation limits use the Goal plugin default,

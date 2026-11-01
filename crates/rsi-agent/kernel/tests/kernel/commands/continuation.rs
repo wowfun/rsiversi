@@ -14,6 +14,79 @@ fn input() -> ContinuationInput {
 }
 
 #[tokio::test]
+async fn automatic_goal_and_schedule_workflows_require_the_exact_owner_codec() {
+    use crate::tool_origin::program::{ProgramTools, workflow::start_workflow_tool};
+    use rsi_agent_turn_protocol::PrepareProgram;
+    for (name, version) in [
+        (
+            rsi_agent_goal::GOAL_DOMAIN,
+            rsi_agent_goal::GOAL_CODEC_VERSION,
+        ),
+        (
+            rsi_agent_schedule::SCHEDULE_DOMAIN,
+            rsi_agent_schedule::SCHEDULE_CODEC_VERSION,
+        ),
+    ] {
+        let domain = DomainIdentity::new(name, version).unwrap();
+        let fixture = Fixture::start_with_domain(
+            Arc::new(MemoryStore::new()),
+            false,
+            domain.clone(),
+            Arc::new(ProgramTools),
+        )
+        .await;
+        let continuation = arm(&fixture).await;
+        reserve(&fixture, &continuation).await;
+        let executor = fixture
+            .kernel
+            .register("automatic-workflow".into())
+            .unwrap();
+        let claim = fixture
+            .kernel
+            .claim("automatic-workflow", CancellationToken::new())
+            .await
+            .unwrap()
+            .unwrap();
+        let input = rsi_agent_turn_protocol::initial_turn_input(&fixture.kernel, &claim)
+            .await
+            .unwrap();
+        assert!(!input.human);
+        assert_eq!(input.continuation_domains, std::slice::from_ref(&domain));
+        let caller = start_workflow_tool(&fixture.kernel, &claim).await;
+        let prepare = |domains| PrepareProgram {
+            caller: caller.clone(),
+            cancellation: CancellationToken::new(),
+            script: "return 42".into(),
+            fork_turns: ForkTurnSelection::All,
+            guard: None,
+            continuation_domains: domains,
+        };
+        let wrong_version = if version == 1 { 2 } else { version - 1 };
+        for refused in [
+            vec![],
+            vec![DomainIdentity::new(name, wrong_version).unwrap()],
+        ] {
+            assert!(matches!(
+                fixture.kernel.prepare_program(prepare(refused)).await,
+                Err(TurnError::Invalid(_))
+            ));
+        }
+        let run = fixture
+            .kernel
+            .prepare_program(prepare(vec![domain]))
+            .await
+            .unwrap();
+        run.accept(&caller).await.unwrap();
+        run.start().await.unwrap();
+        run.finish(rsi_agent_session_protocol::ProgramOutcome::Completed, None)
+            .await
+            .unwrap();
+        drop((run, executor, continuation));
+        fixture.stop().await;
+    }
+}
+
+#[tokio::test]
 async fn shutdown_fences_an_arm_blocked_in_its_domain_binding_read() {
     let store = Arc::new(FactReadRaceStore::new(Arc::new(MemoryStore::new())));
     let fixture = Fixture::start(store.clone(), false).await;

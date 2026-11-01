@@ -30,6 +30,8 @@ tokio = { workspace = true, features = ["fs", "io-util", "macros", "net", "proce
 tokio-util.workspace = true
 
 [dev-dependencies]
+rsi-agent-goal = { path = "../goal" }
+rsi-agent-schedule = { path = "../schedule" }
 rsi-files-protocol = { path = "../../rsi-files/protocol" }
 rsi-agent-context = { path = "../context" }
 rsi-agent-store-sqlite = { path = "../store-sqlite", features = ["test-support"] }

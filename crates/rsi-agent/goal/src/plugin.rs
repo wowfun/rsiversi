@@ -222,7 +222,7 @@ impl PluginFactory for GoalFactory {
     async fn activate(&self, mut plan: ActivationPlan) -> rsi_meta::Result<()> {
         let default_max_rounds: u64 = plan.take_state()?;
         let definition = DomainDefinition::new(
-            DomainIdentity::new(GOAL_DOMAIN, 2).map_err(activation)?,
+            DomainIdentity::new(GOAL_DOMAIN, crate::GOAL_CODEC_VERSION).map_err(activation)?,
             &GoalState::default(),
             GoalState::validate,
             rsi_agent_composition_protocol::DomainReferencePolicy::None,

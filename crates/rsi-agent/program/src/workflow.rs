@@ -246,15 +246,26 @@ impl Workflow {
                     .map_or(Ok(ForkTurnSelection::All), ForkTurnSelection::parse)
                     .map_err(failure)?,
                 guard: Some(guard),
-                continuation_domains: vec![
-                    DomainIdentity::new(rsi_agent_goal::GOAL_DOMAIN, 1).map_err(failure)?,
-                    DomainIdentity::new(rsi_agent_schedule::SCHEDULE_DOMAIN, 1).map_err(failure)?,
-                ],
+                continuation_domains: workflow_continuation_domains()?,
             })
             .await
             .map_err(turn_failure)?;
         Ok(run)
     }
+}
+fn workflow_continuation_domains() -> rsi_tools_protocol::Result<Vec<DomainIdentity>> {
+    Ok(vec![
+        DomainIdentity::new(
+            rsi_agent_goal::GOAL_DOMAIN,
+            rsi_agent_goal::GOAL_CODEC_VERSION,
+        )
+        .map_err(failure)?,
+        DomainIdentity::new(
+            rsi_agent_schedule::SCHEDULE_DOMAIN,
+            rsi_agent_schedule::SCHEDULE_CODEC_VERSION,
+        )
+        .map_err(failure)?,
+    ])
 }
 fn workflow_guard(
     domains: &[rsi_agent_session_protocol::DomainStateView],
@@ -490,6 +501,34 @@ mod tests {
     }
 
     use super::*;
+    #[test]
+    fn goal_workflow_domain_matches_its_owner_codec() {
+        use rsi_agent_session_protocol::{DomainSnapshot, DomainStateValue};
+        let domains = workflow_continuation_domains().unwrap();
+        assert_eq!(domains.len(), 2);
+        assert!(
+            domains.contains(
+                &DomainIdentity::new(
+                    rsi_agent_schedule::SCHEDULE_DOMAIN,
+                    rsi_agent_schedule::SCHEDULE_CODEC_VERSION
+                )
+                .unwrap()
+            )
+        );
+        let identity = domains
+            .into_iter()
+            .find(|domain| domain.id() == rsi_agent_goal::GOAL_DOMAIN)
+            .unwrap();
+        let snapshot = DomainSnapshot::new(
+            identity,
+            DomainStateValue::new(
+                serde_json::to_value(rsi_agent_goal::GoalState::default()).unwrap(),
+            )
+            .unwrap(),
+        );
+        rsi_agent_goal::GoalState::decode(&snapshot)
+            .expect("Goal workflow authority must use the Goal codec");
+    }
     #[test]
     fn workflow_requires_disabled_plan_policy_and_captures_its_revision() {
         use rsi_agent_session_protocol::{

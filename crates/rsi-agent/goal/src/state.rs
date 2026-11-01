@@ -195,7 +195,9 @@ impl GoalState {
     /// # Errors
     /// Rejects a different codec or any invalid bounded Goal state.
     pub fn decode(snapshot: &rsi_agent_session_protocol::DomainSnapshot) -> Result<Self, String> {
-        if snapshot.identity().id() != crate::GOAL_DOMAIN || snapshot.identity().version() != 2 {
+        if snapshot.identity().id() != crate::GOAL_DOMAIN
+            || snapshot.identity().version() != crate::GOAL_CODEC_VERSION
+        {
             return Err("Goal domain codec is unavailable".into());
         }
         let state: Self = serde_json::from_value(snapshot.state().value().clone())
