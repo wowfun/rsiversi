@@ -77,6 +77,7 @@ function NativeSurface({
       ref={ref("node")}
       className={`${css.scope} ${chat.scope} pane${selected ? " selected" : ""}${empty ? " is-empty" : ""}`}
       data-session-id={data?.session ?? ""}
+      data-session-generation={data?.generation ?? ""}
       hidden={!selected}
       aria-label={`${label} conversation`}
     >

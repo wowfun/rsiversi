@@ -2,13 +2,35 @@ import assert from "node:assert/strict";
 import { test } from "node:test";
 import { chromium, firefox } from "playwright";
 import { browserNames, assertControls, assertNoNotices, recordTaskFailure } from "./task-checks.mjs";
-import { clickUiControl, closeDetails, resourceSelector, sourceInspectionGeometry } from './controls.mjs';
+import { clickUiControl, closeDetails, openConversation, resourceSelector, sourceInspectionGeometry } from './controls.mjs';
 import { recordNavigationEvidence } from './navigation-evidence.mjs';
 import { mkdtemp, readFile, rm } from "node:fs/promises";
 import { join } from "node:path";
 import { tmpdir } from "node:os";
 
 for (const [name, engine] of [["chromium", chromium], ["firefox", firefox]]) {
+  test(`${name}: reopening the same conversation requires a newly published generation`, async()=>{
+    const browser=await engine.launch({headless:true});
+    try {
+      const page=await browser.newPage();
+      const scene=async publish=>{
+        await page.setContent('<div data-testid="conversation-row" data-session-id="same"><button data-testid="conversation-open">Open</button></div><section class="pane" aria-label="Main conversation" data-session-id="same" data-session-generation="1"><p>Unchanged transcript</p><textarea aria-label="Main message"></textarea></section>');
+        await page.evaluate(publish=>{
+          window.opens=0;document.querySelector('button').onclick=()=>{
+            window.opens++;
+            if(publish)queueMicrotask(()=>document.querySelector('.pane').dataset.sessionGeneration='2');
+          };
+        },publish);
+      };
+      await scene(false);
+      await assert.rejects(openConversation(page,page.locator('.pane'),'same',{timeout:150}),/Timeout/);
+      assert.equal(await page.evaluate(()=>window.opens),1);
+      await scene(true);
+      await openConversation(page,page.locator('.pane'),'same');
+      assert.equal(await page.evaluate(()=>window.opens),1);
+      assert.equal(await page.locator('.pane').getAttribute('data-session-generation'),'2');
+    } finally {await browser.close();}
+  });
   test(`${name}: resource close observes its Dock identity when the renderer retains the node`, async()=>{
     const browser=await engine.launch({headless:true});
     try {

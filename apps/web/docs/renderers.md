@@ -1,5 +1,9 @@
 # Renderer hosting
 
+Native conversation panes publish `data-session-id` and
+`data-session-generation` together. Reopening the same Session publishes a new
+generation; retained transcript text does not acknowledge that transition.
+
 The standard renderer displays an optional `data.image` by reading its explicitly
 declared PNG source in bounded 64 KiB windows. Its published renderer declares
 the source capability, and reads start only after presentation activation.

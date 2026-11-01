@@ -22,6 +22,7 @@ try {
    await page.goto(server.url);await page.waitForFunction(()=>window.ready);await page.evaluate(()=>fixture.frame());
    // An open resource preference belongs to a conversation, not the starting page.
    await page.evaluate(()=>fixture.surface('resource-preference'));
+   await page.waitForFunction(()=>document.querySelector('.pane:not([hidden])')?.dataset.sessionGeneration===fixture.view.surfaces.main.generation);
    await page.getByRole('button',{name:'Toggle resources',exact:true}).click();
    await page.locator('aside.resources').waitFor({state:'visible'});
    await page.evaluate(async()=>{fixture.view.surfaces.main=null;await fixture.frame();});

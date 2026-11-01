@@ -1708,7 +1708,12 @@ fn paired_web_failures_publish_evidence_before_integration_probes() {
     };
     let workflow_archive = archive_path("rsi-workflow-failure-evidence");
     let product_archive = archive_path("rsi-web-product-failure-evidence");
-    for suffix in ["**/failure*", "**/*-failure*", "**/binary.json"] {
+    for suffix in [
+        "**/failure*",
+        "**/*-failure*",
+        "**/*-source-pointer.json",
+        "**/binary.json",
+    ] {
         assert!(
             product_archive.lines().any(|line| {
                 line == format!("${{{{ runner.temp }}}}/rsi-web-evidence/{suffix}")

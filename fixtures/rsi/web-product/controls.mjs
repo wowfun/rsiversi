@@ -1,4 +1,16 @@
 // Shared semantic entry points for product fixtures; every change uses real controls.
+export async function openConversation(page,pane,session,{timeout=30_000}={}) {
+  const label=await pane.getAttribute('aria-label');
+  const generation=await pane.getAttribute('data-session-generation');
+  await page.locator(`[data-testid="conversation-row"][data-session-id=${JSON.stringify(session)}]`).getByTestId('conversation-open').click();
+  await page.waitForFunction(({label,session,generation})=>{
+    const pane=[...document.querySelectorAll('.pane')].find(pane=>pane.getAttribute('aria-label')===label);
+    const editor=pane?.querySelector('textarea[aria-label="Main message"]');
+    return pane?.dataset.sessionId===session&&pane.dataset.sessionGeneration&&
+      pane.dataset.sessionGeneration!==generation&&editor&&!editor.disabled;
+  },{label,session,generation},{timeout});
+}
+
 export async function openSettings(page) {
   const trigger=page.locator('#settings-open');
   if(!await trigger.isVisible())await page.locator('.application-options > summary').click();

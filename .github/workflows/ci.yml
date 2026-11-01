@@ -417,6 +417,7 @@ jobs:
             ${{ runner.temp }}/rsi-browser-logs/web_product.log
             ${{ runner.temp }}/rsi-web-evidence/**/failure*
             ${{ runner.temp }}/rsi-web-evidence/**/*-failure*
+            ${{ runner.temp }}/rsi-web-evidence/**/*-source-pointer.json
             ${{ runner.temp }}/rsi-web-evidence/**/binary.json
           if-no-files-found: error
 

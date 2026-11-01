@@ -879,8 +879,11 @@ and return focus, and a frame containing sixty settled code blocks. That frame
 must ACK its plain-text presentation before optional tokenization runs. This is
 source/DOM evidence; real Service and provider coverage remains in the paired
 product and opt-in live fixtures.
-Conversation identity assertions read the pane's `data-session-id`; coordinates
-inside a closed tools menu are not visible text. Presentation assertions either
+Conversation reopening waits for the requested `data-session-id`, a changed
+`data-session-generation`, and an enabled editor before further interaction.
+CI's early failure archive retains source-pointer evidence alongside the failure
+capture so a rejected stale-generation action can be distinguished from a lost click.
+Coordinates inside a closed tools menu are not visible text. Presentation assertions either
 open that menu or inspect its text content explicitly.
 
 CI runs the workspace, model settings, starting transcript and composer document
