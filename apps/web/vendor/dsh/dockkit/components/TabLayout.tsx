@@ -5,9 +5,9 @@ import clsx from 'clsx'
 import type { DockIntents } from '../contract/adapter.ts'
 import type { LayoutState, PaneId, PaneNode, TabId, TabRecord } from '../contract/types.ts'
 import { findTabPane, floatRect, getNode, getPane } from '../engine/tree.ts'
-import type { SizePreview } from './PaneTree.tsx'
+import { SplitDivider, type SizePreview } from './PaneTree.tsx'
 import type { PaneCallbacks } from './render.ts'
-import { FloatHeader, useFloatGestures } from './FloatLayer.tsx'
+import { FloatHeader, FloatResize, useFloatGestures } from './FloatLayer.tsx'
 import { PaneDropHints, TabPanel, TabStrip } from './TabPanel.tsx'
 import css from './dockkit.module.css'
 
@@ -97,15 +97,14 @@ function TabHost({ state, callbacks, intents, tab, pane, column, floats, focusRe
         <div className={css.tabHostHeader}>
           {selected && (floating
             ? <FloatHeader paneId={pane.id} tab={tab} labels={callbacks.labels} intents={intents}
-              renderTabTitle={callbacks.renderTabTitle} canCloseTab={callbacks.canCloseTab} drag={floats.drag} />
+              renderTabTitle={callbacks.renderTabTitle} canCloseTab={callbacks.canCloseTab} drag={floats.drag} keyboard={floats.keyboard} rect={rect!} />
             : <TabStrip state={state} pane={pane} callbacks={callbacks} offsets={offsets} />)}
         </div>
         <div ref={body} className={clsx(css.tabHostBody, floating ? css.floatBody : css.paneBody)}>
           {visited && (retained || (active && selected)) ? callbacks.renderTab(tab) : null}
           {!floating && <PaneDropHints pane={pane} callbacks={callbacks} />}
         </div>
-        {floating && <div className={css.floatResize} data-dockkit-float-resize={pane.id}
-          onPointerDown={(event) => { floats.drag('resize', pane.id, event) }} />}
+        {floating && <FloatResize paneId={pane.id} rect={rect!} labels={callbacks.labels} gestures={floats} />}
       </section>
     </div>
   )
@@ -160,9 +159,8 @@ export function TabLayout(props: LayoutProps): ReactNode {
           <TabPanel state={state} pane={pane} callbacks={callbacks} />
         </div>
       ))}
-      {root.kind === 'split' && <div className={clsx(css.divider, css.tabLayoutDivider)}
-        data-dockkit-divider={`${root.id}:0`} style={{ gridColumn: 2, gridRow: 1 }}
-        onPointerDown={(event) => { callbacks.onDividerPressed(root.id, 0, event) }} />}
+      {root.kind === 'split' && <SplitDivider id={root.id} axis={root.axis} sizes={sizes} index={0} callbacks={callbacks}
+        className={css.tabLayoutDivider} style={{ gridColumn: 2, gridRow: 1 }} />}
     </div>
   )
 }

@@ -252,6 +252,22 @@ function Surface({
         })
       })
     },
+    minimumPaneFraction: minPaneFraction,
+    onDividerKeyDown: (splitId, index, event) => {
+      const split = getSplit(state, splitId)
+      const before = split.axis === 'row' ? 'ArrowLeft' : 'ArrowUp'
+      const after = split.axis === 'row' ? 'ArrowRight' : 'ArrowDown'
+      const delta = event.key === before ? -(event.shiftKey ? .1 : .02)
+        : event.key === after ? (event.shiftKey ? .1 : .02)
+        : event.key === 'Home' ? -1 : event.key === 'End' ? 1 : undefined
+      if (delta === undefined) return
+      event.preventDefault()
+      event.stopPropagation()
+      const floor = Math.min(minPaneFraction, 1 / split.sizes.length)
+      const bounded = Math.max(floor - split.sizes[index], Math.min(split.sizes[index + 1] - floor, delta))
+      const sizes = dividerSizes(split.sizes, index, bounded)
+      if (!sameSizes(sizes, split.sizes)) intents.resizeSplit(splitId, sizes)
+    },
     onDividerPressed: (splitId, index, event) => {
       const container = event.currentTarget.parentElement
       /* v8 ignore next -- a divider is rendered as a child of its split's element. */

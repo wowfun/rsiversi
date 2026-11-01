@@ -105,7 +105,44 @@ export function useFloatGestures(state: LayoutState, intents: DockIntents) {
     })
   }
 
-  return { preview, raise, drag }
+  const keyboard = (mode: 'move' | 'resize', paneId: PaneId, event: import('react').KeyboardEvent<HTMLElement>): void => {
+    const step = event.shiftKey ? 50 : 10
+    const dx = event.key === 'ArrowLeft' ? -step : event.key === 'ArrowRight' ? step : 0
+    const dy = event.key === 'ArrowUp' ? -step : event.key === 'ArrowDown' ? step : 0
+    if (!dx && !dy && event.key !== 'Home' && event.key !== 'End') return
+    event.preventDefault()
+    event.stopPropagation()
+    const rect = floatRect(getPane(state, paneId))
+    const root = document.documentElement
+    const caption = root.hasAttribute('data-windows-titlebar') && !root.hasAttribute('data-fullscreen')
+      ? Number.parseFloat(root.style.getPropertyValue('--dsh-windows-titlebar-height')) || 0 : 0
+    const top = root.hasAttribute('data-windows-titlebar') ? caption + 20 : 0
+    const width = root.clientWidth, height = root.clientHeight
+    const next = mode === 'move' ? movedRect(rect, dx, dy) : resizedRect(rect, dx, dy, FLOAT_MIN_SIZE)
+    if (mode === 'move') {
+      const x = event.key === 'Home' ? 0 : event.key === 'End' ? width - rect.width : next.x
+      const y = event.key === 'Home' ? top : event.key === 'End' ? height - rect.height : next.y
+      intents.moveFloat(paneId, Math.max(0, Math.min(width - rect.width, x)), Math.max(top, Math.min(height - rect.height, y)))
+    } else {
+      const w = event.key === 'Home' ? FLOAT_MIN_SIZE.width : event.key === 'End' ? width - rect.x : next.width
+      const h = event.key === 'Home' ? FLOAT_MIN_SIZE.height : event.key === 'End' ? height - rect.y : next.height
+      intents.resizeFloat(paneId, { ...rect,
+        width: Math.max(FLOAT_MIN_SIZE.width, Math.min(w, width - rect.x)),
+        height: Math.max(FLOAT_MIN_SIZE.height, Math.min(h, height - rect.y)) })
+    }
+  }
+
+  return { preview, raise, drag, keyboard }
+}
+
+/** The same two-axis keyboard and pointer resize grip in both layouts. */
+export function FloatResize({ paneId, rect, labels, gestures }: {
+  paneId: PaneId; rect: FloatRect; labels: DockLabels; gestures: ReturnType<typeof useFloatGestures>
+}): ReactNode {
+  return <button type="button" className={css.floatResize} data-dockkit-float-resize={paneId}
+    aria-label={labels.resizeFloat} aria-description={labels.describeFloatSize(Math.round(rect.width), Math.round(rect.height))}
+    onKeyDown={event => gestures.keyboard('resize', paneId, event)}
+    onPointerDown={event => gestures.drag('resize', paneId, event)} />
 }
 
 /**
@@ -113,7 +150,7 @@ export function useFloatGestures(state: LayoutState, intents: DockIntents) {
  * @param props - owning pane/tab, localized labels and gesture callbacks.
  * @returns the float header without a content container.
  */
-export function FloatHeader({ paneId, tab, labels, intents, renderTabTitle, canCloseTab, drag }: {
+export function FloatHeader({ paneId, tab, labels, intents, renderTabTitle, canCloseTab, drag, keyboard, rect }: {
   readonly paneId: PaneId
   readonly tab: TabRecord
   readonly labels: DockLabels
@@ -121,13 +158,17 @@ export function FloatHeader({ paneId, tab, labels, intents, renderTabTitle, canC
   readonly renderTabTitle: TabRenderer | undefined
   readonly canCloseTab: ((id: TabId) => boolean) | undefined
   readonly drag: ReturnType<typeof useFloatGestures>['drag']
+  readonly keyboard: ReturnType<typeof useFloatGestures>['keyboard']
+  readonly rect: FloatRect
 }): ReactNode {
   return (
     <header className={clsx(css.tabStrip, css.floatHeader)} data-dockkit-float-grip={paneId}
       onPointerDown={(event) => { drag('move', paneId, event) }}>
-      <div className={clsx(css.tab, css.floatTitle)} data-dockkit-float-title>
+      <button type="button" className={clsx(css.tab, css.floatTitle)} data-dockkit-float-title
+        aria-label={`${labels.moveFloat}: ${tab.title}`} aria-description={labels.describeFloatPosition(Math.round(rect.x), Math.round(rect.y))}
+        onKeyDown={event => keyboard('move', paneId, event)}>
         <TabTitle>{renderTabTitle?.(tab) ?? tab.title}</TabTitle>
-      </div>
+      </button>
       <div className={css.stripFill} />
       <Tooltip label={labels.dockFloat} side="bottom" delayMs={500}>
         <button type="button" className={css.iconButton} aria-label={labels.dockFloat}
@@ -151,7 +192,8 @@ export function FloatHeader({ paneId, tab, labels, intents, renderTabTitle, canC
 
 /** Every floating panel, in z order. */
 export function FloatLayer({ state, intents, labels, renderTab, renderTabTitle, canCloseTab }: FloatLayerProps): ReactNode {
-  const { preview, raise, drag } = useFloatGestures(state, intents)
+  const gestures = useFloatGestures(state, intents)
+  const { preview, raise, drag, keyboard } = gestures
 
   return (
     <>
@@ -178,13 +220,9 @@ export function FloatLayer({ state, intents, labels, renderTab, renderTabTitle, 
             }}
             onPointerDown={() => { raise(paneId) }}
           >
-            <FloatHeader {...{ paneId, tab, labels, intents, renderTabTitle, canCloseTab, drag }} />
+            <FloatHeader {...{ paneId, tab, labels, intents, renderTabTitle, canCloseTab, drag, keyboard }} rect={live} />
             <div className={css.floatBody}>{renderTab(tab)}</div>
-            <div
-              className={css.floatResize}
-              data-dockkit-float-resize={paneId}
-              onPointerDown={(event) => { drag('resize', paneId, event) }}
-            />
+            <FloatResize paneId={paneId} rect={live} labels={labels} gestures={gestures} />
           </div>
         )
       })}

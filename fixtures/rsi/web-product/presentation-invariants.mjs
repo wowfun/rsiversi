@@ -41,7 +41,7 @@ function dockState(){
  for(let i=0;i<10;i++)state=record(EMPTY_HISTORY,state,planOpenContent(state,mint,{kind:'fixture',contentId:'file-'+i,title:'Files '+i}).ops).state;
  return state;
 }
-const dockLabels={emptyPane:'Open a resource',splitPane:'Split resources',splitPaneDisabled:'Two panes',splitPaneNarrow:'Widen resources',closeTab:'Close resource tab',addTab:'Open resources',dockFloat:'Dock resource',closeFloat:'Close resource window',dropZone:{center:'Merge tabs',left:'Split left',right:'Split right',top:'',bottom:''}};
+const dockLabels={resizePane:'Resize resources',moveFloat:'Move resource window',resizeFloat:'Resize resource window',describeFloatPosition:(x,y)=>'Position '+x+', '+y,describeFloatSize:(w,h)=>'Size '+w+' by '+h,emptyPane:'Open a resource',splitPane:'Split resources',splitPaneDisabled:'Two panes',splitPaneNarrow:'Widen resources',closeTab:'Close resource tab',addTab:'Open resources',dockFloat:'Dock resource',closeFloat:'Close resource window',dropZone:{center:'Merge tabs',left:'Split left',right:'Split right',top:'',bottom:''}};
 const noop=()=>{};
 function DockProbe(){
  const [state,setState]=useState(dockState);

@@ -13,7 +13,7 @@ import {Terminals,type Follower} from './terminal.tsx'
 import {Button} from './button.tsx'
 import {ResourceOwner} from './resource-owner.mjs'
 
-const labels:DockLabels={emptyPane:'Open a resource to use this pane',splitPane:'Split resources',splitPaneDisabled:'Two resource panes are open',splitPaneNarrow:'Widen resources to split',closeTab:'Close resource tab',addTab:'Open resources',dockFloat:'Dock resource',closeFloat:'Close resource window',dropZone:{center:'Merge tabs',left:'Split left',right:'Split right',top:'',bottom:''}}
+const labels:DockLabels={emptyPane:'Open a resource to use this pane',splitPane:'Split resources',splitPaneDisabled:'Two resource panes are open',splitPaneNarrow:'Widen resources to split',closeTab:'Close resource tab',addTab:'Open resources',dockFloat:'Dock resource',closeFloat:'Close resource window',resizePane:'Resize resource panes',moveFloat:'Move resource window',resizeFloat:'Resize resource window',describeFloatPosition:(x,y)=>`Position ${x}, ${y} pixels. Arrow keys move; Shift changes by 50 pixels. Home and End select viewport corners.`,describeFloatSize:(w,h)=>`${w} by ${h} pixels. Arrow keys resize; Shift changes by 50 pixels. Home selects minimum size; End fills available space.`,dropZone:{center:'Merge tabs',left:'Split left',right:'Split right',top:'',bottom:''}}
 const descriptor=(host:ResourceHost,surface:NativeSurface):Coordinate=>{
   const value=host.entry.reopen
   if(!value)throw new Error('This resource cannot be reopened')

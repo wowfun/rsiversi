@@ -36,11 +36,12 @@
   min-height: 0;
 }
 
-/* The divider owns no layout room (`SPLIT_MINIMUMS.divider` mirrors the 0):
+/* The divider occupies an 8px accessible box with cancelling margins, so it
+   owns no layout room (`SPLIT_MINIMUMS.divider` mirrors the 0):
    the halves abut, so a rule a pane draws across its own edge — a header's
    hairline — runs unbroken past the seam. The visible rule is a 0.5px hairline
-   centred on the seam, matching the embedder's other borders, and `::after`
-   widens the pointer target to 8px by reaching 4px over each neighbour.
+   centred on the seam, matching the embedder's other borders. The box reaches
+   4px over each neighbour for pointer and keyboard focus visibility.
    `z-index` keeps that overhang above the later sibling, which would otherwise
    take the hit. */
 .divider {
@@ -61,41 +62,43 @@
 }
 
 .splitRow > .divider {
-  width: 0;
+  width: 8px;
+  margin-inline: -4px;
   cursor: col-resize;
 }
 
 .splitRow > .divider::before {
   top: 0;
   bottom: 0;
-  left: -0.25px;
+  left: 3.75px;
   width: 0.5px;
 }
 
 .splitRow > .divider::after {
   top: 0;
   bottom: 0;
-  left: -4px;
-  right: -4px;
+  left: 0;
+  right: 0;
 }
 
 .splitColumn > .divider {
-  height: 0;
+  height: 8px;
+  margin-block: -4px;
   cursor: row-resize;
 }
 
 .splitColumn > .divider::before {
   left: 0;
   right: 0;
-  top: -0.25px;
+  top: 3.75px;
   height: 0.5px;
 }
 
 .splitColumn > .divider::after {
   left: 0;
   right: 0;
-  top: -4px;
-  bottom: -4px;
+  top: 0;
+  bottom: 0;
 }
 
 /* Hover: a 1px grip fades in over the hairline, its caption ink deepest at
@@ -186,7 +189,8 @@
 }
 
 .tabLayoutDivider {
-  width: 0;
+  width: 8px;
+  margin-inline: -4px;
   cursor: col-resize;
   z-index: calc(var(--dsh-dockkit-dock-layer, 10) + 1);
   pointer-events: auto;
@@ -195,15 +199,15 @@
 .tabLayoutDivider::before {
   top: 0;
   bottom: 0;
-  left: -0.25px;
+  left: 3.75px;
   width: 0.5px;
 }
 
 .tabLayoutDivider::after {
   top: 0;
   bottom: 0;
-  left: -4px;
-  right: -4px;
+  left: 0;
+  right: 0;
   background: linear-gradient(to bottom, transparent, var(--dsw-alias-label-caption) 50%, transparent) center / 1px 100% no-repeat;
 }
 
@@ -841,6 +845,11 @@
 }
 
 .floatResize {
+  padding: 0;
+  min-width: 0;
+  min-height: 0;
+  border: 0;
+  background: transparent;
   position: absolute;
   right: 0;
   bottom: 0;
@@ -869,6 +878,22 @@
 .floatResize:active::after {
   opacity: 1;
 }
+
+.floatTitle {
+  border: 0;
+  background: transparent;
+  color: inherit;
+  text-align: left;
+  cursor: move;
+}
+
+.divider:focus-visible,
+.floatResize:focus-visible,
+.floatTitle:focus-visible {
+  outline: 2px solid var(--dsw-alias-label-primary, currentColor);
+  outline-offset: -2px;
+}
+.floatResize:focus-visible::after { opacity: 1; }
 
 @media (hover: hover) {
   .float:hover .floatResize::after {

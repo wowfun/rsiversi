@@ -39,6 +39,16 @@ export interface DockLabels {
   readonly dockFloat: string
   /** Close a floating panel. */
   readonly closeFloat: string
+  /** Accessible name for the split separator. */
+  readonly resizePane: string
+  /** Accessible name for the floating move grip. */
+  readonly moveFloat: string
+  /** Accessible name for the floating resize grip. */
+  readonly resizeFloat: string
+  /** Current coordinates and keyboard instructions for a move grip. */
+  readonly describeFloatPosition: (x: number, y: number) => string
+  /** Current size and keyboard instructions for a resize grip. */
+  readonly describeFloatSize: (width: number, height: number) => string
   /** The drop hint's caption for each body zone a dragged tab can land on. */
   readonly dropZone: Readonly<Record<DockZone, string>>
 }

@@ -7,7 +7,7 @@
 import { Fragment } from 'react'
 import type { ReactNode } from 'react'
 import clsx from 'clsx'
-import type { LayoutState, NodeId, SplitId } from '../contract/types.ts'
+import type { LayoutState, NodeId, SplitId, SplitAxis } from '../contract/types.ts'
 import { getNode } from '../engine/tree.ts'
 import type { PaneCallbacks } from './render.ts'
 import { TabPanel } from './TabPanel.tsx'
@@ -27,6 +27,22 @@ export interface PaneTreeProps {
   readonly preview: SizePreview | undefined
 }
 
+/** Accessible divider shared by nested and stable-tab layouts. */
+export function SplitDivider({ id, axis, sizes, index, callbacks, className, style }: {
+  id: SplitId; axis: SplitAxis; sizes: readonly number[]; index: number; callbacks: PaneCallbacks
+  className?: string; style?: import('react').CSSProperties
+}): ReactNode {
+  const floor = Math.min(callbacks.minimumPaneFraction, 1 / sizes.length)
+  return <div className={clsx(css.divider, className)} style={style}
+    data-dockkit-divider={`${id}:${index}`} role="separator" tabIndex={0}
+    aria-label={callbacks.labels.resizePane} aria-orientation={axis === 'row' ? 'vertical' : 'horizontal'}
+    aria-valuemin={Math.round(floor * 100)}
+    aria-valuemax={Math.round(((sizes[index] ?? 0) + (sizes[index + 1] ?? 0) - floor) * 100)}
+    aria-valuenow={Math.round((sizes[index] ?? 0) * 100)}
+    onKeyDown={event => callbacks.onDividerKeyDown(id, index, event)}
+    onPointerDown={event => callbacks.onDividerPressed(id, index, event)} />
+}
+
 /** Render a split or pane node and everything under it. */
 export function PaneTree({ state, nodeId, callbacks, preview }: PaneTreeProps): ReactNode {
   const node = getNode(state, nodeId)
@@ -40,11 +56,7 @@ export function PaneTree({ state, nodeId, callbacks, preview }: PaneTreeProps): 
       {node.children.map((childId, index) => (
         <Fragment key={childId}>
           {index > 0 && (
-            <div
-              className={css.divider}
-              data-dockkit-divider={`${node.id}:${index - 1}`}
-              onPointerDown={(event) => { callbacks.onDividerPressed(node.id, index - 1, event) }}
-            />
+            <SplitDivider id={node.id} axis={node.axis} sizes={sizes} index={index - 1} callbacks={callbacks} />
           )}
           <div
             className={css.splitCell}

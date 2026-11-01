@@ -337,6 +337,11 @@ splitting may leave an empty destination until the next move. At narrow widths,
 a single displayed strip combines docked tabs without changing the saved tree.
 Float rectangles are clamped to the current viewport for display; resizing the
 window never persists these temporary bounds.
+Inner split separators support axis arrow keys, Shift for larger steps, and
+Home/End for their bounds. Floating panels expose focused move and resize grips:
+arrow keys adjust either axis, Shift increases the step, and Home/End select
+the position or size bounds. These controls publish the same undoable intents
+as pointer gestures and retain focus after each adjustment.
 Tab-strip scroll positions survive tab selection while their pane exists.
 Removed panes release their saved offsets; undoing a pane removal starts its
 strip afresh and reveals the selected tab.
@@ -400,6 +405,8 @@ Session extension restoration carries its current pane and generation. Narrow
 resource-overlay visibility is transient and never writes the saved desktop
 visibility, including when opening a resource tab. Collapsing docked panes on a
 narrow viewport preserves the focused floating pane and the root dock selection.
+Keyboard resizing preserves the dock engine's minimum float size, including
+End-to-fill when a restored float lies near the viewport edge.
 
 The starting page has no resource column or resource-toggle action. A saved open
 column is suppressed until a conversation is selected, without overwriting that

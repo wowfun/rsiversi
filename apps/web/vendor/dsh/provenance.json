@@ -8,7 +8,9 @@
     "theme-base.css omits the unused brand font declaration; system text/code fonts and focus rules remain.",
     "dockkit-tokens.css retains the full platform token source, adapts selectors to RSI appearance, and repeats dark declarations for system appearance.",
     "slots/index.ts exposes the keyed Hook member overload already implemented by renderer/bindings.tsx.",
-    "TabLayout releases scroll offsets when their pane is removed, after child strip cleanup; TabPanel documents this bounded lifetime."
+    "TabLayout releases scroll offsets when their pane is removed, after child strip cleanup; TabPanel documents this bounded lifetime.",
+    "Split separators and floating move/resize controls expose host-owned accessible labels, bounded keyboard intents and visible focus boxes; undo uses the existing intent history.",
+    "Keyboard float resizing preserves the engine minimum even when End fills a viewport edge smaller than that minimum."
   ],
   "files": [
     {
@@ -99,28 +101,28 @@
       "path": "dockkit/components/DockSurface.tsx",
       "source": "packages/client/ui-dockkit/src/components/DockSurface.tsx",
       "source_sha256": "83f35ffe1c2297725f15eeb3f272605f343fd79abda19fdcf502ef41a637ebca",
-      "adapted_sha256": "83f35ffe1c2297725f15eeb3f272605f343fd79abda19fdcf502ef41a637ebca",
+      "adapted_sha256": "4fb2f9aea46a88bd746248a7f1c0e28f9bcfcb3e0b562c97f20cd2341d36f3a4",
       "revision": "22ddee3792402c3e70ec5f86a63c3e3e895a2f60"
     },
     {
       "path": "dockkit/components/FloatLayer.tsx",
       "source": "packages/client/ui-dockkit/src/components/FloatLayer.tsx",
       "source_sha256": "1665e8163b0b0f13397f2f8bc6dc07c59d2e285fce63177d127d10f9406b79ec",
-      "adapted_sha256": "dd2cad9308bcadfd594e98259bd8e158b80183ecc72bd780d9785cfd0454978a",
+      "adapted_sha256": "a4a7154b5af521003e7f69f7a34b0d2ac8a7d50ba700b8735414996e6c80d063",
       "revision": "22ddee3792402c3e70ec5f86a63c3e3e895a2f60"
     },
     {
       "path": "dockkit/components/PaneTree.tsx",
       "source": "packages/client/ui-dockkit/src/components/PaneTree.tsx",
       "source_sha256": "b3504195fc149c86447e9c66da43bf0eea290d05c0dda25932e0d98495ce42b6",
-      "adapted_sha256": "b3504195fc149c86447e9c66da43bf0eea290d05c0dda25932e0d98495ce42b6",
+      "adapted_sha256": "0e053943ea37a4d484a5451ee900fe014f023e33506090a43eab27cd8f91e7f4",
       "revision": "22ddee3792402c3e70ec5f86a63c3e3e895a2f60"
     },
     {
       "path": "dockkit/components/TabLayout.tsx",
       "source": "packages/client/ui-dockkit/src/components/TabLayout.tsx",
       "source_sha256": "e85edef1fcb8259ac8a870a3d9dbd394a062492b7f4af9c94bb62044372c88e9",
-      "adapted_sha256": "30449e242506838bf3018b368944d4c5a3ecab02d3cb6446035f3ff56127acde",
+      "adapted_sha256": "69e0d0bb8d09f174bd87f352a6ff2254959bdaf31f953789b8332195b104f7bb",
       "revision": "22ddee3792402c3e70ec5f86a63c3e3e895a2f60"
     },
     {
@@ -148,7 +150,7 @@
       "path": "dockkit/components/dockkit.module.css",
       "source": "packages/client/ui-dockkit/src/components/dockkit.module.css",
       "source_sha256": "9f6c40fef185aa0bb64862b3b27fe7f24259a81ac3e8715e5dd9d24fd0fe4225",
-      "adapted_sha256": "9f6c40fef185aa0bb64862b3b27fe7f24259a81ac3e8715e5dd9d24fd0fe4225",
+      "adapted_sha256": "85878a40496426bbc514ddb0747f1afe000ab6fc54ee66298edd2d794cc148ea",
       "revision": "22ddee3792402c3e70ec5f86a63c3e3e895a2f60"
     },
     {
@@ -169,14 +171,14 @@
       "path": "dockkit/components/render.ts",
       "source": "packages/client/ui-dockkit/src/components/render.ts",
       "source_sha256": "bd605e14514595ff40dbfeea73db94ddf769054bb9e5afcfea95a1afe01bbf57",
-      "adapted_sha256": "bd605e14514595ff40dbfeea73db94ddf769054bb9e5afcfea95a1afe01bbf57",
+      "adapted_sha256": "eb2c5f09d7c3697e6da75883add8b83ec0f32630ca5c75a13bb33e5a7e3c7cce",
       "revision": "22ddee3792402c3e70ec5f86a63c3e3e895a2f60"
     },
     {
       "path": "dockkit/contract/adapter.ts",
       "source": "packages/client/ui-dockkit/src/contract/adapter.ts",
       "source_sha256": "546c3bda130d38fecbabc0177c9d7ae5adf768ac22e25807da90d3a4c1a1dd4a",
-      "adapted_sha256": "546c3bda130d38fecbabc0177c9d7ae5adf768ac22e25807da90d3a4c1a1dd4a",
+      "adapted_sha256": "77edd4d7da63cd2552a821b5bad7c2bd5a32a260ab13fa7408f81f84c7577f7a",
       "revision": "22ddee3792402c3e70ec5f86a63c3e3e895a2f60"
     },
     {

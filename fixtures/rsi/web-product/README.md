@@ -899,6 +899,13 @@ It uses the actual document and isolated transport. `composer-controls-live.mjs`
 is opt-in through `RSI_LIVE_ENV_FILE`, `RSI_WEB_BINARY`, `RSI_WEB_ASSETS` and
 `RSI_WEB_REPORT`; it verifies a real DeepSeek effort selection and sandbox mode
 in persisted Session facts, with screenshots from the shipped package.
+`RSI_REPORT_DIR=OUTPUT node fixtures/rsi/web-product/dock-keyboard.mjs` checks
+real split and float keyboard controls, focus retention, undo and viewport bounds
+in Chromium and Firefox, including minimum size when End fills a clipped edge.
+It also exercises the production browser helper against
+300 hidden controls followed by a visible action and a later visibility change.
+The fixture records screenshots; it does not exercise an OS screen reader.
+
 `RSI_PAIRED_BUNDLE=BUNDLE RSI_WEB_REPORT=OUTPUT node
 fixtures/rsi/web-product/service-host-stop.mjs` starts an isolated foreground
 Serve, waits for readiness, stops its Host independently and requires runtime
