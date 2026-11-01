@@ -81,6 +81,9 @@ Provider entry establishes execution readiness; the cancellation-output
 test also waits for the complete JSONL Turn record. These bounded waits retain
 captured output on failure and reap the child. The
 [terminal contract](../terminal/README.md) owns interruption and output deadlines.
+Workspace-review PTY acceptance observes Pending while the provider is held,
+then waits for the interval's completed-state field before opening files.
+Explanatory prose can mention completion while capture remains pending.
 
 Debug and release use the same launch parser, final home selection and resident
 Host path. `--watch` adds connection-owned configuration/source leases; Vite and

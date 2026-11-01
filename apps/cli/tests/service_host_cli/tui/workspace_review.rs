@@ -6,7 +6,6 @@ async fn workspace_review_tui_opens_dirty_baseline_diff_without_model_work() {
     *state.arguments.lock().unwrap() = Some(
         serde_json::json!({"patch":"*** Begin Patch\n*** Update File: card.txt\n@@\n-before\n+after · 界\n*** End Patch\n"}),
     );
-    state.release.notify_one();
     let fixture = CliFixture::new(&endpoint);
     let git = |args: &[&str]| {
         let output = std::process::Command::new("/usr/bin/git")
@@ -37,7 +36,9 @@ async fn workspace_review_tui_opens_dirty_baseline_diff_without_model_work() {
     terminal.capture_name = "workspace-review".into();
     terminal.until("Ctrl+J adds a line").await;
     terminal.send(b"Review interval patch\r");
-    terminal.until("hello from daemon").await;
+    tokio::time::timeout(Duration::from_secs(20), state.requested.notified())
+        .await
+        .unwrap();
     terminal.send(b"\x10");
     terminal.select_menu("Workspace changes").await;
     terminal
@@ -45,6 +46,12 @@ async fn workspace_review_tui_opens_dirty_baseline_diff_without_model_work() {
         .await;
     terminal.send(b"\r");
     terminal.select_menu("Review workspace changes").await;
+    terminal.until("Pending; work or capture not settled").await;
+    let complete_field = "Complete · ";
+    let pending = terminal.screen.lock().unwrap().screen().contents();
+    assert!(pending.contains("Complete"));
+    assert!(!pending.contains(complete_field));
+    state.release.notify_one();
     let end = Instant::now() + Duration::from_secs(15);
     while !terminal
         .screen
@@ -52,7 +59,7 @@ async fn workspace_review_tui_opens_dirty_baseline_diff_without_model_work() {
         .unwrap()
         .screen()
         .contents()
-        .contains("Complete")
+        .contains(complete_field)
     {
         assert!(Instant::now() < end, "review capture never settled");
         terminal.send(b"\r");
