@@ -95,11 +95,10 @@ impl ImageRequest {
     }
 
     fn encode_canonical(&self) -> Result<Vec<u8>, StreamError> {
-        let value = serde_json::to_value(self)
+        let mut value = serde_json::to_value(self)
             .map_err(|error| StreamError::invalid("request.encoding", error.to_string()))?;
-        let canonical = validation::canonical_json(value)
-            .map_err(|error| StreamError::invalid("request.encoding", error.to_string()))?;
-        let bytes = serde_json::to_vec(&canonical)
+        value.sort_all_objects();
+        let bytes = serde_json::to_vec(&value)
             .map_err(|error| StreamError::invalid("request.encoding", error.to_string()))?;
         if bytes.len() > MAX_REQUEST_BYTES {
             return Err(StreamError::invalid(

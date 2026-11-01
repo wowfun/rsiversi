@@ -90,8 +90,10 @@ descriptor, capability request, or provider error performs the same semantic val
 construction boundary. Every successful complete-request constructor and
 builder additionally enforces aggregate relationships, at most 256 media
 occurrences, at most 256 MiB of declared raw media across those occurrences,
-and canonical encoded size. Canonicalization trusts that closed typed invariant,
-sorts the owned JSON object keys in place, and checks the actual output length.
+and canonical encoded size. Recursive JSON limits belong to each external JSON
+field, not the enclosing typed request. Canonicalization trusts that closed typed
+invariant, sorts owned object keys in place without changing array order or number
+text, and checks the actual output length; it does not impose a second admission limit.
 Invalid wire, durable JSON, or public construction cannot create one of those
 invalid typed values.
 

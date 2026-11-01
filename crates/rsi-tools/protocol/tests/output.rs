@@ -30,6 +30,26 @@ fn declaration_digest_is_order_independent_and_verified_at_decode() {
 }
 
 #[test]
+fn canonical_schema_digest_preserves_arrays_and_exact_number_text() {
+    use sha2::{Digest as _, Sha256};
+    let schema = serde_json::from_str(
+        r#"{"type":"object","examples":[{"z":9007199254740993,"a":1.2300},{"b":2,"a":1}]}"#,
+    )
+    .unwrap();
+    let declaration = declaration(schema);
+    let expected =
+        r#"{"examples":[{"a":1.2300,"z":9007199254740993},{"a":1,"b":2}],"type":"object"}"#;
+    assert_eq!(
+        serde_json::to_string(declaration.schema()).unwrap(),
+        expected
+    );
+    assert_eq!(
+        declaration.schema_digest(),
+        format!("{:x}", Sha256::digest(expected.as_bytes()))
+    );
+}
+
+#[test]
 fn schemas_reject_resource_resolution_recursion_and_unbounded_shapes() {
     for schema in [
         json!({"$ref":"https://localhost/private"}),

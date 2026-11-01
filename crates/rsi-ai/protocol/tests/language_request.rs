@@ -570,6 +570,34 @@ fn response_schema_rejects_excessive_json_depth() {
 }
 
 #[test]
+fn admitted_nested_schema_canonicalizes_without_reapplying_envelope_depth() {
+    let mut schema = json!({"type": "string"});
+    for _ in 1..rsi_ai_protocol::MAX_JSON_DEPTH {
+        schema = json!({"nested": schema});
+    }
+    let request = LanguageRequest::new(vec![Message::user_text("hello").unwrap()])
+        .unwrap()
+        .with_response_format(ResponseFormat::json_schema("nested", None, schema).unwrap())
+        .unwrap();
+    request.validate().unwrap();
+    let bytes = request.canonical_bytes().unwrap();
+    assert_eq!(bytes.len(), request.encoded_weight());
+    let restored: LanguageRequest = serde_json::from_slice(&bytes).unwrap();
+    assert_eq!(restored.canonical_bytes().unwrap(), bytes);
+}
+
+#[test]
+fn admitted_many_message_nodes_canonicalize_with_the_request_byte_bound() {
+    let message = Message::user(vec![MessageContent::Text { text: "x".into() }; 256]).unwrap();
+    let request = LanguageRequest::new(vec![message; 64]).unwrap();
+    request.validate().unwrap();
+    let bytes = request.canonical_bytes().unwrap();
+    assert_eq!(bytes.len(), request.encoded_weight());
+    let restored: LanguageRequest = serde_json::from_slice(&bytes).unwrap();
+    assert_eq!(restored.canonical_bytes().unwrap(), bytes);
+}
+
+#[test]
 fn response_schema_reports_the_typed_json_node_limit() {
     let schema = json!({
         "nodes": vec![serde_json::Value::Null; rsi_ai_protocol::MAX_JSON_NODES]

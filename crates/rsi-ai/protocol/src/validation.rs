@@ -125,26 +125,3 @@ fn validate_json_at(
     }
     Ok(())
 }
-
-pub(crate) fn canonical_json(mut value: Value) -> Result<Value, JsonStructureError> {
-    validate_json_structure(&value)?;
-    sort_json_keys(&mut value);
-    Ok(value)
-}
-
-fn sort_json_keys(value: &mut Value) {
-    match value {
-        Value::Array(values) => {
-            for value in values {
-                sort_json_keys(value);
-            }
-        }
-        Value::Object(values) => {
-            for value in values.values_mut() {
-                sort_json_keys(value);
-            }
-            values.sort_keys();
-        }
-        Value::Null | Value::Bool(_) | Value::Number(_) | Value::String(_) => {}
-    }
-}

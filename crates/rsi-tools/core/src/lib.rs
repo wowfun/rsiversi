@@ -16,7 +16,6 @@ use rsi_tools_protocol::{
     ToolStart,
 };
 use serde::{Deserialize, Serialize};
-use serde_json::Value;
 use sha2::{Digest, Sha256};
 use std::collections::{BTreeMap, BTreeSet};
 use std::panic::AssertUnwindSafe;
@@ -1001,27 +1000,14 @@ fn retained_failure(error: &ToolError) -> RetainedToolFailure {
 }
 
 fn canonical_request_sha256(call: &ToolCall) -> Result<String> {
-    let request = serde_json::json!({
-        "arguments": canonicalize(&call.arguments),
+    let mut request = serde_json::json!({
+        "arguments": call.arguments,
         "name": call.name,
     });
+    request.sort_all_objects();
     let bytes =
         serde_json::to_vec(&request).map_err(|error| ToolError::InvalidInput(error.to_string()))?;
     Ok(hex::encode(Sha256::digest(bytes)))
-}
-
-fn canonicalize(value: &Value) -> Value {
-    match value {
-        Value::Array(values) => Value::Array(values.iter().map(canonicalize).collect()),
-        Value::Object(values) => {
-            let ordered: BTreeMap<_, _> = values
-                .iter()
-                .map(|(key, value)| (key.clone(), canonicalize(value)))
-                .collect();
-            Value::Object(ordered.into_iter().collect())
-        }
-        other => other.clone(),
-    }
 }
 
 /// Ordinary factory for one process-wide Tool catalog provider.

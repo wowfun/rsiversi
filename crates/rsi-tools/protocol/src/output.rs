@@ -4,7 +4,7 @@ use crate::{Result, ToolContent, ToolError, ToolResult, validate_identifier, val
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
 use sha2::{Digest, Sha256};
-use std::{collections::BTreeMap, fmt, io::Write, marker::PhantomData, sync::Arc};
+use std::{fmt, io::Write, marker::PhantomData, sync::Arc};
 
 /// Maximum encoded bytes of one complete output declaration.
 pub const MAXIMUM_TOOL_OUTPUT_DECLARATION_BYTES: usize = 64 * 1024;
@@ -226,18 +226,9 @@ fn validate_schema(schema: &Value) -> Result<()> {
     Ok(())
 }
 
-fn canonicalize(value: Value) -> Value {
-    match value {
-        Value::Object(map) => Value::Object(
-            map.into_iter()
-                .map(|(key, value)| (key, canonicalize(value)))
-                .collect::<BTreeMap<_, _>>()
-                .into_iter()
-                .collect(),
-        ),
-        Value::Array(values) => Value::Array(values.into_iter().map(canonicalize).collect()),
-        value => value,
-    }
+fn canonicalize(mut value: Value) -> Value {
+    value.sort_all_objects();
+    value
 }
 
 fn encoded_len(value: &impl Serialize) -> Result<usize> {

@@ -1532,12 +1532,11 @@ impl LanguageRequest {
     }
 
     fn canonical_bytes_unchecked(&self) -> Result<Vec<u8>, SemanticError> {
-        let value = serde_json::to_value(self).map_err(|error| {
+        let mut value = serde_json::to_value(self).map_err(|error| {
             SemanticError::new("request.encoding", "request", error.to_string())
         })?;
-        let canonical =
-            validation::canonical_json(value).map_err(|reason| json_error("request", reason))?;
-        let bytes = serde_json::to_vec(&canonical).map_err(|error| {
+        value.sort_all_objects();
+        let bytes = serde_json::to_vec(&value).map_err(|error| {
             SemanticError::new("request.encoding", "request", error.to_string())
         })?;
         if bytes.len() > MAX_REQUEST_BYTES {

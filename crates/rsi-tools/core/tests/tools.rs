@@ -12,6 +12,7 @@ use rsi_tools_protocol::{
     ToolRegistration, ToolResult, ToolRuntime, ToolStart,
 };
 use serde_json::{Value, json};
+use sha2::{Digest as _, Sha256};
 use std::sync::{
     Arc,
     atomic::{AtomicUsize, Ordering},
@@ -1200,7 +1201,7 @@ async fn canonical_identity_duplicate_start_and_retained_outcome_are_exact() {
             ToolCall {
                 id: "same-call".into(),
                 name: "echo".into(),
-                arguments: json!({"b":2,"a":1}),
+                arguments: json!({"b":[{"z":9_007_199_254_740_993_u64,"a":1},2],"a":1}),
             },
         )
         .unwrap();
@@ -1210,10 +1211,15 @@ async fn canonical_identity_duplicate_start_and_retained_outcome_are_exact() {
             ToolCall {
                 id: "same-call".into(),
                 name: "echo".into(),
-                arguments: json!({"a":1,"b":2}),
+                arguments: json!({"a":1,"b":[{"a":1,"z":9_007_199_254_740_993_u64},2]}),
             },
         )
         .unwrap();
+    let canonical = br#"{"arguments":{"a":1,"b":[{"a":1,"z":9007199254740993},2]},"name":"echo"}"#;
+    assert_eq!(
+        left.identity().request_sha256(),
+        hex::encode(Sha256::digest(canonical))
+    );
     assert_eq!(left.identity(), duplicate.identity());
     let independent = tools
         .prepare(
@@ -1221,7 +1227,7 @@ async fn canonical_identity_duplicate_start_and_retained_outcome_are_exact() {
             ToolCall {
                 id: "same-call".into(),
                 name: "echo".into(),
-                arguments: json!({"a":1,"b":2}),
+                arguments: json!({"a":1,"b":[{"a":1,"z":9_007_199_254_740_993_u64},2]}),
             },
         )
         .unwrap();
