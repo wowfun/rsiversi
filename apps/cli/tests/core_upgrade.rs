@@ -95,6 +95,15 @@ impl Fixture {
             .unwrap()
             .unwrap()
     }
+    fn stop_for_interrupted_upgrade(&self) -> rsi_service_host::HostStartupLease {
+        let host = rsi_service_host::ServiceHostPaths::from_host_paths(&self.paths).unwrap();
+        let startup = rsi_service_host::HostStartupLease::try_acquire(&host).unwrap();
+        let owner = host.read_lifecycle_identity().unwrap().unwrap();
+        assert!(owner.is_current().unwrap());
+        self.success(&["host", "stop"]);
+        assert!(!owner.is_current().unwrap());
+        startup
+    }
     fn manifest(&self) {
         let name = self.candidate.file_name().unwrap().to_str().unwrap();
         std::fs::write(self.package.join("package.json"), serde_json::to_vec(&serde_json::json!({
@@ -157,12 +166,7 @@ fn installed_core_upgrades_recovers_and_preserves_active_host_on_invalid_candida
     assert_ne!(first.host_epoch, second.host_epoch);
     fixture.success(&["host", "status"]);
 
-    let host = rsi_service_host::ServiceHostPaths::from_host_paths(&fixture.paths).unwrap();
-    let startup = rsi_service_host::HostStartupLease::try_acquire(&host).unwrap();
-    let owner = host.read_lifecycle_identity().unwrap().unwrap();
-    assert!(owner.is_current().unwrap());
-    fixture.success(&["host", "stop"]);
-    assert!(!owner.is_current().unwrap());
+    let startup = fixture.stop_for_interrupted_upgrade();
 
     // Interrupt after coordinated stop and promotion, retaining the earlier
     // running state so CLI recovery must reactivate the previous core.
@@ -289,8 +293,7 @@ impl Fixture {
                 .unwrap(),
         ];
         let hashes = inputs.each_ref().map(|path| hash(path));
-        let host = rsi_service_host::ServiceHostPaths::from_host_paths(&self.paths).unwrap();
-        let startup = rsi_service_host::HostStartupLease::try_acquire(&host).unwrap();
+        let startup = self.stop_for_interrupted_upgrade();
         let transaction = rsi_installation::transaction::Transaction::prepare(
             layout.clone(),
             inputs.each_ref().map(PathBuf::as_path),
