@@ -360,13 +360,9 @@ async fn write_frame<T: Serialize>(
     stream: &mut (impl AsyncWrite + Unpin),
     value: &T,
 ) -> Result<(), ServiceHostError> {
-    let bytes =
-        serde_json::to_vec(value).map_err(|error| ServiceHostError::Invalid(error.to_string()))?;
-    if bytes.len() > MAX_FRAME {
-        return Err(ServiceHostError::Invalid(
-            "lifecycle reply exceeds limit".into(),
-        ));
-    }
+    let bytes = rsi_api_protocol::ByteBudget::default()
+        .encode(value, MAX_FRAME)
+        .map_err(|error| ServiceHostError::Invalid(error.to_string()))?;
     let length =
         u32::try_from(bytes.len()).map_err(|error| ServiceHostError::Invalid(error.to_string()))?;
     stream
@@ -381,4 +377,57 @@ async fn write_frame<T: Serialize>(
 }
 fn activation(error: impl std::fmt::Display) -> MetaError {
     MetaError::Activation(error.to_string())
+}
+
+#[cfg(test)]
+mod framing_tests {
+    use super::*;
+    use std::sync::atomic::{AtomicUsize, Ordering};
+
+    struct Oversized(AtomicUsize);
+    impl Serialize for Oversized {
+        fn serialize<S: serde::Serializer>(&self, serializer: S) -> Result<S::Ok, S::Error> {
+            use serde::ser::SerializeSeq as _;
+            let mut sequence = serializer.serialize_seq(None)?;
+            for _ in 0..MAX_FRAME * 2 {
+                self.0.fetch_add(1, Ordering::Relaxed);
+                sequence.serialize_element("x")?;
+            }
+            sequence.end()
+        }
+    }
+
+    #[tokio::test]
+    async fn oversized_output_stops_encoding_before_consuming_the_value_or_writing_a_frame() {
+        let value = Oversized(AtomicUsize::new(0));
+        let mut wire = Vec::new();
+        assert!(matches!(
+            write_frame(&mut wire, &value).await,
+            Err(ServiceHostError::Invalid(_))
+        ));
+        assert!(
+            wire.is_empty(),
+            "no prefix or payload on encoding rejection"
+        );
+        assert!(
+            value.0.load(Ordering::Relaxed) < MAX_FRAME,
+            "encoding must stop at the byte bound"
+        );
+    }
+
+    #[tokio::test]
+    async fn frozen_framing_round_trips_escaped_json_at_the_exact_bound() {
+        let value = "\n".repeat((MAX_FRAME - 2) / 2);
+        let mut wire = Vec::new();
+        write_frame(&mut wire, &value).await.unwrap();
+        assert_eq!(&wire[..4], &u32::try_from(MAX_FRAME).unwrap().to_be_bytes());
+        assert_eq!(&wire[4..], serde_json::to_vec(&value).unwrap());
+        assert_eq!(
+            read_frame::<String>(&mut wire.as_slice()).await.unwrap(),
+            value
+        );
+        wire.clear();
+        assert!(write_frame(&mut wire, &(value + "x")).await.is_err());
+        assert!(wire.is_empty());
+    }
 }

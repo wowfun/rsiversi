@@ -158,6 +158,8 @@ The independent Lifecycle v1 listener accepts status and graceful-stop requests
 for one exact HostEpoch before product API compatibility is considered. It uses
 the same native peer-authentication boundary, a 16 KiB length-prefixed JSON frame,
 a three-second exchange deadline and at most 32 concurrent connections.
+Outbound encoding rejects excess JSON while measuring it, before allocating
+the encoded payload or writing the length prefix.
 `LifecycleFactory` is an ordinary plugin; it publishes a read-only stop-request
 signal to the process owner. Acknowledging stop precedes cancellation of the
 Service lifetime. Client disconnection does not itself request shutdown.
