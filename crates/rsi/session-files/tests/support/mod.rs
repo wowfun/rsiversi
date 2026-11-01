@@ -122,6 +122,8 @@ pub async fn malformed_open_binding_and_file_pages_never_escape_or_replay() {
         json!({"offset": 0, "total": 3, "bytes_hex": "0001"}),
         json!({"offset": 0, "total": 2, "bytes_hex": "00"}),
         json!({"offset": 0, "total": 2, "bytes_hex": "0g01"}),
+        json!({"offset": 0, "total": 2, "bytes_hex": "00AF"}),
+        json!({"offset": 0, "total": 2, "bytes_hex": "000"}),
         json!({"offset": 0, "total": 2, "bytes_hex": "000102"}),
     ] {
         remote.body(body);
@@ -136,14 +138,14 @@ pub async fn malformed_open_binding_and_file_pages_never_escape_or_replay() {
     assert!(is_malformed(
         &client.read(target(), file(FileKind::File), 0, 2).await
     ));
-    assert_eq!(remote.calls.load(Ordering::SeqCst), 9);
+    assert_eq!(remote.calls.load(Ordering::SeqCst), 11);
     assert!(
         client
             .read(target(), file(FileKind::File), u64::MAX, 2)
             .await
             .is_err()
     );
-    assert_eq!(remote.calls.load(Ordering::SeqCst), 9);
+    assert_eq!(remote.calls.load(Ordering::SeqCst), 11);
 }
 
 pub async fn directory_client_checks_parent_exact_names_order_and_forward_progress() {

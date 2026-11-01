@@ -46,6 +46,7 @@ pub trait SessionFiles: fmt::Debug + Send + Sync + 'static {
         kind: FileKind,
     ) -> Result<OpenedFile>;
     /// Read exact bytes from a previously opened regular file.
+    /// Successful pages satisfy [`FilePage::validate_for`] for this request.
     async fn read(
         &self,
         target: SessionTarget,

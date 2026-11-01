@@ -31,6 +31,8 @@ The UI requests 16 directory entries or 4 KiB of file bytes per page, within the
 domain's hard limits. Text uses the Tool protocol's byte sanitizer; a separate
 hex view shows exact bytes. Display names are bounded previews; selected paths
 also have their complete hex representation. Standard source/hex content remains data and grants no execution or write authority.
+Byte decoding consumes the Session Files client's validated whole-byte lowercase
+hexadecimal pages; presentation does not admit unvalidated wire responses.
 
 Paging reuses the opened snapshot. Changed/unavailable results offer explicit
 refresh; they never silently reopen or retry. Closing an in-flight detail cancels

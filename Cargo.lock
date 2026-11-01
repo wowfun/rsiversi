@@ -7624,6 +7624,7 @@ dependencies = [
  "base64 0.22.1",
  "cssparser",
  "futures-util",
+ "hex",
  "html5ever",
  "percent-encoding",
  "pulldown-cmark",
