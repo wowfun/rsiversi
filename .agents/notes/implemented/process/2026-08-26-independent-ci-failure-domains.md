@@ -20,8 +20,8 @@ number, so a manual diagnostic cannot cancel its required checks. Feature-branch
 pushes do not compete with the pull request's merge-tree verification. Document
 archive validation uses the pull request base, push predecessor, or `origin/main`
 for a manual run; an absent event field must not become an empty base reference.
-The preparation step fetches a missing exact commit (including a force-push
-predecessor) and verifies it without requiring ancestry. Only the all-zero
+The preparation step shallow-fetches a missing exact commit (including a force-push
+predecessor) and verifies it without requiring ancestry or full repository history. Only the all-zero
 first-push predecessor is empty. Documentation structure, archive notes,
 architecture, rustdoc and doctests have independent outcomes. A baseline fetch
 failure affects notes only; product lint does not suppress unrelated tests.
@@ -29,8 +29,8 @@ failure affects notes only; product lint does not suppress unrelated tests.
 CI uses independent jobs for documentation, `rsi-meta` conformance, Base
 services, `rsi-ai`, `rsi-agent`, the standard `rsi` product, repository tools,
 dependency audit, lockfile consistency, and Windows `rsi-meta`.
-An independent Windows Server job separates whole-workspace compilation from
-native product lint and behavior checks. Supported native mechanics and explicit
+An independent Windows Server job uses whole-workspace Clippy for compilation
+and lint, with separate native behavior checks. Supported native mechanics and explicit
 unsupported boundaries both require executed tests, including a built CLI's
 preservation of old data. Their independent outcomes remain required by the
 aggregate; compilation alone cannot substitute for either boundary. The
@@ -45,6 +45,17 @@ default suites. Structural selector tests reject compile-only commands, target
 selectors and trailing test-harness arguments without freezing test counts.
 Windows lint covers all workspace targets, independently of the executed package
 suites. Baseline receipts use LF on every host.
+Clippy already type-checks that same graph with `--keep-going`, so repeating it
+through `cargo check` provides no additional target coverage. Explicit Bash
+defaults propagate pipeline producer failures without per-step shell setup;
+Windows jobs override that default with PowerShell. Checkouts discard their
+credential helper before running repository code.
+Documentation reuses its own Cargo cache. The audit executable has a separate
+cache keyed by its pinned version and runner, so product-lock changes do not
+force a tool rebuild. Independent Desktop modes collect failures across the
+loop and fail the step after attempting every mode; one broken surface cannot
+hide later acceptance evidence. Native input reacquires only explicitly stale
+WebDriver targets rejected before dispatch, preserving the unknown-outcome fence.
 Windows repository-tool tests have a separate required job, keeping default
 coverage and timeout headroom without shaving product-check deadlines to fit the
 hosted runner's limit.
@@ -100,10 +111,10 @@ compile-only or focused preflights cannot satisfy that requirement. The Linux SS
 job owns the Execution and SSH families, including the helper executable. Native
 SSH preflights restore any temporarily relaxed namespace sysctl after completion.
 
-The Linux desktop job owns native admission, paired asset and Host incompatibility
-rejection, frame-ACK failure, document-close deadlines, and the normal conversation
+The Linux desktop job owns native admission, paired asset checks, independent
+build-family compatibility, frame-ACK failure, document-close deadlines, and the normal conversation
 close/restart path. It prepares the paired distributions before running scenarios.
-The primary and incompatible-family builds have separate step budgets. Different
+The primary and independent-family builds have separate step budgets. Different
 Rust flags invalidate Cargo fingerprints, so the foreign family cannot be budgeted
 as an incremental rebuild. The job budget includes both possible cold builds;
 only the scenario that consumes the foreign family depends on its success.
@@ -130,11 +141,12 @@ full debugger variable inspection remains a local build choice. Capacity reading
 before evaluation distinguish resource exhaustion from oracle behavior.
 
 The browser job caches root workspace dependencies and installed Rust tools;
-dependency audit caches installed tools without a target directory. Both use
-the existing pinned Rust cache action and retain locked tool installation.
+dependency audit caches its pinned executable independently of product locks and
+caches registry data without a target directory. Tool installation stays locked.
 Standalone fixtures keep their own lockfiles and targets. Audit enumerates
-Git-tracked lockfiles, fetching advisories for the root and reusing that database
-for the remaining files. A separate read-only lockfile gate discovers workspace
+Git-tracked lockfiles, fetching registry and advisory evidence for every graph
+as required by the [independent audit decision](2026-10-14-independent-lockfile-audit-index.md).
+A separate read-only lockfile gate discovers workspace
 roots through Cargo and runs full locked metadata, aggregating stale, missing
 and orphaned lock diagnostics. Its explicit online mode fetches dependencies;
 local verification defaults to offline. This detects manifest drift that a
@@ -167,8 +179,8 @@ the actual aggregate script with successful, failed, cancelled, skipped and
 missing results.
 
 The manual package-repository workflow has the same deadline and unique-guard
-checks as verification CI. Its topology requires validated Web output before
-native packaging and both before signing in the protected release environment.
+checks as verification CI. Web and native producers run independently; signing
+requires both to succeed and runs in the protected release environment.
 Artifact consumers are guarded by the exact successful producer, not merely
 toolchain setup; a compilation failure cannot masquerade as a missing test file.
 
@@ -226,7 +238,7 @@ of 360 minutes, including jobs without explicit step deadlines. A budget that
 cannot satisfy both constraints requires splitting work instead of raising the
 deadline beyond the platform limit. These checks validate configured deadlines,
 not observed execution time or the sufficiency of setup headroom. The desktop
-foreign-family rejection remains required; making it fail-soft would lose that
+independent-family acceptance remains required; making it fail-soft would lose that
 acceptance evidence without demonstrating a timing improvement.
 
 The Web build, browser acceptance and paired-bundle integration probes have

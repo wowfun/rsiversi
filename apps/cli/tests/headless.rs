@@ -224,6 +224,15 @@ fn binary_command(binary: &str, fixture: &Fixture) -> tokio::process::Command {
     command
 }
 
+fn assert_no_status_feedback(stderr: &[u8]) {
+    for line in std::str::from_utf8(stderr).unwrap().lines() {
+        assert!(line.len() < 4096, "oversized stderr diagnostic");
+        let record: serde_json::Value = serde_json::from_str(line)
+            .unwrap_or_else(|_| panic!("unexpected headless stderr: {line}"));
+        assert_eq!(record["event"], "executor_checkpoint", "{line}");
+    }
+}
+
 impl Fixture {
     #[cfg_attr(not(any(target_os = "linux", windows)), allow(clippy::unused_async))]
     async fn stop_resident_host(&self) {
@@ -1009,7 +1018,7 @@ async fn built_binary_separates_jsonl_and_model_text_from_status_feedback() {
         "stderr: {}",
         String::from_utf8_lossy(&first.stderr)
     );
-    assert!(first.stderr.is_empty());
+    assert_no_status_feedback(&first.stderr);
     let stdout = String::from_utf8(first.stdout).unwrap();
     assert!(!stdout.contains("bubblewrap"));
     let lines = stdout
@@ -1590,7 +1599,7 @@ async fn built_binary_sigint_cancels_flushes_and_exits_130() {
     child.signal_sent("SIGINT");
     let output = child.wait(std::time::Duration::from_secs(5)).await.unwrap();
     assert_eq!(output.status.code(), Some(130));
-    assert!(output.stderr.is_empty());
+    assert_no_status_feedback(&output.stderr);
     let lines = String::from_utf8(output.stdout)
         .unwrap()
         .lines()

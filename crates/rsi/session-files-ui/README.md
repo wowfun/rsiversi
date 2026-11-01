@@ -33,6 +33,8 @@ hex view shows exact bytes. Display names are bounded previews; selected paths
 also have their complete hex representation. Standard source/hex content remains data and grants no execution or write authority.
 Byte decoding consumes the Session Files client's validated whole-byte lowercase
 hexadecimal pages; presentation does not admit unvalidated wire responses.
+Decoded source windows allocate exactly their byte length, so allocation capacity
+also fits the UI source window's retained-byte reservation.
 
 Paging reuses the opened snapshot. Changed/unavailable results offer explicit
 refresh; they never silently reopen or retry. Closing an in-flight detail cancels

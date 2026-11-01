@@ -1090,7 +1090,7 @@ mod worker_tests {
         let staged = Arc::new(tempfile::tempdir().unwrap());
         let path = staged.path().to_owned();
         let service = Service {
-            generation: Default::default(),
+            generation: rsi_sandbox::SandboxGeneration::default(),
             backend: None,
             _staged: Some(staged),
             workers: Arc::new(tokio::sync::Semaphore::new(4)),

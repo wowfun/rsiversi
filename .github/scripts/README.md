@@ -1,5 +1,14 @@
 # CI execution contracts
 
+CI uses explicit Bash fail-fast and pipeline failure propagation on Unix;
+Windows jobs retain PowerShell. A failed pipeline producer fails its step even
+when a downstream filter succeeds. Checkouts do not persist Git credentials.
+Windows workspace Clippy checks every target with `--keep-going`; a second
+workspace `cargo check` is redundant. Executed native behavior remains separate.
+Documentation uses a shallow checkout and fetches only a missing exact baseline
+commit; archive validation reads that commit's tree without walking history.
+Independent Desktop modes aggregate failures while attempting every mode.
+
 Workflow steps source `standard-packages.sh` and pass its Bash array as quoted
 arguments to Cargo. Package patterns are Cargo selectors, not shell globs.
 Jobs that use `rg` for test discovery install ripgrep explicitly on Linux.

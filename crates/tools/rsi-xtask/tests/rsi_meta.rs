@@ -350,7 +350,7 @@ fn ci_exercises_every_agent_package_and_formats_the_repository_once() {
     clippy::too_many_lines,
     reason = "This gate checks the complete Windows job composition."
 )]
-fn windows_compile_gate_keeps_independent_lint_and_unsupported_boundary_checks() {
+fn windows_clippy_checks_the_workspace_once_and_keeps_native_behavior_checks() {
     let workflow: serde_json::Value = yaml_serde::from_str(
         &fs::read_to_string(repository().join(".github/workflows/ci.yml")).unwrap(),
     )
@@ -364,14 +364,14 @@ fn windows_compile_gate_keeps_independent_lint_and_unsupported_boundary_checks()
         .filter_map(|step| step["run"].as_str())
         .map(|command| command.split_whitespace().collect::<Vec<_>>())
         .collect::<Vec<_>>();
-    assert!(commands.iter().any(|command| {
-        command.starts_with(&["cargo", "check"])
-            && ["--locked", "--workspace", "--all-targets", "--keep-going"]
-                .iter()
-                .all(|flag| command.contains(flag))
-    }));
+    assert!(
+        !commands
+            .iter()
+            .any(|command| command.starts_with(&["cargo", "check"]))
+    );
     assert!(commands.iter().any(|command| {
         command.starts_with(&["cargo", "clippy"])
+            && command.contains(&"--keep-going")
             && command.contains(&"--workspace")
             && whole_package_command(command, "clippy")
             && command.contains(&"--all-targets")
@@ -458,6 +458,76 @@ fn windows_compile_gate_keeps_independent_lint_and_unsupported_boundary_checks()
             format!("${{{{ !cancelled() && steps.{prerequisite}.outcome == 'success' }}}}")
         );
         assert!(step["timeout-minutes"].as_u64().is_some());
+    }
+}
+
+#[test]
+fn workflows_fail_closed_on_pipelines_and_do_not_persist_checkout_credentials() {
+    for path in [
+        "ci.yml",
+        "package-repository.yml",
+        "performance-evidence.yml",
+    ] {
+        let source = fs::read_to_string(repository().join(".github/workflows").join(path)).unwrap();
+        let workflow: serde_json::Value = yaml_serde::from_str(&source).unwrap();
+        assert_eq!(workflow["defaults"]["run"]["shell"], "bash", "{path}");
+        for (name, job) in workflow["jobs"].as_object().unwrap() {
+            if job["runs-on"]
+                .as_str()
+                .is_some_and(|os| os.starts_with("windows-"))
+            {
+                assert_eq!(job["defaults"]["run"]["shell"], "pwsh", "{path}: {name}");
+            }
+            for step in job["steps"].as_array().unwrap() {
+                if step["uses"]
+                    .as_str()
+                    .is_some_and(|action| action.starts_with("actions/checkout@"))
+                {
+                    assert_eq!(step["with"]["persist-credentials"], false, "{path}: {name}");
+                }
+            }
+        }
+    }
+}
+
+#[cfg(unix)]
+#[test]
+fn desktop_modes_attempt_every_surface_and_preserve_any_failure() {
+    let source = fs::read_to_string(repository().join(".github/workflows/ci.yml")).unwrap();
+    let workflow: serde_json::Value = yaml_serde::from_str(&source).unwrap();
+    let step = workflow["jobs"]["rsi-desktop"]["steps"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|step| {
+            step["name"] == "Exercise WebKitGTK external, Profile, history and language surfaces"
+        })
+        .unwrap();
+    let root = tempfile::tempdir().unwrap();
+    let log = root.path().join("modes");
+    let script = format!(
+        "cargo() {{ return 0; }}\nrustup() {{ printf '/fixture/analyzer'; }}\ndbus-run-session() {{ printf '%s\\n' \"$*\" >> \"$RSI_TEST_LOG\"; [[ -z $RSI_TEST_FAIL || $* != *\"--$RSI_TEST_FAIL\"* ]]; }}\n{}",
+        step["run"].as_str().unwrap()
+    );
+    for failure in ["", "external", "language", "reload"] {
+        fs::write(&log, "").unwrap();
+        let output = Command::new("bash")
+            .args(["--noprofile", "--norc", "-eo", "pipefail", "-c", &script])
+            .env("RSI_TEST_LOG", &log)
+            .env("RSI_TEST_FAIL", failure)
+            .env("GITHUB_WORKSPACE", root.path())
+            .env("RUNNER_TEMP", root.path())
+            .output()
+            .unwrap();
+        assert_eq!(
+            output.status.success(),
+            failure.is_empty(),
+            "{}",
+            stderr(&output)
+        );
+        let calls = fs::read_to_string(&log).unwrap();
+        assert_eq!(calls.lines().count(), 12);
+        assert!(calls.lines().last().unwrap().ends_with("--reload"));
     }
 }
 
@@ -1741,10 +1811,17 @@ fn ci_baseline_script_fetches_exact_nonancestor_commits_and_rejects_missing_inpu
         temp.path(),
         &[
             "clone",
+            "--depth=1",
             "--single-branch",
             "-b",
             "main",
-            origin.to_str().unwrap(),
+            &format!(
+                "file:///{}",
+                origin
+                    .to_string_lossy()
+                    .replace('\\', "/")
+                    .trim_start_matches('/')
+            ),
             checkout.to_str().unwrap(),
         ],
     );

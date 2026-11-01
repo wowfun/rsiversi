@@ -9,6 +9,10 @@ on:
 permissions:
   contents: read
 
+defaults:
+  run:
+    shell: bash
+
 concurrency:
   group: ${{ github.workflow }}-${{ github.event_name }}-${{ github.event.pull_request.number || github.ref }}
   cancel-in-progress: true
@@ -20,7 +24,8 @@ jobs:
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
-          fetch-depth: 0
+          persist-credentials: false
+          fetch-depth: 1
       - name: Install Linux native dependencies
         run: |
           sudo apt-get update
@@ -29,6 +34,7 @@ jobs:
         uses: dtolnay/rust-toolchain@6c977a6ca4077a0ceb28ffbe03f59d46e9ac8772 # master 2026-08-15
         with:
           toolchain: 1.97.0
+      - uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6
       - name: Prepare Agent Notes baseline
         id: notes_base
         if: ${{ !cancelled() && steps.docs_setup.outcome == 'success' }}
@@ -44,7 +50,7 @@ jobs:
               return subprocess.run(["git", *args], check=True, text=True, capture_output=True).stdout.strip()
           event = os.environ["NOTES_EVENT"]
           if event == "workflow_dispatch":
-              git("fetch", "--no-tags", "origin", "+refs/heads/main:refs/remotes/origin/main")
+              git("fetch", "--depth=1", "--no-tags", "origin", "+refs/heads/main:refs/remotes/origin/main")
               base = git("rev-parse", "refs/remotes/origin/main^{commit}")
           elif event == "pull_request":
               base = os.environ["NOTES_PR_BASE"]
@@ -59,7 +65,7 @@ jobs:
                   raise RuntimeError("empty baseline is only valid for first push")
           else:
               if subprocess.run(["git", "cat-file", "-e", base + "^{commit}"], capture_output=True).returncode:
-                  git("fetch", "--no-tags", "origin", base)
+                  git("fetch", "--depth=1", "--no-tags", "origin", base)
               git("cat-file", "-e", base + "^{commit}")
           with open(os.environ["GITHUB_OUTPUT"], "a", encoding="utf-8", newline="\n") as output:
               output.write("base=" + base + "\n")
@@ -97,6 +103,8 @@ jobs:
     timeout-minutes: 50
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
       - uses: dtolnay/rust-toolchain@6c977a6ca4077a0ceb28ffbe03f59d46e9ac8772 # master 2026-08-15
         with:
           toolchain: 1.97.0
@@ -137,6 +145,8 @@ jobs:
     timeout-minutes: 90
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
       - name: Verify runner architecture
         run: test "$(uname -m)" = "${{ matrix.expected_arch }}"
       - name: Install Linux native dependencies
@@ -160,6 +170,8 @@ jobs:
     timeout-minutes: 251
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
       - uses: dtolnay/rust-toolchain@6c977a6ca4077a0ceb28ffbe03f59d46e9ac8772 # master 2026-08-15
         with:
           toolchain: 1.97.0
@@ -424,7 +436,6 @@ jobs:
           export RSI_RUST_ANALYZER="$(rustup which rust-analyzer)"
           # These two opt-in integrations are explicit release probes. Exact-name
           # listing plus bash pipefail rejects a missing/renamed probe before execution.
-          set -o pipefail
           cargo test --locked -p rsi-acp-host --test host independent_sdk_agent_new_permissions_resume_full_load_and_cancel -- --ignored --exact --list | rg --fixed-strings --line-regexp 'independent_sdk_agent_new_permissions_resume_full_load_and_cancel: test'
           cargo test --locked -p rsi-acp-host --test host independent_sdk_agent_new_permissions_resume_full_load_and_cancel -- --ignored --exact
           cargo test --locked -p rsi-lsp --lib tests::pinned_rust_analyzer_four_queries_under_native_read_only_sandbox -- --ignored --exact --list | rg --fixed-strings --line-regexp 'tests::pinned_rust_analyzer_four_queries_under_native_read_only_sandbox: test'
@@ -530,6 +541,8 @@ jobs:
     timeout-minutes: 110
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
       - name: Verify runner architecture
         run: test "$(uname -m)" = "${{ matrix.expected_arch }}"
       - name: Install Linux native dependencies
@@ -557,13 +570,11 @@ jobs:
         if: ${{ !cancelled() && steps.base_setup.outcome == 'success' && runner.os == 'Linux' }}
         timeout-minutes: 5
         run: |
-          set -o pipefail
           cargo test --locked -p rsi-acp-host --test host host_does_not_shorten_client_setup_and_close_phase_budgets -- --ignored --exact --list | rg --fixed-strings --line-regexp 'host_does_not_shorten_client_setup_and_close_phase_budgets: test'
           cargo test --locked -p rsi-acp-host --test host host_does_not_shorten_client_setup_and_close_phase_budgets -- --ignored --exact
       - name: Exercise Linux Bubblewrap enforcement
         if: ${{ !cancelled() && steps.base_setup.outcome == 'success' && runner.os == 'Linux' }}
         run: |
-          set -o pipefail
           source "$GITHUB_WORKSPACE/.github/scripts/sandbox-policy.sh" full
           cargo test --locked -p rsi-sandbox-local --test local native_bubblewrap_enforces_read_only_and_workspace_write_plans -- --ignored --exact --list | rg --fixed-strings --line-regexp 'native_bubblewrap_enforces_read_only_and_workspace_write_plans: test'
           cargo test --locked -p rsi-sandbox-local --test local native_bubblewrap_enforces_read_only_and_workspace_write_plans -- --ignored --exact
@@ -604,6 +615,8 @@ jobs:
     timeout-minutes: 75
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
       - name: Verify runner architecture
         run: test "$(uname -m)" = "${{ matrix.expected_arch }}"
       - name: Install Linux native dependencies
@@ -638,6 +651,8 @@ jobs:
     timeout-minutes: 75
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
       - name: Verify runner architecture
         run: test "$(uname -m)" = "${{ matrix.expected_arch }}"
       - name: Install Linux test discovery tools
@@ -693,6 +708,8 @@ jobs:
     timeout-minutes: 325
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
       - name: Verify runner architecture
         run: test "$(uname -m)" = "${{ matrix.expected_arch }}"
       - name: Install Linux native dependencies
@@ -810,7 +827,6 @@ jobs:
         if: ${{ !cancelled() && runner.os == 'Linux' && steps.standard_build.outcome == 'success' && steps.browser_runtime_setup.outcome == 'success' }}
         timeout-minutes: 20
         run: |
-          set -o pipefail
           source "$GITHUB_WORKSPACE/.github/scripts/sandbox-policy.sh" full
           mkdir -p "$RUNNER_TEMP/rsi-browser-evidence"
           cargo test --locked -p rsi-browser --features test-support --test native -- --ignored --exact native_preview_check_and_retirement --list | rg --fixed-strings --line-regexp 'native_preview_check_and_retirement: test'
@@ -864,7 +880,7 @@ jobs:
           RSI_TUI_PTY_REPORT: ${{ runner.temp }}/rsi-pty-evidence
         run: |
           source "$GITHUB_WORKSPACE/.github/scripts/standard-packages.sh"
-          cargo test --locked "${RSI_STANDARD_PACKAGE_ARGS[@]}" --all-targets --no-fail-fast -- --nocapture
+          cargo test --locked "${RSI_STANDARD_PACKAGE_ARGS[@]}" --all-targets --no-fail-fast
         timeout-minutes: 20
 
       - name: Preserve source addon acceptance evidence
@@ -896,6 +912,8 @@ jobs:
     timeout-minutes: 60
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
       - name: Install native-gate test prerequisites
         timeout-minutes: 5
         run: |
@@ -932,15 +950,26 @@ jobs:
   dependency-audit:
     runs-on: ubuntu-24.04
     timeout-minutes: 40
+    env:
+      CARGO_AUDIT_VERSION: '0.22.2'
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
       - uses: dtolnay/rust-toolchain@6c977a6ca4077a0ceb28ffbe03f59d46e9ac8772 # master 2026-08-15
         with:
           toolchain: 1.97.0
       - uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6 # v2.9.2
         with:
           cache-targets: false
-      - run: cargo install cargo-audit --locked --version 0.22.2
+          cache-bin: false
+      - uses: actions/cache@668228422ae6a00e4ad889ee87cd7109ec5666a7
+        id: audit_tool
+        with:
+          path: ~/.cargo/bin/cargo-audit
+          key: cargo-audit-${{ runner.os }}-${{ runner.arch }}-${{ env.CARGO_AUDIT_VERSION }}
+      - run: cargo install cargo-audit --locked --version "$CARGO_AUDIT_VERSION"
+        if: steps.audit_tool.outputs.cache-hit != 'true'
         timeout-minutes: 15
       - name: Audit every committed Cargo lockfile
         timeout-minutes: 15
@@ -955,9 +984,14 @@ jobs:
 
   windows-rsi-meta:
     runs-on: windows-2025
+    defaults:
+      run:
+        shell: pwsh
     timeout-minutes: 60
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
       - name: Verify runner architecture
         shell: pwsh
         run: |
@@ -977,11 +1011,16 @@ jobs:
 
   windows-rsi-checks:
     runs-on: windows-2025
-    timeout-minutes: 360
+    defaults:
+      run:
+        shell: pwsh
+    timeout-minutes: 310
     env:
       CARGO_BUILD_JOBS: 2
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1
+        with:
+          persist-credentials: false
         timeout-minutes: 5
       - id: native_architecture
         name: Verify runner architecture
@@ -1005,10 +1044,6 @@ jobs:
         if: ${{ !cancelled() && steps.native_toolchain.outcome == 'success' }}
         timeout-minutes: 20
         run: cargo test --locked -p rsi-process-local -p rsi-sandbox-local -p rsi-files -p rsi-credentials-local -p rsi-acp-application --all-targets --no-fail-fast
-      - name: Compile every Windows workspace target
-        if: ${{ !cancelled() && steps.native_toolchain.outcome == 'success' }}
-        timeout-minutes: 50
-        run: cargo check --locked --workspace --all-targets --keep-going
       - name: Lint every Windows workspace target
         if: ${{ !cancelled() && steps.native_toolchain.outcome == 'success' }}
         timeout-minutes: 50
@@ -1079,9 +1114,14 @@ jobs:
 
   windows-repository-tools:
     runs-on: windows-2025
+    defaults:
+      run:
+        shell: pwsh
     timeout-minutes: 90
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1
+        with:
+          persist-credentials: false
         timeout-minutes: 5
       - id: native_architecture
         name: Verify runner architecture
@@ -1138,6 +1178,8 @@ jobs:
       RUST_MIN_STACK: 268435456
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1
+        with:
+          persist-credentials: false
         timeout-minutes: 5
       - name: Install isolated Linux SSH prerequisites
         timeout-minutes: 10
@@ -1290,6 +1332,8 @@ jobs:
     timeout-minutes: 360
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1
+        with:
+          persist-credentials: false
       - name: Install Linux desktop dependencies
         timeout-minutes: 10
         run: |
@@ -1357,7 +1401,6 @@ jobs:
         if: ${{ !cancelled() && steps.automation_runtime.outcome == 'success' }}
         timeout-minutes: 30
         run: |
-          set -o pipefail
           mkdir -p "$RUNNER_TEMP/rsi-auto-evidence"
           export RSI_TEST_BROWSER_SCREENSHOT="$RUNNER_TEMP/rsi-auto-evidence/native.png"
           cargo test --locked -p rsi-browser --features test-support --test native -- --ignored --exact native_preview_check_and_retirement --list | rg --fixed-strings --line-regexp 'native_preview_check_and_retirement: test'
@@ -1384,12 +1427,14 @@ jobs:
         run: |
           cargo build --locked -p rsi-cli --example profile-leaf-probe
           export RSI_RUST_ANALYZER="$(rustup which rust-analyzer)"
+          status=0
           for mode in external profiles history language workspace-review attention typed-results plan-review ui-alignment presentation queue reload; do
             mode_args=("--$mode")
             if [[ "$mode" == language ]]; then mode_args+=("$RSI_RUST_ANALYZER"); fi
             if [[ "$mode" == profiles ]]; then mode_args+=(--profile-probe "$GITHUB_WORKSPACE/target/debug/examples/profile-leaf-probe"); fi
-            dbus-run-session -- xvfb-run -a -s "-screen 0 2560x1440x24" python3 fixtures/rsi/desktop-product/verify.py --binary "$RUNNER_TEMP/rsi-desktop-dist/bundle/rsi-desktop" --driver /usr/bin/WebKitWebDriver --assets "$RUNNER_TEMP/rsi-desktop-dist/bundle/assets" --report "$RUNNER_TEMP/rsi-desk-$mode" "${mode_args[@]}"
+            dbus-run-session -- xvfb-run -a -s "-screen 0 2560x1440x24" python3 fixtures/rsi/desktop-product/verify.py --binary "$RUNNER_TEMP/rsi-desktop-dist/bundle/rsi-desktop" --driver /usr/bin/WebKitWebDriver --assets "$RUNNER_TEMP/rsi-desktop-dist/bundle/assets" --report "$RUNNER_TEMP/rsi-desk-$mode" "${mode_args[@]}" || status=1
           done
+          exit "$status"
       - name: Exercise missing frame acknowledgement
         if: ${{ !cancelled() && steps.build.outcome == 'success' }}
         timeout-minutes: 5

@@ -31,9 +31,10 @@ completed run and a rendered result button can still coexist with a pending
 detail read, which temporarily disables the control.
 Input readiness includes enabled ancestors, visibility, an unobstructed hit point
 and actual focus before any native keystroke. A readiness timeout dispatches none.
-If WebDriver rejects a handle as stale while resolving focus or reading the
-pre-input state, readiness reacquires the current input before dispatch. Other
-errors propagate, and an error from native keystrokes never triggers a replay.
+If WebDriver rejects a handle as stale while resolving focus, reading the
+pre-input state or resolving a Send Keys target, readiness reacquires the current
+input before dispatch. The WebDriver stale-element category establishes that
+target resolution failed before key dispatch; other input errors never replay.
 Directory selection waits for a completed listing or the known-path form; the
 initial empty, non-busy render does not establish browsing readiness.
 The ordinary conversation run also records the composer's native focus state,
@@ -107,6 +108,8 @@ real Worker admission flags and exact OS terminal bytes; responses are never
 mocked. Write pressure holds four real PTYs at OS read barriers, filling the API
 client's Data calls. A UI input under that pressure must remain unconfirmed and
 must not replay after capacity returns; explicit takeover and new typing recover.
+Typing after takeover waits for the completed action and cleared input-failure
+notice; native click delivery alone does not establish writer readiness.
 The `rsi` used by the fixture lives beside its Desktop executable.
 By default the fixture does not access real user settings or credentials.
 An explicit `--live-env-file /authorized/file --live-model model-id` enables

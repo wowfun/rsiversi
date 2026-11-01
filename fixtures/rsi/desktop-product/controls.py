@@ -7,6 +7,12 @@ ASSET_PRESSURE = (Path(__file__).with_name('asset-pressure.js')).read_text()
 BUTTON_TARGET = (Path(__file__).with_name('button-target.js')).read_text()
 
 
+def stale_target(error):
+    reply = error.args[0] if error.args else None
+    failure = reply.get('value') if isinstance(reply, dict) else None
+    return isinstance(failure, dict) and failure.get('error') == 'stale element reference'
+
+
 def fill(script, keys, until, css, value):
     def ready():
         try:
@@ -16,20 +22,28 @@ def fill(script, keys, until, css, value):
             state = script('return {value:arguments[0].value,events:window.fixtureInputEvents?.length??0}', [item])
             return item, state
         except RuntimeError as error:
-            if not error.args or not isinstance(error.args[0], dict):
-                raise
-            failure = error.args[0].get('value')
-            if not isinstance(failure, dict) or failure.get('error') != 'stale element reference':
+            if not stale_target(error):
                 raise
             return None
-    item, before = until(ready)
-    keys(item, '\ue009a\ue000\ue003')
+    def send(text):
+        def attempt():
+            current = ready()
+            if not current:
+                return None
+            try:
+                keys(current[0], text)
+            except RuntimeError as error:
+                if not stale_target(error):
+                    raise
+                return None
+            return current
+        return until(attempt)
+    _, before = send('\ue009a\ue000\ue003')
     until(lambda: script(FOCUS_INPUT, [css, 'value']) == '')
     if css == 'textarea[aria-label="Main message"]' and before['value']:
         until(lambda: script('return window.fixtureInputEvents.slice(arguments[0]).some(e=>e.trusted&&e.length===0)', [before['events']]))
     if value:
-        item, _ = until(ready)
-        keys(item, value)
+        send(value)
     until(lambda: script(FOCUS_INPUT, [css, 'value']) == value)
 
 

@@ -54,6 +54,7 @@ Path('writer-bytes-'+index).write_bytes(data)
     assert not (workspace / 'native-busy-result.txt').exists(), 'uncertain UI input was replayed'
     assert state()['uiWrites'] == before_release['uiWrites'], 'input retried without takeover'
     button('Take control')
+    until(lambda: script('return document.querySelector(".terminal-authority")?.textContent==="You have control" && [...document.querySelectorAll(".terminal-actions button")].some(button=>button.textContent==="Take control"&&!button.disabled) && !document.querySelector(".terminal-notice")'))
     terminal_keys("printf 'native-busy-once' >> native-busy-result.txt")
     until(lambda: file_has_bytes(workspace / 'native-busy-result.txt', b'native-busy-once'))
     assert (workspace / 'native-busy-result.txt').read_bytes() == b'native-busy-once'

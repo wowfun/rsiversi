@@ -741,6 +741,7 @@ async fn stdio_application_closes_drafts_and_replays_owned_native_sessions() {
     assert_eq!(requests.lock().unwrap()[2]["reasoning_effort"], "high");
     // Cold startup must recover the durable choice, not an ACP connection cache.
     stop(&fixture, peer, child).await;
+    fixture.assert_success(&["host", "stop"]);
     let (child, mut peer) = start(&fixture).await;
     let port = peer.handle();
     let restore = json!({"cwd":fixture.workspace,"mcpServers":[],"sessionId":id});

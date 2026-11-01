@@ -2470,7 +2470,6 @@ dependencies = [
  "rsi-automation",
  "rsi-automation-api",
  "rsi-browser",
- "rsi-build-info",
  "rsi-client",
  "rsi-client-composition",
  "rsi-client-preferences",
@@ -3413,7 +3412,6 @@ dependencies = [
 name = "rsi-api-http-client"
 version = "0.0.1"
 dependencies = [
- "async-stream",
  "async-trait",
  "futures-util",
  "http",
@@ -3640,14 +3638,6 @@ dependencies = [
  "tokio",
  "tokio-util",
  "url",
-]
-
-[[package]]
-name = "rsi-build-info"
-version = "0.0.1"
-dependencies = [
- "serde_json",
- "sha2",
 ]
 
 [[package]]
@@ -4006,8 +3996,6 @@ dependencies = [
  "hex",
  "rsi-meta",
  "rsi-meta-profile",
- "serde",
- "serde_json",
  "sha2",
  "thiserror 2.0.20",
  "tokio",
@@ -4268,7 +4256,6 @@ dependencies = [
  "async-trait",
  "bytes",
  "hex",
- "libc",
  "rsi-api-protocol",
  "rsi-files-native-fs",
  "rsi-media-protocol",

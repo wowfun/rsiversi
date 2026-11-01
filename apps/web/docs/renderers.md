@@ -175,4 +175,5 @@ metadata. A changed content key also resets detail-local presentation state.
 Vendor provenance covers every vendored file except its manifest. License details
 read the revision from that manifest. Product adapters own button geometry; the
 pinned vendor sources retain their upstream licenses; each adaptation is recorded
-with its source and adapted hashes in the provenance manifest.
+with its source and adapted hashes in the provenance manifest. Adapted hashes
+cover the committed LF bytes required by the repository's `.gitattributes`.

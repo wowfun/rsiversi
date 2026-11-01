@@ -1,5 +1,9 @@
 # rsi-cli
 
+Headless JSONL stdout contains only its machine records. An embedded Service can
+write the Executor's [checkpoint diagnostics](../../crates/rsi-agent/executor/README.md)
+to stderr; resident Service diagnostics remain in its owner log.
+
 Top-level help groups Usage, Applications, Commands, Global options and Examples.
 Each public entry has one summary; application owners maintain detailed help.
 Nested management help is recognized before home maintenance or path-value
