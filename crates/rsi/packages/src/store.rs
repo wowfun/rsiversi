@@ -110,10 +110,12 @@ impl PackageStore {
             }
             locks.push(self.leases.lock(&name, false)?);
         }
-        Ok(PackagePurge {
+        let purge = PackagePurge {
             store: self,
             _locks: locks,
-        })
+        };
+        purge.visit_objects(false)?;
+        Ok(purge)
     }
     /// Opens or creates the owned private store; never launches package code.
     pub fn open(root: &Path) -> Result<Self> {
@@ -479,7 +481,13 @@ impl PackageStore {
             // All operations below descend from the retained objects handle.
             // A staged tree can be incomplete; deletion never trusts its manifest.
             let mut budget = crate::MAX_FILES * 128 + 2;
-            remove_tree(&self.objects.directory, Path::new(&name), 0, &mut budget)?;
+            visit_tree(
+                &self.objects.directory,
+                Path::new(&name),
+                0,
+                &mut budget,
+                true,
+            )?;
             if !staging {
                 drop(lease);
                 self.leases.directory.remove_child(Path::new(&name))?;
@@ -512,9 +520,8 @@ pub struct PackagePurge {
     _locks: Vec<File>,
 }
 impl PackagePurge {
-    /// Removes known payloads, preserving lease and namespace anchors.
-    pub fn purge(&self) -> Result<()> {
-        for (name, kind) in self.store.objects.names(MAX_OBJECTS)? {
+    fn visit_objects(&self, remove: bool) -> Result<()> {
+        for (name, kind) in self.store.objects.names(MAX_OBJECTS + MAX_PACKAGES)? {
             if kind != EntryKind::Directory {
                 return Err(invalid("package object is not a directory"));
             }
@@ -522,13 +529,19 @@ impl PackagePurge {
                 crate::hash(&name)?;
             }
             let mut budget = crate::MAX_FILES * 128 + 2;
-            remove_tree(
+            visit_tree(
                 &self.store.objects.directory,
                 Path::new(&name),
                 0,
                 &mut budget,
+                remove,
             )?;
         }
+        Ok(())
+    }
+    /// Removes known payloads, preserving lease and namespace anchors.
+    pub fn purge(&self) -> Result<()> {
+        self.visit_objects(true)?;
         self.store.objects.directory.sync_all()?;
         match self
             .store
@@ -590,11 +603,12 @@ fn is_stage(name: &str) -> bool {
     })
 }
 
-fn remove_tree(
+fn visit_tree(
     parent: &rsi_files_native_fs::Directory,
     name: &Path,
     depth: usize,
     budget: &mut usize,
+    remove: bool,
 ) -> Result<()> {
     if depth > 128 || *budget == 0 {
         return Err(invalid("GC traversal capacity"));
@@ -608,16 +622,22 @@ fn remove_tree(
         }
         let child = entry.file_name();
         match entry.file_type()? {
-            EntryKind::Directory => remove_tree(&directory, Path::new(&child), depth + 1, budget)?,
+            EntryKind::Directory => {
+                visit_tree(&directory, Path::new(&child), depth + 1, budget, remove)?;
+            }
             EntryKind::File => {
                 *budget -= 1;
-                directory.remove_child(Path::new(&child))?;
+                if remove {
+                    directory.remove_child(Path::new(&child))?;
+                }
             }
             _ => return Err(invalid("GC refuses links and special files")),
         }
     }
     drop(directory);
-    parent.remove_empty_directory(name)?;
+    if remove {
+        parent.remove_empty_directory(name)?;
+    }
     Ok(())
 }
 fn verify_file(

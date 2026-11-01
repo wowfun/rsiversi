@@ -2,7 +2,10 @@ use super::*;
 
 #[test]
 fn new_core_can_remove_legacy_selections_wait_for_leases_and_reinstall_without_resetting_trust() {
-    let temp = tempfile::tempdir_in(std::env::temp_dir().canonicalize().unwrap()).unwrap();
+    let root = std::env::temp_dir();
+    #[cfg(not(windows))]
+    let root = root.canonicalize().unwrap();
+    let temp = tempfile::tempdir_in(root).unwrap();
     let store = PackageStore::open(&temp.path().join("packages")).unwrap();
     let payload = b"new";
     let manifest = |format, name| {

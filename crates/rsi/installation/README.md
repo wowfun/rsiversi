@@ -71,8 +71,9 @@ normalization never follows a link or junction. Roots cannot redirect through li
 Neither an entire prefix nor an entire home is a recursive deletion target.
 Pending maintenance must be recovered first. Actual execution repeats preflight
 under leases, stops the selected eligible Host gracefully, and holds both home
-authorities and package-use exclusion during purge. Partial failure reports
-completed and remaining work and preserves retry capability. Size previews stop
+authorities and package-use exclusion during purge. Package traversal preflight
+completes before removing the core executable. Partial failure reports completed
+and remaining work and preserves retry capability. Size previews stop
 after at most 1,024 entries and report a lower bound; they never gate deletion. Removal
 streams entries with bounded depth and per-pass work, so a large tree can make
 progress on retry. Depth/type failures identify the exact retained path and manual

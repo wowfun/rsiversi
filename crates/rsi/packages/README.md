@@ -9,6 +9,10 @@ admission does not confer installation or deletion authority.
 Offline purge obtains the writer lease and every generation lease before removing
 objects and resolution metadata. Busy generations refuse admission. Coordination
 anchors remain; unknown top-level store entries are not purge authority.
+Admission traverses every recognized object under those leases before the
+caller may remove its executable. It rejects deterministic count, depth, type
+and name failures without deleting payloads. Purge repeats these checks during
+removal; external filesystem changes and I/O failures can still require retry.
 Purge uses the same per-object traversal bounds as staging cleanup and GC, so
 every admitted object can be removed in one pass without a smaller store-wide cap.
 
