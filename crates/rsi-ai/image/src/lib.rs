@@ -240,17 +240,22 @@ fn remove_route(state: &Weak<RouterState>, deployment: &str, registration_id: u6
     let Some(state) = state.upgrade() else {
         return;
     };
-    let mut inner = state
-        .inner
-        .lock()
-        .unwrap_or_else(std::sync::PoisonError::into_inner);
-    if inner
-        .routes
-        .get(deployment)
-        .is_some_and(|route| route.registration_id == registration_id)
-    {
-        inner.routes.remove(deployment);
-    }
+    let removed = {
+        let mut inner = state
+            .inner
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        if inner
+            .routes
+            .get(deployment)
+            .is_some_and(|route| route.registration_id == registration_id)
+        {
+            inner.routes.remove(deployment)
+        } else {
+            None
+        }
+    };
+    drop(removed);
 }
 
 #[derive(Debug)]

@@ -27,10 +27,10 @@ fn linked(id: &str, factory: Arc<dyn rsi_meta::PluginFactory>) -> ResolvedFactor
     ResolvedFactory::linked(id, "test", UpdateMode::Replayable, factory)
 }
 
-#[derive(Clone)]
 struct Adapter {
     prepares: Arc<AtomicUsize>,
     reject_request: bool,
+    _lease: Option<rsi_ai_provider::ProviderLease>,
 }
 
 #[derive(Debug)]
@@ -159,6 +159,7 @@ async fn image_route_is_gate_owned_and_media_is_resolved_only_for_edit_inputs() 
             .with_image(Adapter {
                 prepares: Arc::clone(&prepare_count),
                 reject_request: false,
+                _lease: None,
             })
             .build()
             .unwrap(),
@@ -248,6 +249,7 @@ async fn image_compatibility_precedes_credential_resolution() {
             .with_image(Adapter {
                 prepares: Arc::new(AtomicUsize::new(0)),
                 reject_request: true,
+                _lease: None,
             })
             .build()
             .unwrap(),
@@ -314,6 +316,7 @@ async fn image_prepare_rejects_media_above_the_process_resident_budget_atomicall
             .with_image(Adapter {
                 prepares: Arc::clone(&prepare_count),
                 reject_request: false,
+                _lease: None,
             })
             .build()
             .unwrap(),
@@ -353,4 +356,66 @@ async fn image_prepare_rejects_media_above_the_process_resident_budget_atomicall
     assert!(credentials.dispose().await.is_clean());
     assert!(media.dispose().await.is_clean());
     let _ = runtime.shutdown().await;
+}
+
+#[tokio::test]
+async fn withdrawal_drops_nested_provider_leases_outside_the_registry_lock() {
+    let runtime = Runtime::default();
+    let credentials = runtime
+        .root()
+        .apply(
+            linked("rsi.credentials", Arc::new(MemoryCredentialsFactory)),
+            Value::Null,
+        )
+        .await
+        .unwrap();
+    let router = runtime
+        .root()
+        .apply(
+            linked("rsi.ai.image", Arc::new(ImageRouterFactory)),
+            Value::Null,
+        )
+        .await
+        .unwrap();
+    let registrar = runtime
+        .root()
+        .lookup_local::<ImageRegistrarContract>()
+        .unwrap();
+    let registration = |name: &str, nested| {
+        Arc::new(
+            ProviderRegistration::builder(name, "nested-lease-test")
+                .unwrap()
+                .with_config_generation(1)
+                .with_image(Adapter {
+                    prepares: Arc::new(AtomicUsize::new(0)),
+                    reject_request: false,
+                    _lease: nested,
+                })
+                .build()
+                .unwrap(),
+        )
+    };
+    let child = registrar
+        .register_image(registration("child", None), RegistrationGate::new())
+        .unwrap();
+    let parent = registrar
+        .register_image(registration("parent", Some(child)), RegistrationGate::new())
+        .unwrap();
+    let (sent, completed) = std::sync::mpsc::channel();
+    let worker = std::thread::spawn(move || {
+        drop(parent);
+        sent.send(()).unwrap();
+    });
+    completed
+        .recv_timeout(std::time::Duration::from_secs(2))
+        .expect("nested provider withdrawal must not deadlock");
+    worker.join().unwrap();
+    // Both coordinates are available again; stale identities cannot retain a route.
+    let replacement = registrar
+        .register_image(registration("child", None), RegistrationGate::new())
+        .unwrap();
+    drop(replacement);
+    drop(registrar);
+    assert!(router.dispose().await.is_clean());
+    assert!(credentials.dispose().await.is_clean());
 }

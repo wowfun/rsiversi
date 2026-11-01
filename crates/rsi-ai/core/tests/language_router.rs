@@ -25,10 +25,21 @@ fn linked(id: &str, factory: Arc<dyn rsi_meta::PluginFactory>) -> ResolvedFactor
 }
 
 #[derive(Debug)]
-struct EnumeratedAdapter(rsi_ai_protocol::LanguageModelProfiles);
+struct EnumeratedAdapter(
+    rsi_ai_protocol::LanguageModelProfiles,
+    Option<rsi_ai_provider::ProviderLease>,
+    Arc<AtomicUsize>,
+);
+
+impl Drop for EnumeratedAdapter {
+    fn drop(&mut self) {
+        drop(self.1.take());
+    }
+}
 
 impl LanguageAdapter for EnumeratedAdapter {
     fn models(&self) -> &rsi_ai_protocol::LanguageModelProfiles {
+        self.2.fetch_add(1, Ordering::SeqCst);
         &self.0
     }
     fn describe(&self, _: &str) -> Result<LanguageProfile, rsi_ai_protocol::AiError> {
@@ -80,6 +91,7 @@ async fn model_enumeration_pages_across_deployments_and_obeys_registration_gates
         .unwrap();
     let mut leases = Vec::new();
     let mut gates = Vec::new();
+    let visits = Arc::new(AtomicUsize::new(0));
     for deployment in ["z-models", "a-models"] {
         let mut models = rsi_ai_protocol::LanguageModelProfiles::default();
         for index in 0..256 {
@@ -94,7 +106,7 @@ async fn model_enumeration_pages_across_deployments_and_obeys_registration_gates
             ProviderRegistration::builder(deployment, "enumeration-test")
                 .unwrap()
                 .with_config_generation(1)
-                .with_language(EnumeratedAdapter(models))
+                .with_language(EnumeratedAdapter(models, None, visits.clone()))
                 .build()
                 .unwrap(),
         );
@@ -786,6 +798,68 @@ async fn deferred_submission_resume_and_restore_are_reachable_through_language_c
     drop(replacement);
     drop(registrar);
     drop(calls);
+    assert!(router.dispose().await.is_clean());
+    assert!(credentials.dispose().await.is_clean());
+}
+
+#[tokio::test]
+async fn withdrawal_drops_nested_provider_leases_outside_the_registry_lock() {
+    let runtime = Runtime::default();
+    let credentials = runtime
+        .root()
+        .apply(
+            linked("rsi.credentials", Arc::new(MemoryCredentialsFactory)),
+            Value::Null,
+        )
+        .await
+        .unwrap();
+    let router = runtime
+        .root()
+        .apply(
+            linked("rsi.ai.core", Arc::new(LanguageRouterFactory)),
+            Value::Null,
+        )
+        .await
+        .unwrap();
+    let registrar = runtime
+        .root()
+        .lookup_local::<LanguageRegistrarContract>()
+        .unwrap();
+    let registration = |name: &str, nested| {
+        Arc::new(
+            ProviderRegistration::builder(name, "nested-lease-test")
+                .unwrap()
+                .with_config_generation(1)
+                .with_language(EnumeratedAdapter(
+                    rsi_ai_protocol::LanguageModelProfiles::default(),
+                    nested,
+                    Arc::new(AtomicUsize::new(0)),
+                ))
+                .build()
+                .unwrap(),
+        )
+    };
+    let child = registrar
+        .register_language(registration("child", None), RegistrationGate::new())
+        .unwrap();
+    let parent = registrar
+        .register_language(registration("parent", Some(child)), RegistrationGate::new())
+        .unwrap();
+    let (sent, completed) = std::sync::mpsc::channel();
+    let worker = std::thread::spawn(move || {
+        drop(parent);
+        sent.send(()).unwrap();
+    });
+    completed
+        .recv_timeout(std::time::Duration::from_secs(2))
+        .expect("nested provider withdrawal must not deadlock");
+    worker.join().unwrap();
+    // Both coordinates are available again; stale identities cannot retain a route.
+    let replacement = registrar
+        .register_language(registration("child", None), RegistrationGate::new())
+        .unwrap();
+    drop(replacement);
+    drop(registrar);
     assert!(router.dispose().await.is_clean());
     assert!(credentials.dispose().await.is_clean());
 }
