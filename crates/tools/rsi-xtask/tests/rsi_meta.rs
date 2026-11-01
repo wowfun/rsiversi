@@ -659,7 +659,7 @@ fn assert_windows_architecture_admission(job: &serde_json::Value) {
         .position(|step| step["id"] == "native_toolchain")
         .unwrap();
     assert!(architecture < toolchain);
-    assert_eq!(steps[architecture]["shell"], "pwsh");
+    assert_eq!(job["defaults"]["run"]["shell"], "pwsh");
     let command = steps[architecture]["run"].as_str().unwrap();
     assert!(command.contains("if ($env:PROCESSOR_ARCHITECTURE -ne 'AMD64')"));
     assert!(command.contains("throw "));

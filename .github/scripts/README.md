@@ -1,7 +1,8 @@
 # CI execution contracts
 
 CI uses explicit Bash fail-fast and pipeline failure propagation on Unix;
-Windows jobs retain PowerShell. A failed pipeline producer fails its step even
+Windows jobs retain PowerShell. Steps inherit their declared shell unless they
+need a different interpreter. A failed pipeline producer fails its step even
 when a downstream filter succeeds. Checkouts do not persist Git credentials.
 Commands that resolve fixture paths or executable inputs assign their result
 before exporting it; a declaration builtin must not hide a failed lookup.

@@ -983,7 +983,6 @@ jobs:
         timeout-minutes: 15
       - name: Audit every committed Cargo lockfile
         timeout-minutes: 15
-        shell: bash
         run: |
           status=0
           cargo audit --file ./Cargo.lock || status=1
@@ -1005,7 +1004,6 @@ jobs:
         with:
           persist-credentials: false
       - name: Verify runner architecture
-        shell: pwsh
         run: |
           if ($env:PROCESSOR_ARCHITECTURE -ne 'AMD64') {
             throw "expected an x86_64 runner, found $env:PROCESSOR_ARCHITECTURE"
@@ -1036,7 +1034,6 @@ jobs:
         timeout-minutes: 5
       - id: native_architecture
         name: Verify runner architecture
-        shell: pwsh
         timeout-minutes: 1
         run: |
           if ($env:PROCESSOR_ARCHITECTURE -ne 'AMD64') {
@@ -1084,7 +1081,6 @@ jobs:
         id: native_cli_tests
         if: ${{ !cancelled() && steps.native_toolchain.outcome == 'success' }}
         timeout-minutes: 30
-        shell: pwsh
         run: |
           cargo build --locked -p rsi-uninstall
           if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
@@ -1098,7 +1094,6 @@ jobs:
       - name: Exercise ordinary Windows frontend watch
         if: ${{ !cancelled() && steps.native_cli_tests.outcome == 'success' }}
         timeout-minutes: 5
-        shell: pwsh
         run: |
           $env:RSI_TEST_NODE = (Get-Command node).Source
           & .github/scripts/windows-native-tests.ps1 -Manifest "$env:RUNNER_TEMP/rsi-native-tests.jsonl" -ExactTest frontend::ordinary_product_watched_smoke -TimeoutSeconds 240
@@ -1137,7 +1132,6 @@ jobs:
         timeout-minutes: 5
       - id: native_architecture
         name: Verify runner architecture
-        shell: pwsh
         timeout-minutes: 1
         run: |
           if ($env:PROCESSOR_ARCHITECTURE -ne 'AMD64') {
