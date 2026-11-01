@@ -382,6 +382,7 @@ impl SessionStore for MemoryStore {
         use rsi_agent_store_protocol::{
             StoreFactOmission, StoreFactWindow, validate_window_limits,
         };
+        self.window_reads.fetch_add(1, Ordering::Relaxed);
         validate_window_limits(limit, maximum_bytes)?;
         let state = self
             .inner
@@ -465,6 +466,7 @@ impl SessionStore for MemoryStore {
         &self,
         session_id: &SessionId,
     ) -> Result<rsi_agent_store_protocol::SessionValidationLease> {
+        self.preparation_reads.fetch_add(1, Ordering::Relaxed);
         self.validate_session(session_id).await?;
         Ok(rsi_agent_store_protocol::SessionValidationLease::new(
             Arc::clone(&self.inner),
@@ -472,6 +474,7 @@ impl SessionStore for MemoryStore {
     }
 
     async fn read_watermarks(&self, session_id: &SessionId) -> Result<StoreSessionWatermarks> {
+        self.watermark_reads.fetch_add(1, Ordering::Relaxed);
         let state = self
             .inner
             .lock()

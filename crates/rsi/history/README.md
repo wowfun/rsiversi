@@ -62,6 +62,16 @@ grants.
 Session authentication refusals retain Unauthorized; unavailable Session identities
 and backend reads surface Unavailable through the History API.
 
+Native discovery reads metadata-only Store watermarks; transcript validation is
+reserved for actual indexing and original reads. One discovery request retains
+its visible catalog snapshot, refreshes only the indexed source's coverage, and
+rechecks all retained source permissions before publishing that snapshot.
+The indexing slot skips sources whose refreshed horizon has no pending work.
+It rotates among pending sources and skips failed sources until a fresh pass;
+every request still refreshes horizons and checks current source authority.
+A fresh discovery uses its cleared failure set immediately; continuation and
+progress requests retain only the failure set of their applicable pass.
+
 The `history_search` Tool derives workspace and target from AgentCallerAuthority,
 exposes discover/query/progress plus read/freeze/rebuild, and emits the
 `rsi.history` version-2 typed output. Discover alone advances finite indexing;

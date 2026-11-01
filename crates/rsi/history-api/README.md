@@ -18,7 +18,8 @@ Header, observed epoch, text digest, content coordinate or byte length.
 
 Query reads the existing index. Discover scans saved metadata and advances one
 source batch; Progress reads authorized coverage. A discovery pass consumes at
-most 4096 returned workspace items and 4096 native/ACP metadata items. Each step
+most 4096 native/ACP metadata items. Workspace registration is checked for each
+source; discovery does not enumerate unrelated registered directories. Each step
 consumes at most 64 items and 2 MiB encoded metadata, then one source batch.
 Retained identities and continuations fit 2 MiB. One second is a between-batch
 scheduling budget; admitted work retains its permit through actual settlement

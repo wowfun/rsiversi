@@ -251,10 +251,10 @@ impl ProductHistorySearch {
             ReferenceSource::Native { binding } => {
                 let page = self
                     .store
-                    .read_fact_window(&binding.session_id, after, 1, 1)
+                    .read_watermarks(&binding.session_id)
                     .await
                     .map_err(invalid)?;
-                (page.durable_seq, page.durable_seq > after)
+                (page.durable_fact_seq, page.durable_fact_seq > after)
             }
             ReferenceSource::Observed { .. } => {
                 let (id, epoch) = observed(&source.identity)?;

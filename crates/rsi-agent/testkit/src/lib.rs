@@ -51,6 +51,9 @@ pub struct MemoryStore {
     activity_cut_reads: AtomicUsize,
     access_reads: AtomicUsize,
     header_reads: AtomicUsize,
+    watermark_reads: AtomicUsize,
+    preparation_reads: AtomicUsize,
+    window_reads: AtomicUsize,
     activity_cut_failure: Mutex<Option<StoreError>>,
     activity_cut_pause: Mutex<Option<ActivityCutPause>>,
 }
@@ -106,6 +109,15 @@ impl MemoryStore {
     /// Creates an empty deterministic Store.
     pub fn new() -> Self {
         Self::default()
+    }
+
+    /// Counts metadata horizons, source validation and payload window operations.
+    pub fn history_read_counts(&self) -> (usize, usize, usize) {
+        (
+            self.watermark_reads.load(Ordering::Acquire),
+            self.preparation_reads.load(Ordering::Acquire),
+            self.window_reads.load(Ordering::Acquire),
+        )
     }
 
     /// Makes exactly the next `count` append attempts fail before mutation.

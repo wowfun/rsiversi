@@ -185,15 +185,6 @@ impl WorkspaceRegistry for Service {
                 "workspace registry reached its capacity".into(),
             ));
         }
-        if state
-            .records
-            .values()
-            .any(|(_, record)| record.coordinates == coordinates)
-        {
-            return Err(WorkspaceError::Corrupt(
-                "canonical path has a conflicting identity".into(),
-            ));
-        }
         let mut record = WorkspaceRecord::new(coordinates);
         record.created_at_ms = Some(
             std::time::SystemTime::now()

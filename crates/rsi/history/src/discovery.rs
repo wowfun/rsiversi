@@ -5,7 +5,7 @@ use super::{
 use rsi_agent_session_protocol::ReferenceSource;
 use rsi_conversation::ConversationIdentity;
 use rsi_history_api::{DiscoveryCursor, QueryProgress, QueryScope, SourceCoverage};
-use rsi_workspace_protocol::{WorkspaceCursor, WorkspaceId};
+use rsi_workspace_protocol::WorkspaceId;
 use sha2::{Digest as _, Sha256};
 use std::time::{Duration, Instant};
 
@@ -44,6 +44,7 @@ impl ProductHistorySearch {
         &self,
         authority: &HistoryAuthority,
         range: &QueryScope,
+        unavailable: &[String],
         stop: &CancellationToken,
     ) -> Result<(Vec<source::Source>, Vec<SourceCoverage>)> {
         authority.narrow(range)?;
@@ -52,17 +53,7 @@ impl ProductHistorySearch {
         } else {
             self.cache.known(range.clone(), stop.clone()).await?
         };
-        let caller = authority.principal();
-        let scope_key = range_key(range);
-        let unavailable: std::collections::BTreeSet<_> = self
-            .discovery
-            .lock()
-            .expect("history discovery")
-            .iter()
-            .rev()
-            .find(|pass| pass.cursor.caller == caller && pass.cursor.scope_key == scope_key)
-            .map(|pass| pass.cursor.unavailable.iter().cloned().collect())
-            .unwrap_or_default();
+        let unavailable: std::collections::BTreeSet<_> = unavailable.iter().collect();
         let mut owners = Vec::new();
         let mut coverage = Vec::new();
         let mut admissions = source::Admissions::new();
@@ -152,9 +143,7 @@ impl ProductHistorySearch {
             continuation: pass
                 .filter(|p| {
                     !p.cursor.capacity_limited
-                        && ((!p.cursor.workspace_done
-                            || !p.cursor.native_done
-                            || !p.cursor.external_done)
+                        && ((!p.cursor.native_done || !p.cursor.external_done)
                             || sources
                                 .iter()
                                 .any(|s| s.coverage.has_more && !s.unavailable))
@@ -176,11 +165,23 @@ impl ProductHistorySearch {
             _ => unreachable!(),
         };
         authority.narrow(&range)?;
-        if let Request::Discover { after, .. } = &request {
+        let (owners, mut sources) = if let Request::Discover { after, .. } = &request {
             self.discover(&authority, &range, after.as_deref(), stop)
-                .await?;
-        }
-        let (owners, mut sources) = self.visible(&authority, &range, stop).await?;
+                .await?
+        } else {
+            let caller = authority.principal();
+            let scope_key = range_key(&range);
+            let unavailable = self
+                .discovery
+                .lock()
+                .expect("history discovery")
+                .iter()
+                .rev()
+                .find(|pass| pass.cursor.caller == caller && pass.cursor.scope_key == scope_key)
+                .map(|pass| pass.cursor.unavailable.clone())
+                .unwrap_or_default();
+            self.visible(&authority, &range, &unavailable, stop).await?
+        };
         if let Request::Reset { after, .. } = &request {
             let _writer = self.writer.try_acquire().map_err(|_| ApiError::Capacity)?;
             for status in sources
@@ -268,7 +269,7 @@ impl ProductHistorySearch {
         range: &QueryScope,
         after: Option<&str>,
         stop: &CancellationToken,
-    ) -> Result<()> {
+    ) -> Result<(Vec<source::Source>, Vec<SourceCoverage>)> {
         let _writer = self.writer.try_acquire().map_err(|_| ApiError::Capacity)?;
         let caller = authority.principal();
         let scope_key = range_key(range);
@@ -295,14 +296,15 @@ impl ProductHistorySearch {
                 index_after,
                 caller: caller.clone(),
                 scope_key: scope_key.clone(),
-                workspace_done: !matches!(range, QueryScope::AccessibleHost),
                 native_done: matches!(range, QueryScope::Conversation { .. }),
                 external_done: matches!(range, QueryScope::Conversation { .. }),
                 ..Default::default()
             }
         };
         if cursor.capacity_limited {
-            return Ok(());
+            return self
+                .visible(authority, range, &cursor.unavailable, stop)
+                .await;
         }
         let started = Instant::now();
         let mut items = 0;
@@ -313,41 +315,6 @@ impl ProductHistorySearch {
             && !cursor.capacity_limited
         {
             check(stop)?;
-            if !cursor.workspace_done {
-                if cursor.workspaces == 4096 {
-                    cursor.capacity_limited = true;
-                    break;
-                }
-                let Ok(page) = self
-                    .workspaces
-                    .list(
-                        cursor
-                            .workspace_after
-                            .map(|after_order| WorkspaceCursor { after_order }),
-                        1,
-                    )
-                    .await
-                else {
-                    cursor.metadata_unavailable = true;
-                    cursor.workspace_done = true;
-                    continue;
-                };
-                if page.records.is_empty() {
-                    cursor.workspace_done = true;
-                    continue;
-                }
-                let record = &page.records[0];
-                let charge = serde_json::to_vec(record).map_err(invalid)?.len();
-                if bytes + charge > 2 * 1024 * 1024 {
-                    break;
-                }
-                bytes += charge;
-                items += 1;
-                cursor.workspaces += 1;
-                cursor.workspace_after = page.next.map(|p| p.after_order);
-                cursor.workspace_done = page.next.is_none();
-                continue;
-            }
             if cursor.native_done && cursor.external_done {
                 break;
             }
@@ -467,7 +434,9 @@ impl ProductHistorySearch {
                 }
             }
         }
-        let (owners, sources) = self.visible(authority, range, stop).await?;
+        let (mut owners, mut sources) = self
+            .visible(authority, range, &cursor.unavailable, stop)
+            .await?;
         // Rotate by the previous source key, independent of long transcript size.
         if !sources.is_empty() {
             let start = cursor
@@ -476,9 +445,13 @@ impl ProductHistorySearch {
                 .and_then(|last| sources.iter().position(|s| cache::key(&s.scope) > *last))
                 .unwrap_or(0);
             for i in 0..sources.len() {
-                let status = &sources[(start + i) % sources.len()];
+                let index = (start + i) % sources.len();
+                let status = &mut sources[index];
                 let source_key = cache::key(&status.scope);
-                if cursor.unavailable.contains(&source_key) {
+                if status.unavailable
+                    || !status.coverage.has_more
+                    || cursor.unavailable.contains(&source_key)
+                {
                     continue;
                 }
                 cursor.index_after = Some(source_key.clone());
@@ -501,7 +474,8 @@ impl ProductHistorySearch {
                                 .advance(cache::key(&status.scope), previous, batch, stop.clone())
                                 .await
                             {
-                                Ok(_) => {}
+                                Ok(Reply::Coverage { coverage }) => status.coverage = coverage,
+                                Ok(_) => unreachable!("cache advance coverage"),
                                 Err(ApiError::Capacity) => cursor.capacity_limited = true,
                                 Err(error) => return Err(error),
                             }
@@ -513,6 +487,7 @@ impl ProductHistorySearch {
                             | ApiError::Invalid(_)
                             | ApiError::Backend(_),
                         ) => {
+                            status.unavailable = true;
                             if cursor.unavailable.len() == 64 {
                                 cursor.capacity_limited = true;
                             } else {
@@ -521,15 +496,11 @@ impl ProductHistorySearch {
                         }
                         Err(error) => return Err(error),
                     }
+                    status.reference_allowed = !source.protected;
+                    owners.push(source);
                     break;
                 }
             }
-        }
-        for source in owners {
-            if source.protection.is_cancelled() {
-                return Err(ApiError::Unauthorized);
-            }
-            let _check = authority.admit(self.resolver.as_ref(), &source.coordinates)?;
         }
         let mut token = [0u8; 16];
         getrandom::fill(&mut token).map_err(invalid)?;
@@ -542,7 +513,7 @@ impl ProductHistorySearch {
             token: hex::encode(token),
             cursor,
         });
-        Ok(())
+        Ok((owners, sources))
     }
 }
 
@@ -573,3 +544,7 @@ fn coverage_page(
         next,
     })
 }
+
+#[cfg(test)]
+#[path = "discovery_tests.rs"]
+mod tests;

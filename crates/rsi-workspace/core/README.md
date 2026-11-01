@@ -20,6 +20,8 @@ allocation high-water mark. Workspace protocol owns identity derivation from
 those coordinates. Local get-or-create canonicalizes only the Service filesystem;
 it never interprets a remote registration's path as Local. Non-UTF-8 paths are
 rejected rather than silently collapsed. Older domain records are rejected.
+Validated coordinate-derived IDs are the in-memory uniqueness authority;
+registration checks that ID before and after acquiring the commit slot.
 
 Cache availability follows [Storage generation health and recovery](../../rsi-storage/core/README.md).
 

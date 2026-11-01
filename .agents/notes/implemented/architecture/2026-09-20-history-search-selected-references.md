@@ -21,6 +21,11 @@ coordinates, re-read through the source owner, and check workspace scope separat
 for searching, reading and freezing a reference. Never manufacture native Facts
 from external observations.
 
+Discovery enumerates saved native and external metadata directly. Workspace
+authority is checked for each source rather than through a discarded preliminary
+registry sweep. The one indexing slot selects pending work from freshly observed
+horizons; it does not revisit complete sources merely to advance its rotation.
+
 Introduce mechanical forward Store windows with pre-body byte admission. Index
 batches inspect at most 256 records and 16 MiB; oversized rows are recorded as
 coverage omissions, not silently skipped. Query pages retain at most 64 hits and
@@ -49,6 +54,9 @@ would silently replace the selected old hit with recent text. Trusting indexed
 snippets would turn a corrupt or stale cache into user input authority. Generic
 provider request indexing would expose reasoning and data outside the visible
 conversation contract.
+Caching authorization across requests would make stale permissions authoritative.
+Increasing the discarded workspace sweep's limit would retain work with no
+consumer and couple discovery to an unrelated registry capacity.
 
 ## Validation
 

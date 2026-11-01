@@ -65,18 +65,12 @@ pub struct DiscoveryCursor {
     pub caller: String,
     /// Exact query range correlation.
     pub scope_key: String,
-    /// Last consumed registry insertion position.
-    pub workspace_after: Option<u64>,
     /// Last consumed native metadata identity.
     pub native_after: Option<SessionId>,
     /// Last consumed external metadata identity.
     pub external_after: Option<rsi_acp_protocol::observation::ConversationId>,
-    /// Returned workspace items consumed by this pass.
-    pub workspaces: usize,
     /// Source items consumed by this pass.
     pub sources: usize,
-    /// Registry scan reached its end.
-    pub workspace_done: bool,
     /// Native scan reached its end.
     pub native_done: bool,
     /// External scan reached its end.
@@ -91,8 +85,7 @@ pub struct DiscoveryCursor {
 impl DiscoveryCursor {
     /// End-of-pass is a live scan observation, not a Host snapshot.
     pub fn complete(&self) -> bool {
-        self.workspace_done
-            && self.native_done
+        self.native_done
             && self.external_done
             && !self.capacity_limited
             && !self.metadata_unavailable
