@@ -83,6 +83,7 @@ for(const [name,engine] of [['chromium',chromium],['firefox',firefox]]) {
     await waitUntil(async()=>/report_result/.test(await details(page).innerText()),'child durable history');
     await page.screenshot({path:join(folder,'child-wide.png')});
     await clickDetails(page,'Latest workflows');
+    await details(page).getByRole('button',{name:'Open workflow',exact:true}).first().waitFor();
     await closeDetails(page);
     const root=(await pane.getAttribute('data-session-id'));
     await waitUntil(()=>page.evaluate(()=>window.workflowInvocations.every(row=>row.reply)),'initial Workflow control replies');

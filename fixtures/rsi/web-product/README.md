@@ -526,6 +526,11 @@ bridge isolation, default blocked network, per-preview HTTPS opt-in, frame reset
 explicit file refresh and over-budget source fallback. Chromium and Firefox
 retain full-size and narrow screenshots. Its provider and HTTPS resources are
 controlled fixtures, separate from opt-in live-provider evidence.
+The edited-definition check waits for the first child's automatic parent reply
+and an idle Send action. Provider evidence must contain the submitted task;
+an unrelated completion request does not acknowledge that submission.
+The preview fixture opens its registered isolated workspace explicitly and
+observes that path in the conversation before creating its test definitions.
 
 The default runner also executes `preview-verify.mjs` on each browser: real
 Markdown Agent definitions, next-fresh-spawn refresh, and bounded Files code,
@@ -750,6 +755,8 @@ negotiation. While that target is busy, it verifies an unrelated candidate write
 and a directory read on the real SSH target, and checks the same-target Busy
 response. It closes the stalled socket explicitly and requires a known connection
 failure; this is contention evidence, not a successful second SSH connection.
+After directory creation, the picker waits for the new folder in its breadcrumb
+navigation. Its parent-column entry can carry the same accessible name.
 
 The opt-in Workflow workbench fixture uses `RSI_TEST_NODE=/absolute/node
 RSI_WEB_REPORT=/new/report node fixtures/rsi/web-product/workflow-verify.mjs` after
@@ -865,6 +872,12 @@ stylesheet at 1440 px and 390 px, checks the last Retry control by keyboard, and
 retains screenshots. Set `RSI_REVIEW_PREVIEW=1` with `RSI_REPORT_DIR` to keep that
 isolated component scene available at the printed local URL for manual inspection.
 This scene verifies cleanup layout; it is not a full connected-workbench capture.
+Keyboard focus checks wait for an enabled Retry control and for it to enter the cleanup
+scroll viewport before reading geometry; native keyboard scrolling can settle
+asynchronously. Resource close helpers pin the selected Dock identity for both
+click and completion within the active resource dock; separate session docks may
+reuse tab IDs. A retained DOM node does not identify a resource.
+Workflow navigation settles its latest view before closing that resource.
 
 `responsiveness.mjs` uses the real document factory with isolated transport ports.
 It checks tablet navigation and desktop preference behavior, the rail logo's
@@ -873,8 +886,11 @@ and return focus, and a frame containing sixty settled code blocks. That frame
 must ACK its plain-text presentation before optional tokenization runs. This is
 source/DOM evidence; real Service and provider coverage remains in the paired
 product and opt-in live fixtures.
-Conversation identity assertions read the pane's `data-session-id`; coordinates
-inside a closed tools menu are not visible text. Presentation assertions either
+Conversation reopening waits for the requested `data-session-id`, a changed
+`data-session-generation`, and an enabled editor before further interaction.
+CI's early failure archive retains source-pointer evidence alongside the failure
+capture so a rejected stale-generation action can be distinguished from a lost click.
+Coordinates inside a closed tools menu are not visible text. Presentation assertions either
 open that menu or inspect its text content explicitly.
 
 CI runs the workspace, model settings, starting transcript and composer document
@@ -893,6 +909,8 @@ conversation fixture checks saved text across reload and model setup, the first
 send's durable handoff, concurrent-window conflicts, underlined transcript tabs,
 message geometry, stable docked composer geometry while statistics arrive or
 change, and light/dark/narrow screenshots in Chromium and Firefox.
+Layout restoration observes the committed layout record before reload;
+rendering and saving complete asynchronously.
 These isolated transport fixtures use production React and IndexedDB; native
 first-use initialization and directory browsing have separate owner tests.
 

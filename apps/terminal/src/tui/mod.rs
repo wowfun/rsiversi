@@ -1790,6 +1790,7 @@ async fn run_inner(
         &mut terminate,
         model_catalog.as_ref(),
         &mut markdown,
+        |text| Box::pin(clipboard::copy(text)),
     )
     .await;
     let (attached, draft) = match startup {

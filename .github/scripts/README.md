@@ -1,5 +1,23 @@
 # CI execution contracts
 
+CI uses explicit Bash fail-fast and pipeline failure propagation on Unix;
+Windows jobs retain PowerShell. Steps inherit their declared shell unless they
+need a different interpreter. A failed pipeline producer fails its step even
+when a downstream filter succeeds. Checkouts do not persist Git credentials.
+Commands that resolve fixture paths or executable inputs assign their result
+before exporting it; a declaration builtin must not hide a failed lookup.
+Verification builds share workflow-level line-table debug information and
+disabled incremental compilation. Debug assertions and source locations remain
+available while native dependency graphs stay within runner disk capacity.
+Windows workspace Clippy checks every target with `--keep-going`; a second
+workspace `cargo check` is redundant. Executed native behavior remains separate.
+Documentation uses a shallow checkout and fetches only a missing exact baseline
+commit; archive validation reads that commit's tree without walking history.
+Independent Desktop modes aggregate failures while attempting every mode.
+Lockfile audit fails when Git cannot enumerate the tracked locks, including when
+it emits a partial list before failing. Desktop acquires sandbox policy after
+building its distributions and restores it after the dependent native probes.
+
 Workflow steps source `standard-packages.sh` and pass its Bash array as quoted
 arguments to Cargo. Package patterns are Cargo selectors, not shell globs.
 Jobs that use `rg` for test discovery install ripgrep explicitly on Linux.

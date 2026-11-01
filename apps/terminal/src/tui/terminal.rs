@@ -56,11 +56,28 @@ pub(super) struct Terminal {
     pub(super) frames: watch::Sender<Option<Arc<RenderedFrame>>>,
     pub(super) presented: watch::Receiver<Option<Arc<RenderedFrame>>>,
     pub(super) commands: mpsc::Sender<String>,
+    owns_modes: bool,
     stop: CancellationToken,
     task: Option<tokio::task::JoinHandle<io::Result<()>>>,
 }
 
 impl Terminal {
+    #[cfg(test)]
+    pub(super) fn test_sink(
+        frames: watch::Sender<Option<Arc<RenderedFrame>>>,
+        presented: watch::Receiver<Option<Arc<RenderedFrame>>>,
+        commands: mpsc::Sender<String>,
+    ) -> Self {
+        Self {
+            frames,
+            presented,
+            commands,
+            owns_modes: false,
+            stop: CancellationToken::new(),
+            task: None,
+        }
+    }
+
     pub(super) fn enter(tasks: &tokio_util::task::TaskTracker) -> io::Result<Self> {
         #[cfg(unix)]
         terminal::enable_raw_mode()?;
@@ -100,6 +117,7 @@ impl Terminal {
             frames,
             presented,
             commands,
+            owns_modes: true,
             stop,
             task: Some(task),
         })
@@ -128,7 +146,9 @@ impl Terminal {
 impl Drop for Terminal {
     fn drop(&mut self) {
         self.stop.cancel();
-        restore();
+        if self.owns_modes {
+            restore();
+        }
     }
 }
 

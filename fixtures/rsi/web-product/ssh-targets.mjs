@@ -84,7 +84,7 @@ try {
   await dialog.getByRole('button',{name:'Edit directory path',exact:true}).waitFor();
   await dialog.getByRole('button',{name:'Edit directory path',exact:true}).click();await dialog.getByLabel('Directory path',{exact:true}).fill(service.workspace);await dialog.getByRole('button',{name:'Go',exact:true}).click();
   await dialog.getByRole('button',{name:'+ New folder',exact:true}).click();await dialog.getByLabel('Folder name',{exact:true}).fill('picked-on-target');await dialog.getByRole('button',{name:'Create folder',exact:true}).click();
-  await dialog.getByRole('button',{name:'picked-on-target',exact:true}).waitFor();
+  await dialog.getByRole('navigation',{name:'Directory breadcrumbs',exact:true}).getByRole('button',{name:'picked-on-target',exact:true}).waitFor();
   const listed=await picker('list',{path:service.workspace});assert.equal(listed.status(),200);assert((await listed.json()).entries.some(entry=>entry.name==='picked-on-target'));
   checks.push('actual Web picker selects SSH, browses target and creates one directory through current lease');
   for(const [width,height] of [[1440,900],[1024,768],[767,900],[390,844]])for(const theme of ['light','dark']){

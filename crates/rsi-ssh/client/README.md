@@ -43,6 +43,9 @@ Discarding an unstarted plan retires its unused local streams before releasing t
 target reservation. A started process retires abandoned local output only after
 native settlement, then releases the target slots. This ordering prevents new
 target generations from overtaking local receipt of a cleanup reply.
+Publication tests observe the client's retained channel directly, covering waiter
+loss before completion and an unconsumed queued result. Native helper tests fill
+all twenty plan slots before dropping their owners and reusing released capacity.
 The managed connector retains the actual SSH child and private configuration until
 reaping, and sends fresh heartbeats every two seconds. Each process connection,
 prepared plan and accepted operation retains that owner. Last-owner release or

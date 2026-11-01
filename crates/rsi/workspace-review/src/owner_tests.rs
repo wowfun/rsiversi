@@ -140,13 +140,7 @@ async fn full_durable_history_is_preserved_and_reports_omission_after_restart() 
     initial.close().await;
     drop(interval);
     drop(initial);
-    for index in 0..8192 {
-        template.id = format!("{index:032x}");
-        domain.rows.lock().unwrap().insert(
-            template.id.clone(),
-            serde_json::to_value(&template).unwrap(),
-        );
-    }
+    seed_history(&domain, &mut template);
     let original = domain.rows.lock().unwrap().clone();
     for _ in 0..2 {
         let current = owner(&runtime, path.clone(), domain.clone()).await;
@@ -203,6 +197,17 @@ async fn full_durable_history_is_preserved_and_reports_omission_after_restart() 
     }
     assert!(process.dispose().await.is_clean());
     assert!(runtime.shutdown().await.is_clean());
+}
+
+fn seed_history(domain: &Storage, template: &mut Summary) {
+    let mut rows = domain.rows.lock().unwrap();
+    for index in 0..8192 {
+        template.id = format!("{index:032x}");
+        rows.insert(
+            template.id.clone(),
+            serde_json::to_value(&*template).unwrap(),
+        );
+    }
 }
 
 #[tokio::test]

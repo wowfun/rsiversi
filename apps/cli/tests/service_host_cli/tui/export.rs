@@ -26,6 +26,7 @@ async fn fullscreen_export_quotes_paths_and_keeps_model_context_unchanged() {
     assert!(requests.lock().unwrap().is_empty());
     terminal.send(b"hello for export\r");
     terminal.until("hello from daemon").await;
+    terminal.until_idle().await;
     terminal.send(b"/export 'nested/tui file.json' -f json -i m\r");
     tokio::time::timeout(Duration::from_secs(10), async {
         while !fixture.workspace.join("nested/tui file.json").is_file() {

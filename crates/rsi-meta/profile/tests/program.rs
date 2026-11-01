@@ -51,12 +51,11 @@ fn live_configuration_admission_bounds_expansion_and_returns_replaced_charges() 
     .unwrap();
     compiler.compile(&ProfileProgram::from_file(&root)).unwrap();
     // Credit from each replacement admits a later leaf instead of charging history.
-    let source = format!(
-        "format=1\n{}",
-        (0..12)
-            .map(|id| format!("{}{}", leaf(id), shrink(id)))
-            .collect::<String>()
-    );
+    let mut source = String::from("format=1\n");
+    for id in 0..12 {
+        source.push_str(&leaf(id));
+        source.push_str(&shrink(id));
+    }
     std::fs::write(&root, source).unwrap();
     compiler.compile(&ProfileProgram::from_file(&root)).unwrap();
     // Four expanded leaves exceed the 256-byte working allowance before patches.

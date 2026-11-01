@@ -1,5 +1,9 @@
 # Renderer hosting
 
+Native conversation panes publish `data-session-id` and
+`data-session-generation` together. Reopening the same Session publishes a new
+generation; retained transcript text does not acknowledge that transition.
+
 The standard renderer displays an optional `data.image` by reading its explicitly
 declared PNG source in bounded 64 KiB windows. Its published renderer declares
 the source capability, and reads start only after presentation activation.
@@ -175,4 +179,5 @@ metadata. A changed content key also resets detail-local presentation state.
 Vendor provenance covers every vendored file except its manifest. License details
 read the revision from that manifest. Product adapters own button geometry; the
 pinned vendor sources retain their upstream licenses; each adaptation is recorded
-with its source and adapted hashes in the provenance manifest.
+with its source and adapted hashes in the provenance manifest. Adapted hashes
+cover the committed LF bytes required by the repository's `.gitattributes`.

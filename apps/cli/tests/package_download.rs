@@ -59,6 +59,7 @@ fn plugin_download_uses_the_cli_runtime_and_reports_http_failure_without_panicki
                 Err(error) => panic!("download client did not connect: {error}"),
             }
         };
+        stream.set_nonblocking(false).unwrap();
         stream
             .set_read_timeout(Some(Duration::from_secs(3)))
             .unwrap();

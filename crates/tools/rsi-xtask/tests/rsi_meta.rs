@@ -350,7 +350,7 @@ fn ci_exercises_every_agent_package_and_formats_the_repository_once() {
     clippy::too_many_lines,
     reason = "This gate checks the complete Windows job composition."
 )]
-fn windows_compile_gate_keeps_independent_lint_and_unsupported_boundary_checks() {
+fn windows_clippy_checks_the_workspace_once_and_keeps_native_behavior_checks() {
     let workflow: serde_json::Value = yaml_serde::from_str(
         &fs::read_to_string(repository().join(".github/workflows/ci.yml")).unwrap(),
     )
@@ -364,14 +364,14 @@ fn windows_compile_gate_keeps_independent_lint_and_unsupported_boundary_checks()
         .filter_map(|step| step["run"].as_str())
         .map(|command| command.split_whitespace().collect::<Vec<_>>())
         .collect::<Vec<_>>();
-    assert!(commands.iter().any(|command| {
-        command.starts_with(&["cargo", "check"])
-            && ["--locked", "--workspace", "--all-targets", "--keep-going"]
-                .iter()
-                .all(|flag| command.contains(flag))
-    }));
+    assert!(
+        !commands
+            .iter()
+            .any(|command| command.starts_with(&["cargo", "check"]))
+    );
     assert!(commands.iter().any(|command| {
         command.starts_with(&["cargo", "clippy"])
+            && command.contains(&"--keep-going")
             && command.contains(&"--workspace")
             && whole_package_command(command, "clippy")
             && command.contains(&"--all-targets")
@@ -461,6 +461,142 @@ fn windows_compile_gate_keeps_independent_lint_and_unsupported_boundary_checks()
     }
 }
 
+#[test]
+fn workflows_fail_closed_on_pipelines_and_do_not_persist_checkout_credentials() {
+    for path in [
+        "ci.yml",
+        "package-repository.yml",
+        "performance-evidence.yml",
+    ] {
+        let source = fs::read_to_string(repository().join(".github/workflows").join(path)).unwrap();
+        let workflow: serde_json::Value = yaml_serde::from_str(&source).unwrap();
+        assert_eq!(workflow["defaults"]["run"]["shell"], "bash", "{path}");
+        for (name, job) in workflow["jobs"].as_object().unwrap() {
+            if job["runs-on"]
+                .as_str()
+                .is_some_and(|os| os.starts_with("windows-"))
+            {
+                assert_eq!(job["defaults"]["run"]["shell"], "pwsh", "{path}: {name}");
+            }
+            for step in job["steps"].as_array().unwrap() {
+                if step["uses"]
+                    .as_str()
+                    .is_some_and(|action| action.starts_with("actions/checkout@"))
+                {
+                    assert_eq!(step["with"]["persist-credentials"], false, "{path}: {name}");
+                }
+            }
+        }
+    }
+}
+
+#[cfg(unix)]
+#[test]
+fn web_acceptance_stops_when_bundle_discovery_fails() {
+    let source = fs::read_to_string(repository().join(".github/workflows/ci.yml")).unwrap();
+    let workflow: serde_json::Value = yaml_serde::from_str(&source).unwrap();
+    let steps = workflow["jobs"]["rsi-meta-browser"]["steps"]
+        .as_array()
+        .unwrap();
+    for id in [
+        "web_product",
+        "web_workflow",
+        "web_integrations",
+        "web_terminals",
+    ] {
+        let root = tempfile::tempdir().unwrap();
+        let probe = root.path().join("probe");
+        let step = steps.iter().find(|step| step["id"] == id).unwrap();
+        let script = format!(
+            "source() {{ return 0; }}\ncargo() {{ if [[ $* == *'fixture-path web'* ]]; then return 29; fi; printf 'cargo' > \"$RSI_TEST_PROBE\"; exit 0; }}\nnode() {{ printf 'node' > \"$RSI_TEST_PROBE\"; exit 0; }}\nnpm() {{ printf 'npm' > \"$RSI_TEST_PROBE\"; exit 0; }}\n{}",
+            step["run"].as_str().unwrap()
+        );
+        let output = Command::new("bash")
+            .args(["--noprofile", "--norc", "-eo", "pipefail", "-c", &script])
+            .env("GITHUB_WORKSPACE", repository())
+            .env("RUNNER_TEMP", root.path())
+            .env("RSI_WEB_REPORT", root.path())
+            .env("RSI_TEST_PROBE", &probe)
+            .current_dir(repository().join("fixtures/rsi/web-product"))
+            .output()
+            .unwrap();
+        assert_eq!(output.status.code(), Some(29), "{id}: {}", stderr(&output));
+        assert!(
+            !probe.exists(),
+            "{id} ran acceptance after failed discovery"
+        );
+    }
+}
+
+#[test]
+fn ci_build_profiles_bound_debug_storage_for_every_job() {
+    let source = fs::read_to_string(repository().join(".github/workflows/ci.yml")).unwrap();
+    let workflow: serde_json::Value = yaml_serde::from_str(&source).unwrap();
+    for (key, value) in [
+        ("CARGO_INCREMENTAL", "0"),
+        ("CARGO_PROFILE_DEV_DEBUG", "line-tables-only"),
+        ("CARGO_PROFILE_TEST_DEBUG", "line-tables-only"),
+    ] {
+        assert_eq!(workflow["env"][key], value, "{key}");
+        for (name, job) in workflow["jobs"].as_object().unwrap() {
+            assert!(job["env"][key].is_null(), "{name} overrides shared {key}");
+        }
+    }
+}
+
+#[cfg(unix)]
+#[test]
+fn desktop_modes_attempt_every_surface_and_preserve_any_failure() {
+    let source = fs::read_to_string(repository().join(".github/workflows/ci.yml")).unwrap();
+    let workflow: serde_json::Value = yaml_serde::from_str(&source).unwrap();
+    let step = workflow["jobs"]["rsi-desktop"]["steps"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|step| {
+            step["name"] == "Exercise WebKitGTK external, Profile, history and language surfaces"
+        })
+        .unwrap();
+    let root = tempfile::tempdir().unwrap();
+    let log = root.path().join("modes");
+    let script = format!(
+        "cargo() {{ return 0; }}\nrustup() {{ printf '/fixture/analyzer'; }}\ndbus-run-session() {{ printf '%s\\n' \"$*\" >> \"$RSI_TEST_LOG\"; [[ -z $RSI_TEST_FAIL || $* != *\"--$RSI_TEST_FAIL\"* ]]; }}\n{}",
+        step["run"].as_str().unwrap()
+    );
+    for failure in ["", "external", "language", "reload"] {
+        fs::write(&log, "").unwrap();
+        let output = Command::new("bash")
+            .args(["--noprofile", "--norc", "-eo", "pipefail", "-c", &script])
+            .env("RSI_TEST_LOG", &log)
+            .env("RSI_TEST_FAIL", failure)
+            .env("GITHUB_WORKSPACE", root.path())
+            .env("RUNNER_TEMP", root.path())
+            .output()
+            .unwrap();
+        assert_eq!(
+            output.status.success(),
+            failure.is_empty(),
+            "{}",
+            stderr(&output)
+        );
+        let calls = fs::read_to_string(&log).unwrap();
+        assert_eq!(calls.lines().count(), 12);
+        assert!(calls.lines().last().unwrap().ends_with("--reload"));
+    }
+}
+
+#[test]
+fn desktop_sandbox_policy_starts_after_distribution_builds() {
+    let source = fs::read_to_string(repository().join(".github/workflows/ci.yml")).unwrap();
+    let workflow: serde_json::Value = yaml_serde::from_str(&source).unwrap();
+    let steps = workflow["jobs"]["rsi-desktop"]["steps"].as_array().unwrap();
+    let position = |id| steps.iter().position(|step| step["id"] == id).unwrap();
+    for build in ["build", "foreign"] {
+        assert!(position(build) < position("sandbox"));
+    }
+    assert_eq!(steps[position("sandbox")]["if"], "${{ !cancelled() }}");
+}
+
 fn assert_windows_tooling_gate(workflow: &serde_json::Value) {
     let tools = &workflow["jobs"]["windows-repository-tools"];
     assert_eq!(tools["runs-on"], "windows-2025");
@@ -523,7 +659,7 @@ fn assert_windows_architecture_admission(job: &serde_json::Value) {
         .position(|step| step["id"] == "native_toolchain")
         .unwrap();
     assert!(architecture < toolchain);
-    assert_eq!(steps[architecture]["shell"], "pwsh");
+    assert_eq!(job["defaults"]["run"]["shell"], "pwsh");
     let command = steps[architecture]["run"].as_str().unwrap();
     assert!(command.contains("if ($env:PROCESSOR_ARCHITECTURE -ne 'AMD64')"));
     assert!(command.contains("throw "));
@@ -1471,6 +1607,31 @@ fn paired_web_consumers_have_independent_failure_domains() {
 }
 
 #[test]
+fn paired_addon_archive_retains_evidence_without_frozen_executables() {
+    let source = fs::read_to_string(repository().join(".github/workflows/ci.yml")).unwrap();
+    let workflow: yaml_serde::Value = yaml_serde::from_str(&source).unwrap();
+    let steps = workflow["jobs"]["rsi-meta-browser"]["steps"]
+        .as_sequence()
+        .unwrap();
+    let archive = steps
+        .iter()
+        .find(|step| step["with"]["name"] == "rsi-addon-paired-evidence")
+        .unwrap();
+    let paths = archive["with"]["path"].as_str().unwrap();
+    assert!(
+        paths
+            .lines()
+            .any(|path| path == "${{ runner.temp }}/rsi-addon-paired-evidence")
+    );
+    for binary in ["paired-workbench-addon", "browser/workbench-addon"] {
+        assert!(
+            paths.lines().any(|path| path
+                == format!("!${{{{ runner.temp }}}}/rsi-addon-paired-evidence/{binary}"))
+        );
+    }
+}
+
+#[test]
 fn paired_web_failures_publish_evidence_before_integration_probes() {
     let source = fs::read_to_string(repository().join(".github/workflows/ci.yml")).unwrap();
     let workflow: yaml_serde::Value = yaml_serde::from_str(&source).unwrap();
@@ -1547,7 +1708,12 @@ fn paired_web_failures_publish_evidence_before_integration_probes() {
     };
     let workflow_archive = archive_path("rsi-workflow-failure-evidence");
     let product_archive = archive_path("rsi-web-product-failure-evidence");
-    for suffix in ["**/failure*", "**/*-failure*", "**/binary.json"] {
+    for suffix in [
+        "**/failure*",
+        "**/*-failure*",
+        "**/*-source-pointer.json",
+        "**/binary.json",
+    ] {
         assert!(
             product_archive.lines().any(|line| {
                 line == format!("${{{{ runner.temp }}}}/rsi-web-evidence/{suffix}")
@@ -1652,7 +1818,7 @@ fn audit_command_collects_every_lockfile_and_preserves_any_failure() {
     for (name, body) in [
         (
             "git",
-            "#!/bin/sh\nprintf 'one/Cargo.lock\\0two/Cargo.lock\\0'\n",
+            "#!/bin/sh\nprintf 'one/Cargo.lock\\0two/Cargo.lock\\0'\n[ \"$RSI_TEST_FAIL\" != git ]\n",
         ),
         (
             "cargo",
@@ -1666,6 +1832,8 @@ fn audit_command_collects_every_lockfile_and_preserves_any_failure() {
     for (failure, success) in [
         ("./Cargo.lock", false),
         ("one/Cargo.lock", false),
+        ("two/Cargo.lock", false),
+        ("git", false),
         ("never-match", true),
     ] {
         let log = root.path().join("calls");
@@ -1741,10 +1909,17 @@ fn ci_baseline_script_fetches_exact_nonancestor_commits_and_rejects_missing_inpu
         temp.path(),
         &[
             "clone",
+            "--depth=1",
             "--single-branch",
             "-b",
             "main",
-            origin.to_str().unwrap(),
+            &format!(
+                "file:///{}",
+                origin
+                    .to_string_lossy()
+                    .replace('\\', "/")
+                    .trim_start_matches('/')
+            ),
             checkout.to_str().unwrap(),
         ],
     );
@@ -1977,6 +2152,13 @@ fn ssh_native_checks_report_independent_failures_after_required_setup() {
         .as_str()
         .unwrap();
     assert!(cache.contains("env -u RUST_MIN_STACK cargo test --locked -p rsi-ssh-helper --lib --test cache -- --ignored"));
+    assert!(
+        cache
+            .lines()
+            .find(|line| line.contains("cargo test") && !line.contains("--list"))
+            .unwrap()
+            .contains("--test-threads=1")
+    );
     assert!(
         !steps[position("Verify cache and execution")]["run"]
             .as_str()

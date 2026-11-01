@@ -1,4 +1,16 @@
 // Shared semantic entry points for product fixtures; every change uses real controls.
+export async function openConversation(page,pane,session,{timeout=30_000}={}) {
+  const label=await pane.getAttribute('aria-label');
+  const generation=await pane.getAttribute('data-session-generation');
+  await page.locator(`[data-testid="conversation-row"][data-session-id=${JSON.stringify(session)}]`).getByTestId('conversation-open').click();
+  await page.waitForFunction(({label,session,generation})=>{
+    const pane=[...document.querySelectorAll('.pane')].find(pane=>pane.getAttribute('aria-label')===label);
+    const editor=pane?.querySelector('textarea[aria-label="Main message"]');
+    return pane?.dataset.sessionId===session&&pane.dataset.sessionGeneration&&
+      pane.dataset.sessionGeneration!==generation&&editor&&!editor.disabled;
+  },{label,session,generation},{timeout});
+}
+
 export async function openSettings(page) {
   const trigger=page.locator('#settings-open');
   if(!await trigger.isVisible())await page.locator('.application-options > summary').click();
@@ -118,14 +130,15 @@ export async function clickUiControl(page, rootSelector, label, {timeout=30_000}
 }
 export function clickDetails(page,label) {return clickUiControl(page,detailSelector,label);}
 export async function closeDetails(page) {
-  const floating=page.locator('[data-dockkit-float-active=true]:visible [data-dockkit-float-close]');
-  if(await floating.count()) {const owner=floating.locator('xpath=ancestor::*[@data-dockkit-content]');const id=await owner.getAttribute('data-dockkit-content');await floating.click();await page.locator(`[data-dockkit-content="${id}"]`).waitFor({state:'detached'});return;}
-  const active=page.locator('.resource-dock:not([hidden]) [data-dockkit-pane-active=true] [data-dockkit-tab][aria-selected=true]:visible');
-  const tab=await active.count()?active:page.locator('[data-dockkit-tab][aria-selected=true]:visible').last();
-  const closing=await tab.elementHandle();
-  await tab.locator('[data-dockkit-tab-close]').click();
-  await page.waitForFunction(element=>!element.isConnected,closing);
-  await closing.dispose();
+  const dock=page.locator('.resource-dock:not([hidden])');
+  const floating=dock.locator('[data-dockkit-float-active=true]:visible [data-dockkit-float-close]');
+  if(await floating.count()) {const owner=floating.locator('xpath=ancestor::*[@data-dockkit-content]');const id=await owner.getAttribute('data-dockkit-content');const closing=dock.locator(`[data-dockkit-content="${id}"]`);await closing.locator('[data-dockkit-float-close]').click();await closing.waitFor({state:'detached'});return;}
+  const active=dock.locator('[data-dockkit-pane-active=true] [data-dockkit-tab][aria-selected=true]:visible');
+  const tab=await active.count()?active:dock.locator('[data-dockkit-tab][aria-selected=true]:visible').last();
+  const id=await tab.getAttribute('data-dockkit-tab');
+  const closing=dock.locator(`[data-dockkit-tab="${id}"]`);
+  await closing.locator('[data-dockkit-tab-close]').click();
+  await closing.waitFor({state:'detached'});
 }
 export async function openResource(page,name) {
   await resources(page);

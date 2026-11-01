@@ -3,6 +3,8 @@ use rsi_sandbox::{
     ConfinedProcess, EnforcementStamp, ProcessStdio, SandboxBackend, SandboxFileSystem,
     SandboxMode, SandboxNetwork, SandboxScratch,
 };
+static POWERSHELL_FIXTURE: tokio::sync::Mutex<()> = tokio::sync::Mutex::const_new(());
+
 fn spec(path: &std::path::Path) -> PtyProcessSpec {
     let root = std::env::var_os("SystemRoot").unwrap();
     PtyProcessSpec {
@@ -115,6 +117,7 @@ fn literal(path: &std::path::Path) -> String {
     format!("'{}'", path.to_str().unwrap().replace('\'', "''"))
 }
 async fn native_key_events(input: &str) {
+    let _fixture = POWERSHELL_FIXTURE.lock().await;
     let directory = tempfile::tempdir().unwrap();
     let service = Service::new(crate::ProcessLocalConfig::default());
     let mut plan = spec(directory.path());
@@ -142,6 +145,7 @@ async fn native_key_events(input: &str) {
 }
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn conpty_interactive_unicode_resize_and_exit_preserve_exact_plan() {
+    let _fixture = POWERSHELL_FIXTURE.lock().await;
     let directory = tempfile::tempdir().unwrap();
     let workspace = directory.path().join("space 工作区");
     std::fs::create_dir(&workspace).unwrap();
@@ -196,6 +200,7 @@ async fn conpty_interactive_unicode_resize_and_exit_preserve_exact_plan() {
 }
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn conpty_ctrl_c_interrupts_foreground_command_without_terminating_shell() {
+    let _fixture = POWERSHELL_FIXTURE.lock().await;
     let directory = tempfile::tempdir().unwrap();
     let service = Service::new(crate::ProcessLocalConfig::default());
     let pty = service.spawn_pty(spec(directory.path())).await.unwrap();
@@ -218,6 +223,7 @@ async fn conpty_ctrl_c_interrupts_foreground_command_without_terminating_shell()
 }
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn conpty_retirement_kills_descendants_with_backpressure_and_cancelled_waiter() {
+    let _fixture = POWERSHELL_FIXTURE.lock().await;
     let directory = tempfile::tempdir().unwrap();
     let service = Service::new(crate::ProcessLocalConfig {
         maximum_active_processes: 1,
@@ -257,6 +263,7 @@ async fn conpty_retirement_kills_descendants_with_backpressure_and_cancelled_wai
 }
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn conpty_spawn_failure_and_final_owner_drop_release_admission() {
+    let _fixture = POWERSHELL_FIXTURE.lock().await;
     let directory = tempfile::tempdir().unwrap();
     let service = Service::new(crate::ProcessLocalConfig {
         maximum_active_processes: 1,

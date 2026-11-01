@@ -86,6 +86,7 @@ pub(super) async fn run(
     terminate: &mut std::pin::Pin<Box<impl std::future::Future<Output = ()>>>,
     catalog: &dyn rsi_ai_protocol::LanguageModels,
     markdown: &mut bool,
+    copy: impl Fn(String) -> futures_util::future::BoxFuture<'static, clipboard::Delivery>,
 ) -> Result<Option<(Attachment, editor::Editor)>> {
     let initial = tokio::select! { biased;
         () = stop.cancelled() => return Ok(None),
@@ -252,7 +253,7 @@ pub(super) async fn run(
                         if control && key.code == KeyCode::Char('c') { break Ok(None); }
                         if menu.is_none() && slash.key(key, &mut editor) {continue;}
                         if control && key.code == KeyCode::Char('y') && let Some((_,Some(id)))=menu.as_ref().and_then(|menu|menu.items.get(selected)) {
-                            if copying.is_none() { copying = Some(Box::pin(clipboard::copy(id.to_string()))); status = "Copying session ID…".into(); }
+                            if copying.is_none() { copying = Some(copy(id.to_string())); status = "Copying session ID…".into(); }
                             continue;
                         }
                         if key.code == KeyCode::Escape { menu = None; super::automation::Pending::dismiss(&mut automation_work); continue; }
@@ -337,6 +338,7 @@ mod tests {
     struct CreateFailure {
         error: SessionError,
         creates: AtomicUsize,
+        allow_history: bool,
     }
     #[async_trait::async_trait]
     impl SessionService for CreateFailure {
@@ -364,7 +366,17 @@ mod tests {
             _: Option<&rsi_session_protocol::RecentSessionCursor>,
             _: usize,
         ) -> rsi_session_protocol::Result<rsi_session_protocol::RecentSessionPage> {
-            unreachable!()
+            assert!(self.allow_history, "startup must not read recent history");
+            Ok(rsi_session_protocol::RecentSessionPage {
+                sessions: vec![rsi_session_protocol::SessionSummary {
+                    header: crate::tests::UnknownThenAcceptedHandle::default()
+                        .header()
+                        .await
+                        .unwrap(),
+                }],
+                has_more: false,
+                next: None,
+            })
         }
     }
     #[derive(Debug)]
@@ -426,6 +438,130 @@ mod tests {
         }
     }
     #[tokio::test]
+    async fn pending_clipboard_keeps_home_input_live_and_is_cancelled_on_exit() {
+        let runtime = rsi_meta::Runtime::default();
+        let context = runtime.root();
+        let directory = tempfile::tempdir().unwrap();
+        let application: Arc<dyn SessionService> = Arc::new(CreateFailure {
+            error: SessionError::SetupRequired,
+            creates: AtomicUsize::new(0),
+            allow_history: true,
+        });
+        let workspace: Arc<dyn rsi_workspace_protocol::WorkspaceRegistry> = Arc::new(Workspace);
+        let catalog = Arc::new(Catalog {
+            total: 0,
+            fail: false,
+            calls: AtomicUsize::new(0),
+        });
+        let mut setup = setup::Ui::new(None, catalog.clone());
+        let mut external = external::Ui::new(&context);
+        let mut profiles = profiles::Ui::new(&context);
+        let mut presentation = crate::presentation::Owner::start(&context, None)
+            .await
+            .unwrap();
+        let (frames, mut received) = tokio::sync::watch::channel(None);
+        let (presented, acknowledged) = tokio::sync::watch::channel(None);
+        let (commands, _command_output) = mpsc::channel(2);
+        let mut terminal = terminal::Terminal::test_sink(frames, acknowledged, commands);
+        let (send, mut input) = mpsc::channel(32);
+        let stop = tokio_util::sync::CancellationToken::new();
+        let dropped = tokio_util::sync::CancellationToken::new();
+        let entered = Arc::new(tokio::sync::Semaphore::new(0));
+        let copy = |text: String| -> futures_util::future::BoxFuture<'static, clipboard::Delivery> {
+            let entered = entered.clone();
+            let dropped = dropped.clone();
+            Box::pin(async move {
+                assert_eq!(text, "session-reconcile");
+                let _drop = dropped.drop_guard();
+                entered.add_permits(1);
+                std::future::pending().await
+            })
+        };
+        let mut terminate = Box::pin(std::future::pending());
+        let mut markdown = true;
+        let run = run(
+            &context,
+            &application,
+            &workspace,
+            SessionSelection::Fresh {
+                cwd: directory.path().to_path_buf(),
+                session_id: None,
+                agent_preset_id: None,
+            },
+            &mut setup,
+            &mut external,
+            &mut profiles,
+            &mut terminal,
+            &mut presentation,
+            &mut input,
+            &stop,
+            &mut terminate,
+            catalog.as_ref(),
+            &mut markdown,
+            copy,
+        );
+        let drive = async {
+            home_frame(&mut received, &presented, "No session attached").await;
+            home_keys(&send, b"/resume\r").await;
+            home_frame(&mut received, &presented, "session-reconcile").await;
+            home_keys(&send, b"\x19").await;
+            entered.acquire().await.unwrap().forget();
+            home_keys(&send, b"\x1b").await;
+            home_keys(&send, b"/help\r").await;
+            home_frame(&mut received, &presented, "RSIversi · Help").await;
+            assert!(
+                !dropped.is_cancelled(),
+                "Help must render while copy is pending"
+            );
+            stop.cancel();
+        };
+        let (outcome, ()) =
+            tokio::time::timeout(Duration::from_secs(10), async { tokio::join!(run, drive) })
+                .await
+                .expect("home input stalled behind clipboard work");
+        assert!(outcome.unwrap().is_none());
+        assert!(dropped.is_cancelled());
+        external.shutdown().await;
+        profiles.shutdown().await;
+        presentation.close().await.unwrap();
+        assert!(runtime.shutdown().await.is_clean());
+    }
+
+    async fn home_keys(send: &mpsc::Sender<input::Input>, bytes: &[u8]) {
+        let mut framer = input::Framer::default();
+        for &byte in bytes {
+            if let Some(event) = framer.advance(byte) {
+                send.send(event).await.unwrap();
+            }
+        }
+        if let Some(event) = framer.flush_escape() {
+            send.send(event).await.unwrap();
+        }
+    }
+
+    async fn home_frame(
+        frames: &mut tokio::sync::watch::Receiver<Option<Arc<terminal::RenderedFrame>>>,
+        presented: &tokio::sync::watch::Sender<Option<Arc<terminal::RenderedFrame>>>,
+        text: &str,
+    ) {
+        loop {
+            if let Some(frame) = frames.borrow_and_update().clone() {
+                presented.send_replace(Some(frame.clone()));
+                let output = frame
+                    .buffer
+                    .content
+                    .iter()
+                    .map(ratatui::buffer::Cell::symbol)
+                    .collect::<String>();
+                if output.contains(text) {
+                    return;
+                }
+            }
+            frames.changed().await.unwrap();
+        }
+    }
+
+    #[tokio::test]
     async fn setup_removed_between_catalog_check_and_create_returns_home_only_for_fresh_sessions() {
         let runtime = rsi_meta::Runtime::default();
         let context = runtime.root();
@@ -458,6 +594,7 @@ mod tests {
             let domain = Arc::new(CreateFailure {
                 error: error.clone(),
                 creates: AtomicUsize::new(0),
+                allow_history: false,
             });
             let application: Arc<dyn SessionService> = domain.clone();
             let catalog = Catalog {

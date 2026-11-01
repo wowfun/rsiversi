@@ -56,7 +56,8 @@ def verify(script, button, until, screenshot, call, root, report):
             button('Close settings');button('Toggle resources')
             evidence.append({'theme':theme,**geometry,'settings':settings})
     call('POST',root+'/window/rect',{'width':1440,'height':980})
-    until(lambda: script(r'return innerWidth===1440'))
+    until(lambda: script(r'return innerWidth===1440&&innerHeight===980'))
+    wait_terminal_fit(script, until)
     sizes=script(r'return window.fixtureTerminalCommands.filter(e=>e.type==="resize").map(e=>e.size)')
     assert sizes and all(isinstance(s['rows'],int) and 1<=s['rows']<=200 and isinstance(s['columns'],int) and 1<=s['columns']<=500 for s in sizes),sizes
     (report/'workbench-geometry.json').write_text(json.dumps(evidence,indent=2))

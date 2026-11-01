@@ -411,7 +411,7 @@ try:
         assert 'bash' in transcript
         (args.report / 'transcript.txt').write_text(transcript)
     else: assert requests and requests[-1]['model'] == 'fixture-model', requests
-    if args.ui_alignment: verify_alignment(script,button,fill,until,screenshot,call,root,args.report,workspace)
+    if args.ui_alignment: verify_alignment(script,button,fill,until,screenshot,call,root,args.report,workspace,painted)
     if args.queue: verify_queue(script, button, fill, until, screenshot, args.report, requests)
     if args.presentation: verify_presentation(script, button, fill, until, screenshot, args.report, args.system_theme)
     if args.automation_fixture: verify_automation(script, button, click, until, screenshot, args.report, args.automation_grant_probe, env)
@@ -467,13 +467,16 @@ try:
         assert (workspace / 'native-pty-result.txt').read_bytes() == b'native-pty-ok'
         (args.report / 'terminal-pressure.json').write_text(json.dumps({'readPressure':pressure,'asset':assets,'exactBytes':'native-pty-ok'}, indent=2))
         verify_writes(script, button, terminal_keys, until, workspace, args.report)
-        screenshot('terminal-writer.png')
         if args.dock: verify_dock(script, button, until, screenshot, call, root, eid, args.report)
+        reattach_marker = 'Native PTY after layout 界'
+        terminal_keys("printf 'Native PTY after layout %s\\n' '界'")
+        until(lambda: script('return document.querySelector(".xterm-rows")?.textContent.includes(arguments[0])', [reattach_marker]))
+        screenshot('terminal-writer.png')
         button('Hide terminal panel')
         until(lambda: script('return document.adoptedStyleSheets.length') == styles_before)
         button('Terminal'); button('Terminal 1 · running')
         until(lambda: script('return document.querySelector(".terminal-authority")?.textContent==="Read only"'))
-        until(lambda: script('return document.querySelector(".xterm-rows")?.textContent.includes("Native PTY 界")'))
+        until(lambda: script('return document.querySelector(".xterm-rows")?.textContent.includes(arguments[0])', [reattach_marker]))
         screenshot('terminal-readonly.png'); button('Take control')
         until(lambda: script('return document.querySelector(".terminal-authority")?.textContent==="You have control"'))
         terminal_keys('exit 7')

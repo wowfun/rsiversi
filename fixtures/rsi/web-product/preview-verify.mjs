@@ -3,7 +3,7 @@ import {workspaceForm} from './controls.mjs';
 import {paired} from './paired-env.mjs';
 import assert from 'node:assert/strict';
 import {mkdir,writeFile} from 'node:fs/promises';
-import {join} from 'node:path';
+import {basename,join} from 'node:path';
 import {chromium,firefox} from 'playwright';
 import {startService} from './service.mjs';
 import {verifyFilePreviews} from './file-previews.mjs';
@@ -22,7 +22,8 @@ for(const[name,engine]of[['chromium',chromium],['firefox',firefox]]){
    URL.revokeObjectURL=url=>{window.previewUrls.delete(url);revoke(url);};
   });page=await context.newPage();page.setDefaultTimeout(30000);page.on('pageerror',error=>errors.push(error.message));
   await page.goto(service.origin);await page.locator('#receipt').fill(JSON.stringify(service.register(`${name} preview verification`)));await page.getByRole('button',{name:'Connect',exact:true}).click();await page.locator('#workbench').waitFor({state:'visible'});
-  await workspaceForm(page);await page.getByLabel('Directory path').fill(service.workspace);await page.locator('.directory-picker footer').getByRole('button',{name:'Open',exact:true}).click();await page.locator('#workspaces [data-testid=workspace-open]').first().click();
+  await workspaceForm(page);await page.getByLabel('Directory path').fill(service.workspace);await page.locator('.directory-picker footer').getByRole('button',{name:'Open',exact:true}).click();await page.getByRole('button',{name:`New conversation in ${basename(service.workspace)}`,exact:true}).click();
+  await page.locator('[aria-label="Main conversation"] .pane-session').filter({hasText:service.workspace}).waitFor({state:'attached'});
   const agents=await verifyMarkdownAgents(page,service,directory,name,providerBodies);
   const evidence=await verifyFilePreviews(page,service,directory,name);
   await disconnect(page);await page.locator('#login').waitFor({state:'visible'});assert.deepEqual(errors,[]);await writeFile(join(directory,'result.json'),JSON.stringify({status:'passed',browser:browser.version(),agents,...evidence},null,2));

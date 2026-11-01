@@ -135,6 +135,34 @@ class InputControlTest(unittest.TestCase):
         script.assert_called_once()
         keys.assert_not_called()
 
+    def test_stale_send_target_is_reacquired_before_any_keys_are_dispatched(self):
+        for rejected in ['clear', 'type']:
+            with self.subTest(rejected=rejected):
+                value, attempts, delivered = 'before', [], []
+                stale = RuntimeError({'value': {'error': 'stale element reference'}})
+                item = {'element-6066': 'current'}
+                def script(source, arguments):
+                    if source == FOCUS_INPUT:
+                        return value if arguments[-1] == 'value' else item
+                    return {'value': value, 'events': 0}
+                def keys(_item, text):
+                    nonlocal value
+                    kind = 'clear' if text.startswith('\ue009') else 'type'
+                    attempts.append(kind)
+                    if kind == rejected and attempts.count(kind) == 1:
+                        raise stale
+                    delivered.append(kind)
+                    value = '' if kind == 'clear' else text
+                def until(read):
+                    for _ in range(5):
+                        result = read()
+                        if result:
+                            return result
+                    raise TimeoutError('input unavailable')
+                fill(script, keys, until, 'input', 'replacement')
+                self.assertEqual(delivered, ['clear', 'type'])
+                self.assertEqual(value, 'replacement')
+
 
 if __name__ == '__main__':
     unittest.main()

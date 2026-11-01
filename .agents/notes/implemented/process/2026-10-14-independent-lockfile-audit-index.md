@@ -13,7 +13,9 @@ for those additional crates and fails with missing registry-index entries.
 CI audits every tracked Cargo lockfile with registry fetching enabled and collects
 all failures. Each audit may refresh advisory evidence as well. The workflow owns
 the command sequence; its isolated script tests cover tracked-file selection,
-paths with spaces and failure aggregation.
+paths with spaces and failure aggregation. Git enumeration participates in the
+auditing pipeline's exit status, so a partial or failed listing cannot silently
+turn missing standalone graphs into a successful audit.
 
 ## Alternatives considered
 

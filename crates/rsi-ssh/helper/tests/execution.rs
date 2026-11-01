@@ -469,49 +469,6 @@ async fn saturated_lossless_output_does_not_block_termination_ack_or_native_reap
 }
 
 #[tokio::test]
-async fn a_prepared_reply_abandoned_in_its_publication_queue_releases_the_target_plan() {
-    let fixture = Fixture::new(false).await;
-    let request = fixture.preparation("cat", None, false).await;
-    let mut held = Vec::new();
-    for _ in 0..19 {
-        held.push(fixture.client.prepare(request.clone()).await.unwrap());
-    }
-    let mut unpublished = Box::pin(fixture.client.prepare(request.clone()));
-    std::future::poll_fn(|cx| {
-        assert!(unpublished.as_mut().poll(cx).is_pending());
-        std::task::Poll::Ready(())
-    })
-    .await;
-    // A capacity rejection proves the twentieth preparation was admitted. Its
-    // caller has never polled again to consume the retained publication result.
-    bounded(async {
-        loop {
-            match fixture.client.prepare(request.clone()).await {
-                Err(ProcessError::Capacity) => break,
-                Ok(extra) => drop(extra),
-                Err(error) => panic!("unexpected preparation failure: {error:?}"),
-            }
-            tokio::task::yield_now().await;
-        }
-    })
-    .await;
-    drop(unpublished);
-    let replacement = bounded(async {
-        loop {
-            match fixture.client.prepare(request.clone()).await {
-                Ok(plan) => break plan,
-                Err(ProcessError::Capacity) => tokio::task::yield_now().await,
-                Err(error) => panic!("unexpected replacement failure: {error:?}"),
-            }
-        }
-    })
-    .await;
-    drop(replacement);
-    drop(held);
-    fixture.close().await;
-}
-
-#[tokio::test]
 async fn target_files_preserve_exact_bytes_names_versions_and_opaque_caller_bindings() {
     use rsi_files_protocol::{FileKind, Files, FilesCaller, FilesError, RelativePath};
     use std::os::unix::{ffi::OsStringExt, fs::PermissionsExt};

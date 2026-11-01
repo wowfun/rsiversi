@@ -1,5 +1,5 @@
 import {disconnect} from './controls.mjs';
-import {workspaceForm,navigationOptions,openSettings,saveSettings} from './controls.mjs';
+import {workspaceForm,navigationOptions,openSettings,saveSettings,openConversation} from './controls.mjs';
 import {closeDetails,details,openResource,resources,sourceInspectionGeometry} from "./controls.mjs";
 import {detailMode,navigationFilter,selectSurface,sessionTools} from './controls.mjs';
 import {recordNavigationEvidence} from './navigation-evidence.mjs';
@@ -236,9 +236,9 @@ try {
       await left.getByRole("textbox", { name: "Main message" }).fill("Keep this draft while switching");
       const leftIdentity = await left.locator(".pane-session").textContent();
       await navigationFilter(page,"all");await navigationOptions(page);await page.locator("#refresh").click();
-      await page.locator(`[data-testid="conversation-row"][data-session-id="${(await right.getAttribute('data-session-id'))}"]`).getByTestId("conversation-open").click();
+      await openConversation(page,left,await right.getAttribute('data-session-id'));
       await left.locator(".pane-session").filter({ hasText: (await right.getAttribute('data-session-id')) }).waitFor({state:"attached"});
-      await page.locator(`[data-testid="conversation-row"][data-session-id="${leftIdentity.split(" · ").at(-1)}"]`).getByTestId("conversation-open").click();
+      await openConversation(page,left,leftIdentity.split(" · ").at(-1));
       await left.locator(".pane-session").filter({ hasText: leftIdentity.split(" · ").at(-1) }).waitFor({state:"attached"});
       await left.getByRole("textbox", { name: "Main message" }).click({ trial: true });
       assert.equal(await left.getByRole("textbox", { name: "Main message" }).inputValue(), "Keep this draft while switching");
@@ -250,7 +250,7 @@ try {
       await left.getByTestId("composer-send").click();
       await left.locator(".pane-status").filter({ hasText: "Completed" }).waitFor({state:'attached'});
       await navigationFilter(page,"all");await navigationOptions(page);await page.locator("#refresh").click();
-      await page.locator(`[data-testid="conversation-row"][data-session-id="${leftIdentity.split(" · ").at(-1)}"]`).getByTestId("conversation-open").click();
+      await openConversation(page,left,leftIdentity.split(" · ").at(-1));
       await left.locator(".message.assistant").filter({hasText:"Stream complete."}).waitFor();
       assert.match(await left.locator(".transcript").innerText(), /\bsegment 0\b/);
       await left.locator(".transcript").evaluate(node => { node.scrollTop = 0; });

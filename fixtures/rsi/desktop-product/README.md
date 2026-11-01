@@ -31,9 +31,10 @@ completed run and a rendered result button can still coexist with a pending
 detail read, which temporarily disables the control.
 Input readiness includes enabled ancestors, visibility, an unobstructed hit point
 and actual focus before any native keystroke. A readiness timeout dispatches none.
-If WebDriver rejects a handle as stale while resolving focus or reading the
-pre-input state, readiness reacquires the current input before dispatch. Other
-errors propagate, and an error from native keystrokes never triggers a replay.
+If WebDriver rejects a handle as stale while resolving focus, reading the
+pre-input state or resolving a Send Keys target, readiness reacquires the current
+input before dispatch. The WebDriver stale-element category establishes that
+target resolution failed before key dispatch; other input errors never replay.
 Directory selection waits for a completed listing or the known-path form; the
 initial empty, non-busy render does not establish browsing readiness.
 The ordinary conversation run also records the composer's native focus state,
@@ -62,6 +63,9 @@ closed document view; native click delivery alone does not settle a Rust command
 Appearance checks use General settings and wait for the current read ticket and
 enabled fields before editing. Saving waits for its replacement ticket; React may
 retain the same field nodes across reads.
+Viewport alignment waits for the requested inner width and the shared paint
+barrier before issuing a native click. Settings closure is observed before
+composer geometry is read; a missing command palette fails without replay.
 Profile receipt recovery waits for the requested root catalog before opening its
 disclosure, then confirms it is open before selecting a receipt; the old leaf
 catalog can remain visible while the asynchronous read changes the layout.
@@ -74,6 +78,9 @@ Native export invokes the bounded Tauri bridge with real Worker export events.
 Artifact hashes identify the core, Desktop and Web metadata used by each run.
 PTY side-effect checks wait for the exact bounded file bytes; file creation can
 precede the shell's append. Extra or duplicated bytes never satisfy readiness.
+Terminal reattachment checks a fresh visible marker written after geometry settles,
+then verifies the [PTY viewport snapshot](../../../crates/rsi-pty/core/README.md)
+after reopening.
 Each
 rejection checks its exact source-defined category and message.
 The native window also reads and refreshes Plugins status, reads the separate
@@ -107,6 +114,8 @@ real Worker admission flags and exact OS terminal bytes; responses are never
 mocked. Write pressure holds four real PTYs at OS read barriers, filling the API
 client's Data calls. A UI input under that pressure must remain unconfirmed and
 must not replay after capacity returns; explicit takeover and new typing recover.
+Typing after takeover waits for the completed action and cleared input-failure
+notice; native click delivery alone does not establish writer readiness.
 The `rsi` used by the fixture lives beside its Desktop executable.
 By default the fixture does not access real user settings or credentials.
 An explicit `--live-env-file /authorized/file --live-model model-id` enables
@@ -251,6 +260,9 @@ additional model requests. It requires libXtst and does not automate host dialog
 `--plan-review` adds an actual native WebKit closed-plan review using a
 deterministic provider. It checks literal plan text, three choices, native
 feedback input and that the next model request observes the committed mode exit.
+After committing the plan-mode command, it waits for the Main message composer
+to clear before typing the next prompt; the hidden device-receipt field cannot
+establish composer readiness.
 The screenshots and requests are native Desktop evidence, separate from live
 model or browser-only checks.
 

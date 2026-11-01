@@ -101,21 +101,21 @@
       "path": "dockkit/components/DockSurface.tsx",
       "source": "packages/client/ui-dockkit/src/components/DockSurface.tsx",
       "source_sha256": "83f35ffe1c2297725f15eeb3f272605f343fd79abda19fdcf502ef41a637ebca",
-      "adapted_sha256": "4fb2f9aea46a88bd746248a7f1c0e28f9bcfcb3e0b562c97f20cd2341d36f3a4",
+      "adapted_sha256": "34202914f85763df9fbde90ef66e91df7f749ec48f1375f95999f77d95df199b",
       "revision": "22ddee3792402c3e70ec5f86a63c3e3e895a2f60"
     },
     {
       "path": "dockkit/components/FloatLayer.tsx",
       "source": "packages/client/ui-dockkit/src/components/FloatLayer.tsx",
       "source_sha256": "1665e8163b0b0f13397f2f8bc6dc07c59d2e285fce63177d127d10f9406b79ec",
-      "adapted_sha256": "a4a7154b5af521003e7f69f7a34b0d2ac8a7d50ba700b8735414996e6c80d063",
+      "adapted_sha256": "ab4281ef99275cf2bd0b3518d353e1c7e47b785d376e995115ae9377ea551185",
       "revision": "22ddee3792402c3e70ec5f86a63c3e3e895a2f60"
     },
     {
       "path": "dockkit/components/PaneTree.tsx",
       "source": "packages/client/ui-dockkit/src/components/PaneTree.tsx",
       "source_sha256": "b3504195fc149c86447e9c66da43bf0eea290d05c0dda25932e0d98495ce42b6",
-      "adapted_sha256": "0e053943ea37a4d484a5451ee900fe014f023e33506090a43eab27cd8f91e7f4",
+      "adapted_sha256": "c18c76ec58952e80261769311fa97925489e346c1313e889646502782262c184",
       "revision": "22ddee3792402c3e70ec5f86a63c3e3e895a2f60"
     },
     {
@@ -150,7 +150,7 @@
       "path": "dockkit/components/dockkit.module.css",
       "source": "packages/client/ui-dockkit/src/components/dockkit.module.css",
       "source_sha256": "9f6c40fef185aa0bb64862b3b27fe7f24259a81ac3e8715e5dd9d24fd0fe4225",
-      "adapted_sha256": "85878a40496426bbc514ddb0747f1afe000ab6fc54ee66298edd2d794cc148ea",
+      "adapted_sha256": "0d2b23f6eb23ce47b8797cb68e8debe26c4827217f85b80c6940b2dbcfb4158c",
       "revision": "22ddee3792402c3e70ec5f86a63c3e3e895a2f60"
     },
     {

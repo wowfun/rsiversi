@@ -27,6 +27,9 @@ child paused between fork and exec cannot extend the parent's ownership through
 an inherited close-on-exec descriptor.
 The local-stream API compiles on Unix and Windows; resident product daemon
 admission remains restricted to Linux and Windows.
+The daemon supervisor mirrors accepted Profile revisions into owner metadata
+asynchronously. A reload reply reports convergence; it does not acknowledge that
+diagnostic metadata write.
 
 Windows ownership creates a TokenUser-owned protected private directory
 through Native Files, opens its owner lock without following reparse points, and

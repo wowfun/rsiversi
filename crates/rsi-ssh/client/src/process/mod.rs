@@ -461,14 +461,21 @@ fn transport_error(error: rsi_ssh_transport::Error) -> ProcessError {
         rsi_ssh_transport::Error::Invalid => invalid(),
     }
 }
-async fn retained<T: Send + 'static>(
+fn retained_reply<T: Send + 'static>(
     future: impl std::future::Future<Output = Result<T>> + Send + 'static,
-) -> Result<T> {
+) -> tokio::sync::oneshot::Receiver<Result<T>> {
     let (send, receive) = tokio::sync::oneshot::channel();
     tokio::spawn(async move {
         let result = future.await;
         // A queued but never consumed result still owns T and invokes its Drop cleanup.
         let _ = send.send(result);
     });
-    receive.await.map_err(|_| ProcessError::OutcomeUnknown)?
+    receive
+}
+async fn retained<T: Send + 'static>(
+    future: impl std::future::Future<Output = Result<T>> + Send + 'static,
+) -> Result<T> {
+    retained_reply(future)
+        .await
+        .map_err(|_| ProcessError::OutcomeUnknown)?
 }

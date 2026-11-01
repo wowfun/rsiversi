@@ -1,5 +1,9 @@
 # rsi-cli
 
+Headless JSONL stdout contains only its machine records. An embedded Service can
+write the Executor's [checkpoint diagnostics](../../crates/rsi-agent/executor/README.md)
+to stderr; resident Service diagnostics remain in its owner log.
+
 Top-level help groups Usage, Applications, Commands, Global options and Examples.
 Each public entry has one summary; application owners maintain detailed help.
 Nested management help is recognized before home maintenance or path-value
@@ -77,6 +81,9 @@ Provider entry establishes execution readiness; the cancellation-output
 test also waits for the complete JSONL Turn record. These bounded waits retain
 captured output on failure and reap the child. The
 [terminal contract](../terminal/README.md) owns interruption and output deadlines.
+Workspace-review PTY acceptance observes Pending while the provider is held,
+then waits for the interval's completed-state field before opening files.
+Explanatory prose can mention completion while capture remains pending.
 
 Debug and release use the same launch parser, final home selection and resident
 Host path. `--watch` adds connection-owned configuration/source leases; Vite and
@@ -100,6 +107,9 @@ and `root`; compact additionally reports `before_bytes` and `after_bytes`.
 The `core_upgrade` integration target also requires a prebuilt `rsi-uninstall`
 (next to the test product binary or selected with `RSI_TEST_UNINSTALLER`). Windows
 Host tests run their compiled test executable outside the Cargo Job.
+Interrupted-upgrade fixtures construct a reachable transaction phase under the
+installation owner's coordinator contract: retain prior Host activity, verify
+its exit before promotion, then release setup leases before invoking CLI recovery.
 
 Core upgrade and recovery emit one JSON receipt on stdout; Host progress goes to
 stderr. `host stop` reports stale metadata without claiming it stopped a dead PID,

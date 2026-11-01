@@ -194,9 +194,8 @@ fn reload_executor_and_keep_listener(
         "executor reload replaced an independent listener"
     );
     fixture.assert_success(&["host", "status"]);
-    let mut current: serde_json::Value =
-        serde_json::from_slice(&std::fs::read(metadata_path).unwrap()).unwrap();
     let mut previous: serde_json::Value = serde_json::from_slice(&owner).unwrap();
+    let mut current = await_service_revision(&metadata_path, &previous);
     assert_ne!(
         current.as_object_mut().unwrap().remove("service_revision"),
         previous.as_object_mut().unwrap().remove("service_revision"),
@@ -206,6 +205,25 @@ fn reload_executor_and_keep_listener(
         current, previous,
         "reload changed process or endpoint identity"
     );
+}
+
+fn await_service_revision(
+    path: &std::path::Path,
+    previous: &serde_json::Value,
+) -> serde_json::Value {
+    let deadline = std::time::Instant::now() + std::time::Duration::from_secs(5);
+    loop {
+        let current: serde_json::Value =
+            serde_json::from_slice(&std::fs::read(path).unwrap()).unwrap();
+        if current["service_revision"] != previous["service_revision"] {
+            return current;
+        }
+        assert!(
+            std::time::Instant::now() < deadline,
+            "reload metadata was not published"
+        );
+        std::thread::sleep(std::time::Duration::from_millis(10));
+    }
 }
 
 async fn request(

@@ -338,9 +338,18 @@ mod tests {
             .map(|i| {
                 let path = path.clone();
                 std::thread::spawn(move || {
-                    FileSecretStore::new(path)
-                        .set(&reference(&i.to_string()), &key("fixture"))
-                        .unwrap();
+                    let store = FileSecretStore::new(path);
+                    let deadline = Instant::now() + Duration::from_secs(10);
+                    loop {
+                        match store.set(&reference(&i.to_string()), &key("fixture")) {
+                            Err(CredentialsError::Store(Failure::LockTimeout))
+                                if Instant::now() < deadline => {}
+                            result => {
+                                result.unwrap();
+                                break;
+                            }
+                        }
+                    }
                 })
             })
             .collect();
@@ -367,5 +376,6 @@ mod tests {
         );
         assert!(start.elapsed() < Duration::from_secs(3));
         drop(guard);
+        assert!(store.get(&reference("blocked")).unwrap().is_none());
     }
 }

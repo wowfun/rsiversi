@@ -6,6 +6,8 @@ unmodified dockkit and primitive source from DeepSeek Harness revision
 `22ddee3792402c3e70ec5f86a63c3e3e895a2f60`; the other imports RSI's vendored closure
 and current document styles. The reference is not a screenshot of RSI itself.
 Both use a fixed Linux DPR 1 canvas and identical content, with no masked pixels.
+The shared scene supplies the complete adapted Dock label contract, including
+floating position and size descriptions; unmodified upstream ignores extra labels.
 The fixture records computed component tokens and geometry, then rejects more
 than 1% differing pixels at per-channel threshold 16. The source checkout is an explicit prerequisite (`RSI_DSH_REFERENCE`, default
 `.references/rsi/deepseek-harness`); CI checks out the exact revision and runs both

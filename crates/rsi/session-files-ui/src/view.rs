@@ -220,12 +220,23 @@ pub(crate) fn directory(revision: u64, file: &OpenedFile, page: DirectoryPage) -
     view
 }
 pub(crate) fn decode(hex: &str) -> Vec<u8> {
-    hex::decode(hex).expect("validated Session Files page hexadecimal")
+    let mut bytes = vec![0; hex.len() / 2];
+    hex::decode_to_slice(hex, &mut bytes).expect("validated Session Files page hexadecimal");
+    bytes
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+    #[test]
+    fn decoded_source_windows_fit_their_retained_allocation_reservation() {
+        for length in [0, 1, 7, 9, 459, 65535, 65536] {
+            let bytes = decode(&"ab".repeat(length));
+            assert_eq!(bytes, vec![0xab; length]);
+            assert_eq!(bytes.capacity(), length, "source window {length}");
+        }
+    }
+
     #[test]
     fn full_path_and_raw_byte_pages_fit_the_shared_view_and_action_limits() {
         let mut bytes = vec![1; rsi_files_protocol::MAXIMUM_FILE_PATH_BYTES];

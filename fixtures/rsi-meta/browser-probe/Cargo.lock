@@ -357,8 +357,6 @@ dependencies = [
  "hex",
  "rsi-meta",
  "rsi-meta-profile",
- "serde",
- "serde_json",
  "sha2",
  "thiserror",
  "tokio",

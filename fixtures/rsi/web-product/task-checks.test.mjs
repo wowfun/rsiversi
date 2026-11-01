@@ -2,13 +2,58 @@ import assert from "node:assert/strict";
 import { test } from "node:test";
 import { chromium, firefox } from "playwright";
 import { browserNames, assertControls, assertNoNotices, recordTaskFailure } from "./task-checks.mjs";
-import { clickUiControl, resourceSelector, sourceInspectionGeometry } from './controls.mjs';
+import { clickUiControl, closeDetails, openConversation, resourceSelector, sourceInspectionGeometry } from './controls.mjs';
 import { recordNavigationEvidence } from './navigation-evidence.mjs';
 import { mkdtemp, readFile, rm } from "node:fs/promises";
 import { join } from "node:path";
 import { tmpdir } from "node:os";
 
 for (const [name, engine] of [["chromium", chromium], ["firefox", firefox]]) {
+  test(`${name}: reopening the same conversation requires a newly published generation`, async()=>{
+    const browser=await engine.launch({headless:true});
+    try {
+      const page=await browser.newPage();
+      const scene=async publish=>{
+        await page.setContent('<div data-testid="conversation-row" data-session-id="same"><button data-testid="conversation-open">Open</button></div><section class="pane" aria-label="Main conversation" data-session-id="same" data-session-generation="1"><p>Unchanged transcript</p><textarea aria-label="Main message"></textarea></section>');
+        await page.evaluate(publish=>{
+          window.opens=0;document.querySelector('button').onclick=()=>{
+            window.opens++;
+            if(publish)queueMicrotask(()=>document.querySelector('.pane').dataset.sessionGeneration='2');
+          };
+        },publish);
+      };
+      await scene(false);
+      await assert.rejects(openConversation(page,page.locator('.pane'),'same',{timeout:150}),/Timeout/);
+      assert.equal(await page.evaluate(()=>window.opens),1);
+      await scene(true);
+      await openConversation(page,page.locator('.pane'),'same');
+      assert.equal(await page.evaluate(()=>window.opens),1);
+      assert.equal(await page.locator('.pane').getAttribute('data-session-generation'),'2');
+    } finally {await browser.close();}
+  });
+  test(`${name}: resource close observes its Dock identity when the renderer retains the node`, async()=>{
+    const browser=await engine.launch({headless:true});
+    try {
+      const page=await browser.newPage();page.setDefaultTimeout(2000);
+      for(const floating of [false,true]) {
+        const attribute=floating?'data-dockkit-content':'data-dockkit-tab';
+        await page.setContent(floating
+          ? '<aside class="resource-dock"><section data-dockkit-content="old" data-dockkit-float-active="true"><button data-dockkit-float-close>Close</button></section></aside>'
+          : '<aside class="resource-dock"><section data-dockkit-pane-active="true"><div data-dockkit-tab="old" aria-selected="true"><button data-dockkit-tab-close>Close</button></div></section></aside>');
+        await page.evaluate(attribute=>{
+          const inactive=document.querySelector('.resource-dock').cloneNode(true);
+          inactive.hidden=true;inactive.querySelector('button').onclick=()=>{throw new Error('inactive session dispatched');};
+          document.body.prepend(inactive);
+          window.closes=0;window.retained=document.querySelector(`.resource-dock:not([hidden]) [${attribute}="old"]`);
+          window.retained.querySelector('button').onclick=()=>{window.closes++;window.retained.setAttribute(attribute,'next');};
+        },attribute);
+        await closeDetails(page);
+        assert.equal(await page.evaluate(()=>window.closes),1);
+        assert(await page.evaluate(()=>window.retained.isConnected));
+        assert.equal(await page.locator(`[${attribute}="next"]`).count(),1);
+      }
+    } finally {await browser.close();}
+  });
   test(`${name}: source inspection reads the replacement resource without reusing a retired node`, async()=>{
     const browser=await engine.launch({headless:true});
     try {

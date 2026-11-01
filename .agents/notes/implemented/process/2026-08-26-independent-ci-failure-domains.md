@@ -20,8 +20,8 @@ number, so a manual diagnostic cannot cancel its required checks. Feature-branch
 pushes do not compete with the pull request's merge-tree verification. Document
 archive validation uses the pull request base, push predecessor, or `origin/main`
 for a manual run; an absent event field must not become an empty base reference.
-The preparation step fetches a missing exact commit (including a force-push
-predecessor) and verifies it without requiring ancestry. Only the all-zero
+The preparation step shallow-fetches a missing exact commit (including a force-push
+predecessor) and verifies it without requiring ancestry or full repository history. Only the all-zero
 first-push predecessor is empty. Documentation structure, archive notes,
 architecture, rustdoc and doctests have independent outcomes. A baseline fetch
 failure affects notes only; product lint does not suppress unrelated tests.
@@ -29,8 +29,8 @@ failure affects notes only; product lint does not suppress unrelated tests.
 CI uses independent jobs for documentation, `rsi-meta` conformance, Base
 services, `rsi-ai`, `rsi-agent`, the standard `rsi` product, repository tools,
 dependency audit, lockfile consistency, and Windows `rsi-meta`.
-An independent Windows Server job separates whole-workspace compilation from
-native product lint and behavior checks. Supported native mechanics and explicit
+An independent Windows Server job uses whole-workspace Clippy for compilation
+and lint, with separate native behavior checks. Supported native mechanics and explicit
 unsupported boundaries both require executed tests, including a built CLI's
 preservation of old data. Their independent outcomes remain required by the
 aggregate; compilation alone cannot substitute for either boundary. The
@@ -45,6 +45,19 @@ default suites. Structural selector tests reject compile-only commands, target
 selectors and trailing test-harness arguments without freezing test counts.
 Windows lint covers all workspace targets, independently of the executed package
 suites. Baseline receipts use LF on every host.
+Clippy already type-checks that same graph with `--keep-going`, so repeating it
+through `cargo check` provides no additional target coverage. Explicit Bash
+defaults propagate pipeline producer failures without per-step shell setup;
+Windows jobs override that default with PowerShell. Checkouts discard their
+credential helper before running repository code.
+Fixture-path and executable lookups assign before export, because an export
+builtin otherwise replaces the lookup's failure status with its own success.
+Documentation reuses its own Cargo cache. The audit executable has a separate
+cache keyed by its pinned version and runner, so product-lock changes do not
+force a tool rebuild. Independent Desktop modes collect failures across the
+loop and fail the step after attempting every mode; one broken surface cannot
+hide later acceptance evidence. Native input reacquires only explicitly stale
+WebDriver targets rejected before dispatch, preserving the unknown-outcome fence.
 Windows repository-tool tests have a separate required job, keeping default
 coverage and timeout headroom without shaving product-check deadlines to fit the
 hosted runner's limit.
@@ -65,10 +78,24 @@ checks. Guarded prerequisites have unique step identities checked alongside thei
 references, so a renamed ID cannot silently suppress dependent verification.
 The native cache target includes its internal publication-race tests, explicitly
 opts into native filesystem requirements, and removes the job's enlarged stack
-setting. Checkout, toolchain and cache actions have their own SSH deadlines;
+setting. Its harness cases run serially: unrelated concurrent forks can briefly
+inherit another case's writable staging descriptor and refuse exec with `ETXTBSY`.
+The case-owned concurrency remains exercised; production execution does not retry.
+Windows credential writer fixtures start a new bounded attempt only after the
+typed pre-mutation lock-admission timeout, preserving all concurrent records and
+the separate held-lock deadline assertion. Unknown mutation outcomes still fail
+immediately. Native ConPTY tests serialize their PowerShell fixture cases with
+asynchronous admission: simultaneous cold shells exhausted readiness deadlines on
+fresh Windows runners while a later-starting case succeeded. Internal cancellation
+and backpressure still run concurrently; production concurrency and readiness
+deadlines do not change. Checkout, toolchain and cache actions have their own SSH deadlines;
 the job budget covers these along with the verification steps.
 Base independently compiles and exercises UDS test-support contracts on Linux;
 its ignored timing report remains opt-in.
+Home clipboard input fairness uses a controlled pending future rather than racing
+the native helper deadline against full-frame rendering. The native PTY fixture
+still exercises timeout and cleanup; asynchronous input and actual helper lifetime
+have separate causal witnesses.
 Conformance remains the only command that enumerates the foundation test
 surface and runs on Linux, macOS, and Windows. Product lint and tests run in
 their product jobs; the Base job owns `rsi-host` and every Base service family,
@@ -100,10 +127,10 @@ compile-only or focused preflights cannot satisfy that requirement. The Linux SS
 job owns the Execution and SSH families, including the helper executable. Native
 SSH preflights restore any temporarily relaxed namespace sysctl after completion.
 
-The Linux desktop job owns native admission, paired asset and Host incompatibility
-rejection, frame-ACK failure, document-close deadlines, and the normal conversation
+The Linux desktop job owns native admission, paired asset checks, independent
+build-family compatibility, frame-ACK failure, document-close deadlines, and the normal conversation
 close/restart path. It prepares the paired distributions before running scenarios.
-The primary and incompatible-family builds have separate step budgets. Different
+The primary and independent-family builds have separate step budgets. Different
 Rust flags invalidate Cargo fingerprints, so the foreign family cannot be budgeted
 as an incremental rebuild. The job budget includes both possible cold builds;
 only the scenario that consumes the foreign family depends on its success.
@@ -111,8 +138,8 @@ Independent desktop fault scenarios require a successful shared build and run ev
 when another scenario fails; missing-ACK and close-deadline checks do not depend
 on sandbox preflight. Tool-using scenarios additionally require that preflight.
 Their phase diagnostics and bounded redacted child logs are always uploaded.
-Sandbox policy remains active
-through those scenarios and is restored by an always-running final step.
+Sandbox preflight follows the distribution builds. Policy remains active only
+through the dependent native scenarios and is restored by an always-running final step.
 The browser job also runs the shared document typecheck and ownership
 tests before product interaction.
 
@@ -122,19 +149,22 @@ Its execution budget includes cold oracle fault checks and three task deadlines.
 Desktop diagnostic unit tests run after the native scenarios, so a diagnostic
 assertion cannot suppress otherwise available WebKit evidence.
 
-The standard-product job disables incremental builds and retains line tables
-instead of full debug information for development and test artifacts. Its
-independent native development builds inherit those build-only settings. This
+Verification CI disables incremental builds and retains line tables
+instead of full debug information for development and test artifacts. Full-debug
+Base artifacts exhausted a runner's disk after cache restoration; one workflow
+profile prevents that class of storage failure across native jobs without
+duplicating per-job settings. Independent development builds inherit the same settings. This
 bounds hosted-runner disk use while preserving source locations in backtraces;
 full debugger variable inspection remains a local build choice. Capacity readings
 before evaluation distinguish resource exhaustion from oracle behavior.
 
 The browser job caches root workspace dependencies and installed Rust tools;
-dependency audit caches installed tools without a target directory. Both use
-the existing pinned Rust cache action and retain locked tool installation.
+dependency audit caches its pinned executable independently of product locks and
+caches registry data without a target directory. Tool installation stays locked.
 Standalone fixtures keep their own lockfiles and targets. Audit enumerates
-Git-tracked lockfiles, fetching advisories for the root and reusing that database
-for the remaining files. A separate read-only lockfile gate discovers workspace
+Git-tracked lockfiles, fetching registry and advisory evidence for every graph
+as required by the [independent audit decision](2026-10-14-independent-lockfile-audit-index.md).
+A separate read-only lockfile gate discovers workspace
 roots through Cargo and runs full locked metadata, aggregating stale, missing
 and orphaned lock diagnostics. Its explicit online mode fetches dependencies;
 local verification defaults to offline. This detects manifest drift that a
@@ -151,6 +181,9 @@ Acceptance uploads retain diagnostics and build identities while excluding the
 native executable copies used to freeze scenarios. The owning fixtures record
 those hashes before execution, including failure paths; desktop uploads also
 retain its distribution receipt, frozen input manifest, and build log.
+The paired addon archive likewise excludes its produced example and frozen
+browser copy: uploading both duplicates execution inputs without improving the
+retained hash, receipt, build-log or browser evidence.
 Early retention covers readiness command logs before the paired build and Web
 product failure captures and Workflow reports before independent integration probes.
 Waiting for those probes delayed diagnosis despite completed failing steps.
@@ -167,8 +200,8 @@ the actual aggregate script with successful, failed, cancelled, skipped and
 missing results.
 
 The manual package-repository workflow has the same deadline and unique-guard
-checks as verification CI. Its topology requires validated Web output before
-native packaging and both before signing in the protected release environment.
+checks as verification CI. Web and native producers run independently; signing
+requires both to succeed and runs in the protected release environment.
 Artifact consumers are guarded by the exact successful producer, not merely
 toolchain setup; a compilation failure cannot masquerade as a missing test file.
 
@@ -226,7 +259,7 @@ of 360 minutes, including jobs without explicit step deadlines. A budget that
 cannot satisfy both constraints requires splitting work instead of raising the
 deadline beyond the platform limit. These checks validate configured deadlines,
 not observed execution time or the sufficiency of setup headroom. The desktop
-foreign-family rejection remains required; making it fail-soft would lose that
+independent-family acceptance remains required; making it fail-soft would lose that
 acceptance evidence without demonstrating a timing improvement.
 
 The Web build, browser acceptance and paired-bundle integration probes have
@@ -256,3 +289,10 @@ acceptance supplies Node explicitly and preserves its separate Workflow report.
 Ordinary resident smoke compiles its integration executable in a separate
 twenty-minute step, then allows ten minutes for its runtime scenarios. The
 protocol gate meta-test pins its baseline, failure guard and five-minute bound.
+
+Queued SSH publication cleanup belongs to the client's retained-result owner.
+A capacity probe is itself a preparation: it can win the final target slot and
+cause the supposedly retained preparation to be refused. Observing the actual
+publication channel avoids that competing mutation. Client tests cover both
+abandonment positions; the native helper test separately proves that real plan
+destruction releases all twenty slots and permits a process to run.
