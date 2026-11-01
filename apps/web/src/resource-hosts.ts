@@ -1,7 +1,7 @@
-import type {ResourceModel} from './details/model.ts';
+import type {ResourceModel,PanelDetails} from './details/model.ts';
 import {observable} from './bridge.ts'
 
-export interface PanelEntry {
+export interface PanelEntry extends PanelDetails {
   view:string; open_revision:string; opening_request:string|null; session:string|null; pane:string|null; generation:string|null; floating:boolean
   reopen:Record<string,unknown>|null
 }

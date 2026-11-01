@@ -11,7 +11,7 @@ const absent = observable<StandardSourceBinding>(empty)
 let binding: ScopedStandardSourceBinding | undefined
 function updateScope() {
   const surface = source.getSnapshot()?.surfaces[selection.getSnapshot()]
-  const key = surface ? `${selection.getSnapshot()}:${surface.generation}:${surface.session}` : undefined
+  const key = surface?.kind === "native" ? `${selection.getSnapshot()}:${surface.generation}:${surface.session}` : undefined
   if (key === current.getSnapshot().key) return
   binding = key ? {...empty, key, ctx: Object.freeze({key}), props: {surface: selection.getSnapshot()}} : undefined
   current.set(binding ?? empty)

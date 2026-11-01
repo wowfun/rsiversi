@@ -166,6 +166,9 @@ renders them as separate messages. React owns the Session surface, composer and
 stable control nodes. The controller receives those hosts after commit and owns
 draft/submission lifetimes. History and reference pickers, observed external
 conversations, resource details and registered settings use the same React root.
+Resource detail models retain identity across unchanged connection, entry and
+media inputs. Renderer slots are still collected on every frame; replacing any
+of those inputs rebuilds the model and its bound authority.
 Registered settings retain exact JSON text and their opened version while edited;
 publication keeps controls locked until a fresh settings presentation arrives.
 Focus is captured before disabling or replacing a settings control and restored
@@ -188,7 +191,17 @@ The ordinary Serve application Profile selects `rsi.application.service` and
 `rsi.application.serve`; `--assets ABSOLUTE_DIRECTORY` supplies the Web bundle.
 See the [Serve contract](../../serve/README.md) for listener policy.
 
-Presentation frames are snapshots or patches. The document applies a patch only
+Presentation frames are snapshots or patches. Presentation types are shared by the bridge, native/external owners and React
+consumers, including selection/creation, active-Turn and sandbox fields, media
+limits, completion results, resource-panel identities/details and Settings projections.
+The resource projector and detail router check their actual reads against this
+same contract, including native/external and approval/question discrimination. Opaque owner
+payloads retain their owning types rather than an unrestricted index signature.
+The existing `kind` field distinguishes native and external surfaces;
+the frame merger and staging projector are JavaScript-type-checked consumers of
+that same contract. Opaque Tool arguments remain opaque. Type checking does not
+replace frame identity, base, membership and order validation at runtime.
+The document applies a patch only
 to its exact decimal base-frame ID, preserving unchanged pane data and stable
 block identities. A mismatch leaves the current DOM intact and requests a
 snapshot; a successful render acknowledges the resulting frame ID. The Worker

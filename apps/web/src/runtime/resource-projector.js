@@ -1,5 +1,15 @@
+// @ts-check
+/** @typedef {import('../bridge.ts').View} View */
+/** @typedef {import('../resource-hosts.ts').ResourceHost} ResourceHost */
+/** @typedef {{resources:{observe(panels:View['panels'],surfaces:View['surfaces']):void}}} ResourceConnection */
+/** @param {{connection?:ResourceConnection,resourceHosts:Map<string,ResourceHost>,
+ * element(tag:string,className:string):HTMLElement,$(id:string):HTMLElement,
+ * renderDetail(entry:View['panels'][number] & {has_media:boolean},target:ResourceHost,identity:View['panels'][number]):void,
+ * publishResources():void}} context */
 export function createResourceProjector(context) {
+  /** @type {{owner?:ResourceConnection,panels:View['panels'],media:boolean,scope:string}|undefined} */
   let resourceCapture;
+  /** @param {View} next */
   function renderResources(next) {
     const scope = JSON.stringify(
       Object.entries(next.surfaces ?? {}).map(([key, value]) => [
@@ -8,7 +18,7 @@ export function createResourceProjector(context) {
       ]),
     );
     const unchanged =
-      resourceCapture?.owner === context.connection &&
+      resourceCapture && resourceCapture.owner === context.connection &&
       resourceCapture.panels === next.panels &&
       resourceCapture.media === next.has_media &&
       resourceCapture.scope === scope;
@@ -48,7 +58,7 @@ export function createResourceProjector(context) {
         context.resourceHosts.set(entry.view, target);
       }
       target.entry = entry;
-      context.renderDetail({ ...entry, has_media: next.has_media }, target);
+      context.renderDetail({ ...entry, has_media: next.has_media }, target, entry);
     }
     for (const [id, target] of context.resourceHosts)
       if (!keep.has(id)) {

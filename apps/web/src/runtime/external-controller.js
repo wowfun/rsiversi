@@ -55,7 +55,6 @@ export function externalPaneClass({ command, perform }) {
       const next = this.staged;
       if (!next) return;
       this.submitKey = next.submitKey;
-      this.composerActions = next.composerActions;
       this.render(next.data);
     }
     changed = () => {

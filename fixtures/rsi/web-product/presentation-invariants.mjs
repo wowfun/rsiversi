@@ -62,7 +62,7 @@ window.resourceIdentity=()=>{const before=resources.getSnapshot();entry.reopen.t
 window.updateResource=(seq,key)=>{const host=resourceHosts.get('sources');host.model={...host.model,data:{...host.model.data,page:[{seq,field:{kind:'text'}}]}};if(key)host.key=key;publishResources()};
 window.imageReads=0;window.imageReleases=0;
 const imageBody=document.createElement('section');document.body.append(imageBody);
-const imageContext={connection:{},boundCall:()=>async()=>{},acquireImage(){window.imageReads++;const url=URL.createObjectURL(new Blob(['<svg xmlns="http://www.w3.org/2000/svg" width="24" height="24"><rect width="24" height="24" fill="blue"/></svg>'],{type:'image/svg+xml'}));return {result:Promise.resolve(url),release(){window.imageReleases++;URL.revokeObjectURL(url)}}}};
+const imageContext={rendererSlots:[],connection:{},boundCall:()=>async()=>{},acquireImage(){window.imageReads++;const url=URL.createObjectURL(new Blob(['<svg xmlns="http://www.w3.org/2000/svg" width="24" height="24"><rect width="24" height="24" fill="blue"/></svg>'],{type:'image/svg+xml'}));return {result:Promise.resolve(url),release(){window.imageReleases++;URL.revokeObjectURL(url)}}}};
 const imageRender=createResourceDetails(imageContext);
 const imageHost={body:imageBody,entry:{view:'image'}};
 window.imageFrame=(ticket='1',reconnect=false)=>{if(reconnect)imageContext.connection={};flushSync(()=>imageRender({image_detail:{ticket,media:{width:24,height:24,bytes:100}}},{show(key,title,model){Object.assign(imageHost,{key,title,model});resourceHosts.set('image',imageHost);publishResources()}}))};

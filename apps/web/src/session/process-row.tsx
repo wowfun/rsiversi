@@ -2,7 +2,7 @@ import {
   IconBrowseOutlineRegular, IconCodeOutlineRegular, IconApiOutlineRegular, IconEditOutlineRegular,
   IconSearchOutlineRegular, IconThinkOutlineRegular, IconChevronRightOutlineRegular,
 } from '../../vendor/dsh/dockkit-primitives/icons/index.tsx';
-import type {TranscriptBlock} from './transcript.tsx';
+import type {TranscriptBlock} from '../presentation-types.ts';
 
 function toolPresentation(name: string) {
   switch (name) {

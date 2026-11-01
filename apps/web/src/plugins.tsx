@@ -8,9 +8,8 @@ export function Plugins({loading=false}:{loading?:boolean}) {
   const view = useView(view => view?.plugins), [working,setBusy] = useState(false), [problem,setProblem] = useState<string|null>(null)
   const busy = loading || working
   const selected = useSelected(value => value)
-  const agentPreset = useView(view => view?.surfaces[selected]?.agent_preset)
-  const session = useView(view => view?.surfaces[selected]?.session)
-  const header = useView(view => view?.surfaces[selected]?.header)
+  const active = useView(view => {const surface=view?.surfaces[selected];return surface?.kind === 'native' ? surface : undefined})
+  const agentPreset = active?.agent_preset, session = active?.session, header = active?.header
   const [preset,setPreset] = useState('')
   const page = view?.page
   const command = (command: Record<string,unknown>) => void (async () => {

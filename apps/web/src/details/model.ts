@@ -24,13 +24,29 @@ export interface SourceData {
   owner: object;
   ticket: string; source: SourceRef; error?: string | null;
   window?: {start: number; end: number; more: boolean; text: string} | null;
-  media?: ImageData['media']; acquire: ImageData['acquire'];
+  media?: ImageData['media']|null; acquire: ImageData['acquire'];
 }
-export type ResourceModel = {command: Command} & (
+export type Call = (method:string, payload:string) => Promise<unknown>;
+export interface UiDetail {
+  ticket:string; binding:unknown; error:string|null; busy:boolean;
+  model:{standard_view:{title:string}|null;actions:{name:string}[]}|null;
+}
+export interface RemoteCatalog {
+  ticket:string;error:string|null;
+  page:{entries:{bundle:string;surface:string;title:string}[];next:unknown}|null;
+}
+export interface BlockSources {pane:string;generation:string;ticket:string;start:number;total:number;page:SourceRef[]}
+export interface PanelDetails {
+  image_detail:Omit<ImageData,'owner'|'acquire'>|null;
+  ui_detail:UiDetail|null;remote_ui_catalog:RemoteCatalog|null;
+  block_sources:BlockSources|null;source_detail:Omit<SourceData,'owner'|'media'|'acquire'>|null;
+  source_media:ImageData['media']|null;detail:InteractionData|null;
+}
+export type ResourceContent =
   {kind: 'image'; data: ImageData}
   | {kind: 'interaction'; data: InteractionData}
   | {kind: 'source'; data: SourceData}
-  | {kind: 'ui'; data: {model?: unknown; binding?: unknown; error?: string}}
-  | {kind: 'extensions'; data: {ticket: string; error?: string; page?: {entries: {bundle: string; surface: string; title: string}[]; next?: unknown}}}
-  | {kind: 'block-sources'; data: {pane: string; generation: string; ticket: string; start: number; total: number; page: SourceRef[]}}
-);
+  | {kind: 'ui'; data: UiDetail}
+  | {kind: 'extensions'; data: RemoteCatalog}
+  | {kind: 'block-sources'; data: BlockSources};
+export type ResourceModel = {command:Command;call:Call} & ResourceContent;

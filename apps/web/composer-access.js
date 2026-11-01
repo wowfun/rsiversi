@@ -1,6 +1,6 @@
 const modes = new Set(['read-only', 'workspace-write', 'danger-full-access']);
 const storageKey = 'rsi.composer-access';
-export function accessMode(value) {
+function accessMode(value) {
   if (!modes.has(value)) throw new Error('Invalid composer access mode');
   return value;
 }

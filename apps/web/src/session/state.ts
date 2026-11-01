@@ -4,20 +4,17 @@ import type { FilePickerState } from "./file-picker.tsx";
 import type { SavedDraftsState } from "./saved-drafts.tsx";
 import type { ReferencePickerState } from "./reference-picker.tsx";
 import type { QueueEditorState } from "./queue-editor.tsx";
-import type { ComposerOwner, ComposerProjection } from "./composer-state.ts";
+import type { ComposerOwner } from "./composer-state.ts";
 import type { Model } from "../bridge.ts";
-import type {MetricsRead} from './metrics.tsx';
+import type {NativeSurface} from '../presentation-types.ts';
 import type {
-  InlineCard,
   TranscriptOwner,
-  TranscriptView,
 } from "./transcript.tsx";
 import { observable } from "../bridge.ts";
 
 export interface SessionSurfaceOwner extends TranscriptOwner, ComposerOwner {
   subscribe(listener: () => void): () => void;
   getSnapshot(): number;
-  stopBinding?: unknown;
   queueDialog?: QueueEditorState;
   referenceDialog?: ReferencePickerState;
   recoveryView?: SavedDraftsState;
@@ -27,27 +24,14 @@ export interface SessionSurfaceOwner extends TranscriptOwner, ComposerOwner {
   kind?: "native";
   staged?: {
     models: Model[];
+    composerActions?: unknown;
     submitKey: string;
-    data:
-      | (ComposerProjection & {
-          notice?: string;
-          session: string;
-          path: string;
-          workspace: string;
-          historical?: boolean;
-          history_more?: boolean;
-          transcript: TranscriptView;
-          generation: string;
-          metrics?: MetricsRead | null;
-          context_capacity_tokens?: number | null;
-          ui_cards?: boolean;
-          inline?: Record<string, InlineCard>;
-        })
-      | null;
+    data: NativeSurface | null;
   };
   node: HTMLElement;
   mount(elements: Record<string, HTMLElement>): void;
   unmount(): void;
+  dispose(): void;
   applyFrame(): void;
 }
 

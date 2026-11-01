@@ -9,43 +9,8 @@ import {
 } from "react";
 import css from "./surface.module.css";
 import chat from "./chat.module.css";
-import { run, type ExternalSnapshot } from "../bridge.ts";
-interface Block {
-  key: string;
-  role: string;
-  text: string;
-  source: unknown;
-  truncated: boolean;
-}
-interface Permission {
-  id: string;
-  generation: string;
-  title: string;
-  options: { id: string; name: string; kind: string }[];
-}
-interface ExternalData {
-  generation: string;
-  external: {
-    observed: {
-      snapshot: ExternalSnapshot;
-      connected: boolean;
-      permissions: Permission[];
-    };
-    capabilities: { submit: boolean; resume: boolean; load: boolean };
-    busy: boolean;
-    more: boolean;
-    following: boolean;
-    blocks: Block[];
-  };
-  attention_focus?: { kind: string; request: string; generation: string };
-  external_source?: {
-    start: number;
-    end: number;
-    text: string;
-    more: boolean;
-    source: unknown;
-  };
-}
+import { run } from "../bridge.ts";
+import type {ExternalBlock as Block, ExternalSurface as ExternalData} from '../presentation-types.ts';
 export interface ExternalOwner {
   index: string;
   kind: "external";
@@ -55,6 +20,7 @@ export interface ExternalOwner {
   getSnapshot(): number;
   mount(elements: Record<string, HTMLElement>): void;
   unmount(): void;
+  dispose(): void;
   applyFrame(): void;
   action(fields: Record<string, unknown>): Promise<void>;
   control(value: Record<string, unknown>): Promise<void>;

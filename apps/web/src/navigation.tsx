@@ -29,7 +29,7 @@ export function Navigation() {
       [
         ...new Set(
           Object.values(value?.surfaces ?? {})
-            .map((surface) => surface?.workspace)
+            .map((surface) => surface?.kind === "native" ? surface.workspace : undefined)
             .filter(Boolean),
         ),
       ].sort(),

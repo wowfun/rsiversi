@@ -13,7 +13,7 @@ function open() {
     };
   });
 }
-export function validateStart(value) {
+function validateStart(value) {
   if (!value || !Number.isSafeInteger(value.revision) || value.revision < 0 ||
       typeof value.text !== 'string' || new TextEncoder().encode(value.text).length > 1024 * 1024 ||
       !(value.workspace === null || (typeof value.workspace === 'string' && value.workspace.length <= 256)))

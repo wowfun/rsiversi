@@ -182,6 +182,7 @@ const view = {
   notice: "",
   surfaces: {
     main: {
+      kind: "native",
       generation: "1",
       selection: "1",
       session: "fixture-session",

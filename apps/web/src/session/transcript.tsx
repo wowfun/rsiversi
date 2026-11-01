@@ -20,48 +20,9 @@ import {
 } from "../../turn-presentation.js";
 import { run } from "../bridge.ts";
 import { closeDisclosure } from "../../disclosure.js";
-import { Markdown, type MarkdownEvent } from "./markdown.tsx";
+import { Markdown } from "./markdown.tsx";
 
-export interface TranscriptBlock {
-  key: string;
-  role: string;
-  title: string;
-  text: string;
-  markdown?: MarkdownEvent[];
-  clipped?: boolean;
-  sources: number;
-  external?: unknown;
-  tool?: {
-    name?: string | null;
-    argument_summary?: string | null;
-    arguments?: unknown;
-    result?: unknown;
-    rejection?: unknown;
-    intent_present: boolean;
-    phase: "prepared" | "running" | "rejected" | {settled: "completed" | "tool_failed" | "process_failed"};
-  };
-}
-interface Turn {
-  id: string;
-  status: string;
-  running: boolean;
-  foldable: boolean;
-  partial: boolean;
-  blocks: string[];
-  process: string[];
-  candidate: string[];
-  answer: string[];
-  terminal?: string | null;
-  timestamps?: Record<string, number>;
-  elapsed_ms?: number | null;
-  usage?: TokenUsage | null;
-}
-export interface TranscriptView {
-  status?: string;
-  blocks: TranscriptBlock[];
-  omitted?: boolean;
-  turns?: { entries: Record<string, Turn> };
-}
+import type {TranscriptBlock, TranscriptView} from '../presentation-types.ts';
 export interface MessageHost {
   node: HTMLElement;
   inline: HTMLElement;

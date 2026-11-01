@@ -1,3 +1,4 @@
+import type {NativeSurface} from './presentation-types.ts';
 import css from "./resources.module.css"
 import {useEffect,useLayoutEffect,useMemo,useRef,useState,useSyncExternalStore,type ReactNode} from 'react'
 import {DockLayout} from '../vendor/dsh/dockkit/components/DockSurface.tsx'
@@ -6,14 +7,14 @@ import type {TabId,TabRecord} from '../vendor/dsh/dockkit/contract/types.ts'
 import {DeviceStore} from '../device-store.js'
 import {coordinate,dockIntent,emptyDock,floatingTab,dockPaneIds,displayDock,paneFor,getPane,type DockDocument,type DockIntent,type Coordinate} from './dock-state.ts'
 import {resources,resourceHosts,type ResourceHost} from './resource-hosts.ts'
-import {input,source,useSelected,useView,type Surface} from './bridge.ts'
+import {input,source,useSelected,useView} from './bridge.ts'
 import {presentationIdentity,useLayout,useNarrow,useViewport} from './presentation.tsx'
 import {Terminals,type Follower} from './terminal.tsx'
 import {Button} from './button.tsx'
 import {ResourceOwner} from './resource-owner.mjs'
 
 const labels:DockLabels={emptyPane:'Open a resource to use this pane',splitPane:'Split resources',splitPaneDisabled:'Two resource panes are open',splitPaneNarrow:'Widen resources to split',closeTab:'Close resource tab',addTab:'Open resources',dockFloat:'Dock resource',closeFloat:'Close resource window',dropZone:{center:'Merge tabs',left:'Split left',right:'Split right',top:'',bottom:''}}
-const descriptor=(host:ResourceHost,surface:Surface):Coordinate=>{
+const descriptor=(host:ResourceHost,surface:NativeSurface):Coordinate=>{
   const value=host.entry.reopen
   if(!value)throw new Error('This resource cannot be reopened')
   if(value.action==='ui_surface'||value.action==='application_ui_surface'){
@@ -47,7 +48,7 @@ export function ResourceCleanupNotice() {
   return owner&&errors.length>0&&<div className="resource-cleanup-notice" role="alert" aria-label="Resource cleanup" tabIndex={0}>Resource operations need attention.{errors.map((error:any)=><p key={error.key}><span title={error.key} data-session={error.session}>{error.label}</span>: {error.error} {error.retryable?<Button aria-label={`Retry cleanup for ${error.label} (${error.key})`} disabled={error.busy} onClick={()=>owner.retry(error.key)}>Retry cleanup</Button>:<span>Disconnect and reconnect to resolve this uncertain operation.</span>}</p>)}</div>
 }
 const emptyErrors:never[]=[]
-function SessionDock({owner,pane,surface,active,launcher}:{owner:ResourceOwner;pane:string;surface:Surface;active:boolean;launcher:ReactNode}) {
+function SessionDock({owner,pane,surface,active,launcher}:{owner:ResourceOwner;pane:string;surface:NativeSurface;active:boolean;launcher:ReactNode}) {
   const identity=useSyncExternalStore(presentationIdentity.subscribe,presentationIdentity.getSnapshot)
   const hosts=useSyncExternalStore(resources.subscribe,resources.getSnapshot)
   const [doc,setDoc]=useState<DockDocument>(emptyDock),[notice,setNotice]=useState(''),[revision,changed]=useState(0)
@@ -75,7 +76,8 @@ function SessionDock({owner,pane,surface,active,launcher}:{owner:ResourceOwner;p
   }
   const openingCommand=(c:Coordinate)=>{
     if(c.action==='surface'||c.action==='application_surface'){
-      const candidates=c.action==='surface'?source.getSnapshot()?.surfaces[pane]?.ui_surfaces:source.getSnapshot()?.application_surfaces
+      const currentSurface=source.getSnapshot()?.surfaces[pane]
+      const candidates=c.action==='surface'?(currentSurface?.kind==='native'?currentSurface.ui_surfaces:undefined):source.getSnapshot()?.application_surfaces
       const item=candidates?.find(item=>item.bundle===c.bundle&&item.reference.name===c.name)
       if(!item)throw new Error('This extension is unavailable in the current Session')
       if(c.action==='application_surface')return {action:'application_ui_surface',reference:item.reference}

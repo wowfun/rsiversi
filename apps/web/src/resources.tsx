@@ -6,7 +6,7 @@ export function Resources() {
     surface = useView((view) => view?.surfaces[selected]),
     remote = useView((view) => view?.has_remote_ui);
   if (!surface) return null;
-  if (surface.kind === "external" && surface.external) {
+  if (surface.kind === "external") {
     const external = surface.external,
       snapshot = external.observed.snapshot;
     return (
@@ -43,7 +43,7 @@ export function Resources() {
         <h2>Session resources</h2>
         <StateDot
           state={
-            surface.transcript.status.toLowerCase() === "running"
+            surface.transcript.status?.toLowerCase() === "running"
               ? "ongoing"
               : "idle"
           }

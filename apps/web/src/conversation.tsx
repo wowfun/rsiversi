@@ -20,7 +20,8 @@ export function Conversation() {
   }, [mode]);
   const surface = useView((view) => view?.surfaces[selected]);
   const title = useView(view => {
-    const active = view?.surfaces[selected];
+    const selectedSurface = view?.surfaces[selected];
+    const active = selectedSurface?.kind === "native" ? selectedSurface : undefined;
     const entries = [...(view?.navigation?.entries ?? []), ...Object.values(view?.navigation?.groups ?? {}).flatMap(group=>group.entries)];
     const workspace=view?.catalog.workspaces.find(entry=>entry.id===active?.workspace);
     return entries.find(entry=>entry.session===active?.session)?.metadata.title || workspaceName(active?.path,workspace?.name);

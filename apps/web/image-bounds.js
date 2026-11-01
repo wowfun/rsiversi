@@ -1,6 +1,6 @@
 // Inspect encoded structure before handing any workspace image to a browser decoder.
 export const maximumImagePixels = 16_777_216;
-export const maximumPreviewPixels = 2 * maximumImagePixels;
+const maximumPreviewPixels = 2 * maximumImagePixels;
 export function imageBudget() {
   let remaining = maximumPreviewPixels;
   return pixels => {

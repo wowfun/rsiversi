@@ -36,7 +36,7 @@ export function WorkspaceNavigation({
   row(entry: NavigationEntry): ReactNode;
 }) {
   const selected = useSelected(value => value);
-  const active = useView(value => value?.surfaces[selected]);
+  const active = useView(value => {const surface=value?.surfaces[selected];return surface?.kind === "native" ? surface : undefined;});
   const [expanded, setExpanded] = useState<Set<string>>(() => new Set());
   const group = (
     key: string,

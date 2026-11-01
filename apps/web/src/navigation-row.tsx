@@ -33,7 +33,7 @@ export function ConversationRow({
   ): Promise<unknown>;
 }) {
   const selected=useSelected(value=>value);
-  const active=useView(value=>value?.surfaces[selected]?.session===entry.session);
+  const active=useView(value=>value?.surfaces[selected]?.kind === "native" && value.surfaces[selected].session===entry.session);
   const clock = messageClock(entry.last_activity_ms, now);
   return (
     <div

@@ -3,7 +3,7 @@ import {Terminal as Xterm} from '@xterm/xterm'
 import {FitAddon} from '@xterm/addon-fit'
 import '@xterm/xterm/css/xterm.css'
 import {Button} from './button.tsx'
-import {type Surface} from './bridge.ts'
+import type {NativeSurface} from './presentation-types.ts'
 import {readTerminalPage} from './terminal-read.mjs'
 import {TerminalInput} from './terminal-input.mjs'
 import {terminalDocument} from './terminal-style.ts'
@@ -14,7 +14,7 @@ export type Follower={terminal:Status;id:string}
 type Reply={type:string;value:any;ack?:string}
 function terminalTheme(){const style=getComputedStyle(document.documentElement);return {background:style.getPropertyValue('--secondary-surface').trim(),foreground:style.getPropertyValue('--ink').trim(),cursor:style.getPropertyValue('--teal').trim(),selectionBackground:style.getPropertyValue('--active').trim()}}
 const encoder=new TextEncoder()
-export function Terminals({owner,pane,surface,hide,initial,created,onOpen}:{owner:ResourceOwner;pane:string;surface:Surface;hide:()=>void;initial?:string;created?:ReturnType<ResourceOwner['attachment']>;onOpen?:(id?:string)=>void}) {
+export function Terminals({owner,pane,surface,hide,initial,created,onOpen}:{owner:ResourceOwner;pane:string;surface:NativeSurface;hide:()=>void;initial?:string;created?:ReturnType<ResourceOwner['attachment']>;onOpen?:(id?:string)=>void}) {
   const [roster,setRoster]=useState<Status[]>([]),[follower,setFollower]=useState<Follower>(),[status,setStatus]=useState<Status>(),[notice,setNotice]=useState(''),[busy,setBusy]=useState(false)
   const screen=useRef<HTMLDivElement>(null),alive=useRef(true),current=useRef<Follower>(),pump=useRef<TerminalInput>(),display=useRef<Xterm>(),resizeCurrent=useRef<()=>void>(),attachment=useRef<ReturnType<ResourceOwner['attachment']>>()
   const request=async(request:unknown):Promise<Reply>=>JSON.parse(await owner.call('terminal',JSON.stringify({pane,generation:surface.generation,request})))
