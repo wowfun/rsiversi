@@ -1,7 +1,9 @@
 # rsi-host
 
 `RunningHost::inspect` exposes Meta's bounded redacted ownership pages without
-exporting mutable Runtime authority. Profile status and desired-tree snapshots
+exporting mutable Runtime authority or raw Fiber snapshots. `RunningHost` Debug output
+contains no runtime diagnostics. Trusted core callers that already own a Runtime
+can use its raw snapshot API directly. Profile status and desired-tree snapshots
 remain owned by Profile control; observation does not establish atomic convergence
 or cleanup quiescence.
 

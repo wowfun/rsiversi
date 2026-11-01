@@ -58,7 +58,12 @@ impl PluginFactory for Noop {
 }
 
 fn paths() -> HostPaths {
-    HostPaths::new("/config", "/state", "/cache").unwrap()
+    let root = std::path::Path::new(if cfg!(windows) {
+        "C:/rsi-host-fixture"
+    } else {
+        "/rsi-host-fixture"
+    });
+    HostPaths::new(root.join("config"), root.join("state"), root.join("cache")).unwrap()
 }
 
 #[test]
@@ -275,15 +280,33 @@ async fn resolved_native_identity_survives_preview_and_runtime_and_changes_diges
         assert_ne!(digest, other.composition_digest().unwrap());
     }
     let running = host.start(rsi_host::Profile::default()).await.unwrap();
-    assert!(
-        running
-            .runtime_snapshot()
-            .fibers
-            .iter()
-            .any(|fiber| fiber.factory == identity)
-    );
-    let _ = running.shutdown().await;
-    assert!(running.runtime_snapshot().fibers.is_empty());
+    let mut after = None;
+    let mut found = false;
+    loop {
+        let page = running
+            .inspect(rsi_meta::InspectionRequest {
+                after,
+                maximum_fibers: 1,
+                ..Default::default()
+            })
+            .unwrap();
+        assert!(page.fibers.len() <= 1);
+        found |= page.fibers.iter().any(|fiber| {
+            fiber.factory == identity && fiber.state == rsi_meta::InspectedFiberState::Active
+        });
+        after = page.next_after;
+        if after.is_none() {
+            break;
+        }
+    }
+    assert!(found);
+    assert!(running.shutdown().await.is_clean());
+    let inspection = running
+        .inspect(rsi_meta::InspectionRequest::default())
+        .unwrap();
+    assert!(inspection.shutting_down);
+    assert_eq!(inspection.total_fibers, 0);
+    assert!(inspection.fibers.is_empty());
 }
 
 #[test]

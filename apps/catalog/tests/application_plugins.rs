@@ -280,12 +280,9 @@ async fn serve_profile_owns_one_runtime_authenticates_http_and_releases_its_list
         .to_vec(),
     );
     let running = host.start_program(program).await.unwrap();
-    let count = |id: &str| {
-        running.runtime_snapshot().fibers.into_iter().filter(|fiber| fiber.state == rsi_meta::FiberState::Active && matches!(&fiber.factory, rsi_meta::FactoryIdentity::Linked { plugin, .. } if plugin.as_str() == id)).count()
-    };
-    assert_eq!(count("rsi.session"), 1);
-    assert_eq!(count("rsi.api"), 1);
-    assert_eq!(count("rsi.serve.http"), 1);
+    assert_eq!(active_factory_count(&running, "rsi.session"), 1);
+    assert_eq!(active_factory_count(&running, "rsi.api"), 1);
+    assert_eq!(active_factory_count(&running, "rsi.serve.http"), 1);
     let conflict = rsi_service_host::HostOwnerLease::try_acquire(
         rsi_service_host::ServiceHostPaths::from_host_paths(&paths).unwrap(),
     )
@@ -343,6 +340,28 @@ async fn serve_profile_owns_one_runtime_authenticates_http_and_releases_its_list
         rsi_service_host::ServiceHostPaths::from_host_paths(&paths).unwrap(),
     )
     .unwrap();
+}
+
+#[cfg(any(target_os = "linux", windows))]
+fn active_factory_count(running: &rsi_host::RunningHost, id: &str) -> usize {
+    let mut count = 0;
+    let mut after = None;
+    loop {
+        let page = running
+            .inspect(rsi_meta::InspectionRequest {
+                after,
+                ..Default::default()
+            })
+            .unwrap();
+        count += page.fibers.iter().filter(|fiber| {
+            fiber.state == rsi_meta::InspectedFiberState::Active
+                && matches!(&fiber.factory, rsi_meta::FactoryIdentity::Linked { plugin, .. } if plugin.as_str() == id)
+        }).count();
+        after = page.next_after;
+        if after.is_none() {
+            return count;
+        }
+    }
 }
 
 #[cfg(any(target_os = "linux", windows))]

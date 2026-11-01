@@ -507,7 +507,7 @@ mod tests {
 
     #[test]
     fn rejected_duplicate_define_preserves_the_accepted_value() {
-        let mut builder = HostBuilder::new(HostPaths::new("/config", "/state", "/cache").unwrap());
+        let mut builder = HostBuilder::without_paths("test");
         builder.define("answer", json!(42)).unwrap();
         assert!(matches!(
             builder.define("answer", Value::Null),

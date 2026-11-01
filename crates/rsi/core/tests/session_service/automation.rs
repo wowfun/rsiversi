@@ -244,7 +244,7 @@ async fn exercise_frozen_protected_goal(fail_after_report: bool) {
         panic!(
             "Automation owner: {:?}; runtime: {:?}",
             *changes.borrow(),
-            host.runtime_snapshot()
+            host.inspect(rsi_meta::InspectionRequest::default())
         )
     });
     let status = owner
@@ -749,7 +749,12 @@ async fn signed_deployment_reaches_native_browser_and_live_deepseek_goal() {
         }
     })
     .await
-    .unwrap_or_else(|_| panic!("Automation readiness: {:?}", host.runtime_snapshot()));
+    .unwrap_or_else(|_| {
+        panic!(
+            "Automation readiness: {:?}",
+            host.inspect(rsi_meta::InspectionRequest::default())
+        )
+    });
     let digest = owner
         .api(
             rsi_api_protocol::CallOrigin::Local,

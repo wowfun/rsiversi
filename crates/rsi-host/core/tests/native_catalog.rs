@@ -127,7 +127,8 @@ async fn native_catalog_factory_runs_through_frozen_host_and_releases_after_last
     let running = host.start(Profile::default()).await.unwrap();
     assert!(
         running
-            .runtime_snapshot()
+            .inspect(rsi_meta::InspectionRequest::default())
+            .unwrap()
             .fibers
             .iter()
             .any(|fiber| fiber.factory == expected)

@@ -11,13 +11,12 @@ async-trait.workspace = true
 hex.workspace = true
 rsi-meta = { path = "../../rsi-meta/core" }
 rsi-meta-profile = { path = "../../rsi-meta/profile" }
-serde.workspace = true
-serde_json.workspace = true
 sha2.workspace = true
 thiserror.workspace = true
 tokio.workspace = true
 
 [dev-dependencies]
+serde_json.workspace = true
 rsi-meta-scope = { path = "../../rsi-meta/scope" }
 tempfile.workspace = true
 tokio = { workspace = true, features = ["rt-multi-thread", "time", "test-util"] }

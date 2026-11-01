@@ -6712,7 +6712,6 @@ dependencies = [
  "rsi-meta-native-loader",
  "rsi-meta-profile",
  "rsi-meta-scope",
- "serde",
  "serde_json",
  "sha2",
  "tempfile",

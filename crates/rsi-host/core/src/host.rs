@@ -4,9 +4,8 @@ use crate::{
     ProfilePatch, ProfileProgram, ProfileSnapshot, ProfileStatus, ReloadOutcome, Result,
 };
 use rsi_meta::{
-    ConfigValue, Context, FactoryIdentity, FiberHandle, FiberState, LocalContract,
-    LocalContractKey, LocalEvent, LocalEventKey, PluginId, ResolvedFactory, Runtime,
-    RuntimeSnapshot, ShutdownOutcome, UpdateMode,
+    ConfigValue, Context, FactoryIdentity, FiberState, LocalContract, LocalContractKey, LocalEvent,
+    LocalEventKey, PluginId, ResolvedFactory, Runtime, ShutdownOutcome, UpdateMode,
 };
 use rsi_meta_profile::{
     ProfileBootstrap, ProfileCompiler, ProfileEnvironment, ProfileInput, ProfileResolver,
@@ -448,8 +447,8 @@ impl Host {
                 ConfigValue::Null,
             )
             .await;
-        let profile_fiber = match applied {
-            Ok(handle) if matches!(handle.snapshot().state, FiberState::Active) => handle,
+        match applied {
+            Ok(handle) if matches!(handle.snapshot().state, FiberState::Active) => {}
             Ok(handle) => {
                 let state = handle.snapshot().state;
                 let _ = runtime.shutdown().await;
@@ -461,12 +460,11 @@ impl Host {
                 let _ = runtime.shutdown().await;
                 return Err(error.into());
             }
-        };
+        }
         Ok(RunningHost {
             paths: self.paths,
             runtime,
             catalog: self.catalog,
-            profile_fiber,
             control,
             updater,
         })
@@ -742,7 +740,6 @@ pub struct RunningHost {
     paths: Option<HostPaths>,
     runtime: Runtime,
     catalog: Arc<FrozenCatalog>,
-    profile_fiber: FiberHandle,
     control: Arc<dyn ProfileControl>,
     updater: rsi_meta_profile::ProfileUpdateHandle,
 }
@@ -752,7 +749,6 @@ impl std::fmt::Debug for RunningHost {
         formatter
             .debug_struct("RunningHost")
             .field("paths", &self.paths)
-            .field("profile", &self.profile_fiber.snapshot())
             .finish_non_exhaustive()
     }
 }
@@ -810,11 +806,6 @@ impl RunningHost {
         self.has_local_contract::<C>()
             .then(|| self.runtime.root().lookup_local::<C>())
             .flatten()
-    }
-
-    /// Observes Meta without exposing mutable Runtime authority.
-    pub fn runtime_snapshot(&self) -> RuntimeSnapshot {
-        self.runtime.snapshot()
     }
 
     /// Reads bounded redacted Meta ownership metadata without mutable Runtime authority.

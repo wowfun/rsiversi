@@ -392,12 +392,25 @@ async fn remote_client_replacement(uds: bool) {
     control.refresh().await.unwrap();
     tokio::time::timeout(std::time::Duration::from_secs(20), async {
         loop {
-            if running.runtime_snapshot().fibers.iter().any(|fiber| {
-                fiber.factory
-                    == rsi_meta::FactoryIdentity::native(next.plugin(), next.artifact_sha256())
-                    && fiber.state == rsi_meta::FiberState::Active
-            }) {
-                break;
+            let mut after = None;
+            loop {
+                let page = running
+                    .inspect(rsi_meta::InspectionRequest {
+                        after,
+                        ..Default::default()
+                    })
+                    .unwrap();
+                if page.fibers.iter().any(|fiber| {
+                    fiber.factory
+                        == rsi_meta::FactoryIdentity::native(next.plugin(), next.artifact_sha256())
+                        && fiber.state == rsi_meta::InspectedFiberState::Active
+                }) {
+                    return;
+                }
+                after = page.next_after;
+                if after.is_none() {
+                    break;
+                }
             }
             tokio::time::sleep(std::time::Duration::from_millis(20)).await;
         }
