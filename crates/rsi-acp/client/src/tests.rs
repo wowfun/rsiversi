@@ -165,7 +165,11 @@ async fn fixture() -> (tempfile::TempDir, Client, Peer, Arc<Gate>) {
         .unwrap();
     let id = ConversationId::new("ordering").unwrap();
     journal
-        .create(id.clone(), "fixture".into(), "/workspace".into())
+        .create(
+            id.clone(),
+            "fixture".into(),
+            root.path().to_str().unwrap().into(),
+        )
         .await
         .unwrap();
     let snapshot = journal.connect(&id).await.unwrap();
@@ -200,7 +204,7 @@ async fn transition_owner_orders_commit_and_publication_after_waiter_drop() {
                 .transition(if completion_first {
                     Transition::Complete(Completion::EndTurn)
                 } else {
-                    Transition::Disconnected
+                    Transition::Status(Status::Unknown)
                 })
                 .await
         });
@@ -212,7 +216,7 @@ async fn transition_owner_orders_commit_and_publication_after_waiter_drop() {
         let second = tokio::spawn(async move {
             owner
                 .transition(if completion_first {
-                    Transition::Disconnected
+                    Transition::Status(Status::Unknown)
                 } else {
                     Transition::Complete(Completion::EndTurn)
                 })
@@ -491,7 +495,10 @@ async fn disconnect_discards_unpublished_replay_before_rollback_waiter_runs() {
         )
         .await
         .unwrap();
-    state.transition(Transition::Disconnected).await.unwrap();
+    state
+        .transition(Transition::Status(Status::Unknown))
+        .await
+        .unwrap();
     // A second replay must not be needed to discard the unpublished epoch.
     let position = state.journal.get(&state.id).await.unwrap();
     assert_eq!(position.status, Status::Unknown);

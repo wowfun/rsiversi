@@ -239,7 +239,7 @@ impl Client {
             .transition(if closed {
                 Transition::Status(Status::Closed)
             } else {
-                Transition::Disconnected
+                Transition::Status(Status::Unknown)
             })
             .await
     }

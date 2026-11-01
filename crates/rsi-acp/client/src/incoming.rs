@@ -1,6 +1,6 @@
 use crate::{Error, PendingPermission, Permission, PermissionOption, Result, State, Transition};
 use rsi_acp::{Incoming, Peer};
-use rsi_acp_journal::RecordKind;
+use rsi_acp_journal::{RecordKind, Status};
 use rsi_acp_protocol::Message;
 use serde_json::json;
 use std::sync::Arc;
@@ -67,7 +67,7 @@ pub(super) async fn run(mut peer: Peer, state: Arc<State>) -> Result<()> {
     }
     state.permissions.lock().expect("ACP permissions").clear();
     let closed = peer.close().await.map_err(|_| Error::Unknown);
-    let _recorded = state.transition(Transition::Disconnected).await;
+    let _recorded = state.transition(Transition::Status(Status::Unknown)).await;
     state.changed();
     closed
 }

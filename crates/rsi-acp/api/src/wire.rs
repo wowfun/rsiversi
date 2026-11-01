@@ -35,21 +35,6 @@ pub enum Operation {
     Window,
 }
 impl Operation {
-    /// All operation identities owned by this protocol.
-    pub const ALL: [Self; 12] = [
-        Self::Endpoints,
-        Self::Residents,
-        Self::List,
-        Self::View,
-        Self::Start,
-        Self::Reconnect,
-        Self::Submit,
-        Self::Cancel,
-        Self::Close,
-        Self::Answer,
-        Self::Page,
-        Self::Window,
-    ];
     /// Local request and response policy for this operation.
     ///
     /// # Panics

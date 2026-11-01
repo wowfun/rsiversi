@@ -4,7 +4,6 @@ use std::sync::{Arc, atomic::Ordering};
 
 pub(super) enum Transition {
     Status(Status),
-    Disconnected,
     Complete(Completion),
     BeginReplay,
     FinishReplay(bool),
@@ -48,18 +47,13 @@ impl State {
         let id = &self.id;
         let generation = self.generation;
         let mut snapshot = match change {
-            Transition::Status(Status::Unknown) | Transition::Disconnected
-                if !unfinished(current.status) =>
-            {
+            Transition::Status(Status::Unknown) if !unfinished(current.status) => {
                 return Ok(current);
             }
-            Transition::Status(Status::Unknown) | Transition::Disconnected
-                if current.status == Status::Loading =>
-            {
+            Transition::Status(Status::Unknown) if current.status == Status::Loading => {
                 journal.finish_replay(id, generation, false).await
             }
             Transition::Status(status) => journal.settle(id, generation, status).await,
-            Transition::Disconnected => journal.settle(id, generation, Status::Unknown).await,
             Transition::Complete(completion) => journal.complete(id, generation, completion).await,
             Transition::BeginReplay => journal.begin_replay(id, generation).await,
             Transition::FinishReplay(success) => {
