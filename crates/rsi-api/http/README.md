@@ -201,7 +201,9 @@ CSP strings. Product asset providers own which exact paths receive each policy.
 An explicitly injected BrowserBootstrap capability enables the loopback-only
 `POST /api/v2/browser-bootstrap` route. It requires an empty body, exact Host and
 Origin, and `X-Rsi-Csrf: 1`. A single bounded `X-Rsi-Launch-Ticket` header exchanges
-a one-use application ticket for a device cookie; without that header
+a one-use application ticket for a device cookie. Tickets are exactly 64 lowercase
+ASCII hexadecimal characters; malformed tickets are unauthorized before invoking
+the redemption capability. Without that header
 a valid cookie returns only EndpointId and DeviceId for recovery. Bearer
 credentials and expected-device mismatches are rejected. A ticket can replace an
 old browser cookie after explicit credential rotation; an expected-device header

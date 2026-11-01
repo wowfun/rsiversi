@@ -16,7 +16,10 @@ pub async fn bootstrap_local_browser(
     let origin = bridge::origin(true)?;
     if ticket.as_ref().is_some_and(|ticket| {
         let value = ticket.expose_secret();
-        value.len() != 64 || !value.bytes().all(|b| b.is_ascii_hexdigit())
+        value.len() != 64
+            || !value
+                .bytes()
+                .all(|b| b.is_ascii_digit() || (b'a'..=b'f').contains(&b))
     }) {
         return Err(ApiError::Unauthorized);
     }

@@ -150,7 +150,9 @@ impl Access {
         let (device, token) = if let Some(ticket) = one(headers, "x-rsi-launch-ticket")? {
             if expected.is_some()
                 || ticket.len() != 64
-                || !ticket.bytes().all(|b| b.is_ascii_hexdigit())
+                || !ticket
+                    .bytes()
+                    .all(|b| b.is_ascii_digit() || (b'a'..=b'f').contains(&b))
             {
                 return Err(ApiError::Unauthorized);
             }

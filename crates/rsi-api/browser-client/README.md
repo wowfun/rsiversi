@@ -9,7 +9,8 @@ calls, with exact Origin and CSRF enforcement by the HTTP endpoint. Cookie login
 and logout are explicit operations. RSI issues each Fetch once and does not
 automatically replay mutations or reauthenticate.
 
-The optional local Web bootstrap exchanges a bounded fragment ticket at the
+The optional local Web bootstrap accepts exactly 64 lowercase ASCII hexadecimal
+characters as its fragment ticket and exchanges it at the
 Worker's loopback origin for an HttpOnly cookie and connection identity. If the
 exchange outcome is uncertain, it attempts cookie recovery once without replaying
 the ticket. If recovery also fails, the original exchange error is preserved; a

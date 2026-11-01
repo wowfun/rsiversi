@@ -1807,6 +1807,48 @@ impl rsi_api_http::BrowserBootstrap for Bootstrap {
     }
 }
 
+#[tokio::test]
+async fn browser_bootstrap_rejects_noncanonical_tickets_before_redemption() {
+    #[derive(Debug, Default)]
+    struct Observe(std::sync::atomic::AtomicUsize);
+    impl rsi_api_http::BrowserBootstrap for Observe {
+        fn redeem(&self, _: &SecretValue) -> rsi_api_protocol::Result<SecretValue> {
+            self.0.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+            Ok(SecretValue::new("a".repeat(64)).unwrap())
+        }
+    }
+    let observer = Arc::new(Observe::default());
+    let harness = Harness::start_with_bootstrap(false, None, Some(observer.clone())).await;
+    for ticket in [
+        "B".repeat(64),
+        "bB".repeat(32),
+        "b".repeat(63),
+        "g".repeat(64),
+    ] {
+        let response = Harness::client()
+            .post(format!("{}/api/v2/browser-bootstrap", harness.origin))
+            .header("origin", &harness.origin)
+            .header("x-rsi-csrf", "1")
+            .header("x-rsi-launch-ticket", ticket)
+            .send()
+            .await
+            .unwrap();
+        assert_eq!(response.status(), 401);
+        assert_eq!(observer.0.load(std::sync::atomic::Ordering::SeqCst), 0);
+    }
+    let response = Harness::client()
+        .post(format!("{}/api/v2/browser-bootstrap", harness.origin))
+        .header("origin", &harness.origin)
+        .header("x-rsi-csrf", "1")
+        .header("x-rsi-launch-ticket", "b".repeat(64))
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(response.status(), 200);
+    assert_eq!(observer.0.load(std::sync::atomic::Ordering::SeqCst), 1);
+    harness.close().await;
+}
+
 #[derive(Debug)]
 struct EmptyWebAssets;
 impl rsi_api_http::HttpAssets for EmptyWebAssets {
