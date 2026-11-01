@@ -43,6 +43,13 @@ pub type ImageAdapterStream = AdapterStream<ImageEvent>;
 pub type DeferredLanguageAdapterStream = AdapterStream<DeferredLanguageBatch>;
 
 /// Provider-private context whose secret half is intentionally not serializable.
+/// Media reads use [`Self::resolve_media`]; the raw resolver is not exposed.
+///
+/// ```compile_fail,E0599
+/// fn raw_media(context: &rsi_ai_provider::PrepareContext) {
+///     let _ = context.media();
+/// }
+/// ```
 #[derive(Clone)]
 pub struct PrepareContext {
     snapshot: PreparedCallSnapshot,
@@ -366,6 +373,17 @@ fn media_waiter_cancelled() -> AiError {
 }
 
 impl PrepareContext {
+    /// Resolves the caller's cap against the exact frozen profile without rewriting
+    /// the request or changing its retained allocation weight.
+    pub fn language_output_tokens(&self, request: &LanguageRequest) -> Option<u32> {
+        request.settings().max_output_tokens().or_else(|| {
+            self.snapshot
+                .language_settings
+                .as_ref()
+                .and_then(|settings| settings.profile.default_output_tokens())
+        })
+    }
+
     /// Couples redacted snapshot facts with nonserializable secret and media access.
     pub fn new(
         snapshot: PreparedCallSnapshot,
@@ -392,11 +410,6 @@ impl PrepareContext {
     /// Returns the resolved secret and source facts when the provider requires one.
     pub const fn credential(&self) -> Option<&ResolvedCredential> {
         self.credential.as_ref()
-    }
-
-    /// Returns the Start-time media resolver.
-    pub fn media(&self) -> &Arc<dyn MediaResolver> {
-        &self.media
     }
 
     /// Releases successful media bodies after the adapter's final resolution.
@@ -572,7 +585,7 @@ type StartExecutor<T> =
 /// One-shot prepared adapter call. Construction performs no provider I/O.
 pub struct Prepared<T> {
     snapshot: PreparedCallSnapshot,
-    executor: Option<StartExecutor<T>>,
+    executor: StartExecutor<T>,
 }
 
 impl<T> Prepared<T> {
@@ -583,7 +596,7 @@ impl<T> Prepared<T> {
     {
         Self {
             snapshot,
-            executor: Some(Box::new(executor)),
+            executor: Box::new(executor),
         }
     }
 
@@ -593,12 +606,8 @@ impl<T> Prepared<T> {
     }
 
     /// Consumes the prepared call and permits exactly one external provider attempt.
-    pub async fn start(mut self, abort: AbortSignal) -> Result<T, AiError> {
-        let executor = self
-            .executor
-            .take()
-            .expect("Prepared executor exists until the consuming start call");
-        executor(abort).await
+    pub async fn start(self, abort: AbortSignal) -> Result<T, AiError> {
+        (self.executor)(abort).await
     }
 }
 
@@ -607,8 +616,7 @@ impl<T> fmt::Debug for Prepared<T> {
         formatter
             .debug_struct("Prepared")
             .field("snapshot", &self.snapshot)
-            .field("ready", &self.executor.is_some())
-            .finish()
+            .finish_non_exhaustive()
     }
 }
 

@@ -26,6 +26,9 @@ services. The Language router also publishes the read-only
 Base contracts needed by their adapters. Their registrations are bound to the
 provider Fiber generation. Removing or replacing that Fiber withdraws the
 registrations after generation-local prepared calls drain.
+Withdrawal removes only the matching registration identity under the registry
+lock, then releases the provider outside it. Adapter destruction may withdraw
+other provider leases from the same router.
 
 This topology uses the public `rsi-meta` Context/Fiber dependency semantics;
 provider packages do not invent a parallel lifecycle or serialize in-process
@@ -55,6 +58,8 @@ duplicate-charge risk; it grants no permission to repeat external tools.
 Routers run the selected adapter's compatibility check before credential or
 media-service access, then freeze those dependencies only for an admitted
 request.
+Canonical request buffers are hashed and released before asynchronous credential
+lookup; the prepared snapshot retains only their digest.
 
 Provider-managed deferred Language work is separate. Submit, poll, resume, and
 cancel each perform at most one request. Each resumed batch pairs normalized

@@ -201,6 +201,226 @@ struct Adapter {
     misreport_checkpoint: bool,
 }
 
+#[derive(Debug)]
+struct CountedAdapter {
+    inner: Adapter,
+    descriptions: Arc<AtomicUsize>,
+    prepared_caps: Arc<std::sync::Mutex<Vec<u32>>>,
+}
+
+impl CountedAdapter {
+    fn observe_prepare(&self, context: &PrepareContext, request: &LanguageRequest) {
+        let profile = &context
+            .snapshot()
+            .language_settings
+            .as_ref()
+            .unwrap()
+            .profile;
+        assert_eq!(profile.default_output_tokens(), Some(256));
+        profile.validate_output_cap(request.settings()).unwrap();
+        self.prepared_caps
+            .lock()
+            .unwrap()
+            .push(context.language_output_tokens(request).unwrap());
+    }
+}
+
+impl LanguageAdapter for CountedAdapter {
+    fn models(&self) -> &rsi_ai_protocol::LanguageModelProfiles {
+        self.inner.models()
+    }
+    fn describe(&self, model: &str) -> Result<LanguageProfile, rsi_ai_protocol::AiError> {
+        self.descriptions.fetch_add(1, Ordering::SeqCst);
+        Ok(self
+            .inner
+            .describe(model)?
+            .with_default_output_tokens(Some(256))
+            .unwrap())
+    }
+    fn validate_request(
+        &self,
+        model: &str,
+        request: &LanguageRequest,
+    ) -> Result<(), rsi_ai_protocol::AiError> {
+        self.inner.validate_request(model, request)
+    }
+    fn prepare(
+        &self,
+        context: PrepareContext,
+        model: String,
+        request: LanguageRequest,
+    ) -> AdapterFuture<Result<Prepared<LanguageAdapterStream>, rsi_ai_protocol::AiError>> {
+        self.observe_prepare(&context, &request);
+        self.inner.prepare(context, model, request)
+    }
+    fn prepare_deferred(
+        &self,
+        context: PrepareContext,
+        model: String,
+        request: LanguageRequest,
+    ) -> AdapterFuture<Result<Prepared<DeferredLanguageAdapterHandle>, rsi_ai_protocol::AiError>>
+    {
+        self.observe_prepare(&context, &request);
+        self.inner.prepare_deferred(context, model, request)
+    }
+}
+
+#[tokio::test]
+#[expect(
+    clippy::too_many_lines,
+    reason = "one registration fixture covers direct and deferred retained default resolution"
+)]
+async fn direct_and_deferred_prepare_resolve_one_profile_for_defaults_and_snapshot() {
+    let runtime = Runtime::default();
+    let credentials = runtime
+        .root()
+        .apply(
+            linked("credentials", Arc::new(MemoryCredentialsFactory)),
+            Value::Null,
+        )
+        .await
+        .unwrap();
+    let router = runtime
+        .root()
+        .apply(
+            linked("language", Arc::new(LanguageRouterFactory)),
+            Value::Null,
+        )
+        .await
+        .unwrap();
+    let calls = runtime
+        .root()
+        .lookup_local::<LanguageCallContract>()
+        .unwrap();
+    let registrar = runtime
+        .root()
+        .lookup_local::<LanguageRegistrarContract>()
+        .unwrap();
+    let descriptions = Arc::new(AtomicUsize::new(0));
+    let starts = Arc::new(AtomicUsize::new(0));
+    let caps = Arc::new(std::sync::Mutex::new(Vec::new()));
+    let registration = Arc::new(
+        ProviderRegistration::builder("counted", "fixture")
+            .unwrap()
+            .with_config_generation(1)
+            .with_language(CountedAdapter {
+                inner: Adapter {
+                    starts: starts.clone(),
+                    reject_request: false,
+                    misreport_checkpoint: false,
+                },
+                descriptions: descriptions.clone(),
+                prepared_caps: caps.clone(),
+            })
+            .build()
+            .unwrap(),
+    );
+    let gate = RegistrationGate::new();
+    let lease = registrar
+        .register_language(registration, gate.clone())
+        .unwrap();
+    gate.commit();
+    for deferred in [false, true] {
+        for explicit_cap in [None, Some(128)] {
+            let before = descriptions.load(Ordering::SeqCst);
+            let model = ModelRef::new("counted", "model").unwrap();
+            let mut request =
+                LanguageRequest::new(vec![Message::user_text("hello").unwrap()]).unwrap();
+            if let Some(cap) = explicit_cap {
+                request = request
+                    .with_settings(
+                        rsi_ai_protocol::LanguageSettings::default()
+                            .with_max_output_tokens(cap)
+                            .unwrap(),
+                    )
+                    .unwrap();
+            }
+            let caller_request = request.clone();
+            let canonical = caller_request.canonical_bytes().unwrap();
+            let guard = Arc::new(());
+            request = request.with_retention(guard.clone());
+            let retained = request.clone();
+            if deferred {
+                drop(calls.prepare_deferred(model, request).await.unwrap());
+            } else {
+                drop(calls.prepare(model, request).await.unwrap());
+            }
+            assert_eq!(caller_request.canonical_bytes().unwrap(), canonical);
+            assert_eq!(retained.canonical_bytes().unwrap(), canonical);
+            assert_eq!(retained.settings().max_output_tokens(), explicit_cap);
+            assert!(
+                retained
+                    .clone()
+                    .with_settings(rsi_ai_protocol::LanguageSettings::default())
+                    .is_err()
+            );
+            assert!(Arc::strong_count(&guard) > 1);
+            drop(retained);
+            assert_eq!(Arc::strong_count(&guard), 1);
+            assert_eq!(
+                descriptions.load(Ordering::SeqCst) - before,
+                1,
+                "one selected model profile per Prepare"
+            );
+        }
+    }
+    assert_eq!(*caps.lock().unwrap(), [256, 128, 256, 128]);
+    assert_media_reader_required(calls.as_ref()).await;
+    assert_eq!(
+        *caps.lock().unwrap(),
+        [256, 128, 256, 128],
+        "media refusal precedes adapter Prepare"
+    );
+    assert_eq!(starts.load(Ordering::SeqCst), 0);
+    drop(lease);
+    drop(registrar);
+    drop(calls);
+    assert!(router.dispose().await.is_clean());
+    assert!(credentials.dispose().await.is_clean());
+}
+
+async fn assert_media_reader_required(calls: &dyn rsi_ai_protocol::LanguageCall) {
+    let image = rsi_ai_protocol::MessageContent::Image(
+        rsi_ai_protocol::MediaDescriptor::new(
+            rsi_ai_protocol::MediaKind::Image,
+            "image/png",
+            1,
+            "0".repeat(64),
+        )
+        .unwrap(),
+    );
+    let direct_media = vec![Message::user(vec![image.clone()]).unwrap()];
+    let nested_media = vec![
+        Message::assistant(vec![rsi_ai_protocol::MessageContent::ToolCall(
+            rsi_ai_protocol::ToolCall {
+                id: "read-image".into(),
+                name: "inspect".into(),
+                arguments: "{}".into(),
+                kind: rsi_ai_protocol::ToolCallKind::Function,
+            },
+        )])
+        .unwrap(),
+        Message::tool_result("read-image", vec![image], false).unwrap(),
+    ];
+    for messages in [direct_media, nested_media] {
+        for deferred in [false, true] {
+            let model = ModelRef::new("counted", "model").unwrap();
+            let request = LanguageRequest::new(messages.clone()).unwrap();
+            let error = if deferred {
+                calls.prepare_deferred(model, request).await.unwrap_err()
+            } else {
+                calls.prepare(model, request).await.unwrap_err()
+            };
+            assert_eq!(error.kind(), ErrorKind::Artifact);
+            assert!(
+                error
+                    .to_string()
+                    .contains("Media but rsi.media.read is absent")
+            );
+        }
+    }
+}
+
 impl fmt::Debug for Adapter {
     fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
         formatter

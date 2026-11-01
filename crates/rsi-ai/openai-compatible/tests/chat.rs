@@ -562,3 +562,80 @@ async fn thinking_switch_uses_the_configured_alias_and_is_opt_in() {
     }
     server.abort();
 }
+
+#[tokio::test]
+async fn retained_requests_translate_frozen_defaults_and_explicit_caps_without_rewrite() {
+    let capture = Capture::default();
+    let app = Router::new()
+        .route("/v1/chat/completions", post(chat))
+        .with_state(capture.clone());
+    let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let address = listener.local_addr().unwrap();
+    let server = tokio::spawn(async move { axum::serve(listener, app).await.unwrap() });
+    let adapter = ChatCompletionsAdapter::new(
+        ChatCompletionsConfig::new(format!("http://{address}"))
+            .unwrap()
+            .with_model_profile("fixture-model", model_limits())
+            .unwrap(),
+        Arc::new(ReqwestTransport::new().unwrap()),
+    );
+    for explicit in [None, Some(128)] {
+        let mut request = LanguageRequest::new(vec![Message::user_text("hello").unwrap()]).unwrap();
+        if let Some(cap) = explicit {
+            request = request
+                .with_settings(
+                    LanguageSettings::default()
+                        .with_max_output_tokens(cap)
+                        .unwrap(),
+                )
+                .unwrap();
+        }
+        let guard = Arc::new(());
+        let request = request.with_retention(guard.clone());
+        let original = request.clone();
+        let base = language_context(
+            "chat",
+            "openai-compatible",
+            "fixture-model",
+            Some(credential()),
+            Arc::new(MissingMediaResolver),
+            0,
+        );
+        let mut snapshot = base.snapshot().clone();
+        snapshot.language_settings = Some(
+            rsi_ai_protocol::PreparedLanguageSettings::new(
+                adapter
+                    .describe("fixture-model")
+                    .unwrap()
+                    .with_default_output_tokens(Some(321))
+                    .unwrap(),
+                None,
+            )
+            .unwrap(),
+        );
+        let context = rsi_ai_provider::PrepareContext::new(
+            snapshot,
+            Some(credential()),
+            Arc::new(MissingMediaResolver),
+            0,
+        )
+        .unwrap();
+        let prepared = adapter
+            .prepare(context, "fixture-model".into(), request)
+            .await
+            .unwrap();
+        drop(original);
+        assert!(Arc::strong_count(&guard) > 1);
+        let mut stream = prepared.start(AbortSignal::default()).await.unwrap();
+        while let Some(event) = stream.next().await {
+            event.unwrap();
+        }
+        drop(stream);
+        assert_eq!(
+            capture.0.lock().unwrap().as_ref().unwrap().1["max_tokens"],
+            explicit.unwrap_or(321)
+        );
+        assert_eq!(Arc::strong_count(&guard), 1);
+    }
+    server.abort();
+}

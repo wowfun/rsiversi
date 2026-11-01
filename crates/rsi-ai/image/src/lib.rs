@@ -95,9 +95,11 @@ impl Router {
         let media_admission_bytes = image_media_admission_bytes(request)?;
         validate_media_admission_bytes(media_admission_bytes)
             .map_err(|error| artifact(error.to_string()))?;
-        let request_bytes = request
-            .canonical_bytes()
-            .map_err(|error| invalid(error.to_string()))?;
+        let request_sha256 = hex::encode(Sha256::digest(
+            request
+                .canonical_bytes()
+                .map_err(|error| invalid(error.to_string()))?,
+        ));
         let call_number = self
             .next_call_id
             .fetch_update(Ordering::AcqRel, Ordering::Acquire, |current| {
@@ -140,7 +142,7 @@ impl Router {
                 .as_ref()
                 .map(|credential| credential.source.clone()),
             retry_policy: registration.retry_policy().clone(),
-            request_sha256: hex::encode(Sha256::digest(request_bytes)),
+            request_sha256,
         };
         PrepareContext::new(snapshot, credential, media, media_admission_bytes)
             .map_err(|error| invalid(error.to_string()))

@@ -329,7 +329,7 @@ fn responses_replay_id(extension: &ProviderExtension) -> Result<&str, AiError> {
 
 struct OpenAiDeferredOperation {
     context: PrepareContext,
-    config: OpenAiConfig,
+    config: Arc<OpenAiConfig>,
     transport: Arc<dyn HttpTransport>,
     checkpoint: Arc<Mutex<DeferredLanguageCheckpoint>>,
 }
@@ -803,7 +803,7 @@ async fn responses_request(
         body.insert("background".to_owned(), Value::Bool(true));
     }
     let settings = request.settings();
-    if let Some(value) = settings.max_output_tokens() {
+    if let Some(value) = context.language_output_tokens(request) {
         body.insert("max_output_tokens".to_owned(), Value::from(value));
     }
     if let Some(value) = settings.temperature() {

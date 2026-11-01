@@ -1060,3 +1060,62 @@ async fn responses_and_image_edit_share_credential_and_start_time_media_resoluti
             .any(|window| window == [137, 80, 78, 71])
     );
 }
+
+#[tokio::test]
+async fn retained_requests_translate_frozen_defaults_and_explicit_caps_without_rewrite() {
+    let capture = Capture::default();
+    let model = language_model(capture.clone()).await;
+    for explicit in [None, Some(128)] {
+        let mut request = LanguageRequest::new(vec![Message::user_text("hello").unwrap()]).unwrap();
+        if let Some(cap) = explicit {
+            request = request
+                .with_settings(
+                    rsi_ai_protocol::LanguageSettings::default()
+                        .with_max_output_tokens(cap)
+                        .unwrap(),
+                )
+                .unwrap();
+        }
+        let guard = Arc::new(());
+        let request = request.with_retention(guard.clone());
+        let base = context(AiCapability::Language, InMemoryMediaResolver::default(), 0);
+        let mut snapshot = base.snapshot().clone();
+        snapshot.language_settings = Some(
+            rsi_ai_protocol::PreparedLanguageSettings::new(
+                model
+                    .adapter
+                    .describe("gpt-5")
+                    .unwrap()
+                    .with_default_output_tokens(Some(321))
+                    .unwrap(),
+                None,
+            )
+            .unwrap(),
+        );
+        let context = PrepareContext::new(
+            snapshot,
+            Some(ResolvedCredential {
+                secret: SecretValue::new("openai-secret").unwrap(),
+                source: CredentialSource::Keyring,
+            }),
+            Arc::new(rsi_ai_provider::MissingMediaResolver),
+            0,
+        )
+        .unwrap();
+        let prepared = model
+            .adapter
+            .prepare(context, "gpt-5".into(), request)
+            .await
+            .unwrap();
+        assert!(Arc::strong_count(&guard) > 1);
+        let mut stream = prepared.start(AbortSignal::default()).await.unwrap();
+        while let Some(event) = stream.next().await {
+            event.unwrap();
+        }
+        drop(stream);
+        let body: Value =
+            serde_json::from_slice(&capture.0.lock().unwrap().last().unwrap().2).unwrap();
+        assert_eq!(body["max_output_tokens"], explicit.unwrap_or(321));
+        assert_eq!(Arc::strong_count(&guard), 1);
+    }
+}

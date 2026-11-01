@@ -87,28 +87,28 @@ impl Router {
         Ok(route)
     }
 
-    async fn prepare_context(
+    async fn prepare_request(
         &self,
         registration: &ProviderRegistration,
         model: &ModelRef,
-        request: &LanguageRequest,
-    ) -> Result<PrepareContext, AiError> {
-        registration
+        request: LanguageRequest,
+    ) -> Result<(LanguageRequest, PrepareContext), AiError> {
+        let language = registration
             .language()
-            .expect("route checked its Language facet")
-            .validate_request(model.model(), request)?;
-        registration
-            .language()
-            .expect("validated language facet")
-            .describe(model.model())?
+            .expect("route checked its Language facet");
+        let profile = language.describe(model.model())?;
+        language.validate_request(model.model(), &request)?;
+        profile
             .validate_output_cap(request.settings())
             .map_err(|error| invalid(error.to_string()))?;
-        let media_admission_bytes = language_media_admission_bytes(request)?;
+        let media_admission_bytes = language_media_admission_bytes(&request)?;
         validate_media_admission_bytes(media_admission_bytes)
             .map_err(|error| artifact(error.to_string()))?;
-        let request_bytes = request
-            .canonical_bytes()
-            .map_err(|error| invalid(error.to_string()))?;
+        let request_sha256 = hex::encode(Sha256::digest(
+            request
+                .canonical_bytes()
+                .map_err(|error| invalid(error.to_string()))?,
+        ));
         let call_number = self
             .next_call_id
             .fetch_update(Ordering::AcqRel, Ordering::Acquire, |current| {
@@ -125,7 +125,7 @@ impl Router {
             ),
             None => None,
         };
-        let media: Arc<dyn MediaResolver> = if request_has_media(request) {
+        let media: Arc<dyn MediaResolver> = if media_admission_bytes > 0 {
             let reader = self
                 .context
                 .lookup_local::<MediaReadContract>()
@@ -137,10 +137,7 @@ impl Router {
         let snapshot = PreparedCallSnapshot {
             language_settings: Some(
                 rsi_ai_protocol::PreparedLanguageSettings::new(
-                    registration
-                        .language()
-                        .expect("validated language facet")
-                        .describe(model.model())?,
+                    profile,
                     request.settings().reasoning_effort().cloned(),
                 )
                 .map_err(|error| invalid(error.to_string()))?,
@@ -158,10 +155,11 @@ impl Router {
                 .as_ref()
                 .map(|credential| credential.source.clone()),
             retry_policy: registration.retry_policy().clone(),
-            request_sha256: hex::encode(Sha256::digest(request_bytes)),
+            request_sha256,
         };
-        PrepareContext::new(snapshot, credential, media, media_admission_bytes)
-            .map_err(|error| invalid(error.to_string()))
+        let context = PrepareContext::new(snapshot, credential, media, media_admission_bytes)
+            .map_err(|error| invalid(error.to_string()))?;
+        Ok((request, context))
     }
 
     async fn restore_context(
@@ -305,9 +303,8 @@ impl LanguageCall for Router {
         request: LanguageRequest,
     ) -> Result<Box<dyn PreparedLanguageCall>, AiError> {
         let route = self.route(&model)?;
-        let request = resolve_request_default(&route.registration, &model, request)?;
-        let context = self
-            .prepare_context(&route.registration, &model, &request)
+        let (request, context) = self
+            .prepare_request(&route.registration, &model, request)
             .await?;
         let expected_call = context.snapshot().clone();
         let prepared = route
@@ -326,9 +323,8 @@ impl LanguageCall for Router {
         request: LanguageRequest,
     ) -> Result<Box<dyn PreparedDeferredLanguageCall>, AiError> {
         let route = self.route(&model)?;
-        let request = resolve_request_default(&route.registration, &model, request)?;
-        let context = self
-            .prepare_context(&route.registration, &model, &request)
+        let (request, context) = self
+            .prepare_request(&route.registration, &model, request)
             .await?;
         let expected_call = context.snapshot().clone();
         let prepared = route
@@ -554,13 +550,6 @@ fn validate_prepared_snapshot(
     Ok(())
 }
 
-fn request_has_media(request: &LanguageRequest) -> bool {
-    request
-        .messages()
-        .iter()
-        .any(|message| message.content().iter().any(message_content_has_media))
-}
-
 fn language_media_admission_bytes(request: &LanguageRequest) -> Result<u64, AiError> {
     let mut unique = HashSet::new();
     for message in request.messages() {
@@ -589,16 +578,6 @@ fn collect_media_descriptors<'a>(
             | MessageContent::Reasoning { .. }
             | MessageContent::ToolCall(_) => {}
         }
-    }
-}
-
-fn message_content_has_media(content: &MessageContent) -> bool {
-    match content {
-        MessageContent::Image(_) | MessageContent::Audio(_) => true,
-        MessageContent::ToolResult { content, .. } => content.iter().any(message_content_has_media),
-        MessageContent::Text { .. }
-        | MessageContent::Reasoning { .. }
-        | MessageContent::ToolCall(_) => false,
     }
 }
 
@@ -680,31 +659,4 @@ fn ai_error(kind: ErrorKind, message: impl Into<String>) -> AiError {
         message,
     )
     .expect("router-generated AI errors are bounded static facts")
-}
-
-fn resolve_request_default(
-    registration: &ProviderRegistration,
-    model: &ModelRef,
-    request: LanguageRequest,
-) -> Result<LanguageRequest, AiError> {
-    if request.settings().max_output_tokens().is_some() {
-        return Ok(request);
-    }
-    let profile = registration
-        .language()
-        .expect("validated language facet")
-        .describe(model.model())?;
-    match profile.default_output_tokens() {
-        Some(cap) => {
-            let settings = request
-                .settings()
-                .clone()
-                .with_max_output_tokens(cap)
-                .map_err(|error| invalid(error.to_string()))?;
-            request
-                .with_settings(settings)
-                .map_err(|error| invalid(error.to_string()))
-        }
-        None => Ok(request),
-    }
 }

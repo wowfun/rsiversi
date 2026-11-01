@@ -173,3 +173,8 @@ Validated request options and requests share immutable Tool definitions across
 clones and context planning. Constructor and wire decoding still establish their
 own request aggregate limits; composition catalog measurements admit allocation
 and do not replace Language request validation.
+
+Portable `LanguageInput.request` preserves the caller's original settings. For
+translation, its explicit output cap wins; otherwise the captured
+`LanguageInput.snapshot.language_settings.profile.default_output_tokens()`
+supplies the declared default. Its request digest does not include this resolution.

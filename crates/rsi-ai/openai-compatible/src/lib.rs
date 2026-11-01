@@ -198,7 +198,7 @@ impl ChatCompletionsConfig {
 /// One no-retry Chat Completions adapter.
 #[derive(Clone)]
 pub struct ChatCompletionsAdapter {
-    config: ChatCompletionsConfig,
+    config: Arc<ChatCompletionsConfig>,
     transport: Arc<dyn HttpTransport>,
 }
 
@@ -206,7 +206,10 @@ impl ChatCompletionsAdapter {
     #[must_use]
     /// Binds validated endpoint policy to the transport that performs each request.
     pub fn new(config: ChatCompletionsConfig, transport: Arc<dyn HttpTransport>) -> Self {
-        Self { config, transport }
+        Self {
+            config: Arc::new(config),
+            transport,
+        }
     }
 }
 
@@ -583,7 +586,7 @@ async fn build_request_body(
     body.insert("stream".to_owned(), Value::Bool(true));
     body.insert("stream_options".to_owned(), json!({"include_usage": true}));
     let settings = request.settings();
-    if let Some(value) = settings.max_output_tokens() {
+    if let Some(value) = context.language_output_tokens(request) {
         body.insert("max_tokens".to_owned(), Value::from(value));
     }
     if let Some(value) = settings.temperature() {

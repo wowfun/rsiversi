@@ -223,7 +223,7 @@ macro_rules! http_adapter {
     ($name:ident) => {
         #[derive(Clone)]
         pub struct $name {
-            config: OpenAiConfig,
+            config: Arc<OpenAiConfig>,
             transport: Arc<dyn HttpTransport>,
         }
 
@@ -231,7 +231,10 @@ macro_rules! http_adapter {
             #[must_use]
             /// Binds the official endpoint policy to the no-retry HTTP transport.
             pub fn new(config: OpenAiConfig, transport: Arc<dyn HttpTransport>) -> Self {
-                Self { config, transport }
+                Self {
+                    config: Arc::new(config),
+                    transport,
+                }
             }
         }
 

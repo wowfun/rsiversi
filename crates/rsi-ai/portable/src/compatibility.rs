@@ -15,7 +15,8 @@ pub(crate) fn language(model: &LanguageModel, request: &LanguageRequest) -> Resu
     if (!request.hosted_tools().is_empty() && !features.contains(&LanguageFeature::HostedTools))
         || (!matches!(request.response_format(), ResponseFormat::Text)
             && !features.contains(&LanguageFeature::StructuredOutput))
-        || (request.settings() != &LanguageSettings::default()
+        || ((request.settings() != &LanguageSettings::default()
+            || profile.default_output_tokens().is_some())
             && !features.contains(&LanguageFeature::GenerationSettings))
         || request
             .settings()

@@ -24,6 +24,8 @@ committed Language routes in strict `ModelRef` order with an exclusive cursor
 and 1–256 models per page. The total across deployments may exceed one page.
 Enumeration performs no credential resolution, media read, or provider I/O and
 does not promise that a listed route survives later generation withdrawal.
+Paging seeks the exclusive cursor in the ordered deployment and model catalogs;
+it does not enumerate or allocate the preceding catalog on each page.
 The router publishes `LanguageModelsContract` independently of its invocation
 capability. Its asynchronous interface is shared by native and remote clients;
 enumerating models requires neither a Session nor provider invocation authority.

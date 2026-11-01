@@ -14,10 +14,20 @@ checkpoint, and batch types; it has no parallel representation or conversion
 step. Decoded durable checkpoints revalidate the complete protocol contract,
 and adapters advance the same typed checkpoint in place.
 
+`Prepared<T>` always owns its executor; consuming Start enforces one-shot use.
+Concrete HTTP adapters share immutable configuration with their prepared and
+deferred calls, pinning the selected generation without copying model catalogs.
+
 Capability adapters expose a synchronous compatibility preflight with no
 credential, media, filesystem, or network access. Routers run it before
 resolving effect dependencies; direct adapter Prepare repeats the same check so
 the provider-author seam remains safe independently.
+
+Language adapters retain the original request and read the effective output cap
+through `PrepareContext::language_output_tokens`: an explicit caller cap wins,
+otherwise the frozen profile supplies its declared default. This scalar
+resolution does not mutate, clone, or release a retained request allocation.
+Portable providers apply the same rule to `LanguageInput.snapshot` and `request`.
 
 Starting a Language or Image call returns a normalized raw stream, not a
 terminal success value. The caller must pass every event through the matching
@@ -26,7 +36,9 @@ committing success; transport EOF alone is never success.
 
 One `PrepareContext` is constructed with the sum of its unique declared media
 bytes. Construction rejects a request above the 256 MiB process resident bound;
-the first Start-time resolution acquires that complete request weight atomically
+adapters access its media only through `resolve_media`, which retains admission
+and verifies the declared body. The context does not expose its raw resolver.
+The first Start-time resolution acquires that complete request weight atomically
 before any descriptor read. It then coalesces successful resolution of identical
 complete media descriptors for that prepared call. Resolution errors are not
 cached, each waiter observes its own abort signal without cancelling the shared
