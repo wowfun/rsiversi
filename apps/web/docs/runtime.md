@@ -82,7 +82,22 @@ close starts a new attempt after recovery. The native close attempt has a thirty
 Failure to cancel native close retains the draft-save
 guidance and fails the owning connection instead of escaping as a raw fetch error. Disconnect immediately fences ordinary admission and joins admitted
 work and reply delivery before reporting clean shutdown. It does not gain capacity
-by forgetting pending mutations. The document owns persistent composer drafts;
+by forgetting pending mutations. Export cancellation and exact resource-panel
+closure use the bounded control lane independently of ordinary requests. Their
+owners cancel the underlying reads; an ordinary slot is released only after its
+operation settles.
+
+A failed Worker generation immediately fences admission and notifies the document,
+without waiting for admitted work to drain. The document rejects its waiters,
+disposes renderers and terminates that Worker before explicit reconnection.
+Best-effort Rust cleanup cannot delay the failure notification. This failure path
+does not confirm logout or cancellation of an admitted remote mutation. Saved
+submissions retain their original identity and unknown-outcome reconciliation;
+reconnection never automatically repeats them. Normal long-running operations
+retain their owning cancellation and the independent Disconnect action, rather
+than a document-wide request deadline.
+
+The document owns persistent composer drafts;
 Worker frames never overwrite editable text or ordered image references. Dynamic content enters text
 nodes or the Worker's restricted Markdown event stream, using only its closed
 element set. HTML and remote Markdown images remain inert text.
@@ -206,7 +221,7 @@ to its exact decimal base-frame ID, preserving unchanged pane data and stable
 block identities. A mismatch leaves the current DOM intact and requests a
 snapshot; a successful render acknowledges the resulting frame ID. The Worker
 admits one frame at a time, with a 30-second acknowledgement deadline. Expiry
-drains the connection before reporting failure. This presentation handshake never
+retires the failed generation without waiting for request drain. This presentation handshake never
 owns Fact or control cursors.
 
 `src/runtime/workbench.js` constructs the document owner with explicit transport,

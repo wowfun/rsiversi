@@ -2,12 +2,14 @@
 export const limits = Object.freeze({ ordinary: 8, terminalRead: 32, terminalWrite: 8, lifecycle: 1, exportControl: 8 });
 export function lane(method, payload) {
   if (method === "command" && typeof payload === "string" && payload.length <= 128) {
-    try { if (JSON.parse(payload)?.action === "close_settings") return "exportControl"; } catch {}
+    try { if (["close_settings", "close_detail"].includes(JSON.parse(payload)?.action)) return "exportControl"; } catch {}
   }
   if(method==="directory_input" && typeof payload==="string" && payload.length<=128*1024){
     try {if(JSON.parse(payload)?.action==="cancel")return "exportControl";} catch {}
   }
-  if (method === "export_cancel") return "exportControl";
+  if (method === "export_input" && typeof payload === "string" && payload.length <= 16 * 1024) {
+    try { if (JSON.parse(payload)?.operation?.kind === "cancel") return "exportControl"; } catch {}
+  }
   if (method === "connect" || method === "disconnect") return "lifecycle";
   if (method === "terminal" && typeof payload === "string" && payload.length <= 512 * 1024) {
     try {

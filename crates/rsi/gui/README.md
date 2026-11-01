@@ -39,7 +39,10 @@ a separate internal fence.
 `close_settings` cancels the exact window, including reads whose frames have not
 yet rendered, through bounded control admission independent of ordinary commands;
 a close for a previously closed window is a successful no-op. Resource panels use
-`close_detail` with their explicit view and opening revision. Closing Settings cancels its
+`close_detail` with their explicit view and opening revision. Like Settings
+dismissal, this synchronous close checks application admission but does not need
+an ordinary command slot; it cancels reads even when all ordinary slots are held.
+An old opening revision cannot close a replacement. Closing Settings cancels its
 reads, not an already accepted save. The document fences dismissed revisions by
 connection identity, so late frames or replies cannot reopen them or close a
 newer Settings window.

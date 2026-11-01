@@ -60,10 +60,11 @@ async function dispatch(data) {
       : await connect(data.payload.receipt, data.payload.devHttp);
     delete data.payload.ticket;
     connected = true; accepting = true;
-    pumping = views().catch(async error => {
+    pumping = views().catch(error => {
       if (!connected) return;
-      try { await shutdown(false); }
-      catch (cleanup) { error = new Error(`${error}; ${cleanup}`); }
+      // shutdown fences admission synchronously. Failed-generation notification
+      // must not wait for Rust cleanup or a non-settling admitted dispatch.
+      void shutdown(false).catch(() => {});
       postMessage({ kind: "failed", error: String(error) });
     });
   } else if (data.method === "command") {

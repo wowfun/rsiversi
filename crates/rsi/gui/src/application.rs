@@ -526,6 +526,14 @@ impl GuiApplication {
             self.close_settings(&revision)?;
             return Ok(Box::pin(async { Ok(()) }));
         }
+        if let Command::CloseDetail {
+            view,
+            expected_open_revision,
+        } = command
+        {
+            self.close_detail(&view, &expected_open_revision)?;
+            return Ok(Box::pin(async { Ok(()) }));
+        }
         // Plugin operations publish their outcome in the shared workbench. A
         // recovered connection must not leave its previous error as a global banner.
         let global_error = !matches!(command, Command::Plugins { .. });
@@ -535,6 +543,19 @@ impl GuiApplication {
             move |app| async move { app.execute(command).await },
         )
     }
+    fn close_detail(&self, view: &str, expected_open_revision: &str) -> Result<()> {
+        let _admission = self.admission.lock().expect("Web admission poisoned");
+        if self.stop.is_cancelled() {
+            return Err("Web application is closed".into());
+        }
+        self.details
+            .lock()
+            .expect("Web details poisoned")
+            .close(view, expected_open_revision)?;
+        self.changed();
+        Ok(())
+    }
+
     fn close_settings(&self, revision: &str) -> Result<()> {
         let expected = revision
             .parse::<u64>()
@@ -1039,11 +1060,7 @@ impl GuiApplication {
             Command::CloseDetail {
                 view,
                 expected_open_revision,
-            } => {
-                let mut registry = self.details.lock().expect("Web details poisoned");
-                registry.close(&view, &expected_open_revision)?;
-                Ok(())
-            }
+            } => self.close_detail(&view, &expected_open_revision),
             // command() normally handles this synchronously before ordinary admission.
             Command::CloseSettings { revision } => self.close_settings(&revision),
             Command::FloatPanel { view, floating } => self

@@ -22,8 +22,8 @@ A WASM trap requires a fresh Worker and does not prove clean Rust shutdown.
 
 The document requests one coalesced frame, mounts admitted renderers and then
 acknowledges its exact frame ID. One pending frame and one acknowledgement wait
-are retained; a 30-second stalled acknowledgement closes and drains the
-connection. Domain observation cursors advance independently. Renderer offers
+are retained; a 30-second stalled acknowledgement retires the failed Worker
+generation through the document runtime's failure path. Domain observation cursors advance independently. Renderer offers
 wake the existing frame producer instead of adding a second frame queue.
 
 Image bytes are bounded before copying into WASM. Canonical response receive

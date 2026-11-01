@@ -51,6 +51,55 @@ pub(super) async fn fixture() -> (Runtime, Arc<Backend>, Arc<rsi_gui::GuiApplica
 }
 
 #[tokio::test]
+async fn exact_panel_close_cancels_reads_when_all_ordinary_slots_are_occupied() {
+    let (runtime, backend, app) = fixture().await;
+    app.command(r#"{"action":"add_surface","pane":"compare"}"#)
+        .await
+        .unwrap();
+    app.command(r#"{"action":"create","pane":"compare","workspace":"aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"}"#).await.unwrap();
+    let generation = view(&app)["surfaces"]["main"]["generation"].clone();
+    backend.block_source.store(true, Ordering::SeqCst);
+    let inspect = json!({"action":"inspect_source","pane":"main","generation":generation,"source":{"seq":"1","field":{"kind":"turn_input"}}}).to_string();
+    let mut waiting = Vec::new();
+    for count in 1..=8 {
+        let inspect = if count <= 4 {
+            inspect.clone()
+        } else {
+            json!({"action":"inspect_source","pane":"compare","generation":view(&app)["surfaces"]["compare"]["generation"],"source":{"seq":"1","field":{"kind":"turn_input"}}}).to_string()
+        };
+        waiting.push(app.command(&inspect));
+        tokio::time::timeout(std::time::Duration::from_secs(2), async {
+            while backend.active_source.load(Ordering::SeqCst) != count {
+                tokio::task::yield_now().await;
+            }
+        })
+        .await
+        .unwrap_or_else(|_| {
+            panic!(
+                "expected {count} active reads; actual {}; panels {}",
+                backend.active_source.load(Ordering::SeqCst),
+                view(&app)["panels"]
+            )
+        });
+    }
+    assert!(app.try_command(r#"{"action":"refresh"}"#).is_err());
+    let panels = view(&app)["panels"].as_array().unwrap().clone();
+    app.try_command(&json!({"action":"close_detail","view":panels[0]["view"],"expected_open_revision":"18446744073709551615"}).to_string())
+        .unwrap().await.unwrap();
+    assert_eq!(view(&app)["panels"].as_array().unwrap().len(), 8);
+    for panel in panels {
+        app.try_command(&json!({"action":"close_detail","view":panel["view"],"expected_open_revision":panel["open_revision"]}).to_string())
+            .unwrap().await.unwrap();
+    }
+    for task in waiting {
+        task.await.unwrap();
+    }
+    assert_eq!(backend.active_source.load(Ordering::SeqCst), 0);
+    assert!(view(&app)["panels"].as_array().unwrap().is_empty());
+    assert!(runtime.shutdown().await.is_clean());
+}
+
+#[tokio::test]
 async fn explicit_resource_open_receipts_keep_same_coordinate_documents_independent() {
     let (runtime, _, app) = fixture().await;
     let generation = view(&app)["surfaces"]["main"]["generation"].clone();
