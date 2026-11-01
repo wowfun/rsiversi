@@ -20,6 +20,65 @@ fn environment(root: &std::path::Path) -> ProfileEnvironment {
 }
 
 #[test]
+fn live_configuration_admission_bounds_expansion_and_returns_replaced_charges() {
+    let temp = tempfile::tempdir().unwrap();
+    let root = temp.path().join("profile.toml");
+    let compiler = ProfileCompiler::new(
+        ProfileEnvironment::new(
+            temp.path(),
+            temp.path(),
+            temp.path(),
+            "linux-x86_64",
+            BTreeMap::from([("payload".into(), json!("x".repeat(70)))]),
+        )
+        .unwrap(),
+        ProfileLimits {
+            maximum_config_bytes: 128,
+            ..ProfileLimits::default()
+        },
+    );
+    let leaf = |id| {
+        format!(
+            "[[steps]]\nkind='plugin'\nid='p{id}'\nplugin='test'\nconfig_rhai='defines.payload'\n"
+        )
+    };
+    let shrink = |id| format!("[[steps]]\nkind='patch'\ntarget='p{id}'\nconfig_json='null'\n");
+    // The ordered program can exceed the final 128-byte budget and then shrink.
+    std::fs::write(
+        &root,
+        format!("format=1\n{}{}{}{}", leaf(0), leaf(1), shrink(0), shrink(1)),
+    )
+    .unwrap();
+    compiler.compile(&ProfileProgram::from_file(&root)).unwrap();
+    // Credit from each replacement admits a later leaf instead of charging history.
+    let source = format!(
+        "format=1\n{}",
+        (0..12)
+            .map(|id| format!("{}{}", leaf(id), shrink(id)))
+            .collect::<String>()
+    );
+    std::fs::write(&root, source).unwrap();
+    compiler.compile(&ProfileProgram::from_file(&root)).unwrap();
+    // Four expanded leaves exceed the 256-byte working allowance before patches.
+    std::fs::write(
+        &root,
+        format!(
+            "format=1\n{}{}",
+            (0..4).map(leaf).collect::<String>(),
+            (0..4).map(shrink).collect::<String>()
+        ),
+    )
+    .unwrap();
+    assert!(matches!(
+        compiler.compile(&ProfileProgram::from_file(&root)),
+        Err(ProfileError::CapacityExceeded {
+            resource: "live config bytes",
+            maximum: 256
+        })
+    ));
+}
+
+#[test]
 fn immutable_source_publication_survives_program_clones_and_compilation() {
     let temp = tempfile::tempdir().unwrap();
     let lease = std::sync::Arc::new("publication");

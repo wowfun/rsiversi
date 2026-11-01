@@ -85,6 +85,17 @@ Profile limits. The operation ceiling is shared by every expression in one
 rebuild rather than resetting for each program step. Scripts and configuration
 values never appear in diagnostics.
 
+The final tree admits `maximum_config_bytes` of encoded configuration. During
+ordered compilation, retained leaf and staged patch configurations together
+admit at most twice that budget. Replacing a configuration returns its previous
+charge. A single expression result may be materialized before admission, bounded
+by the per-value and Rhai limits; byte measurement streams into a bounded counter.
+Patches may shrink an intermediate tree above the final budget within this working
+allowance. Programs exceeding that allowance reject before later patches, even if
+those patches would eventually shrink the tree. This bounds retained expansion
+independently of the number of nodes. Source and expression-engine limits remain
+separate from configuration-byte accounting.
+
 ## Preflight and convergence
 
 Every startup or reload rereads immutable sources and rebuilds the candidate
@@ -265,7 +276,9 @@ identity and must not be used as a cross-platform cache key.
 
 `ProfileFragment::source_digest` fingerprints a linked declaration with the same
 source encoding used by the compiler, under a fixed path-free identity domain.
-It evaluates no expressions or patch targets. It is suitable for catalog source
+That domain uses the `rsi-meta-profile-source-v1` format, absent paths,
+`fragment-identity` platform and empty defines. Computing it needs no compiler or
+expression engine and evaluates no expressions or patch targets. It is suitable for catalog source
 identity before assembly; it does not replace whole-program preflight or prove
 that any plugin configuration will activate.
 

@@ -68,7 +68,8 @@ pub struct ProfileLimits {
     pub maximum_expression_operations: u64,
     /// Maximum Rhai expression and function-call nesting.
     pub maximum_expression_depth: usize,
-    /// Maximum retained JSON bytes in the resolved tree.
+    /// Maximum retained JSON bytes in the resolved tree; compilation admits
+    /// twice this weight across live leaf and staged patch configurations.
     pub maximum_config_bytes: usize,
     /// Maximum bytes retained for one redacted operational diagnostic.
     pub maximum_diagnostic_bytes: usize,
@@ -279,17 +280,13 @@ impl ProfileFragment {
     /// This performs no expression evaluation, target lookup, or configuration validation.
     /// A patch may therefore refer to a target supplied by another fragment.
     pub fn source_digest(&self) -> String {
-        let compiler = ProfileCompiler::new(
-            ProfileEnvironment {
-                paths: None,
-                platform: "fragment-identity".into(),
-                defines: BTreeMap::new(),
-            },
-            ProfileLimits::default(),
-        );
-        let mut state = CompileState::new(&compiler);
-        state.hash_fragment(self);
-        hex_lower(state.digest.finalize().as_slice())
+        let mut digest = source_hasher(&ProfileEnvironment {
+            paths: None,
+            platform: "fragment-identity".into(),
+            defines: BTreeMap::new(),
+        });
+        hash_fragment(&mut digest, self);
+        hex_lower(digest.finalize().as_slice())
     }
 
     /// Creates an ordered linked fragment of plugin leaves.
@@ -740,7 +737,7 @@ impl ProfileCompiler {
             state.bundle = Some(bundle);
         }
         for fragment in &program.linked {
-            state.hash_fragment(fragment);
+            hash_fragment(&mut state.digest, fragment);
             state.charge_identifier("fragment", &fragment.id)?;
             for entry in &fragment.entries {
                 state.charge_step()?;
@@ -755,30 +752,30 @@ impl ProfileCompiler {
         match &program.root {
             #[cfg(not(target_family = "wasm"))]
             ProgramRoot::File(path) => {
-                state.hash_marker(b"root-file");
+                hash_marker(&mut state.digest, b"root-file");
                 state.execute_source(path, 1)?;
             }
             ProgramRoot::Bundle(bundle) => {
-                state.hash_marker(b"root-bundle");
+                hash_marker(&mut state.digest, b"root-bundle");
                 state.execute_source(Path::new(bundle.root()), 1)?;
             }
             ProgramRoot::Memory(profile) => {
-                state.hash_marker(b"root-memory");
+                hash_marker(&mut state.digest, b"root-memory");
                 for entry in &profile.entries {
-                    state.hash_entry(entry);
+                    hash_entry(&mut state.digest, entry);
                     state.charge_step()?;
                     let node = state.compile_public_entry(entry)?;
                     state.execute_node(node)?;
                 }
                 for step in &profile.steps {
-                    state.hash_step(step);
+                    hash_step(&mut state.digest, step);
                     state.charge_step()?;
                     state.execute_public_step(step)?;
                 }
             }
         }
         for patch in &program.launch_patches {
-            state.hash_patch(patch);
+            hash_patch(&mut state.digest, patch);
             state.charge_step()?;
             state.execute_public_patch(patch)?;
         }
@@ -983,6 +980,7 @@ struct CompileState<'a> {
     tree: Vec<TreeNode>,
     instance_ids: HashSet<String>,
     node_count: usize,
+    live_config_bytes: std::cell::Cell<usize>,
     expression_engine: Engine,
     watch_paths: BTreeSet<PathBuf>,
     source_fingerprints: BTreeMap<PathBuf, [u8; 32]>,
@@ -993,35 +991,161 @@ struct CompileState<'a> {
     digest: Sha256,
 }
 
+fn source_hasher(environment: &ProfileEnvironment) -> Sha256 {
+    let mut digest = Sha256::new();
+    digest_component(&mut digest, b"format", b"rsi-meta-profile-source-v1");
+    if let Some(paths) = &environment.paths {
+        for (label, path) in [
+            b"environment-config".as_slice(),
+            b"environment-state",
+            b"environment-cache",
+        ]
+        .into_iter()
+        .zip(paths)
+        {
+            digest_component(&mut digest, label, path.as_os_str().as_encoded_bytes());
+        }
+    } else {
+        digest_component(&mut digest, b"environment-paths", b"absent");
+    }
+    digest_component(
+        &mut digest,
+        b"environment-platform",
+        environment.platform.as_bytes(),
+    );
+    digest_component(
+        &mut digest,
+        b"environment-defines",
+        &serde_json::to_vec(&environment.defines)
+            .expect("JSON-compatible defines always serialize"),
+    );
+    digest
+}
+
+fn hash_marker(digest: &mut Sha256, marker: &[u8]) {
+    digest_component(digest, b"marker", marker);
+}
+
+fn hash_fragment(digest: &mut Sha256, fragment: &ProfileFragment) {
+    hash_marker(digest, b"linked-fragment");
+    digest_component(digest, b"fragment-id", fragment.id.as_bytes());
+    for entry in &fragment.entries {
+        hash_entry(digest, entry);
+    }
+    for step in &fragment.steps {
+        hash_step(digest, step);
+    }
+    hash_marker(digest, b"linked-fragment-end");
+}
+
+fn hash_entry(digest: &mut Sha256, entry: &ProfileEntry) {
+    hash_marker(digest, b"plugin");
+    digest_component(digest, b"instance-id", entry.id.as_str().as_bytes());
+    digest_component(digest, b"plugin-id", entry.plugin.as_str().as_bytes());
+    digest_component(
+        digest,
+        b"plugin-config",
+        &serde_json::to_vec(&entry.config)
+            .expect("JSON-compatible Profile configs always serialize"),
+    );
+}
+
+fn hash_step(digest: &mut Sha256, step: &ProfileStep) {
+    match step {
+        ProfileStep::Node(node) => hash_node(digest, node),
+        ProfileStep::Patch(patch) => hash_patch(digest, patch),
+    }
+}
+
+fn hash_node(digest: &mut Sha256, root: &ProfileNode) {
+    enum Frame<'a> {
+        Node(&'a ProfileNode),
+        GroupEnd,
+    }
+
+    let mut frames = vec![Frame::Node(root)];
+    while let Some(frame) = frames.pop() {
+        match frame {
+            Frame::Node(ProfileNode::Plugin(entry)) => hash_entry(digest, entry),
+            Frame::Node(ProfileNode::Group(group)) => {
+                hash_marker(digest, b"group");
+                digest_component(digest, b"group-id", group.id.as_bytes());
+                digest_component(digest, b"group-enabled", &[u8::from(group.enabled)]);
+                hash_isolation(digest, &group.isolation);
+                frames.push(Frame::GroupEnd);
+                frames.extend(group.children.iter().rev().map(Frame::Node));
+            }
+            Frame::GroupEnd => hash_marker(digest, b"group-end"),
+        }
+    }
+}
+
+fn hash_patch(digest: &mut Sha256, patch: &ProfilePatch) {
+    hash_marker(digest, b"patch");
+    match patch {
+        ProfilePatch::Append { target, nodes } => {
+            digest_component(digest, b"patch-kind", b"append");
+            digest_component(digest, b"patch-target", target.as_bytes());
+            for node in nodes {
+                hash_node(digest, node);
+            }
+            hash_marker(digest, b"append-end");
+        }
+        ProfilePatch::ReplaceConfig { target, config } => {
+            digest_component(digest, b"patch-kind", b"replace-config");
+            digest_component(digest, b"patch-target", target.as_bytes());
+            digest_component(
+                digest,
+                b"patch-config",
+                &serde_json::to_vec(config)
+                    .expect("JSON-compatible Profile configs always serialize"),
+            );
+        }
+        ProfilePatch::SetEnabled { target, enabled } => {
+            digest_component(digest, b"patch-kind", b"set-enabled");
+            digest_component(digest, b"patch-target", target.as_bytes());
+            digest_component(digest, b"patch-enabled", &[u8::from(*enabled)]);
+        }
+        ProfilePatch::ReplaceIsolation { target, isolation } => {
+            digest_component(digest, b"patch-kind", b"replace-isolation");
+            digest_component(digest, b"patch-target", target.as_bytes());
+            hash_isolation(digest, isolation);
+        }
+    }
+    hash_marker(digest, b"patch-end");
+}
+
+fn hash_isolation(digest: &mut Sha256, isolation: &IsolationSpec) {
+    for (lane, values) in [
+        (b"isolation-local".as_slice(), isolation.local.as_slice()),
+        (b"isolation-events".as_slice(), isolation.events.as_slice()),
+        (
+            b"isolation-portable".as_slice(),
+            isolation.portable.as_slice(),
+        ),
+    ] {
+        digest_component(digest, b"isolation-lane", lane);
+        for value in values {
+            digest_component(digest, b"isolation-key", value.as_bytes());
+        }
+        hash_marker(digest, b"isolation-lane-end");
+    }
+    for named in isolation.named.iter() {
+        let lane = match named.lane {
+            IsolationLane::Local => b"local".as_slice(),
+            IsolationLane::Event => b"event",
+            IsolationLane::Portable => b"portable",
+        };
+        digest_component(digest, b"named-isolation-lane", lane);
+        digest_component(digest, b"named-isolation-key", named.key.as_bytes());
+        digest_component(digest, b"named-isolation-label", named.label.as_bytes());
+    }
+    hash_marker(digest, b"named-isolation-end");
+}
+
 impl<'a> CompileState<'a> {
     fn new(compiler: &'a ProfileCompiler) -> Self {
-        let mut digest = Sha256::new();
-        digest_component(&mut digest, b"format", b"rsi-meta-profile-source-v1");
-        if let Some(paths) = &compiler.environment.paths {
-            for (label, path) in [
-                b"environment-config".as_slice(),
-                b"environment-state",
-                b"environment-cache",
-            ]
-            .into_iter()
-            .zip(paths)
-            {
-                digest_component(&mut digest, label, path.as_os_str().as_encoded_bytes());
-            }
-        } else {
-            digest_component(&mut digest, b"environment-paths", b"absent");
-        }
-        digest_component(
-            &mut digest,
-            b"environment-platform",
-            compiler.environment.platform.as_bytes(),
-        );
-        digest_component(
-            &mut digest,
-            b"environment-defines",
-            &serde_json::to_vec(&compiler.environment.defines)
-                .expect("JSON-compatible defines always serialize"),
-        );
+        let digest = source_hasher(&compiler.environment);
         Self {
             compiler,
             bundle: None,
@@ -1030,6 +1154,7 @@ impl<'a> CompileState<'a> {
             tree: Vec::new(),
             instance_ids: HashSet::new(),
             node_count: 0,
+            live_config_bytes: std::cell::Cell::new(0),
             expression_engine: expression_engine(&compiler.limits),
             watch_paths: BTreeSet::new(),
             source_fingerprints: BTreeMap::new(),
@@ -1039,147 +1164,6 @@ impl<'a> CompileState<'a> {
             steps: 0,
             digest,
         }
-    }
-
-    fn hash_marker(&mut self, marker: &[u8]) {
-        digest_component(&mut self.digest, b"marker", marker);
-    }
-
-    fn hash_fragment(&mut self, fragment: &ProfileFragment) {
-        self.hash_marker(b"linked-fragment");
-        digest_component(&mut self.digest, b"fragment-id", fragment.id.as_bytes());
-        for entry in &fragment.entries {
-            self.hash_entry(entry);
-        }
-        for step in &fragment.steps {
-            self.hash_step(step);
-        }
-        self.hash_marker(b"linked-fragment-end");
-    }
-
-    fn hash_entry(&mut self, entry: &ProfileEntry) {
-        self.hash_marker(b"plugin");
-        digest_component(
-            &mut self.digest,
-            b"instance-id",
-            entry.id.as_str().as_bytes(),
-        );
-        digest_component(
-            &mut self.digest,
-            b"plugin-id",
-            entry.plugin.as_str().as_bytes(),
-        );
-        digest_component(
-            &mut self.digest,
-            b"plugin-config",
-            &serde_json::to_vec(&entry.config)
-                .expect("JSON-compatible Profile configs always serialize"),
-        );
-    }
-
-    fn hash_step(&mut self, step: &ProfileStep) {
-        match step {
-            ProfileStep::Node(node) => self.hash_node(node),
-            ProfileStep::Patch(patch) => self.hash_patch(patch),
-        }
-    }
-
-    fn hash_node(&mut self, root: &ProfileNode) {
-        enum Frame<'a> {
-            Node(&'a ProfileNode),
-            GroupEnd,
-        }
-
-        let mut frames = vec![Frame::Node(root)];
-        while let Some(frame) = frames.pop() {
-            match frame {
-                Frame::Node(ProfileNode::Plugin(entry)) => self.hash_entry(entry),
-                Frame::Node(ProfileNode::Group(group)) => {
-                    self.hash_marker(b"group");
-                    digest_component(&mut self.digest, b"group-id", group.id.as_bytes());
-                    digest_component(
-                        &mut self.digest,
-                        b"group-enabled",
-                        &[u8::from(group.enabled)],
-                    );
-                    self.hash_isolation(&group.isolation);
-                    frames.push(Frame::GroupEnd);
-                    frames.extend(group.children.iter().rev().map(Frame::Node));
-                }
-                Frame::GroupEnd => self.hash_marker(b"group-end"),
-            }
-        }
-    }
-
-    fn hash_patch(&mut self, patch: &ProfilePatch) {
-        self.hash_marker(b"patch");
-        match patch {
-            ProfilePatch::Append { target, nodes } => {
-                digest_component(&mut self.digest, b"patch-kind", b"append");
-                digest_component(&mut self.digest, b"patch-target", target.as_bytes());
-                for node in nodes {
-                    self.hash_node(node);
-                }
-                self.hash_marker(b"append-end");
-            }
-            ProfilePatch::ReplaceConfig { target, config } => {
-                digest_component(&mut self.digest, b"patch-kind", b"replace-config");
-                digest_component(&mut self.digest, b"patch-target", target.as_bytes());
-                digest_component(
-                    &mut self.digest,
-                    b"patch-config",
-                    &serde_json::to_vec(config)
-                        .expect("JSON-compatible Profile configs always serialize"),
-                );
-            }
-            ProfilePatch::SetEnabled { target, enabled } => {
-                digest_component(&mut self.digest, b"patch-kind", b"set-enabled");
-                digest_component(&mut self.digest, b"patch-target", target.as_bytes());
-                digest_component(&mut self.digest, b"patch-enabled", &[u8::from(*enabled)]);
-            }
-            ProfilePatch::ReplaceIsolation { target, isolation } => {
-                digest_component(&mut self.digest, b"patch-kind", b"replace-isolation");
-                digest_component(&mut self.digest, b"patch-target", target.as_bytes());
-                self.hash_isolation(isolation);
-            }
-        }
-        self.hash_marker(b"patch-end");
-    }
-
-    fn hash_isolation(&mut self, isolation: &IsolationSpec) {
-        for (lane, values) in [
-            (b"isolation-local".as_slice(), isolation.local.as_slice()),
-            (b"isolation-events".as_slice(), isolation.events.as_slice()),
-            (
-                b"isolation-portable".as_slice(),
-                isolation.portable.as_slice(),
-            ),
-        ] {
-            digest_component(&mut self.digest, b"isolation-lane", lane);
-            for value in values {
-                digest_component(&mut self.digest, b"isolation-key", value.as_bytes());
-            }
-            self.hash_marker(b"isolation-lane-end");
-        }
-        for named in isolation.named.iter() {
-            let lane = match named.lane {
-                IsolationLane::Local => b"local".as_slice(),
-                IsolationLane::Event => b"event",
-                IsolationLane::Portable => b"portable",
-            };
-            digest_component(&mut self.digest, b"named-isolation-lane", lane);
-            digest_component(
-                &mut self.digest,
-                b"named-isolation-key",
-                named.key.as_bytes(),
-            );
-            digest_component(
-                &mut self.digest,
-                b"named-isolation-label",
-                named.label.as_bytes(),
-            );
-        }
-        self.hash_marker(b"named-isolation-end");
     }
 
     fn load_source(&self, requested: &Path) -> Result<(PathBuf, Arc<[u8]>)> {
@@ -1344,7 +1328,7 @@ impl<'a> CompileState<'a> {
     fn compile_public_entry(&self, entry: &ProfileEntry) -> Result<TreeNode> {
         self.validate_identifier("instance", entry.id.as_str())?;
         self.validate_identifier("plugin", entry.plugin.as_str())?;
-        bounded_json_bytes(&entry.config, self.compiler.limits.maximum_config_bytes)?;
+        self.retain_config(&entry.config)?;
         Ok(TreeNode::from_entry(entry.clone()))
     }
 
@@ -1445,7 +1429,7 @@ impl<'a> CompileState<'a> {
                 ),
             ),
             ProfilePatch::ReplaceConfig { target, config } => {
-                bounded_json_bytes(config, self.compiler.limits.maximum_config_bytes)?;
+                self.retain_config(config)?;
                 (target.as_str(), CompiledPatch::Config(config.clone()))
             }
             ProfilePatch::SetEnabled { target, enabled } => {
@@ -1557,14 +1541,18 @@ impl<'a> CompileState<'a> {
         self.validate_identifier("instance", &raw.id)?;
         self.validate_identifier("plugin", &raw.plugin)?;
         let enabled = self.evaluate_enabled(&raw.id, raw.enabled, raw.enabled_rhai.as_deref())?;
-        let config = self
-            .config_value(
-                &raw.id,
-                raw.config,
-                raw.config_rhai.as_deref(),
-                raw.config_json.as_deref(),
-            )?
-            .unwrap_or(Value::Null);
+        let config = self.config_value(
+            &raw.id,
+            raw.config,
+            raw.config_rhai.as_deref(),
+            raw.config_json.as_deref(),
+        )?;
+        let config = if let Some(config) = config {
+            config
+        } else {
+            self.retain_config(&Value::Null)?;
+            Value::Null
+        };
         Ok(PluginNode {
             id: raw.id.into(),
             plugin: raw.plugin.into(),
@@ -1670,7 +1658,15 @@ impl<'a> CompileState<'a> {
         })?;
         match node {
             TreeNode::Plugin(plugin) => match operation {
-                CompiledPatch::Config(config) => plugin.config = config,
+                CompiledPatch::Config(config) => {
+                    let previous = bounded_json_bytes(
+                        &plugin.config,
+                        self.compiler.limits.maximum_config_bytes,
+                    )?;
+                    self.live_config_bytes
+                        .set(self.live_config_bytes.get() - previous);
+                    plugin.config = config;
+                }
                 CompiledPatch::Enabled(enabled) => plugin.enabled = enabled,
                 CompiledPatch::Isolation(_) | CompiledPatch::Append(_) => {
                     return Err(ProfileError::InvalidProgram(format!(
@@ -1744,8 +1740,24 @@ impl<'a> CompileState<'a> {
         } else {
             return Ok(None);
         };
-        bounded_json_bytes(&value, self.compiler.limits.maximum_config_bytes)?;
+        self.retain_config(&value)?;
         Ok(Some(value))
+    }
+
+    fn retain_config(&self, value: &Value) -> Result<()> {
+        let bytes = bounded_json_bytes(value, self.compiler.limits.maximum_config_bytes)?;
+        let maximum = self.compiler.limits.maximum_config_bytes * 2;
+        let next = self
+            .live_config_bytes
+            .get()
+            .checked_add(bytes)
+            .filter(|next| *next <= maximum)
+            .ok_or(ProfileError::CapacityExceeded {
+                resource: "live config bytes",
+                maximum,
+            })?;
+        self.live_config_bytes.set(next);
+        Ok(())
     }
 
     fn evaluate_config(&self, id: &str, expression: &str) -> Result<Value> {
@@ -1865,9 +1877,8 @@ impl<'a> CompileState<'a> {
             let TreeNode::Plugin(plugin) = node else {
                 return Ok(());
             };
-            let bytes = serde_json::to_vec(&plugin.config)
-                .expect("JSON-compatible Profile configs always serialize")
-                .len();
+            let bytes =
+                bounded_json_bytes(&plugin.config, self.compiler.limits.maximum_config_bytes)?;
             retained = retained
                 .checked_add(bytes)
                 .ok_or(ProfileError::CapacityExceeded {
@@ -2199,19 +2210,31 @@ fn contains_datetime(value: &toml::Value) -> bool {
     }
 }
 
-fn bounded_json_bytes(value: &Value, maximum: usize) -> Result<()> {
-    validate_json_depth(value)?;
-    let bytes = serde_json::to_vec(value)
-        .expect("serde_json::Value always serializes")
-        .len();
-    if bytes > maximum {
-        Err(ProfileError::CapacityExceeded {
-            resource: "config bytes",
-            maximum,
-        })
-    } else {
-        Ok(())
+fn bounded_json_bytes(value: &Value, maximum: usize) -> Result<usize> {
+    struct Counter {
+        bytes: usize,
+        maximum: usize,
     }
+    impl std::io::Write for Counter {
+        fn write(&mut self, bytes: &[u8]) -> std::io::Result<usize> {
+            self.bytes = self
+                .bytes
+                .checked_add(bytes.len())
+                .filter(|total| *total <= self.maximum)
+                .ok_or_else(|| std::io::Error::other("configuration byte capacity"))?;
+            Ok(bytes.len())
+        }
+        fn flush(&mut self) -> std::io::Result<()> {
+            Ok(())
+        }
+    }
+    validate_json_depth(value)?;
+    let mut counter = Counter { bytes: 0, maximum };
+    serde_json::to_writer(&mut counter, value).map_err(|_| ProfileError::CapacityExceeded {
+        resource: "config bytes",
+        maximum,
+    })?;
+    Ok(counter.bytes)
 }
 
 fn validate_json_depth(value: &Value) -> Result<()> {
@@ -2294,6 +2317,12 @@ fn absolute_path(kind: &'static str, path: PathBuf) -> Result<PathBuf> {
 }
 
 fn validate_limits(limits: &ProfileLimits) -> Result<()> {
+    if limits.maximum_config_bytes > usize::MAX / 2 {
+        return Err(ProfileError::CapacityExceeded {
+            resource: "config bytes",
+            maximum: usize::MAX / 2,
+        });
+    }
     for (resource, value) in [
         ("document bytes", limits.maximum_document_bytes),
         ("source bytes", limits.maximum_source_bytes),
