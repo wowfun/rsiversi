@@ -184,6 +184,18 @@ pub fn validate_environment(environment: &[(OsString, OsString)]) -> Result<()> 
             ));
         }
     }
+    #[cfg(windows)]
+    {
+        // Command's environment map uses Windows ordinal name comparison. Only
+        // names enter this map; no process starts and no ambient values are read.
+        let mut names = std::process::Command::new("");
+        names.envs(environment.iter().map(|(name, _)| (name, "")));
+        if names.get_envs().count() != environment.len() {
+            return Err(ProcessError::InvalidInput(
+                "process environment names must be unique on Windows".into(),
+            ));
+        }
+    }
     Ok(())
 }
 
@@ -509,6 +521,28 @@ mod tests {
                 "accepted an environment entry that process APIs cannot represent: {spec:?}"
             );
         }
+    }
+
+    #[test]
+    fn environment_identity_matches_the_host_process_api() {
+        for (first, second) in [("RSI_AUDIT_KEY", "rsi_audit_key"), ("RSI_Ä", "rsi_ä")] {
+            let aliases = [
+                (OsString::from(first), "FIRST".into()),
+                (OsString::from(second), "SECOND".into()),
+            ];
+            assert_eq!(validate_environment(&aliases).is_ok(), !cfg!(windows));
+        }
+        assert!(
+            validate_environment(&[("same".into(), "one".into()), ("same".into(), "two".into())])
+                .is_err()
+        );
+        assert!(
+            validate_environment(&[
+                ("one".into(), "value".into()),
+                ("two".into(), "value".into())
+            ])
+            .is_ok()
+        );
     }
 
     #[test]

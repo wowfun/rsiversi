@@ -17,6 +17,9 @@ argument bytes. The complete environment accepts platform-native names and value
 must be nonempty, unique, and contain neither `=` nor NUL; values must not
 contain NUL. These process-API invariants are rejected by the platform-neutral
 request contract before any provider admission.
+Name uniqueness follows the host's process API: Windows uses its ordinal
+case-insensitive environment identity, including native Unicode names, while
+POSIX names remain case-sensitive. Pipe, duplex and PTY requests share this rule.
 
 This is a trusted in-process Local capability. A `ConfinedProcess` is a typed
 plan, not an unforgeable authorization token: its holder must forward the exact
