@@ -21,11 +21,17 @@ fixture.setReply('command',async text=>{
  }
  return '{}';
 });
+const createdDirectories=[];
 fixture.setReply('directory_input',text=>{
  const request=JSON.parse(text);
  if(request.action==='status')return JSON.stringify({status:'ok',value:{supported:true,allowed:true}});
+ if(request.action==='create'){
+  const entry={name:request.name,path:request.parent+'/'+request.name,hidden:false,symlink:false};
+  createdDirectories.push({parent:request.parent,entry});
+  return JSON.stringify({status:'ok',value:{path:entry.path}});
+ }
  if(request.action==='list'){
-  const path=request.path??'C:/projects';return JSON.stringify({status:'ok',value:{path,home:'C:/projects',breadcrumbs:path.slice(3).split('/').filter(Boolean),entries:path==='C:/projects'?[{name:'demo',path:'C:/projects/demo',hidden:false,symlink:false}]:[],truncated:false,unrepresentable:false}});
+  const path=request.path??'C:/projects';return JSON.stringify({status:'ok',value:{path,home:'C:/projects',breadcrumbs:path.slice(3).split('/').filter(Boolean),entries:path==='C:/projects'?[{name:'demo',path:'C:/projects/demo',hidden:false,symlink:false}]:createdDirectories.filter(item=>item.parent===path).map(item=>item.entry),truncated:false,unrepresentable:false}});
  }
  return '{}';
 });
@@ -65,10 +71,16 @@ try {
    const dialog=page.getByRole('dialog',{name:'Select workspace directory',exact:true});
    await dialog.getByRole('button',{name:'demo',exact:false}).click();
    await dialog.getByRole('navigation',{name:'Directory breadcrumbs'}).getByRole('button',{name:'C:/',exact:true}).waitFor();
+   await dialog.getByRole('button',{name:'+ New folder',exact:true}).click();
+   await dialog.getByLabel('Folder name',{exact:true}).fill('picked-on-target');
+   await dialog.getByRole('button',{name:'Create folder',exact:true}).click();
+   await dialog.getByRole('navigation',{name:'Directory breadcrumbs',exact:true}).getByRole('button',{name:'picked-on-target',exact:true}).waitFor();
+   assert.equal(await dialog.getByRole('button',{name:'picked-on-target',exact:true}).count(),2);
+   assert.equal(await page.evaluate(()=>fixture.calls.filter(call=>call.method==='directory_input'&&JSON.parse(call.payload).action==='create').length),1);
    await dialog.locator('footer').getByRole('button',{name:'Open',exact:true}).click();
    await dialog.waitFor({state:'detached'});
    const registrations=await page.evaluate(()=>fixture.calls.filter(call=>call.method==='command').map(call=>JSON.parse(call.payload)).filter(command=>command.action==='register_workspace'));
-   assert.deepEqual(registrations,[{action:'register_workspace',location:{kind:'local'},path:'C:/projects/demo'}]);
+   assert.deepEqual(registrations,[{action:'register_workspace',location:{kind:'local'},path:'C:/projects/demo/picked-on-target'}]);
    assert.equal(await page.getByRole('button',{name:'Toggle resources',exact:true}).count(),0);
    assert.equal(await page.locator('aside.resources').isVisible(),false);
    await page.screenshot({path:join(report,name+'-starting.png')});

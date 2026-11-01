@@ -750,6 +750,8 @@ negotiation. While that target is busy, it verifies an unrelated candidate write
 and a directory read on the real SSH target, and checks the same-target Busy
 response. It closes the stalled socket explicitly and requires a known connection
 failure; this is contention evidence, not a successful second SSH connection.
+After directory creation, the picker waits for the new folder in its breadcrumb
+navigation. Its parent-column entry can carry the same accessible name.
 
 The opt-in Workflow workbench fixture uses `RSI_TEST_NODE=/absolute/node
 RSI_WEB_REPORT=/new/report node fixtures/rsi/web-product/workflow-verify.mjs` after
@@ -902,6 +904,8 @@ conversation fixture checks saved text across reload and model setup, the first
 send's durable handoff, concurrent-window conflicts, underlined transcript tabs,
 message geometry, stable docked composer geometry while statistics arrive or
 change, and light/dark/narrow screenshots in Chromium and Firefox.
+Layout restoration observes the committed layout record before reload;
+rendering and saving complete asynchronously.
 These isolated transport fixtures use production React and IndexedDB; native
 first-use initialization and directory browsing have separate owner tests.
 

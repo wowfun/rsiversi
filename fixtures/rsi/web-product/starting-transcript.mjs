@@ -25,6 +25,12 @@ try {
    await page.waitForFunction(()=>document.querySelector('.pane:not([hidden])')?.dataset.sessionGeneration===fixture.view.surfaces.main.generation);
    await page.getByRole('button',{name:'Toggle resources',exact:true}).click();
    await page.locator('aside.resources').waitFor({state:'visible'});
+   await page.waitForFunction(async()=>{
+    const {PresentationStore}=await import('/presentation-store.js');
+    const {presentationIdentity}=await import('/src/presentation.tsx');
+    const store=await PresentationStore.open(presentationIdentity.getSnapshot());
+    try{return (await store.load()).resourcesClosed===false}finally{store.close()}
+   });
    await page.evaluate(async()=>{fixture.view.surfaces.main=null;await fixture.frame();});
    await page.locator('aside.resources').waitFor({state:'hidden'});
    assert.equal(await page.getByRole('button',{name:'Toggle resources',exact:true}).count(),0);
