@@ -4,6 +4,55 @@ use rsi_ssh_transport::{Incoming, RequestKind};
 use std::time::Duration;
 use tokio::time::Instant;
 
+struct PublicationOwner(Arc<std::sync::atomic::AtomicUsize>);
+impl Drop for PublicationOwner {
+    fn drop(&mut self) {
+        self.0.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+    }
+}
+
+#[tokio::test]
+async fn an_unconsumed_retained_reply_releases_its_owner() {
+    let drops = Arc::new(std::sync::atomic::AtomicUsize::new(0));
+    let owner = PublicationOwner(drops.clone());
+    let receive = retained_reply(async move { Ok(owner) });
+    tokio::time::timeout(Duration::from_secs(5), async {
+        while receive.is_empty() {
+            tokio::task::yield_now().await;
+        }
+    })
+    .await
+    .unwrap();
+    assert_eq!(drops.load(std::sync::atomic::Ordering::SeqCst), 0);
+    drop(receive);
+    assert_eq!(drops.load(std::sync::atomic::Ordering::SeqCst), 1);
+}
+
+#[tokio::test]
+async fn an_abandoned_waiter_releases_a_later_retained_result() {
+    let drops = Arc::new(std::sync::atomic::AtomicUsize::new(0));
+    let owner = PublicationOwner(drops.clone());
+    let completed = Arc::new(std::sync::atomic::AtomicBool::new(false));
+    let finished = completed.clone();
+    let (finish, work) = tokio::sync::oneshot::channel();
+    let receive = retained_reply(async move {
+        work.await.unwrap();
+        finished.store(true, std::sync::atomic::Ordering::SeqCst);
+        Ok(owner)
+    });
+    drop(receive);
+    finish.send(()).unwrap();
+    tokio::time::timeout(Duration::from_secs(5), async {
+        while drops.load(std::sync::atomic::Ordering::SeqCst) == 0 {
+            tokio::task::yield_now().await;
+        }
+    })
+    .await
+    .unwrap();
+    assert!(completed.load(std::sync::atomic::Ordering::SeqCst));
+    assert_eq!(drops.load(std::sync::atomic::Ordering::SeqCst), 1);
+}
+
 fn pair() -> (ProcessConnection, Connection, Incoming) {
     let (left, right) = tokio::io::duplex(1024);
     let (lr, lw) = tokio::io::split(left);

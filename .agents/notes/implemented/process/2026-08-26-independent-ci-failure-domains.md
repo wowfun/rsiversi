@@ -289,3 +289,10 @@ acceptance supplies Node explicitly and preserves its separate Workflow report.
 Ordinary resident smoke compiles its integration executable in a separate
 twenty-minute step, then allows ten minutes for its runtime scenarios. The
 protocol gate meta-test pins its baseline, failure guard and five-minute bound.
+
+Queued SSH publication cleanup belongs to the client's retained-result owner.
+A capacity probe is itself a preparation: it can win the final target slot and
+cause the supposedly retained preparation to be refused. Observing the actual
+publication channel avoids that competing mutation. Client tests cover both
+abandonment positions; the native helper test separately proves that real plan
+destruction releases all twenty slots and permits a process to run.
