@@ -7,6 +7,7 @@ from pathlib import Path
 import platform
 import subprocess
 import sys
+from trend import RECIPE, hardware, summarize
 
 root = Path(__file__).resolve().parents[3]
 
@@ -56,6 +57,7 @@ def validate_store(output):
     for pattern, expected, labels in (
         (r"^case facts=(\d+) payload=(\d+) shape=(\w+) db_bytes=", {(str(count), str(size), shape) for count in (1000, 10000) for size in (256, 16384) for shape in ("LongOpen", "MixedSessions")}, ("warm_fast_open", "warm_first_session_validation", "warm_full_verify")),
         (r"^metadata_case sessions=(\d+) ", {"128", "256", "512"}, ("reopened_header", "warm_complete_recent_catalog", "first_session_validation", "one_call_control_subtree_snapshot", "mixed_recent_read_and_append")),
+        (r"^operational_case sessions=(\d+) ", {"257", "512"}, ("operational_one_fact_page",)),
         (r"^control_case business_controls=(\d+) ", {"1000", "10000", "50000"}, ("cold_control_one_fact_page", "warm_control_one_fact_page")),
     ):
         found = re.findall(pattern, log, re.MULTILINE)
@@ -110,7 +112,7 @@ def main(argv=None):
         if key.startswith("RSI_STORE_BENCH_"):
             del env[key]
     env.update(RSI_STORE_BENCH_EVIDENCE=str(output / "store"), RSI_STORE_BENCH_COUNTS="1000,10000", RSI_TUI_PERFORMANCE_REPORT=str(output / "cells.json"))
-    metadata = dict(format=1, surface=surface, commit=capture("git", "rev-parse", "HEAD"), dirty=bool(capture("git", "status", "--porcelain", "--untracked-files=normal")), rust=capture("rustc", "-Vv"), cargo=capture("cargo", "-V"), platform=platform.platform(), runner=os.environ.get("RUNNER_NAME", "local"), cpu_count=os.cpu_count(), commands=commands, timing_gate=False, results=[])
+    metadata = dict(format=1, recipe=RECIPE, build="release", hardware=hardware(), surface=surface, commit=capture("git", "rev-parse", "HEAD"), dirty=bool(capture("git", "status", "--porcelain", "--untracked-files=normal")), rust=capture("rustc", "-Vv"), cargo=capture("cargo", "-V"), platform=platform.platform(), runner=os.environ.get("RUNNER_NAME", "local"), cpu_count=os.cpu_count(), commands=commands, timing_gate=False, results=[])
     (output / "metadata.json").write_text(json.dumps(metadata, indent=2), encoding="utf-8")
     for index, command in enumerate(commands):
         with (output / f"probe-{index}.log").open("w", encoding="utf-8") as log:
@@ -123,7 +125,10 @@ def main(argv=None):
                 evidence_error = str(error)
         metadata["results"].append(dict(exit_code=result.returncode, log=f"probe-{index}.log", evidence_error=evidence_error))
         (output / "metadata.json").write_text(json.dumps(metadata, indent=2), encoding="utf-8")
-    return int(any(result["exit_code"] or result.get("evidence_error") for result in metadata["results"]))
+    failed = any(result["exit_code"] or result.get("evidence_error") for result in metadata["results"])
+    if not failed:
+        summarize(output, metadata)
+    return int(failed)
 
 
 if __name__ == "__main__":

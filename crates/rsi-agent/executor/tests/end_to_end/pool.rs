@@ -1,4 +1,84 @@
 use super::*;
+use std::time::Duration;
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+#[ignore = "report-only wall-clock fairness evidence"]
+async fn report_cross_session_fairness() {
+    for capacity in [1, 2] {
+        for blocked_observer_end in [false, true] {
+            let stack = BaseStack::activate().await;
+            let (observer, observer_owner) = super::observation::install(&stack).await;
+            observer.release.cancel();
+            observer
+                .block_end
+                .store(blocked_observer_end, Ordering::Release);
+            let first_entered = Arc::new(Notify::new());
+            let release = Arc::new(Notify::new());
+            let second_entered = Arc::new(Notify::new());
+            let second_release = Arc::new(Notify::new());
+            let language = stack
+                .activate_language(
+                    "fairness.language",
+                    Arc::new(LanguageFixture {
+                        outcomes: Mutex::new(VecDeque::from([
+                            gated_answer(&first_entered, &release),
+                            gated_answer(&second_entered, &second_release),
+                        ])),
+                        requests: Mutex::new(vec![]),
+                        starts: Arc::new(AtomicUsize::new(0)),
+                        store: stack.store.clone(),
+                        retry_policy: RetryPolicy::default(),
+                    }),
+                )
+                .await;
+            let executor=stack.activate_executor_with_config(json!({"executor_id":"fairness","maximum_active_turns":capacity,"observe_execution":true})).await;
+            let turns = stack
+                .runtime
+                .root()
+                .lookup_local::<TurnServiceContract>()
+                .unwrap();
+            let first = stack.submit_fresh(&turns, "fairness-slow", "slow").await;
+            tokio::time::timeout(Duration::from_secs(5), first_entered.notified())
+                .await
+                .unwrap();
+            let started = std::time::Instant::now();
+            let short = stack.submit_fresh(&turns, "fairness-short", "short").await;
+            let release_task = tokio::spawn(async move {
+                tokio::time::sleep(Duration::from_millis(100)).await;
+                release.notify_one();
+            });
+            tokio::time::timeout(Duration::from_secs(5), second_entered.notified())
+                .await
+                .unwrap();
+            let wait_us = started.elapsed().as_micros();
+            let slow_still_running = turns
+                .outcome(&first.session_id, &first.turn_id)
+                .await
+                .unwrap()
+                .is_none();
+            second_release.notify_one();
+            assert_eq!(
+                wait_for_outcome(&turns, &short).await,
+                TurnOutcome::Completed
+            );
+            release_task.await.unwrap();
+            assert_eq!(
+                wait_for_outcome(&turns, &first).await,
+                TurnOutcome::Completed
+            );
+            observer.end_release.cancel();
+            println!(
+                "FAIRNESS {}",
+                json!({"active_limit":capacity,"blocked_observer_end":blocked_observer_end,"slow_release_delay_ms":100,"short_submit_to_provider_us":wait_us,"slow_still_running_at_short_start":slow_still_running})
+            );
+            assert!(executor.dispose().await.is_clean());
+            assert!(observer_owner.dispose().await.is_clean());
+            assert!(language.dispose().await.is_clean());
+            drop(turns);
+            stack.dispose_services().await;
+        }
+    }
+}
 
 #[tokio::test(start_paused = true)]
 async fn bounded_pool_enforces_its_peak_and_progresses_independent_sessions() {

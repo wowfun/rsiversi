@@ -13,6 +13,9 @@ class Evidence(unittest.TestCase):
         platform = patch.object(run.platform, "platform", return_value="fixture-platform")
         platform.start()
         self.addCleanup(platform.stop)
+        hardware = patch.object(run, "hardware", return_value={"cpu":"fixture","available_cpus":2})
+        hardware.start()
+        self.addCleanup(hardware.stop)
 
     def test_untracked_source_marks_evidence_dirty(self):
         with tempfile.TemporaryDirectory() as temporary:
@@ -55,11 +58,12 @@ class Evidence(unittest.TestCase):
         projection = [dict(blocks=blocks, run=run, iterations=500, baseline_cpu_ns=0, cached_cpu_ns=0, unchanged_reparses=0) for blocks in (16, 64, 128) for run in range(10)]
         store = [f"case facts={count} payload={size} shape={shape} db_bytes=100" for count in (1000, 10000) for size in (256, 16384) for shape in ("LongOpen", "MixedSessions")]
         store += [f"metadata_case sessions={count} samples=100" for count in (128, 256, 512)]
+        store += [f"operational_case sessions={count} cycles=3 fact_page_calls=3 returned_facts=3" for count in (257, 512)]
         store += [f"control_case business_controls={count} terminal_markers=1" for count in (1000, 10000, 50000)]
         measured = []
         for heading in store:
             measured.append(heading)
-            labels = ("warm_fast_open", "warm_first_session_validation", "warm_full_verify") if heading.startswith("case ") else ("reopened_header", "warm_complete_recent_catalog", "first_session_validation", "one_call_control_subtree_snapshot", "mixed_recent_read_and_append") if heading.startswith("metadata_case ") else ("cold_control_one_fact_page", "warm_control_one_fact_page")
+            labels = ("warm_fast_open", "warm_first_session_validation", "warm_full_verify") if heading.startswith("case ") else ("reopened_header", "warm_complete_recent_catalog", "first_session_validation", "one_call_control_subtree_snapshot", "mixed_recent_read_and_append") if heading.startswith("metadata_case ") else ("operational_one_fact_page",) if heading.startswith("operational_case ") else ("cold_control_one_fact_page", "warm_control_one_fact_page")
             measured.extend(f"{label} min_ns=0 median_ns=0 p95_ns=0" for label in labels)
             if heading.startswith("case "): measured.append("cold_new_inode open_ns=0 first_validation_ns=0 verify_ns=0")
         store = measured

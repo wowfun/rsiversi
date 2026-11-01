@@ -23,6 +23,14 @@ Admission unit tests also run in ordinary CI with nonempty discovery. Their
 platform probe is isolated from subprocess mocks because Python's platform
 discovery itself can execute subprocesses on Linux.
 
+Historical comparison admits only compatible recipe/build/hardware/toolchain
+summaries from the same workflow's successful default-branch runs. Bounded lookup
+and exact-member archive reads keep artifact history an external input, rather
+than trusted execution. Missing/incompatible history remains visibly unmeasured;
+relative and absolute timing changes are reported without an uncalibrated gate.
+The executor fairness probe measures the existing admission order and keeps its
+provider delays isolated; it does not infer starvation from source order alone.
+
 Scheduled parser campaigns use pinned tooling, bounded inputs that include production-limit rejection cases,
 and temporary generated corpus. Only bounded failure inputs and provenance are
 retained; a corpus cache would add durable unreviewed state without a measured

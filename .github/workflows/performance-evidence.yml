@@ -51,6 +51,9 @@ jobs:
             ${{ runner.temp }}/parser-fuzz/mcp_frame/failure.bin
           if-no-files-found: warn
   measure:
+    permissions:
+      contents: read
+      actions: read
     runs-on: ubuntu-24.04
     timeout-minutes: 90
     strategy:
@@ -72,6 +75,19 @@ jobs:
         run: python3 fixtures/tools/python-tests.py fixtures/rsi/performance
       - name: Collect raw measurements and provenance
         run: python3 fixtures/rsi/performance/run.py ${{ matrix.surface }} ${{ runner.temp }}/performance-evidence/${{ matrix.surface }}
+      - name: Compare compatible historical evidence
+        timeout-minutes: 4
+        env:
+          GH_TOKEN: ${{ github.token }}
+          RSI_DEFAULT_BRANCH: ${{ github.event.repository.default_branch }}
+        run: python3 fixtures/rsi/performance/trend.py ${{ runner.temp }}/performance-evidence/${{ matrix.surface }} --github
+      - uses: actions/upload-artifact@bbbca2ddaa5d8feaa63e36b76fdaad77386f024f
+        with:
+          name: performance-summary-${{ matrix.surface }}-${{ github.sha }}
+          path: |
+            ${{ runner.temp }}/performance-evidence/${{ matrix.surface }}/metadata.json
+            ${{ runner.temp }}/performance-evidence/${{ matrix.surface }}/summary.json
+          if-no-files-found: error
       - uses: actions/upload-artifact@bbbca2ddaa5d8feaa63e36b76fdaad77386f024f
         if: always()
         with:
