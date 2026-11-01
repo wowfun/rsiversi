@@ -7,6 +7,20 @@ const composerFocus = await readFile(new URL('./composer-focus.js', import.meta.
 const assets = await readFile(new URL('./asset-pressure.js', import.meta.url), 'utf8');
 const buttonTarget = await readFile(new URL('./button-target.js', import.meta.url), 'utf8');
 for (const [name, engine] of Object.entries({chromium, firefox})) {
+  test(`${name}: composer clear readiness excludes the hidden device receipt`, async () => {
+    const browser = await engine.launch({headless: true});
+    try {
+      const page = await browser.newPage();
+      await page.setContent('<form hidden><textarea id="receipt"></textarea></form><textarea aria-label="Main message">/plan on</textarea>');
+      assert.equal(await page.evaluate(() => document.querySelector('textarea').value === ''), true, 'the generic selector falsely reports readiness');
+      const cleared = () => page.evaluate(source => new Function(source)('textarea[aria-label="Main message"]', 'value') === '', focus);
+      assert.equal(await cleared(), false, 'an empty receipt does not finish clearing the command');
+      await page.getByRole('textbox', {name: 'Main message'}).evaluate(input => {input.value = '';});
+      assert.equal(await cleared(), true);
+      await page.getByRole('textbox', {name: 'Main message'}).evaluate(input => input.remove());
+      assert.equal(await cleared(), false, 'an absent composer is not ready for the next prompt');
+    } finally {await browser.close();}
+  });
   test(`${name}: native button selection excludes hidden duplicates and covered controls`, async () => {
     const browser=await engine.launch({headless:true});
     try {

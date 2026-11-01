@@ -260,6 +260,9 @@ additional model requests. It requires libXtst and does not automate host dialog
 `--plan-review` adds an actual native WebKit closed-plan review using a
 deterministic provider. It checks literal plan text, three choices, native
 feedback input and that the next model request observes the committed mode exit.
+After committing the plan-mode command, it waits for the Main message composer
+to clear before typing the next prompt; the hidden device-receipt field cannot
+establish composer readiness.
 The screenshots and requests are native Desktop evidence, separate from live
 model or browser-only checks.
 

@@ -1,5 +1,6 @@
 """Closed plan review through the Linux Tauri bridge and actual WebKit input."""
 import json
+from controls import FOCUS_INPUT
 
 requests = []
 
@@ -27,7 +28,7 @@ def verify(script, button, fill, until, screenshot, report):
     fill('textarea[aria-label="Main message"]', '/plan on')
     button('Send')
     until(lambda: script('return document.querySelector(".command-receipt")?.textContent.includes("Committed")'))
-    until(lambda: script("return document.querySelector('textarea').value === ''"))
+    until(lambda: script(FOCUS_INPUT, ['textarea[aria-label="Main message"]', 'value']) == '')
     fill('textarea[aria-label="Main message"]', 'PLAN_REVIEW_DESKTOP')
     button('Send')
     until(lambda: script('return [...document.querySelectorAll(".attention-navigation button")].some(e=>e.textContent==="Answer question 1")'))
