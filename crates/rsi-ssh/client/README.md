@@ -100,9 +100,11 @@ dropping an acknowledgement waiter neither cancels nor replays it. A successful 
 means the target accepted termination, not that descendants have already exited.
 This distinction permits measuring the control lane while output credits are full.
 
-Termination cleanup retries temporary control-lane capacity within 30 seconds.
-Capacity retries for termination and release back off from 1 ms to a 100 ms cap;
+Process termination cleanup retries temporary control-lane capacity within 30 seconds.
+Capacity retries for process termination and release back off from 1 ms to a 100 ms cap;
 successful or uncertain effect replies are never retried. Existing cleanup
 deadlines include the backoff waits.
 Expiry retires the connection epoch and reports an unknown outcome; it does not
 replay the accepted effect or claim remote settlement.
+Remote Files handle release uses the reserved control lane with a fixed 1 ms
+capacity retry and a five-second cleanup deadline; failure retires the connection.
