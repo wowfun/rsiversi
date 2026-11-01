@@ -187,7 +187,8 @@ async fn read(context: &Context, operation: Operation) -> Result<UiView> {
 fn present(reply: Reply) -> UiView {
     let mut elements = vec![home()];
     match reply{
-        Reply::Summaries{epoch,items,next}=>{
+        Reply::Summaries{epoch,items,next,capacity_limited}=>{
+            if capacity_limited { elements.push(text("Workspace review history is full. New execution intervals are not being recorded; Agent work continues. Existing summaries remain available.")); }
             elements.push(text("Interval evidence includes concurrent edits, and excludes ignored files and nested repository contents. Complete applies only to the declared text-file scope and controlled work. External agents and detached background work may write after the interval."));
             if items.is_empty(){elements.push(text("No recorded execution intervals."));}
             for item in items{
@@ -225,6 +226,16 @@ fn present(reply: Reply) -> UiView {
 mod tests {
     use super::*;
     use rsi_workspace_review_api::FileChange;
+    #[test]
+    fn capacity_is_visible_even_without_summaries_for_the_selected_session() {
+        let result = present(Reply::Summaries {
+            epoch: "a".repeat(32),
+            items: vec![],
+            next: None,
+            capacity_limited: true,
+        });
+        assert!(result.elements.iter().any(|element| matches!(element, UiElement::Text { text } if text.contains("New execution intervals are not being recorded"))));
+    }
     fn next(view: &UiView) -> Operation {
         let value = view
             .elements

@@ -1,5 +1,14 @@
 # rsi-workspace-review
 
+The 8192-summary durable ceiling preserves existing evidence. Once full, new
+claims receive an explicit evidence-capacity omission and Agent execution
+continues. The Executor reports the exact claim omission in structured stderr;
+the review list and UI expose the persistent capacity-limited state, including
+after restart. No new baseline, comparison or summary is claimed for omitted
+intervals. Source authority and backend health are checked before this decision.
+Other admission failures remain failures; capture ordering is unchanged for
+admitted intervals. Omission diagnostics are process logs, not durable Agent Facts.
+
 WorkspaceReview is an ordinary product plugin implementing the Executor's optional
 execution observer. It records changes observed between two filesystem captures,
 not causal attribution to a model or Tool. Native intervals identify Session,

@@ -51,3 +51,13 @@ between reading bytes and reopening a different inode for its mode. DSH
 `packages/deliverables/workspace-changes/src/git.ts` provides bounded subprocess
 and private snapshot patterns, but its direct Node filesystem scratch operations
 do not establish RSI remote-source authority.
+
+Durable summary saturation produces an explicit observation omission rather than
+terminating unrelated Agent work. DSH's `workspace-changes/src/recorder.ts`
+serializes capture before tools, catches capture failures in `enqueue`, and keeps
+comparisons only until Session disposal. We reuse its non-authoritative failure
+boundary, while preserving RSI's already durable summaries and source grants.
+The list reports saturation after restart and the Executor logs each omitted
+claim. These logs do not promise durable per-claim omission history. Automatic
+archive would require a separate durable paging and recovery protocol; silent
+eviction or increasing the summary bound would not solve the lifetime mismatch.

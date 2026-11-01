@@ -242,6 +242,8 @@ impl Request {
 pub enum Reply {
     /// Durable summaries independent of scratch availability.
     Summaries {
+        /// New interval evidence is omitted because durable summary retention is full.
+        capacity_limited: bool,
         /// Current owner epoch for immediate expired/interrupted presentation.
         epoch: String,
         /// Bounded records.
@@ -360,7 +362,12 @@ impl Client {
 /// Validates owner or remote response before it enters a UI.
 pub fn validate_reply(request: &Request, reply: &Reply) -> Result<()> {
     match (request, reply) {
-        (Request::List { scope, after }, Reply::Summaries { epoch, items, next }) => {
+        (
+            Request::List { scope, after },
+            Reply::Summaries {
+                epoch, items, next, ..
+            },
+        ) => {
             identity(epoch)?;
             if items.len() > 32 {
                 return Err(invalid("too many interval summaries"));

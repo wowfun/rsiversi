@@ -11,3 +11,5 @@ at most 64 KiB of text and explicit byte cursors. IDs and cursors are canonical
 strings, not JavaScript numbers. An old runtime epoch or discarded scratch returns
 `Expired`; missing, pending and partial evidence are distinct from a complete
 empty comparison. Reads confer no execution, rollback, staging or restore authority.
+Every summary page reports `capacity_limited`: new intervals are omitted while
+the durable summary store is full, and previously recorded evidence remains readable.

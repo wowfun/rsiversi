@@ -25,8 +25,8 @@ mod controlled_work;
 mod execution_observer;
 pub use controlled_work::{ControlledWork, ControlledWorkReporter, ControlledWorkStatus};
 pub use execution_observer::{
-    ExecutionInterval, ExecutionObservationEnd, ExecutionObservationStart, ExecutionObserver,
-    ExecutionObserverContract,
+    ExecutionInterval, ExecutionObservationAdmission, ExecutionObservationEnd,
+    ExecutionObservationStart, ExecutionObserver, ExecutionObserverContract,
 };
 mod initial_input;
 pub use initial_input::{InitialTurnInput, initial_turn_input};

@@ -4,8 +4,8 @@ use crate::{
 };
 use async_trait::async_trait;
 use rsi_agent_turn_protocol::{
-    ControlledWorkStatus, ExecutionInterval, ExecutionObservationEnd, ExecutionObservationStart,
-    ExecutionObserver,
+    ControlledWorkStatus, ExecutionInterval, ExecutionObservationAdmission,
+    ExecutionObservationEnd, ExecutionObservationStart, ExecutionObserver,
 };
 use rsi_api_protocol::{ApiError, Result};
 use rsi_execution::{ExecutionLease, ExecutionLocation, ExecutionOperation};
@@ -97,13 +97,16 @@ impl ExecutionObserver for Observer {
         &self,
         start: ExecutionObservationStart,
         cancellation: CancellationToken,
-    ) -> std::result::Result<Arc<dyn ExecutionInterval>, String> {
+    ) -> std::result::Result<ExecutionObservationAdmission, String> {
         if cancellation.is_cancelled() {
             return Err("workspace observation admission cancelled".into());
         }
         self.0
             .admit(start)
-            .map(|v| Arc::new(v) as Arc<dyn ExecutionInterval>)
+            .map(|v| match v {
+                Some(interval) => ExecutionObservationAdmission::Interval(Arc::new(interval)),
+                None => ExecutionObservationAdmission::OmittedCapacity,
+            })
             .map_err(|e| e.to_string())
     }
 }
@@ -156,7 +159,7 @@ impl WorkspaceReview {
             tasks,
         }))
     }
-    fn admit(self: &Arc<Self>, start: ExecutionObservationStart) -> Result<Interval> {
+    fn admit(self: &Arc<Self>, start: ExecutionObservationStart) -> Result<Option<Interval>> {
         let admission = match &start.execution {
             Some(execution)
                 if execution.binding().location() == start.header.coordinates().location() =>
@@ -175,7 +178,10 @@ impl WorkspaceReview {
         if state.closed {
             return Err(ApiError::ShuttingDown);
         }
-        if state.entries.len() >= 8192 || state.entries.values().filter(|e| e.active).count() >= 8 {
+        if state.entries.len() >= 8192 {
+            return Ok(None);
+        }
+        if state.entries.values().filter(|e| e.active).count() >= 8 {
             return Err(ApiError::Capacity);
         }
         // Retire oldest finished runtime material while preserving its durable summary.
@@ -235,7 +241,7 @@ impl WorkspaceReview {
                 runtime: None,
             },
         );
-        Ok(Interval {
+        Ok(Some(Interval {
             owner: self.clone(),
             id,
             workspace,
@@ -245,7 +251,7 @@ impl WorkspaceReview {
                 admission,
                 ..IntervalState::default()
             })),
-        })
+        }))
     }
     async fn publish(
         &self,
@@ -345,6 +351,7 @@ impl WorkspaceReview {
             };
             return Ok(Reply::Summaries {
                 epoch: self.epoch.clone(),
+                capacity_limited: state.entries.len() >= 8192,
                 items,
                 next,
             });

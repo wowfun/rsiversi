@@ -98,6 +98,114 @@ fn start(path: &std::path::Path, recovered: bool) -> ExecutionObservationStart {
     }
 }
 #[tokio::test]
+async fn full_durable_history_is_preserved_and_reports_omission_after_restart() {
+    let temporary = tempfile::tempdir().unwrap();
+    let runtime = Runtime::default();
+    let process = runtime
+        .root()
+        .apply(
+            ResolvedFactory::linked(
+                "process",
+                "test",
+                UpdateMode::Replayable,
+                Arc::new(rsi_process_local::ProcessLocalFactory),
+            ),
+            serde_json::json!({}),
+        )
+        .await
+        .unwrap();
+    let domain = Arc::new(Storage {
+        spec: DomainSpec {
+            id: "review".into(),
+            backend: "base".into(),
+            version: 1,
+            maximum_records: 8192,
+            maximum_bytes: 64 * 1024 * 1024,
+        },
+        rows: Mutex::new(BTreeMap::new()),
+        fail: AtomicBool::new(false),
+        fenced: AtomicBool::new(false),
+    });
+    let path = temporary.path().join("scratch");
+    let initial = owner(&runtime, path.clone(), domain.clone()).await;
+    let interval = initial
+        .admit(start(temporary.path(), false))
+        .unwrap()
+        .unwrap();
+    let mut template = initial.state.lock().unwrap().entries[&interval.id]
+        .summary
+        .clone();
+    template.phase = Phase::Complete;
+    template.finished_ms = Some(template.started_ms.clone());
+    initial.close().await;
+    drop(interval);
+    drop(initial);
+    for index in 0..8192 {
+        template.id = format!("{index:032x}");
+        domain.rows.lock().unwrap().insert(
+            template.id.clone(),
+            serde_json::to_value(&template).unwrap(),
+        );
+    }
+    let original = domain.rows.lock().unwrap().clone();
+    for _ in 0..2 {
+        let current = owner(&runtime, path.clone(), domain.clone()).await;
+        assert!(matches!(
+            Observer(current.clone())
+                .observe(start(temporary.path(), false), CancellationToken::new())
+                .await
+                .unwrap(),
+            ExecutionObservationAdmission::OmittedCapacity
+        ));
+        let denied = start(temporary.path(), false);
+        // Backend recovery remains a hard refusal even when history is full.
+        domain.fenced.store(true, Ordering::Release);
+        assert!(
+            Observer(current.clone())
+                .observe(denied, CancellationToken::new())
+                .await
+                .is_err()
+        );
+        domain.fenced.store(false, Ordering::Release);
+        let mut after = None;
+        let mut count = 0;
+        loop {
+            let Reply::Summaries {
+                items,
+                next,
+                capacity_limited,
+                ..
+            } = current
+                .read(
+                    Request::List {
+                        scope: template.scope.clone(),
+                        after,
+                    },
+                    ExecutionOperation::new(()),
+                    CancellationToken::new(),
+                )
+                .await
+                .unwrap()
+            else {
+                panic!("expected summaries")
+            };
+            assert!(capacity_limited);
+            count += items.len();
+            after = next;
+            if after.is_none() {
+                break;
+            }
+        }
+        assert_eq!(count, 8192);
+        assert_eq!(*domain.rows.lock().unwrap(), original);
+        current.close().await;
+        drop(current);
+    }
+    assert!(process.dispose().await.is_clean());
+    assert!(runtime.shutdown().await.is_clean());
+}
+
+#[tokio::test]
 #[expect(
     clippy::too_many_lines,
     reason = "one causal failure, teardown and recovery sequence"
@@ -132,7 +240,10 @@ async fn lost_storage_ack_blocks_reads_and_admission_until_restart_then_pending_
     });
     let path = temporary.path().join("scratch");
     let first = owner(&runtime, path.clone(), domain.clone()).await;
-    let interval = first.admit(start(temporary.path(), false)).unwrap();
+    let interval = first
+        .admit(start(temporary.path(), false))
+        .unwrap()
+        .unwrap();
     let id = interval.id.clone();
     interval.begin(CancellationToken::new()).await;
     let summary = first.state.lock().unwrap().entries[&id].summary.clone();
@@ -202,7 +313,10 @@ async fn lost_storage_ack_blocks_reads_and_admission_until_restart_then_pending_
             .unwrap(),
         Reply::Expired { .. }
     ));
-    let recovered = second.admit(start(temporary.path(), true)).unwrap();
+    let recovered = second
+        .admit(start(temporary.path(), true))
+        .unwrap()
+        .unwrap();
     recovered.begin(CancellationToken::new()).await;
     recovered
         .end(
@@ -266,7 +380,10 @@ async fn shutdown_retains_an_admitted_read_until_its_task_drains() {
         fenced: AtomicBool::new(false),
     });
     let owner = owner(&runtime, temporary.path().join("scratch"), domain).await;
-    let interval = owner.admit(start(temporary.path(), false)).unwrap();
+    let interval = owner
+        .admit(start(temporary.path(), false))
+        .unwrap()
+        .unwrap();
     let scope = owner.state.lock().unwrap().entries[&interval.id]
         .summary
         .scope
@@ -352,7 +469,7 @@ async fn admitted_baseline_waits_for_workers_and_diff_pages_reuse_captured_patch
         fenced: AtomicBool::new(false),
     });
     let owner = owner(&runtime, temporary.path().join("scratch"), domain.clone()).await;
-    let interval = owner.admit(start(&workspace, false)).unwrap();
+    let interval = owner.admit(start(&workspace, false)).unwrap().unwrap();
     let held = owner.workers.clone().acquire_many_owned(2).await.unwrap();
     let baseline = tokio::spawn({
         let interval = interval.clone();
@@ -467,7 +584,10 @@ async fn late_begin_cannot_resurrect_a_finished_interval() {
         fenced: AtomicBool::new(false),
     });
     let owner = owner(&runtime, temporary.path().join("scratch"), domain.clone()).await;
-    let interval = owner.admit(start(temporary.path(), false)).unwrap();
+    let interval = owner
+        .admit(start(temporary.path(), false))
+        .unwrap()
+        .unwrap();
     interval
         .end(
             ExecutionObservationEnd {
@@ -568,7 +688,8 @@ async fn observation_rejects_missing_wrong_or_revoked_execution_before_state_or_
     gate.revoked.store(false, Ordering::SeqCst);
     let interval = owner
         .admit(remote)
-        .expect("admission performs no source I/O");
+        .expect("admission performs no source I/O")
+        .unwrap();
     assert_eq!(gate.active.load(Ordering::SeqCst), 1);
     let retained = interval.clone();
     drop(interval);

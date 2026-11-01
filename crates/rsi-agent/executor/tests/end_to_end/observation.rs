@@ -1,7 +1,7 @@
 use super::*;
 use rsi_agent_turn_protocol::{
-    ControlledWorkStatus, ExecutionInterval, ExecutionObservationEnd, ExecutionObserver,
-    ExecutionObserverContract,
+    ControlledWorkStatus, ExecutionInterval, ExecutionObservationAdmission,
+    ExecutionObservationEnd, ExecutionObserver, ExecutionObserverContract,
 };
 use std::time::Duration;
 
@@ -17,6 +17,7 @@ pub(super) struct Observer {
     pub block_admission: AtomicBool,
     pub admission_stop: Mutex<Option<CancellationToken>>,
     pub admission_entered: Notify,
+    pub omit_capacity: AtomicBool,
 }
 #[async_trait]
 impl ExecutionInterval for Observer {
@@ -41,13 +42,16 @@ impl ExecutionObserver for Observe {
         &self,
         _: rsi_agent_turn_protocol::ExecutionObservationStart,
         stop: CancellationToken,
-    ) -> Result<Arc<dyn ExecutionInterval>, String> {
+    ) -> Result<ExecutionObservationAdmission, String> {
+        if self.0.omit_capacity.load(Ordering::Acquire) {
+            return Ok(ExecutionObservationAdmission::OmittedCapacity);
+        }
         if self.0.block_admission.load(Ordering::Acquire) {
             *self.0.admission_stop.lock().unwrap() = Some(stop);
             self.0.admission_entered.notify_one();
             std::future::pending::<()>().await;
         }
-        Ok(self.0.clone())
+        Ok(ExecutionObservationAdmission::Interval(self.0.clone()))
     }
 }
 #[derive(Debug)]
@@ -138,6 +142,47 @@ async fn observation_admission_deadline_cancels_before_any_model_effect() {
             .unwrap()
             .is_cancelled()
     );
+    assert!(executor.dispose().await.is_clean());
+    assert!(owner.dispose().await.is_clean());
+    assert!(language.dispose().await.is_clean());
+    stack.dispose_services().await;
+}
+
+#[tokio::test]
+async fn explicit_observation_capacity_omission_preserves_model_execution() {
+    let stack = BaseStack::activate().await;
+    let (observer, owner) = install(&stack).await;
+    observer.omit_capacity.store(true, Ordering::Release);
+    let starts = Arc::new(AtomicUsize::new(0));
+    let language = stack
+        .activate_language(
+            "test.language.omitted",
+            Arc::new(LanguageFixture {
+                outcomes: Mutex::new(VecDeque::from([StartOutcome::Stream(answer_script())])),
+                requests: Mutex::new(vec![]),
+                starts: starts.clone(),
+                store: stack.store.clone(),
+                retry_policy: RetryPolicy::default(),
+            }),
+        )
+        .await;
+    let executor = stack
+        .activate_executor_with_config(json!({"executor_id":"omitted", "observe_execution":true}))
+        .await;
+    let turns = stack
+        .runtime
+        .root()
+        .lookup_local::<TurnServiceContract>()
+        .unwrap();
+    let receipt = stack
+        .submit_fresh(&turns, "omitted-capacity", "continue")
+        .await;
+    assert_eq!(
+        wait_for_outcome(&turns, &receipt).await,
+        TurnOutcome::Completed
+    );
+    assert_eq!(starts.load(Ordering::Acquire), 1);
+    assert!(observer.result.lock().unwrap().is_none());
     assert!(executor.dispose().await.is_clean());
     assert!(owner.dispose().await.is_clean());
     assert!(language.dispose().await.is_clean());

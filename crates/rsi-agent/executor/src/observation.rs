@@ -104,6 +104,18 @@ pub(super) async fn end(
     }
 }
 
+pub(super) fn report_capacity_omission(claim: &rsi_agent_turn_protocol::TurnClaim) {
+    use std::io::Write as _;
+    let _ = writeln!(
+        std::io::stderr().lock(),
+        "{}",
+        serde_json::json!({
+            "event": "execution_observation_omitted", "reason": "evidence_capacity",
+            "session": claim.session_id(), "turn": claim.turn_id(), "claim": claim.claim_id().to_string()
+        })
+    );
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

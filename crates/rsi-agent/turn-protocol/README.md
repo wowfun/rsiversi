@@ -1,5 +1,11 @@
 # rsi-agent-turn-protocol
 
+An optional execution observer returns either an admitted interval or an explicit
+evidence-capacity omission. The Executor reports an omitted claim before driving
+it without capture. Errors, cancellation and admission deadlines still prevent
+effect entry. The observation owner exposes its persistent capacity state; an
+omission is never evidence of an empty or complete comparison.
+
 `reserve_model_attempt` admits a 64 MiB live working set before dispatch. The
 Kernel owns its cancellation-aware 60-second wait, exact claim identity and clock.
 The lease publishes immutable compact prefixes and releases capacity on drop.

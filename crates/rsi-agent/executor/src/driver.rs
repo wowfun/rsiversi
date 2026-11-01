@@ -46,7 +46,15 @@ impl Driver {
             tokio::select! { biased;
                 () = stop.cancelled() => Err("observation admission cancelled".to_owned()),
                 result = tokio::time::timeout_at(deadline, observer.observe(start, preparation_stop.clone())) =>
-                    result.unwrap_or_else(|_| Err("observation admission deadline elapsed".into())).map(Some),
+                    result.unwrap_or_else(|_| Err("observation admission deadline elapsed".into())).map(|admission| {
+                        match admission {
+                            rsi_agent_turn_protocol::ExecutionObservationAdmission::Interval(interval) => Some(interval),
+                            rsi_agent_turn_protocol::ExecutionObservationAdmission::OmittedCapacity => {
+                                observation::report_capacity_omission(&claim);
+                                None
+                            }
+                        }
+                    }),
             }
         } else {
             Ok(None)
