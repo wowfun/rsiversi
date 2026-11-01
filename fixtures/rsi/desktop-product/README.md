@@ -78,6 +78,9 @@ Native export invokes the bounded Tauri bridge with real Worker export events.
 Artifact hashes identify the core, Desktop and Web metadata used by each run.
 PTY side-effect checks wait for the exact bounded file bytes; file creation can
 precede the shell's append. Extra or duplicated bytes never satisfy readiness.
+Terminal reattachment checks a fresh visible marker written after geometry settles,
+then verifies the [PTY viewport snapshot](../../../crates/rsi-pty/core/README.md)
+after reopening.
 Each
 rejection checks its exact source-defined category and message.
 The native window also reads and refreshes Plugins status, reads the separate

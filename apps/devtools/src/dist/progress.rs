@@ -326,8 +326,11 @@ mod tests {
                 contender.try_lock(),
                 Err(std::fs::TryLockError::WouldBlock)
             ));
+            let retained = next.try_clone().unwrap();
+            next.unlock().unwrap();
             drop(next);
             contender.try_lock().unwrap();
+            drop(retained);
         });
     }
     #[test]
