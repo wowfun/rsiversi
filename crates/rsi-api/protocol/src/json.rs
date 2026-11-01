@@ -81,11 +81,8 @@ pub async fn call_json<I: Serialize + Sync, O: DeserializeOwned, E: DeserializeO
         .encode(request, operation.maximum_request_bytes)?;
     let result = client.call(operation, input).await;
     let malformed = || {
-        if operation.effect == OperationEffect::Mutation {
-            ApiError::OutcomeUnknown
-        } else {
-            ApiError::Invalid("invalid domain response".into())
-        }
+        ApiError::Invalid("invalid domain response".into())
+            .after_dispatch(operation.effect == OperationEffect::Mutation)
     };
     match result {
         Ok(ApiOutput::Reply(message)) if message.binary.is_none() => {

@@ -57,11 +57,10 @@ impl ApiInvocation for Invocation {
         drop(execution.spawn(AssertUnwindSafe(self.run(input, sender)).catch_unwind()));
         Box::pin(async move {
             receiver.await.unwrap_or_else(|_| {
-                Err(if mutation {
-                    ApiError::OutcomeUnknown
-                } else {
+                Err(
                     ApiError::Backend("operation task stopped without a result".into())
-                })
+                        .after_dispatch(mutation),
+                )
             })
         })
     }
@@ -118,10 +117,8 @@ impl Invocation {
                 let _ = sender.send(result);
             }
             Err(error) => {
-                let error = if entry.spec.effect == OperationEffect::Mutation
-                    && matches!(error, ApiError::Backend(_))
-                {
-                    ApiError::OutcomeUnknown
+                let error = if matches!(error, ApiError::Backend(_)) {
+                    error.after_dispatch(entry.spec.effect == OperationEffect::Mutation)
                 } else {
                     error
                 };
@@ -134,9 +131,5 @@ impl Invocation {
 }
 
 fn response_failure(effect: OperationEffect, message: &str) -> ApiError {
-    if effect == OperationEffect::Mutation {
-        ApiError::OutcomeUnknown
-    } else {
-        ApiError::Backend(message.into())
-    }
+    ApiError::Backend(message.into()).after_dispatch(effect == OperationEffect::Mutation)
 }

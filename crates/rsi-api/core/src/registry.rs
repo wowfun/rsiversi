@@ -50,20 +50,6 @@ pub(crate) struct Entry {
 }
 
 impl ApiRegistry {
-    /// Reports current membership without copying the catalog or granting admission.
-    pub fn contains_operation(&self, operation: &OperationId) -> bool {
-        let state = self
-            .state
-            .inner
-            .lock()
-            .unwrap_or_else(std::sync::PoisonError::into_inner);
-        !state.closed
-            && state
-                .operations
-                .get(operation)
-                .is_some_and(|entry| !entry.retired.load(Ordering::Acquire))
-    }
-
     /// Creates independent input/output budgets and the standard non-queuing limits.
     pub fn new(execution: Execution) -> Self {
         Self {
@@ -150,7 +136,7 @@ impl ApiRegistrar for ApiRegistry {
 
 impl ApiDispatch for ApiRegistry {
     fn input_budget(&self, class: OperationClass) -> ByteBudget {
-        self.input[lane(class)].clone()
+        self.input[class.lane()].clone()
     }
     fn operation(
         &self,
@@ -216,7 +202,7 @@ impl ApiDispatch for ApiRegistry {
             if entry.retired.load(Ordering::Acquire) {
                 return Err(ApiError::OperationRetiring);
             }
-            let lane = lane(entry.spec.class);
+            let lane = entry.spec.class.lane();
             if state.calls[lane] >= GLOBAL_CALLS[lane] {
                 return Err(ApiError::Capacity);
             }
@@ -285,14 +271,6 @@ impl ApiDispatch for ApiRegistry {
             .filter(|entry| !entry.retired.load(Ordering::Acquire))
             .map(|entry| entry.spec.clone())
             .collect())
-    }
-}
-
-fn lane(class: OperationClass) -> usize {
-    match class {
-        OperationClass::Control => 0,
-        OperationClass::Data => 1,
-        OperationClass::Subscription => 2,
     }
 }
 
@@ -378,7 +356,7 @@ impl Drop for QuotaOwner {
             .inner
             .lock()
             .unwrap_or_else(std::sync::PoisonError::into_inner);
-        let lane = lane(self.class);
+        let lane = self.class.lane();
         state.calls[lane] -= 1;
         if let CallOrigin::Device(device) = &self.origin {
             let calls = state

@@ -115,11 +115,7 @@ impl Export {
                 if bytes > operation.maximum_request_bytes {
                     return Err(wire::invalid());
                 }
-                let lane = match operation.class {
-                    OperationClass::Control => 0,
-                    OperationClass::Data => 1,
-                    OperationClass::Subscription => 2,
-                };
+                let lane = operation.class.lane();
                 drop(lookup);
                 let permit = self.slots[lane]
                     .clone()
@@ -142,11 +138,7 @@ impl Export {
                         .output(channel, &operation, output)
                         .await
                         .map_err(|error| {
-                            if operation.effect == OperationEffect::Mutation {
-                                ApiError::OutcomeUnknown
-                            } else {
-                                error
-                            }
+                            error.after_dispatch(operation.effect == OperationEffect::Mutation)
                         }),
                     Err(error) => {
                         error::send(
@@ -281,11 +273,8 @@ impl Export {
                 }
                 wire::send_header(channel, &self.scratch, &Header::End {}).await
             }
-            _ => Err(if operation.effect == OperationEffect::Mutation {
-                ApiError::OutcomeUnknown
-            } else {
-                ApiError::Backend("API response class mismatch".into())
-            }),
+            _ => Err(ApiError::Backend("API response class mismatch".into())
+                .after_dispatch(operation.effect == OperationEffect::Mutation)),
         }
     }
     async fn send_message(

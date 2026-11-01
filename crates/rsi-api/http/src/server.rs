@@ -500,7 +500,7 @@ impl State {
         }
         let result = invocation.invoke(input);
         let output = tokio::select! { biased;
-            () = caller.revoked.cancelled() => return Err(if spec.effect == OperationEffect::Mutation { ApiError::OutcomeUnknown } else { ApiError::Unauthorized }),
+            () = caller.revoked.cancelled() => return Err(ApiError::Unauthorized.after_dispatch(spec.effect == OperationEffect::Mutation)),
             output = result => output?,
         };
         Ok(match output {

@@ -202,12 +202,7 @@ impl ApiClient for SessionTargetClient {
         }
     }
     fn input_budget(&self, class: OperationClass) -> ByteBudget {
-        self.input[match class {
-            OperationClass::Control => 0,
-            OperationClass::Data => 1,
-            OperationClass::Subscription => 2,
-        }]
-        .clone()
+        self.input[class.lane()].clone()
     }
     async fn call(&self, operation: &OperationSpec, input: RetainedBytes) -> Result<ApiOutput> {
         self.validate_target(operation, &input)?;

@@ -275,12 +275,7 @@ impl ApiDispatch for Service {
         &self,
         class: rsi_api_protocol::OperationClass,
     ) -> rsi_api_protocol::ByteBudget {
-        self.inputs[match class {
-            rsi_api_protocol::OperationClass::Control => 0,
-            rsi_api_protocol::OperationClass::Data => 1,
-            rsi_api_protocol::OperationClass::Subscription => 2,
-        }]
-        .clone()
+        self.inputs[class.lane()].clone()
     }
 }
 impl DeviceAuthentication for Service {

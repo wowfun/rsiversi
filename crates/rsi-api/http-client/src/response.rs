@@ -10,13 +10,6 @@ use rsi_meta::Execution;
 pub(crate) fn invalid() -> ApiError {
     ApiError::Invalid("invalid API peer response".into())
 }
-pub(crate) fn uncertain(error: ApiError, mutation: bool) -> ApiError {
-    if mutation {
-        ApiError::OutcomeUnknown
-    } else {
-        error
-    }
-}
 fn body(response: reqwest::Response) -> rsi_api_client::ResponseBytes {
     Box::pin(
         response

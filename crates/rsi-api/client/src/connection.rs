@@ -100,13 +100,6 @@ fn budgets() -> [ByteBudget; 3] {
         ByteBudget::default(),
     ]
 }
-fn lane(class: OperationClass) -> usize {
-    match class {
-        OperationClass::Control => 0,
-        OperationClass::Data => 1,
-        OperationClass::Subscription => 2,
-    }
-}
 impl ClientConnection {
     async fn query_operations(
         &self,
@@ -246,7 +239,7 @@ impl ApiClient for ClientConnection {
             .ok_or(ApiError::UnknownOperation)
     }
     fn input_budget(&self, class: OperationClass) -> ByteBudget {
-        self.inner.input[lane(class)].clone()
+        self.inner.input[class.lane()].clone()
     }
     async fn call(&self, operation: &OperationSpec, input: RetainedBytes) -> Result<ApiOutput> {
         let admission = self.inner.admit(operation, &input)?;
@@ -263,7 +256,7 @@ impl ApiClient for ClientConnection {
             let _ = sender.send(result.map(|(_, output)| output));
         }));
         receiver.await.unwrap_or_else(|_| {
-            Err(uncertain(
+            Err(ApiError::after_dispatch(
                 ApiError::Backend("API client task stopped without a result".into()),
                 mutation,
             ))
@@ -307,7 +300,7 @@ impl Connection {
                 "API input exceeds operation bound".into(),
             ));
         }
-        let lane = lane(operation.class);
+        let lane = operation.class.lane();
         let permit = self.calls[lane]
             .clone()
             .try_acquire_owned()
@@ -348,7 +341,7 @@ impl Connection {
         let output = match capacity {
             Some(capacity) => ApiResponseCapacity::Finite(capacity),
             None => ApiResponseCapacity::Subscription {
-                budget: self.output[lane(operation.class)].clone(),
+                budget: self.output[operation.class.lane()].clone(),
                 maximum: operation.maximum_response_bytes,
             },
         };
@@ -361,7 +354,7 @@ impl Connection {
                 epoch,
                 ClientResponseCapacity {
                     receiving: output,
-                    retained: self.retained[lane(operation.class)].clone(),
+                    retained: self.retained[operation.class.lane()].clone(),
                 },
                 &self.retiring,
             )
@@ -384,18 +377,11 @@ impl Connection {
             ApiOutput::Reply(reply) if operation.class != OperationClass::Subscription => {
                 Ok((epoch, ApiOutput::Reply(reply)))
             }
-            _ => Err(uncertain(
+            _ => Err(ApiError::after_dispatch(
                 ApiError::Backend("transport response disagrees with operation class".into()),
                 operation.effect == OperationEffect::Mutation,
             )),
         }
-    }
-}
-fn uncertain(error: ApiError, mutation: bool) -> ApiError {
-    if mutation {
-        ApiError::OutcomeUnknown
-    } else {
-        error
     }
 }
 

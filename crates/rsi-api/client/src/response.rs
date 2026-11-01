@@ -11,13 +11,6 @@ use std::{pin::Pin, time::Duration};
 
 /// Transport-supplied immutable chunks; byte owners may include bridge scratch admission.
 pub type ResponseBytes = Pin<Box<dyn Stream<Item = Result<bytes::Bytes>> + Send + 'static>>;
-fn uncertain(error: ApiError, mutation: bool) -> ApiError {
-    if mutation {
-        ApiError::OutcomeUnknown
-    } else {
-        error
-    }
-}
 /// Admits and decodes one finite HTTP response before polling its body.
 /// The transport owns the absolute exchange deadline and I/O cancellation.
 pub async fn decode_response(
@@ -31,9 +24,9 @@ pub async fn decode_response(
     if !matches!(status, 200 | 422) {
         let error = common_error(status, headers, source)
             .await
-            .map_err(|error| uncertain(error, mutation))?;
+            .map_err(|error| ApiError::after_dispatch(error, mutation))?;
         if matches!(error, ApiError::Backend(_)) {
-            return Err(uncertain(error, mutation));
+            return Err(ApiError::after_dispatch(error, mutation));
         }
         return Err(error);
     }
@@ -57,7 +50,7 @@ pub async fn decode_response(
         decoder.finish_into(retained)
     }
     .await
-    .map_err(|error| uncertain(error, mutation))?;
+    .map_err(|error| ApiError::after_dispatch(error, mutation))?;
     if status == 422 {
         return Err(ApiError::Domain(result.json));
     }

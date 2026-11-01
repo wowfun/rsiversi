@@ -116,7 +116,7 @@ impl ConnectionTransport for Transport {
             .ok_or(ApiError::ShuttingDown)?;
         let result = tokio::select! {
             biased;
-            () = retiring.cancelled() => Err(if operation.effect == OperationEffect::Mutation { ApiError::OutcomeUnknown } else { ApiError::ShuttingDown }),
+            () = retiring.cancelled() => Err(ApiError::ShuttingDown.after_dispatch(operation.effect == OperationEffect::Mutation)),
             result = exchange(capability, operation, input, output, &self.scratch) => result,
         };
         result.map(|output| (self.description.host_epoch.clone(), output))
@@ -147,34 +147,34 @@ async fn exchange(
         Ok(header)
     }
     .await
-    .map_err(|error| uncertain(error, mutation))?;
+    .map_err(|error| ApiError::after_dispatch(error, mutation))?;
     match (result, output.receiving) {
         (Header::Reply { json, binary }, ApiResponseCapacity::Finite(mut capacity)) => {
             let bytes = json
                 .checked_add(binary.unwrap_or(0))
-                .ok_or_else(|| uncertain(wire::invalid(), mutation))?;
+                .ok_or_else(|| ApiError::after_dispatch(wire::invalid(), mutation))?;
             let message = wire::message(
                 &mut call,
                 capacity
                     .split(bytes)
-                    .map_err(|error| uncertain(error, mutation))?,
+                    .map_err(|error| ApiError::after_dispatch(error, mutation))?,
                 &output.retained,
                 json,
                 binary,
                 operation.maximum_response_bytes,
             )
             .await
-            .map_err(|error| uncertain(error, mutation))?;
+            .map_err(|error| ApiError::after_dispatch(error, mutation))?;
             wire::eof(&mut call)
                 .await
-                .map_err(|error| uncertain(error, mutation))?;
+                .map_err(|error| ApiError::after_dispatch(error, mutation))?;
             Ok(ApiOutput::Reply(message))
         }
         (Header::Error { code, domain }, capacity) => {
             let reservation = match capacity {
                 ApiResponseCapacity::Finite(mut capacity) => capacity
                     .split(domain.unwrap_or(0))
-                    .map_err(|error| uncertain(error, mutation))?,
+                    .map_err(|error| ApiError::after_dispatch(error, mutation))?,
                 ApiResponseCapacity::Subscription { budget, maximum } => {
                     budget.reserve(domain.unwrap_or(0).min(maximum))?
                 }
@@ -188,10 +188,10 @@ async fn exchange(
                 operation.maximum_response_bytes,
             )
             .await
-            .map_err(|error| uncertain(error, mutation))?;
+            .map_err(|error| ApiError::after_dispatch(error, mutation))?;
             wire::eof(&mut call)
                 .await
-                .map_err(|error| uncertain(error, mutation))?;
+                .map_err(|error| ApiError::after_dispatch(error, mutation))?;
             Err(error)
         }
         (Header::Stream {}, ApiResponseCapacity::Subscription { budget, maximum }) => {
@@ -210,13 +210,6 @@ async fn exchange(
                 }
             })))
         }
-        _ => Err(uncertain(wire::invalid(), mutation)),
-    }
-}
-fn uncertain(error: ApiError, mutation: bool) -> ApiError {
-    if mutation {
-        ApiError::OutcomeUnknown
-    } else {
-        error
+        _ => Err(ApiError::after_dispatch(wire::invalid(), mutation)),
     }
 }

@@ -67,16 +67,16 @@ impl ConnectionTransport for NativeTransport {
             self.transport.execute(request).await
         };
         let response = tokio::select! { biased;
-            () = retiring.cancelled() => return Err(if mutation && started.load(Ordering::Acquire) { ApiError::OutcomeUnknown } else { ApiError::ShuttingDown }),
+            () = retiring.cancelled() => return Err(ApiError::ShuttingDown.after_dispatch(mutation && started.load(Ordering::Acquire))),
             response = deadline.timeout(pending) => match response {
-                Err(_) => return Err(response::uncertain(ApiError::Backend("API response deadline elapsed".into()), mutation)),
+                Err(_) => return Err(ApiError::after_dispatch(ApiError::Backend("API response deadline elapsed".into()), mutation)),
                 Ok(Err(error)) if error.is_connect() => return Err(ApiError::Backend("API connection failed".into())),
-                Ok(Err(_)) => return Err(response::uncertain(ApiError::Backend("API response was lost".into()), mutation)),
+                Ok(Err(_)) => return Err(ApiError::after_dispatch(ApiError::Backend("API response was lost".into()), mutation)),
                 Ok(Ok(response)) => response,
             },
         };
         let received_epoch = response::identity(response.headers(), endpoint, epoch)
-            .map_err(|error| response::uncertain(error, mutation))?;
+            .map_err(|error| ApiError::after_dispatch(error, mutation))?;
         if response.status().as_u16() == 200 && operation.class == OperationClass::Subscription {
             response::content_type(response.headers(), "text/event-stream")?;
             let source = response::stream(
@@ -99,8 +99,8 @@ impl ConnectionTransport for NativeTransport {
             capacity
         };
         let result = tokio::select! { biased;
-            () = retiring.cancelled() => Err(response::uncertain(ApiError::ShuttingDown, mutation)),
-            result = deadline.timeout(response::finite(response, capacity, mutation, &retained)) => result.unwrap_or_else(|_| Err(response::uncertain(ApiError::Backend("API body deadline elapsed".into()), mutation))),
+            () = retiring.cancelled() => Err(ApiError::after_dispatch(ApiError::ShuttingDown, mutation)),
+            result = deadline.timeout(response::finite(response, capacity, mutation, &retained)) => result.unwrap_or_else(|_| Err(ApiError::after_dispatch(ApiError::Backend("API body deadline elapsed".into()), mutation))),
         };
         result.map(|message| (received_epoch, ApiOutput::Reply(message)))
     }

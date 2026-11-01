@@ -98,10 +98,13 @@ impl BrowserTransport {
                     .head
                     .await
                     .unwrap_or_else(|_| Err(bridge::lost()))
-                    .map_err(|error| uncertain(error, started.load(Ordering::Acquire)))?;
+                    .map_err(|error| {
+                        ApiError::after_dispatch(error, started.load(Ordering::Acquire))
+                    })?;
                 self.protocol(&head.headers)
-                    .map_err(|e| uncertain(e, true))?;
-                response_identity(&head.headers, endpoint, None).map_err(|e| uncertain(e, true))?;
+                    .map_err(|e| ApiError::after_dispatch(e, true))?;
+                response_identity(&head.headers, endpoint, None)
+                    .map_err(|e| ApiError::after_dispatch(e, true))?;
                 if head.status != 200 {
                     return decode_response(
                         head.status,
@@ -139,7 +142,12 @@ impl BrowserTransport {
                 Ok(())
             })
             .await
-            .unwrap_or_else(|_| Err(uncertain(bridge::lost(), started.load(Ordering::Acquire))))
+            .unwrap_or_else(|_| {
+                Err(ApiError::after_dispatch(
+                    bridge::lost(),
+                    started.load(Ordering::Acquire),
+                ))
+            })
     }
 }
 impl Drop for BrowserTransport {
@@ -155,13 +163,6 @@ fn base_headers() -> Vec<(&'static str, String)> {
         ),
         ("x-rsi-csrf", "1".into()),
     ]
-}
-fn uncertain(error: ApiError, mutation: bool) -> ApiError {
-    if mutation {
-        ApiError::OutcomeUnknown
-    } else {
-        error
-    }
 }
 #[async_trait]
 impl ConnectionTransport for BrowserTransport {
@@ -205,15 +206,15 @@ impl ConnectionTransport for BrowserTransport {
         let started = pending.started.clone();
         let deadline = self.execution.deadline_after(Duration::from_mins(1));
         let head = tokio::select! { biased;
-            () = retiring.cancelled() => return Err(uncertain(ApiError::ShuttingDown, mutation && started.load(Ordering::Acquire))),
-            result = deadline.timeout(pending.head) => result.map_err(|_| uncertain(bridge::lost(), mutation && started.load(Ordering::Acquire)))?
-                .map_err(|_| uncertain(bridge::lost(), mutation && started.load(Ordering::Acquire)))?
-                .map_err(|error| uncertain(error, mutation && started.load(Ordering::Acquire)))?,
+            () = retiring.cancelled() => return Err(ApiError::after_dispatch(ApiError::ShuttingDown, mutation && started.load(Ordering::Acquire))),
+            result = deadline.timeout(pending.head) => result.map_err(|_| ApiError::after_dispatch(bridge::lost(), mutation && started.load(Ordering::Acquire)))?
+                .map_err(|_| ApiError::after_dispatch(bridge::lost(), mutation && started.load(Ordering::Acquire)))?
+                .map_err(|error| ApiError::after_dispatch(error, mutation && started.load(Ordering::Acquire)))?,
         };
         let received_epoch = response_identity(&head.headers, endpoint, epoch)
-            .map_err(|e| uncertain(e, mutation))?;
+            .map_err(|e| ApiError::after_dispatch(e, mutation))?;
         self.protocol(&head.headers)
-            .map_err(|e| uncertain(e, mutation))?;
+            .map_err(|e| ApiError::after_dispatch(e, mutation))?;
         let (capacity, subscription) = match output {
             ApiResponseCapacity::Finite(capacity) => (Some(capacity), None),
             ApiResponseCapacity::Subscription { budget, maximum } => {
@@ -242,9 +243,9 @@ impl ConnectionTransport for BrowserTransport {
             capacity
         };
         let result = tokio::select! { biased;
-            () = retiring.cancelled() => Err(uncertain(ApiError::ShuttingDown, mutation)),
+            () = retiring.cancelled() => Err(ApiError::after_dispatch(ApiError::ShuttingDown, mutation)),
             result = deadline.timeout(decode_response(head.status, &head.headers, pending.source, capacity, mutation, &retained)) =>
-                result.unwrap_or_else(|_| Err(uncertain(bridge::lost(), mutation))),
+                result.unwrap_or_else(|_| Err(ApiError::after_dispatch(bridge::lost(), mutation))),
         };
         result.map(|message| (received_epoch, ApiOutput::Reply(message)))
     }

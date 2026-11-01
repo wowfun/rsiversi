@@ -75,6 +75,15 @@ pub enum ApiError {
     Unavailable,
 }
 
+impl ApiError {
+    /// Classifies an infrastructure or response failure after possible dispatch.
+    /// Callers supply the mutation/start fence and preserve definite remote rejections.
+    #[must_use]
+    pub fn after_dispatch(self, mutation: bool) -> Self {
+        if mutation { Self::OutcomeUnknown } else { self }
+    }
+}
+
 /// API foundation result.
 pub type Result<T> = std::result::Result<T, ApiError>;
 
@@ -158,6 +167,17 @@ pub enum OperationClass {
     Data,
     /// Long-lived reconnectable observation.
     Subscription,
+}
+
+impl OperationClass {
+    /// Index into independently sized control, data and subscription pools.
+    pub const fn lane(self) -> usize {
+        match self {
+            Self::Control => 0,
+            Self::Data => 1,
+            Self::Subscription => 2,
+        }
+    }
 }
 
 /// Work ownership selected by a registered operation, never by its caller.

@@ -64,8 +64,8 @@ Input and output each have separate retention pools: 2 MiB for controls and
 64 MiB for each data/subscription lane. Finite
 mutation response upper bounds are reserved before invoking a handler. Finite
 handlers consume response capacity through the protocol's finite conversion;
-subscription capacity is rejected before domain work. Registry membership reads
-only the selected live operation and confer no admission or caller authority.
+subscription capacity is rejected before domain work. Registry discovery uses
+the caller-aware `ApiDispatch::operation` lookup and confers no admission.
 Finite reads reserve their measured encoding or copy size before allocating response
 storage, under both the operation maximum and shared delivery pool. Read execution
 scratch remains the domain adapter's responsibility; a small retained reply does

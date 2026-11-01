@@ -1,6 +1,21 @@
 use rsi_api_protocol::{
-    OperationCatalog, OperationId, describe_operation, operation_operation, operations_operation,
+    OperationCatalog, OperationClass, OperationId, describe_operation, operation_operation,
+    operations_operation,
 };
+
+#[test]
+fn admission_lanes_keep_their_order_after_wire_round_trip() {
+    for (index, class, wire) in [
+        (0, OperationClass::Control, "\"control\""),
+        (1, OperationClass::Data, "\"data\""),
+        (2, OperationClass::Subscription, "\"subscription\""),
+    ] {
+        assert_eq!(serde_json::to_string(&class).unwrap(), wire);
+        let decoded: OperationClass = serde_json::from_str(wire).unwrap();
+        assert_eq!(decoded, class);
+        assert_eq!(decoded.lane(), index);
+    }
+}
 
 #[test]
 fn catalogs_validate_descriptors_duplicates_and_entry_bound_during_decode() {

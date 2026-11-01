@@ -7,7 +7,6 @@ license.workspace = true
 publish = false
 
 [dependencies]
-async-stream.workspace = true
 async-trait.workspace = true
 futures-util.workspace = true
 http.workspace = true
@@ -26,6 +25,7 @@ zeroize.workspace = true
 libc.workspace = true
 
 [dev-dependencies]
+async-stream.workspace = true
 rsi-api = { path = "../core" }
 rsi-api-http = { path = "../http" }
 tempfile.workspace = true

@@ -357,14 +357,25 @@ async fn mutation_starts_before_waiter_poll_and_retirement_drains_it() {
     let registry = registry();
     let gate = Gate::new();
     let operation = spec("write", OperationClass::Data, OperationEffect::Mutation);
-    assert!(!registry.contains_operation(&operation.id));
+    assert!(matches!(
+        registry.operation(&operation.key(), &CallOrigin::Local),
+        Err(ApiError::UnknownOperation)
+    ));
     let registration = registry.register(operation.clone(), gate.clone()).unwrap();
-    assert!(registry.contains_operation(&operation.id));
+    assert_eq!(
+        registry
+            .operation(&operation.key(), &CallOrigin::Local)
+            .unwrap(),
+        operation
+    );
     drop(start(&registry, &operation, CallOrigin::Local));
     gate.entered.acquire().await.unwrap().forget();
     let mut closing = Box::pin(registration.close());
     assert!(closing.as_mut().now_or_never().is_none());
-    assert!(!registry.contains_operation(&operation.id));
+    assert!(matches!(
+        registry.operation(&operation.key(), &CallOrigin::Local),
+        Err(ApiError::OperationRetiring)
+    ));
     assert!(matches!(
         registry.admit(&operation.call(), CallOrigin::Local),
         Err(ApiError::OperationRetiring)

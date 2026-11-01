@@ -62,6 +62,9 @@ Operation identity is a validated domain/name pair and positive version. It does
 not encode an executable build hash or a running Host epoch. Those are separate
 connection policies. The registered operation determines its control/data/
 subscription class and whether an admitted call survives waiter cancellation.
+`OperationClass::lane` selects the in-process pool index: Control = 0, Data = 1,
+Subscription = 2. This shared ordering does not prescribe pool capacities;
+registries, clients and adapters own their admission and byte limits.
 
 A domain registers an exact operation descriptor and handler through the write-only
 registrar contract. The dispatcher opens one admitted invocation from that
@@ -75,7 +78,10 @@ and can await the drain of work already owned by it.
 Infrastructure failure after mutation dispatch cannot prove non-execution. Panic,
 invalid response shape, failed result encoding or a lost result is an unknown
 outcome, reconciled through the domain's own identity and status operation. A
-typed domain error may establish a stronger result. RSI client implementations never automatically
+typed domain error may establish a stronger result. `ApiError::after_dispatch`
+centralizes this mapping for infrastructure/response failures; callers retain
+the admission/start fence and do not apply it to definite remote rejections.
+RSI client implementations never automatically
 retry an unknown mutation or invents a durable request-outcome database.
 
 EndpointId names a persisted deployment across restarts and code upgrades.

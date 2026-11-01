@@ -30,13 +30,6 @@ fn lost() -> ApiError {
 fn protocol_failure(error: &hyper::Error) -> ApiError {
     ApiError::Backend(format!("local API response was lost: {error:?}"))
 }
-fn uncertain(error: ApiError, mutation: bool) -> ApiError {
-    if mutation {
-        ApiError::OutcomeUnknown
-    } else {
-        error
-    }
-}
 
 #[async_trait]
 impl ConnectionTransport for LocalTransport {
@@ -72,17 +65,17 @@ impl ConnectionTransport for LocalTransport {
             let response = sender.send_request(request);
             tokio::pin!(response);
             tokio::select! { biased;
-                response = &mut response => response.map_err(|error| uncertain(protocol_failure(&error), mutation)),
+                response = &mut response => response.map_err(|error| ApiError::after_dispatch(protocol_failure(&error), mutation)),
                 result = &mut connection => {
                     ended = true;
-                    result.map_err(|error| uncertain(protocol_failure(&error), mutation))?;
-                    response.await.map_err(|error| uncertain(protocol_failure(&error), mutation))
+                    result.map_err(|error| ApiError::after_dispatch(protocol_failure(&error), mutation))?;
+                    response.await.map_err(|error| ApiError::after_dispatch(protocol_failure(&error), mutation))
                 },
             }
         };
         let response = tokio::select! { biased;
-            () = retiring.cancelled() => return Err(uncertain(ApiError::ShuttingDown, mutation && started.load(Ordering::Acquire))),
-            result = deadline.timeout(pending) => result.map_err(|_| uncertain(lost(), mutation && started.load(Ordering::Acquire)))??,
+            () = retiring.cancelled() => return Err(ApiError::after_dispatch(ApiError::ShuttingDown, mutation && started.load(Ordering::Acquire))),
+            result = deadline.timeout(pending) => result.map_err(|_| ApiError::after_dispatch(lost(), mutation && started.load(Ordering::Acquire)))??,
         };
         #[cfg(feature = "test-support")]
         let response_head_ns = started_at.elapsed().as_nanos();
@@ -92,7 +85,7 @@ impl ConnectionTransport for LocalTransport {
             endpoint,
             epoch.or(Some(&self.config.host_epoch)),
         )
-        .map_err(|error| uncertain(error, mutation))?;
+        .map_err(|error| ApiError::after_dispatch(error, mutation))?;
         let source = crate::io::source(connection, body, ended);
         let (capacity, subscription) = match output {
             ApiResponseCapacity::Finite(capacity) => (Some(capacity), None),
@@ -122,8 +115,8 @@ impl ConnectionTransport for LocalTransport {
             capacity
         };
         let response = tokio::select! { biased;
-            () = retiring.cancelled() => Err(uncertain(ApiError::ShuttingDown, mutation)),
-            result = deadline.timeout(decode_response(head.status.as_u16(), &head.headers, source, capacity, mutation, &retained)) => result.unwrap_or_else(|_| Err(uncertain(lost(), mutation))),
+            () = retiring.cancelled() => Err(ApiError::after_dispatch(ApiError::ShuttingDown, mutation)),
+            result = deadline.timeout(decode_response(head.status.as_u16(), &head.headers, source, capacity, mutation, &retained)) => result.unwrap_or_else(|_| Err(ApiError::after_dispatch(lost(), mutation))),
         }?;
         #[cfg(feature = "test-support")]
         self.measurement.record(crate::ExchangeTiming {
