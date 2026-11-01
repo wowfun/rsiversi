@@ -15,6 +15,9 @@ environment before credential resolution. Configuration retains references only;
 the product checks the precise target/server grant and allowed references before
 launching or exporting their values. Both stdio kinds are excluded from ordinary
 remote HTTP configuration replacement.
+`McpConfig::validate` checks configuration shape, not replacement authority.
+The core configuration owner admits HTTP-only settings and SSH-only candidates
+separately, merging them with the frozen Local stdio configuration.
 
 A complete frozen manifest retains selected flags, original server Tool definitions,
 resource descriptors, protocol version, capabilities and attributed instructions.

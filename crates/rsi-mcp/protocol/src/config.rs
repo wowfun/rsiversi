@@ -114,22 +114,6 @@ impl McpConfig {
         }
         Ok(())
     }
-    /// Whether a remote replacement preserves every existing Local or SSH stdio
-    /// entry and introduces no new one. HTTP entries still require configuration grants.
-    pub fn remote_replacement_of(&self, current: &Self) -> bool {
-        let stdio = |config: &Self| {
-            config
-                .servers
-                .iter()
-                .filter(|server| match server.transport {
-                    TransportConfig::Stdio { .. } | TransportConfig::SshStdio { .. } => true,
-                    TransportConfig::StreamableHttp { .. } => false,
-                })
-                .map(|server| (server.id.clone(), server.clone()))
-                .collect::<BTreeMap<_, _>>()
-        };
-        stdio(self) == stdio(current)
-    }
 }
 impl ServerConfig {
     /// Validates complete explicit target configuration without acquiring authority.

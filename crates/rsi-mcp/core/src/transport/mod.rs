@@ -193,26 +193,14 @@ impl Connection {
             } else {
                 REQUEST_TIMEOUT
             };
-        self.request_until(method, params, tokio::time::Instant::now() + timeout)
-            .await
-    }
-    pub async fn request_until(
-        &self,
-        method: &str,
-        params: Value,
-        deadline: tokio::time::Instant,
-    ) -> Result<Value> {
-        self.request_observed(method, params, deadline, None).await
-    }
-    pub async fn request_observed(
-        &self,
-        method: &str,
-        params: Value,
-        deadline: tokio::time::Instant,
-        dispatched: Option<&AtomicBool>,
-    ) -> Result<Value> {
-        self.request_authorized(method, params, deadline, dispatched, None)
-            .await
+        self.request_authorized(
+            method,
+            params,
+            tokio::time::Instant::now() + timeout,
+            None,
+            None,
+        )
+        .await
     }
     pub async fn request_authorized(
         &self,

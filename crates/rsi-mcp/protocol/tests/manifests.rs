@@ -106,22 +106,6 @@ fn aggregate_catalog_check_rejects_public_name_collisions_before_schema_validati
     );
 }
 #[test]
-fn remote_replacements_cannot_create_change_disable_or_remove_stdio_configuration() {
-    let local: McpConfig = serde_json::from_value(json!({"servers":[{"id":"local","enabled":true,"tools":["echo"],"transport":{"kind":"stdio","program":"/usr/bin/python3","cwd":"/tmp","arguments":[],"environment":{}}}]})).unwrap();
-    local.validate().unwrap();
-    assert!(local.remote_replacement_of(&local));
-    assert!(!local.remote_replacement_of(&McpConfig::default()));
-    assert!(!McpConfig::default().remote_replacement_of(&local));
-    let mut changed = local.clone();
-    changed.servers[0].enabled = false;
-    assert!(!changed.remote_replacement_of(&local));
-    changed.servers[0].transport = TransportConfig::StreamableHttp {
-        url: "http://localhost:8080/mcp".into(),
-        credential: None,
-    };
-    assert!(!changed.remote_replacement_of(&local));
-}
-#[test]
 fn endpoints_and_credentials_have_explicit_owners_and_no_ambient_resolution() {
     for endpoint in [
         "file:///tmp/mcp",

@@ -115,13 +115,19 @@ async fn saved_http_settings_require_explicit_verification_and_stdio_is_never_ex
     )
     .await;
     let capabilities = activate(&runtime, "capabilities", Capabilities, json!(null)).await;
-    let stdio = json!({"servers":[{"id":"private-local","enabled":false,"transport":{"kind":"stdio","program":"/private/local-program","cwd":"/private/local-cwd","arguments":["private-launch-argument"],"environment":{}}}]});
+    let temporary = tempfile::tempdir().unwrap();
+    let private = temporary.path().join("private");
+    let stdio = json!({"servers":[{"id":"private-local","enabled":false,"transport":{"kind":"stdio","program":private.join("local-program"),"cwd":private.join("local-cwd"),"arguments":["private-launch-argument"],"environment":{}}}]});
+    serde_json::from_value::<rsi_mcp::McpConfig>(stdio.clone())
+        .unwrap()
+        .validate()
+        .unwrap();
     let mcp = activate(&runtime, "mcp", McpFactory, stdio.clone()).await;
     let owner = runtime.root().lookup_local::<McpOwnerContract>().unwrap();
     assert!(owner.seed().is_ok());
     assert!(owner.is_stdio("private-local"));
     check_unchanged_remote_keeps_seed(&owner, rsi_mcp::McpConfig::default()).await;
-    check_remote_rejection_and_abandonment(&runtime, &owner, stdio).await;
+    check_remote_rejection_and_abandonment(&runtime, &owner, stdio.clone()).await;
     let access = runtime
         .root()
         .lookup_local::<SettingsAccessContract>()
@@ -129,11 +135,10 @@ async fn saved_http_settings_require_explicit_verification_and_stdio_is_never_ex
     let actual = access.read("rsi.mcp").await.unwrap();
     assert_eq!(actual.value, json!({"servers":[]}));
     let description = access.describe("rsi.mcp").await.unwrap();
-    assert!(
-        !serde_json::to_string(&description)
-            .unwrap()
-            .contains("/private/")
-    );
+    let description = serde_json::to_string(&description).unwrap();
+    for private_value in ["local-program", "local-cwd", "private-launch-argument"] {
+        assert!(!description.contains(private_value));
+    }
     let scope = runtime
         .root()
         .lookup_local::<SettingsContract>()
@@ -155,7 +160,14 @@ async fn saved_http_settings_require_explicit_verification_and_stdio_is_never_ex
         .unwrap();
     assert!(!owner.settings_pending());
     assert!(owner.seed().is_ok());
-    assert!(scope.replace(saved.version().revision,json!({"servers":[{"id":"escape","transport":{"kind":"stdio","program":"/bin/sh","cwd":"/tmp"}}]})).await.is_err());
+    let mut forbidden = stdio;
+    forbidden["servers"][0]["id"] = "escape".into();
+    assert!(
+        scope
+            .replace(saved.version().revision, forbidden)
+            .await
+            .is_err()
+    );
     assert!(mcp.dispose().await.is_clean());
     drop(owner);
     assert!(capabilities.dispose().await.is_clean());
