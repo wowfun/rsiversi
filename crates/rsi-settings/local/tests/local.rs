@@ -12,6 +12,81 @@ fn linked(id: &str, factory: Arc<dyn rsi_meta::PluginFactory>) -> ResolvedFactor
     ResolvedFactory::linked(id, "test", UpdateMode::Replayable, factory)
 }
 
+#[cfg(target_os = "linux")]
+#[test]
+fn fifo_documents_reject_and_settle_without_a_writer_or_with_an_open_writer() {
+    use std::{
+        process::Command,
+        time::{Duration, Instant},
+    };
+    for mode in ["empty", "writer"] {
+        let mut child = Command::new(std::env::current_exe().unwrap())
+            .args(["--exact", "fifo_document_probe_child", "--nocapture"])
+            .env("RSI_SETTINGS_FIFO_PROBE", mode)
+            .spawn()
+            .unwrap();
+        let deadline = Instant::now() + Duration::from_secs(5);
+        loop {
+            if let Some(status) = child.try_wait().unwrap() {
+                assert!(status.success(), "FIFO {mode} child failed");
+                break;
+            }
+            if Instant::now() >= deadline {
+                child.kill().unwrap();
+                child.wait().unwrap();
+                panic!("FIFO {mode} activation/shutdown did not settle");
+            }
+            std::thread::sleep(Duration::from_millis(10));
+        }
+    }
+}
+
+#[cfg(target_os = "linux")]
+#[test]
+fn fifo_document_probe_child() {
+    let Ok(mode) = std::env::var("RSI_SETTINGS_FIFO_PROBE") else {
+        return;
+    };
+    let directory = tempfile::tempdir().unwrap();
+    let path = directory.path().join("settings.json");
+    assert!(
+        std::process::Command::new("mkfifo")
+            .arg(&path)
+            .status()
+            .unwrap()
+            .success()
+    );
+    let _writer = (mode == "writer").then(|| {
+        fs::OpenOptions::new()
+            .read(true)
+            .write(true)
+            .open(&path)
+            .unwrap()
+    });
+    tokio::runtime::Runtime::new().unwrap().block_on(async {
+        let runtime = Runtime::default();
+        let result = runtime
+            .root()
+            .apply(
+                linked("fifo", Arc::new(LocalSettingsFactory)),
+                json!({"path":path}),
+            )
+            .await;
+        let fiber = result.unwrap();
+        assert!(matches!(
+            fiber.snapshot().state,
+            rsi_meta::FiberState::Failed(_)
+        ));
+        assert!(
+            runtime
+                .root()
+                .lookup_local::<rsi_settings_protocol::SettingsProviderContract>()
+                .is_none()
+        );
+        assert!(runtime.shutdown().await.is_clean());
+    });
+}
+
 #[tokio::test]
 async fn local_write_preserves_unloaded_namespaces_and_detects_external_change() {
     let temporary = tempfile::tempdir().unwrap();

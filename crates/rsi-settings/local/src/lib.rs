@@ -192,7 +192,15 @@ fn read_document(config: &LocalSettingsConfig) -> Result<SettingsDocument> {
 }
 
 fn read_file_bounded(path: &Path, maximum_bytes: usize) -> std::io::Result<Vec<u8>> {
-    #[cfg(not(windows))]
+    #[cfg(unix)]
+    let file = {
+        use std::os::unix::fs::OpenOptionsExt;
+        OpenOptions::new()
+            .read(true)
+            .custom_flags(libc::O_NONBLOCK)
+            .open(path)?
+    };
+    #[cfg(not(any(unix, windows)))]
     let file = File::open(path)?;
     #[cfg(windows)]
     let file = {
@@ -208,7 +216,14 @@ fn read_file_bounded(path: &Path, maximum_bytes: usize) -> std::io::Result<Vec<u
             ),
         )?
     };
-    if file.metadata()?.len() > maximum_bytes as u64 {
+    let metadata = file.metadata()?;
+    if !metadata.is_file() {
+        return Err(std::io::Error::new(
+            std::io::ErrorKind::InvalidData,
+            "Settings document must be a regular file",
+        ));
+    }
+    if metadata.len() > maximum_bytes as u64 {
         return Err(std::io::Error::new(
             std::io::ErrorKind::InvalidData,
             format!("document exceeds {maximum_bytes} bytes"),

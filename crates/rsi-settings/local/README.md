@@ -11,6 +11,9 @@ temporary file and atomic rename. Supporting platforms also sync the parent
 directory. The persistent lock must be a real regular file and preplaced
 symlinks are rejected before permissions are changed. Unloaded namespaces are
 preserved.
+Unix document acquisition is nonblocking and admits only an opened regular file
+before reading. FIFOs and other special files are rejected without waiting for
+a writer or stream EOF; existing directory and alias policy is unchanged.
 Newly created path components and files are private on Unix; the provider never
 changes permissions on a caller-supplied directory that already exists.
 Windows reads use retained no-reparse parent and regular-file handles. Writes
