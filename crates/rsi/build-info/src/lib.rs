@@ -1,11 +1,6 @@
-//! Verified producer identity shared by native applications and their Worker.
+//! Verified publication management and native generation leases.
 #![deny(unsafe_code)]
 #![warn(missing_docs)]
-
-/// Paired source-manifest digest, absent for an ordinary standalone Cargo build.
-pub const fn family() -> Option<&'static str> {
-    option_env!("RSI_COMPILED_BUILD_FAMILY")
-}
 
 #[cfg(all(test, not(target_arch = "wasm32")))]
 mod tests {

@@ -1,5 +1,4 @@
 mod build_family;
-use sha2::{Digest, Sha256};
 use std::io::Read;
 
 fn main() {
@@ -33,9 +32,5 @@ fn main() {
     println!(
         "cargo:rustc-env=RSI_COMPILED_MANAGED={}",
         value["managed"].as_bool().expect("validated managed flag")
-    );
-    println!(
-        "cargo:rustc-env=RSI_COMPILED_BUILD_FAMILY={:x}",
-        Sha256::digest(&bytes)
     );
 }
