@@ -64,12 +64,6 @@ impl Drop for Stage {
 }
 
 pub(super) fn build_lock(cache: &Path) -> Result<fs::File> {
-    development_build_lock(cache, None)
-}
-pub(super) fn development_build_lock(
-    cache: &Path,
-    cancellation: Option<&std::sync::atomic::AtomicBool>,
-) -> Result<fs::File> {
     fs::create_dir_all(cache)?;
     let lock = fs::OpenOptions::new()
         .create(true)
@@ -81,25 +75,7 @@ pub(super) fn development_build_lock(
         Ok(()) => (),
         Err(std::fs::TryLockError::WouldBlock) => {
             let stage = Stage::new("Waiting for the paired build owner");
-            if let Some(cancellation) = cancellation {
-                loop {
-                    if cancellation.load(std::sync::atomic::Ordering::SeqCst) {
-                        return Err(
-                            "development interrupted while waiting for the paired build owner"
-                                .into(),
-                        );
-                    }
-                    match lock.try_lock() {
-                        Ok(()) => break,
-                        Err(std::fs::TryLockError::WouldBlock) => {
-                            thread::sleep(Duration::from_millis(50));
-                        }
-                        Err(std::fs::TryLockError::Error(error)) => return Err(error.into()),
-                    }
-                }
-            } else {
-                lock.lock()?;
-            }
+            lock.lock()?;
             stage.complete();
         }
         Err(std::fs::TryLockError::Error(error)) => return Err(error.into()),
@@ -113,7 +89,6 @@ pub(super) struct Runner {
     log: Arc<Mutex<fs::File>>,
     log_path: PathBuf,
     verbose: bool,
-    cancellation: Option<std::sync::Arc<std::sync::atomic::AtomicBool>>,
 }
 impl Runner {
     pub(super) fn new(
@@ -128,15 +103,7 @@ impl Runner {
             log: Arc::new(Mutex::new(fs::File::create(&log_path)?)),
             log_path,
             verbose,
-            cancellation: None,
         })
-    }
-    pub(super) fn with_cancellation(
-        mut self,
-        cancellation: Option<std::sync::Arc<std::sync::atomic::AtomicBool>>,
-    ) -> Self {
-        self.cancellation = cancellation;
-        self
     }
     fn command(&self, program: &str, args: &[&str]) -> Command {
         let mut command = Command::new(program);
@@ -153,11 +120,11 @@ impl Runner {
             .stdin(Stdio::null())
             .stdout(Stdio::piped())
             .stderr(Stdio::piped());
-        let mut child =
-            crate::supervision::BuildChild::spawn(command, self.cancellation.clone())
-                .map_err(|e| format!("{program}: {e}; run the source entrypoint's doctor"))?;
-        let output = bounded_capture(child.stdout().ok_or("version stdout missing")?);
-        let errors = bounded_capture(child.stderr().ok_or("version stderr missing")?);
+        let mut child = command
+            .spawn()
+            .map_err(|e| format!("{program}: {e}; run the source entrypoint's doctor"))?;
+        let output = bounded_capture(child.stdout.take().ok_or("version stdout missing")?);
+        let errors = bounded_capture(child.stderr.take().ok_or("version stderr missing")?);
         let status = child.wait()?;
         let (output, overflow) = output
             .join()
@@ -192,14 +159,14 @@ impl Runner {
             .stdin(Stdio::null())
             .stdout(Stdio::piped())
             .stderr(Stdio::piped());
-        let mut child = crate::supervision::BuildChild::spawn(command, self.cancellation.clone())?;
+        let mut child = command.spawn()?;
         let output = mirror(
-            child.stdout().ok_or("child stdout missing")?,
+            child.stdout.take().ok_or("child stdout missing")?,
             self.log.clone(),
             self.verbose,
         );
         let errors = mirror(
-            child.stderr().ok_or("child stderr missing")?,
+            child.stderr.take().ok_or("child stderr missing")?,
             self.log.clone(),
             self.verbose,
         );
@@ -331,33 +298,37 @@ mod tests {
     use super::*;
 
     #[test]
-    fn development_lock_wait_can_stop_without_changing_the_current_owner() {
-        use std::sync::atomic::{AtomicBool, Ordering};
+    fn build_lock_waits_for_the_current_owner_and_retains_the_next_owner() {
         let directory = tempfile::tempdir().unwrap();
         let owner = build_lock(directory.path()).unwrap();
-        let cancelled = AtomicBool::new(false);
+        let (waiting, started) = mpsc::channel();
+        let (acquired, next_owner) = mpsc::channel();
         thread::scope(|scope| {
             scope.spawn(|| {
-                thread::sleep(Duration::from_millis(100));
-                cancelled.store(true, Ordering::SeqCst);
+                waiting.send(()).unwrap();
+                acquired
+                    .send(build_lock(directory.path()).unwrap())
+                    .unwrap();
             });
-            let started = Instant::now();
-            let error = development_build_lock(directory.path(), Some(&cancelled)).unwrap_err();
-            assert!(error.to_string().contains("interrupted"));
-            assert!(started.elapsed() < Duration::from_secs(2));
+            started.recv_timeout(Duration::from_secs(5)).unwrap();
+            assert!(matches!(
+                next_owner.recv_timeout(Duration::from_millis(100)),
+                Err(mpsc::RecvTimeoutError::Timeout)
+            ));
+            owner.unlock().unwrap();
+            let next = next_owner.recv_timeout(Duration::from_secs(5)).unwrap();
+            let contender = fs::File::options()
+                .read(true)
+                .write(true)
+                .open(directory.path().join("build.lock"))
+                .unwrap();
+            assert!(matches!(
+                contender.try_lock(),
+                Err(std::fs::TryLockError::WouldBlock)
+            ));
+            drop(next);
+            contender.try_lock().unwrap();
         });
-        let contender = fs::File::options()
-            .read(true)
-            .write(true)
-            .open(directory.path().join("build.lock"))
-            .unwrap();
-        assert!(matches!(
-            contender.try_lock(),
-            Err(std::fs::TryLockError::WouldBlock)
-        ));
-        owner.unlock().unwrap();
-        drop(owner);
-        contender.try_lock().unwrap();
     }
     #[test]
     fn first_error_keeps_following_context_across_read_boundaries() {

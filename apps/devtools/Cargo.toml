@@ -29,6 +29,3 @@ tokio = { workspace = true, features = ["test-util", "io-std"] }
 
 [lints]
 workspace = true
-
-[target.'cfg(windows)'.dependencies]
-rsi-process-native = { path = "../../crates/rsi-process/native" }

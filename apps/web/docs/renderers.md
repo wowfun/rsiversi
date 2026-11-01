@@ -69,6 +69,8 @@ After the first bundle build, `node apps/web/renderers.mjs /absolute/bundle`
 rebuilds only the standard renderer graph. Append `--watch` to observe its explicit
 source file. The directory must belong to a running WebAssets configuration with
 `watch = true` for publication. This renderer build never recompiles the Worker.
+The launching process owns watcher termination; standard fixture development
+retains it through the devtools child supervisor. Closing stdin does not stop it.
 Changes to app.js, mounts.js, worker.js, styles.css, index.html or Worker Rust code
 require a complete new bundle and application restart.
 

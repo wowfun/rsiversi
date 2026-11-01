@@ -102,6 +102,10 @@ both native exports and the launcher are verified before publication.
 `fixture-dist` binds the document bundle identity to its captured build-family
 digest. This lets evidence fixtures verify the exact native/assets publication;
 it does not make that digest a production wire-compatibility requirement.
+Its synchronous command runner waits for the build lock, drains both child
+output pipes and retains failure diagnostics before reporting the exit status.
+Watched-build cancellation and process-tree settlement belong to the ordinary
+Host build plugin described above.
 Web selects those contract owners from the Worker package's explicit Host-interface
 declaration and verifies that each is a WASM normal dependency. It does not infer
 remote requirements from every codec in the transitive dependency graph.

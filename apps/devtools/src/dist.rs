@@ -56,19 +56,15 @@ fn execute(arguments: &[String]) -> Result<()> {
         let lock = build_lock(&cache)?;
         return addon::run(&root, &cache, &options, lock);
     }
-    produce(&root, &options, None)?;
+    produce(&root, &options)?;
     Ok(())
 }
 
-fn produce(
-    root: &Path,
-    options: &Options,
-    cancellation: Option<std::sync::Arc<std::sync::atomic::AtomicBool>>,
-) -> Result<()> {
+fn produce(root: &Path, options: &Options) -> Result<()> {
     let cache = root.join("target/rsi-app");
     let started = std::time::Instant::now();
     describe(options);
-    let _lock = progress::development_build_lock(&cache, cancellation.as_deref())?;
+    let _lock = build_lock(&cache)?;
     if let Some(output) = &options.output {
         validate_external_output(&cache, output)?;
     }
@@ -110,7 +106,7 @@ fn produce(
         output.join("build.log").display()
     );
     let _family = finish_build(
-        || build(root, &cache, &output, options, managed, cancellation),
+        || build(root, &cache, &output, options, managed),
         &publication,
         &output,
         managed,
@@ -351,7 +347,6 @@ fn build(
     output: &Path,
     options: &Options,
     managed: bool,
-    cancellation: Option<std::sync::Arc<std::sync::atomic::AtomicBool>>,
 ) -> Result<String> {
     let work = cache.join("build").join(options.kind.name());
     let captured = work.join("source");
@@ -377,8 +372,7 @@ fn build(
         environment(cache)?,
         output.join("build.log"),
         options.verbose,
-    )?
-    .with_cancellation(cancellation);
+    )?;
     let tools_stage = Stage::new("Validate selected toolchains");
     let rustc = runner.version("rustc", &["-vV"])?;
     let cargo = runner.version("cargo", &["-V"])?;
