@@ -16,6 +16,12 @@ before reading. FIFOs and other special files are rejected without waiting for
 a writer or stream EOF; existing directory and alias policy is unchanged.
 Newly created path components and files are private on Unix; the provider never
 changes permissions on a caller-supplied directory that already exists.
+Unix writes synchronize the complete parent-directory chain before acquiring the
+writer lock, including pre-existing ancestors from an interrupted creation.
+A synchronization failure prevents document publication and success.
+This requires readable, synchronizable ancestors: an execute-only intermediate
+directory can permit ordinary file access yet still make a write fail. Each
+write pays synchronization cost proportional to directory depth, including retries.
 Windows reads use retained no-reparse parent and regular-file handles. Writes
 require a TokenUser-owned protected private parent, retain its namespace pin and
 exclusive no-follow writer lock, and publish a synced atomically private staging

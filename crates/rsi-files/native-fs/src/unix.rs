@@ -163,6 +163,29 @@ pub fn create_absolute_directory_and_sync_no_follow(path: &Path) -> std::io::Res
     acquire_absolute_directory(path, true, true)
 }
 
+/// Sync a caller-selected directory and its entire ancestor chain, including existing entries.
+/// This path-based durability operation follows directory aliases and grants no root authority.
+/// A failed sync stops the operation; the caller must not acknowledge durable publication.
+pub fn sync_directory_ancestors(path: &Path) -> std::io::Result<()> {
+    sync_ancestors(path, |ancestor| {
+        Directory::from_opened_file(File::open(ancestor)?)?.sync_all()
+    })
+}
+
+fn sync_ancestors(
+    path: &Path,
+    mut sync: impl FnMut(&Path) -> std::io::Result<()>,
+) -> std::io::Result<()> {
+    for ancestor in path.ancestors() {
+        sync(if ancestor.as_os_str().is_empty() {
+            Path::new(".")
+        } else {
+            ancestor
+        })?;
+    }
+    Ok(())
+}
+
 fn acquire_absolute_directory(path: &Path, create: bool, sync: bool) -> std::io::Result<Directory> {
     use rustix::fs::{Mode, OFlags, mkdirat, openat};
     use std::path::Component;
@@ -360,5 +383,68 @@ impl Directory {
     /// Flush this retained directory without reopening its path.
     pub fn sync_all(&self) -> std::io::Result<()> {
         self.0.sync_all()
+    }
+}
+
+#[cfg(test)]
+mod durability_tests {
+    use super::*;
+
+    #[test]
+    fn ancestor_sync_checks_directory_type_and_preserves_selected_aliases() {
+        let temporary = tempfile::tempdir().unwrap();
+        let root = temporary.path().canonicalize().unwrap();
+        let directory = root.join("directory");
+        std::fs::create_dir(&directory).unwrap();
+        let alias = root.join("alias");
+        std::os::unix::fs::symlink(&directory, &alias).unwrap();
+        sync_directory_ancestors(&alias).unwrap();
+        let file = root.join("file");
+        std::fs::write(&file, b"unchanged").unwrap();
+        assert_eq!(
+            sync_directory_ancestors(&file).unwrap_err().kind(),
+            std::io::ErrorKind::InvalidInput
+        );
+        assert_eq!(
+            sync_directory_ancestors(&root.join("missing"))
+                .unwrap_err()
+                .kind(),
+            std::io::ErrorKind::NotFound
+        );
+        assert_eq!(std::fs::read(&file).unwrap(), b"unchanged");
+    }
+
+    #[test]
+    fn every_parent_entry_is_synced_and_failure_prevents_success() {
+        let mut observed = Vec::new();
+        sync_ancestors(Path::new("/existing/new/inner"), |path| {
+            observed.push(path.to_owned());
+            Ok(())
+        })
+        .unwrap();
+        assert_eq!(
+            observed,
+            ["/existing/new/inner", "/existing/new", "/existing", "/"]
+                .map(std::path::PathBuf::from)
+        );
+        let error = sync_ancestors(Path::new("/existing/new/inner"), |path| {
+            if path == Path::new("/existing") {
+                Err(std::io::Error::other("ancestor sync failed"))
+            } else {
+                Ok(())
+            }
+        })
+        .unwrap_err();
+        assert_eq!(error.to_string(), "ancestor sync failed");
+        observed.clear();
+        sync_ancestors(Path::new("new/inner"), |path| {
+            observed.push(path.to_owned());
+            Ok(())
+        })
+        .unwrap();
+        assert_eq!(
+            observed,
+            ["new/inner", "new", "."].map(std::path::PathBuf::from)
+        );
     }
 }

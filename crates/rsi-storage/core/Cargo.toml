@@ -14,7 +14,7 @@ serde_json.workspace = true
 thiserror.workspace = true
 tokio = { workspace = true, features = ["rt", "sync"] }
 
-[target.'cfg(windows)'.dependencies]
+[target.'cfg(any(unix, windows))'.dependencies]
 rsi-files-native-fs = { path = "../../rsi-files/native-fs" }
 
 [dev-dependencies]

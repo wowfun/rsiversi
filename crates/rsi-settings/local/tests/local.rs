@@ -88,6 +88,63 @@ fn fifo_document_probe_child() {
 }
 
 #[tokio::test]
+async fn nested_settings_writes_preserve_existing_permissions_and_reopen() {
+    use rsi_settings_protocol::SettingsProviderContract;
+    use std::os::unix::fs::PermissionsExt as _;
+    let temporary = tempfile::tempdir().unwrap();
+    let root = temporary.path().canonicalize().unwrap();
+    fs::set_permissions(&root, fs::Permissions::from_mode(0o755)).unwrap();
+    let parent = root.join("settings-parent").join("settings-leaf");
+    let path = parent.join("settings.json");
+    let runtime = Runtime::default();
+    let provider = runtime
+        .root()
+        .apply(
+            linked("settings", Arc::new(LocalSettingsFactory)),
+            json!({"path":path}),
+        )
+        .await
+        .unwrap();
+    let settings = runtime
+        .root()
+        .lookup_local::<SettingsProviderContract>()
+        .unwrap();
+    settings
+        .compare_and_set("fixture", None, Some(&json!(1)))
+        .await
+        .unwrap();
+    settings
+        .compare_and_set("fixture", Some(&json!(1)), Some(&json!(2)))
+        .await
+        .unwrap();
+    assert_eq!(
+        settings.load().await.unwrap().get("fixture"),
+        Some(&json!(2))
+    );
+    for created in [root.join("settings-parent"), parent] {
+        assert_eq!(
+            fs::metadata(created).unwrap().permissions().mode() & 0o777,
+            0o700
+        );
+    }
+    assert_eq!(
+        fs::metadata(&path).unwrap().permissions().mode() & 0o777,
+        0o600
+    );
+    assert_eq!(
+        fs::metadata(&root).unwrap().permissions().mode() & 0o777,
+        0o755
+    );
+    drop(settings);
+    assert!(provider.dispose().await.is_clean());
+    assert!(runtime.shutdown().await.is_clean());
+    assert_eq!(
+        serde_json::from_slice::<Value>(&fs::read(path).unwrap()).unwrap(),
+        json!({"fixture":2})
+    );
+}
+
+#[tokio::test]
 async fn local_write_preserves_unloaded_namespaces_and_detects_external_change() {
     let temporary = tempfile::tempdir().unwrap();
     #[cfg(unix)]

@@ -60,6 +60,12 @@ and does not reopen absolute paths for synchronization. A sync failure propagate
 and may leave a created prefix; unchanged directories and later child publication
 remain the caller's responsibility.
 
+The Unix `sync_directory_ancestors` helper synchronizes a caller-selected directory
+and every ancestor, including pre-existing ones left by an interrupted creation.
+It propagates the first failure. This path-based publication helper follows the
+caller's existing directory aliases; it does not acquire no-follow directory
+authority or replace the retained-handle synchronization above.
+
 An explicit `resolve_absolute_root_alias` path operation canonicalizes only the
 first component below `/` and preserves the untouched suffix. Callers choose
 whether an absent first component may remain unresolved for later creation.

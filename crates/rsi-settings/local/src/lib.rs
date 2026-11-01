@@ -421,6 +421,8 @@ fn create_private_directories(path: &Path) -> Result<()> {
     builder.recursive(true).mode(0o700);
     builder
         .create(path)
+        .map_err(|error| SettingsError::Io(error.to_string()))?;
+    rsi_files_native_fs::sync_directory_ancestors(path)
         .map_err(|error| SettingsError::Io(error.to_string()))
 }
 

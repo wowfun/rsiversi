@@ -1,7 +1,9 @@
 # rsi-storage
 
 Native directory publication creates missing private components on Unix and
-Windows. Unix synchronizes the ancestor chain. Windows retains each newly created
+Windows. Unix synchronizes the ancestor chain through the shared
+[native filesystem helper](../../rsi-files/native-fs/README.md), including
+pre-existing ancestors from an interrupted creation. Windows retains each newly created
 directory and changed parent through no-follow NTFS handles and flushes only those
 namespace changes; existing higher ancestors
 remain unchanged and need no write permission. Sync failures prevent success.

@@ -21,7 +21,7 @@ libc.workspace = true
 rsi-settings = { path = "../core" }
 tempfile.workspace = true
 
-[target.'cfg(windows)'.dependencies]
+[target.'cfg(any(unix, windows))'.dependencies]
 rsi-files-native-fs = { path = "../../rsi-files/native-fs" }
 
 [lints]
