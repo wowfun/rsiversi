@@ -492,6 +492,44 @@ fn workflows_fail_closed_on_pipelines_and_do_not_persist_checkout_credentials() 
 
 #[cfg(unix)]
 #[test]
+fn web_acceptance_stops_when_bundle_discovery_fails() {
+    let source = fs::read_to_string(repository().join(".github/workflows/ci.yml")).unwrap();
+    let workflow: serde_json::Value = yaml_serde::from_str(&source).unwrap();
+    let steps = workflow["jobs"]["rsi-meta-browser"]["steps"]
+        .as_array()
+        .unwrap();
+    for id in [
+        "web_product",
+        "web_workflow",
+        "web_integrations",
+        "web_terminals",
+    ] {
+        let root = tempfile::tempdir().unwrap();
+        let probe = root.path().join("probe");
+        let step = steps.iter().find(|step| step["id"] == id).unwrap();
+        let script = format!(
+            "source() {{ return 0; }}\ncargo() {{ if [[ $* == *'fixture-path web'* ]]; then return 29; fi; printf 'cargo' > \"$RSI_TEST_PROBE\"; exit 0; }}\nnode() {{ printf 'node' > \"$RSI_TEST_PROBE\"; exit 0; }}\nnpm() {{ printf 'npm' > \"$RSI_TEST_PROBE\"; exit 0; }}\n{}",
+            step["run"].as_str().unwrap()
+        );
+        let output = Command::new("bash")
+            .args(["--noprofile", "--norc", "-eo", "pipefail", "-c", &script])
+            .env("GITHUB_WORKSPACE", repository())
+            .env("RUNNER_TEMP", root.path())
+            .env("RSI_WEB_REPORT", root.path())
+            .env("RSI_TEST_PROBE", &probe)
+            .current_dir(repository().join("fixtures/rsi/web-product"))
+            .output()
+            .unwrap();
+        assert_eq!(output.status.code(), Some(29), "{id}: {}", stderr(&output));
+        assert!(
+            !probe.exists(),
+            "{id} ran acceptance after failed discovery"
+        );
+    }
+}
+
+#[cfg(unix)]
+#[test]
 fn desktop_modes_attempt_every_surface_and_preserve_any_failure() {
     let source = fs::read_to_string(repository().join(".github/workflows/ci.yml")).unwrap();
     let workflow: serde_json::Value = yaml_serde::from_str(&source).unwrap();

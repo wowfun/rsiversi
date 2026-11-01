@@ -3,6 +3,8 @@
 CI uses explicit Bash fail-fast and pipeline failure propagation on Unix;
 Windows jobs retain PowerShell. A failed pipeline producer fails its step even
 when a downstream filter succeeds. Checkouts do not persist Git credentials.
+Commands that resolve fixture paths or executable inputs assign their result
+before exporting it; a declaration builtin must not hide a failed lookup.
 Windows workspace Clippy checks every target with `--keep-going`; a second
 workspace `cargo check` is redundant. Executed native behavior remains separate.
 Documentation uses a shallow checkout and fetches only a missing exact baseline

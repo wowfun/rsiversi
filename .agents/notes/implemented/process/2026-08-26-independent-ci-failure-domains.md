@@ -50,6 +50,8 @@ through `cargo check` provides no additional target coverage. Explicit Bash
 defaults propagate pipeline producer failures without per-step shell setup;
 Windows jobs override that default with PowerShell. Checkouts discard their
 credential helper before running repository code.
+Fixture-path and executable lookups assign before export, because an export
+builtin otherwise replaces the lookup's failure status with its own success.
 Documentation reuses its own Cargo cache. The audit executable has a separate
 cache keyed by its pinned version and runner, so product-lock changes do not
 force a tool rebuild. Independent Desktop modes collect failures across the
