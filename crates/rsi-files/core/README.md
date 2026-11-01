@@ -5,6 +5,10 @@
 namespace and owns its handles; process-wide job/token permits survive waiter
 cancellation and generation retirement. Cleanup closes admission, cancels jobs,
 withdraws retained tokens and waits for actual blocking work to finish.
+Token admission reclaims expired retained tokens across all provider generations.
+The process-wide reclamation registry weakly references only owners with retained
+tokens and is pruned on admission and publication. A read that already retained
+an expired resource keeps its permit until its actual work releases that resource.
 
 On Unix and Windows, every root and relative component uses the shared
 [native filesystem library](../native-fs/README.md). Content reads check the

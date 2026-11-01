@@ -9,7 +9,7 @@ use std::sync::Arc;
 use std::{
     collections::BTreeMap,
     sync::{
-        LazyLock, Mutex,
+        LazyLock, Mutex, MutexGuard, Weak,
         atomic::{AtomicU64, Ordering},
     },
     time::Instant,
@@ -28,6 +28,7 @@ static JOBS: LazyLock<Arc<Semaphore>> =
     LazyLock::new(|| Arc::new(Semaphore::new(MAXIMUM_FILE_JOBS)));
 static TOKENS: LazyLock<Arc<Semaphore>> =
     LazyLock::new(|| Arc::new(Semaphore::new(MAXIMUM_FILE_TOKENS)));
+static TOKEN_OWNERS: Mutex<BTreeMap<u64, Weak<Owner>>> = Mutex::new(BTreeMap::new());
 static GENERATIONS: AtomicU64 = AtomicU64::new(0);
 
 #[derive(Debug)]
@@ -187,6 +188,25 @@ fn prune(state: &mut State) {
     let now = Instant::now();
     state.tokens.retain(|_, resource| resource.expires > now);
 }
+// Global token ownership is locked before any provider state. Only owners with
+// retained tokens are registered, so this scan is bounded by the token budget.
+fn reclaim_tokens() -> MutexGuard<'static, BTreeMap<u64, Weak<Owner>>> {
+    let mut owners = TOKEN_OWNERS
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner);
+    owners.retain(|_, owner| {
+        let Some(owner) = owner.upgrade() else {
+            return false;
+        };
+        let mut state = owner
+            .state
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        prune(&mut state);
+        !state.tokens.is_empty()
+    });
+    owners
+}
 fn check(cancellation: &CancellationToken) -> Result<()> {
     if cancellation.is_cancelled() {
         Err(FilesError::Cancelled)
@@ -220,9 +240,12 @@ impl Files for LocalFiles {
     ) -> Result<OpenedFile> {
         let resource = self
             .run(cancellation.clone(), move |stopped| {
-                let permit = Arc::clone(&TOKENS)
-                    .try_acquire_owned()
-                    .map_err(|_| FilesError::Capacity)?;
+                let permit = {
+                    let _owners = reclaim_tokens();
+                    Arc::clone(&TOKENS)
+                        .try_acquire_owned()
+                        .map_err(|_| FilesError::Capacity)?
+                };
                 let data = platform::open(&binding, path, kind, &stopped)?;
                 check(&stopped)?;
                 Ok(Resource {
@@ -234,6 +257,7 @@ impl Files for LocalFiles {
             })
             .await?;
         check(&cancellation)?;
+        let mut owners = reclaim_tokens();
         let mut state = self
             .owner
             .state
@@ -247,6 +271,7 @@ impl Files for LocalFiles {
         let token = FileToken::try_from(format!("{:016x}{next:016x}", self.generation))?;
         let opened = resource.data.describe(token.clone());
         state.tokens.insert(token.clone(), Arc::new(resource));
+        owners.insert(self.generation, Arc::downgrade(&self.owner));
         Ok(opened)
     }
 
@@ -307,6 +332,65 @@ impl Files for LocalFiles {
 mod tests {
     use super::*;
     static SERIAL: tokio::sync::Mutex<()> = tokio::sync::Mutex::const_new(());
+
+    #[cfg(any(unix, windows))]
+    #[tokio::test]
+    async fn idle_provider_expiry_reclaims_global_capacity_but_keeps_in_flight_permits() {
+        async fn open(service: &LocalFiles, binding: &FilesBinding) -> Result<OpenedFile> {
+            service
+                .open(
+                    binding.clone(),
+                    RelativePath::new(b"file").unwrap(),
+                    FileKind::File,
+                    CancellationToken::new(),
+                )
+                .await
+        }
+        let _serial = SERIAL.lock().await;
+        let temporary = tempfile::tempdir().unwrap();
+        #[cfg(unix)]
+        let root = temporary.path().canonicalize().unwrap();
+        #[cfg(windows)]
+        let root = temporary.path().to_owned();
+        std::fs::write(root.join("file"), "body").unwrap();
+        let binding = FilesBinding::new(FilesCaller::default(), "session", "header", root).unwrap();
+        let idle = LocalFiles::new().unwrap();
+        let active = LocalFiles::new().unwrap();
+        for _ in 0..MAXIMUM_FILE_TOKENS {
+            open(&idle, &binding).await.unwrap();
+        }
+        assert!(matches!(
+            open(&active, &binding).await,
+            Err(FilesError::Capacity)
+        ));
+        let held = {
+            let mut state = idle.owner.state.lock().unwrap();
+            for resource in state.tokens.values_mut() {
+                Arc::get_mut(resource).unwrap().expires = Instant::now()
+                    .checked_sub(std::time::Duration::from_secs(1))
+                    .unwrap();
+            }
+            state.tokens.values().next().unwrap().clone()
+        };
+        let opened = open(&active, &binding)
+            .await
+            .expect("another provider reclaims expired idle tokens");
+        assert!(idle.owner.state.lock().unwrap().tokens.is_empty());
+        assert_eq!(TOKENS.available_permits(), MAXIMUM_FILE_TOKENS - 2);
+        assert_eq!(
+            held.data
+                .read(0, 4, &CancellationToken::new())
+                .unwrap()
+                .bytes_hex,
+            "626f6479"
+        );
+        drop(held);
+        assert_eq!(TOKENS.available_permits(), MAXIMUM_FILE_TOKENS - 1);
+        active.release(&binding, &opened.token).unwrap();
+        assert_eq!(TOKENS.available_permits(), MAXIMUM_FILE_TOKENS);
+        idle.close().await;
+        active.close().await;
+    }
 
     #[tokio::test]
     async fn dropped_waiters_and_retirement_keep_actual_jobs_charged_across_generations() {
