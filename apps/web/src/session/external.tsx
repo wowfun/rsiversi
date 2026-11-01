@@ -80,10 +80,18 @@ class ObservedHistory extends PureComponent<{
     _state: unknown,
     bottom: boolean,
   ) {
+    const before = previous.data.external.blocks,
+      after = this.props.data.external.blocks;
+    const changed = previous.data.generation !== this.props.data.generation ||
+      before.length !== after.length || after.some((block, index) => {
+        const old = before[index];
+        return block.key !== old.key || block.role !== old.role ||
+          block.text !== old.text || block.truncated !== old.truncated;
+      });
     if (
       bottom &&
       this.props.data.external.following &&
-      previous.data.external.blocks !== this.props.data.external.blocks
+      changed
     )
       this.root.current!.scrollTop = this.root.current!.scrollHeight;
   }

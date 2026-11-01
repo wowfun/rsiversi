@@ -37,6 +37,14 @@ uses the unified Settings window and verifies disclosure Escape/outside dismissa
 focus return, Verbose inline source actions, modal Escape, transcript keyboard regions and responsive geometry. These are
 document/runtime checks; `plan-live.mjs` separately exercises an explicitly selected
 real provider through the paired Worker and native service.
+`controller-keyboard.mjs` mounts the actual Session event owner and external draft
+controller in Chromium and Firefox. It checks native textarea End/selection,
+handled inline events, region navigation, and explicit retry after known
+non-admission while retaining the unknown-outcome fence. Its transport is scripted.
+`composer-history.mjs` mounts the production model menu and external transcript in
+both browsers. It checks initial arrow navigation, model-search caret and selection,
+and scroll stability across decoded status-only frames while preserving content
+tail following and historical reading. Its transport is scripted.
 The opt-in alignment live fixture uses one isolated text file and a configured
 DeepSeek model to check rendered table/code output, an actual read-only file Tool,
 Stop and a subsequent successful turn. It records durable Facts and provider usage,

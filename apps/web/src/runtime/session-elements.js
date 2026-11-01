@@ -31,7 +31,9 @@ export function mount(pane, context, elements) {
     { passive: true },
   );
   listen(pane.transcript, "keydown", (event) => {
-    if (event.key === "End") {
+    if (event.key === "End" && event.target === pane.transcript &&
+        !event.defaultPrevented && !event.isComposing && !event.shiftKey) {
+      event.preventDefault();
       pane.setReadingSummary(false);
       pane.transcript.scrollTop = pane.transcript.scrollHeight;
     }

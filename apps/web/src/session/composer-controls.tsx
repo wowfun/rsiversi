@@ -32,7 +32,7 @@ export function ComposerModel({owner,data,models}:{owner:ComposerOwner;data?:Com
       setPage('root');setQuery('');setBusy(true);
       await run(async()=>{if(await owner.prepareComposer())await owner.action('model_refresh');});setBusy(false);
     }}>
-    {(close)=> <div ref={content} onKeyDown={event=>{if(event.key==='ArrowLeft'&&page!=='root'){event.preventDefault();setPage('root');}}}>
+    {(close)=> <div ref={content} onKeyDown={event=>{if(event.defaultPrevented||event.nativeEvent.isComposing||event.target instanceof HTMLElement&&event.target.closest('input,textarea,[contenteditable="true"]'))return;if(event.key==='ArrowLeft'&&page!=='root'){event.preventDefault();setPage('root');}}}>
       {page!=='root'&&<button type="button" role="menuitem" onClick={()=>setPage('root')}><Back/>{page==='models'?'Model':'Reasoning effort'}</button>}
       {page==='root'&&<>
         <button type="button" role="menuitem" onClick={()=>setPage('models')} disabled={disabled}>Model <span className={css.trailing}>{current?.model??'Choose model'}</span><Next/></button>

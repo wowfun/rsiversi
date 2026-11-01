@@ -17,7 +17,7 @@ test('byte pressure retains zero-weight records and unbinding refreshes idle rec
 
 test('draft capacity evicts idle uncertainty with text, pins bindings and pending bytes',()=>{
   const store=externalDrafts(), changed=()=>{};
-  const first=store.bind('first',changed);store.edit(first,'unknown');store.finish(store.begin(first),false);store.unbind(first,changed);
+  const first=store.bind('first',changed);store.edit(first,'unknown');store.finish(store.begin(first),'unknown');store.unbind(first,changed);
   for(let i=0;i<16;i++){const record=store.bind(String(i),changed);assert(record);}
   assert.equal(store.current(first),false);assert.equal(store.bind('overflow',changed),null);
   store.clear();const reopened=store.bind('first',changed);assert.equal(reopened.text,'');assert.equal(reopened.unknownRevision,null);
@@ -27,7 +27,7 @@ test('draft capacity evicts idle uncertainty with text, pins bindings and pendin
   assert.equal(reopened.text.length,512*1024);
   store.unbind(reopened,changed);
   const next=store.bind('next',changed);assert.equal(store.edit(next,'x'),false);
-  store.finish(pending,false);assert.equal(store.edit(next,'x'),true);
+  store.finish(pending,'unknown');assert.equal(store.edit(next,'x'),true);
   assert.equal(reopened.unknownRevision,null,'old revision failure does not fence an edited draft');
 });
 
@@ -49,9 +49,9 @@ test('draft admission measures only changed text, including pending revisions',t
   const pending=store.begin(record);
   assert.equal(store.edit(record,'新'),true);
   assert.equal(store.edit(record,'新'),true);
-  store.finish(pending,true);
+  store.finish(pending,'succeeded');
   assert.equal(record.text,'新','old completion preserves the newer revision');
-  store.finish(store.begin(record),true);
+  store.finish(store.begin(record),'succeeded');
   assert.equal(record.text,'');
   assert.equal(store.edit(record,'é'.repeat(32*1024)),true,'success releases cached byte weight');
   assert.equal(store.edit(records[1],records[1].text+'x'),false,'UTF-8 bytes still enforce the exact cap');
@@ -67,7 +67,7 @@ test('clear fences old records before callbacks and preserves a new connection a
     assert.equal(store.current(previous),false);
     assert.equal(previous.text,'');
     assert.equal(store.begin(previous),null);
-    store.finish(oldAttempt,true);
+    store.finish(oldAttempt,'succeeded');
     fresh=store.bind('same-conversation',()=>{});
     assert.notEqual(fresh,previous);
     assert.equal(store.edit(fresh,'new connection'),true);
@@ -81,11 +81,11 @@ test('clear fences old records before callbacks and preserves a new connection a
   store.clear();
   assert.equal(notifications,1);
   assert.equal(previous.bindings.size,0);
-  store.finish(oldAttempt,false);
+  store.finish(oldAttempt,'unknown');
   assert.equal(fresh.text,'new connection');
   assert.equal(fresh.unknownRevision,null);
   assert.equal(fresh.pending,freshAttempt);
-  store.finish(freshAttempt,true);
+  store.finish(freshAttempt,'succeeded');
   assert.equal(fresh.text,'');
   assert.equal(fresh.pending,null);
 });

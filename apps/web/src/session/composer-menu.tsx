@@ -45,6 +45,7 @@ export function ComposerMenu({name, label, children, onOpen, className = '', dis
     </button>
     {createPortal(<div ref={panel} id={id} role="menu" aria-label={name} tabIndex={-1} hidden={!open} className={css.panel}
       onKeyDown={event => {
+        if(event.defaultPrevented||event.nativeEvent.isComposing)return;
         if(event.key==='Escape') {event.preventDefault();event.stopPropagation();close();return;}
         if(!['ArrowDown','ArrowUp','Home','End'].includes(event.key))return;
         if(event.target instanceof HTMLInputElement && ['Home','End'].includes(event.key))return;
@@ -52,7 +53,7 @@ export function ComposerMenu({name, label, children, onOpen, className = '', dis
         if(!items.length)return;
         event.preventDefault();
         const index=items.indexOf(document.activeElement as HTMLButtonElement);
-        const next=event.key==='Home'?0:event.key==='End'?items.length-1:event.key==='ArrowDown'?(index+1)%items.length:(index+items.length-1)%items.length;
+        const next=event.key==='Home'?0:event.key==='End'?items.length-1:event.key==='ArrowDown'?(index+1)%items.length:index<0?items.length-1:(index+items.length-1)%items.length;
         items[next].focus();
       }}>{children(close,open)}</div>,document.body)}
   </>;

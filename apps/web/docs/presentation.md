@@ -182,6 +182,11 @@ omitted-history notice is present. Refreshes must not detach action controls
 between pointer down and click. Unchanged transcript frames preserve the scroll
 position even near the bottom; automatic tail scrolling follows changed content
 or a newly bound conversation, so unrelated frames cannot move a pressed action.
+External transcript changes are compared by block content and conversation binding,
+not decoded array identity. Busy and status updates alone preserve the viewport.
+Model-search editing keeps native caret and selection keys. Left Arrow returns
+from a submenu only on its menu items; initial Up and Down select the last and
+first available menu items respectively.
 
 Closed human reviews display the exact request and explicit action choices.
 Terminal clients accept a choice number followed by optional feedback; Web and
@@ -238,6 +243,8 @@ available viewport. Empty and docked states retain the same composer node in
 the same parent; CSS positions it. Process folding, history and streaming retain
 a visible block anchor when reading away from the end. A bottom action resumes
 following. Tool/source inspection remains available in all detail modes.
+End resumes following only when the transcript region itself owns the key event.
+Handled events, composition, and Shift selection remain with the focused editor.
 
 Turn presentation writes block visibility and classification classes only when
 their values change. Tail-following frames do not read individual message geometry. Reading anchors

@@ -49,13 +49,13 @@ export function externalDrafts() {
       record.pending = attempt; record.used = ++clock; notify(record);
       return attempt;
     },
-    finish(attempt, succeeded) {
+    finish(attempt, outcome) {
       const record = attempt.record;
       if (attempt.epoch !== epoch || !current(record) || record.pending !== attempt) return;
       record.pending = null;
       if (record.revision === attempt.revision) {
-        if (succeeded) { record.text = ''; record.bytes = 0; record.revision++; record.unknownRevision = null; }
-        else record.unknownRevision = attempt.revision;
+        if (outcome === 'succeeded') { record.text = ''; record.bytes = 0; record.revision++; record.unknownRevision = null; }
+        else if (outcome === 'unknown') record.unknownRevision = attempt.revision;
       }
       record.used = ++clock; notify(record);
     },

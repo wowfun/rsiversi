@@ -17,6 +17,9 @@ attempt belongs to one conversation, revision and store lifetime. Completion
 clears text on success or fences it on an unknown outcome only if that revision
 is still current. An older completion cannot clear or fence a newer edit.
 There is no automatic prompt retry. Retiring the store invalidates old replies.
+Web transport refusals marked `notAdmitted` leave that revision sendable: they
+clear its pending attempt without clearing text or marking an unknown outcome.
+Only a later explicit user submission retries it.
 
 Web notices change the alert region only when its message or visibility changes.
 An edit-capacity notice persists across blocked sends and no-op saves, and clears

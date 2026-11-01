@@ -11,6 +11,16 @@ function externalPaneClass(ports){const Controller=controllerClass(ports);return
 const frame=(id,generation=id)=>({generation,external:{observed:{connected:true,snapshot:{id,generation:'1',endpoint:'fixture',cwd:'/workspace',status:'ready'},permissions:[]},capabilities:{submit:true},blocks:[],following:true,busy:false}});
 const edit=(pane,text)=>{pane.input.value=text;pane.input.listeners.input();};
 
+test('known non-admission retains the draft and permits only an explicit retry',async t=>{
+  let calls=0;
+  const Pane=setup(t,async()=>{if(++calls===1)throw Object.assign(Error('capacity'),{notAdmitted:true});}),pane=new Pane(0);
+  pane.render(frame('A'));edit(pane,'retry this');
+  await assert.rejects(pane.submit(),/capacity/);
+  assert.equal(pane.input.value,'retry this');assert.equal(pane.uncertain,false);
+  assert.equal(pane.composerView.sendDisabled,false);assert.equal(calls,1);
+  await pane.submit();assert.equal(calls,2);assert.equal(pane.input.value,'');
+});
+
 function setup(t,command) {
   const original=globalThis.document;
   globalThis.document={getElementById:()=>new Element()};

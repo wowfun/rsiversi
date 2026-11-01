@@ -136,9 +136,9 @@ export function externalPaneClass({ command, perform }) {
       if (!attempt) return;
       try {
         await this.control({ kind: "submit", text: attempt.text });
-        drafts.finish(attempt, true);
+        drafts.finish(attempt, 'succeeded');
       } catch (error) {
-        drafts.finish(attempt, false);
+        drafts.finish(attempt, error?.notAdmitted === true ? 'not_admitted' : 'unknown');
         throw error;
       }
     }
