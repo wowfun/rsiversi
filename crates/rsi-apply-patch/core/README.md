@@ -43,6 +43,12 @@ through the helper process's Linux umask; updates and moves preserve the
 preflighted source mode. Each update lazily derives its rstrip, trim, and Unicode
 source views at most once, so additional hunks do not repeatedly normalize the
 whole target file. A mutating helper invocation is never replayed automatically.
+Source line text borrows the preflight buffer; rendering writes unchanged spans
+and replacement lines directly into the result. The first single-line exact
+search scans only as far as its match; subsequent searches share an occurrence
+index and seek from the current source position. Multi-line searches
+retain KMP. All exact matches still take precedence over every fuzzy match;
+this optimization does not select a nearer fuzzy edit over a later exact edit.
 Descriptor-relative revalidation narrows, but cannot remove, the final
 same-host race between validation and `renameat`/`unlinkat`; exact partial
 effects remain the recovery authority if a concurrent actor mutates the same

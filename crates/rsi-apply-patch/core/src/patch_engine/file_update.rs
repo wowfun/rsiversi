@@ -1,4 +1,4 @@
-use std::sync::OnceLock;
+use std::{cell::Cell, collections::HashMap, sync::OnceLock};
 
 use super::parser::UpdateChunk;
 use super::{EngineFailure, MAXIMUM_PATCH_FUZZY_MATCHES, MatchKind, PatchFuzzyMatch, SafePath};
@@ -21,21 +21,21 @@ impl LineEnding {
 }
 
 #[derive(Clone, Debug)]
-struct SourceLine {
-    text: String,
+struct SourceLine<'a> {
+    text: &'a str,
     ending: Option<LineEnding>,
 }
 
 #[derive(Debug)]
-struct SourceFile {
-    lines: Vec<SourceLine>,
+struct SourceFile<'a> {
+    lines: Vec<SourceLine<'a>>,
     preferred: LineEnding,
 }
 
-type Replacement = (usize, usize, Vec<String>);
+type Replacement<'a> = (usize, usize, &'a [String]);
 
-impl SourceFile {
-    fn parse(contents: &str) -> Self {
+impl<'a> SourceFile<'a> {
+    fn parse(contents: &'a str) -> Self {
         let mut lines = Vec::new();
         let mut preferred = None;
         let mut start = 0;
@@ -54,7 +54,7 @@ impl SourceFile {
             };
             preferred.get_or_insert(ending);
             lines.push(SourceLine {
-                text: contents[start..cursor].to_owned(),
+                text: &contents[start..cursor],
                 ending: Some(ending),
             });
             cursor += width;
@@ -62,7 +62,7 @@ impl SourceFile {
         }
         if start < contents.len() {
             lines.push(SourceLine {
-                text: contents[start..].to_owned(),
+                text: &contents[start..],
                 ending: None,
             });
         }
@@ -72,37 +72,25 @@ impl SourceFile {
         }
     }
 
-    fn texts(&self) -> Vec<String> {
-        self.lines.iter().map(|line| line.text.clone()).collect()
-    }
-
-    fn apply(mut self, replacements: &[Replacement]) -> String {
-        let mut source = self.lines.drain(..);
-        let mut output = Vec::new();
+    fn apply(&self, replacements: &[Replacement<'_>]) -> String {
+        let mut content = String::new();
         let mut source_index = 0;
+        let append_source = |lines: &[SourceLine<'_>], content: &mut String| {
+            for line in lines {
+                content.push_str(line.text);
+                content.push_str(line.ending.unwrap_or(self.preferred).text());
+            }
+        };
         for (start, old_len, new_lines) in replacements {
             debug_assert!(*start >= source_index);
-            output.extend(source.by_ref().take(*start - source_index));
-            source.by_ref().take(*old_len).for_each(drop);
-            output.extend(new_lines.iter().map(|text| SourceLine {
-                text: text.clone(),
-                ending: Some(self.preferred),
-            }));
+            append_source(&self.lines[source_index..*start], &mut content);
+            for text in *new_lines {
+                content.push_str(text);
+                content.push_str(self.preferred.text());
+            }
             source_index = *start + *old_len;
         }
-        output.extend(source);
-        if !output.is_empty() {
-            for line in &mut output {
-                line.ending.get_or_insert(self.preferred);
-            }
-        }
-        let mut content = String::new();
-        for line in output {
-            content.push_str(&line.text);
-            if let Some(ending) = line.ending {
-                content.push_str(ending.text());
-            }
-        }
+        append_source(&self.lines[source_index..], &mut content);
         content
     }
 }
@@ -115,8 +103,7 @@ pub(super) fn derive_update(
     fuzzy_matches: &mut Vec<PatchFuzzyMatch>,
 ) -> Result<String, EngineFailure> {
     let source = SourceFile::parse(contents);
-    let lines = source.texts();
-    let views = LineViews::new(&lines);
+    let views = LineViews::new(source.lines.iter().map(|line| line.text));
     let mut replacements = Vec::new();
     let mut line_index = 0;
     let mut previous_end = 0;
@@ -139,7 +126,7 @@ pub(super) fn derive_update(
                 if chunk.context.is_some() {
                     line_index
                 } else {
-                    lines.len()
+                    source.lines.len()
                 },
                 MatchKind::Exact,
             )
@@ -167,7 +154,7 @@ pub(super) fn derive_update(
                 replacements.push((
                     start + old_start,
                     old_context - old_start,
-                    chunk.new_lines[new_start..new_context].to_vec(),
+                    &chunk.new_lines[new_start..new_context],
                 ));
             }
             old_start = old_context + 1;
@@ -177,7 +164,7 @@ pub(super) fn derive_update(
             replacements.push((
                 start + old_start,
                 chunk.old_lines.len() - old_start,
-                chunk.new_lines[new_start..].to_vec(),
+                &chunk.new_lines[new_start..],
             ));
         }
         previous_end = start + chunk.old_lines.len();
@@ -224,15 +211,19 @@ fn audit_match(
 
 struct LineViews<'a> {
     exact: Vec<&'a str>,
+    single_exact: OnceLock<HashMap<&'a str, Vec<usize>>>,
+    searched_single: Cell<bool>,
     rstrip: OnceLock<Vec<&'a str>>,
     trim: OnceLock<Vec<&'a str>>,
     unicode: OnceLock<Vec<String>>,
 }
 
 impl<'a> LineViews<'a> {
-    fn new(lines: &'a [String]) -> Self {
+    fn new(lines: impl IntoIterator<Item = &'a str>) -> Self {
         Self {
-            exact: lines.iter().map(String::as_str).collect(),
+            exact: lines.into_iter().collect(),
+            single_exact: OnceLock::new(),
+            searched_single: Cell::new(false),
             rstrip: OnceLock::new(),
             trim: OnceLock::new(),
             unicode: OnceLock::new(),
@@ -254,7 +245,24 @@ fn seek_sequence(
         return None;
     }
     let exact_pattern = pattern.iter().map(String::as_str).collect::<Vec<_>>();
-    if let Some(index) = seek_sequence_layer(&lines.exact, &exact_pattern, start, eof) {
+    let exact = if pattern.len() == 1 && !eof && lines.searched_single.replace(true) {
+        let index = lines.single_exact.get_or_init(|| {
+            let mut index = HashMap::<&str, Vec<usize>>::new();
+            for (position, text) in lines.exact.iter().enumerate() {
+                index.entry(text).or_default().push(position);
+            }
+            index
+        });
+        index
+            .get(exact_pattern[0])
+            .and_then(|positions| {
+                positions.get(positions.partition_point(|position| *position < start))
+            })
+            .copied()
+    } else {
+        seek_sequence_layer(&lines.exact, &exact_pattern, start, eof)
+    };
+    if let Some(index) = exact {
         return Some((index, MatchKind::Exact));
     }
     let rstrip_lines = lines
@@ -349,6 +357,57 @@ mod tests {
     use super::*;
 
     #[test]
+    fn first_single_line_match_does_not_allocate_a_whole_file_index() {
+        let lines = (0..150_000)
+            .map(|n| format!("line {n}"))
+            .collect::<Vec<_>>();
+        let views = LineViews::new(lines.iter().map(String::as_str));
+        assert_eq!(
+            seek_sequence(&views, &["line 5".into()], 0, false),
+            Some((5, MatchKind::Exact))
+        );
+        assert!(views.single_exact.get().is_none());
+        assert_eq!(
+            seek_sequence(&views, &["line 149999".into()], 6, false),
+            Some((149_999, MatchKind::Exact))
+        );
+        let index = views.single_exact.get().unwrap();
+        assert_eq!(index["line 5"], [5]);
+        assert_eq!(seek_sequence(&views, &["line 5".into()], 6, false), None);
+        assert!(std::ptr::eq(index, views.single_exact.get().unwrap()));
+    }
+
+    #[test]
+    fn source_lines_borrow_input_and_render_mixed_endings_directly() {
+        let input = "a\r\nb\nc\rd";
+        let source = SourceFile::parse(input);
+        let lower = input.as_ptr() as usize;
+        for line in &source.lines {
+            let pointer = line.text.as_ptr() as usize;
+            assert!(pointer >= lower && pointer + line.text.len() <= lower + input.len());
+        }
+        let inserted = vec!["replacement".to_owned()];
+        assert_eq!(
+            source.apply(&[(1, 1, &inserted)]),
+            "a\r\nreplacement\r\nc\rd\r\n"
+        );
+    }
+
+    #[test]
+    fn later_exact_match_precedes_nearby_fuzzy_match() {
+        let lines = [
+            "needle  ".to_owned(),
+            "other".to_owned(),
+            "needle".to_owned(),
+        ];
+        let views = LineViews::new(lines.iter().map(String::as_str));
+        assert_eq!(
+            seek_sequence(&views, &["needle".to_owned()], 0, false),
+            Some((2, MatchKind::Exact))
+        );
+    }
+
+    #[test]
     fn fuzzy_audit_budget_rejects_before_cloning_the_next_path() {
         let path = SafePath::parse("bounded.txt").unwrap();
         let mut matches = vec![
@@ -374,7 +433,7 @@ mod tests {
         lines.push("needle".to_owned());
         let mut pattern = vec!["repeat".to_owned(); 5_000];
         pattern.push("needle".to_owned());
-        let views = LineViews::new(&lines);
+        let views = LineViews::new(lines.iter().map(String::as_str));
 
         assert_eq!(
             seek_sequence(&views, &pattern, 0, false),
@@ -384,8 +443,8 @@ mod tests {
 
     #[test]
     fn sequence_matcher_lazily_reuses_whole_file_normalizations() {
-        let lines = vec!["exact".to_owned(), "rstrip  ".to_owned()];
-        let views = LineViews::new(&lines);
+        let lines = ["exact".to_owned(), "rstrip  ".to_owned()];
+        let views = LineViews::new(lines.iter().map(String::as_str));
 
         assert_eq!(
             seek_sequence(&views, &["exact".to_owned()], 0, false),
