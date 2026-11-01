@@ -484,7 +484,10 @@ jobs:
         uses: actions/upload-artifact@bbbca2ddaa5d8feaa63e36b76fdaad77386f024f
         with:
           name: rsi-addon-paired-evidence
-          path: ${{ runner.temp }}/rsi-addon-paired-evidence
+          path: |
+            ${{ runner.temp }}/rsi-addon-paired-evidence
+            !${{ runner.temp }}/rsi-addon-paired-evidence/paired-workbench-addon
+            !${{ runner.temp }}/rsi-addon-paired-evidence/browser/workbench-addon
           if-no-files-found: warn
 
       - name: Preserve Web terminal evidence

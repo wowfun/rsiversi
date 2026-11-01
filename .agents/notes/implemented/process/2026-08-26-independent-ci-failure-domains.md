@@ -165,6 +165,9 @@ Acceptance uploads retain diagnostics and build identities while excluding the
 native executable copies used to freeze scenarios. The owning fixtures record
 those hashes before execution, including failure paths; desktop uploads also
 retain its distribution receipt, frozen input manifest, and build log.
+The paired addon archive likewise excludes its produced example and frozen
+browser copy: uploading both duplicates execution inputs without improving the
+retained hash, receipt, build-log or browser evidence.
 Early retention covers readiness command logs before the paired build and Web
 product failure captures and Workflow reports before independent integration probes.
 Waiting for those probes delayed diagnosis despite completed failing steps.

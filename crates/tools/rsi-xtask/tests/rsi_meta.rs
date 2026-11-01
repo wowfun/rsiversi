@@ -1591,6 +1591,31 @@ fn paired_web_consumers_have_independent_failure_domains() {
 }
 
 #[test]
+fn paired_addon_archive_retains_evidence_without_frozen_executables() {
+    let source = fs::read_to_string(repository().join(".github/workflows/ci.yml")).unwrap();
+    let workflow: yaml_serde::Value = yaml_serde::from_str(&source).unwrap();
+    let steps = workflow["jobs"]["rsi-meta-browser"]["steps"]
+        .as_sequence()
+        .unwrap();
+    let archive = steps
+        .iter()
+        .find(|step| step["with"]["name"] == "rsi-addon-paired-evidence")
+        .unwrap();
+    let paths = archive["with"]["path"].as_str().unwrap();
+    assert!(
+        paths
+            .lines()
+            .any(|path| path == "${{ runner.temp }}/rsi-addon-paired-evidence")
+    );
+    for binary in ["paired-workbench-addon", "browser/workbench-addon"] {
+        assert!(
+            paths.lines().any(|path| path
+                == format!("!${{{{ runner.temp }}}}/rsi-addon-paired-evidence/{binary}"))
+        );
+    }
+}
+
+#[test]
 fn paired_web_failures_publish_evidence_before_integration_probes() {
     let source = fs::read_to_string(repository().join(".github/workflows/ci.yml")).unwrap();
     let workflow: yaml_serde::Value = yaml_serde::from_str(&source).unwrap();
