@@ -71,6 +71,9 @@ Checker predicates include an entry identity guard, final URL, visible text and
 role/name visibility. Missing entry identity and protected pages are unavailable
 targets. Only complete assertion results settle a verdict. Navigation is bounded
 to 20 seconds, checker to two minutes; dialogs are dismissed and recorded.
+Structured observations filter visible actionable candidates before the 256-node output
+window. Disappearing nodes are rechecked; byte limits, operation deadlines and
+action-freshness checks remain independent of this visibility filter.
 Exploration exposes only fixed navigate and text observation wrappers. Raw MCP
 catalogs are never exposed. Screenshots are viewport-only user evidence, not
 Agent Media: at most four 512 KiB canonical PNGs. No screenshot base64 enters

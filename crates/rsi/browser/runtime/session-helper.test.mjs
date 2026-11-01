@@ -2,6 +2,35 @@ import assert from 'node:assert/strict';
 import test from 'node:test';
 import {sessionHelper} from './session-helper.mjs';
 
+test('hidden prefixes do not consume the visible node window and stale handles are retired',async()=>{
+  let disposed=0,acquired=0;
+  const rows=Array.from({length:256},()=>({visible:false}));
+  const button={visible:true};rows.push(button);
+  const state={role:'button',name:'Visible control',type:'button',href:'',signature:'stable',disabled:false,read_only:false};
+  const locator=(items)=>({
+    filter({visible}){assert.equal(visible,true);return locator(items.filter(row=>row.visible));},
+    count:async()=>items.length,
+    nth:index=>({elementHandle:async()=>{
+      acquired++;const row=items[index];if(row.gone)return null;
+      return {isVisible:async()=>row.visible,evaluate:async()=>state,dispose:async()=>{disposed++;}};
+    }}),
+  });
+  const page={setViewportSize:async()=>{},on:()=>{},url:()=> 'https://public.example/',evaluate:async()=>'',locator:()=>locator(rows)};
+  const context={pages:()=>[page],on:()=>{},route:async()=>{}};
+  const helper=await sessionHelper({contexts:()=>[context]},{mode:'public_web'});
+  const first=await helper({operation:'observe'});
+  assert.equal(first.snapshot.nodes.length,1);assert.equal(first.snapshot.truncated,false);assert.equal(acquired,1);
+  button.visible=false;
+  const refused=await helper({operation:'click',document_version:first.snapshot.document_version,observation_id:first.snapshot.observation_id,node:'1'});
+  assert.equal(refused.reason,'node_changed_or_not_actionable');
+  rows.push({visible:true,gone:true},...Array.from({length:257},()=>({visible:true})));
+  acquired=0;
+  const next=await helper({operation:'observe'});
+  assert.equal(next.snapshot.nodes.length,255);assert.equal(next.snapshot.truncated,true);assert.equal(acquired,256);assert.equal(disposed,1);
+  const stale=await helper({operation:'click',document_version:first.snapshot.document_version,observation_id:first.snapshot.observation_id,node:'1'});
+  assert.equal(stale.reason,'stale_observation');
+});
+
 test('page text, node semantics and truncated hrefs serialize as Unicode scalars',async t=>{
   const state={role:'button\ud800',name:'Name\udfff',type:'submit',href:'x'.repeat(511)+'🦀',disabled:false,read_only:false};
   const previousDocument=globalThis.document,previousFilter=globalThis.NodeFilter;
@@ -11,7 +40,7 @@ test('page text, node semantics and truncated hrefs serialize as Unicode scalars
   const wire=value=>{const pending=[value];while(pending.length){const item=pending.pop();if(typeof item==='string')assert(item.isWellFormed(),'lone surrogate reached the CDP boundary');else if(item&&typeof item==='object')pending.push(...Object.values(item));}return JSON.parse(JSON.stringify(value));};
   const element={tagName:'BUTTON',type:'submit',getAttribute:name=>({role:state.role,'aria-label':state.name,href:state.href}[name]??null)};
   const handle={isVisible:async()=>true,evaluate:async callback=>wire(callback(element)),dispose:async()=>{}};
-  const page={setViewportSize:async()=>{},on:()=>{},url:()=> 'https://public.example/',evaluate:async callback=>wire(callback()),locator:()=>({count:async()=>1,nth:()=>({elementHandle:async()=>handle})})};
+  const page={setViewportSize:async()=>{},on:()=>{},url:()=> 'https://public.example/',evaluate:async callback=>wire(callback()),locator:()=>({filter(){return this;},count:async()=>1,nth:()=>({elementHandle:async()=>handle})})};
   const context={pages:()=>[page],on:()=>{},route:async()=>{}};
   const helper=await sessionHelper({contexts:()=>[context]},{mode:'public_web'});
   const result=await helper({operation:'observe'});
@@ -29,7 +58,7 @@ test('page text, node semantics and truncated hrefs serialize as Unicode scalars
 test('only the initial blank document allows navigation and screenshots recheck the settled URL',async()=>{
   let url='about:blank',navigation;
   const page={setViewportSize:async()=>{},on:(name,listener)=>{if(name==='framenavigated')navigation=listener;},mainFrame:()=>page,url:()=>url,
-    goto:async target=>{url=target;navigation(page);},evaluate:async()=>'',locator:()=>({count:async()=>0}),
+    goto:async target=>{url=target;navigation(page);},evaluate:async()=>'',locator:()=>({filter(){return this;},count:async()=>0}),
     screenshot:async()=>{url='about:blank';navigation(page);return Buffer.from('image');}};
   const context={pages:()=>[page],on:()=>{},route:async()=>{}};
   const helper=await sessionHelper({contexts:()=>[context]},{mode:'public_web'});
@@ -45,7 +74,7 @@ test('observation truncates by encoded UTF-8 structure bytes and retains at most
   for(const name of ['界'.repeat(256),'"\\\n'.repeat(80)]){
     const state={role:'button',name,type:'submit',href:'x'.repeat(8192),disabled:false,read_only:false};
     const handle={isVisible:async()=>true,evaluate:async()=>state,dispose:async()=>{}};
-    const page={setViewportSize:async()=>{},on:()=>{},url:()=> 'https://public.example/',evaluate:async()=> '原文'.repeat(4000),locator:()=>({count:async()=>300,nth:()=>({elementHandle:async()=>handle})})};
+    const page={setViewportSize:async()=>{},on:()=>{},url:()=> 'https://public.example/',evaluate:async()=> '原文'.repeat(4000),locator:()=>({filter(){return this;},count:async()=>300,nth:()=>({elementHandle:async()=>handle})})};
     const context={pages:()=>[page],on:()=>{},route:async()=>{}};
     const helper=await sessionHelper({contexts:()=>[context]},{mode:'public_web'});
     const result=await helper({operation:'observe'});
@@ -61,7 +90,7 @@ test('the complete observation envelope stays within 64 KiB with a long legal UR
   const state={role:'button',name:'界'.repeat(256),type:'submit',href:'',disabled:false,read_only:false};
   let disposed=0;
   const handle={isVisible:async()=>true,evaluate:async()=>state,dispose:async()=>{disposed++;}};
-  const page={setViewportSize:async()=>{},on:()=>{},url:()=>url,evaluate:async()=> '原文'.repeat(1000),locator:()=>({count:async()=>300,nth:()=>({elementHandle:async()=>handle})})};
+  const page={setViewportSize:async()=>{},on:()=>{},url:()=>url,evaluate:async()=> '原文'.repeat(1000),locator:()=>({filter(){return this;},count:async()=>300,nth:()=>({elementHandle:async()=>handle})})};
   const context={pages:()=>[page],on:()=>{},route:async()=>{}};
   const helper=await sessionHelper({contexts:()=>[context]},{mode:'public_web'});
   const result=await helper({operation:'observe'});

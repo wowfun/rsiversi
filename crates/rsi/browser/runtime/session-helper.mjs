@@ -31,7 +31,7 @@ export async function sessionHelper(browser,policy,violation=()=>{}) {
   const snapshot=async()=>{
     invalidate();observation=identity();
     const text=await page.evaluate(()=>{let out='';const walker=document.createTreeWalker(document.body??document.documentElement,NodeFilter.SHOW_TEXT);let current,count=0;while((current=walker.nextNode())&&out.length<8192&&count++<8192){if(!['SCRIPT','STYLE','NOSCRIPT'].includes(current.parentElement?.tagName))out+=current.textContent.slice(0,8192-out.length)+'\n';}return out.toWellFormed();});
-    const candidates=page.locator('a,button,input:not([type=file]),textarea,select,[role=button],[role=link],[role=textbox]');
+    const candidates=page.locator('a,button,input:not([type=file]),textarea,select,[role=button],[role=link],[role=textbox]').filter({visible:true});
     const total=await candidates.count(),count=Math.min(total,256);const structure=[];let truncated=total>count;
     const initial=Buffer.byteLength(JSON.stringify({text,nodes:[]}));
     let retained=initial;const charges=[];
