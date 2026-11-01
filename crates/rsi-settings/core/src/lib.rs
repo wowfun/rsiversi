@@ -46,7 +46,6 @@ struct NamespaceState {
     registration: u64,
     scope_id: SettingsScopeId,
     revision: u64,
-    raw: Option<Value>,
     resolved: Value,
     defaults: Value,
     base: Value,
@@ -352,7 +351,6 @@ impl Service {
                 registration,
                 scope_id,
                 revision: 0,
-                raw,
                 resolved,
                 defaults: spec.defaults,
                 base: spec.base,
@@ -470,7 +468,7 @@ impl Scope {
                 .checked_add(1)
                 .ok_or_else(|| SettingsError::InvalidInput("settings revision exhausted".into()))?;
             (
-                entry.raw.clone(),
+                inner.raw.get(&self.namespace).cloned(),
                 entry.defaults.clone(),
                 entry.base.clone(),
                 Arc::clone(&entry.validator),
@@ -580,7 +578,6 @@ fn publish_settings_commit(
                     entry.revision = expected_revision
                         .checked_add(1)
                         .expect("write admission checked revision capacity");
-                    entry.raw.clone_from(&committed);
                     entry.resolved = resolve(&entry.defaults, &entry.base, committed.as_ref());
                     Ok(SettingsSnapshot {
                         scope_id: entry.scope_id.clone(),

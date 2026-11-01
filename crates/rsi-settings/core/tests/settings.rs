@@ -314,6 +314,56 @@ async fn cancelling_a_caller_after_durable_commit_cannot_split_live_and_raw_stat
 }
 
 #[tokio::test]
+async fn a_commit_during_retirement_updates_the_next_registrations_cas_source() {
+    let runtime = Runtime::default();
+    let pausing = Arc::new(PausingProvider::default());
+    runtime
+        .root()
+        .apply(
+            linked(
+                "provider",
+                Arc::new(PausingProviderFactory(pausing.clone())),
+            ),
+            Value::Null,
+        )
+        .await
+        .unwrap();
+    runtime
+        .root()
+        .apply(linked("settings", Arc::new(SettingsFactory)), Value::Null)
+        .await
+        .unwrap();
+    let settings = runtime.root().lookup_local::<SettingsContract>().unwrap();
+    let registration = settings.register(spec()).unwrap();
+    let scope = registration.scope.clone();
+    let write = tokio::spawn(async move { scope.replace(0, json!({"model":"committed"})).await });
+    pausing.committed.notified().await;
+    drop(registration);
+    assert!(matches!(
+        settings.register(spec()),
+        Err(SettingsError::DuplicateNamespace(_))
+    ));
+    pausing.release.notify_one();
+    write.await.unwrap().unwrap();
+    let next = settings.register(spec()).unwrap();
+    assert_eq!(
+        next.scope.get().unwrap().value,
+        json!({"model":"committed"})
+    );
+    pausing.release.notify_one();
+    next.scope
+        .replace(0, json!({"model":"next"}))
+        .await
+        .unwrap();
+    assert_eq!(
+        pausing.document.lock().unwrap().get("agent"),
+        Some(&json!({"model":"next"}))
+    );
+    drop(next);
+    assert!(runtime.shutdown().await.is_clean());
+}
+
+#[tokio::test]
 async fn panicking_provider_does_not_strand_retiring_namespace_ownership() {
     let runtime = Runtime::default();
     let provider = runtime

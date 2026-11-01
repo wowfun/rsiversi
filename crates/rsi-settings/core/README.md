@@ -12,7 +12,8 @@ Revision exhaustion is rejected before durable write admission.
 Failed provider writes or validation leave the published value and revision
 unchanged. Once a durable write begins, a service-owned operation completes its
 live-state publication even if the requesting future is dropped. The complete
-raw document is updated with the same commit, so later registration cannot
+raw document is the sole retained raw-section authority and is updated with the
+same commit. CAS captures it after checking registration identity; later registration cannot
 reload stale activation-time state. Dropping a registration lease makes all
 escaped scopes stale and defers namespace handoff until any in-flight commit
 has converged. A provider panic fails that commit but still releases its
