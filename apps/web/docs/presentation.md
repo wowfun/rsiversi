@@ -397,8 +397,15 @@ detaches; only explicit termination ends its shell. Restoring terminal coordinat
 never creates a shell or silently takes its writer grant. The terminal roster
 refreshes when its tab becomes active, so retained hidden UI cannot conceal
 shells created since the prior observation.
+Individual terminal tabs attach one explicit terminal or consume its creation
+lease. Navigation and terminal listing belong to the launcher; tabs neither
+maintain a hidden roster nor issue list requests on mount, exit or termination.
 Only a visible, nonzero terminal viewport with finite measured cell counts can
 request a resize. Hiding a retained host never resizes its remote shell.
+Automatic resize diagnostics belong to the current running controller; a late
+refusal after exit or loss of control does not replace the retained terminal
+view with an error. Explicit action and output-read errors remain visible.
+Unused space below a retained terminal grid uses the current surface theme.
 
 Application extension restoration sends the ownerless application command;
 Session extension restoration carries its current pane and generation. Narrow

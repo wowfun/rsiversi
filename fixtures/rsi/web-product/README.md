@@ -88,10 +88,18 @@ checks the MCP editor entry. Missing Windows MCP management is not a fixture
 timeout or a claim of supported management.
 The live plan probe reads up to 512 Facts and 16 MiB from its own SQLite database
 in one read-only transaction for durable evidence; this avoids the Unix-only
-interactive Line input adapter. Native terminal execution remains Linux-only.
-The Dock fixture reports that execution as skipped on other platforms. On Windows
-it exercises the native terminal refusal through the paired Worker and checks
-that no cleanup responsibility or retry banner is created.
+interactive Line input adapter. The Dock fixture exercises native terminal
+execution on Linux and Windows through the paired Worker: a workspace file and
+visible output prove shell input, and float/dock, detach, read-only reattach,
+takeover and exit prove the follower lifecycle. On Windows it uses the product's
+PowerShell shell and checks the `Current user permissions` label. Other platforms
+report terminal execution as skipped.
+The Dock fixture delays one real resize until after shell exit and verifies that
+the refused stale request leaves no terminal alert. It checks nested resource
+alerts and the unused terminal viewport background at every viewport/theme pair.
+It also asserts that creating or restoring an individual terminal tab does not
+request a hidden roster; terminal listing and refresh stay with the launcher.
+These counts begin after the launcher's own activation refresh is observed.
 
 `verify.mjs` runs `worker-conformance.mjs` before the acknowledgement deadline
 probe against the published Worker and Rust/Wasm module. The fixture supplies
