@@ -135,9 +135,11 @@ Its execution budget includes cold oracle fault checks and three task deadlines.
 Desktop diagnostic unit tests run after the native scenarios, so a diagnostic
 assertion cannot suppress otherwise available WebKit evidence.
 
-The standard-product job disables incremental builds and retains line tables
-instead of full debug information for development and test artifacts. Its
-independent native development builds inherit those build-only settings. This
+Verification CI disables incremental builds and retains line tables
+instead of full debug information for development and test artifacts. Full-debug
+Base artifacts exhausted a runner's disk after cache restoration; one workflow
+profile prevents that class of storage failure across native jobs without
+duplicating per-job settings. Independent development builds inherit the same settings. This
 bounds hosted-runner disk use while preserving source locations in backtraces;
 full debugger variable inspection remains a local build choice. Capacity readings
 before evaluation distinguish resource exhaustion from oracle behavior.

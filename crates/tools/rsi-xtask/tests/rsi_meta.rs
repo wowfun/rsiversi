@@ -528,6 +528,22 @@ fn web_acceptance_stops_when_bundle_discovery_fails() {
     }
 }
 
+#[test]
+fn ci_build_profiles_bound_debug_storage_for_every_job() {
+    let source = fs::read_to_string(repository().join(".github/workflows/ci.yml")).unwrap();
+    let workflow: serde_json::Value = yaml_serde::from_str(&source).unwrap();
+    for (key, value) in [
+        ("CARGO_INCREMENTAL", "0"),
+        ("CARGO_PROFILE_DEV_DEBUG", "line-tables-only"),
+        ("CARGO_PROFILE_TEST_DEBUG", "line-tables-only"),
+    ] {
+        assert_eq!(workflow["env"][key], value, "{key}");
+        for (name, job) in workflow["jobs"].as_object().unwrap() {
+            assert!(job["env"][key].is_null(), "{name} overrides shared {key}");
+        }
+    }
+}
+
 #[cfg(unix)]
 #[test]
 fn desktop_modes_attempt_every_surface_and_preserve_any_failure() {
