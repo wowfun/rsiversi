@@ -92,6 +92,10 @@ deadlines do not change. Checkout, toolchain and cache actions have their own SS
 the job budget covers these along with the verification steps.
 Base independently compiles and exercises UDS test-support contracts on Linux;
 its ignored timing report remains opt-in.
+Home clipboard input fairness uses a controlled pending future rather than racing
+the native helper deadline against full-frame rendering. The native PTY fixture
+still exercises timeout and cleanup; asynchronous input and actual helper lifetime
+have separate causal witnesses.
 Conformance remains the only command that enumerates the foundation test
 surface and runs on Linux, macOS, and Windows. Product lint and tests run in
 their product jobs; the Base job owns `rsi-host` and every Base service family,

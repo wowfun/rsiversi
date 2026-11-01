@@ -320,5 +320,11 @@ changes require the documentation gate. Run broader suites when the changed
 surface or the task calls for them, and report only the platforms and live
 integrations actually exercised.
 
+Home clipboard responsiveness uses a gated copy future in the actual input loop:
+Help must render before that future is released, and exit must cancel it. The PTY
+fixture separately checks native helper timeout, Help and exit, and helper cleanup.
+A native helper may reach its bounded deadline before a complete Help frame is
+painted, so its later process liveness does not establish input responsiveness.
+
 The [interaction design](tui-design.md) defines the user-facing contract exercised
 by geometry, source-copy, controller and live-provider verification.

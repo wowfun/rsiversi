@@ -560,7 +560,7 @@ async fn masked_key_and_manual_limits_complete_setup_with_injected_store() {
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
-async fn home_clipboard_helper_does_not_block_help_input() {
+async fn home_clipboard_helper_timeout_keeps_help_and_exit_usable() {
     use std::os::unix::fs::PermissionsExt as _;
     let (endpoint, provider) = provider().await;
     let fixture = CliFixture::new(&endpoint);
@@ -613,11 +613,6 @@ async fn home_clipboard_helper_does_not_block_help_input() {
     terminal.send(b"/help\r");
     terminal.until("RSIversi · Help").await;
     let pid = std::fs::read_to_string(&entered).unwrap();
-    let active = Command::new("kill")
-        .args(["-0", &pid])
-        .status()
-        .unwrap()
-        .success();
     terminal.send(b"\x03");
     terminal.absent("RSIversi · Help").await;
     terminal.until("No session attached").await;
@@ -625,7 +620,11 @@ async fn home_clipboard_helper_does_not_block_help_input() {
     terminal.finish().await;
     provider.abort();
     assert!(
-        active,
-        "Help must render while the clipboard helper is still blocked on its explicit gate"
+        !Command::new("kill")
+            .args(["-0", &pid])
+            .status()
+            .unwrap()
+            .success(),
+        "the clipboard helper must be reaped after leaving home"
     );
 }
