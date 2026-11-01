@@ -84,7 +84,11 @@ The case-owned concurrency remains exercised; production execution does not retr
 Windows credential writer fixtures start a new bounded attempt only after the
 typed pre-mutation lock-admission timeout, preserving all concurrent records and
 the separate held-lock deadline assertion. Unknown mutation outcomes still fail
-immediately. Checkout, toolchain and cache actions have their own SSH deadlines;
+immediately. Native ConPTY tests serialize their PowerShell fixture cases with
+asynchronous admission: simultaneous cold shells exhausted readiness deadlines on
+fresh Windows runners while a later-starting case succeeded. Internal cancellation
+and backpressure still run concurrently; production concurrency and readiness
+deadlines do not change. Checkout, toolchain and cache actions have their own SSH deadlines;
 the job budget covers these along with the verification steps.
 Base independently compiles and exercises UDS test-support contracts on Linux;
 its ignored timing report remains opt-in.

@@ -148,3 +148,6 @@ also fails settlement, preserving any earlier settlement error.
 Windows ConPTY fixtures use PowerShell's native console readers with direct .NET
 file receipts. Receipt creation and descendant startup must not depend on optional
 PowerShell module discovery in the deliberately minimal child environment.
+PowerShell fixture cases share asynchronous admission so cold shell startups do
+not compete with unrelated cases for their readiness budget. Case-owned input,
+backpressure, cancellation and descendant checks retain their concurrency.
