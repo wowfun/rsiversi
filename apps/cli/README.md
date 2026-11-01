@@ -104,6 +104,9 @@ and `root`; compact additionally reports `before_bytes` and `after_bytes`.
 The `core_upgrade` integration target also requires a prebuilt `rsi-uninstall`
 (next to the test product binary or selected with `RSI_TEST_UNINSTALLER`). Windows
 Host tests run their compiled test executable outside the Cargo Job.
+Interrupted-upgrade fixtures construct a reachable transaction phase under the
+installation owner's coordinator contract: retain prior Host activity, verify
+its exit before promotion, then release setup leases before invoking CLI recovery.
 
 Core upgrade and recovery emit one JSON receipt on stdout; Host progress goes to
 stderr. `host stop` reports stale metadata without claiming it stopped a dead PID,

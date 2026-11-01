@@ -157,8 +157,15 @@ fn installed_core_upgrades_recovers_and_preserves_active_host_on_invalid_candida
     assert_ne!(first.host_epoch, second.host_epoch);
     fixture.success(&["host", "status"]);
 
-    // Simulate interruption after executable promotion. Recovery runs through the
-    // real CLI and retained Host coordinator, and reactivates the previous core.
+    let host = rsi_service_host::ServiceHostPaths::from_host_paths(&fixture.paths).unwrap();
+    let startup = rsi_service_host::HostStartupLease::try_acquire(&host).unwrap();
+    let owner = host.read_lifecycle_identity().unwrap().unwrap();
+    assert!(owner.is_current().unwrap());
+    fixture.success(&["host", "stop"]);
+    assert!(!owner.is_current().unwrap());
+
+    // Interrupt after coordinated stop and promotion, retaining the earlier
+    // running state so CLI recovery must reactivate the previous core.
     let transaction = rsi_installation::legacy::CoreUpgrade::prepare(
         &fixture.executable,
         &support::product_binary(),
@@ -169,6 +176,7 @@ fn installed_core_upgrades_recovers_and_preserves_active_host_on_invalid_candida
     .unwrap();
     transaction.promote().unwrap();
     drop(transaction);
+    drop(startup);
     let denied = fixture.command().args(["config", "show"]).output().unwrap();
     assert!(!denied.status.success());
     fixture.success(&["core", "recover"]);
