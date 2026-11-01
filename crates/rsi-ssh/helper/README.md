@@ -115,6 +115,11 @@ There are at most 32 artifacts per Service; a full set of live
 leases prevents new publication. Staging files have fixed bounded names and are
 cleaned only under the writer lock.
 
+Native cache tests run with `--test-threads=1` and the default Rust thread stack.
+Unrelated cases otherwise share a descriptor table: a concurrent fork can briefly
+inherit a staging writer until exec closes it, causing `ETXTBSY` in an execution
+case. Each case retains its own explicit concurrent publication and lease checks.
+
 The launcher keeps its returned lease until the helper acquires its own lease and
 acknowledges that acquisition. Cache operations support that overlap but do not
 perform the transport handshake. A path or digest alone is not a lease. These are

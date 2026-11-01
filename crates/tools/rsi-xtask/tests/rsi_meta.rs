@@ -2148,6 +2148,13 @@ fn ssh_native_checks_report_independent_failures_after_required_setup() {
         .unwrap();
     assert!(cache.contains("env -u RUST_MIN_STACK cargo test --locked -p rsi-ssh-helper --lib --test cache -- --ignored"));
     assert!(
+        cache
+            .lines()
+            .find(|line| line.contains("cargo test") && !line.contains("--list"))
+            .unwrap()
+            .contains("--test-threads=1")
+    );
+    assert!(
         !steps[position("Verify cache and execution")]["run"]
             .as_str()
             .unwrap()

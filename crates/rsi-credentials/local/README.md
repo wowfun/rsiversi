@@ -42,7 +42,9 @@ The same bounded zeroizing codec is used on Unix and Windows.
 Other targets fail explicitly as unsupported; they never write an unprotected file.
 
 Writers acquire a stable private lock file with a one-second bounded wait, reread
-the current document under the lock and preserve unrelated entries. Lock files
+the current document under the lock and preserve unrelated entries. `LockTimeout`
+refuses admission before credential mutation; an explicit caller may start a new
+attempt. Lock files
 are created exclusively; an existing name is opened separately without creation
 flags and receives the same no-follow and metadata checks. Writers never remove
 or replace that lock file. A unique

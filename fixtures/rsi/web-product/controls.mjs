@@ -118,12 +118,13 @@ export async function clickUiControl(page, rootSelector, label, {timeout=30_000}
 }
 export function clickDetails(page,label) {return clickUiControl(page,detailSelector,label);}
 export async function closeDetails(page) {
-  const floating=page.locator('[data-dockkit-float-active=true]:visible [data-dockkit-float-close]');
-  if(await floating.count()) {const owner=floating.locator('xpath=ancestor::*[@data-dockkit-content]');const id=await owner.getAttribute('data-dockkit-content');const closing=page.locator(`[data-dockkit-content="${id}"]`);await closing.locator('[data-dockkit-float-close]').click();await closing.waitFor({state:'detached'});return;}
-  const active=page.locator('.resource-dock:not([hidden]) [data-dockkit-pane-active=true] [data-dockkit-tab][aria-selected=true]:visible');
-  const tab=await active.count()?active:page.locator('[data-dockkit-tab][aria-selected=true]:visible').last();
+  const dock=page.locator('.resource-dock:not([hidden])');
+  const floating=dock.locator('[data-dockkit-float-active=true]:visible [data-dockkit-float-close]');
+  if(await floating.count()) {const owner=floating.locator('xpath=ancestor::*[@data-dockkit-content]');const id=await owner.getAttribute('data-dockkit-content');const closing=dock.locator(`[data-dockkit-content="${id}"]`);await closing.locator('[data-dockkit-float-close]').click();await closing.waitFor({state:'detached'});return;}
+  const active=dock.locator('[data-dockkit-pane-active=true] [data-dockkit-tab][aria-selected=true]:visible');
+  const tab=await active.count()?active:dock.locator('[data-dockkit-tab][aria-selected=true]:visible').last();
   const id=await tab.getAttribute('data-dockkit-tab');
-  const closing=page.locator(`[data-dockkit-tab="${id}"]`);
+  const closing=dock.locator(`[data-dockkit-tab="${id}"]`);
   await closing.locator('[data-dockkit-tab-close]').click();
   await closing.waitFor({state:'detached'});
 }

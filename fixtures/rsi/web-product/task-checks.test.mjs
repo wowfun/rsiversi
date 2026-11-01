@@ -16,11 +16,14 @@ for (const [name, engine] of [["chromium", chromium], ["firefox", firefox]]) {
       for(const floating of [false,true]) {
         const attribute=floating?'data-dockkit-content':'data-dockkit-tab';
         await page.setContent(floating
-          ? '<section data-dockkit-content="old" data-dockkit-float-active="true"><button data-dockkit-float-close>Close</button></section>'
+          ? '<aside class="resource-dock"><section data-dockkit-content="old" data-dockkit-float-active="true"><button data-dockkit-float-close>Close</button></section></aside>'
           : '<aside class="resource-dock"><section data-dockkit-pane-active="true"><div data-dockkit-tab="old" aria-selected="true"><button data-dockkit-tab-close>Close</button></div></section></aside>');
         await page.evaluate(attribute=>{
-          window.closes=0;window.retained=document.querySelector(`[${attribute}="old"]`);
-          document.querySelector('button').onclick=()=>{window.closes++;window.retained.setAttribute(attribute,'next');};
+          const inactive=document.querySelector('.resource-dock').cloneNode(true);
+          inactive.hidden=true;inactive.querySelector('button').onclick=()=>{throw new Error('inactive session dispatched');};
+          document.body.prepend(inactive);
+          window.closes=0;window.retained=document.querySelector(`.resource-dock:not([hidden]) [${attribute}="old"]`);
+          window.retained.querySelector('button').onclick=()=>{window.closes++;window.retained.setAttribute(attribute,'next');};
         },attribute);
         await closeDetails(page);
         assert.equal(await page.evaluate(()=>window.closes),1);

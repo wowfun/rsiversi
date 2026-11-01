@@ -868,7 +868,8 @@ This scene verifies cleanup layout; it is not a full connected-workbench capture
 Keyboard focus checks wait for an enabled Retry control and for it to enter the cleanup
 scroll viewport before reading geometry; native keyboard scrolling can settle
 asynchronously. Resource close helpers pin the selected Dock identity for both
-click and completion, rather than treating a retained DOM node as the resource.
+click and completion within the active resource dock; separate session docks may
+reuse tab IDs. A retained DOM node does not identify a resource.
 Workflow navigation settles its latest view before closing that resource.
 
 `responsiveness.mjs` uses the real document factory with isolated transport ports.

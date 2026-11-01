@@ -78,7 +78,13 @@ checks. Guarded prerequisites have unique step identities checked alongside thei
 references, so a renamed ID cannot silently suppress dependent verification.
 The native cache target includes its internal publication-race tests, explicitly
 opts into native filesystem requirements, and removes the job's enlarged stack
-setting. Checkout, toolchain and cache actions have their own SSH deadlines;
+setting. Its harness cases run serially: unrelated concurrent forks can briefly
+inherit another case's writable staging descriptor and refuse exec with `ETXTBSY`.
+The case-owned concurrency remains exercised; production execution does not retry.
+Windows credential writer fixtures start a new bounded attempt only after the
+typed pre-mutation lock-admission timeout, preserving all concurrent records and
+the separate held-lock deadline assertion. Unknown mutation outcomes still fail
+immediately. Checkout, toolchain and cache actions have their own SSH deadlines;
 the job budget covers these along with the verification steps.
 Base independently compiles and exercises UDS test-support contracts on Linux;
 its ignored timing report remains opt-in.

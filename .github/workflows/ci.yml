@@ -1257,7 +1257,7 @@ jobs:
         run: |
           source "$GITHUB_WORKSPACE/.github/scripts/sandbox-policy.sh" apparmor
           env -u RUST_MIN_STACK cargo test --locked -p rsi-ssh-helper --lib --test cache -- --ignored --list | rg ": test$"
-          env -u RUST_MIN_STACK cargo test --locked -p rsi-ssh-helper --lib --test cache -- --ignored --nocapture
+          env -u RUST_MIN_STACK cargo test --locked -p rsi-ssh-helper --lib --test cache -- --ignored --test-threads=1 --nocapture
       - name: Verify target native lifecycle
         timeout-minutes: 5
         if: ${{ !cancelled() && steps.ssh_setup.outcome == 'success' && steps.ssh_helper_build.outcome == 'success' && steps.ssh_native.outcome == 'success' }}
