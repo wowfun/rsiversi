@@ -535,9 +535,10 @@ impl Server {
 }
 fn sandbox_failure(error: &SandboxError) -> Failure {
     match error {
+        SandboxError::Capacity => Failure::Capacity,
         SandboxError::Unsupported(_) => Failure::Unsupported,
         SandboxError::InvalidInput(_) => Failure::Invalid,
-        SandboxError::Probe(_) => Failure::Io,
+        SandboxError::Probe(_) | SandboxError::Preparation => Failure::Io,
     }
 }
 fn transport_failure(error: rsi_ssh_transport::Error) -> Failure {
@@ -581,6 +582,25 @@ async fn wait_status(
 #[cfg(test)]
 mod status_tests {
     use super::*;
+    #[test]
+    fn sandbox_preparation_failures_preserve_wire_categories() {
+        assert_eq!(sandbox_failure(&SandboxError::Capacity), Failure::Capacity);
+        assert_eq!(sandbox_failure(&SandboxError::Preparation), Failure::Io);
+        assert_eq!(
+            sandbox_failure(&SandboxError::Probe("probe".into())),
+            Failure::Io
+        );
+        assert_eq!(
+            sandbox_failure(&SandboxError::InvalidInput("input".into())),
+            Failure::Invalid
+        );
+        assert_eq!(
+            sandbox_failure(&SandboxError::Unsupported(
+                rsi_sandbox::SandboxMode::ReadOnly
+            )),
+            Failure::Unsupported
+        );
+    }
     #[tokio::test(start_paused = true)]
     async fn pending_status_waits_until_the_bound_then_returns_a_snapshot() {
         let (_outcome, outcome) = watch::channel(None);

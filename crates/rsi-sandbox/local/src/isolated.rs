@@ -10,7 +10,11 @@ fn unavailable(message: impl Into<String>) -> SandboxError {
     SandboxError::Probe(message.into())
 }
 
-pub(super) async fn verify(request: &IsolatedProcessRequest, user_runtime: &Path) -> Result<()> {
+pub(super) async fn verify(
+    service: &super::Service,
+    request: &IsolatedProcessRequest,
+    user_runtime: &Path,
+) -> Result<()> {
     request.validate()?;
     if !user_runtime.is_absolute() {
         return Err(unavailable(
@@ -55,7 +59,10 @@ pub(super) async fn verify(request: &IsolatedProcessRequest, user_runtime: &Path
             let text = std::str::from_utf8(&bytes)
                 .map_err(|_| unavailable("invalid supervisor response"))?;
             if status.success() && text.lines().any(|line| line == "ActiveState=active") {
-                return verify_effective(Path::new("/sys/fs/cgroup"), text);
+                let properties = text.to_owned();
+                return service
+                    .prepare(move |_| verify_effective(Path::new("/sys/fs/cgroup"), &properties))
+                    .await;
             }
             tokio::time::sleep(Duration::from_millis(10)).await;
         }

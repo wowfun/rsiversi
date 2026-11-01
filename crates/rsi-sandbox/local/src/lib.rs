@@ -123,11 +123,12 @@ impl SandboxLocalConfig {
     }
 }
 
-#[derive(Debug)]
+#[derive(Clone, Debug)]
 struct Service {
     generation: rsi_sandbox::SandboxGeneration,
     backend: Option<SelectedBackend>,
-    _staged: Option<tempfile::TempDir>,
+    _staged: Option<Arc<tempfile::TempDir>>,
+    workers: Arc<tokio::sync::Semaphore>,
 }
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -189,9 +190,56 @@ impl Sandbox for Service {
         request: &rsi_sandbox::IsolatedProcessRequest,
         user_runtime: &Path,
     ) -> Result<()> {
-        isolated::verify(request, user_runtime).await
+        isolated::verify(self, request, user_runtime).await
     }
     async fn confine_isolated(
+        &self,
+        request: rsi_sandbox::IsolatedProcessRequest,
+    ) -> Result<ConfinedProcess> {
+        self.prepare(move |service| service.isolated_plan(request))
+            .await
+    }
+
+    async fn workspace_read(
+        &self,
+        request: rsi_sandbox::WorkspaceReadRequest,
+    ) -> Result<rsi_sandbox::WorkspaceReadScope> {
+        rsi_sandbox::WorkspaceReadScope::new(request, self.generation.clone())
+    }
+    async fn confine(&self, request: ProcessRequest) -> Result<ConfinedProcess> {
+        self.prepare(move |service| service.confine_view(request, false))
+            .await
+    }
+    async fn confine_source_reader(&self, request: ProcessRequest) -> Result<ConfinedProcess> {
+        if request.mode != SandboxMode::ReadOnly
+            || request.stdio != rsi_sandbox::ProcessStdio::Pipes
+        {
+            return Err(SandboxError::Unsupported(request.mode));
+        }
+        self.prepare(move |service| service.confine_view(request, true))
+            .await
+    }
+}
+impl Service {
+    async fn prepare<T: Send + 'static>(
+        &self,
+        work: impl FnOnce(&Self) -> Result<T> + Send + 'static,
+    ) -> Result<T> {
+        let permit = self
+            .workers
+            .clone()
+            .try_acquire_owned()
+            .map_err(|_| SandboxError::Capacity)?;
+        let service = self.clone();
+        tokio::task::spawn_blocking(move || {
+            let _permit = permit;
+            work(&service)
+        })
+        .await
+        .map_err(|_| SandboxError::Preparation)?
+    }
+
+    fn isolated_plan(
         &self,
         request: rsi_sandbox::IsolatedProcessRequest,
     ) -> Result<ConfinedProcess> {
@@ -280,25 +328,7 @@ impl Sandbox for Service {
             stamp: evidence,
         })
     }
-    async fn workspace_read(
-        &self,
-        request: rsi_sandbox::WorkspaceReadRequest,
-    ) -> Result<rsi_sandbox::WorkspaceReadScope> {
-        rsi_sandbox::WorkspaceReadScope::new(request, self.generation.clone())
-    }
-    async fn confine(&self, request: ProcessRequest) -> Result<ConfinedProcess> {
-        self.confine_view(request, false)
-    }
-    async fn confine_source_reader(&self, request: ProcessRequest) -> Result<ConfinedProcess> {
-        if request.mode != SandboxMode::ReadOnly
-            || request.stdio != rsi_sandbox::ProcessStdio::Pipes
-        {
-            return Err(SandboxError::Unsupported(request.mode));
-        }
-        self.confine_view(request, true)
-    }
-}
-impl Service {
+
     #[expect(
         clippy::too_many_lines,
         reason = "one exhaustive platform admission decision"
@@ -594,7 +624,8 @@ impl PluginFactory for SandboxLocalFactory {
         let sandbox: Arc<dyn Sandbox> = Arc::new(Service {
             generation: rsi_sandbox::SandboxGeneration::default(),
             backend,
-            _staged: staged,
+            _staged: staged.map(Arc::new),
+            workers: Arc::new(tokio::sync::Semaphore::new(4)),
         });
         let supply = plan.context().provide_local::<SandboxContract>(sandbox)?;
         plan.defer(
@@ -968,6 +999,7 @@ mod tests {
             generation: rsi_sandbox::SandboxGeneration::default(),
             backend: None,
             _staged: None,
+            workers: Arc::new(tokio::sync::Semaphore::new(4)),
         };
         for mode in [
             SandboxMode::DangerFullAccess,
@@ -1046,5 +1078,64 @@ mod tests {
         let metadata = temporary.path().metadata().unwrap();
         assert!(!matches_protected_root(&metadata, &temporary.path().join("absent")).unwrap());
         assert!(matches_protected_root(&metadata, temporary.path()).unwrap());
+    }
+}
+
+#[cfg(test)]
+mod worker_tests {
+    use super::*;
+
+    #[tokio::test(flavor = "current_thread")]
+    async fn cancelled_waiters_retain_worker_capacity_and_staged_backend_until_completion() {
+        let staged = Arc::new(tempfile::tempdir().unwrap());
+        let path = staged.path().to_owned();
+        let service = Service {
+            generation: Default::default(),
+            backend: None,
+            _staged: Some(staged),
+            workers: Arc::new(tokio::sync::Semaphore::new(4)),
+        };
+        let runtime_thread = std::thread::current().id();
+        let workers = service.workers.clone();
+        let mut releases = Vec::new();
+        for _ in 0..4 {
+            let (entered, started) = tokio::sync::oneshot::channel();
+            let (release, wait) = std::sync::mpsc::channel();
+            releases.push(release);
+            let owner = service.clone();
+            let waiter = tokio::spawn(async move {
+                owner
+                    .prepare(move |_| {
+                        assert_ne!(runtime_thread, std::thread::current().id());
+                        entered.send(()).unwrap();
+                        wait.recv_timeout(Duration::from_secs(5)).unwrap();
+                        Ok(())
+                    })
+                    .await
+            });
+            tokio::time::timeout(Duration::from_secs(2), started)
+                .await
+                .unwrap()
+                .unwrap();
+            waiter.abort();
+            assert!(waiter.await.unwrap_err().is_cancelled());
+        }
+        tokio::time::sleep(Duration::from_millis(1)).await;
+        assert!(matches!(
+            service.prepare(|_| Ok(())).await,
+            Err(SandboxError::Capacity)
+        ));
+        drop(service);
+        assert!(path.exists(), "live workers own the staged executable");
+        for release in releases {
+            release.send(()).unwrap();
+        }
+        tokio::time::timeout(Duration::from_secs(2), async {
+            while workers.available_permits() != 4 || path.exists() {
+                tokio::time::sleep(Duration::from_millis(1)).await;
+            }
+        })
+        .await
+        .unwrap();
     }
 }

@@ -1,5 +1,12 @@
 # rsi-sandbox-local
 
+Process-plan filesystem admission and effective cgroup reads run on blocking
+workers, with at most four outstanding operations per service generation.
+Admission is immediate and returns `SandboxError::Capacity` when full. A worker
+owns its permit, generation and staged backend until actual completion, even if
+its async waiter cancels or the published service is withdrawn. Filesystem calls
+have no claimed hard deadline; cancellation does not free a still-running slot.
+
 This ordinary plugin probes only explicit absolute candidate paths. A process request must also carry native absolute cwd and workspace paths before
 filesystem canonicalization. Portable host-path DTOs may describe another
 platform; those spellings do not grant this native effect boundary a relative path.

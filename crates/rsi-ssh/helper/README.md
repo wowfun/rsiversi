@@ -131,6 +131,9 @@ connection. Preparation registers output senders before returning their identiti
 start registers batch stdin only after the client has registered its sender.
 Program selection and environment come from target policy, never ambient Service
 state. The server checks preparation against a catalog program/environment pair.
+Sandbox preparation-capacity refusal remains `Capacity` on the helper wire;
+native preparation failure is `Io`, while unsupported and invalid plans retain
+their respective categories.
 
 Interactive input uses bounded requests that acknowledge the native accepted
 prefix. Stream credit is not a write acknowledgement. Batch input uses the reserved

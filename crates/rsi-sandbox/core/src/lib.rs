@@ -289,6 +289,12 @@ pub struct ConfinedProcess {
 /// Closed sandbox failure taxonomy.
 #[derive(Clone, Debug, Error, Eq, PartialEq)]
 pub enum SandboxError {
+    /// All bounded process-plan workers are occupied.
+    #[error("sandbox preparation capacity is exhausted")]
+    Capacity,
+    /// A process-plan worker did not complete normally.
+    #[error("sandbox preparation worker failed")]
+    Preparation,
     /// Malformed, missing, or out-of-bounds path/argv input.
     #[error("invalid sandbox request: {0}")]
     InvalidInput(String),
