@@ -494,16 +494,7 @@ async fn plan_application(binary: Option<std::path::PathBuf>) {
     assert!(requests.lock().unwrap().is_empty());
     terminal.send(b"inspect plan\r");
     terminal.until("hello from daemon").await;
-    // The reply is streamed before the terminal control commit. Wait for the
-    // footer's activity projection to settle before executing a versioned command.
-    terminal
-        .until_screen("idle after the first turn", |screen| {
-            screen.lines().rev().nth(1).is_some_and(|footer| {
-                footer.contains("fixture-model")
-                    && !footer.chars().any(|ch| "⠋⠙⠹⠸⠼⠴⠦⠧".contains(ch))
-            })
-        })
-        .await;
+    terminal.until_idle().await;
 
     assert_eq!(requests.lock().unwrap().len(), 1);
     assert!(
@@ -871,6 +862,18 @@ plugin = "rsi.application.tui"
     async fn until(&mut self, text: &str) {
         self.until_screen(text, |screen| screen.contains(text))
             .await;
+    }
+
+    async fn until_idle(&mut self) {
+        // Streamed text can precede the durable terminal commit; the footer
+        // projects the settled activity needed by export and versioned commands.
+        self.until_screen("idle after the turn", |screen| {
+            screen.lines().rev().nth(1).is_some_and(|footer| {
+                footer.contains("fixture-model")
+                    && !footer.chars().any(|ch| "⠋⠙⠹⠸⠼⠴⠦⠧".contains(ch))
+            })
+        })
+        .await;
     }
 
     async fn until_screen(&mut self, text: &str, matches: impl Fn(&str) -> bool) {

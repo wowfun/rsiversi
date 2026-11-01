@@ -119,13 +119,13 @@ export async function clickUiControl(page, rootSelector, label, {timeout=30_000}
 export function clickDetails(page,label) {return clickUiControl(page,detailSelector,label);}
 export async function closeDetails(page) {
   const floating=page.locator('[data-dockkit-float-active=true]:visible [data-dockkit-float-close]');
-  if(await floating.count()) {const owner=floating.locator('xpath=ancestor::*[@data-dockkit-content]');const id=await owner.getAttribute('data-dockkit-content');await floating.click();await page.locator(`[data-dockkit-content="${id}"]`).waitFor({state:'detached'});return;}
+  if(await floating.count()) {const owner=floating.locator('xpath=ancestor::*[@data-dockkit-content]');const id=await owner.getAttribute('data-dockkit-content');const closing=page.locator(`[data-dockkit-content="${id}"]`);await closing.locator('[data-dockkit-float-close]').click();await closing.waitFor({state:'detached'});return;}
   const active=page.locator('.resource-dock:not([hidden]) [data-dockkit-pane-active=true] [data-dockkit-tab][aria-selected=true]:visible');
   const tab=await active.count()?active:page.locator('[data-dockkit-tab][aria-selected=true]:visible').last();
-  const closing=await tab.elementHandle();
-  await tab.locator('[data-dockkit-tab-close]').click();
-  await page.waitForFunction(element=>!element.isConnected,closing);
-  await closing.dispose();
+  const id=await tab.getAttribute('data-dockkit-tab');
+  const closing=page.locator(`[data-dockkit-tab="${id}"]`);
+  await closing.locator('[data-dockkit-tab-close]').click();
+  await closing.waitFor({state:'detached'});
 }
 export async function openResource(page,name) {
   await resources(page);

@@ -2,13 +2,33 @@ import assert from "node:assert/strict";
 import { test } from "node:test";
 import { chromium, firefox } from "playwright";
 import { browserNames, assertControls, assertNoNotices, recordTaskFailure } from "./task-checks.mjs";
-import { clickUiControl, resourceSelector, sourceInspectionGeometry } from './controls.mjs';
+import { clickUiControl, closeDetails, resourceSelector, sourceInspectionGeometry } from './controls.mjs';
 import { recordNavigationEvidence } from './navigation-evidence.mjs';
 import { mkdtemp, readFile, rm } from "node:fs/promises";
 import { join } from "node:path";
 import { tmpdir } from "node:os";
 
 for (const [name, engine] of [["chromium", chromium], ["firefox", firefox]]) {
+  test(`${name}: resource close observes its Dock identity when the renderer retains the node`, async()=>{
+    const browser=await engine.launch({headless:true});
+    try {
+      const page=await browser.newPage();page.setDefaultTimeout(2000);
+      for(const floating of [false,true]) {
+        const attribute=floating?'data-dockkit-content':'data-dockkit-tab';
+        await page.setContent(floating
+          ? '<section data-dockkit-content="old" data-dockkit-float-active="true"><button data-dockkit-float-close>Close</button></section>'
+          : '<aside class="resource-dock"><section data-dockkit-pane-active="true"><div data-dockkit-tab="old" aria-selected="true"><button data-dockkit-tab-close>Close</button></div></section></aside>');
+        await page.evaluate(attribute=>{
+          window.closes=0;window.retained=document.querySelector(`[${attribute}="old"]`);
+          document.querySelector('button').onclick=()=>{window.closes++;window.retained.setAttribute(attribute,'next');};
+        },attribute);
+        await closeDetails(page);
+        assert.equal(await page.evaluate(()=>window.closes),1);
+        assert(await page.evaluate(()=>window.retained.isConnected));
+        assert.equal(await page.locator(`[${attribute}="next"]`).count(),1);
+      }
+    } finally {await browser.close();}
+  });
   test(`${name}: source inspection reads the replacement resource without reusing a retired node`, async()=>{
     const browser=await engine.launch({headless:true});
     try {

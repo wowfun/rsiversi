@@ -411,7 +411,7 @@ try:
         assert 'bash' in transcript
         (args.report / 'transcript.txt').write_text(transcript)
     else: assert requests and requests[-1]['model'] == 'fixture-model', requests
-    if args.ui_alignment: verify_alignment(script,button,fill,until,screenshot,call,root,args.report,workspace)
+    if args.ui_alignment: verify_alignment(script,button,fill,until,screenshot,call,root,args.report,workspace,painted)
     if args.queue: verify_queue(script, button, fill, until, screenshot, args.report, requests)
     if args.presentation: verify_presentation(script, button, fill, until, screenshot, args.report, args.system_theme)
     if args.automation_fixture: verify_automation(script, button, click, until, screenshot, args.report, args.automation_grant_probe, env)

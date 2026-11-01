@@ -443,7 +443,15 @@ try{
   const geometry=await page.evaluate(()=>{const alert=document.querySelector('.resource-cleanup-notice'),main=document.querySelector('#workbench'),composer=document.querySelector('textarea');return {height:alert.clientHeight,scroll:alert.scrollHeight,main:main.clientHeight,bottom:composer.getBoundingClientRect().bottom,width:document.documentElement.scrollWidth}});
   assert(geometry.height<=844*.3+1&&geometry.scroll>geometry.height&&geometry.main>300&&geometry.bottom<=844&&geometry.width<=width,JSON.stringify(geometry));
   await page.screenshot({path:join(report,`cleanup-${width}.png`)});
-  const last=flood.getByRole('button',{name:/^Retry cleanup for /}).last();await last.focus();
+  const last=flood.getByRole('button',{name:/^Retry cleanup for /}).last();
+  await page.waitForFunction(()=>![...document.querySelectorAll('.resource-cleanup-notice button')].at(-1)?.disabled);
+  await last.focus();
+  await page.waitForFunction(()=>{
+   const alert=document.querySelector('.resource-cleanup-notice'),last=[...alert.querySelectorAll('button')].at(-1);
+   if(document.activeElement!==last)return false;
+   const button=last.getBoundingClientRect(),viewport=alert.getBoundingClientRect();
+   return button.top>=viewport.top&&button.bottom<=viewport.bottom;
+  });
   const focused=await last.evaluate(node=>{const button=node.getBoundingClientRect(),alert=node.closest('[role=alert]').getBoundingClientRect();return {top:button.top,bottom:button.bottom,alertTop:alert.top,alertBottom:alert.bottom}});
   assert(focused.top>=focused.alertTop&&focused.bottom<=focused.alertBottom,JSON.stringify(focused));
   await page.screenshot({path:join(report,`cleanup-last-${width}.png`)});

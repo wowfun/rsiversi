@@ -63,6 +63,9 @@ closed document view; native click delivery alone does not settle a Rust command
 Appearance checks use General settings and wait for the current read ticket and
 enabled fields before editing. Saving waits for its replacement ticket; React may
 retain the same field nodes across reads.
+Viewport alignment waits for the requested inner width and the shared paint
+barrier before issuing a native click. Settings closure is observed before
+composer geometry is read; a missing command palette fails without replay.
 Profile receipt recovery waits for the requested root catalog before opening its
 disclosure, then confirms it is open before selecting a receipt; the old leaf
 catalog can remain visible while the asynchronous read changes the layout.
