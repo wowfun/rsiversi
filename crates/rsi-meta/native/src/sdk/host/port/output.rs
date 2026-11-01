@@ -98,3 +98,37 @@ pub(in crate::sdk::host) fn size_u32<T>() -> u32 {
 }
 
 pub(in crate::sdk::host) const CALL_CHANNEL_RIGHTS: u32 = RIGHT_RECEIVE | RIGHT_SEND | RIGHT_FINISH;
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::{ABI_MINOR, HostTable, RawBytes, TableHeader};
+
+    unsafe extern "C" fn exchange(
+        _: *mut core::ffi::c_void,
+        _: u32,
+        _: *const core::ffi::c_void,
+        _: u32,
+        _: *mut core::ffi::c_void,
+        _: u32,
+    ) -> u32 {
+        crate::STATUS_OK
+    }
+
+    #[test]
+    fn host_diagnostic_requires_an_output_owner() {
+        let port = HostPort::new(HostTable {
+            header: TableHeader::new(ABI_MINOR, HostTable::STRUCT_SIZE),
+            issuer: 41,
+            state: core::ptr::dangling_mut::<u8>().cast(),
+            exchange: Some(exchange),
+        })
+        .unwrap();
+        let mut prefix = OutputPrefix::empty(size_u32::<crate::BasicOutput>());
+        prefix.diagnostic = RawBytes {
+            ptr: b"diagnostic".as_ptr(),
+            len: 10,
+        };
+        assert!(OutputGuard::adopt(port, prefix, size_u32::<crate::BasicOutput>()).is_err());
+    }
+}

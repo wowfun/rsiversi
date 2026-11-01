@@ -51,7 +51,9 @@ impl OutputPrefix {
         {
             return Err(WireError::InvalidHeader);
         }
-        if !self.release.is_valid_or_empty() {
+        if !self.release.is_valid_or_empty()
+            || (self.diagnostic.len != 0 && self.release.is_empty())
+        {
             return Err(WireError::InvalidRelease);
         }
         self.diagnostic.checked_len(maximum_diagnostic)?;

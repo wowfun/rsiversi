@@ -130,6 +130,8 @@ typedef struct rsi_meta_injection {
  * adopted before the receiver interprets status or any later field. The token
  * owns every pointer range published by that output. Owned-cap frames separately
  * specify which transferable initial capability leases the token also owns.
+ * A nonempty diagnostic therefore requires a nonzero release token even when
+ * the operation fails (including a failed FINALIZE).
  */
 typedef struct rsi_meta_output_prefix {
   uint32_t struct_size;

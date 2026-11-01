@@ -277,12 +277,6 @@ impl<O: OutputFrame> PluginReply<O> {
             value,
         };
         validate_prefix(prefix, size_u32::<O>(), operation)?;
-        if prefix.diagnostic.len != 0 && release.is_none() {
-            return Err(LoaderError::Protocol {
-                operation,
-                message: "nonempty diagnostic has no owning release token".to_owned(),
-            });
-        }
         reply.diagnostic = String::from_utf8_lossy(&copy_bytes(
             prefix.diagnostic,
             MAX_NATIVE_DIAGNOSTIC_BYTES,
@@ -614,6 +608,115 @@ mod tests {
             assert!(plugin.transport.is_finalized());
             assert_eq!(plugin.calls(), vec![PLUGIN_FINALIZE]);
         }
+    }
+
+    #[test]
+    fn failed_finalize_rejects_unowned_diagnostic_and_remains_retryable() {
+        let plugin = MockPlugin::new(STATUS_FAILED, FinalizeOutput::UnownedDiagnostic);
+        assert!(matches!(
+            plugin.transport.finalize(),
+            Err(LoaderError::Protocol {
+                operation: "finalize",
+                ..
+            })
+        ));
+        assert!(!plugin.transport.is_finalized());
+        assert_eq!(plugin.calls(), vec![PLUGIN_FINALIZE]);
+        plugin.set_response(STATUS_OK, FinalizeOutput::Empty);
+        plugin.transport.finalize().unwrap();
+        assert!(plugin.transport.is_finalized());
+    }
+
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn failed_finalize_diagnostic_from_dylib_requires_owner() {
+        let directory = tempfile::tempdir().unwrap();
+        let source = directory.path().join("diagnostic.c");
+        let library_path = directory.path().join("diagnostic.so");
+        std::fs::write(&source, r#"
+#include <string.h>
+#include "rsi_meta_plugin.h"
+static unsigned calls;
+static uint32_t exchange(void *state, uint32_t opcode, const void *input,
+    uint32_t input_size, void *output, uint32_t capacity) {
+  (void)state; (void)input; (void)input_size;
+  if (opcode != RSI_META_PLUGIN_FINALIZE || capacity != sizeof(rsi_meta_basic_output))
+    return RSI_META_STATUS_PROTOCOL_ERROR;
+  rsi_meta_basic_output *value = output;
+  memset(value, 0, sizeof(*value));
+  value->prefix.struct_size = sizeof(*value);
+  if (calls++ == 0) {
+    value->prefix.diagnostic = (rsi_meta_bytes){(const uint8_t *)"diagnostic", 10};
+    return RSI_META_STATUS_FAILED;
+  }
+  return RSI_META_STATUS_OK;
+}
+uint32_t rsi_meta_plugin_entry_v3(const rsi_meta_host_table *host,
+    rsi_meta_plugin_table *output, uint32_t capacity) {
+  (void)host;
+  if (capacity != sizeof(*output)) return RSI_META_STATUS_INVALID_ARGUMENT;
+  memset(output, 0, sizeof(*output));
+  output->header = (rsi_meta_table_header){RSI_META_ABI_MAJOR, RSI_META_ABI_MINOR, sizeof(*output), 0};
+  output->issuer = 41;
+  output->state = &calls;
+  output->exchange = exchange;
+  output->factory = (rsi_meta_cap_id){41, 1, 1, RSI_META_CAP_KIND_FACTORY, RSI_META_RIGHT_RETAIN | RSI_META_RIGHT_MUTATE};
+  return RSI_META_STATUS_OK;
+}
+"#).unwrap();
+        assert!(
+            std::process::Command::new("cc")
+                .args([
+                    "-std=c11",
+                    "-Wall",
+                    "-Wextra",
+                    "-Werror",
+                    "-pedantic",
+                    "-shared",
+                    "-fPIC"
+                ])
+                .arg(&source)
+                .arg("-I")
+                .arg(concat!(env!("CARGO_MANIFEST_DIR"), "/../native/include"))
+                .arg("-o")
+                .arg(&library_path)
+                .status()
+                .unwrap()
+                .success()
+        );
+        // SAFETY: This test just compiled the trusted fixture; the mapping remains
+        // live until the transport and every borrowed pointer have been dropped.
+        let library = unsafe { libloading::Library::new(&library_path) }.unwrap();
+        type Entry =
+            unsafe extern "C" fn(*const rsi_meta_native::HostTable, *mut PluginTable, u32) -> u32;
+        // SAFETY: The fixture exports the exact signature above and writes the whole table.
+        let table = unsafe {
+            let entry: libloading::Symbol<'_, Entry> =
+                library.get(b"rsi_meta_plugin_entry_v3").unwrap();
+            let mut table = core::mem::MaybeUninit::<PluginTable>::uninit();
+            assert_eq!(
+                entry(
+                    core::ptr::null(),
+                    table.as_mut_ptr(),
+                    PluginTable::STRUCT_SIZE
+                ),
+                STATUS_OK
+            );
+            table.assume_init()
+        };
+        let transport = Arc::new(PluginTransport::new(table));
+        assert!(matches!(
+            transport.finalize(),
+            Err(LoaderError::Protocol {
+                operation: "finalize",
+                ..
+            })
+        ));
+        assert!(!transport.is_finalized());
+        transport.finalize().unwrap();
+        assert!(transport.is_finalized());
+        drop(transport);
+        drop(library);
     }
 
     #[test]
