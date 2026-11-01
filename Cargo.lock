@@ -6980,7 +6980,6 @@ dependencies = [
  "bytes",
  "hex",
  "image",
- "libc",
  "rsi-api-protocol",
  "rsi-files-native-fs",
  "rsi-media",

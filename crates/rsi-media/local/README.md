@@ -10,7 +10,13 @@ writes and syncs a private temporary file, closes its writable handle, atomicall
 into place without replacement and removes the temporary name. Unix also syncs
 the shard and its `objects` parent before acknowledging publication, including
 retries of an existing identity. Activation syncs the CAS directory ancestry so
-newly created roots also have durable namespace entries. Windows requires exact
+newly created roots also have durable namespace entries. Unix acquires that
+ancestry component by component without following links (only a trusted first
+root component may be a platform alias). It retains the `objects` handle; shard
+acquisition, private modes, staging, publication, cleanup and synchronization
+use retained directory authority. Replacing an absolute path cannot redirect
+an active backend. Existing `objects` and shard links are rejected before their
+targets can be read or chmodded. Windows requires exact
 local NTFS no-reparse paths, creates private objects atomically, and flushes each
 changed directory through retained handles. Its private CAS root retains a
 NamespaceLease through every admitted blocking operation. The `objects` directory
@@ -28,8 +34,12 @@ Configuration absolute-root syntax is checked without I/O before platform
 admission: malformed configuration returns `InvalidInput`, while valid
 configuration on an unsupported platform returns `Unsupported`.
 
-Every read opens an unchanged regular file without following its final
+Every read opens a regular file without following any internal directory or file
 symlink, then revalidates the envelope, reference, length, and SHA-256 digest.
+Reads, publication and activation classify rejected links or non-directory
+components as `Corrupt`. Native backends share the immutable object publication
+algorithm; platform code owns root acquisition, private permissions and the
+namespace handle used for publication and synchronization.
 The backend admits at most 64 I/O tasks before scheduling blocking work. A
 put checks reference shape and declared length before admission, then verifies
 the digest on the admitted blocking worker before touching durable objects.
