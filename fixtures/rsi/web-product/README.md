@@ -526,6 +526,11 @@ bridge isolation, default blocked network, per-preview HTTPS opt-in, frame reset
 explicit file refresh and over-budget source fallback. Chromium and Firefox
 retain full-size and narrow screenshots. Its provider and HTTPS resources are
 controlled fixtures, separate from opt-in live-provider evidence.
+The edited-definition check waits for the first child's automatic parent reply
+and an idle Send action. Provider evidence must contain the submitted task;
+an unrelated completion request does not acknowledge that submission.
+The preview fixture opens its registered isolated workspace explicitly and
+observes that path in the conversation before creating its test definitions.
 
 The default runner also executes `preview-verify.mjs` on each browser: real
 Markdown Agent definitions, next-fresh-spawn refresh, and bounded Files code,

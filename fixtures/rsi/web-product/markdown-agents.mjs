@@ -2,6 +2,14 @@ import assert from 'node:assert/strict';
 import {mkdir,writeFile,rm} from 'node:fs/promises';
 import {join} from 'node:path';
 import {waitUntil} from './service.mjs';
+export async function sendMarkdownTask(pane,text,bodies) {
+ const before=bodies.length;
+ await pane.getByRole('textbox',{name:'Main message'}).fill(text);
+ await pane.getByRole('button',{name:'Send',exact:true}).click();
+ await waitUntil(()=>bodies.slice(before).some(body=>body.messages.some(message=>
+   message.role==='user'&&JSON.stringify(message.content).includes(text))),
+ 'submitted Markdown task reached provider');
+}
 export async function verifyMarkdownAgents(page,service,report,browser,bodies) {
  const directory=join(service.workspace,'.agents','agents');await mkdir(directory,{recursive:true});
  const path=join(directory,'reviewer.md');
@@ -20,12 +28,12 @@ export async function verifyMarkdownAgents(page,service,report,browser,bodies) {
  await editor.fill('@reviewer: please check');
  await editor.evaluate(element=>{element.setSelectionRange(9,9);element.dispatchEvent(new KeyboardEvent('keyup',{key:'ArrowLeft',bubbles:true}));});
  await pane.getByRole('option').filter({hasText:'reviewer'}).waitFor();await editor.press('Escape');
- const send=async text=>{const before=bodies.length;await editor.fill(text);await pane.getByTestId('composer-send').click();await waitUntil(()=>bodies.length>before,'provider entered');await pane.locator('.pane-status').filter({hasText:'Completed'}).waitFor({state:'attached'});};
- await send('@reviewer: delegate to Markdown reviewer, first task');
+ await sendMarkdownTask(pane,'@reviewer: delegate to Markdown reviewer, first task',bodies);
  const child=version=>bodies.find(body=>body.messages.some(message=>message.role==='system'&&JSON.stringify(message.content).includes(`MARKDOWN-REVIEWER-V${version}`)));
  await waitUntil(()=>!!child(1),'first custom reviewer');assert.equal(child(1).tools?.length??0,0,'empty allow must expose no ordinary tools');
+ await pane.locator('.message.assistant').filter({hasText:'Reviewed: Subagent activation completed.'}).waitFor();
  await writeFile(path,definition(2));
- await send('@reviewer delegate to Markdown reviewer, second task');
+ await sendMarkdownTask(pane,'@reviewer delegate to Markdown reviewer, second task',bodies);
  await waitUntil(()=>!!child(2),'next spawn reads edited definition');
  assert(bodies.some(body=>JSON.stringify(body.messages).includes('Review isolated source 2')),'existing parent did not receive current catalog');
  await writeFile(path,'---\ndescription: broken\nunknown_field: true\n---\nInvalid\n');
