@@ -173,8 +173,6 @@ impl EvidenceCache {
     }
 }
 
-impl Driver {}
-
 pub(super) fn budget_fallback(bodies: &[SessionFactBody]) -> Option<Vec<SessionFactBody>> {
     let [
         SessionFactBody::ModelIntent {

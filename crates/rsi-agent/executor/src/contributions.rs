@@ -224,8 +224,7 @@ impl Driver {
                 }
             }
         } else if !facts.is_empty() {
-            let entered = self.publish_apply(claim, fold, facts).await?;
-            self.flush_last(claim, &entered).await?;
+            self.publish_durable(claim, fold, facts).await?;
         }
         // Capturing may have opened a direct Turn's first Step even for an empty output.
         self.sync_fold(claim, fold).await

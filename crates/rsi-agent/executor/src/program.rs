@@ -5,6 +5,11 @@ use rsi_agent_turn_protocol::{ProgramToolCalls, ProgramToolDispatcher};
 use rsi_tools_protocol::{ToolDefinition, ToolProgramRole};
 use tokio::sync::{mpsc, oneshot};
 
+fn program_eligible(definition: &ToolDefinition) -> bool {
+    definition.program_role() == ToolProgramRole::Callable
+        && definition.scheduling() != ToolScheduling::ExclusiveFinal
+}
+
 struct RequestInput {
     name: String,
     arguments: Value,
@@ -110,10 +115,7 @@ impl Driver {
                 .tools()
                 .definitions()
                 .into_iter()
-                .filter(|definition| {
-                    definition.program_role() == ToolProgramRole::Callable
-                        && definition.scheduling() != ToolScheduling::ExclusiveFinal
-                })
+                .filter(program_eligible)
                 .collect(),
             sender,
             capacity: Arc::new(Semaphore::new(MAXIMUM_PROGRAM_OUTSTANDING_CALLS)),
@@ -221,10 +223,7 @@ impl Driver {
         let definition = composition
             .tools()
             .definition(&request.name)
-            .filter(|definition| {
-                definition.program_role() == ToolProgramRole::Callable
-                    && definition.scheduling() != ToolScheduling::ExclusiveFinal
-            })
+            .filter(program_eligible)
             .ok_or_else(|| {
                 failed(
                     "program.ineligible",

@@ -230,39 +230,25 @@ impl Driver {
         drive: std::result::Result<(), DriveFailure>,
         stop: &CancellationToken,
     ) {
-        match drive {
-            Ok(()) | Err(DriveFailure::Stopped) => {}
-            Err(DriveFailure::Turn(outcome)) => {
-                if self.finish(claim, job_scope, outcome).await.is_ok() {
-                    self.request_checkpoint(claim, composition);
-                    self.retire_tracked_tools(claim, stop);
-                }
+        let (outcome, settled_identity) = match drive {
+            Ok(()) | Err(DriveFailure::Stopped) => return,
+            Err(DriveFailure::Turn(outcome)) => (outcome, None),
+            Err(DriveFailure::SettledTool { outcome, identity }) => (outcome, Some(identity)),
+            Err(DriveFailure::Fatal(message)) => (
+                TurnOutcome::Failed {
+                    code: "executor.internal".into(),
+                    message,
+                },
+                None,
+            ),
+        };
+        if self.finish(claim, job_scope, outcome).await.is_ok() {
+            self.request_checkpoint(claim, composition);
+            if let Some(identity) = settled_identity {
+                let _ignored = composition.tools().commit(&identity);
+                self.clear_tracked_tool(claim, &identity);
             }
-            Err(DriveFailure::SettledTool { outcome, identity }) => {
-                if self.finish(claim, job_scope, outcome).await.is_ok() {
-                    self.request_checkpoint(claim, composition);
-                    let _ignored = composition.tools().commit(&identity);
-                    self.clear_tracked_tool(claim, &identity);
-                    self.retire_tracked_tools(claim, stop);
-                }
-            }
-            Err(DriveFailure::Fatal(message)) => {
-                if self
-                    .finish(
-                        claim,
-                        job_scope,
-                        TurnOutcome::Failed {
-                            code: "executor.internal".into(),
-                            message,
-                        },
-                    )
-                    .await
-                    .is_ok()
-                {
-                    self.request_checkpoint(claim, composition);
-                    self.retire_tracked_tools(claim, stop);
-                }
-            }
+            self.retire_tracked_tools(claim, stop);
         }
     }
 
@@ -578,29 +564,26 @@ impl Driver {
         }
         let snapshot = prepared.snapshot().clone();
         let effect_id = next_effect_id().map_err(fatal)?;
-        let intent = self
-            .publish_apply(
-                claim,
-                fold,
-                vec![SessionFactBody::ImageIntent {
-                    turn_id: claim.turn_id().clone(),
-                    effect_id: effect_id.clone(),
-                    snapshot,
-                }],
-            )
-            .await?;
-        self.flush_last(claim, &intent).await?;
-        let started = self
-            .publish_apply(
-                claim,
-                fold,
-                vec![SessionFactBody::ImageStarted {
-                    turn_id: claim.turn_id().clone(),
-                    effect_id: effect_id.clone(),
-                }],
-            )
-            .await?;
-        self.flush_last(claim, &started).await?;
+        self.publish_durable(
+            claim,
+            fold,
+            vec![SessionFactBody::ImageIntent {
+                turn_id: claim.turn_id().clone(),
+                effect_id: effect_id.clone(),
+                snapshot,
+            }],
+        )
+        .await?;
+
+        self.publish_durable(
+            claim,
+            fold,
+            vec![SessionFactBody::ImageStarted {
+                turn_id: claim.turn_id().clone(),
+                effect_id: effect_id.clone(),
+            }],
+        )
+        .await?;
 
         let combined = combine_cancellation(&cancellation, stop);
         let stream = match prepared.start(combined.token()).await {
@@ -690,19 +673,18 @@ impl Driver {
                                 error.to_string(),
                             )
                         })?;
-                let published = self
-                    .publish_apply(
-                        claim,
-                        fold,
-                        vec![SessionFactBody::ImageOutput {
-                            turn_id: claim.turn_id().clone(),
-                            effect_id: effect_id.clone(),
-                            index,
-                            media: reference.clone(),
-                        }],
-                    )
-                    .await?;
-                self.flush_last(claim, &published).await?;
+                self.publish_durable(
+                    claim,
+                    fold,
+                    vec![SessionFactBody::ImageOutput {
+                        turn_id: claim.turn_id().clone(),
+                        effect_id: effect_id.clone(),
+                        index,
+                        media: reference.clone(),
+                    }],
+                )
+                .await?;
+
                 media.push(reference);
             }
             if matches!(event, ImageEvent::Finished) {
@@ -805,7 +787,7 @@ impl Driver {
             .map_err(|_| fatal("evidence cache lock poisoned"))?
             .deduplicate(claim.session_id(), &mut evidence);
         let intent = self
-            .publish_apply(
+            .publish_durable(
                 claim,
                 fold,
                 vec![SessionFactBody::ModelIntent {
@@ -823,24 +805,23 @@ impl Driver {
                 }],
             )
             .await?;
-        self.flush_last(claim, &intent).await?;
+
         for fact in intent.facts() {
             self.evidence
                 .lock()
                 .map_err(|_| fatal("evidence cache lock poisoned"))?
                 .observe(claim.session_id(), fact);
         }
-        let started = self
-            .publish_apply(
-                claim,
-                fold,
-                vec![SessionFactBody::ModelStarted {
-                    turn_id: claim.turn_id().clone(),
-                    effect_id: effect_id.clone(),
-                }],
-            )
-            .await?;
-        self.flush_last(claim, &started).await?;
+        self.publish_durable(
+            claim,
+            fold,
+            vec![SessionFactBody::ModelStarted {
+                turn_id: claim.turn_id().clone(),
+                effect_id: effect_id.clone(),
+            }],
+        )
+        .await?;
+
         live.started().map_err(fatal)?;
 
         let combined = combine_cancellation(cancellation, stop);
@@ -995,7 +976,7 @@ impl Driver {
             };
             let attempt = evidence.finish(retain_context).map_err(fatal)?;
             let facts = self
-                .publish_apply(
+                .publish_durable(
                     claim,
                     fold,
                     vec![SessionFactBody::ModelAttemptSettled {
@@ -1006,7 +987,7 @@ impl Driver {
                     }],
                 )
                 .await?;
-            self.flush_last(claim, &facts).await?;
+
             live.committed(&facts).map_err(fatal)?;
             if capacity {
                 return Err(failed(
@@ -1286,23 +1267,22 @@ impl Driver {
             )
             .await?;
         if let Some(rejection) = rejection {
-            let rejected = self
-                .publish_apply(
-                    claim,
-                    fold,
-                    vec![SessionFactBody::ToolRejected {
-                        origin: origin.clone(),
-                        program_role,
-                        turn_id: claim.turn_id().clone(),
-                        effect_id,
-                        identity,
-                        name,
-                        arguments,
-                        rejection,
-                    }],
-                )
-                .await?;
-            self.flush_last(claim, &rejected).await?;
+            self.publish_durable(
+                claim,
+                fold,
+                vec![SessionFactBody::ToolRejected {
+                    origin: origin.clone(),
+                    program_role,
+                    turn_id: claim.turn_id().clone(),
+                    effect_id,
+                    identity,
+                    name,
+                    arguments,
+                    rejection,
+                }],
+            )
+            .await?;
+
             return Err(failed(
                 "policy.denied",
                 "pinned policy denied the prepared Tool call",
@@ -1348,25 +1328,24 @@ impl Driver {
                 )
                 .await?;
             if outcome.decision == ApprovalDecision::Deny {
-                let rejected = self
-                    .publish_apply(
-                        claim,
-                        fold,
-                        vec![SessionFactBody::ToolRejected {
-                            origin: origin.clone(),
-                            program_role,
-                            turn_id: claim.turn_id().clone(),
-                            effect_id,
-                            identity,
-                            name,
-                            arguments,
-                            rejection: rsi_agent_session_protocol::ToolRejection::ApprovalDenied {
-                                outcome,
-                            },
-                        }],
-                    )
-                    .await?;
-                self.flush_last(claim, &rejected).await?;
+                self.publish_durable(
+                    claim,
+                    fold,
+                    vec![SessionFactBody::ToolRejected {
+                        origin: origin.clone(),
+                        program_role,
+                        turn_id: claim.turn_id().clone(),
+                        effect_id,
+                        identity,
+                        name,
+                        arguments,
+                        rejection: rsi_agent_session_protocol::ToolRejection::ApprovalDenied {
+                            outcome,
+                        },
+                    }],
+                )
+                .await?;
+
                 return Err(failed(
                     "approval.denied",
                     "live approval denied the Tool effect",
@@ -1408,7 +1387,7 @@ impl Driver {
             prepared,
         } = pending;
         let intent = self
-            .publish_apply(
+            .publish_durable(
                 claim,
                 fold,
                 vec![SessionFactBody::ToolIntent {
@@ -1424,19 +1403,18 @@ impl Driver {
                 }],
             )
             .await?;
-        self.flush_last(claim, &intent).await?;
-        let started = self
-            .publish_apply(
-                claim,
-                fold,
-                vec![SessionFactBody::ToolStarted {
-                    turn_id: claim.turn_id().clone(),
-                    effect_id: effect_id.clone(),
-                    identity: identity.clone(),
-                }],
-            )
-            .await?;
-        self.flush_last(claim, &started).await?;
+
+        self.publish_durable(
+            claim,
+            fold,
+            vec![SessionFactBody::ToolStarted {
+                turn_id: claim.turn_id().clone(),
+                effect_id: effect_id.clone(),
+                identity: identity.clone(),
+            }],
+        )
+        .await?;
+
         self.track_tool(claim, composition.clone(), identity.clone());
         Ok(PreparedToolEffect {
             intent: intent
@@ -1485,8 +1463,8 @@ impl Driver {
             prepared.push((effect_id, identity, prepared_call));
         }
 
-        let intents = self.publish_apply(claim, fold, intents).await?;
-        self.flush_last(claim, &intents).await?;
+        let intents = self.publish_durable(claim, fold, intents).await?;
+
         let prepared: Vec<_> = prepared
             .into_iter()
             .zip(intents.into_facts())
@@ -1507,8 +1485,8 @@ impl Driver {
                 identity: effect.identity.clone(),
             })
             .collect();
-        let starts = self.publish_apply(claim, fold, starts).await?;
-        self.flush_last(claim, &starts).await?;
+        self.publish_durable(claim, fold, starts).await?;
+
         for effect in &prepared {
             self.track_tool(claim, composition.clone(), effect.identity.clone());
         }
@@ -1543,8 +1521,8 @@ impl Driver {
             conclusion: settlement.conclusion,
         };
         let returned = if settlement.domains.is_empty() {
-            let facts = self.publish_apply(claim, fold, vec![body]).await?;
-            self.flush_last(claim, &facts).await?;
+            let facts = self.publish_durable(claim, fold, vec![body]).await?;
+
             facts
                 .into_facts()
                 .into_iter()
@@ -2033,7 +2011,7 @@ impl Driver {
         ));
     }
 
-    pub(super) async fn publish_apply(
+    pub(super) async fn publish_durable(
         &self,
         claim: &TurnClaim,
         fold: &mut ModelContextState,
@@ -2060,21 +2038,13 @@ impl Driver {
             fold.ingest(ContextPage::Canonical(&facts[unapplied..]))
                 .map_err(|error| context_failure("context.incremental", &error))?;
         }
-        Ok(receipt)
-    }
-
-    pub(super) async fn flush_last(
-        &self,
-        claim: &TurnClaim,
-        receipt: &rsi_agent_turn_protocol::PublishedFacts,
-    ) -> std::result::Result<(), DriveFailure> {
         let seq = receipt
             .facts()
             .last()
             .ok_or_else(|| failed("executor.empty_publish", "publication returned no Facts"))?
             .seq();
         self.flush_durable(claim, seq).await?;
-        Ok(())
+        Ok(receipt)
     }
 
     pub(super) async fn flush_durable(
@@ -2082,18 +2052,13 @@ impl Driver {
         claim: &TurnClaim,
         through_seq: u64,
     ) -> std::result::Result<u64, DriveFailure> {
-        tokio::time::timeout(
-            self.config.durability_wait(),
-            self.turns.flush(claim, through_seq),
+        crate::execution_support::flush_execution_prefix(
+            self.turns.as_ref(),
+            &self.config,
+            claim,
+            through_seq,
         )
         .await
-        .map_err(|_| {
-            fatal(format!(
-                "Fact durability wait exceeded {} ms",
-                self.config.durability_wait_ms
-            ))
-        })?
-        .map_err(fatal)
     }
 
     pub(super) async fn sync_fold(
