@@ -199,6 +199,9 @@ intersecting blocks in transcript order without per-block scroll geometry reads.
 Inline-card selection waits for the initial observation of every current block;
 an unobserved block is not evidence of an empty viewport. Removing all blocks or
 disabling inline cards still clears the selection without waiting for observations.
+Visibility delivery retries at most twice immediately with the same sequence.
+After both attempts fail, a later unchanged observation may send a fresh sequence;
+an older failure cannot invalidate a newer observation or generation.
 Closing a browser tab cannot guarantee Rust cleanup; the service's
 transport owners still bound and clean up their disconnected work.
 

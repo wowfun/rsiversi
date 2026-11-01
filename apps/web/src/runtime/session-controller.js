@@ -155,7 +155,11 @@ export function createPaneClass(context) {
                 owner.closing
               )
                 break;
-              if (attempt === 1) context.notify(error.message);
+              if (attempt === 1) {
+                if (this.visibleSequence.toString() === request.sequence)
+                  this.visibleKey = undefined;
+                context.notify(error.message);
+              }
               else await new Promise((resolve) => setTimeout(resolve, 100));
             }
           }
