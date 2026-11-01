@@ -13,6 +13,12 @@ Host epoch plus the `rsi.web.control` descriptor. Applications do not create an
 additional Store or rotate credentials when attaching.
 Invalid Web/Serve arguments are rejected before activation and retain a bounded
 application diagnostic, so the CLI can report the specific rejected option.
+Failures before listener/frontend readiness use bootstrap exit code 2. After
+readiness, failures including an unexpected Host listener or watched frontend
+exit use runtime exit code 1. The foreground application's own shutdown request
+or signal succeeds; an independently requested Host stop is listener loss for
+that application and exits 1. This follows the application
+[failure classification](../../crates/rsi/application/README.md).
 
 `rsi web` starts or reuses one loopback listener, prints a fresh one-use ticket,
 opens the browser in the caller's desktop environment and returns. Omitting

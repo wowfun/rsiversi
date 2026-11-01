@@ -891,3 +891,8 @@ It uses the actual document and isolated transport. `composer-controls-live.mjs`
 is opt-in through `RSI_LIVE_ENV_FILE`, `RSI_WEB_BINARY`, `RSI_WEB_ASSETS` and
 `RSI_WEB_REPORT`; it verifies a real DeepSeek effort selection and sandbox mode
 in persisted Session facts, with screenshots from the shipped package.
+`RSI_PAIRED_BUNDLE=BUNDLE RSI_WEB_REPORT=OUTPUT node
+fixtures/rsi/web-product/service-host-stop.mjs` starts an isolated foreground
+Serve, waits for readiness, stops its Host independently and requires runtime
+exit 1 without a termination signal. It exercises actual processes and listener
+lifetime without provider calls or real user state.

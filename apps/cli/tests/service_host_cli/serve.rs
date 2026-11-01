@@ -88,7 +88,7 @@ async fn foreground_serve_supports_local_clients_reload_and_exact_host_stop() {
         .unwrap()
         .unwrap();
     assert!(
-        !output.status.success()
+        output.status.code() == Some(1)
             && String::from_utf8_lossy(&output.stderr).contains("Host listener stopped"),
         "{}",
         String::from_utf8_lossy(&output.stderr)

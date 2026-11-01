@@ -184,7 +184,7 @@ impl ApplicationRun for Runner {
                 Ok(()) => 0,
                 Err(error) => {
                     eprintln!("error: {error}");
-                    2
+                    error.exit_code()
                 }
             };
             let _ = sender.send(code);
@@ -223,15 +223,15 @@ pub async fn request(
     .map_err(|_| "Web control readiness deadline elapsed".to_owned())?
 }
 impl Runner {
-    async fn execute(&self) -> Result<(), String> {
+    async fn execute(&self) -> Result<(), RsiError> {
         let mut frontend = if let Some(runtime) = &self.frontend {
             let Command::Launch { assets, .. } = &self.command else {
-                return Err("frontend requires a Web launch".into());
+                return Err(RsiError::Boot("frontend requires a Web launch".into()));
             };
             let assets = assets.clone().unwrap_or_default();
             Some(tokio::select! {
                 () = self.stop.cancelled() => return Ok(()),
-                result = runtime.start(&assets) => result?,
+                result = runtime.start(&assets) => result.map_err(RsiError::Boot)?,
             })
         } else {
             None
@@ -245,10 +245,10 @@ impl Runner {
     async fn execute_with_frontend(
         &self,
         mut frontend: Option<&mut crate::FrontendSession>,
-    ) -> Result<(), String> {
+    ) -> Result<(), RsiError> {
         let command = if let Some(frontend) = &frontend {
             let Command::Launch { assets, .. } = &self.command else {
-                return Err("frontend requires a Web launch".into());
+                return Err(RsiError::Boot("frontend requires a Web launch".into()));
             };
             Command::Watch {
                 assets: assets.clone().unwrap_or_default(),
@@ -259,20 +259,20 @@ impl Runner {
         };
         let (mut stream, reply) = tokio::select! {
             () = self.stop.cancelled() => return Ok(()),
-            result = request(&self.owner, command) => result?,
+            result = request(&self.owner, command) => result.map_err(RsiError::Boot)?,
         };
         let Reply::Ready {
             address, ticket, ..
         } = reply
         else {
-            return Err("listener did not report readiness".into());
+            return Err(RsiError::Boot("listener did not report readiness".into()));
         };
         if let Some(web) = &self.web {
-            let ticket = ticket.ok_or("missing launch ticket")?;
+            let ticket = ticket.ok_or_else(|| RsiError::Boot("missing launch ticket".into()))?;
             let origin = if let Some(frontend) = frontend.as_mut() {
                 tokio::select! {
                     () = self.stop.cancelled() => return Ok(()),
-                    ready = frontend.configure(address) => ready?,
+                    ready = frontend.configure(address) => ready.map_err(RsiError::Boot)?,
                 }
                 frontend.origin().to_owned()
             } else {
@@ -280,7 +280,7 @@ impl Runner {
             };
             let url = format!("{origin}#rsi-launch={ticket}");
             println!("rsi web: {url}");
-            if web.requested().map_err(|e| e.to_string())?.2
+            if web.requested().map_err(|e| RsiError::Run(e.to_string()))?.2
                 && let Some(opener) = &web.environment.opener
                 && opener.open(&url).await.is_err()
             {
@@ -290,8 +290,8 @@ impl Runner {
                 let mut byte = [0];
                 return tokio::select! {
                     () = self.stop.cancelled() => Ok(()),
-                    () = frontend.stopped() => Err("frontend exited during watch".into()),
-                    _ = stream.read(&mut byte) => Err("Host watch listener stopped".into()),
+                    () = frontend.stopped() => Err(RsiError::Run("frontend exited during watch".into())),
+                    _ = stream.read(&mut byte) => Err(RsiError::Run("Host watch listener stopped".into())),
                 };
             }
             return Ok(());
@@ -304,12 +304,12 @@ impl Runner {
             "{}",
             serde_json::json!({"event":"serving", "origin":origin, "bind":address.to_string()})
         );
-        let mut signals = crate::service::Signals::new()?;
+        let mut signals = crate::service::Signals::new().map_err(RsiError::Run)?;
         let mut byte = [0];
         tokio::select! {
             () = self.stop.cancelled() => Ok(()),
             _ = signals.next(false) => Ok(()),
-            _ = stream.read(&mut byte) => Err("Host listener stopped".into()),
+            _ = stream.read(&mut byte) => Err(RsiError::Run("Host listener stopped".into())),
         }
     }
 }

@@ -250,6 +250,7 @@ export async function startService({ binary, assets, report, configure, onReques
     };
     await startProcess();
     return { origin, launchUrl, developmentHttp: new URL(origin).protocol === 'http:', workspace, run, provider, close, get pid() { return child.pid; },
+      waitForExit: () => deadline(stopped, 'foreground service exit', 20_000),
       async readSessionFacts(session) {
         assert(typeof session==='string'&&session.length>0&&session.length<=128);
         const {DatabaseSync}=await import('node:sqlite');
