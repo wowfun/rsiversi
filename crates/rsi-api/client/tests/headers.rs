@@ -43,13 +43,21 @@ fn finite_and_sse_metadata_reject_contradictory_representations() {
     headers.insert("content-length", "2".parse().unwrap());
     let head = finite_response_head(200, &headers).unwrap();
     assert_eq!(head.length, Some(2));
-    assert!(!head.domain_error);
+    assert!(matches!(
+        head.encoding,
+        rsi_api_client::FiniteEncoding::Json
+    ));
     assert!(finite_response_head(422, &headers).is_err());
     headers.insert(
         "content-type",
         "application/vnd.rsi.domain-error+json".parse().unwrap(),
     );
-    assert!(finite_response_head(422, &headers).unwrap().domain_error);
+    let head = finite_response_head(422, &headers).unwrap();
+    assert!(matches!(
+        head.encoding,
+        rsi_api_client::FiniteEncoding::Json
+    ));
+    assert_eq!(head.length, Some(2));
     headers.append("content-length", "2".parse().unwrap());
     assert!(finite_response_head(422, &headers).is_err());
     headers.remove("content-length");

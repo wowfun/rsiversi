@@ -53,8 +53,6 @@ pub struct FiniteResponseHead {
     pub encoding: FiniteEncoding,
     /// Declared wire bytes, including binary framing when present.
     pub length: Option<usize>,
-    /// Whether the JSON body carries a closed domain failure.
-    pub domain_error: bool,
 }
 /// Accepts successful finite data or a typed domain error, rejecting contradictory headers.
 pub fn finite_response_head(status: u16, headers: &http::HeaderMap) -> Result<FiniteResponseHead> {
@@ -71,7 +69,6 @@ pub fn finite_response_head(status: u16, headers: &http::HeaderMap) -> Result<Fi
     Ok(FiniteResponseHead {
         encoding,
         length: response_content_length(headers)?,
-        domain_error: status == 422,
     })
 }
 /// Checks that a decoded common failure agrees with its HTTP status.

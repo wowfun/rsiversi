@@ -31,6 +31,8 @@ Finite decoding acquires its response reservation before polling body bytes.
 Shared HTTP response validation checks single-valued identity, content type and
 length headers before body decoding. Native and browser transports supply header
 values; neither owns an independent interpretation of those response fields.
+The validated finite head carries encoding and length; HTTP status remains the
+source for classifying a typed domain error.
 JSON receives within admitted capacity; binary replies consume a fixed 16-byte length
 prefix and reserve the exact combined payload before allocation. Metadata and
 binary slices share their original allocation's lease. At finite EOF the decoder

@@ -121,11 +121,6 @@ impl SessionController {
         }
         Ok((entries, notice))
     }
-    /// Reads the current named Agent catalog, including unavailable definitions for preview.
-    pub async fn agent_completions(&self) -> Result<Vec<InputCompletion>> {
-        self.agent_completions_from(&self.resource_sources().await?)
-            .await
-    }
     async fn resource_sources(&self) -> Result<Vec<ContributionId>> {
         let snapshot = self.read_resource(SessionResourceRequest::Sources).await?;
         let SessionResourceValue::Sources { sources } = &snapshot.response().value else {
@@ -198,11 +193,6 @@ impl SessionController {
         }
     }
 
-    /// Discovers user-invocable skills from this Session's contribution catalog.
-    pub async fn skill_completions(&self, command_names: &[&str]) -> Result<Vec<InputCompletion>> {
-        self.skill_completions_from(command_names, &self.resource_sources().await?)
-            .await
-    }
     async fn skill_completions_from(
         &self,
         command_names: &[&str],
