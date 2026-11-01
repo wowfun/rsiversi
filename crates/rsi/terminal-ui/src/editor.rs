@@ -44,9 +44,6 @@ impl Editor {
     pub fn retained_bytes(&self) -> usize {
         self.text.capacity() + self.journal.bytes
     }
-    pub fn has_edits(&self) -> bool {
-        !self.journal.undo.is_empty() || !self.journal.redo.is_empty()
-    }
     pub fn set_retention_limit(&mut self, budget: usize) {
         self.retention_limit = budget.min(MAX_TEXT + journal::MAXIMUM_BYTES);
         if self.text.capacity() > self.retention_limit {

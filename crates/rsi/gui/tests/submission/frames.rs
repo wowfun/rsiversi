@@ -160,6 +160,10 @@ async fn application_frames_follow_models_details_and_generation_changes_without
     let pane = &initial["view"]["surfaces"]["main"];
     assert!(pane.get("draft").is_none());
     assert!(pane.get("images").is_none());
+    assert!(pane.get("conversation").is_none());
+    assert!(pane.get("capabilities").is_none());
+    assert_eq!(pane["kind"], "native");
+    assert!(pane["session"].is_string());
     assert_eq!(pane["header"].as_str().unwrap().len(), 64);
     app.command(&json!({"action":"model","pane":"main","generation":pane["generation"],"model":{"deployment":"changed","model":"next"}}).to_string()).await.unwrap();
     let model = frame(&app, Some("1"));

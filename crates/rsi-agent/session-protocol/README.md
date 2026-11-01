@@ -4,7 +4,7 @@
 admission and durable timing projections share this cardinality limit.
 
 Live prefix transport appends canonical base64 pages at an exact raw byte offset.
-The receiver retains immutable compact blocks and a grammar cursor, validating
+`ModelPrefixDecoder` retains immutable compact blocks and a grammar cursor, validating
 only newly appended events. Each revision ends at an event boundary and declares
 the complete event count; gaps, rewrites, malformed events and overflow fail closed.
 

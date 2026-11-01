@@ -335,10 +335,7 @@ impl Pane {
             .expect("GUI metrics poisoned")
             .clone();
         let metadata = serde_json::json!({
-            "kind":"native","conversation":rsi_conversation::ConversationIdentity::Native(current.id.clone()),
-            "capabilities":rsi_conversation::ConversationCapabilities::native(
-                !current.protected&&current.controller.goal_changes().borrow().as_ref().is_some_and(std::result::Result::is_ok),
-                !current.protected&&current.creation.is_some() && !current.durable.load(std::sync::atomic::Ordering::Acquire), !current.protected),
+            "kind":"native",
             "inline": inline::frames(&current, &state, ui),
             "generation": current.generation.to_string(), "selection": self.selection.load(std::sync::atomic::Ordering::Acquire).to_string(), "session":current.id, "path":current.path,"workspace":current.workspace,
             "ui_surfaces": ui.surfaces(&current.ui_target).unwrap_or_default(),

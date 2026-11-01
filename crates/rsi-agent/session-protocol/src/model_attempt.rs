@@ -253,49 +253,6 @@ impl ModelAttemptPrefix {
             self.chunks.len() - offset / RAW_CHUNK_BYTES
         }
     }
-    /// Validates a complete immutable prefix reconstructed from bounded transport pages.
-    pub fn from_pages(pages: Vec<String>, expected_events: u64) -> Result<Self> {
-        let mut total = 64_usize;
-        let count = pages.len();
-        for (index, page) in pages.iter().enumerate() {
-            total = total
-                .checked_add(page.len() + 3)
-                .ok_or_else(|| invalid("prefix size overflow"))?;
-            if total > STREAM_BYTES || page.len() > 192 * 1024 {
-                return Err(invalid("prefix capacity exceeded"));
-            }
-            let decoded = STANDARD
-                .decode(page)
-                .map_err(|_| invalid("invalid prefix base64"))?;
-            if decoded.is_empty()
-                || decoded.len() > RAW_CHUNK_BYTES
-                || STANDARD.encode(&decoded) != *page
-                || (index + 1 < count && decoded.len() != RAW_CHUNK_BYTES)
-            {
-                return Err(invalid("noncanonical prefix page"));
-            }
-        }
-        let prefix = Self {
-            chunks: pages
-                .into_iter()
-                .map(|page| Chunk(Arc::from(page)))
-                .collect(),
-            events: expected_events,
-        };
-        let mut assembler = LanguageAssembler::new();
-        let mut actual = 0;
-        for item in prefix.events() {
-            assembler
-                .push(&item?.1)
-                .map_err(|error| invalid(error.to_string()))?;
-            actual += 1;
-        }
-        if actual != expected_events {
-            return Err(invalid("prefix event count differs"));
-        }
-        Ok(prefix)
-    }
-
     /// Original event count, used to suppress duplicate snapshot delivery.
     pub fn event_count(&self) -> u64 {
         self.events

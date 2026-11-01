@@ -72,6 +72,11 @@ renders this panel in Linux Desktop.
 
 ## Turn presentation
 
+Native pane frames identify their Session through `kind`, `session`, `header` and
+generation. Controls consume their owning command and contribution projections;
+native frames do not duplicate identity or capability summaries. External frames
+retain their distinct observed conversation identity and negotiated capabilities.
+
 Each loaded transcript window owns a separate, bounded Turn index. Its revision
 and upsert/remove patches reference stable block keys; reclassification never
 changes a block's content revision. Classification is recomputed only for Turns

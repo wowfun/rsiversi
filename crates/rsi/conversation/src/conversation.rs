@@ -130,16 +130,6 @@ pub struct ConversationCapabilities {
     pub load: bool,
 }
 impl ConversationCapabilities {
-    /// Native capabilities remain selected by the native controller's actual state.
-    pub const fn native(goal: bool, preset: bool, submit: bool) -> Self {
-        Self {
-            goal,
-            preset,
-            submit,
-            resume: false,
-            load: false,
-        }
-    }
     /// External conversations never acquire native Goal or preset authority.
     pub fn external(snapshot: &Snapshot, connected: bool) -> Self {
         Self {
