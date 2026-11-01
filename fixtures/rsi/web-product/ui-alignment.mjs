@@ -23,19 +23,13 @@ for(const [name,engine] of Object.entries({chromium,firefox})){
     const editor=await page.getByLabel('Main message',{exact:true}).elementHandle();
     await page.getByTestId('choose-workspace').click();
     const dialog=page.getByRole('dialog',{name:'Select workspace directory'});
-    if(process.platform==='win32') {
-      // Native browsing is explicitly Unix-only; exercise the supported known-path entry.
-      await dialog.getByRole('status').filter({hasText:'Directory browsing is unavailable for this location.'}).waitFor();
-      await mkdir(join(service.workspace,'ui-folder'));
-      await dialog.getByLabel('Directory path').fill(join(service.workspace,'ui-folder'));
-      checks.push({directoryBrowsing:'unsupported on Windows',knownPathEntry:true});
-    } else {
+    await dialog.locator('.directory-columns[aria-busy=false]').waitFor();
     await dialog.getByRole('button',{name:'Edit directory path',exact:true}).click();await dialog.getByLabel('Directory path').fill(service.workspace);await dialog.getByRole('button',{name:'Go',exact:true}).click();
     await dialog.getByRole('button',{name:'+ New folder',exact:true}).click();await dialog.getByLabel('Folder name').fill('.');await dialog.getByRole('button',{name:'Create folder',exact:true}).click();await dialog.getByRole('status').filter({hasText:'Invalid directory path or folder name'}).waitFor();assert.equal(await dialog.getByRole('button',{name:'Read parent to check result',exact:true}).count(),0);await dialog.getByLabel('Folder name').fill('ui-folder');await dialog.getByRole('button',{name:'Create folder',exact:true}).click();
-    await page.waitForFunction(()=>document.querySelector('.directory-column:last-child')?.getAttribute('aria-label')?.endsWith('/ui-folder'));assert.equal(await dialog.locator('.directory-column').count(),2);await page.screenshot({path:join(directory,'directory-dark.png')});
+    await page.waitForFunction(()=>document.querySelector('.directory-column:last-child')?.getAttribute('aria-label')?.replaceAll('\\','/').endsWith('/ui-folder'));assert.equal(await dialog.locator('.directory-column').count(),2);await page.screenshot({path:join(directory,'directory-dark.png')});
     checks.push({directory:true,create:true});
-    }
     await dialog.locator('footer').getByRole('button',{name:'Open',exact:true}).click();await dialog.waitFor({state:'detached'});await page.waitForFunction(()=>!document.querySelector('[aria-label="Main message"]').disabled);
+    await page.getByRole('button',{name:'New conversation in ui-folder',exact:true}).click();
     assert((await stat(join(service.workspace,'ui-folder'))).isDirectory());
     assert(await editor.evaluate(node=>node===document.querySelector('[aria-label="Main message"]')));
     const input=page.getByLabel('Main message',{exact:true});await input.fill('Markdown example');await input.press('Enter');await page.locator('.message.assistant').filter({hasText:'Review notes'}).waitFor();await page.waitForFunction(()=>document.querySelector('.pane-status').textContent==='Completed');

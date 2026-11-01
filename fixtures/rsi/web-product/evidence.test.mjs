@@ -4,7 +4,20 @@ import {mkdtemp, mkdir, writeFile, readFile, symlink, lstat, rm} from 'node:fs/p
 import {tmpdir} from 'node:os';
 import {join} from 'node:path';
 import {cleanupAll,finishFixture} from './cleanup.mjs';
-import {redactEvidence, requireProviderUsage, liveTurnTerminal, settleLiveEvidence, recoverLiveRead} from './evidence.mjs';
+import {redactEvidence, requireProviderUsage, requireFileRead, liveTurnTerminal, settleLiveEvidence, recoverLiveRead} from './evidence.mjs';
+
+test('live file-read evidence rejects failed, stale, unrelated and missing-content results',()=>{
+  const intent={seq:11,type:'tool_intent',name:'file_read',arguments:{path:'fixture.txt'},turn_id:'current',effect_id:'read'};
+  const result={seq:12,type:'tool_result',turn_id:'current',effect_id:'read',result:{is_error:false,content:[{type:'text',text:'1: expected line'}]}};
+  const check=facts=>requireFileRead(facts,10,'fixture.txt',['expected line']);
+  assert.equal(check([intent,result]),result);
+  for(const patch of [{seq:9},{turn_id:'older'},{effect_id:'unrelated'},
+    {result:{...result.result,is_error:true}},{result:{is_error:false,content:[{type:'text',text:'cannot read fixture.txt'}]}}]) {
+    assert.throws(()=>check([intent,{...result,...patch}]),/successful current-turn/);
+  }
+  assert.throws(()=>check([intent]),/successful current-turn/);
+  assert.throws(()=>check([{...intent,arguments:{path:'other.txt'}},result]),/successful current-turn/);
+});
 
 test('live read recovery never replays the read or masks unclassified failures',async()=>{
   const timeout=new Error('read timed out');timeout.name='TimeoutError';

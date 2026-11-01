@@ -652,6 +652,11 @@ with reconnect. It captures 390/768/1024/1440/1920-pixel viewports under light,
 dark and system appearance. Screenshot files are human comparison evidence, not
 pixel goldens. The React document checks separately observe Turn reclassification,
 unchanged DOM child identity and bounded to one CSS pixel reading-anchor preservation.
+Directory browsing uses the supported native Windows/Unix path. The opt-in
+`alignment-live.mjs` selects its registered fixture workspace explicitly and
+requires a successful, current-turn `file_read` result containing the fixture
+lines. A tool intent, a marker in a refusal, or an older successful result cannot
+establish that the file was read. The fixture also checks unchanged file bytes.
 Shared `controls.mjs` opens the actual Resources, detail and navigation controls;
 fixtures identify conversation rows by Session ID rather than visible title text.
 The same helpers open the directory picker and onboard a provider through
@@ -907,6 +912,16 @@ It uses the actual document and isolated transport. `composer-controls-live.mjs`
 is opt-in through `RSI_LIVE_ENV_FILE`, `RSI_WEB_BINARY`, `RSI_WEB_ASSETS` and
 `RSI_WEB_REPORT`; it verifies a real DeepSeek effort selection and sandbox mode
 in persisted Session facts, with screenshots from the shipped package.
+
+`RSI_REPORT_DIR=OUTPUT node fixtures/rsi/web-product/reflow.mjs` exercises the
+actual document module graph in Chromium and Firefox at 320/390 CSS pixels,
+12/14/17 px application content settings, light/dark and forced colors with
+reduced motion. It records keyboard navigation, external permission actions,
+terminal controls and failure/reconnect actionability, overflow and screenshots.
+A deliberately overflowing element must fail the same geometry probe. These
+source fixtures do not prove Worker/backend integration, browser text-only zoom,
+OS magnification or screen-reader behavior; paired and manual evidence remain separate.
+
 `RSI_REPORT_DIR=OUTPUT node fixtures/rsi/web-product/dock-keyboard.mjs` checks
 real split and float keyboard controls, focus retention, undo and viewport bounds
 in Chromium and Firefox, including minimum size when End fills a clipped edge.

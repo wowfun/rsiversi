@@ -49,6 +49,17 @@ export function requireProviderUsage(facts) {
   return usage;
 }
 
+export function requireFileRead(facts, afterSeq, path, expectedLines) {
+  const intents=facts.filter(fact=>fact.seq>afterSeq && fact.type==='tool_intent'
+    && fact.name==='file_read' && fact.arguments?.path===path);
+  const result=facts.find(fact=>fact.seq>afterSeq && fact.type==='tool_result'
+    && fact.result?.is_error===false && intents.some(intent=>intent.effect_id===fact.effect_id
+      && intent.turn_id===fact.turn_id && intent.seq<fact.seq)
+    && expectedLines.every(line=>fact.result.content?.some(part=>part.type==='text' && part.text.includes(line))));
+  assert(result,'A successful current-turn file_read result with the expected content is required');
+  return result;
+}
+
 export function liveTurnTerminal(facts, prompt, afterSeq) {
   const input = facts.findLast(fact => fact.seq > afterSeq && fact.type === 'input_message_entered'
     && fact.source?.type === 'human'

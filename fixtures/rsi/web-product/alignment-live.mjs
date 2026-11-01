@@ -10,7 +10,7 @@ import {chromium} from 'playwright';
 import {startService} from './service.mjs';
 import {detailMode} from './controls.mjs';
 import {readDeepseekKey,liveLimits,deepseekProfile} from './live-limits.mjs';
-import {requireProviderUsage,settleLiveEvidence} from './evidence.mjs';
+import {requireProviderUsage,requireFileRead,settleLiveEvidence} from './evidence.mjs';
 
 assert(process.env.RSI_LIVE_ENV_FILE && process.env.RSI_LIVE_MODEL && process.env.RSI_WEB_REPORT,'Explicit live environment, model and report required');
 const model=process.env.RSI_LIVE_MODEL,limits=liveLimits(),key=await readDeepseekKey(process.env.RSI_LIVE_ENV_FILE);
@@ -29,7 +29,9 @@ try {
   await page.goto(service.origin);await page.getByLabel('Device registration receipt').fill(JSON.stringify(service.register('alignment live')));
   await page.getByRole('button',{name:'Connect',exact:true}).click();await page.locator('#workbench').waitFor();
   await workspaceForm(page);await page.getByLabel('Directory path').fill(service.workspace);
-  await page.locator('.directory-picker footer').getByRole('button',{name:'Open',exact:true}).click();await page.locator('#workspaces [data-testid=workspace-open]').click();
+  await page.locator('.directory-picker footer').getByRole('button',{name:'Open',exact:true}).click();
+  await page.getByRole('dialog',{name:'Select workspace directory',exact:true}).waitFor({state:'detached'});
+  await page.getByRole('button',{name:'New conversation in workspace',exact:true}).click();
   const pane=page.getByRole('region',{name:'Main conversation',exact:true}),input=pane.getByLabel('Main message',{exact:true});
   const submit=async prompt=>{await input.fill(prompt);await pane.getByTestId('composer-send').click();await page.waitForFunction(()=>document.querySelector('[aria-label="Main message"]').value==='');};
   const complete=async(marker,stage)=>{
@@ -47,9 +49,9 @@ try {
   await detailMode(page,'verbose');
   await submit('Use only the file_read tool to read live-check.txt in the current workspace. Do not write any file or run shell commands. Report its first line, alpha and beta, then the exact marker RSI_READ_VERIFIED_1027.');
   const read=await complete('RSI_READ_VERIFIED_1027','readonly');
-  assert(read.facts.some(fact=>fact.type==='tool_intent'&&fact.name==='file_read'),'actual file_read intent required');
+  const readResult=requireFileRead(read.facts,markdown.facts.at(-1).seq,'live-check.txt',['RSI_READONLY_OK_1027','alpha=7','beta=11']);
   assert.equal((await readFile(join(service.workspace,'live-check.txt'))).toString(),original);
-  checks.push({readonly:true,fileSha256:sha(original),usage:read.usage});
+  checks.push({readonly:true,successfulToolResultSeq:readResult.seq,fileSha256:sha(original),usage:read.usage});
   await submit('Use no tools. Write 500 numbered, distinct UI test cases, each with a full sentence. Do not summarize; continue until all 500 are written.');
   const stop=pane.getByRole('button',{name:'Stop',exact:true});await stop.waitFor({timeout:60000});await stop.click();
   await stop.waitFor({state:'hidden',timeout:60000});
