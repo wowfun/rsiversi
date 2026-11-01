@@ -630,6 +630,8 @@ mod tests {
     #[cfg(target_os = "linux")]
     #[test]
     fn failed_finalize_diagnostic_from_dylib_requires_owner() {
+        type Entry =
+            unsafe extern "C" fn(*const rsi_meta_native::HostTable, *mut PluginTable, u32) -> u32;
         let directory = tempfile::tempdir().unwrap();
         let source = directory.path().join("diagnostic.c");
         let library_path = directory.path().join("diagnostic.so");
@@ -687,8 +689,6 @@ uint32_t rsi_meta_plugin_entry_v3(const rsi_meta_host_table *host,
         // SAFETY: This test just compiled the trusted fixture; the mapping remains
         // live until the transport and every borrowed pointer have been dropped.
         let library = unsafe { libloading::Library::new(&library_path) }.unwrap();
-        type Entry =
-            unsafe extern "C" fn(*const rsi_meta_native::HostTable, *mut PluginTable, u32) -> u32;
         // SAFETY: The fixture exports the exact signature above and writes the whole table.
         let table = unsafe {
             let entry: libloading::Symbol<'_, Entry> =

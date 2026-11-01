@@ -341,7 +341,7 @@ async fn remote_client_replacement(uds: bool) {
         .with_addons(client_addons())
         .with_credential_store(Arc::new(FixtureSecret(token)));
     let owner = rsi_service_host::ServiceHostPaths::from_host_paths(composition.paths()).unwrap();
-    let mut entries = remote_client_entries(address, endpoint);
+    let mut entries = remote_client_entries(address, &endpoint);
     let stop = tokio_util::sync::CancellationToken::new();
     let daemon = if uds {
         let daemon = start_client_daemon(&composition, &root, &owner).await;
@@ -416,7 +416,7 @@ async fn remote_client_replacement(uds: bool) {
 #[cfg(target_os = "linux")]
 fn remote_client_entries(
     address: std::net::SocketAddr,
-    endpoint: rsi_api_protocol::EndpointId,
+    endpoint: &rsi_api_protocol::EndpointId,
 ) -> Vec<ProfileEntry> {
     vec![
         ProfileEntry::new(

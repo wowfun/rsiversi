@@ -531,6 +531,18 @@ fn desktop_modes_attempt_every_surface_and_preserve_any_failure() {
     }
 }
 
+#[test]
+fn desktop_sandbox_policy_starts_after_distribution_builds() {
+    let source = fs::read_to_string(repository().join(".github/workflows/ci.yml")).unwrap();
+    let workflow: serde_json::Value = yaml_serde::from_str(&source).unwrap();
+    let steps = workflow["jobs"]["rsi-desktop"]["steps"].as_array().unwrap();
+    let position = |id| steps.iter().position(|step| step["id"] == id).unwrap();
+    for build in ["build", "foreign"] {
+        assert!(position(build) < position("sandbox"));
+    }
+    assert_eq!(steps[position("sandbox")]["if"], "${{ !cancelled() }}");
+}
+
 fn assert_windows_tooling_gate(workflow: &serde_json::Value) {
     let tools = &workflow["jobs"]["windows-repository-tools"];
     assert_eq!(tools["runs-on"], "windows-2025");
@@ -1722,7 +1734,7 @@ fn audit_command_collects_every_lockfile_and_preserves_any_failure() {
     for (name, body) in [
         (
             "git",
-            "#!/bin/sh\nprintf 'one/Cargo.lock\\0two/Cargo.lock\\0'\n",
+            "#!/bin/sh\nprintf 'one/Cargo.lock\\0two/Cargo.lock\\0'\n[ \"$RSI_TEST_FAIL\" != git ]\n",
         ),
         (
             "cargo",
@@ -1736,6 +1748,8 @@ fn audit_command_collects_every_lockfile_and_preserves_any_failure() {
     for (failure, success) in [
         ("./Cargo.lock", false),
         ("one/Cargo.lock", false),
+        ("two/Cargo.lock", false),
+        ("git", false),
         ("never-match", true),
     ] {
         let log = root.path().join("calls");

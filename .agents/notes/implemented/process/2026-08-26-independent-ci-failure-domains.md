@@ -122,8 +122,8 @@ Independent desktop fault scenarios require a successful shared build and run ev
 when another scenario fails; missing-ACK and close-deadline checks do not depend
 on sandbox preflight. Tool-using scenarios additionally require that preflight.
 Their phase diagnostics and bounded redacted child logs are always uploaded.
-Sandbox policy remains active
-through those scenarios and is restored by an always-running final step.
+Sandbox preflight follows the distribution builds. Policy remains active only
+through the dependent native scenarios and is restored by an always-running final step.
 The browser job also runs the shared document typecheck and ownership
 tests before product interaction.
 

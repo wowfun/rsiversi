@@ -33,6 +33,7 @@ class NativeGateTests(unittest.TestCase):
                 with self.subTest(test=name):
                     calls.write_text('')
                     env = dict(os.environ, PATH=f'{root}{os.pathsep}{os.environ["PATH"]}', RUNNER_TEMP=directory, FAILING_TEST=name, GITHUB_WORKSPACE=directory, POLICY_CALLS=str(calls))
-                    result = subprocess.run(['bash', '-e', '-c', script], env=env, capture_output=True, timeout=10)
+                    # Match Actions' explicit Bash shell from the workflow defaults.
+                    result = subprocess.run(['bash', '--noprofile', '--norc', '-eo', 'pipefail', '-c', script], env=env, capture_output=True, timeout=10)
                     self.assertEqual(result.returncode, 23 if name else 0, result.stdout.decode(errors="replace") + result.stderr.decode(errors="replace"))
                     self.assertEqual(calls.read_text().splitlines(), ['prepare', 'restore'])

@@ -977,10 +977,12 @@ jobs:
         run: |
           status=0
           cargo audit --file ./Cargo.lock || status=1
-          while IFS= read -r -d '' lockfile; do
-            cargo audit --file "$lockfile" || status=1
-          done < <(git ls-files -z -- '**/Cargo.lock')
-          exit "$status"
+          git ls-files -z -- '**/Cargo.lock' | (
+            while IFS= read -r -d '' lockfile; do
+              cargo audit --file "$lockfile" || status=1
+            done
+            exit "$status"
+          )
 
   windows-rsi-meta:
     runs-on: windows-2025
@@ -1359,13 +1361,6 @@ jobs:
       - name: Exercise native admission
         timeout-minutes: 10
         run: dbus-run-session -- xvfb-run -a cargo run --locked --manifest-path fixtures/rsi/desktop-admission/Cargo.toml
-      - name: Prepare native sandbox enforcement
-        id: sandbox
-        timeout-minutes: 10
-        run: |
-          python3 "$GITHUB_WORKSPACE/.github/scripts/sandbox-policy.py" prepare "$RUNNER_TEMP/rsi-desktop-sandbox-policy.json" full
-          cargo test --locked -p rsi-sandbox-local --test local native_bubblewrap_enforces_read_only_and_workspace_write_plans -- --ignored --exact --list | rg --fixed-strings --line-regexp 'native_bubblewrap_enforces_read_only_and_workspace_write_plans: test'
-          cargo test --locked -p rsi-sandbox-local --test local native_bubblewrap_enforces_read_only_and_workspace_write_plans -- --ignored --exact
       - name: Install pinned frontend package manager
         timeout-minutes: 5
         run: |
@@ -1384,6 +1379,14 @@ jobs:
         timeout-minutes: 100
         run: |
           RUSTFLAGS="-Cdebug-assertions=no" cargo run --locked -p rsi-app-tools -- fixture-dist desktop "$RUNNER_TEMP/rsi-desktop-foreign" --debug
+      - name: Prepare native sandbox enforcement
+        id: sandbox
+        if: ${{ !cancelled() }}
+        timeout-minutes: 10
+        run: |
+          python3 "$GITHUB_WORKSPACE/.github/scripts/sandbox-policy.py" prepare "$RUNNER_TEMP/rsi-desktop-sandbox-policy.json" full
+          cargo test --locked -p rsi-sandbox-local --test local native_bubblewrap_enforces_read_only_and_workspace_write_plans -- --ignored --exact --list | rg --fixed-strings --line-regexp 'native_bubblewrap_enforces_read_only_and_workspace_write_plans: test'
+          cargo test --locked -p rsi-sandbox-local --test local native_bubblewrap_enforces_read_only_and_workspace_write_plans -- --ignored --exact
       - name: Prepare Automation product runtime
         id: automation_runtime
         if: ${{ !cancelled() && steps.build.outcome == 'success' && steps.sandbox.outcome == 'success' }}
