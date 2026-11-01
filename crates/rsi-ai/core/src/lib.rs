@@ -27,6 +27,7 @@ use rsi_meta::{
 use serde_json::Value;
 use sha2::{Digest, Sha256};
 use std::collections::{BTreeMap, HashSet};
+use std::ops::Bound::{Included, Unbounded};
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::{Arc, Mutex, Weak};
 use tokio_util::sync::CancellationToken;
@@ -242,26 +243,28 @@ impl rsi_ai_protocol::LanguageModels for Router {
             .lock()
             .unwrap_or_else(std::sync::PoisonError::into_inner);
         let mut models = Vec::with_capacity(limit);
-        for (deployment, route) in &inner.routes {
+        let start = after.map_or(Unbounded, |cursor| Included(cursor.deployment()));
+        for (deployment, route) in inner.routes.range::<str, _>((start, Unbounded)) {
             if !route.gate.is_committed() {
                 continue;
             }
             let Some(adapter) = route.registration.language() else {
                 continue;
             };
-            for (model, _) in adapter.models().iter() {
-                let model = ModelRef::new(deployment.clone(), model)
-                    .expect("registered and configured model identifiers are validated");
-                if after.is_some_and(|after| model <= *after) {
-                    continue;
-                }
+            let model_after = after
+                .filter(|cursor| cursor.deployment() == deployment)
+                .map(ModelRef::model);
+            for (model, _) in adapter.models().iter_after(model_after) {
                 if models.len() == limit {
                     return Ok(rsi_ai_protocol::LanguageModelPage {
                         models,
                         has_more: true,
                     });
                 }
-                models.push(model);
+                models.push(
+                    ModelRef::new(deployment.clone(), model)
+                        .expect("registered and configured model identifiers are validated"),
+                );
             }
         }
         Ok(rsi_ai_protocol::LanguageModelPage {

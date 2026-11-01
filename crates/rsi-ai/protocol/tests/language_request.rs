@@ -598,6 +598,29 @@ fn admitted_many_message_nodes_canonicalize_with_the_request_byte_bound() {
 }
 
 #[test]
+fn model_profile_cursor_is_exclusive_even_without_an_exact_key() {
+    let mut profiles = LanguageModelProfiles::default();
+    let limits = LanguageModelLimits::new(8192, 512, 1024).unwrap();
+    for key in ["a", "c", "z"] {
+        profiles.insert(key, limits).unwrap();
+    }
+    for (after, expected) in [
+        (None, vec!["a", "c", "z"]),
+        (Some("a"), vec!["c", "z"]),
+        (Some("b"), vec!["c", "z"]),
+        (Some("z"), vec![]),
+    ] {
+        assert_eq!(
+            profiles
+                .iter_after(after)
+                .map(|(model, _)| model)
+                .collect::<Vec<_>>(),
+            expected
+        );
+    }
+}
+
+#[test]
 fn response_schema_reports_the_typed_json_node_limit() {
     let schema = json!({
         "nodes": vec![serde_json::Value::Null; rsi_ai_protocol::MAX_JSON_NODES]

@@ -150,6 +150,17 @@ impl LanguageModelProfiles {
             .map(|(model, limits)| (model.as_str(), *limits))
     }
 
+    /// Seeks an exclusive model cursor without visiting or allocating earlier entries.
+    pub fn iter_after(
+        &self,
+        after: Option<&str>,
+    ) -> impl Iterator<Item = (&str, LanguageModelLimits)> {
+        use std::ops::Bound::{Excluded, Unbounded};
+        self.profiles
+            .range::<str, _>((after.map_or(Unbounded, Excluded), Unbounded))
+            .map(|(model, limits)| (model.as_str(), *limits))
+    }
+
     /// Adds one unique, bounded printable-ASCII model identifier.
     pub fn with_profile(
         mut self,

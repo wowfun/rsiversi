@@ -147,6 +147,7 @@ async fn model_enumeration_pages_across_deployments_and_obeys_registration_gates
             .iter()
             .all(|model| model.deployment() == "z-models")
     );
+    assert_model_cursor_seeks(calls.as_ref(), visits.as_ref()).await;
     assert!(calls.list_models(None, 0).await.is_err());
     assert!(calls.list_models(None, 257).await.is_err());
     drop(leases);
@@ -162,6 +163,35 @@ async fn model_enumeration_pages_across_deployments_and_obeys_registration_gates
     drop(registrar);
     assert!(router.dispose().await.is_clean());
     assert!(credentials.dispose().await.is_clean());
+}
+
+async fn assert_model_cursor_seeks(
+    calls: &dyn rsi_ai_protocol::LanguageModels,
+    visits: &AtomicUsize,
+) {
+    for (deployment, model, expected_first) in [
+        ("z-models", "model-127", "model-128"),
+        ("m-absent", "model-127", "model-000"),
+    ] {
+        visits.store(0, Ordering::SeqCst);
+        let after = ModelRef::new(deployment, model).unwrap();
+        let page = calls.list_models(Some(&after), 64).await.unwrap();
+        page.validate(Some(&after), 64).unwrap();
+        assert_eq!(page.models.len(), 64);
+        assert_eq!(
+            page.models[0],
+            ModelRef::new("z-models", expected_first).unwrap()
+        );
+        assert!(page.has_more);
+        assert_eq!(
+            visits.load(Ordering::SeqCst),
+            1,
+            "seek skips preceding deployments"
+        );
+    }
+    let after = ModelRef::new("z-models", "model-255").unwrap();
+    let empty = calls.list_models(Some(&after), 64).await.unwrap();
+    assert!(empty.models.is_empty() && !empty.has_more);
 }
 
 #[derive(Clone)]
