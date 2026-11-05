@@ -437,7 +437,20 @@ impl ServiceHostPaths {
             |root| root.join("rsi").join(state_root_digest(paths.state())),
         );
         #[cfg(unix)]
-        let socket = runtime_directory.join(SOCKET_FILE);
+        let (runtime_directory, socket) = {
+            let socket = runtime_directory.join(SOCKET_FILE);
+            if xdg_runtime_directory.is_none()
+                && std::os::unix::net::SocketAddr::from_pathname(&socket).is_err()
+            {
+                let uid = rustix::process::geteuid().as_raw();
+                let digest = state_root_digest(paths.state());
+                let directory = Path::new("/tmp").join(format!("rsi-{uid}-{digest}"));
+                let socket = directory.join(SOCKET_FILE);
+                (directory, socket)
+            } else {
+                (runtime_directory, socket)
+            }
+        };
         #[cfg(windows)]
         let socket = PathBuf::from(format!(
             r"\\.\pipe\rsi-{}",

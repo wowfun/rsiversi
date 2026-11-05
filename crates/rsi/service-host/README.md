@@ -110,9 +110,12 @@ checks are separate from structural validation, so a rebuilt lifecycle client
 can still stop an older exact process generation. Linux signals open a pidfd
 and recheck the recorded process-start token before signaling that descriptor.
 
-Ordinary startup places the socket in the protected state home, so logging out
-does not remove the resident Host's endpoint. Embedders may explicitly supply a
-different runtime directory. The published absolute endpoint remains authoritative;
+Ordinary startup places the socket in the protected state home. If the Unix
+socket address cannot contain that path, the Host uses a private directory
+under `/tmp` named for the effective user and the state-home digest. Both
+locations are independent of the login session. The state home still owns the
+lease and owner metadata. Embedders may explicitly supply a different runtime
+directory. The published absolute endpoint remains authoritative;
 metadata discovery does not require a bindable client runtime directory.
 
 The diagnostic handle combines native socket acceptance, peer identity,

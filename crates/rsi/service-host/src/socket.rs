@@ -1,6 +1,8 @@
 use crate::owner::io_error;
 use crate::{ServiceHostError, ServiceHostPaths};
-use std::os::unix::fs::{FileTypeExt as _, MetadataExt as _, PermissionsExt as _};
+use std::os::unix::fs::{
+    DirBuilderExt as _, FileTypeExt as _, MetadataExt as _, PermissionsExt as _,
+};
 use std::{
     fs, io,
     path::{Path, PathBuf},
@@ -98,14 +100,15 @@ fn create_private_runtime_directory(path: &Path) -> Result<(), ServiceHostError>
         fs::set_permissions(parent, fs::Permissions::from_mode(0o700)).map_err(io_error)?;
         create_directory(path)?;
     } else {
-        fs::create_dir_all(path).map_err(io_error)?;
+        fs::create_dir_all(parent).map_err(io_error)?;
+        create_directory(path)?;
     }
     validate_effective_user_directory(path, "Service Host runtime path")?;
     fs::set_permissions(path, fs::Permissions::from_mode(0o700)).map_err(io_error)
 }
 
 fn create_directory(path: &Path) -> Result<(), ServiceHostError> {
-    match fs::create_dir(path) {
+    match fs::DirBuilder::new().mode(0o700).create(path) {
         Ok(()) => Ok(()),
         Err(error) if error.kind() == io::ErrorKind::AlreadyExists => Ok(()),
         Err(error) => Err(io_error(error)),
@@ -189,6 +192,29 @@ fn probe_socket(path: &Path) -> io::Result<()> {
 #[cfg(all(test, target_os = "linux"))]
 mod tests {
     use super::*;
+    #[tokio::test]
+    async fn a_long_state_home_has_a_private_connectable_socket() {
+        let home = tempfile::tempdir().unwrap();
+        let config = home.path().join("config");
+        let state = home.path().join("s".repeat(120));
+        let homes =
+            rsi_host::HostPaths::new(config, state.clone(), home.path().join("cache")).unwrap();
+        let paths = ServiceHostPaths::from_host_paths(&homes).unwrap();
+        assert!(paths.owner_directory().starts_with(&state));
+        assert!(!paths.socket().starts_with(&state));
+        let (listener, published) = PublishedSocket::bind(&paths).unwrap();
+        let _client = tokio::net::UnixStream::connect(paths.socket())
+            .await
+            .unwrap();
+        let _server = listener.accept().await.unwrap();
+        let directory = fs::symlink_metadata(paths.runtime_directory()).unwrap();
+        assert_eq!(directory.uid(), rustix::process::geteuid().as_raw());
+        assert_eq!(directory.mode() & 0o777, 0o700);
+        drop(published);
+        assert!(!paths.socket().exists());
+        fs::remove_dir(paths.runtime_directory()).unwrap();
+    }
+
     #[test]
     fn full_backlog_is_a_live_owner_without_blocking_the_publisher() {
         let directory = tempfile::tempdir().unwrap();
