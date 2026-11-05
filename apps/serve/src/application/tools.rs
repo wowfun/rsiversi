@@ -32,7 +32,7 @@ pub(super) struct Listener {
 }
 impl Listener {
     pub(super) fn validate(&self) -> rsi_meta::Result<()> {
-        if self.protocol != 12 || self.port == 0 {
+        if self.protocol != 13 || self.port == 0 {
             return Err(failure("invalid application tool listener"));
         }
         rsi_agent_session_protocol::validate_identifier("application generation", &self.generation)
@@ -321,17 +321,43 @@ impl RequestToolSource for Source {
     }
 }
 
+impl View {
+    async fn callback<T: DeserializeOwned>(
+        &self,
+        name: &str,
+        request: &(impl Serialize + Sync),
+        maximum: usize,
+        stop: CancellationToken,
+    ) -> rsi_agent_composition_protocol::Result<T> {
+        let observe = async {
+            match self.endpoint.call(name, request, maximum).await {
+                Err(ToolError::OutcomeUnknown) if !self.endpoint.retired.is_cancelled() => {
+                    self.endpoint
+                        .call(
+                            "callback-outcome",
+                            &json!({"view": self.id, "callback": name}),
+                            maximum,
+                        )
+                        .await
+                }
+                result => result,
+            }
+        };
+        tokio::select! {biased;
+            () = stop.cancelled() => Err(AgentCompositionError::ShuttingDown),
+            result = observe => result.map_err(invalid),
+        }
+    }
+}
+
 #[async_trait]
 impl RequestInputPreparer for View {
     async fn turn_stopping(
         &self,
         stop: CancellationToken,
     ) -> rsi_agent_composition_protocol::Result<()> {
-        let request = json!({"view": self.id});
-        tokio::select! {biased;
-            () = stop.cancelled() => Err(AgentCompositionError::ShuttingDown),
-            result = self.endpoint.call::<()>("stopping", &request, 128) => result.map_err(invalid),
-        }
+        self.callback("stopping", &json!({"view": self.id}), 128, stop)
+            .await
     }
 
     async fn prepare(
@@ -350,10 +376,13 @@ impl RequestInputPreparer for View {
             session: &self.session,
             input: context,
         };
-        tokio::select! {biased;
-            () = stop.cancelled() => Err(AgentCompositionError::ShuttingDown),
-            result = self.endpoint.call("prepare", &request, rsi_agent_session_protocol::MAXIMUM_SESSION_FACT_BYTES) => result.map_err(invalid),
-        }
+        self.callback(
+            "prepare",
+            &request,
+            rsi_agent_session_protocol::MAXIMUM_SESSION_FACT_BYTES,
+            stop,
+        )
+        .await
     }
 }
 

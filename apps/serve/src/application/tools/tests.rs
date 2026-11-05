@@ -9,7 +9,7 @@ pub(super) async fn endpoint() -> (TcpListener, Arc<Endpoint>) {
     let port = socket.local_addr().unwrap().port();
     let endpoint = Arc::new(Endpoint {
         listener: Listener {
-            protocol: 12,
+            protocol: 13,
             generation: "worker".into(),
             port,
         },
@@ -37,7 +37,9 @@ pub(super) fn captured_view(
 #[tokio::test]
 async fn rejected_preparation_reports_the_listener_diagnostic() {
     let (socket, endpoint) = endpoint().await;
-    let request = endpoint.call::<Value>("prepare", &(), 128);
+    let (_publish, current) = watch::channel(Some(endpoint.clone()));
+    let view = captured_view(endpoint, current);
+    let request = view.callback::<Value>("prepare", &(), 128, CancellationToken::new());
     let peer = async {
         let mut stream = accept(&socket, "prepare", &Value::Null).await;
         let body = r#"{"error":"input Session changed"}"#;
@@ -45,13 +47,21 @@ async fn rejected_preparation_reports_the_listener_diagnostic() {
     };
     let (result, ()) = tokio::join!(request, peer);
     assert!(
-        matches!(result, Err(ToolError::Execution(message)) if message.contains("400") && message.contains("input Session changed"))
+        matches!(result, Err(AgentCompositionError::InvalidInput(message)) if message.contains("400") && message.contains("input Session changed"))
     );
 }
 
 #[tokio::test]
 async fn capture_preparation_and_start_use_caller_deadlines_while_receipt_reads_time_out() {
-    for operation in ["capture", "prepare", "start", "outcome"] {
+    for operation in [
+        "capture",
+        "prepare",
+        "stopping",
+        "start",
+        "outcome",
+        "callback-outcome",
+    ] {
+        let receipt = matches!(operation, "outcome" | "callback-outcome");
         let (socket, endpoint) = endpoint().await;
         let pending =
             tokio::spawn(async move { endpoint.call::<Value>(operation, &json!({}), 128).await });
@@ -67,7 +77,7 @@ async fn capture_preparation_and_start_use_caller_deadlines_while_receipt_reads_
         tokio::time::advance(Duration::from_secs(12)).await;
         tokio::task::yield_now().await;
         tokio::time::resume();
-        if operation != "outcome" {
+        if !receipt {
             assert!(!pending.is_finished());
             respond(&mut stream, r#"{"ok":true}"#).await;
         }
@@ -75,7 +85,7 @@ async fn capture_preparation_and_start_use_caller_deadlines_while_receipt_reads_
             .await
             .unwrap()
             .unwrap();
-        if operation == "outcome" {
+        if receipt {
             assert!(matches!(result, Err(ToolError::OutcomeUnknown)));
         } else {
             assert_eq!(result.unwrap(), json!({"ok":true}));
@@ -84,7 +94,7 @@ async fn capture_preparation_and_start_use_caller_deadlines_while_receipt_reads_
 }
 
 #[tokio::test]
-async fn lost_preparation_reply_does_not_repeat_the_http_callback() {
+async fn lost_callback_replies_read_the_original_view_without_repeating_hooks() {
     let (socket, endpoint) = endpoint().await;
     let (_publish, current) = watch::channel(Some(endpoint.clone()));
     let view = captured_view(endpoint, current);
@@ -100,20 +110,59 @@ async fn lost_preparation_reply_does_not_repeat_the_http_callback() {
         trailing_facts: 0,
     };
     let payload = json!({"view":"capture", "session":"session", "input":context});
-    let request = view.prepare(&context, CancellationToken::new());
     let worker = async {
-        // The worker accepted the complete preparation, but its reply was lost.
-        drop(accept(&socket, "prepare", &payload).await);
+        for (callback, request, reply) in [
+            ("prepare", payload, r#"{"kind":"reject"}"#),
+            ("stopping", json!({"view":"capture"}), "null"),
+        ] {
+            drop(accept(&socket, callback, &request).await);
+            let mut lookup = accept(
+                &socket,
+                "callback-outcome",
+                &json!({"view":"capture", "callback":callback}),
+            )
+            .await;
+            respond(&mut lookup, reply).await;
+        }
     };
-    let (result, ()) = tokio::time::timeout(Duration::from_secs(5), async {
-        tokio::join!(request, worker)
+    let request = async {
+        assert_eq!(
+            view.prepare(&context, CancellationToken::new())
+                .await
+                .unwrap(),
+            rsi_agent_session_protocol::StepInputDecision::reject()
+        );
+        view.turn_stopping(CancellationToken::new()).await.unwrap();
+    };
+    tokio::time::timeout(Duration::from_secs(5), async {
+        tokio::join!(worker, request);
     })
     .await
     .unwrap();
-    assert!(matches!(
-        result,
-        Err(AgentCompositionError::InvalidInput(_))
-    ));
+}
+
+#[tokio::test]
+async fn stopping_can_be_cancelled_while_reading_the_original_callback_result() {
+    let (socket, endpoint) = endpoint().await;
+    let (_publish, current) = watch::channel(Some(endpoint.clone()));
+    let view = captured_view(endpoint, current);
+    let stop = CancellationToken::new();
+    let worker = async {
+        drop(accept(&socket, "stopping", &json!({"view": "capture"})).await);
+        let _reply = accept(
+            &socket,
+            "callback-outcome",
+            &json!({"view": "capture", "callback": "stopping"}),
+        )
+        .await;
+        stop.cancel();
+    };
+    let ((), result) = tokio::time::timeout(Duration::from_secs(5), async {
+        tokio::join!(worker, view.turn_stopping(stop.clone()))
+    })
+    .await
+    .unwrap();
+    assert!(matches!(result, Err(AgentCompositionError::ShuttingDown)));
 }
 
 async fn accept(listener: &TcpListener, operation: &str, payload: &Value) -> TcpStream {
