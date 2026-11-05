@@ -27,7 +27,7 @@ pub async fn assert_metadata_only_cas_retention(
         Err(StoreError::Corrupt(_))
     ));
 }
-pub use queue::assert_queue_store_contract;
+pub use queue::{assert_inbox_pause_store_contract, assert_queue_store_contract};
 mod program;
 pub use program::assert_program_store_contract;
 
@@ -40,6 +40,7 @@ use super::{
     StoreAgentMailboxSummary, StoreError, StoredContextCheckpoint, TurnId, TurnOutcome,
     WriteContextCheckpoint, fact_prefix_sha256,
 };
+use rsi_agent_store_protocol::MailboxRead;
 
 /// Exercises the backend-independent observable Store contract against one
 /// empty implementation.
@@ -708,7 +709,7 @@ pub async fn assert_mechanical_store_contract(
         AgentControlRecordBody::MessageAccepted {
             message: AgentMessage {
                 message_id: message_id.clone(),
-                source: AgentMessageSource::Human,
+                source: AgentMessageSource::Human { attribution: None },
                 content: vec![AgentMessageContent::Text {
                     text: "durable queued input".into(),
                 }],
@@ -838,7 +839,7 @@ pub async fn assert_mechanical_store_contract(
                                 activation_id: activation_id.clone(),
                                 turn_id: message_turn_id.clone(),
                                 step_id: message_step_id.clone(),
-                                entered_fact_seq: 3,
+                                claimed_fact_seq: 3,
                             },
                         )
                         .unwrap(),
@@ -877,10 +878,11 @@ pub async fn assert_mechanical_store_contract(
         SessionFact::new(
             6,
             11,
-            SessionFactBody::InputMessageEntered {
+            SessionFactBody::InputMessageClaimed {
                 turn_id: message_turn_id.clone(),
                 step_id: message_step_id.clone(),
                 source: InputMessageSource::Human {
+                    attribution: None,
                     message_id: message_id.clone(),
                 },
                 content: vec![AgentMessageContent::Text {
@@ -931,7 +933,7 @@ pub async fn assert_mechanical_store_contract(
                             activation_id: activation_id.clone(),
                             turn_id: message_turn_id.clone(),
                             step_id: message_step_id.clone(),
-                            entered_fact_seq: 6,
+                            claimed_fact_seq: 6,
                         },
                     )
                     .unwrap(),
@@ -941,7 +943,7 @@ pub async fn assert_mechanical_store_contract(
                         AgentControlRecordBody::MessageAccepted {
                             message: AgentMessage {
                                 message_id: step_message_id.clone(),
-                                source: AgentMessageSource::Human,
+                                source: AgentMessageSource::Human { attribution: None },
                                 content: vec![AgentMessageContent::Text {
                                     text: "enter the next Step".into(),
                                 }],
@@ -1104,7 +1106,11 @@ pub async fn assert_mechanical_store_contract(
         .await
         .unwrap();
     let none = store
-        .resolve_fork_boundary(&session_id, &invoking_turn, ForkTurnSelection::None)
+        .resolve_fork_boundary(
+            &session_id,
+            &rsi_agent_session_protocol::ForkPoint::before(&invoking_turn),
+            ForkTurnSelection::None,
+        )
         .await
         .unwrap();
     assert_eq!(
@@ -1115,16 +1121,64 @@ pub async fn assert_mechanical_store_contract(
     assert_eq!(none.resolved_terminal_control_seq, 0);
     assert_eq!(none.terminal_control_prefix_sha256, "0".repeat(64));
     let all = store
-        .resolve_fork_boundary(&session_id, &invoking_turn, ForkTurnSelection::All)
+        .resolve_fork_boundary(
+            &session_id,
+            &rsi_agent_session_protocol::ForkPoint::before(&invoking_turn),
+            ForkTurnSelection::All,
+        )
         .await
         .unwrap();
     let last = store
-        .resolve_fork_boundary(&session_id, &invoking_turn, ForkTurnSelection::Last(8))
+        .resolve_fork_boundary(
+            &session_id,
+            &rsi_agent_session_protocol::ForkPoint::before(&invoking_turn),
+            ForkTurnSelection::Last(8),
+        )
         .await
         .unwrap();
     assert_eq!(all, last);
     assert_eq!((all.resolved_after_seq, all.resolved_terminal_seq), (0, 7));
     assert_eq!(all.effective_turns, 2);
+    let completed = message_facts.last().unwrap().body().turn_id();
+    let through = store
+        .resolve_fork_boundary(
+            &session_id,
+            &rsi_agent_session_protocol::ForkPoint::through(completed),
+            ForkTurnSelection::All,
+        )
+        .await
+        .unwrap();
+    assert_eq!(
+        through, all,
+        "through includes the selected terminal but excludes later idle controls"
+    );
+    let before = store
+        .resolve_fork_boundary(
+            &session_id,
+            &rsi_agent_session_protocol::ForkPoint::before(completed),
+            ForkTurnSelection::All,
+        )
+        .await
+        .unwrap();
+    assert_eq!(
+        before.effective_turns, 1,
+        "cache identity distinguishes before and through on the same Turn"
+    );
+    for selection in [ForkTurnSelection::All, ForkTurnSelection::None] {
+        assert!(
+            matches!(
+                store
+                    .resolve_fork_boundary(
+                        &session_id,
+                        &rsi_agent_session_protocol::ForkPoint::through(&invoking_turn),
+                        selection
+                    )
+                    .await,
+                Err(StoreError::Invalid(_))
+            ),
+            "even an empty fork must bind a completed source point"
+        );
+    }
     assert_eq!(all.resolved_terminal_control_seq, 8);
     let controls_at_terminal = store
         .read_controls(
@@ -1155,19 +1209,23 @@ pub async fn assert_mechanical_store_contract(
     );
 
     let child_origin = |task_name: &str| ForkOrigin {
-        parent_session_id: session_id.clone(),
+        history: rsi_agent_session_protocol::HistoryOrigin {
+            parent_session_id: session_id.clone(),
+            parent_header_fingerprint: header.fingerprint().unwrap(),
+            point: rsi_agent_session_protocol::ForkPoint::BeforeTurn {
+                turn_id: invoking_turn.clone(),
+            },
+            resolved_after_seq: all.resolved_after_seq,
+            resolved_terminal_seq: all.resolved_terminal_seq,
+            terminal_prefix_sha256: all.terminal_prefix_sha256.clone(),
+            resolved_terminal_control_seq: all.resolved_terminal_control_seq,
+            terminal_control_prefix_sha256: all.terminal_control_prefix_sha256.clone(),
+            requested_turns: ForkTurnSelection::All,
+            effective_turns: all.effective_turns,
+        },
         root_session_id: session_id.clone(),
         path: AgentPath::new(vec![1]).unwrap(),
         task_name: task_name.into(),
-        parent_header_fingerprint: header.fingerprint().unwrap(),
-        invoking_turn_id: invoking_turn.clone(),
-        resolved_after_seq: all.resolved_after_seq,
-        resolved_terminal_seq: all.resolved_terminal_seq,
-        terminal_prefix_sha256: all.terminal_prefix_sha256.clone(),
-        resolved_terminal_control_seq: all.resolved_terminal_control_seq,
-        terminal_control_prefix_sha256: all.terminal_control_prefix_sha256.clone(),
-        requested_turns: ForkTurnSelection::All,
-        effective_turns: all.effective_turns,
     };
     let first_child_id = SessionId::new("shared-contract-child-one").unwrap();
     let first_child_header = header
@@ -1261,19 +1319,23 @@ pub async fn assert_mechanical_store_contract(
             grandchild_id.clone(),
             31,
             ForkOrigin {
-                parent_session_id: first_child_id.clone(),
+                history: rsi_agent_session_protocol::HistoryOrigin {
+                    parent_session_id: first_child_id.clone(),
+                    parent_header_fingerprint: first_child_fingerprint,
+                    point: rsi_agent_session_protocol::ForkPoint::BeforeTurn {
+                        turn_id: invoking_turn.clone(),
+                    },
+                    resolved_after_seq: 0,
+                    resolved_terminal_seq: 0,
+                    terminal_prefix_sha256: "0".repeat(64),
+                    resolved_terminal_control_seq: 0,
+                    terminal_control_prefix_sha256: "0".repeat(64),
+                    requested_turns: ForkTurnSelection::None,
+                    effective_turns: 0,
+                },
                 root_session_id: session_id.clone(),
                 path: AgentPath::new(vec![1, 1]).unwrap(),
                 task_name: "grandchild".into(),
-                parent_header_fingerprint: first_child_fingerprint,
-                invoking_turn_id: invoking_turn.clone(),
-                resolved_after_seq: 0,
-                resolved_terminal_seq: 0,
-                terminal_prefix_sha256: "0".repeat(64),
-                resolved_terminal_control_seq: 0,
-                terminal_control_prefix_sha256: "0".repeat(64),
-                requested_turns: ForkTurnSelection::None,
-                effective_turns: 0,
             },
             rsi_agent_session_protocol::ModelSelection::baseline(first_child_header.settings()),
         )
@@ -1507,7 +1569,7 @@ pub async fn assert_mechanical_store_contract(
         AgentControlRecordBody::MessageAccepted {
             message: AgentMessage {
                 message_id: MessageId::new("wrong-root-message").unwrap(),
-                source: AgentMessageSource::Human,
+                source: AgentMessageSource::Human { attribution: None },
                 content: vec![AgentMessageContent::Text {
                     text: "must not enter a foreign ready lane".into(),
                 }],
@@ -1545,7 +1607,7 @@ pub async fn assert_mechanical_store_contract(
         AgentControlRecordBody::MessageAccepted {
             message: AgentMessage {
                 message_id: message_id.clone(),
-                source: AgentMessageSource::Human,
+                source: AgentMessageSource::Human { attribution: None },
                 content: vec![AgentMessageContent::Text {
                     text: "duplicate identity".into(),
                 }],
@@ -1666,7 +1728,7 @@ pub async fn assert_mechanical_store_contract(
                                 activation_id: reservation_activation.clone(),
                             }
                         } else {
-                            AgentMessageSource::Human
+                            AgentMessageSource::Human { attribution: None }
                         },
                         content: vec![AgentMessageContent::Text {
                             text: if offset == 0 {
@@ -1733,7 +1795,7 @@ pub async fn assert_mechanical_store_contract(
                             message: AgentMessage {
                                 message_id: MessageId::new("message-blocked-by-reservation")
                                     .unwrap(),
-                                source: AgentMessageSource::Human,
+                                source: AgentMessageSource::Human { attribution: None },
                                 content: vec![AgentMessageContent::Text {
                                     text: "must preserve completion capacity".into(),
                                 }],
@@ -1797,7 +1859,7 @@ pub async fn assert_mechanical_store_contract(
                                 "bounded-message-{final_bounded_offset}"
                             ))
                             .unwrap(),
-                            source: AgentMessageSource::Human,
+                            source: AgentMessageSource::Human { attribution: None },
                             content: vec![AgentMessageContent::Text {
                                 text: "x".repeat(
                                     MAXIMUM_STORE_MAILBOX_PAGE_BYTES
@@ -1837,7 +1899,7 @@ pub async fn assert_mechanical_store_contract(
                         AgentControlRecordBody::MessageAccepted {
                             message: AgentMessage {
                                 message_id: MessageId::new("message-beyond-bound").unwrap(),
-                                source: AgentMessageSource::Human,
+                                source: AgentMessageSource::Human { attribution: None },
                                 content: vec![AgentMessageContent::Text {
                                     text: "must not enter the mailbox".into(),
                                 }],
@@ -1858,7 +1920,10 @@ pub async fn assert_mechanical_store_contract(
             .await,
         Err(StoreError::Invalid(message)) if message.contains("pending-message bound")
     ));
-    let mailbox = store.read_agent_mailbox(&session_id, None).await.unwrap();
+    let mailbox = store
+        .read_agent_mailbox(&session_id, MailboxRead::All)
+        .await
+        .unwrap();
     assert_eq!(
         mailbox.pending_count,
         rsi_agent_session_protocol::MAXIMUM_PENDING_AGENT_MESSAGES
@@ -1870,6 +1935,7 @@ pub async fn assert_mechanical_store_contract(
     assert_eq!(
         store.read_agent_mailbox_summary(&session_id).await.unwrap(),
         StoreAgentMailboxSummary {
+            inbox_paused: false,
             pending_count: rsi_agent_session_protocol::MAXIMUM_PENDING_AGENT_MESSAGES,
             pending_promotable_message_ids: vec![MessageId::new("bounded-message-0").unwrap(),],
             durable_control_seq: full_control_seq,
@@ -1927,7 +1993,10 @@ pub async fn assert_mechanical_store_contract(
         .await
         .expect("promote a pending next-Step completion into the ready index");
     let promoted = store
-        .read_agent_mailbox(&session_id, Some(&promoted_message_id))
+        .read_agent_mailbox(
+            &session_id,
+            MailboxRead::WithMessage(promoted_message_id.clone()),
+        )
         .await
         .unwrap()
         .selected
@@ -1949,6 +2018,20 @@ pub async fn assert_mechanical_store_contract(
     );
     assert_eq!(promoted.target, MessageTarget::NextTurn);
     assert!(promoted.wake_required);
+    let step = store
+        .read_agent_mailbox(&session_id, MailboxRead::NextStep)
+        .await
+        .unwrap();
+    assert_eq!(
+        step.pending_count,
+        rsi_agent_session_protocol::MAXIMUM_PENDING_AGENT_MESSAGES - 1
+    );
+    assert!(
+        step.pending
+            .iter()
+            .all(|entry| entry.target == MessageTarget::NextStep)
+    );
+    assert_eq!(step.durable_control_seq, full_control_seq + 1);
     let inspection = store.inspect_session(&session_id).await.unwrap();
     inspection.validate().unwrap();
     assert!(
@@ -2004,7 +2087,7 @@ async fn assert_unbound_steer_inspection(store: &dyn SessionStore, template: &Se
                         AgentControlRecordBody::MessageAccepted {
                             message: AgentMessage {
                                 message_id: message_id.clone(),
-                                source: AgentMessageSource::Human,
+                                source: AgentMessageSource::Human { attribution: None },
                                 content: vec![AgentMessageContent::Text {
                                     text: "idle steering".into(),
                                 }],
@@ -2026,7 +2109,7 @@ async fn assert_unbound_steer_inspection(store: &dyn SessionStore, template: &Se
         .await
         .unwrap();
     let entry = store
-        .read_agent_mailbox(&session_id, Some(&message_id))
+        .read_agent_mailbox(&session_id, MailboxRead::WithMessage(message_id.clone()))
         .await
         .unwrap()
         .selected

@@ -172,7 +172,11 @@ async fn warm_fork_selection_work_does_not_grow_with_unselected_history() {
             VM.store(0, Ordering::Relaxed);
             COMPLETED_QUERIES.store(0, Ordering::Relaxed);
             let boundary = store
-                .resolve_fork_boundary(&id, &turn, selection.clone())
+                .resolve_fork_boundary(
+                    &id,
+                    &rsi_agent_session_protocol::ForkPoint::before(&turn),
+                    selection.clone(),
+                )
                 .await
                 .unwrap();
             let vm = measured_work();
@@ -199,7 +203,11 @@ async fn warm_fork_selection_work_does_not_grow_with_unselected_history() {
         );
         assert_eq!(
             store
-                .resolve_fork_boundary(&id, &turn, ForkTurnSelection::Last(u64::MAX))
+                .resolve_fork_boundary(
+                    &id,
+                    &rsi_agent_session_protocol::ForkPoint::before(&turn),
+                    ForkTurnSelection::Last(u64::MAX)
+                )
                 .await
                 .unwrap()
                 .effective_turns,
@@ -207,7 +215,11 @@ async fn warm_fork_selection_work_does_not_grow_with_unselected_history() {
         );
         assert_eq!(
             store
-                .resolve_fork_boundary(&id, &turn, ForkTurnSelection::All)
+                .resolve_fork_boundary(
+                    &id,
+                    &rsi_agent_session_protocol::ForkPoint::before(&turn),
+                    ForkTurnSelection::All
+                )
                 .await
                 .unwrap()
                 .effective_turns,
@@ -327,7 +339,11 @@ async fn paused_warm_fork_resolution_leaves_foreground_free_and_survives_waiter_
     let invoking = turn.clone();
     let first = tokio::spawn(async move {
         worker
-            .resolve_fork_boundary(&id, &invoking, ForkTurnSelection::All)
+            .resolve_fork_boundary(
+                &id,
+                &rsi_agent_session_protocol::ForkPoint::before(&invoking),
+                ForkTurnSelection::All,
+            )
             .await
     });
     entered.await.unwrap();
@@ -343,7 +359,11 @@ async fn paused_warm_fork_resolution_leaves_foreground_free_and_survives_waiter_
             .unwrap();
         assert_eq!(
             store
-                .resolve_fork_boundary(&parent, &turn, ForkTurnSelection::None)
+                .resolve_fork_boundary(
+                    &parent,
+                    &rsi_agent_session_protocol::ForkPoint::before(&turn),
+                    ForkTurnSelection::None
+                )
                 .await
                 .unwrap()
                 .effective_turns,
@@ -367,7 +387,11 @@ async fn paused_warm_fork_resolution_leaves_foreground_free_and_survives_waiter_
     let invoking = turn.clone();
     let second = tokio::spawn(async move {
         worker
-            .resolve_fork_boundary(&id, &invoking, ForkTurnSelection::All)
+            .resolve_fork_boundary(
+                &id,
+                &rsi_agent_session_protocol::ForkPoint::before(&invoking),
+                ForkTurnSelection::All,
+            )
             .await
     });
     release.send(()).unwrap();
@@ -381,29 +405,49 @@ async fn paused_warm_fork_resolution_leaves_foreground_free_and_survives_waiter_
 }
 
 #[tokio::test]
+#[expect(
+    clippy::too_many_lines,
+    reason = "One identity-lifetime scenario follows warm reuse, append and cold reopen without splitting its owners."
+)]
 async fn fork_boundaries_reuse_exact_identities_across_append_but_not_reopen() {
     let root = private_tempdir();
     let store = SqliteStore::open(root.path()).unwrap();
     let (id, turn) = completed_history(&store, 4).await;
     let all = store
-        .resolve_fork_boundary(&id, &turn, ForkTurnSelection::All)
+        .resolve_fork_boundary(
+            &id,
+            &rsi_agent_session_protocol::ForkPoint::before(&turn),
+            ForkTurnSelection::All,
+        )
         .await
         .unwrap();
     let last = store
-        .resolve_fork_boundary(&id, &turn, ForkTurnSelection::Last(1))
+        .resolve_fork_boundary(
+            &id,
+            &rsi_agent_session_protocol::ForkPoint::before(&turn),
+            ForkTurnSelection::Last(1),
+        )
         .await
         .unwrap();
     for _ in 0..3 {
         assert_eq!(
             store
-                .resolve_fork_boundary(&id, &turn, ForkTurnSelection::All)
+                .resolve_fork_boundary(
+                    &id,
+                    &rsi_agent_session_protocol::ForkPoint::before(&turn),
+                    ForkTurnSelection::All
+                )
                 .await
                 .unwrap(),
             all
         );
         assert_eq!(
             store
-                .resolve_fork_boundary(&id, &turn, ForkTurnSelection::Last(1))
+                .resolve_fork_boundary(
+                    &id,
+                    &rsi_agent_session_protocol::ForkPoint::before(&turn),
+                    ForkTurnSelection::Last(1)
+                )
                 .await
                 .unwrap(),
             last
@@ -433,7 +477,11 @@ async fn fork_boundaries_reuse_exact_identities_across_append_but_not_reopen() {
     .unwrap();
     assert_eq!(
         store
-            .resolve_fork_boundary(&id, &turn, ForkTurnSelection::All)
+            .resolve_fork_boundary(
+                &id,
+                &rsi_agent_session_protocol::ForkPoint::before(&turn),
+                ForkTurnSelection::All
+            )
             .await
             .unwrap(),
         all
@@ -452,7 +500,11 @@ async fn fork_boundaries_reuse_exact_identities_across_append_but_not_reopen() {
         .unwrap();
     assert_eq!(
         store
-            .resolve_fork_boundary(&id, &next_turn, ForkTurnSelection::All)
+            .resolve_fork_boundary(
+                &id,
+                &rsi_agent_session_protocol::ForkPoint::before(&next_turn),
+                ForkTurnSelection::All
+            )
             .await
             .unwrap()
             .effective_turns,
@@ -463,7 +515,11 @@ async fn fork_boundaries_reuse_exact_identities_across_append_but_not_reopen() {
     let store = SqliteStore::open(root.path()).unwrap();
     assert_eq!(
         store
-            .resolve_fork_boundary(&id, &turn, ForkTurnSelection::All)
+            .resolve_fork_boundary(
+                &id,
+                &rsi_agent_session_protocol::ForkPoint::before(&turn),
+                ForkTurnSelection::All
+            )
             .await
             .unwrap(),
         all
@@ -479,7 +535,11 @@ async fn fork_boundary_cache_is_bounded_evicts_and_does_not_hold_pins() {
     let turn = |index: u64| test_fact(index * 2 + 1).body().turn_id().clone();
     for index in 1..=257 {
         store
-            .resolve_fork_boundary(&id, &turn(index), ForkTurnSelection::Last(1))
+            .resolve_fork_boundary(
+                &id,
+                &rsi_agent_session_protocol::ForkPoint::before(&turn(index)),
+                ForkTurnSelection::Last(1),
+            )
             .await
             .unwrap();
     }
@@ -490,12 +550,20 @@ async fn fork_boundary_cache_is_bounded_evicts_and_does_not_hold_pins() {
     );
     let before = store.inner.fork_resolutions.load(Ordering::Relaxed);
     store
-        .resolve_fork_boundary(&id, &turn(257), ForkTurnSelection::Last(1))
+        .resolve_fork_boundary(
+            &id,
+            &rsi_agent_session_protocol::ForkPoint::before(&turn(257)),
+            ForkTurnSelection::Last(1),
+        )
         .await
         .unwrap();
     assert_eq!(store.inner.fork_resolutions.load(Ordering::Relaxed), before);
     store
-        .resolve_fork_boundary(&id, &turn(1), ForkTurnSelection::Last(1))
+        .resolve_fork_boundary(
+            &id,
+            &rsi_agent_session_protocol::ForkPoint::before(&turn(1)),
+            ForkTurnSelection::Last(1),
+        )
         .await
         .unwrap();
     assert_eq!(
@@ -505,7 +573,11 @@ async fn fork_boundary_cache_is_bounded_evicts_and_does_not_hold_pins() {
     assert_eq!(store.inner.fork_boundaries.lock().unwrap().0.len(), 256);
     assert!(
         store
-            .resolve_fork_boundary(&id, &turn(1), ForkTurnSelection::Last(0))
+            .resolve_fork_boundary(
+                &id,
+                &rsi_agent_session_protocol::ForkPoint::before(&turn(1)),
+                ForkTurnSelection::Last(0)
+            )
             .await
             .is_err()
     );
@@ -513,7 +585,7 @@ async fn fork_boundary_cache_is_bounded_evicts_and_does_not_hold_pins() {
         store
             .resolve_fork_boundary(
                 &id,
-                &TurnId::new("missing").unwrap(),
+                &rsi_agent_session_protocol::ForkPoint::before(&TurnId::new("missing").unwrap()),
                 ForkTurnSelection::All
             )
             .await
@@ -538,7 +610,11 @@ async fn poisoned_fork_cache_falls_back_to_validated_resolution() {
     );
     assert_eq!(
         store
-            .resolve_fork_boundary(&id, &turn, ForkTurnSelection::All)
+            .resolve_fork_boundary(
+                &id,
+                &rsi_agent_session_protocol::ForkPoint::before(&turn),
+                ForkTurnSelection::All
+            )
             .await
             .unwrap()
             .effective_turns,
@@ -565,7 +641,7 @@ fn ready_append(id: &SessionId, count: u64) -> AtomicSessionAppend {
                 AgentControlRecordBody::MessageAccepted {
                     message: AgentMessage {
                         message_id: MessageId::new(format!("message-{seq}")).unwrap(),
-                        source: AgentMessageSource::Human,
+                        source: AgentMessageSource::Human { attribution: None },
                         content: vec![rsi_agent_session_protocol::AgentMessageContent::Text {
                             text: "work".into(),
                         }],
@@ -628,18 +704,42 @@ async fn ready_root_pages_seek_past_duplicates_with_and_without_statistics() {
                 .unwrap()
                 .last_mut()
                 .unwrap()
-                .query_row(
-                    &format!("EXPLAIN QUERY PLAN {LIST_READY_ROOTS_AFTER_SQL}"),
-                    params!["a-root", 1_i64],
-                    |row| row.get::<_, String>(3),
-                )
-                .unwrap();
+                .prepare(&format!("EXPLAIN QUERY PLAN {LIST_READY_ROOTS_AFTER_SQL}"))
+                .unwrap()
+                .query_map(params!["a-root", 1_i64], |row| row.get::<_, String>(3))
+                .unwrap()
+                .collect::<rusqlite::Result<Vec<_>>>()
+                .unwrap()
+                .join("; ");
             assert!(
                 plan.contains("COVERING INDEX ready_messages_by_root")
                     && plan.contains("root_session_id>?"),
                 "{plan}"
             );
             eprintln!("ready roots statistics={statistics} duplicates={duplicates} plan={plan}");
+            let first_plan = store
+                .inner
+                .connections
+                .readers
+                .lock()
+                .unwrap()
+                .last_mut()
+                .unwrap()
+                .prepare(&format!(
+                    "EXPLAIN QUERY PLAN {}",
+                    crate::session_store::LIST_READY_ROOTS_FIRST_SQL
+                ))
+                .unwrap()
+                .query_map(params![None::<String>, 1_i64], |row| {
+                    row.get::<_, String>(3)
+                })
+                .unwrap()
+                .collect::<rusqlite::Result<Vec<_>>>()
+                .unwrap()
+                .join("; ");
+            eprintln!(
+                "ready roots first statistics={statistics} duplicates={duplicates} plan={first_plan}"
+            );
             trace_readers(&store, TraceEventCodes::SQLITE_TRACE_PROFILE, Some(count));
             VM.store(0, Ordering::Relaxed);
             let first = store.list_ready_roots(None, 1).await.unwrap();

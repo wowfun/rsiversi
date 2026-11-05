@@ -134,7 +134,7 @@ async fn activation_counterpart_lookup_work_is_independent_of_control_history() 
             )
             .unwrap();
             tx.execute(
-                "INSERT INTO agent_controls(session_id,seq,control_json) VALUES(?1,?2,?3)",
+                "INSERT INTO agent_controls(session_id,seq,control_json,fact_seq) VALUES(?1,?2,?3,0)",
                 params![
                     id.as_str(),
                     i64::try_from(seq).unwrap(),

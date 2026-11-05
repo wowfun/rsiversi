@@ -257,7 +257,11 @@ async fn cached_integrity_never_exposes_retiring_secondary_rows() {
     unavailable!(store.read_queue_mutation(id, &QueueOperationId::new("mutation").unwrap()));
     unavailable!(store.queue_mutation_count(id));
     unavailable!(store.active_activation(id));
-    unavailable!(store.resolve_fork_boundary(id, &turn, ForkTurnSelection::None));
+    unavailable!(store.resolve_fork_boundary(
+        id,
+        &rsi_agent_session_protocol::ForkPoint::before(&turn),
+        ForkTurnSelection::None
+    ));
     unavailable!(store.read_program_records_after(id, &ProgramRunId::new("run").unwrap(), 0));
     unavailable!(store.list_program_history(id, 100, None, 10));
 }
@@ -648,6 +652,12 @@ async fn purge_restarts_between_bounded_batches_and_rejects_old_proofs_and_resur
     let store = SqliteStore::open(root.path()).unwrap();
     let request = seed(&store, "bounded-purge", 160).await;
     let id = request.targets[0].session_id.clone();
+    let summaries = store
+        .session_activity_summaries(std::slice::from_ref(&id))
+        .await
+        .unwrap();
+    let row = summaries[0].as_ref().unwrap();
+    assert_eq!((row.durable_fact_seq, row.durable_control_seq), (320, 160));
     let pin = store.prepare_session(&id).await.unwrap();
     assert!(
         store
@@ -803,19 +813,23 @@ async fn purge_blockers_are_exact_and_refusals_do_not_latch_cached_proof_checks(
     let parent = seed(&store, "parent", 1).await;
     let child_header = test_header("child")
         .with_fork_origin(ForkOrigin {
-            parent_session_id: parent.targets[0].session_id.clone(),
+            history: rsi_agent_session_protocol::HistoryOrigin {
+                parent_session_id: parent.targets[0].session_id.clone(),
+                parent_header_fingerprint: parent.targets[0].header_sha256.clone(),
+                point: rsi_agent_session_protocol::ForkPoint::BeforeTurn {
+                    turn_id: TurnId::new("turn-0").unwrap(),
+                },
+                resolved_after_seq: 0,
+                resolved_terminal_seq: 0,
+                terminal_prefix_sha256: "0".repeat(64),
+                resolved_terminal_control_seq: 0,
+                terminal_control_prefix_sha256: "0".repeat(64),
+                requested_turns: ForkTurnSelection::None,
+                effective_turns: 0,
+            },
             root_session_id: parent.targets[0].session_id.clone(),
             path: AgentPath::new(vec![1]).unwrap(),
             task_name: "child".into(),
-            parent_header_fingerprint: parent.targets[0].header_sha256.clone(),
-            invoking_turn_id: TurnId::new("turn-0").unwrap(),
-            resolved_after_seq: 0,
-            resolved_terminal_seq: 0,
-            terminal_prefix_sha256: "0".repeat(64),
-            resolved_terminal_control_seq: 0,
-            terminal_control_prefix_sha256: "0".repeat(64),
-            requested_turns: ForkTurnSelection::None,
-            effective_turns: 0,
         })
         .unwrap();
     let child = seed_header(&store, child_header, 1).await;

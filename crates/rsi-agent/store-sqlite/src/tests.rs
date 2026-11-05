@@ -27,6 +27,44 @@ mod admission;
 #[path = "tests/maintenance.rs"]
 mod maintenance;
 
+#[tokio::test]
+async fn control_fact_cuts_survive_reopen_and_reject_corrupt_anchors() {
+    for anchor in [None, Some(0), Some(3)] {
+        let root = private_tempdir();
+        let header = test_header("control-cuts");
+        let store = SqliteStore::open(root.path()).unwrap();
+        rsi_agent_testkit::assert_control_fact_order(&store, header.clone()).await;
+        drop(store);
+        if let Some(anchor) = anchor {
+            let connection = Connection::open(root.path().join("sessions.sqlite3")).unwrap();
+            connection
+                .execute(
+                    "UPDATE agent_controls SET fact_seq=?1 WHERE seq=2",
+                    [anchor],
+                )
+                .unwrap();
+        }
+        let store = SqliteStore::open(root.path()).unwrap();
+        let page = store
+            .read_controls(
+                header.session_id(),
+                0,
+                3,
+                rsi_agent_store_protocol::MAXIMUM_STORE_CONTROL_PAGE_BYTES,
+            )
+            .await;
+        if anchor.is_some() {
+            assert!(
+                matches!(page, Err(StoreError::Corrupt(message)) if message.contains("anchors"))
+            );
+        } else {
+            assert_eq!(page.unwrap().fact_cursors, [1, 1, 2]);
+        }
+        drop(store);
+        assert_eq!(SqliteStore::verify(root.path()).is_ok(), anchor.is_none());
+    }
+}
+
 #[cfg(windows)]
 #[test]
 fn windows_archival_reset_refuses_before_filesystem_effects() {
@@ -314,9 +352,7 @@ async fn factory_retains_only_safe_startup_facts_for_its_owner() {
     let root = private_tempdir();
     drop(SqliteStore::open(root.path()).unwrap());
     let connection = Connection::open(root.path().join("sessions.sqlite3")).unwrap();
-    connection
-        .pragma_update(None, "user_version", AGENT_STORE_SCHEMA_VERSION - 1)
-        .unwrap();
+    connection.pragma_update(None, "user_version", 42).unwrap();
     drop(connection);
     let factory = SqliteStoreFactory::default();
     let runtime = rsi_meta::Runtime::default();
@@ -341,7 +377,7 @@ async fn factory_retains_only_safe_startup_facts_for_its_owner() {
         diagnostic.kind,
         SqliteStoreStartupFailureKind::SchemaMismatch {
             expected: AGENT_STORE_SCHEMA_VERSION,
-            actual: AGENT_STORE_SCHEMA_VERSION - 1,
+            actual: 42,
         }
     );
     assert!(factory.take_startup_failure().is_none());
@@ -630,7 +666,7 @@ async fn control_projection_replay_enforces_the_individual_control_bound() {
         },
     )
     .unwrap();
-    writer.execute("INSERT INTO agent_controls (session_id,seq,control_json) VALUES (?1,1,?2 || printf('%*s',?3,''))",
+    writer.execute("INSERT INTO agent_controls (session_id,seq,control_json,fact_seq) VALUES (?1,1,?2 || printf('%*s',?3,''),0)",
         params![header.session_id().as_str(), serde_json::to_string(&record).unwrap(), i64::try_from(MAXIMUM_SESSION_FACT_BYTES).unwrap()]).unwrap();
     let result = crate::validation::validate_agent_indexes(writer, &header);
     assert!(
@@ -1268,7 +1304,7 @@ async fn cold_subtree_and_quiescence_reject_a_descendant_missing_its_indexes() {
                             AgentControlRecordBody::MessageAccepted {
                                 message: rsi_agent_session_protocol::AgentMessage {
                                     message_id: MessageId::new("pending-child").unwrap(),
-                                    source: AgentMessageSource::Human,
+                                    source: AgentMessageSource::Human { attribution: None },
                                     content: vec![
                                         rsi_agent_session_protocol::AgentMessageContent::Text {
                                             text: "pending".into(),
@@ -1646,7 +1682,7 @@ async fn control_pages_admit_stored_lengths_before_materializing_the_next_body()
             json.extend(std::iter::repeat_n(' ', 32 * 1024 * 1024));
             writer
                 .execute(
-                    "INSERT INTO agent_controls (session_id,seq,control_json) VALUES (?1,?2,?3)",
+                    "INSERT INTO agent_controls (session_id,seq,control_json,fact_seq) VALUES (?1,?2,?3,0)",
                     params![
                         header.session_id().as_str(),
                         i64::try_from(seq).unwrap(),
@@ -2001,7 +2037,7 @@ fn discarded_message_controls(id: &SessionId, count: u64) -> Vec<AgentControlRec
                 AgentControlRecordBody::MessageAccepted {
                     message: AgentMessage {
                         message_id: message_id.clone(),
-                        source: AgentMessageSource::Human,
+                        source: AgentMessageSource::Human { attribution: None },
                         content: vec![rsi_agent_session_protocol::AgentMessageContent::Text {
                             text: "bounded".into(),
                         }],
@@ -2064,7 +2100,10 @@ async fn cold_control_replay_decodes_each_record_once() {
         )
         .await
         .unwrap();
-    store.read_agent_mailbox(&id, None).await.unwrap();
+    store
+        .read_agent_mailbox(&id, rsi_agent_store_protocol::MailboxRead::All)
+        .await
+        .unwrap();
     assert_eq!(store.inner.validation_runs.load(Ordering::Relaxed), 1);
     assert_eq!(store.inner.control_decodes.load(Ordering::Relaxed), 500);
     assert_one_header_read_for_control_validation(&store, &id).await;
@@ -2195,19 +2234,23 @@ fn test_child_header(parent: &SessionHeader, id: &str) -> SessionHeader {
             SessionId::new(id).unwrap(),
             2,
             rsi_agent_session_protocol::ForkOrigin {
-                parent_session_id: parent.session_id().clone(),
+                history: rsi_agent_session_protocol::HistoryOrigin {
+                    parent_session_id: parent.session_id().clone(),
+                    parent_header_fingerprint: parent.fingerprint().unwrap(),
+                    point: rsi_agent_session_protocol::ForkPoint::BeforeTurn {
+                        turn_id: TurnId::new("turn-1").unwrap(),
+                    },
+                    resolved_after_seq: 0,
+                    resolved_terminal_seq: 0,
+                    terminal_prefix_sha256: "0".repeat(64),
+                    resolved_terminal_control_seq: 0,
+                    terminal_control_prefix_sha256: "0".repeat(64),
+                    requested_turns: rsi_agent_session_protocol::ForkTurnSelection::None,
+                    effective_turns: 0,
+                },
                 root_session_id: parent.session_id().clone(),
                 path: rsi_agent_session_protocol::AgentPath::new(vec![1]).unwrap(),
                 task_name: "child".into(),
-                parent_header_fingerprint: parent.fingerprint().unwrap(),
-                invoking_turn_id: TurnId::new("turn-1").unwrap(),
-                resolved_after_seq: 0,
-                resolved_terminal_seq: 0,
-                terminal_prefix_sha256: "0".repeat(64),
-                resolved_terminal_control_seq: 0,
-                terminal_control_prefix_sha256: "0".repeat(64),
-                requested_turns: rsi_agent_session_protocol::ForkTurnSelection::None,
-                effective_turns: 0,
             },
             rsi_agent_session_protocol::ModelSelection::baseline(parent.settings()),
         )
@@ -3165,7 +3208,7 @@ async fn report_cold_history_cancellation_and_small_session_progress() {
                         AgentControlRecordBody::MessageAccepted {
                             message: AgentMessage {
                                 message_id: message_id.clone(),
-                                source: AgentMessageSource::Human,
+                                source: AgentMessageSource::Human { attribution: None },
                                 content: vec![
                                     rsi_agent_session_protocol::AgentMessageContent::Text {
                                         text: "bounded".into(),
@@ -3510,6 +3553,65 @@ async fn cas_process_crash_reopens_without_admitting_unconfirmed_metadata() {
 
 #[tokio::test]
 #[cfg(any(unix, windows))]
+async fn domain_reads_query_only_the_selected_keys_and_reuse_their_common_control() {
+    use rusqlite::trace::{TraceEvent, TraceEventCodes};
+    thread_local! {
+        static QUERIES: std::cell::Cell<[usize; 3]> = const { std::cell::Cell::new([0; 3]) };
+    }
+    fn trace(event: TraceEvent<'_>) {
+        if let TraceEvent::Stmt(statement, _) = event {
+            let sql = statement.sql();
+            for (index, table) in [
+                "FROM domain_heads",
+                "FROM domain_versions",
+                "FROM agent_controls",
+            ]
+            .iter()
+            .enumerate()
+            {
+                if sql.contains(table) {
+                    let mut counts = QUERIES.get();
+                    counts[index] += 1;
+                    QUERIES.set(counts);
+                }
+            }
+        }
+    }
+    let root = private_tempdir();
+    let store = SqliteStore::open(root.path()).unwrap();
+    let header = test_header("domain-query");
+    let id = header.session_id().clone();
+    let accepted = test_fact(1);
+    let event = SessionFact::new(
+        2,
+        2,
+        SessionFactBody::CancelRequested {
+            turn_id: accepted.body().turn_id().clone(),
+            reason: None,
+        },
+    )
+    .unwrap();
+    rsi_agent_testkit::assert_domain_store_contract(&store, header, accepted, event).await;
+    let connection = Connection::open(root.path().join("sessions.sqlite3")).unwrap();
+    connection.trace_v2(TraceEventCodes::SQLITE_TRACE_STMT, Some(trace));
+    for (domain_id, horizon, expected) in [
+        (Some("missing"), None, [0, 1, 0]),
+        (Some("b"), Some(1), [0, 1, 1]),
+        (None, None, [1, 0, 1]),
+        (None, Some(1), [1, 2, 1]),
+    ] {
+        QUERIES.set([0; 3]);
+        domain::read_states(&connection, &id, horizon, domain_id).unwrap();
+        assert_eq!(
+            QUERIES.get(),
+            expected,
+            "domain={domain_id:?}, horizon={horizon:?}"
+        );
+    }
+}
+
+#[tokio::test]
+#[cfg(any(unix, windows))]
 async fn recent_page_uses_one_bounded_header_query() {
     static READS: std::sync::atomic::AtomicUsize = std::sync::atomic::AtomicUsize::new(0);
     fn trace(event: rusqlite::trace::TraceEvent<'_>) {
@@ -3565,4 +3667,30 @@ async fn recent_page_uses_one_bounded_header_query() {
         page.sessions[0].header.session_id().as_str(),
         "recent-query-11"
     );
+}
+
+#[test]
+fn schema_43_mailbox_upgrades_on_open_and_reopens() {
+    let temporary = private_tempdir();
+    let path = temporary.path().join("sessions.sqlite3");
+    let db = Connection::open(&path).unwrap();
+    for (name, sql) in EXPECTED_TABLES {
+        if name == "agent_messages" {
+            db.execute_batch(&sql.replace("message_source TEXT NOT NULL,",
+                "message_source TEXT NOT NULL CHECK (message_source IN ('human', 'agent', 'completion', 'continuation', 'program', 'command')),")).unwrap();
+        } else {
+            db.execute_batch(sql).unwrap();
+        }
+    }
+    for (_, sql) in EXPECTED_INDEXES {
+        db.execute_batch(sql).unwrap();
+    }
+    db.pragma_update(None, "user_version", 43).unwrap();
+    drop(db);
+    drop(SqliteStore::open(temporary.path()).unwrap());
+    let db = Connection::open(&path).unwrap();
+    assert_eq!(pragma_user_version(&db).unwrap(), 44);
+    validate_schema_shape(&db).unwrap();
+    drop(db);
+    drop(SqliteStore::open(temporary.path()).unwrap());
 }

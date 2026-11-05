@@ -1,5 +1,21 @@
 # rsi-agent-store-sqlite
 
+Schema 44 stores Header format 34 with separate history provenance and Agent
+execution ownership. The mailbox index admits the explicit command message source. The
+canonical domain receipt binds the complete input batch; rebuilding the index
+uses those validated records. When opening an exact schema 43 under the writer
+lease, the Store rebuilds the mailbox table and its indexes in one transaction.
+Only its redundant SQL enumeration of message sources changes. Canonical messages
+and Facts retain their bytes. Typed readers validate the source at the storage
+boundary. Other incompatible versions are rejected during read-only preflight.
+The Session row projects inbox suspension from canonical controls. Ready queries
+filter suspended Sessions without rewriting their message candidates; canonical
+validation compares the stored flag with control replay.
+Each control row also stores its committing append's final Fact watermark.
+Append writes this anchor in the canonical transaction. Cold validation checks
+anchor order and the Fact tail before exposing a control page. Presentation can
+therefore merge the streams without relying on a wall clock or a live process.
+
 Diagnostic lane samples label the owning mechanical operation explicitly.
 Labels distinguish access batches, activity cuts, Headers, Fact pages, domain
 states and durable watermarks without inferring caller purpose from a result type or page
@@ -187,8 +203,7 @@ and hash chunks, and cannot interrupt an active syscall or visitor callback.
 SQLite and filesystem-CAS ordinary plugin for
 `rsi-agent-store-protocol`. Opening the Store acquires one cross-process writer
 lease for the entire root before schema validation or recovery reads. Only the
-exact current schema is accepted; this pre-release implementation does not
-migrate old layouts. For an existing nonempty database, the retained read-only
+current schema or its documented upgrade source is accepted. For an existing nonempty database, the retained read-only
 foreground connection validates the exact schema before opening a writer or
 cleaning CAS staging. Rejected-version database bytes and staging contents stay
 unchanged. A current WAL is read in that preflight snapshot before ordinary
@@ -403,7 +418,7 @@ On Unix, owned Store and CAS directories are created and tightened to mode
 connection also opens the database with `SQLITE_OPEN_NOFOLLOW`, closing the
 final-component symlink window after the path precheck.
 
-The exact current schema stores immutable queue successors and a lifetime-retained queue operation index with individually bounded receipts. It rejects older schema versions without migration or reset. The format admits version 2 selected-reference envelopes and the current mandatory Agent-preset
+The exact current schema stores immutable queue successors and a lifetime-retained queue operation index with individually bounded receipts. The format admits version 2 selected-reference envelopes and the current mandatory Agent-preset
 Header encoding, indexes Fact rows by turn, advances a Store-owned
 canonical Fact-prefix digest with every append, and tracks which accepted
 turns do not yet have a terminal Fact. Agent-node root/path lookups have one
@@ -480,8 +495,7 @@ Program runs retain an indexed accepted_control_seq projection, checked against
 canonical head_json and controls. The Session acceptance index orders fixed-seed
 history without sorting all rows. A history page projects bounded head JSON and
 correlated scalar fields in that same query; point and page reads share one
-head decoder and its identity/budget checks. This exact pre-release schema rejects older
-stores; there is no automatic migration. CAS reads reject symlinks, metadata/length
+head decoder and its identity/budget checks. CAS reads reject symlinks, metadata/length
 changes, unexpected trailing bytes and digest mismatches while holding worker
 byte admission through returned buffer ownership.
 An unexpected EOF within an admitted CAS body is corruption, not a retryable I/O fault.
@@ -511,3 +525,9 @@ read marks, and are never recycled or automatically reopened. Healthy concurrent
 readers return to the pool for ordered shutdown even after lane admission closes. Post-write
 proof maintenance does not run on a condemned connection or replace its lane error. Shutdown
 still drains jobs and closes all readers before the writer and its exclusive lease.
+
+The opt-in `store_scaling` benchmark's `RSI_STORE_BENCH_COLD_MIXED_ONLY=1`
+mode measures long cold histories alongside small cold reads, a fork-boundary
+read, warm reads and writes, and abandoned waiters. It reports lane admission,
+worker scheduling and execution medians/p95 plus cold-validation refusals for
+the selected `RSI_STORE_BENCH_COUNTS`. These observations are not timing gates.

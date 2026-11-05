@@ -15,6 +15,7 @@ use super::{
     TurnId, WriteContextCheckpoint, advance_control_prefix_digest, advance_fact_prefix_digest,
     async_trait, validate_message_claim_fact, validate_read_limit, validate_session_read_limit,
 };
+use rsi_agent_store_protocol::MailboxRead;
 use rsi_agent_store_protocol::admit_page_record;
 
 #[cfg(test)]
@@ -77,6 +78,11 @@ impl SessionStore for MemoryStore {
                         coordinates: session.header.coordinates().clone(),
                         created_at_ms: session.header.created_at_ms(),
                         last_activity_ms: session.last_activity_ms,
+                        durable_fact_seq: session.facts.last().map_or(0, |fact| fact.seq()),
+                        durable_control_seq: session
+                            .controls
+                            .last()
+                            .map_or(0, AgentControlRecord::seq),
                     })
             })
             .collect())
@@ -124,6 +130,8 @@ impl SessionStore for MemoryStore {
                     coordinates: session.header.coordinates().clone(),
                     created_at_ms: session.header.created_at_ms(),
                     last_activity_ms: *time,
+                    durable_fact_seq: session.facts.last().map_or(0, |fact| fact.seq()),
+                    durable_control_seq: session.controls.last().map_or(0, AgentControlRecord::seq),
                 }
             })
             .collect::<Vec<_>>();
@@ -490,6 +498,10 @@ impl SessionStore for MemoryStore {
         })
     }
 
+    #[expect(
+        clippy::too_many_lines,
+        reason = "The append boundary validates and applies one locked in-memory transaction."
+    )]
     async fn append(&self, batch: AppendBatch) -> Result<AppendCommit> {
         batch.validate()?;
         let commit = AppendCommit {
@@ -556,7 +568,10 @@ impl SessionStore for MemoryStore {
                 .insert((header.created_at_ms(), batch.session_id.clone()));
             if let Some(origin) = header.fork_origin() {
                 state.agent_children.insert(
-                    (origin.parent_session_id.clone(), batch.session_id.clone()),
+                    (
+                        origin.history.parent_session_id.clone(),
+                        batch.session_id.clone(),
+                    ),
                     StoreAgentChild {
                         session_id: batch.session_id.clone(),
                         path: origin.path.clone(),
@@ -567,6 +582,7 @@ impl SessionStore for MemoryStore {
             state.sessions.insert(
                 batch.session_id.clone(),
                 MemorySession {
+                    inbox_paused: false,
                     last_activity_ms: activity,
                     header,
                     model_coordinates,
@@ -575,6 +591,7 @@ impl SessionStore for MemoryStore {
                     fact_prefix_digest,
                     checkpoint: None,
                     controls: Vec::new(),
+                    control_fact_cursors: Vec::new(),
                     programs: BTreeMap::new(),
                     last_settled_control_seq: 0,
                     control_prefix_digest: EMPTY_CONTROL_PREFIX_DIGEST,
@@ -702,6 +719,7 @@ impl SessionStore for MemoryStore {
         &self,
         session_id: &SessionId,
         at_control_seq: Option<u64>,
+        domain: Option<&str>,
     ) -> Result<rsi_agent_store_protocol::StoreDomainStatePage> {
         use rsi_agent_store_protocol::{StoreDomainState, StoreDomainStatePage};
         let state = self
@@ -720,7 +738,8 @@ impl SessionStore for MemoryStore {
             ));
         }
         let mut states = Vec::new();
-        for versions in session.domain_versions.values() {
+        let bound = domain.map_or(std::ops::Bound::Unbounded, std::ops::Bound::Included);
+        for (_, versions) in session.domain_versions.range::<str, _>((bound, bound)) {
             let Some(index) = versions
                 .partition_point(|head| head.control_seq <= selected_control_seq)
                 .checked_sub(1)
@@ -959,6 +978,8 @@ impl SessionStore for MemoryStore {
         }
         let page = StoreControlPage {
             after_seq,
+            fact_cursors: session.control_fact_cursors[start..start + records.len()].to_vec(),
+            durable_fact_seq: session.facts.last().map_or(0, |fact| fact.seq()),
             records,
             durable_seq,
         };
@@ -1128,7 +1149,7 @@ impl SessionStore for MemoryStore {
     async fn resolve_fork_boundary(
         &self,
         session_id: &SessionId,
-        invoking_turn_id: &TurnId,
+        point: &rsi_agent_session_protocol::ForkPoint,
         selection: ForkTurnSelection,
     ) -> Result<StoreForkBoundary> {
         selection
@@ -1144,6 +1165,7 @@ impl SessionStore for MemoryStore {
             .sessions
             .get(session_id)
             .ok_or_else(|| StoreError::NotFound(session_id.to_string()))?;
+        let invoking_turn_id = point.turn_id();
         let invoking =
             session
                 .turns
@@ -1152,12 +1174,23 @@ impl SessionStore for MemoryStore {
                     session: session_id.to_string(),
                     turn: invoking_turn_id.to_string(),
                 })?;
+        let exclusive_before = match point {
+            rsi_agent_session_protocol::ForkPoint::BeforeTurn { .. } => invoking.accepted_seq,
+            rsi_agent_session_protocol::ForkPoint::ThroughTurn { .. } => invoking
+                .terminal_seq
+                .and_then(|seq| seq.checked_add(1))
+                .ok_or_else(|| {
+                    StoreError::Invalid(
+                        "through-Turn fork requires a completed bounded source".into(),
+                    )
+                })?,
+        };
         let mut completed = session
             .turns
             .iter()
             .filter_map(|(turn_id, turn)| {
                 turn.terminal_seq
-                    .filter(|terminal| *terminal < invoking.accepted_seq)
+                    .filter(|terminal| *terminal < exclusive_before)
                     .map(|terminal| (terminal, turn.accepted_seq, turn_id))
             })
             .collect::<Vec<_>>();
@@ -1284,6 +1317,7 @@ impl SessionStore for MemoryStore {
         let has_more = turns.len() > limit;
         turns.truncate(limit);
         let page = StoreOpenTurnPage {
+            durable_control_seq: session.controls.last().map_or(0, AgentControlRecord::seq),
             after_accepted_seq,
             turns,
             durable_seq,
@@ -1421,7 +1455,9 @@ impl SessionStore for MemoryStore {
         let mut all = state
             .ready_messages
             .iter()
-            .filter(|((root, _, _, _), _)| root == root_session_id)
+            .filter(|((root, _, id, _), _)| {
+                root == root_session_id && !state.sessions[id].inbox_paused
+            })
             .map(|(_, message)| message.clone())
             .filter(|message| {
                 after.is_none_or(|after| {
@@ -1449,6 +1485,55 @@ impl SessionStore for MemoryStore {
         };
         page.validate()?;
         Ok(page)
+    }
+
+    async fn read_inbox_control_state(
+        &self,
+        session_id: &SessionId,
+        include_pending: bool,
+    ) -> Result<rsi_agent_store_protocol::StoreInboxControlState> {
+        let state = self
+            .inner
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        let session = state
+            .sessions
+            .get(session_id)
+            .ok_or_else(|| StoreError::NotFound(session_id.to_string()))?;
+        let mut pending = if include_pending {
+            state
+                .agent_messages
+                .iter()
+                .filter(|((id, _), entry)| {
+                    id == session_id && matches!(entry.state, StoreAgentMessageState::Pending)
+                })
+                .map(|((_, id), entry)| (entry.accepted_control_seq, id))
+                .collect::<Vec<_>>()
+        } else {
+            vec![]
+        };
+        pending.sort_unstable_by_key(|(seq, _)| *seq);
+        if pending.len() > rsi_agent_session_protocol::MAXIMUM_PENDING_AGENT_MESSAGES {
+            return Err(StoreError::Corrupt(
+                "pending inbox exceeds its bound".into(),
+            ));
+        }
+        Ok(rsi_agent_store_protocol::StoreInboxControlState {
+            durable_fact_seq: session.facts.last().map_or(0, |fact| fact.seq()),
+            durable_control_seq: session.controls.last().map_or(0, AgentControlRecord::seq),
+            inbox_paused: session.inbox_paused,
+            has_open_turn: session
+                .turns
+                .values()
+                .any(|turn| turn.terminal_seq.is_none()),
+            has_active_activation: state.active_activations.contains_key(session_id),
+            has_waking_message: !session.inbox_paused
+                && state
+                    .ready_keys
+                    .keys()
+                    .any(|(candidate, _)| candidate == session_id),
+            pending_message_ids: pending.into_iter().map(|(_, id)| id.clone()).collect(),
+        })
     }
 
     async fn inspect_session(
@@ -1544,7 +1629,7 @@ impl SessionStore for MemoryStore {
     async fn read_agent_mailbox(
         &self,
         session_id: &SessionId,
-        selected_message_id: Option<&MessageId>,
+        query: MailboxRead,
     ) -> Result<StoreAgentMailbox> {
         let state = self
             .inner
@@ -1556,18 +1641,20 @@ impl SessionStore for MemoryStore {
             .ok_or_else(|| StoreError::NotFound(session_id.to_string()))?;
         let durable_control_seq = session.controls.last().map_or(0, AgentControlRecord::seq);
         let durable_fact_seq = session.facts.last().map_or(0, |fact| fact.seq());
-        let selected = selected_message_id
-            .and_then(|message_id| {
-                state
-                    .agent_messages
-                    .get(&(session_id.clone(), message_id.clone()))
-            })
-            .cloned();
+        let step_only = query == MailboxRead::NextStep;
+        let selected = match query {
+            MailboxRead::WithMessage(id) => {
+                state.agent_messages.get(&(session_id.clone(), id)).cloned()
+            }
+            MailboxRead::All | MailboxRead::NextStep => None,
+        };
         let mut pending = state
             .agent_messages
             .iter()
             .filter_map(|((candidate, _), entry)| {
-                (candidate == session_id && matches!(entry.state, StoreAgentMessageState::Pending))
+                (candidate == session_id
+                    && matches!(entry.state, StoreAgentMessageState::Pending)
+                    && (!step_only || entry.target == MessageTarget::NextStep))
                     .then_some(entry)
             })
             .collect::<Vec<_>>();
@@ -1586,6 +1673,7 @@ impl SessionStore for MemoryStore {
             bounded.push(entry.clone());
         }
         let mailbox = StoreAgentMailbox {
+            inbox_paused: state.sessions[session_id].inbox_paused,
             selected,
             pending: bounded,
             pending_count,
@@ -1609,6 +1697,7 @@ impl SessionStore for MemoryStore {
             .get(session_id)
             .ok_or_else(|| StoreError::NotFound(session_id.to_string()))?;
         let summary = StoreAgentMailboxSummary {
+            inbox_paused: session.inbox_paused,
             pending_count: state
                 .agent_messages
                 .iter()
@@ -1706,6 +1795,7 @@ impl SessionStore for MemoryStore {
         let mut roots = state
             .ready_messages
             .keys()
+            .filter(|(_, _, id, _)| !state.sessions[id].inbox_paused)
             .map(|(root, _, _, _)| root)
             .filter(|root| after.is_none_or(|after| *root > after))
             .cloned()
@@ -2029,7 +2119,7 @@ fn apply_atomic_memory_append(
         .get(&append.session_id)
         .map(|session| session.last_activity_ms);
     let session_id = append.session_id.clone();
-    let minimum_entered_fact_seq = append
+    let minimum_claimed_fact_seq = append
         .expected_fact_seq
         .checked_add(1)
         .ok_or_else(|| StoreError::Invalid("Fact sequence is exhausted".into()))?;
@@ -2071,6 +2161,10 @@ fn apply_atomic_memory_append(
         session.turns.extend(turn_updates);
         session.fact_prefix_digest = fact_digest;
         session.controls.extend(append.controls.clone());
+        session.control_fact_cursors.extend(std::iter::repeat_n(
+            session.facts.last().map_or(0, |fact| fact.seq()),
+            append.controls.len(),
+        ));
         session.control_prefix_digest = control_digest;
     } else {
         let header = append
@@ -2093,7 +2187,7 @@ fn apply_atomic_memory_append(
             .insert((header.created_at_ms(), session_id.clone()));
         if let Some(origin) = header.fork_origin() {
             state.agent_children.insert(
-                (origin.parent_session_id.clone(), session_id.clone()),
+                (origin.history.parent_session_id.clone(), session_id.clone()),
                 StoreAgentChild {
                     session_id: session_id.clone(),
                     path: origin.path.clone(),
@@ -2104,9 +2198,17 @@ fn apply_atomic_memory_append(
         state.sessions.insert(
             session_id.clone(),
             MemorySession {
+                inbox_paused: false,
                 last_activity_ms: activity,
                 header,
                 model_coordinates,
+                control_fact_cursors: vec![
+                    append
+                        .facts
+                        .last()
+                        .map_or(append.expected_fact_seq, |fact| fact.seq());
+                    append.controls.len()
+                ],
                 facts: append.facts,
                 turns,
                 fact_prefix_digest: fact_digest,
@@ -2148,7 +2250,7 @@ fn apply_atomic_memory_append(
         }
         let controls = std::slice::from_ref(record);
         apply_program_updates(state, &session_id, controls)?;
-        apply_message_updates(state, &session_id, minimum_entered_fact_seq, controls)?;
+        apply_message_updates(state, &session_id, minimum_claimed_fact_seq, controls)?;
         apply_ready_updates(state, &session_id, controls)?;
         apply_activation_updates(state, &session_id, controls)?;
     }
@@ -2156,7 +2258,14 @@ fn apply_atomic_memory_append(
         .sessions
         .get_mut(&session_id)
         .expect("atomic append installed or updated its session");
-    apply_domain_updates(session, minimum_entered_fact_seq, &append.controls)?;
+    apply_domain_updates(session, minimum_claimed_fact_seq, &append.controls)?;
+    for record in &append.controls {
+        match record.body() {
+            AgentControlRecordBody::InboxPaused => session.inbox_paused = true,
+            AgentControlRecordBody::InboxResumed => session.inbox_paused = false,
+            _ => {}
+        }
+    }
     if let Some(record) = append.controls.iter().rev().find(|record| {
         matches!(
             record.body(),
@@ -2260,7 +2369,7 @@ fn validate_memory_agent_node(state: &MemoryState, header: &SessionHeader) -> Re
     };
     let parent = state
         .sessions
-        .get(&origin.parent_session_id)
+        .get(&origin.history.parent_session_id)
         .ok_or_else(|| StoreError::Invalid("Agent parent session is not durable".into()))?;
     let expected_root = parent
         .header
@@ -2300,7 +2409,9 @@ fn validate_memory_agent_node(state: &MemoryState, header: &SessionHeader) -> Re
                 "Agent tree path is already present".into(),
             ));
         }
-        if parent_session_id == &origin.parent_session_id && child.task_name == origin.task_name {
+        if parent_session_id == &origin.history.parent_session_id
+            && child.task_name == origin.task_name
+        {
             return Err(StoreError::Invalid(
                 "Agent task name is already present below its parent".into(),
             ));
@@ -2313,7 +2424,7 @@ fn validate_memory_agent_node(state: &MemoryState, header: &SessionHeader) -> Re
 fn apply_message_updates(
     state: &mut MemoryState,
     session_id: &SessionId,
-    minimum_entered_fact_seq: u64,
+    minimum_claimed_fact_seq: u64,
     controls: &[AgentControlRecord],
 ) -> Result<()> {
     for record in controls {
@@ -2440,7 +2551,7 @@ fn apply_message_updates(
                 activation_id,
                 turn_id,
                 step_id,
-                entered_fact_seq,
+                claimed_fact_seq,
             } => {
                 let key = (session_id.clone(), message_id.clone());
                 let message = state
@@ -2456,7 +2567,7 @@ fn apply_message_updates(
                     ));
                 }
                 message.validate_claim_turn(turn_id)?;
-                let fact = usize::try_from(*entered_fact_seq)
+                let fact = usize::try_from(*claimed_fact_seq)
                     .ok()
                     .and_then(|sequence| sequence.checked_sub(1))
                     .and_then(|index| {
@@ -2469,7 +2580,7 @@ fn apply_message_updates(
                     &message.message,
                     turn_id,
                     step_id,
-                    minimum_entered_fact_seq,
+                    minimum_claimed_fact_seq,
                     fact.map(AsRef::as_ref),
                 )?;
                 let entry = state
@@ -2480,7 +2591,7 @@ fn apply_message_updates(
                     activation_id: activation_id.clone(),
                     turn_id: turn_id.clone(),
                     step_id: step_id.clone(),
-                    entered_fact_seq: *entered_fact_seq,
+                    claimed_fact_seq: *claimed_fact_seq,
                 };
             }
             AgentControlRecordBody::MessagePromoted { message_id } => {
@@ -2528,7 +2639,9 @@ fn apply_message_updates(
             | AgentControlRecordBody::TurnBoundaryRecorded { .. }
             | AgentControlRecordBody::DomainStateCommitted { .. }
             | AgentControlRecordBody::ProgramRun { .. }
-            | AgentControlRecordBody::ProgramCompletionReserved { .. } => {}
+            | AgentControlRecordBody::ProgramCompletionReserved { .. }
+            | AgentControlRecordBody::InboxPaused
+            | AgentControlRecordBody::InboxResumed => {}
         }
     }
     Ok(())
@@ -2812,12 +2925,18 @@ fn apply_activation_updates(
             | AgentControlRecordBody::DomainStateCommitted { .. }
             | AgentControlRecordBody::MessageSuccessor { .. }
             | AgentControlRecordBody::QueueMutationRecorded { .. }
-            | AgentControlRecordBody::ProgramRun { .. } => {}
+            | AgentControlRecordBody::ProgramRun { .. }
+            | AgentControlRecordBody::InboxPaused
+            | AgentControlRecordBody::InboxResumed => {}
         }
     }
     Ok(())
 }
 
+#[expect(
+    clippy::too_many_lines,
+    reason = "One ordered projection reducer covers every control variant without a second dispatch."
+)]
 fn apply_ready_updates(
     state: &mut MemoryState,
     session_id: &SessionId,
@@ -2918,7 +3037,9 @@ fn apply_ready_updates(
             | AgentControlRecordBody::DomainStateCommitted { .. }
             | AgentControlRecordBody::ProgramRun { .. }
             | AgentControlRecordBody::QueueMutationRecorded { .. }
-            | AgentControlRecordBody::ProgramCompletionReserved { .. } => {}
+            | AgentControlRecordBody::ProgramCompletionReserved { .. }
+            | AgentControlRecordBody::InboxPaused
+            | AgentControlRecordBody::InboxResumed => {}
         }
     }
     Ok(())
@@ -2989,6 +3110,7 @@ fn memory_agent_subtree(
             .get(id)
             .ok_or_else(|| StoreError::NotFound(id.to_string()))?;
         Ok(StoreAgentSessionStatus {
+            inbox_paused: session.inbox_paused,
             last_settled_control_seq: session.last_settled_control_seq,
             session_id: id.clone(),
             durable_control_seq: session.controls.last().map_or(0, AgentControlRecord::seq),
@@ -2998,10 +3120,11 @@ fn memory_agent_subtree(
                 .any(|turn| turn.terminal_seq.is_none()),
             has_active_activation: state.active_activations.contains_key(id),
             has_active_program: session.programs.values().any(|(head, _)| !head.terminal),
-            has_waking_message: state
-                .ready_keys
-                .keys()
-                .any(|(candidate, _)| candidate == id),
+            has_waking_message: !session.inbox_paused
+                && state
+                    .ready_keys
+                    .keys()
+                    .any(|(candidate, _)| candidate == id),
         })
     };
     let session = status(root)?;

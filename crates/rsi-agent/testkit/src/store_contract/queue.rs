@@ -7,6 +7,7 @@ use rsi_agent_session_protocol::{
     MessageDelivery, MessageDiscardReason, QueueMutationOutcome, QueueMutationReceipt,
     QueueMutationRejection, QueueOperationId, QueueSlot, QueueSlotId,
 };
+use rsi_agent_store_protocol::MailboxRead;
 
 fn record(seq: u64, body: AgentControlRecordBody) -> AgentControlRecord {
     AgentControlRecord::new(seq, 1000 + seq, body).unwrap()
@@ -45,6 +46,219 @@ fn receipt(operation: &str, seq: u64, outcome: QueueMutationOutcome) -> QueueMut
 }
 
 const OPERATIONS: usize = 4100;
+
+/// Proves inbox suspension preserves messages, gates readiness and rolls back atomically.
+/// Leaves the supplied new Session paused with one original pending input.
+///
+/// # Panics
+/// Panics if a backend violates the durable inbox suspension contract.
+#[expect(
+    clippy::too_many_lines,
+    reason = "One stateful contract checks pause, failed atomic resume, successful resume and later edits on the same messages."
+)]
+pub async fn assert_inbox_pause_store_contract(store: &dyn SessionStore, header: SessionHeader) {
+    let id = header.session_id().clone();
+    let acceptance = |name: &str| AgentControlRecordBody::MessageAccepted {
+        message: AgentMessage {
+            message_id: MessageId::new(name).unwrap(),
+            source: AgentMessageSource::Human { attribution: None },
+            content: vec![AgentMessageContent::Text { text: name.into() }],
+            options: MessageOptions::default(),
+        },
+        delivery: MessageDelivery::NextTurn,
+        bound_turn_id: None,
+        root_session_id: id.clone(),
+        target: MessageTarget::NextTurn,
+        wake_required: true,
+    };
+    append(
+        store,
+        &id,
+        0,
+        Some(header),
+        vec![record(1, acceptance("original"))],
+    )
+    .await
+    .unwrap();
+    let original = store
+        .read_agent_mailbox(&id, MailboxRead::All)
+        .await
+        .unwrap()
+        .pending;
+    assert_eq!(
+        store.list_ready_roots(None, 10).await.unwrap().roots,
+        std::slice::from_ref(&id)
+    );
+    let ready = store
+        .list_ready_messages(&id, None, 10)
+        .await
+        .unwrap()
+        .messages;
+    assert_eq!(ready.len(), 1);
+    assert!(
+        store
+            .read_inbox_control_state(&id, false)
+            .await
+            .unwrap()
+            .has_waking_message
+    );
+    append(
+        store,
+        &id,
+        1,
+        None,
+        vec![record(2, AgentControlRecordBody::InboxPaused)],
+    )
+    .await
+    .unwrap();
+    let paused = store
+        .read_agent_mailbox(&id, MailboxRead::All)
+        .await
+        .unwrap();
+    assert!(paused.inbox_paused);
+    assert_eq!(paused.pending, original);
+    let metadata = store.read_inbox_control_state(&id, true).await.unwrap();
+    assert!(metadata.inbox_paused);
+    assert!(!metadata.has_open_turn);
+    assert!(!metadata.has_active_activation);
+    assert!(!metadata.has_waking_message);
+    assert_eq!(metadata.durable_fact_seq, paused.durable_fact_seq);
+    assert_eq!(metadata.durable_control_seq, paused.durable_control_seq);
+    assert_eq!(
+        metadata.pending_message_ids,
+        std::slice::from_ref(&original[0].message.message_id)
+    );
+    let status = store.read_inbox_control_state(&id, false).await.unwrap();
+    assert_eq!(
+        status,
+        rsi_agent_store_protocol::StoreInboxControlState {
+            pending_message_ids: vec![],
+            ..metadata
+        }
+    );
+    assert!(
+        store
+            .read_agent_mailbox_summary(&id)
+            .await
+            .unwrap()
+            .inbox_paused
+    );
+    let inspection = store.inspect_session(&id).await.unwrap();
+    assert!(inspection.tree.session.inbox_paused);
+    assert!(!inspection.tree.session.has_waking_message);
+    assert_eq!(inspection.pending.len(), 1);
+    assert!(
+        store
+            .list_ready_roots(None, 10)
+            .await
+            .unwrap()
+            .roots
+            .is_empty()
+    );
+    assert!(
+        store
+            .list_ready_messages(&id, None, 10)
+            .await
+            .unwrap()
+            .messages
+            .is_empty()
+    );
+    // A later invalid control cannot make the preceding resume externally visible.
+    assert!(
+        append(
+            store,
+            &id,
+            2,
+            None,
+            vec![
+                record(3, AgentControlRecordBody::InboxResumed),
+                record(
+                    4,
+                    AgentControlRecordBody::MessagePromoted {
+                        message_id: MessageId::new("absent").unwrap()
+                    }
+                )
+            ]
+        )
+        .await
+        .is_err()
+    );
+    assert_eq!(
+        store
+            .read_agent_mailbox(&id, MailboxRead::All)
+            .await
+            .unwrap(),
+        paused
+    );
+    append(
+        store,
+        &id,
+        2,
+        None,
+        vec![record(3, AgentControlRecordBody::InboxResumed)],
+    )
+    .await
+    .unwrap();
+    assert_eq!(
+        store
+            .list_ready_messages(&id, None, 10)
+            .await
+            .unwrap()
+            .messages,
+        ready
+    );
+    assert!(
+        store
+            .read_agent_subtree_snapshot(&id)
+            .await
+            .unwrap()
+            .session
+            .has_waking_message
+    );
+    append(
+        store,
+        &id,
+        3,
+        None,
+        vec![
+            record(4, AgentControlRecordBody::InboxPaused),
+            record(5, acceptance("later")),
+        ],
+    )
+    .await
+    .unwrap();
+    assert!(
+        store
+            .list_ready_roots(None, 10)
+            .await
+            .unwrap()
+            .roots
+            .is_empty(),
+        "Store acceptance alone cannot substitute for Kernel wake policy"
+    );
+    append(
+        store,
+        &id,
+        5,
+        None,
+        vec![record(
+            6,
+            AgentControlRecordBody::MessageDiscarded {
+                message_id: MessageId::new("later").unwrap(),
+                reason: MessageDiscardReason::Cancelled,
+            },
+        )],
+    )
+    .await
+    .unwrap();
+    let final_state = store
+        .read_agent_mailbox(&id, MailboxRead::All)
+        .await
+        .unwrap();
+    assert!(final_state.inbox_paused);
+    assert_eq!(final_state.pending, original);
+    store.validate_session(&id).await.unwrap();
+}
 
 async fn assert_absent_turn_conversion_rejected(
     store: &dyn SessionStore,
@@ -148,7 +362,7 @@ pub async fn assert_queue_store_contract(store: &dyn SessionStore, header: Sessi
                 AgentControlRecordBody::MessageAccepted {
                     message: AgentMessage {
                         message_id: MessageId::new(format!("message-{index}")).unwrap(),
-                        source: AgentMessageSource::Human,
+                        source: AgentMessageSource::Human { attribution: None },
                         content: vec![AgentMessageContent::Text {
                             text: format!("original {index}"),
                         }],

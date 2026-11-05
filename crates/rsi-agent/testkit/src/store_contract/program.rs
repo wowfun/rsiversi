@@ -625,7 +625,7 @@ async fn assert_ordered_admission(
                 AgentControlRecordBody::MessageAccepted {
                     message: AgentMessage {
                         message_id: MessageId::new(format!("pending-{seq}")).unwrap(),
-                        source: AgentMessageSource::Human,
+                        source: AgentMessageSource::Human { attribution: None },
                         content: vec![AgentMessageContent::Text {
                             text: "pending".into(),
                         }],
@@ -702,19 +702,23 @@ async fn reject_nonwaking_or_retired_initial_children(
             SessionId::new("invalid-program-child").unwrap(),
             2,
             ForkOrigin {
-                parent_session_id: id.clone(),
+                history: rsi_agent_session_protocol::HistoryOrigin {
+                    parent_session_id: id.clone(),
+                    parent_header_fingerprint: parent.fingerprint().unwrap(),
+                    point: rsi_agent_session_protocol::ForkPoint::BeforeTurn {
+                        turn_id: descriptor.creator_turn_id.clone(),
+                    },
+                    resolved_after_seq: 0,
+                    resolved_terminal_seq: 0,
+                    terminal_prefix_sha256: "0".repeat(64),
+                    resolved_terminal_control_seq: 0,
+                    terminal_control_prefix_sha256: "0".repeat(64),
+                    requested_turns: ForkTurnSelection::None,
+                    effective_turns: 0,
+                },
                 root_session_id: id.clone(),
                 path: AgentPath::new(vec![1]).unwrap(),
                 task_name: "invalid-child".into(),
-                parent_header_fingerprint: parent.fingerprint().unwrap(),
-                invoking_turn_id: descriptor.creator_turn_id.clone(),
-                resolved_after_seq: 0,
-                resolved_terminal_seq: 0,
-                terminal_prefix_sha256: "0".repeat(64),
-                resolved_terminal_control_seq: 0,
-                terminal_control_prefix_sha256: "0".repeat(64),
-                requested_turns: ForkTurnSelection::None,
-                effective_turns: 0,
             },
             descriptor.selection.clone(),
         )

@@ -212,7 +212,7 @@ pub(super) fn validate_receipt_boundary(
     session: &SessionId,
     record: &AgentControlRecord,
 ) -> Result<()> {
-    use rsi_agent_session_protocol::{AgentMessageSource, QueueMutationOutcome};
+    use rsi_agent_session_protocol::QueueMutationOutcome;
     let Body::QueueMutationRecorded { receipt } = record.body() else {
         return Ok(());
     };
@@ -243,11 +243,9 @@ pub(super) fn validate_receipt_boundary(
             session,
             &receipt.expected_message_id,
         )?;
-        if predecessor.queue_slot.id != receipt.slot_id
-            || predecessor.message.source != AgentMessageSource::Human
-        {
+        if predecessor.queue_slot.id != receipt.slot_id {
             return Err(StoreError::Corrupt(
-                "withdraw receipt has a foreign slot or source".into(),
+                "withdraw receipt has a foreign slot".into(),
             ));
         }
     }

@@ -10,7 +10,7 @@ async fn ready_fixture(store: &SqliteStore) -> SessionId {
                 AgentControlRecordBody::MessageAccepted {
                     message: AgentMessage {
                         message_id: MessageId::new(format!("message-{seq}")).unwrap(),
-                        source: AgentMessageSource::Human,
+                        source: AgentMessageSource::Human { attribution: None },
                         content: vec![rsi_agent_session_protocol::AgentMessageContent::Text {
                             text: "ordinary".into(),
                         }],
@@ -118,6 +118,7 @@ async fn ready_projection_classifies_metadata_without_reading_message_bodies() {
         .unwrap();
     for (encoded, expected) in [
         ("human", AgentMessageSourceKind::Human),
+        ("application", AgentMessageSourceKind::Application),
         ("agent", AgentMessageSourceKind::Agent),
         ("completion", AgentMessageSourceKind::Completion),
         ("continuation", AgentMessageSourceKind::Continuation),

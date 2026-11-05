@@ -9,9 +9,8 @@ use rsi_agent_session_protocol::{
     SessionFact, SessionFactBody, SessionHeader, SessionId, TurnId,
 };
 use rsi_agent_store_protocol::{
-    AGENT_STORE_SCHEMA_VERSION, AppendBatch, AtomicAgentCommit, AtomicSessionAppend,
-    MAXIMUM_STORE_MAILBOX_PAGE_BYTES, SessionStore, StoreError, StoredContextCheckpoint,
-    WriteContextCheckpoint,
+    AppendBatch, AtomicAgentCommit, AtomicSessionAppend, MAXIMUM_STORE_MAILBOX_PAGE_BYTES,
+    MailboxRead, SessionStore, StoreError, StoredContextCheckpoint, WriteContextCheckpoint,
 };
 use rsi_agent_store_sqlite::SqliteStore;
 use rsi_agent_testkit::assert_mechanical_store_contract;
@@ -123,7 +122,7 @@ async fn cold_domain_reads_and_offline_verify_reject_corrupted_canonical_indexes
         assert!(
             matches!(
                 reopened
-                    .read_domain_states(&SessionId::new("domains").unwrap(), None)
+                    .read_domain_states(&SessionId::new("domains").unwrap(), None, None)
                     .await,
                 Err(StoreError::Corrupt(_))
             ),
@@ -345,14 +344,18 @@ async fn fork_boundary_rejects_an_unselected_turn_interleaved_in_the_interval() 
     .unwrap();
     assert!(matches!(
         store
-            .resolve_fork_boundary(&session_id, &invoking, ForkTurnSelection::Last(1))
+            .resolve_fork_boundary(&session_id, &rsi_agent_session_protocol::ForkPoint::before(&invoking), ForkTurnSelection::Last(1))
             .await,
         Err(StoreError::Invalid(message))
             if message.contains("balanced contiguous completed-turn interval")
     ));
     assert_eq!(
         store
-            .resolve_fork_boundary(&session_id, &invoking, ForkTurnSelection::All)
+            .resolve_fork_boundary(
+                &session_id,
+                &rsi_agent_session_protocol::ForkPoint::before(&invoking),
+                ForkTurnSelection::All
+            )
             .await
             .unwrap()
             .effective_turns,
@@ -371,7 +374,7 @@ fn accepted_message_control(
         AgentControlRecordBody::MessageAccepted {
             message: AgentMessage {
                 message_id: message_id.clone(),
-                source: AgentMessageSource::Human,
+                source: AgentMessageSource::Human { attribution: None },
                 content: vec![AgentMessageContent::Text {
                     text: "mailbox input".into(),
                 }],
@@ -415,7 +418,7 @@ fn insert_agent_node_without_admission(database: &Path, header: &SessionHeader) 
             rusqlite::params![
                 session_id.as_str(),
                 origin.root_session_id.as_str(),
-                origin.parent_session_id.as_str(),
+                origin.history.parent_session_id.as_str(),
                 serde_json::to_string(&origin.path).unwrap(),
                 &origin.task_name,
                 serde_json::to_string(header.execution_owner().unwrap()).unwrap(),
@@ -539,19 +542,23 @@ async fn durable_agent_tree_accepts_exactly_its_declared_node_bound() {
                 child_id,
                 u64::try_from(index + 1).unwrap(),
                 ForkOrigin {
-                    parent_session_id: root_id.clone(),
+                    history: rsi_agent_session_protocol::HistoryOrigin {
+                        parent_session_id: root_id.clone(),
+                        parent_header_fingerprint: parent_header_fingerprint.clone(),
+                        point: rsi_agent_session_protocol::ForkPoint::BeforeTurn {
+                            turn_id: TurnId::new("turn-1").unwrap(),
+                        },
+                        resolved_after_seq: 0,
+                        resolved_terminal_seq: 0,
+                        terminal_prefix_sha256: "0".repeat(64),
+                        resolved_terminal_control_seq: 0,
+                        terminal_control_prefix_sha256: "0".repeat(64),
+                        requested_turns: ForkTurnSelection::None,
+                        effective_turns: 0,
+                    },
                     root_session_id: root_id.clone(),
                     path: AgentPath::new(vec![u16::try_from(index).unwrap()]).unwrap(),
                     task_name: format!("bounded-task-{index}"),
-                    parent_header_fingerprint: parent_header_fingerprint.clone(),
-                    invoking_turn_id: TurnId::new("turn-1").unwrap(),
-                    resolved_after_seq: 0,
-                    resolved_terminal_seq: 0,
-                    terminal_prefix_sha256: "0".repeat(64),
-                    resolved_terminal_control_seq: 0,
-                    terminal_control_prefix_sha256: "0".repeat(64),
-                    requested_turns: ForkTurnSelection::None,
-                    effective_turns: 0,
                 },
                 rsi_agent_session_protocol::ModelSelection::baseline(root_header.settings()),
             )
@@ -1054,6 +1061,7 @@ async fn turn_indexes_support_exact_outcome_and_open_turn_queries() {
     assert_eq!(turn.facts, vec![fact(2), terminal_fact(4, 2)]);
     assert!(!turn.has_more);
     let open = store.list_open_turns(&session, 0, 8).await.unwrap();
+    assert_eq!((open.durable_seq, open.durable_control_seq), (4, 1));
     assert_eq!(
         open.turns
             .iter()
@@ -1268,7 +1276,7 @@ fn mailbox_read_rejects_an_oversized_indexed_message_before_loading_its_json() {
     drop(connection);
 
     assert!(matches!(
-        runtime.block_on(store.read_agent_mailbox(&session, Some(&message))),
+        runtime.block_on(store.read_agent_mailbox(&session, MailboxRead::WithMessage(message.clone()))),
         Err(StoreError::Corrupt(message))
             if message.contains("Agent message") && message.contains("exceeds")
     ));
@@ -1289,7 +1297,7 @@ fn mailbox_read_rejects_an_oversized_indexed_message_before_loading_its_json() {
         .unwrap();
     drop(connection);
     assert!(matches!(
-        runtime.block_on(store.read_agent_mailbox(&session, Some(&message))),
+        runtime.block_on(store.read_agent_mailbox(&session, MailboxRead::WithMessage(message.clone()))),
         Err(StoreError::Corrupt(message))
             if message.contains("Agent message state") && message.contains("exceeds")
     ));
@@ -1324,8 +1332,8 @@ fn mailbox_summary_bounds_completion_identity_rows_before_decoding() {
             "WITH RECURSIVE counter(value) AS (
                  SELECT 2 UNION ALL SELECT value + 1 FROM counter WHERE value < {corrupt_count}
              )
-             INSERT INTO agent_controls (session_id, seq, control_json)
-             SELECT '{session}', value, source.control_json
+             INSERT INTO agent_controls (session_id, seq, control_json, fact_seq)
+             SELECT '{session}', value, source.control_json, source.fact_seq
              FROM counter
              JOIN agent_controls AS source
                ON source.session_id = '{session}' AND source.seq = 1;
@@ -1392,7 +1400,7 @@ fn verify_rejects_a_fabricated_claim_for_a_never_claimed_message() {
                 .unwrap(),
             turn_id: TurnId::new("fabricated-turn").unwrap(),
             step_id: rsi_agent_session_protocol::StepId::new("fabricated-step").unwrap(),
-            entered_fact_seq: 1,
+            claimed_fact_seq: 1,
         })
         .unwrap();
     let connection = Connection::open(root.path().join("sessions.sqlite3")).unwrap();
@@ -1747,11 +1755,8 @@ fn verify_refuses_a_snapshot_with_an_uncheckpointed_wal() {
 }
 
 #[test]
-fn old_or_partial_schema_is_rejected_without_migration() {
-    let immediately_previous = AGENT_STORE_SCHEMA_VERSION
-        .checked_sub(1)
-        .expect("the Store schema starts above version zero");
-    for (version, partial) in [(immediately_previous, false), (2, false), (0, true)] {
+fn unsupported_or_incomplete_schema_is_rejected_before_any_write() {
+    for (version, partial) in [(43, false), (42, false), (2, false), (0, true)] {
         let root = tempfile::tempdir().unwrap();
         let connection = Connection::open(root.path().join("sessions.sqlite3")).unwrap();
         if partial {
@@ -1772,10 +1777,14 @@ fn old_or_partial_schema_is_rejected_without_migration() {
             b"preserve rejected-version state",
         )
         .unwrap();
-        assert!(matches!(
-            SqliteStore::open(root.path()),
-            Err(StoreError::SchemaMismatch { actual, .. }) if actual == version
-        ));
+        let result = SqliteStore::open(root.path());
+        if version == 43 {
+            assert!(matches!(result, Err(StoreError::Corrupt(_))));
+        } else {
+            assert!(
+                matches!(result, Err(StoreError::SchemaMismatch { actual, .. }) if actual == version)
+            );
+        }
         assert_eq!(
             std::fs::read(&database).unwrap(),
             original,
@@ -1978,7 +1987,7 @@ async fn a_missing_fork_terminal_digest_is_corruption() {
         store
             .resolve_fork_boundary(
                 &session_id,
-                &TurnId::new("turn-3").unwrap(),
+                &rsi_agent_session_protocol::ForkPoint::before(&TurnId::new("turn-3").unwrap()),
                 ForkTurnSelection::All
             )
             .await,
@@ -2158,7 +2167,7 @@ fn rejected_schema_in_an_uncheckpointed_wal_preserves_both_canonical_files() {
     let writer = Connection::open(&source_db).unwrap();
     writer.execute_batch(&format!(
         "PRAGMA journal_mode = WAL; CREATE TABLE legacy (payload TEXT); INSERT INTO legacy VALUES ('retained'); PRAGMA user_version = {};",
-        AGENT_STORE_SCHEMA_VERSION - 1,
+        42,
     )).unwrap();
     let target = tempfile::tempdir().unwrap();
     for name in ["sessions.sqlite3", "sessions.sqlite3-wal"] {
@@ -2166,9 +2175,10 @@ fn rejected_schema_in_an_uncheckpointed_wal_preserves_both_canonical_files() {
     }
     let before = ["sessions.sqlite3", "sessions.sqlite3-wal"]
         .map(|name| std::fs::read(target.path().join(name)).unwrap());
-    assert!(
-        matches!(SqliteStore::open(target.path()), Err(StoreError::SchemaMismatch { actual, .. }) if actual == AGENT_STORE_SCHEMA_VERSION - 1)
-    );
+    assert!(matches!(
+        SqliteStore::open(target.path()),
+        Err(StoreError::SchemaMismatch { actual: 42, .. })
+    ));
     for (name, original) in ["sessions.sqlite3", "sessions.sqlite3-wal"]
         .into_iter()
         .zip(before)
@@ -2223,6 +2233,96 @@ async fn current_schema_preflight_reads_the_committed_wal_before_writer_recovery
 }
 
 #[tokio::test]
+async fn step_mailbox_reaches_steers_beyond_a_full_page_of_next_turn_messages() {
+    let root = tempfile::tempdir().unwrap();
+    let store = SqliteStore::open(root.path()).unwrap();
+    let session = SessionId::new("mixed-mailbox").unwrap();
+    for first in (1..=35_u64).step_by(8) {
+        let controls = (first..=(first + 7).min(35))
+            .map(|seq| {
+                let next_step = seq > 33;
+                let delivery = if next_step {
+                    rsi_agent_session_protocol::MessageDelivery::NextStep
+                } else {
+                    rsi_agent_session_protocol::MessageDelivery::NextTurn
+                };
+                AgentControlRecord::new(
+                    seq,
+                    seq,
+                    AgentControlRecordBody::MessageAccepted {
+                        message: AgentMessage {
+                            message_id: MessageId::new(format!("input-{seq}")).unwrap(),
+                            source: AgentMessageSource::Human { attribution: None },
+                            content: vec![AgentMessageContent::Text {
+                                text: if next_step {
+                                    format!("follow-up-{seq}")
+                                } else {
+                                    "x".repeat(1024 * 1024 - 256)
+                                },
+                            }],
+                            options: MessageOptions::default(),
+                        },
+                        root_session_id: session.clone(),
+                        delivery,
+                        bound_turn_id: None,
+                        target: if next_step {
+                            MessageTarget::NextStep
+                        } else {
+                            MessageTarget::NextTurn
+                        },
+                        wake_required: !next_step,
+                    },
+                )
+                .unwrap()
+            })
+            .collect();
+        store
+            .commit_agent(AtomicAgentCommit {
+                sessions: vec![AtomicSessionAppend {
+                    session_id: session.clone(),
+                    expected_fact_seq: 0,
+                    expected_control_seq: first - 1,
+                    header: (first == 1).then(|| header(session.as_str())),
+                    facts: vec![],
+                    controls,
+                }],
+                required_active_activations: vec![],
+                quiescent_descendants_of: None,
+            })
+            .await
+            .unwrap();
+    }
+    let all = store
+        .read_agent_mailbox(&session, MailboxRead::All)
+        .await
+        .unwrap();
+    assert_eq!(all.pending_count, 35);
+    assert!(
+        all.pending
+            .iter()
+            .all(|entry| entry.target == MessageTarget::NextTurn)
+    );
+    let step = store
+        .read_agent_mailbox(&session, MailboxRead::NextStep)
+        .await
+        .unwrap();
+    assert_eq!(step.pending_count, 2);
+    assert_eq!(step.durable_control_seq, all.durable_control_seq);
+    assert_eq!(
+        step.pending
+            .iter()
+            .map(|entry| entry.accepted_control_seq)
+            .collect::<Vec<_>>(),
+        [34, 35]
+    );
+    assert!(
+        step.pending
+            .iter()
+            .all(|entry| entry.target == MessageTarget::NextStep)
+    );
+}
+
+#[tokio::test]
 async fn exact_message_read_does_not_decode_unrelated_pending_payloads() {
     let root = tempfile::tempdir().unwrap();
     let store = SqliteStore::open(root.path()).unwrap();
@@ -2267,8 +2367,65 @@ async fn exact_message_read_does_not_decode_unrelated_pending_payloads() {
         store.read_agent_message(&session, &unrelated).await,
         Err(StoreError::Corrupt(_))
     ));
+    assert_eq!(
+        store
+            .read_agent_mailbox(&session, MailboxRead::NextStep)
+            .await
+            .unwrap()
+            .pending_count,
+        0
+    );
     assert!(matches!(
-        store.read_agent_mailbox(&session, None).await,
+        store.read_agent_mailbox(&session, MailboxRead::All).await,
+        Err(StoreError::Corrupt(_))
+    ));
+}
+
+#[tokio::test]
+async fn inbox_pause_survives_reopen_and_rejects_projection_tampering() {
+    let temporary = tempfile::tempdir().unwrap();
+    let id = SessionId::new("inbox-pause").unwrap();
+    let store = SqliteStore::open(temporary.path()).unwrap();
+    rsi_agent_testkit::assert_inbox_pause_store_contract(&store, header("inbox-pause")).await;
+    drop(store);
+    SqliteStore::verify(temporary.path()).unwrap();
+    let store = SqliteStore::open(temporary.path()).unwrap();
+    assert!(
+        store
+            .read_agent_mailbox_summary(&id)
+            .await
+            .unwrap()
+            .inbox_paused
+    );
+    assert!(
+        store
+            .list_ready_messages(&id, None, 10)
+            .await
+            .unwrap()
+            .messages
+            .is_empty()
+    );
+    assert!(
+        store
+            .list_ready_roots(None, 10)
+            .await
+            .unwrap()
+            .roots
+            .is_empty()
+    );
+    drop(store);
+    let connection = Connection::open(temporary.path().join("sessions.sqlite3")).unwrap();
+    connection
+        .execute(
+            "UPDATE sessions SET inbox_paused = 0 WHERE session_id = ?1",
+            [id.as_str()],
+        )
+        .unwrap();
+    drop(connection);
+    assert!(SqliteStore::verify(temporary.path()).is_err());
+    let store = SqliteStore::open(temporary.path()).unwrap();
+    assert!(matches!(
+        store.read_agent_mailbox(&id, MailboxRead::All).await,
         Err(StoreError::Corrupt(_))
     ));
 }

@@ -6,6 +6,96 @@ use rsi_agent_session_protocol::{
 use rsi_agent_store_protocol::{AtomicAgentCommit, AtomicSessionAppend, SessionStore, StoreError};
 use std::sync::Arc;
 
+/// Checks stable commit order across control-only writes and wall-clock rollback.
+/// # Panics
+/// Panics if the Store loses atomic Fact anchors or misorders a control page.
+pub async fn assert_control_fact_order(store: &dyn SessionStore, header: SessionHeader) {
+    use rsi_agent_session_protocol::{SessionFactBody, TurnId};
+    let turn = TurnId::new("anchor-turn").unwrap();
+    let accepted = SessionFact::new(
+        1,
+        1000,
+        SessionFactBody::TurnAccepted {
+            turn_id: turn.clone(),
+            text: "begin".into(),
+            model: None,
+            reasoning_effort: None,
+            sandbox: rsi_sandbox::SandboxMode::WorkspaceWrite,
+            require_approval: false,
+        },
+    )
+    .unwrap();
+    let baseline = control(
+        1,
+        None,
+        DomainMutationSource::Baseline,
+        vec![update("a", 0, false)],
+    );
+    let baseline = AgentControlRecord::new(1, 1000, baseline.body().clone()).unwrap();
+    store
+        .commit_agent(atomic(&header, 0, 0, true, vec![accepted], vec![baseline]))
+        .await
+        .unwrap();
+    let choice = control(
+        2,
+        Some("choose"),
+        DomainMutationSource::Turn {
+            turn_id: turn.clone(),
+        },
+        vec![update("a", 1, true)],
+    );
+    store
+        .commit_agent(atomic(&header, 1, 1, false, vec![], vec![choice]))
+        .await
+        .unwrap();
+    let event = SessionFact::new(
+        2,
+        1,
+        SessionFactBody::CancelRequested {
+            turn_id: turn.clone(),
+            reason: None,
+        },
+    )
+    .unwrap();
+    let change = bind_fact(
+        &control(
+            3,
+            Some("mixed"),
+            DomainMutationSource::Turn { turn_id: turn },
+            vec![update("a", 2, false)],
+        ),
+        &event,
+    );
+    store
+        .commit_agent(atomic(&header, 1, 2, false, vec![event], vec![change]))
+        .await
+        .unwrap();
+    let page = store
+        .read_controls(
+            header.session_id(),
+            0,
+            3,
+            rsi_agent_store_protocol::MAXIMUM_STORE_CONTROL_PAGE_BYTES,
+        )
+        .await
+        .unwrap();
+    assert_eq!(page.fact_cursors, [1, 1, 2]);
+    assert_eq!((page.durable_seq, page.durable_fact_seq), (3, 2));
+    assert!(page.records[0].timestamp_ms() > page.records[1].timestamp_ms());
+    let tail = store
+        .read_controls(
+            header.session_id(),
+            1,
+            1,
+            rsi_agent_store_protocol::MAXIMUM_STORE_CONTROL_PAGE_BYTES,
+        )
+        .await
+        .unwrap();
+    assert_eq!(tail.fact_cursors, [1]);
+    assert_eq!(tail.records[0].seq(), 2);
+    assert!(!tail.caught_up());
+}
+
 fn update(id: &str, revision: u64, enabled: bool) -> DomainStateUpdate {
     DomainStateUpdate::new(
         DomainRevision::new(revision),
@@ -103,7 +193,7 @@ pub async fn assert_domain_store_contract(
         ))
         .await
         .unwrap();
-    let first = store.read_domain_states(session, None).await.unwrap();
+    let first = store.read_domain_states(session, None, None).await.unwrap();
     let baseline_usage = store
         .read_turn_domain_usage(session, accepted.body().turn_id())
         .await
@@ -137,7 +227,7 @@ pub async fn assert_domain_store_contract(
             .is_err()
     );
     assert_eq!(
-        store.read_domain_states(session, None).await.unwrap(),
+        store.read_domain_states(session, None, None).await.unwrap(),
         first
     );
     assert_eq!(
@@ -170,7 +260,7 @@ pub async fn assert_domain_store_contract(
         Err(StoreError::DomainRevisionConflict { .. })
     ));
     assert_eq!(
-        store.read_domain_states(session, None).await.unwrap(),
+        store.read_domain_states(session, None, None).await.unwrap(),
         first
     );
     assert_eq!(
@@ -227,7 +317,7 @@ pub async fn assert_domain_store_contract(
         Err(StoreError::Invalid(_))
     ));
     assert_eq!(
-        store.read_domain_states(session, None).await.unwrap(),
+        store.read_domain_states(session, None, None).await.unwrap(),
         first
     );
     store
@@ -241,7 +331,7 @@ pub async fn assert_domain_store_contract(
         ))
         .await
         .unwrap();
-    let current = store.read_domain_states(session, None).await.unwrap();
+    let current = store.read_domain_states(session, None, None).await.unwrap();
     let usage = store
         .read_turn_domain_usage(session, accepted.body().turn_id())
         .await
@@ -261,17 +351,52 @@ pub async fn assert_domain_store_contract(
         current.states[1].snapshot.state().value(),
         &serde_json::Value::Bool(false)
     );
-    let historical = store.read_domain_states(session, Some(1)).await.unwrap();
+    let historical = store
+        .read_domain_states(session, Some(1), None)
+        .await
+        .unwrap();
+    for (cut, all) in [(None, &current), (Some(1), &historical)] {
+        let selected = store
+            .read_domain_states(session, cut, Some("a"))
+            .await
+            .unwrap();
+        assert_eq!(selected.states.as_slice(), &all.states[..1]);
+        assert_eq!(
+            (
+                selected.durable_fact_seq,
+                selected.durable_control_seq,
+                selected.selected_control_seq
+            ),
+            (
+                all.durable_fact_seq,
+                all.durable_control_seq,
+                all.selected_control_seq
+            )
+        );
+        assert!(
+            store
+                .read_domain_states(session, cut, Some("absent"))
+                .await
+                .unwrap()
+                .states
+                .is_empty()
+        );
+    }
     assert_eq!(historical.states, first.states);
     assert!(
         store
-            .read_domain_states(session, Some(0))
+            .read_domain_states(session, Some(0), None)
             .await
             .unwrap()
             .states
             .is_empty()
     );
-    assert!(store.read_domain_states(session, Some(3)).await.is_err());
+    assert!(
+        store
+            .read_domain_states(session, Some(3), None)
+            .await
+            .is_err()
+    );
     assert_eq!(
         store
             .read_domain_request(session, &DomainRequestId::new("replace-both").unwrap())
@@ -294,7 +419,7 @@ pub async fn assert_domain_store_contract(
         Err(StoreError::DomainRequestConflict { .. })
     ));
     assert_eq!(
-        store.read_domain_states(session, None).await.unwrap(),
+        store.read_domain_states(session, None, None).await.unwrap(),
         current
     );
     store.validate_session(session).await.unwrap();

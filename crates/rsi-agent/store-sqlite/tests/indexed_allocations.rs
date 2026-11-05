@@ -199,7 +199,7 @@ async fn excessive_ready_rows_do_not_grow_aggregate_peak() {
                 AgentControlRecordBody::MessageAccepted {
                     message: AgentMessage {
                         message_id: message_id.clone(),
-                        source: AgentMessageSource::Human,
+                        source: AgentMessageSource::Human { attribution: None },
                         content: vec![AgentMessageContent::Text {
                             text: "bounded".into(),
                         }],

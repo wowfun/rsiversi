@@ -77,6 +77,7 @@ struct MemoryState {
 
 #[derive(Clone, Debug)]
 struct MemorySession {
+    inbox_paused: bool,
     model_coordinates: BTreeSet<(TurnId, rsi_agent_session_protocol::EffectId, String)>,
     last_activity_ms: u64,
     header: SessionHeader,
@@ -85,6 +86,7 @@ struct MemorySession {
     fact_prefix_digest: [u8; 32],
     checkpoint: Option<StoredContextCheckpoint>,
     controls: Vec<AgentControlRecord>,
+    control_fact_cursors: Vec<u64>,
     programs: BTreeMap<
         rsi_agent_session_protocol::ProgramRunId,
         (rsi_agent_store_protocol::StoreProgramHead, Vec<u64>),
@@ -222,10 +224,10 @@ mod program_graph;
 mod store_contract;
 
 pub use contribution::activate_contribution_owner;
-pub use domain_contract::assert_domain_store_contract;
+pub use domain_contract::{assert_control_fact_order, assert_domain_store_contract};
 pub use store_contract::{
-    assert_mechanical_store_contract, assert_metadata_only_cas_retention,
-    assert_program_store_contract, assert_queue_store_contract,
+    assert_inbox_pause_store_contract, assert_mechanical_store_contract,
+    assert_metadata_only_cas_retention, assert_program_store_contract, assert_queue_store_contract,
 };
 
 /// Test-only ordinary factory providing one chosen Memory Store instance.

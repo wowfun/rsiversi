@@ -78,6 +78,11 @@ fn model_delta(seq: u64, turn_id: &TurnId, text: String) -> SessionFact {
 }
 
 #[tokio::test]
+async fn controls_retain_their_atomic_fact_cut_despite_clock_rollback() {
+    rsi_agent_testkit::assert_control_fact_order(&MemoryStore::new(), header()).await;
+}
+
+#[tokio::test]
 async fn memory_domains_preserve_atomic_revisions_receipts_and_history() {
     let accepted = fact(1);
     let event = model_delta(2, accepted.body().turn_id(), "event".into());
@@ -337,6 +342,12 @@ async fn append_retry_and_atomic_staging_retain_the_same_immutable_fact_allocati
     );
     drop(store);
     assert!(payload_identity.upgrade().is_none());
+}
+
+#[tokio::test]
+async fn inbox_pause_preserves_messages_and_gates_readiness_atomically() {
+    let store = MemoryStore::new();
+    rsi_agent_testkit::assert_inbox_pause_store_contract(&store, header()).await;
 }
 
 #[tokio::test]

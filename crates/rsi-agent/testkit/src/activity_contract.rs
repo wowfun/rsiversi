@@ -116,7 +116,6 @@ pub async fn assert_activity_store_contract(store: &dyn SessionStore, template: 
     let remote_id = seed(store, template, "activity-remote", 30, remote.clone()).await;
     filtered_recent(store, local.location(), &a, &b).await;
     filtered_cursors(store, &a, &b, &remote).await;
-    exact_summaries(store, &a, &b, &remote_id).await;
     let global = store
         .list_session_activity(&ExecutionLocations::all(), None, None, 3)
         .await
@@ -149,10 +148,12 @@ pub async fn assert_activity_store_contract(store: &dyn SessionStore, template: 
     )
     .await;
     let unchanged = store
-        .list_session_activity(&ExecutionLocations::all(), Some(&local), None, 1)
+        .list_session_activity(&ExecutionLocations::all(), Some(&local), None, 2)
         .await
         .unwrap();
     assert_eq!(unchanged.newest, first.newest);
+    assert_eq!(unchanged.sessions[1].durable_fact_seq, 2);
+    exact_summaries(store, &a, &b, &remote_id).await;
     append(
         store,
         &a,
@@ -207,6 +208,7 @@ async fn exact_summaries(
     let rows = store.session_activity_summaries(&requested).await.unwrap();
     assert_eq!(rows.len(), 4);
     assert!(rows[1].is_none());
+    assert_eq!(rows[3].as_ref().unwrap().durable_fact_seq, 2);
     for index in [0, 2, 3] {
         assert_eq!(rows[index].as_ref().unwrap().session_id, requested[index]);
     }
@@ -231,7 +233,7 @@ async fn exact_summaries(
 async fn new_human(store: &dyn SessionStore, session: &SessionId) {
     let message = AgentMessage {
         message_id: MessageId::new("new-human").unwrap(),
-        source: AgentMessageSource::Human,
+        source: AgentMessageSource::Human { attribution: None },
         content: vec![AgentMessageContent::Text {
             text: "next".into(),
         }],

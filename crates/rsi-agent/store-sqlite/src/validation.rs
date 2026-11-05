@@ -17,10 +17,9 @@ impl CanonicalObserver for Unobserved {}
 pub(super) fn initialize_or_validate_schema(
     connection: &mut Connection,
     may_initialize: bool,
-) -> Result<()> {
-    let version = pragma_user_version(connection)?;
-    let tables = user_tables(connection)?;
-    if version == 0 && tables.is_empty() && may_initialize {
+) -> Result<u32> {
+    let mut version = pragma_user_version(connection)?;
+    if may_initialize && version == 0 && user_tables(connection)?.is_empty() {
         let transaction = connection
             .transaction_with_behavior(TransactionBehavior::Immediate)
             .map_err(sql_error)?;
@@ -40,16 +39,47 @@ pub(super) fn initialize_or_validate_schema(
         .expect("writing to a String cannot fail");
         transaction.execute_batch(&schema).map_err(sql_error)?;
         transaction.commit().map_err(sql_error)?;
-    } else if version != AGENT_STORE_SCHEMA_VERSION {
+        version = AGENT_STORE_SCHEMA_VERSION;
+    } else if version != AGENT_STORE_SCHEMA_VERSION && version != 43 {
         return Err(StoreError::SchemaMismatch {
             expected: AGENT_STORE_SCHEMA_VERSION,
             actual: version,
         });
     }
-    validate_schema_shape(connection)
+    validate_version_shape(connection, version)?;
+    Ok(version)
 }
 
 pub(super) fn validate_schema_shape(connection: &Connection) -> Result<()> {
+    validate_version_shape(connection, AGENT_STORE_SCHEMA_VERSION)
+}
+
+/// The exclusive Store lease covers the exact schema-43 preflight and this transaction.
+pub(super) fn upgrade_mailbox_sources(connection: &mut Connection) -> Result<()> {
+    let transaction = connection
+        .transaction_with_behavior(TransactionBehavior::Immediate)
+        .map_err(sql_error)?;
+    let (_, table_sql) = EXPECTED_TABLES
+        .iter()
+        .find(|(name, _)| *name == "agent_messages")
+        .expect("declared mailbox table");
+    transaction
+        .execute_batch("ALTER TABLE agent_messages RENAME TO schema_43_messages")
+        .map_err(sql_error)?;
+    transaction.execute_batch(table_sql).map_err(sql_error)?;
+    transaction.execute_batch("INSERT INTO agent_messages SELECT * FROM schema_43_messages; DROP TABLE schema_43_messages").map_err(sql_error)?;
+    for (_, sql) in EXPECTED_INDEXES {
+        if sql.contains("ON agent_messages") {
+            transaction.execute_batch(sql).map_err(sql_error)?;
+        }
+    }
+    transaction
+        .pragma_update(None, "user_version", AGENT_STORE_SCHEMA_VERSION)
+        .map_err(sql_error)?;
+    transaction.commit().map_err(sql_error)
+}
+
+fn validate_version_shape(connection: &Connection, version: u32) -> Result<()> {
     let expected = EXPECTED_TABLES
         .iter()
         .map(|(name, _)| (*name).to_owned())
@@ -60,7 +90,14 @@ pub(super) fn validate_schema_shape(connection: &Connection) -> Result<()> {
             "Store table set differs from its declared schema".into(),
         ));
     }
-    for (table, expected_sql) in EXPECTED_TABLES {
+    for (table, current_sql) in EXPECTED_TABLES {
+        let previous;
+        let expected_sql = if version == 43 && table == "agent_messages" {
+            previous = current_sql.replace("message_source TEXT NOT NULL", "message_source TEXT NOT NULL CHECK (message_source IN ('human', 'agent', 'completion', 'continuation', 'program', 'command'))");
+            previous.as_str()
+        } else {
+            current_sql
+        };
         let observed_sql = connection
             .query_row(
                 "SELECT sql FROM sqlite_master WHERE type = 'table' AND name = ?1",
@@ -68,7 +105,7 @@ pub(super) fn validate_schema_shape(connection: &Connection) -> Result<()> {
                 |row| bounded_text(row, 0, expected_sql.len()),
             )
             .map_err(sql_error)?;
-        if observed_sql != *expected_sql {
+        if observed_sql != expected_sql {
             return Err(StoreError::Corrupt(format!(
                 "SQLite table `{table}` does not match the exact schema"
             )));
@@ -206,6 +243,25 @@ pub(super) fn validate_session_observed(
         ));
     }
 
+    let invalid_anchor = connection
+        .query_row(
+            "SELECT EXISTS(SELECT 1 FROM (
+           SELECT fact_seq, LAG(fact_seq, 1, 0) OVER (ORDER BY seq) AS previous
+           FROM agent_controls WHERE session_id = ?1
+         ) WHERE fact_seq < previous OR fact_seq > ?2)",
+            params![
+                session_id.as_str(),
+                sqlite_u64("Fact watermark", durable_seq)?
+            ],
+            |row| row.get::<_, bool>(0),
+        )
+        .map_err(sql_error)?;
+    if invalid_anchor {
+        return Err(StoreError::Corrupt(
+            "control Fact anchors are inconsistent".into(),
+        ));
+    }
+
     validate_turn_index(connection, session_id)?;
     validate_session_lineage(connection, &header)?;
     validate_agent_indexes_observed(connection, &header, observer)
@@ -238,7 +294,7 @@ fn validate_session_lineage(connection: &Connection, header: &SessionHeader) -> 
         (None, None) => {}
         (Some(origin), Some((root, parent, path, task_name, owner)))
             if root == origin.root_session_id.as_str()
-                && parent == origin.parent_session_id.as_str()
+                && parent == origin.history.parent_session_id.as_str()
                 && decode_json::<rsi_agent_session_protocol::AgentPath>("Agent path", &path)?
                     == origin.path
                 && task_name == origin.task_name
@@ -253,7 +309,8 @@ fn validate_session_lineage(connection: &Connection, header: &SessionHeader) -> 
         }
     }
     if let Some(origin) = header.fork_origin()
-        && derived_session_root(connection, &origin.parent_session_id)? != origin.root_session_id
+        && derived_session_root(connection, &origin.history.parent_session_id)?
+            != origin.root_session_id
     {
         return Err(StoreError::Corrupt(
             "Agent child root differs from its parent's durable root".into(),
@@ -271,7 +328,7 @@ fn validate_session_lineage(connection: &Connection, header: &SessionHeader) -> 
         && parent.as_deref()
             != header
                 .fork_origin()
-                .map(|origin| origin.parent_session_id.as_str())
+                .map(|origin| origin.history.parent_session_id.as_str())
     {
         return Err(StoreError::Corrupt(
             "active activation parent disagrees with Header lineage".into(),
@@ -708,7 +765,7 @@ impl MailboxProjection {
                 activation_id,
                 turn_id,
                 step_id,
-                entered_fact_seq,
+                claimed_fact_seq,
             } => {
                 let expected = expected_messages
                     .get_mut(&(session_id.clone(), message_id.clone()))
@@ -725,7 +782,7 @@ impl MailboxProjection {
                     activation_id: activation_id.clone(),
                     turn_id: turn_id.clone(),
                     step_id: step_id.clone(),
-                    entered_fact_seq: *entered_fact_seq,
+                    claimed_fact_seq: *claimed_fact_seq,
                 };
             }
             AgentControlRecordBody::MessagePromoted { message_id } => {
@@ -772,7 +829,9 @@ impl MailboxProjection {
             | AgentControlRecordBody::TurnBoundaryRecorded { .. }
             | AgentControlRecordBody::DomainStateCommitted { .. }
             | AgentControlRecordBody::ProgramRun { .. }
-            | AgentControlRecordBody::ProgramCompletionReserved { .. } => {}
+            | AgentControlRecordBody::ProgramCompletionReserved { .. }
+            | AgentControlRecordBody::InboxPaused
+            | AgentControlRecordBody::InboxResumed => {}
         }
         if let AgentControlRecordBody::MessageClaimed { message_id, .. }
         | AgentControlRecordBody::MessageDiscarded { message_id, .. } = record.body()
@@ -1047,7 +1106,9 @@ impl ActivationProjection {
             | AgentControlRecordBody::DomainStateCommitted { .. }
             | AgentControlRecordBody::MessageSuccessor { .. }
             | AgentControlRecordBody::QueueMutationRecorded { .. }
-            | AgentControlRecordBody::ProgramRun { .. } => {}
+            | AgentControlRecordBody::ProgramRun { .. }
+            | AgentControlRecordBody::InboxPaused
+            | AgentControlRecordBody::InboxResumed => {}
         }
         Ok(())
     }
@@ -1341,7 +1402,9 @@ impl ReadyProjection {
             | AgentControlRecordBody::DomainStateCommitted { .. }
             | AgentControlRecordBody::ProgramRun { .. }
             | AgentControlRecordBody::QueueMutationRecorded { .. }
-            | AgentControlRecordBody::ProgramCompletionReserved { .. } => {}
+            | AgentControlRecordBody::ProgramCompletionReserved { .. }
+            | AgentControlRecordBody::InboxPaused
+            | AgentControlRecordBody::InboxResumed => {}
         }
         Ok(())
     }
@@ -1419,6 +1482,7 @@ fn validate_agent_indexes_observed(
     let mut terminals = 0_u64;
     let mut queue_receipts = 0_usize;
     let mut last_settled_control_seq = 0;
+    let mut inbox_paused = false;
     let mut successor_link = None;
     let mut statement = connection
         .prepare(
@@ -1447,6 +1511,11 @@ fn validate_agent_indexes_observed(
         decoded += 1;
         observer.control(selected, &record, &encoded)?;
         activity.observe_control(&record);
+        match record.body() {
+            AgentControlRecordBody::InboxPaused => inbox_paused = true,
+            AgentControlRecordBody::InboxResumed => inbox_paused = false,
+            _ => {}
+        }
         #[cfg(test)]
         CONTROL_DECODES.set(CONTROL_DECODES.get() + 1);
         #[cfg(any(test, feature = "test-support"))]
@@ -1514,14 +1583,19 @@ fn validate_agent_indexes_observed(
         )
         .then_some(record);
     }
-    let (indexed_terminals, indexed_settlement, indexed_digest) = connection
+    let (indexed_terminals, indexed_settlement, indexed_digest, indexed_pause) = connection
         .query_row(
             "SELECT (SELECT COUNT(*) FROM turns WHERE session_id = ?1 AND terminal_seq IS NOT NULL),
-                last_settled_control_seq, control_prefix_sha256 FROM sessions WHERE session_id = ?1",
+                last_settled_control_seq, control_prefix_sha256, inbox_paused FROM sessions WHERE session_id = ?1",
             [selected.as_str()],
-            |row| Ok((row.get::<_, i64>(0)?, row.get::<_, i64>(1)?, bounded_text(row, 2, 64)?)),
+            |row| Ok((row.get::<_, i64>(0)?, row.get::<_, i64>(1)?, bounded_text(row, 2, 64)?, row.get::<_, bool>(3)?)),
         )
         .map_err(sql_error)?;
+    if indexed_pause != inbox_paused {
+        return Err(StoreError::Corrupt(
+            "inbox pause state differs from canonical controls".into(),
+        ));
+    }
     if digest != decode_sha256("control-prefix digest", &indexed_digest)? {
         return Err(StoreError::Corrupt(
             "control-prefix digest differs from the canonical control stream".into(),

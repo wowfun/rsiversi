@@ -168,7 +168,7 @@ pub(super) fn apply_atomic_sqlite_append(
         }
     }
     let durable_fact_seq = append.facts.last().map_or(actual_fact, |fact| fact.seq());
-    let minimum_entered_fact_seq = append
+    let minimum_claimed_fact_seq = append
         .expected_fact_seq
         .checked_add(1)
         .ok_or_else(|| StoreError::Invalid("Fact sequence is exhausted".into()))?;
@@ -210,7 +210,8 @@ pub(super) fn apply_atomic_sqlite_append(
         insert_control(
             transaction,
             &append.session_id,
-            minimum_entered_fact_seq,
+            minimum_claimed_fact_seq,
+            durable_fact_seq,
             record,
             &references,
         )?;
@@ -291,14 +292,16 @@ pub(super) fn apply_atomic_sqlite_append(
 pub(super) fn insert_control(
     transaction: &Transaction<'_>,
     session_id: &SessionId,
-    minimum_entered_fact_seq: u64,
+    minimum_claimed_fact_seq: u64,
+    after_fact_seq: u64,
     record: &AgentControlRecord,
     references: &super::reference_index::Writer<'_>,
 ) -> Result<()> {
     ControlIndexer {
         transaction,
         session_id,
-        minimum_entered_fact_seq,
+        minimum_claimed_fact_seq,
+        after_fact_seq,
         record,
     }
     .insert(references)
@@ -307,7 +310,8 @@ pub(super) fn insert_control(
 pub(super) struct ControlIndexer<'a, 'connection> {
     transaction: &'a Transaction<'connection>,
     session_id: &'a SessionId,
-    minimum_entered_fact_seq: u64,
+    minimum_claimed_fact_seq: u64,
+    after_fact_seq: u64,
     record: &'a AgentControlRecord,
 }
 
@@ -316,11 +320,12 @@ impl ControlIndexer<'_, '_> {
     fn insert(&self, references: &super::reference_index::Writer<'_>) -> Result<()> {
         self.transaction
             .execute(
-                "INSERT INTO agent_controls (session_id, seq, control_json) VALUES (?1, ?2, ?3)",
+                "INSERT INTO agent_controls (session_id, seq, control_json, fact_seq) VALUES (?1, ?2, ?3, ?4)",
                 params![
                     self.session_id.as_str(),
                     sqlite_u64("control sequence", self.record.seq())?,
                     references.control(self.record)?,
+                    sqlite_u64("control Fact watermark", self.after_fact_seq)?,
                 ],
             )
             .map_err(sql_error)?;
@@ -349,10 +354,22 @@ impl ControlIndexer<'_, '_> {
             AgentControlRecordBody::DomainStateCommitted { commit } => super::domain::insert(
                 self.transaction,
                 self.session_id,
-                self.minimum_entered_fact_seq,
+                self.minimum_claimed_fact_seq,
                 self.record,
                 commit,
             ),
+            AgentControlRecordBody::InboxPaused | AgentControlRecordBody::InboxResumed => {
+                self.transaction
+                    .execute(
+                        "UPDATE sessions SET inbox_paused = ?2 WHERE session_id = ?1",
+                        params![
+                            self.session_id.as_str(),
+                            matches!(self.record.body(), AgentControlRecordBody::InboxPaused)
+                        ],
+                    )
+                    .map_err(sql_error)?;
+                Ok(())
+            }
             // The enclosing atomic append derives the correlated digest after inserting this row.
             AgentControlRecordBody::TurnBoundaryRecorded { .. } => Ok(()),
             AgentControlRecordBody::MessageAccepted {
@@ -378,13 +395,13 @@ impl ControlIndexer<'_, '_> {
                 activation_id,
                 turn_id,
                 step_id,
-                entered_fact_seq,
+                claimed_fact_seq,
             } => self.insert_message_claimed(
                 message_id,
                 activation_id,
                 turn_id,
                 step_id,
-                *entered_fact_seq,
+                *claimed_fact_seq,
             ),
             AgentControlRecordBody::MessageDiscarded { message_id, reason } => {
                 self.insert_message_discarded(message_id, *reason)
@@ -600,7 +617,7 @@ impl ControlIndexer<'_, '_> {
         activation_id: &ActivationId,
         turn_id: &TurnId,
         step_id: &StepId,
-        entered_fact_seq: u64,
+        claimed_fact_seq: u64,
     ) -> Result<()> {
         let entry = super::validation::read_indexed_agent_message(
             self.transaction,
@@ -622,7 +639,7 @@ impl ControlIndexer<'_, '_> {
                  FROM facts WHERE session_id = ?1 AND seq = ?2",
                 params![
                     self.session_id.as_str(),
-                    sqlite_u64("entered Fact sequence", entered_fact_seq)?,
+                    sqlite_u64("entered Fact sequence", claimed_fact_seq)?,
                     i64::try_from(MAXIMUM_SESSION_FACT_BYTES)
                         .expect("session Fact bound fits SQLite INTEGER"),
                 ],
@@ -643,7 +660,7 @@ impl ControlIndexer<'_, '_> {
             &message,
             turn_id,
             step_id,
-            self.minimum_entered_fact_seq,
+            self.minimum_claimed_fact_seq,
             fact.as_ref(),
         )?;
         self.transaction
@@ -656,7 +673,7 @@ impl ControlIndexer<'_, '_> {
             activation_id: activation_id.clone(),
             turn_id: turn_id.clone(),
             step_id: step_id.clone(),
-            entered_fact_seq,
+            claimed_fact_seq,
         };
         let changed = self
             .transaction
@@ -899,9 +916,11 @@ pub(super) const fn message_delivery_name(
 pub(super) const fn message_source_name(source: &AgentMessageSource) -> &'static str {
     use rsi_agent_session_protocol::AgentMessageSourceKind;
     match source.kind() {
+        AgentMessageSourceKind::Command => "command",
         AgentMessageSourceKind::Program => "program",
         AgentMessageSourceKind::Continuation => "continuation",
         AgentMessageSourceKind::Human => "human",
+        AgentMessageSourceKind::Application => "application",
         AgentMessageSourceKind::Agent => "agent",
         AgentMessageSourceKind::Completion => "completion",
     }
@@ -1017,22 +1036,28 @@ pub(super) fn decode_indexed_message(row: IndexedMessageRow) -> Result<StoreAgen
     })
 }
 
-pub(super) fn decode_ready_message(
-    row: (String, String, i64, i64, String, Vec<u8>, bool),
-) -> Result<StoreReadyMessage> {
+pub(super) fn decode_message_source(
+    bytes: &[u8],
+) -> Result<rsi_agent_session_protocol::AgentMessageSourceKind> {
     use rsi_agent_session_protocol::AgentMessageSourceKind;
-    let source_kind = match row.5.as_slice() {
+    Ok(match bytes {
+        b"command" => AgentMessageSourceKind::Command,
         b"program" => AgentMessageSourceKind::Program,
         b"human" => AgentMessageSourceKind::Human,
+        b"application" => AgentMessageSourceKind::Application,
         b"agent" => AgentMessageSourceKind::Agent,
         b"completion" => AgentMessageSourceKind::Completion,
         b"continuation" => AgentMessageSourceKind::Continuation,
         _ => {
-            return Err(StoreError::Corrupt(
-                "ready message source is missing or invalid".into(),
-            ));
+            return Err(StoreError::Corrupt("invalid mailbox message source".into()));
         }
-    };
+    })
+}
+
+pub(super) fn decode_ready_message(
+    row: (String, String, i64, i64, String, Vec<u8>, bool),
+) -> Result<StoreReadyMessage> {
+    let source_kind = decode_message_source(&row.5)?;
     if !row.6 {
         return Err(StoreError::Corrupt(
             "ready message differs from pending mailbox routing".into(),
@@ -1121,7 +1146,7 @@ pub(super) fn insert_agent_node(
     let Some(origin) = header.fork_origin() else {
         return Ok(());
     };
-    let expected_root = derived_session_root(transaction, &origin.parent_session_id)?;
+    let expected_root = derived_session_root(transaction, &origin.history.parent_session_id)?;
     if origin.root_session_id != expected_root {
         return Err(StoreError::Invalid(
             "Agent child root differs from its parent's durable root".into(),
@@ -1160,7 +1185,7 @@ pub(super) fn insert_agent_node(
     let task_exists = transaction
         .query_row(
             "SELECT 1 FROM agent_nodes WHERE parent_session_id = ?1 AND task_name = ?2",
-            params![origin.parent_session_id.as_str(), &origin.task_name],
+            params![origin.history.parent_session_id.as_str(), &origin.task_name],
             |_| Ok(()),
         )
         .optional()
@@ -1179,7 +1204,7 @@ pub(super) fn insert_agent_node(
             params![
                 header.session_id().as_str(),
                 origin.root_session_id.as_str(),
-                origin.parent_session_id.as_str(),
+                origin.history.parent_session_id.as_str(),
                 path_json,
                 &origin.task_name,
                 encode_json("execution owner", &header.execution_owner().ok_or_else(|| StoreError::Invalid("child execution owner is absent".into()))?)?,

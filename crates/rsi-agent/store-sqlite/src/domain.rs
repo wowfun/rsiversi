@@ -165,6 +165,7 @@ pub(super) fn read_states(
     connection: &Connection,
     session: &SessionId,
     horizon: Option<u64>,
+    domain: Option<&str>,
 ) -> Result<StoreDomainStatePage> {
     let (fact, control) = connection
         .query_row(
@@ -183,17 +184,30 @@ pub(super) fn read_states(
         ));
     }
     let mut states = Vec::new();
-    for current in read_heads(connection, session)? {
-        let Some(head) = read_version(
-            connection,
-            session,
-            current.identity.id(),
-            selected_control_seq,
-        )?
-        else {
-            continue;
+    let heads = match domain {
+        Some(id) => read_version(connection, session, id, selected_control_seq)?
+            .into_iter()
+            .collect(),
+        None => read_heads(connection, session)?,
+    };
+    let mut previous_control: Option<AgentControlRecord> = None;
+    for mut head in heads {
+        if head.control_seq > selected_control_seq {
+            let Some(version) = read_version(
+                connection,
+                session,
+                head.identity.id(),
+                selected_control_seq,
+            )?
+            else {
+                continue;
+            };
+            head = version;
+        }
+        let record = match &previous_control {
+            Some(record) if record.seq() == head.control_seq => record,
+            _ => previous_control.insert(read_control(connection, session, head.control_seq)?),
         };
-        let record = read_control(connection, session, head.control_seq)?;
         let AgentControlRecordBody::DomainStateCommitted { commit } = record.body() else {
             unreachable!("read_control validated its kind");
         };

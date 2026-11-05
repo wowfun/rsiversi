@@ -9,6 +9,7 @@ use rsi_agent_store_protocol::{AppendBatch, AtomicAgentCommit, AtomicSessionAppe
 use rsi_agent_store_sqlite::SqliteStore;
 use rsi_ai_protocol::ModelRef;
 use rsi_sandbox::SandboxMode;
+#[cfg(feature = "test-support")]
 use std::future::Future;
 use std::hint::black_box;
 use std::path::Path;
@@ -60,6 +61,12 @@ async fn run() {
 
     #[cfg(feature = "test-support")]
     {
+        if std::env::var_os("RSI_STORE_BENCH_COLD_MIXED_ONLY").is_some() {
+            for count in counts {
+                benchmark_cold_mixed(count).await;
+            }
+            return;
+        }
         if std::env::var_os("RSI_STORE_BENCH_ACTIVITY_ONLY").is_some() {
             benchmark_activity_batches().await;
             return;
@@ -693,7 +700,12 @@ fn save_measurements(
             .iter()
             .map(|value| Duration::from_nanos(u64::try_from(value.worker_ns).unwrap()))
             .collect::<Vec<_>>();
+        let scheduling = values
+            .iter()
+            .map(|value| Duration::from_nanos(u64::try_from(value.scheduling_ns).unwrap()))
+            .collect::<Vec<_>>();
         report(&format!("{case}.{lane}.admission"), &admission);
+        report(&format!("{case}.{lane}.scheduling"), &scheduling);
         report(&format!("{case}.{lane}.worker"), &worker);
     }
     if let Some(root) = std::env::var_os("RSI_STORE_BENCH_EVIDENCE") {
@@ -702,6 +714,99 @@ fn save_measurements(
         std::fs::write(
             root.join(format!("{case}.json")),
             serde_json::to_vec_pretty(&samples).unwrap(),
+        )
+        .unwrap();
+    }
+}
+
+#[cfg(feature = "test-support")]
+async fn benchmark_cold_mixed(facts: usize) {
+    let root = tempfile::tempdir().unwrap();
+    let store = SqliteStore::open(root.path()).unwrap();
+    append_session(&store, 0, facts, 256, false).await;
+    for index in 1..=101 {
+        append_session(&store, index, 2, 256, false).await;
+    }
+    drop(store);
+    let store = open_after_settlement(root.path()).await;
+    let large = SessionId::new("session-000").unwrap();
+    let warm = SessionId::new("session-001").unwrap();
+    store.validate_session(&warm).await.unwrap();
+    store.begin_store_measurements();
+    let (entered, release) = store.pause_next_validation();
+    let large_read = tokio::spawn({
+        let store = store.clone();
+        let large = large.clone();
+        async move { store.validate_session(&large).await }
+    });
+    entered.await.unwrap();
+    let arranged = Instant::now();
+    let mut cold = Vec::new();
+    for index in 2..=101 {
+        let store = store.clone();
+        cold.push(tokio::spawn(async move {
+            store
+                .read_facts(
+                    &SessionId::new(format!("session-{index:03}")).unwrap(),
+                    0,
+                    1,
+                    4096,
+                )
+                .await
+        }));
+    }
+    let fork = tokio::spawn({
+        let store = store.clone();
+        let large = large.clone();
+        async move {
+            store
+                .resolve_fork_boundary(
+                    &large,
+                    &rsi_agent_session_protocol::ForkPoint::before(
+                        &TurnId::new("turn-000").unwrap(),
+                    ),
+                    rsi_agent_session_protocol::ForkTurnSelection::All,
+                )
+                .await
+        }
+    });
+    let mut abandoned = Box::pin(store.validate_session(&large));
+    std::future::poll_fn(|cx| {
+        assert!(abandoned.as_mut().poll(cx).is_pending());
+        std::task::Poll::Ready(())
+    })
+    .await;
+    drop(abandoned);
+    // The first validation sample includes this explicitly reported arrangement delay.
+    let barrier_ns = arranged.elapsed().as_nanos();
+    drop(release);
+    let warm_reads = async {
+        for _ in 0..SAMPLES {
+            black_box(store.read_facts(&warm, 0, 1, 4096).await.unwrap());
+        }
+    };
+    let writes = async {
+        for index in 1000..1100 {
+            append_session(&store, index, 2, 256, true).await;
+        }
+    };
+    tokio::join!(warm_reads, writes);
+    large_read.await.unwrap().unwrap();
+    fork.await.unwrap().unwrap();
+    for read in cold {
+        read.await.unwrap().unwrap();
+    }
+    let metrics = store.cold_validation_metrics();
+    let case = format!("cold-mixed-{facts}");
+    println!(
+        "case={case} barrier_hold_ns={barrier_ns} cold_metrics={}",
+        serde_json::to_string(&metrics).unwrap()
+    );
+    save_measurements(&case, &store.take_store_measurements());
+    if let Some(evidence) = std::env::var_os("RSI_STORE_BENCH_EVIDENCE") {
+        std::fs::write(
+            std::path::Path::new(&evidence).join(format!("{case}-cold.json")),
+            serde_json::to_vec_pretty(&metrics).unwrap(),
         )
         .unwrap();
     }

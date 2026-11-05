@@ -1,5 +1,5 @@
 use super::*;
-use rsi_agent_store_protocol::admit_page_record;
+use rsi_agent_store_protocol::{MailboxRead, admit_page_record};
 
 pub(super) const LIST_READY_MESSAGES_AFTER_SQL: &str =
     "SELECT r.session_id, r.message_id, r.ready_control_seq, r.timestamp_ms, r.target,
@@ -10,6 +10,7 @@ pub(super) const LIST_READY_MESSAGES_AFTER_SQL: &str =
      FROM ready_messages AS r
      LEFT JOIN agent_messages AS m ON m.session_id = r.session_id AND m.message_id = r.message_id
      WHERE r.root_session_id = ?1
+       AND COALESCE((SELECT inbox_paused FROM sessions WHERE session_id = r.session_id), 0) = 0
        AND (r.timestamp_ms, r.session_id, r.ready_control_seq) > (?2, ?3, ?4)
      ORDER BY r.timestamp_ms, r.session_id, r.ready_control_seq LIMIT ?5";
 const LIST_READY_MESSAGES_FIRST_SQL: &str =
@@ -21,6 +22,7 @@ const LIST_READY_MESSAGES_FIRST_SQL: &str =
      FROM ready_messages AS r
      LEFT JOIN agent_messages AS m ON m.session_id = r.session_id AND m.message_id = r.message_id
      WHERE r.root_session_id = ?1
+       AND COALESCE((SELECT inbox_paused FROM sessions WHERE session_id = r.session_id), 0) = 0
      ORDER BY r.timestamp_ms, r.session_id, r.ready_control_seq LIMIT ?5";
 pub(super) const LIST_AGENT_CHILDREN_AFTER_SQL: &str =
     "SELECT session_id, path_json, task_name FROM agent_nodes
@@ -38,11 +40,17 @@ pub(super) const LIST_WAITING_ACTIVATIONS_FIRST_SQL: &str =
     "SELECT session_id FROM active_activations
      WHERE phase = 'waiting'
      ORDER BY session_id LIMIT ?2";
-pub(super) const LIST_READY_ROOTS_AFTER_SQL: &str = "SELECT root_session_id FROM ready_messages
-     WHERE root_session_id > ?1
-     ORDER BY root_session_id LIMIT ?2";
-const LIST_READY_ROOTS_FIRST_SQL: &str = "SELECT root_session_id FROM ready_messages
-     ORDER BY root_session_id LIMIT ?2";
+// Point reads preserve the ready-index seek plan under ANALYZE without
+// statistics-dependent join work before LIMIT.
+pub(super) const LIST_READY_ROOTS_AFTER_SQL: &str =
+    "SELECT r.root_session_id FROM ready_messages AS r
+     WHERE r.root_session_id > ?1
+       AND COALESCE((SELECT inbox_paused FROM sessions WHERE session_id = r.session_id), 0) = 0
+     ORDER BY r.root_session_id LIMIT ?2";
+pub(super) const LIST_READY_ROOTS_FIRST_SQL: &str =
+    "SELECT r.root_session_id FROM ready_messages AS r
+     WHERE COALESCE((SELECT inbox_paused FROM sessions WHERE session_id = r.session_id), 0) = 0
+     ORDER BY r.root_session_id LIMIT ?2";
 
 #[async_trait]
 #[allow(clippy::too_many_lines)] // The trait implementation keeps each Store seam explicit.
@@ -404,14 +412,21 @@ impl SessionStore for SqliteStore {
         &self,
         session_id: &SessionId,
         at_control_seq: Option<u64>,
+        domain: Option<&str>,
     ) -> Result<rsi_agent_store_protocol::StoreDomainStatePage> {
         self.ensure_session_validated(session_id).await?;
         let session_id = session_id.clone();
+        let domain = domain.map(str::to_owned);
         self.with_reader_named(StoreOperation::DomainStates, move |connection| {
             let transaction = connection
                 .transaction_with_behavior(TransactionBehavior::Deferred)
                 .map_err(sql_error)?;
-            let states = super::domain::read_states(&transaction, &session_id, at_control_seq)?;
+            let states = super::domain::read_states(
+                &transaction,
+                &session_id,
+                at_control_seq,
+                domain.as_deref(),
+            )?;
             transaction.commit().map_err(sql_error)?;
             Ok(states)
         })
@@ -627,14 +642,15 @@ impl SessionStore for SqliteStore {
                 .map_err(sql_error)?;
             let durable_seq = transaction
                 .query_row(
-                    "SELECT control_seq FROM sessions WHERE session_id NOT IN (SELECT session_id FROM session_tombstones) AND session_id = ?1",
+                    "SELECT control_seq, durable_seq FROM sessions WHERE session_id NOT IN (SELECT session_id FROM session_tombstones) AND session_id = ?1",
                     [session_id.as_str()],
-                    |row| row.get::<_, i64>(0),
+                    |row| Ok((row.get::<_, i64>(0)?, row.get::<_, i64>(1)?)),
                 )
                 .optional()
                 .map_err(sql_error)?
                 .ok_or_else(|| StoreError::NotFound(session_id.to_string()))
-                .and_then(|value| decode_u64("control sequence", value))?;
+                .and_then(|(control, fact)| Ok((decode_u64("control sequence", control)?, decode_u64("Fact sequence", fact)?)))?;
+            let (durable_seq, durable_fact_seq) = durable_seq;
             if after_seq > durable_seq {
                 return Err(StoreError::Invalid(
                     "control cursor exceeds the durable tail".into(),
@@ -644,7 +660,7 @@ impl SessionStore for SqliteStore {
                 .prepare(
                     "SELECT length(CAST(control_json AS BLOB)),
                             CASE WHEN length(CAST(control_json AS BLOB)) <= ?4
-                                 THEN control_json END
+                                 THEN control_json END, fact_seq
                      FROM agent_controls
                      WHERE session_id = ?1 AND seq > ?2 AND seq <= ?5
                      ORDER BY seq LIMIT ?3",
@@ -662,6 +678,7 @@ impl SessionStore for SqliteStore {
                 ])
                 .map_err(sql_error)?;
             let mut records = Vec::new();
+            let mut fact_cursors = Vec::new();
             let mut encoded_bytes = 0_usize;
             while let Some(row) = rows.next().map_err(sql_error)? {
                 let encoded_len = usize::try_from(row.get::<_, i64>(0).map_err(sql_error)?)
@@ -687,6 +704,7 @@ impl SessionStore for SqliteStore {
                     MAXIMUM_SESSION_FACT_BYTES,
                 )?;
                 encoded_bytes = projected;
+                fact_cursors.push(decode_u64("control Fact watermark", row.get(2).map_err(sql_error)?)?);
                 records.push(record);
             }
             drop(rows);
@@ -694,6 +712,8 @@ impl SessionStore for SqliteStore {
             let page = StoreControlPage {
                 after_seq,
                 records,
+                fact_cursors,
+                durable_fact_seq,
                 durable_seq,
             };
             page.validate()?;
@@ -986,7 +1006,7 @@ impl SessionStore for SqliteStore {
     async fn resolve_fork_boundary(
         &self,
         session_id: &SessionId,
-        invoking_turn_id: &TurnId,
+        point: &rsi_agent_session_protocol::ForkPoint,
         selection: ForkTurnSelection,
     ) -> Result<StoreForkBoundary> {
         selection
@@ -994,14 +1014,15 @@ impl SessionStore for SqliteStore {
             .map_err(|error| StoreError::Invalid(error.to_string()))?;
         self.ensure_session_validated(session_id).await?;
         let session_id = session_id.clone();
-        let invoking_turn_id = invoking_turn_id.clone();
+        let point = point.clone();
+        let invoking_turn_id = point.turn_id().clone();
         let historical = selection != ForkTurnSelection::None;
         if historical {
             self.ensure_not_retired(&session_id).await?;
         }
         let key = ForkBoundaryKey {
             session: session_id.clone(),
-            invoking: invoking_turn_id.clone(),
+            point: point.clone(),
             selection: selection.clone(),
         };
         if historical
@@ -1028,19 +1049,30 @@ impl SessionStore for SqliteStore {
             {
                 return Ok(boundary);
             }
-            let invoking_accepted_seq = transaction
+            let (accepted, terminal) = transaction
                 .query_row(
-                    "SELECT accepted_seq FROM turns WHERE session_id = ?1 AND turn_id = ?2",
+                    "SELECT accepted_seq, terminal_seq FROM turns WHERE session_id = ?1 AND turn_id = ?2",
                     params![session_id.as_str(), invoking_turn_id.as_str()],
-                    |row| row.get::<_, i64>(0),
+                    |row| Ok((row.get::<_, i64>(0)?, row.get::<_, Option<i64>>(1)?)),
                 )
                 .optional()
                 .map_err(sql_error)?
                 .ok_or_else(|| StoreError::TurnNotFound {
                     session: session_id.to_string(),
                     turn: invoking_turn_id.to_string(),
-                })
-                .and_then(|value| decode_u64("invoking acceptance sequence", value))?;
+                })?;
+            let invoking_accepted_seq = match point {
+                rsi_agent_session_protocol::ForkPoint::BeforeTurn { .. } => {
+                    decode_u64("invoking acceptance sequence", accepted)?
+                }
+                rsi_agent_session_protocol::ForkPoint::ThroughTurn { .. } => terminal
+                    .ok_or_else(|| {
+                        StoreError::Invalid("through-Turn fork requires a completed source".into())
+                    })
+                    .and_then(|value| decode_u64("selected terminal sequence", value))?
+                    .checked_add(1)
+                    .ok_or_else(|| StoreError::Invalid("fork source sequence exhausted".into()))?,
+            };
             #[cfg(test)]
             if historical {
                 owner.fork_resolutions.fetch_add(1, Ordering::Relaxed);
@@ -1219,16 +1251,18 @@ impl SessionStore for SqliteStore {
             let transaction = connection
                 .transaction_with_behavior(TransactionBehavior::Deferred)
                 .map_err(sql_error)?;
-            let durable_seq = transaction
+            let (durable_seq, durable_control_seq) = transaction
                 .query_row(
-                    "SELECT durable_seq FROM sessions WHERE session_id NOT IN (SELECT session_id FROM session_tombstones) AND session_id = ?1",
+                    "SELECT durable_seq, control_seq FROM sessions WHERE session_id NOT IN (SELECT session_id FROM session_tombstones) AND session_id = ?1",
                     [session_id.as_str()],
-                    |row| row.get::<_, i64>(0),
+                    |row| Ok((row.get::<_, i64>(0)?, row.get::<_, i64>(1)?)),
                 )
                 .optional()
                 .map_err(sql_error)?
                 .ok_or_else(|| StoreError::NotFound(session_id.to_string()))
-                .and_then(|value| decode_u64("durable sequence", value))?;
+                ?;
+            let durable_seq = decode_u64("durable sequence", durable_seq)?;
+            let durable_control_seq = decode_u64("control sequence", durable_control_seq)?;
             if after_accepted_seq > durable_seq {
                 return Err(StoreError::Invalid(
                     "open-turn cursor exceeds the durable tail".into(),
@@ -1270,6 +1304,7 @@ impl SessionStore for SqliteStore {
                     after_accepted_seq,
                     turns,
                     durable_seq,
+                    durable_control_seq,
                     has_more,
                 };
                 page.validate()?;
@@ -1518,6 +1553,51 @@ impl SessionStore for SqliteStore {
         .await
     }
 
+    async fn read_inbox_control_state(
+        &self,
+        session_id: &SessionId,
+        include_pending: bool,
+    ) -> Result<rsi_agent_store_protocol::StoreInboxControlState> {
+        self.ensure_session_validated(session_id).await?;
+        let id = session_id.clone();
+        self.with_reader(move |connection| {
+            let transaction = connection.transaction_with_behavior(TransactionBehavior::Deferred).map_err(sql_error)?;
+            let (fact_seq, control_seq, inbox_paused, has_open_turn, has_active_activation, has_waking_message) = transaction.query_row(
+                "SELECT durable_seq, control_seq, inbox_paused,
+                   EXISTS(SELECT 1 FROM turns WHERE session_id = ?1 AND terminal_seq IS NULL),
+                   EXISTS(SELECT 1 FROM active_activations WHERE session_id = ?1),
+                   NOT inbox_paused AND EXISTS(SELECT 1 FROM ready_messages WHERE session_id = ?1)
+                 FROM sessions WHERE session_id = ?1 AND session_id NOT IN (SELECT session_id FROM session_tombstones)", [id.as_str()],
+                |row| Ok((row.get::<_, i64>(0)?, row.get::<_, i64>(1)?, row.get::<_, bool>(2)?, row.get::<_, bool>(3)?, row.get::<_, bool>(4)?, row.get::<_, bool>(5)?)),
+            ).map_err(sql_error)?;
+            let mut pending_message_ids = Vec::new();
+            if include_pending {
+            let mut statement = transaction.prepare_cached(
+                "SELECT message_id FROM agent_messages WHERE session_id = ?1 AND state = 'pending'
+                 ORDER BY accepted_control_seq LIMIT ?2"
+            ).map_err(sql_error)?;
+            let mut rows = statement.query(params![id.as_str(),
+                i64::try_from(rsi_agent_session_protocol::MAXIMUM_PENDING_AGENT_MESSAGES + 1).expect("mailbox bound fits SQLite INTEGER")
+            ]).map_err(sql_error)?;
+            while let Some(row) = rows.next().map_err(sql_error)? {
+                if pending_message_ids.len() == rsi_agent_session_protocol::MAXIMUM_PENDING_AGENT_MESSAGES {
+                    return Err(StoreError::Corrupt("pending inbox exceeds its bound".into()));
+                }
+                pending_message_ids.push(MessageId::new(bounded_text(row, 0,
+                    rsi_agent_session_protocol::MAXIMUM_AGENT_IDENTIFIER_BYTES).map_err(sql_error)?)
+                    .map_err(|error| StoreError::Corrupt(error.to_string()))?);
+            }
+            }
+            let state = rsi_agent_store_protocol::StoreInboxControlState {
+                durable_fact_seq: decode_u64("inbox Fact tail", fact_seq)?,
+                durable_control_seq: decode_u64("inbox control tail", control_seq)?,
+                inbox_paused, has_open_turn, has_active_activation, has_waking_message, pending_message_ids,
+            };
+            transaction.commit().map_err(sql_error)?;
+            Ok(state)
+        }).await
+    }
+
     async fn inspect_session(
         &self,
         session_id: &SessionId,
@@ -1541,14 +1621,7 @@ impl SessionStore for SqliteStore {
                 let (id, delivery, target, bound, seq, permits_promotion, slot, time, order, source, has_turn_options) = row.map_err(sql_error)?;
                 pending.push(StorePendingMessage {
                     queue_slot: rsi_agent_session_protocol::QueueSlot {id:rsi_agent_session_protocol::QueueSlotId::new(slot).map_err(|error|StoreError::Corrupt(error.to_string()))?, timestamp_ms:decode_u64("queue timestamp",time)?, control_seq:decode_u64("queue sequence",order)?},
-                    source_kind: match source.as_str() {
-                        "human"=>rsi_agent_session_protocol::AgentMessageSourceKind::Human,
-                        "agent"=>rsi_agent_session_protocol::AgentMessageSourceKind::Agent,
-                        "program"=>rsi_agent_session_protocol::AgentMessageSourceKind::Program,
-                        "completion"=>rsi_agent_session_protocol::AgentMessageSourceKind::Completion,
-                        "continuation"=>rsi_agent_session_protocol::AgentMessageSourceKind::Continuation,
-                        _=>return Err(StoreError::Corrupt("invalid queue source".into())),
-                    },
+                    source_kind: crate::append::decode_message_source(source.as_bytes())?,
                     has_turn_options,
                     permits_promotion,
                     message_id: MessageId::new(id).map_err(|error| StoreError::Corrupt(error.to_string()))?,
@@ -1616,20 +1689,19 @@ impl SessionStore for SqliteStore {
     async fn read_agent_mailbox(
         &self,
         session_id: &SessionId,
-        selected_message_id: Option<&MessageId>,
+        query: MailboxRead,
     ) -> Result<StoreAgentMailbox> {
         self.ensure_session_validated(session_id).await?;
         let session_id = session_id.clone();
-        let selected_message_id = selected_message_id.cloned();
         self.with_reader(move |connection| {
             let transaction = connection
                 .transaction_with_behavior(TransactionBehavior::Deferred)
                 .map_err(sql_error)?;
-            let (durable_fact_seq, durable_control_seq) = transaction
+            let (durable_fact_seq, durable_control_seq, inbox_paused) = transaction
                 .query_row(
-                    "SELECT durable_seq, control_seq FROM sessions WHERE session_id NOT IN (SELECT session_id FROM session_tombstones) AND session_id = ?1",
+                    "SELECT durable_seq, control_seq, inbox_paused FROM sessions WHERE session_id NOT IN (SELECT session_id FROM session_tombstones) AND session_id = ?1",
                     [session_id.as_str()],
-                    |row| Ok((row.get::<_, i64>(0)?, row.get::<_, i64>(1)?)),
+                    |row| Ok((row.get::<_, i64>(0)?, row.get::<_, i64>(1)?, row.get::<_, bool>(2)?)),
                 )
                 .optional()
                 .map_err(sql_error)?
@@ -1637,12 +1709,16 @@ impl SessionStore for SqliteStore {
             let durable_fact_seq = decode_u64("mailbox durable Fact sequence", durable_fact_seq)?;
             let durable_control_seq =
                 decode_u64("mailbox durable control sequence", durable_control_seq)?;
-            let selected = selected_message_id.as_ref().map(|id| read_indexed_message(&transaction, &session_id, id)).transpose()?.flatten();
+            let step_only = query == MailboxRead::NextStep;
+            let selected = match query {
+                MailboxRead::WithMessage(id) => read_indexed_message(&transaction, &session_id, &id)?,
+                MailboxRead::All | MailboxRead::NextStep => None,
+            };
             let pending_count = transaction
                 .query_row(
                     "SELECT COUNT(*) FROM agent_messages
-                     WHERE session_id = ?1 AND state = 'pending'",
-                    [session_id.as_str()],
+                     WHERE session_id = ?1 AND state = 'pending' AND (NOT ?2 OR target = 'next_step')",
+                    params![session_id.as_str(), step_only],
                     |row| row.get::<_, i64>(0),
                 )
                 .map_err(sql_error)
@@ -1663,7 +1739,7 @@ impl SessionStore for SqliteStore {
                                  THEN state_json END,
                     delivery, CASE WHEN bound_turn_id IS NULL OR length(CAST(bound_turn_id AS BLOB)) <= 256 THEN bound_turn_id ELSE '' END, accepted_timestamp_ms, CASE WHEN length(CAST(queue_slot_id AS BLOB)) <= 256 THEN queue_slot_id ELSE '' END, queue_timestamp_ms, queue_control_seq, has_turn_options
                      FROM agent_messages
-                     WHERE session_id = ?1 AND state = 'pending'
+                     WHERE session_id = ?1 AND state = 'pending' AND (NOT ?4 OR target = 'next_step')
                      ORDER BY accepted_control_seq",
                 )
                 .map_err(sql_error)?;
@@ -1675,6 +1751,7 @@ impl SessionStore for SqliteStore {
                             .expect("mailbox page bound fits SQLite INTEGER"),
                         i64::try_from(MAXIMUM_INDEXED_MESSAGE_STATE_BYTES)
                             .expect("message state bound fits SQLite INTEGER"),
+                        step_only,
                     ],
                     indexed_message_row,
                 )
@@ -1693,6 +1770,7 @@ impl SessionStore for SqliteStore {
                 pending.push(entry);
             }
             let mailbox = StoreAgentMailbox {
+                inbox_paused,
                 selected,
                 pending,
                 pending_count,
@@ -1717,11 +1795,11 @@ impl SessionStore for SqliteStore {
             let transaction = connection
                 .transaction_with_behavior(TransactionBehavior::Deferred)
                 .map_err(sql_error)?;
-            let (durable_fact_seq, durable_control_seq, pending_count) = transaction
+            let (durable_fact_seq, durable_control_seq, pending_count, inbox_paused) = transaction
                 .query_row(
                     "SELECT durable_seq, control_seq,
                             (SELECT COUNT(*) FROM agent_messages
-                             WHERE session_id = ?1 AND state = 'pending')
+                             WHERE session_id = ?1 AND state = 'pending'), inbox_paused
                      FROM sessions WHERE session_id NOT IN (SELECT session_id FROM session_tombstones) AND session_id = ?1",
                     [session_id.as_str()],
                     |row| {
@@ -1729,6 +1807,7 @@ impl SessionStore for SqliteStore {
                             row.get::<_, i64>(0)?,
                             row.get::<_, i64>(1)?,
                             row.get::<_, i64>(2)?,
+                            row.get::<_, bool>(3)?,
                         ))
                     },
                 )
@@ -1762,6 +1841,7 @@ impl SessionStore for SqliteStore {
                 })
                 .collect::<Result<Vec<_>>>()?;
             let summary = StoreAgentMailboxSummary {
+                inbox_paused,
                 pending_count: usize::try_from(pending_count).map_err(|_| {
                     StoreError::Corrupt("mailbox pending count is outside usize".into())
                 })?,
@@ -2463,18 +2543,20 @@ pub(super) fn read_agent_subtree(
            CASE WHEN length(CAST(node.parent_session_id AS BLOB)) <= ?4 THEN node.parent_session_id END,
            CASE WHEN length(CAST(node.path_json AS BLOB)) <= ?3 THEN node.path_json END,
            CASE WHEN length(CAST(node.task_name AS BLOB)) <= ?4 THEN node.task_name END,
-           (SELECT control_seq FROM sessions WHERE session_id = subtree.session_id),
+           session.control_seq,
            EXISTS(SELECT 1 FROM turns WHERE session_id = subtree.session_id AND terminal_seq IS NULL),
            EXISTS(SELECT 1 FROM active_activations WHERE session_id = subtree.session_id),
-           EXISTS(SELECT 1 FROM ready_messages WHERE session_id = subtree.session_id),
+           NOT session.inbox_paused AND EXISTS(SELECT 1 FROM ready_messages WHERE session_id = subtree.session_id),
            CASE WHEN subtree.session_id = ?1 THEN
              EXISTS(SELECT 1 FROM subtree ancestry WHERE ancestry.session_id = node.parent_session_id)
              ELSE 0 END,
-           (SELECT last_settled_control_seq FROM sessions WHERE session_id = subtree.session_id),
+           session.last_settled_control_seq,
            EXISTS(SELECT 1 FROM program_runs WHERE session_id = subtree.session_id AND terminal=0),
            length(CAST(node.execution_owner_json AS BLOB)),
-           CASE WHEN length(CAST(node.execution_owner_json AS BLOB)) <= ?5 THEN node.execution_owner_json END
-         FROM subtree LEFT JOIN agent_nodes node ON node.session_id = subtree.session_id
+           CASE WHEN length(CAST(node.execution_owner_json AS BLOB)) <= ?5 THEN node.execution_owner_json END,
+           session.inbox_paused
+         FROM subtree LEFT JOIN sessions AS session ON session.session_id = subtree.session_id
+         LEFT JOIN agent_nodes node ON node.session_id = subtree.session_id
          ORDER BY subtree.session_id",
         )
         .map_err(sql_error)?;
@@ -2500,6 +2582,12 @@ pub(super) fn read_agent_subtree(
             ));
         }
         let status = StoreAgentSessionStatus {
+            inbox_paused: row
+                .get::<_, Option<bool>>(13)
+                .map_err(sql_error)?
+                .ok_or_else(|| {
+                    StoreError::Corrupt("Agent subtree references a missing Session".into())
+                })?,
             last_settled_control_seq: decode_u64(
                 "last settlement sequence",
                 row.get(9).map_err(sql_error)?,

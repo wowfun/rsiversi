@@ -503,7 +503,7 @@ async fn full_inspection_checks_frozen_references_in_controls_and_facts() {
     let message_id = MessageId::new("frozen-message").unwrap();
     let message = AgentMessage {
         message_id: message_id.clone(),
-        source: AgentMessageSource::Human,
+        source: AgentMessageSource::Human { attribution: None },
         content: content.clone(),
         options: MessageOptions::default(),
     };
@@ -528,10 +528,13 @@ async fn full_inspection_checks_frozen_references_in_controls_and_facts() {
                     SessionFact::new(
                         3,
                         3,
-                        SessionFactBody::InputMessageEntered {
+                        SessionFactBody::InputMessageClaimed {
                             turn_id: TurnId::new("turn-1").unwrap(),
                             step_id: StepId::new("step").unwrap(),
-                            source: InputMessageSource::Human { message_id },
+                            source: InputMessageSource::Human {
+                                message_id,
+                                attribution: None,
+                            },
                             content,
                         },
                     )

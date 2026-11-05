@@ -160,6 +160,7 @@ const EXPECTED_TABLES: [(&str, &str); 22] = [
             durable_seq INTEGER NOT NULL CHECK (durable_seq >= 0),
             fact_prefix_sha256 TEXT NOT NULL,
             control_seq INTEGER NOT NULL CHECK (control_seq >= 0),
+            inbox_paused INTEGER NOT NULL DEFAULT 0 CHECK (inbox_paused IN (0, 1)),
             last_settled_control_seq INTEGER NOT NULL DEFAULT 0
                 CHECK (last_settled_control_seq >= 0 AND last_settled_control_seq <= control_seq),
             control_prefix_sha256 TEXT NOT NULL
@@ -232,6 +233,7 @@ const EXPECTED_TABLES: [(&str, &str); 22] = [
         "CREATE TABLE agent_controls (
             session_id TEXT NOT NULL REFERENCES sessions(session_id) ON DELETE RESTRICT,
             seq INTEGER NOT NULL CHECK (seq > 0),
+            fact_seq INTEGER NOT NULL CHECK (fact_seq >= 0),
             control_json TEXT NOT NULL,
             PRIMARY KEY (session_id, seq)
          ) STRICT",
@@ -260,7 +262,7 @@ const EXPECTED_TABLES: [(&str, &str); 22] = [
             queue_timestamp_ms INTEGER NOT NULL CHECK (queue_timestamp_ms > 0),
             queue_control_seq INTEGER NOT NULL CHECK (queue_control_seq > 0 AND queue_control_seq <= accepted_control_seq),
             root_session_id TEXT NOT NULL,
-            message_source TEXT NOT NULL CHECK (message_source IN ('human', 'agent', 'completion', 'continuation', 'program')),
+            message_source TEXT NOT NULL,
             message_json TEXT NOT NULL,
             has_turn_options INTEGER NOT NULL CHECK (has_turn_options IN (0, 1)),
             target TEXT NOT NULL CHECK (target IN ('next_turn', 'next_step')),
@@ -457,7 +459,7 @@ type FactPagePause = (
 #[derive(Clone, PartialEq, Eq)]
 struct ForkBoundaryKey {
     session: SessionId,
-    invoking: TurnId,
+    point: rsi_agent_session_protocol::ForkPoint,
     selection: ForkTurnSelection,
 }
 #[derive(Default)]
@@ -724,8 +726,8 @@ impl SqliteStore {
             )
             .map_err(sql_error)?;
             configure_reader(&reader)?;
-            initialize_or_validate_schema(&mut reader, false)?;
-            Some(reader)
+            let version = initialize_or_validate_schema(&mut reader, false)?;
+            Some((reader, version))
         };
         prepare_owned_directory(&cas_dir, "CAS directory")?;
         prepare_cas_staging_directory(&cas_staging_dir)?;
@@ -735,10 +737,12 @@ impl SqliteStore {
         )
         .map_err(sql_error)?;
         configure_writer(&writer_connection)?;
-        if may_initialize {
+        if matches!(validated_reader, Some((_, 43))) {
+            validation::upgrade_mailbox_sources(&mut writer_connection)?;
+        } else if may_initialize {
             initialize_or_validate_schema(&mut writer_connection, true)?;
         }
-        let reader_connection = if let Some(reader) = validated_reader {
+        let reader_connection = if let Some((reader, _)) = validated_reader {
             reader
         } else {
             let reader = Connection::open_with_flags(

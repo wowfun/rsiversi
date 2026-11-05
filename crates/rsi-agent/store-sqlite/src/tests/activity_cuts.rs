@@ -104,3 +104,42 @@ async fn warm_access_and_cut_batches_have_three_measured_reader_operations() {
         ]
     );
 }
+
+#[cfg(feature = "test-support")]
+#[tokio::test]
+async fn cold_catalog_summaries_need_one_reader_without_canonical_history_proofs() {
+    let root = private_tempdir();
+    let store = SqliteStore::open(root.path()).unwrap();
+    let mut ids = Vec::new();
+    for index in 0..64 {
+        ids.push(seed_session(&store, &format!("cold-catalog-{index}")).await);
+    }
+    drop(store);
+    let store = SqliteStore::open(root.path()).unwrap();
+    store.begin_store_measurements();
+    let rows = store.session_activity_summaries(&ids).await.unwrap();
+    assert_eq!(rows.len(), ids.len());
+    assert!(
+        rows.iter()
+            .all(|row| row.as_ref().is_some_and(|row| row.durable_fact_seq == 1))
+    );
+    let summaries = store.take_store_measurements();
+    assert_eq!(summaries.reader.len(), 1);
+    assert!(summaries.validation.is_empty());
+
+    // Canonical Turn checks have a separate cost and remain available to recovery.
+    store.begin_store_measurements();
+    let cuts = store.session_activity_cuts(&ids).await.unwrap();
+    assert!(
+        cuts.iter()
+            .all(|cut| cut.as_ref().is_ok_and(|cut| cut.has_open_turn))
+    );
+    let cuts = store.take_store_measurements();
+    eprintln!(
+        "64 cold Sessions, metadata reader jobs {}, validations {}; additional activity-cut reader jobs {}, validations {}",
+        summaries.reader.len(),
+        summaries.validation.len(),
+        cuts.reader.len(),
+        cuts.validation.len()
+    );
+}

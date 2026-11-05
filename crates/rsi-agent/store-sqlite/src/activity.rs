@@ -89,7 +89,7 @@ impl SqliteStore {
             let result = {
                 let values = (0..sessions.len()).map(|index| format!("({index},?{})", index + 1)).collect::<Vec<_>>().join(",");
                 let sql = format!("WITH requested(ordinal, id) AS (VALUES {values})
-                    SELECT sessions.session_id, sessions.coordinates_key, sessions.created_at_ms, sessions.last_activity_ms
+                    SELECT sessions.session_id, sessions.coordinates_key, sessions.created_at_ms, sessions.last_activity_ms, sessions.durable_seq, sessions.control_seq
                     FROM requested LEFT JOIN sessions ON sessions.session_id = requested.id AND NOT EXISTS(SELECT 1 FROM session_tombstones WHERE session_id=requested.id) ORDER BY requested.ordinal");
                 let mut statement = transaction.prepare(&sql).map_err(sql_error)?;
                 let mut rows = statement.query(rusqlite::params_from_iter(sessions.iter().map(SessionId::as_str))).map_err(sql_error)?;
@@ -107,6 +107,8 @@ impl SqliteStore {
                         coordinates: decode_json("indexed execution coordinates", &key)?,
                         created_at_ms: decode_u64("creation timestamp", raw.get(2).map_err(sql_error)?)?,
                         last_activity_ms: decode_u64("activity timestamp", raw.get(3).map_err(sql_error)?)?,
+                        durable_fact_seq: decode_u64("durable sequence", raw.get(4).map_err(sql_error)?)?,
+                        durable_control_seq: decode_u64("control sequence", raw.get(5).map_err(sql_error)?)?,
                     };
                     if row.session_id != *session || row.created_at_ms == 0 || row.last_activity_ms < row.created_at_ms {
                         return Err(StoreError::Corrupt("invalid activity summary".into()));
@@ -241,6 +243,8 @@ fn read_rows(
                 "indexed activity timestamp",
                 row.get(3).map_err(sql_error)?,
             )?,
+            durable_fact_seq: decode_u64("durable sequence", row.get(4).map_err(sql_error)?)?,
+            durable_control_seq: decode_u64("control sequence", row.get(5).map_err(sql_error)?)?,
         });
     }
     Ok(result)
@@ -271,6 +275,11 @@ pub(super) fn ordered_query(
     } else {
         format!("{column} DESC, session_id DESC")
     };
+    let watermark = if matches!(ordering, Ordering::Activity) {
+        ", durable_seq, control_seq"
+    } else {
+        ""
+    };
     let mut parameters = Vec::new();
     let mut query = |scope: &ExecutionLocations| -> Result<String> {
         let (mut conditions, values) = selection(scope, key)?;
@@ -287,7 +296,7 @@ pub(super) fn ordered_query(
                 .into(),
         );
         Ok(format!(
-            "SELECT session_id, coordinates_key, created_at_ms, last_activity_ms FROM sessions {} ORDER BY {order} LIMIT ?",
+            "SELECT session_id, coordinates_key, created_at_ms, last_activity_ms{watermark} FROM sessions {} ORDER BY {order} LIMIT ?",
             predicate(&conditions)
         ))
     };
@@ -358,7 +367,7 @@ mod tests {
     #[test]
     fn maximum_location_union_preserves_all_rows_across_continuation_pages() {
         let connection = Connection::open_in_memory().unwrap();
-        connection.execute_batch("CREATE TABLE session_tombstones(session_id TEXT PRIMARY KEY); CREATE TABLE sessions(session_id TEXT PRIMARY KEY, coordinates_key TEXT, created_at_ms INTEGER, last_activity_ms INTEGER);").unwrap();
+        connection.execute_batch("CREATE TABLE session_tombstones(session_id TEXT PRIMARY KEY); CREATE TABLE sessions(session_id TEXT PRIMARY KEY, coordinates_key TEXT, created_at_ms INTEGER, last_activity_ms INTEGER, durable_seq INTEGER, control_seq INTEGER);").unwrap();
         let mut locations = std::collections::BTreeSet::from([
             rsi_agent_session_protocol::ExecutionLocation::Local,
         ]);
@@ -377,7 +386,7 @@ mod tests {
             .unwrap();
             connection
                 .execute(
-                    "INSERT INTO sessions VALUES(?1,?2,?3,?3)",
+                    "INSERT INTO sessions VALUES(?1,?2,?3,?3,0,0)",
                     params![
                         format!("session-{index:03}"),
                         key,
@@ -426,7 +435,7 @@ mod tests {
     #[test]
     fn selected_location_pages_bound_physical_sort_work_before_merging() {
         let mut connection = Connection::open_in_memory().unwrap();
-        connection.execute_batch("CREATE TABLE session_tombstones(session_id TEXT PRIMARY KEY); CREATE TABLE sessions(session_id TEXT PRIMARY KEY, coordinates_key TEXT, created_at_ms INTEGER, last_activity_ms INTEGER);").unwrap();
+        connection.execute_batch("CREATE TABLE session_tombstones(session_id TEXT PRIMARY KEY); CREATE TABLE sessions(session_id TEXT PRIMARY KEY, coordinates_key TEXT, created_at_ms INTEGER, last_activity_ms INTEGER, durable_seq INTEGER, control_seq INTEGER);").unwrap();
         for (name, sql) in crate::EXPECTED_INDEXES {
             if matches!(
                 name,
@@ -447,7 +456,7 @@ mod tests {
         let transaction = connection.transaction().unwrap();
         {
             let mut insert = transaction
-                .prepare("INSERT INTO sessions VALUES(?1,?2,?3,?3)")
+                .prepare("INSERT INTO sessions VALUES(?1,?2,?3,?3,0,0)")
                 .unwrap();
             for (index, location) in locations.iter().enumerate() {
                 let key = coordinates_key(
