@@ -1,6 +1,6 @@
 import {useState} from 'react';
 import {Button} from '../button.tsx';
-import {input,useView,type Provider} from '../bridge.ts';
+import {input,useView,type Provider,type SetupBinding} from '../bridge.ts';
 import {ProviderEditor} from './provider-editor.tsx';
 import type {SetupActions} from './setup-actions.ts';
 import {providerLabels} from './provider-draft.ts';
@@ -11,9 +11,10 @@ export function ModelsSettings({actions}:{actions:SetupActions}) {
   const setup=useView(view=>view?.setup);
   const models=useView(view=>view?.catalog.models??[]);
   const more=useView(view=>view?.catalog.models_more);
-  const [editing,setEditing]=useState<{entry?:Provider;revision:string;deployments:Provider[]}>();
+  const [editing,setEditing]=useState<{entry?:Provider;revision:string;deployments:Provider[];binding:SetupBinding}>();
   const providers=setup?.providers, locked=!setup?.allowed||!setup.providers_writable||actions.busy;
-  const edit=(entry?:Provider)=>{if(providers)setEditing({entry,revision:providers.desired_revision,deployments:providers.deployments});};
+  const closeEditor=()=>{editing?.binding.retire();setEditing(undefined);};
+  const edit=(entry?:Provider)=>{if(providers){editing?.binding.retire();setEditing({entry,revision:providers.desired_revision,deployments:providers.deployments,binding:input.captureSetupBinding()});}};
   return <section className={css.models} aria-label="Models">
     <h2>Models</h2><p className={css.intro}>Enter your API keys to use models from the following providers.</p>
     {!setup?.allowed&&<p role="status">Configuration is read only for this connection.</p>}
@@ -25,11 +26,11 @@ export function ModelsSettings({actions}:{actions:SetupActions}) {
       const id=String(entry.config.deployment),opened=editing?.entry?.config.deployment===id;
       const state=providers.applying?'Applying':providers.desired_revision===providers.applied_revision?'Applied':'Needs attention';
       return <div className={css.card} key={id}>
-        <div className={css.cardHeading}><strong>{providerLabels[entry.provider]}{id!==entry.provider&&<span className={css.identity}>{id}</span>}</strong><span className={css.dot} data-state={state} role="img" aria-label={state} title={state}/><Button size="sm" variant="outline" disabled={locked} onClick={()=>opened?setEditing(undefined):edit(entry)}>Edit</Button></div>
-        {opened&&<ProviderEditor key={`${id}:${editing.revision}`} original={editing.entry} revision={editing.revision} deployments={editing.deployments} actions={actions} close={()=>setEditing(undefined)}/>}
+        <div className={css.cardHeading}><strong>{providerLabels[entry.provider]}{id!==entry.provider&&<span className={css.identity}>{id}</span>}</strong><span className={css.dot} data-state={state} role="img" aria-label={state} title={state}/><Button size="sm" variant="outline" disabled={locked} onClick={()=>opened?closeEditor():edit(entry)}>Edit</Button></div>
+        {opened&&<ProviderEditor key={`${id}:${editing.revision}`} binding={editing.binding} original={editing.entry} revision={editing.revision} deployments={editing.deployments} actions={actions} close={closeEditor}/>}
       </div>;
     })}
-    {editing&&!editing.entry?<ProviderEditor key="new" revision={editing.revision} deployments={editing.deployments} actions={actions} close={()=>setEditing(undefined)}/>:<button type="button" className={css.add} disabled={locked||!providers} onClick={()=>edit()}><IconPlusOutlineRegular size={16}/>Add model provider</button>}
+    {editing&&!editing.entry?<ProviderEditor key="new" binding={editing.binding} revision={editing.revision} deployments={editing.deployments} actions={actions} close={closeEditor}/>:<button type="button" className={css.add} disabled={locked||!providers} onClick={()=>edit()}><IconPlusOutlineRegular size={16}/>Add model provider</button>}
     {!!models.length&&<label className={css.defaultModel}>Default model<select aria-label="Default model" disabled={actions.busy||!setup?.settings_writable} value={setup?.agent?.default_model?JSON.stringify(setup.agent.default_model):''} onChange={event=>{if(event.target.value)actions.act(()=>actions.command({kind:'default_model',ticket:setup?.ticket,model:JSON.parse(event.target.value)}));}}><option value="">Choose a model</option>{models.map(model=><option key={`${model.deployment}:${model.model}`} value={JSON.stringify(model)}>{model.model} · {model.deployment}</option>)}</select></label>}
     {more&&<Button size="sm" disabled={actions.busy} onClick={()=>actions.act(()=>input.command({action:"models_next"}))}>More models</Button>}
   </section>;

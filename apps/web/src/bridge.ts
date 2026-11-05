@@ -54,10 +54,12 @@ export const useSelected = bindSnapshotSelector(selection)
 export const publish = source.set
 export const selectSurface = selection.set
 type Command = Record<string, unknown>
-interface Actions { disconnect():Promise<unknown>; restoreDrafts():Promise<void>; dismissSettings():void; resources():ResourceOwner|undefined; command(command: Command): Promise<unknown>; open(command: Command): Promise<unknown>; select(key: string): void; closeSurface(key: string): Promise<void>; addSurface(key: string): Promise<void>; call(method: string, payload: unknown): Promise<unknown> }
+export type {SetupBinding} from './runtime/setup-binding.ts'
+interface Actions { captureSetupBinding():import('./runtime/setup-binding.ts').SetupBinding; disconnect():Promise<unknown>; restoreDrafts():Promise<void>; dismissSettings():void; resources():ResourceOwner|undefined; command(command: Command): Promise<unknown>; open(command: Command): Promise<unknown>; select(key: string): void; closeSurface(key: string): Promise<void>; addSurface(key: string): Promise<void>; call(method: string, payload: unknown): Promise<unknown> }
 let actions: Actions | undefined
 export function installActions(value: Actions) { actions = value }
 export const input = {
+  captureSetupBinding() { if (!actions) throw new Error('Application is starting'); return actions.captureSetupBinding() },
   disconnect() { if (!actions) return Promise.reject(new Error("Application is starting")); return actions.disconnect() },
   restoreDrafts() { return actions?.restoreDrafts() ?? Promise.reject(new Error('Application is starting')) },
   resourceOwner() { return actions?.resources() },

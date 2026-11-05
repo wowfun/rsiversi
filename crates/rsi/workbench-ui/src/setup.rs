@@ -542,6 +542,13 @@ impl SetupFeature {
             .map(|_| ())
             .map_err(|failure| match failure {
                 rsi_settings_protocol::SettingsError::Api(error) => error.clone(),
+                rsi_settings_protocol::SettingsError::OutcomeUnknown(_) => {
+                    rsi_api_protocol::ApiError::OutcomeUnknown
+                }
+                rsi_settings_protocol::SettingsError::RecoveryRequired(_)
+                | rsi_settings_protocol::SettingsError::Io(_) => {
+                    rsi_api_protocol::ApiError::Unavailable
+                }
                 _ => rsi_api_protocol::ApiError::Invalid(error(failure)),
             });
         self.receipt(field, &receipt_result);

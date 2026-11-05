@@ -1,5 +1,6 @@
-import {useEffect,useRef,useState} from 'react';
-import {source,useView,type Provider,type Setup} from '../bridge.ts';
+import {useEffect,useLayoutEffect,useRef,useState} from 'react';
+import {useView,type Provider,type SetupBinding} from '../bridge.ts';
+import {providerApplied,type SetupScope} from '../runtime/setup-binding.ts';
 import {Button} from '../button.tsx';
 import {Modal} from '../presentation.tsx';
 import type {SetupActions} from './setup-actions.ts';
@@ -7,16 +8,9 @@ import {ModelDefinitions} from './model-definitions.tsx';
 import {draftRows,modelDefinitions,newRow,providerLabels,providerOwners,providerModelConfig,replaceProvider,type Limits} from './provider-draft.ts';
 import css from './models.module.css';
 
-function waitSetup(ready:(setup:Setup)=>boolean):Promise<Setup> {
-  return new Promise((resolve,reject)=>{
-    let stop=()=>{};
-    const timer=setTimeout(()=>{stop();reject(new Error('Configuration saved; refresh settings to read its status.'));},10000);
-    const read=()=>{const setup=source.getSnapshot()?.setup;if(setup&&ready(setup)){clearTimeout(timer);stop();resolve(setup);}};
-    stop=source.subscribe(read);read();
-  });
-}
-export function ProviderEditor({original,revision,deployments,actions,close}:{original?:Provider;revision:string;deployments:Provider[];actions:SetupActions;close:()=>void}) {
+export function ProviderEditor({original,revision,deployments,binding,actions,close}:{original?:Provider;revision:string;deployments:Provider[];binding:SetupBinding;actions:SetupActions;close:()=>void}) {
   const setup=useView(view=>view?.setup),secret=useRef<HTMLInputElement>(null),alive=useRef(true);
+  const scope=useRef<SetupScope>();
   const [provider,setProvider]=useState<Provider['provider']>(original?.provider??'deepseek');
   const uniqueId=(kind:string)=>{let id=kind,index=2;while(deployments.some(entry=>entry.config.deployment===id))id=`${kind}-${index++}`;return id;};
   const [deployment,setDeployment]=useState(String(original?.config.deployment??uniqueId('deepseek')));
@@ -26,12 +20,13 @@ export function ProviderEditor({original,revision,deployments,actions,close}:{or
   const [images,setImages]=useState(original?.config.allow_image_input===true),[imageOutput,setImageOutput]=useState(original?.config.image===true),[language,setLanguage]=useState(original?.config.language!==false);
   const [rows,setRows]=useState(()=>draftRows(original)),[error,setError]=useState(''),[note,setNote]=useState(''),[removing,setRemoving]=useState(false);
   const [candidates,setCandidates]=useState<{id:string;name?:string|null;context_window_tokens?:number|null;max_output_tokens?:number|null}[]>();
-  const [advanced,setAdvanced]=useState(false),[applied,setApplied]=useState(false);
+  const [advanced,setAdvanced]=useState(false),[applied,setApplied]=useState<string>();
   const [checking,setChecking]=useState(false);
   const statusRead=useRef<{timer?:ReturnType<typeof setTimeout>;pending?:Promise<unknown>;checked?:string}>({});
-  const {busy,command,act}=actions,locked=busy||!setup?.allowed;
+  const {busy,act}=actions,locked=busy||!setup?.allowed;
+  const command=(value:Record<string,unknown>)=>scope.current!.command(value);
   const credential=setup?.credential?.provider===provider&&setup.credential.slot===slot?setup.credential.status:undefined;
-  useEffect(()=>{alive.current=true;return()=>{alive.current=false;if(secret.current)secret.current.value='';};},[]);
+  useLayoutEffect(()=>{const current=binding.open();scope.current=current;alive.current=true;return()=>{alive.current=false;current.retire();clearTimeout(statusRead.current.timer);if(secret.current)secret.current.value='';};},[binding]);
   useEffect(()=>{
     const state=statusRead.current,key=JSON.stringify([provider,slot]);
     if(busy||checking||!setup?.credentials_available||!slot.trim()||state.checked===key)return;
@@ -49,7 +44,7 @@ export function ProviderEditor({original,revision,deployments,actions,close}:{or
   };
   const perform=(work:()=>Promise<void>)=>{
     clearTimeout(statusRead.current.timer);
-    act(async()=>{setError('');try{await statusRead.current.pending;await work();}catch(reason){if(alive.current)setError(reason instanceof Error?reason.message:String(reason));}});
+    act(async()=>{setError('');try{await statusRead.current.pending;await work();}catch(reason){if(alive.current&&scope.current?.active)setError(reason instanceof Error?reason.message:String(reason));}});
   };
   const save=()=>perform(async()=>{
     const models=modelDefinitions(rows);
@@ -61,22 +56,22 @@ export function ProviderEditor({original,revision,deployments,actions,close}:{or
     if(provider==='openai'){config.language=language;config.image=imageOutput;}
     if(provider==='openai-compatible'){config.path=path;config.allow_image_input=images;}
     const next=replaceProvider(deployments,{provider,config},original?String(original.config.deployment):undefined);
+    const target=applied??String(BigInt(revision)+1n);
     if(!applied){
-      if(setup?.providers?.desired_revision!==revision)throw new Error('Provider configuration changed. Cancel and reopen this editor before applying.');
+      if(scope.current!.snapshot()?.providers?.desired_revision!==revision)throw new Error('Provider configuration changed. Cancel and reopen this editor before applying.');
       const key=secret.current?.value??'';
       if(key){if(secret.current)secret.current.value='';await command({kind:'credential_set',provider,slot,secret:key});if(alive.current)setNote('API key saved.');}
       await command({kind:'providers_replace',expected_revision:revision,deployments:next});
-      setApplied(true);
-    }
-    const current=await waitSetup(value=>value.providers?.desired_revision!==revision);
-    if(current.providers?.diagnostic||current.providers?.applying||current.providers?.desired_revision!==current.providers?.applied_revision)throw new Error('Provider saved, but not applied. Refresh settings to inspect its status.');
+      if(alive.current&&scope.current?.active)setApplied(target);
+    }else await command({kind:'refresh'});
+    const current=await scope.current!.waitSetup(value=>providerApplied(value,target));
     if(!current.agent?.default_model&&current.settings_writable&&rows[0])await command({kind:'default_model',ticket:current.ticket,model:{deployment,model:rows[0].name.trim()}});
     if(alive.current)close();
   });
   const fetchModels=()=>perform(async()=>{
-    const previous=source.getSnapshot()?.setup?.discovery;
+    const previous=scope.current!.snapshot()?.discovery;
     await command({kind:'discover_models',input:{request:{provider,endpoint,slot},secret:secret.current?.value||null}});
-    const next=await waitSetup(value=>!!value.discovery&&value.discovery!==previous&&value.discovery.request.provider===provider&&value.discovery.request.endpoint===endpoint&&value.discovery.request.slot===slot);
+    const next=await scope.current!.waitSetup(value=>!!value.discovery&&value.discovery!==previous&&value.discovery.request.provider===provider&&value.discovery.request.endpoint===endpoint&&value.discovery.request.slot===slot);
     if(alive.current)setCandidates(next.discovery!.models);
   });
   const addCandidate=(candidate:NonNullable<typeof candidates>[number])=>{
@@ -87,7 +82,7 @@ export function ProviderEditor({original,revision,deployments,actions,close}:{or
     setRows(previous=>previous.some(row=>row.name===candidate.id)?previous:[...previous,row]);
   };
   return <form className={css.editor} onSubmit={event=>{event.preventDefault();save();}} aria-label={original?'Edit model provider':'Add model provider'} aria-busy={busy}>
-    <fieldset disabled={locked||applied}>
+    <fieldset disabled={locked||!!applied}>
       {!original&&<><div className={css.segments} role="group" aria-label="Provider type"><button type="button" aria-pressed={provider!=='openai-compatible'} onClick={()=>choose('deepseek')}>Built-in provider</button><button type="button" aria-pressed={provider==='openai-compatible'} onClick={()=>choose('openai-compatible')}>Custom model API</button></div>
       {provider!=='openai-compatible'?<label>Provider<select aria-label="Provider" value={provider} onChange={event=>choose(event.target.value as Provider['provider'])}><option value="deepseek">DeepSeek</option><option value="openai">OpenAI</option></select></label>:<><label>Provider ID<input aria-label="Provider ID" value={deployment} onChange={event=>{setDeployment(event.target.value);setSlot(event.target.value||'default');}} maxLength={128} placeholder="my-gateway"/></label><label>Base URL<input aria-label="Base URL" value={endpoint} onChange={event=>setEndpoint(event.target.value)} placeholder="https://gateway.example/v1" maxLength={2048}/></label></> }</>}
       {original&&<div className={css.editorTitle}><strong>{providerLabels[provider]}</strong><span>{deployment}</span></div>}

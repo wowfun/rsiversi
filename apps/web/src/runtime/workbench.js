@@ -231,7 +231,7 @@ async function openInSelected(fields) {
 }
 const projectView=createViewProjector({publishSurfaces:sessionSurfaces.set,get rendererSlots(){return rendererSlots},set rendererSlots(value){rendererSlots=value},get view(){return view},set view(value){view=value},get lastNotice(){return lastNotice},set lastNotice(value){lastNotice=value},get notify(){return notify},get panes(){return panes},get ExternalPane(){return ExternalPane},get Pane(){return Pane},get selected(){return selected},set selected(value){selected=value},get select(){return select},get publish(){return publish},renderSettings:settings.present,get renderResources(){return renderResources}});
 function render(next){return projectView(next)}
-installActions({ disconnect:async()=>nativeDocument?nativeCall({kind:"request_close"}):disconnectDocument(), restoreDrafts:async()=>{const pane=panes.get(selected);if(!(pane instanceof Pane))throw new Error("Open a local conversation first");await pane.restoreDrafts()}, command, open: openInSelected, select, call, resources: () => connection?.resources, dismissSettings:settings.dismiss,
+installActions({ captureSetupBinding:settings.captureSetupBinding, disconnect:async()=>nativeDocument?nativeCall({kind:"request_close"}):disconnectDocument(), restoreDrafts:async()=>{const pane=panes.get(selected);if(!(pane instanceof Pane))throw new Error("Open a local conversation first");await pane.restoreDrafts()}, command, open: openInSelected, select, call, resources: () => connection?.resources, dismissSettings:settings.dismiss,
   async closeSurface(key) {
     const owner = connection;
     const pane = panes.get(key);

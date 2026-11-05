@@ -1,18 +1,22 @@
 import { SettingsDialog } from "../../settings-dialog.js";
 import { createSettingsDraft } from "./settings-draft.js";
+import { createSetupBinding } from "./setup-binding.ts";
 import {
   settingsPanel,
   settingsMounted,
   advancedSettings,
   registeredSettings,
+  source,
 } from "../bridge.ts";
 
 export function createSettingsRuntime(context) {
   const drafts = new Map(),
-    subscriptions = [];
+    subscriptions = [], bindings = new Set();
+  const retireBindings = () => { for (const binding of bindings) binding.retire(); bindings.clear(); };
   let selecting = false,
     read;
   const clear = () => {
+    retireBindings();
     for (const draft of drafts.values()) draft.retire();
     drafts.clear();
     registeredSettings.set(undefined);
@@ -20,6 +24,7 @@ export function createSettingsRuntime(context) {
   };
   const dialog = new SettingsDialog({
     close() {
+      retireBindings();
       read = undefined;
       settingsPanel.set(undefined);
     },
@@ -136,6 +141,17 @@ export function createSettingsRuntime(context) {
     }),
   );
   return {
+    captureSetupBinding() {
+      const binding = createSetupBinding({
+        owner: () => context.connection,
+        closing: owner => owner.closing,
+        snapshot: () => context.view?.setup,
+        subscribe: source.subscribe,
+        command: (owner, command) => context.boundCall(owner)("command", JSON.stringify({action:"setup", command})),
+      });
+      bindings.add(binding);
+      return {...binding, retire() { binding.retire(); bindings.delete(binding); }};
+    },
     command,
     present,
     dismiss: () => dialog.dismiss(),

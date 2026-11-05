@@ -364,6 +364,7 @@ jobs:
           RSI_REPORT_DIR="$RUNNER_TEMP/rsi-web-evidence/history-picker" node history-picker.mjs
           RSI_REPORT_DIR="$RUNNER_TEMP/rsi-web-evidence/workspace-navigation" node workspace-navigation.mjs
           RSI_REPORT_DIR="$RUNNER_TEMP/rsi-web-evidence/workspace-model-settings" node workspace-model-settings.mjs
+          RSI_REPORT_DIR="$RUNNER_TEMP/rsi-web-evidence/provider-binding" node provider-binding.mjs
           RSI_REPORT_DIR="$RUNNER_TEMP/rsi-web-evidence/starting-transcript" node starting-transcript.mjs
           RSI_REPORT_DIR="$RUNNER_TEMP/rsi-web-evidence/process-transcript" node process-transcript.mjs
           RSI_REPORT_DIR="$RUNNER_TEMP/rsi-web-evidence/composer-controls" node composer-controls.mjs

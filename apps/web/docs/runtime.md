@@ -290,6 +290,13 @@ leaves the native deadline responsible for reporting unsuccessful shutdown.
 One document connection owns transport, pending RPCs, authentication, mounts and
 teardown. Async operations capture that owner before awaiting and cannot close or
 dispatch through a replacement. UI callbacks additionally check current identity.
+Provider editors capture the connection when opened. Each mounted editor owns a
+scope for commands and setup observations; editor teardown, Settings dismissal,
+and connection retirement cancel its waiters and prevent further dispatch.
+Dispatched requests still settle with their original connection. A successful
+provider replacement waits for its exact successor revision to finish applying.
+Finish setup refreshes that revision without repeating the replacement; a newer
+revision requires reopening the editor.
 Authentication attaches only draft storage and its storage notice to the owner.
 An unexpected authentication or storage-setup rejection fails that owner, rejects
 its pending requests and starts its shared renderer and transport cleanup. The
