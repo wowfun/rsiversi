@@ -24,17 +24,18 @@ async fn storage_runtime(path: &std::path::Path) -> Runtime {
             Value::Null,
         ),
         (
-            "json",
-            Arc::new(JsonStorageFactory),
-            json!({"name":"json","path":path}),
+            "sqlite",
+            Arc::new(rsi_storage_sqlite::SqliteStorageFactory),
+            json!({"name":"sqlite","path":path}),
         ),
         ("domains", Arc::new(DomainFactory), Value::Null),
     ] {
-        runtime
+        let fiber = runtime
             .root()
             .apply(linked(id, factory), config)
             .await
             .unwrap();
+        assert_eq!(fiber.snapshot().state, rsi_meta::FiberState::Active, "{id}");
     }
     runtime
 }
@@ -63,8 +64,10 @@ async fn cursor_survives_deletion_of_highest_orders_and_registry_restart() {
     for name in ["first", "second", "third", "after_restart", "after_empty"] {
         fs::create_dir(temporary.path().join(name)).unwrap();
     }
-    let runtime = storage_runtime(&temporary.path().join("registry.json")).await;
-    let config = json!({"backend":"json"});
+    let state = temporary.path().join("state");
+    rsi_files_native_fs::create_absolute_directory_no_follow(&state).unwrap();
+    let runtime = storage_runtime(&state.join("registry.sqlite3")).await;
+    let config = json!({"backend":"sqlite"});
     let mut fiber = runtime
         .root()
         .apply(
@@ -95,8 +98,15 @@ async fn cursor_survives_deletion_of_highest_orders_and_registry_restart() {
     )
     .await;
     let cursor = registry.list(None, 2).await.unwrap().next.unwrap();
+    let ingress = runtime
+        .root()
+        .lookup_local::<rsi_workspace_protocol::WorkspaceIngressContract>()
+        .unwrap();
+    assert_eq!(ingress.directory_revision(), Some(3));
     assert!(registry.delete_registration(&second.id).await.unwrap());
     assert!(registry.delete_registration(&third.id).await.unwrap());
+    assert_eq!(ingress.directory_revision(), Some(5));
+    drop(ingress);
     drop(registry);
     assert!(fiber.dispose().await.is_clean());
     fiber = runtime
@@ -420,6 +430,11 @@ async fn failed_registration_leaves_a_reserved_gap_and_invalid_allocation_is_rej
         .await
         .unwrap();
     assert!(original.created_at_ms.is_some());
+    let ingress = runtime
+        .root()
+        .lookup_local::<rsi_workspace_protocol::WorkspaceIngressContract>()
+        .unwrap();
+    assert_eq!(ingress.directory_revision(), Some(1));
     let kept = registry
         .rename(
             &original.id,
@@ -453,6 +468,8 @@ async fn failed_registration_leaves_a_reserved_gap_and_invalid_allocation_is_rej
             .is_err()
     );
     assert_eq!(registry.get(&kept.id).await.unwrap(), kept);
+    assert_eq!(ingress.directory_revision(), Some(2));
+    drop(ingress);
     assert_eq!(
         registry
             .list(
@@ -809,8 +826,13 @@ async fn scoped_registry_filters_before_paging_and_seed_budget_and_rechecks_revo
     let remote_location = ExecutionLocation::Ssh {
         target: serde_json::from_value(json!("a".repeat(32))).unwrap(),
     };
+    let remote_path = if cfg!(windows) {
+        "/visible-offline"
+    } else {
+        local_path.to_str().unwrap()
+    };
     let remote = WorkspaceRecord::new(
-        ExecutionCoordinates::new(remote_location.clone(), local_path.to_str().unwrap()).unwrap(),
+        ExecutionCoordinates::new(remote_location.clone(), remote_path).unwrap(),
     );
     // Hidden entries exceed the full manual-order seed budget, before the visible row.
     let mut values = std::collections::BTreeMap::new();
@@ -930,6 +952,21 @@ async fn scoped_registry_filters_before_paging_and_seed_budget_and_rechecks_revo
         "denied mutations perform zero domain writes"
     );
     assert!(local_path.is_dir());
+    let workspace_path = temporary.path().join("concurrent-registration");
+    fs::create_dir(&workspace_path).unwrap();
+    let ingress = runtime
+        .root()
+        .lookup_local::<rsi_workspace_protocol::WorkspaceIngressContract>()
+        .unwrap();
+    let (one, two) = tokio::join!(
+        ingress.register_local(rsi_api_protocol::CallOrigin::Local, &workspace_path),
+        ingress.register_local(rsi_api_protocol::CallOrigin::Local, &workspace_path)
+    );
+    let (first, inserted) = one.unwrap();
+    let (concurrent, other_inserted) = two.unwrap();
+    assert_eq!(first, concurrent);
+    assert_ne!(inserted, other_inserted);
+
     assert!(runtime.shutdown().await.is_clean());
 }
 

@@ -311,10 +311,21 @@ impl LocalContract for WorkspaceRegistryContract {
 }
 
 /// Trusted authenticated ingress; a scoped view retains its caller, never a serialized grant.
+#[async_trait]
 pub trait WorkspaceIngress: fmt::Debug + Send + Sync + 'static {
+    /// Process-local revision of published registrations. Unversioned providers require reconciliation.
+    fn directory_revision(&self) -> Option<u64> {
+        None
+    }
     /// Binds a view to exactly the caller authenticated by its transport.
     fn scoped(&self, origin: rsi_api_protocol::CallOrigin)
     -> std::sync::Arc<dyn WorkspaceRegistry>;
+    /// Registers a local path and reports whether this call inserted its record.
+    async fn register_local(
+        &self,
+        origin: rsi_api_protocol::CallOrigin,
+        path: &Path,
+    ) -> Result<(WorkspaceRecord, bool)>;
 }
 /// Server-only Workspace caller binding.
 #[derive(Debug)]

@@ -23,7 +23,7 @@ use std::collections::{BTreeMap, HashSet};
 use std::path::{Path, PathBuf};
 use std::sync::{
     Arc,
-    atomic::{AtomicBool, Ordering},
+    atomic::{AtomicBool, AtomicU64, Ordering},
 };
 use tokio::sync::{Mutex, RwLock};
 
@@ -67,6 +67,7 @@ struct Service {
     origin: CallOrigin,
     domain: Arc<dyn Domain>,
     state: Arc<RwLock<RegistryData>>,
+    revision: Arc<AtomicU64>,
     commit: Arc<Mutex<()>>,
     execution: Execution,
     closed: Arc<AtomicBool>,
@@ -148,92 +149,9 @@ impl WorkspaceRegistry for Service {
         location: &ExecutionLocation,
         path: &Path,
     ) -> Result<WorkspaceRecord> {
-        let _permit = self.admit(location)?;
-        let text = rsi_workspace_protocol::validate_registration_path(location, path)?;
-        let coordinates = match location {
-            ExecutionLocation::Local => {
-                let canonical = canonical_directory(path).await?;
-                ExecutionCoordinates::new(
-                    location.clone(),
-                    canonical.to_str().expect("validated UTF-8 path"),
-                )
-                .map_err(|error| WorkspaceError::InvalidInput(error.to_string()))?
-            }
-            ExecutionLocation::Ssh { .. } => self
-                .resolver
-                .lease(self.origin.clone(), location)
-                .map_err(WorkspaceError::Api)?
-                .canonicalize(text)
-                .await
-                .map_err(execution_error)?,
-        };
-        let id = WorkspaceId::from_coordinates(&coordinates);
-        let current = self.state.read().await;
-        self.ensure_available()?;
-        if let Some((_, existing)) = current.records.get(&id) {
-            return Ok(existing.clone());
-        }
-        drop(current);
-        let _commit = Arc::clone(&self.commit).lock_owned().await;
-        let state = self.state.read().await;
-        self.ensure_available()?;
-        if let Some((_, existing)) = state.records.get(&id) {
-            return Ok(existing.clone());
-        }
-        if state.records.len() == MAXIMUM_WORKSPACES {
-            return Err(WorkspaceError::InvalidInput(
-                "workspace registry reached its capacity".into(),
-            ));
-        }
-        let mut record = WorkspaceRecord::new(coordinates);
-        record.created_at_ms = Some(
-            std::time::SystemTime::now()
-                .duration_since(std::time::UNIX_EPOCH)
-                .map_err(|_| WorkspaceError::Storage("system clock precedes Unix epoch".into()))?
-                .as_millis()
-                .try_into()
-                .map_err(|_| WorkspaceError::Storage("system clock is out of range".into()))?,
-        );
-        record.validate()?;
-        let order = state
-            .next_order
-            .checked_add(1)
-            .ok_or_else(|| WorkspaceError::InvalidInput("workspace order exhausted".into()))?;
-        drop(state);
-        let durable = DurableWorkspaceRecord {
-            order,
-            record: record.clone(),
-        };
-        let value = serde_json::to_value(durable)
-            .map_err(|error| WorkspaceError::Storage(error.to_string()))?;
-        let domain = Arc::clone(&self.domain);
-        let state = Arc::clone(&self.state);
-        let durable_key = id.as_str().to_owned();
-        self.execution
-            .spawn(async move {
-                let _commit = _commit;
-                let _permit = _permit;
-                // Reserve even an uncertain allocation locally; an error cannot prove
-                // that the durable write did not happen. No registration is published
-                // until its reservation has been acknowledged.
-                state.write().await.next_order = order;
-                domain
-                    .put(ALLOCATION_KEY, serde_json::json!({"high_water": order}))
-                    .await
-                    .map_err(storage_error)?;
-                domain
-                    .put(&durable_key, value)
-                    .await
-                    .map_err(storage_error)?;
-                let mut state = state.write().await;
-                state.order.insert(order, id.clone());
-                state.records.insert(id, (order, record.clone()));
-                Ok(record)
-            })
+        self.register(location, path)
             .await
-            .map_err(|error| {
-                WorkspaceError::Storage(format!("workspace commit task failed: {error}"))
-            })?
+            .map(|(record, _)| record)
     }
 
     async fn rename(
@@ -263,6 +181,7 @@ impl WorkspaceRegistry for Service {
         .map_err(|error| WorkspaceError::Storage(error.to_string()))?;
         let domain = self.domain.clone();
         let state = self.state.clone();
+        let revision = self.revision.clone();
         self.execution
             .spawn(async move {
                 let (_commit, _permit) = (commit, permit);
@@ -275,6 +194,7 @@ impl WorkspaceRegistry for Service {
                     .await
                     .records
                     .insert(record.id.clone(), (order, record.clone()));
+                revision.fetch_add(1, Ordering::Release);
                 Ok(record)
             })
             .await
@@ -321,6 +241,7 @@ impl WorkspaceRegistry for Service {
         let domain = Arc::clone(&self.domain);
         let state = Arc::clone(&self.state);
         let id = id.clone();
+        let revision = self.revision.clone();
         self.execution
             .spawn(async move {
                 let _commit = _commit;
@@ -333,6 +254,7 @@ impl WorkspaceRegistry for Service {
                 let mut state = state.write().await;
                 state.records.remove(&id);
                 state.order.remove(&order);
+                revision.fetch_add(1, Ordering::Release);
                 Ok(true)
             })
             .await
@@ -385,6 +307,7 @@ impl PluginFactory for WorkspaceFactory {
             origin: CallOrigin::Local,
             domain,
             state: Arc::new(RwLock::new(state)),
+            revision: Arc::default(),
             commit: Arc::new(Mutex::new(())),
             execution: plan.context().runtime().execution().clone(),
             closed: Arc::new(AtomicBool::new(false)),
@@ -497,6 +420,100 @@ fn storage_meta(error: &StorageError) -> MetaError {
 }
 
 impl Service {
+    async fn register(
+        &self,
+        location: &ExecutionLocation,
+        path: &Path,
+    ) -> Result<(WorkspaceRecord, bool)> {
+        let permit = self.admit(location)?;
+        let text = rsi_workspace_protocol::validate_registration_path(location, path)?;
+        let coordinates = match location {
+            ExecutionLocation::Local => {
+                let canonical = canonical_directory(path).await?;
+                ExecutionCoordinates::new(
+                    location.clone(),
+                    canonical.to_str().expect("validated UTF-8 path"),
+                )
+                .map_err(|error| WorkspaceError::InvalidInput(error.to_string()))?
+            }
+            ExecutionLocation::Ssh { .. } => self
+                .resolver
+                .lease(self.origin.clone(), location)
+                .map_err(WorkspaceError::Api)?
+                .canonicalize(text)
+                .await
+                .map_err(execution_error)?,
+        };
+        let id = WorkspaceId::from_coordinates(&coordinates);
+        let current = self.state.read().await;
+        self.ensure_available()?;
+        if let Some((_, existing)) = current.records.get(&id) {
+            return Ok((existing.clone(), false));
+        }
+        drop(current);
+        let commit = Arc::clone(&self.commit).lock_owned().await;
+        let state = self.state.read().await;
+        self.ensure_available()?;
+        if let Some((_, existing)) = state.records.get(&id) {
+            return Ok((existing.clone(), false));
+        }
+        if state.records.len() == MAXIMUM_WORKSPACES {
+            return Err(WorkspaceError::InvalidInput(
+                "workspace registry reached its capacity".into(),
+            ));
+        }
+        let mut record = WorkspaceRecord::new(coordinates);
+        record.created_at_ms = Some(
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .map_err(|_| WorkspaceError::Storage("system clock precedes Unix epoch".into()))?
+                .as_millis()
+                .try_into()
+                .map_err(|_| WorkspaceError::Storage("system clock is out of range".into()))?,
+        );
+        record.validate()?;
+        let order = state
+            .next_order
+            .checked_add(1)
+            .ok_or_else(|| WorkspaceError::InvalidInput("workspace order exhausted".into()))?;
+        drop(state);
+        let durable = DurableWorkspaceRecord {
+            order,
+            record: record.clone(),
+        };
+        let value = serde_json::to_value(durable)
+            .map_err(|error| WorkspaceError::Storage(error.to_string()))?;
+        let domain = Arc::clone(&self.domain);
+        let state = Arc::clone(&self.state);
+        let durable_key = id.as_str().to_owned();
+        let revision = self.revision.clone();
+        self.execution
+            .spawn(async move {
+                let _commit = commit;
+                let _permit = permit;
+                // Reserve even an uncertain allocation locally; an error cannot prove
+                // that the durable write did not happen. No registration is published
+                // until its reservation has been acknowledged.
+                state.write().await.next_order = order;
+                domain
+                    .put(ALLOCATION_KEY, serde_json::json!({"high_water": order}))
+                    .await
+                    .map_err(storage_error)?;
+                domain
+                    .put(&durable_key, value)
+                    .await
+                    .map_err(storage_error)?;
+                let mut state = state.write().await;
+                state.order.insert(order, id.clone());
+                state.records.insert(id, (order, record.clone()));
+                revision.fetch_add(1, Ordering::Release);
+                Ok((record, true))
+            })
+            .await
+            .map_err(|error| {
+                WorkspaceError::Storage(format!("workspace commit task failed: {error}"))
+            })?
+    }
     fn ensure_available(&self) -> Result<()> {
         if self.closed.load(Ordering::Acquire) {
             return Err(WorkspaceError::Api(ApiError::ShuttingDown));
@@ -515,7 +532,24 @@ impl Service {
             .map_err(WorkspaceError::Api)
     }
 }
+#[async_trait]
 impl WorkspaceIngress for Service {
+    fn directory_revision(&self) -> Option<u64> {
+        Some(self.revision.load(Ordering::Acquire))
+    }
+    async fn register_local(
+        &self,
+        origin: CallOrigin,
+        path: &Path,
+    ) -> Result<(WorkspaceRecord, bool)> {
+        Self {
+            origin,
+            ..self.clone()
+        }
+        .register(&ExecutionLocation::Local, path)
+        .await
+    }
+
     fn scoped(&self, origin: CallOrigin) -> Arc<dyn WorkspaceRegistry> {
         Arc::new(Self {
             origin,

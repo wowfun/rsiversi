@@ -8,6 +8,8 @@ characters. Rename replaces only the display name, retaining identity,
 coordinates, creation time and insertion order. New native registrations record
 their creation time. Rename and deletion require the same location admission as
 registration and retain admitted commits through durable publication.
+Authenticated registration can return the record and whether this call
+created it. The registry decides that result under its existing commit lock.
 
 Registrations carry mandatory validated execution coordinates. Their identity
 includes the owning machine and canonical path; decoding and validation never
@@ -48,3 +50,5 @@ proxy does not replay mutations or reinterpret API failures as storage failures.
 `WorkspaceId::from_canonical_path` is an explicitly Local convenience for callers
 that already own a native canonical directory. Cross-location consumers derive
 identity from complete coordinates through `WorkspaceId::from_coordinates`.
+
+The native ingress can expose a process-local directory revision. Publishing, renaming or deleting a registration changes the revision. Reusing an existing record leaves it unchanged.
