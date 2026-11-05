@@ -342,6 +342,7 @@ async fn exercise(
         infrastructure(
             "Session create",
             service.create(CreateSession {
+                fork: None,
                 session_id: request.session,
                 workspace_id: workspace.id,
                 agent_preset_id: None,

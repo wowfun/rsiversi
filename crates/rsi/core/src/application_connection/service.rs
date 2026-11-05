@@ -162,6 +162,13 @@ impl PluginFactory for ServiceFactory {
                 .provide_local::<crate::application_services::LocalBrowserAdministrationContract>(
                     service.clone(),
                 )?,
+            context.provide_local::<rsi_api_http::BrowserOwnerContract>(Arc::new(
+                BrowserOwner {
+                    devices: service.clone(),
+                    launcher: service.clone(),
+                    id: tokio::sync::OnceCell::new(),
+                },
+            ))?,
             context.provide_local::<ServingServiceContract>(service.clone())?,
         ];
         if self.1 {
@@ -425,6 +432,26 @@ async fn authorize_browser<F: std::future::Future<Output = rsi_api_protocol::Res
 #[derive(Debug)]
 pub(crate) struct BrowserAuthorityFactory;
 #[derive(Debug)]
+struct BrowserOwner {
+    devices: Arc<dyn DeviceAdministration>,
+    launcher: Arc<dyn crate::application_services::LocalBrowserAdministration>,
+    id: tokio::sync::OnceCell<DeviceId>,
+}
+#[async_trait]
+impl rsi_api_http::BrowserOwner for BrowserOwner {
+    async fn owner_id(&self) -> rsi_api_protocol::Result<DeviceId> {
+        self.id
+            .get_or_try_init(|| async {
+                if let Some(owner) = self.devices.managed_device("local-web")? {
+                    return Ok(owner.id);
+                }
+                Ok(self.launcher.launch().await?.record.id)
+            })
+            .await
+            .cloned()
+    }
+}
+#[derive(Debug)]
 struct BrowserAuthority {
     device: tokio::sync::OnceCell<RegisteredDevice>,
     administration: Arc<dyn DeviceAdministration>,
@@ -459,21 +486,30 @@ impl PluginFactory for BrowserAuthorityFactory {
             .requiring_local::<rsi_configuration_access::ConfigurationAccessContract>())
     }
     async fn activate(&self, plan: ActivationPlan) -> rsi_meta::Result<()> {
+        let devices = plan.local::<rsi_api_protocol::DeviceAdministrationContract>()?;
+        let launcher = Arc::new(BrowserAuthority {
+            device: tokio::sync::OnceCell::new(),
+            administration: devices.clone(),
+            configuration: plan.local::<rsi_configuration_access::ConfigurationAccessContract>()?,
+        });
         let supply = plan
             .context()
             .provide_local::<crate::application_services::LocalBrowserAdministrationContract>(
-            Arc::new(BrowserAuthority {
-                device: tokio::sync::OnceCell::new(),
-                administration: plan.local::<rsi_api_protocol::DeviceAdministrationContract>()?,
-                configuration: plan
-                    .local::<rsi_configuration_access::ConfigurationAccessContract>()?,
-            }),
+            launcher.clone(),
         )?;
+        let owner = plan
+            .context()
+            .provide_local::<rsi_api_http::BrowserOwnerContract>(Arc::new(BrowserOwner {
+                devices,
+                launcher,
+                id: tokio::sync::OnceCell::new(),
+            }))?;
         plan.defer(
             "withdraw browser launch authority",
             Box::new(move || {
                 Box::pin(async move {
                     drop(supply);
+                    drop(owner);
                     Ok(())
                 })
             }),

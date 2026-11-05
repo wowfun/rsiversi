@@ -103,6 +103,7 @@ rsi-agent-workspace-context = { path = "../../rsi-agent/workspace-context" }
 rsi-agent-time-context = { path = "../../rsi-agent/time-context" }
 rsi-agent-todo = { path = "../../rsi-agent/todo" }
 rsi-agent-model-selection = { path = "../../rsi-agent/model-selection" }
+rsi-agent-context-input = { path = "../../rsi-agent/context-input" }
 rsi-agent-plan-policy = { path = "../../rsi-agent/plan-policy" }
 rsi-agent-repeat-tool-reminder = { path = "../../rsi-agent/repeat-tool-reminder" }
 rsi-ai = { path = "../../rsi-ai/core" }
@@ -121,6 +122,8 @@ rsi-commands-protocol = { path = "../../rsi-commands/protocol" }
 rsi-credentials-local = { path = "../../rsi-credentials/local" }
 rsi-credentials-protocol = { path = "../../rsi-credentials/protocol" }
 rsi-host = { path = "../../rsi-host/core" }
+rsi-extension = { path = "../../rsi-extension/core" }
+rsi-extension-agent = { path = "../../rsi-extension/agent" }
 rsi-jobs = { path = "../../rsi-jobs/core" }
 rsi-jobs-local = { path = "../../rsi-jobs/local" }
 rsi-jobs-tools = { path = "../../rsi-jobs/tools" }

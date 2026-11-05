@@ -14,7 +14,7 @@ pub(super) fn publish(paths: &rsi_host::HostPaths) -> rsi::Result<PathBuf> {
     Ok(publish_before(
         paths,
         None,
-        std::time::Instant::now() + rsi::APPLICATION_TRANSITION_TIMEOUT,
+        std::time::Instant::now() + rsi::PRODUCT_TRANSITION_TIMEOUT,
     )?
     .path)
 }
@@ -350,7 +350,7 @@ fn publish_source(paths: &rsi_host::HostPaths, source: &Path) -> rsi::Result<Pat
     publish_source_before(
         paths,
         source,
-        std::time::Instant::now() + rsi::APPLICATION_TRANSITION_TIMEOUT,
+        std::time::Instant::now() + rsi::PRODUCT_TRANSITION_TIMEOUT,
     )
 }
 #[cfg(test)]
@@ -370,7 +370,7 @@ mod tests {
         let published = publish_before(
             &paths,
             Some(&source),
-            std::time::Instant::now() + rsi::APPLICATION_TRANSITION_TIMEOUT,
+            std::time::Instant::now() + rsi::PRODUCT_TRANSITION_TIMEOUT,
         )
         .unwrap();
         assert_eq!(std::fs::read(published.path).unwrap(), b"runtime bytes");
@@ -389,7 +389,7 @@ mod tests {
         std::fs::write(bundle.join(".rsi-generation.lock"), b"").unwrap();
         let source = bundle.join("rsi.exe");
         std::fs::write(&source, b"managed executable").unwrap();
-        let deadline = std::time::Instant::now() + rsi::APPLICATION_TRANSITION_TIMEOUT;
+        let deadline = std::time::Instant::now() + rsi::PRODUCT_TRANSITION_TIMEOUT;
         assert!(publish_before(&paths, Some(&source), deadline).is_err());
         std::fs::create_dir(temp.path().join("leases")).unwrap();
         let lease = std::fs::File::create(temp.path().join("leases/00000000000000000001")).unwrap();

@@ -11,6 +11,7 @@ pub(super) async fn browse(
 ) -> (SessionTarget, OpenedFile) {
     let handle = sessions
         .create(CreateSession {
+            fork: None,
             workspace_id: workspace.clone(),
             session_id: SessionId::new(format!("files-{label}")).unwrap(),
             agent_preset_id: None,

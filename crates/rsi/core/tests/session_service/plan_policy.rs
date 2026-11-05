@@ -35,6 +35,7 @@ async fn standard_plan_policy_denies_bash_before_intent_start_or_filesystem_effe
         .session_service()
         .unwrap()
         .create(CreateSession {
+            fork: None,
             workspace_id: running
                 .workspace_registry()
                 .unwrap()
@@ -195,6 +196,7 @@ async fn saved_plan_review_commits_exact_decision_and_rejects_stale_mode_revisio
             .session_service()
             .unwrap()
             .create(CreateSession {
+                fork: None,
                 workspace_id: running
                     .workspace_registry()
                     .unwrap()

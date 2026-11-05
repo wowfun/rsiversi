@@ -591,6 +591,9 @@ impl Manager {
             ExecutionOperation::new((permit, visibility)),
         ))
     }
+    pub(crate) fn visibility_revision(&self) -> u64 {
+        self.grants.visibility_revision()
+    }
     pub(crate) fn lease(
         &self,
         origin: CallOrigin,

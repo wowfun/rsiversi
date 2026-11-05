@@ -99,6 +99,7 @@ async fn create(running: &RunningRsi, fixture: &Fixture, id: &str) -> Arc<dyn Se
         .session_service()
         .unwrap()
         .create(CreateSession {
+            fork: None,
             workspace_id: running
                 .workspace_registry()
                 .unwrap()
@@ -317,6 +318,7 @@ async fn check_removed(fixture: &Fixture) {
             .session_service()
             .unwrap()
             .create(CreateSession {
+                fork: None,
                 workspace_id,
                 session_id: SessionId::new("removed-addon").unwrap(),
                 agent_preset_id: Some(rsi_agent_presets::AgentPresetId::new("workbench").unwrap()),

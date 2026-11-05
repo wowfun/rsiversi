@@ -105,6 +105,7 @@ async fn profile_tool_uses_live_session_grants_and_the_same_review_and_receipt_o
         .session_service()
         .unwrap()
         .create(rsi_session_protocol::CreateSession {
+            fork: None,
             workspace_id: workspace.id,
             session_id: id.clone(),
             agent_preset_id: None,

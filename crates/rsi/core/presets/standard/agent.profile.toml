@@ -32,6 +32,11 @@ plugin = "rsi.agent.todo"
 
 [[steps]]
 kind = "plugin"
+id = "context-input"
+plugin = "rsi.agent.context-input"
+
+[[steps]]
+kind = "plugin"
 id = "model-selection"
 plugin = "rsi.agent.model-selection"
 

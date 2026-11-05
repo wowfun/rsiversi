@@ -45,6 +45,7 @@ async fn standard_repeat_contribution_reaches_provider_after_unchanged_real_tool
         .session_service()
         .unwrap()
         .create(CreateSession {
+            fork: None,
             workspace_id: running
                 .workspace_registry()
                 .unwrap()
@@ -73,7 +74,7 @@ async fn standard_repeat_contribution_reaches_provider_after_unchanged_real_tool
         .filter(|f| matches!(f.body(), SessionFactBody::ToolResult { .. }))
         .collect::<Vec<_>>();
     assert_eq!(results.len(), 3);
-    let reminders = history.facts.iter().filter(|f| matches!(f.body(), SessionFactBody::InputMessageEntered { source: InputMessageSource::PluginContext { contribution_id }, .. } if contribution_id.as_str() == "rsi.repeat-tool-reminder")).collect::<Vec<_>>();
+    let reminders = history.facts.iter().filter(|f| matches!(f.body(), SessionFactBody::InputMessageClaimed { source: InputMessageSource::PluginContext { contribution_id, .. }, .. } if contribution_id.as_str() == "rsi.repeat-tool-reminder")).collect::<Vec<_>>();
     assert_eq!(reminders.len(), 1);
     assert!(reminders[0].seq() > results[2].seq());
     assert!(
@@ -85,7 +86,7 @@ async fn standard_repeat_contribution_reaches_provider_after_unchanged_real_tool
     run_message_to_terminal(&handle, "new-turn-no-replay").await;
     assert_eq!(requests.lock().unwrap().len(), 5);
     let history = handle.history_before(None, 128).await.unwrap();
-    assert_eq!(history.facts.iter().filter(|f| matches!(f.body(), SessionFactBody::InputMessageEntered { source: InputMessageSource::PluginContext { contribution_id }, .. } if contribution_id.as_str() == "rsi.repeat-tool-reminder")).count(), 1);
+    assert_eq!(history.facts.iter().filter(|f| matches!(f.body(), SessionFactBody::InputMessageClaimed { source: InputMessageSource::PluginContext { contribution_id, .. }, .. } if contribution_id.as_str() == "rsi.repeat-tool-reminder")).count(), 1);
     assert!(running.shutdown().await.is_clean());
     provider.abort();
 }

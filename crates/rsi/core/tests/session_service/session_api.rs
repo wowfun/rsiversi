@@ -220,6 +220,7 @@ async fn http_session_plugins_pass_the_same_real_kernel_store_scenario() {
         .lookup_local::<SessionContract>()
         .unwrap();
     let create = CreateSession {
+        fork: None,
         workspace_id: workspace.id,
         session_id: SessionId::new("http-contract").unwrap(),
         agent_preset_id: None,
@@ -446,6 +447,8 @@ async fn lost_submission(api: Arc<HttpClient>, session: &SessionId) {
     let client = rsi_session_api::SessionClient::new(connection.clone());
     let handle = client.attach(session).await.unwrap();
     let request = rsi_session_protocol::SubmitInput {
+        origin: rsi_session_protocol::SubmissionOrigin::User,
+        attribution: None,
         reasoning_effort: None,
         delivery: rsi_agent_session_protocol::MessageDelivery::NextTurn,
         message_id: rsi_agent_session_protocol::MessageId::new("lost-http-reply").unwrap(),

@@ -66,7 +66,7 @@ async fn fullscreen_queue_editor_preserves_draft_and_withdraws_the_successor() {
     assert!(serialized.contains("queued original") && serialized.contains("queued replacement"));
     assert_eq!(
         store
-            .read_agent_mailbox(&session, None)
+            .read_agent_mailbox_summary(&session)
             .await
             .unwrap()
             .pending_count,

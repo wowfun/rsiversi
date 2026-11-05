@@ -117,3 +117,18 @@ and graceful failure also names its explicit `--force` escape hatch.
 
 The managed core-upgrade fixture uses Node to assemble a real devtools package
 before admitting it through the CLI; build `rsi-uninstall` first.
+
+`rsi plugin install --importer PACKAGE/EXPORT --program ABSOLUTE_EXE SPEC...`
+executes an installed importer in a short-lived generic Host containing only
+Process, unconfined Sandbox and the process extension connection. The selected
+exact package closure stays leased through process shutdown and package admission.
+The importer receives a fresh staging/home/cache directory, the explicit source
+working directory and specifications. No Session, credentials, settings or
+reverse-call capabilities are supplied. Essential platform environment variables
+are explicit; user package-manager configuration is not inherited. Imported code
+has native-equivalent trust and network access; this is not an OS sandbox.
+The import call has a ten-minute deadline and Ctrl-C cancellation. Process drain
+precedes normal no-follow PackageStore admission with local provenance; failed or
+cancelled import leaves the previous resolution selected. Staging is removed only
+after the process is confirmed stopped. The importer owns ecosystem parsing and
+dependency policy; the CLI contains no language-specific package behavior.

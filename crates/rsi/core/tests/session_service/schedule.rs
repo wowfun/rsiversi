@@ -28,6 +28,7 @@ async fn create(running: &RunningRsi, fixture: &Fixture, id: &str) -> Arc<dyn Se
         .session_service()
         .unwrap()
         .create(CreateSession {
+            fork: None,
             workspace_id: running
                 .workspace_registry()
                 .unwrap()
@@ -115,7 +116,7 @@ async fn due_reminder_uses_normal_turn_and_cannot_create_a_successor() {
     assert_eq!(calls.load(Ordering::SeqCst), 3);
     assert!(history.facts.iter().any(|fact| matches!(fact.body(), SessionFactBody::TurnTerminal { outcome: rsi_agent_session_protocol::TurnOutcome::Failed { code, message }, .. }
         if code == "tool.execution" && message.contains("initial human-origin root Turn"))));
-    assert!(history.facts.iter().any(|fact| matches!(fact.body(), SessionFactBody::InputMessageEntered { source: rsi_agent_session_protocol::InputMessageSource::Continuation { source, .. }, .. } if source.domain.id() == rsi_agent_schedule::SCHEDULE_DOMAIN)));
+    assert!(history.facts.iter().any(|fact| matches!(fact.body(), SessionFactBody::InputMessageClaimed { source: rsi_agent_session_protocol::InputMessageSource::Continuation { source, .. }, .. } if source.domain.id() == rsi_agent_schedule::SCHEDULE_DOMAIN)));
     let request = requests.lock().unwrap()[2].clone();
     assert!(
         request["tools"]

@@ -73,6 +73,7 @@ async fn service_preset_settings_select_future_headers_through_the_actual_api_sc
         .await
         .unwrap();
     let create = |name| CreateSession {
+        fork: None,
         session_id: SessionId::new(name).unwrap(),
         workspace_id: workspace.id.clone(),
         agent_preset_id: None,
@@ -1159,6 +1160,7 @@ async fn setup_required_is_typed_for_embedded_and_daemon_clients() {
         let error = connection
             .session_service()
             .create(CreateSession {
+                fork: None,
                 session_id: SessionId::new("unconfigured").unwrap(),
                 workspace_id: workspace.id,
                 agent_preset_id: None,

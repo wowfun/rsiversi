@@ -141,7 +141,7 @@ async fn start(
         paths,
         startup,
         Some(executable),
-        tokio::time::Instant::now() + rsi::APPLICATION_TRANSITION_TIMEOUT,
+        tokio::time::Instant::now() + rsi::PRODUCT_TRANSITION_TIMEOUT,
     )
     .await
 }

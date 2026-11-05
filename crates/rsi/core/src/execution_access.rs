@@ -105,6 +105,16 @@ struct Resolver {
     ssh: Arc<crate::ssh_targets::Manager>,
 }
 impl ExecutionResolver for Resolver {
+    fn visibility_revision(&self) -> Option<u64> {
+        #[cfg(target_os = "linux")]
+        {
+            Some(self.ssh.visibility_revision())
+        }
+        #[cfg(not(target_os = "linux"))]
+        {
+            Some(0)
+        }
+    }
     fn visibility(
         &self,
         origin: &CallOrigin,

@@ -1,7 +1,9 @@
 use super::{OsString, RsiError};
-use rsi_packages::{InstallSource, Manifest, PackageStore, Provenance};
-use std::{io::Read as _, path::Path};
+use rsi::local_package_source as local_source;
+use rsi_packages::{Manifest, PackageStore};
+use std::path::Path;
 mod download;
+mod importer;
 
 use super::cli::PLUGIN_HELP as HELP;
 
@@ -9,6 +11,9 @@ pub(super) async fn run(arguments: &[OsString]) -> u8 {
     let result: rsi::Result<()> = async {
         let command = match arguments.first().and_then(|arg| arg.to_str()) {
             Some("list" | "gc") if arguments.len() == 1 => arguments[0].to_str().unwrap(),
+            Some("install") if arguments.get(1).is_some_and(|arg| arg == "--importer") => {
+                "importer"
+            }
             Some("install")
                 if arguments.get(1).is_some_and(|arg| arg == "--local")
                     && (3..=130).contains(&arguments.len()) =>
@@ -28,7 +33,9 @@ pub(super) async fn run(arguments: &[OsString]) -> u8 {
         super::launch::maintain()?;
         let paths = super::launch::paths()?;
         let store = PackageStore::open(&paths.state().join("packages")).map_err(error)?;
-        let resolution = if command == "local" {
+        let resolution = if command == "importer" {
+            importer::install(std::sync::Arc::new(store), &arguments[2..]).await?
+        } else if command == "local" {
             let cwd = std::env::current_dir().map_err(error)?;
             let sources = arguments[2..]
                 .iter()
@@ -83,24 +90,6 @@ pub(super) async fn run(arguments: &[OsString]) -> u8 {
     }
     .await;
     result.map_or_else(|error| super::report_error(&error), |()| 0)
-}
-
-fn local_source(path: &Path, cwd: &Path) -> rsi::Result<InstallSource> {
-    let directory = rsi::normalize_launch_path(path, cwd)?;
-    let input =
-        rsi_files_native_fs::open_absolute_directory_no_follow(&directory).map_err(error)?;
-    let mut manifest = Vec::new();
-    rsi_files_native_fs::open_relative_file_no_follow(&input, Path::new("package.json"))
-        .map_err(error)?
-        .take(rsi_packages::MAX_DOCUMENT as u64 + 1)
-        .read_to_end(&mut manifest)
-        .map_err(error)?;
-    Manifest::parse(&manifest).map_err(error)?;
-    Ok(InstallSource {
-        directory,
-        manifest,
-        provenance: Provenance::Local,
-    })
 }
 
 #[cfg(any(target_os = "linux", windows))]

@@ -50,6 +50,7 @@ async fn create(daemon: &DaemonFixture, fixture: &Fixture, name: &str) -> Arc<dy
         .connection
         .session_service()
         .create(CreateSession {
+            fork: None,
             workspace_id: daemon
                 .connection
                 .workspace_registry()

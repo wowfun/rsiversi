@@ -55,6 +55,7 @@ async fn attention_preserves_fast_completion_without_hydration_and_persists_exac
         .unwrap();
     let handle = service
         .create(CreateSession {
+            fork: None,
             workspace_id: workspace.id,
             session_id: id.clone(),
             agent_preset_id: None,

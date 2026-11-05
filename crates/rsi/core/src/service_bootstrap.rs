@@ -36,7 +36,8 @@ pub(crate) async fn start(
         return Ok(owner);
     }
     let paths = composition.paths().clone();
-    let mut builder = HostBuilder::new(paths.clone());
+    let mut builder =
+        HostBuilder::new(paths.clone()).runtime_limits(crate::runtime_policy::runtime_limits());
     builder
         .register_local_contract::<ServiceProfileContract>()
         .map_err(boot)?;

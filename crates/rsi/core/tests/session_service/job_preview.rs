@@ -40,6 +40,7 @@ async fn remote_job_preview_follows_actual_tool_origin_and_leaves_the_durable_re
         .connection
         .session_service()
         .create(CreateSession {
+            fork: None,
             workspace_id: daemon
                 .connection
                 .workspace_registry()

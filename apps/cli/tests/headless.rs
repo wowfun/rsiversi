@@ -792,12 +792,12 @@ async fn claim_message(handle: &Arc<dyn SessionHandle>, receipt: &MessageReceipt
                 && let AgentControlRecordBody::MessageClaimed {
                     message_id,
                     turn_id,
-                    entered_fact_seq,
+                    claimed_fact_seq,
                     ..
                 } = record.body()
                 && message_id == &receipt.message_id
             {
-                return (turn_id.clone(), *entered_fact_seq);
+                return (turn_id.clone(), *claimed_fact_seq);
             }
         }
     })
@@ -859,6 +859,7 @@ async fn standard_profile_runs_fresh_and_resume_through_durable_plugins() {
     let application = running.session_service().unwrap();
     let first_handle = application
         .create(CreateSession {
+            fork: None,
             workspace_id: running
                 .workspace_registry()
                 .unwrap()
@@ -873,6 +874,8 @@ async fn standard_profile_runs_fresh_and_resume_through_durable_plugins() {
         .unwrap();
     let first = first_handle
         .submit(SubmitInput {
+            origin: rsi_session_protocol::SubmissionOrigin::User,
+            attribution: None,
             reasoning_effort: None,
             delivery: rsi_agent_session_protocol::MessageDelivery::NextTurn,
             message_id: MessageId::new("message-first").unwrap(),
@@ -886,9 +889,9 @@ async fn standard_profile_runs_fresh_and_resume_through_durable_plugins() {
         })
         .await
         .unwrap();
-    let (first_turn_id, first_entered_fact_seq) = claim_message(&first_handle, &first).await;
+    let (first_turn_id, first_claimed_fact_seq) = claim_message(&first_handle, &first).await;
     let (first_facts, first_outcome, first_durable_seq) =
-        observe_turn_after(&first_handle, &first_turn_id, first_entered_fact_seq).await;
+        observe_turn_after(&first_handle, &first_turn_id, first_claimed_fact_seq).await;
     assert_eq!(first_outcome, TurnOutcome::Completed);
     assert!(first_durable_seq >= first_facts.last().unwrap().seq());
     assert!(first_facts.iter().any(|fact| matches!(
@@ -901,13 +904,15 @@ async fn standard_profile_runs_fresh_and_resume_through_durable_plugins() {
     let first_history = first_handle.history_before(None, 64).await.unwrap();
     assert!(first_history.facts.iter().any(|fact| matches!(
         fact.body(),
-        SessionFactBody::InputMessageEntered { content, .. }
+        SessionFactBody::InputMessageClaimed { content, .. }
             if content == &[AgentMessageContent::Text { text: "/status".into() }]
     )));
 
     let second_handle = application.attach(&first.session_id).await.unwrap();
     let second = second_handle
         .submit(SubmitInput {
+            origin: rsi_session_protocol::SubmissionOrigin::User,
+            attribution: None,
             reasoning_effort: None,
             delivery: rsi_agent_session_protocol::MessageDelivery::NextTurn,
             message_id: MessageId::new("message-second").unwrap(),
@@ -921,9 +926,9 @@ async fn standard_profile_runs_fresh_and_resume_through_durable_plugins() {
         })
         .await
         .unwrap();
-    let (second_turn_id, second_entered_fact_seq) = claim_message(&second_handle, &second).await;
+    let (second_turn_id, second_claimed_fact_seq) = claim_message(&second_handle, &second).await;
     let (second_facts, second_outcome, _) =
-        observe_turn_after(&second_handle, &second_turn_id, second_entered_fact_seq).await;
+        observe_turn_after(&second_handle, &second_turn_id, second_claimed_fact_seq).await;
     assert_eq!(second_outcome, TurnOutcome::Completed);
     assert!(second_facts.first().unwrap().seq() > first_durable_seq);
     assert!(matches!(
@@ -1799,6 +1804,7 @@ credential = {{ owner = "rsi.ai.provider.openai", slot = "default" }}
     let application = running.session_service().unwrap();
     let handle = application
         .create(CreateSession {
+            fork: None,
             workspace_id: running
                 .workspace_registry()
                 .unwrap()
@@ -1935,6 +1941,7 @@ async fn real_question_tool_and_inspection_have_local_and_uds_parity() {
         };
         let handle = application
             .create(CreateSession {
+                fork: None,
                 workspace_id: running
                     .workspace_registry()
                     .unwrap()
@@ -1949,6 +1956,8 @@ async fn real_question_tool_and_inspection_have_local_and_uds_parity() {
             .unwrap();
         let receipt = handle
             .submit(SubmitInput {
+                origin: rsi_session_protocol::SubmissionOrigin::User,
+                attribution: None,
                 reasoning_effort: None,
                 delivery: rsi_agent_session_protocol::MessageDelivery::NextTurn,
                 message_id: MessageId::new("question-input").unwrap(),

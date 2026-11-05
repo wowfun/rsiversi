@@ -38,6 +38,8 @@ pub use application_catalog::{
     ApplicationCatalog, ApplicationCatalogMetadata, ApplicationCatalogProvider,
 };
 mod application_connection;
+mod application_receipts;
+pub use application_receipts::application_tool_receipt_directory;
 pub mod application_services;
 pub use application_connection::{
     ApplicationDiagnostics, BASE_APPLICATION_PLUGINS, base_application_catalog,
@@ -67,12 +69,18 @@ mod local_acp;
 #[cfg(any(target_os = "linux", windows))]
 mod local_control;
 mod maintenance;
+mod package_import;
+mod process_extension;
 pub use import::{
     ImportReceipt, import_product_homes, recover_product_import, reject_pending_import,
 };
+pub use package_import::{
+    PackageAdmission, PackageImport, import_packages, import_profile_packages, local_package_source,
+};
+pub use process_extension::{PackageProcess, package_extension_factory, resolve_package_process};
+mod runtime_policy;
 #[cfg(any(unix, windows))]
 mod source_inputs;
-pub use application_bootstrap::APPLICATION_TRANSITION_TIMEOUT;
 pub use launch::{
     HomeOverrides, LAUNCH_FILE, LaunchConfiguration, LaunchFrontend, LaunchProfile,
     LaunchRepository, LaunchSource, MAXIMUM_LAUNCH_BYTES, normalize_launch_path, product_protocols,
@@ -84,6 +92,7 @@ pub use local_control::{
 };
 pub use maintenance::{ResetReceipt, ResetSelection, maintain_product_homes};
 pub use rsi_host_control::{BuildRecipe, BuildUpdate};
+pub use runtime_policy::PRODUCT_TRANSITION_TIMEOUT;
 mod local_api_client;
 mod local_host;
 #[cfg(unix)]

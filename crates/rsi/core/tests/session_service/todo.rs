@@ -57,6 +57,7 @@ async fn todo_replaces_across_turns_clears_and_is_allowed_in_plan_mode() {
         .session_service()
         .unwrap()
         .create(CreateSession {
+            fork: None,
             workspace_id: running
                 .workspace_registry()
                 .unwrap()

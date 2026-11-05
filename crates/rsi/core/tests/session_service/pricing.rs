@@ -29,6 +29,7 @@ async fn configured_prices_freeze_at_creation_and_are_copied_into_actual_intents
         .unwrap()
         .id;
     let create = |id: &str| CreateSession {
+        fork: None,
         workspace_id: workspace.clone(),
         session_id: SessionId::new(id).unwrap(),
         agent_preset_id: None,

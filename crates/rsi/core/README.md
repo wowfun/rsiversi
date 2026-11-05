@@ -1,5 +1,45 @@
 # rsi
 
+The linked catalog includes the optional `rsi.media.attachments.local` factory. An
+explicit Profile can install it and point its `root` at
+an uploader's immutable file and normalized image namespace. Standard composition has no uploader-
+specific root or runtime logic.
+
+The standard Agent preset includes the ordinary
+[context-input command](../../rsi-agent/context-input/README.md). Application
+adapters use the same Session command admission and receipt API as native clients
+when adding non-waking context; human questions remain separate submissions.
+
+`rsi.extension.package` selects an exact installed package digest and a
+`process_extension` export from this Host's PackageStore. Its configuration
+supplies only the absolute runtime executable and complete environment in addition
+to that selection. The descriptor supplies payload paths and argv; activation
+retains the complete immutable closure through native process settlement. No
+current-name lookup, installer or downloader runs during generation activation.
+
+Applications can acquire the leased process provider through
+`package_extension_factory`. For background preparation they may use
+`resolve_package_process` before activating the same supervised provider.
+Agent presets can select the ordinary
+`rsi.extension.process` and `rsi.extension.agent` factories.
+The process configuration supplies an absolute
+installed executable, arguments, working directory, complete environment and
+generation identity; the Agent adapter pins the artifact digest. Activation
+freezes the external catalog before publishing Tools or contributions. These
+factories are opt-in and add no DSH policy to the standard preset or Meta.
+The [extension contract](../../rsi-extension/README.md) owns transport, trust and
+canonical publication semantics.
+
+CLI and application package imports use the same `import_packages` operation.
+Its caller freezes the importer, executable, workspace, requested specs, an
+optional importer-defined JSON options object of at most 64 KiB, and
+available protocols. The operation retains the exact importer, supervises
+private staging, settles the process, then admits its complete output into
+PackageStore in one publication. Cancellation reaches staging and publication.
+Registry imports inherit the Host's HTTP(S) proxy and bypass settings after
+the standard child environment scrub. Proxy URLs containing user information are
+excluded. The importer retains its private home and configuration.
+
 The route adapters for workspace-review, history, ACP, device operations,
 workspace, models, settings, media, output and Session use Replayable registration.
 Disable/enable and regrouping affect routes while admitted mutations drain; linked
@@ -821,6 +861,13 @@ contracts belong to [Agent Program](../../rsi-agent/program/README.md).
 
 ## Explicit application composition
 
+The standard Kernel can read completed external tool receipts before any
+application Worker starts. The product selects a directory under the Host's
+state home per named application source. The writer records the Session,
+effect, native Tool result identity, captured registration and original
+result. Startup reads a bounded regular file at the exact key and accepts
+only the expected identity. It never runs application code to recover it.
+
 `ApplicationCatalogMetadata` freezes reserved application plugin IDs and built-in
 Application Profile documents. `StandardComposition` and `ProfileCatalog` require
 this input; the Service daemon receives the same metadata as its native clients.
@@ -872,6 +919,13 @@ permits through settlement. Session and workspace ingress must pass the lease
 as live runtime authority, independently of durable coordinates.
 
 ## Local Workflow enablement
+
+Standard Service and Application roots use the same three-minute transition
+deadline, including verification of an installed extension's complete immutable
+dependency closure. Embedding into an existing Runtime inherits that Runtime's
+explicit policy. Meta's generic default remains thirty seconds. Expiry abandons
+the waiter; native verification owns its handles until it settles, and activation
+failure cannot publish the process service.
 
 Base composition ships a disabled program-runtime leaf. Copy the standard Host
 Profile, configure an absolute Node executable with an explicit complete environment,

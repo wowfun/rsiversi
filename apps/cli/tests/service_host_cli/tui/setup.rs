@@ -91,12 +91,7 @@ async fn reset_state_tui_archives_old_schema_for_both_launcher_forms() {
         let root = fixture.temporary.path().join("state/rsi/agent");
         drop(rsi_agent_store_sqlite::SqliteStore::open(&root).unwrap());
         let db = rusqlite::Connection::open(root.join("sessions.sqlite3")).unwrap();
-        db.pragma_update(
-            None,
-            "user_version",
-            rsi_agent_store_protocol::AGENT_STORE_SCHEMA_VERSION - 1,
-        )
-        .unwrap();
+        db.pragma_update(None, "user_version", 42).unwrap();
         drop(db);
         let before = std::fs::read(root.join("sessions.sqlite3")).unwrap();
         let entry = ["--reset-state"]

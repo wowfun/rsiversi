@@ -44,6 +44,7 @@ async fn discovery_limits_each_metadata_step_and_fences_continuations_by_caller_
     for number in 0..65 {
         let session = service
             .create(CreateSession {
+                fork: None,
                 workspace_id: workspace.id.clone(),
                 session_id: SessionId::new(format!("discovery-{number:03}")).unwrap(),
                 agent_preset_id: None,
@@ -135,6 +136,7 @@ async fn history_search_rereads_original_freezes_into_an_unpublished_draft_and_r
     let workspace = registry.get_or_create(&fixture.workspace).await.unwrap();
     let source = service
         .create(CreateSession {
+            fork: None,
             workspace_id: workspace.id.clone(),
             session_id: SessionId::new("history-source").unwrap(),
             agent_preset_id: None,
@@ -143,6 +145,7 @@ async fn history_search_rereads_original_freezes_into_an_unpublished_draft_and_r
         .unwrap();
     let target = service
         .create(CreateSession {
+            fork: None,
             workspace_id: workspace.id.clone(),
             session_id: SessionId::new("history-target").unwrap(),
             agent_preset_id: None,
@@ -232,6 +235,7 @@ async fn history_search_rereads_original_freezes_into_an_unpublished_draft_and_r
     let foreign = registry.get_or_create(&foreign_dir).await.unwrap();
     let foreign_target = service
         .create(CreateSession {
+            fork: None,
             workspace_id: foreign.id.clone(),
             session_id: SessionId::new("history-cross-project-target").unwrap(),
             agent_preset_id: None,
@@ -524,6 +528,7 @@ async fn history_observed_epoch_replacement_rejects_old_candidates_but_keeps_fro
         .session_service()
         .unwrap()
         .create(CreateSession {
+            fork: None,
             workspace_id: workspace.id.clone(),
             session_id: SessionId::new("observed-target").unwrap(),
             agent_preset_id: None,

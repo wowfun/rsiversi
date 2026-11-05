@@ -85,6 +85,8 @@ async fn wait_receipt(
 }
 fn input(id: &str) -> SubmitInput {
     SubmitInput {
+        origin: rsi_session_protocol::SubmissionOrigin::User,
+        attribution: None,
         message_id: MessageId::new(id).unwrap(),
         content: vec![SessionInput::Text { text: id.into() }]
             .try_into()
@@ -124,6 +126,7 @@ async fn exercise(scenario: Scenario) {
         .session_service()
         .unwrap()
         .create(CreateSession {
+            fork: None,
             workspace_id: running
                 .workspace_registry()
                 .unwrap()
@@ -348,6 +351,7 @@ async fn default_effort_is_described_and_changed_capacity_invalidates_context_af
         .session_service()
         .unwrap()
         .create(CreateSession {
+            fork: None,
             workspace_id: running
                 .workspace_registry()
                 .unwrap()
@@ -475,6 +479,7 @@ async fn reduced_output_capacity_preserves_metrics_and_tree_usage() {
         .session_service()
         .unwrap()
         .create(CreateSession {
+            fork: None,
             workspace_id: running
                 .workspace_registry()
                 .unwrap()

@@ -105,6 +105,7 @@ const WORKSPACE_CONTRIBUTOR_FACTORY: &str = "rsi.agent.workspace-context.contrib
 const TIME_CONTEXT_FACTORY: &str = "rsi.agent.time-context";
 const TODO_FACTORY: &str = "rsi.agent.todo";
 const MODEL_SELECTION_FACTORY: &str = "rsi.agent.model-selection";
+const CONTEXT_INPUT_FACTORY: &str = "rsi.agent.context-input";
 const PLAN_POLICY_FACTORY: &str = "rsi.agent.plan-policy";
 const REPEAT_REMINDER_FACTORY: &str = "rsi.agent.repeat-tool-reminder";
 const APPLY_PATCH_FACTORY: &str = "rsi.apply-patch";
@@ -272,6 +273,7 @@ impl StandardCodingTools {
 
 fn standard_agent_addon(
     coding_tools: Option<&StandardCodingTools>,
+    package_root: &Path,
 ) -> rsi_host::Result<StandardAddon> {
     let mut builder = StandardAddonBuilder::new("rsi.standard.agent");
     let mut register = |id: &str, factory: Arc<dyn PluginFactory>| {
@@ -303,12 +305,7 @@ fn standard_agent_addon(
         rsi_session_protocol::PROGRAM_TOOLS_PLUGIN_ID,
         Arc::new(rsi_agent_program::ProgramToolsFactory),
     )?;
-    register(TODO_FACTORY, Arc::new(rsi_agent_todo::TodoFactory))?;
-    register(
-        MODEL_SELECTION_FACTORY,
-        Arc::new(rsi_agent_model_selection::ModelSelectionFactory),
-    )?;
-    register(GOAL_DOMAIN_FACTORY, Arc::new(rsi_agent_goal::GoalFactory))?;
+    register_session_commands(&mut register)?;
     register(
         "rsi.automation.browser.tools",
         Arc::new(rsi_automation::BrowserToolsFactory),
@@ -335,6 +332,7 @@ fn standard_agent_addon(
     )?;
     register("rsi.lsp.tools", Arc::new(rsi_lsp::LanguageToolsFactory))?;
     register("rsi.mcp.tools", Arc::new(rsi_mcp::McpToolsFactory))?;
+    register_extensions(&mut register, package_root)?;
     register("rsi.acp.tools", Arc::new(rsi_acp_tools::Factory))?;
     register(
         "rsi.history.tools",
@@ -372,6 +370,42 @@ fn standard_agent_addon(
     builder.build()
 }
 
+fn register_session_commands(
+    register: &mut impl FnMut(&str, Arc<dyn PluginFactory>) -> rsi_host::Result<()>,
+) -> rsi_host::Result<()> {
+    register(TODO_FACTORY, Arc::new(rsi_agent_todo::TodoFactory))?;
+    register(
+        CONTEXT_INPUT_FACTORY,
+        Arc::new(rsi_agent_context_input::ContextInputFactory),
+    )?;
+    register(
+        MODEL_SELECTION_FACTORY,
+        Arc::new(rsi_agent_model_selection::ModelSelectionFactory),
+    )?;
+    register(GOAL_DOMAIN_FACTORY, Arc::new(rsi_agent_goal::GoalFactory))
+}
+
+fn register_extensions(
+    register: &mut impl FnMut(&str, Arc<dyn PluginFactory>) -> rsi_host::Result<()>,
+    package_root: &Path,
+) -> rsi_host::Result<()> {
+    register(
+        "rsi.extension.process",
+        Arc::new(rsi_extension::ExtensionFactory::new(Arc::new(
+            rsi_extension::RejectRequests,
+        ))),
+    )?;
+    register(
+        "rsi.extension.package",
+        crate::package_extension_factory(package_root.into()),
+    )?;
+    register(
+        "rsi.extension.agent",
+        Arc::new(rsi_extension_agent::AgentAdapterFactory),
+    )?;
+    Ok(())
+}
+
 fn register_coding_tools(
     register: &mut impl FnMut(&str, Arc<dyn PluginFactory>) -> rsi_host::Result<()>,
     coding: &StandardCodingTools,
@@ -388,6 +422,7 @@ fn register_coding_tools(
 }
 
 fn describe_agent_addon(builder: &mut StandardAddonBuilder) -> rsi_host::Result<()> {
+    builder.register_local_contract_at::<rsi_extension::ExtensionContract>(AddonScope::Agent)?;
     builder.describe_factory(
         "rsi.tools.portable",
         "Import an explicitly injected Portable Tool service into this Agent catalog",
@@ -1050,8 +1085,10 @@ impl StandardComposition {
             std::env::consts::OS,
             std::env::consts::ARCH
         ))?;
-        self.addons
-            .merged(standard_agent_addon(self.coding_tools.as_ref())?)
+        self.addons.merged(standard_agent_addon(
+            self.coding_tools.as_ref(),
+            &self.paths.state().join("packages"),
+        )?)
     }
 
     pub(crate) fn agent_compiler_identity(&self) -> crate::Result<String> {
@@ -1411,6 +1448,7 @@ impl StandardComposition {
             self.coding_tools.clone(),
             agent_composition,
             self.agent_store_factory.clone(),
+            crate::application_receipts::Receipts(self.paths.clone()),
         )?;
         let owner = self.service_owner_factory()?;
         builder.register_local_contract::<rsi_service_host::ServiceOwnerContract>()?;
@@ -1587,7 +1625,10 @@ impl StandardComposition {
         let service_addon = builder.build()?;
         let frozen_digest = self
             .addons
-            .merged(standard_agent_addon(self.coding_tools.as_ref())?)?
+            .merged(standard_agent_addon(
+                self.coding_tools.as_ref(),
+                &self.paths.state().join("packages"),
+            )?)?
             .merged(service_addon.clone())?
             .digest()?;
         let addons = agent_addons.merged(service_addon)?;
@@ -1597,7 +1638,8 @@ impl StandardComposition {
             .set(self.linked_plugins(&factories)?)
             .expect("new catalog reservation");
         inspector.freeze(&factories)?;
-        let mut host = HostBuilder::new(paths);
+        let mut host =
+            HostBuilder::new(paths).runtime_limits(crate::runtime_policy::runtime_limits());
         addons.register_into(&mut host, AddonScope::Service)?;
         host.define("rsi_standard_addons", json!(frozen_digest))?;
         host.build().map(|host| (host, preset_identity, factories))
@@ -1656,6 +1698,7 @@ fn register_factories(
     coding_tools: Option<StandardCodingTools>,
     agent_composition: AgentCompositionFactory,
     agent_store_factory: rsi_agent_store_sqlite::SqliteStoreFactory,
+    receipt_reader: crate::application_receipts::Receipts,
 ) -> rsi_host::Result<()> {
     register(
         builder,
@@ -1742,7 +1785,7 @@ fn register_factories(
         rsi_agent_program::ProgramRuntimeFactory,
     )?;
     register_runtime_factories(builder, coding_tools, agent_composition)?;
-    register_agent_ai_factories(builder, agent_store_factory)
+    register_agent_ai_factories(builder, agent_store_factory, receipt_reader)
 }
 
 #[allow(clippy::too_many_lines)] // The standard linked catalog is one product-owned composition boundary.
@@ -1767,6 +1810,12 @@ fn register_runtime_factories(
         MEDIA_LOCAL_FACTORY,
         UpdateMode::RestartRequired,
         rsi_media_local::LocalMediaBackendFactory,
+    )?;
+    register(
+        builder,
+        "rsi.media.attachments.local",
+        UpdateMode::RestartRequired,
+        rsi_media_local::LocalAttachmentReaderFactory,
     )?;
     register(
         builder,
@@ -1954,6 +2003,7 @@ fn register_runtime_factories(
 fn register_agent_ai_factories(
     builder: &mut StandardAddonBuilder,
     agent_store_factory: rsi_agent_store_sqlite::SqliteStoreFactory,
+    receipt_reader: crate::application_receipts::Receipts,
 ) -> rsi_host::Result<()> {
     register(
         builder,
@@ -1994,7 +2044,7 @@ fn register_agent_ai_factories(
         builder,
         KERNEL_FACTORY,
         UpdateMode::Replayable,
-        rsi_agent_kernel::KernelFactory,
+        rsi_agent_kernel::KernelFactory::with_application_receipts(Arc::new(receipt_reader)),
     )?;
     register(
         builder,
@@ -2056,6 +2106,8 @@ fn register_contracts(builder: &mut StandardAddonBuilder) -> rsi_host::Result<()
     builder.register_local_contract::<MediaBackendContract>()?;
     builder.register_local_contract::<MediaContract>()?;
     builder.register_local_contract::<MediaReadContract>()?;
+    builder.register_local_contract::<rsi_media_protocol::FileReadContract>()?;
+    builder.register_local_contract::<rsi_media_protocol::PublishedImagesContract>()?;
     builder.register_local_contract::<ApprovalContract>()?;
     builder.register_local_contract::<ApprovalAnswerersContract>()?;
     builder.register_local_contract::<PermissionPresetsContract>()?;
@@ -2608,9 +2660,13 @@ mod tests {
     #[test]
     fn portable_ai_is_an_explicit_service_factory_with_restart_semantics() {
         let mut builder = StandardAddonBuilder::new("test.providers");
+        let home = tempfile::tempdir().unwrap();
         register_agent_ai_factories(
             &mut builder,
             rsi_agent_store_sqlite::SqliteStoreFactory::default(),
+            crate::application_receipts::Receipts(
+                HostPaths::new(home.path(), home.path(), home.path()).unwrap(),
+            ),
         )
         .unwrap();
         let set = StandardAddonSet::new([builder.build().unwrap()]).unwrap();
@@ -2789,6 +2845,7 @@ mod tests {
                 "rsi.agent.references.tools",
                 TIME_CONTEXT_FACTORY,
                 TODO_FACTORY,
+                CONTEXT_INPUT_FACTORY,
                 MODEL_SELECTION_FACTORY,
                 PLAN_POLICY_FACTORY,
                 GOAL_DOMAIN_FACTORY,
@@ -2824,6 +2881,7 @@ mod tests {
                 "rsi.agent.references.tools",
                 TIME_CONTEXT_FACTORY,
                 TODO_FACTORY,
+                CONTEXT_INPUT_FACTORY,
                 MODEL_SELECTION_FACTORY,
                 PLAN_POLICY_FACTORY,
                 GOAL_DOMAIN_FACTORY,
@@ -2840,12 +2898,20 @@ mod tests {
             ]
         );
 
-        let portable = StandardAddonSet::new([standard_agent_addon(None).unwrap()])
-            .unwrap()
-            .agent_catalog()
-            .unwrap();
+        let portable =
+            StandardAddonSet::new([standard_agent_addon(None, Path::new("/packages")).unwrap()])
+                .unwrap()
+                .agent_catalog()
+                .unwrap();
         let jobs = rsi_meta::PluginId::from(JOBS_TOOLS_FACTORY);
         assert!(portable.resolve(&jobs).is_ok());
+        for name in [
+            "rsi.extension.process",
+            "rsi.extension.package",
+            "rsi.extension.agent",
+        ] {
+            assert!(portable.resolve(&rsi_meta::PluginId::from(name)).is_ok());
+        }
         assert!(
             portable
                 .resolve(&rsi_meta::PluginId::from("rsi.tools.portable"))

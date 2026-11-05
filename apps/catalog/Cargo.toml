@@ -34,6 +34,10 @@ rsi-api-http = { path = "../../crates/rsi-api/http" }
 rsi-meta = { path = "../../crates/rsi-meta/core" }
 
 [dev-dependencies]
+rsi-agent-session-protocol = { path = "../../crates/rsi-agent/session-protocol" }
+rsi-agent-store-protocol = { path = "../../crates/rsi-agent/store-protocol" }
+rsi-agent-turn-protocol = { path = "../../crates/rsi-agent/turn-protocol" }
+rsi-ai-protocol = { path = "../../crates/rsi-ai/protocol" }
 rsi-meta-native-loader = { path = "../../crates/rsi-meta/native-loader" }
 tokio = { workspace = true, features = ["rt-multi-thread", "time", "test-util"] }
 tempfile.workspace = true

@@ -879,6 +879,7 @@ async fn profile_leaf_preview_capacity_and_restart_observation_preserve_resident
         .session_service()
         .unwrap()
         .create(rsi_session_protocol::CreateSession {
+            fork: None,
             workspace_id: workspace.id,
             session_id: rsi_agent_session_protocol::SessionId::new("profile-resident").unwrap(),
             agent_preset_id: None,

@@ -46,12 +46,16 @@ mod automation;
 #[cfg(target_os = "linux")]
 #[path = "session_service/browser.rs"]
 mod browser;
+#[path = "session_service/context_input.rs"]
+mod context_input;
 #[path = "session_service/external.rs"]
 mod external;
 #[path = "session_service/goal.rs"]
 mod goal;
 #[path = "session_service/history.rs"]
 mod history;
+#[path = "session_service/input_attribution.rs"]
+mod input_attribution;
 #[path = "session_service/job_preview.rs"]
 mod job_preview;
 #[path = "session_service/managed_providers.rs"]
@@ -335,6 +339,8 @@ async fn run_message_with_text_to_terminal(
     let message_id = MessageId::new(message_id).unwrap();
     let receipt = handle
         .submit(SubmitInput {
+            origin: rsi_session_protocol::SubmissionOrigin::User,
+            attribution: None,
             reasoning_effort: None,
             delivery: rsi_agent_session_protocol::MessageDelivery::NextTurn,
             message_id: message_id.clone(),
@@ -346,11 +352,11 @@ async fn run_message_with_text_to_terminal(
         })
         .await
         .unwrap();
-    let (turn_id, entered_fact_seq) = observe_message_claim(handle, &receipt).await;
+    let (turn_id, claimed_fact_seq) = observe_message_claim(handle, &receipt).await;
     let mut observation = handle
         .observe(ObservationCursor {
             control_seq: receipt.accepted_control_seq,
-            fact_seq: entered_fact_seq,
+            fact_seq: claimed_fact_seq,
         })
         .await
         .unwrap();
@@ -420,6 +426,7 @@ async fn standard_plan_commands_reach_the_actual_projection_and_provider_context
     let application = running.session_service().unwrap();
     let handle = application
         .create(CreateSession {
+            fork: None,
             workspace_id: running
                 .workspace_registry()
                 .unwrap()
@@ -504,6 +511,7 @@ async fn standard_product_applies_project_instructions_by_default_on_create_and_
     let application = running.session_service().unwrap();
     let created = application
         .create(CreateSession {
+            fork: None,
             workspace_id: running
                 .workspace_registry()
                 .unwrap()
@@ -567,6 +575,7 @@ async fn assert_session_service_contract(
     rsi_session_testkit::assert_session_contract(
         application,
         CreateSession {
+            fork: None,
             workspace_id: registry.get_or_create(workspace).await.unwrap().id,
             session_id: SessionId::new(session).unwrap(),
             agent_preset_id: None,
@@ -595,6 +604,7 @@ async fn local_and_uds_adapters_pass_one_real_kernel_store_contract() {
 
     let remote = daemon.connection.session_service();
     let shared = CreateSession {
+        fork: None,
         workspace_id: running
             .workspace_registry()
             .unwrap()
@@ -904,6 +914,7 @@ async fn independent_media_upload_survives_message_rejection_and_host_restart() 
     );
     let handle = sessions
         .create(CreateSession {
+            fork: None,
             workspace_id: running
                 .workspace_registry()
                 .unwrap()
@@ -918,10 +929,13 @@ async fn independent_media_upload_survives_message_rejection_and_host_restart() 
         .unwrap();
     let result = handle
         .submit(SubmitInput {
+            origin: rsi_session_protocol::SubmissionOrigin::User,
+            attribution: None,
             reasoning_effort: None,
             delivery: rsi_agent_session_protocol::MessageDelivery::NextTurn,
             message_id: MessageId::new("rejected-media-message").unwrap(),
             content: vec![SessionInput::Image {
+                presentation: None,
                 media: reference.clone(),
             }]
             .try_into()
@@ -984,6 +998,7 @@ async fn builtin_workflow_is_discoverable_but_cannot_prepare_without_an_active_r
     assert!(matches!(
         service
             .create(CreateSession {
+                fork: None,
                 workspace_id: workspace.id,
                 session_id: SessionId::new("workflow-unavailable").unwrap(),
                 agent_preset_id: Some(

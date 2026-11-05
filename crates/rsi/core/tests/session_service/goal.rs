@@ -9,6 +9,7 @@ async fn create(running: &RunningRsi, fixture: &Fixture, id: &str) -> Arc<dyn Se
         .session_service()
         .unwrap()
         .create(CreateSession {
+            fork: None,
             workspace_id: running
                 .workspace_registry()
                 .unwrap()
@@ -233,7 +234,7 @@ async fn draft_goal_drives_exact_allocations_and_restart_reads_do_not_arm() {
             .iter()
             .filter(|fact| matches!(
                 fact.body(),
-                SessionFactBody::InputMessageEntered {
+                SessionFactBody::InputMessageClaimed {
                     source: InputMessageSource::Continuation { .. },
                     ..
                 }
@@ -368,6 +369,7 @@ async fn finite_goal_round_creates_and_completes_one_real_workflow() {
         .session_service()
         .unwrap()
         .create(CreateSession {
+            fork: None,
             workspace_id: running
                 .workspace_registry()
                 .unwrap()
@@ -624,6 +626,7 @@ async fn remote_goal_control_and_observation_use_the_same_host_driver() {
         .connection
         .session_service()
         .create(CreateSession {
+            fork: None,
             workspace_id,
             session_id: SessionId::new("remote-goal").unwrap(),
             agent_preset_id: None,

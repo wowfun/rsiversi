@@ -76,6 +76,7 @@ async fn workspace_review_api_waits_for_real_shell_work_and_preserves_summaries_
         .connection
         .session_service()
         .create(CreateSession {
+            fork: None,
             workspace_id: workspace.id,
             session_id: SessionId::new("review-source").unwrap(),
             agent_preset_id: None,

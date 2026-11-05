@@ -63,6 +63,7 @@ async fn evidence_matches_actual_request_reuses_original_sections_and_survives_r
         .session_service()
         .unwrap()
         .create(CreateSession {
+            fork: None,
             workspace_id: running
                 .workspace_registry()
                 .unwrap()
@@ -246,6 +247,7 @@ async fn request_evidence_above_former_turn_budget_is_retained_and_dispatches_on
         .session_service()
         .unwrap()
         .create(CreateSession {
+            fork: None,
             workspace_id: running
                 .workspace_registry()
                 .unwrap()

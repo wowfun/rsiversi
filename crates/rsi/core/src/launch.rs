@@ -15,6 +15,15 @@ pub const MAXIMUM_LAUNCH_BYTES: usize = 1024 * 1024;
 /// Interfaces implemented by this product, independent from optional package contents.
 pub fn product_protocols() -> Vec<rsi_api_protocol::ProtocolDescriptor> {
     vec![
+        rsi_packages::importer_protocol_descriptor(),
+        rsi_api_protocol::ProtocolDescriptor {
+            name: "rsi.extension.process".into(),
+            version: 1,
+        },
+        rsi_api_protocol::ProtocolDescriptor {
+            name: "rsi.extension.agent".into(),
+            version: 7,
+        },
         rsi_api_protocol::connection_protocol(),
         rsi_api_device_api::protocol_descriptor(),
         rsi_acp_api::protocol_descriptor(),

@@ -235,7 +235,7 @@ pub fn standard_application_host(
         ))
         .map_err(boot)?;
     let mut host = HostBuilder::new(service.paths().clone())
-        .runtime_limits(crate::application_bootstrap::runtime_limits());
+        .runtime_limits(crate::runtime_policy::runtime_limits());
     addons
         .register_into(&mut host, crate::AddonScope::Application)
         .map_err(boot)?;

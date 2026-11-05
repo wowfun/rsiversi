@@ -36,6 +36,7 @@ async fn create(daemon: &DaemonFixture, fixture: &Fixture, id: &str) -> Arc<dyn 
         .connection
         .session_service()
         .create(CreateSession {
+            fork: None,
             workspace_id: daemon
                 .connection
                 .workspace_registry()
@@ -51,6 +52,8 @@ async fn create(daemon: &DaemonFixture, fixture: &Fixture, id: &str) -> Arc<dyn 
 }
 fn message(id: &str, content: Vec<SessionInput>) -> SubmitInput {
     SubmitInput {
+        origin: rsi_session_protocol::SubmissionOrigin::User,
+        attribution: None,
         message_id: MessageId::new(id).unwrap(),
         content: content.try_into().unwrap(),
         delivery: rsi_agent_session_protocol::MessageDelivery::NextTurn,
@@ -193,7 +196,7 @@ async fn uds_references_keep_exact_retry_cas_and_real_parent_interval_after_rest
     assert_eq!(retry.accepted_control_seq, receipt.accepted_control_seq);
     assert_eq!(provider.requests.lock().unwrap().len(), before);
     let facts = target.history_before(None, 128).await.unwrap();
-    let entered = facts.facts.iter().find(|fact| matches!(fact.body(), SessionFactBody::InputMessageEntered {content, ..} if matches!(content.first(),Some(AgentMessageContent::Reference {reference}) if reference.as_ref() == &frozen))).unwrap();
+    let entered = facts.facts.iter().find(|fact| matches!(fact.body(), SessionFactBody::InputMessageClaimed {content, ..} if matches!(content.first(),Some(AgentMessageContent::Reference {reference}) if reference.as_ref() == &frozen))).unwrap();
     let request = ReferenceReadRequest {
         recorded_session_id: target.header().await.unwrap().session_id().clone(),
         fact_seq: entered.seq(),
@@ -249,7 +252,7 @@ async fn uds_references_keep_exact_retry_cas_and_real_parent_interval_after_rest
         preview.text
     );
     let child_header = child.header().await.unwrap();
-    assert!(child_header.fork_origin().unwrap().resolved_terminal_seq >= request.fact_seq);
+    assert!(child_header.history_origin().unwrap().resolved_terminal_seq >= request.fact_seq);
     let later = target
         .capture_reference(source.header().await.unwrap().session_id().clone())
         .await
@@ -265,7 +268,7 @@ async fn uds_references_keep_exact_retry_cas_and_real_parent_interval_after_rest
     )
     .await;
     let after = target.history_before(None, 128).await.unwrap();
-    let outside = after.facts.iter().rev().find(|fact| matches!(fact.body(),SessionFactBody::InputMessageEntered {content,..} if matches!(content.first(),Some(AgentMessageContent::Reference {..})))).unwrap();
+    let outside = after.facts.iter().rev().find(|fact| matches!(fact.body(),SessionFactBody::InputMessageClaimed {content,..} if matches!(content.first(),Some(AgentMessageContent::Reference {..})))).unwrap();
     let outside = ReferenceReadRequest {
         fact_seq: outside.seq(),
         ..request.clone()

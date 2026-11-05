@@ -87,6 +87,7 @@ impl rsi_acp_agent::SessionOwner for Owner {
                 .map_err(|_| Failure::Backend)?;
             self.sessions
                 .create(CreateSession {
+                    fork: None,
                     workspace_id: workspace.id,
                     session_id: id.clone(),
                     agent_preset_id: Some(

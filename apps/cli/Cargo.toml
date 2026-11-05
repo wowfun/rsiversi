@@ -27,6 +27,10 @@ path = "../../fixtures/rsi/desktop-product/automation-grant.rs"
 paired-web-tests = []
 
 [dependencies]
+rsi-extension = { path = "../../crates/rsi-extension/core" }
+rsi-process-local = { path = "../../crates/rsi-process/local" }
+rsi-sandbox-local = { path = "../../crates/rsi-sandbox/local" }
+rsi-sandbox = { path = "../../crates/rsi-sandbox/core" }
 rsi-workspace-path = { path = "../../crates/rsi-workspace/path" }
 rsi-installation = { path = "../../crates/rsi/installation" }
 reqwest.workspace = true
@@ -81,7 +85,6 @@ rsi-agent-session-protocol = { path = "../../crates/rsi-agent/session-protocol" 
 rsi-agent-store-protocol = { path = "../../crates/rsi-agent/store-protocol" }
 rsi-agent-turn-protocol = { path = "../../crates/rsi-agent/turn-protocol" }
 rsi-ai-protocol = { path = "../../crates/rsi-ai/protocol" }
-rsi-sandbox = { path = "../../crates/rsi-sandbox/core" }
 rsi-settings-protocol = { path = "../../crates/rsi-settings/protocol" }
 toml.workspace = true
 

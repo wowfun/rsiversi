@@ -2,6 +2,13 @@ use super::{ApiError, Failure, Gate, Grant, Manager, Principal, Reply, wire};
 use rsi_api_protocol::CallOrigin;
 
 impl Manager {
+    #[cfg(target_os = "linux")]
+    pub(crate) fn visibility_revision(&self) -> u64 {
+        self.state
+            .lock()
+            .expect("execution visibility grants")
+            .visibility_revision
+    }
     pub(crate) fn admit_ssh_stdio(
         &self,
         origin: &CallOrigin,
@@ -155,15 +162,16 @@ impl Manager {
             return Ok(Err(Failure::Busy));
         }
         let value = serde_json::to_value(&document).map_err(|_| ApiError::Unavailable)?;
+        let ssh = matches!(change.scope.scope, wire::GrantScope::SshUse { .. });
         let drain = if change.granted {
             None
         } else {
-            self.state
-                .lock()
-                .expect("Profile grant revocation")
-                .gates
-                .get_mut(&change.scope)
-                .map(Gate::close)
+            let mut state = self.state.lock().expect("Profile grant revocation");
+            let drain = state.gates.get_mut(&change.scope).map(Gate::close);
+            if ssh && drain.is_some() {
+                state.visibility_revision = state.visibility_revision.wrapping_add(1);
+            }
+            drain
         };
         self.domain
             .put("grants", value)
@@ -173,6 +181,9 @@ impl Manager {
             let mut state = self.state.lock().expect("Profile grant publication");
             state.document = document.clone();
             if change.granted && !state.closed {
+                if ssh && !state.gates.get(&change.scope).is_some_and(|gate| gate.open) {
+                    state.visibility_revision = state.visibility_revision.wrapping_add(1);
+                }
                 state
                     .gates
                     .entry(change.scope)

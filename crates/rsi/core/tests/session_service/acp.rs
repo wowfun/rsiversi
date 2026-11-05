@@ -69,6 +69,7 @@ impl SessionOwner for Owner {
         let session = self
             .sessions
             .create(CreateSession {
+                fork: None,
                 workspace_id: workspace.id,
                 session_id: id.clone(),
                 agent_preset_id: None,

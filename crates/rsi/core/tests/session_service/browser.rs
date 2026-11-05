@@ -219,6 +219,7 @@ async fn session_browser_real_http_ws_nodes_images_and_presentation_detach() {
         .unwrap();
     let session = service
         .create(CreateSession {
+            fork: None,
             workspace_id: workspace.id.clone(),
             session_id: SessionId::new("browser-proof-session").unwrap(),
             agent_preset_id: None,
@@ -368,6 +369,7 @@ async fn session_browser_real_http_ws_nodes_images_and_presentation_detach() {
     for (number, capacity) in [(2, false), (3, true)] {
         let another = service
             .create(CreateSession {
+                fork: None,
                 workspace_id: workspace.id.clone(),
                 session_id: SessionId::new(format!("browser-proof-{number}")).unwrap(),
                 agent_preset_id: None,

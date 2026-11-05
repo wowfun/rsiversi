@@ -121,6 +121,7 @@ impl PluginFactory for Factory {
             domain,
             state: Mutex::new(State {
                 closed: false,
+                visibility_revision: 0,
                 document,
                 gates,
                 previews: BTreeMap::new(),
@@ -181,6 +182,7 @@ impl Gate {
     }
 }
 struct State {
+    visibility_revision: u64,
     closed: bool,
     document: wire::Grants,
     gates: BTreeMap<Grant, Gate>,
@@ -343,6 +345,7 @@ impl Manager {
         {
             let mut state = self.state.lock().expect("Profile leaf retirement");
             state.closed = true;
+            state.visibility_revision = state.visibility_revision.wrapping_add(1);
             for gate in state.gates.values_mut() {
                 gate.close();
             }

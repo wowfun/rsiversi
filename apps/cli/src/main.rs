@@ -36,7 +36,7 @@ const FORCE_HOST_STOP_TIMEOUT: Duration = Duration::from_secs(5);
 #[cfg(any(target_os = "linux", windows))]
 const HOST_DIAGNOSTICS_INTERVAL: Duration = Duration::from_secs(5);
 #[cfg(any(target_os = "linux", windows))]
-const DAEMON_READINESS_TIMEOUT: Duration = rsi::APPLICATION_TRANSITION_TIMEOUT;
+const DAEMON_READINESS_TIMEOUT: Duration = rsi::PRODUCT_TRANSITION_TIMEOUT;
 
 #[cfg(any(target_os = "linux", windows))]
 fn daemon_readiness_timeout_error() -> RsiError {

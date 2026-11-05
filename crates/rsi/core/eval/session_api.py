@@ -261,7 +261,7 @@ def selected_pressure_answer(trace, plan, intent_seq):
             kind = fact["type"]
             if kind in (
                 "turn_accepted",
-                "input_message_entered",
+                "input_message_claimed",
                 "tool_result",
                 "tool_rejected",
             ):
