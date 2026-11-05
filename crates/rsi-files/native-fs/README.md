@@ -93,6 +93,9 @@ rejects reparse traversal during name parsing;
 bypasses final-component reparse processing. Every successful open checks
 `FileAttributeTagInfo` on the returned handle and rejects a reparse attribute,
 the wrong directory/file type, or a mismatched long name before returning it.
+The long-name query uses a small stack buffer for ordinary paths. Longer
+volume-relative names use a bounded retry on the same handle. The comparison
+uses the returned UTF-16 extent, including on the retry.
 Native UTF-16 names, including unpaired surrogates, remain lossless
 `OsString` values inside this package; this does not define a wire path encoding.
 Windows `resolve_absolute_root_alias` only validates the admitted spelling; it

@@ -275,6 +275,28 @@ fn privatization_changes_only_the_selected_owned_directory() {
 }
 
 #[test]
+fn exact_name_check_retries_for_long_volume_relative_paths() {
+    let temporary = tempfile::tempdir().unwrap();
+    let component = "nested".repeat(20);
+    let relative: std::path::PathBuf = (0..5).map(|_| component.as_str()).collect();
+    let parent = temporary.path().join(&relative);
+    fs::create_dir_all(&parent).unwrap();
+    let name = OsString::from_wide(&[0xd800, 65, 46, 116, 120, 116]);
+    fs::write(parent.join(&name), "deep").unwrap();
+
+    let root = open_absolute_directory_no_follow(temporary.path()).unwrap();
+    let directory = open_relative_directory_no_follow(&root, &relative).unwrap();
+    let mut contents = String::new();
+    open_relative_file_no_follow(&directory, Path::new(&name))
+        .unwrap()
+        .read_to_string(&mut contents)
+        .unwrap();
+    assert_eq!(contents, "deep");
+    let wrong_case = OsString::from_wide(&[0xd800, 97, 46, 116, 120, 116]);
+    assert!(open_relative_file_no_follow(&directory, Path::new(&wrong_case)).is_err());
+}
+
+#[test]
 fn exact_names_and_native_utf16_survive_relative_reads_and_enumeration() {
     let temporary = tempfile::tempdir().unwrap();
     let base = temporary.path();

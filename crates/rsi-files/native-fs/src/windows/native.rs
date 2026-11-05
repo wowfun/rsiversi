@@ -165,7 +165,7 @@ pub(super) fn root(drive: u16) -> io::Result<File> {
     // SAFETY: CreateFileW returned a new valid handle; ownership transfers exactly once.
     let file = unsafe { File::from_raw_handle(handle) };
     require_type(&file, true)?;
-    if long_name(&file)? != [92] {
+    if !long_name_matches(&file, |actual| actual == [92])? {
         return Err(names::invalid("drive root is a directory alias"));
     }
     let mut filesystem = [0_u16; 64];
@@ -578,13 +578,12 @@ pub(super) fn verify_private(file: &File) -> io::Result<()> {
 }
 
 pub(super) fn version(file: &File) -> io::Result<crate::windows::FileVersion> {
-    let basic = information(file, 0, 40)?;
-    let standard = information(file, 1, 24)?;
-    let identity = identity(file)?;
+    let mut basic_buffer = [0; 5];
+    let mut standard_buffer = [0; 3];
+    let basic = information(file, 0, &mut basic_buffer)?;
+    let standard = information(file, 1, &mut standard_buffer)?;
     Ok(crate::windows::FileVersion {
-        identity: identity
-            .try_into()
-            .map_err(|_| io::Error::other("invalid FileID extent"))?,
+        identity: identity(file)?,
         attributes: u32::from_ne_bytes(basic[32..36].try_into().expect("attributes")),
         length: u64::from_ne_bytes(standard[8..16].try_into().expect("length")),
         link_count: u32::from_ne_bytes(standard[16..20].try_into().expect("link count")),
@@ -599,12 +598,12 @@ fn check_opened(file: &File, name: &[u16], directory: bool) -> io::Result<()> {
 }
 
 fn check_name(file: &File, name: &[u16]) -> io::Result<()> {
-    if !name.is_empty() {
-        let actual = long_name(file)?;
-        let final_name = actual.rsplit(|unit| *unit == 92).next().unwrap_or_default();
-        if final_name != name {
-            return Err(names::invalid("exact Windows long-name spelling required"));
-        }
+    if !name.is_empty()
+        && !long_name_matches(file, |actual| {
+            actual.rsplit(|unit| *unit == 92).next() == Some(name)
+        })?
+    {
+        return Err(names::invalid("exact Windows long-name spelling required"));
     }
     Ok(())
 }
@@ -614,7 +613,7 @@ pub(super) fn child_kind(parent: &File, name: &[u16]) -> io::Result<crate::Entry
     // requesting content access or assuming whether the child is a directory.
     let (file, _) = acquire_with_access(parent, name, None, None, 0x0010_0080, FILE_OPEN, 7)?;
     check_name(&file, name)?;
-    let attributes = version(&file)?.attributes;
+    let attributes = file_attributes(&file)?;
     Ok(if attributes & 0x400 != 0 {
         crate::EntryKind::Link
     } else if attributes & 0x10 != 0 {
@@ -646,30 +645,38 @@ pub(super) fn private_descriptor(file: &File) -> io::Result<String> {
     security::observed(file)
 }
 
-fn information(file: &File, kind: u32, size: u32) -> io::Result<Vec<u8>> {
-    let mut buffer = vec![0_u64; (size as usize).div_ceil(8)];
-    // SAFETY: The zeroed allocation is aligned to 8 bytes and holds at least size
-    // writable bytes. The handle and allocation outlive the synchronous call.
+fn information<'a>(file: &File, kind: u32, buffer: &'a mut [u64]) -> io::Result<&'a [u8]> {
+    let size =
+        u32::try_from(std::mem::size_of_val(buffer)).expect("bounded native information buffer");
+    // SAFETY: The initialized, 8-byte-aligned buffer owns exactly size writable
+    // bytes. The handle and buffer remain live throughout the synchronous query.
     let ok = unsafe {
         GetFileInformationByHandleEx(file.as_raw_handle(), kind, buffer.as_mut_ptr().cast(), size)
     };
     if ok == 0 {
         return Err(io::Error::last_os_error());
     }
-    Ok(buffer
-        .into_iter()
-        .flat_map(u64::to_ne_bytes)
-        .take(size as usize)
-        .collect())
+    // SAFETY: u64 has no padding. All bytes were initialized before the query
+    // and this view borrows only that allocation for the lifetime of the buffer.
+    Ok(unsafe { std::slice::from_raw_parts(buffer.as_ptr().cast(), size as usize) })
 }
 
-pub(super) fn identity(file: &File) -> io::Result<Vec<u8>> {
-    information(file, 18, 24)
+pub(super) fn identity(file: &File) -> io::Result<[u8; 24]> {
+    Ok(information(file, 18, &mut [0; 3])?
+        .try_into()
+        .expect("fixed FileID extent"))
+}
+
+fn file_attributes(file: &File) -> io::Result<u32> {
+    let mut buffer = [0; 1];
+    let bytes = information(file, FILE_ATTRIBUTE_TAG_INFO, &mut buffer)?;
+    Ok(u32::from_le_bytes(
+        bytes[..4].try_into().expect("fixed attribute record"),
+    ))
 }
 
 fn require_type(file: &File, directory: bool) -> io::Result<()> {
-    let bytes = information(file, FILE_ATTRIBUTE_TAG_INFO, 8)?;
-    let attributes = u32::from_le_bytes(bytes[..4].try_into().expect("fixed attribute record"));
+    let attributes = file_attributes(file)?;
     if attributes & REPARSE != 0 {
         return Err(io::Error::from_raw_os_error(
             ERROR_REPARSE_POINT_ENCOUNTERED,
@@ -684,8 +691,19 @@ fn require_type(file: &File, directory: bool) -> io::Result<()> {
     Ok(())
 }
 
-fn long_name(file: &File) -> io::Result<Vec<u16>> {
-    let bytes = information(file, 2, 65540)?;
+fn long_name_matches(file: &File, matches: impl FnOnce(&[u16]) -> bool) -> io::Result<bool> {
+    const ERROR_MORE_DATA: i32 = 234;
+    let mut short = [0; 128];
+    let mut long;
+    let bytes = match information(file, 2, &mut short) {
+        Ok(bytes) => bytes,
+        Err(error) if error.raw_os_error() == Some(ERROR_MORE_DATA) => {
+            // One full-size retry also covers renames between the two queries.
+            long = vec![0; 65540_usize.div_ceil(8)];
+            information(file, 2, &mut long)?
+        }
+        Err(error) => return Err(error),
+    };
     let count = u32::from_le_bytes(bytes[..4].try_into().expect("fixed name header")) as usize;
     if count == 0 || count > bytes.len() - 4 || !count.is_multiple_of(2) {
         return Err(io::Error::new(
@@ -693,7 +711,15 @@ fn long_name(file: &File) -> io::Result<Vec<u16>> {
             "invalid native long-name length",
         ));
     }
-    Ok(utf16(&bytes[4..4 + count]))
+    // SAFETY: FILE_NAME_INFO stores native UTF-16 immediately after a DWORD.
+    // The buffer starts on an 8-byte boundary, offset 4 is aligned for u16,
+    // and the checked, even byte count lies within the initialized allocation.
+    #[expect(
+        clippy::cast_ptr_alignment,
+        reason = "information borrows u64 storage; offset 4 retains WCHAR alignment"
+    )]
+    let name = unsafe { std::slice::from_raw_parts(bytes[4..].as_ptr().cast::<u16>(), count / 2) };
+    Ok(matches(name))
 }
 
 fn utf16(bytes: &[u8]) -> Vec<u16> {

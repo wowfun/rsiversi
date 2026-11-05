@@ -154,7 +154,7 @@ impl Directory {
     /// Pin this same directory's namespace for path-based native consumers.
     pub fn pin_namespace(&self) -> io::Result<NamespaceLease> {
         native::verify_private_directory(&self.0)?;
-        let identity = self.version()?.identity;
+        let identity = native::identity(&self.0)?;
         let mut pins = NAMESPACE_PINS
             .lock()
             .map_err(|_| io::Error::other("namespace pin registry is poisoned"))?;
