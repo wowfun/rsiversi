@@ -156,9 +156,14 @@ output, and commits it before provider preparation. An admitted provider retry r
 source-ordered settled batch after every successful result publication is
 durable. If a successful result waives the model follow-up, Executor first
 settles all sibling calls and the post-tool stage. Pending Tool context or
-steering still runs in this Turn. An idle batch completes without capturing
-another request or calling the model. Structured output still requires the
-frozen contract's own result.
+steering still runs in this Turn. At an otherwise idle language stopping
+boundary (answer, output limit, or waived Tool follow-up), the producing
+request's application may publish more input before the Executor settles the
+Turn. The Executor awaits that callback, checks the mailbox again, and captures
+another request only if input is pending. An output limit remains the final
+outcome if the continued Turn otherwise completes. Cold recovery does not
+replay process callbacks. Structured output still requires the frozen
+contract's own result.
 Tool policy stages inspect the exact prepared identity before approval:
 Abstain preserves constraints, RequireApproval adds one, and Deny wins before
 any Tool intent/start and persists a charged ToolRejected.

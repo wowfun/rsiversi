@@ -19,16 +19,33 @@ enum Decision {
     PresetReject,
     Mixed,
     MixedFailure,
+    StoppingFailure,
 }
 
 #[derive(Debug)]
 struct Preparation {
     decision: Decision,
     calls: AtomicUsize,
+    stops: AtomicUsize,
 }
 
 #[async_trait]
 impl RequestInputPreparer for Preparation {
+    async fn turn_stopping(
+        &self,
+        _: CancellationToken,
+    ) -> rsi_agent_composition_protocol::Result<()> {
+        self.stops.fetch_add(1, Ordering::SeqCst);
+        if matches!(self.decision, Decision::StoppingFailure) {
+            return Err(
+                rsi_agent_composition_protocol::AgentCompositionError::InvalidInput(
+                    "stop listener failed".into(),
+                ),
+            );
+        }
+        Ok(())
+    }
+
     async fn prepare(
         &self,
         context: &RequestInputContext<'_>,
@@ -83,7 +100,7 @@ impl RequestInputPreparer for Preparation {
             }
             Decision::Reject | Decision::ColdReject => StepInputDecision::reject(),
             Decision::Empty => StepInputDecision::enter(vec![]).unwrap(),
-            Decision::Rewrite => StepInputDecision::enter(vec![
+            Decision::Rewrite | Decision::StoppingFailure => StepInputDecision::enter(vec![
                 PreparedInput::Replacement {
                     claim: InputClaimRef::new(context.claims[0].seq(), 0).unwrap(),
                     message: PreparedInputMessage::new(
@@ -160,6 +177,19 @@ impl RequestToolSource for Source {
 #[tokio::test]
 async fn application_preparation_rewrites_before_the_request_and_reuses_the_decision_on_retry() {
     exercise(Decision::Rewrite, TurnOutcome::Completed, 2).await;
+}
+
+#[tokio::test]
+async fn stopping_listener_failure_settles_the_turn_without_replaying_the_callback() {
+    exercise(
+        Decision::StoppingFailure,
+        TurnOutcome::Failed {
+            code: "application.turn_stopping".into(),
+            message: "invalid Agent composition input: stop listener failed".into(),
+        },
+        2,
+    )
+    .await;
 }
 
 #[tokio::test]
@@ -311,7 +341,16 @@ async fn submit_when_ready(
     }
 }
 
-fn assert_entered_model_requests(provider: &LanguageFixture, starts: usize, decision: Decision) {
+fn assert_entered_model_requests(
+    provider: &LanguageFixture,
+    starts: usize,
+    preparation: &Preparation,
+) {
+    let decision = preparation.decision;
+    assert_eq!(
+        preparation.stops.load(Ordering::SeqCst),
+        usize::from(starts > 0)
+    );
     let requests = provider.requests.lock().unwrap();
     for request in requests.iter() {
         let encoded = serde_json::to_string(request).unwrap();
@@ -343,6 +382,7 @@ async fn exercise(decision: Decision, expected: TurnOutcome, starts: usize) {
     let preparation = Arc::new(Preparation {
         decision,
         calls: AtomicUsize::new(0),
+        stops: AtomicUsize::new(0),
     });
     let source = Arc::new(Source {
         catalogs: stack
@@ -381,7 +421,7 @@ async fn exercise(decision: Decision, expected: TurnOutcome, starts: usize) {
         source.captures.load(Ordering::SeqCst),
         usize::from(!matches!(decision, Decision::ColdCancel))
     );
-    assert_entered_model_requests(&provider, starts, decision);
+    assert_entered_model_requests(&provider, starts, &preparation);
     let page = stack
         .store
         .read_facts(

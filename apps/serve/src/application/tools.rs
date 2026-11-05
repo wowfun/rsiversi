@@ -32,7 +32,7 @@ pub(super) struct Listener {
 }
 impl Listener {
     pub(super) fn validate(&self) -> rsi_meta::Result<()> {
-        if self.protocol != 11 || self.port == 0 {
+        if self.protocol != 12 || self.port == 0 {
             return Err(failure("invalid application tool listener"));
         }
         rsi_agent_session_protocol::validate_identifier("application generation", &self.generation)
@@ -64,7 +64,7 @@ impl Endpoint {
                     serde_json::to_vec(body)
                         .map_err(|_| ToolError::InvalidInput("application tool payload".into()))?,
                 );
-            let request = if matches!(path, "capture" | "prepare" | "start") {
+            let request = if matches!(path, "capture" | "prepare" | "start" | "stopping") {
                 request
             } else {
                 request.timeout(Duration::from_secs(10))
@@ -323,6 +323,17 @@ impl RequestToolSource for Source {
 
 #[async_trait]
 impl RequestInputPreparer for View {
+    async fn turn_stopping(
+        &self,
+        stop: CancellationToken,
+    ) -> rsi_agent_composition_protocol::Result<()> {
+        let request = json!({"view": self.id});
+        tokio::select! {biased;
+            () = stop.cancelled() => Err(AgentCompositionError::ShuttingDown),
+            result = self.endpoint.call::<()>("stopping", &request, 128) => result.map_err(invalid),
+        }
+    }
+
     async fn prepare(
         &self,
         context: &RequestInputContext<'_>,

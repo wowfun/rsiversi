@@ -9,7 +9,7 @@ pub(super) async fn endpoint() -> (TcpListener, Arc<Endpoint>) {
     let port = socket.local_addr().unwrap().port();
     let endpoint = Arc::new(Endpoint {
         listener: Listener {
-            protocol: 11,
+            protocol: 12,
             generation: "worker".into(),
             port,
         },

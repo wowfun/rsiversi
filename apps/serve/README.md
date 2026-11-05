@@ -77,8 +77,12 @@ All other preset names retain precedence and delegated Sessions still obey
 their tool allowlist.
 
 An application configured with `tools = true` can advertise a separate private
-loopback listener in its opening reply. Tool protocol 11 owns capture, input
-preparation, start, outcome, cancellation and view release. Preparation borrows
+loopback listener in its opening reply. Tool protocol 12 owns capture, input
+preparation, stopping, start, outcome, cancellation and view release. Before an
+idle language Turn settles, `POST /v1/stopping` names its producing view.
+The application returns JSON null once its stopping listeners and their native
+publications have settled. A lost reply fails the Turn without retrying the
+callback. Preparation borrows
 the captured claims and retains the same view even without Tools. Local Turns
 wait for this process's opening handshake when it owns input preparation. A
 closed publisher wakes waiting Turns, and the Host continues serving unrelated

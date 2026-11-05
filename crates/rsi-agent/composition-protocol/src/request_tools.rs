@@ -103,6 +103,12 @@ pub trait RequestInputPreparer: fmt::Debug + Send + Sync + 'static {
         context: &RequestInputContext<'_>,
         stop: CancellationToken,
     ) -> Result<rsi_agent_session_protocol::StepInputDecision>;
+
+    /// Gives the producing application a last opportunity to publish same-Turn input.
+    /// Complete only after those publications settle; the executor checks its mailbox again.
+    async fn turn_stopping(&self, _stop: CancellationToken) -> Result<()> {
+        Ok(())
+    }
 }
 
 #[derive(Debug)]

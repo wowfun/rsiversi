@@ -19,6 +19,91 @@ fn provider(stack: &BaseStack, scripts: Vec<Vec<LanguageEvent>>) -> Arc<Language
 }
 
 #[tokio::test]
+async fn steering_at_the_output_limit_continues_the_same_turn_and_preserves_its_outcome() {
+    use rsi_agent_session_protocol::{
+        AgentMessage, AgentMessageContent, AgentMessageSource, MessageDelivery, MessageId,
+    };
+    use rsi_agent_turn_protocol::SubmitMessage;
+    let stack = BaseStack::activate().await;
+    let waiting = Arc::new(Notify::new());
+    let release = Arc::new(Notify::new());
+    let provider = provider(&stack, vec![answer_script(), answer_script()]);
+    provider.outcomes.lock().unwrap()[0] = StartOutcome::GatedStream {
+        events: truncated(answer_script()),
+        waiting_after_first: waiting.clone(),
+        release: release.clone(),
+    };
+    let language = stack
+        .activate_language("test.language.stopping", provider.clone())
+        .await;
+    let executor = stack.activate_executor("output-limit-steering").await;
+    let turns = stack
+        .runtime
+        .root()
+        .lookup_local::<TurnServiceContract>()
+        .unwrap();
+    let id = SessionId::new("limit-steer").unwrap();
+    let submit = |session, delivery, text: &str| {
+        turns.submit_message(SubmitMessage {
+            session,
+            delivery,
+            message: AgentMessage {
+                message_id: MessageId::new(text).unwrap(),
+                source: AgentMessageSource::Human { attribution: None },
+                content: vec![AgentMessageContent::Text { text: text.into() }],
+                options: rsi_agent_session_protocol::MessageOptions::default(),
+            },
+        })
+    };
+    submit(
+        stack.fresh(header_for_session(id.as_str())).await,
+        MessageDelivery::NextTurn,
+        "first",
+    )
+    .await
+    .unwrap();
+    tokio::time::timeout(std::time::Duration::from_secs(5), waiting.notified())
+        .await
+        .unwrap();
+    let turn = stack
+        .store
+        .inspect_session(&id)
+        .await
+        .unwrap()
+        .active_turn_id
+        .unwrap();
+    submit(
+        SubmitSession::Resume(turns.prepare_resume(&id).await.unwrap()),
+        MessageDelivery::NextStep,
+        "continued",
+    )
+    .await
+    .unwrap();
+    release.notify_one();
+    let outcome = tokio::time::timeout(std::time::Duration::from_secs(5), async {
+        loop {
+            if let Some(result) = turns.outcome(&id, &turn).await.unwrap() {
+                break result;
+            }
+            tokio::task::yield_now().await;
+        }
+    })
+    .await
+    .unwrap();
+    assert_eq!(outcome, TurnOutcome::MaxTokens);
+    {
+        let requests = provider.requests.lock().unwrap();
+        assert_eq!(requests.len(), 2);
+        assert!(
+            serde_json::to_string(&requests[1])
+                .unwrap()
+                .contains("continued")
+        );
+    }
+    stack.dispose(language, executor).await;
+}
+
+#[tokio::test]
 async fn truncated_tool_batch_is_diagnostic_only_and_stops_without_replanning() {
     let stack = BaseStack::activate().await;
     let calls = Arc::new(AtomicUsize::new(0));

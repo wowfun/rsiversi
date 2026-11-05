@@ -367,7 +367,15 @@ enum ModelRequest {
     #[default]
     Initial,
     ToolFollowup,
-    WaivedToolFollowup,
+    Stopping,
+}
+
+#[derive(Debug, Default)]
+enum ScannedEnding {
+    #[default]
+    Open,
+    StructuredResult,
+    Terminal,
 }
 
 #[derive(Debug, Default)]
@@ -375,12 +383,12 @@ struct ScannedTurn {
     model: Option<ModelRef>,
     reasoning_effort: Option<rsi_ai_protocol::ReasoningEffortId>,
     image: Option<(ModelRef, ImageRequest)>,
-    terminal: bool,
+    ending: ScannedEnding,
     completed_model_without_successor: bool,
     completed_model_source: Option<EffectId>,
     conversation_source: Option<EffectId>,
     pending_model_calls: BTreeMap<u32, (String, bool)>,
-    concluded: bool,
+    max_tokens: bool,
     request: ModelRequest,
     effects: Vec<ResumeEffect>,
     turn_policy: Option<ResolvedTurnPolicy>,
@@ -512,6 +520,25 @@ fn scan_turn(
                 state.effects.remove(index);
                 state.completed_model_without_successor = true;
                 if state.conversation_source.as_ref() == Some(effect_id) {
+                    let terminal = attempt.terminal();
+                    if !matches!(
+                        terminal,
+                        LanguageEvent::Finished {
+                            reason: FinishReason::ToolCalls,
+                            ..
+                        }
+                    ) {
+                        state.max_tokens |= matches!(
+                            terminal,
+                            LanguageEvent::Finished {
+                                reason: FinishReason::MaxTokens,
+                                ..
+                            }
+                        );
+                        state.pending_model_calls.clear();
+                        continue;
+                    }
+                    state.completed_model_source = Some(effect_id.clone());
                     for item in attempt.events() {
                         match item.map_err(|_| "invalid model attempt evidence")?.1 {
                             LanguageEvent::ContentStarted {
@@ -529,17 +556,6 @@ fn scan_turn(
                             }
                             _ => {}
                         }
-                    }
-                    if matches!(
-                        attempt.terminal(),
-                        LanguageEvent::Finished {
-                            reason: FinishReason::ToolCalls,
-                            ..
-                        }
-                    ) {
-                        state.completed_model_source = Some(effect_id.clone());
-                    } else {
-                        state.pending_model_calls.clear();
                     }
                 }
             }
@@ -615,18 +631,20 @@ fn scan_turn(
                     return Err("Tool result lacks exact start");
                 };
                 let effect = state.effects.remove(index);
-                state.concluded |= conclusion.is_some();
+                if conclusion.is_some() {
+                    state.ending = ScannedEnding::StructuredResult;
+                }
                 if result.concludes_turn
                     && let ResumeEffect::Tool { intent, .. } = effect
                     && matches!(intent.body(), SessionFactBody::ToolIntent {
                         origin: rsi_agent_session_protocol::ToolOrigin::Model { effect_id }, ..
                     } if Some(effect_id) == state.conversation_source.as_ref())
                 {
-                    state.request = ModelRequest::WaivedToolFollowup;
+                    state.request = ModelRequest::Stopping;
                 }
             }
             SessionFactBody::TurnTerminal { turn_id, .. } if turn_id == claim.turn_id() => {
-                state.terminal = true;
+                state.ending = ScannedEnding::Terminal;
                 state.completed_model_without_successor = false;
                 state.effects.clear();
             }

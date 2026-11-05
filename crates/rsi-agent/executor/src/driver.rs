@@ -272,11 +272,12 @@ impl Driver {
         fold: &mut ModelContextState,
     ) -> std::result::Result<(), DriveFailure> {
         let state = self.load_claim(claim, fold).await?;
-        if state.terminal {
-            return Ok(());
-        }
-        if state.concluded {
-            return Err(DriveFailure::Turn(TurnOutcome::Completed));
+        match state.ending {
+            ScannedEnding::Terminal => return Ok(()),
+            ScannedEnding::StructuredResult => {
+                return Err(DriveFailure::Turn(TurnOutcome::Completed));
+            }
+            ScannedEnding::Open => {}
         }
         if state.completed_model_without_successor {
             return Err(DriveFailure::Turn(TurnOutcome::Interrupted {
@@ -315,12 +316,30 @@ impl Driver {
             match state.request {
                 ModelRequest::Initial => ModelRequest::Initial,
                 _ if !state.pending_model_calls.is_empty() => ModelRequest::ToolFollowup,
-                _ if recovered_waiver => ModelRequest::WaivedToolFollowup,
+                _ if recovered_waiver => ModelRequest::Stopping,
                 request => request,
             },
+            state.max_tokens,
             stop,
         )
         .await
+    }
+
+    async fn claim_step_messages(
+        &self,
+        claim: &TurnClaim,
+        fold: &mut ModelContextState,
+    ) -> std::result::Result<bool, DriveFailure> {
+        let added = self
+            .turns
+            .claim_pending_step_messages(claim)
+            .await
+            .map_err(fatal)?
+            > 0;
+        if added {
+            self.sync_fold(claim, fold).await?;
+        }
+        Ok(added)
     }
 
     #[allow(clippy::too_many_arguments, clippy::too_many_lines)] // Keep one visible model/Tool durability loop over the exact claim authorities.
@@ -333,6 +352,7 @@ impl Driver {
         explicit_selection: Option<rsi_agent_session_protocol::ModelSelection>,
         turn_policy: ResolvedTurnPolicy,
         mut request: ModelRequest,
+        mut max_tokens: bool,
         stop: &CancellationToken,
     ) -> std::result::Result<(), DriveFailure> {
         let mut retry_attempt = 0_u8;
@@ -348,25 +368,37 @@ impl Driver {
             if cancellation.is_cancelled() {
                 return Err(DriveFailure::Turn(TurnOutcome::Cancelled));
             }
-            if retry_attempt == 0
-                && self
-                    .turns
-                    .claim_pending_step_messages(claim)
-                    .await
-                    .map_err(fatal)?
-                    > 0
-            {
-                self.sync_fold(claim, fold).await?;
-            }
             if retry_attempt == 0 {
-                if request == ModelRequest::WaivedToolFollowup
+                self.claim_step_messages(claim, fold).await?;
+                if request == ModelRequest::Stopping
                     && !fold.has_pending_tool_inputs()
                     && fold
                         .claimed_inputs(claim.turn_id())
                         .map_err(fatal)?
                         .is_empty()
                 {
-                    return Err(DriveFailure::Turn(TurnOutcome::Completed));
+                    let continued = if let Some(application) =
+                        request_composition.request_input_preparer()
+                    {
+                        let token = cancellation.child_token();
+                        let _guard = token.clone().drop_guard();
+                        tokio::select! { biased;
+                            () = stop.cancelled() => return Err(DriveFailure::Stopped),
+                            () = cancellation.cancelled() => return Err(DriveFailure::Turn(TurnOutcome::Cancelled)),
+                            result = application.turn_stopping(token) =>
+                                result.map_err(|error| failed("application.turn_stopping", bounded(&error.to_string())))?,
+                        }
+                        self.claim_step_messages(claim, fold).await?
+                    } else {
+                        false
+                    };
+                    if !continued {
+                        return Err(DriveFailure::Turn(if max_tokens {
+                            TurnOutcome::MaxTokens
+                        } else {
+                            TurnOutcome::Completed
+                        }));
+                    }
                 }
                 (request_composition, selection, selected_tools) = self
                     .before_step(
@@ -378,7 +410,13 @@ impl Driver {
                         &cancellation,
                         stop,
                     )
-                    .await?;
+                    .await
+                    .map_err(|failure| match failure {
+                        DriveFailure::Turn(TurnOutcome::Completed) if max_tokens => {
+                            DriveFailure::Turn(TurnOutcome::MaxTokens)
+                        }
+                        other => other,
+                    })?;
             }
             let composition = &request_composition;
             request = ModelRequest::ToolFollowup;
@@ -405,7 +443,12 @@ impl Driver {
                     retry_attempt = retry_attempt.saturating_add(1);
                     continue;
                 }
-                ModelAttempt::Incomplete => return Err(DriveFailure::Turn(TurnOutcome::MaxTokens)),
+                ModelAttempt::Incomplete => {
+                    max_tokens = true;
+                    retry_attempt = 0;
+                    request = ModelRequest::Stopping;
+                    continue;
+                }
                 ModelAttempt::Output(effect_id, output) => (effect_id, *output),
             };
             if cancellation.is_cancelled()
@@ -413,21 +456,14 @@ impl Driver {
             {
                 return Err(DriveFailure::Turn(TurnOutcome::Cancelled));
             }
-            if self
-                .turns
-                .claim_pending_step_messages(claim)
-                .await
-                .map_err(fatal)?
-                > 0
-            {
-                self.sync_fold(claim, fold).await?;
-                retry_attempt = 0;
+            retry_attempt = 0;
+            if !matches!(output.finish_reason, FinishReason::ToolCalls) {
+                request = ModelRequest::Stopping;
                 continue;
             }
-            if !matches!(output.finish_reason, FinishReason::ToolCalls) {
-                return Err(DriveFailure::Turn(TurnOutcome::Completed));
+            if self.claim_step_messages(claim, fold).await? {
+                continue;
             }
-            retry_attempt = 0;
             let calls = output
                 .content
                 .into_iter()
@@ -535,7 +571,7 @@ impl Driver {
                 matches!(fact.body(),
                 SessionFactBody::ToolResult { result, .. } if result.concludes_turn)
             }) {
-                request = ModelRequest::WaivedToolFollowup;
+                request = ModelRequest::Stopping;
             }
         }
     }
