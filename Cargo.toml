@@ -88,6 +88,13 @@ url = "2.5"
 [profile.dev.package.sha2]
 opt-level = 3
 
+# Large plugin trees spend most of their verification time walking and reading files.
+[profile.dev.package.rsi-packages]
+opt-level = 2
+
+[profile.dev.package.rsi-files-native-fs]
+opt-level = 2
+
 [workspace.lints.rust]
 unsafe_code = "deny"
 missing_debug_implementations = "warn"
