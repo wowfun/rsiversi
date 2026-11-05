@@ -232,22 +232,34 @@ fn canonicalize(mut value: Value) -> Value {
 }
 
 fn encoded_len(value: &impl Serialize) -> Result<usize> {
-    struct Counter(usize);
+    bounded_json_len(
+        value,
+        MAXIMUM_TOOL_OUTPUT_DECLARATION_BYTES,
+        "tool output declaration",
+    )
+}
+
+pub(super) fn bounded_json_len(
+    value: &impl Serialize,
+    maximum: usize,
+    kind: &str,
+) -> Result<usize> {
+    struct Counter(usize, usize);
     impl Write for Counter {
         fn write(&mut self, bytes: &[u8]) -> std::io::Result<usize> {
             self.0 = self
                 .0
                 .checked_add(bytes.len())
-                .filter(|length| *length <= MAXIMUM_TOOL_OUTPUT_DECLARATION_BYTES)
-                .ok_or_else(|| std::io::Error::other("tool output declaration too large"))?;
+                .filter(|length| *length <= self.1)
+                .ok_or_else(|| std::io::Error::other("encoded value exceeds byte limit"))?;
             Ok(bytes.len())
         }
         fn flush(&mut self) -> std::io::Result<()> {
             Ok(())
         }
     }
-    let mut counter = Counter(0);
+    let mut counter = Counter(0, maximum);
     serde_json::to_writer(&mut counter, value)
-        .map_err(|_| invalid("tool output declaration exceeds 64 KiB"))?;
+        .map_err(|_| invalid(&format!("{kind} exceeds its byte bound")))?;
     Ok(counter.0)
 }

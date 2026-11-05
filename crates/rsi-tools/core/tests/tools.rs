@@ -1283,6 +1283,69 @@ async fn precancelled_invocation_never_polls_an_immediately_successful_tool() {
 }
 
 #[tokio::test]
+async fn caller_drop_during_native_post_hook_retains_only_the_final_result() {
+    #[derive(Debug, Default, Clone)]
+    struct Render {
+        entered: Arc<Notify>,
+        release: Arc<Notify>,
+        calls: Arc<AtomicUsize>,
+    }
+    #[async_trait]
+    impl rsi_tools_protocol::AroundTool for Render {
+        async fn execute(
+            self: Box<Self>,
+            body: rsi_tools_protocol::ToolBody<'_>,
+        ) -> Result<ToolResult> {
+            self.calls.fetch_add(1, Ordering::SeqCst);
+            let mut result = body.run().await?;
+            self.entered.notify_one();
+            self.release.notified().await;
+            result.content.push(rsi_tools_protocol::ToolContent::Text {
+                text: "rendered".into(),
+            });
+            Ok(result)
+        }
+    }
+    let (fiber, provider) = activated().await;
+    let tools = seal(&provider, vec![echo_registration("echo")]);
+    let call = ToolCall {
+        id: "call".into(),
+        name: "echo".into(),
+        arguments: json!({"n":9_007_199_254_740_993_u64}),
+    };
+    let mut prepared = tools.prepare("effect", call).unwrap();
+    let identity = prepared.identity().clone();
+    let hook = Render::default();
+    let start = tool_start(CancellationToken::new());
+    *prepared.native_plan().unwrap().continuation = Some(Box::new(hook.clone()));
+    let waiter = tokio::spawn(async move { prepared.start(start).await });
+    hook.entered.notified().await;
+    waiter.abort();
+    assert!(waiter.await.unwrap_err().is_cancelled());
+    assert_eq!(tools.query(&identity).unwrap(), RetainedToolResult::Pending);
+    hook.release.notify_one();
+    let retained = tools
+        .wait(&identity, CancellationToken::new())
+        .await
+        .unwrap();
+    assert_eq!(tools.query(&identity).unwrap(), retained);
+    let RetainedToolResult::Returned(result) = retained else {
+        panic!("expected rendered result");
+    };
+    assert_eq!(result.value, json!({"n":9_007_199_254_740_993_u64}));
+    assert_eq!(
+        result.content,
+        vec![rsi_tools_protocol::ToolContent::Text {
+            text: "rendered".into()
+        }]
+    );
+    assert_eq!(hook.calls.load(Ordering::SeqCst), 1);
+    tools.commit(&identity).unwrap();
+    drop((tools, provider));
+    assert!(fiber.dispose().await.is_clean());
+}
+
+#[tokio::test]
 async fn cancellation_and_dropped_waiters_do_not_abandon_tool_settlement() {
     let (fiber, provider) = activated().await;
     let entered = Arc::new(Notify::new());
@@ -1630,5 +1693,93 @@ async fn preparation_timeout_waits_for_callback_settlement_without_holding_regis
     body.release.notify_one();
     assert_eq!(work.await.unwrap().unwrap_err(), ToolError::Timeout);
     drop((body, tools, provider));
+    assert!(fiber.dispose().await.is_clean());
+}
+
+#[tokio::test]
+async fn shutdown_waits_for_explicit_preparation_and_caller_drop_releases_it() {
+    for abandon in [false, true] {
+        let (fiber, provider) = activated().await;
+        let body = Arc::new(PreparingTool::default());
+        let tools = seal(
+            &provider,
+            vec![ToolRegistration {
+                output: None,
+                definition: ToolDefinition::new("prepare", "", json!({})).unwrap(),
+                timeout: rsi_tools_protocol::ToolTimeoutPolicy::Execution { timeout_ms: 30_000 },
+                executor: body.clone(),
+            }],
+        );
+        let mut prepared = tools
+            .prepare(
+                "preparing",
+                ToolCall {
+                    id: "preparing".into(),
+                    name: "prepare".into(),
+                    arguments: json!({}),
+                },
+            )
+            .unwrap();
+        let work = tokio::spawn(async move {
+            prepared
+                .prepare_execution(tool_start(CancellationToken::new()))
+                .await
+        });
+        body.entered.notified().await;
+        let cleanup = tokio::spawn(async move { fiber.dispose().await });
+        body.cancelling.notified().await;
+        assert!(!cleanup.is_finished());
+        if abandon {
+            work.abort();
+            assert!(work.await.unwrap_err().is_cancelled());
+        } else {
+            body.release.notify_one();
+            assert_eq!(work.await.unwrap().unwrap_err(), ToolError::Cancelled);
+        }
+        assert!(cleanup.await.unwrap().is_clean());
+    }
+}
+
+#[derive(Debug)]
+struct ArgumentAllocation(AtomicUsize);
+#[async_trait]
+impl ToolExecutor for ArgumentAllocation {
+    async fn execute(&self, arguments: Value, _: ToolExecution) -> Result<ToolResult> {
+        assert_eq!(
+            arguments["large"].as_str().unwrap().as_ptr() as usize,
+            self.0.load(Ordering::SeqCst)
+        );
+        ToolResult::new(json!({}), vec![], false)
+    }
+}
+#[tokio::test]
+async fn consumed_call_moves_its_large_argument_allocation_into_executor() {
+    let (fiber, provider) = activated().await;
+    let value = Value::String("x".repeat(256 * 1024));
+    let pointer = value.as_str().unwrap().as_ptr() as usize;
+    let tools = seal(
+        &provider,
+        vec![ToolRegistration {
+            output: None,
+            definition: ToolDefinition::new("move", "", json!({})).unwrap(),
+            timeout: rsi_tools_protocol::ToolTimeoutPolicy::Execution { timeout_ms: 30_000 },
+            executor: Arc::new(ArgumentAllocation(AtomicUsize::new(pointer))),
+        }],
+    );
+    let prepared = tools
+        .prepare(
+            "move",
+            ToolCall {
+                id: "move".into(),
+                name: "move".into(),
+                arguments: Value::Object([("large".into(), value)].into_iter().collect()),
+            },
+        )
+        .unwrap();
+    prepared
+        .start(tool_start(CancellationToken::new()))
+        .await
+        .unwrap();
+    drop((tools, provider));
     assert!(fiber.dispose().await.is_clean());
 }

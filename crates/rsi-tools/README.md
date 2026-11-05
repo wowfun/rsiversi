@@ -1,5 +1,10 @@
 # rsi-tools
 
+A result can carry ordered text context messages for a later model Step.
+Each has a source-defined message ID, source metadata and ordered text blocks.
+They are separate from the tool's rendered output and share its retained-result
+identity. Empty context lists are omitted from the wire.
+
 `rsi-tools` owns trusted process-local Tool catalogs and execution. The
 [`rsi-tools-protocol`](protocol/README.md) package defines bounded schemas,
 calls, canonical values, model-facing text/image content, and the catalog
@@ -15,13 +20,22 @@ generation. Registration leases can withdraw only from an open stage; dropping
 or retiring one after sealing cannot mutate the published catalog or its calls.
 Dropping an unsealed stage publishes nothing.
 
+A sealed runtime can expose its exact registration owner for a name. A caller
+can join two sealed catalogs for one request while keeping each invocation's
+preparation, retained result and commit with its original owner.
+
 Invocation admission and shutdown are provider-wide rather than multiplied by
 the number of immutable catalogs. One admission remains owned by an active Tool
 body until it truly settles, then moves with its retained result until commit or
 catalog withdrawal. A runtime generation pins exact executors for admitted
 calls; dropping the caller waiter cannot abandon their eventual result.
 Catalog lifetime is owned by its Agent generation, while provider shutdown
-cancels and joins all admitted work under the same bound. Contributor leases do
+cancels and joins all admitted work under the same bound. Running explicit
+preparation callbacks count toward shutdown
+until their future and review settle or the caller drops them. A completed plan
+retains admission while awaiting approval but does not delay shutdown. Catalogs
+share immutable registration entries; starting a consumed plan moves its call
+payload into execution without cloning it under the provider lock. Contributor leases do
 not own call cancellation or settlement after publication. Dropping the
 immutable catalog cancels its admitted calls and immediately reclaims settled
 results, but a non-cooperative active body keeps its admission until true

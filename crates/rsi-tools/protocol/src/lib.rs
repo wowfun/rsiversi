@@ -678,6 +678,92 @@ pub struct ToolResult {
     pub is_error: bool,
     /// Truthful process confinement selected through [`ToolExecution::confine`].
     pub enforcement: Vec<EnforcementStamp>,
+    /// Ordered plugin context for the next model Step, independent of visible tool output.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub additional_contexts: Vec<ToolContextMessage>,
+}
+
+/// One plugin-authored message. Metadata describes its source without granting input authority.
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct ToolContextMessage {
+    /// Source message identity.
+    pub id: String,
+    /// Original plugin-supplied provenance.
+    pub source: Value,
+    /// Ordered model-visible text blocks.
+    pub text: Vec<String>,
+}
+impl ToolContextMessage {
+    /// Validates the ordered messages returned by a Tool body or its policy.
+    pub fn validate_batch(messages: &[Self]) -> Result<()> {
+        if messages.is_empty() {
+            return Ok(());
+        }
+        if messages.len() > 64 {
+            return Err(ToolError::InvalidInput(
+                "too many tool context messages".into(),
+            ));
+        }
+        output::bounded_json_len(&messages, 64 * 1024, "tool contexts")?;
+        messages.iter().try_for_each(Self::validate)
+    }
+    /// Validates the original attribution also carried by an entered message.
+    pub fn validate_source(id: &str, source: &Value) -> Result<()> {
+        validate_safe_text(
+            "tool context message ID",
+            id,
+            MAXIMUM_TOOL_IDENTIFIER_BYTES,
+            false,
+        )?;
+        validate_json("tool context source", source)
+    }
+    /// Validates a decoded message before retaining it in a result or checkpoint.
+    pub fn validate(&self) -> Result<()> {
+        Self::validate_source(&self.id, &self.source)?;
+        output::bounded_json_len(self, 64 * 1024, "tool context")?;
+        if self.text.is_empty()
+            || self.text.len() > MAXIMUM_TOOL_CONTENT_ITEMS
+            || self.text.iter().all(|s| s.trim().is_empty())
+        {
+            return Err(ToolError::InvalidInput(
+                "invalid tool context text blocks".into(),
+            ));
+        }
+        for text in &self.text {
+            validate_safe_text("tool context text", text, 64 * 1024, true)?;
+        }
+        Ok(())
+    }
+}
+
+/// Application-returned output. Native execution evidence belongs to the tool owner.
+#[derive(Debug, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct ToolOutput {
+    /// Canonical result value.
+    pub value: Value,
+    /// Model-visible tool response.
+    pub content: Vec<ToolContent>,
+    /// Whether the tool reported failure.
+    pub is_error: bool,
+    /// Ordered deferred inputs authored by tool hooks.
+    #[serde(default)]
+    pub additional_contexts: Vec<ToolContextMessage>,
+}
+impl ToolOutput {
+    /// Validates the output and constructs a result with no process enforcement stamps.
+    pub fn into_result(self) -> Result<ToolResult> {
+        let result = ToolResult {
+            value: self.value,
+            content: self.content,
+            is_error: self.is_error,
+            enforcement: vec![],
+            additional_contexts: self.additional_contexts,
+        };
+        result.validate()?;
+        Ok(result)
+    }
 }
 
 impl<'de> Deserialize<'de> for ToolResult {
@@ -692,6 +778,8 @@ impl<'de> Deserialize<'de> for ToolResult {
             content: Vec<ToolContent>,
             is_error: bool,
             enforcement: Vec<EnforcementStamp>,
+            #[serde(default)]
+            additional_contexts: Vec<ToolContextMessage>,
         }
 
         let wire = WireResult::deserialize(deserializer)?;
@@ -700,6 +788,7 @@ impl<'de> Deserialize<'de> for ToolResult {
             content: wire.content,
             is_error: wire.is_error,
             enforcement: wire.enforcement,
+            additional_contexts: wire.additional_contexts,
         };
         result
             .validate()
@@ -716,6 +805,7 @@ impl ToolResult {
             content,
             is_error,
             enforcement: Vec::new(),
+            additional_contexts: Vec::new(),
         };
         result.validate()?;
         Ok(result)
@@ -723,6 +813,7 @@ impl ToolResult {
 
     /// Revalidates a result decoded from a durable boundary.
     pub fn validate(&self) -> Result<()> {
+        ToolContextMessage::validate_batch(&self.additional_contexts)?;
         validate_json("tool canonical result", &self.value)?;
         if self.content.len() > MAXIMUM_TOOL_CONTENT_ITEMS {
             return Err(ToolError::InvalidInput(
@@ -775,6 +866,106 @@ pub trait ToolExecutor: fmt::Debug + Send + Sync + 'static {
     }
     /// Executes one validated bounded argument value.
     async fn execute(&self, arguments: Value, execution: ToolExecution) -> Result<ToolResult>;
+}
+
+/// One already-prepared invocation. Consuming it enters exactly the admitted body.
+#[derive(Debug)]
+pub struct ToolBody<'a> {
+    arguments: Value,
+    execution: ToolExecution,
+    executor: &'a dyn ToolExecutor,
+}
+
+impl<'a> ToolBody<'a> {
+    /// Binds the immutable native call and its exact prepared execution.
+    pub fn new(executor: &'a dyn ToolExecutor, arguments: Value, execution: ToolExecution) -> Self {
+        Self {
+            arguments,
+            execution,
+            executor,
+        }
+    }
+    /// Scoped authority and cancellation for this invocation.
+    #[must_use]
+    pub fn execution(&self) -> &ToolExecution {
+        &self.execution
+    }
+    /// Executes the prepared body once.
+    pub async fn run(self) -> Result<ToolResult> {
+        self.executor.execute(self.arguments, self.execution).await
+    }
+}
+
+/// Application middleware around a native body inside the Tool owner's retention scope.
+#[async_trait]
+pub trait AroundTool: fmt::Debug + Send + Sync + 'static {
+    /// Resolves if the continuation is withdrawn during native human review.
+    async fn withdrawn(&mut self) {
+        std::future::pending::<()>().await;
+    }
+    /// Runs once for this invocation, optionally consuming the supplied body.
+    async fn execute(self: Box<Self>, body: ToolBody<'_>) -> Result<ToolResult>;
+}
+
+/// The exact native registration and its owned, single-use continuation slot.
+#[derive(Debug)]
+pub struct NativeToolPlan<'a> {
+    /// Immutable call fixed by the provider.
+    pub call: &'a ToolCall,
+    /// Successful output contract of this registration.
+    pub output: Option<&'a ToolOutputDeclaration>,
+    /// Filled after policy and any human approval have completed.
+    pub continuation: &'a mut Option<Box<dyn AroundTool>>,
+}
+
+/// Captured application policy on a native call outside the execution timeout.
+#[async_trait]
+pub trait ToolMiddleware: fmt::Debug + Send + Sync + 'static {
+    /// Runs the invocation's policy once, stopping at a decision or user review.
+    async fn prepare(
+        self: Arc<Self>,
+        call: &ToolCall,
+        output: Option<&ToolOutputDeclaration>,
+        stop: &CancellationToken,
+    ) -> Result<ToolGate>;
+}
+
+/// Native policy can share one human review with a prepared application call.
+#[derive(Debug)]
+pub enum ToolGate {
+    /// The application reached its decision without requesting a human.
+    Decided(ToolDecision),
+    /// This same call is suspended at the application's human approval.
+    Ask {
+        /// Human-facing explanation from the policy.
+        reason: String,
+        /// One response resumes the original policy.
+        pending: Box<dyn PendingToolApproval>,
+    },
+}
+
+/// Terminal preparation decision before publishing a Tool intent.
+#[derive(Debug)]
+pub enum ToolDecision {
+    /// The owner may settle the call under the supplied continuation.
+    Ready(Box<dyn AroundTool>),
+    /// The body was refused before start.
+    Denied {
+        /// Human- and model-visible explanation.
+        reason: String,
+        /// Ordered inputs supplied by the completed policy.
+        additional_contexts: Vec<ToolContextMessage>,
+    },
+}
+
+/// A live human review belonging to one native invocation.
+#[async_trait]
+pub trait PendingToolApproval: fmt::Debug + Send + 'static {
+    /// Resolves when this application's pending question ceases to exist.
+    async fn withdrawn(&mut self);
+    /// Delivers the decision and waits for the application's final preparation.
+    async fn answer(self: Box<Self>, allow: bool, stop: &CancellationToken)
+    -> Result<ToolDecision>;
 }
 
 /// Owner-declared cooperative timeout policy.
@@ -989,6 +1180,10 @@ pub enum RetainedToolResult {
 /// One Tool call pinned to the registration generation resolved at prepare.
 #[async_trait]
 pub trait PreparedToolCall: fmt::Debug + Send + 'static {
+    /// Exposes the native continuation when this registration supports wrapping its body.
+    fn native_plan(&mut self) -> Option<NativeToolPlan<'_>> {
+        None
+    }
     /// Returns the immutable exact retained-result identity.
     fn identity(&self) -> &ToolResultIdentity;
     /// Fixes execution authority and an optional opaque process before requesting Approval.
@@ -1069,6 +1264,10 @@ pub trait ToolCatalogProvider: fmt::Debug + Send + Sync + 'static {
 /// Immutable exact-name Tool execution authority.
 #[async_trait]
 pub trait ToolRuntime: fmt::Debug + Send + Sync + 'static {
+    /// Exact native result owner when the runtime publishes registration bindings.
+    fn registration_owner(&self, _name: &str) -> Option<&str> {
+        None
+    }
     /// Returns ordered model-visible definitions of the active tools.
     fn definitions(&self) -> Vec<ToolDefinition> {
         let mut definitions = Vec::new();
@@ -1213,7 +1412,11 @@ pub fn validate_identifier(kind: &str, value: &str) -> Result<()> {
     Ok(())
 }
 
-fn validate_model_tool_name(value: &str) -> Result<()> {
+/// Validates the exact bounded model-visible name grammar shared by definitions and calls.
+///
+/// # Errors
+/// Rejects an empty, oversized or malformed Tool name.
+pub fn validate_model_tool_name(value: &str) -> Result<()> {
     if value.is_empty()
         || value.len() > MAXIMUM_TOOL_IDENTIFIER_BYTES
         || !value.bytes().enumerate().all(|(index, byte)| {

@@ -1,5 +1,11 @@
 # rsi-tools
 
+A caller can attach an around hook to a started invocation. The hook receives
+the prepared body's immutable name and arguments and can consume its continuation
+once. Preparation, process approval, timeout, quiescent cancellation, enforcement
+and retention remain with the native owner. Both the waiter and recovery see the
+hook's final result, including a result returned without entering the body.
+
 This ordinary plugin owns one process-wide Tool catalog provider. A caller
 opens a bounded unpublished stage, contributes exact-name definitions through
 its registrar, and consumes the stage to seal one immutable runtime. Duplicate
@@ -106,3 +112,10 @@ cancellation. Start transfers that same permit into retained-result ownership.
 Standalone starts prepare inside the admitted settlement task, preserving a
 queryable failure even for pre-cancelled invocations. Preparation metadata and
 plans are process-local and cannot replay a retained invocation.
+Prepared native calls own their optional one-shot middleware. Dropping the
+preparation releases it even if the call waited for a human or another member
+of its parallel batch. Started calls move it into the retained Tool body.
+A suspended application review is withdrawn when its invocation ends. Its
+owner can observe that lifetime on the existing connection throughout the
+native human wait. Preparation and answer delivery have the policy-stage
+deadline. Time spent waiting for a human is outside that deadline.

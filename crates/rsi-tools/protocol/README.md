@@ -14,6 +14,9 @@ value survives the canonical `serde_json::Value` representation. Serializable
 calls and execution policies revalidate those invariants during
 deserialization rather than relying on a later runtime consumer.
 
+`validate_model_tool_name` exposes the same name admission used by definitions
+and calls so narrower durable authorities do not maintain a second grammar.
+
 `bounded_json_fragment_page` owns UTF-8 fragment selection under a 1–16 KiB
 complete presentation budget, including the caller's label and encoded envelope.
 Callers retain exact-result/revision authentication and envelope metadata; the

@@ -83,6 +83,7 @@ struct ProviderInner {
     active_catalogs: usize,
     retained: BTreeMap<ToolResultIdentity, RetainedEntry>,
     active: BTreeSet<ToolResultIdentity>,
+    active_preparations: usize,
     active_by_owner: BTreeMap<String, usize>,
     abandoned_owners: BTreeSet<String>,
 }
@@ -107,6 +108,15 @@ struct ActiveInvocation {
     owner_id: String,
     admission: Option<OwnedSemaphorePermit>,
     finished: bool,
+}
+
+struct ActivePreparation(Arc<ProviderState>);
+
+impl Drop for ActivePreparation {
+    fn drop(&mut self) {
+        lock_provider(&self.0).active_preparations -= 1;
+        self.0.settled.notify_waiters();
+    }
 }
 
 impl ActiveInvocation {
@@ -175,6 +185,7 @@ impl Default for ProviderInner {
             active_catalogs: 0,
             retained: BTreeMap::new(),
             active: BTreeSet::new(),
+            active_preparations: 0,
             active_by_owner: BTreeMap::new(),
             abandoned_owners: BTreeSet::new(),
         }
@@ -218,7 +229,7 @@ struct StageInner {
     status: StageStatus,
     life: Option<Arc<CatalogLife>>,
     next_registration: u64,
-    definitions: BTreeMap<String, Entry>,
+    definitions: BTreeMap<String, Arc<Entry>>,
 }
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -228,7 +239,7 @@ enum StageStatus {
     Abandoned,
 }
 
-#[derive(Clone, Debug)]
+#[derive(Debug)]
 struct Entry {
     registration: u64,
     owner_id: String,
@@ -246,7 +257,7 @@ struct BatchMember {
 struct Registry {
     provider: Arc<ProviderState>,
     _life: Arc<CatalogLife>,
-    definitions: BTreeMap<String, Entry>,
+    definitions: BTreeMap<String, Arc<Entry>>,
 }
 
 impl Drop for Registry {
@@ -444,7 +455,7 @@ impl ToolRegistrar for Registrar {
                 retirement,
                 definition,
             };
-            inner.definitions.insert(name.clone(), entry);
+            inner.definitions.insert(name.clone(), Arc::new(entry));
             members.push(BatchMember { name, registration });
         }
         debug_assert_eq!(inner.next_registration, final_registration);
@@ -493,6 +504,11 @@ impl ToolRuntime for Registry {
         for entry in self.definitions.values() {
             visitor(&entry.definition.definition);
         }
+    }
+    fn registration_owner(&self, name: &str) -> Option<&str> {
+        self.definitions
+            .get(name)
+            .map(|entry| entry.owner_id.as_str())
     }
 
     fn scheduling(&self, name: &str) -> Option<rsi_tools_protocol::ToolScheduling> {
@@ -549,6 +565,7 @@ impl ToolRuntime for Registry {
             request_sha256,
         )?;
         Ok(Box::new(Prepared {
+            middleware: None,
             preparation_admission: None,
             execution: None,
             provider: Arc::clone(&self.provider),
@@ -632,16 +649,24 @@ impl Registry {
 
 #[derive(Debug)]
 struct Prepared {
+    middleware: Option<Box<dyn rsi_tools_protocol::AroundTool>>,
     preparation_admission: Option<OwnedSemaphorePermit>,
     execution: Option<rsi_tools_protocol::ToolPreparation>,
     provider: Arc<ProviderState>,
-    entry: Entry,
+    entry: Arc<Entry>,
     call: ToolCall,
     identity: ToolResultIdentity,
 }
 
 #[async_trait]
 impl PreparedToolCall for Prepared {
+    fn native_plan(&mut self) -> Option<rsi_tools_protocol::NativeToolPlan<'_>> {
+        Some(rsi_tools_protocol::NativeToolPlan {
+            call: &self.call,
+            output: self.entry.definition.output.as_ref(),
+            continuation: &mut self.middleware,
+        })
+    }
     fn identity(&self) -> &ToolResultIdentity {
         &self.identity
     }
@@ -655,35 +680,7 @@ impl PreparedToolCall for Prepared {
                 "Tool execution was already prepared".into(),
             ));
         }
-        {
-            let inner = lock_provider(&self.provider);
-            if !inner.accepting {
-                return Err(ToolError::ShuttingDown);
-            }
-            if self.entry.retirement.is_cancelled() {
-                return Err(ToolError::Withdrawn(self.call.name.clone()));
-            }
-        }
-        let admission = self
-            .provider
-            .admission
-            .clone()
-            .try_acquire_owned()
-            .map_err(|_| ToolError::Capacity)?;
-        let prepared =
-            prepare_execution(&self.entry, &self.call, start, &self.provider.shutdown).await?;
-        let review = prepared.review()?;
-        self.execution = Some(prepared);
-        self.preparation_admission = Some(admission);
-        Ok(review)
-    }
-
-    async fn start(mut self: Box<Self>, start: ToolStart) -> Result<ToolResult> {
-        let preparation = self.execution.take();
-        if let Some(preparation) = &preparation {
-            preparation.validate_start(&start)?;
-        }
-        let receiver = {
+        let admission = {
             let mut inner = lock_provider(&self.provider);
             if !inner.accepting {
                 return Err(ToolError::ShuttingDown);
@@ -691,15 +688,61 @@ impl PreparedToolCall for Prepared {
             if self.entry.retirement.is_cancelled() {
                 return Err(ToolError::Withdrawn(self.call.name.clone()));
             }
-            if inner.retained.contains_key(&self.identity) {
+            let admission = self
+                .provider
+                .admission
+                .clone()
+                .try_acquire_owned()
+                .map_err(|_| ToolError::Capacity)?;
+            inner.active_preparations += 1;
+            admission
+        };
+        let running = ActivePreparation(Arc::clone(&self.provider));
+        let prepared =
+            prepare_execution(&self.entry, &self.call, start, &self.provider.shutdown).await?;
+        let review = prepared.review()?;
+        self.execution = Some(prepared);
+        self.preparation_admission = Some(admission);
+        drop(running);
+        Ok(review)
+    }
+
+    async fn start(self: Box<Self>, start: ToolStart) -> Result<ToolResult> {
+        let Prepared {
+            middleware,
+            preparation_admission,
+            execution: preparation,
+            provider,
+            entry,
+            call,
+            identity,
+        } = *self;
+        if let Some(preparation) = &preparation {
+            preparation.validate_start(&start)?;
+        }
+        let (sender, receiver) = oneshot::channel();
+        let shutdown = provider.shutdown.clone();
+        let pending_identity = identity.clone();
+        let active_identity = identity.clone();
+        let owner_id = identity.owner_id().to_owned();
+        let active_owner = owner_id.clone();
+        let active_provider = Arc::clone(&provider);
+        {
+            let mut inner = lock_provider(&provider);
+            if !inner.accepting {
+                return Err(ToolError::ShuttingDown);
+            }
+            if entry.retirement.is_cancelled() {
+                return Err(ToolError::Withdrawn(call.name.clone()));
+            }
+            if inner.retained.contains_key(&identity) {
                 return Err(ToolError::Execution(
                     "Tool invocation identity was already started".into(),
                 ));
             }
-            let admission = match self.preparation_admission.take() {
+            let admission = match preparation_admission {
                 Some(admission) => admission,
-                None => self
-                    .provider
+                None => provider
                     .admission
                     .clone()
                     .try_acquire_owned()
@@ -707,18 +750,11 @@ impl PreparedToolCall for Prepared {
             };
             inner
                 .retained
-                .insert(self.identity.clone(), RetainedEntry::Pending);
-            let (sender, receiver) = oneshot::channel();
-            let provider = Arc::clone(&self.provider);
-            let shutdown = self.provider.shutdown.clone();
-            let identity = self.identity.clone();
-            let entry = self.entry.clone();
-            let call = self.call.clone();
-            let owner_id = identity.owner_id().to_owned();
+                .insert(pending_identity, RetainedEntry::Pending);
             let active = ActiveInvocation {
-                provider,
-                identity: identity.clone(),
-                owner_id: owner_id.clone(),
+                provider: active_provider,
+                identity: active_identity,
+                owner_id: active_owner,
                 admission: Some(admission),
                 finished: false,
             };
@@ -726,7 +762,7 @@ impl PreparedToolCall for Prepared {
             *inner.active_by_owner.entry(owner_id).or_default() += 1;
             tokio::spawn(async move {
                 let mut active = active;
-                let result = settle(entry, call, start, shutdown, preparation).await;
+                let result = settle(entry, call, start, shutdown, preparation, middleware).await;
                 let retained = Arc::new(match &result {
                     Ok(result) => RetainedToolResult::Returned(result.clone()),
                     Err(error) => RetainedToolResult::Failed(retained_failure(error)),
@@ -734,8 +770,7 @@ impl PreparedToolCall for Prepared {
                 active.finish(retained);
                 let _ = sender.send(result);
             });
-            receiver
-        };
+        }
         receiver.await.unwrap_or_else(|_| {
             Err(ToolError::Execution(
                 "Tool settlement task ended without an outcome".into(),
@@ -793,11 +828,12 @@ enum ToolCompletion {
 }
 
 async fn settle(
-    entry: Entry,
+    entry: Arc<Entry>,
     call: ToolCall,
     start: ToolStart,
     shutdown: CancellationToken,
     preparation: Option<rsi_tools_protocol::ToolPreparation>,
+    middleware: Option<Box<dyn rsi_tools_protocol::AroundTool>>,
 ) -> Result<ToolResult> {
     let cancellation = start.cancellation.clone();
     if cancellation.is_cancelled() || entry.retirement.is_cancelled() || shutdown.is_cancelled() {
@@ -816,8 +852,19 @@ async fn settle(
         extensions: start.extensions,
     };
     let (execution, enforcement) = preparation.start(call.id, execution_start)?;
-    let future = AssertUnwindSafe(entry.definition.executor.execute(call.arguments, execution))
-        .catch_unwind();
+    let future = AssertUnwindSafe(async {
+        let body = rsi_tools_protocol::ToolBody::new(
+            entry.definition.executor.as_ref(),
+            call.arguments,
+            execution,
+        );
+        if let Some(middleware) = middleware {
+            middleware.execute(body).await
+        } else {
+            body.run().await
+        }
+    })
+    .catch_unwind();
     tokio::pin!(future);
     let timeout = async {
         match entry.definition.timeout {
@@ -909,7 +956,11 @@ async fn shutdown(state: Arc<ProviderState>) -> std::result::Result<(), String> 
             let notified = state.settled.notified();
             tokio::pin!(notified);
             let _already_notified = notified.as_mut().enable();
-            if lock_provider(&state).active.is_empty() {
+            let settled = {
+                let inner = lock_provider(&state);
+                inner.active.is_empty() && inner.active_preparations == 0
+            };
+            if settled {
                 return;
             }
             notified.await;
@@ -919,9 +970,12 @@ async fn shutdown(state: Arc<ProviderState>) -> std::result::Result<(), String> 
         .await
         .is_err()
     {
-        let unresolved = lock_provider(&state).active.len();
+        let (unresolved, preparations) = {
+            let inner = lock_provider(&state);
+            (inner.active.len(), inner.active_preparations)
+        };
         return Err(format!(
-            "Tool provider shutdown timed out with unsettled work: {unresolved} invocation(s)"
+            "Tool provider shutdown timed out with unsettled work: {unresolved} invocation(s), {preparations} preparation(s)"
         ));
     }
     Ok(())

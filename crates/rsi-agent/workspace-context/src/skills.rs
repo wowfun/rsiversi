@@ -229,6 +229,7 @@ impl ToolExecutor for SkillTool {
                 content: vec![ToolContent::Text { text }],
                 value: json!({"version":1,"resource":resource}),
                 is_error: false,
+                additional_contexts: vec![],
                 enforcement: Vec::new(),
             }),
             Ok(_) => Err(ToolError::InvalidInput(
@@ -241,6 +242,7 @@ impl ToolExecutor for SkillTool {
                 }],
                 value: json!({"version":1,"error":"skill_unavailable"}),
                 is_error: true,
+                additional_contexts: vec![],
                 enforcement: Vec::new(),
             }),
         }

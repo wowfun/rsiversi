@@ -138,6 +138,7 @@ impl ToolExecutor for Executor {
                     content: vec![ToolContent::Text { text }],
                     value: serde_json::to_value(result).expect("retrieval result"),
                     is_error: false,
+                    additional_contexts: vec![],
                     enforcement: vec![],
                 }
             }
@@ -147,6 +148,7 @@ impl ToolExecutor for Executor {
                 }],
                 value: json!({"version":1,"operation":self.operation,"error":error}),
                 is_error: true,
+                additional_contexts: vec![],
                 enforcement: vec![],
             },
         })
