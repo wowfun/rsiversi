@@ -8,7 +8,7 @@ import {updateNotice} from '../notice-state.js'
 export interface Model { deployment: string; model: string }
 export type ExecutionLocation = {kind:'local'} | {kind:'ssh';target:string}
 export interface Coordinates {location:ExecutionLocation;path:string}
-export interface OrderMember {session:string;group:number;pinned:boolean;archived:boolean;last_activity_ms:string}
+export interface OrderMember {session:string;group:number;pinned:boolean;partition_revision?:string;archived:boolean;last_activity_ms:string}
 export interface ManualOrder {ticket:string;seed:{scope:{kind:'all'}|{kind:'coordinates';coordinates:Coordinates};host_epoch:string;metadata_revision:string;membership:{kind:'too_large'}|{kind:'available';groups:Coordinates[];members:OrderMember[]}};requested:string[];entries:(NavigationEntry|null)[]}
 export interface NavigationEntry { session: string; created_at_ms: string; last_activity_ms:string;location:ExecutionLocation; path: string; workspace: string | null; metadata: {title: string | null; archived: boolean; pinned: boolean} }
 export interface AttentionPosition {conversation:{kind:'native'|'external';id:string};epoch:string;sequence:string}

@@ -34,8 +34,8 @@ durable bounds; every mutation validates the projected document before writing.
 Cold validation seeds exact record-object byte and pin counts. An edit measures
 only the old and new entry and projects the revision envelope before publication.
 The immutable snapshot and atomic single-record durable format remain unchanged.
-The Session owner remains authoritative for existence and immutable Header data.
-Unpublished drafts cannot acquire Host navigation metadata.
+Navigation reads the authoritative immutable Header directly from the Session Store. It admits metadata writes using the execution location and protection grant of the actual caller.
+Unpublished drafts cannot acquire Host navigation metadata. An archive intent sets the archive flag and clears the pin in one revision. Restoring clears only the archive flag. Both preserve the title and return the caller-visible archives in archive order. Repeated intents leave the revision unchanged. A local operator may clear a stale archive after its Session is gone.
 
 Every endpoint forwards its actual origin. Each finite request captures admitted
 location visibility and retains the grant gates until settlement. Store queries
@@ -97,8 +97,7 @@ Workspace filters explicitly select all, one registered identity, or unregistere
 Headers. No matching row is not proof of exhaustion when a cursor remains.
 
 Pinned summaries use one bounded Store snapshot for at most 64 exact identities.
-Ordinary and pinned listing authorize immutable Headers and do not decode transcript bodies. Pins sort
-by activity and identity descending; absent activity retains explicit missing entries only when its immutable Header
+Ordinary and pinned listing authorize immutable Headers and do not decode transcript bodies. Available pins follow the order in which the user pinned them, newest first. Repeat pin requests keep their position. Records written before pin order was retained follow explicit pins in activity and identity order; absent activity retains explicit missing entries only when its immutable Header
 authorizes the caller. Metadata edits continue to check durable existence separately.
 
 Cache availability follows [Storage generation health and recovery](../../rsi-storage/core/README.md).
@@ -110,7 +109,7 @@ reads preserve the requested order and metadata revision; missing rows stay null
 
 Protected Session scope is read from its immutable Header before navigation,
 pinned summaries, complete manual membership or exact summaries are published.
-The actual caller must hold the product scope's View grant. Unknown scopes are
+The actual caller must hold the product scope's View grant. Unprotected Sessions require no revocation lease. Unknown scopes are
 hidden; revocation ends the finite read lease. Candidate indexes remain bounded
 and no transcript is read. This adds bounded Header authorization reads to the
 metadata query path; identities and stored titles alone never authorize a row.
@@ -133,3 +132,5 @@ cleanup receipt. Cleanup resolves the original completed Store selection and
 removes only those metadata records, preserving all unselected records. Failure
 leaves canonical purge complete and is retried through the same operation status;
 absence of this owner is reported as unavailable rather than successful cleanup.
+
+Native directory observers may sample the current metadata revision without reading membership. Rows and pin or archive state are always obtained through the authenticated read.

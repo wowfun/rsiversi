@@ -40,7 +40,7 @@ snapshot of all selected identities independently of ordinary continuation.
 Listings authorize immutable Headers before exposing summaries, coordinates or
 continuations. They do not decode transcript bodies. Unknown protected scopes
 are omitted; exact protected summaries are null without View authority. Pins apply the same
-query/archive/workspace filter and sort by activity then SessionId descending.
+query/archive/workspace filter. Order seeds carry the optional decimal `partition_revision` at which a Session entered its current pin or archive partition. Pins sort newest first, followed by unranked pins in descending activity and SessionId order. Archives sort oldest first, with unranked archives preceding them in SessionId order.
 Missing activity remains disabled only when the retained Header authorizes the
 read. Missing-Header metadata stays durable but is omitted from listings; it may
 be explicitly cleared under revision CAS.

@@ -88,6 +88,12 @@ struct Sources(
 );
 #[async_trait]
 impl SessionIngress for Sources {
+    async fn device_drafts(
+        &self,
+        _: &rsi_api_protocol::AuthenticatedDevice,
+    ) -> rsi_session_protocol::Result<Vec<rsi_session_protocol::DeviceDraft>> {
+        Ok(Vec::new())
+    }
     fn scoped(&self, origin: CallOrigin) -> Arc<dyn SessionService> {
         self.2.lock().unwrap().push(origin);
         Arc::new(self.clone())

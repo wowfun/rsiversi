@@ -139,11 +139,17 @@ fn remote_page_rejects_wrong_scope_order_and_impossible_activity() {
 fn pins_validate_machine_paths_and_partition_order() {
     let (mut page, filter, _) = fixture();
     page.entries[0].metadata.pinned = true;
+    let mut more_recent = page.entries[0].clone();
+    more_recent.session = SessionId::new("later-activity").unwrap();
+    more_recent.last_activity_ms = "3".into();
     let mut pins = PinnedPage {
         metadata_revision: "1".into(),
-        entries: vec![PinnedEntry::Available {
-            entry: page.entries.remove(0),
-        }],
+        entries: vec![
+            PinnedEntry::Available {
+                entry: page.entries.remove(0),
+            },
+            PinnedEntry::Available { entry: more_recent },
+        ],
     };
     validation::pins(&pins, &filter).unwrap();
     let PinnedEntry::Available { entry } = &mut pins.entries[0] else {

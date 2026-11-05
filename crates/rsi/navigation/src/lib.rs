@@ -16,7 +16,7 @@ use rsi_navigation_api::{
     MetadataReceipt, NavigationCursor, NavigationEntry, NavigationFilter, NavigationPage,
     PinnedEntry, PinnedPage, SessionMetadata, WorkspaceFilter, matches_query, revision,
 };
-use rsi_session_protocol::{SessionContract, SessionError, SessionService};
+use rsi_session_protocol::SessionError;
 use rsi_storage::{RecordObjectSize, encoded_entry_bytes};
 use rsi_storage_domain::storage_error;
 use rsi_storage_domain::{Domain, DomainFacilityContract, DomainSpec};
@@ -40,9 +40,29 @@ pub use attention::AttentionFactory;
 #[serde(deny_unknown_fields)]
 struct Document {
     revision: u64,
-    records: BTreeMap<SessionId, SessionMetadata>,
+    records: BTreeMap<SessionId, StoredMetadata>,
     #[serde(skip)]
     accounting: Option<MetadataSize>,
+}
+#[derive(Clone, Debug, Default, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+struct StoredMetadata {
+    #[serde(flatten)]
+    metadata: SessionMetadata,
+    #[serde(
+        default,
+        rename = "rank",
+        alias = "pin_revision",
+        skip_serializing_if = "Option::is_none"
+    )]
+    partition_revision: Option<u64>,
+}
+impl std::ops::Deref for StoredMetadata {
+    type Target = SessionMetadata;
+
+    fn deref(&self) -> &SessionMetadata {
+        &self.metadata
+    }
 }
 #[derive(Clone, Copy, Debug, Default)]
 struct MetadataSize {
@@ -68,7 +88,7 @@ impl MetadataSize {
         Ok(())
     }
 }
-fn metadata_bytes(id: &SessionId, metadata: &SessionMetadata) -> Result<usize> {
+fn metadata_bytes(id: &SessionId, metadata: &StoredMetadata) -> Result<usize> {
     encoded_entry_bytes(
         id.as_str(),
         serde_json::to_vec(metadata)
@@ -82,6 +102,14 @@ impl Document {
         let mut accounting = MetadataSize::default();
         for (id, record) in &self.records {
             record.validate()?;
+            if record
+                .partition_revision
+                .is_some_and(|r| !(record.pinned || record.archived) || r == 0 || r > self.revision)
+            {
+                return Err(ApiError::Invalid(
+                    "invalid stored partition revision".into(),
+                ));
+            }
             accounting.records = accounting
                 .records
                 .with_entry(None, metadata_bytes(id, record)?)
@@ -98,6 +126,22 @@ impl Document {
         }
         let mut accounting = self.accounting.expect("validated metadata accounting");
         let previous = self.records.get(session);
+        let revision = self
+            .revision
+            .checked_add(1)
+            .ok_or_else(|| ApiError::Invalid("navigation revision exhausted".into()))?;
+        let stored = StoredMetadata {
+            partition_revision: if metadata.pinned || metadata.archived {
+                previous
+                    .filter(|row| {
+                        row.pinned == metadata.pinned && row.archived == metadata.archived
+                    })
+                    .map_or(Some(revision), |row| row.partition_revision)
+            } else {
+                None
+            },
+            metadata: metadata.clone(),
+        };
         let previous_bytes = previous
             .map(|old| metadata_bytes(session, old))
             .transpose()?;
@@ -113,19 +157,15 @@ impl Document {
         } else {
             accounting.records = accounting
                 .records
-                .with_entry(previous_bytes, metadata_bytes(session, metadata)?)
+                .with_entry(previous_bytes, metadata_bytes(session, &stored)?)
                 .map_err(storage_error)?;
             accounting.pins += usize::from(metadata.pinned);
         }
-        let revision = self
-            .revision
-            .checked_add(1)
-            .ok_or_else(|| ApiError::Invalid("navigation revision exhausted".into()))?;
         accounting.check(revision)?;
         if remove {
             self.records.remove(session);
         } else {
-            self.records.insert(session.clone(), metadata.clone());
+            self.records.insert(session.clone(), stored);
         }
         self.revision = revision;
         self.accounting = Some(accounting);
@@ -136,11 +176,45 @@ impl Document {
 struct State {
     document: Arc<Document>,
 }
+/// Domain result for a pin intent on a published Session.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum PinOutcome {
+    /// The requested state is durable, including an idempotent retry.
+    Applied,
+    /// No published Session is available.
+    Unknown,
+    /// An archived Session cannot be pinned.
+    Archived,
+}
+/// Workspace archive operations on one Session.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum ArchiveIntent {
+    /// Admit activity providers only for a known, currently unarchived Session.
+    Inspect,
+    /// Archive and clear any pin atomically.
+    Archive,
+    /// Clear only the archive flag.
+    Restore,
+}
+/// Result at the Navigation owner's serialized revision.
+#[derive(Debug, Eq, PartialEq)]
+pub enum ArchiveOutcome {
+    /// No published Session is available to archive.
+    Unknown,
+    /// The caller may proceed to check activity before archiving.
+    Ready,
+    /// The visible archive set, in entry order, with the mutation outcome.
+    Applied {
+        /// True only when this intent changed the durable metadata.
+        changed: bool,
+        /// Caller-visible Sessions in archive entry order at this revision.
+        ids: Vec<SessionId>,
+    },
+}
 /// One Host's navigation owner; it never owns Session execution.
 #[derive(Debug)]
 pub struct Navigation {
     domain: Arc<dyn Domain>,
-    session: Arc<dyn SessionService>,
     resolver: Arc<dyn rsi_execution::ExecutionResolver>,
     store: Arc<dyn SessionStore>,
     protection: Option<Arc<dyn rsi_session_protocol::SessionProtection>>,
@@ -262,7 +336,7 @@ impl Navigation {
             let metadata = document
                 .records
                 .get(&row.session_id)
-                .unwrap_or(&default_metadata);
+                .map_or(&default_metadata, |row| &row.metadata);
             (filter.matches_archive(metadata.archived)
                 && !metadata.pinned
                 && matches_query(
@@ -278,22 +352,24 @@ impl Navigation {
             scanned += 1;
             cursor = Some(row.cursor());
             let id = &row.session_id;
-            let metadata = document.records.get(id).cloned().unwrap_or_default();
+            let metadata = document
+                .records
+                .get(id)
+                .map_or(&default_metadata, |row| &row.metadata);
             if !filter.matches_archive(metadata.archived) || metadata.pinned {
                 continue;
             }
             let path = row.coordinates.path();
-            if !matches_query(&query, id, &metadata, Some(path)) {
+            if !matches_query(&query, id, metadata, Some(path)) {
                 continue;
             }
             let workspace = workspace?;
             if !filter.workspace.matches(workspace.as_ref()) {
                 continue;
             }
-            let Some(lease) = self.scope_view(id, &origin).await? else {
+            if !self.retain_session_view(id, &origin, &mut leases).await? {
                 continue;
-            };
-            leases.push(lease);
+            }
             visible_cut = Some(row.cursor());
             entries.push(NavigationEntry {
                 session: id.clone(),
@@ -302,7 +378,7 @@ impl Navigation {
                 location: row.coordinates.location().clone(),
                 path: path.into(),
                 workspace,
-                metadata,
+                metadata: metadata.clone(),
             });
             if entries.len() == 64 {
                 break;
@@ -312,8 +388,10 @@ impl Navigation {
         let more = scanned < page.sessions.len() || page.has_more;
         let newest = match page.newest {
             Some(key) => {
-                if let Some(lease) = self.scope_view(&key.session_id, &origin).await? {
-                    leases.push(lease);
+                if self
+                    .retain_session_view(&key.session_id, &origin, &mut leases)
+                    .await?
+                {
                     Some(key)
                 } else {
                     None
@@ -426,11 +504,10 @@ impl Navigation {
                     .filter(|(_, metadata)| {
                         metadata.pinned && filter.matches_archive(metadata.archived)
                     })
-                    .map(|(id, metadata)| (id.clone(), metadata.clone()))
                     .collect::<Vec<_>>();
                 let ids = selected
                     .iter()
-                    .map(|(id, _)| id.clone())
+                    .map(|(id, _)| (*id).clone())
                     .collect::<Vec<_>>();
                 let rows = owner
                     .store
@@ -452,20 +529,20 @@ impl Navigation {
                             .map(|row| &row.coordinates)
                     },
                 ));
-                let mut rows = stream::iter(selected.iter().zip(&rows)).zip(lookups);
-                while let Some((((id, metadata), row), workspace)) = rows.next().await {
+                let mut rows = stream::iter(rows.iter().enumerate()).zip(lookups);
+                while let Some(((index, row), workspace)) = rows.next().await {
+                    let (id, metadata) = selected[index];
                     let Some(row) = row else {
-                        let Some(lease) = owner.scope_view(id, &origin).await? else {
+                        if !owner.retain_session_view(id, &origin, &mut leases).await? {
                             continue;
-                        };
-                        leases.push(lease);
+                        }
                         if matches!(origin, CallOrigin::Local)
                             && filter.workspace == WorkspaceFilter::All
                             && matches_query(&query, id, metadata, None)
                         {
                             missing.push(PinnedEntry::Missing {
                                 session: id.clone(),
-                                metadata: metadata.clone(),
+                                metadata: metadata.metadata.clone(),
                             });
                         }
                         continue;
@@ -473,10 +550,9 @@ impl Navigation {
                     if !visibility.locations().contains(row.coordinates.location()) {
                         continue;
                     }
-                    let Some(lease) = owner.scope_view(id, &origin).await? else {
+                    if !owner.retain_session_view(id, &origin, &mut leases).await? {
                         continue;
-                    };
-                    leases.push(lease);
+                    }
                     let path = row.coordinates.path();
                     if !matches_query(&query, id, metadata, Some(path)) {
                         continue;
@@ -486,8 +562,8 @@ impl Navigation {
                         continue;
                     }
                     available.push((
-                        row.last_activity_ms,
-                        id.clone(),
+                        (metadata.partition_revision, row.last_activity_ms),
+                        id,
                         PinnedEntry::Available {
                             entry: NavigationEntry {
                                 session: id.clone(),
@@ -496,7 +572,7 @@ impl Navigation {
                                 location: row.coordinates.location().clone(),
                                 path: path.into(),
                                 workspace,
-                                metadata: metadata.clone(),
+                                metadata: metadata.metadata.clone(),
                             },
                         },
                     ));
@@ -536,64 +612,199 @@ impl Navigation {
         self.run_mutation(move |owner| {
             Box::pin(async move {
                 let _permit = permit;
-                let mut document = owner
-                    .state
-                    .lock()
-                    .expect("navigation state poisoned")
-                    .document
-                    .as_ref()
-                    .clone();
+                let document = owner.document();
                 if document.revision != expected {
                     return Err(ApiError::Invalid(
                         "navigation revision conflict; refresh before editing".into(),
                     ));
                 }
-                let _admission = match owner.session.read_header(&session).await {
-                    Ok(header) => {
-                        let _lease = owner
-                            .scope_view(&session, &origin)
-                            .await?
-                            .ok_or(ApiError::Unauthorized)?;
-                        Some(
-                            owner
-                                .resolver
-                                .admit(&origin, header.coordinates().location())?,
-                        )
-                    }
-                    Err(SessionError::NotFound(_))
-                        if matches!(origin, CallOrigin::Local)
-                            && document.records.get(&session).is_some_and(|old| {
-                                metadata == SessionMetadata::default()
-                                    || old.pinned && !metadata.pinned
-                            }) =>
+                let _admission = match owner.metadata_header(&session).await? {
+                    Some(header) => Some(owner.admit_metadata(&header, &origin)?),
+                    None if matches!(origin, CallOrigin::Local)
+                        && document.records.get(&session).is_some_and(|old| {
+                            metadata == SessionMetadata::default() || old.pinned && !metadata.pinned
+                        }) =>
                     {
                         None
                     }
-                    Err(error) => return Err(session_error(error)),
+                    None => return Err(ApiError::Invalid("Session is not available".into())),
                 };
-                document.edit(&session, &metadata)?;
-                owner
-                    .domain
-                    .put(
-                        "metadata",
-                        serde_json::to_value(&document)
-                            .map_err(|_| ApiError::Invalid("invalid navigation document".into()))?,
-                    )
-                    .await
-                    .map_err(storage_error)?;
-                let receipt = MetadataReceipt {
-                    revision: document.revision.to_string(),
+                let updated = owner.write_metadata(&document, &session, &metadata).await?;
+                Ok(MetadataReceipt {
+                    revision: updated.revision.to_string(),
                     session,
                     metadata,
-                };
-                owner
-                    .state
-                    .lock()
-                    .expect("navigation state poisoned")
-                    .document = Arc::new(document);
-                Ok(receipt)
+                })
             })
         })
+    }
+    /// Applies one pin intent under the same writer as metadata replacement.
+    pub fn set_pin(
+        self: &Arc<Self>,
+        origin: CallOrigin,
+        session: SessionId,
+        pinned: bool,
+    ) -> Result<BoxFuture<'static, Result<PinOutcome>>> {
+        self.run_mutation(move |owner| {
+            Box::pin(async move {
+                let _permit = owner
+                    .writer
+                    .acquire()
+                    .await
+                    .map_err(|_| ApiError::ShuttingDown)?;
+                let document = owner.document();
+                let previous = document.records.get(&session);
+                if !pinned && !previous.is_some_and(|row| row.pinned) {
+                    return Ok(PinOutcome::Applied);
+                }
+                let Some(header) = owner.metadata_header(&session).await? else {
+                    return Ok(if pinned {
+                        PinOutcome::Unknown
+                    } else {
+                        PinOutcome::Applied
+                    });
+                };
+                let _admission = owner.admit_metadata(&header, &origin)?;
+                if pinned && previous.is_some_and(|row| row.archived) {
+                    return Ok(PinOutcome::Archived);
+                }
+                if previous.is_some_and(|row| row.pinned) != pinned {
+                    let mut metadata = previous.map(|row| row.metadata.clone()).unwrap_or_default();
+                    metadata.pinned = pinned;
+                    owner.write_metadata(&document, &session, &metadata).await?;
+                }
+                Ok(PinOutcome::Applied)
+            })
+        })
+    }
+
+    /// Inspects or updates a single Session's archive membership.
+    pub fn archive_intent(
+        self: &Arc<Self>,
+        origin: CallOrigin,
+        session: SessionId,
+        intent: ArchiveIntent,
+    ) -> Result<BoxFuture<'static, Result<ArchiveOutcome>>> {
+        if intent == ArchiveIntent::Inspect {
+            return self.run_read(move |owner| {
+                Box::pin(async move {
+                    let Some(header) = owner.metadata_header(&session).await? else {
+                        return Ok(ArchiveOutcome::Unknown);
+                    };
+                    let _admission = owner.admit_metadata(&header, &origin)?;
+                    let current = owner.document();
+                    if !current
+                        .records
+                        .get(&session)
+                        .is_some_and(|row| row.archived)
+                    {
+                        return Ok(ArchiveOutcome::Ready);
+                    }
+                    let visibility = owner.resolver.visibility(&origin)?;
+                    let ids = owner
+                        .visible_archives(&current, &origin, visibility)
+                        .await?;
+                    Ok(ArchiveOutcome::Applied {
+                        changed: false,
+                        ids,
+                    })
+                })
+            });
+        }
+        self.run_mutation(move |owner| {
+            Box::pin(async move {
+                let visibility = owner.resolver.visibility(&origin)?;
+                let (document, changed) = {
+                    let _permit = owner
+                        .writer
+                        .acquire()
+                        .await
+                        .map_err(|_| ApiError::ShuttingDown)?;
+                    let current = owner.document();
+                    let previous = current.records.get(&session);
+                    let archived = previous.is_some_and(|row| row.archived);
+                    let restore = intent == ArchiveIntent::Restore;
+                    let _admission = if archived || !restore {
+                        match owner.metadata_header(&session).await? {
+                            Some(header) => Some(owner.admit_metadata(&header, &origin)?),
+                            None if restore && matches!(origin, CallOrigin::Local) => None,
+                            None if !restore => return Ok(ArchiveOutcome::Unknown),
+                            None => {
+                                return Err(ApiError::Invalid("Session is not available".into()));
+                            }
+                        }
+                    } else {
+                        None
+                    };
+                    let desired = !restore;
+                    if archived == desired {
+                        (current, false)
+                    } else {
+                        let mut metadata =
+                            previous.map(|row| row.metadata.clone()).unwrap_or_default();
+                        metadata.archived = desired;
+                        metadata.pinned = false;
+                        (
+                            owner.write_metadata(&current, &session, &metadata).await?,
+                            true,
+                        )
+                    }
+                };
+                let ids = owner
+                    .visible_archives(&document, &origin, visibility)
+                    .await?;
+                Ok(ArchiveOutcome::Applied { changed, ids })
+            })
+        })
+    }
+
+    async fn visible_archives(
+        &self,
+        document: &Document,
+        origin: &CallOrigin,
+        visibility: rsi_execution::ExecutionVisibility,
+    ) -> Result<Vec<SessionId>> {
+        let mut visible = Vec::new();
+        let mut leases = Vec::new();
+        for (id, record) in document.records.iter().filter(|(_, row)| row.archived) {
+            let Some(header) = visible_header(self.store.header(id).await)? else {
+                continue;
+            };
+            if visibility
+                .locations()
+                .contains(header.coordinates().location())
+                && self.retain_header_view(&header, origin, &mut leases)?
+            {
+                visible.push((record.partition_revision, id.clone()));
+            }
+        }
+        finish_scope(origin, &leases)?;
+        visible.sort_unstable();
+        Ok(visible.into_iter().map(|(_, id)| id).collect())
+    }
+
+    async fn write_metadata(
+        &self,
+        current: &Document,
+        session: &SessionId,
+        metadata: &SessionMetadata,
+    ) -> Result<Arc<Document>> {
+        let mut document = current.clone();
+        document.edit(session, metadata)?;
+        self.domain
+            .put(
+                "metadata",
+                serde_json::to_value(&document)
+                    .map_err(|_| ApiError::Invalid("invalid navigation document".into()))?,
+            )
+            .await
+            .map_err(storage_error)?;
+        let document = Arc::new(document);
+        self.state
+            .lock()
+            .expect("navigation state poisoned")
+            .document = Arc::clone(&document);
+        Ok(document)
     }
     async fn close(&self) {
         self.admission.close(&self.writer).await;
@@ -730,7 +941,6 @@ impl PluginFactory for NavigationFactory {
         }
         Ok(PreparedActivation::new(config.clone())
             .requiring_local::<DomainFacilityContract>()
-            .requiring_local::<SessionContract>()
             .requiring_local::<rsi_execution::ExecutionResolverContract>()
             .requiring_local::<SessionStoreContract>()
             .requiring_local::<WorkspaceRegistryContract>()
@@ -762,7 +972,6 @@ impl PluginFactory for NavigationFactory {
         document.validate().map_err(activation)?;
         let owner = Arc::new(Navigation {
             domain,
-            session: plan.local::<SessionContract>()?,
             resolver: plan.local::<rsi_execution::ExecutionResolverContract>()?,
             store: plan.local::<SessionStoreContract>()?,
             cursors: Mutex::new(CursorBook::default()),
@@ -824,25 +1033,78 @@ fn activation(error: impl std::fmt::Display) -> MetaError {
 mod tests;
 
 impl Navigation {
-    async fn scope_view(
+    async fn metadata_header(
+        &self,
+        id: &SessionId,
+    ) -> Result<Option<rsi_agent_session_protocol::SessionHeader>> {
+        use rsi_agent_store_protocol::StoreError;
+        match self.store.header(id).await {
+            Err(StoreError::ReadCapacity | StoreError::ValidationBusy) => Err(ApiError::Capacity),
+            result => visible_header(result),
+        }
+    }
+
+    async fn retain_session_view(
         &self,
         id: &SessionId,
         origin: &CallOrigin,
-    ) -> Result<Option<tokio_util::sync::CancellationToken>> {
+        leases: &mut Vec<tokio_util::sync::CancellationToken>,
+    ) -> Result<bool> {
         let Some(header) = visible_header(self.store.header(id).await)? else {
-            return Ok(None);
+            return Ok(false);
         };
-        Ok(match header.protection() {
-            None => Some(tokio_util::sync::CancellationToken::new()),
-            Some(scope) => match self.protection.as_ref().map(|p| p.view(scope, origin)) {
-                None
-                | Some(Err(rsi_session_protocol::SessionError::Api(ApiError::Unauthorized))) => {
-                    None
-                }
-                Some(Ok(lease)) => Some(lease),
-                Some(Err(_)) => return Err(ApiError::Unavailable),
-            },
-        })
+        self.retain_header_view(&header, origin, leases)
+    }
+
+    fn retain_header_view(
+        &self,
+        header: &rsi_agent_session_protocol::SessionHeader,
+        origin: &CallOrigin,
+        leases: &mut Vec<tokio_util::sync::CancellationToken>,
+    ) -> Result<bool> {
+        let Some(scope) = header.protection() else {
+            return Ok(true);
+        };
+        let Some(lease) = self.protection_view(scope, origin)? else {
+            return Ok(false);
+        };
+        leases.push(lease);
+        Ok(true)
+    }
+
+    fn admit_metadata(
+        &self,
+        header: &rsi_agent_session_protocol::SessionHeader,
+        origin: &CallOrigin,
+    ) -> Result<(
+        rsi_execution::ExecutionOperation,
+        Option<tokio_util::sync::CancellationToken>,
+    )> {
+        let lease = match header.protection() {
+            Some(scope) => Some(
+                self.protection_view(scope, origin)?
+                    .ok_or(ApiError::Unauthorized)?,
+            ),
+            None => None,
+        };
+        let operation = self
+            .resolver
+            .admit(origin, header.coordinates().location())?;
+        Ok((operation, lease))
+    }
+
+    fn protection_view(
+        &self,
+        scope: &rsi_agent_session_protocol::SessionProtectionScope,
+        origin: &CallOrigin,
+    ) -> Result<Option<tokio_util::sync::CancellationToken>> {
+        match self.protection.as_ref().map(|p| p.view(scope, origin)) {
+            None | Some(Err(rsi_session_protocol::SessionError::Api(ApiError::Unauthorized))) => {
+                Ok(None)
+            }
+            Some(Ok(lease)) => Ok(Some(lease)),
+            Some(Err(_)) => Err(ApiError::Unavailable),
+        }
     }
 }
 fn visible_header(

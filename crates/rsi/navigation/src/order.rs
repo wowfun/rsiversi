@@ -35,11 +35,12 @@ impl Navigation {
                         let mut remap = std::collections::BTreeMap::new();
                         let mut visible_groups = Vec::new();
                         for member in members {
-                            let Some(lease) = owner.scope_view(&member.session, &origin).await?
-                            else {
+                            if !owner
+                                .retain_session_view(&member.session, &origin, &mut leases)
+                                .await?
+                            {
                                 continue;
-                            };
-                            leases.push(lease);
+                            }
                             let group = if let Some(group) = remap.get(&member.group) {
                                 *group
                             } else {
@@ -54,17 +55,16 @@ impl Navigation {
                                 remap.insert(member.group, group);
                                 group
                             };
-                            let metadata = document
-                                .records
-                                .get(&member.session)
-                                .cloned()
-                                .unwrap_or_default();
+                            let metadata = document.records.get(&member.session);
                             selected.push(OrderMember {
                                 last_activity_ms: member.last_activity_ms.to_string(),
                                 group,
                                 session: member.session,
-                                pinned: metadata.pinned,
-                                archived: metadata.archived,
+                                pinned: metadata.is_some_and(|row| row.pinned),
+                                partition_revision: metadata
+                                    .and_then(|row| row.partition_revision)
+                                    .map(|r| r.to_string()),
+                                archived: metadata.is_some_and(|row| row.archived),
                             });
                         }
                         super::finish_scope(&origin, &leases)?;
@@ -108,14 +108,12 @@ impl Navigation {
                     .map_err(|_| ApiError::Unavailable)?;
                 let mut leases = Vec::new();
                 for row in &mut rows {
-                    if let Some(candidate) = row {
-                        if let Some(lease) =
-                            owner.scope_view(&candidate.session_id, &origin).await?
-                        {
-                            leases.push(lease);
-                        } else {
-                            *row = None;
-                        }
+                    if let Some(candidate) = row
+                        && !owner
+                            .retain_session_view(&candidate.session_id, &origin, &mut leases)
+                            .await?
+                    {
+                        *row = None;
                     }
                 }
                 let mut entries = Vec::with_capacity(rows.len());
@@ -135,7 +133,7 @@ impl Navigation {
                                 metadata: document
                                     .records
                                     .get(&row.session_id)
-                                    .cloned()
+                                    .map(|row| row.metadata.clone())
                                     .unwrap_or_default(),
                                 session: row.session_id.clone(),
                                 created_at_ms: row.created_at_ms.to_string(),
@@ -163,5 +161,16 @@ impl Navigation {
             .expect("navigation state poisoned")
             .document
             .clone()
+    }
+    /// Current partition metadata revision, without retaining or scanning the document.
+    ///
+    /// # Panics
+    /// Panics if a prior Navigation writer poisoned the metadata lock.
+    pub fn metadata_revision(&self) -> u64 {
+        self.state
+            .lock()
+            .expect("navigation state poisoned")
+            .document
+            .revision
     }
 }

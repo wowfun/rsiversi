@@ -179,7 +179,7 @@ pub enum PinnedEntry {
 pub struct PinnedPage {
     /// Revision shared with ordinary navigation and edits.
     pub metadata_revision: String,
-    /// Available rows descending by activity/identity, then missing IDs descending.
+    /// Available rows in pin order, then missing IDs descending.
     pub entries: Vec<PinnedEntry>,
 }
 /// Exact metadata mutation receipt.

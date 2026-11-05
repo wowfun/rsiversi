@@ -3,9 +3,6 @@ use rsi_agent_session_protocol::{
     AgentPresetId, FrozenAgentSettings, SessionFact, SessionFactBody, SessionHeader, TurnId,
 };
 use rsi_agent_store_protocol::AppendBatch;
-use rsi_session_protocol::{
-    CreateSession, RecentSessionCursor, RecentSessionPage, SessionHandle, SessionSummary,
-};
 use rsi_workspace_protocol::{WorkspaceCursor, WorkspacePage, WorkspaceRecord, WorkspaceStatus};
 
 #[tokio::test]
@@ -20,14 +17,16 @@ async fn archive_selection_includes_both_partitions_only_when_requested() {
                 SessionMetadata {
                     archived: true,
                     ..Default::default()
-                },
+                }
+                .into(),
             ),
             (
                 SessionId::new("row-299").unwrap(),
                 SessionMetadata {
                     pinned: true,
                     ..Default::default()
-                },
+                }
+                .into(),
             ),
         ]
         .into(),
@@ -163,44 +162,10 @@ async fn read_abandonment_and_retirement_release_slots_without_dispatching_more_
     assert!(owner.admission.tasks.is_empty());
 }
 
-#[derive(Debug)]
-struct Rows(Vec<SessionSummary>, Arc<ReadConcurrency>);
 #[derive(Debug, Default)]
 struct ReadConcurrency {
     active: std::sync::atomic::AtomicUsize,
     peak: std::sync::atomic::AtomicUsize,
-}
-#[async_trait]
-impl SessionService for Rows {
-    async fn read_header(&self, id: &SessionId) -> rsi_session_protocol::Result<SessionHeader> {
-        use std::sync::atomic::Ordering::SeqCst;
-        let active = self.1.active.fetch_add(1, SeqCst) + 1;
-        self.1.peak.fetch_max(active, SeqCst);
-        tokio::task::yield_now().await;
-        self.1.active.fetch_sub(1, SeqCst);
-        self.0
-            .iter()
-            .find(|row| row.header.session_id() == id)
-            .map(|row| row.header.clone())
-            .ok_or_else(|| SessionError::NotFound(id.to_string()))
-    }
-    async fn create(
-        &self,
-        _: CreateSession,
-    ) -> rsi_session_protocol::Result<Arc<dyn SessionHandle>> {
-        panic!("navigation query cannot create")
-    }
-    async fn attach(&self, _: &SessionId) -> rsi_session_protocol::Result<Arc<dyn SessionHandle>> {
-        panic!("navigation query cannot load transcript")
-    }
-    async fn list_recent(
-        &self,
-        after: Option<&RecentSessionCursor>,
-        limit: usize,
-    ) -> rsi_session_protocol::Result<RecentSessionPage> {
-        let _ = (after, limit);
-        panic!("indexed navigation cannot read Header listings")
-    }
 }
 #[derive(Debug, Default)]
 struct Workspaces {
@@ -282,9 +247,6 @@ impl Domain for ReadOnlyDomain {
     }
 }
 async fn owner() -> Arc<Navigation> {
-    owner_with_reads(Arc::new(ReadConcurrency::default())).await
-}
-async fn owner_with_reads(reads: Arc<ReadConcurrency>) -> Arc<Navigation> {
     let settings = FrozenAgentSettings::new(
         "default",
         "system",
@@ -293,30 +255,25 @@ async fn owner_with_reads(reads: Arc<ReadConcurrency>) -> Arc<Navigation> {
         false,
     )
     .unwrap();
-    let rows: Vec<_> = (1..=300)
-        .rev()
-        .map(|id| SessionSummary {
-            header: SessionHeader::new_local(
-                SessionId::new(format!("row-{id:03}")).unwrap(),
-                id,
-                "/unregistered",
-                AgentPresetId::new("fixture").unwrap(),
-                settings.clone(),
-            )
-            .unwrap(),
-        })
-        .collect();
     let store = Arc::new(rsi_agent_testkit::MemoryStore::new());
-    for row in &rows {
+    for id in (1..=300).rev() {
+        let header = SessionHeader::new_local(
+            SessionId::new(format!("row-{id:03}")).unwrap(),
+            id,
+            "/unregistered",
+            AgentPresetId::new("fixture").unwrap(),
+            settings.clone(),
+        )
+        .unwrap();
         store
             .append(AppendBatch {
-                session_id: row.header.session_id().clone(),
+                session_id: header.session_id().clone(),
                 expected_seq: 0,
-                header: Some(row.header.clone()),
+                header: Some(header),
                 facts: vec![Arc::new(
                     SessionFact::new(
                         1,
-                        row.header.created_at_ms(),
+                        id,
                         SessionFactBody::TurnAccepted {
                             turn_id: TurnId::new("turn").unwrap(),
                             text: "input".into(),
@@ -340,7 +297,6 @@ async fn owner_with_reads(reads: Arc<ReadConcurrency>) -> Arc<Navigation> {
             maximum_records: 1,
             maximum_bytes: 8 * 1024 * 1024,
         })),
-        session: Arc::new(Rows(rows, reads)),
         resolver: Arc::new(Visibility),
         store,
         protection: None,
@@ -383,7 +339,8 @@ async fn grouping_queries_each_coordinate_once_per_page_pins_and_summary_batch()
                     SessionMetadata {
                         pinned: true,
                         ..Default::default()
-                    },
+                    }
+                    .into(),
                 )
             })
             .collect(),
@@ -566,8 +523,7 @@ async fn match_limit_continues_after_64_not_after_entire_scanned_store_page() {
 
 #[tokio::test]
 async fn activity_moving_ahead_of_a_live_cursor_is_exposed_on_refresh() {
-    let reads = Arc::new(ReadConcurrency::default());
-    let owner = owner_with_reads(reads.clone()).await;
+    let owner = owner().await;
     let filter = NavigationFilter::default();
     let first = owner
         .query(&CallOrigin::Local, filter.clone(), None)
@@ -620,7 +576,6 @@ async fn activity_moving_ahead_of_a_live_cursor_is_exposed_on_refresh() {
     assert_eq!(refreshed.entries[0].session, session);
     assert_eq!(refreshed.entries[0].created_at_ms, "1");
     assert_eq!(refreshed.entries[0].last_activity_ms, "1000");
-    assert_eq!(reads.peak.load(std::sync::atomic::Ordering::SeqCst), 0);
     let absent = owner
         .query(
             &CallOrigin::Local,
@@ -652,7 +607,8 @@ async fn manual_seed_is_complete_before_ordered_64_65_summary_reads() {
             SessionMetadata {
                 pinned: true,
                 ..Default::default()
-            },
+            }
+            .into(),
         )]
         .into(),
     });
@@ -748,7 +704,7 @@ fn metadata_bounds_reject_durable_and_external_oversize_or_control_titles() {
         .map(|id| {
             (
                 SessionId::new(format!("row-{id}")).unwrap(),
-                SessionMetadata::default(),
+                StoredMetadata::default(),
             )
         })
         .collect();
@@ -772,7 +728,7 @@ async fn pins_without_authorizable_headers_are_hidden_and_metadata_is_retained()
         pinned: true,
     };
     let records = ["row-001", "row-300", "gone"]
-        .map(|id| (SessionId::new(id).unwrap(), metadata.clone()))
+        .map(|id| (SessionId::new(id).unwrap(), metadata.clone().into()))
         .into();
     owner.state.lock().unwrap().document = Arc::new(Document {
         accounting: None,
@@ -862,7 +818,8 @@ fn legacy_metadata_and_pin_capacity_have_explicit_durable_semantics() {
             SessionMetadata {
                 pinned: true,
                 ..Default::default()
-            },
+            }
+            .into(),
         );
     }
     assert!(document.validate().is_ok());
@@ -871,7 +828,8 @@ fn legacy_metadata_and_pin_capacity_have_explicit_durable_semantics() {
         SessionMetadata {
             pinned: true,
             ..Default::default()
-        },
+        }
+        .into(),
     );
     assert!(document.validate().is_err());
     assert!(
@@ -887,8 +845,7 @@ fn legacy_metadata_and_pin_capacity_have_explicit_durable_semantics() {
 
 #[tokio::test]
 async fn pinned_summaries_preserve_sorted_order_without_attaching_sessions() {
-    let reads = Arc::new(ReadConcurrency::default());
-    let owner = owner_with_reads(reads.clone()).await;
+    let owner = owner().await;
     owner.state.lock().unwrap().document = Arc::new(Document {
         accounting: None,
         revision: 1,
@@ -899,7 +856,8 @@ async fn pinned_summaries_preserve_sorted_order_without_attaching_sessions() {
                     SessionMetadata {
                         pinned: true,
                         ..Default::default()
-                    },
+                    }
+                    .into(),
                 )
             })
             .collect(),
@@ -910,8 +868,6 @@ async fn pinned_summaries_preserve_sorted_order_without_attaching_sessions() {
         .await
         .unwrap();
     assert_eq!(pins.entries.len(), 64);
-    assert_eq!(reads.peak.load(std::sync::atomic::Ordering::SeqCst), 0);
-    assert_eq!(reads.active.load(std::sync::atomic::Ordering::SeqCst), 0);
     for (offset, entry) in pins.entries.iter().enumerate() {
         assert!(
             matches!(entry, PinnedEntry::Available {entry} if entry.session.as_str() == format!("row-{:03}", 64-offset))
@@ -949,6 +905,246 @@ impl Domain for RecordingDomain {
     }
 }
 #[tokio::test]
+async fn pin_intents_keep_pin_order_and_skip_redundant_writes() {
+    let mut owner = owner().await;
+    let domain = Arc::new(RecordingDomain(
+        owner.domain.spec().clone(),
+        Mutex::new(None),
+    ));
+    Arc::get_mut(&mut owner).unwrap().domain = domain.clone();
+    let newer = SessionId::new("row-300").unwrap();
+    let older = SessionId::new("row-001").unwrap();
+    let pin = |id: &SessionId, pinned| {
+        owner
+            .set_pin(CallOrigin::Local, id.clone(), pinned)
+            .unwrap()
+    };
+    let (first, retry) = tokio::join!(pin(&newer, true), pin(&newer, true));
+    assert_eq!(
+        (first.unwrap(), retry.unwrap()),
+        (PinOutcome::Applied, PinOutcome::Applied)
+    );
+    assert_eq!(owner.metadata_revision(), 1);
+    assert_eq!(pin(&older, true).await.unwrap(), PinOutcome::Applied);
+    let pins = owner
+        .pinned(CallOrigin::Local, NavigationFilter::default())
+        .unwrap()
+        .await
+        .unwrap();
+    assert!(
+        matches!(&pins.entries[..], [PinnedEntry::Available{entry:a},PinnedEntry::Available{entry:b}] if a.session==older && b.session==newer)
+    );
+    let mut saved: Document =
+        serde_json::from_value(domain.1.lock().unwrap().take().unwrap()).unwrap();
+    saved.validate().unwrap();
+    assert_eq!(saved.records[&older].partition_revision, Some(2));
+    let absent = SessionId::new("missing").unwrap();
+    assert_eq!(pin(&older, true).await.unwrap(), PinOutcome::Applied);
+    assert_eq!(pin(&absent, false).await.unwrap(), PinOutcome::Applied);
+    assert_eq!(pin(&absent, true).await.unwrap(), PinOutcome::Unknown);
+    assert!(domain.1.lock().unwrap().is_none());
+    assert_eq!(pin(&newer, false).await.unwrap(), PinOutcome::Applied);
+    assert_eq!(pin(&newer, true).await.unwrap(), PinOutcome::Applied);
+    owner
+        .replace(
+            CallOrigin::Local,
+            newer.clone(),
+            "4",
+            SessionMetadata {
+                pinned: true,
+                title: Some("kept".into()),
+                archived: false,
+            },
+        )
+        .unwrap()
+        .await
+        .unwrap();
+    assert_eq!(owner.document().records[&newer].partition_revision, Some(4));
+    owner
+        .replace(
+            CallOrigin::Local,
+            newer.clone(),
+            "5",
+            SessionMetadata {
+                pinned: true,
+                title: None,
+                archived: true,
+            },
+        )
+        .unwrap()
+        .await
+        .unwrap();
+    assert_eq!(pin(&newer, true).await.unwrap(), PinOutcome::Archived);
+    assert_eq!(owner.document().records[&newer].partition_revision, Some(6));
+    owner.close().await;
+}
+#[test]
+fn existing_pin_ranks_and_unranked_archives_survive_a_title_edit() {
+    let mut stored: Document = serde_json::from_value(serde_json::json!({
+        "revision": 4, "records": {
+            "pin": {"pinned": true, "archived": false, "title": null, "pin_revision": 3},
+            "archive": {"pinned": false, "archived": true, "title": null}
+        }
+    }))
+    .unwrap();
+    stored.validate().unwrap();
+    for (id, rank) in [("pin", Some(3)), ("archive", None)] {
+        let id = SessionId::new(id).unwrap();
+        let mut metadata = stored.records[&id].metadata.clone();
+        metadata.title = Some("renamed".into());
+        stored.edit(&id, &metadata).unwrap();
+        assert_eq!(stored.records[&id].partition_revision, rank);
+    }
+}
+
+#[tokio::test]
+async fn unprotected_navigation_reads_retain_no_revocation_leases() {
+    let owner = owner().await;
+    let mut leases = Vec::new();
+    for n in 1..=300 {
+        let id = SessionId::new(format!("row-{n:03}")).unwrap();
+        assert!(
+            owner
+                .retain_session_view(&id, &CallOrigin::Local, &mut leases)
+                .await
+                .unwrap()
+        );
+    }
+    assert!(
+        leases.is_empty(),
+        "retained {} revocation leases",
+        leases.len()
+    );
+    owner.close().await;
+}
+
+#[tokio::test]
+async fn archive_admission_preserves_title_clears_pin_and_repeats_without_a_write() {
+    let mut owner = owner().await;
+    let domain = Arc::new(RecordingDomain(
+        owner.domain.spec().clone(),
+        Mutex::new(None),
+    ));
+    Arc::get_mut(&mut owner).unwrap().domain = domain;
+    let id = SessionId::new("row-001").unwrap();
+    let apply = |id: &SessionId, intent| {
+        owner
+            .archive_intent(CallOrigin::Local, id.clone(), intent)
+            .unwrap()
+    };
+    assert_eq!(
+        apply(&SessionId::new("unknown").unwrap(), ArchiveIntent::Archive)
+            .await
+            .unwrap(),
+        ArchiveOutcome::Unknown
+    );
+    owner
+        .replace(
+            CallOrigin::Local,
+            id.clone(),
+            "0",
+            SessionMetadata {
+                title: Some("keep".into()),
+                pinned: true,
+                archived: false,
+            },
+        )
+        .unwrap()
+        .await
+        .unwrap();
+    assert_eq!(
+        apply(&id, ArchiveIntent::Inspect).await.unwrap(),
+        ArchiveOutcome::Ready
+    );
+    for (intent, changed) in [
+        (ArchiveIntent::Archive, true),
+        (ArchiveIntent::Inspect, false),
+        (ArchiveIntent::Archive, false),
+    ] {
+        assert_eq!(
+            apply(&id, intent).await.unwrap(),
+            ArchiveOutcome::Applied {
+                changed,
+                ids: vec![id.clone()]
+            }
+        );
+    }
+    let document = owner.document();
+    assert_eq!(document.revision, 2);
+    assert_eq!(document.records[&id].title.as_deref(), Some("keep"));
+    assert!(!document.records[&id].pinned);
+    owner.close().await;
+}
+
+#[tokio::test]
+async fn unarchive_returns_visible_archives_in_entry_order_and_preserves_other_metadata() {
+    let mut owner = owner().await;
+    let domain = Arc::new(RecordingDomain(
+        owner.domain.spec().clone(),
+        Mutex::new(None),
+    ));
+    Arc::get_mut(&mut owner).unwrap().domain = domain.clone();
+    let ids = ["row-300", "row-001", "row-002"].map(|id| SessionId::new(id).unwrap());
+    for (index, id) in ids.iter().enumerate() {
+        owner
+            .replace(
+                CallOrigin::Local,
+                id.clone(),
+                &index.to_string(),
+                SessionMetadata {
+                    title: Some("keep".into()),
+                    archived: true,
+                    pinned: false,
+                },
+            )
+            .unwrap()
+            .await
+            .unwrap();
+    }
+    domain.1.lock().unwrap().take();
+    let undo = |id: &SessionId| {
+        owner
+            .archive_intent(CallOrigin::Local, id.clone(), ArchiveIntent::Restore)
+            .unwrap()
+    };
+    let applied = |changed, ids| ArchiveOutcome::Applied { changed, ids };
+    assert_eq!(
+        undo(&SessionId::new("unknown").unwrap()).await.unwrap(),
+        applied(false, ids.to_vec())
+    );
+    assert!(domain.1.lock().unwrap().is_none());
+    let (one, two) = tokio::join!(undo(&ids[1]), undo(&ids[1]));
+    let kept = vec![ids[0].clone(), ids[2].clone()];
+    let pair = [one.unwrap(), two.unwrap()];
+    assert!(pair.contains(&applied(true, kept.clone())));
+    assert!(pair.contains(&applied(false, kept.clone())));
+    let snapshot = owner.document();
+    assert_eq!(snapshot.revision, 4);
+    assert_eq!(snapshot.records[&ids[1]].title.as_deref(), Some("keep"));
+    assert!(!snapshot.records[&ids[1]].archived);
+    assert_eq!(snapshot.records[&ids[1]].partition_revision, None);
+    let gone = SessionId::new("gone").unwrap();
+    let mut stale = (*snapshot).clone();
+    stale
+        .edit(
+            &gone,
+            &SessionMetadata {
+                archived: true,
+                title: Some("retained title".into()),
+                pinned: false,
+            },
+        )
+        .unwrap();
+    owner.state.lock().unwrap().document = Arc::new(stale);
+    assert_eq!(undo(&gone).await.unwrap(), applied(true, kept));
+    assert_eq!(
+        owner.document().records[&gone].title.as_deref(),
+        Some("retained title")
+    );
+    owner.close().await;
+}
+
+#[tokio::test]
 async fn missing_unpinned_metadata_can_be_cleared_with_revision_cas() {
     let mut owner = owner().await;
     let domain = Arc::new(RecordingDomain(
@@ -966,7 +1162,8 @@ async fn missing_unpinned_metadata_can_be_cleared_with_revision_cas() {
                 title: Some("Old archived conversation".into()),
                 archived: true,
                 pinned: false,
-            },
+            }
+            .into(),
         )]
         .into(),
     });
@@ -983,6 +1180,7 @@ async fn missing_unpinned_metadata_can_be_cleared_with_revision_cas() {
             .is_err()
     );
     assert!(domain.1.lock().unwrap().is_none());
+    assert_eq!(owner.metadata_revision(), 7);
     owner
         .replace(
             CallOrigin::Local,
@@ -994,6 +1192,7 @@ async fn missing_unpinned_metadata_can_be_cleared_with_revision_cas() {
         .await
         .unwrap();
     assert!(owner.state.lock().unwrap().document.records.is_empty());
+    assert_eq!(owner.metadata_revision(), 8);
     let saved: Document =
         serde_json::from_value(domain.1.lock().unwrap().clone().unwrap()).unwrap();
     assert!(saved.records.is_empty());
@@ -1105,7 +1304,8 @@ async fn visibility_filters_before_order_capacity_cursors_pins_and_exact_summari
             SessionMetadata {
                 pinned: true,
                 ..Default::default()
-            },
+            }
+            .into(),
         );
         state.document = Arc::new(document);
     }
@@ -1369,19 +1569,54 @@ async fn protected_scope_is_hidden_in_pages_pins_order_membership_and_exact_summ
             SessionMetadata {
                 pinned: true,
                 ..Default::default()
-            },
+            }
+            .into(),
         )]),
         ..Default::default()
     });
     assert!(
         owner
-            .pinned(device, NavigationFilter::default())
+            .pinned(device.clone(), NavigationFilter::default())
             .unwrap()
             .await
             .unwrap()
             .entries
             .is_empty()
     );
+    owner.state.lock().unwrap().document = Arc::new(Document {
+        records: BTreeMap::from([(
+            header.session_id().clone(),
+            SessionMetadata {
+                archived: true,
+                ..Default::default()
+            }
+            .into(),
+        )]),
+        ..Default::default()
+    });
+    assert_eq!(
+        owner
+            .archive_intent(
+                device.clone(),
+                SessionId::new("unknown").unwrap(),
+                ArchiveIntent::Restore
+            )
+            .unwrap()
+            .await
+            .unwrap(),
+        ArchiveOutcome::Applied {
+            changed: false,
+            ids: vec![]
+        }
+    );
+    assert!(matches!(
+        owner
+            .archive_intent(device, header.session_id().clone(), ArchiveIntent::Restore)
+            .unwrap()
+            .await,
+        Err(ApiError::Unauthorized)
+    ));
+    assert!(owner.document().records[header.session_id()].archived);
     Arc::get_mut(&mut owner).unwrap().protection = Some(Arc::new(Unavailable));
     assert!(matches!(
         owner
@@ -1641,8 +1876,8 @@ async fn purge_cleanup_requires_completion_preserves_other_records_and_retries_c
         accounting: None,
         revision: 7,
         records: [
-            (selected.clone(), metadata.clone()),
-            (other.clone(), metadata.clone()),
+            (selected.clone(), metadata.clone().into()),
+            (other.clone(), metadata.clone().into()),
         ]
         .into(),
     });
@@ -1677,7 +1912,10 @@ async fn purge_cleanup_requires_completion_preserves_other_records_and_retries_c
     assert_eq!(domain.written.lock().unwrap().len(), 1);
     let state = navigation.state.lock().unwrap();
     assert_eq!(state.document.records.len(), 1);
-    assert_eq!(state.document.records.get(&other), Some(&metadata));
+    assert_eq!(
+        state.document.records.get(&other).map(|row| &row.metadata),
+        Some(&metadata)
+    );
 }
 
 async fn seed_purge_cleanup(
@@ -1747,5 +1985,14 @@ async fn seed_purge_cleanup(
             fact_seq: 2,
             control_seq: 1,
         }],
+    }
+}
+
+impl From<SessionMetadata> for StoredMetadata {
+    fn from(metadata: SessionMetadata) -> Self {
+        Self {
+            metadata,
+            partition_revision: None,
+        }
     }
 }

@@ -15,7 +15,26 @@ Navigation reads Store-owned indexed summaries through a dedicated service opera
 empty continuations. It retains durable metadata version 1 with missing pins false;
 versions the changed wire contract. It uses attention as the only live-status source.
 
+The Navigation writer records the revision of each new pin with its metadata.
+A title edit or a new message can then leave the pin in place. The writer
+serializes pin intents from multiple browsers and can acknowledge a duplicate
+without cloning or persisting the document. Earlier records have no recoverable
+pin time, so they keep their activity order until the user pins them again.
+
 ## Alternatives considered
+
+Keeping pin order in a browser or a plugin would require reconciling a second
+copy after native archive, purge or restart. The existing revision counter
+already distinguishes successive pins without another clock or storage record.
+Pin and archive membership are mutually exclusive, so the same revision records
+entry into either partition. Title edits preserve that rank. Historical archive
+order cannot be reconstructed from activity timestamps.
+
+An application can ask several execution providers about active work or ask
+them to stop. Holding the Navigation writer while those callbacks run would
+block unrelated metadata edits. The writer commits the archive and pin removal
+together and identifies the request that changed membership. That request can
+notify providers after commit. Repeating the intent cannot cancel later work.
 
 Copying Headers into metadata creates another durable source of truth. Increasing
 the recent scan bound still misses old pins. Inferring idle from absence confuses

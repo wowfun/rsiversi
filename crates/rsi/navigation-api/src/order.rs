@@ -38,6 +38,9 @@ pub struct OrderMember {
     pub session: SessionId,
     /// Shared pin partition; moves cannot cross it.
     pub pinned: bool,
+    /// Revision at which a Session entered its current pin or archive partition, when recorded.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub partition_revision: Option<String>,
     /// Shared archive partition.
     pub archived: bool,
 }
@@ -87,9 +90,17 @@ impl OrderSeed {
         Ok(self)
     }
     fn validate_membership(&self) -> Result<()> {
-        revision(&self.metadata_revision)?;
+        let revision_bound = revision(&self.metadata_revision)?;
         if let OrderMembership::Available { members, .. } = &self.membership {
             for member in members {
+                if let Some(rank) = &member.partition_revision
+                    && (!(member.pinned || member.archived)
+                        || !(1..=revision_bound).contains(&revision(rank)?))
+                {
+                    return Err(ApiError::Invalid(
+                        "invalid order member partition revision".into(),
+                    ));
+                }
                 if revision(&member.last_activity_ms)? == 0 {
                     return Err(ApiError::Invalid("invalid order member activity".into()));
                 }
@@ -252,6 +263,7 @@ mod tests {
                     last_activity_ms: "1".into(),
                     group: 0,
                     session: SessionId::new("one").unwrap(),
+                    partition_revision: None,
                     pinned: false,
                     archived: false,
                 }],
@@ -275,6 +287,7 @@ mod tests {
                     last_activity_ms: "1".into(),
                     group: 0,
                     session: SessionId::new(format!("{i:04}{}", "x".repeat(200))).unwrap(),
+                    partition_revision: None,
                     pinned: false,
                     archived: false,
                 })
