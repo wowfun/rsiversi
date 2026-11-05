@@ -2,6 +2,7 @@
 use super::{Arc, LocalSessionHandle, PathBuf, Result, SessionError, SessionId, StoreError};
 use rsi_pty_protocol::{PtyProvider, PtyScope};
 use rsi_session_protocol::terminal::{Operation, PtyError, Reply, Request};
+mod creation;
 use std::{
     collections::BTreeMap,
     sync::{
@@ -12,6 +13,7 @@ use std::{
 
 #[derive(Debug)]
 pub(super) struct Terminals {
+    changed: tokio::sync::Notify,
     stopping: tokio::sync::Mutex<()>,
     provider: Arc<dyn PtyProvider>,
     sandbox: Arc<dyn rsi_sandbox::Sandbox>,
@@ -23,6 +25,7 @@ struct Registry {
     retired: bool,
     failure: Option<PtyError>,
     scopes: BTreeMap<SessionId, Arc<ScopeEntry>>,
+    creations: BTreeMap<creation::Identity, creation::Receipt>,
 }
 #[derive(Debug)]
 struct ScopeEntry {
@@ -81,6 +84,7 @@ impl Terminals {
         sandbox: Arc<dyn rsi_sandbox::Sandbox>,
     ) -> Self {
         Self {
+            changed: tokio::sync::Notify::new(),
             stopping: tokio::sync::Mutex::new(()),
             provider,
             sandbox,
@@ -140,6 +144,9 @@ impl Terminals {
             Some(execution) => scope.entry.scope.execute_with(operation, execution).await,
             None => scope.entry.scope.execute(operation).await,
         };
+        if closing {
+            self.changed.notify_waiters();
+        }
         Ok(result?)
     }
     pub(super) async fn stop(&self) -> Result<()> {
@@ -156,6 +163,7 @@ impl Terminals {
                     .map_or(Ok(()), |error| Err(error.into()));
             }
             state.stopped = true;
+            self.changed.notify_waiters();
             state
                 .scopes
                 .values()
@@ -180,7 +188,88 @@ impl Terminals {
     }
 }
 impl LocalSessionHandle {
+    pub(super) async fn borrow_attachment(
+        &self,
+        request: Request,
+    ) -> Result<Box<dyn rsi_session_protocol::terminal::AttachmentLease>> {
+        if !matches!(
+            request,
+            Request::Create { .. }
+                | Request::Operate {
+                    operation: Operation::Attach { .. }
+                }
+        ) {
+            return Err(PtyError::Invalid("expected an attachment operation".into()).into());
+        }
+        let Reply::Attached(attachment) = self.terminal_request(request).await? else {
+            return Err(PtyError::OutcomeUnknown.into());
+        };
+        let scope = self
+            .terminals
+            .as_ref()
+            .ok_or_else(|| unavailable("terminal provider is absent"))?
+            .scope(&self.session_id, false)?
+            .ok_or_else(|| unavailable("terminal scope retired"))?;
+        Ok(Box::new(creation::Held {
+            scope: scope.entry.scope.clone(),
+            attachment,
+        }))
+    }
+    fn terminal_owner(&self) -> Option<&rsi_api_protocol::DeviceId> {
+        match &self.origin {
+            rsi_api_protocol::CallOrigin::Local => None,
+            rsi_api_protocol::CallOrigin::Device(device) => Some(&device.id),
+        }
+    }
+    pub(super) async fn read_terminal_catalog(
+        &self,
+    ) -> Result<rsi_session_protocol::terminal::Catalog> {
+        let _admission = self.admit()?;
+        let _activity = self.begin_read()?;
+        let terminals = self
+            .terminals
+            .as_ref()
+            .ok_or_else(|| unavailable("terminal provider is absent"))?;
+        let header = self.header_snapshot().await?;
+        let cwd = PathBuf::from(header.canonical_cwd());
+        let local = header.coordinates().location() == &rsi_execution::ExecutionLocation::Local;
+        terminal_mode(local, header.settings().sandbox())?;
+        let shell = manual_shell(cfg!(windows) && local, &cwd)?;
+        let bindings = terminals
+            .bindings(&self.session_id, self.terminal_owner())
+            .await?;
+        Ok(rsi_session_protocol::terminal::Catalog {
+            program: shell.program,
+            arguments: shell.arguments,
+            cwd,
+            bindings,
+        })
+    }
+    pub(super) async fn wait_for_terminal(&self, key: &str) -> Result<()> {
+        let _admission = self.admit()?;
+        let _activity = self.begin_read()?;
+        let terminals = self
+            .terminals
+            .as_ref()
+            .ok_or_else(|| unavailable("terminal provider is absent"))?;
+        loop {
+            let changed = terminals.changed.notified();
+            tokio::pin!(changed);
+            changed.as_mut().enable();
+            if !terminals
+                .bindings(&self.session_id, self.terminal_owner())
+                .await?
+                .iter()
+                .any(|row| row.key == key)
+            {
+                return Ok(());
+            }
+            changed.await;
+        }
+    }
     pub(super) async fn terminal_request(&self, request: Request) -> Result<Reply> {
+        let admission = self.admit_mutation()?;
+        let activity = self.begin_activity()?;
         request.validate()?;
         if self.projection_stopped.is_cancelled() {
             return Err(SessionError::ShuttingDown);
@@ -190,7 +279,7 @@ impl LocalSessionHandle {
             .as_ref()
             .ok_or_else(|| unavailable("terminal provider is absent"))?;
         match request {
-            Request::Create { size } => {
+            Request::Create { key, size } => {
                 let header = self.header_snapshot().await?;
                 let persisted =
                     self.store
@@ -206,17 +295,18 @@ impl LocalSessionHandle {
                     return Err(unavailable("Session Header is no longer current"));
                 }
                 let launch = self.prepare_terminal(terminals, &header, size).await?;
-                let scope = terminals
-                    .scope(&self.session_id, true)?
-                    .expect("new scope requested");
-                let _mutation = scope.entry.mutation.lock().await;
-                let attachment = match launch {
-                    TerminalLaunch::Native(spec) => scope.entry.scope.create(spec).await?,
-                    TerminalLaunch::Execution(spec) => {
-                        scope.entry.scope.create_execution(spec).await?
-                    }
-                };
-                Ok(Reply::Attached(attachment))
+                let owner = self.terminal_owner().cloned();
+                let identity = (self.session_id.clone(), owner, key);
+                let terminals = terminals.clone();
+                let runtime = tokio::runtime::Handle::try_current()
+                    .map_err(|_| unavailable("terminal creation requires a runtime"))?;
+                runtime
+                    .spawn(async move {
+                        let _guards = (admission, activity);
+                        terminals.create_keyed(identity, size, launch).await
+                    })
+                    .await
+                    .map_err(|_| PtyError::OutcomeUnknown)?
             }
             Request::Operate { operation } => {
                 let execution = if matches!(
@@ -252,28 +342,16 @@ impl LocalSessionHandle {
         });
         let windows = cfg!(windows) && local;
         let mode = terminal_mode(local, header.settings().sandbox())?;
-        let mut environment = vec![
-            ("PATH".into(), "/usr/local/bin:/usr/bin:/bin".into()),
-            ("HOME".into(), workspace.clone().into_os_string()),
-            ("SHELL".into(), "/bin/bash".into()),
-            ("TERM".into(), "xterm-256color".into()),
-            ("LANG".into(), "C.UTF-8".into()),
-            ("HISTFILE".into(), "/dev/null".into()),
-        ];
-        let mut request = rsi_sandbox::ProcessRequest {
+        let shell = manual_shell(windows, &workspace)?;
+        let environment = shell.environment;
+        let request = rsi_sandbox::ProcessRequest {
             stdio: rsi_sandbox::ProcessStdio::Pty,
             mode,
-            program: PathBuf::from("/bin/bash"),
-            arguments: vec!["--noprofile".into(), "--norc".into(), "-i".into()],
+            program: shell.program,
+            arguments: shell.arguments,
             cwd: workspace.clone(),
             workspace,
         };
-        if windows {
-            let (program, selected) = windows_shell()?;
-            request.program = program;
-            request.arguments = vec!["-NoLogo".into(), "-NoProfile".into()];
-            environment = selected;
-        }
         if let Some(lease) = lease {
             let coordinates = lease
                 .canonicalize(header.canonical_cwd())
@@ -321,6 +399,34 @@ impl LocalSessionHandle {
         }
     }
 }
+struct ManualShell {
+    program: PathBuf,
+    arguments: Vec<String>,
+    environment: Vec<(std::ffi::OsString, std::ffi::OsString)>,
+}
+fn manual_shell(windows: bool, workspace: &std::path::Path) -> Result<ManualShell> {
+    if windows {
+        let (program, environment) = windows_shell()?;
+        return Ok(ManualShell {
+            program,
+            arguments: vec!["-NoLogo".into(), "-NoProfile".into()],
+            environment,
+        });
+    }
+    Ok(ManualShell {
+        program: "/bin/bash".into(),
+        arguments: vec!["--noprofile".into(), "--norc".into(), "-i".into()],
+        environment: vec![
+            ("PATH".into(), "/usr/local/bin:/usr/bin:/bin".into()),
+            ("HOME".into(), workspace.as_os_str().into()),
+            ("SHELL".into(), "/bin/bash".into()),
+            ("TERM".into(), "xterm-256color".into()),
+            ("LANG".into(), "C.UTF-8".into()),
+            ("HISTFILE".into(), "/dev/null".into()),
+        ],
+    })
+}
+
 fn unavailable(message: &str) -> SessionError {
     PtyError::Unavailable(message.into()).into()
 }
@@ -445,6 +551,7 @@ mod tests {
     }
     #[async_trait]
     impl PtyScope for Scope {
+        fn release_attachment(&self, _terminal: &str, _attachment: &str) {}
         async fn create_execution(
             &self,
             _: rsi_process::PtyProcessSpec<rsi_execution::PreparedProcess>,

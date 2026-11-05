@@ -339,6 +339,11 @@ impl Scope {
 }
 #[async_trait]
 impl PtyScope for Scope {
+    fn release_attachment(&self, terminal: &str, attachment: &str) {
+        if let Ok(term) = self.term(terminal) {
+            let _ = term.detach(attachment, None);
+        }
+    }
     fn is_empty(&self) -> bool {
         let state = lock(&self.inner);
         state.terminals.is_empty() && self.creating.active.load(Ordering::Acquire) == 0

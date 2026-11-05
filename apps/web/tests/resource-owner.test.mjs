@@ -15,12 +15,12 @@ test('exact cleanup retries a busy refusal but respects a permanent refusal',asy
   }
 });
 
-test('unknown allocation is actionable without replaying a rejected promise',async()=>{
+test('a second unknown create receipt keeps its unresolved notice without further replay',async()=>{
   let calls=0;const owner=new ResourceOwner(()=>{calls++;return Promise.reject(new Error('lost reply'))});
   const created=owner.attachment('session','main','old',{type:'create'});
   await assert.rejects(created.promise);await tick();
   const notice=owner.getSnapshot()[0];assert.equal(notice.retryable,false);
-  owner.retry(notice.key);await tick();assert.equal(calls,1);
+  owner.retry(notice.key);await tick();assert.equal(calls,2);
 });
 test('malformed open receipts reconcile from the matching frame and then clean up',async()=>{
   let calls=0;const owner=new ResourceOwner(()=>++calls===1?Promise.resolve('{'):Promise.resolve(),()=> 'request');
@@ -191,4 +191,16 @@ test('cancelled cleanup never dispatches even if an old tab later commits it',as
   const reservation=owner.reservePanel('session',{view:'1',open_revision:'1'});
   reservation.cancel();reservation.commit();await Promise.resolve();
   assert.equal(calls,0);assert.equal(owner.cleanup.size,0);
+});
+test('a lost shell receipt retries the same creation key once',async()=>{
+  const sent=[];
+  const owner=new ResourceOwner(async(_method,source)=>{
+    sent.push(JSON.parse(source));
+    if(sent.length===1)throw new Error('lost create receipt');
+    return JSON.stringify({value:{id:'writer'}});
+  },()=> 'shell-request');
+  await owner.attachment('session','main','generation',{type:'create',size:{rows:24,columns:80}}).promise;
+  assert.equal(sent.length,2);
+  assert.deepEqual(sent[0],sent[1]);
+  assert.equal(sent[0].request.key,'shell-request');
 });

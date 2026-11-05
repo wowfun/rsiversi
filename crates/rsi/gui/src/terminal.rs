@@ -88,6 +88,7 @@ pub(super) struct Follower {
 enum Command {
     List,
     Create {
+        key: String,
         size: Size,
     },
     Attach {
@@ -249,7 +250,7 @@ impl Attachment {
             })
             .await
             .map_err(error)?,
-            Command::Create { size } => call(Request::Create { size })
+            Command::Create { key, size } => call(Request::Create { key, size })
                 .await
                 .map_err(|error| TerminalFailure::allocation(&error))?,
             Command::Attach { terminal } => call(Request::Operate {
@@ -407,8 +408,7 @@ impl Attachment {
                 if self.terminal_closed.load(Ordering::Acquire) {
                     true
                 } else {
-                    followers.insert(
-                        value.id.clone(),
+                    followers.entry(value.id.clone()).or_insert_with(|| {
                         Arc::new(Follower {
                             status: Mutex::new(value.clone()),
                             input: tokio::sync::Mutex::new(controller::Input {
@@ -420,8 +420,8 @@ impl Attachment {
                             output: tokio::sync::Mutex::new(controller::Output::new(
                                 value.stream_epoch,
                             )),
-                        }),
-                    );
+                        })
+                    });
                     false
                 }
             };

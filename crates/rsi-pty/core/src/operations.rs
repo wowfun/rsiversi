@@ -69,7 +69,7 @@ impl Scope {
                 attachment,
                 epoch,
             } => {
-                self.term(&terminal)?.detach(&attachment, epoch)?;
+                self.term(&terminal)?.detach(&attachment, Some(epoch))?;
                 Ok(Reply::Done)
             }
             Operation::Close { terminal } => {
@@ -124,18 +124,22 @@ impl Term {
         self.changed.notify_waiters();
         Ok(status)
     }
-    fn detach(&self, attachment: &str, epoch: u64) -> Result<()> {
+    pub(super) fn detach(&self, attachment: &str, epoch: Option<u64>) -> Result<()> {
         let mut state = lock(&self.inner);
         // A delayed detach from an older controller epoch must not remove a newer owner.
         if state.status.controller.as_deref() == Some(attachment) {
-            if state.status.controller_epoch != epoch {
+            if epoch.is_some_and(|epoch| state.status.controller_epoch != epoch) {
                 return Err(PtyError::StaleController);
             }
-            state.status.controller_epoch = state
-                .status
-                .controller_epoch
-                .checked_add(1)
-                .ok_or(PtyError::Capacity)?;
+            state.status.controller_epoch = if epoch.is_some() {
+                state
+                    .status
+                    .controller_epoch
+                    .checked_add(1)
+                    .ok_or(PtyError::Capacity)?
+            } else {
+                state.status.controller_epoch.saturating_add(1)
+            };
             state.status.controller = None;
             state.next_input = 1;
         }

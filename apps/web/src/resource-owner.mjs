@@ -98,12 +98,19 @@ export class ResourceOwner {
     // Reserve before creating an attachment. Unmount never needs fresh capacity.
     if(this.retired)throw new Error('The resource connection has retired');
     let promise;
-    const reservation=this.reserve(session, `attachment:${this.mint()}`, async () => {
+    const allocation=this.mint();
+    if(request.type==='create')request={...request,key:request.key??allocation};
+    const reservation=this.reserve(session, `attachment:${allocation}`, async () => {
       let value;
       try { value=await promise; } catch(error) { if(error?.notAdmitted)return;throw Object.assign(error,{unresolvedOpening:true}); }
       await this.call('terminal', JSON.stringify({pane,generation,request:{type:'detach',attachment:value.id}}));
     }, undefined, undefined, 'Terminal');
-    promise=Promise.resolve().then(()=>this.call('terminal', JSON.stringify({pane,generation,request}))).then(text=>JSON.parse(text).value);
+    const source=JSON.stringify({pane,generation,request});
+    const dispatch=()=>this.call('terminal',source);
+    promise=Promise.resolve().then(dispatch).catch(error=>{
+      if(request.type==='create'&&!this.retired&&!error?.notAdmitted)return dispatch();
+      throw error;
+    }).then(text=>JSON.parse(text).value);
     promise.catch(error=>{if(error?.notAdmitted)reservation.cancel();else reservation.commit();});
     return {promise,close:reservation.commit};
   }

@@ -376,6 +376,8 @@ fn identifier(value: &str) -> Result<()> {
 /// Trusted live scope, owned by a product service rather than a UI pane.
 #[async_trait]
 pub trait PtyScope: fmt::Debug + Send + Sync + 'static {
+    /// Releases an attachment issued by this scope to a retiring process-local owner.
+    fn release_attachment(&self, terminal: &str, attachment: &str);
     /// Returns a non-I/O snapshot including in-flight creation and cleanup ownership.
     /// A true result does not fence concurrent creation; callers own that serialization.
     fn is_empty(&self) -> bool;

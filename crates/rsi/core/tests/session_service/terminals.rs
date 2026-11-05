@@ -9,6 +9,7 @@ async fn create(daemon: &DaemonFixture, fixture: &Fixture, id: &str) -> Arc<dyn 
         .connection
         .session_service()
         .create(CreateSession {
+            fork: None,
             workspace_id: daemon
                 .connection
                 .workspace_registry()
@@ -63,6 +64,7 @@ async fn uds_terminals_require_persistence_isolate_sessions_keep_facts_unchanged
     let daemon = DaemonFixture::new(&fixture).await;
     let handle = create(&daemon, &fixture, "terminal-session").await;
     let request = Request::Create {
+        key: "public-api-shell".into(),
         size: Size {
             rows: 24,
             columns: 80,
@@ -74,9 +76,29 @@ async fn uds_terminals_require_persistence_isolate_sessions_keep_facts_unchanged
     ));
     run_message_to_terminal(&handle, "publish-terminal").await;
     let before = handle.history_before(None, 128).await.unwrap().durable_seq;
-    let Reply::Attached(writer) = handle.terminal(request.clone()).await.unwrap() else {
+    let (first, retry) = tokio::join!(
+        handle.terminal(request.clone()),
+        handle.terminal(request.clone())
+    );
+    assert_eq!(first, retry);
+    let Reply::Attached(writer) = first.unwrap() else {
         panic!()
     };
+    let Request::Create { key, size } = request.clone() else {
+        unreachable!()
+    };
+    assert!(matches!(
+        handle
+            .terminal(Request::Create {
+                key,
+                size: Size {
+                    columns: size.columns + 1,
+                    ..size
+                }
+            })
+            .await,
+        Err(SessionError::Terminal(PtyError::Invalid(_)))
+    ));
     let other = create(&daemon, &fixture, "other-terminal-session").await;
     run_message_to_terminal(&other, "publish-other").await;
     assert!(matches!(
@@ -202,7 +224,18 @@ async fn uds_terminals_require_persistence_isolate_sessions_keep_facts_unchanged
             .unwrap(),
         Reply::List(vec![])
     );
-    let Reply::Attached(retired) = resumed.terminal(request).await.unwrap() else {
+    assert!(matches!(
+        resumed.terminal(request).await,
+        Err(SessionError::Terminal(PtyError::Unavailable(_)))
+    ));
+    let Reply::Attached(retired) = resumed
+        .terminal(Request::Create {
+            key: "replacement-shell".into(),
+            size,
+        })
+        .await
+        .unwrap()
+    else {
         panic!()
     };
     daemon.shutdown().await;

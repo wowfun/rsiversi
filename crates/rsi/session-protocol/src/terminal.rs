@@ -4,12 +4,42 @@ pub use rsi_pty_protocol::{
     PtyError, Reply, Size, Terminal,
 };
 use serde::{Deserialize, Serialize};
+/// One live terminal visible under its creator's Session key.
+#[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct Binding {
+    /// Original client-generated creation identity.
+    pub key: String,
+    /// Current native screen and control coordinates.
+    pub terminal: Terminal,
+}
+/// Selected manual shell and this caller's current live terminals.
+#[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct Catalog {
+    /// Actual executable on the execution target.
+    pub program: std::path::PathBuf,
+    /// Arguments used by the manual shell.
+    pub arguments: Vec<String>,
+    /// Canonical Session workspace on that target.
+    pub cwd: std::path::PathBuf,
+    /// Active records in stable creation-key order.
+    pub bindings: Vec<Binding>,
+}
+/// A process-local owner of exactly one attachment. Drop relinquishes the
+/// attachment, independent of the shell's lifetime and of transport authority.
+pub trait AttachmentLease: std::fmt::Debug + Send + Sync {
+    /// Original native attachment receipt.
+    fn receipt(&self) -> &Attachment;
+}
 /// A Session selects its manual shell and policy; callers cannot supply a program or environment.
 #[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
 #[serde(tag = "type", rename_all = "snake_case", deny_unknown_fields)]
 pub enum Request {
     /// Creates a manual shell and initial writer: restricted Bash or local Windows user access.
     Create {
+        /// Caller-minted idempotency key for this allocation.
+        key: String,
         /// Initial character dimensions.
         size: Size,
     },
@@ -24,7 +54,17 @@ impl Request {
     /// Validates domain framing before dispatch.
     pub fn validate(&self) -> rsi_pty_protocol::Result<()> {
         match self {
-            Self::Create { size } => size.validate(),
+            Self::Create { key, size } => {
+                if key.is_empty()
+                    || key.len() > 128
+                    || !key
+                        .bytes()
+                        .all(|c| c.is_ascii_alphanumeric() || matches!(c, b'-' | b'_'))
+                {
+                    return Err(PtyError::Invalid("invalid terminal creation key".into()));
+                }
+                size.validate()
+            }
             Self::Operate { operation } => operation.validate(),
         }
     }
@@ -53,7 +93,7 @@ impl Request {
     pub fn validate_reply(&self, reply: &Reply) -> rsi_pty_protocol::Result<()> {
         reply.validate()?;
         let valid = match (self, reply) {
-            (Self::Create { size }, Reply::Attached(value)) => {
+            (Self::Create { size, .. }, Reply::Attached(value)) => {
                 value.terminal.size == *size
                     && value.terminal.controller.as_deref() == Some(&value.id)
                     && matches!(value.terminal.phase, Phase::Running)

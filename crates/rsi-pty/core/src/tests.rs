@@ -172,6 +172,21 @@ async fn op(scope: &Scope, operation: Operation) -> Result<Reply> {
     scope.execute(operation).await
 }
 #[tokio::test]
+async fn retiring_attachment_owners_releases_only_their_seats_and_keeps_the_shell() {
+    let (scope, term, process) = fixture();
+    let reader = term.attach().unwrap();
+    scope.release_attachment("pty", &reader.id);
+    scope.release_attachment("pty", &reader.id);
+    assert_eq!(
+        lock(&term.inner).status.controller.as_deref(),
+        Some("writer")
+    );
+    scope.release_attachment("pty", "writer");
+    assert!(lock(&term.inner).status.controller.is_none());
+    assert!(!process.stopped.load(Ordering::Acquire));
+    scope.retire().await.unwrap();
+}
+#[tokio::test]
 async fn takeover_fences_writes_resize_and_delayed_detach_without_stopping_shell() {
     let (scope, term, process) = fixture();
     let reader = term.attach().unwrap();

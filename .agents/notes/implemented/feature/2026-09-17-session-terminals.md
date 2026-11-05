@@ -124,3 +124,12 @@ Known-unadmitted bridge requests retain queued input through bounded-delay retri
 ambiguous writes still require Rust receipt reconciliation. Browser fixtures inspect
 output at the Worker reply boundary before xterm, so filter assertions do not rely
 on xterm independently discarding control strings.
+## Retried creation
+
+DSH supplies a terminal identity with its create request. A lost create
+reply otherwise leaves an allocated shell without a usable receipt. The
+Session service owns the key and completes admitted creation independently
+of the transport waiter. It binds the receipt to the caller and keeps closed
+keys for the generation, including after the last live scope is reclaimed.
+This permits normal scope cleanup while preventing an old request from
+reviving a shell.

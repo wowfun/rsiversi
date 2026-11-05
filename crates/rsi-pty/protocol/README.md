@@ -27,3 +27,6 @@ current caller's exact lease for input and resize; the resource checks that it
 belongs to the original provider before native I/O. Scope possession remains the
 trusted authority for bounded projection, attachment and cleanup operations, so
 products must admit those operations before dispatch, including while offline.
+The process-local scope owner can relinquish an exact attachment at the end
+of its owner lifetime. The wire detach operation still requires its controller
+epoch. Releasing a reader leaves the current writer alone.
