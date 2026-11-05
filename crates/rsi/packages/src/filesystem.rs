@@ -168,6 +168,7 @@ impl Dir {
         for entry in self.directory.entries()? {
             let entry = entry?;
             let name = entry.file_name().to_string_lossy().into_owned();
+            #[cfg(windows)]
             if name == ".rsi-namespace-pin" {
                 continue;
             }

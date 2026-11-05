@@ -19,6 +19,44 @@ every admitted object can be removed in one pass without a smaller store-wide ca
 This library owns bounded, non-executing package admission and immutable storage
 below the selected state home. Applications supply downloads and source recipes;
 installing a package never runs a compiler, lifecycle script or executable.
+An optional `payload_tree` export carries an uncompressed RSI tree container:
+the eight bytes `RSITREE1`, a little-endian u32 JSON-header length, a format-1
+header with ordered FileRecords, then their exact bytes. Admission expands it
+inside the same unpublished object before publication. Files are regular,
+hash-checked and immutable; links and case-colliding paths are refused. Hidden
+ordinary components are allowed inside payloads for dependency-manager metadata.
+Each tree has at most 16,384 files, 32 path components and a 16 MiB header; one
+package has at most 65,536 expanded files plus directories. Archive and expanded
+bytes are both reserved against the store budget. The materialized payload retains
+its complete PackageLease, so selection changes and GC cannot remove a live tree.
+There is no second expansion cache or installation registry.
+Acquisition rechecks archive and expanded file hashes. The admitted header supplies
+the exact names and types for the directory walk. Each declared entry must occur
+once, with its original spelling, and the walk rejects undeclared entries.
+Only Windows excludes its filesystem-owned `.rsi-namespace-pin` guard from that walk.
+Traversal retains only the current ancestor chain (at most 31 directories)
+and reuses its common prefix across files; file order is not a trust assumption.
+Large read-only acquisitions may divide the verified archive into contiguous
+ranges. At most seven additional readers across the process hold their own
+bounded ancestor chain and buffers. Installation writes serially, and every
+reader settles before the complete namespace check or publication of the lease.
+The `process_extension` export is a format-1 JSON descriptor, bounded to 64 KiB,
+with an immutable payload working directory and at most 64 arguments. Arguments
+are literal strings, the host-issued generation identity, or paths in a named
+payload of this package or an exact direct dependency. It never selects an
+executable or inherits an environment. Descriptor parsing and reference admission
+run before resolution publication; host interface requirements remain in the
+manifest. Consumers resolve paths from the leased closure, never current names.
+The `package_importer` export uses the same descriptor grammar with the additional
+`rsi.packages.importer` v1 requirement. Its consumer owns a short-lived process
+scope. `package.import` receives format 1, an absolute private staging directory,
+the caller's working directory and 1–128 nonempty specifications (at most 64 KiB
+total). It returns format 1 and 1–128 distinct immediate child directory names.
+The request also identifies the leased importer by package name, exact manifest
+digest and direct dependencies, so generated descriptors can retain that same
+implementation closure. This metadata does not grant access to other exports.
+Only those staged PackageStore manifests may enter ordinary atomic admission;
+importers cannot publish resolution selections or grant signed provenance.
 Profiles select activation. The resolution lock records installed names, exact
 manifest digests and dependency closures; it contains no enabled flag.
 
@@ -50,8 +88,31 @@ repository. Durable receipts describe history and cannot authorize new content.
 Explicit local files are recorded with local provenance and never acquire an
 official signature claim. Signature tests use independent fixture keys.
 
-Installed objects remain immutable. A consumer leases its complete resolved
-closure before exposing paths. Updating the resolution lock does not mutate
+An acquisition authenticates the payload archive against the admitted manifest.
+Its authenticated header supplies each expanded file's exact path, size and
+SHA-256 digest. Verification checks every file through its directory handle
+and enumerates the tree for missing, unexpected or substituted entries.
+
+Installed objects remain immutable. A named profile can retain exact installed
+roots across process retirement. Its roots map manifest digests to package
+names, so two versions of one package can coexist during handoff. A writer
+compares the previous set before replacing it. Roots acquire no new execution
+authority. Additions must already be selected, retained by another profile,
+or held by the Store's process leases. Collection retains the transitive
+closure of every profile's roots.
+The Host Store bounds the number of profiles and roots per profile to its
+package count limit. An empty set removes the profile's reservation.
+A profile import admits its produced objects under the same Store writer
+lock and producer fence as a CLI installation. It retains all produced
+digests in that profile before replying, leaving the CLI's selected names
+unchanged. Its exact dependencies must be in the transaction or already
+admitted to the global selection, profile closure or a live process lease.
+Owners may namespace root sets as `owner/profile`.
+The profile then chooses the roots
+it needs for its working view.
+
+A consumer leases its complete resolved closure before exposing paths.
+Updating the resolution lock does not mutate
 already leased bytes. Garbage collection may reclaim only unselected objects
 whose exclusive lease can be acquired. Home reset preserves this store and
 its trust receipts.
@@ -67,14 +128,21 @@ and reported with their name; move them outside `objects/` before retrying GC.
 The collector never deletes an unrecognized operator-owned directory.
 Read-only resolution and acquisition share the coordinator; mutation and GC
 require exclusive ownership. Acquisition pins objects before releasing that
-coordinator. Installation collects unselected, unleased generations and
-abandoned stages before capacity accounting, and syncs every staged directory
-from leaves through the object root before publication. Recovery enumeration
-allows the 256 committed objects plus at most 128 interrupted staging names.
-Installation also removes abandoned `stage-<id>` trees under the same writer
-lease before accounting capacity, including a crash before manifest publication.
-These unpublished names never carry consumer leases; selected immutable objects
-remain subject to the ordinary GC rules.
+coordinator. Installation removes abandoned `stage-<id>` trees, including a
+stage interrupted before its manifest was written. It accounts for existing
+and incoming digests together under the writer lease. Complete retired
+generations remain available for reuse within the Store's count and byte
+limits. An install that needs space reclaims unselected, unleased objects
+outside its candidate set until the reservation fits. Explicit GC can
+reclaim these objects at any time. Recovery enumeration allows the 256
+committed objects plus at most 128 interrupted staging names. Installation
+syncs every staged directory from leaves through the object root before publication.
+If the incoming and already selected objects alone exceed capacity, the
+reservation fails before evicting reusable generations.
+If staging exhausts filesystem space or quota, installation discards the
+incomplete stage and collects eligible retired generations outside its inputs.
+When that releases an old object, it retries staging once under the same
+writer lease, before the producer's publication check.
 
 Limits are enforced before parsing or allocation: manifests and repository
 payloads at most 1 MiB; at most 128 selected packages, 256 objects, 4,096 files
@@ -91,8 +159,28 @@ Source producers may use `install_checked` to revalidate their captured inputs
 and cancellation immediately before the atomic resolution write. This callback
 runs under the package writer lease after complete object staging. Rejection
 leaves the previous selection intact; independently accepted trust receipts remain.
-Staged immutable objects
-are reclaimed before returning, retaining any selected or leased generation.
+Newly staged immutable objects from a failed transaction and its unfinished
+stages are reclaimed before returning, retaining any selected or leased generation.
 If resolution publication reports a durability error after rename, cleanup reads
 the actual resolution again before deciding which objects are unselected. The callback is an in-process producer fence,
 not package-provided executable code.
+When publishing a selection, the Store reuses an existing candidate whose
+immutable object passes verification, including an unselected generation.
+An unselected, unleased candidate that fails verification can be reclaimed
+and staged again from the supplied source.
+One lease can materialize payload exports of its exact direct dependencies.
+Callers retain the selection lease while using those paths. Reopening the
+same dependency to acquire another lease would repeat verification of bytes
+already owned by that process generation.
+Process and importer exports resolved by the same store may share an already
+live lease of the exact named generation. Each launch resolves its own export
+role, descriptor bytes and arguments. Releasing the last consumer ends this
+reuse. Opening a different store or acquiring an ordinary lease verifies the
+durable closure afresh.
+When the running process adds another selection, its store can transfer
+already held immutable dependency objects to that selection. Each new lease
+holds its own locks. New object bytes still undergo full verification.
+For an opt-in cold-start measurement, `RSI_PACKAGE_TIMINGS=1` writes Store
+writer-lock wait, manifest and content verification, expanded payload
+verification and process-closure acquisition times to stderr. Records use
+the immutable object digest and milliseconds.

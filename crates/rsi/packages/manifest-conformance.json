@@ -326,5 +326,113 @@
         }
       }
     }
+  },
+  {
+    "name": "payload_tree export",
+    "valid": true,
+    "manifest": {
+      "format": 2,
+      "name": "fixture",
+      "version": "1",
+      "target": "portable",
+      "dependencies": [],
+      "requires": [],
+      "files": [
+        {
+          "path": "asset",
+          "bytes": 4,
+          "digest": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+          "executable": false
+        }
+      ],
+      "exports": {
+        "main": {
+          "kind": "payload_tree",
+          "path": "asset"
+        }
+      }
+    }
+  },
+  {
+    "name": "process_extension export",
+    "valid": true,
+    "manifest": {
+      "format": 2,
+      "name": "fixture",
+      "version": "1",
+      "target": "portable",
+      "dependencies": [],
+      "requires": [],
+      "files": [
+        {
+          "path": "asset",
+          "bytes": 4,
+          "digest": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+          "executable": false
+        }
+      ],
+      "exports": {
+        "main": {
+          "kind": "process_extension",
+          "path": "asset"
+        }
+      }
+    }
+  },
+  {
+    "name": "package_importer export",
+    "valid": true,
+    "manifest": {
+      "format": 2,
+      "name": "fixture",
+      "version": "1",
+      "target": "portable",
+      "dependencies": [],
+      "requires": [],
+      "files": [
+        {
+          "path": "asset",
+          "bytes": 4,
+          "digest": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+          "executable": false
+        }
+      ],
+      "exports": {
+        "main": {
+          "kind": "package_importer",
+          "path": "asset"
+        }
+      }
+    }
+  },
+  {
+    "name": "duplicate exported payload archive",
+    "valid": false,
+    "manifest": {
+      "format": 2,
+      "name": "fixture",
+      "version": "1",
+      "target": "portable",
+      "dependencies": [],
+      "requires": [],
+      "files": [
+        {
+          "path": "asset",
+          "bytes": 4,
+          "digest": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+          "executable": false
+        }
+      ],
+      "exports": {
+        "main": {
+          "kind": "payload_tree",
+          "path": "asset"
+        },
+        "second": {
+          "kind": "payload_tree",
+          "path": "asset"
+        }
+      }
+    }
   }
 ]

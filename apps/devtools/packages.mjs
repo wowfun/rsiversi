@@ -100,9 +100,14 @@ export function validateManifest(manifest) {
     const components = file.path.toLowerCase().split('/');
     for (let end = 1; end < components.length; end++) if (paths.has(components.slice(0,end).join('/'))) fail();
   }
+  const trees = new Set();
   for (const [name, item] of Object.entries(manifest.exports)) {
     if (!identifier(name) || !fields(item,['kind','path']) || !portable(item.path)
-        || !['web_assets','executable','application_profile','service_profile','native_addon'].includes(item.kind)) fail();
+        || !['web_assets','executable','application_profile','service_profile','native_addon','payload_tree','process_extension','package_importer'].includes(item.kind)) fail();
+    if (item.kind === 'payload_tree') {
+      if (trees.has(item.path)) fail();
+      trees.add(item.path);
+    }
     if (!manifest.files.some(file => item.kind === 'web_assets' ? file.path.startsWith(item.path+'/')
       : file.path === item.path && (item.kind !== 'executable' || file.executable))) fail();
   }
@@ -223,23 +228,16 @@ export async function assemble(kind, output, input, uninstaller) {
 }
 async function verifyFiles(directory, manifest) {
   validateManifest(manifest);
-  let total = 0;
-  const seen = new Set();
   for (const file of manifest.files) {
-    if (!portable(file.path) || seen.has(file.path.toLowerCase()) || !Number.isSafeInteger(file.bytes)
-      || file.bytes < 0 || file.bytes > maximumFileBytes || !/^[a-f0-9]{64}$/.test(file.digest))
-      throw new Error('Invalid package file declaration');
-    seen.add(file.path.toLowerCase());
     let parent = directory;
     for (const component of file.path.split('/').slice(0,-1)) {
       parent = join(parent,component);
-      if (!(await lstat(parent)).isDirectory() || (await lstat(parent)).isSymbolicLink())
+      const metadata = await lstat(parent);
+      if (!metadata.isDirectory() || metadata.isSymbolicLink())
         throw new Error('Package parent is not a regular directory');
     }
     const content = await fileDigest(join(directory,file.path),file.bytes);
     if (content.bytes !== file.bytes || content.digest !== file.digest) throw new Error('Package file digest differs');
-    total += content.bytes;
-    if (total > maximumStoreBytes) throw new Error('Package exceeds capacity');
   }
 }
 export async function signRepository(directory, name, sequence, pem, expectedKey, now = Math.floor(Date.now()/1000)) {
@@ -258,9 +256,6 @@ export async function signRepository(directory, name, sequence, pem, expectedKey
     if (names.includes('package.json')) {
       const bytes = await bounded(join(path,'package.json'));
       const manifest = parseManifest(bytes);
-      if (!identifier(manifest.name)
-        || !/^(portable|(?:windows|linux|macos)-(?:x86_64|aarch64))$/.test(manifest.target))
-        throw new Error('Invalid package selection');
       await verifyFiles(path,manifest);
       const selected = packages[manifest.name] ??= Object.create(null);
       if (selected[manifest.target]) throw new Error('Duplicate package target');

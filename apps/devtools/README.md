@@ -91,8 +91,9 @@ homes and commands with `--watch`; trusted recipes belong to
 runtime or source-directory launcher.
 
 `node apps/devtools/packages.mjs assemble KIND OUTPUT INPUT [UNINSTALLER]`
-assembles already built artifacts. Output must be new. Payloads are hashed and
-copied in 64 KiB chunks, then verified before the manifest is written. The package
+assembles already built artifacts. Output must be new. The manifest validator accepts the same payload-tree, process and importer export
+kinds as PackageStore. The store owns descriptor parsing and exact path admission.
+Payloads are hashed and copied in 64 KiB chunks, then verified before the manifest is written. The package
 owner's disk bounds cover unstripped debug binaries without making them buffer
 sizes. `RSI_RELEASE_VERSION` labels the package. Requirements come from the
 artifact's actual wire contracts, not a native build family.

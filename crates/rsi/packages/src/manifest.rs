@@ -38,6 +38,12 @@ pub enum ExportKind {
     ServiceProfile,
     /// Native ABI addon.
     NativeAddon,
+    /// Immutable, verified process dependency tree expanded during admission.
+    PayloadTree,
+    /// Descriptor for an ordinary process extension.
+    ProcessExtension,
+    /// Descriptor for a short-lived package importer.
+    PackageImporter,
 }
 /// A named path and role; it grants no activation authority.
 #[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
@@ -145,7 +151,9 @@ impl Manifest {
                 .checked_add(file.bytes)
                 .ok_or_else(|| invalid("package size overflow"))?;
         }
-        if total > crate::MAX_STORE_BYTES {
+        if total > crate::MAX_STORE_BYTES
+            || crate::payload::reserved_bytes(self) > crate::MAX_STORE_BYTES
+        {
             return Err(invalid("package exceeds store capacity"));
         }
         for file in &self.files {
@@ -156,7 +164,11 @@ impl Manifest {
                 }
             }
         }
+        let mut payload_paths = BTreeSet::new();
         for (name, export) in &self.exports {
+            if export.kind == ExportKind::PayloadTree && !payload_paths.insert(&export.path) {
+                return Err(invalid("duplicate payload tree export"));
+            }
             crate::identifier(name)?;
             relative(&export.path)?;
             let valid = if export.kind == ExportKind::WebAssets {
@@ -204,6 +216,15 @@ impl Manifest {
     }
 }
 pub(crate) fn relative(path: &str) -> Result<()> {
+    relative_components(path, false)
+}
+pub(crate) fn relative_payload(path: &str) -> Result<()> {
+    if path.split('/').count() > 32 {
+        return Err(invalid("payload path depth"));
+    }
+    relative_components(path, true)
+}
+fn relative_components(path: &str, hidden: bool) -> Result<()> {
     if path.is_empty() || path.len() > 1024 || !path.is_ascii() || path.split('/').count() > 128 {
         return Err(invalid("invalid portable path"));
     }
@@ -214,7 +235,7 @@ pub(crate) fn relative(path: &str) -> Result<()> {
             || part.len() > 200
             || part.ends_with('.')
             || part.ends_with(' ')
-            || part.starts_with('.')
+            || (!hidden && part.starts_with('.'))
             || part.bytes().any(|b| b < 32 || b"\\:*?\"<>|".contains(&b))
         {
             return Err(invalid("escaping or ambiguous path"));

@@ -42,6 +42,294 @@ fn source(root: &std::path::Path, name: &str, bytes: &[u8]) -> InstallSource {
 }
 
 #[test]
+fn unrelated_installs_and_rejected_publications_leave_retired_objects_for_gc() {
+    let root = temporary_root();
+    let store = PackageStore::open(&root.path().join("packages")).unwrap();
+    let install =
+        |name, bytes| store.install(&[source(root.path(), name, bytes)], &[], &[], "portable");
+    let retired = install("web", b"old").unwrap().packages["web"]
+        .digest
+        .clone();
+    install("web", b"new").unwrap();
+    install("side", b"side").unwrap();
+    let object = root.path().join("packages/objects").join(&retired);
+    assert!(
+        object.is_dir(),
+        "an unrelated publication collected a reusable generation"
+    );
+    let failed = store.install_checked(
+        &[source(root.path(), "side", b"rejected")],
+        &[],
+        &[],
+        "portable",
+        || Err(Error::Invalid("cancelled".into())),
+    );
+    assert!(failed.is_err());
+    assert_eq!(store.collect().unwrap(), [retired]);
+}
+
+#[test]
+fn object_pressure_reclaims_retired_generations_and_keeps_pinned_bytes() {
+    let root = temporary_root();
+    let store = PackageStore::open(&root.path().join("packages")).unwrap();
+    let batch = |generation| {
+        (0..128)
+            .map(|n| source(root.path(), &format!("p-{n}"), &[generation]))
+            .collect::<Vec<_>>()
+    };
+    let initial = store.install(&batch(1), &[], &[], "portable").unwrap();
+    let held = store.acquire("p-0").unwrap();
+    store.install(&batch(2), &[], &[], "portable").unwrap();
+    let objects = root.path().join("packages/objects");
+    assert!(objects.join(&initial.packages["p-1"].digest).exists());
+    store
+        .install(
+            &[source(root.path(), "p-1", b"third")],
+            &[],
+            &[],
+            "portable",
+        )
+        .unwrap();
+    assert_eq!(
+        initial
+            .packages
+            .values()
+            .filter(|entry| !objects.join(&entry.digest).exists())
+            .count(),
+        1,
+        "one free slot suffices"
+    );
+    assert_eq!(
+        std::fs::read(held.export("main", ExportKind::ApplicationProfile).unwrap()).unwrap(),
+        [1]
+    );
+}
+
+#[test]
+fn impossible_byte_reservation_preserves_retired_objects_and_rejects_before_copying() {
+    let root = temporary_root();
+    let store = PackageStore::open(&root.path().join("packages")).unwrap();
+    let retired = store
+        .install(&[source(root.path(), "web", b"one")], &[], &[], "portable")
+        .unwrap();
+    store
+        .install(&[source(root.path(), "web", b"two")], &[], &[], "portable")
+        .unwrap();
+    let mut full = source(root.path(), "full", b"");
+    let mut manifest = Manifest::parse(&full.manifest).unwrap();
+    let file = manifest.files[0].clone();
+    for i in 1..4 {
+        manifest.files.push(FileRecord {
+            path: format!("part-{i}"),
+            ..file.clone()
+        });
+    }
+    for file in &mut manifest.files {
+        file.bytes = MAX_FILE_BYTES;
+    }
+    full.manifest = serde_json::to_vec(&manifest).unwrap();
+    let error = store.install(&[full], &[], &[], "portable").unwrap_err();
+    assert!(
+        error.to_string().contains("installed object capacity"),
+        "{error}"
+    );
+    assert_eq!(
+        store.collect().unwrap(),
+        [retired.packages["web"].digest.clone()]
+    );
+}
+
+#[test]
+fn reselection_reuses_a_verified_object_and_repairs_a_damaged_unleased_one() {
+    let root = temporary_root();
+    let path = root.path().join("packages");
+    let store = PackageStore::open(&path).unwrap();
+    let first = source(root.path(), "app", b"original");
+    let install = || store.install(std::slice::from_ref(&first), &[], &[], "portable");
+    let installed = install().unwrap();
+    let digest = &installed.packages["app"].digest;
+    let content = path
+        .join("objects")
+        .join(digest)
+        .join("content/application.toml");
+    store.uninstall(&["app".into()]).unwrap();
+    std::fs::remove_file(first.directory.join("application.toml")).unwrap();
+    assert_eq!(&install().unwrap().packages["app"].digest, digest);
+    store.uninstall(&["app".into()]).unwrap();
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt as _;
+        std::fs::set_permissions(&content, std::fs::Permissions::from_mode(0o600)).unwrap();
+    }
+    std::fs::write(&content, b"tampered").unwrap();
+    std::fs::write(first.directory.join("application.toml"), b"original").unwrap();
+    install().unwrap();
+    assert_eq!(std::fs::read(content).unwrap(), b"original");
+}
+
+#[test]
+fn profiles_retain_independent_versions_and_their_dependencies_through_restart_and_gc() {
+    let root = temporary_root();
+    let path = root.path().join("packages");
+    let store = PackageStore::open(&path).unwrap();
+    let install = |bytes: &[u8]| {
+        let dependency = source(root.path(), "runtime", bytes);
+        let digest = hex::encode(Sha256::digest(&dependency.manifest));
+        let mut package = source(root.path(), "extension", bytes);
+        let mut manifest = Manifest::parse(&package.manifest).unwrap();
+        manifest.dependencies.push(Dependency {
+            name: "runtime".into(),
+            digest: digest.clone(),
+        });
+        package.manifest = serde_json::to_vec(&manifest).unwrap();
+        let result = store
+            .install(&[dependency, package], &[], &[], "portable")
+            .unwrap();
+        (result.packages["extension"].digest.clone(), digest)
+    };
+    let (first, first_runtime) = install(b"one");
+    let held = store.acquire_for_process("extension", &first).unwrap();
+    let (second, second_runtime) = install(b"second");
+    let a = BTreeMap::from([(first.clone(), "extension".into())]);
+    let b = BTreeMap::from([(second.clone(), "extension".into())]);
+    store
+        .replace_profile_roots("one", &BTreeMap::new(), &a)
+        .unwrap();
+    store
+        .replace_profile_roots("two", &BTreeMap::new(), &b)
+        .unwrap();
+    drop(held);
+    drop(store);
+    let store = PackageStore::open(&path).unwrap();
+    store
+        .uninstall(&["extension".into(), "runtime".into()])
+        .unwrap();
+    assert!(store.collect().unwrap().is_empty());
+    assert_eq!(store.profile_roots("one").unwrap(), a);
+    assert!(
+        store
+            .replace_profile_roots("one", &BTreeMap::new(), &b)
+            .is_err()
+    );
+    assert!(
+        store
+            .replace_profile_roots(
+                "two",
+                &b,
+                &BTreeMap::from([("f".repeat(64), "extension".into())])
+            )
+            .is_err()
+    );
+    store
+        .replace_profile_roots("one", &a, &BTreeMap::new())
+        .unwrap();
+    let mut reclaimed = store.collect().unwrap();
+    reclaimed.sort();
+    let mut expected = vec![first, first_runtime];
+    expected.sort();
+    assert_eq!(reclaimed, expected);
+    assert_eq!(store.profile_roots("two").unwrap(), b);
+    store
+        .replace_profile_roots("two", &b, &BTreeMap::new())
+        .unwrap();
+    let mut reclaimed = store.collect().unwrap();
+    reclaimed.sort();
+    let mut expected = vec![second, second_runtime];
+    expected.sort();
+    assert_eq!(reclaimed, expected);
+}
+
+#[test]
+fn candidate_admission_reserves_the_profile_without_changing_cli_or_other_profiles() {
+    let root = temporary_root();
+    let store = PackageStore::open(&root.path().join("store")).unwrap();
+    let global = store
+        .install(
+            &[source(root.path(), "runtime", b"shared")],
+            &[],
+            &[],
+            "portable",
+        )
+        .unwrap();
+    let input = |bytes: &[u8]| {
+        let private = source(root.path(), "private", bytes);
+        let mut plugin = source(root.path(), "extension", bytes);
+        let mut manifest = Manifest::parse(&plugin.manifest).unwrap();
+        manifest.dependencies = vec![
+            Dependency {
+                name: "private".into(),
+                digest: hex::encode(Sha256::digest(&private.manifest)),
+            },
+            Dependency {
+                name: "runtime".into(),
+                digest: global.packages["runtime"].digest.clone(),
+            },
+        ];
+        plugin.manifest = serde_json::to_vec(&manifest).unwrap();
+        vec![private, plugin]
+    };
+    let empty = BTreeMap::new();
+    let first = store
+        .stage_for_profile("one", &empty, &input(b"first"), &[], "portable", || Ok(()))
+        .unwrap();
+    let second = store
+        .stage_for_profile("two", &empty, &input(b"second"), &[], "portable", || Ok(()))
+        .unwrap();
+    assert_eq!(
+        first.roots,
+        BTreeMap::from([(first.packages["extension"].clone(), "extension".into())])
+    );
+    assert_eq!(store.resolution().unwrap().packages, global.packages);
+    let candidate = store
+        .stage_for_profile(
+            "one",
+            &first.roots,
+            &input(b"third"),
+            &[],
+            "portable",
+            || Ok(()),
+        )
+        .unwrap();
+    assert_eq!(candidate.roots.len(), 2);
+    assert!(
+        store
+            .stage_for_profile(
+                "one",
+                &first.roots,
+                &input(b"conflict"),
+                &[],
+                "portable",
+                || Ok(())
+            )
+            .is_err()
+    );
+    store
+        .replace_profile_roots("one", &candidate.roots, &first.roots)
+        .unwrap();
+    let freed = store.collect().unwrap();
+    assert!(
+        candidate
+            .packages
+            .values()
+            .all(|digest| freed.contains(digest))
+    );
+    assert!(
+        store
+            .stage_for_profile(
+                "two",
+                &second.roots,
+                &input(b"cancel"),
+                &[],
+                "portable",
+                || Err(Error::Invalid("cancelled".into()))
+            )
+            .is_err()
+    );
+    assert_eq!(store.profile_roots("two").unwrap(), second.roots);
+    assert!(store.collect().unwrap().is_empty());
+}
+
+#[test]
 fn producer_fence_rejects_after_staging_without_changing_selection() {
     let root = temporary_root();
     let store = PackageStore::open(&root.path().join("packages")).unwrap();

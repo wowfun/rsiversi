@@ -5,14 +5,44 @@ use crate::{
 use rsi_files_native_fs::EntryKind;
 use serde::{Deserialize, Serialize};
 use sha2::{Digest as _, Sha256};
+
+#[derive(Clone, Copy)]
+struct Timing(Option<std::time::Instant>);
+
+impl Timing {
+    fn start() -> Self {
+        static ENABLED: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
+        Self(
+            (*ENABLED.get_or_init(|| {
+                std::env::var_os("RSI_PACKAGE_TIMINGS").as_deref()
+                    == Some(std::ffi::OsStr::new("1"))
+            }))
+            .then(std::time::Instant::now),
+        )
+    }
+    fn mark(&mut self, digest: &str, operation: &str) {
+        if let Some(start) = self.0 {
+            let now = std::time::Instant::now();
+            eprintln!(
+                "package_timing {operation} {digest} {} ms",
+                now.duration_since(start).as_millis()
+            );
+            self.0 = Some(now);
+        }
+    }
+}
 use std::{
     collections::{BTreeMap, BTreeSet},
     fs::File,
     io::{Read as _, Write as _},
     path::{Path, PathBuf},
+    sync::Arc,
 };
 
+type Candidates<'a> = BTreeMap<String, (String, Manifest, &'a InstallSource)>;
 const MAX_PACKAGES: usize = 128;
+mod profile;
+pub use profile::ProfileAdmission;
 #[cfg(test)]
 #[path = "migration_tests.rs"]
 mod migration_tests;
@@ -62,6 +92,7 @@ pub struct PackageStore {
     root: Dir,
     objects: Dir,
     leases: Dir,
+    processes: std::sync::Mutex<BTreeMap<String, std::sync::Weak<PackageLease>>>,
 }
 /// Retains a complete closure while callers use exported immutable paths.
 #[derive(Debug)]
@@ -69,8 +100,35 @@ pub struct PackageLease {
     digest: String,
     manifest: Manifest,
     root: PathBuf,
+    dependency_payloads: BTreeMap<(String, String), PathBuf>,
     _files: Vec<File>,
-    _directories: Vec<Dir>,
+    directories: Vec<Dir>,
+}
+/// Fully resolved immutable arguments, retaining the complete selected closure.
+#[derive(Debug)]
+pub struct ResolvedProcessExtension {
+    /// Exact immutable package whose descriptor was resolved.
+    pub package: Arc<PackageLease>,
+    /// Absolute working directory.
+    pub cwd: PathBuf,
+    /// Complete arguments after the externally selected executable.
+    pub arguments: Vec<String>,
+}
+/// Verified expanded bytes retaining the entire admitted package closure.
+#[derive(Debug)]
+pub struct MaterializedPayload {
+    package: Arc<PackageLease>,
+    path: PathBuf,
+}
+impl MaterializedPayload {
+    /// Immutable tree root; valid while this lease is retained.
+    pub fn path(&self) -> &Path {
+        &self.path
+    }
+    /// Exact selection retaining the tree, including a selected dependency's payload.
+    pub fn package(&self) -> &Arc<PackageLease> {
+        &self.package
+    }
 }
 impl PartialEq for PackageLease {
     fn eq(&self, other: &Self) -> bool {
@@ -79,6 +137,21 @@ impl PartialEq for PackageLease {
 }
 impl Eq for PackageLease {}
 impl PackageLease {
+    /// Borrows a named payload of an exact direct dependency already pinned by this lease.
+    pub fn dependency_payload(
+        self: &Arc<Self>,
+        package: &str,
+        export: &str,
+    ) -> Result<MaterializedPayload> {
+        let path = self
+            .dependency_payloads
+            .get(&(package.to_owned(), export.to_owned()))
+            .ok_or_else(|| invalid("missing direct dependency payload"))?;
+        Ok(MaterializedPayload {
+            package: self.clone(),
+            path: path.clone(),
+        })
+    }
     /// Exact immutable manifest identity retained by this lease.
     pub fn digest(&self) -> &str {
         &self.digest
@@ -96,6 +169,19 @@ impl PackageLease {
             .filter(|export| export.kind == kind)
             .ok_or_else(|| invalid("missing export or wrong role"))?;
         Ok(self.root.join(&export.path))
+    }
+    /// Pins a payload expanded and verified by `PackageStore`, without a second cache.
+    pub fn payload(self: &Arc<Self>, name: &str) -> Result<MaterializedPayload> {
+        self.export(name, ExportKind::PayloadTree)?;
+        Ok(MaterializedPayload {
+            package: self.clone(),
+            path: self
+                .root
+                .parent()
+                .ok_or_else(|| invalid("object content has no parent"))?
+                .join("payloads")
+                .join(name),
+        })
     }
 }
 impl PackageStore {
@@ -126,6 +212,7 @@ impl PackageStore {
             root,
             objects,
             leases,
+            processes: std::sync::Mutex::default(),
         })
     }
     fn resolution_unlocked(&self) -> Result<Resolution> {
@@ -200,20 +287,11 @@ impl PackageStore {
     ) -> Result<Resolution> {
         self.install_checked(sources, repositories, interfaces, target, || Ok(()))
     }
-    /// Stages verified objects, then checks the producer fence before selection.
-    pub fn install_checked(
+    fn admit_repository_receipts(
         &self,
-        sources: &[InstallSource],
+        resolution: &mut Resolution,
         repositories: &[VerifiedRepository],
-        interfaces: &[Interface],
-        target: &str,
-        check: impl FnOnce() -> Result<()>,
-    ) -> Result<Resolution> {
-        if sources.is_empty() || sources.len() > MAX_PACKAGES {
-            return Err(invalid("installation source count"));
-        }
-        let _writer = self.root.lock("writer.lock", false)?;
-        let mut resolution = self.resolution_unlocked()?;
+    ) -> Result<()> {
         for repository in repositories {
             let receipt = repository.receipt();
             if let Some(previous) = resolution.trust.get(&receipt.repository)
@@ -230,31 +308,35 @@ impl PackageStore {
             return Err(invalid("repository capacity"));
         }
         if !repositories.is_empty() {
-            self.write_resolution(&resolution)?;
+            self.write_resolution(resolution)?;
         }
-        let mut names = BTreeSet::new();
-        let mut candidates = BTreeMap::new();
-        for source in sources {
-            let manifest = Manifest::parse(&source.manifest)?;
-            if manifest.target != "portable" && manifest.target != target {
-                return Err(invalid("unsupported package target"));
-            }
-            manifest.admit_interfaces(interfaces)?;
-            if !names.insert(manifest.name.clone()) {
-                return Err(invalid("duplicate transaction name"));
-            }
-            validate_provenance(&source.provenance, &resolution.trust)?;
-            let digest = crate::digest(&source.manifest);
-            authorize_manifest(&source.provenance, &manifest, &digest, repositories, target)?;
-
+        Ok(())
+    }
+    /// Stages verified objects, then checks the producer fence before selection.
+    pub fn install_checked(
+        &self,
+        sources: &[InstallSource],
+        repositories: &[VerifiedRepository],
+        interfaces: &[Interface],
+        target: &str,
+        check: impl FnOnce() -> Result<()>,
+    ) -> Result<Resolution> {
+        if sources.is_empty() || sources.len() > MAX_PACKAGES {
+            return Err(invalid("installation source count"));
+        }
+        let _writer = self.root.lock("writer.lock", false)?;
+        let mut resolution = self.resolution_unlocked()?;
+        self.admit_repository_receipts(&mut resolution, repositories)?;
+        let candidates =
+            Self::admit_sources(sources, repositories, interfaces, target, &resolution)?;
+        for (name, (digest, _, source)) in &candidates {
             resolution.packages.insert(
-                manifest.name.clone(),
+                name.clone(),
                 Selection {
                     digest: digest.clone(),
                     provenance: source.provenance.clone(),
                 },
             );
-            candidates.insert(manifest.name.clone(), (digest, manifest, source));
         }
         if resolution.packages.len() > MAX_PACKAGES {
             return Err(invalid("selected package capacity"));
@@ -272,34 +354,104 @@ impl PackageStore {
             manifests.insert(name.clone(), manifest);
         }
         validate_closure(&resolution, &manifests)?;
-        self.collect_unlocked()?;
-        let publication = (|| {
-            let (mut count, mut bytes) = self.usage()?;
-            for (digest, manifest, source) in candidates.values() {
-                if match self.objects.directory.child_kind(Path::new(digest)) {
-                    Ok(EntryKind::Directory) => true,
-                    Ok(_) => return Err(invalid("non-directory package object")),
-                    Err(error) if error.kind() == std::io::ErrorKind::NotFound => false,
-                    Err(error) => return Err(error.into()),
-                } {
-                    self.verify_object(digest)?;
-                    continue;
-                }
-                count += 1;
-                bytes += manifest.files.iter().map(|file| file.bytes).sum::<u64>();
-                if count > MAX_OBJECTS || bytes > crate::MAX_STORE_BYTES {
-                    return Err(invalid("installed object capacity"));
-                }
-                self.stage(digest, manifest, source)?;
-            }
-            check()?;
+        self.publish_objects(&candidates, check, || {
             self.write_resolution(&resolution)?;
             Ok(resolution)
+        })
+    }
+    fn admit_sources<'a>(
+        sources: &'a [InstallSource],
+        repositories: &[VerifiedRepository],
+        interfaces: &[Interface],
+        target: &str,
+        resolution: &Resolution,
+    ) -> Result<Candidates<'a>> {
+        let mut names = BTreeSet::new();
+        let mut candidates = BTreeMap::new();
+        for source in sources {
+            let manifest = Manifest::parse(&source.manifest)?;
+            if manifest.target != "portable" && manifest.target != target {
+                return Err(invalid("unsupported package target"));
+            }
+            manifest.admit_interfaces(interfaces)?;
+            if !names.insert(manifest.name.clone()) {
+                return Err(invalid("duplicate transaction name"));
+            }
+            validate_provenance(&source.provenance, &resolution.trust)?;
+            let digest = crate::digest(&source.manifest);
+            authorize_manifest(&source.provenance, &manifest, &digest, repositories, target)?;
+
+            candidates.insert(manifest.name.clone(), (digest, manifest, source));
+        }
+        Ok(candidates)
+    }
+    fn publish_objects<T>(
+        &self,
+        candidates: &Candidates<'_>,
+        check: impl FnOnce() -> Result<()>,
+        publish: impl FnOnce() -> Result<T>,
+    ) -> Result<T> {
+        self.reserve_installation(candidates)?;
+        let mut staged = BTreeSet::new();
+        let mut reclaimed_disk = false;
+        let publication = (|| {
+            for (digest, manifest, source) in candidates.values() {
+                match self.objects.directory.child_kind(Path::new(digest)) {
+                    Ok(EntryKind::Directory) => match self.verify_object(digest) {
+                        Ok(_) => continue,
+                        Err(error) => {
+                            // Only an unselected, unleased candidate can be repaired in place.
+                            if self.collect_unlocked(|name| name == digest)?.is_empty() {
+                                return Err(error);
+                            }
+                        }
+                    },
+                    Ok(_) => return Err(invalid("non-directory package object")),
+                    Err(error) if error.kind() == std::io::ErrorKind::NotFound => (),
+                    Err(error) => return Err(error.into()),
+                }
+                staged.insert(digest.as_str());
+                if let Err(error) = self.stage(digest, manifest, source) {
+                    if reclaimed_disk
+                        || !matches!(&error, Error::Io(e) if matches!(e.kind(),
+                        std::io::ErrorKind::StorageFull | std::io::ErrorKind::QuotaExceeded))
+                    {
+                        return Err(error);
+                    }
+                    let incoming: BTreeSet<_> =
+                        candidates.values().map(|(id, _, _)| id.as_str()).collect();
+                    let removed =
+                        self.collect_unlocked(|name| name == digest || !incoming.contains(name))?;
+                    if !removed.iter().any(|name| name != digest && !is_stage(name)) {
+                        return Err(error);
+                    }
+                    reclaimed_disk = true;
+                    self.stage(digest, manifest, source)?;
+                }
+            }
+            for (digest, manifest, _) in candidates.values() {
+                for (name, export) in &manifest.exports {
+                    if matches!(
+                        export.kind,
+                        ExportKind::ProcessExtension | ExportKind::PackageImporter
+                    ) {
+                        self.resolve_process_unlocked(
+                            digest,
+                            manifest,
+                            name,
+                            "admission",
+                            export.kind,
+                        )?;
+                    }
+                }
+            }
+            check()?;
+            publish()
         })();
-        if publication.is_err() {
+        if publication.is_err() && !staged.is_empty() {
             // A failed sync may follow the resolution rename. Re-read authority
             // rather than assuming the old selection survived publication.
-            self.collect_unlocked()?;
+            self.collect_unlocked(|name| is_stage(name) || staged.contains(name))?;
         }
         publication
     }
@@ -313,6 +465,7 @@ impl PackageStore {
         Ok((directory, Manifest::parse(&bytes)?))
     }
     fn verify_object(&self, digest: &str) -> Result<(Dir, Manifest)> {
+        let mut timing = Timing::start();
         let (directory, manifest) = self.read_object(digest)?;
         for file in &manifest.files {
             let input = rsi_files_native_fs::open_relative_file_no_follow(
@@ -321,22 +474,72 @@ impl PackageStore {
             )?;
             verify_file(input, file, None)?;
         }
+        timing.mark(digest, "content");
+        crate::payload::process(&directory, &manifest, false)?;
+        timing.mark(digest, "expanded");
         Ok((directory, manifest))
     }
-    fn usage(&self) -> Result<(usize, u64)> {
-        let entries = self.objects.names(MAX_OBJECTS)?;
-        let mut bytes = 0_u64;
-        for (name, kind) in &entries {
-            if *kind != EntryKind::Directory {
+    fn reserve_installation(&self, candidates: &Candidates<'_>) -> Result<()> {
+        let mut bytes = 0;
+        let mut incoming = BTreeSet::new();
+        for (digest, manifest, _) in candidates.values() {
+            incoming.insert(digest.as_str());
+            bytes += crate::payload::reserved_bytes(manifest);
+        }
+        if bytes > crate::MAX_STORE_BYTES {
+            return Err(invalid("installed object capacity"));
+        }
+        let mut existing = Vec::new();
+        let mut recovered = false;
+        for (name, kind) in self.objects.names(MAX_OBJECTS + MAX_PACKAGES)? {
+            if kind != EntryKind::Directory {
                 return Err(invalid("non-directory package object"));
             }
-            let directory = self.objects.child(Path::new(name), false)?;
-            let manifest = Manifest::parse(&directory.read("manifest.json", crate::MAX_DOCUMENT)?)?;
-            bytes = bytes
-                .checked_add(manifest.files.iter().map(|file| file.bytes).sum::<u64>())
-                .ok_or_else(|| invalid("object byte accounting overflow"))?;
+            if is_stage(&name) {
+                self.remove_object_tree(&name)?;
+                recovered = true;
+            } else if !incoming.contains(name.as_str()) {
+                let manifest = match self.read_object(&name) {
+                    Ok((_, manifest)) => manifest,
+                    Err(error) => {
+                        if self.collect_unlocked(|digest| digest == name)?.is_empty() {
+                            return Err(error);
+                        }
+                        continue;
+                    }
+                };
+                let size = crate::payload::reserved_bytes(&manifest);
+                bytes += size;
+                existing.push((name, size));
+            }
         }
-        Ok((entries.len(), bytes))
+        if recovered {
+            self.objects.directory.sync_all()?;
+        }
+        let mut count = incoming.len() + existing.len();
+        if count <= MAX_OBJECTS && bytes <= crate::MAX_STORE_BYTES {
+            return Ok(());
+        }
+        let selected = self.selected_objects()?;
+        existing.retain(|(digest, _)| !selected.contains(digest));
+        let reclaimable: u64 = existing.iter().map(|(_, size)| size).sum();
+        if count - existing.len() > MAX_OBJECTS || bytes - reclaimable > crate::MAX_STORE_BYTES {
+            return Err(invalid("installed object capacity"));
+        }
+        for (digest, size) in existing {
+            if self.reclaim_unleased(&digest)? {
+                count -= 1;
+                bytes -= size;
+                if count <= MAX_OBJECTS && bytes <= crate::MAX_STORE_BYTES {
+                    break;
+                }
+            }
+        }
+        self.objects.directory.sync_all()?;
+        if count > MAX_OBJECTS || bytes > crate::MAX_STORE_BYTES {
+            return Err(invalid("installed object capacity"));
+        }
+        Ok(())
     }
     fn stage(&self, digest: &str, manifest: &Manifest, source: &InstallSource) -> Result<()> {
         let mut random = [0; 16];
@@ -364,7 +567,8 @@ impl PackageStore {
             verify_file(source, file, Some(output))?;
             directory.directory.sync_all()?;
         }
-        let mut budget = crate::MAX_FILES * 128 + 2;
+        crate::payload::process(&staging, manifest, true)?;
+        let mut budget = traversal_budget();
         sync_tree(&staging.directory, 0, &mut budget)?;
         drop(staging);
         self.objects
@@ -378,21 +582,210 @@ impl PackageStore {
             .packages
             .get(name)
             .ok_or_else(|| invalid("package is not installed"))?;
-        self.acquire_unlocked(name, &selected.digest)
+        self.acquire_unlocked(name, &selected.digest, &[])
     }
     /// Pins an exact admitted generation, even after its name selects a newer one.
     pub fn acquire_exact(&self, name: &str, digest: &str) -> Result<PackageLease> {
         crate::identifier(name)?;
         crate::hash(digest)?;
         let _writer = self.root.lock("writer.lock", true)?;
-        self.acquire_unlocked(name, digest)
+        self.acquire_unlocked(name, digest, &[])
     }
-    fn acquire_unlocked(&self, name: &str, digest: &str) -> Result<PackageLease> {
+    /// Leases a process selection, reusing only immutable objects of live process
+    /// leases from this store instance. Ordinary exact acquisition remains fresh.
+    pub fn acquire_for_process(&self, name: &str, digest: &str) -> Result<Arc<PackageLease>> {
+        crate::identifier(name)?;
+        crate::hash(digest)?;
+        let parents: Vec<_> = self
+            .processes
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .values()
+            .filter_map(std::sync::Weak::upgrade)
+            .collect();
+        if let Some(lease) = parents.iter().find(|lease| lease.digest() == digest) {
+            if lease.manifest().name != name {
+                return Err(invalid("package identity differs from manifest"));
+            }
+            return Ok(lease.clone());
+        }
+        let mut timing = Timing::start();
+        let _writer = self.root.lock("writer.lock", true)?;
+        timing.mark(digest, "lock");
+        let lease = Arc::new(self.acquire_unlocked(name, digest, &parents)?);
+        timing.mark(digest, "closure");
+        let mut active = self
+            .processes
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        active.retain(|_, item| item.strong_count() > 0);
+        active.insert(digest.to_owned(), Arc::downgrade(&lease));
+        Ok(lease)
+    }
+    /// Resolves only an exact leased generation, independent of current selections.
+    pub fn process_extension(
+        &self,
+        name: &str,
+        digest: &str,
+        export: &str,
+        generation: &str,
+    ) -> Result<ResolvedProcessExtension> {
+        self.resolve_extension(
+            name,
+            digest,
+            export,
+            generation,
+            ExportKind::ProcessExtension,
+        )
+    }
+    /// Resolves an exact installed importer with its complete process lifetime lease.
+    pub fn package_importer(
+        &self,
+        name: &str,
+        digest: &str,
+        export: &str,
+        generation: &str,
+    ) -> Result<ResolvedProcessExtension> {
+        self.resolve_extension(
+            name,
+            digest,
+            export,
+            generation,
+            ExportKind::PackageImporter,
+        )
+    }
+    fn resolve_extension(
+        &self,
+        name: &str,
+        digest: &str,
+        export: &str,
+        generation: &str,
+        kind: ExportKind,
+    ) -> Result<ResolvedProcessExtension> {
+        let package = self.acquire_for_process(name, digest)?;
+        let (cwd, arguments) = self.resolve_process_unlocked(
+            package.digest(),
+            package.manifest(),
+            export,
+            generation,
+            kind,
+        )?;
+        Ok(ResolvedProcessExtension {
+            package,
+            cwd,
+            arguments,
+        })
+    }
+    fn resolve_process_unlocked(
+        &self,
+        digest: &str,
+        manifest: &Manifest,
+        name: &str,
+        generation: &str,
+        kind: ExportKind,
+    ) -> Result<(PathBuf, Vec<String>)> {
+        crate::identifier(name)?;
+        if generation.is_empty() || generation.len() > 128 || generation.contains('\0') {
+            return Err(invalid("process generation"));
+        }
+        if !manifest.requires.iter().any(|requirement| {
+            requirement.name == "rsi.extension.process" && requirement.version == 1
+        }) {
+            return Err(invalid(
+                "process export requires rsi.extension.process version 1",
+            ));
+        }
+        if kind == ExportKind::PackageImporter
+            && !manifest
+                .requires
+                .contains(&crate::importer_protocol_descriptor())
+        {
+            return Err(invalid("importer requires rsi.packages.importer version 1"));
+        }
+        let export = manifest
+            .exports
+            .get(name)
+            .filter(|export| export.kind == kind)
+            .ok_or_else(|| invalid("missing process export"))?;
+        let (object, _) = self.read_object(digest)?;
+        let descriptor = object.read(&format!("content/{}", export.path), 64 * 1024)?;
+        let file = manifest
+            .files
+            .iter()
+            .find(|file| file.path == export.path)
+            .ok_or_else(|| invalid("missing process descriptor file"))?;
+        if hex::encode(Sha256::digest(&descriptor)) != file.digest {
+            return Err(Error::Digest);
+        }
+        let descriptor = crate::ProcessExtension::parse(&descriptor)?;
+        let resolve = |location: &crate::PayloadPath, directory: bool| -> Result<PathBuf> {
+            let (owner, owner_manifest) = if let Some(package) = &location.package {
+                let dependency = manifest
+                    .dependencies
+                    .iter()
+                    .find(|dependency| &dependency.name == package)
+                    .ok_or_else(|| invalid("process path is not a direct dependency"))?;
+                let (owner, owner_manifest) = self.read_object(&dependency.digest)?;
+                if owner_manifest.name != *package {
+                    return Err(invalid("process dependency identity"));
+                }
+                (owner, owner_manifest)
+            } else {
+                (self.read_object(digest)?.0, manifest.clone())
+            };
+            owner_manifest
+                .exports
+                .get(&location.payload)
+                .filter(|export| export.kind == ExportKind::PayloadTree)
+                .ok_or_else(|| invalid("process path lacks a payload export"))?;
+            let tree = owner.child(&Path::new("payloads").join(&location.payload), false)?;
+            let relative = Path::new(&location.path);
+            if directory || location.path.is_empty() {
+                tree.child(relative, false)?;
+            } else {
+                match rsi_files_native_fs::open_relative_file_no_follow(&tree.directory, relative) {
+                    Ok(file) if file.metadata()?.is_file() => {}
+                    _ => {
+                        tree.child(relative, false)?;
+                    }
+                }
+            }
+            Ok(tree.path.join(relative))
+        };
+        let cwd = resolve(&descriptor.cwd, true)?;
+        let arguments = descriptor
+            .arguments
+            .iter()
+            .map(|argument| {
+                Ok(match argument {
+                    crate::ProcessArgument::Literal { value } => value.clone(),
+                    crate::ProcessArgument::Generation => generation.to_owned(),
+                    crate::ProcessArgument::Path { location } => resolve(location, false)?
+                        .into_os_string()
+                        .into_string()
+                        .map_err(|_| invalid("process payload path is not UTF-8"))?,
+                })
+            })
+            .collect::<Result<Vec<_>>>()?;
+        Ok((cwd, arguments))
+    }
+    fn acquire_unlocked(
+        &self,
+        name: &str,
+        digest: &str,
+        parents: &[Arc<PackageLease>],
+    ) -> Result<PackageLease> {
+        let held: BTreeSet<_> = parents
+            .iter()
+            .flat_map(|lease| &lease.directories)
+            .filter_map(|dir| dir.path.file_name()?.to_str())
+            .collect();
         let mut pending = vec![(name.to_owned(), digest.to_owned())];
         let mut seen = BTreeSet::new();
         let mut files = Vec::new();
         let mut directories = Vec::new();
         let mut selected_manifest = None;
+        let mut dependency_payloads = BTreeMap::new();
         while let Some((name, current_digest)) = pending.pop() {
             if !seen.insert((name.clone(), current_digest.clone())) {
                 continue;
@@ -401,7 +794,11 @@ impl PackageStore {
                 return Err(invalid("package closure capacity"));
             }
             files.push(self.leases.lock(&current_digest, true)?);
-            let (directory, manifest) = self.verify_object(&current_digest)?;
+            let (directory, manifest) = if held.contains(current_digest.as_str()) {
+                self.read_object(&current_digest)?
+            } else {
+                self.verify_object(&current_digest)?
+            };
             if manifest.name != name {
                 return Err(invalid("package identity differs from manifest"));
             }
@@ -410,15 +807,30 @@ impl PackageStore {
             }
             if current_digest == digest {
                 selected_manifest = Some(manifest);
+            } else if selected_manifest.as_ref().is_some_and(|selected| {
+                selected
+                    .dependencies
+                    .iter()
+                    .any(|d| d.name == name && d.digest == current_digest)
+            }) {
+                for (export, role) in &manifest.exports {
+                    if role.kind == ExportKind::PayloadTree {
+                        dependency_payloads.insert(
+                            (name.clone(), export.clone()),
+                            directory.path.join("payloads").join(export),
+                        );
+                    }
+                }
             }
             directories.push(directory);
         }
         Ok(PackageLease {
             digest: digest.to_owned(),
             manifest: selected_manifest.ok_or_else(|| invalid("selected manifest missing"))?,
+            dependency_payloads,
             root: self.objects.path.join(digest).join("content"),
             _files: files,
-            _directories: directories,
+            directories,
         })
     }
     /// Atomically removes names, refusing to break any remaining exact dependency.
@@ -445,57 +857,66 @@ impl PackageStore {
     /// Reclaims unselected, unleased generations and abandoned installation stages.
     pub fn collect(&self) -> Result<Vec<String>> {
         let _writer = self.root.lock("writer.lock", false)?;
-        self.collect_unlocked()
+        self.collect_unlocked(|_| true)
     }
-    fn collect_unlocked(&self) -> Result<Vec<String>> {
+    fn selected_objects(&self) -> Result<BTreeSet<String>> {
         let resolution = self.resolution_unlocked()?;
         self.validate_resolution(&resolution)?;
-        let selected: BTreeSet<_> = resolution
+        let mut selected: BTreeSet<_> = resolution
             .packages
             .values()
-            .map(|selection| selection.digest.as_str())
+            .map(|selection| selection.digest.clone())
             .collect();
+        selected.extend(self.profile_objects()?);
+        Ok(selected)
+    }
+    fn collect_unlocked(&self, reclaim: impl Fn(&str) -> bool) -> Result<Vec<String>> {
+        let selected = self.selected_objects()?;
         let mut removed = Vec::new();
         for (name, kind) in self.objects.names(MAX_OBJECTS + MAX_PACKAGES)? {
             if kind != EntryKind::Directory {
                 return Err(invalid("non-directory package object"));
             }
-            if selected.contains(name.as_str()) {
+            if selected.contains(name.as_str()) || !reclaim(&name) {
                 continue;
             }
-            let staging = is_stage(&name);
-            let lease = if staging {
-                None
-            } else {
-                crate::hash(&name).map_err(|_| {
-                    invalid(format!(
-                        "unknown object {name:?}; move it outside objects/ before retrying GC"
-                    ))
-                })?;
-                match self.leases.lock(&name, false) {
-                    Ok(lease) => Some(lease),
-                    Err(Error::Busy) => continue,
-                    Err(error) => return Err(error),
-                }
-            };
-            // All operations below descend from the retained objects handle.
-            // A staged tree can be incomplete; deletion never trusts its manifest.
-            let mut budget = crate::MAX_FILES * 128 + 2;
-            visit_tree(
-                &self.objects.directory,
-                Path::new(&name),
-                0,
-                &mut budget,
-                true,
-            )?;
-            if !staging {
-                drop(lease);
-                self.leases.directory.remove_child(Path::new(&name))?;
+            if is_stage(&name) {
+                self.remove_object_tree(&name)?;
+            } else if !self.reclaim_unleased(&name)? {
+                continue;
             }
             removed.push(name);
         }
-        self.objects.directory.sync_all()?;
+        if !removed.is_empty() {
+            self.objects.directory.sync_all()?;
+        }
         Ok(removed)
+    }
+    fn reclaim_unleased(&self, digest: &str) -> Result<bool> {
+        crate::hash(digest).map_err(|_| {
+            invalid(format!(
+                "unknown object {digest:?}; move it outside objects/ before retrying GC"
+            ))
+        })?;
+        let lease = match self.leases.lock(digest, false) {
+            Ok(lease) => lease,
+            Err(Error::Busy) => return Ok(false),
+            Err(error) => return Err(error),
+        };
+        self.remove_object_tree(digest)?;
+        drop(lease);
+        self.leases.directory.remove_child(Path::new(digest))?;
+        Ok(true)
+    }
+    fn remove_object_tree(&self, name: &str) -> Result<()> {
+        // Interrupted stages can lack a manifest. Descend only from the retained handle.
+        visit_tree(
+            &self.objects.directory,
+            Path::new(name),
+            0,
+            &mut traversal_budget(),
+            true,
+        )
     }
     fn validate_resolution(&self, resolution: &Resolution) -> Result<()> {
         let manifests = resolution
@@ -528,7 +949,7 @@ impl PackagePurge {
             if !is_stage(&name) {
                 crate::hash(&name)?;
             }
-            let mut budget = crate::MAX_FILES * 128 + 2;
+            let mut budget = traversal_budget();
             visit_tree(
                 &self.store.objects.directory,
                 Path::new(&name),
@@ -543,24 +964,21 @@ impl PackagePurge {
     pub fn purge(&self) -> Result<()> {
         self.visit_objects(true)?;
         self.store.objects.directory.sync_all()?;
-        match self
-            .store
-            .root
-            .directory
-            .child_kind(Path::new("resolution.json"))
-        {
-            Ok(EntryKind::File) => self
-                .store
-                .root
-                .directory
-                .remove_child(Path::new("resolution.json"))?,
-            Err(e) if e.kind() == std::io::ErrorKind::NotFound => {}
-            Err(e) => return Err(e.into()),
-            _ => return Err(invalid("resolution is not an ordinary file")),
+        for name in ["resolution.json", profile::DOCUMENT] {
+            let path = Path::new(name);
+            match self.store.root.directory.child_kind(path) {
+                Ok(EntryKind::File) => self.store.root.directory.remove_child(path)?,
+                Err(e) if e.kind() == std::io::ErrorKind::NotFound => {}
+                Err(e) => return Err(e.into()),
+                _ => return Err(invalid("package state is not an ordinary file")),
+            }
         }
         self.store.root.directory.sync_all()?;
         Ok(())
     }
+}
+fn traversal_budget() -> usize {
+    crate::MAX_FILES * 128 + crate::payload::MAX_PAYLOAD_ENTRIES + 260
 }
 fn sync_tree(
     directory: &rsi_files_native_fs::Directory,

@@ -4,14 +4,21 @@
 #![allow(clippy::missing_errors_doc)]
 mod filesystem;
 mod manifest;
+mod payload;
+mod process;
 mod repository;
 mod store;
 pub use manifest::{Dependency, Export, ExportKind, FileRecord, Manifest, Provenance};
+pub use payload::PayloadHeader;
+pub use process::{PayloadPath, ProcessArgument, ProcessExtension};
 pub use repository::{
     Repository, RepositoryTarget, SignedRepository, TrustReceipt, VerifiedRepository,
 };
 pub use rsi_api_protocol::ProtocolDescriptor as Interface;
-pub use store::{InstallSource, PackageLease, PackagePurge, PackageStore, Resolution, Selection};
+pub use store::{
+    InstallSource, MaterializedPayload, PackageLease, PackagePurge, PackageStore, ProfileAdmission,
+    Resolution, ResolvedProcessExtension, Selection,
+};
 
 /// Maximum bounded encoded manifest, repository or resolution document.
 pub const MAX_DOCUMENT: usize = 1024 * 1024;
@@ -81,4 +88,12 @@ fn hash(value: &str) -> Result<()> {
 fn digest(value: &[u8]) -> String {
     use sha2::{Digest as _, Sha256};
     hex::encode(Sha256::digest(value))
+}
+
+/// Finite short-lived package import protocol supported by product installers.
+pub fn importer_protocol_descriptor() -> Interface {
+    Interface {
+        name: "rsi.packages.importer".into(),
+        version: 1,
+    }
 }
