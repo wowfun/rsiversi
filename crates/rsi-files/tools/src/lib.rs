@@ -1,4 +1,4 @@
-//! Read-only Tool contributions using the invocation's pinned Sandbox scope.
+//! Read-only Tool contributions using the invocation's pinned execution provider.
 #![forbid(unsafe_code)]
 #![warn(missing_docs)]
 #![allow(clippy::missing_errors_doc)]
@@ -6,8 +6,8 @@
 use async_trait::async_trait;
 use rsi_files_protocol::{
     FileKind, Files, FilesBinding, FilesCaller, FilesContract, FilesError,
-    MAXIMUM_DIRECTORY_ENTRIES, MAXIMUM_DIRECTORY_PAGE_ENTRIES, MAXIMUM_FILE_PAGE_BYTES,
-    MAXIMUM_FILE_PATH_BYTES, PREFERRED_DIRECTORY_PAGE_ENTRIES, PREFERRED_FILE_PAGE_BYTES,
+    MAXIMUM_DIRECTORY_PAGE_ENTRIES, MAXIMUM_FILE_PAGE_BYTES, MAXIMUM_FILE_PATH_BYTES,
+    PREFERRED_DIRECTORY_PAGE_ENTRIES, PREFERRED_FILE_PAGE_BYTES, PathRead, ReadPage, ReadPath,
     RelativePath,
 };
 use rsi_meta::{ActivationPlan, ConfigValue, MetaError, PluginFactory, PreparedActivation};
@@ -56,8 +56,8 @@ impl PluginFactory for FilesToolsFactory {
 fn registrations(files: &Arc<dyn Files>) -> rsi_tools_protocol::Result<Vec<ToolRegistration>> {
     let mut entries = [FileKind::File, FileKind::Directory].into_iter().map(|kind| {
         let (name, description, maximum) = match kind {
-            FileKind::File => ("file_read", format!("Read one fresh byte page from a regular file beneath the current workspace. path is cwd-relative UTF-8; path_hex is its exact byte alternative. No symlinks or parent traversal. offset is zero-based bytes; maximum defaults to {PREFERRED_FILE_PAGE_BYTES}."), MAXIMUM_FILE_PAGE_BYTES),
-            FileKind::Directory => ("directory_list", format!("Read one page of a fresh directory snapshot beneath the current workspace. path or path_hex is cwd-relative; omit both to list cwd. Symlinks and special files are not readable. offset is zero-based entries; maximum defaults to {PREFERRED_DIRECTORY_PAGE_ENTRIES}. Later calls observe a fresh snapshot."), MAXIMUM_DIRECTORY_PAGE_ENTRIES),
+            FileKind::File => ("file_read", format!("Read one fresh byte page from a regular file on the execution host. path is absolute or cwd-relative UTF-8; path_hex is its exact byte alternative. Parents and symlinks are resolved by the filesystem. offset is zero-based bytes; maximum defaults to {PREFERRED_FILE_PAGE_BYTES}."), MAXIMUM_FILE_PAGE_BYTES),
+            FileKind::Directory => ("directory_list", format!("Read one page of a fresh directory snapshot on the execution host. path or path_hex is absolute or cwd-relative; omit both to list cwd. Parents and symlinks are resolved by the filesystem. offset is zero-based entries; maximum defaults to {PREFERRED_DIRECTORY_PAGE_ENTRIES}. Later calls observe a fresh snapshot."), MAXIMUM_DIRECTORY_PAGE_ENTRIES),
         };
         let mut schema = json!({"type":"object", "properties": {
             "path":{"type":"string","maxLength":MAXIMUM_FILE_PATH_BYTES},
@@ -72,68 +72,30 @@ fn registrations(files: &Arc<dyn Files>) -> rsi_tools_protocol::Result<Vec<ToolR
     Ok(entries)
 }
 
-fn workspace_path(
-    prefix: &RelativePath,
-    relative: &RelativePath,
-) -> rsi_files_protocol::Result<RelativePath> {
-    let mut bytes = prefix.as_bytes().to_vec();
-    if !bytes.is_empty() && !relative.as_bytes().is_empty() {
-        bytes.push(b'/');
-    }
-    bytes.extend_from_slice(relative.as_bytes());
-    RelativePath::new(&bytes)
-}
 #[derive(Debug, Deserialize)]
 #[serde(deny_unknown_fields)]
 struct Arguments {
     path: Option<String>,
-    path_hex: Option<RelativePath>,
+    path_hex: Option<ReadPath>,
     #[serde(default)]
     offset: u64,
     maximum: Option<usize>,
 }
 impl Arguments {
-    fn page_limit(&self, kind: FileKind) -> rsi_files_protocol::Result<usize> {
-        let (preferred, maximum) = match kind {
-            FileKind::File => (PREFERRED_FILE_PAGE_BYTES, MAXIMUM_FILE_PAGE_BYTES),
-            FileKind::Directory => (
-                PREFERRED_DIRECTORY_PAGE_ENTRIES,
-                MAXIMUM_DIRECTORY_PAGE_ENTRIES,
-            ),
-        };
-        let page_limit = self.maximum.unwrap_or(preferred);
-        if page_limit == 0
-            || page_limit > maximum
-            || (kind == FileKind::Directory && self.offset > MAXIMUM_DIRECTORY_ENTRIES as u64)
-        {
-            return Err(FilesError::Invalid);
-        }
-        Ok(page_limit)
+    fn page_limit(&self, kind: FileKind) -> usize {
+        self.maximum.unwrap_or(match kind {
+            FileKind::File => PREFERRED_FILE_PAGE_BYTES,
+            FileKind::Directory => PREFERRED_DIRECTORY_PAGE_ENTRIES,
+        })
     }
 
-    fn path(&self, kind: FileKind) -> rsi_files_protocol::Result<RelativePath> {
-        let path = match (&self.path, &self.path_hex) {
-            (Some(path), None) if path == "." && kind == FileKind::Directory => {
-                RelativePath::default()
-            }
-            (Some(path), None) => RelativePath::new(path.as_bytes())?,
-            (None, Some(path)) => path.clone(),
-            (None, None) if kind == FileKind::Directory => RelativePath::default(),
-            (Some(_), Some(_)) | (None, None) => return Err(FilesError::Invalid),
-        };
-        if kind == FileKind::File && path.as_bytes().is_empty() {
-            return Err(FilesError::Invalid);
+    fn path(&self, kind: FileKind) -> rsi_files_protocol::Result<ReadPath> {
+        match (&self.path, &self.path_hex) {
+            (Some(path), None) => ReadPath::new(path.as_bytes()),
+            (None, Some(path)) => Ok(path.clone()),
+            (None, None) if kind == FileKind::Directory => ReadPath::new(b"."),
+            _ => Err(FilesError::Invalid),
         }
-        Ok(path)
-    }
-}
-struct ReadOwner {
-    files: Arc<dyn Files>,
-    caller: FilesCaller,
-}
-impl Drop for ReadOwner {
-    fn drop(&mut self) {
-        self.files.release_caller(&self.caller);
     }
 }
 #[derive(Debug)]
@@ -156,88 +118,28 @@ impl ToolExecutor for ReadTool {
             Ok(value) => value,
             Err(failure) => return error(&failure),
         };
-        let page_limit = match arguments.page_limit(self.kind) {
-            Ok(value) => value,
+        let page_limit = arguments.page_limit(self.kind);
+        let request = match PathRead::new(
+            execution.policy().cwd.clone(),
+            relative,
+            self.kind,
+            arguments.offset,
+            page_limit,
+        ) {
+            Ok(request) => request,
             Err(failure) => return error(&failure),
         };
-        let scope = execution.workspace_read().await?;
-        let prefix = scope
-            .cwd()
-            .strip_prefix(scope.workspace())
-            .map_err(|_| ToolError::Execution("invalid workspace read scope".into()))?;
-        let prefix = prefix
-            .to_str()
-            .ok_or_else(|| ToolError::Execution("workspace cwd is not UTF-8".into()))?;
-        let prefix = match RelativePath::new(prefix.as_bytes()) {
-            Ok(value) => value,
-            Err(failure) => return error(&failure),
-        };
-        let path = match workspace_path(&prefix, &relative) {
-            Ok(value) => value,
-            Err(failure) => return error(&failure),
-        };
-        let owner = ReadOwner {
-            files: execution.files(&self.files)?,
-            caller: FilesCaller::default(),
-        };
-        let binding = FilesBinding::new(
-            owner.caller.clone(),
-            &execution.call_id,
-            "workspace-read",
-            scope.workspace().to_owned(),
-        )
-        .map_err(|_| ToolError::Execution("invalid Files invocation binding".into()))?;
-        let opened = match owner
-            .files
-            .open(
-                binding.clone(),
-                path,
-                self.kind,
-                execution.cancellation.clone(),
-            )
+        let page = match execution
+            .files(&self.files)?
+            .read_path(request, execution.cancellation.clone())
             .await
         {
-            Ok(value) => value,
+            Ok(page) => page,
             Err(failure) => return error(&failure),
         };
-        match self.kind {
-            FileKind::File => {
-                let page = match owner
-                    .files
-                    .read(
-                        binding,
-                        opened.token,
-                        arguments.offset,
-                        page_limit,
-                        execution.cancellation.clone(),
-                    )
-                    .await
-                {
-                    Ok(value) => value,
-                    Err(failure) => return error(&failure),
-                };
-                file_result(&relative, &page)
-            }
-            FileKind::Directory => {
-                let offset = usize::try_from(arguments.offset).map_err(|_| {
-                    ToolError::InvalidInput("directory offset exceeds host limits".into())
-                })?;
-                let mut page = match owner
-                    .files
-                    .list(
-                        binding,
-                        opened.token,
-                        offset,
-                        page_limit,
-                        execution.cancellation.clone(),
-                    )
-                    .await
-                {
-                    Ok(value) => value,
-                    Err(failure) => return error(&failure),
-                };
-                directory_result(&relative, &prefix, &mut page)
-            }
+        match page.page {
+            ReadPage::File(file) => file_result(&page.path, &file),
+            ReadPage::Directory(directory) => directory_result(&page.path, directory),
         }
     }
 }
@@ -258,7 +160,7 @@ fn error(failure: &FilesError) -> rsi_tools_protocol::Result<ToolResult> {
 }
 
 fn file_result(
-    relative: &RelativePath,
+    relative: &ReadPath,
     page: &rsi_files_protocol::FilePage,
 ) -> rsi_tools_protocol::Result<ToolResult> {
     let bytes = hex::decode(&page.bytes_hex)
@@ -281,26 +183,31 @@ fn file_result(
 }
 
 fn directory_result(
-    relative: &RelativePath,
-    prefix: &RelativePath,
-    page: &mut rsi_files_protocol::DirectoryPage,
+    path: &ReadPath,
+    page: rsi_files_protocol::DirectoryPage,
 ) -> rsi_tools_protocol::Result<ToolResult> {
-    for entry in &mut page.entries {
-        if !prefix.as_bytes().is_empty() {
-            let bytes = entry
-                .path
-                .as_bytes()
-                .strip_prefix(prefix.as_bytes())
-                .and_then(|rest| rest.strip_prefix(b"/"))
-                .ok_or_else(|| {
-                    ToolError::Execution("invalid trusted Files directory prefix".into())
-                })?;
-            entry.path = RelativePath::new(bytes)
-                .map_err(|_| ToolError::Execution("invalid trusted Files directory path".into()))?;
+    let mut entries = Vec::with_capacity(page.entries.len());
+    let mut bytes = 256 + path.as_bytes().len() * 2;
+    for entry in page.entries {
+        let mut absolute = path.as_bytes().to_vec();
+        if !absolute.ends_with(b"/") {
+            absolute.push(b'/');
         }
+        absolute.extend_from_slice(entry.path.as_bytes());
+        let cost = absolute.len() * 2 + entry.name.len() * 6 + 128;
+        if absolute.len() > MAXIMUM_FILE_PATH_BYTES
+            || bytes + cost > rsi_files_protocol::MAXIMUM_DIRECTORY_PAGE_BYTES
+        {
+            if entries.is_empty() {
+                return error(&FilesError::Capacity);
+            }
+            break;
+        }
+        bytes += cost;
+        entries.push(json!({"name":entry.name,"path":hex::encode(absolute),"kind":entry.kind}));
     }
-    let next = page.offset + page.entries.len();
-    let value = json!({"path_hex":relative,"offset":page.offset,"total":page.total,"next_offset":next,"has_more":next < page.total,"entries":page.entries,"snapshot":"fresh_per_invocation"});
+    let next = page.offset + entries.len();
+    let value = json!({"path_hex":path,"offset":page.offset,"total":page.total,"next_offset":next,"has_more":next < page.total,"entries":entries,"snapshot":"fresh_per_invocation"});
     let display = serde_json::to_string_pretty(&value)
         .map_err(|error| ToolError::Execution(error.to_string()))?;
     ToolResult::new(

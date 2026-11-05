@@ -183,12 +183,10 @@ async fn actual_catalog_reads_all_modes_from_pinned_cwd_and_never_fabricates_pro
         };
         assert!(text.contains("Exact bytes (hex): 00ff1b68"));
         assert!(!text.contains('\x1b'));
-        let scopes = planner.scopes.lock().unwrap();
-        let scope = scopes.last().unwrap();
-        assert_eq!(scope.mode(), mode);
-        assert_eq!(scope.cwd(), root.join("cwd"));
-        assert_eq!(scope.workspace(), root);
-        assert_eq!(scope.generation(), &planner.generation);
+        assert!(
+            planner.scopes.lock().unwrap().is_empty(),
+            "finite host reads need no workspace scope RPC"
+        );
     }
     let replacement = Arc::new(Planner::default());
     assert_ne!(replacement.generation, planner.generation);
@@ -200,10 +198,7 @@ async fn actual_catalog_reads_all_modes_from_pinned_cwd_and_never_fabricates_pro
     )
     .await
     .unwrap();
-    assert_eq!(
-        replacement.scopes.lock().unwrap()[0].generation(),
-        &replacement.generation
-    );
+    assert!(replacement.scopes.lock().unwrap().is_empty());
     for _ in 0..=MAXIMUM_FILE_TOKENS {
         assert!(
             !call(
@@ -222,7 +217,7 @@ async fn actual_catalog_reads_all_modes_from_pinned_cwd_and_never_fabricates_pro
 }
 
 #[tokio::test]
-async fn unknown_roots_parent_paths_symlinks_and_oversized_pages_cannot_expand_read_scope() {
+async fn host_reads_accept_absolute_parent_and_symlink_paths_but_reject_policy_overrides() {
     let _scenario = SCENARIOS.lock().await;
     let temporary = tempfile::tempdir().unwrap();
     let root = temporary.path().canonicalize().unwrap();
@@ -253,33 +248,22 @@ async fn unknown_roots_parent_paths_symlinks_and_oversized_pages_cannot_expand_r
     assert!(planner.scopes.lock().unwrap().is_empty());
     for arguments in [
         json!({"path":"../secret"}),
-        json!({"path":"/secret"}),
-        json!({"path_hex":"2e2e2f736563726574"}),
+        json!({"path":root.join("secret")}),
+        json!({"path_hex":hex::encode("../secret")}),
+        json!({"path":"link"}),
     ] {
-        assert!(
-            call(
-                tools.as_ref(),
-                "file_read",
-                arguments,
-                start(&root, SandboxMode::ReadOnly, planner.clone())
-            )
-            .await
-            .unwrap()
-            .is_error
-        );
-    }
-    assert!(planner.scopes.lock().unwrap().is_empty());
-    assert!(
-        call(
+        let result = call(
             tools.as_ref(),
             "file_read",
-            json!({"path":"link"}),
-            start(&root, SandboxMode::DangerFullAccess, planner.clone())
+            arguments,
+            start(&root, SandboxMode::ReadOnly, planner.clone()),
         )
         .await
-        .unwrap()
-        .is_error
-    );
+        .unwrap();
+        assert!(!result.is_error, "{}", result.value);
+        assert_eq!(result.value["text"], "outside cwd");
+    }
+    assert!(planner.scopes.lock().unwrap().is_empty());
     let cancelled = start(&root, SandboxMode::ReadOnly, planner.clone());
     cancelled.cancellation.cancel();
     assert!(
@@ -315,7 +299,10 @@ async fn directory_paths_are_cwd_relative_and_each_invocation_captures_a_fresh_s
     )
     .await
     .unwrap();
-    assert_eq!(page.value["entries"][0]["path"], "7375622f62");
+    assert_eq!(
+        page.value["entries"][0]["path"],
+        hex::encode(root.join("cwd/sub/b").as_os_str().as_encoded_bytes())
+    );
     assert_eq!(page.value["entries"][0]["name"], "b");
     let read = call(
         tools.as_ref(),
@@ -376,7 +363,15 @@ async fn listed_non_utf8_filename_can_be_read_through_the_exact_byte_argument() 
     )
     .await
     .unwrap();
-    assert_eq!(page.value["entries"][0]["path"], "ff");
+    assert_eq!(
+        page.value["entries"][0]["path"],
+        hex::encode(
+            root.join("cwd")
+                .join(std::ffi::OsStr::from_bytes(b"\xff"))
+                .as_os_str()
+                .as_bytes()
+        )
+    );
     let file = call(
         tools.as_ref(),
         "file_read",
@@ -386,6 +381,58 @@ async fn listed_non_utf8_filename_can_be_read_through_the_exact_byte_argument() 
     .await
     .unwrap();
     assert_eq!(file.value["bytes_hex"], hex::encode("exact"));
+    drop(tools);
+    assert!(runtime.shutdown().await.is_clean());
+}
+
+#[tokio::test]
+async fn absolute_directory_paths_remain_bounded_and_pagination_does_not_skip_entries() {
+    let _scenario = SCENARIOS.lock().await;
+    let temporary = tempfile::tempdir().unwrap();
+    let mut root = temporary.path().canonicalize().unwrap();
+    for _ in 0..8 {
+        root.push("a".repeat(180));
+    }
+    std::fs::create_dir_all(root.join("cwd")).unwrap();
+    for index in 0..40 {
+        std::fs::write(root.join("cwd").join(format!("file-{index:02}")), "body").unwrap();
+    }
+    let (runtime, tools) = fixture().await;
+    let planner = Arc::new(Planner::default());
+    let mut offset = 0;
+    let mut names = Vec::new();
+    loop {
+        let result = call(
+            tools.as_ref(),
+            "directory_list",
+            json!({"offset":offset}),
+            start(&root, SandboxMode::ReadOnly, planner.clone()),
+        )
+        .await
+        .unwrap();
+        assert!(!result.is_error, "{}", result.value);
+        assert!(
+            serde_json::to_vec(&result.value).unwrap().len()
+                <= rsi_files_protocol::MAXIMUM_DIRECTORY_PAGE_BYTES
+        );
+        let entries = result.value["entries"].as_array().unwrap();
+        assert!(!entries.is_empty() && entries.len() < 40);
+        names.extend(
+            entries
+                .iter()
+                .map(|entry| entry["name"].as_str().unwrap().to_owned()),
+        );
+        offset = result.value["next_offset"].as_u64().unwrap();
+        if !result.value["has_more"].as_bool().unwrap() {
+            break;
+        }
+    }
+    assert_eq!(
+        names,
+        (0..40)
+            .map(|index| format!("file-{index:02}"))
+            .collect::<Vec<_>>()
+    );
     drop(tools);
     assert!(runtime.shutdown().await.is_clean());
 }
@@ -527,6 +574,14 @@ struct OneTokenFiles {
 }
 #[async_trait]
 impl rsi_files_protocol::Files for OneTokenFiles {
+    async fn read_path(
+        &self,
+        request: rsi_files_protocol::PathRead,
+        cancellation: tokio_util::sync::CancellationToken,
+    ) -> rsi_files_protocol::Result<rsi_files_protocol::PathPage> {
+        self.inner.read_path(request, cancellation).await
+    }
+
     fn release_caller(&self, caller: &rsi_files_protocol::FilesCaller) {
         self.inner.release_caller(caller);
         self.held.lock().unwrap().take();
@@ -655,7 +710,11 @@ async fn target_tuple_reads_never_use_native_providers_and_revocation_precedes_i
     .await
     .unwrap();
     assert!(!present.is_error);
-    assert_eq!(target.scopes.lock().unwrap().len(), 3);
+    assert_eq!(
+        target.scopes.lock().unwrap().len(),
+        1,
+        "only present needs a workspace read scope"
+    );
     assert!(native.scopes.lock().unwrap().is_empty());
     gate.revoked.store(true, Ordering::SeqCst);
     assert_eq!(
@@ -664,7 +723,7 @@ async fn target_tuple_reads_never_use_native_providers_and_revocation_precedes_i
             .unwrap_err(),
         rsi_tools_protocol::ToolError::ShuttingDown
     );
-    assert_eq!(target.scopes.lock().unwrap().len(), 3);
+    assert_eq!(target.scopes.lock().unwrap().len(), 1);
 
     // A foreign process cannot escape to the native legacy Sandbox, even with a live lease.
     let inert = execution_fixture::lease(location, Arc::new(execution_fixture::Gate::default()), 2);

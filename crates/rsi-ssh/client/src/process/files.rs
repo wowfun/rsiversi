@@ -178,6 +178,25 @@ impl RemoteFiles {
 }
 #[async_trait]
 impl Files for RemoteFiles {
+    async fn read_path(
+        &self,
+        request: rsi_files_protocol::PathRead,
+        cancellation: CancellationToken,
+    ) -> Result<rsi_files_protocol::PathPage> {
+        if cancellation.is_cancelled() {
+            return Err(FilesError::Cancelled);
+        }
+        let (kind, offset, maximum) = (request.kind(), request.offset(), request.maximum());
+        match self.call(Request::FilesReadPath { request }).await? {
+            Reply::PathPage { page } if page.validate_for(kind, offset, maximum).is_ok() => {
+                if cancellation.is_cancelled() {
+                    return Err(FilesError::Cancelled);
+                }
+                Ok(page)
+            }
+            _ => Err(self.malformed()),
+        }
+    }
     fn release_caller(&self, caller: &FilesCaller) {
         lock(&self.0.entries).retain(|_, entry| entry.binding.caller() != caller);
     }

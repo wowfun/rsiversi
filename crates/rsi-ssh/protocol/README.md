@@ -1,5 +1,10 @@
 # rsi-ssh-protocol
 
+`FilesReadPath` carries one validated Files `PathRead` to the target and returns
+one `PathPage`. Path resolution and reading happen on the target. No remote token,
+separate scope request or release request is needed for this finite operation.
+The client validates the complete page at the transport boundary.
+
 Connection coordinates contain only a bounded DNS name or IP address, an explicit
 nonzero port and a bounded account name. SSH aliases, option syntax, URL syntax,
 control characters and arbitrary configuration are not accepted. Parsing performs

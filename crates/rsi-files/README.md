@@ -7,8 +7,10 @@ provides directory-handle operations without Session, Workspace registry, trust,
 API authentication or model Tool policy. Callers establish their own authority
 before opening a root and keep reads relative to that retained handle.
 
-The ordinary [Tool contribution](tools/README.md) obtains its read scope from
-the invocation's pinned Sandbox after existing Tool admission and approval.
+The ordinary [Tool contribution](tools/README.md) reads through the invocation's
+pinned execution provider after Tool admission and approval. General reads use
+one finite native-path operation; workspace declarations use a retained-root
+Sandbox scope. Files does not infer either authority from model-selected paths.
 
 A path or Workspace identity describes a location; neither grants file access.
 Reading content does not make it a trusted project instruction. Filesystem

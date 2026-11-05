@@ -7,7 +7,9 @@ use async_trait::async_trait;
 use serde::{Deserialize, Serialize};
 use std::{fmt, path::PathBuf, sync::Arc, time::Duration};
 use tokio_util::sync::CancellationToken;
+mod path_read;
 mod validation;
+pub use path_read::{PathPage, PathRead, ReadPage, ReadPath};
 
 /// Preferred exact file page size.
 pub const PREFERRED_FILE_PAGE_BYTES: usize = 16 * 1024;
@@ -280,6 +282,12 @@ pub struct DirectoryPage {
 /// Shared reader. Entrypoints must establish current authority before every call.
 #[async_trait]
 pub trait Files: fmt::Debug + Send + Sync + 'static {
+    /// Resolve and read one page on this execution host; caller owns read authority.
+    async fn read_path(
+        &self,
+        request: PathRead,
+        cancellation: CancellationToken,
+    ) -> Result<PathPage>;
     /// Release a caller generation after its owner has stopped and drained admission.
     fn release_caller(&self, caller: &FilesCaller);
     /// Inspect admitted metadata under a currently authorized binding.

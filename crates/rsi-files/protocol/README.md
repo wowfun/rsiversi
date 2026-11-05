@@ -1,5 +1,18 @@
 # rsi-files-protocol
 
+`Files::read_path` performs one finite read under caller-established host read
+authority. `PathRead` binds an absolute cwd, bounded native path bytes, object
+kind, offset and page maximum. Native paths may be absolute, contain parents,
+or name symlinks; the execution backend resolves them against cwd. Unix uses
+exact filename bytes; Windows uses UTF-8 native paths. Resolution is independent
+of the workspace write boundary. It returns one `PathPage` with the resolved
+absolute path and a bounded file or directory page, without allocating a token.
+Directory entries are immediate relative names; consumers combine them with
+the returned directory path. The existing page limits and version checks apply.
+External adapters validate reply shape, absolute resolved path, coordinates,
+bytes and immediate children before exposing typed results in-process.
+The retained-root API below remains the contract for scoped, paginated readers.
+
 This library owns read-only filesystem requests, exact byte pages, directory
 snapshots and their resource limits. `Files` is a Local service; it does not
 perform authentication or infer authority from a workspace path. Its trusted

@@ -5,6 +5,12 @@ use rsi_files_protocol::{FileToken, OpenedFile};
 use tokio_util::sync::CancellationToken;
 #[derive(Debug)]
 pub(super) enum Resource {}
+pub(super) fn read_path(
+    _: &rsi_files_protocol::PathRead,
+    _: &CancellationToken,
+) -> Result<rsi_files_protocol::PathPage> {
+    Err(FilesError::Unsupported)
+}
 pub(super) fn open(
     _: &FilesBinding,
     _: RelativePath,

@@ -228,6 +228,18 @@ impl Server {
                     .map_err(|error| sandbox_failure(&error))?;
                 Ok(Reply::Done)
             }
+            Request::FilesReadPath { request } => Ok(
+                match self
+                    .owner
+                    .capabilities
+                    .files
+                    .read_path(request, self.stop.clone())
+                    .await
+                {
+                    Ok(page) => Reply::PathPage { page },
+                    Err(failure) => Reply::FilesFailed { failure },
+                },
+            ),
             Request::FilesOpen {
                 workspace,
                 path,

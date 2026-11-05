@@ -307,6 +307,14 @@ impl ExecutionBackend for Backend {
 struct FileReader(Arc<Events>);
 #[async_trait]
 impl Files for FileReader {
+    async fn read_path(
+        &self,
+        _request: rsi_files_protocol::PathRead,
+        _cancellation: tokio_util::sync::CancellationToken,
+    ) -> rsi_files_protocol::Result<rsi_files_protocol::PathPage> {
+        panic!("finite path read is outside this fixture")
+    }
+
     fn release_caller(&self, _: &FilesCaller) {
         self.0.callers_released.fetch_add(1, Ordering::SeqCst);
     }

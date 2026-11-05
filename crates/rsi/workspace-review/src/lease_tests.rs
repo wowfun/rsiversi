@@ -17,6 +17,14 @@ struct TargetFiles {
 }
 #[async_trait]
 impl Files for TargetFiles {
+    async fn read_path(
+        &self,
+        _request: rsi_files_protocol::PathRead,
+        _cancellation: tokio_util::sync::CancellationToken,
+    ) -> rsi_files_protocol::Result<rsi_files_protocol::PathPage> {
+        panic!("finite path read is outside this fixture")
+    }
+
     async fn open(
         &self,
         binding: FilesBinding,

@@ -687,6 +687,22 @@ async fn ssh_execution_lease_pins_all_capabilities_and_rechecks_revocation_witho
         .await
         .unwrap();
     let files = lease.files().unwrap();
+    let finite = rsi_files_protocol::PathRead::new(
+        fixture.root.path().to_owned(),
+        rsi_files_protocol::ReadPath::new(b"proof").unwrap(),
+        FileKind::File,
+        0,
+        32,
+    )
+    .unwrap();
+    let page = files
+        .read_path(finite.clone(), CancellationToken::new())
+        .await
+        .unwrap();
+    let rsi_files_protocol::ReadPage::File(page) = page.page else {
+        panic!("file")
+    };
+    assert_eq!(page.bytes_hex, hex::encode(b"target"));
     let binding = fixture.binding(FilesCaller::default());
     let opened = files
         .open(
@@ -717,6 +733,12 @@ async fn ssh_execution_lease_pins_all_capabilities_and_rechecks_revocation_witho
         b"before\n"
     );
     gate.0.store(true, Ordering::SeqCst);
+    assert!(
+        files
+            .read_path(finite, CancellationToken::new())
+            .await
+            .is_err()
+    );
     assert_eq!(
         process.stdin().write(b"forbidden\n").await,
         Err(ProcessError::ShuttingDown)

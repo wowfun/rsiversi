@@ -88,6 +88,10 @@ pub trait ExecutionAdmission: fmt::Debug + Send + Sync + 'static {
 /// Product-owned location selection at trusted authenticated ingress.
 /// Returned leases retain live delegation; coordinates never recreate that authority.
 pub trait ExecutionResolver: fmt::Debug + Send + Sync + 'static {
+    /// In-process hint covering changes in every caller's location visibility.
+    fn visibility_revision(&self) -> Option<u64> {
+        None
+    }
     /// Captures current metadata visibility and retains its gates through a finite enumeration.
     fn visibility(
         &self,

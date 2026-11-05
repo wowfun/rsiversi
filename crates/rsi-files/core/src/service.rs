@@ -216,6 +216,16 @@ fn check(cancellation: &CancellationToken) -> Result<()> {
 }
 #[async_trait]
 impl Files for LocalFiles {
+    async fn read_path(
+        &self,
+        request: rsi_files_protocol::PathRead,
+        cancellation: CancellationToken,
+    ) -> Result<rsi_files_protocol::PathPage> {
+        self.run(cancellation, move |stopped| {
+            platform::read_path(&request, &stopped)
+        })
+        .await
+    }
     fn release_caller(&self, caller: &FilesCaller) {
         let mut state = self
             .owner

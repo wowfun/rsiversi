@@ -320,6 +320,14 @@ async fn remote_exchange_rejects_false_enforcement_before_spawn_and_reaps_on_can
 struct NoFiles;
 #[async_trait]
 impl Files for NoFiles {
+    async fn read_path(
+        &self,
+        _request: rsi_files_protocol::PathRead,
+        _cancellation: tokio_util::sync::CancellationToken,
+    ) -> rsi_files_protocol::Result<rsi_files_protocol::PathPage> {
+        panic!("finite path read is outside this fixture")
+    }
+
     fn release_caller(&self, _: &FilesCaller) {}
     fn describe(&self, _: &FilesBinding, _: &FileToken) -> rsi_files_protocol::Result<OpenedFile> {
         unreachable!("metadata described a file")

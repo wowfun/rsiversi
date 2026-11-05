@@ -196,6 +196,18 @@ impl BoundFiles {
 }
 #[async_trait]
 impl Files for BoundFiles {
+    async fn read_path(
+        &self,
+        request: rsi_files_protocol::PathRead,
+        cancellation: CancellationToken,
+    ) -> Result<rsi_files_protocol::PathPage> {
+        let permit = self.admit()?;
+        let inner = self.inner.clone();
+        self.operation(permit, async move {
+            inner.read_path(request, cancellation).await
+        })
+        .await
+    }
     fn release_caller(&self, caller: &FilesCaller) {
         if let Some(scoped) = self.resource.0.callers.remove(caller) {
             self.inner.release_caller(&scoped);

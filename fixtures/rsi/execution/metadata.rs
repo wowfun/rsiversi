@@ -167,6 +167,13 @@ impl ExecutionBackend for NoIo {
 }
 #[async_trait]
 impl Files for NoIo {
+    async fn read_path(
+        &self,
+        _: rsi_files_protocol::PathRead,
+        _: CancellationToken,
+    ) -> rsi_files_protocol::Result<rsi_files_protocol::PathPage> {
+        panic!("metadata fixture must not read file content")
+    }
     fn release_caller(&self, _: &FilesCaller) {}
     fn describe(&self, _: &FilesBinding, _: &FileToken) -> rsi_files_protocol::Result<OpenedFile> {
         unreachable!("metadata described a file")

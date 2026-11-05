@@ -147,7 +147,17 @@ pub(super) fn open(
     cancellation: &CancellationToken,
 ) -> Result<Resource> {
     check(cancellation)?;
-    let root = open_absolute_directory_no_follow(binding.workspace()).map_err(io)?;
+    let resource = open_at(binding.workspace(), path, kind, cancellation)?;
+    resource.verify(cancellation)?;
+    Ok(resource)
+}
+fn open_at(
+    root: &std::path::Path,
+    path: RelativePath,
+    kind: FileKind,
+    cancellation: &CancellationToken,
+) -> Result<Resource> {
+    let root = open_absolute_directory_no_follow(root).map_err(io)?;
     let (object, version) = match kind {
         FileKind::File => {
             let file = open_relative_file_no_follow(&root, &native(&path)?)
@@ -200,8 +210,53 @@ pub(super) fn open(
         version,
         object,
     };
-    resource.verify(cancellation)?;
+    check(cancellation)?;
     Ok(resource)
+}
+
+pub(super) fn read_path(
+    request: &rsi_files_protocol::PathRead,
+    cancellation: &CancellationToken,
+) -> Result<rsi_files_protocol::PathPage> {
+    use rsi_files_protocol::{PathPage, ReadPage, ReadPath};
+    check(cancellation)?;
+    if !request.cwd().is_absolute() {
+        return Err(FilesError::Invalid);
+    }
+    #[cfg(unix)]
+    let path = PathBuf::from(std::ffi::OsStr::from_bytes(request.path().as_bytes()));
+    #[cfg(windows)]
+    let path = PathBuf::from(
+        std::str::from_utf8(request.path().as_bytes()).map_err(|_| FilesError::Invalid)?,
+    );
+    // Resolve once on the execution host. Subsequent I/O uses retained handles.
+    let path = rsi_workspace_path::canonical_native_path(
+        std::fs::canonicalize(request.cwd().join(path)).map_err(relative_open_error)?,
+    );
+    check(cancellation)?;
+    let resolved = ReadPath::new(&name_bytes(path.as_os_str())?)?;
+    let (root, relative) = match request.kind() {
+        FileKind::File => (
+            path.parent().ok_or(FilesError::Invalid)?,
+            RelativePath::new(&name_bytes(path.file_name().ok_or(FilesError::Invalid)?)?)?,
+        ),
+        FileKind::Directory => (path.as_path(), RelativePath::default()),
+    };
+    let resource = open_at(root, relative, request.kind(), cancellation)?;
+    let page = match request.kind() {
+        FileKind::File => {
+            ReadPage::File(resource.read(request.offset(), request.maximum(), cancellation)?)
+        }
+        FileKind::Directory => ReadPage::Directory(resource.list(
+            usize::try_from(request.offset()).expect("validated directory offset fits usize"),
+            request.maximum(),
+            cancellation,
+        )?),
+    };
+    Ok(PathPage {
+        path: resolved,
+        page,
+    })
 }
 impl Resource {
     pub(super) fn describe(&self, token: FileToken) -> OpenedFile {

@@ -135,3 +135,5 @@ basename using its own account and fixed PATH; Service environment snapshots are
 never accepted implicitly. Callers own configuration and credential-export policy.
 The returned program remains sealed to the exact original lease. The [SSH helper contract](../../rsi-ssh/helper/README.md) owns its connection
 selection and aggregate byte bounds; equal selections reuse their frozen resolution.
+
+A resolver may expose a process-local visibility revision shared by all callers. It changes when the effective grants change, including revocation before durable publication. Consumers sample this hint without acquiring enumeration permits and still check permissions on each read.

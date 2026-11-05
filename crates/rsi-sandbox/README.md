@@ -31,12 +31,14 @@ unsupported backends. Ordinary `confine` plans retain their private scratch and
 host network semantics. This interface does not infer a source-reader exception
 from an arbitrary executable; the consumer owns selection of its fixed collector.
 
-Workspace reads use a separate, process-local `WorkspaceReadScope`. The Sandbox
+Consumers requiring workspace-scoped reads use a process-local `WorkspaceReadScope`. The Sandbox
 provider binds the exact mode, cwd, workspace and its opaque generation. All
 three existing modes allow read-only access inside that workspace; the file
 provider enforces relative directory-handle reads without following symlinks.
 Issuing this scope neither opens files nor emits a process enforcement stamp.
-Tool policy and approval still precede execution. Paths are preserved exactly
+Tool policy and approval still precede execution. General read Tools use the
+Files finite-read contract: these modes constrain writes, not host read access.
+Paths in workspace-scoped reads are preserved exactly
 after native, bounded lexical validation, so a later filesystem symlink cannot
 silently retarget the pinned workspace through canonicalization.
 

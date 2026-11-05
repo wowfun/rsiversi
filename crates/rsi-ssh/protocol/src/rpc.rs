@@ -6,6 +6,11 @@ use serde::{Deserialize, Serialize};
 #[derive(Serialize, Deserialize)]
 #[serde(tag = "operation", rename_all = "snake_case", deny_unknown_fields)]
 pub enum Request {
+    /// Resolve and read one finite page on the target without retaining a token.
+    FilesReadPath {
+        /// Validated cwd, native path and page limits.
+        request: rsi_files_protocol::PathRead,
+    },
     /// First-request target policy initialization; cannot reconfigure a live server.
     Initialize {
         /// Bounded target program selectors and explicit extra values.
@@ -194,6 +199,11 @@ impl From<Failure> for rsi_process::ProcessError {
 #[derive(Serialize, Deserialize)]
 #[serde(tag = "result", rename_all = "snake_case", deny_unknown_fields)]
 pub enum Reply {
+    /// Finite file/directory page and its resolved target path.
+    PathPage {
+        /// Bounded reply checked against the original request.
+        page: rsi_files_protocol::PathPage,
+    },
     /// Initialization completed after artifact lease and native prerequisite checks.
     Ready {
         /// SHA-256 of the independently leased helper image.

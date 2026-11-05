@@ -61,6 +61,73 @@ fn pair() -> (ProcessConnection, Connection, Incoming) {
     let (helper, incoming) = Connection::start(rr, rw, Role::Helper, 37).unwrap();
     (ProcessConnection::new(client).unwrap(), helper, incoming)
 }
+
+#[tokio::test]
+async fn finite_file_read_uses_one_rpc_without_open_or_release_and_rejects_bad_replies() {
+    use rsi_files_protocol::{
+        FileKind, FilePage, Files, FilesError, PathPage, PathRead, ReadPage, ReadPath,
+    };
+    for malformed in [false, true] {
+        let (client, helper, mut incoming) = pair();
+        let files = RemoteFiles::new(client.clone());
+        let replying = tokio::spawn(async move {
+            let incoming_request = incoming.next().await.unwrap();
+            let Request::FilesReadPath { request } =
+                serde_json::from_slice(incoming_request.payload()).unwrap()
+            else {
+                panic!("one finite request")
+            };
+            assert_eq!(request.cwd(), std::path::Path::new("/target/cwd"));
+            assert_eq!(request.path().as_bytes(), b"../proof");
+            incoming_request
+                .reply(
+                    serde_json::to_vec(&Reply::PathPage {
+                        page: PathPage {
+                            path: ReadPath::new(b"/target/proof").unwrap(),
+                            page: ReadPage::File(FilePage {
+                                offset: 0,
+                                total: 2,
+                                bytes_hex: if malformed { "61" } else { "6162" }.into(),
+                            }),
+                        },
+                    })
+                    .unwrap(),
+                )
+                .unwrap();
+            incoming
+        });
+        let request = PathRead::new(
+            "/target/cwd".into(),
+            ReadPath::new(b"../proof").unwrap(),
+            FileKind::File,
+            0,
+            2,
+        )
+        .unwrap();
+        let result = files
+            .read_path(request, tokio_util::sync::CancellationToken::new())
+            .await;
+        let mut incoming = replying.await.unwrap();
+        if malformed {
+            assert!(matches!(result, Err(FilesError::OutcomeUnknown)));
+            assert!(client.transport.is_closed());
+        } else {
+            let ReadPage::File(page) = result.unwrap().page else {
+                panic!("file")
+            };
+            assert_eq!(page.bytes_hex, "6162");
+            drop(files);
+            assert!(
+                tokio::time::timeout(Duration::from_millis(20), incoming.next())
+                    .await
+                    .is_err(),
+                "finite reads do not send cleanup RPCs"
+            );
+        }
+        helper.close();
+        client.transport.close();
+    }
+}
 #[cfg(unix)]
 #[tokio::test]
 async fn closed_files_transport_reports_retirement_instead_of_token_loss() {

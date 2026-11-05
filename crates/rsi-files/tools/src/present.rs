@@ -1,10 +1,31 @@
 use super::{
-    Arc, Arguments, Deserialize, FileKind, Files, FilesBinding, FilesCaller, FilesError,
-    MAXIMUM_FILE_PATH_BYTES, ReadOwner, RelativePath, ToolContent, ToolDefinition, ToolError,
-    ToolExecution, ToolExecutor, ToolRegistration, ToolResult, ToolScheduling, ToolTimeoutPolicy,
-    Value, async_trait, error, json, safe_tool_text, workspace_path,
+    Arc, Deserialize, FileKind, Files, FilesBinding, FilesCaller, FilesError,
+    MAXIMUM_FILE_PATH_BYTES, RelativePath, ToolContent, ToolDefinition, ToolError, ToolExecution,
+    ToolExecutor, ToolRegistration, ToolResult, ToolScheduling, ToolTimeoutPolicy, Value,
+    async_trait, error, json, safe_tool_text,
 };
 use serde::Serialize;
+
+fn workspace_path(
+    prefix: &RelativePath,
+    relative: &RelativePath,
+) -> rsi_files_protocol::Result<RelativePath> {
+    let mut bytes = prefix.as_bytes().to_vec();
+    if !bytes.is_empty() && !relative.as_bytes().is_empty() {
+        bytes.push(b'/');
+    }
+    bytes.extend_from_slice(relative.as_bytes());
+    RelativePath::new(&bytes)
+}
+struct ReadOwner {
+    files: Arc<dyn Files>,
+    caller: FilesCaller,
+}
+impl Drop for ReadOwner {
+    fn drop(&mut self) {
+        self.files.release_caller(&self.caller);
+    }
+}
 
 /// Maximum encoded canonical file declaration, independent of file contents.
 pub const MAXIMUM_PRESENTED_FILES_BYTES: usize = 160 * 1024;
@@ -151,15 +172,14 @@ impl ToolExecutor for Present {
             files: Vec::with_capacity(input.files.len()),
         };
         for entry in input.files {
-            let args = Arguments {
-                path: entry.path,
-                path_hex: entry.path_hex,
-                offset: 0,
-                maximum: None,
+            let path = match (entry.path, entry.path_hex) {
+                (Some(path), None) => RelativePath::new(path.as_bytes()),
+                (None, Some(path)) => Ok(path),
+                _ => Err(FilesError::Invalid),
             };
-            let path = match args.path(FileKind::File) {
-                Ok(path) => path,
-                Err(failure) => return error(&failure),
+            let path = match path {
+                Ok(path) if !path.as_bytes().is_empty() => path,
+                _ => return error(&FilesError::Invalid),
             };
             declared.files.push(PresentedFile {
                 path_hex: path,

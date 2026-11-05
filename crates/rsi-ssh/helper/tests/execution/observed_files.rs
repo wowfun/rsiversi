@@ -13,6 +13,14 @@ pub struct Observed {
 
 #[async_trait::async_trait]
 impl Files for Observed {
+    async fn read_path(
+        &self,
+        request: rsi_files_protocol::PathRead,
+        cancellation: tokio_util::sync::CancellationToken,
+    ) -> rsi_files_protocol::Result<rsi_files_protocol::PathPage> {
+        self.inner.read_path(request, cancellation).await
+    }
+
     fn release_caller(&self, caller: &FilesCaller) {
         self.inner.release_caller(caller);
     }

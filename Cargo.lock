@@ -6533,6 +6533,7 @@ dependencies = [
  "rsi-files-native-fs",
  "rsi-files-protocol",
  "rsi-meta",
+ "rsi-workspace-path",
  "rustix 1.1.4",
  "serde_json",
  "tempfile",

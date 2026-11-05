@@ -59,9 +59,10 @@ compatibility branches would preserve obsolete execution contracts.
 ## Project context across machines
 
 The existing workspace source owns ancestor instruction selection, skill directory
-links, metadata/body identity checks and last-good publication. General Files
-workspace scopes intentionally cannot read ancestor roots. Extending ordinary file
-Tool authority to every instruction root would conflate those policies.
+links, metadata/body identity checks and last-good publication. Retained Files
+workspace scopes intentionally cannot read ancestor roots. General file Tools now
+use [finite host reads](2026-11-05-finite-host-file-reads.md); host read visibility
+does not establish instruction-selection policy.
 
 A fixed helper application entry therefore reuses the workspace source's bounded
 project collector under the selected lease's ReadOnly process plan. Reusable SSH

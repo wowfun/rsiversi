@@ -1,5 +1,12 @@
 # rsi-files
 
+Finite `read_path` operations resolve native paths on this host, following
+symlinks once before acquiring the resolved parent/directory with retained
+handles. They share the bounded blocking-job owner and page/version mechanics
+with retained reads, but consume no token slot and use one blocking job for the
+whole operation. Cancellation or retirement retains that job's permit until its
+actual work finishes. Special files are rejected before content reads.
+
 `FilesFactory` supplies the read-only Local service defined by the
 [protocol](../protocol/README.md). Each activation has an independent token
 namespace and owns its handles; process-wide job/token permits survive waiter
