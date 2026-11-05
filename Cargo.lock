@@ -6507,6 +6507,24 @@ dependencies = [
 ]
 
 [[package]]
+name = "rsi-extension"
+version = "0.0.1"
+dependencies = [
+ "async-trait",
+ "rsi-meta",
+ "rsi-process",
+ "rsi-process-local",
+ "rsi-sandbox",
+ "rsi-sandbox-local",
+ "serde",
+ "serde_json",
+ "tempfile",
+ "thiserror 2.0.20",
+ "tokio",
+ "tokio-util",
+]
+
+[[package]]
 name = "rsi-files"
 version = "0.0.1"
 dependencies = [
