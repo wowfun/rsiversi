@@ -269,9 +269,12 @@ pub(super) async fn finish_control_tool(kernel: &AgentKernel, claim: &TurnClaim)
 #[tokio::test]
 async fn application_registration_binds_owner_without_forcing_approval() {
     use rsi_agent_session_protocol::{ApplicationToolBinding, ApplicationToolView};
+    use rsi_tools_protocol::ToolProgramRole::{Callable, Unavailable};
     let kernel = kernel(Arc::new(MemoryStore::new())).await;
     let workers = kernel.start_workers();
-    submit(&kernel, "application-policy", "work").await;
+    let session =
+        PreparedFreshSession::new(header("application-policy"), program::program_pin()).unwrap();
+    submit_in(&kernel, SubmitSession::Fresh(session), "work").await;
     let lease = kernel.register("worker".into()).unwrap();
     let claim = kernel
         .claim("worker", CancellationToken::new())
@@ -279,6 +282,14 @@ async fn application_registration_binds_owner_without_forcing_approval() {
         .unwrap()
         .unwrap();
     let turn = claim.turn_id().clone();
+    assert_eq!(
+        kernel
+            .composition(&claim)
+            .unwrap()
+            .tools()
+            .program_role("file_read"),
+        Some(Callable)
+    );
     let step = StepId::new("step").unwrap();
     flush_bodies(
         &kernel,
@@ -291,15 +302,15 @@ async fn application_registration_binds_owner_without_forcing_approval() {
             SessionFactBody::StepPrepared {
                 turn_id: turn.clone(),
                 step_id: step,
-                names: vec!["other".into(), "probe".into()],
+                names: vec!["file_read".into(), "other".into()],
                 instructions: vec![],
                 application: Some(ApplicationToolView::Ready {
                     generation: "worker".into(),
                     receipt_source: Some("market".into()),
                     tools: vec![ApplicationToolBinding {
                         definition: ToolDefinition::new(
-                            "probe",
-                            "probe",
+                            "file_read",
+                            "Application reader",
                             serde_json::json!({"type":"object"}),
                         )
                         .unwrap(),
@@ -314,17 +325,17 @@ async fn application_registration_binds_owner_without_forcing_approval() {
     publish_model_calls(
         &kernel,
         &claim,
-        &[("call", "probe"), ("other-call", "other")],
+        &[("call", "file_read"), ("other-call", "other")],
         &snapshot(),
     )
     .await;
-    let intent = |owner, name: &str, call| SessionFactBody::ToolIntent {
+    let intent = |owner, name: &str, call, program_role| SessionFactBody::ToolIntent {
         turn_id: turn.clone(),
         effect_id: EffectId::new("effect").unwrap(),
         origin: rsi_agent_session_protocol::ToolOrigin::Model {
             effect_id: EffectId::new("source-model").unwrap(),
         },
-        program_role: rsi_tools_protocol::ToolProgramRole::Unavailable,
+        program_role,
         identity: ToolResultIdentity::new(owner, "effect", call, "a".repeat(64)).unwrap(),
         name: name.into(),
         arguments: serde_json::json!({}),
@@ -332,8 +343,9 @@ async fn application_registration_binds_owner_without_forcing_approval() {
         parallel_safe: false,
     };
     for invalid in [
-        intent("replacement", "probe", "call"),
-        intent("application-owner", "other", "other-call"),
+        intent("replacement", "file_read", "call", Unavailable),
+        intent("application-owner", "other", "other-call", Unavailable),
+        intent("application-owner", "file_read", "call", Callable),
     ] {
         assert!(matches!(
             kernel.publish(&claim, vec![invalid]).await,
@@ -343,7 +355,12 @@ async fn application_registration_binds_owner_without_forcing_approval() {
     flush_bodies(
         &kernel,
         &claim,
-        vec![intent("application-owner", "probe", "call")],
+        vec![intent(
+            "application-owner",
+            "file_read",
+            "call",
+            Unavailable,
+        )],
     )
     .await;
     drop(lease);

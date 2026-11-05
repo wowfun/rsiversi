@@ -227,7 +227,12 @@ impl AgentKernel {
         };
         let mut staged = clone_turn_control(&original);
         for fact in &facts {
-            execution::validate_program_role(&staged, fact.body())?;
+            execution::validate_tool_admission(
+                claim.header(),
+                &staged,
+                fact.body(),
+                Some(&staged.program_roles),
+            )?;
             super::structured::validate_conclusion(claim.header(), &staged, fact.body())?;
             apply_executor_body(&mut staged, fact.body(), fact.seq())?;
             if let SessionFactBody::ToolResult {

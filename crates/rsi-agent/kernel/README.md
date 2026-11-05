@@ -354,9 +354,12 @@ these fingerprints are recomputed during recovery and never persisted.
 Model effect IDs cannot be reused within a Turn. Their bounded set is charged
 by the existing maximum-provider-attempt count and rebuilt during recovery.
 The caller captures the source request's actual model and effective effort.
-Application Tool admission also binds the name to its captured result owner and
-requires model origin. Approval evidence follows the execution policy; membership
-in an application catalog does not independently require an approval receipt.
+Application Tool admission binds the name to its captured result owner, requires
+model origin and admits only the `Unavailable` program role. A request-selected
+application registration takes precedence over a same-name Local Tool, including
+when that Local Tool is callable from a program. Approval evidence follows the
+execution policy; membership in an application catalog does not independently
+require an approval receipt.
 Pre-start rejection consumes the same exact call proof without requiring
 execution settings and grants no caller authority. Invalid JSON has no typed argument digest and cannot be
 replaced with an invented value to record a rejection; executor preparation fails

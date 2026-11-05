@@ -50,7 +50,7 @@ pub(super) fn apply_recovered_fact(
             let turn = turns.get_mut(body.turn_id()).ok_or_else(|| {
                 KernelError::Invariant("durable Fact references unknown turn".into())
             })?;
-            super::execution::validate_tool_admission(header, turn, body)
+            super::execution::validate_tool_admission(header, turn, body, None)
                 .map_err(|error| KernelError::Invariant(error.to_string()))?;
             super::structured::validate_conclusion(header, turn, body)
                 .map_err(|error| KernelError::Invariant(error.to_string()))?;

@@ -1134,8 +1134,7 @@ pub(super) fn stage_execution_facts(
             ));
         }
         let body = canonicalize_terminal(body, turn.cancel_requested);
-        validate_program_role(&turn, &body)?;
-        validate_tool_admission(claim.header(), &turn, &body)?;
+        validate_tool_admission(claim.header(), &turn, &body, Some(&turn.program_roles))?;
         super::structured::validate_conclusion(claim.header(), &turn, &body)?;
         next_seq = next_seq
             .checked_add(1)
@@ -1357,12 +1356,15 @@ pub(super) fn validate_intent_price(
 }
 
 /// Frozen Tool restrictions are authoritative at publication and durable replay,
-/// independently of the Executor's filtered catalog. The initial report helper
+/// independently of the Executor's filtered catalog. Only a live claim supplies
+/// Local program roles. Captured application registrations survive replay.
+/// The initial report helper
 /// is installed by Kernel outside that ordinary catalog for its exact activation.
 pub(super) fn validate_tool_admission(
     header: &SessionHeader,
     turn: &TurnControl,
     body: &SessionFactBody,
+    local_roles: Option<&BTreeMap<String, rsi_tools_protocol::ToolProgramRole>>,
 ) -> TurnResult<()> {
     if let SessionFactBody::ToolResult {
         effect_id, result, ..
@@ -1386,19 +1388,22 @@ pub(super) fn validate_tool_admission(
             name,
             identity,
             origin,
+            program_role,
             ..
         }
         | SessionFactBody::ToolRejected {
             name,
             identity,
             origin,
+            program_role,
             ..
-        } => Some((name, identity, origin)),
+        } => Some((name, identity, origin, program_role)),
         _ => None,
     };
-    if let Some((name, id, origin)) = registration {
+    if let Some((name, id, origin, role)) = registration {
         if let Some(binding) = turn.application.tools.get(name) {
             if binding.owner != id.owner_id()
+                || *role != rsi_tools_protocol::ToolProgramRole::Unavailable
                 || !matches!(origin, rsi_agent_session_protocol::ToolOrigin::Model { .. })
             {
                 return Err(TurnError::Invalid(
@@ -1414,6 +1419,12 @@ pub(super) fn validate_tool_admission(
             return Err(TurnError::Invalid(
                 "application Tool owner belongs to another name".into(),
             ));
+        } else if let Some(roles) = local_roles
+            && roles.get(name).copied().unwrap_or_default() != *role
+        {
+            return Err(TurnError::Invalid(
+                "Tool program role disagrees with the frozen Local catalog".into(),
+            ));
         }
     }
     if let SessionFactBody::ToolIntent { name, .. } = body
@@ -1425,22 +1436,6 @@ pub(super) fn validate_tool_admission(
     {
         return Err(TurnError::Invalid(
             "ToolIntent is outside the frozen delegation policy".into(),
-        ));
-    }
-    Ok(())
-}
-
-pub(super) fn validate_program_role(turn: &TurnControl, body: &SessionFactBody) -> TurnResult<()> {
-    if let SessionFactBody::ToolIntent {
-        name, program_role, ..
-    }
-    | SessionFactBody::ToolRejected {
-        name, program_role, ..
-    } = body
-        && turn.program_roles.get(name).copied().unwrap_or_default() != *program_role
-    {
-        return Err(TurnError::Invalid(
-            "Tool program role disagrees with the frozen Local catalog".into(),
         ));
     }
     Ok(())

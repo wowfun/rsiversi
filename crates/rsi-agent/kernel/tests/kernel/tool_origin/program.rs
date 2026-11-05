@@ -78,6 +78,20 @@ impl ToolRuntime for ProgramTools {
 }
 #[derive(Debug)]
 struct ProgramComposition(AgentCompositionPin);
+
+pub(super) fn program_pin() -> AgentCompositionPin {
+    AgentCompositionPin::new(
+        AgentPresetId::new("test-agent").unwrap(),
+        "a".repeat(64),
+        Arc::new(ProgramTools),
+        Arc::new(rsi_agent_context::DefaultContextBuilder::default()),
+        rsi_agent_composition_protocol::DomainCatalog::default(),
+        rsi_agent_composition_protocol::ContributionCatalog::default(),
+        Arc::new(()),
+    )
+    .unwrap()
+}
+
 #[async_trait]
 impl AgentComposition for ProgramComposition {
     async fn default_preset_id(&self) -> rsi_agent_composition_protocol::Result<AgentPresetId> {
@@ -142,18 +156,7 @@ fn result(turn_id: &TurnId, id: &str, text: &str) -> SessionFactBody {
 )]
 async fn nested_program_calls_bind_frozen_catalog_parent_and_ordinals_and_stay_out_of_context() {
     let store = Arc::new(MemoryStore::new());
-    let composition = Arc::new(ProgramComposition(
-        AgentCompositionPin::new(
-            AgentPresetId::new("test-agent").unwrap(),
-            "a".repeat(64),
-            Arc::new(ProgramTools),
-            Arc::new(rsi_agent_context::DefaultContextBuilder::default()),
-            rsi_agent_composition_protocol::DomainCatalog::default(),
-            rsi_agent_composition_protocol::ContributionCatalog::default(),
-            Arc::new(()),
-        )
-        .unwrap(),
-    ));
+    let composition = Arc::new(ProgramComposition(program_pin()));
     let kernel =
         AgentKernel::recover_with_clock(store.clone(), composition.clone(), Arc::new(FixedClock))
             .await

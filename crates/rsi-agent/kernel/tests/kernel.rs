@@ -1901,11 +1901,19 @@ async fn submit(
     session_id: &str,
     text: &str,
 ) -> rsi_agent_turn_protocol::SubmittedTurn {
+    submit_in(kernel, fresh(header(session_id)), text).await
+}
+
+async fn submit_in(
+    kernel: &AgentKernel,
+    session: SubmitSession,
+    text: &str,
+) -> rsi_agent_turn_protocol::SubmittedTurn {
     kernel
         .submit(SubmitTurn {
             reasoning_effort: None,
             turn_id: client_turn_id(),
-            session: fresh(header(session_id)),
+            session,
             text: text.into(),
             model: None,
             sandbox: None,
