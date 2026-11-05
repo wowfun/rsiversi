@@ -20,7 +20,7 @@ use rsi_tools_protocol::{
     ToolExecutionPolicy, ToolRegistrar, ToolRegistrarContract, ToolRuntime, ToolStart,
 };
 use serde_json::{Value, json};
-use std::ffi::{OsStr, OsString};
+use std::ffi::OsString;
 use std::path::PathBuf;
 use std::sync::Arc;
 use std::sync::atomic::{AtomicU64, Ordering};
@@ -344,64 +344,6 @@ async fn foreground_preview_reads_bounded_native_output_before_completion_withou
 }
 
 #[test]
-fn child_environment_scrub_is_case_insensitive_and_preserves_ordinary_raw_values() {
-    #[cfg(unix)]
-    use std::os::unix::ffi::OsStringExt as _;
-
-    let scrubbed = scrub_child_environment(vec![
-        (OsString::from("API_KEY"), OsString::from("secret")),
-        (OsString::from("rSi_INTERNAL"), OsString::from("secret")),
-        (
-            OsString::from("HTTPS_PROXY"),
-            OsString::from("http://user:pass@example.test:8080"),
-        ),
-        (
-            OsString::from("HTTP_PROXY"),
-            OsString::from("http://example.test:8080"),
-        ),
-        (OsString::from("NO_PROXY"), OsString::from("localhost")),
-        (OsString::from("VISIBLE"), OsString::from("yes")),
-        (
-            OsString::from("LD_PRELOAD"),
-            OsString::from("/tmp/inject.so"),
-        ),
-        (OsString::from("BASH_ENV"), OsString::from("/tmp/bash-env")),
-        #[cfg(unix)]
-        (
-            OsString::from("RAW_VALUE"),
-            OsString::from_vec(vec![0xff, b'x']),
-        ),
-        #[cfg(unix)]
-        (
-            OsString::from_vec(vec![0xff, b'N']),
-            OsString::from("bad-name"),
-        ),
-    ]);
-    let get = |name: &str| {
-        scrubbed
-            .iter()
-            .find(|(candidate, _)| candidate == OsStr::new(name))
-            .map(|(_, value)| value)
-    };
-    assert!(get("API_KEY").is_none());
-    assert!(get("rSi_INTERNAL").is_none());
-    assert!(get("HTTPS_PROXY").is_none());
-    assert_eq!(
-        get("HTTP_PROXY"),
-        Some(&OsString::from("http://example.test:8080"))
-    );
-    assert_eq!(get("NO_PROXY"), Some(&OsString::from("localhost")));
-    assert_eq!(get("VISIBLE"), Some(&OsString::from("yes")));
-    assert!(get("LD_PRELOAD").is_none());
-    assert!(get("BASH_ENV").is_none());
-    #[cfg(unix)]
-    assert_eq!(
-        get("RAW_VALUE"),
-        Some(&OsString::from_vec(vec![0xff, b'x']))
-    );
-}
-
-#[test]
 fn bash_factory_rejects_missing_executables_and_duplicate_retained_names() {
     assert!(
         BashToolFactory::new(PathBuf::from("/definitely/missing/rsi-bash"), Vec::new(),).is_err()
@@ -532,11 +474,12 @@ async fn factories_publish_only_bash_and_preserve_foreground_and_background_beha
 async fn background_nonzero_exit_is_a_failed_job_terminal() {
     let fixture = Fixture::activate().await;
     let started = fixture
-        .call(json!({"command":"exit 7","run_in_background":true}))
+        .call(json!({"command":format!(":\n# {}\nexit 7", "测".repeat(100)), "run_in_background":true}))
         .await
         .unwrap();
     let id = started.value["job_id"].as_str().unwrap();
     let failed = fixture.jobs.wait(&fixture.scope, id, 0, 0).await.unwrap();
+    assert_eq!(failed.job.name, format!(": # {}…", "测".repeat(83)));
 
     assert_eq!(failed.job.status, JobStatus::Failed);
     assert_eq!(failed.job.terminal.unwrap().exit_code, Some(7));

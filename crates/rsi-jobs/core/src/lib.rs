@@ -17,6 +17,8 @@ use thiserror::Error;
 
 /// Maximum job, producer, or scope-component bytes.
 pub const MAXIMUM_JOB_IDENTIFIER_BYTES: usize = 256;
+/// Maximum UTF-8 bytes in the human-facing job name.
+pub const MAXIMUM_JOB_LABEL_BYTES: usize = 256;
 /// Maximum components in one generic owner scope.
 pub const MAXIMUM_JOB_SCOPE_COMPONENTS: usize = 8;
 /// Default simultaneous live jobs in one authority generation.
@@ -337,6 +339,15 @@ pub struct JobOutputRead {
     pub lossy: bool,
 }
 
+/// Display identity of an unsettled job.
+#[derive(Clone, Debug, Eq, PartialEq, Serialize)]
+pub struct ActiveJob {
+    /// Process-local identifier.
+    pub id: String,
+    /// Producer-supplied display name.
+    pub label: String,
+}
+
 /// Immutable externally visible job facts.
 #[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
@@ -367,13 +378,9 @@ impl JobSummary {
         if let Some(origin) = &self.origin {
             validate_job_identifier("job origin", origin)?;
         }
-        for (kind, value) in [
-            ("job id", &self.id),
-            ("job name", &self.name),
-            ("job producer", &self.producer),
-        ] {
-            validate_job_identifier(kind, value)?;
-        }
+        validate_job_label(&self.name)?;
+        validate_job_identifier("job id", &self.id)?;
+        validate_job_identifier("job producer", &self.producer)?;
         if let Some(terminal) = &self.terminal {
             terminal.validate()?;
             if terminal.status != self.status {
@@ -552,6 +559,8 @@ pub trait Jobs: fmt::Debug + Send + Sync + 'static {
     async fn submit(&self, scope: &JobScopeAuthority, submission: JobSubmission) -> Result<String>;
     /// Lists at most [`MAXIMUM_JOBS_PER_LIST`] exact-scope records oldest-first.
     fn list(&self, scope: &JobScopeAuthority) -> Result<Vec<JobSummary>>;
+    /// Lists only running and stopping identities in the original scope.
+    fn active(&self, scope: &JobScopeAuthority) -> Result<Vec<ActiveJob>>;
     /// Gets one exact-scope record.
     fn get(&self, scope: &JobScopeAuthority, id: &str) -> Result<JobSummary>;
     /// Samples tails without reporting or retention; each limit is 1..=32768.
@@ -636,6 +645,17 @@ pub type Result<T> = std::result::Result<T, JobsError>;
 /// Validates one bounded producer/job identifier.
 pub fn validate_job_identifier(kind: &str, value: &str) -> Result<()> {
     validate_identifier(kind, value)
+}
+
+/// Checks the bounded display text accepted from a producer or wire summary.
+pub fn validate_job_label(value: &str) -> Result<()> {
+    if value.is_empty() || value.len() > MAXIMUM_JOB_LABEL_BYTES || value.contains(char::is_control)
+    {
+        return Err(JobsError::InvalidInput(
+            "job name must be bounded nonempty display text".into(),
+        ));
+    }
+    Ok(())
 }
 
 fn validate_identifier(kind: &str, value: &str) -> Result<()> {

@@ -46,6 +46,9 @@ where
         let Some(name_text) = name.to_str() else {
             continue;
         };
+        if name_text.contains('=') {
+            continue;
+        }
         let uppercase = name_text.to_ascii_uppercase();
         if uppercase.starts_with("RSI_")
             || uppercase.starts_with("LD_")
@@ -389,6 +392,18 @@ mod native {
         }
     }
 
+    fn job_label(mut command: String) -> String {
+        let maximum = rsi_jobs::MAXIMUM_JOB_LABEL_BYTES;
+        if command.len() > maximum {
+            let end = command.floor_char_boundary(maximum - '…'.len_utf8());
+            command = format!("{}…", &command[..end]);
+        }
+        if command.contains(char::is_control) {
+            command = command.replace(char::is_control, " ");
+        }
+        command
+    }
+
     #[derive(Debug)]
     struct BashTool {
         services: Arc<BashServices>,
@@ -454,7 +469,7 @@ mod native {
             };
             if let Some(scope) = scope {
                 let submission = JobSubmission {
-                    name: "bash".into(),
+                    name: job_label(arguments.command),
                     producer: BASH_PRODUCER.into(),
                     origin: execution
                         .extension::<rsi_jobs::JobOrigin>()

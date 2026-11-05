@@ -1,5 +1,9 @@
 # rsi-shell-bash
 
+Bash labels each registered Job with the command the user approved. Control
+characters become spaces and a command beyond the Jobs display bound ends
+in an ellipsis. The process receives the complete original command.
+
 When Tool execution supplies a Jobs scope, foreground Bash also uses the named
 Bash producer. Foreground waits and cancellation retain their existing result
 classification; the submitted origin comes from the executor's `JobOrigin`
@@ -29,6 +33,8 @@ frozen environment snapshot. The snapshot is scrubbed case-insensitively for
 RSI names, loader and shell hooks, secret-shaped names, and credential-bearing
 proxy URLs; non-UTF-8 names and proxy values are dropped while ordinary raw
 values remain byte-exact.
+Windows drive working-directory entries such as `=D:` are excluded because
+their names cannot be passed as ordinary process environment variables.
 
 Each command runs as `bash --noprofile --norc -c <command>` through the exact
 Sandbox-produced Process plan. Foreground timeout/cancellation joins process

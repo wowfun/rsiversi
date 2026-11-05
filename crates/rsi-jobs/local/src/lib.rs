@@ -404,7 +404,7 @@ impl Jobs for Service {
     }
 
     async fn submit(&self, scope: &JobScopeAuthority, submission: JobSubmission) -> Result<String> {
-        validate_job_identifier("job name", &submission.name)?;
+        rsi_jobs::validate_job_label(&submission.name)?;
         validate_job_identifier("job producer name", &submission.producer)?;
         if let Some(origin) = &submission.origin {
             validate_job_identifier("job origin", origin)?;
@@ -459,6 +459,19 @@ impl Jobs for Service {
             .collect::<Vec<_>>();
         debug_assert!(records.len() <= MAXIMUM_JOBS_PER_LIST);
         Ok(records)
+    }
+
+    fn active(&self, scope: &JobScopeAuthority) -> Result<Vec<rsi_jobs::ActiveJob>> {
+        let registry = lock(&self.registry);
+        self.validate_scope(&registry, scope)?;
+        Ok(registry
+            .scope_records(scope.generation())
+            .filter(|(_, record)| !record.status.is_terminal())
+            .map(|(id, record)| rsi_jobs::ActiveJob {
+                id: id.clone(),
+                label: record.name.clone(),
+            })
+            .collect())
     }
 
     fn get(&self, scope: &JobScopeAuthority, id: &str) -> Result<JobSummary> {

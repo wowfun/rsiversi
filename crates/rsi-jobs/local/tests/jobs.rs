@@ -1029,6 +1029,13 @@ async fn finalization_is_scope_isolated_reports_unobserved_work_and_revokes_old_
         .await
         .unwrap();
 
+    assert_eq!(
+        jobs.active(&authority).unwrap(),
+        [rsi_jobs::ActiveJob {
+            id: active_id.clone(),
+            label: "active".into()
+        }]
+    );
     let finalization = jobs.finalize_scope(&authority).await.unwrap();
     assert_eq!(
         finalization
@@ -1058,6 +1065,7 @@ async fn finalization_is_scope_isolated_reports_unobserved_work_and_revokes_old_
     );
     other_control.release.cancel();
     jobs.wait(&other, &other_id, 0, 0).await.unwrap();
+    assert!(jobs.active(&other).unwrap().is_empty());
 
     let replacement = jobs.acquire_scope(scope("turn-a")).unwrap();
     assert!(!replacement.same_generation(&authority));
