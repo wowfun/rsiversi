@@ -52,8 +52,13 @@ catalog stages; Agent-only contribution plugins register through a write-only
 registrar. The sealed catalog, selected context builder and hidden Scope form
 the exact generation pin retained by drafts, resident sessions, delayed Tool
 work and checkpoint maintenance.
+An explicitly mounted application can contribute a second, request-scoped Tool
+catalog. Agent captures its registration bindings before a Conversation request
+series. The application's own process and Fiber continue to own its tool bodies.
 Runtime-composed implementations are independent ordinary plugins; protocol
 and test-support packages are libraries.
+The product supplies read-only application tool receipts to Agent Kernel cold
+recovery independently of the application process and its browser routes.
 The [Agent Goal domain](../crates/rsi-agent/goal/README.md) owns frozen objectives,
 round allocation and report settlement through those composition contracts.
 Kernel continuation admission provides live authority separately from durable
@@ -63,6 +68,11 @@ existing claim-bound read port; Jobs scope ownership stays with the executor.
 [`rsi-mcp`](../crates/rsi-mcp/README.md) owns operator-selected external protocol
 servers, finite frozen catalogs and connection retirement. It consumes Process,
 Sandbox, Credentials, Media, Tools and generic Agent composition seeds.
+[`rsi-extension`](../crates/rsi-extension/README.md) owns a bounded duplex host
+for trusted external processes. Its core has no language or Agent semantics;
+its Agent adapter stages ordinary typed domain proposals and retained CAS data.
+Process and Sandbox retain execution ownership, and Agent retains canonical
+publication. A process reply is never a durable commit receipt.
 [`rsi-retrieval`](../crates/rsi-retrieval/README.md) owns model-selected public-web
 URL policy, bounded retrieval and attributed source results. Their configuration
 and model adapters remain above generic Agent and Meta contracts; neither moves

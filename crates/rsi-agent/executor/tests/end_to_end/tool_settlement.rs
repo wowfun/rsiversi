@@ -10,6 +10,44 @@ struct Settlement {
     conclude: bool,
     state: DomainHandle<u64>,
     calls: AtomicUsize,
+    confirmed: Arc<AtomicUsize>,
+    unconfirmed: Arc<AtomicUsize>,
+    fail_confirmation: Arc<std::sync::atomic::AtomicBool>,
+}
+#[derive(Debug)]
+struct Publication {
+    confirmed: Arc<AtomicUsize>,
+    unconfirmed: Arc<AtomicUsize>,
+    fail: Arc<std::sync::atomic::AtomicBool>,
+}
+#[async_trait]
+impl rsi_agent_composition_protocol::PublicationObserver for Publication {
+    async fn committed(
+        &self,
+        receipt: &rsi_agent_composition_protocol::PublicationReceipt<'_>,
+    ) -> rsi_agent_composition_protocol::ContributionResult<()> {
+        let (_, commit) = receipt.domain_commit.expect("atomic domain receipt");
+        assert_eq!(
+            commit.fact_span().unwrap().first_seq(),
+            receipt.facts[0].seq()
+        );
+        assert_eq!(commit.fact_span().unwrap().count(), 1);
+        let SessionFactBody::ToolResult { effect_id, .. } = receipt.facts[0].body() else {
+            panic!("exact ToolResult")
+        };
+        assert_eq!(commit.request_id().unwrap().as_str(), effect_id.as_str());
+        self.confirmed.fetch_add(1, Ordering::SeqCst);
+        if self.fail.load(Ordering::SeqCst) {
+            return Err(rsi_agent_composition_protocol::ContributionError::Closed);
+        }
+        Ok(())
+    }
+    async fn rejected(&self) -> rsi_agent_composition_protocol::ContributionResult<()> {
+        panic!("unexpected rejection")
+    }
+    fn unconfirmed(&self) {
+        self.unconfirmed.fetch_add(1, Ordering::SeqCst);
+    }
 }
 impl ToolSettlementContributor for Settlement {
     fn settle(
@@ -26,6 +64,13 @@ impl ToolSettlementContributor for Settlement {
         let view = &context.domains[0];
         let count = self.state.decode(&view.snapshot).unwrap();
         Ok(rsi_agent_composition_protocol::ToolSettlement {
+            publications: vec![rsi_agent_composition_protocol::Publication::new(Arc::new(
+                Publication {
+                    confirmed: self.confirmed.clone(),
+                    unconfirmed: self.unconfirmed.clone(),
+                    fail: self.fail_confirmation.clone(),
+                },
+            ))],
             require_uncancelled_turn: false,
             domains: vec![self.state.propose(view.revision, &(count + 1)).unwrap()],
             conclusion: self
@@ -52,6 +97,9 @@ async fn setup_conclusion(stack: &BaseStack, conclude: bool) -> (Arc<Settlement>
         conclude,
         state: domains.bind(&definition).unwrap(),
         calls: AtomicUsize::new(0),
+        confirmed: Arc::new(AtomicUsize::new(0)),
+        unconfirmed: Arc::new(AtomicUsize::new(0)),
+        fail_confirmation: Arc::new(std::sync::atomic::AtomicBool::new(false)),
     });
     *stack.composition.domains.lock().unwrap() = domains;
     let fiber = contributions::install(
@@ -112,9 +160,11 @@ async fn serial_and_parallel_results_invoke_settlement_once_per_effect() {
         let expected = if parallel { 2 } else { 1 };
         assert_eq!(calls.load(Ordering::SeqCst), expected);
         assert_eq!(callback.calls.load(Ordering::SeqCst), expected);
+        assert_eq!(callback.confirmed.load(Ordering::SeqCst), expected);
+        assert_eq!(callback.unconfirmed.load(Ordering::SeqCst), 0);
         let page = stack
             .store
-            .read_domain_states(&submitted.session_id, None)
+            .read_domain_states(&submitted.session_id, None, None)
             .await
             .unwrap();
         assert_eq!(
@@ -276,6 +326,32 @@ async fn retained_settlement(uncertain: bool) {
             .unwrap(),
         ),
     };
+    let step_id = rsi_agent_session_protocol::StepId::new("source-step").unwrap();
+    publish(
+        execution.as_ref(),
+        &claim,
+        vec![
+            SessionFactBody::StepStarted {
+                turn_id: claim.turn_id().clone(),
+                step_id: step_id.clone(),
+            },
+            SessionFactBody::StepInputsPrepared {
+                turn_id: claim.turn_id().clone(),
+                step_id,
+                decision: rsi_agent_session_protocol::StepInputDecision::enter(vec![
+                    rsi_agent_session_protocol::PreparedInput::Claimed {
+                        claim: rsi_agent_session_protocol::InputClaimRef::new(
+                            claim.accepted_seq(),
+                            0,
+                        )
+                        .unwrap(),
+                    },
+                ])
+                .unwrap(),
+            },
+        ],
+    )
+    .await;
     publish(
         execution.as_ref(),
         &claim,
@@ -434,7 +510,7 @@ async fn retained_settlement(uncertain: bool) {
     ));
     let page = stack
         .store
-        .read_domain_states(&submitted.session_id, None)
+        .read_domain_states(&submitted.session_id, None, None)
         .await
         .unwrap();
     assert_eq!(
@@ -517,6 +593,75 @@ async fn conclusion_and_domain_update_share_the_exact_result_commit() {
         .records;
     assert!(controls.iter().any(|record| matches!(record.body(), rsi_agent_session_protocol::AgentControlRecordBody::DomainStateCommitted { commit } if commit.fact_span().is_some_and(|span| span.first_seq() == fact.seq() && span.count() == 1))));
     drop(lease);
+    assert!(callbacks.dispose().await.is_clean());
+    stack.dispose(language, executor).await;
+}
+
+#[tokio::test]
+async fn failed_publication_notification_preserves_the_atomic_result_without_replay() {
+    let stack = BaseStack::activate().await;
+    let (callback, callbacks) = setup(&stack).await;
+    callback.fail_confirmation.store(true, Ordering::SeqCst);
+    let calls = Arc::new(AtomicUsize::new(0));
+    let tool = stack
+        .tool_registrar
+        .register(ToolRegistration {
+            definition: ToolDefinition::new("echo", "echo", json!({"type":"object"})).unwrap(),
+            output: None,
+            executor: Arc::new(EchoTool {
+                store: stack.store.clone(),
+                calls: calls.clone(),
+            }),
+            timeout: rsi_tools_protocol::ToolTimeoutPolicy::Execution { timeout_ms: 2000 },
+        })
+        .unwrap();
+    let provider = Arc::new(LanguageFixture {
+        outcomes: Mutex::new(VecDeque::from([StartOutcome::Stream(tool_script())])),
+        requests: Mutex::new(vec![]),
+        starts: Arc::new(AtomicUsize::new(0)),
+        store: stack.store.clone(),
+        retry_policy: RetryPolicy::default(),
+    });
+    let language = stack
+        .activate_language("notification.provider", provider.clone())
+        .await;
+    let executor = stack.activate_executor("notification-executor").await;
+    let (submitted, outcome) = stack
+        .submit_and_wait("commit before notification failure")
+        .await;
+    assert!(matches!(outcome, TurnOutcome::Failed { .. }), "{outcome:?}");
+    assert_eq!(calls.load(Ordering::SeqCst), 1);
+    assert_eq!(callback.confirmed.load(Ordering::SeqCst), 1);
+    assert_eq!(callback.unconfirmed.load(Ordering::SeqCst), 1);
+    assert_eq!(provider.requests.lock().unwrap().len(), 1);
+    let states = stack
+        .store
+        .read_domain_states(&submitted.session_id, None, None)
+        .await
+        .unwrap();
+    assert_eq!(
+        callback.state.decode(&states.states[0].snapshot).unwrap(),
+        1
+    );
+    let facts = stack
+        .store
+        .read_facts(
+            &submitted.session_id,
+            0,
+            64,
+            rsi_agent_store_protocol::MAXIMUM_STORE_FACT_PAGE_BYTES,
+        )
+        .await
+        .unwrap()
+        .facts;
+    assert_eq!(
+        facts
+            .iter()
+            .filter(|fact| matches!(fact.body(), SessionFactBody::ToolResult { .. }))
+            .count(),
+        1
+    );
+    drop(tool);
     assert!(callbacks.dispose().await.is_clean());
     stack.dispose(language, executor).await;
 }

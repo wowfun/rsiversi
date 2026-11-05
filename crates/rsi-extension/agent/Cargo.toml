@@ -1,0 +1,33 @@
+[package]
+name = "rsi-extension-agent"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+publish = false
+
+[dependencies]
+rsi-execution = { path = "../../rsi-execution/core" }
+rsi-extension = { path = "../core" }
+rsi-meta = { path = "../../rsi-meta/core" }
+rsi-tools-protocol = { path = "../../rsi-tools/protocol" }
+rsi-user-questions-protocol = { path = "../../rsi-user-questions/protocol" }
+sha2.workspace = true
+async-trait.workspace = true
+serde.workspace = true
+tokio = { workspace = true, features = ["sync"] }
+tokio-util.workspace = true
+rsi-agent-session-protocol = { path = "../../rsi-agent/session-protocol" }
+rsi-agent-composition-protocol = { path = "../../rsi-agent/composition-protocol" }
+rsi-agent-store-protocol = { path = "../../rsi-agent/store-protocol" }
+rsi-agent-turn-protocol = { path = "../../rsi-agent/turn-protocol" }
+rsi-api-protocol = { path = "../../rsi-api/protocol" }
+serde_json.workspace = true
+thiserror.workspace = true
+
+[dev-dependencies]
+rsi-agent-testkit = { path = "../../rsi-agent/testkit" }
+tokio = { workspace = true, features = ["rt-multi-thread", "macros"] }
+
+[lints]
+workspace = true

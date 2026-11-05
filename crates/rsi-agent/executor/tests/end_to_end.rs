@@ -158,7 +158,7 @@ impl Sandbox for TestSandbox {
 }
 
 #[derive(Debug)]
-struct SecurityFixtureFactory(ApprovalDecision);
+struct SecurityFixtureFactory(Arc<dyn Approval>);
 
 #[async_trait]
 impl PluginFactory for SecurityFixtureFactory {
@@ -169,7 +169,7 @@ impl PluginFactory for SecurityFixtureFactory {
     async fn activate(&self, plan: ActivationPlan) -> rsi_meta::Result<()> {
         let approval = plan
             .context()
-            .provide_local::<ApprovalContract>(Arc::new(FixtureApproval(self.0)))?;
+            .provide_local::<ApprovalContract>(self.0.clone())?;
         let sandbox = plan
             .context()
             .provide_local::<SandboxContract>(Arc::new(TestSandbox))?;
@@ -255,16 +255,29 @@ impl TurnExecution for FailingClaimFixture {
         Err(TurnError::StaleClaim)
     }
 
+    async fn read_fork_sources(
+        &self,
+        claim: &TurnClaim,
+    ) -> rsi_agent_turn_protocol::Result<Vec<SessionHeader>> {
+        Ok(claim
+            .header()
+            .fork_origin()
+            .map(|_| claim.header().clone())
+            .into_iter()
+            .collect())
+    }
+
     async fn read_fork_facts(
         &self,
         _claim: &TurnClaim,
+        _source: &SessionId,
         _after_parent_seq: u64,
         _limit: usize,
     ) -> rsi_agent_turn_protocol::Result<Option<rsi_agent_turn_protocol::ForkFactPage>> {
         unreachable!("the failing claim fixture never reads fork Facts")
     }
 
-    async fn enter_pending_step_messages(
+    async fn claim_pending_step_messages(
         &self,
         _claim: &TurnClaim,
     ) -> rsi_agent_turn_protocol::Result<usize> {
@@ -771,7 +784,24 @@ impl LanguageCall for LanguageFixture {
                 retry_policy: self.retry_policy.clone(),
                 request_sha256: "a".repeat(64),
             },
-            outcome: self.outcomes.lock().unwrap().pop_front().expect("outcome"),
+            outcome: self
+                .outcomes
+                .lock()
+                .unwrap()
+                .pop_front()
+                .unwrap_or_else(|| {
+                    let requests = self.requests.lock().unwrap();
+                    panic!(
+                        "missing scripted outcome after {} prepares; last inputs {:?}",
+                        requests.len(),
+                        requests
+                            .iter()
+                            .rev()
+                            .take(4)
+                            .map(|request| request.messages().last())
+                            .collect::<Vec<_>>()
+                    );
+                }),
             store: self.store.clone(),
             starts: self.starts.clone(),
         }))
@@ -1339,8 +1369,12 @@ impl BaseStack {
         Self::activate_with_approval(ApprovalDecision::AllowOnce).await
     }
 
-    #[allow(clippy::too_many_lines)] // The fixture keeps the complete dependency-order activation visible.
     async fn activate_with_approval(decision: ApprovalDecision) -> Self {
+        Self::activate_with_answerer(Arc::new(FixtureApproval(decision))).await
+    }
+
+    #[allow(clippy::too_many_lines)] // The fixture keeps the complete dependency-order activation visible.
+    async fn activate_with_answerer(approval: Arc<dyn Approval>) -> Self {
         static TEST_STACK_ADMISSION: OnceLock<Arc<Semaphore>> = OnceLock::new();
         let test_admission =
             Arc::clone(TEST_STACK_ADMISSION.get_or_init(|| Arc::new(Semaphore::new(8))))
@@ -1417,7 +1451,7 @@ impl BaseStack {
                     "rsi.agent.kernel",
                     "kernel",
                     UpdateMode::Replayable,
-                    Arc::new(KernelFactory),
+                    Arc::new(KernelFactory::default()),
                 ),
                 Value::Null,
             )
@@ -1443,7 +1477,7 @@ impl BaseStack {
                     "test.security",
                     "security",
                     UpdateMode::Replayable,
-                    Arc::new(SecurityFixtureFactory(decision)),
+                    Arc::new(SecurityFixtureFactory(approval)),
                 ),
                 Value::Null,
             )
@@ -1522,7 +1556,7 @@ impl BaseStack {
                     "rsi.agent.kernel",
                     "kernel-restarted",
                     UpdateMode::Replayable,
-                    Arc::new(KernelFactory),
+                    Arc::new(KernelFactory::default()),
                 ),
                 Value::Null,
             )
@@ -1720,6 +1754,8 @@ mod compaction;
 mod context_builder;
 #[path = "end_to_end/contributions.rs"]
 mod contributions;
+#[path = "end_to_end/extension.rs"]
+mod extension;
 #[cfg(unix)]
 #[path = "end_to_end/files.rs"]
 mod files;
@@ -1729,6 +1765,8 @@ mod image_and_shutdown;
 mod output_recovery;
 #[path = "end_to_end/pool.rs"]
 mod pool;
+#[path = "end_to_end/request_input.rs"]
+mod request_input;
 #[path = "end_to_end/tool_execution.rs"]
 mod tool_execution;
 #[path = "end_to_end/tool_settlement.rs"]

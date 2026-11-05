@@ -26,6 +26,50 @@ struct Dispatch {
     sender: mpsc::Sender<Request>,
     capacity: Arc<Semaphore>,
 }
+
+#[derive(Debug)]
+struct SelectedDispatch {
+    inner: ProgramToolCalls,
+    names: Vec<String>,
+}
+#[async_trait]
+impl ProgramToolDispatcher for SelectedDispatch {
+    fn definitions(&self) -> Vec<ToolDefinition> {
+        self.inner
+            .0
+            .definitions()
+            .into_iter()
+            .filter(|definition| {
+                self.names
+                    .binary_search_by(|name| name.as_str().cmp(definition.name()))
+                    .is_ok()
+            })
+            .collect()
+    }
+    async fn call(
+        &self,
+        name: String,
+        arguments: Value,
+        cancellation: CancellationToken,
+    ) -> rsi_tools_protocol::Result<ToolResult> {
+        if self.names.binary_search(&name).is_err() {
+            return Err(ToolError::Unknown(name));
+        }
+        self.inner.0.call(name, arguments, cancellation).await
+    }
+}
+pub(super) fn selected_dispatch(
+    program: ProgramToolCalls,
+    names: Option<&[String]>,
+) -> ProgramToolCalls {
+    match names {
+        None => program,
+        Some(names) => ProgramToolCalls(Arc::new(SelectedDispatch {
+            inner: program,
+            names: names.to_vec(),
+        })),
+    }
+}
 #[async_trait]
 impl ProgramToolDispatcher for Dispatch {
     fn definitions(&self) -> Vec<ToolDefinition> {
@@ -241,7 +285,6 @@ impl Driver {
                 &origin,
                 claim,
                 composition,
-                fold,
                 ModelToolCall {
                     id: next_effect_id().map_err(fatal)?.to_string(),
                     name: request.name.clone(),
@@ -254,6 +297,29 @@ impl Driver {
                 stop,
             )
             .await?;
+        let pending = match pending {
+            ToolPreparation::Ready(pending) => pending,
+            ToolPreparation::Rejected(body) => {
+                let fact = self
+                    .publish_durable(claim, fold, vec![*body])
+                    .await?
+                    .into_facts()
+                    .into_iter()
+                    .next()
+                    .expect("one Tool rejection");
+                let SessionFactBody::ToolRejected { rejection, .. } = fact.body() else {
+                    return Err(fatal("program refusal has no rejection"));
+                };
+                let message = rejection.message().into_owned();
+                let result = ToolResult::new(
+                    serde_json::json!({"rejected": true, "message": message}),
+                    vec![rsi_tools_protocol::ToolContent::Text { text: message }],
+                    true,
+                )
+                .map_err(fatal)?;
+                return Ok((result, fact));
+            }
+        };
         let prepared = self
             .publish_tool_start(claim, composition, fold, pending)
             .await?;

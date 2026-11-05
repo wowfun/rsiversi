@@ -92,6 +92,7 @@ fn count(content: &MessageContent, counts: &mut BTreeMap<EvidenceContentKind, (u
         }
         MessageContent::Image(media) => (EvidenceContentKind::Image, media.byte_len()),
         MessageContent::Audio(media) => (EvidenceContentKind::Audio, media.byte_len()),
+        MessageContent::File { .. } => (EvidenceContentKind::File, 0),
         MessageContent::ToolResult { content, .. } => {
             for item in content {
                 count(item, counts);

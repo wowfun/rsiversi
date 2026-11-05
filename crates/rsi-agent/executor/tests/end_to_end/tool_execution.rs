@@ -3,6 +3,658 @@ use rsi_agent_store_protocol::MAXIMUM_STORE_FACT_PAGE_BYTES as FACT_PAGE_BYTES;
 
 #[derive(Debug)]
 struct AuthenticatedEcho(EchoTool);
+
+#[derive(Debug)]
+struct RequestEcho {
+    replaced: Option<Arc<std::collections::BTreeSet<String>>>,
+    middleware: Option<Arc<dyn rsi_tools_protocol::ToolMiddleware>>,
+    catalogs: Arc<dyn rsi_tools_protocol::ToolCatalogProvider>,
+    echo: Arc<AuthenticatedEcho>,
+    captures: AtomicUsize,
+    selections: Mutex<Vec<rsi_agent_session_protocol::ModelSelection>>,
+}
+
+impl RequestEcho {
+    fn new(stack: &BaseStack, calls: Arc<AtomicUsize>) -> Self {
+        Self {
+            replaced: None,
+            middleware: None,
+            captures: AtomicUsize::new(0),
+            selections: Mutex::new(vec![]),
+            catalogs: stack
+                .runtime
+                .root()
+                .lookup_local::<ToolCatalogProviderContract>()
+                .unwrap(),
+            echo: Arc::new(AuthenticatedEcho(EchoTool {
+                store: stack.store.clone(),
+                calls,
+            })),
+        }
+    }
+}
+
+#[async_trait]
+impl rsi_agent_composition_protocol::RequestToolSource for RequestEcho {
+    fn replaced_preset_tools(&self) -> Option<Arc<std::collections::BTreeSet<String>>> {
+        self.replaced.clone()
+    }
+
+    async fn capture(
+        &self,
+        _header: &SessionHeader,
+        selection: &rsi_agent_session_protocol::ModelSelection,
+        reserved: &std::collections::BTreeSet<String>,
+        _stop: CancellationToken,
+    ) -> rsi_agent_composition_protocol::Result<rsi_agent_composition_protocol::RequestToolCatalog>
+    {
+        assert_eq!(reserved.contains("echo"), self.middleware.is_some());
+        self.selections.lock().unwrap().push(selection.clone());
+        let stage = self.catalogs.begin_stage().unwrap();
+        let mut registrations = std::collections::BTreeMap::new();
+        let capture = self.captures.fetch_add(1, Ordering::SeqCst);
+        let _lease = if capture == 0 && !reserved.contains("echo") {
+            registrations.insert("echo".into(), "first-registration".into());
+            Some(
+                stage
+                    .registrar()
+                    .register(ToolRegistration {
+                        output: None,
+                        definition: ToolDefinition::new(
+                            "echo",
+                            "Only for this request",
+                            json!({"type":"object"}),
+                        )
+                        .unwrap(),
+                        timeout: rsi_tools_protocol::ToolTimeoutPolicy::Execution {
+                            timeout_ms: 2000,
+                        },
+                        executor: self.echo.clone(),
+                    })
+                    .unwrap(),
+            )
+        } else {
+            None
+        };
+        Ok(rsi_agent_composition_protocol::RequestToolCatalog {
+            middleware: self.middleware.clone(),
+            inputs: None,
+            instructions: format!("APPLICATION_SYSTEM_{capture}"),
+            generation: "process-generation".into(),
+            receipt_source: None,
+            registrations,
+            runtime: stage.seal().unwrap(),
+        })
+    }
+}
+
+/// The same fixture observes the human broker and the application's parked invocation.
+#[derive(Debug)]
+struct Review {
+    decision: Option<ApprovalDecision>,
+    revoked: CancellationToken,
+    cards: AtomicUsize,
+    answers: Mutex<Vec<bool>>,
+}
+
+#[async_trait]
+impl Approval for Review {
+    async fn ask(
+        &self,
+        request: ApprovalRequest,
+        stop: CancellationToken,
+    ) -> rsi_approval_protocol::Result<ApprovalOutcome> {
+        assert_eq!(request.reason, "Review native echo");
+        assert_eq!(request.review.unwrap().arguments, json!({"value":42}));
+        self.cards.fetch_add(1, Ordering::SeqCst);
+        if let Some(decision) = self.decision {
+            return Ok(ApprovalOutcome {
+                decision,
+                answerer: "human".into(),
+                reason: None,
+            });
+        }
+        self.revoked.cancel();
+        stop.cancelled().await;
+        Err(rsi_approval_protocol::ApprovalError::Cancelled)
+    }
+}
+
+#[async_trait]
+impl rsi_tools_protocol::ToolMiddleware for Review {
+    async fn prepare(
+        self: Arc<Self>,
+        call: &rsi_tools_protocol::ToolCall,
+        _: Option<&rsi_tools_protocol::ToolOutputDeclaration>,
+        _: &CancellationToken,
+    ) -> ToolResultType<rsi_tools_protocol::ToolGate> {
+        assert_eq!(call.name, "echo");
+        Ok(rsi_tools_protocol::ToolGate::Ask {
+            reason: "Review native echo".into(),
+            pending: Box::new(ReviewCall(self)),
+        })
+    }
+}
+
+#[derive(Debug)]
+struct ReviewCall(Arc<Review>);
+#[async_trait]
+impl rsi_tools_protocol::PendingToolApproval for ReviewCall {
+    async fn withdrawn(&mut self) {
+        self.0.revoked.cancelled().await;
+    }
+    async fn answer(
+        self: Box<Self>,
+        allow: bool,
+        _: &CancellationToken,
+    ) -> ToolResultType<rsi_tools_protocol::ToolDecision> {
+        self.0.answers.lock().unwrap().push(allow);
+        if allow {
+            Ok(rsi_tools_protocol::ToolDecision::Ready(self))
+        } else {
+            Ok(rsi_tools_protocol::ToolDecision::Denied {
+                reason: "Refused".into(),
+                additional_contexts: vec![rsi_tools_protocol::ToolContextMessage {
+                    id: "review-after-deny".into(),
+                    source: json!({"kind":"plugin","id":"fixture.review"}),
+                    text: vec!["Use the read-only tool instead.".into()],
+                }],
+            })
+        }
+    }
+}
+#[async_trait]
+impl rsi_tools_protocol::AroundTool for ReviewCall {
+    async fn execute(
+        self: Box<Self>,
+        body: rsi_tools_protocol::ToolBody<'_>,
+    ) -> ToolResultType<ToolResult> {
+        body.run().await
+    }
+}
+
+fn echo_then_answer(stack: &BaseStack) -> Arc<LanguageFixture> {
+    Arc::new(LanguageFixture {
+        outcomes: Mutex::new(VecDeque::from([
+            StartOutcome::Stream(tool_script()),
+            StartOutcome::Stream(answer_script()),
+        ])),
+        requests: Mutex::default(),
+        starts: Arc::new(AtomicUsize::new(0)),
+        store: stack.store.clone(),
+        retry_policy: RetryPolicy::default(),
+    })
+}
+
+#[tokio::test]
+async fn native_and_application_policies_share_one_withdrawable_human_review() {
+    for decision in [
+        Some(ApprovalDecision::AllowOnce),
+        Some(ApprovalDecision::Deny),
+        None,
+    ] {
+        let review = Arc::new(Review {
+            decision,
+            revoked: CancellationToken::new(),
+            cards: AtomicUsize::new(0),
+            answers: Mutex::default(),
+        });
+        let stack = BaseStack::activate_with_answerer(review.clone()).await;
+        let calls = Arc::new(AtomicUsize::new(0));
+        let lease = register_native_echo(&stack, calls.clone());
+        let mut source = RequestEcho::new(&stack, calls.clone());
+        source.middleware = Some(review.clone());
+        let worker = activate_fixture(
+            &stack.runtime,
+            "test.review-source",
+            "app",
+            Arc::new(RequestSourceFactory(Arc::new(source))),
+        )
+        .await;
+        let model = echo_then_answer(&stack);
+        let provider = stack
+            .activate_language("test.review-language", model.clone())
+            .await;
+        let executor = stack.activate_executor("combined-review").await;
+        let (submitted, outcome) = stack
+            .submit_and_wait_with_header(
+                "call echo",
+                None,
+                header()
+                    .with_execution_policy(SandboxMode::WorkspaceWrite, true)
+                    .unwrap(),
+            )
+            .await;
+        assert_eq!(outcome, TurnOutcome::Completed);
+        assert_eq!(review.cards.load(Ordering::SeqCst), 1);
+        let allowed = decision == Some(ApprovalDecision::AllowOnce);
+        assert_eq!(calls.load(Ordering::SeqCst), usize::from(allowed));
+        assert_eq!(
+            *review.answers.lock().unwrap(),
+            decision
+                .map(|d| d == ApprovalDecision::AllowOnce)
+                .into_iter()
+                .collect::<Vec<_>>()
+        );
+        let facts = stack
+            .store
+            .read_facts(&submitted.session_id, 0, 64, FACT_PAGE_BYTES)
+            .await
+            .unwrap()
+            .facts;
+        assert_eq!(
+            facts
+                .iter()
+                .filter(|f| matches!(f.body(), SessionFactBody::ToolIntent { .. }))
+                .count(),
+            usize::from(allowed)
+        );
+        assert_eq!(
+            facts
+                .iter()
+                .filter(|f| matches!(f.body(), SessionFactBody::ToolStarted { .. }))
+                .count(),
+            usize::from(allowed)
+        );
+        let refusal = facts.iter().find_map(|f| match f.body() {
+            SessionFactBody::ToolRejected { rejection, .. } => Some(rejection),
+            _ => None,
+        });
+        let claims: Vec<_> = facts
+            .iter()
+            .filter_map(|f| match f.body() {
+                SessionFactBody::ToolContextsClaimed { messages, .. } => Some(messages),
+                _ => None,
+            })
+            .flatten()
+            .collect();
+        if decision == Some(ApprovalDecision::Deny) {
+            let [claim] = claims.as_slice() else {
+                panic!("expected one policy message")
+            };
+            assert_eq!(claim.message.id, "review-after-deny");
+            assert!(facts.iter().any(|f| matches!(f.body(),
+                SessionFactBody::ToolRejected { effect_id, additional_contexts, .. }
+                    if effect_id == &claim.effect && additional_contexts.as_slice() == [claim.message.clone()])));
+            let requests = model.requests.lock().unwrap();
+            let last = serde_json::to_string(requests.last().unwrap()).unwrap();
+            assert_eq!(last.matches("Use the read-only tool instead.").count(), 1);
+        } else {
+            assert!(claims.is_empty());
+        }
+        assert!(matches!(
+            (decision, refusal),
+            (Some(ApprovalDecision::AllowOnce), None)
+                | (
+                    Some(ApprovalDecision::Deny),
+                    Some(rsi_agent_session_protocol::ToolRejection::ApprovalDenied { .. })
+                )
+                | (
+                    None,
+                    Some(rsi_agent_session_protocol::ToolRejection::PolicyDenied { .. })
+                )
+        ));
+        assert!(worker.dispose().await.is_clean());
+        drop(lease);
+        stack.dispose(provider, executor).await;
+    }
+}
+
+#[derive(Debug)]
+pub(super) struct RequestSourceFactory(
+    pub(super) Arc<dyn rsi_agent_composition_protocol::RequestToolSource>,
+);
+#[async_trait]
+impl PluginFactory for RequestSourceFactory {
+    fn prepare(&self, desired: &ConfigValue) -> rsi_meta::Result<PreparedActivation> {
+        Ok(PreparedActivation::new(desired.clone()))
+    }
+    async fn activate(&self, plan: ActivationPlan) -> rsi_meta::Result<()> {
+        plan.context()
+            .provide_local::<rsi_agent_composition_protocol::RequestToolSourceContract>(
+                self.0.clone(),
+            )?;
+        Ok(())
+    }
+}
+
+fn register_native_echo(
+    stack: &BaseStack,
+    calls: Arc<AtomicUsize>,
+) -> rsi_tools_protocol::ToolLease {
+    stack
+        .tool_registrar
+        .register(ToolRegistration {
+            output: None,
+            definition: ToolDefinition::new("echo", "native echo", json!({"type":"object"}))
+                .unwrap(),
+            executor: Arc::new(EchoTool {
+                store: stack.store.clone(),
+                calls,
+            }),
+            timeout: rsi_tools_protocol::ToolTimeoutPolicy::Execution { timeout_ms: 2_000 },
+        })
+        .unwrap()
+}
+
+#[tokio::test]
+async fn model_retry_reuses_application_registration_and_next_round_drops_it() {
+    // Any unexpected approval would refuse the Tool and make its body count fail.
+    let stack = BaseStack::activate_with_approval(ApprovalDecision::Deny).await;
+    let calls = Arc::new(AtomicUsize::new(0));
+    let native_calls = Arc::new(AtomicUsize::new(0));
+    let _native = register_native_echo(&stack, native_calls.clone());
+    let mut source = RequestEcho::new(&stack, calls.clone());
+    source.replaced = Some(Arc::new(["echo".to_owned()].into()));
+    let source = Arc::new(source);
+    let provider = Arc::new(LanguageFixture {
+        outcomes: Mutex::new(VecDeque::from([
+            StartOutcome::Error(
+                AiError::new(
+                    ErrorKind::RateLimited,
+                    ErrorPhase::Connect,
+                    DispatchStatus::NotDispatched,
+                    "retry",
+                )
+                .unwrap(),
+            ),
+            StartOutcome::Stream(tool_script()),
+            StartOutcome::Error(
+                AiError::new(
+                    ErrorKind::RateLimited,
+                    ErrorPhase::Connect,
+                    DispatchStatus::NotDispatched,
+                    "retry after context",
+                )
+                .unwrap(),
+            ),
+            StartOutcome::Stream(answer_script()),
+        ])),
+        requests: Mutex::new(vec![]),
+        starts: Arc::new(AtomicUsize::new(0)),
+        store: stack.store.clone(),
+        retry_policy: RetryPolicy::new(1, vec![ErrorKind::RateLimited], 1, 1, 0).unwrap(),
+    });
+    let language = stack
+        .activate_language("test.language", provider.clone())
+        .await;
+    let executor = stack.activate_executor("executor-request-tools").await;
+    let worker = activate_fixture(
+        &stack.runtime,
+        "test.request-tools",
+        "app",
+        Arc::new(RequestSourceFactory(source.clone())),
+    )
+    .await;
+    let (submitted, outcome) = stack.submit_and_wait("echo then complete").await;
+    assert_eq!(outcome, TurnOutcome::Completed);
+    assert_eq!(source.captures.load(Ordering::SeqCst), 2);
+    assert_eq!(source.selections.lock().unwrap().len(), 2);
+    assert_eq!(native_calls.load(Ordering::SeqCst), 0);
+    assert_eq!(calls.load(Ordering::SeqCst), 1);
+    assert_retry_tools_and_inputs(&provider.requests.lock().unwrap());
+    for (index, request) in provider.requests.lock().unwrap().iter().enumerate() {
+        let encoded = serde_json::to_string(request).unwrap();
+        let capture = index / 2;
+        assert!(encoded.contains(&format!("APPLICATION_SYSTEM_{capture}")));
+        assert!(!encoded.contains(&format!("APPLICATION_SYSTEM_{}", 1 - capture)));
+    }
+    let page = stack
+        .store
+        .read_facts(&submitted.session_id, 0, 64, FACT_PAGE_BYTES)
+        .await
+        .unwrap();
+    let views = page
+        .facts
+        .iter()
+        .filter_map(|f| match f.body() {
+            SessionFactBody::StepPrepared {
+                application: Some(view),
+                ..
+            } => Some(view.bindings()),
+            _ => None,
+        })
+        .collect::<Vec<_>>();
+    assert_eq!(views.len(), 2);
+    assert!(views[1].is_empty());
+    let binding = &views[0][0];
+    assert_eq!(binding.registration, "first-registration");
+    assert!(page.facts.iter().any(|f|matches!(f.body(),
+        SessionFactBody::ToolIntent{identity,approval:None,..} if identity.owner_id()==binding.owner)));
+    assert!(page.facts.iter().any(|f|matches!(f.body(),
+        SessionFactBody::ToolResult{identity,result,..} if identity.owner_id()==binding.owner && result.value==json!({"value":42}))));
+    assert_entered_tool_contexts(&page.facts, &submitted.session_id);
+    assert!(worker.dispose().await.is_clean());
+    stack.dispose(language, executor).await;
+}
+
+fn assert_retry_tools_and_inputs(requests: &[LanguageRequest]) {
+    assert_eq!(
+        requests
+            .iter()
+            .map(|request| request.tools().len())
+            .collect::<Vec<_>>(),
+        [1, 1, 0, 0]
+    );
+    let entered=requests.iter().map(|request|{
+        request.messages().windows(2).filter(|pair|{
+            let first=&pair[0];let second=&pair[1];
+            first.role()==rsi_ai_protocol::MessageRole::User && second.role()==first.role() &&
+                matches!(first.content(),[rsi_ai_protocol::MessageContent::Text{text:a},rsi_ai_protocol::MessageContent::Text{text:b}]
+                    if a=="tool guidance" && b=="second block") &&
+                matches!(second.content(),[rsi_ai_protocol::MessageContent::Text{text}] if text=="last guidance")
+        }).count()
+    }).collect::<Vec<_>>();
+    assert_eq!(entered, [0, 0, 1, 1]);
+}
+
+#[derive(Debug)]
+struct ApplicationPolicy(rsi_agent_composition_protocol::ToolPolicyDecision);
+
+#[derive(Debug)]
+struct GatedCapture {
+    inner: RequestEcho,
+    entered: Notify,
+    release: Notify,
+}
+
+#[async_trait]
+impl rsi_agent_composition_protocol::RequestToolSource for GatedCapture {
+    async fn capture(
+        &self,
+        header: &SessionHeader,
+        selection: &rsi_agent_session_protocol::ModelSelection,
+        reserved: &std::collections::BTreeSet<String>,
+        stop: CancellationToken,
+    ) -> rsi_agent_composition_protocol::Result<rsi_agent_composition_protocol::RequestToolCatalog>
+    {
+        if self.inner.captures.load(Ordering::SeqCst) == 0 {
+            self.entered.notify_one();
+            self.release.notified().await;
+            assert!(!stop.is_cancelled());
+        }
+        self.inner.capture(header, selection, reserved, stop).await
+    }
+}
+
+#[tokio::test(start_paused = true)]
+async fn application_prompt_capture_uses_the_preparation_stage_budget() {
+    let stack = BaseStack::activate().await;
+    let calls = Arc::new(AtomicUsize::new(0));
+    let source = Arc::new(GatedCapture {
+        inner: RequestEcho::new(&stack, calls.clone()),
+        entered: Notify::new(),
+        release: Notify::new(),
+    });
+    let worker = activate_fixture(
+        &stack.runtime,
+        "test.request-tools",
+        "app",
+        Arc::new(RequestSourceFactory(source.clone())),
+    )
+    .await;
+    let language = Arc::new(LanguageFixture {
+        outcomes: Mutex::new(VecDeque::from([
+            StartOutcome::Stream(tool_script()),
+            StartOutcome::Stream(answer_script()),
+        ])),
+        requests: Mutex::new(vec![]),
+        starts: Arc::new(AtomicUsize::new(0)),
+        store: stack.store.clone(),
+        retry_policy: RetryPolicy::default(),
+    });
+    let provider = stack
+        .activate_language("test.language", language.clone())
+        .await;
+    let executor = stack.activate_executor("prompt-budget").await;
+    let turns = stack
+        .runtime
+        .root()
+        .lookup_local::<TurnServiceContract>()
+        .unwrap();
+    let submitted = stack
+        .submit_fresh(&turns, "prompt-budget", "call echo")
+        .await;
+    source.entered.notified().await;
+    tokio::time::advance(std::time::Duration::from_secs(12)).await;
+    assert_eq!(language.starts.load(Ordering::SeqCst), 0);
+    source.release.notify_one();
+    assert_eq!(
+        wait_for_outcome(&turns, &submitted).await,
+        TurnOutcome::Completed
+    );
+    assert_eq!(calls.load(Ordering::SeqCst), 1);
+    assert!(
+        serde_json::to_string(&language.requests.lock().unwrap()[0])
+            .unwrap()
+            .contains("APPLICATION_SYSTEM_0")
+    );
+    assert!(worker.dispose().await.is_clean());
+    stack.dispose(provider, executor).await;
+}
+
+#[async_trait]
+impl rsi_agent_composition_protocol::ToolPolicy for ApplicationPolicy {
+    async fn decide(
+        &self,
+        _: &rsi_agent_composition_protocol::ContributionContext,
+        request: &rsi_agent_composition_protocol::ToolPolicyRequest<'_>,
+        _: CancellationToken,
+    ) -> rsi_agent_composition_protocol::ContributionResult<
+        rsi_agent_composition_protocol::ToolPolicyDecision,
+    > {
+        assert_eq!(request.name, "echo");
+        assert_eq!(request.sandbox, SandboxMode::DangerFullAccess);
+        assert!(!request.require_approval);
+        Ok(self.0.clone())
+    }
+}
+
+#[tokio::test]
+async fn application_tools_keep_explicit_approval_and_native_policy_constraints() {
+    use rsi_agent_composition_protocol::{
+        ContributionKind, ContributionRegistration, ToolPolicyDecision,
+    };
+    use rsi_agent_session_protocol::{ContributionId, ToolRejection};
+    for decision in [
+        None,
+        Some(ToolPolicyDecision::RequireApproval),
+        Some(ToolPolicyDecision::Deny {
+            reason: "plugin policy".into(),
+        }),
+    ] {
+        let stack = BaseStack::activate_with_approval(ApprovalDecision::Deny).await;
+        let calls = Arc::new(AtomicUsize::new(0));
+        let source = Arc::new(RequestEcho::new(&stack, calls.clone()));
+        let worker = activate_fixture(
+            &stack.runtime,
+            "test.request-tools",
+            "app",
+            Arc::new(RequestSourceFactory(source)),
+        )
+        .await;
+        let callbacks = if let Some(decision) = &decision {
+            Some(
+                super::contributions::install(
+                    &stack,
+                    vec![ContributionRegistration::new(
+                        ContributionId::new("fixture.application-policy").unwrap(),
+                        0,
+                        ContributionKind::ToolPolicy(Arc::new(ApplicationPolicy(decision.clone()))),
+                    )],
+                )
+                .await,
+            )
+        } else {
+            None
+        };
+        let language = echo_then_answer(&stack);
+        let provider = stack.activate_language("test.language", language).await;
+        let executor = stack.activate_executor("application-policy").await;
+        let header = header()
+            .with_execution_policy(SandboxMode::WorkspaceWrite, decision.is_none())
+            .unwrap();
+        let (submitted, outcome) = stack
+            .submit_and_wait_with_header("call echo", None, header)
+            .await;
+        assert_eq!(outcome, TurnOutcome::Completed);
+        assert_eq!(calls.load(Ordering::SeqCst), 0);
+        let facts = stack
+            .store
+            .read_facts(&submitted.session_id, 0, 64, FACT_PAGE_BYTES)
+            .await
+            .unwrap()
+            .facts;
+        let rejections: Vec<_> = facts
+            .iter()
+            .filter_map(|fact| match fact.body() {
+                SessionFactBody::ToolRejected { rejection, .. } => Some(rejection),
+                _ => None,
+            })
+            .collect();
+        assert_eq!(rejections.len(), 1);
+        assert_eq!(
+            matches!(rejections[0], ToolRejection::PolicyDenied { .. }),
+            matches!(decision, Some(ToolPolicyDecision::Deny { .. }))
+        );
+        assert!(!facts.iter().any(|fact| matches!(
+            fact.body(),
+            SessionFactBody::ToolIntent { .. }
+                | SessionFactBody::ToolStarted { .. }
+                | SessionFactBody::ToolResult { .. }
+        )));
+        if let Some(callbacks) = callbacks {
+            assert!(callbacks.dispose().await.is_clean());
+        }
+        assert!(worker.dispose().await.is_clean());
+        stack.dispose(provider, executor).await;
+    }
+}
+
+fn assert_entered_tool_contexts(facts: &[SessionFact], session: &SessionId) {
+    let contexts: Vec<_> = facts
+        .iter()
+        .filter_map(|fact| match fact.body() {
+            SessionFactBody::ToolContextsClaimed { messages, .. } => Some((fact.seq(), messages)),
+            _ => None,
+        })
+        .collect();
+    assert_eq!(contexts.len(), 1);
+    let (seq, inputs) = contexts[0];
+    assert_eq!(inputs.len(), 2);
+    assert!(
+        inputs
+            .iter()
+            .enumerate()
+            .all(|(i, input)| input.session == *session
+                && usize::from(input.ordinal) == i
+                && input.effect == inputs[0].effect)
+    );
+    assert_eq!(inputs[1].message.id, "second-hook");
+    assert!(facts.iter().any(|fact|fact.seq()<seq && matches!(fact.body(),
+        SessionFactBody::ToolResult{effect_id,result,..} if effect_id==&inputs[0].effect&&result.additional_contexts[0]==inputs[0].message)));
+}
+
 #[async_trait]
 impl ToolExecutor for AuthenticatedEcho {
     async fn execute(
@@ -15,7 +667,22 @@ impl ToolExecutor for AuthenticatedEcho {
             .expect("external Tool execution requires authenticated origin authority");
         assert!(caller.tool_effect_id().is_some());
         assert!(caller.source_selection().is_some());
-        self.0.execute(arguments, execution).await
+        let mut result = self.0.execute(arguments, execution).await?;
+        result
+            .additional_contexts
+            .push(rsi_tools_protocol::ToolContextMessage {
+                id: "hook".into(),
+                source: json!({"kind":"post-tool"}),
+                text: vec!["tool guidance".into(), "second block".into()],
+            });
+        result
+            .additional_contexts
+            .push(rsi_tools_protocol::ToolContextMessage {
+                id: "second-hook".into(),
+                source: json!({"kind":"another-hook"}),
+                text: vec!["last guidance".into()],
+            });
+        Ok(result)
     }
 }
 
@@ -117,7 +784,10 @@ async fn denied_approval_persists_the_prepared_call_without_starting_the_tool() 
         })
         .unwrap();
     let fixture = Arc::new(LanguageFixture {
-        outcomes: Mutex::new(VecDeque::from([StartOutcome::Stream(tool_script())])),
+        outcomes: Mutex::new(VecDeque::from([
+            StartOutcome::Stream(tool_script()),
+            StartOutcome::Stream(answer_script()),
+        ])),
         requests: Mutex::new(vec![]),
         starts: Arc::new(AtomicUsize::new(0)),
         store: stack.store.clone(),
@@ -130,9 +800,18 @@ async fn denied_approval_persists_the_prepared_call_without_starting_the_tool() 
     let (submitted, outcome) = stack
         .submit_and_wait_with_sandbox("call echo", Some(SandboxMode::DangerFullAccess))
         .await;
-    assert!(matches!(outcome, TurnOutcome::Failed { ref code, .. } if code == "approval.denied"));
+    assert_eq!(outcome, TurnOutcome::Completed);
     assert_eq!(calls.load(Ordering::Acquire), 0);
-    assert_eq!(fixture.starts.load(Ordering::Acquire), 1);
+    assert_eq!(fixture.starts.load(Ordering::Acquire), 2);
+    {
+        let requests = fixture.requests.lock().unwrap();
+        assert_complete_tool_groups(&requests[1]);
+        assert!(
+            serde_json::to_string(&requests[1])
+                .unwrap()
+                .contains("denied")
+        );
+    }
     let page = stack
         .store
         .read_facts(&submitted.session_id, 0, 64, FACT_PAGE_BYTES)
@@ -936,7 +1615,8 @@ fn fact_kind(body: &SessionFactBody) -> &'static str {
         SessionFactBody::TurnAccepted { .. } => "accepted",
         SessionFactBody::MessageTurnAccepted { .. } => "message_accepted",
         SessionFactBody::StepStarted { .. } => "step_started",
-        SessionFactBody::InputMessageEntered { .. } => "input_message_entered",
+        SessionFactBody::InputMessageClaimed { .. } => "input_message_claimed",
+        SessionFactBody::ToolContextsClaimed { .. } => "tool_contexts_claimed",
         SessionFactBody::StepEnded { .. } => "step_ended",
         SessionFactBody::WorkspaceTouched { .. } => "workspace_touched",
         SessionFactBody::ImageRequested { .. } => "image_requested",
@@ -953,6 +1633,8 @@ fn fact_kind(body: &SessionFactBody) -> &'static str {
         SessionFactBody::TurnTerminal { .. } => "terminal",
         SessionFactBody::CancelRequested { .. } => "cancel",
         SessionFactBody::ToolCallsSuperseded { .. } => "tool_calls_superseded",
+        SessionFactBody::StepPrepared { .. } => "step_tools_selected",
+        SessionFactBody::StepInputsPrepared { .. } => "step_inputs_prepared",
     }
 }
 
@@ -1071,7 +1753,7 @@ async fn next_step_supersedes_two_unadmitted_calls_before_the_next_provider_requ
             delivery: MessageDelivery::NextTurn,
             message: AgentMessage {
                 message_id: MessageId::new("initial").unwrap(),
-                source: AgentMessageSource::Human,
+                source: AgentMessageSource::Human { attribution: None },
                 content: vec![AgentMessageContent::Text {
                     text: "original".into(),
                 }],
@@ -1096,7 +1778,7 @@ async fn next_step_supersedes_two_unadmitted_calls_before_the_next_provider_requ
             delivery: MessageDelivery::NextStep,
             message: AgentMessage {
                 message_id: MessageId::new("steer").unwrap(),
-                source: AgentMessageSource::Human,
+                source: AgentMessageSource::Human { attribution: None },
                 content: vec![AgentMessageContent::Text {
                     text: "new direction".into(),
                 }],
@@ -1182,7 +1864,7 @@ async fn next_step_supersedes_two_unadmitted_calls_before_the_next_provider_requ
     ));
     assert!(matches!(
         facts[marker + 3].body(),
-        SessionFactBody::InputMessageEntered { .. }
+        SessionFactBody::InputMessageClaimed { .. }
     ));
     let mut replay = ModelContextState::open(
         Arc::new(rsi_agent_context::DefaultContextBuilder::default()),

@@ -249,6 +249,7 @@ impl ExecutorConfig {
 
 #[derive(Debug)]
 struct Driver {
+    scope: rsi_meta::Context,
     observer: Option<Arc<dyn rsi_agent_turn_protocol::ExecutionObserver>>,
     evidence: Mutex<evidence::EvidenceCache>,
     turns: Arc<dyn TurnExecution>,
@@ -291,6 +292,15 @@ struct PendingToolEffect {
     approval: Option<rsi_approval_protocol::ApprovalOutcome>,
     parallel_safe: bool,
     prepared: Box<dyn PreparedToolCall>,
+}
+
+#[expect(
+    clippy::large_enum_variant,
+    reason = "This transient decision moves preparation directly into its existing owner without another per-call allocation."
+)]
+enum ToolPreparation {
+    Ready(PendingToolEffect),
+    Rejected(Box<SessionFactBody>),
 }
 
 async fn select_drive_or_stop(
@@ -604,7 +614,7 @@ fn scan_turn(
             SessionFactBody::TurnAccepted { .. }
             | SessionFactBody::MessageTurnAccepted { .. }
             | SessionFactBody::StepStarted { .. }
-            | SessionFactBody::InputMessageEntered { .. }
+            | SessionFactBody::InputMessageClaimed { .. }
             | SessionFactBody::StepEnded { .. }
             | SessionFactBody::WorkspaceTouched { .. }
             | SessionFactBody::ImageRequested { .. }
@@ -620,7 +630,10 @@ fn scan_turn(
             | SessionFactBody::ToolStarted { .. }
             | SessionFactBody::ToolResult { .. }
             | SessionFactBody::ToolCallsSuperseded { .. }
-            | SessionFactBody::TurnTerminal { .. } => {}
+            | SessionFactBody::TurnTerminal { .. }
+            | SessionFactBody::ToolContextsClaimed { .. }
+            | SessionFactBody::StepInputsPrepared { .. }
+            | SessionFactBody::StepPrepared { .. } => {}
         }
     }
     Ok(())
@@ -682,18 +695,13 @@ impl PluginFactory for ExecutorFactory {
             .clone();
         let turns = plan.local::<TurnExecutionContract>()?;
         let finalization = plan.local::<TurnFinalizationContract>()?;
-        let language = plan.local::<LanguageCallContract>()?;
-        let image = plan.local::<ImageCallContract>()?;
-        let media = plan.local::<MediaContract>()?;
-        let approval = plan.local::<ApprovalContract>()?;
-        let sandbox = plan.local::<SandboxContract>()?;
-        let jobs = plan.local::<JobsContract>()?;
         let lease = turns
             .register(config.executor_id.clone())
             .map_err(|error| MetaError::Activation(error.to_string()))?;
         let checkpoint_turns = Arc::clone(&turns);
         let checkpoints = Arc::new(CheckpointScheduler::new());
         let driver = Arc::new(Driver {
+            scope: plan.context().clone(),
             observer: if config.observe_execution {
                 Some(plan.local::<rsi_agent_turn_protocol::ExecutionObserverContract>()?)
             } else {
@@ -702,12 +710,12 @@ impl PluginFactory for ExecutorFactory {
             evidence: Mutex::new(evidence::EvidenceCache::default()),
             turns,
             finalization,
-            language,
-            image,
-            media,
-            approval,
-            sandbox,
-            jobs,
+            language: plan.local::<LanguageCallContract>()?,
+            image: plan.local::<ImageCallContract>()?,
+            media: plan.local::<MediaContract>()?,
+            approval: plan.local::<ApprovalContract>()?,
+            sandbox: plan.local::<SandboxContract>()?,
+            jobs: plan.local::<JobsContract>()?,
             active_tools: Mutex::new(BTreeMap::new()),
             controlled_work: Mutex::new(BTreeMap::new()),
             retirement_tasks: Mutex::new(Vec::new()),

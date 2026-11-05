@@ -24,6 +24,7 @@ fn admitted_options(
     composition: &AgentCompositionPin,
     model: &rsi_agent_session_protocol::ModelSelection,
     output_cap: Option<u32>,
+    selected_tools: Option<&[String]>,
 ) -> std::result::Result<
     (
         rsi_ai_protocol::LanguageRequestOptions,
@@ -57,7 +58,18 @@ fn admitted_options(
             .map_err(|error| options_failure(&error))?;
     }
     let options = rsi_ai_protocol::LanguageRequestOptions::new(
-        composition.tools().definitions(),
+        composition
+            .tools()
+            .definitions()
+            .into_iter()
+            .filter(|definition| {
+                selected_tools.is_none_or(|names| {
+                    names
+                        .binary_search_by(|name| name.as_str().cmp(definition.name()))
+                        .is_ok()
+                })
+            })
+            .collect(),
         rsi_ai_protocol::ToolChoice::Auto,
         Vec::new(),
         rsi_ai_protocol::ResponseFormat::Text,
@@ -82,6 +94,7 @@ impl Driver {
         composition: &AgentCompositionPin,
         fold: &mut ModelContextState,
         model: &rsi_agent_session_protocol::ModelSelection,
+        selected_tools: Option<&[String]>,
         retry_attempt: u8,
         cancellation: &CancellationToken,
         stop: &CancellationToken,
@@ -101,6 +114,7 @@ impl Driver {
                 .output_budgets()
                 .cap(&model.model)
                 .or(profile.default_output_tokens()),
+            selected_tools,
         )
         .map_err(DriveFailure::Turn)?;
         self.sync_fold(claim, fold).await?;
@@ -245,7 +259,7 @@ impl Driver {
                     // A steering message accepted during the summary must enter
                     // before the resumed ordinary request is prepared.
                     self.turns
-                        .enter_pending_step_messages(claim)
+                        .claim_pending_step_messages(claim)
                         .await
                         .map_err(fatal)?;
                     self.sync_fold(claim, fold).await?;
@@ -294,7 +308,7 @@ mod tests {
             model: rsi_ai_protocol::ModelRef::new("fixture", "model").unwrap(),
             reasoning_effort: None,
         };
-        let (options, credit) = admitted_options(&budget, &pin, &model, None).unwrap();
+        let (options, credit) = admitted_options(&budget, &pin, &model, None, None).unwrap();
         let weight = options.encoded_weight();
         assert_eq!(credit.bytes(), weight);
         assert_eq!(budget.used(), weight);
@@ -321,7 +335,7 @@ mod tests {
         assert_eq!(budget.used(), 0);
         let held = budget.reserve(budget.maximum()).unwrap();
         assert!(
-            matches!(admitted_options(&budget, &pin, &model, None), Err(rsi_agent_session_protocol::TurnOutcome::Failed { code, .. }) if code == "context.capacity")
+            matches!(admitted_options(&budget, &pin, &model, None, None), Err(rsi_agent_session_protocol::TurnOutcome::Failed { code, .. }) if code == "context.capacity")
         );
         assert_eq!(budget.used(), budget.maximum());
         drop(held);

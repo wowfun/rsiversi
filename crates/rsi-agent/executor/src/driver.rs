@@ -1,4 +1,5 @@
 use super::*;
+use rsi_tools_protocol::{ToolDecision, ToolGate};
 
 impl Driver {
     pub(super) async fn run_claim(
@@ -132,7 +133,7 @@ impl Driver {
                     !matches!(
                         fact.body(),
                         SessionFactBody::StepStarted { .. }
-                            | SessionFactBody::InputMessageEntered { .. }
+                            | SessionFactBody::InputMessageClaimed { .. }
                     )
                 })
             {
@@ -245,7 +246,17 @@ impl Driver {
         if self.finish(claim, job_scope, outcome).await.is_ok() {
             self.request_checkpoint(claim, composition);
             if let Some(identity) = settled_identity {
-                let _ignored = composition.tools().commit(&identity);
+                let runtime = self
+                    .active_tools
+                    .lock()
+                    .unwrap_or_else(std::sync::PoisonError::into_inner)
+                    .get(&(claim.session_id().clone(), claim.turn_id().clone()))
+                    .and_then(|calls| calls.get(&identity))
+                    .map_or_else(
+                        || composition.tools(),
+                        |tracked| tracked.composition.tools(),
+                    );
+                let _ignored = runtime.commit(&identity);
                 self.clear_tracked_tool(claim, &identity);
             }
             self.retire_tracked_tools(claim, stop);
@@ -300,6 +311,7 @@ impl Driver {
             fold,
             model,
             turn_policy,
+            state.conversation_source.is_none(),
             stop,
         )
         .await
@@ -314,11 +326,14 @@ impl Driver {
         fold: &mut ModelContextState,
         explicit_selection: Option<rsi_agent_session_protocol::ModelSelection>,
         turn_policy: ResolvedTurnPolicy,
+        mut initial_request: bool,
         stop: &CancellationToken,
     ) -> std::result::Result<(), DriveFailure> {
         let mut retry_attempt = 0_u8;
         let mut selection =
             rsi_agent_session_protocol::ModelSelection::baseline(claim.header().settings());
+        let mut selected_tools = None;
+        let mut request_composition = composition.clone();
         loop {
             if stop.is_cancelled() {
                 return Err(DriveFailure::Stopped);
@@ -330,7 +345,7 @@ impl Driver {
             if retry_attempt == 0
                 && self
                     .turns
-                    .enter_pending_step_messages(claim)
+                    .claim_pending_step_messages(claim)
                     .await
                     .map_err(fatal)?
                     > 0
@@ -338,23 +353,27 @@ impl Driver {
                 self.sync_fold(claim, fold).await?;
             }
             if retry_attempt == 0 {
-                selection = self
+                (request_composition, selection, selected_tools) = self
                     .before_step(
                         claim,
                         composition,
                         fold,
                         explicit_selection.as_ref(),
+                        initial_request,
                         &cancellation,
                         stop,
                     )
                     .await?;
             }
+            let composition = &request_composition;
+            initial_request = false;
             let (source_model_effect_id, output) = match self
                 .run_model_attempt(
                     claim,
                     composition,
                     fold,
                     &selection,
+                    selected_tools.as_deref(),
                     retry_attempt,
                     &cancellation,
                     stop,
@@ -381,7 +400,7 @@ impl Driver {
             }
             if self
                 .turns
-                .enter_pending_step_messages(claim)
+                .claim_pending_step_messages(claim)
                 .await
                 .map_err(fatal)?
                 > 0
@@ -413,6 +432,15 @@ impl Driver {
             let mut scheduled = VecDeque::with_capacity(calls.len());
             let total_calls = calls.len();
             for (index, call) in calls.into_iter().enumerate() {
+                if selected_tools
+                    .as_ref()
+                    .is_some_and(|names| names.binary_search(&call.name).is_err())
+                {
+                    return Err(failed(
+                        "tool.not_admitted",
+                        format!("Tool '{}' was not selected for this Step", call.name),
+                    ));
+                }
                 let scheduling = tools.scheduling(&call.name).ok_or_else(|| {
                     failed(
                         "tool.not_found",
@@ -1062,7 +1090,6 @@ impl Driver {
                 },
                 claim,
                 composition,
-                fold,
                 call,
                 scheduling,
                 turn_policy,
@@ -1070,6 +1097,18 @@ impl Driver {
                 stop,
             )
             .await?;
+        let pending = match pending {
+            ToolPreparation::Ready(pending) => pending,
+            ToolPreparation::Rejected(body) => {
+                return Ok(self
+                    .publish_durable(claim, fold, vec![*body])
+                    .await?
+                    .into_facts()
+                    .into_iter()
+                    .next()
+                    .expect("one Tool rejection"));
+            }
+        };
         let prepared = self
             .publish_tool_start(claim, composition, fold, pending)
             .await?;
@@ -1140,23 +1179,37 @@ impl Driver {
         stop: &CancellationToken,
     ) -> std::result::Result<Vec<Arc<SessionFact>>, DriveFailure> {
         let mut pending = Vec::with_capacity(calls.len());
-        for call in calls {
-            pending.push(
-                self.prepare_tool_call(
+        let mut rejections = vec![None; calls.len()];
+        for (index, call) in calls.into_iter().enumerate() {
+            match self
+                .prepare_tool_call(
                     &rsi_agent_session_protocol::ToolOrigin::Model {
                         effect_id: source_model_effect_id.clone(),
                     },
                     claim,
                     composition,
-                    fold,
                     call,
                     ToolScheduling::ParallelSafe,
                     turn_policy,
                     cancellation,
                     stop,
                 )
-                .await?,
-            );
+                .await?
+            {
+                ToolPreparation::Ready(effect) => pending.push(effect),
+                ToolPreparation::Rejected(body) => rejections[index] = Some(body),
+            }
+        }
+
+        if pending.is_empty() {
+            return Ok(self
+                .publish_durable(
+                    claim,
+                    fold,
+                    rejections.into_iter().flatten().map(|body| *body).collect(),
+                )
+                .await?
+                .into_facts());
         }
 
         let prepared = self
@@ -1186,8 +1239,19 @@ impl Driver {
         .await;
 
         let mut first_failure = None;
-        let mut settled = Vec::new();
-        for (intent, identity, result) in outcomes {
+        let mut outcomes = outcomes.into_iter();
+        let mut settled = Vec::with_capacity(rejections.len());
+        for rejection in rejections {
+            if let Some(body) = rejection {
+                settled.extend(
+                    self.publish_durable(claim, fold, vec![*body])
+                        .await?
+                        .into_facts(),
+                );
+                continue;
+            }
+            let (intent, identity, result) =
+                outcomes.next().expect("one outcome per admitted call");
             match result {
                 Ok(result) => {
                     match self
@@ -1225,13 +1289,12 @@ impl Driver {
         origin: &rsi_agent_session_protocol::ToolOrigin,
         claim: &TurnClaim,
         composition: &AgentCompositionPin,
-        fold: &mut ModelContextState,
         call: ModelToolCall,
         scheduling: ToolScheduling,
         turn_policy: ResolvedTurnPolicy,
         cancellation: &CancellationToken,
         stop: &CancellationToken,
-    ) -> std::result::Result<PendingToolEffect, DriveFailure> {
+    ) -> std::result::Result<ToolPreparation, DriveFailure> {
         let (effect_id, arguments) = prepare_tool_effect(&call).map_err(|failure| *failure)?;
         let name = call.name;
         let program_role = composition
@@ -1250,6 +1313,16 @@ impl Driver {
             )
             .map_err(|error| tool_failure(&error))?;
         let identity = prepared.identity().clone();
+        // The application worker runs as the operator, independently of the
+        // sandbox chosen for native processes in this Turn.
+        let (execution_mode, middleware) = match composition.request_tool_route(&name) {
+            rsi_agent_composition_protocol::RequestToolRoute::Application => {
+                (SandboxMode::DangerFullAccess, None)
+            }
+            rsi_agent_composition_protocol::RequestToolRoute::Native(middleware) => {
+                (turn_policy.sandbox, middleware)
+            }
+        };
         let (require_approval, rejection) = self
             .tool_policy_decision(
                 claim,
@@ -1258,7 +1331,7 @@ impl Driver {
                     identity: &identity,
                     name: &name,
                     arguments: &arguments,
-                    sandbox: turn_policy.sandbox,
+                    sandbox: execution_mode,
                     require_approval: turn_policy.require_approval,
                 },
                 origin,
@@ -1267,10 +1340,9 @@ impl Driver {
             )
             .await?;
         if let Some(rejection) = rejection {
-            self.publish_durable(
-                claim,
-                fold,
-                vec![SessionFactBody::ToolRejected {
+            return Ok(ToolPreparation::Rejected(Box::new(
+                SessionFactBody::ToolRejected {
+                    additional_contexts: Vec::new(),
                     origin: origin.clone(),
                     program_role,
                     turn_id: claim.turn_id().clone(),
@@ -1279,14 +1351,8 @@ impl Driver {
                     name,
                     arguments,
                     rejection,
-                }],
-            )
-            .await?;
-
-            return Err(failed(
-                "policy.denied",
-                "pinned policy denied the prepared Tool call",
-            ));
+                },
+            )));
         }
         let combined = combine_cancellation(cancellation, stop);
         let mut extensions = rsi_tools_protocol::ToolExecutionExtensions::default();
@@ -1308,64 +1374,136 @@ impl Driver {
             })
             .await
             .map_err(|error| tool_failure(&error))?;
-        combined.cancel();
-        let approval = if require_approval {
-            let outcome = self
-                .request_tool_approval(
-                    claim,
-                    &effect_id,
-                    &name,
+        let token = combined.token();
+        let plan = prepared.native_plan();
+        let mut gate = if let (Some(source), Some(plan)) = (middleware, plan.as_ref()) {
+            Some(policy_stage(Arc::clone(source).prepare(plan.call, plan.output, &token)).await?)
+        } else {
+            None
+        };
+        let reason = match &gate {
+            Some(ToolGate::Ask { reason, .. }) => Some(bounded(reason)),
+            Some(ToolGate::Decided(ToolDecision::Denied { .. })) => None,
+            _ if require_approval => Some("Required by the execution policy".into()),
+            _ => None,
+        };
+        let mut approval = None;
+        if let Some(reason) = reason {
+            let request = ApprovalRequest {
+                subject: ApprovalSubject::new(
+                    claim.session_id().as_str(),
+                    claim.turn_id().as_str(),
+                    effect_id.as_str(),
+                )
+                .map_err(|error| failed("approval.invalid_subject", error.to_string()))?,
+                id: format!("{}:{}", claim.turn_id().as_str(), effect_id.as_str()),
+                action: format!("run tool {name}"),
+                reason,
+                review: Some(
                     tool_approval_review(
                         claim,
                         &arguments,
                         &identity,
-                        turn_policy,
+                        execution_mode,
                         execution_review,
                     )
                     .map_err(fatal)?,
-                    cancellation,
-                    stop,
-                )
+                ),
+            };
+            approval = self
+                .request_tool_approval(claim, request, gate.as_mut(), &token, stop)
                 .await?;
-            if outcome.decision == ApprovalDecision::Deny {
-                self.publish_durable(
-                    claim,
-                    fold,
-                    vec![SessionFactBody::ToolRejected {
-                        origin: origin.clone(),
-                        program_role,
-                        turn_id: claim.turn_id().clone(),
-                        effect_id,
-                        identity,
-                        name,
-                        arguments,
-                        rejection: rsi_agent_session_protocol::ToolRejection::ApprovalDenied {
-                            outcome,
-                        },
-                    }],
-                )
-                .await?;
-
-                return Err(failed(
-                    "approval.denied",
-                    "live approval denied the Tool effect",
-                ));
+            if approval.is_none() {
+                gate = Some(ToolGate::Decided(ToolDecision::Denied {
+                    reason: "Application withdrew its native Tool invocation during approval"
+                        .into(),
+                    additional_contexts: Vec::new(),
+                }));
             }
-            Some(outcome)
-        } else {
-            None
+        }
+        let denied = approval
+            .as_ref()
+            .is_some_and(|outcome| outcome.decision == ApprovalDecision::Deny);
+        let decision = match gate {
+            Some(ToolGate::Ask { pending, .. }) => {
+                let decision = policy_stage(pending.answer(!denied, &token)).await;
+                // A user's refusal remains conclusive if the application loses its answer.
+                if denied {
+                    decision.ok()
+                } else {
+                    Some(decision?)
+                }
+            }
+            Some(ToolGate::Decided(decision)) => Some(decision),
+            None => None,
         };
-        Ok(PendingToolEffect {
-            origin: origin.clone(),
-            program_role,
-            effect_id,
-            identity,
-            name,
-            arguments,
-            approval,
-            parallel_safe: scheduling == ToolScheduling::ParallelSafe,
-            prepared,
-        })
+        let (rejection, additional_contexts) = match (approval, decision) {
+            (Some(outcome), decision) if outcome.decision == ApprovalDecision::Deny => {
+                let messages = match decision {
+                    Some(ToolDecision::Denied {
+                        additional_contexts,
+                        ..
+                    }) => additional_contexts,
+                    _ => Vec::new(),
+                };
+                (
+                    rsi_agent_session_protocol::ToolRejection::ApprovalDenied { outcome },
+                    messages,
+                )
+            }
+            (
+                _,
+                Some(ToolDecision::Denied {
+                    reason,
+                    additional_contexts,
+                }),
+            ) => (
+                rsi_agent_session_protocol::ToolRejection::PolicyDenied {
+                    contribution_id: rsi_agent_session_protocol::ContributionId::new(
+                        "rsi.application.tool-policy",
+                    )
+                    .map_err(fatal)?,
+                    reason: bounded(&reason),
+                },
+                additional_contexts,
+            ),
+            (approval, decision) => {
+                if let (Some(plan), Some(ToolDecision::Ready(continuation))) = (plan, decision) {
+                    *plan.continuation = Some(continuation);
+                }
+                return Ok(ToolPreparation::Ready(PendingToolEffect {
+                    origin: origin.clone(),
+                    program_role,
+                    effect_id,
+                    identity,
+                    name,
+                    arguments,
+                    approval,
+                    parallel_safe: scheduling == ToolScheduling::ParallelSafe,
+                    prepared,
+                }));
+            }
+        };
+        Ok(ToolPreparation::Rejected(Box::new(
+            SessionFactBody::ToolRejected {
+                additional_contexts: if matches!(
+                    origin,
+                    rsi_agent_session_protocol::ToolOrigin::Model { .. }
+                ) {
+                    additional_contexts
+                } else {
+                    Vec::new()
+                },
+                origin: origin.clone(),
+                program_role,
+                turn_id: claim.turn_id().clone(),
+                effect_id,
+                identity,
+                name,
+                arguments,
+                rejection,
+            },
+        )))
     }
 
     pub(super) async fn publish_tool_start(
@@ -1493,6 +1631,7 @@ impl Driver {
         Ok(prepared)
     }
 
+    #[allow(clippy::too_many_lines)] // Publication, exact receipt verification and notification must share one result owner.
     pub(super) async fn publish_tool_result(
         &self,
         claim: &TurnClaim,
@@ -1509,7 +1648,7 @@ impl Driver {
         else {
             return Err(fatal("settlement lacks a ToolIntent"));
         };
-        let settlement = self
+        let mut settlement = self
             .tool_settlement_proposals(claim, composition, &intent, &result)
             .await?;
         let body = SessionFactBody::ToolResult {
@@ -1520,6 +1659,7 @@ impl Driver {
 
             conclusion: settlement.conclusion,
         };
+        let mut committed_domains = None;
         let returned = if settlement.domains.is_empty() {
             let facts = self.publish_durable(claim, fold, vec![body]).await?;
 
@@ -1543,8 +1683,26 @@ impl Driver {
                         facts: vec![body],
                     },
                 )
-                .await
-                .map_err(crate::execution_support::turn_failure)?;
+                .await;
+            let receipt = match receipt {
+                Ok(receipt) => receipt,
+                Err(error) => {
+                    // These errors are issued before a domain candidate can be installed.
+                    // Other failures require canonical reconciliation, even when the same
+                    // error name can also originate before publication.
+                    if matches!(
+                        error,
+                        TurnError::DomainRevisionConflict { .. } | TurnError::Capacity
+                    ) {
+                        super::tool_settlement::notify_publications(
+                            &mut settlement.publications,
+                            None,
+                        )
+                        .await?;
+                    }
+                    return Err(crate::execution_support::turn_failure(error));
+                }
+            };
             let span = receipt
                 .commit()
                 .fact_span()
@@ -1559,8 +1717,18 @@ impl Driver {
                 && matches!(fact.body(), SessionFactBody::ToolResult { effect_id: actual, identity: exact, .. } if actual == effect_id && exact == identity))
                 .ok_or_else(|| fatal("Tool settlement receipt does not resolve to its exact result"))?;
             self.sync_fold(claim, fold).await?;
+            committed_domains = Some(receipt);
             fact
         };
+        let evidence = rsi_agent_composition_protocol::PublicationReceipt {
+            session_id: claim.session_id(),
+            facts: std::slice::from_ref(&returned),
+            domain_commit: committed_domains
+                .as_ref()
+                .map(|receipt| (receipt.control_seq(), receipt.commit())),
+        };
+        super::tool_settlement::notify_publications(&mut settlement.publications, Some(&evidence))
+            .await?;
         composition
             .tools()
             .commit(identity)
@@ -1733,6 +1901,8 @@ impl Driver {
                 .map_err(|error| fatal(error.to_string()))?;
         }
         if let Some(program) = program {
+            let caller = self.turns.tool_caller(claim, effect_id).map_err(fatal)?;
+            let program = super::program::selected_dispatch(program, caller.source_tools());
             extensions = extensions.with(Arc::new(program)).map_err(fatal)?;
         }
         let result = tokio::select! {
@@ -1779,30 +1949,14 @@ impl Driver {
     }
 
     #[allow(clippy::too_many_arguments)] // Exact prepared review and both cancellation owners remain explicit.
-    pub(super) async fn request_tool_approval(
+    async fn request_tool_approval(
         &self,
         claim: &TurnClaim,
-        effect_id: &EffectId,
-        tool_name: &str,
-        review: rsi_approval_protocol::ApprovalReview,
-        cancellation: &CancellationToken,
+        request: ApprovalRequest,
+        gate: Option<&mut ToolGate>,
+        token: &CancellationToken,
         stop: &CancellationToken,
-    ) -> std::result::Result<rsi_approval_protocol::ApprovalOutcome, DriveFailure> {
-        let request = ApprovalRequest {
-            review: Some(review),
-            subject: ApprovalSubject::new(
-                claim.session_id().as_str(),
-                claim.turn_id().as_str(),
-                effect_id.as_str(),
-            )
-            .map_err(|error| failed("approval.invalid_subject", error.to_string()))?,
-            id: format!("{}:{}", claim.turn_id().as_str(), effect_id.as_str()),
-            action: format!("run tool {tool_name}"),
-            reason: format!(
-                "Agent turn {} requested this Tool effect",
-                claim.turn_id().as_str()
-            ),
-        };
+    ) -> std::result::Result<Option<rsi_approval_protocol::ApprovalOutcome>, DriveFailure> {
         let parking = EXECUTOR_LANE_PARKING
             .try_with(Clone::clone)
             .map_err(|error| fatal(error.to_string()))?;
@@ -1811,17 +1965,28 @@ impl Driver {
             .park_human_wait(claim, parking)
             .await
             .map_err(execution_support::turn_failure)?;
-        let combined = combine_cancellation(cancellation, stop);
-        let outcome = self.approval.ask(request, combined.token()).await;
-        let resumed = waiting.resume(combined.token()).await;
-        combined.cancel();
+        let ask_stop = token.child_token();
+        let ask = self.approval.ask(request, ask_stop.clone());
+        tokio::pin!(ask);
+        let outcome = tokio::select! {
+            biased;
+            () = async {
+                match gate {
+                    Some(ToolGate::Ask { pending, .. }) => pending.withdrawn().await,
+                    Some(ToolGate::Decided(ToolDecision::Ready(call))) => call.withdrawn().await,
+                    _ => std::future::pending().await,
+                }
+            } => { ask_stop.cancel(); let _ = ask.await; None },
+            outcome = &mut ask => Some(outcome),
+        };
+        let resumed = waiting.resume(token.clone()).await;
         if stop.is_cancelled() {
             return Err(DriveFailure::Stopped);
         }
         resumed.map_err(execution_support::turn_failure)?;
-        match outcome {
+        match outcome.transpose() {
             Ok(outcome) => Ok(outcome),
-            Err(ApprovalError::Cancelled) if cancellation.is_cancelled() => {
+            Err(ApprovalError::Cancelled) if token.is_cancelled() => {
                 Err(DriveFailure::Turn(TurnOutcome::Cancelled))
             }
             Err(error) => Err(failed("approval.failed", error.to_string())),
@@ -2194,57 +2359,87 @@ impl Driver {
         fold: &mut ModelContextState,
         scan: &mut crate::checkpoint_diagnostics::Scan,
     ) -> std::result::Result<(), DriveFailure> {
-        let Some(origin) = claim.header().fork_origin() else {
+        if claim.header().history_origin().is_none() {
             return Ok(());
-        };
-        let mut cursor = origin.resolved_after_seq;
-        loop {
-            let page = self
-                .turns
-                .read_fork_facts(
-                    claim,
-                    cursor,
-                    rsi_agent_session_protocol::MAXIMUM_FACTS_PER_READ,
-                )
-                .await
-                .map_err(fatal)?
-                .ok_or_else(|| {
-                    failed(
-                        "context.fork_unsupported",
-                        "forked session has no inherited-history reader",
-                    )
-                })?;
-            scan.page(true, &page.facts);
-            if page.through_parent_seq == cursor {
-                if cursor != page.terminal_parent_seq {
-                    return Err(failed(
-                        "context.fork_stalled",
-                        "fork history reader made no progress",
-                    ));
-                }
-                break;
-            }
-            fold.ingest(ContextPage::ForkSeed(&page.facts))
+        }
+        let sources = self.turns.read_fork_sources(claim).await.map_err(fatal)?;
+        for source in &sources {
+            fold.ingest(ContextPage::ForkSource(source))
                 .map_err(|error| context_failure("context.invalid_fork", &error))?;
-            cursor = page.through_parent_seq;
+            let origin = source
+                .history_origin()
+                .ok_or_else(|| failed("context.invalid_fork", "source has no fork interval"))?;
+            let mut cursor = origin.resolved_after_seq;
+            loop {
+                let page = self
+                    .turns
+                    .read_fork_facts(
+                        claim,
+                        source.session_id(),
+                        cursor,
+                        rsi_agent_session_protocol::MAXIMUM_FACTS_PER_READ,
+                    )
+                    .await
+                    .map_err(fatal)?
+                    .ok_or_else(|| {
+                        failed(
+                            "context.fork_unsupported",
+                            "forked session has no inherited-history reader",
+                        )
+                    })?;
+                scan.page(true, &page.facts);
+                if page.through_parent_seq == cursor {
+                    if cursor != page.terminal_parent_seq {
+                        return Err(failed(
+                            "context.fork_stalled",
+                            "fork history reader made no progress",
+                        ));
+                    }
+                    break;
+                }
+                fold.ingest(ContextPage::ForkSeed(&page.facts))
+                    .map_err(|error| context_failure("context.invalid_fork", &error))?;
+                cursor = page.through_parent_seq;
+            }
         }
         fold.ingest(ContextPage::FinishSeed)
             .map_err(|error| context_failure("context.invalid_fork", &error))
     }
 }
 
+/// Only the two machine-driven policy exchanges share the contribution stage budget.
+async fn policy_stage<T>(
+    step: impl Future<Output = rsi_tools_protocol::Result<T>>,
+) -> std::result::Result<T, DriveFailure> {
+    tokio::time::timeout(contributions::STAGE_DEADLINE, step)
+        .await
+        .map_err(|_| {
+            failed(
+                "tool.policy_timeout",
+                "Application Tool policy deadline elapsed before native start",
+            )
+        })?
+        .map_err(|error| match error {
+            ToolError::OutcomeUnknown => failed(
+                "tool.policy_unavailable",
+                "Application Tool policy disconnected before native start",
+            ),
+            _ => tool_failure(&error),
+        })
+}
+
 fn tool_approval_review(
     claim: &TurnClaim,
     arguments: &serde_json::Value,
     identity: &ToolResultIdentity,
-    policy: ResolvedTurnPolicy,
+    execution_mode: SandboxMode,
     execution: Option<rsi_execution::ExecutionReview>,
 ) -> serde_json::Result<rsi_approval_protocol::ApprovalReview> {
     Ok(rsi_approval_protocol::ApprovalReview {
         execution,
         arguments: arguments.clone(),
         cwd: claim.header().canonical_cwd().to_owned(),
-        sandbox: serde_json::to_value(policy.sandbox)?
+        sandbox: serde_json::to_value(execution_mode)?
             .as_str()
             .expect("sandbox enum is a string")
             .to_owned(),

@@ -313,16 +313,29 @@ impl TurnExecution for CheckpointFixture {
         unreachable!("checkpoint writer test does not resolve composition")
     }
 
+    async fn read_fork_sources(
+        &self,
+        claim: &TurnClaim,
+    ) -> rsi_agent_turn_protocol::Result<Vec<SessionHeader>> {
+        Ok(claim
+            .header()
+            .history_origin()
+            .map(|_| claim.header().clone())
+            .into_iter()
+            .collect())
+    }
+
     async fn read_fork_facts(
         &self,
         _claim: &TurnClaim,
+        _source: &SessionId,
         _after_parent_seq: u64,
         _limit: usize,
     ) -> rsi_agent_turn_protocol::Result<Option<ForkFactPage>> {
         unreachable!("checkpoint writer uses only maintenance fork reads")
     }
 
-    async fn enter_pending_step_messages(
+    async fn claim_pending_step_messages(
         &self,
         _claim: &TurnClaim,
     ) -> rsi_agent_turn_protocol::Result<usize> {
@@ -392,9 +405,17 @@ impl TurnExecution for CheckpointFixture {
         }))
     }
 
+    async fn read_checkpoint_fork_sources(
+        &self,
+        claim: &TurnClaim,
+    ) -> rsi_agent_turn_protocol::Result<Option<Vec<SessionHeader>>> {
+        Ok(Some(vec![claim.header().clone()]))
+    }
+
     async fn read_checkpoint_fork_facts(
         &self,
         _claim: &TurnClaim,
+        _source: &SessionId,
         after_parent_seq: u64,
         limit: usize,
     ) -> rsi_agent_turn_protocol::Result<Option<ForkFactPage>> {
@@ -458,9 +479,45 @@ impl TurnExecution for CheckpointFixture {
 
 #[async_trait]
 impl TurnExecution for FullBeforePublish {
+    async fn request_step(
+        &self,
+        _: &TurnClaim,
+        domain: Option<&str>,
+        _: Vec<rsi_agent_session_protocol::SettledToolContext>,
+        _: CancellationToken,
+    ) -> rsi_agent_turn_protocol::Result<(
+        rsi_agent_session_protocol::StepId,
+        Option<rsi_agent_session_protocol::DomainStateView>,
+    )> {
+        use rsi_agent_session_protocol::{
+            DomainIdentity, DomainRevision, DomainSnapshot, DomainStateValue, DomainStateView,
+            ModelSelection, StepId,
+        };
+        let selection = domain.map(|id| {
+            assert_eq!(id, rsi_agent_model_selection::DOMAIN);
+            let model = ModelSelection {
+                model: ModelRef::new("fixture", "persisted").unwrap(),
+                reasoning_effort: None,
+            };
+            DomainStateView {
+                revision: DomainRevision::new(1),
+                snapshot: DomainSnapshot::new(
+                    DomainIdentity::new(id, 1).unwrap(),
+                    DomainStateValue::new(serde_json::to_value(model).unwrap()).unwrap(),
+                ),
+            }
+        });
+        let step = if selection.is_some() {
+            "selected"
+        } else {
+            "explicit"
+        };
+        Ok((StepId::new(step).unwrap(), selection))
+    }
     async fn contribution_context(
         &self,
         _: &TurnClaim,
+        _: Vec<rsi_agent_session_protocol::SettledToolContext>,
         cancellation: CancellationToken,
     ) -> rsi_agent_turn_protocol::Result<rsi_agent_composition_protocol::ContributionContext> {
         self.capture_tokens
@@ -507,16 +564,29 @@ impl TurnExecution for FullBeforePublish {
         unreachable!("terminal publication test does not resolve composition")
     }
 
+    async fn read_fork_sources(
+        &self,
+        claim: &TurnClaim,
+    ) -> rsi_agent_turn_protocol::Result<Vec<SessionHeader>> {
+        Ok(claim
+            .header()
+            .history_origin()
+            .map(|_| claim.header().clone())
+            .into_iter()
+            .collect())
+    }
+
     async fn read_fork_facts(
         &self,
         _claim: &TurnClaim,
+        _source: &SessionId,
         _after_parent_seq: u64,
         _limit: usize,
     ) -> rsi_agent_turn_protocol::Result<Option<ForkFactPage>> {
         unreachable!("terminal publication test does not read fork Facts")
     }
 
-    async fn enter_pending_step_messages(
+    async fn claim_pending_step_messages(
         &self,
         _claim: &TurnClaim,
     ) -> rsi_agent_turn_protocol::Result<usize> {
@@ -736,19 +806,23 @@ fn fork_checkpoint_claim(parent_session_id: SessionId) -> TurnClaim {
     )
     .unwrap()
     .with_fork_origin(ForkOrigin {
-        parent_session_id: parent_session_id.clone(),
+        history: rsi_agent_session_protocol::HistoryOrigin {
+            parent_session_id: parent_session_id.clone(),
+            parent_header_fingerprint: "a".repeat(64),
+            point: rsi_agent_session_protocol::ForkPoint::BeforeTurn {
+                turn_id: TurnId::new("turn-checkpoint-spawn").unwrap(),
+            },
+            resolved_after_seq: 0,
+            resolved_terminal_seq: 2,
+            terminal_prefix_sha256: "b".repeat(64),
+            resolved_terminal_control_seq: 1,
+            terminal_control_prefix_sha256: "c".repeat(64),
+            requested_turns: ForkTurnSelection::All,
+            effective_turns: 1,
+        },
         root_session_id: parent_session_id,
         path: AgentPath::new(vec![1]).unwrap(),
         task_name: "checkpoint-child".into(),
-        parent_header_fingerprint: "a".repeat(64),
-        invoking_turn_id: TurnId::new("turn-checkpoint-spawn").unwrap(),
-        resolved_after_seq: 0,
-        resolved_terminal_seq: 2,
-        terminal_prefix_sha256: "b".repeat(64),
-        resolved_terminal_control_seq: 1,
-        terminal_control_prefix_sha256: "c".repeat(64),
-        requested_turns: ForkTurnSelection::All,
-        effective_turns: 1,
     })
     .unwrap();
     rsi_agent_turn_protocol::TurnClaimIssuer::new().issue(
@@ -1595,10 +1669,11 @@ fn short_page_history(recovered: bool) -> (TurnClaim, CheckpointFixture) {
             SessionFact::new(
                 3,
                 3,
-                SessionFactBody::InputMessageEntered {
+                SessionFactBody::InputMessageClaimed {
                     turn_id,
                     step_id,
                     source: InputMessageSource::Human {
+                        attribution: None,
                         message_id: MessageId::new("short-page-input").unwrap(),
                     },
                     content: vec![AgentMessageContent::Text {

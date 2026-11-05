@@ -1,7 +1,61 @@
 # rsi-agent-executor
 
+BeforeStep contributors edit captured input in registration order. The retained
+application prepares their result together with newly contributed context.
+Without an application preparer, Executor preserves the preset order and
+appends the contributed claims to a nonempty list. A rejection ends input
+editing and blocks the Turn. An initially empty entered list completes without
+a provider request. Empty bodies inside a nonempty list still enter.
+The final `StepInputsPrepared`, instructions, context claims and staged domain
+updates publish together before the Conversation model intent. Retries reuse
+this decision. An observer that loses confirmation reconciles against the
+commit. A lost preparation response fails the request without replaying the callback.
+
+Before a BeforeStep callback runs, Kernel claims pending context from settled
+tools under the open Step. Its captured Fact history includes those claims with
+their original message order and attribution. A model retry shares
+the already committed inputs. A process interruption leaves the ToolResult
+and any consumption Facts available to the next claim.
+
+Conversation preparation captures an explicitly published `RequestToolSource`
+once per provider retry series. Its immutable catalog is used for the model
+request and every resulting tool call. Unavailable tools-only application sources leave the preset tools available and
+record the reason on `StepPrepared`. A participating input source completes
+startup before the stage timer starts. Cancellation interrupts this wait. A
+failed readiness or capture ends the Turn before provider dispatch.
+The captured application's system guidance precedes preset contribution sections
+in that same `StepPrepared` publication. Provider retries reuse it; the next
+capture replaces it. No application guidance is retained from an unavailable
+capture. The shared Step instruction capacity includes all producers.
+Application capture shares the BeforeStep stage's deadline, including model
+selection and subsequent callbacks. It has no shorter discovery-only timeout
+that can discard a valid asynchronous prompt assembly.
+Application calls use the Turn's approval requirement and ordinary Tool policy
+contributors. Their policy/review reports `DangerFullAccess` because the trusted
+application process runs with local operator authority, independently of native
+process confinement. Application origin alone does not require approval; the
+application's own pipeline may additionally ask or refuse before its body.
+
+A policy denial or declined approval settles only that Tool call. Executor
+stages its exact `ToolRejected` Fact without Tool intent, start or body, then
+publishes rejections and executed results in source order for the batch.
+Context supplies the rejected call's error reply to the next model request.
+A completed middleware refusal may also supply ordered Tool messages. Executor
+commits them with the rejected model call, including when the user declined
+a shared approval. A lost application answer still leaves the user's refusal
+conclusive. Program callers receive an error result for
+the same durable rejection, so the coordinator can handle it. PostTool callbacks
+receive results and rejections in source order. A refusal never fabricates body
+execution, enforcement stamps or a `ToolResult` Fact. User cancellation, shutdown,
+invalid admission and unknown effect outcomes retain their separate stop paths.
+
 Conversation requests select their explicit output cap from the immutable
 Header's exact-model output budget table before Context build and Prepare.
+Before request-scoped Tool capture, Executor resolves the actual model and effort
+from the same captured contribution horizon or explicit Turn choice used for
+provider dispatch. The source receives that selection directly. Capture and
+preparation callbacks run once per retry series; provider retries retain both
+the selected route and the captured registration view.
 Builders must preserve that cap, including absence; compaction instead preserves
 its admitted summary-plan cap. MaxTokens Conversation results authorize no Tools.
 MaxTokens ends the Step and Turn without automatic continuation. Summary
@@ -73,6 +127,12 @@ available for diagnosis and cleanup. A lost acknowledgement uses the same canoni
 never another Tool invocation or callback execution. Goal and repeat-tool
 PostTool contributions remain after durable batch settlement.
 The domain-capture wait has a 30-second ceiling within the complete claim drive.
+After canonical publication, settlement observers receive the exact result Fact
+and domain control record before Tool runtime retirement. The whole notification
+stage has a five-second deadline. Failure preserves the durable result and stops
+the drive; it cannot replay a callback or publish a second result. Explicit
+precommit rejection notifies rollback. All other exits leave observers
+unconfirmed, including cancellation while a notification is pending.
 Executor shutdown or Turn cancellation cancels that outer drive and drops a
 pending capture without waiting for its local ceiling. This does not assert that
 already-admitted Store work or a synchronous callback can be forcibly interrupted.
@@ -278,9 +338,12 @@ accepted requests within the executor's existing absolute shutdown deadline.
 Before a new Step request, Executor captures the complete model/effort selection
 from explicit Turn override, current selection domain or Header baseline, in that
 order. Retries retain this capture and do not admit newly queued Step input.
-Selection and BeforeStep callbacks share one captured context and its 30-second
-stage deadline. An explicit selection needs no context capture when the stage has
-no callbacks. Stage capture is cancelled by either Turn cancellation or Host stop.
+BeforeStep callbacks share one complete context and model selection. Without
+preset callbacks the Kernel opens the same charged Step and flushes its Fact cut.
+An explicit model needs no domain read. Otherwise only the model-selection domain
+is read, with the Header supplying the default. Application tools and their input
+preparer still run against this Step. Capture uses the same 30-second deadline
+and is cancelled by either Turn cancellation or Host stop.
 After that attempt finishes, pending Step input enters normally and the next
 request captures the newest selection. Only `NotStarted`/`NotDispatched` errors
 allowed by the frozen retry policy can retry; a dispatched HTTP rejection is not

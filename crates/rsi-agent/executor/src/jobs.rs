@@ -18,23 +18,26 @@ impl TurnJobStatusSource for StatusSource {
                 request.effect_id.as_str(),
                 [request.stdout_bytes, request.stderr_bytes],
             )
-            .map_err(|error| match error {
-                rsi_jobs::JobsError::ScopeClosed | rsi_jobs::JobsError::UnknownJob(_) => {
-                    TurnError::StaleClaim
-                }
-                rsi_jobs::JobsError::ShuttingDown => TurnError::ShuttingDown,
-                other => TurnError::Invalid(bounded(&other.to_string())),
-            })
+            .map_err(status_error)
     }
     fn is_active(&self) -> bool {
         self.scope.is_active()
     }
     fn list(&self) -> std::result::Result<Vec<rsi_jobs::JobSummary>, TurnError> {
-        self.jobs.list(&self.scope).map_err(|error| match error {
-            rsi_jobs::JobsError::ScopeClosed => TurnError::StaleClaim,
-            rsi_jobs::JobsError::ShuttingDown => TurnError::ShuttingDown,
-            other => TurnError::Invalid(bounded(&other.to_string())),
-        })
+        self.jobs.list(&self.scope).map_err(status_error)
+    }
+    fn active(&self) -> std::result::Result<Vec<rsi_jobs::ActiveJob>, TurnError> {
+        self.jobs.active(&self.scope).map_err(status_error)
+    }
+}
+
+fn status_error(error: rsi_jobs::JobsError) -> TurnError {
+    match error {
+        rsi_jobs::JobsError::ScopeClosed | rsi_jobs::JobsError::UnknownJob(_) => {
+            TurnError::StaleClaim
+        }
+        rsi_jobs::JobsError::ShuttingDown => TurnError::ShuttingDown,
+        other => TurnError::Invalid(bounded(&other.to_string())),
     }
 }
 

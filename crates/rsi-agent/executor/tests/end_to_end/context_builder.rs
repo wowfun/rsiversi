@@ -62,6 +62,12 @@ struct SelectedCursor {
     drop_effort: bool,
 }
 impl ModelContextCursor for SelectedCursor {
+    fn claimed_inputs(
+        &self,
+        turn: &rsi_agent_session_protocol::TurnId,
+    ) -> rsi_agent_context::Result<&[rsi_agent_session_protocol::SessionFact]> {
+        self.inner.claimed_inputs(turn)
+    }
     fn ingest(&mut self, page: ContextPage<'_>) -> rsi_agent_context::Result<()> {
         self.inner.ingest(page)
     }

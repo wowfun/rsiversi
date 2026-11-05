@@ -3,6 +3,7 @@ use super::*;
 use rsi_agent_composition_protocol::{ContributionKind, ToolSettlement, ToolSettlementContext};
 
 impl Driver {
+    #[allow(clippy::too_many_lines)] // One bounded pure stage aggregates domains, conclusions and retained publication observers.
     pub(super) async fn tool_settlement_proposals(
         &self,
         claim: &TurnClaim,
@@ -73,6 +74,18 @@ impl Driver {
                     })?;
             settlement.require_uncancelled_turn |= additions.require_uncancelled_turn;
             if settlement
+                .publications
+                .len()
+                .saturating_add(additions.publications.len())
+                > rsi_agent_composition_protocol::MAXIMUM_AGENT_CONTRIBUTIONS
+            {
+                return Err(failed(
+                    "tool.settlement_capacity",
+                    "too many publication observers",
+                ));
+            }
+            settlement.publications.extend(additions.publications);
+            if settlement
                 .domains
                 .len()
                 .saturating_add(additions.domains.len())
@@ -120,4 +133,27 @@ fn structured_conclusion(
     } else {
         Ok(None)
     }
+}
+
+pub(super) async fn notify_publications(
+    observers: &mut [rsi_agent_composition_protocol::Publication],
+    receipt: Option<&rsi_agent_composition_protocol::PublicationReceipt<'_>>,
+) -> std::result::Result<(), DriveFailure> {
+    let notify = async {
+        for observer in observers {
+            match receipt {
+                Some(receipt) => observer.committed(receipt).await?,
+                None => observer.rejected().await?,
+            }
+        }
+        Ok::<_, rsi_agent_composition_protocol::ContributionError>(())
+    };
+    tokio::time::timeout(
+        Duration::from_secs(5),
+        AssertUnwindSafe(notify).catch_unwind(),
+    )
+    .await
+    .map_err(|_| failed("tool.publication_timeout", "notification deadline exceeded"))?
+    .map_err(|_| failed("tool.publication_panic", "notification panicked"))?
+    .map_err(|error| failed("tool.publication_failed", bounded(&error.to_string())))
 }

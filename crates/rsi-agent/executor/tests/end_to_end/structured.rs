@@ -69,7 +69,7 @@ async fn invalid_report_retries_valid_report_stops_before_later_tools_and_missin
                 delivery: MessageDelivery::NextTurn,
                 message: AgentMessage {
                     message_id,
-                    source: AgentMessageSource::Human,
+                    source: AgentMessageSource::Human { attribution: None },
                     content: vec![AgentMessageContent::Text {
                         text: "produce the required structured result".into(),
                     }],

@@ -268,11 +268,10 @@ async fn scenario(
     if !policy_denied && decision == ApprovalDecision::AllowOnce {
         assert_eq!(outcome, TurnOutcome::Completed);
         let scopes = security.scopes.lock().unwrap();
-        assert_eq!(scopes.len(), 1);
-        assert_eq!(scopes[0].generation(), &security.generation);
-        assert_eq!(scopes[0].mode(), mode);
-        assert_eq!(scopes[0].cwd(), root);
-        assert_eq!(scopes[0].workspace(), root);
+        assert!(
+            scopes.is_empty(),
+            "approved finite reads need no workspace scope request"
+        );
         let result = facts
             .iter()
             .find_map(|fact| match fact.body() {
@@ -291,12 +290,7 @@ async fn scenario(
             SessionFactBody::ToolIntent { approval: Some(approval), .. }
                 if approval.decision == ApprovalDecision::AllowOnce)));
     } else {
-        let expected = if policy_denied {
-            "policy.denied"
-        } else {
-            "approval.denied"
-        };
-        assert!(matches!(outcome, TurnOutcome::Failed { ref code, .. } if code == expected));
+        assert_eq!(outcome, TurnOutcome::Completed);
         assert!(security.scopes.lock().unwrap().is_empty());
         assert!(
             facts

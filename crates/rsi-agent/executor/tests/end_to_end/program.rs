@@ -6,6 +6,7 @@ use rsi_tools_protocol::ToolProgramRole;
 #[derive(Debug)]
 struct Coordinator {
     abandoned: Option<Arc<Abandoned>>,
+    denied: bool,
 }
 #[derive(Debug, Default)]
 struct Abandoned {
@@ -67,7 +68,17 @@ impl ToolExecutor for Coordinator {
                 CancellationToken::new(),
             )
             .await?;
-        assert!(!result.is_error);
+        assert_eq!(result.is_error, self.denied);
+        if self.denied {
+            assert_eq!(result.value["rejected"], true);
+            assert!(
+                result.value["message"]
+                    .as_str()
+                    .unwrap()
+                    .contains("nested call denied")
+            );
+            assert!(result.enforcement.is_empty());
+        }
         ToolResult::new(json!({"summary":"CURATED_PROGRAM_OUTPUT"}), vec![], false)
     }
 }
@@ -168,6 +179,7 @@ async fn check_program_policy(policy: Option<bool>, abandon: bool) {
             .with_program_role(ToolProgramRole::Coordinator),
             timeout: rsi_tools_protocol::ToolTimeoutPolicy::Execution { timeout_ms: 2_000 },
             executor: Arc::new(Coordinator {
+                denied: policy == Some(true),
                 abandoned: abandoned.clone(),
             }),
         })
@@ -239,7 +251,7 @@ async fn check_program_policy(policy: Option<bool>, abandon: bool) {
         .unwrap()
         .facts;
     if policy == Some(true) {
-        assert!(matches!(outcome, TurnOutcome::Failed { ref code, .. } if code == "policy.denied"));
+        assert_eq!(outcome, TurnOutcome::Completed);
         assert_eq!(calls.load(Ordering::Acquire), 0);
         assert!(facts.iter().any(|fact| matches!(
             fact.body(),
