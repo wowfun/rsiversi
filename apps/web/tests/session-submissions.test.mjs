@@ -1,6 +1,6 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
-import {submit,executePending} from '../src/runtime/session-submissions.js';
+import {submit,executePending,executeDocumentCommand} from '../src/runtime/session-submissions.js';
 
 function fixture() {
   const events=[], connection={closing:false}, saved={revision:1};
@@ -39,4 +39,28 @@ for(const mode of ['dispatch','retry_message','query'])test(`retirement before $
   if(mode!=='dispatch')context.connection={};
   await assert.rejects(executePending(pane,context,editor,'1',connection,mode),/Connection changed before dispatch/);
   assert.deepEqual(events,mode==='dispatch'?['begin','not_admitted']:['unknown']);
+});
+
+for (const mode of ['complete','unknown','missing','replaced']) test(`document command ${mode} preserves the editor and exact submission ownership`, async () => {
+  const {pane,context,editor,events} = fixture();
+  editor.flush = pane.flush;
+  editor.store.freeze = async (record, prepared, preserve) => {
+    assert.equal(preserve, true); events.push('freeze'); return {...record, pending: prepared};
+  };
+  context.call = async (method, payload) => {
+    events.push(method);
+    if (method === 'prepare_submission') {
+      assert.equal(JSON.parse(payload).text, '/plan off');
+      if (mode === 'replaced') pane.generation = '2';
+      return JSON.stringify({kind: mode === 'missing' ? 'message' : 'command', opaque: 'exact-command', phase: 'prepared'});
+    }
+    assert.equal(payload.opaque, 'exact-command');
+    return JSON.stringify({status: mode});
+  };
+  const operation = executeDocumentCommand(pane,context,'plan','off');
+  if (mode === 'complete') await operation;
+  else await assert.rejects(operation, mode === 'missing' ? /unavailable/ : mode === 'replaced' ? /changed/ : /confirmation/);
+  assert.equal(editor.text, 'input');
+  assert.equal(pane.submitting, false);
+  assert.equal(events.includes('dispatch_submission'), ['complete','unknown'].includes(mode));
 });

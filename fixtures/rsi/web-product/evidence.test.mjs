@@ -49,7 +49,7 @@ test('live cleanup closes every owner before scanning even after a close failure
 
 test('a completed turn with different human text cannot acknowledge the requested prompt', () => {
   const facts = [
-    {seq: 1, type: 'input_message_entered', turn_id: 'other', source: {type: 'human'}, content: [{type: 'text', text: 'different'}]},
+    {seq: 1, type: 'input_message_claimed', turn_id: 'other', source: {type: 'human'}, content: [{type: 'text', text: 'different'}]},
     {seq: 2, type: 'turn_terminal', turn_id: 'other', outcome: {status: 'completed'}},
   ];
   assert.equal(liveTurnTerminal(facts, 'requested', 0), undefined);
@@ -109,7 +109,7 @@ test('live usage evidence cannot succeed on absent or invalid counts', () => {
 
 test('a previous terminal or another Turn cannot acknowledge the submitted live input', () => {
   const old = {seq: 2, type: 'turn_terminal', turn_id: 'old', outcome: {status: 'completed'}};
-  const input = {seq: 3, type: 'input_message_entered', turn_id: 'new', source: {type: 'human'}, content: [{type: 'text', text: 'next'}]};
+  const input = {seq: 3, type: 'input_message_claimed', turn_id: 'new', source: {type: 'human'}, content: [{type: 'text', text: 'next'}]};
   const unrelated = {seq: 4, type: 'turn_terminal', turn_id: 'other', outcome: {status: 'completed'}};
   assert.equal(liveTurnTerminal([old], 'next', 2), undefined);
   assert.equal(liveTurnTerminal([old, input, unrelated], 'next', 2), undefined);
@@ -118,7 +118,7 @@ test('a previous terminal or another Turn cannot acknowledge the submitted live 
 });
 
 test('live matching handles repeated prompts, immediate completion and failed outcomes', () => {
-  const input = (seq, turn_id, source = 'human') => ({seq, type: 'input_message_entered', turn_id, source: {type: source}, content: [{type: 'text', text: 'repeat'}]});
+  const input = (seq, turn_id, source = 'human') => ({seq, type: 'input_message_claimed', turn_id, source: {type: source}, content: [{type: 'text', text: 'repeat'}]});
   const terminal = (seq, turn_id, status) => ({seq, type: 'turn_terminal', turn_id, outcome: {status}});
   const prior = [input(1, 'old'), terminal(2, 'old', 'completed')];
   assert.equal(liveTurnTerminal(prior, 'repeat', 2), undefined);

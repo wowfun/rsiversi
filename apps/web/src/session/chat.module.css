@@ -170,7 +170,7 @@
 :global(.turn-running):where(.scope, .scope *) { display: flex; align-items: center; gap: 6px; margin: 20px 0 0; padding: 10px 0 0; border-top: 1px solid var(--line); color: var(--dsw-alias-state-business-primary); font-size: 12px; line-height: 24px; }
 :global(
   .message:is(.tool, .reasoning):not(.summary-expanded):not(.turn-expanded)
-    > :not(.message-title):not(.delegation-action)
+    > :is(.message-text, .omitted, .inline-status, .inline-card, .message-actions)
 ):where(.scope, .scope *) {
   display: none;
 }

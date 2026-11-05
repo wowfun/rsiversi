@@ -25,3 +25,6 @@ the pinned checkout, it also verifies each recorded upstream source hash; CI
 performs this comparison after acquiring that exact revision.
 
 The document Node tests require Node 22.18 or later for direct TypeScript imports.
+The terminal resource owner retries an uncertain shell create once using the
+same allocation key and pane generation. If the retry also loses its result,
+the existing unresolved cleanup notice remains visible.

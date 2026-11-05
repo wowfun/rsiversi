@@ -8,7 +8,7 @@ the opaque request before its existing durable freeze; retry never rereads the
 current preference. These preferences grant no capability or exemption from
 tool approval, and do not change terminal policy or another client's messages.
 
-IndexedDB schema 5 namespaces composer records by endpoint, real principal
+IndexedDB schema 6 namespaces composer records by endpoint, real principal
 (`local` or authenticated DeviceId), stable surface key and SessionId. Only this
 schema is accepted; older schemas are refused without rewriting their records,
 ledgers or version. Explicit discard is the separate recovery action. Rust still
@@ -29,6 +29,11 @@ shown without restoring the removed reference or changing the draft's text.
 Composer records live in IndexedDB under endpoint, authenticated principal, surface and
 Session identity. Each record has a random incarnation, independent editable and
 pending revisions, exact Header fingerprint, and optional Fresh creation intent.
+An ordinary welcome draft requests the default preset. An independent fork draft
+retains the selected preset, source Session, completed Turn and history selection
+(all, none, or a positive number of recent Turns). Moving a never-submitted draft
+may change its new Session ID, but must preserve this creation intent; the Session
+service reauthorizes the source when recreating it.
 All namespaces share the fixed origin allowance defined above. Each record permits
 1 MiB text, eight canonical Media references and one unresolved submission.
 No image bytes, object URLs or credentials are persisted. Counters and records
@@ -93,7 +98,7 @@ saving and restores input admission on failure. Ordinary submission saves only
 its selected editor. Unavailable draft storage reports that diagnosis consistently.
 
 Reference descriptors use the exact envelope-2 source/capture contract. Only
-draft schema 5 is admitted; opening an older journal fails without modifying its
+draft schema 6 is admitted; opening an older journal fails without modifying its
 rows or database version. Unsupported reference metadata
 is never translated into a new selection or silently removed from an uncertain
 submission.

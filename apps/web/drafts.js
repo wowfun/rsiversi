@@ -54,7 +54,8 @@ export function validateEditor(text, images, references = []) {
   return textBytes + referenceBytes(references);
 }
 function validatePending(pending) {
-  require(pending && Object.keys(pending).sort().join() === "editRevision,id,images,kind,opaque,phase,references,text_bytes");
+  require(pending && ["editRevision,id,images,kind,opaque,phase,references,text_bytes", "editRevision,id,images,kind,opaque,phase,preserve_editor,references,text_bytes"].includes(Object.keys(pending).sort().join()));
+  require(!("preserve_editor" in pending) || pending.preserve_editor === true && pending.kind === "command");
   require(pending && ["message", "command", "queue"].includes(pending.kind) && identity(pending.id));
   require(typeof pending.opaque === "string" && bytes(pending.opaque) <= (pending.kind !== "command" ? 8 * MiB : 32 * 1024));
   require(integer(pending.text_bytes, MiB) && integer(pending.images, 8));
@@ -63,8 +64,27 @@ function validatePending(pending) {
 }
 const surface = value => typeof value === "string" && /^[a-z0-9_-]{1,32}$/.test(value);
 const principalKey = value => value === "local" || (typeof value === "string" && /^device:[0-9a-f]{32}$/.test(value));
+function validateCreation(creation, session) {
+  require(creation && hex(creation.workspace_id) && creation.session_id === session);
+  const fields = Object.keys(creation).sort().join();
+  if (fields === "agent_preset_id,session_id,workspace_id") {
+    require(creation.agent_preset_id === null);
+    return;
+  }
+  require(fields === "agent_preset_id,fork,session_id,workspace_id" && typeof creation.agent_preset_id === "string"
+    && /^[a-z0-9][a-z0-9-]{0,254}$/.test(creation.agent_preset_id));
+  const fork = creation.fork;
+  require(fork && Object.keys(fork).sort().join() === "point,source_session_id,turns"
+    && identity(fork.source_session_id) && fork.source_session_id !== session);
+  const point = fork.point;
+  require(point && Object.keys(point).sort().join() === "kind,turn_id"
+    && ["before_turn", "through_turn"].includes(point.kind) && identity(point.turn_id));
+  const selection = fork.turns;
+  require(selection === "all" || selection === "none" || (selection && typeof selection === "object"
+    && Object.keys(selection).join() === "last" && integer(selection.last) && selection.last > 0));
+}
 function validateRecord(record) {
-  require(record?.version === 5 && Array.isArray(record.key) && record.key.length === 4 &&
+  require(record?.version === 6 && Array.isArray(record.key) && record.key.length === 4 &&
     hex(record.key[0], 32) && (principalKey(record.key[1]) && surface(record.key[2])) && identity(record.key[3]));
   require(equal(record.scope, record.key.slice(0, 3)) && hex(record.header) && hex(record.incarnation, 32));
   require(integer(record.editRevision) && integer(record.pendingRevision) && typeof record.everDispatched === "boolean");
@@ -75,12 +95,7 @@ function validateRecord(record) {
     require(record.pending.editRevision <= record.editRevision && (record.pending.phase === "prepared" || record.everDispatched));
   }
   if (record.receipt !== null) require(typeof record.receipt === "string" && bytes(record.receipt) <= 4096);
-  if (record.creation !== null) {
-    const creation = record.creation;
-    // The Rust Web README owns the default-preset Fresh creation contract.
-    require(creation && Object.keys(creation).sort().join() === "agent_preset_id,session_id,workspace_id");
-    require(hex(creation.workspace_id) && creation.session_id === record.key[3] && creation.agent_preset_id === null);
-  }
+  if (record.creation !== null) validateCreation(record.creation, record.key[3]);
   require(Object.keys(record).sort().join() === "creation,editRevision,everDispatched,header,images,incarnation,key,pending,pendingRevision,receipt,references,scope,text,version");
   return record;
 }
@@ -106,7 +121,7 @@ let database;
 async function openDatabase() {
   if (!database) database = new Promise((resolve, reject) => {
     let failure;
-    const request = indexedDB.open("rsi.composer", 5);
+    const request = indexedDB.open("rsi.composer", 6);
     request.onupgradeneeded = event => {
       const fail = error => { failure = error; request.transaction.abort(); };
       if (failure) { request.transaction.abort(); return; }
@@ -242,7 +257,7 @@ export class DraftStore {
   blank(pane, session, header, creation) {
     const key = this.key(pane, session);
     return validateRecord({
-      version: 5, key, scope: key.slice(0, 3), incarnation: [...crypto.getRandomValues(new Uint8Array(16))].map(value => value.toString(16).padStart(2, "0")).join(""),
+      version: 6, key, scope: key.slice(0, 3), incarnation: [...crypto.getRandomValues(new Uint8Array(16))].map(value => value.toString(16).padStart(2, "0")).join(""),
       editRevision: 0, pendingRevision: 0, text: "", images: [], references: [], header,
       creation: creation ?? null, everDispatched: !creation, pending: null, receipt: null,
     });
@@ -256,11 +271,13 @@ export class DraftStore {
       return saved;
     });
   }
-  freeze(expected, prepared) {
+  freeze(expected, prepared, preserveEditor = false) {
+    require(!preserveEditor || prepared.kind === "command", "Only a command control can retain its editor");
     return this.mutate(expected.key, saved => {
       samePending(expected, saved);
       if (saved.pending) throw conflict(saved);
       saved.pending = { kind: prepared.kind, id: prepared.id, opaque: prepared.opaque,
+        ...(preserveEditor ? {preserve_editor: true} : {}),
         text_bytes: prepared.text_bytes, images: prepared.images, references: prepared.references, phase: "prepared", editRevision: expected.editRevision };
       saved.pendingRevision = bump(saved.pendingRevision);
       return saved;
@@ -282,7 +299,7 @@ export class DraftStore {
       if (settlement.status === "complete") {
         require(typeof settlement.receipt === "string", "The completed receipt must remain an opaque Rust string");
         saved.receipt = settlement.receipt;
-        if (saved.pending.kind !== "queue" && saved.editRevision === saved.pending.editRevision) {
+        if (!saved.pending.preserve_editor && saved.pending.kind !== "queue" && saved.editRevision === saved.pending.editRevision) {
           saved.text = ""; saved.images = []; saved.references = []; saved.editRevision = bump(saved.editRevision);
         }
         saved.pending = null;
@@ -309,7 +326,11 @@ export class DraftStore {
       require(old.creation && !old.everDispatched && !old.pending, "Only a never-dispatched Fresh draft can start a replacement conversation");
       require(!old.references.length, "References belong to the original conversation. Remove them before moving this draft, then capture them again.");
       require(!next.text && !next.images.length && !next.references.length && !next.pending && next.creation && !next.everDispatched);
-      require(old.creation.workspace_id === next.creation.workspace_id);
+      const from = old.creation, to = next.creation;
+      require(from.workspace_id === to.workspace_id && from.agent_preset_id === to.agent_preset_id
+        && from.fork?.source_session_id === to.fork?.source_session_id
+        && equal(from.fork?.point,to.fork?.point) && equal(from.fork?.turns,to.fork?.turns),
+        "Replacement draft must preserve its workspace, preset and selected history");
       next.text = old.text; next.images = old.images; next.editRevision = bump(next.editRevision);
       return [undefined, next];
     });

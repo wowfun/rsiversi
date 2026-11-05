@@ -1,5 +1,6 @@
 import {readFactEvidence} from './fact-evidence.mjs';
 import { cleanupAll } from './cleanup.mjs';
+import { liveProxyEnvironment } from './live-limits.mjs';
 import assert from "node:assert/strict";
 import { createHash } from "node:crypto";
 import http from "node:http";
@@ -134,21 +135,23 @@ async function startProvider(onRequest) {
     async close() { const closed = new Promise(resolve => server.close(resolve)); for (const socket of sockets) socket.destroy(); await closed; } };
 }
 
-export async function startService({ binary, assets, report, configure, onRequest, deepseekKey, watchAssets = false, developmentHttp = false, embedded = false }) {
+export async function startService({ binary, assets, report, configure, onRequest, deepseekKey, networkProxy, watchAssets = false, developmentHttp = false, embedded = false }) {
   assert(!(embedded && watchAssets), "embedded fixture uses an explicit application Profile");
+  const networkEnvironment = liveProxyEnvironment(networkProxy);
   const temporary = await mkdtemp(join(tmpdir(), "rsi-web-"));
   const provider = await startProvider(onRequest);
   let child; let stopped; let hostStarted = false;
   let stderr = "";
   const workspace = join(temporary, "workspace");
   const inherited = Object.fromEntries(["PATH", "LANG", "RUSTUP_HOME", "CARGO_HOME"].filter(key => process.env[key]).map(key => [key, process.env[key]]));
-  const env = { ...inherited, HOME: join(temporary, "home"), XDG_CONFIG_HOME: join(temporary, "config"), XDG_STATE_HOME: join(temporary, "state"), XDG_CACHE_HOME: join(temporary, "cache"), XDG_RUNTIME_DIR: join(temporary, "runtime"), DBUS_SESSION_BUS_ADDRESS: `unix:path=${temporary}/absent-session-bus`, RSI_OPENAI_COMPATIBLE_API_KEY: "isolated-fixture-secret" };
-  const run = (args, {input} = {}) => {
+  const env = { ...inherited, ...networkEnvironment, HOME: join(temporary, "home"), XDG_CONFIG_HOME: join(temporary, "config"), XDG_STATE_HOME: join(temporary, "state"), XDG_CACHE_HOME: join(temporary, "cache"), XDG_RUNTIME_DIR: join(temporary, "runtime"), DBUS_SESSION_BUS_ADDRESS: `unix:path=${temporary}/absent-session-bus`, RSI_OPENAI_COMPATIBLE_API_KEY: "isolated-fixture-secret" };
+  const run = (args, {input, timeout = 30_000} = {}) => {
+    assert(Number.isSafeInteger(timeout) && timeout > 0 && timeout <= 600_000, 'bounded fixture command deadline');
     if (embedded) {
       assert.equal(args[0], "run", "embedder supports explicit Profile invocations");
       args = ["--profile", ...args.slice(1)];
     }
-    return boundedRun(binary, args, { cwd: workspace, env, encoding: "utf8", timeout: 30_000, input });
+    return boundedRun(binary, args, { cwd: workspace, env, encoding: "utf8", timeout, input });
   };
   // Only the explicitly invoked live fixture supplies this value. Default tests
   // remain keyless even when the developer's process has a real provider key.

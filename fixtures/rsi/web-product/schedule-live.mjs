@@ -31,7 +31,7 @@ try {
   const facts=records.flatMap(record=>record.fact?[record.fact]:[]).sort((a,b)=>a.seq-b.seq);await writeFile(join(report,'facts.json'),JSON.stringify(facts,null,2));
   const creates=facts.filter(f=>f.type==='tool_intent' && f.name==='schedule_create');assert.equal(creates.length,1);
   const created=facts.find(f=>f.type==='tool_result' && f.effect_id===creates[0].effect_id);assert.equal(created?.result.value.status,'created_armed');
-  const automatic=facts.filter(f=>f.type==='input_message_entered' && f.source?.type==='continuation');
+  const automatic=facts.filter(f=>f.type==='input_message_claimed' && f.source?.type==='continuation');
   assert.equal(automatic.length,1,'one automatic input');assert.equal(automatic[0].source.source.domain.id,'rsi.schedule');
   const list=facts.find(f=>f.type==='tool_intent' && f.name==='schedule_list' && f.turn_id===automatic[0].turn_id);assert(list,'automatic Turn must call ordinary Tool');
   const listed=facts.find(f=>f.type==='tool_result' && f.effect_id===list.effect_id);assert.equal(listed?.result.value.state.allocated_rounds,1);assert.equal(listed.result.value.state.reminders.length,1);assert.equal(listed.result.value.state.reminders[0].consumed,true);

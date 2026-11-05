@@ -1,5 +1,10 @@
 # Presentation design
 
+Each completed native Turn offers a fork into a new draft: full history, a positive
+number of recent local Turns, or no history. The action flushes the local editor
+and binds the current pane generation before requesting creation. The Session
+owner resolves the terminal cut and publishes only on the draft's first input.
+
 Workspace labels share one path rule across navigation, conversation titles and
 composer choices: prefer a supplied display name, otherwise use the final path
 component after removing trailing separators; preserve roots and render
@@ -25,7 +30,7 @@ An open reference picker retains that capture identity until release succeeds.
 Further capture attempts retry its cleanup first; closing joins an in-flight
 release rather than issuing a second release for the same identity.
 Draft removal, history selection and conversation previews share that cleanup owner.
-Composer journal schema 5 carries those capture identities; unsupported saved
+The composer journal carries those capture identities; unsupported saved
 schemas are rejected without rewriting their data. When storage cannot open, an
 explicit two-step discard action deletes this site's entire saved-draft journal
 (including saved request identities) and reloads; it never runs automatically.
@@ -425,6 +430,8 @@ existing registered workspace when available. Its input remains usable before
 model configuration; the model control opens setup when no model is available.
 The workspace selector chooses registered workspaces and offers the directory
 picker for adding one. Composer controls expose only implemented actions.
+Completion hints appear only for an attached, available conversation: `/` offers
+commands and `@` offers Agents. Draft and switching composers use a plain prompt.
 Conversation headings and underlined tabs separate the transcript from execution
 activity. User messages are compact right-aligned bubbles; assistant output uses
 the shared conversation width with its actions beneath the reply.
@@ -518,3 +525,27 @@ policy. The add menu exposes supported image import, workspace file references,
 conversation references, history and the Session's actual command catalog.
 Picker lifetimes are distinct from the metrics and other dialog lifetimes;
 closing a picker removes its modal and returns focus to the original editor.
+
+
+Optional trusted document plugins compose through `src/document-plugins.tsx`.
+An inspected closed question can mount a read-only review accessory in the
+matching live Session occurrence. The resource ticket, Session generation and
+pending request must all still match. Native question controls alone own answers.
+Their module graph is part of the immutable application bootstrap and shares the
+workbench's React instances. At most 16 definitions register before the workbench
+mounts; their composer, transcript, turn-tail and panel occurrences are ordinary
+React children, independent of the remote MountTable's 16 document slots.
+Each occurrence inherits its pane, Session and generation. Replacement or unmount
+retires its actions; raw frame data never selects executable modules. Plugin
+renderers preserve the Rust transcript unless their registered matcher explicitly
+claims a block. Native text/Markdown remains the default. Original DSH modules
+and service adaptation belong to the external plugin repository.
+
+A failed optional document contribution renders a local diagnostic; a transcript
+contribution also retains its native fallback. Its error boundary resets with the
+Session occurrence and must not remove the required workbench presentation hosts.
+
+Document provider elements keep stable identities across draft publication and
+Session changes so native presentation hosts stay attached. Providers consume the
+optional Session binding and retire their own occurrence state when its Session
+or generation changes; individual contribution occurrences may remount.

@@ -17,7 +17,7 @@ export type InteractionData = InteractionBase & (
     arguments: unknown; cwd: string; sandbox: string;
     execution?: {binding?: {location: ExecutionLocation}; workspace?: string};
   } | null}}
-  | {kind: 'question'; request: {id: string; session_id: string; questions: {prompt: string; options: string[]}[];
+  | {kind: 'question'; request: {id: string; session_id: string; questions: {id: string; prompt: string; options: string[]}[];
     review?: {binding: unknown; choices: {id: string; label: string}[]} | null}}
 );
 export interface SourceData {

@@ -1,3 +1,4 @@
+import {DocumentContributions} from "../document-plugins.tsx";
 import { useLayoutEffect, useRef } from "react";
 import type { Model } from "../bridge.ts";
 import {ComposerAdd, ComposerAccess, ComposerModel} from "./composer-controls.tsx";
@@ -74,6 +75,7 @@ export function Composer({
         index={owner.index}
         register={register("completionPanel")}
       />
+      <DocumentContributions seat="composer"/>
       <DraftReferences owner={owner} state={state} />
       <textarea
         ref={(node) => {
@@ -95,8 +97,8 @@ export function Composer({
         }
         placeholder={
           data
-            ? "Send a message, / for commands, @ for files or conversations"
-            : "Describe what you want to build, / for commands, @ for files or conversations"
+            ? state?.completionsAvailable ? "Send a message · / commands · @ agents" : "Send a message"
+            : "Describe what you want to build"
         }
         maxLength={1024 * 1024}
       />

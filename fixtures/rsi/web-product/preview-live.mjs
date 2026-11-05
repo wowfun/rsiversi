@@ -80,7 +80,7 @@ try {
  const parentFacts=facts(parent);await writeFile(join(report,'parent-facts.json'),JSON.stringify(parentFacts,null,2));
  const parentAnswer=assistantText(parentFacts);
  for(const [index,token] of tokens.entries()){
-  const completion=parentFacts.find(fact=>fact.type==='input_message_entered'&&fact.source?.type==='completion'&&fact.source.child_session_id===children[index]&&fact.source.outcome.status==='completed');
+  const completion=parentFacts.find(fact=>fact.type==='input_message_claimed'&&fact.source?.type==='completion'&&fact.source.child_session_id===children[index]&&fact.source.outcome.status==='completed');
   assert(completion?.content.some(part=>part.type==='text'&&part.text.includes(token)),'durable child completion did not carry the current reply');
   assert(parentAnswer.includes(token),'main agent did not quote the child reply');
  }

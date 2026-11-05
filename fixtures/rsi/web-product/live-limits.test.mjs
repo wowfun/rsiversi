@@ -1,9 +1,19 @@
 import assert from 'node:assert/strict';
 import {test} from 'node:test';
-import {liveLimits,readDeepseekKey,deepseekProfile} from './live-limits.mjs';
+import {liveLimits,readDeepseekKey,deepseekProfile,liveProxyEnvironment} from './live-limits.mjs';
 import {mkdtemp,writeFile,rm} from 'node:fs/promises';
 import {join} from 'node:path';
 import {tmpdir} from 'node:os';
+
+test('live proxy is explicit and keeps local service traffic direct',()=>{
+  assert.deepEqual(liveProxyEnvironment(undefined),{});
+  assert.deepEqual(liveProxyEnvironment('http://127.0.0.1:7897'),{
+    HTTP_PROXY:'http://127.0.0.1:7897/',HTTPS_PROXY:'http://127.0.0.1:7897/',NO_PROXY:'localhost,127.0.0.1,::1',
+  });
+  for(const value of ['',42,'x'.repeat(2049),'socks5://localhost:7897','http://user:pass@localhost','http://localhost/path','http://localhost?x=1','http://localhost/#fragment']) {
+    assert.throws(()=>liveProxyEnvironment(value));
+  }
+});
 
 test('live capacities are explicit, exact and bounded without model inference',()=>{
   const environment={DEEPSEEK_CONTEXT_WINDOW_TOKENS:'1048576',DEEPSEEK_DEFAULT_OUTPUT_RESERVE_TOKENS:'4096',DEEPSEEK_MAX_OUTPUT_RESERVE_TOKENS:'393216'};

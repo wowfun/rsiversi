@@ -1,3 +1,4 @@
+import {DocumentContributions, DocumentTranscript} from "../document-plugins.tsx";
 import {IconCopyOutlineRegular} from "../../vendor/dsh/dockkit-primitives/icons/index.tsx";
 import {writeClipboard} from "../../mounts.js";
 import {messageClock, elapsedLabel} from '../../message-metrics.js';
@@ -21,6 +22,7 @@ import {
 import { run } from "../bridge.ts";
 import { closeDisclosure } from "../../disclosure.js";
 import { Markdown } from "./markdown.tsx";
+import {ForkTurn} from './fork.tsx';
 
 import type {TranscriptBlock, TranscriptView} from '../presentation-types.ts';
 export interface MessageHost {
@@ -101,7 +103,7 @@ const Message = memo(function Message({
     const entry = {
       node: article.current!,
       inline: inline.current!,
-      text: body.current!,
+      text: body.current ?? article.current!,
       sourceKey,
     };
     owner.blocks.set(block.key, entry);
@@ -135,7 +137,7 @@ const Message = memo(function Message({
       className={`message ${block.role}${block.external ? " delegation" : ""}${expanded ? " turn-expanded" : ""}${summary ? " summary-expanded" : ""}`}
       hidden={hidden && !block.external}
     >
-      {foldable ? (
+      <DocumentTranscript block={block}>{foldable ? (
         <ProcessTitle block={block} open={summary || expanded} toggle={() => setSummary(value => !value)}/>
       ) : (
         <p className="message-title">{block.title}</p>
@@ -145,7 +147,7 @@ const Message = memo(function Message({
         className={`message-text${block.markdown ? " markdown" : ""}`}
       >
         {block.markdown ? <Markdown events={block.markdown} streaming={streaming} /> : block.text}
-      </div>
+      </div></DocumentTranscript>
       <p className="omitted" hidden={!block.clipped}>
         Text shortened in this view.
       </p>
@@ -244,8 +246,10 @@ export class Transcript extends PureComponent<Props, State, Position> {
         { hidden: boolean; expanded: boolean; streaming: boolean; timestamp?: number; usage?: TokenUsage | null }
       >(),
       summaries = new Map<string, ReactNode>();
+    const completed = new Map<string,string>();
     const keys = new Set(transcript.blocks.map((block) => block.key));
     for (const turn of Object.values(transcript.turns?.entries ?? {})) {
+      if (turn.terminal && !turn.running) completed.set(turn.terminal, turn.id);
       const state = turnVisibility(
         turn,
         mode,
@@ -306,6 +310,8 @@ export class Transcript extends PureComponent<Props, State, Position> {
         />,
       );
       if (block.key === runningTail) nodes.push(<RunningStatus key={`running:${generation}`}/>);
+      const terminal = completed.get(block.key);
+      if (terminal) nodes.push(<Fragment key={`tail:${generation}:${terminal}`}><DocumentContributions seat="turnTail" turn={terminal}/><ForkTurn turn={terminal} owner={owner}/></Fragment>);
     }
     return (
       <div

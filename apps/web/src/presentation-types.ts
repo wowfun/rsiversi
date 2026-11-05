@@ -4,7 +4,8 @@ import type {MarkdownEvent} from './session/markdown.tsx';
 import type {TokenUsage, MetricsRead} from './session/metrics.tsx';
 import type {InlineCard} from './session/transcript.tsx';
 export type SandboxMode = 'read-only' | 'workspace-write' | 'danger-full-access';
-export interface SessionCreation {workspace_id:string;session_id:string;agent_preset_id:string|null}
+export type ForkSelection = 'all' | 'none' | {last:number};
+export interface SessionCreation {workspace_id:string;session_id:string;agent_preset_id:string|null;fork?:{source_session_id:string;point:{kind:'before_turn'|'through_turn';turn_id:string};turns:ForkSelection}}
 export interface MediaLimits {images:number;upload_bytes:number;preview_objects:number;preview_bytes:number;preview_concurrency:number}
 export interface SettingsCatalog {ticket:string;namespace:string|null;page:{namespaces:string[];next:string|null}|null;error:string|null}
 export interface TranscriptBlock {

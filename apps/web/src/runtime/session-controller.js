@@ -5,6 +5,7 @@ import {
   submit,
   reconcile,
   executePending,
+  executeDocumentCommand,
   submitQueue,
   upload,
 } from "./session-submissions.js";
@@ -84,12 +85,32 @@ export function createPaneClass(context) {
       this.composerActions = composerActions;
       this.render(data);
     }
-    action(action, fields = {}) {
+    async action(action, fields = {}) {
       if (!this.generation) throw new Error("Open a conversation first");
+      const generation = this.generation;
+      if (action === "document_resource") {
+        const connection = context.connection;
+        const response = await context.call("read_session_resource", JSON.stringify({pane:this.index,generation,request:fields.request}));
+        if (this.generation !== generation || context.connection !== connection || connection?.closing) throw new Error("Resource Session was replaced");
+        return JSON.parse(response);
+      }
+      if (action === "document_command") return executeDocumentCommand(this, context, fields.name, fields.input);
+      if (action === "fork_conversation") {
+        if (this.switching || this.submitting || this.uploading) throw new Error("Wait for this conversation's current operation");
+        this.switching = true;
+        this.renderComposer();
+        try {
+          await this.flush();
+          if (this.generation !== generation) throw new Error("Conversation changed before fork preparation");
+          return await context.command({action, pane:this.index, generation, ...fields});
+        } finally {
+          if (this.generation === generation) { this.switching = false; this.renderComposer(); }
+        }
+      }
       return context.command({
         action,
         pane: this.index,
-        generation: this.generation,
+        generation,
         ...fields,
       });
     }
@@ -401,6 +422,7 @@ export function createPaneClass(context) {
         !editor || !!this.bindingError || editor.transferring || this.switching;
       this.images = editor?.images ?? [];
       this.composerView = {
+        completionsAvailable: !!this.generation && !this.switching,
         access: session ? this.accessPreference?.mode ?? this.staged?.data?.sandbox : context.view?.setup?.agent?.sandbox,
         accessDisabled: !!this.submitting || !!editor?.record.pending || !!this.switching,
         text: starting?.text ?? editor?.text ?? "",

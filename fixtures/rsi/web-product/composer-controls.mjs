@@ -29,6 +29,7 @@ try {for(const [name,engine] of Object.entries({chromium,firefox})){
   const input=page.getByRole('textbox',{name:'Main message',exact:true});await input.fill('Draft survives opening controls');
   await page.getByRole('button',{name:'Add files or run commands'}).click();await page.getByRole('menuitem',{name:'File',exact:true}).waitFor();
   await page.waitForFunction(()=>fixture.creates===1&&document.querySelector('[role=menu] button:not(:disabled)'));
+  assert.equal(await input.getAttribute('placeholder'),'Send a message · / commands · @ agents');
   assert.equal(await input.inputValue(),'Draft survives opening controls');assert.equal(await page.evaluate(()=>fixture.prepared.length),0);
   await page.screenshot({path:join(report,name+'-plus.png')});
   await page.getByRole('menuitem',{name:'Commands',exact:true}).click();await page.getByRole('menuitem',{name:'/plan',exact:true}).click();assert.equal(await input.inputValue(),'/plan ');

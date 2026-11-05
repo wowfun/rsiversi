@@ -16,6 +16,7 @@ interface Pending {
   images?: number;
 }
 export interface ComposerView {
+  completionsAvailable?: boolean;
   access?: string;
   accessDisabled?: boolean;
   workspace?: string;

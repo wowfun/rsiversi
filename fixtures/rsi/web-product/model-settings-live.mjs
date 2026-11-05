@@ -11,7 +11,7 @@ const report=resolve(process.env.RSI_WEB_REPORT),binary=process.env.RSI_WEB_BINA
 assert(binary&&assets&&process.env.RSI_LIVE_ENV_FILE,'Explicit live configuration is required');await mkdir(report,{recursive:true});
 const key=await readDeepseekKey(process.env.RSI_LIVE_ENV_FILE);let service,browser,page;const errors=[];
 try{
- service=await startService({binary,assets,report,developmentHttp:true,configure:async({config})=>{
+ service=await startService({binary,assets,report,networkProxy:process.env.RSI_LIVE_PROXY,developmentHttp:true,configure:async({config})=>{
   await writeFile(join(config,'settings.json'),'{}');await writeFile(join(config,'host-profiles/fixture/host.profile.toml'),'format=1\nsteps=[]\n');
  }});
  await writeFile(join(service.workspace,'keep.txt'),'workspace data must remain');
@@ -39,6 +39,9 @@ try{
  // Settlement invalidates the paged navigation; settle that explicit refresh before hovering a row.
  await page.getByRole('button',{name:'Refresh conversations',exact:true}).click();
  await page.getByRole('button',{name:'Refresh conversations',exact:true}).waitFor({state:'hidden'});
+ // A refresh can replace the header under a stationary pointer. Enter it from
+ // outside the sidebar so the hover test exercises a real pointer transition.
+ await page.mouse.move(1400,900);
  const renamed=page.getByTestId('workspace-group').filter({has:page.getByRole('button',{name:'Live workspace',exact:true})});await renamed.locator('.workspace-toggle').hover();await page.getByRole('tooltip').waitFor();assert.match(await page.getByRole('tooltip').innerText(),/Created/);await page.screenshot({path:join(report,'workspace-info.png')});
  await service.restart();await page.reload();await page.locator('#dev-http').check();await page.getByRole('button',{name:'Reconnect with this browser',exact:true}).click();await page.locator('#workbench').waitFor({state:'visible',timeout:60000});
  await page.getByRole('button',{name:'Live workspace',exact:true}).waitFor();await openSettings(page);await page.getByRole('button',{name:'Models',exact:true}).click();await page.getByRole('button',{name:'Edit',exact:true}).click();editor=page.getByRole('form',{name:'Edit model provider'});assert.equal(await editor.getByRole('textbox',{name:'API key'}).inputValue(),'');await editor.getByRole('button',{name:'Cancel',exact:true}).click();await page.getByRole('button',{name:'Close settings'}).click();

@@ -58,7 +58,7 @@ async function complete(pane,prompt){
     const {current,status}=state;
     if(!['Completed','Failed'].includes(status)||!current)return false;
     const terminal=liveTurnTerminal(facts(current),prompt,after);if(!terminal)return false;
-    const submissions=facts(current).filter(fact=>fact.seq>after&&fact.type==='input_message_entered'&&fact.source?.type==='human'&&fact.content?.some(part=>part.type==='text'&&part.text===prompt));
+    const submissions=facts(current).filter(fact=>fact.seq>after&&fact.type==='input_message_claimed'&&fact.source?.type==='human'&&fact.content?.some(part=>part.type==='text'&&part.text===prompt));
     assert.equal(submissions.length,1,'submitted turn was replayed');assert.equal(terminal.outcome.status,'completed',JSON.stringify(terminal));assert.equal(status,'Completed');durable.add(current);return true;
   },'real model turn',240000);
 }

@@ -1,3 +1,4 @@
+import {DocumentSessionScope, DocumentContributions, DocumentReviews} from "../document-plugins.tsx";
 import {WorkspaceChoice} from './workspace-choice.tsx';
 import { ExternalSurface } from "./external.tsx";
 import { IconEllipsisOutlineRegular, IconChevronDownOutlineRegular } from "../../vendor/dsh/dockkit-primitives/icons/index.tsx";
@@ -73,6 +74,7 @@ function NativeSurface({
     </button>
   );
   return (
+    <DocumentSessionScope view={data} owner={owner}>
     <section
       ref={ref("node")}
       className={`${css.scope} ${chat.scope} pane${selected ? " selected" : ""}${empty ? " is-empty" : ""}`}
@@ -176,7 +178,10 @@ function NativeSurface({
       <div className="session-metrics-seat">
         {data && <SessionMetrics key={`metrics:${data.generation}`} owner={owner}/>}
       </div>
+      <DocumentContributions seat="panel"/>
+      <DocumentReviews/>
     </section>
+    </DocumentSessionScope>
   );
 }
 

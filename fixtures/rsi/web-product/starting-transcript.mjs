@@ -43,6 +43,7 @@ try {
    const input=page.getByRole('textbox',{name:'Main message',exact:true});
    await page.getByTestId('new-conversation').click();
    assert(await input.isEnabled());
+   assert.equal(await input.getAttribute('placeholder'),'Describe what you want to build');
    await input.fill('A saved starting message 世界');await page.evaluate(()=>fixture.runtime.panes.get('main').flush());
    assert.equal(await page.evaluate(()=>fixture.calls.some(call=>call.method==='command'&&JSON.parse(call.payload).action==='create')),false);
    await page.reload();await page.waitForFunction(()=>window.ready);await page.evaluate(()=>fixture.frame());

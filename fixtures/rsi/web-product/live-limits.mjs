@@ -1,6 +1,15 @@
 import assert from 'node:assert/strict';
 import {open} from 'node:fs/promises';
 
+export function liveProxyEnvironment(proxy) {
+  if (proxy === undefined) return {};
+  assert(typeof proxy === 'string' && proxy.length > 0 && proxy.length <= 2048, 'invalid live proxy');
+  const url = new URL(proxy);
+  assert(['http:', 'https:'].includes(url.protocol) && url.hostname && !url.username && !url.password
+    && url.pathname === '/' && !url.search && !url.hash, 'invalid live proxy');
+  return {HTTP_PROXY: url.href, HTTPS_PROXY: url.href, NO_PROXY: 'localhost,127.0.0.1,::1'};
+}
+
 export function liveLimits(environment=process.env) {
   const limits = Object.fromEntries(['context_window_tokens','default_output_reserve_tokens','max_output_reserve_tokens'].map(field=>{
     const name=`DEEPSEEK_${field.toUpperCase()}`,raw=environment[name];

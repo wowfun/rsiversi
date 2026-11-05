@@ -79,3 +79,41 @@ test('pane disposal releases the mount scope and clears staged authority', () =>
   assert.equal(disposed, 1);
   assert.equal(pane.staged, undefined);
 });
+
+test('manual forks flush the editor and refuse concurrent or replaced pane authority', async () => {
+  const calls=[];
+  const pane=new(createPaneClass({command:async value=>calls.push(value)}))('main');
+  pane.generation='1';pane.renderComposer=()=>{};
+  let release;
+  pane.flush=()=>new Promise(resolve=>{release=resolve});
+  const pending=pane.action('fork_conversation',{turn:'completed',turns:{last:2}});
+  assert.equal(pane.switching,true);
+  await assert.rejects(pane.action('fork_conversation',{turn:'another',turns:'all'}),/current operation/);
+  assert.equal(calls.length,0);
+  release();await pending;
+  assert.deepEqual(calls,[{action:'fork_conversation',pane:'main',generation:'1',turn:'completed',turns:{last:2}}]);
+  assert.equal(pane.switching,false);
+  const stale=pane.action('fork_conversation',{turn:'completed',turns:'all'});
+  pane.generation='2';release();
+  await assert.rejects(stale,/Conversation changed/);
+  assert.equal(calls.length,1);
+});
+
+test('document resource reads reject late attachment and connection replacements', async () => {
+  for (const replacement of ['attachment', 'connection', 'closing']) {
+    let finish;
+    const context = {connection: {}, call: async (method, body) => {
+      assert.equal(method, 'read_session_resource');
+      assert.equal(JSON.parse(body).generation, '1');
+      return new Promise(resolve => { finish = resolve; });
+    }};
+    const pane = new (createPaneClass(context))('main');
+    pane.generation = '1';
+    const pending = pane.action('document_resource', {request: {kind: 'sources'}});
+    if (replacement === 'attachment') pane.generation = '2';
+    if (replacement === 'connection') context.connection = {};
+    if (replacement === 'closing') context.connection.closing = true;
+    finish('{}');
+    await assert.rejects(pending, /Resource Session was replaced/);
+  }
+});

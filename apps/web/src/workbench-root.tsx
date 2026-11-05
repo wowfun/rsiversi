@@ -1,3 +1,4 @@
+import {sealDocumentPlugins} from "./document-plugins.tsx";
 import "../styles.css";
 import shellCss from "./shell.module.css";
 import "../code-highlight.css";
@@ -51,6 +52,7 @@ export function mountWorkbench(
   options: Parameters<typeof createWorkbench>[0] = {},
 ) {
   if (active) throw new Error("The document workbench already has an owner");
+  sealDocumentPlugins();
   active = true;
   element.classList.add(shellCss.scope);
   const root = createRoot(element);

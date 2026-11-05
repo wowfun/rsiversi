@@ -2,6 +2,9 @@
 
 Settings saves wait for a refreshed editor ticket and enabled controls. React
 retains the editor nodes across saves, so node removal is not a completion signal.
+`provider-binding.mjs` mounts the production document with controlled transport.
+It checks delayed provider status across Settings close, endpoint replacement and
+principal replacement, and exact revision handling through Finish setup.
 The document runtime fixture checks catalog namespace reads within one window,
 while explicit section reads and dismissal continue to fence old frames.
 External navigation checks configured endpoint visibility, reopening and paging,
@@ -72,6 +75,9 @@ document with deterministic transport replies in Chromium and Firefox. Set
 `RSI_REPORT_DIR` for its screenshots and results. `model-settings-live.mjs` is an
 opt-in shipped Worker/Service check: it starts with no providers, uses the key
 from `RSI_LIVE_ENV_FILE` through the UI, discovers models, configures DeepSeek,
+and accepts an explicit `RSI_LIVE_PROXY` HTTP(S) proxy for provider requests.
+The isolated Service bypasses this proxy for loopback traffic; default fixtures
+never inherit ambient proxy variables. The live check continues through setup
 and sends one short request. It verifies persistence after a Service restart and
 registration-only workspace deletion while preserving a file and Session history.
 Set `RSI_WEB_BINARY`, `RSI_WEB_ASSETS` and `RSI_WEB_REPORT` explicitly. It uses an

@@ -228,3 +228,27 @@ export async function upload(pane, context, files) {
     pane.renderComposer();
   }
 }
+
+export async function executeDocumentCommand(pane, context, name, input = '') {
+  if (!/^[a-zA-Z0-9_.-]{1,128}$/.test(name) || typeof input !== 'string' || new TextEncoder().encode(input).length > 16 * 1024)
+    throw new Error('Invalid Session command');
+  const editor = pane.editor, generation = pane.generation, current = context.connection;
+  if (!editor || !generation || !current || current.closing || pane.submitting || pane.uploading || pane.switching || editor.record.pending || pane.bindingError)
+    throw new Error('Resolve the pending operation before using a Session command');
+  pane.submitting = true;
+  pane.renderComposer();
+  try {
+    await editor.flush();
+    const prepared = JSON.parse(await context.call('prepare_submission', JSON.stringify({
+      pane: pane.index, generation, text: `/${name} ${input}`, images: [], references: [],
+    })));
+    if (prepared.kind !== 'command') throw new Error('Session command is unavailable');
+    if (pane.editor !== editor || pane.generation !== generation || context.connection !== current || current.closing)
+      throw new Error('Conversation changed before command preparation completed');
+    await editor.update(record => editor.store.freeze(record, prepared, true));
+    await pane.executePending(editor, generation, current, 'dispatch');
+  } finally {
+    pane.submitting = false;
+    pane.renderComposer();
+  }
+}

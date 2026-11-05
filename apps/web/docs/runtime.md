@@ -325,3 +325,16 @@ disconnect flush instead captures the existing editors before awaiting binding,
 so it cannot save drafts owned by a replacement connection.
 Transport failure also retires a Draining connection and rejects pending
 receipts; draft flushing cannot suppress failure or revive a replaced owner.
+
+Document plugin commands use the same prepared/dispatch/query submission path as
+composer commands. They freeze a command-only intent with `preserve_editor: true`
+in the existing pending draft record; text, images and references survive its
+settlement. The optional field is valid only for commands and only when true.
+An unknown result retains its exact opaque request for the existing recovery UI.
+Missing commands, a replaced Session, or an existing pending submission reject
+before dispatch. A command control never falls back to submitting a user message.
+
+A document contribution may wrap its Session occurrence in one provider. The
+provider shares that occurrence's action fence and is disposed with its generation;
+it cannot retain a replacement pane's authority. Finite document resource reads
+also recheck the connection and attachment after completion.

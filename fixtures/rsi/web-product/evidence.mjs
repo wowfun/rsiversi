@@ -61,7 +61,7 @@ export function requireFileRead(facts, afterSeq, path, expectedLines) {
 }
 
 export function liveTurnTerminal(facts, prompt, afterSeq) {
-  const input = facts.findLast(fact => fact.seq > afterSeq && fact.type === 'input_message_entered'
+  const input = facts.findLast(fact => fact.seq > afterSeq && fact.type === 'input_message_claimed'
     && fact.source?.type === 'human'
     && fact.content?.some(part => part.type === 'text' && part.text === prompt));
   return input && facts.find(fact => fact.seq > input.seq && fact.type === 'turn_terminal'

@@ -5,7 +5,7 @@ import { join } from 'node:path';
 export async function verifyDraftMigration(browser, root) {
   const source = await readFile(join(root, 'apps/web/drafts.js'), 'utf8');
   const reports = [];
-  for (const version of [1, 2, 3, 4, 0]) {
+  for (const version of [1, 2, 3, 4, 5, 0]) {
     const context = await browser.newContext();
     await context.route('http://localhost:37918/**', route => route.fulfill({contentType:'text/javascript',body:route.request().url().endsWith('drafts.js') ? source : ''}));
     try {
@@ -32,7 +32,7 @@ export async function verifyDraftMigration(browser, root) {
         const actual=store.database.version;store.database.close();device.database.close();
         return {rejected,version:actual,isolated};
       }, version);
-      assert.deepEqual(report, version ? {rejected:true,version,unchanged:true} : {rejected:false,version:5,isolated:true});
+      assert.deepEqual(report, version ? {rejected:true,version,unchanged:true} : {rejected:false,version:6,isolated:true});
       reports.push(report);
     } finally {await context.close();}
   }
