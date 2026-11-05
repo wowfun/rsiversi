@@ -82,6 +82,7 @@ async fn installed_original_todo_commits_through_kernel_and_restores_without_rep
         json!({"todos":[{"content":"Verify Kernel receipt","status":"in_progress"}]}).to_string();
     let provider = Arc::new(LanguageFixture {
         outcomes: Mutex::new(VecDeque::from([
+            StartOutcome::Stream(tool_calls_script(&[("invalid-todo", "todo_write", "{}")])),
             StartOutcome::Stream(tool_calls_script(&[("original-todo", "todo_write", &args)])),
             StartOutcome::Stream(answer_script()),
         ])),
@@ -147,6 +148,13 @@ async fn installed_original_todo_commits_through_kernel_and_restores_without_rep
         .iter()
         .position(|event| event["type"] == "todo/write")
         .unwrap();
+    assert_eq!(
+        events
+            .iter()
+            .filter(|event| event["type"] == "todo/write")
+            .count(),
+        1
+    );
     assert!(
         call < mutation,
         "the first Todo diff must see the list before this invocation"
@@ -166,25 +174,40 @@ async fn installed_original_todo_commits_through_kernel_and_restores_without_rep
         .iter()
         .filter(|fact| matches!(fact.body(), SessionFactBody::ToolResult { .. }))
         .collect();
-    assert_eq!(results.len(), 1);
-    let SessionFactBody::ToolResult { effect_id, .. } = results[0].body() else {
-        unreachable!()
-    };
-    let receipt = stack
-        .store
-        .read_domain_request(
-            &submitted.session_id,
-            &rsi_agent_session_protocol::DomainRequestId::new(effect_id.as_str()).unwrap(),
-        )
-        .await
-        .unwrap()
-        .unwrap();
-    let rsi_agent_session_protocol::AgentControlRecordBody::DomainStateCommitted { commit } =
-        receipt.body()
-    else {
-        unreachable!()
-    };
-    assert_eq!(commit.fact_span().unwrap().first_seq(), results[0].seq());
+    assert_eq!(results.len(), 2);
+    for (fact, expected_call) in results.into_iter().zip(["invalid-todo", "original-todo"]) {
+        let SessionFactBody::ToolResult {
+            effect_id,
+            identity,
+            result,
+            ..
+        } = fact.body()
+        else {
+            unreachable!()
+        };
+        assert_eq!(identity.call_id(), expected_call);
+        assert_eq!(result.is_error, expected_call == "invalid-todo");
+        if result.is_error {
+            assert!(
+                matches!(result.content.as_slice(), [rsi_tools_protocol::ToolContent::Text { text }] if text.contains("invalid arguments") && text.contains("todos"))
+            );
+        }
+        let receipt = stack
+            .store
+            .read_domain_request(
+                &submitted.session_id,
+                &rsi_agent_session_protocol::DomainRequestId::new(effect_id.as_str()).unwrap(),
+            )
+            .await
+            .unwrap()
+            .unwrap();
+        let rsi_agent_session_protocol::AgentControlRecordBody::DomainStateCommitted { commit } =
+            receipt.body()
+        else {
+            unreachable!()
+        };
+        assert_eq!(commit.fact_span().unwrap().first_seq(), fact.seq());
+    }
     let before = connection
         .request(
             "session.project",
