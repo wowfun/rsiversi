@@ -316,10 +316,13 @@ boundary, then observes with both captured cursors across subsequent Turns.
 `observe_interactions` produces one complete initial snapshot of tree approvals
 and this root's questions, followed by coalesced scoped changes. Each reconnect
 gets a fresh baseline. The immutable snapshot handle retains its share of one
-64 MiB application budget until the last clone drops; admission failure is
-immediate typed Capacity. Snapshot bounds are independent: 1,024 approvals and
-256 questions. Collection reserves before copying broker payloads: at most
-16 MiB of approvals, 256 questions of at most 64 KiB, and JSON collection framing.
+64 MiB application budget until the last clone drops. Concurrent local readers
+take turns collecting from the brokers. Each reserves room for at most 16 MiB
+of approvals, 256 questions of at most 64 KiB, and JSON framing before copying.
+After collection, only the snapshot's exact bytes remain charged. If retained
+snapshots leave insufficient room for admission, the caller receives typed
+Capacity. Snapshot counts are bounded independently at 1,024 approvals and
+256 questions.
 The stream
 subscribes to root/tree membership before validation, then broker changes before
 collection. It holds identities and live services, never a Fresh composition pin;

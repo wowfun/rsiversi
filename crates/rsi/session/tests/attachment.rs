@@ -1847,12 +1847,12 @@ async fn attach_and_history_need_only_the_durable_store() {
     );
 }
 
-#[tokio::test]
-#[allow(clippy::too_many_lines)] // One tree fixture proves duplicate tuples and rejection before dispatch.
-async fn root_session_lists_and_answers_a_descendant_approval_by_exact_subject() {
+async fn approval_tree(
+    root: &SessionId,
+    child: &SessionId,
+    approvals: Arc<TreeApprovals>,
+) -> LocalSessionService {
     let store = Arc::new(MemoryStore::new());
-    let root = SessionId::new("session-approval-root").unwrap();
-    let child = SessionId::new("session-approval-child").unwrap();
     let cwd = rsi_workspace_protocol::canonical_native_path(
         std::env::current_dir().unwrap().canonicalize().unwrap(),
     );
@@ -1890,20 +1890,7 @@ async fn root_session_lists_and_answers_a_descendant_approval_by_exact_subject()
         })
         .await
         .unwrap();
-    let request = ApprovalRequest {
-        review: None,
-        subject: ApprovalSubject::new(child.as_str(), "turn-child", "effect-child").unwrap(),
-        id: "approval-child".into(),
-        action: "write child file".into(),
-        reason: "child mutation".into(),
-    };
-    let approvals = Arc::new(TreeApprovals::default());
-    approvals
-        .pending
-        .lock()
-        .await
-        .insert(child.clone(), vec![request.clone()]);
-    let application = LocalSessionService::new(
+    LocalSessionService::new(
         rsi_meta::Execution::native(tokio::runtime::Handle::current()),
         Arc::new(UnavailableCommands),
         Arc::new(UnavailableProjections),
@@ -1919,8 +1906,56 @@ async fn root_session_lists_and_answers_a_descendant_approval_by_exact_subject()
         Arc::new(UnavailableLanguage),
         Arc::new(UnavailableImage),
         Arc::new(UnavailableMedia),
-        approvals.clone(),
-    );
+        approvals,
+    )
+}
+
+fn child_approval(child: &SessionId) -> ApprovalRequest {
+    ApprovalRequest {
+        review: None,
+        subject: ApprovalSubject::new(child.as_str(), "turn-child", "effect-child").unwrap(),
+        id: "approval-child".into(),
+        action: "write child file".into(),
+        reason: "child mutation".into(),
+    }
+}
+
+#[tokio::test]
+async fn concurrent_interaction_observers_both_receive_the_pending_approval() {
+    use futures_util::StreamExt as _;
+
+    let root = SessionId::new("root").unwrap();
+    let child = SessionId::new("child").unwrap();
+    let approvals = Arc::new(TreeApprovals::default());
+    let service = approval_tree(&root, &child, approvals.clone()).await;
+    let handle = service.attach(&root).await.unwrap();
+    let request = child_approval(&child);
+    let mut pending = approvals.pending.lock().await;
+    pending.insert(child, vec![request.clone()]);
+    let mut first = handle.observe_interactions();
+    assert!(futures_util::poll!(&mut first).is_pending());
+    assert_eq!(approvals.reads.load(Ordering::SeqCst), 1);
+    let mut second = handle.observe_interactions();
+    assert!(futures_util::poll!(&mut second).is_pending());
+    drop(pending);
+    let first = first.await.unwrap().next().await.unwrap().unwrap();
+    let second = second.await.unwrap().next().await.unwrap().unwrap();
+    assert_eq!(first.approvals(), &[request]);
+    assert_eq!(first, second);
+}
+
+#[tokio::test]
+async fn root_session_lists_and_answers_a_descendant_approval_by_exact_subject() {
+    let root = SessionId::new("session-approval-root").unwrap();
+    let child = SessionId::new("session-approval-child").unwrap();
+    let request = child_approval(&child);
+    let approvals = Arc::new(TreeApprovals::default());
+    approvals
+        .pending
+        .lock()
+        .await
+        .insert(child.clone(), vec![request.clone()]);
+    let application = approval_tree(&root, &child, approvals.clone()).await;
     let handle = application.attach(&root).await.unwrap();
 
     assert_eq!(

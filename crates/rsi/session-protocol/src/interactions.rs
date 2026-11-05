@@ -2,6 +2,7 @@ use super::{ApprovalRequest, Arc, Result, SessionError, fmt, map_question_error}
 use rsi_user_questions_protocol::QuestionRequest;
 use serde::Serialize;
 use std::sync::atomic::{AtomicUsize, Ordering};
+use tokio::sync::{Mutex, MutexGuard};
 
 const MAXIMUM_BYTES: usize = 64 * 1024 * 1024;
 const COLLECTION_BYTES: usize = 32 * 1024 * 1024 + 4096;
@@ -14,7 +15,13 @@ pub type InteractionStream =
 
 /// Aggregate ownership of retained snapshots for one Session application/decoder.
 #[derive(Clone, Debug, Default)]
-pub struct InteractionRetention(Arc<AtomicUsize>);
+pub struct InteractionRetention(Arc<Pool>);
+
+#[derive(Debug, Default)]
+struct Pool {
+    bytes: AtomicUsize,
+    collection: Mutex<()>,
+}
 
 struct Reservation {
     pool: InteractionRetention,
@@ -22,13 +29,16 @@ struct Reservation {
 }
 impl Drop for Reservation {
     fn drop(&mut self) {
-        self.pool.0.fetch_sub(self.bytes, Ordering::AcqRel);
+        self.pool.0.bytes.fetch_sub(self.bytes, Ordering::AcqRel);
     }
 }
 impl Reservation {
     fn shrink(&mut self, bytes: usize) {
         assert!(bytes <= self.bytes, "snapshot was bounded before admission");
-        self.pool.0.fetch_sub(self.bytes - bytes, Ordering::AcqRel);
+        self.pool
+            .0
+            .bytes
+            .fetch_sub(self.bytes - bytes, Ordering::AcqRel);
         self.bytes = bytes;
     }
 }
@@ -78,11 +88,12 @@ impl InteractionSnapshot {
 impl InteractionRetention {
     /// Canonical bytes held by all issued snapshot clones.
     pub fn retained_bytes(&self) -> usize {
-        self.0.load(Ordering::Acquire)
+        self.0.bytes.load(Ordering::Acquire)
     }
 
     fn reserve(&self, bytes: usize) -> Result<Reservation> {
         self.0
+            .bytes
             .fetch_update(Ordering::AcqRel, Ordering::Acquire, |current| {
                 current
                     .checked_add(bytes)
@@ -165,15 +176,18 @@ fn validate_snapshot(data: &SnapshotData) -> Result<usize> {
 }
 
 /// Pre-admitted collection budget released unless completed into a snapshot.
-pub struct InteractionCollection(Reservation);
-impl fmt::Debug for InteractionCollection {
+pub struct InteractionCollection<'a> {
+    reservation: Reservation,
+    _guard: MutexGuard<'a, ()>,
+}
+impl fmt::Debug for InteractionCollection<'_> {
     fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
         formatter
             .debug_struct("InteractionCollection")
             .finish_non_exhaustive()
     }
 }
-impl InteractionCollection {
+impl InteractionCollection<'_> {
     /// Validates the complete collected payload and transfers its exact lease.
     pub fn retain(
         mut self,
@@ -184,17 +198,21 @@ impl InteractionCollection {
             approvals,
             questions,
         };
-        self.0.shrink(validate_snapshot(&data)?);
+        self.reservation.shrink(validate_snapshot(&data)?);
         Ok(InteractionSnapshot(Arc::new(RetainedSnapshot {
             data,
-            _reservation: self.0,
+            _reservation: self.reservation,
         })))
     }
 }
 impl InteractionRetention {
-    /// Reserves before copying any broker payload into a new live snapshot.
-    pub fn reserve_collection(&self) -> Result<InteractionCollection> {
-        self.reserve(COLLECTION_BYTES).map(InteractionCollection)
+    /// Waits for the current collector to release its estimate before reserving for the next.
+    pub async fn reserve_collection(&self) -> Result<InteractionCollection<'_>> {
+        let guard = self.0.collection.lock().await;
+        Ok(InteractionCollection {
+            reservation: self.reserve(COLLECTION_BYTES)?,
+            _guard: guard,
+        })
     }
 }
 
@@ -295,6 +313,30 @@ mod tests {
         drop(reservation);
         assert_eq!(pool.retained_bytes(), 0);
         assert!(question(0, 70_000).validate().is_err());
+    }
+
+    #[tokio::test]
+    async fn cancelling_a_collection_releases_its_estimate_but_keeps_retained_bytes_charged() {
+        let pool = InteractionRetention::default();
+        let collecting = pool.reserve_collection().await.unwrap();
+        let mut waiting = std::pin::pin!(pool.reserve_collection());
+        assert!(futures_util::poll!(&mut waiting).is_pending());
+        drop(collecting);
+        let snapshot = waiting
+            .await
+            .unwrap()
+            .retain(vec![approval(0)], vec![])
+            .unwrap();
+        let charge = pool.retained_bytes();
+        let other = pool.reserve(MAXIMUM_BYTES - charge).unwrap();
+        assert!(matches!(
+            pool.reserve_collection().await,
+            Err(SessionError::Capacity)
+        ));
+        drop(other);
+        assert_eq!(pool.retained_bytes(), charge);
+        drop(snapshot);
+        assert_eq!(pool.retained_bytes(), 0);
     }
 
     #[test]

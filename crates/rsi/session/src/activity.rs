@@ -178,7 +178,7 @@ impl LocalSessionService {
             .retain_visible_activity(&mut selected, visibility.locations())
             .await?;
         let ids: Vec<_> = selected.keys().cloned().collect();
-        let reservation = self.interaction_retention.reserve_collection()?;
+        let reservation = self.interaction_retention.reserve_collection().await?;
         let approvals = self.approvals.pending_for_sessions(&ids).await?;
         let questions = match &self.questions {
             Some(owner) => owner

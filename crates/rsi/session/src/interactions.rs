@@ -21,22 +21,17 @@ async fn collect(
     root: &SessionId,
     members: &[SessionId],
 ) -> Result<InteractionSnapshot> {
-    // Reserve before either broker clones its payload. Release unused capacity only
-    // after both bounded snapshots have been collected and validated.
-    let reservation = retention.reserve_collection()?;
-    let (approval_snapshot, question_snapshot) = if members.is_empty() {
-        (Vec::new(), Vec::new())
-    } else {
-        (
-            approvals.pending_for_sessions(members).await?,
-            match questions {
-                Some(questions) => questions
-                    .pending_for_sessions(&[root.as_str().to_owned()])
-                    .await
-                    .map_err(map_question_error)?,
-                None => Vec::new(),
-            },
-        )
+    if members.is_empty() {
+        return retention.retain(Vec::new(), Vec::new());
+    }
+    let reservation = retention.reserve_collection().await?;
+    let approval_snapshot = approvals.pending_for_sessions(members).await?;
+    let question_snapshot = match questions {
+        Some(questions) => questions
+            .pending_for_sessions(&[root.as_str().to_owned()])
+            .await
+            .map_err(map_question_error)?,
+        None => Vec::new(),
     };
     reservation.retain(approval_snapshot, question_snapshot)
 }
