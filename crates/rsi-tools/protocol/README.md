@@ -21,6 +21,11 @@ A successful Tool result may carry `concludes_turn: true` to waive the
 otherwise expected model follow-up for its batch. The marker travels with the
 retained result, including after receipt recovery. An error result cannot set it.
 
+A result may also carry a bounded JSON object in `metadata`. Producers can
+record namespaced diagnostics and presentation data there. The exact object
+travels with the retained result and its Fact. Only canonical values supply
+program output, and only the content and error flag supply model output.
+
 `bounded_json_fragment_page` owns UTF-8 fragment selection under a 1–16 KiB
 complete presentation budget, including the caller's label and encoded envelope.
 Callers retain exact-result/revision authentication and envelope metadata; the

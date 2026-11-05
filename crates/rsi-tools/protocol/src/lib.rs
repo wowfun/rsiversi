@@ -676,6 +676,9 @@ pub struct ToolResult {
     pub content: Vec<ToolContent>,
     /// Whether this is a tool-owned error result.
     pub is_error: bool,
+    /// Optional producer-owned presentation and diagnostic fields, separate from model content.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub metadata: Option<Box<Value>>,
     /// A successful body waived the usual model follow-up for this batch.
     #[serde(default, skip_serializing_if = "std::ops::Not::not")]
     pub concludes_turn: bool,
@@ -750,6 +753,9 @@ pub struct ToolOutput {
     pub content: Vec<ToolContent>,
     /// Whether the tool reported failure.
     pub is_error: bool,
+    /// Producer-owned result metadata to retain with the canonical value.
+    #[serde(default)]
+    pub metadata: Option<Box<Value>>,
     /// Whether this successful result waives the usual model follow-up.
     #[serde(default)]
     pub concludes_turn: bool,
@@ -764,6 +770,7 @@ impl ToolOutput {
             value: self.value,
             content: self.content,
             is_error: self.is_error,
+            metadata: self.metadata,
             concludes_turn: self.concludes_turn,
             enforcement: vec![],
             additional_contexts: self.additional_contexts,
@@ -785,6 +792,8 @@ impl<'de> Deserialize<'de> for ToolResult {
             content: Vec<ToolContent>,
             is_error: bool,
             #[serde(default)]
+            metadata: Option<Box<Value>>,
+            #[serde(default)]
             concludes_turn: bool,
             enforcement: Vec<EnforcementStamp>,
             #[serde(default)]
@@ -796,6 +805,7 @@ impl<'de> Deserialize<'de> for ToolResult {
             value: wire.value,
             content: wire.content,
             is_error: wire.is_error,
+            metadata: wire.metadata,
             concludes_turn: wire.concludes_turn,
             enforcement: wire.enforcement,
             additional_contexts: wire.additional_contexts,
@@ -814,6 +824,7 @@ impl ToolResult {
             value,
             content,
             is_error,
+            metadata: None,
             concludes_turn: false,
             enforcement: Vec::new(),
             additional_contexts: Vec::new(),
@@ -831,6 +842,14 @@ impl ToolResult {
         }
         ToolContextMessage::validate_batch(&self.additional_contexts)?;
         validate_json("tool canonical result", &self.value)?;
+        if let Some(metadata) = &self.metadata {
+            if !metadata.is_object() {
+                return Err(ToolError::InvalidInput(
+                    "tool metadata must be an object".into(),
+                ));
+            }
+            validate_json("tool metadata", metadata)?;
+        }
         if self.content.len() > MAXIMUM_TOOL_CONTENT_ITEMS {
             return Err(ToolError::InvalidInput(
                 "tool result contains too many content items".into(),

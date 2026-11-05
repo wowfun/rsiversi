@@ -152,6 +152,39 @@ fn portable_v2_roundtrips_declarations_and_preserves_result_shape() {
 }
 
 #[test]
+fn tool_output_retains_bounded_metadata_separately_from_model_content() {
+    use rsi_tools_protocol::{ToolOutput, ToolResult};
+
+    let output =
+        json!({"value":0,"content":[],"is_error":false,"metadata":{"ui":{"cwd":"nested dir"}}});
+    let result = serde_json::from_value::<ToolOutput>(output.clone())
+        .unwrap()
+        .into_result()
+        .unwrap();
+    assert_eq!(result.metadata.as_deref(), Some(&output["metadata"]));
+    assert!(result.content.is_empty());
+    let mut wire = serde_json::to_value(&result).unwrap();
+    assert_eq!(
+        serde_json::from_value::<ToolResult>(wire.clone()).unwrap(),
+        result
+    );
+    for invalid in [
+        json!("scalar"),
+        json!({"ui": "x".repeat(rsi_tools_protocol::MAXIMUM_TOOL_JSON_BYTES)}),
+    ] {
+        wire["metadata"] = invalid;
+        assert!(serde_json::from_value::<ToolResult>(wire.clone()).is_err());
+    }
+    wire.as_object_mut().unwrap().remove("metadata");
+    assert!(
+        serde_json::from_value::<ToolResult>(wire)
+            .unwrap()
+            .metadata
+            .is_none()
+    );
+}
+
+#[test]
 fn object_constants_and_enums_ignore_property_order_without_rewriting_output() {
     let original: Value = serde_json::from_str(r#"{"z":1,"a":{"z":2,"a":3}}"#).unwrap();
     for schema in [json!({"const":original}), json!({"enum":[original]})] {

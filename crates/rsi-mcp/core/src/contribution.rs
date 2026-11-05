@@ -214,6 +214,7 @@ pub(crate) fn unavailable(server: &str, error: McpError) -> ToolResult {
         }],
         value: json!({"version":1,"server":server,"error":error}),
         is_error: true,
+        metadata: None,
         additional_contexts: vec![],
         enforcement: vec![],
         concludes_turn: false,

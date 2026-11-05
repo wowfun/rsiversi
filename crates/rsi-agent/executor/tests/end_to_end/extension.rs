@@ -188,6 +188,10 @@ async fn installed_original_todo_commits_through_kernel_and_restores_without_rep
         assert_eq!(identity.call_id(), expected_call);
         assert_eq!(result.is_error, expected_call == "invalid-todo");
         if result.is_error {
+            assert_eq!(
+                result.metadata.as_deref().unwrap()["dsh"]["error"]["code"],
+                "INVALID_ARGS"
+            );
             assert!(
                 matches!(result.content.as_slice(), [rsi_tools_protocol::ToolContent::Text { text }] if text.contains("invalid arguments") && text.contains("todos"))
             );

@@ -32,7 +32,7 @@ pub(super) struct Listener {
 }
 impl Listener {
     pub(super) fn validate(&self) -> rsi_meta::Result<()> {
-        if self.protocol != 13 || self.port == 0 {
+        if self.protocol != 14 || self.port == 0 {
             return Err(failure("invalid application tool listener"));
         }
         rsi_agent_session_protocol::validate_identifier("application generation", &self.generation)

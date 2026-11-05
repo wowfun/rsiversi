@@ -29,6 +29,8 @@ enum Reply {
     Unchanged,
     Rendered {
         content: Vec<ToolContent>,
+        #[serde(default)]
+        metadata: serde_json::Map<String, serde_json::Value>,
         additional_contexts: Vec<ToolContextMessage>,
         #[serde(default)]
         concludes_turn: bool,
@@ -273,10 +275,22 @@ impl View {
                 Reply::Unchanged => Ok(original),
                 Reply::Rendered {
                     content,
+                    metadata,
                     additional_contexts,
                     concludes_turn,
                 } => {
                     original.content = content;
+                    if !metadata.is_empty() {
+                        match original.metadata.as_deref_mut() {
+                            Some(serde_json::Value::Object(fields)) => fields.extend(metadata),
+                            None => original.metadata = Some(Box::new(metadata.into())),
+                            Some(_) => {
+                                return Err(ToolError::InvalidInput(
+                                    "tool metadata must be an object".into(),
+                                ));
+                            }
+                        }
+                    }
                     original.additional_contexts = additional_contexts;
                     original.concludes_turn = concludes_turn;
                     Ok(original)
@@ -391,7 +405,7 @@ mod tests {
             send(
                 &mut peer,
                 &json!({"state":"rendered","content":[{"type":"text","text":"edited"}],
-                "additional_contexts":[],"concludes_turn":true}),
+                "metadata":{"ui":{"cwd":"dir"}},"additional_contexts":[],"concludes_turn":true}),
             )
             .await
             .unwrap();
@@ -403,7 +417,12 @@ mod tests {
                     socket,
                     async {
                         done.await.unwrap();
-                        ToolResult::new(json!(9_007_199_254_740_993_u64), vec![], false)
+                        let mut result =
+                            ToolResult::new(json!(9_007_199_254_740_993_u64), vec![], false)?;
+                        result.metadata = Some(Box::new(
+                            json!({"native":{"wide":9_007_199_254_740_993_u64}}),
+                        ));
+                        Ok(result)
                     },
                     &stop,
                     None,
@@ -411,6 +430,10 @@ mod tests {
                 .await
                 .unwrap();
             assert_eq!(output.value, 9_007_199_254_740_993_u64);
+            assert_eq!(
+                output.metadata.as_deref(),
+                Some(&json!({"ui":{"cwd":"dir"},"native":{"wide":9_007_199_254_740_993_u64}}))
+            );
             assert!(output.concludes_turn);
             assert_eq!(
                 output.content,
