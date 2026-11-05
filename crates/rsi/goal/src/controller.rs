@@ -21,6 +21,8 @@ use tokio::sync::{Mutex as AsyncMutex, Semaphore, watch};
 use tokio_util::{sync::CancellationToken, task::TaskTracker};
 
 mod driver;
+#[cfg(test)]
+mod tests;
 
 /// One Host-generation controller with finite driver, operation and observer retention.
 #[derive(Clone, Debug)]
@@ -37,6 +39,7 @@ struct Inner {
     tasks: TaskTracker,
     stopped: CancellationToken,
     cleanup_errors: Mutex<Vec<String>>,
+    stop_deadline: Mutex<Option<tokio::time::Instant>>,
 }
 
 #[derive(Debug)]
@@ -51,6 +54,16 @@ struct Live {
     session: Arc<dyn GoalSession>,
     lease: ContinuationLease,
     stop: CancellationToken,
+    pending: Arc<Mutex<Option<PendingMutation>>>,
+}
+
+#[derive(Clone, Debug)]
+struct PendingMutation {
+    request: DomainRequestId,
+    message: rsi_agent_session_protocol::MessageId,
+    kind: &'static str,
+    digest: String,
+    initial_input: Option<String>,
 }
 
 impl Default for GoalService {
@@ -64,6 +77,7 @@ impl Default for GoalService {
                 tasks: TaskTracker::new(),
                 stopped: CancellationToken::new(),
                 cleanup_errors: Mutex::new(Vec::new()),
+                stop_deadline: Mutex::new(None),
             }),
         }
     }
@@ -116,6 +130,13 @@ impl GoalService {
                 .admission
                 .lock()
                 .unwrap_or_else(std::sync::PoisonError::into_inner);
+            self.inner
+                .stop_deadline
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner)
+                .get_or_insert_with(|| {
+                    tokio::time::Instant::now() + std::time::Duration::from_secs(30)
+                });
             self.inner.stopped.cancel();
             self.inner.operations.close();
             self.inner.observers.close();
@@ -235,6 +256,7 @@ impl GoalService {
                         session,
                         lease,
                         stop: self.inner.stopped.child_token(),
+                        pending: Arc::default(),
                     },
                 )?;
             } else {
@@ -286,6 +308,7 @@ impl GoalService {
                 session: session.clone(),
                 lease,
                 stop: self.inner.stopped.child_token(),
+                pending: Arc::default(),
             }
         };
         live.lease.revoke();
@@ -341,10 +364,24 @@ impl GoalService {
         let owner = owner.clone();
         let controller = self.clone();
         self.inner.tasks.spawn(async move {
-            let result = std::panic::AssertUnwindSafe(controller.drive(&owner, &live))
-                .catch_unwind()
-                .await
-                .unwrap_or_else(|_| Err(GoalError::Backend("Goal driver panicked".into())));
+            let result = {
+                let drive = std::panic::AssertUnwindSafe(controller.drive(&owner, &live)).catch_unwind();
+                tokio::pin!(drive);
+                let completed = tokio::select! {
+                    biased;
+                    () = live.stop.cancelled() => {
+                        live.lease.revoke();
+                        tokio::time::timeout_at(controller.stop_deadline(), drive.as_mut()).await
+                            .map_err(|_| live.deadline_error())
+                    }
+                    result = drive.as_mut() => Ok(result),
+                };
+                match completed {
+                    Ok(Ok(result)) => result,
+                    Ok(Err(_)) => Err(GoalError::Backend("Goal driver panicked".into())),
+                    Err(error) => Err(error),
+                }
+            };
             let preempted = matches!(result, Err(GoalError::Disarmed));
             let result = match result {
                 Err(GoalError::Disarmed) => Ok(()),
@@ -352,17 +389,21 @@ impl GoalService {
             };
             live.lease.revoke();
             let result = if live.stop.is_cancelled() {
-                let cleanup = tokio::time::timeout(
-                    std::time::Duration::from_secs(30),
+                let pending = live.pending.lock().unwrap_or_else(std::sync::PoisonError::into_inner).is_some();
+                let cleanup = if tokio::time::Instant::now() >= controller.stop_deadline() {
+                    Err(live.deadline_error())
+                } else { tokio::time::timeout_at(
+                    controller.stop_deadline(),
                     controller.finish_shutdown(&owner, &live),
                 )
                 .await
-                .unwrap_or_else(|_| {
-                    Err(GoalError::Backend(
-                        "Goal cleanup exceeded its deadline".into(),
-                    ))
-                });
-                match cleanup {
+                .unwrap_or_else(|_| Err(live.deadline_error())) };
+                let outcome = match cleanup {
+                    Ok(()) if pending || matches!(result, Ok(()) | Err(GoalError::ShuttingDown)) => Ok(()),
+                    Ok(()) => result,
+                    Err(error) => Err(error),
+                };
+                match outcome {
                     Ok(()) => Ok(()),
                     Err(error) => {
                         controller
@@ -370,14 +411,16 @@ impl GoalService {
                             .cleanup_errors
                             .lock()
                             .unwrap_or_else(std::sync::PoisonError::into_inner)
-                            .push(bounded(&error.to_string()));
+                            .push(live.failure_detail(&error));
                         Err(error)
                     }
                 }
             } else {
                 result
             };
-            let _gate = owner.gate.lock().await;
+            let _gate = if live.stop.is_cancelled() { None } else {
+                tokio::select! { biased; () = live.stop.cancelled() => None, guard = owner.gate.lock() => Some(guard) }
+            };
             owner.publish(
                 &live,
                 if result.is_ok() {
@@ -386,7 +429,7 @@ impl GoalService {
                     GoalDriverStage::Failed
                 },
                 None,
-                result.err().map(|error| bounded(&error.to_string())).or_else(|| preempted.then(|| "Automatic scheduling was preempted. Resume Goal to reconcile the charged round, or Cancel to abandon unaccepted input.".into())),
+                result.err().map(|error| live.failure_detail(&error)).or_else(|| preempted.then(|| "Automatic scheduling was preempted. Resume Goal to reconcile the charged round, or Cancel to abandon unaccepted input.".into())),
             );
             *owner
                 .live
@@ -394,6 +437,47 @@ impl GoalService {
                 .unwrap_or_else(std::sync::PoisonError::into_inner) = None;
         });
         Ok(())
+    }
+
+    fn stop_deadline(&self) -> tokio::time::Instant {
+        self.inner
+            .stop_deadline
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .expect("stop publishes deadline before cancellation")
+    }
+}
+
+impl Live {
+    fn failure_detail(&self, error: &GoalError) -> String {
+        let pending = self
+            .pending
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        bounded(&pending.as_ref().map_or_else(
+            || error.to_string(),
+            |pending| {
+                format!(
+                    "Unresolved {} request {} message {}: {error}",
+                    pending.kind, pending.request, pending.message
+                )
+            },
+        ))
+    }
+    fn deadline_error(&self) -> GoalError {
+        let pending = self
+            .pending
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        GoalError::Backend(pending.as_ref().map_or_else(
+            || "Goal cleanup exceeded its deadline".into(),
+            |pending| {
+                format!(
+                    "Goal cleanup exceeded its deadline with unresolved {} request {} message {}",
+                    pending.kind, pending.request, pending.message
+                )
+            },
+        ))
     }
 }
 

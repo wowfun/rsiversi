@@ -1,4 +1,4 @@
-use super::{GoalService, Live, Owner, invalid};
+use super::{GoalService, Live, Owner, PendingMutation, invalid};
 use crate::{GoalDriverStage, GoalError, GoalResult, GoalSnapshot};
 use rsi_agent_goal::{
     GOAL_RESERVE, GOAL_SETTLE, GoalPhase, ReserveGoal, RoundSettlement, SettleGoal,
@@ -106,16 +106,26 @@ impl GoalService {
             Some(reservation.message_id.clone()),
             None,
         );
-        if matches!(snapshot.revision, CommandRevision::Draft { .. }) {
+        live.begin_mutation(
+            &invocation,
+            &reservation.message_id,
+            "reserve",
+            matches!(snapshot.revision, CommandRevision::Draft { .. })
+                .then(|| reservation.input_sha256.clone()),
+        )?;
+        let result = if matches!(snapshot.revision, CommandRevision::Draft { .. }) {
             live.session
                 .reserve_initial(&live.lease, invocation, reservation.input(&goal.id))
-                .await?;
+                .await
+                .map(|_| ())
         } else {
             live.session
                 .internal_command(&live.lease, invocation, Some(reservation.input(&goal.id)))
-                .await?;
-        }
-        Ok(())
+                .await
+                .map(|_| ())
+        };
+        live.finish_mutation(&result);
+        result
     }
 
     pub(super) async fn settle(
@@ -148,14 +158,62 @@ impl GoalService {
         }
         owner.publish(live, GoalDriverStage::Settling, Some(message.clone()), None);
         let invocation = settlement_invocation(&snapshot, goal, message, outcome)?;
-        live.session
+        live.begin_mutation(&invocation, message, "settle", None)?;
+        let result = live
+            .session
             .internal_command(&live.lease, invocation, None)
-            .await?;
-        Ok(())
+            .await
+            .map(|_| ());
+        live.finish_mutation(&result);
+        result
     }
 
     pub(super) async fn finish_shutdown(&self, owner: &Owner, live: &Live) -> GoalResult<()> {
         let _gate = owner.gate.lock().await;
+        let pending = live
+            .pending
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .clone();
+        if let Some(pending) = pending {
+            let matches = if let Some(digest) = &pending.initial_input {
+                let receipt = live.session.message_status(&pending.message).await?;
+                let snapshot = live.session.snapshot().await?;
+                receipt.is_some_and(|receipt| {
+                    receipt.session_id == *live.session.session_id()
+                        && receipt.message_id == pending.message
+                }) && matches!(snapshot.revision, CommandRevision::Durable { .. })
+                    && snapshot.state.goal.as_ref().is_some_and(|goal| {
+                        goal.id == live.lease.binding().owner
+                            && goal.reservation.as_ref().is_some_and(|reservation| {
+                                reservation.message_id == pending.message
+                                    && &reservation.input_sha256 == digest
+                            })
+                    })
+            } else {
+                let receipt = live
+                    .session
+                    .internal_status(&live.lease, &pending.request)
+                    .await?;
+                receipt.as_ref().is_some_and(|receipt| {
+                use rsi_agent_session_protocol::DomainMutationSource;
+                receipt.session_id() == live.session.session_id()
+                    && receipt.commit().request_id() == Some(&pending.request)
+                    && matches!(receipt.commit().source(), DomainMutationSource::Continuation { invocation, domain, owner, .. }
+                        if domain == &live.lease.binding().domain && owner == &live.lease.binding().owner && invocation.digest().ok().as_deref() == Some(pending.digest.as_str()))
+                })
+            };
+            if !matches {
+                return Err(GoalError::OutcomeUnknown(format!(
+                    "{} request {} message {}",
+                    pending.kind, pending.request, pending.message
+                )));
+            }
+            *live
+                .pending
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner) = None;
+        }
         let snapshot = live.session.snapshot().await?;
         let Some(goal) = snapshot
             .state
@@ -182,19 +240,53 @@ impl GoalService {
         if matches!(receipt.state, MessageState::Claimed { .. }) {
             live.session.cancel(&reservation.message_id).await?;
         }
-        let outcome = tokio::time::timeout(
-            std::time::Duration::from_secs(30),
-            live.session
-                .wait_round(&reservation.message_id, CancellationToken::new()),
-        )
-        .await
-        .map_err(|_| {
-            GoalError::Backend(
-                "Goal source Turn did not settle before Host cleanup deadline".into(),
-            )
-        })??;
+        let outcome = live
+            .session
+            .wait_round(&reservation.message_id, CancellationToken::new())
+            .await?;
         self.settle(owner, live, &reservation.message_id, outcome)
             .await
+    }
+}
+
+impl Live {
+    fn begin_mutation(
+        &self,
+        invocation: &SessionCommandInvocation,
+        message: &rsi_agent_session_protocol::MessageId,
+        kind: &'static str,
+        initial_input: Option<String>,
+    ) -> GoalResult<()> {
+        let mut pending = self
+            .pending
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        if pending.is_some() {
+            return Err(GoalError::OutcomeUnknown(
+                "previous Goal mutation remains unresolved".into(),
+            ));
+        }
+        *pending = Some(PendingMutation {
+            request: invocation.request_id.clone(),
+            message: message.clone(),
+            kind,
+            digest: invocation.digest().map_err(invalid)?,
+            initial_input,
+        });
+        Ok(())
+    }
+    fn finish_mutation(&self, result: &GoalResult<()>) {
+        if !matches!(
+            result,
+            Err(GoalError::OutcomeUnknown(_)
+                | GoalError::ExecutionOutcomeUnknown
+                | GoalError::Backend(_))
+        ) {
+            *self
+                .pending
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner) = None;
+        }
     }
 }
 

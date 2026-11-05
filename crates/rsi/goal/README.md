@@ -9,6 +9,17 @@ Session drivers, with one lease per Session. GUI detach leaves that owner
 running. Host withdrawal revokes leases, discards pending continuation input,
 cancels and joins drivers. Startup is disarmed; only an explicit successful
 create/resume action may arm after canonical command-receipt reconciliation.
+Shutdown gives the existing driver and its final settlement one shared 30-second
+deadline from stop. It revokes scheduling and drains the same future before
+reading final state. Each dispatched reservation or settlement retains its
+original request, message, kind and invocation digest until a definite result or
+matching canonical receipt resolves it. A draft-first reservation is reconciled
+through its canonical message receipt and
+matching durable Goal reservation because its first commit is a baseline.
+An absent receipt cannot prove that a
+retained Kernel mutation has stopped. Timeout reports unresolved identities and
+never replays the mutation or claims clean shutdown. Final live-state publication
+does not wait beyond that deadline for the control gate.
 
 Each round atomically reserves by an internal command/CAS and accepts the exact
 frozen message through idle Kernel admission. Busy preserves the live owner and

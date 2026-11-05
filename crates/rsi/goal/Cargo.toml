@@ -24,6 +24,12 @@ tokio-util.workspace = true
 tokio = { workspace = true, features = ["time"] }
 
 [dev-dependencies]
+rsi-agent-composition-protocol = { path = "../../rsi-agent/composition-protocol" }
+rsi-agent-context = { path = "../../rsi-agent/context" }
+rsi-ai-protocol = { path = "../../rsi-ai/protocol" }
+rsi-sandbox = { path = "../../rsi-sandbox/core" }
+rsi-tools = { path = "../../rsi-tools/core" }
+rsi-tools-protocol = { path = "../../rsi-tools/protocol" }
 tokio = { workspace = true, features = ["test-util"] }
 
 [lints]
