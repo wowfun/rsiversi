@@ -39,13 +39,29 @@ impl RemoteFactory {
     }
     fn command(&self, config: &ConfigValue) -> rsi::Result<Command> {
         if let Some(web) = &self.web {
-            if !config.is_null() {
-                return Err(RsiError::Boot("Web takes application arguments".into()));
+            #[derive(serde::Deserialize)]
+            #[serde(deny_unknown_fields)]
+            struct WebConfig {
+                assets: Assets,
             }
             let (port, assets, _) = web.requested()?;
+            let configured = if config.is_null() {
+                None
+            } else {
+                Some(
+                    serde_json::from_value::<WebConfig>(config.clone())
+                        .map_err(|error| RsiError::Boot(error.to_string()))?
+                        .assets,
+                )
+            };
+            if configured.is_some() && assets.is_some() {
+                return Err(RsiError::Boot(
+                    "Web assets are selected by either Profile or --assets".into(),
+                ));
+            }
             Ok(Command::Launch {
                 port,
-                assets: assets.map(|path| Assets::Directory { path }),
+                assets: configured.or_else(|| assets.map(|path| Assets::Directory { path })),
             })
         } else {
             let (config, assets) = if config.is_null() {
@@ -163,6 +179,7 @@ struct Runner {
     tasks: TaskTracker,
     execution: rsi_meta::Execution,
 }
+
 impl ApplicationRun for Runner {
     fn returns_after_launch(&self) -> bool {
         self.frontend.is_none() && matches!(&self.command, Command::Launch { .. })
@@ -194,12 +211,28 @@ impl ApplicationRun for Runner {
         Box::pin(async move { receiver.await.map_err(|_| ApplicationError::TaskStopped) })
     }
 }
+fn readiness_deadline(command: &Command) -> Duration {
+    if matches!(command, Command::Launch { assets: None, .. }) {
+        return Duration::from_mins(5);
+    }
+    let assets = match command {
+        Command::Launch { assets, .. } | Command::Serve { assets, .. } => assets.as_ref(),
+        Command::Desktop { assets } | Command::Watch { assets, .. } => Some(assets),
+        _ => None,
+    };
+    if matches!(assets, Some(Assets::Package { .. })) {
+        Duration::from_mins(5)
+    } else {
+        Duration::from_secs(30)
+    }
+}
+
 /// Connects to an exact native Host identity and negotiates only Web control.
 pub async fn request(
     owner: &rsi_service_host::HostOwnerMetadata,
     command: Command,
 ) -> Result<(Box<dyn rsi_service_host::LocalStream>, Reply), String> {
-    tokio::time::timeout(Duration::from_secs(30), async {
+    tokio::time::timeout(readiness_deadline(&command), async {
         let mut stream = rsi_service_host::connect_local_service(owner, "web")
             .await
             .map_err(|e| e.to_string())?;
@@ -311,5 +344,78 @@ impl Runner {
             _ = signals.next(false) => Ok(()),
             _ = stream.read(&mut byte) => Err(RsiError::Run("Host listener stopped".into())),
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn package_creation_allows_bounded_full_verification() {
+        assert_eq!(
+            readiness_deadline(&Command::Launch {
+                port: None,
+                assets: None
+            }),
+            Duration::from_mins(5)
+        );
+        assert_eq!(
+            readiness_deadline(&Command::Launch {
+                port: None,
+                assets: Some(Assets::default())
+            }),
+            Duration::from_mins(5)
+        );
+        assert_eq!(
+            readiness_deadline(&Command::Launch {
+                port: None,
+                assets: Some(Assets::Directory {
+                    path: std::env::temp_dir()
+                })
+            }),
+            Duration::from_secs(30)
+        );
+        assert_eq!(
+            readiness_deadline(&Command::Status {}),
+            Duration::from_secs(30)
+        );
+    }
+
+    #[test]
+    fn profile_selects_an_installed_document_without_changing_invocation_options() {
+        let factory = RemoteFactory::web(crate::WebLaunch::new(
+            vec!["--port".into(), "4321".into(), "--no-open".into()],
+            crate::WebLaunchEnvironment::default(),
+        ));
+        let config = serde_json::json!({"assets":{"kind":"package","package":"example-ui","export":"document"}});
+        let Command::Launch { port, assets } = factory.command(&config).unwrap() else {
+            panic!("launch")
+        };
+        assert_eq!(port, Some(4321));
+        assert_eq!(
+            assets,
+            Some(Assets::Package {
+                package: "example-ui".into(),
+                export: "document".into()
+            })
+        );
+        let path = std::env::temp_dir().join("explicit-assets");
+        let factory = RemoteFactory::web(crate::WebLaunch::new(
+            vec!["--assets".into(), path.into_os_string()],
+            crate::WebLaunchEnvironment::default(),
+        ));
+        assert!(
+            factory
+                .command(&config)
+                .unwrap_err()
+                .to_string()
+                .contains("either Profile")
+        );
+        assert!(
+            factory
+                .command(&serde_json::json!({"unknown":true}))
+                .is_err()
+        );
     }
 }

@@ -2,6 +2,7 @@
 #![deny(unsafe_code)]
 #![warn(missing_docs)]
 #![allow(clippy::missing_errors_doc)]
+mod application;
 mod arguments;
 mod desktop_port;
 mod local_web;

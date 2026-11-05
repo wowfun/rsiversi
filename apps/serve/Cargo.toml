@@ -20,14 +20,34 @@ rsi-web-assets-api = { path = "../../crates/rsi/web-assets-api" }
 rsi-web-control = { path = "../../crates/rsi/web-control" }
 rsi-service-host = { path = "../../crates/rsi/service-host" }
 rsi-packages = { path = "../../crates/rsi/packages" }
+rsi-extension = { path = "../../crates/rsi-extension/core" }
+rsi-extension-agent = { path = "../../crates/rsi-extension/agent" }
+rsi-session-protocol = { path = "../../crates/rsi/session-protocol" }
+rsi-approval-protocol = { path = "../../crates/rsi-approval/protocol" }
+rsi-user-questions-protocol = { path = "../../crates/rsi-user-questions/protocol" }
+rsi-workspace-protocol = { path = "../../crates/rsi-workspace/protocol" }
+rsi-navigation = { path = "../../crates/rsi/navigation" }
+rsi-navigation-api = { path = "../../crates/rsi/navigation-api" }
+rsi-workspace-default-api = { path = "../../crates/rsi/workspace-default-api" }
+rsi-agent-session-protocol = { path = "../../crates/rsi-agent/session-protocol" }
+rsi-agent-store-protocol = { path = "../../crates/rsi-agent/store-protocol" }
+rsi-agent-turn-protocol = { path = "../../crates/rsi-agent/turn-protocol" }
+rsi-agent-composition-protocol = { path = "../../crates/rsi-agent/composition-protocol" }
+rsi-agent-model-selection = { path = "../../crates/rsi-agent/model-selection" }
+rsi-tools-protocol = { path = "../../crates/rsi-tools/protocol" }
+reqwest.workspace = true
+tokio-tungstenite.workspace = true
+rsi-execution-protocol = { path = "../../crates/rsi-execution/protocol" }
 rsi-host = { path = "../../crates/rsi-host/core" }
 async-trait.workspace = true
 futures-util.workspace = true
 rsi-application = { path = "../../crates/rsi/application" }
 rsi-api-http = { path = "../../crates/rsi-api/http" }
 rsi-api-protocol = { path = "../../crates/rsi-api/protocol" }
+rsi-ai-protocol = { path = "../../crates/rsi-ai/protocol" }
 rsi-meta = { path = "../../crates/rsi-meta/core" }
 serde_json.workspace = true
+serde.workspace = true
 getrandom.workspace = true
 hex.workspace = true
 sha2.workspace = true
@@ -36,6 +56,7 @@ tokio = { workspace = true, features = ["sync", "signal", "process", "time"] }
 tokio-util.workspace = true
 
 [dev-dependencies]
+tempfile.workspace = true
 tokio = { workspace = true, features = ["rt-multi-thread", "time", "test-util"] }
 
 [lints]

@@ -32,6 +32,20 @@ pub fn supported_protocols() -> Vec<rsi_api_protocol::ProtocolDescriptor> {
 pub fn service_addons(paths: HostPaths) -> rsi::Result<rsi::StandardAddonSet> {
     let mut builder = rsi::StandardAddonBuilder::new("rsi.resident.web");
     builder
+        .register_local_contract::<rsi_extension::ExtensionContract>()
+        .map_err(boot)?;
+    builder
+        .register_local_contract::<super::application::ApplicationContract>()
+        .map_err(boot)?;
+    builder
+        .register_linked(
+            "rsi.web.application",
+            env!("CARGO_PKG_VERSION"),
+            UpdateMode::RestartRequired,
+            Arc::new(super::application::Factory(paths.clone())),
+        )
+        .map_err(boot)?;
+    builder
         .register_local_contract::<HttpAssetsContract>()
         .map_err(boot)?;
     builder
@@ -443,11 +457,17 @@ impl Manager {
                 context.runtime().execution().clone(),
             ))
         });
+        let upstream = self
+            .context
+            .lookup_local::<super::application::ApplicationContract>()
+            .filter(|application| tickets.is_some() && Some(&application.source) == source.as_ref())
+            .map(|application| application.upstream.clone());
         let fiber = context
             .apply(
                 linked(
                     "rsi.web.listener",
                     Arc::new(ListenerFactory {
+                        upstream,
                         directory,
                         _package: package.clone(),
                         tickets: tickets.clone(),
@@ -591,7 +611,7 @@ impl Manager {
         }
     }
 }
-fn linked(id: &str, factory: Arc<dyn PluginFactory>) -> ResolvedFactory {
+pub(super) fn linked(id: &str, factory: Arc<dyn PluginFactory>) -> ResolvedFactory {
     ResolvedFactory::linked(
         id,
         env!("CARGO_PKG_VERSION"),
@@ -601,6 +621,7 @@ fn linked(id: &str, factory: Arc<dyn PluginFactory>) -> ResolvedFactory {
 }
 #[derive(Debug)]
 struct ListenerFactory {
+    upstream: Option<Arc<rsi_api_http::ApplicationRoutes>>,
     directory: Option<PathBuf>,
     _package: Option<Arc<rsi_packages::PackageLease>>,
     tickets: Option<Arc<crate::tickets::Tickets>>,
@@ -649,6 +670,9 @@ impl PluginFactory for ListenerFactory {
         let (factory, config): (Arc<dyn PluginFactory>, _) = match &self.tickets {
             Some(tickets) => {
                 let mut factory = rsi_api_http::LocalBrowserHttpFactory::new(tickets.clone());
+                if let Some(upstream) = &self.upstream {
+                    factory = factory.with_application_upstream(upstream.clone());
+                }
                 if let Some(origin) = &self.frontend_origin {
                     factory = factory.with_frontend_origin(origin.clone());
                 }
@@ -666,7 +690,7 @@ impl PluginFactory for ListenerFactory {
         apply(&context, "rsi.web.http", factory, config).await
     }
 }
-async fn apply(
+pub(super) async fn apply(
     context: &Context,
     id: &str,
     factory: Arc<dyn PluginFactory>,
