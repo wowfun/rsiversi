@@ -8,7 +8,6 @@ use rsi_agent_composition_protocol::{
     ContributionKind, ContributionOutput, ContributionRegistrarContract, ContributionRegistration,
     ContributionResult, DomainDefinition, DomainHandle, DomainRegistrarContract, SessionCommand,
     SessionCommandContext, SessionCommandRegistration, SessionProjection, SessionProjectionContext,
-    ValidatedDomainProposal,
 };
 use rsi_agent_session_protocol::{
     CommandArguments, CommandRevision, ContributionId, DomainIdentity, DomainRequestId,
@@ -87,7 +86,7 @@ impl SessionCommand for Command {
         context: &SessionCommandContext,
         arguments: &CommandArguments,
         cancellation: CancellationToken,
-    ) -> ContributionResult<Vec<ValidatedDomainProposal>> {
+    ) -> ContributionResult<rsi_agent_composition_protocol::SessionCommandOutput> {
         if cancellation.is_cancelled() {
             return Err(ContributionError::Closed);
         }
@@ -143,7 +142,8 @@ impl SessionCommand for Command {
                 .state
                 .propose(view.revision, &state)
                 .map_err(invalid)?,
-        ])
+        ]
+        .into())
     }
 }
 

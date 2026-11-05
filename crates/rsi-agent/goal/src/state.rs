@@ -115,6 +115,8 @@ pub enum RoundSettlement {
 pub enum RoundOutcome {
     /// Successful natural model termination.
     Completed,
+    /// Input preparation declined the request.
+    Blocked,
     /// User or controller cancellation.
     Cancelled,
     /// Runtime or provider failure.
@@ -131,6 +133,7 @@ impl From<&TurnOutcome> for RoundOutcome {
     fn from(outcome: &TurnOutcome) -> Self {
         match outcome {
             TurnOutcome::Completed => Self::Completed,
+            TurnOutcome::Blocked => Self::Blocked,
             TurnOutcome::Cancelled => Self::Cancelled,
             TurnOutcome::Failed { .. } => Self::Failed,
             TurnOutcome::PartialFailed { .. } => Self::PartialFailed,

@@ -133,7 +133,7 @@ async fn create(draft: &mut AgentSessionDraft) {
         panic!("new command");
     };
     let mutation = prepared.execute(CancellationToken::new()).await.unwrap();
-    draft.apply_command(mutation).unwrap();
+    draft.apply_command(mutation).finish().await.unwrap();
 }
 
 async fn view(draft: &AgentSessionDraft) -> serde_json::Value {
@@ -221,6 +221,8 @@ async fn reserve_callback_rejects_any_input_differing_from_its_proposed_allocati
     goal.reserve().unwrap();
     let expected = goal.reservation.as_ref().unwrap().input(&goal.id);
     let mut context = rsi_agent_composition_protocol::SessionCommandContext {
+        outcome: None,
+        history: None,
         request_id: goal
             .reservation
             .as_ref()
@@ -383,6 +385,8 @@ async fn report_contribution_authenticates_tool_name_identity_arguments_and_sour
         })
         .unwrap();
     let context = rsi_agent_composition_protocol::SessionCommandContext {
+        outcome: None,
+        history: None,
         request_id: reservation.request_id.clone().unwrap(),
         continuation_input: Some(reservation.input(&goal.id)),
         header: Arc::new(draft.header().clone()),
@@ -405,7 +409,9 @@ async fn report_contribution_authenticates_tool_name_identity_arguments_and_sour
         )
         .await
         .unwrap();
-    draft.apply_domain_initial_batch(&proposals).unwrap();
+    draft
+        .apply_domain_initial_batch(&proposals.domains)
+        .unwrap();
     let domains = draft
         .baseline()
         .initial_states()

@@ -7,11 +7,11 @@ use rsi_agent_composition_protocol::{
     ContributionError, ContributionKind, ContributionRegistrarContract, ContributionRegistration,
     ContributionResult, DomainDefinition, DomainForkPolicy, DomainHandle, DomainRegistrarContract,
     SessionCommand, SessionCommandContext, SessionCommandRegistration, SessionProjection,
-    SessionProjectionContext, ValidatedDomainProposal,
+    SessionProjectionContext,
 };
 use rsi_agent_session_protocol::{
-    CommandArguments, ContributionId, DomainIdentity, DomainStateView, ModelSelection,
-    ProjectionValue, SessionCommandDescriptor, SessionHeader,
+    CommandArguments, ContributionId, DomainIdentity, ModelSelection, ProjectionValue,
+    SessionCommandDescriptor, SessionHeader,
 };
 use rsi_ai_protocol::{LanguageCall, LanguageCallContract};
 use rsi_meta::{ActivationPlan, ConfigValue, MetaError, PluginFactory, PreparedActivation};
@@ -32,24 +32,24 @@ pub const VIEW: &str = "rsi.model-selection.view";
 ///
 /// # Errors
 /// Rejects invalid selections, malformed domain state and unknown domain versions.
-pub fn resolve_selection(
+pub fn resolve_selection<'a>(
     header: &SessionHeader,
-    domains: &[DomainStateView],
+    domains: impl IntoIterator<Item = &'a rsi_agent_session_protocol::DomainSnapshot>,
     explicit: Option<&ModelSelection>,
 ) -> ContributionResult<ModelSelection> {
     if let Some(selection) = explicit {
         selection.validate().map_err(invalid)?;
         return Ok(selection.clone());
     }
-    if let Some(view) = domains
-        .iter()
-        .find(|view| view.snapshot.identity().id() == DOMAIN)
+    if let Some(snapshot) = domains
+        .into_iter()
+        .find(|snapshot| snapshot.identity().id() == DOMAIN)
     {
-        if view.snapshot.identity().version() != 1 {
+        if snapshot.identity().version() != 1 {
             return Err(invalid("unsupported model selection domain version"));
         }
         let selection: Option<ModelSelection> =
-            serde_json::from_value(view.snapshot.state().value().clone()).map_err(invalid)?;
+            serde::Deserialize::deserialize(snapshot.state().value()).map_err(invalid)?;
         if let Some(selection) = selection {
             selection.validate().map_err(invalid)?;
             return Ok(selection);
@@ -83,7 +83,7 @@ impl SessionCommand for Selection {
         context: &SessionCommandContext,
         arguments: &CommandArguments,
         cancellation: CancellationToken,
-    ) -> ContributionResult<Vec<ValidatedDomainProposal>> {
+    ) -> ContributionResult<rsi_agent_composition_protocol::SessionCommandOutput> {
         if cancellation.is_cancelled() {
             return Err(ContributionError::Closed);
         }
@@ -109,7 +109,8 @@ impl SessionCommand for Selection {
             self.state
                 .propose(view.revision, &Some(selection))
                 .map_err(invalid)?,
-        ])
+        ]
+        .into())
     }
 }
 #[async_trait]
@@ -124,7 +125,7 @@ impl SessionProjection for Selection {
         }
         ProjectionValue::encode(&resolve_selection(
             context.header(),
-            context.domains(),
+            context.domains().iter().map(|view| &view.snapshot),
             None,
         )?)
         .map_err(invalid)

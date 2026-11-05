@@ -136,6 +136,7 @@ fn draft_and_durable_creation_allocate_nothing_until_reservation() {
 #[test]
 fn failure_overrides_a_model_completion_claim_and_retains_its_source() {
     for outcome in [
+        RoundOutcome::Blocked,
         RoundOutcome::Failed,
         RoundOutcome::PartialFailed,
         RoundOutcome::Interrupted,
@@ -164,6 +165,7 @@ fn report_verification_checks_source_settlement_for_every_disposition() {
         for outcome in [
             RoundOutcome::Completed,
             RoundOutcome::Cancelled,
+            RoundOutcome::Blocked,
             RoundOutcome::Failed,
             RoundOutcome::PartialFailed,
             RoundOutcome::Interrupted,

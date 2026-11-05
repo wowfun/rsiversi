@@ -4979,6 +4979,20 @@ dependencies = [
 ]
 
 [[package]]
+name = "rsi-agent-context-input"
+version = "0.0.1"
+dependencies = [
+ "async-trait",
+ "rsi-agent-composition-protocol",
+ "rsi-agent-session-protocol",
+ "rsi-media-protocol",
+ "rsi-meta",
+ "serde",
+ "serde_json",
+ "tokio-util",
+]
+
+[[package]]
 name = "rsi-agent-executor"
 version = "0.0.1"
 dependencies = [

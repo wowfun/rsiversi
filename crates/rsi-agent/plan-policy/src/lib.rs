@@ -9,7 +9,7 @@ use rsi_agent_composition_protocol::{
     ContributionKind, ContributionOutput, ContributionRegistrarContract, ContributionRegistration,
     ContributionResult, DomainDefinition, DomainHandle, DomainRegistrarContract, SessionCommand,
     SessionCommandContext, SessionCommandRegistration, SessionProjection, SessionProjectionContext,
-    ToolPolicy, ToolPolicyDecision, ToolPolicyRequest, ValidatedDomainProposal,
+    ToolPolicy, ToolPolicyDecision, ToolPolicyRequest,
 };
 use rsi_agent_session_protocol::{
     CommandArguments, ContributionId, DomainIdentity, DomainStateView, ProjectionValue,
@@ -123,7 +123,7 @@ impl SessionCommand for PlanPolicy {
         context: &SessionCommandContext,
         arguments: &CommandArguments,
         cancellation: CancellationToken,
-    ) -> ContributionResult<Vec<ValidatedDomainProposal>> {
+    ) -> ContributionResult<rsi_agent_composition_protocol::SessionCommandOutput> {
         if cancellation.is_cancelled() {
             return Err(ContributionError::Closed);
         }
@@ -142,7 +142,8 @@ impl SessionCommand for PlanPolicy {
             self.state
                 .propose(view.revision, &enabled)
                 .map_err(invalid)?,
-        ])
+        ]
+        .into())
     }
 }
 #[async_trait]

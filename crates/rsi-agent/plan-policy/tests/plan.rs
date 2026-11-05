@@ -172,7 +172,7 @@ impl Fixture {
                 "fixture.composition",
                 AgentCompositionFactory::new(presets, contributions, ScopeRoot::new(16).unwrap()),
             ),
-            linked("fixture.kernel", rsi_agent_kernel::KernelFactory),
+            linked("fixture.kernel", rsi_agent_kernel::KernelFactory::default()),
         ] {
             runtime
                 .root()
@@ -237,7 +237,7 @@ async fn command(draft: &mut AgentSessionDraft, id: &str, argument: &str) {
         panic!("new command")
     };
     let mutation = prepared.execute(CancellationToken::new()).await.unwrap();
-    draft.apply_command(mutation).unwrap();
+    draft.apply_command(mutation).finish().await.unwrap();
 }
 async fn view(draft: &AgentSessionDraft) -> serde_json::Value {
     let rsi_agent_session_protocol::CommandRevision::Draft { revision } = draft.revision() else {
@@ -342,7 +342,7 @@ async fn check_actual_draft(review_tools: bool) {
         .unwrap()
         .unwrap();
     let context = kernel
-        .contribution_context(&claim, CancellationToken::new())
+        .contribution_context(&claim, Vec::new(), CancellationToken::new())
         .await
         .unwrap();
     assert_eq!(context.domains[0].snapshot.state().value(), &true);
@@ -381,7 +381,7 @@ async fn check_actual_draft(review_tools: bool) {
         .await
         .unwrap();
     let current = kernel
-        .contribution_context(&claim, CancellationToken::new())
+        .contribution_context(&claim, Vec::new(), CancellationToken::new())
         .await
         .unwrap();
     let identity =
@@ -404,7 +404,7 @@ async fn check_actual_draft(review_tools: bool) {
     );
     assert_eq!(
         store
-            .read_domain_states(fixture.header().session_id(), None)
+            .read_domain_states(fixture.header().session_id(), None, None)
             .await
             .unwrap()
             .states[0]

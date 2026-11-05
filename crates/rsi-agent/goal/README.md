@@ -30,7 +30,7 @@ text. It cannot create a Goal, increase its cap or arm a driver. The
 call must be the sole, final Tool call after the model's work and checks. A post-Tool
 contribution checks the exact named Tool intent/result before recording a report
 with its source Turn. Completion is a claim until that Turn is canonically
-Completed. Failed, PartialFailed, Interrupted and MaxTokens take precedence
+Completed. Blocked, Failed, PartialFailed, Interrupted and MaxTokens take precedence
 and block; Cancelled pauses. A failed Turn retains its unverified completion
 claim. Pause stops future scheduling; an already committed completion report
 can still settle Completed when its in-flight Turn completes successfully.

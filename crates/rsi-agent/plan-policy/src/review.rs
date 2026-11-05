@@ -172,6 +172,7 @@ impl ToolSettlementContributor for PlanPolicy {
                 last_review: None,
             };
             return Ok(ToolSettlement {
+                publications: vec![],
                 require_uncancelled_turn: false,
                 domains: vec![
                     self.review
@@ -210,6 +211,7 @@ impl ToolSettlementContributor for PlanPolicy {
             );
         }
         Ok(ToolSettlement {
+            publications: vec![],
             require_uncancelled_turn: true,
             domains,
             conclusion: (receipt.decision == Decision::Decline)
