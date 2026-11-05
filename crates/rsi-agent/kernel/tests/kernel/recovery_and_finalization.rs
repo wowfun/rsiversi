@@ -96,8 +96,14 @@ impl rsi_agent_kernel::ApplicationReceiptReader for Receipts {
         assert_eq!(receipt.effect.as_str(), "effect");
         assert_eq!(receipt.identity.call_id(), "call");
         Ok((receipt.session.as_str() == "settled").then(|| {
-            rsi_tools_protocol::ToolResult::new(serde_json::json!("original result"), vec![], false)
-                .unwrap()
+            let mut result = rsi_tools_protocol::ToolResult::new(
+                serde_json::json!("original result"),
+                vec![],
+                false,
+            )
+            .unwrap();
+            result.concludes_turn = true;
+            result
         }))
     }
 }
@@ -183,6 +189,7 @@ async fn cold_application_receipt_repairs_only_a_started_bound_result_and_never_
         if session == "settled" {
             assert_eq!(results.len(), 1);
             assert_eq!(results[0].value, "original result");
+            assert!(results[0].concludes_turn);
         } else {
             assert!(results.is_empty());
         }

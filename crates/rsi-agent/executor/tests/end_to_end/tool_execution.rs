@@ -242,20 +242,7 @@ async fn native_and_application_policies_share_one_withdrawable_human_review() {
             .await
             .unwrap()
             .facts;
-        assert_eq!(
-            facts
-                .iter()
-                .filter(|f| matches!(f.body(), SessionFactBody::ToolIntent { .. }))
-                .count(),
-            usize::from(allowed)
-        );
-        assert_eq!(
-            facts
-                .iter()
-                .filter(|f| matches!(f.body(), SessionFactBody::ToolStarted { .. }))
-                .count(),
-            usize::from(allowed)
-        );
+        assert_tool_admissions(&facts, usize::from(allowed));
         let refusal = facts.iter().find_map(|f| match f.body() {
             SessionFactBody::ToolRejected { rejection, .. } => Some(rejection),
             _ => None,
@@ -300,6 +287,17 @@ async fn native_and_application_policies_share_one_withdrawable_human_review() {
     }
 }
 
+fn assert_tool_admissions(facts: &[SessionFact], expected: usize) {
+    let intents = facts
+        .iter()
+        .filter(|f| matches!(f.body(), SessionFactBody::ToolIntent { .. }));
+    let starts = facts
+        .iter()
+        .filter(|f| matches!(f.body(), SessionFactBody::ToolStarted { .. }));
+    assert_eq!(intents.count(), expected);
+    assert_eq!(starts.count(), expected);
+}
+
 #[derive(Debug)]
 pub(super) struct RequestSourceFactory(
     pub(super) Arc<dyn rsi_agent_composition_protocol::RequestToolSource>,
@@ -335,6 +333,60 @@ fn register_native_echo(
             timeout: rsi_tools_protocol::ToolTimeoutPolicy::Execution { timeout_ms: 2_000 },
         })
         .unwrap()
+}
+
+#[tokio::test]
+async fn application_tool_conclusion_waits_for_siblings_and_their_pending_inputs() {
+    for defer in [false, true] {
+        let stack = BaseStack::activate_with_approval(ApprovalDecision::Deny).await;
+        let calls = Arc::new(AtomicUsize::new(0));
+        let source = Arc::new(RequestEcho::new(&stack, calls.clone()));
+        let worker = activate_fixture(
+            &stack.runtime,
+            "test.request-tools",
+            "app",
+            Arc::new(RequestSourceFactory(source.clone())),
+        )
+        .await;
+        let model = echo_then_answer(&stack);
+        let second = json!({"defer":defer}).to_string();
+        model.outcomes.lock().unwrap()[0] = StartOutcome::Stream(tool_calls_script(&[
+            ("first", "echo", r#"{"finish":true,"defer":false}"#),
+            ("second", "echo", &second),
+        ]));
+        let provider = stack
+            .activate_language("test.language", model.clone())
+            .await;
+        let executor = stack.activate_executor("executor-tool-conclusion").await;
+        let (submitted, outcome) = stack.submit_and_wait("finish after both calls").await;
+        assert_eq!(outcome, TurnOutcome::Completed);
+        assert_eq!(calls.load(Ordering::SeqCst), 2);
+        assert_eq!(model.requests.lock().unwrap().len(), 1 + usize::from(defer));
+        assert_eq!(
+            source.captures.load(Ordering::SeqCst),
+            1 + usize::from(defer)
+        );
+        let facts = stack
+            .store
+            .read_facts(&submitted.session_id, 0, 64, FACT_PAGE_BYTES)
+            .await
+            .unwrap()
+            .facts;
+        assert_tool_admissions(&facts, 2);
+        let markers: Vec<_> = facts
+            .iter()
+            .filter_map(|f| match f.body() {
+                SessionFactBody::ToolResult { result, .. } => Some(result.concludes_turn),
+                _ => None,
+            })
+            .collect();
+        assert_eq!(markers, [true, false]);
+        if defer {
+            assert_entered_tool_contexts(&facts, &submitted.session_id);
+        }
+        assert!(worker.dispose().await.is_clean());
+        stack.dispose(provider, executor).await;
+    }
 }
 
 #[tokio::test]
@@ -668,6 +720,10 @@ impl ToolExecutor for AuthenticatedEcho {
         assert!(caller.tool_effect_id().is_some());
         assert!(caller.source_selection().is_some());
         let mut result = self.0.execute(arguments, execution).await?;
+        result.concludes_turn = result.value.get("finish") == Some(&Value::Bool(true));
+        if result.value.get("defer") == Some(&Value::Bool(false)) {
+            return Ok(result);
+        }
         result
             .additional_contexts
             .push(rsi_tools_protocol::ToolContextMessage {

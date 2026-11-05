@@ -676,6 +676,9 @@ pub struct ToolResult {
     pub content: Vec<ToolContent>,
     /// Whether this is a tool-owned error result.
     pub is_error: bool,
+    /// A successful body waived the usual model follow-up for this batch.
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub concludes_turn: bool,
     /// Truthful process confinement selected through [`ToolExecution::confine`].
     pub enforcement: Vec<EnforcementStamp>,
     /// Ordered plugin context for the next model Step, independent of visible tool output.
@@ -747,6 +750,9 @@ pub struct ToolOutput {
     pub content: Vec<ToolContent>,
     /// Whether the tool reported failure.
     pub is_error: bool,
+    /// Whether this successful result waives the usual model follow-up.
+    #[serde(default)]
+    pub concludes_turn: bool,
     /// Ordered deferred inputs authored by tool hooks.
     #[serde(default)]
     pub additional_contexts: Vec<ToolContextMessage>,
@@ -758,6 +764,7 @@ impl ToolOutput {
             value: self.value,
             content: self.content,
             is_error: self.is_error,
+            concludes_turn: self.concludes_turn,
             enforcement: vec![],
             additional_contexts: self.additional_contexts,
         };
@@ -777,6 +784,8 @@ impl<'de> Deserialize<'de> for ToolResult {
             value: Value,
             content: Vec<ToolContent>,
             is_error: bool,
+            #[serde(default)]
+            concludes_turn: bool,
             enforcement: Vec<EnforcementStamp>,
             #[serde(default)]
             additional_contexts: Vec<ToolContextMessage>,
@@ -787,6 +796,7 @@ impl<'de> Deserialize<'de> for ToolResult {
             value: wire.value,
             content: wire.content,
             is_error: wire.is_error,
+            concludes_turn: wire.concludes_turn,
             enforcement: wire.enforcement,
             additional_contexts: wire.additional_contexts,
         };
@@ -804,6 +814,7 @@ impl ToolResult {
             value,
             content,
             is_error,
+            concludes_turn: false,
             enforcement: Vec::new(),
             additional_contexts: Vec::new(),
         };
@@ -813,6 +824,11 @@ impl ToolResult {
 
     /// Revalidates a result decoded from a durable boundary.
     pub fn validate(&self) -> Result<()> {
+        if self.is_error && self.concludes_turn {
+            return Err(ToolError::InvalidInput(
+                "an error result cannot conclude a Turn".into(),
+            ));
+        }
         ToolContextMessage::validate_batch(&self.additional_contexts)?;
         validate_json("tool canonical result", &self.value)?;
         if self.content.len() > MAXIMUM_TOOL_CONTENT_ITEMS {

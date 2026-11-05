@@ -154,7 +154,12 @@ provider retry series, one stage captures durable Fact/control watermarks and
 domain states, invokes callbacks in catalog order, validates the complete
 output, and commits it before provider preparation. An admitted provider retry reuses those entered inputs and the original request. A post-tool stage receives one
 source-ordered settled batch after every successful result publication is
-durable. Tool policy stages inspect the exact prepared identity before approval:
+durable. If a successful result waives the model follow-up, Executor first
+settles all sibling calls and the post-tool stage. Pending Tool context or
+steering still runs in this Turn. An idle batch completes without capturing
+another request or calling the model. Structured output still requires the
+frozen contract's own result.
+Tool policy stages inspect the exact prepared identity before approval:
 Abstain preserves constraints, RequireApproval adds one, and Deny wins before
 any Tool intent/start and persists a charged ToolRejected.
 

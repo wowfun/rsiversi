@@ -30,6 +30,8 @@ enum Reply {
     Rendered {
         content: Vec<ToolContent>,
         additional_contexts: Vec<ToolContextMessage>,
+        #[serde(default)]
+        concludes_turn: bool,
     },
     Settled {
         result: ToolOutput,
@@ -272,9 +274,11 @@ impl View {
                 Reply::Rendered {
                     content,
                     additional_contexts,
+                    concludes_turn,
                 } => {
                     original.content = content;
                     original.additional_contexts = additional_contexts;
+                    original.concludes_turn = concludes_turn;
                     Ok(original)
                 }
                 Reply::Settled { result } => settled(result, declaration),
@@ -384,7 +388,13 @@ mod tests {
             finish.send(()).unwrap();
             let original = peer.next().await.unwrap().unwrap().into_text().unwrap();
             assert!(original.contains("9007199254740993"));
-            send(&mut peer,&json!({"state":"rendered","content":[{"type":"text","text":"edited"}],"additional_contexts":[]})).await.unwrap();
+            send(
+                &mut peer,
+                &json!({"state":"rendered","content":[{"type":"text","text":"edited"}],
+                "additional_contexts":[],"concludes_turn":true}),
+            )
+            .await
+            .unwrap();
         };
         let client = async {
             let socket = view.native_socket().await.unwrap();
@@ -401,6 +411,7 @@ mod tests {
                 .await
                 .unwrap();
             assert_eq!(output.value, 9_007_199_254_740_993_u64);
+            assert!(output.concludes_turn);
             assert_eq!(
                 output.content,
                 [ToolContent::Text {

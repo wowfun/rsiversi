@@ -85,7 +85,7 @@ impl Driver {
             None => true,
         };
         drop(preparation_guard);
-        self.run_observed_claim(claim.clone(), stop).await;
+        self.run_observed_claim(&claim, stop).await;
         // Only observation ownership is dropped; Tools retains uncertain effects.
         let unconfirmed = self
             .active_tools
@@ -144,15 +144,15 @@ impl Driver {
         false
     }
 
-    async fn run_observed_claim(&self, claim: TurnClaim, stop: &CancellationToken) {
-        let Some((job_scope, _job_status)) = self.prepare_jobs(&claim).await else {
+    async fn run_observed_claim(&self, claim: &TurnClaim, stop: &CancellationToken) {
+        let Some((job_scope, _job_status)) = self.prepare_jobs(claim).await else {
             return;
         };
         let job_scope = Some(job_scope);
-        let composition = match self.turns.composition(&claim) {
+        let composition = match self.turns.composition(claim) {
             Ok(composition) => composition,
             Err(error) => {
-                self.finish_context_error(&claim, job_scope.as_ref(), error.to_string())
+                self.finish_context_error(claim, job_scope.as_ref(), error.to_string())
                     .await;
                 return;
             }
@@ -169,7 +169,7 @@ impl Driver {
             Err(error) => {
                 let _ignored = self
                     .finish(
-                        &claim,
+                        claim,
                         job_scope.as_ref(),
                         failure_outcome(
                             if matches!(error, rsi_agent_context::ContextError::Capacity) {
@@ -187,7 +187,7 @@ impl Driver {
         let drive = select_drive_or_stop(
             &claim_stop,
             self.drive(
-                &claim,
+                claim,
                 &composition,
                 job_scope.as_ref(),
                 &claim_stop,
@@ -195,7 +195,7 @@ impl Driver {
             ),
         )
         .await;
-        self.settle_drive(&claim, &composition, job_scope.as_ref(), drive, stop)
+        self.settle_drive(claim, &composition, job_scope.as_ref(), drive, stop)
             .await;
     }
 
@@ -285,7 +285,8 @@ impl Driver {
                     .into(),
             }));
         }
-        self.resume_effects(claim, composition, fold, state.effects, stop)
+        let recovered_waiver = self
+            .resume_effects(claim, composition, fold, state.effects, stop)
             .await?;
 
         if let Some((model, request)) = state.image {
@@ -311,14 +312,19 @@ impl Driver {
             fold,
             model,
             turn_policy,
-            state.conversation_source.is_none(),
+            match state.request {
+                ModelRequest::Initial => ModelRequest::Initial,
+                _ if !state.pending_model_calls.is_empty() => ModelRequest::ToolFollowup,
+                _ if recovered_waiver => ModelRequest::WaivedToolFollowup,
+                request => request,
+            },
             stop,
         )
         .await
     }
 
     #[allow(clippy::too_many_arguments, clippy::too_many_lines)] // Keep one visible model/Tool durability loop over the exact claim authorities.
-    pub(super) async fn run_language(
+    async fn run_language(
         &self,
         claim: &TurnClaim,
         composition: &AgentCompositionPin,
@@ -326,7 +332,7 @@ impl Driver {
         fold: &mut ModelContextState,
         explicit_selection: Option<rsi_agent_session_protocol::ModelSelection>,
         turn_policy: ResolvedTurnPolicy,
-        mut initial_request: bool,
+        mut request: ModelRequest,
         stop: &CancellationToken,
     ) -> std::result::Result<(), DriveFailure> {
         let mut retry_attempt = 0_u8;
@@ -353,20 +359,29 @@ impl Driver {
                 self.sync_fold(claim, fold).await?;
             }
             if retry_attempt == 0 {
+                if request == ModelRequest::WaivedToolFollowup
+                    && !fold.has_pending_tool_inputs()
+                    && fold
+                        .claimed_inputs(claim.turn_id())
+                        .map_err(fatal)?
+                        .is_empty()
+                {
+                    return Err(DriveFailure::Turn(TurnOutcome::Completed));
+                }
                 (request_composition, selection, selected_tools) = self
                     .before_step(
                         claim,
                         composition,
                         fold,
                         explicit_selection.as_ref(),
-                        initial_request,
+                        request != ModelRequest::ToolFollowup,
                         &cancellation,
                         stop,
                     )
                     .await?;
             }
             let composition = &request_composition;
-            initial_request = false;
+            request = ModelRequest::ToolFollowup;
             let (source_model_effect_id, output) = match self
                 .run_model_attempt(
                     claim,
@@ -516,6 +531,12 @@ impl Driver {
                 stop,
             )
             .await?;
+            if settled.iter().any(|fact| {
+                matches!(fact.body(),
+                SessionFactBody::ToolResult { result, .. } if result.concludes_turn)
+            }) {
+                request = ModelRequest::WaivedToolFollowup;
+            }
         }
     }
 
@@ -526,7 +547,8 @@ impl Driver {
         fold: &mut ModelContextState,
         effects: Vec<ResumeEffect>,
         stop: &CancellationToken,
-    ) -> std::result::Result<(), DriveFailure> {
+    ) -> std::result::Result<bool, DriveFailure> {
+        let mut followup_waived = false;
         for effect in effects {
             match effect {
                 ResumeEffect::Model { started, .. } => {
@@ -552,12 +574,13 @@ impl Driver {
                     started: true,
                     ..
                 } => {
-                    self.recover_tool(claim, composition, fold, intent, stop)
+                    followup_waived |= self
+                        .recover_tool(claim, composition, fold, intent, stop)
                         .await?;
                 }
             }
         }
-        Ok(())
+        Ok(followup_waived)
     }
 
     pub(super) async fn run_image(
@@ -2000,10 +2023,14 @@ impl Driver {
         fold: &mut ModelContextState,
         intent: Arc<SessionFact>,
         stop: &CancellationToken,
-    ) -> std::result::Result<(), DriveFailure> {
-        let SessionFactBody::ToolIntent { identity, .. } = intent.body() else {
+    ) -> std::result::Result<bool, DriveFailure> {
+        let SessionFactBody::ToolIntent {
+            identity, origin, ..
+        } = intent.body()
+        else {
             return Err(fatal("retained settlement lacks a ToolIntent"));
         };
+        let model_call = matches!(origin, rsi_agent_session_protocol::ToolOrigin::Model { .. });
         let tools = composition.tools();
         self.track_tool(claim, composition.clone(), identity.clone());
         let cancellation = self.turns.cancellation(claim).map_err(fatal)?;
@@ -2018,9 +2045,10 @@ impl Driver {
         }
         match retained.map_err(|error| tool_failure(&error))? {
             RetainedToolResult::Returned(result) => {
+                let followup_waived = model_call && result.concludes_turn;
                 self.publish_tool_result(claim, composition, fold, intent, result)
                     .await?;
-                Ok(())
+                Ok(followup_waived)
             }
             RetainedToolResult::Failed(failure) => {
                 let outcome = match failure.kind {

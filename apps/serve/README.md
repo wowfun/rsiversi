@@ -77,7 +77,7 @@ All other preset names retain precedence and delegated Sessions still obey
 their tool allowlist.
 
 An application configured with `tools = true` can advertise a separate private
-loopback listener in its opening reply. Tool protocol 10 owns capture, input
+loopback listener in its opening reply. Tool protocol 11 owns capture, input
 preparation, start, outcome, cancellation and view release. Preparation borrows
 the captured claims and retains the same view even without Tools. Local Turns
 wait for this process's opening handshake when it owns input preparation. A

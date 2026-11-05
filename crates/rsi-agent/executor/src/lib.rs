@@ -362,6 +362,14 @@ struct ImageStreamContext<'a> {
     combined: CombinedCancellation,
 }
 
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+enum ModelRequest {
+    #[default]
+    Initial,
+    ToolFollowup,
+    WaivedToolFollowup,
+}
+
 #[derive(Debug, Default)]
 struct ScannedTurn {
     model: Option<ModelRef>,
@@ -373,6 +381,7 @@ struct ScannedTurn {
     conversation_source: Option<EffectId>,
     pending_model_calls: BTreeMap<u32, (String, bool)>,
     concluded: bool,
+    request: ModelRequest,
     effects: Vec<ResumeEffect>,
     turn_policy: Option<ResolvedTurnPolicy>,
 }
@@ -457,6 +466,7 @@ fn scan_turn(
                     rsi_agent_session_protocol::ModelPurpose::Conversation
                 ) {
                     state.conversation_source = Some(effect_id.clone());
+                    state.request = ModelRequest::ToolFollowup;
                     state.pending_model_calls.clear();
                 }
                 state.completed_model_without_successor = false;
@@ -596,6 +606,7 @@ fn scan_turn(
                 effect_id,
                 identity,
                 conclusion,
+                result,
                 ..
             } if turn_id == claim.turn_id() => {
                 let Some(index) = state.effects.iter().position(
@@ -603,8 +614,16 @@ fn scan_turn(
                 ) else {
                     return Err("Tool result lacks exact start");
                 };
-                state.effects.remove(index);
+                let effect = state.effects.remove(index);
                 state.concluded |= conclusion.is_some();
+                if result.concludes_turn
+                    && let ResumeEffect::Tool { intent, .. } = effect
+                    && matches!(intent.body(), SessionFactBody::ToolIntent {
+                        origin: rsi_agent_session_protocol::ToolOrigin::Model { effect_id }, ..
+                    } if Some(effect_id) == state.conversation_source.as_ref())
+                {
+                    state.request = ModelRequest::WaivedToolFollowup;
+                }
             }
             SessionFactBody::TurnTerminal { turn_id, .. } if turn_id == claim.turn_id() => {
                 state.terminal = true;

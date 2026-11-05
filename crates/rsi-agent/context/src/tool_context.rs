@@ -39,6 +39,9 @@ impl Pending {
     pub fn messages(&self) -> Vec<SettledToolContext> {
         self.rows.iter().map(|(row, _)| row.clone()).collect()
     }
+    pub fn is_empty(&self) -> bool {
+        self.rows.is_empty()
+    }
     fn consume(
         &mut self,
         session: &SessionId,

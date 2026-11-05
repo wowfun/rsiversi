@@ -331,6 +331,10 @@ impl ModelContextState {
     pub fn pending_tool_inputs(&self) -> Vec<rsi_agent_session_protocol::SettledToolContext> {
         self.pending.messages()
     }
+    /// Whether a settled Tool supplied input that still needs a model Step.
+    pub fn has_pending_tool_inputs(&self) -> bool {
+        !self.pending.is_empty()
+    }
     /// Builds the next bounded request preserving the pin's complete frozen options.
     pub fn build(
         &self,

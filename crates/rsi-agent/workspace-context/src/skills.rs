@@ -231,6 +231,7 @@ impl ToolExecutor for SkillTool {
                 is_error: false,
                 additional_contexts: vec![],
                 enforcement: Vec::new(),
+                concludes_turn: false,
             }),
             Ok(_) => Err(ToolError::InvalidInput(
                 "skill source returned a catalog for a body read".into(),
@@ -244,6 +245,7 @@ impl ToolExecutor for SkillTool {
                 is_error: true,
                 additional_contexts: vec![],
                 enforcement: Vec::new(),
+                concludes_turn: false,
             }),
         }
     }

@@ -140,6 +140,7 @@ impl ToolExecutor for Executor {
                     is_error: false,
                     additional_contexts: vec![],
                     enforcement: vec![],
+                    concludes_turn: false,
                 }
             }
             Err(error) => ToolResult {
@@ -150,6 +151,7 @@ impl ToolExecutor for Executor {
                 is_error: true,
                 additional_contexts: vec![],
                 enforcement: vec![],
+                concludes_turn: false,
             },
         })
     }

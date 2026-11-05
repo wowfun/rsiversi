@@ -17,6 +17,10 @@ deserialization rather than relying on a later runtime consumer.
 `validate_model_tool_name` exposes the same name admission used by definitions
 and calls so narrower durable authorities do not maintain a second grammar.
 
+A successful Tool result may carry `concludes_turn: true` to waive the
+otherwise expected model follow-up for its batch. The marker travels with the
+retained result, including after receipt recovery. An error result cannot set it.
+
 `bounded_json_fragment_page` owns UTF-8 fragment selection under a 1–16 KiB
 complete presentation budget, including the caller's label and encoded envelope.
 Callers retain exact-result/revision authentication and envelope metadata; the

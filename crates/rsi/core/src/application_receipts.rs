@@ -134,6 +134,18 @@ mod tests {
             read_file(dir.path(), &receipt).unwrap().unwrap().value,
             "once"
         );
+        record["result"]["concludes_turn"] = json!(true);
+        save(&record);
+        assert!(
+            read_file(dir.path(), &receipt)
+                .unwrap()
+                .unwrap()
+                .concludes_turn
+        );
+        let mut invalid = record.clone();
+        invalid["result"]["is_error"] = json!(true);
+        save(&invalid);
+        assert!(read_file(dir.path(), &receipt).is_err());
         for (key, value) in [
             ("session", "other"),
             ("effect", "other"),

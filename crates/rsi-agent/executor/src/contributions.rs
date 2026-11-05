@@ -222,7 +222,7 @@ impl Driver {
         composition: &AgentCompositionPin,
         fold: &mut ModelContextState,
         explicit: Option<&rsi_agent_session_protocol::ModelSelection>,
-        initial_request: bool,
+        needs_input: bool,
         cancellation: &CancellationToken,
         stop: &CancellationToken,
     ) -> std::result::Result<
@@ -285,7 +285,7 @@ impl Driver {
                 Some(&selection),
             )
             .await?;
-        if initial_request && empty {
+        if needs_input && empty {
             return Err(DriveFailure::Turn(TurnOutcome::Completed));
         }
         Ok((composition, selection, tools))
