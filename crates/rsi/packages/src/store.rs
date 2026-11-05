@@ -467,15 +467,29 @@ impl PackageStore {
     fn verify_object(&self, digest: &str) -> Result<(Dir, Manifest)> {
         let mut timing = Timing::start();
         let (directory, manifest) = self.read_object(digest)?;
+        let payloads: BTreeMap<_, _> = manifest
+            .exports
+            .iter()
+            .filter(|(_, export)| export.kind == ExportKind::PayloadTree)
+            .map(|(name, export)| (export.path.as_str(), name.as_str()))
+            .collect();
+        let mut trees = Vec::with_capacity(payloads.len());
         for file in &manifest.files {
-            let input = rsi_files_native_fs::open_relative_file_no_follow(
-                &directory.directory,
-                Path::new("content").join(&file.path).as_path(),
-            )?;
-            verify_file(input, file, None)?;
+            if let Some(&name) = payloads.get(file.path.as_str()) {
+                trees.push((name, file));
+            } else {
+                let input = rsi_files_native_fs::open_relative_file_no_follow(
+                    &directory.directory,
+                    &Path::new("content").join(&file.path),
+                )?;
+                verify_file(input, file, None)?;
+            }
         }
         timing.mark(digest, "content");
-        crate::payload::process(&directory, &manifest, false)?;
+        let mut remaining = crate::payload::MAX_PAYLOAD_ENTRIES;
+        for (name, file) in trees {
+            crate::payload::verify(&directory, name, file, &mut remaining)?;
+        }
         timing.mark(digest, "expanded");
         Ok((directory, manifest))
     }
@@ -567,7 +581,7 @@ impl PackageStore {
             verify_file(source, file, Some(output))?;
             directory.directory.sync_all()?;
         }
-        crate::payload::process(&staging, manifest, true)?;
+        crate::payload::expand(&staging, manifest)?;
         let mut budget = traversal_budget();
         sync_tree(&staging.directory, 0, &mut budget)?;
         drop(staging);

@@ -30,16 +30,16 @@ package has at most 65,536 expanded files plus directories. Archive and expanded
 bytes are both reserved against the store budget. The materialized payload retains
 its complete PackageLease, so selection changes and GC cannot remove a live tree.
 There is no second expansion cache or installation registry.
-Acquisition rechecks archive and expanded file hashes. The admitted header supplies
-the exact names and types for the directory walk. Each declared entry must occur
-once, with its original spelling, and the walk rejects undeclared entries.
-Only Windows excludes its filesystem-owned `.rsi-namespace-pin` guard from that walk.
-Traversal retains only the current ancestor chain (at most 31 directories)
-and reuses its common prefix across files; file order is not a trust assumption.
-Large read-only acquisitions may divide the verified archive into contiguous
-ranges. At most seven additional readers across the process hold their own
-bounded ancestor chain and buffers. Installation writes serially, and every
-reader settles before the complete namespace check or publication of the lease.
+Acquisition streams each archive once to authenticate the manifest digest and
+the ordered file records. It then walks the expanded tree once, matching each
+exact name and type to that header and hashing each file through its retained
+parent directory. A missing, extra, changed or substituted entry fails the
+acquisition. Windows excludes the filesystem-owned `.rsi-namespace-pin` guard
+of each pinned directory. The last live process lease still ends reuse.
+Installation writes in archive order and holds only the current ancestor chain.
+For large acquisitions the directory walk sends bounded batches from retained
+parents to at most seven additional readers across the process. All readers
+settle before the lease is published.
 The `process_extension` export is a format-1 JSON descriptor, bounded to 64 KiB,
 with an immutable payload working directory and at most 64 arguments. Arguments
 are literal strings, the host-issued generation identity, or paths in a named
@@ -87,11 +87,6 @@ signed installation; each manifest must match its name, target and digest in tha
 repository. Durable receipts describe history and cannot authorize new content.
 Explicit local files are recorded with local provenance and never acquire an
 official signature claim. Signature tests use independent fixture keys.
-
-An acquisition authenticates the payload archive against the admitted manifest.
-Its authenticated header supplies each expanded file's exact path, size and
-SHA-256 digest. Verification checks every file through its directory handle
-and enumerates the tree for missing, unexpected or substituted entries.
 
 Installed objects remain immutable. A named profile can retain exact installed
 roots across process retirement. Its roots map manifest digests to package
@@ -181,6 +176,6 @@ When the running process adds another selection, its store can transfer
 already held immutable dependency objects to that selection. Each new lease
 holds its own locks. New object bytes still undergo full verification.
 For an opt-in cold-start measurement, `RSI_PACKAGE_TIMINGS=1` writes Store
-writer-lock wait, manifest and content verification, expanded payload
-verification and process-closure acquisition times to stderr. Records use
+writer-lock wait, manifest and regular content verification, payload verification
+(archive plus expanded tree) and process-closure acquisition times to stderr. Records use
 the immutable object digest and milliseconds.

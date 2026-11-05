@@ -221,6 +221,37 @@ fn a_rewritten_archive_and_matching_expansion_do_not_replace_the_admitted_record
 }
 
 #[test]
+fn acquisition_authenticates_the_exact_header_bytes_even_when_every_file_hash_matches() {
+    let root = tempfile::tempdir().unwrap();
+    let store_root = root.path().join("store");
+    let store = PackageStore::open(&store_root).unwrap();
+    let mut archive = tree(&[("one", b"same")]);
+    let size = u32::from_le_bytes(archive[8..12].try_into().unwrap());
+    archive[8..12].copy_from_slice(&(size + 1).to_le_bytes());
+    archive.insert(12, b' ');
+    store
+        .install(
+            &[source(root.path(), "spaced", &archive)],
+            &[],
+            &[],
+            "portable",
+        )
+        .unwrap();
+    let digest = store.acquire("plugin").unwrap().digest().to_owned();
+    let path = store_root
+        .join("objects")
+        .join(digest)
+        .join("content/payload.rsi");
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt as _;
+        std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o600)).unwrap();
+    }
+    archive[12] = b'\t';
+    std::fs::write(path, archive).unwrap();
+    assert!(matches!(store.acquire("plugin"), Err(Error::Digest)));
+}
+#[test]
 fn arbitrary_file_order_preserves_directory_authority_and_checks_every_file() {
     let root = tempfile::tempdir().unwrap();
     let store = PackageStore::open(&root.path().join("store")).unwrap();
@@ -283,8 +314,10 @@ fn payload_file_count_does_not_reuse_the_small_manifest_limit() {
         use std::os::unix::fs::PermissionsExt as _;
         std::fs::set_permissions(&last, std::fs::Permissions::from_mode(0o600)).unwrap();
     }
-    std::fs::write(last, b"y").unwrap();
+    std::fs::write(&last, b"y").unwrap();
     assert!(matches!(store.acquire("plugin"), Err(Error::Digest)));
+    std::fs::write(last, b"x").unwrap();
+    assert_eq!(store.acquire("plugin").unwrap().digest(), lease.digest());
 }
 
 fn process_source(
