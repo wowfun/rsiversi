@@ -38,7 +38,10 @@ impl MediaBackend for MemoryBackend {
         objects.insert(media.reference.id.clone(), media);
         Ok(())
     }
+}
 
+#[async_trait]
+impl rsi_media_protocol::MediaObjectReader for MemoryBackend {
     async fn get(&self, id: &MediaId) -> Result<StoredMedia> {
         objects_get(&self.objects, id)
     }

@@ -10,50 +10,54 @@ use std::io::Cursor;
 use std::sync::Arc;
 use std::time::Duration;
 
+use async_trait::async_trait;
+use rsi_media_protocol::{
+    ImageImportOptions, MediaBackend, MediaBackendContract, MediaId, StoredMedia,
+};
+use std::sync::atomic::{AtomicUsize, Ordering};
+#[derive(Debug, Default)]
+struct CountWrites(AtomicUsize);
+#[async_trait]
+impl MediaBackend for CountWrites {
+    async fn put(&self, _: StoredMedia) -> rsi_media_protocol::Result<()> {
+        self.0.fetch_add(1, Ordering::SeqCst);
+        Ok(())
+    }
+}
+#[async_trait]
+impl rsi_media_protocol::MediaObjectReader for CountWrites {
+    async fn get(&self, id: &MediaId) -> rsi_media_protocol::Result<StoredMedia> {
+        Err(MediaError::NotFound(id.clone()))
+    }
+}
+#[derive(Debug)]
+struct TestBackend(Arc<CountWrites>);
+#[async_trait]
+impl rsi_meta::PluginFactory for TestBackend {
+    fn prepare(
+        &self,
+        _: &rsi_meta::ConfigValue,
+    ) -> rsi_meta::Result<rsi_meta::PreparedActivation> {
+        Ok(rsi_meta::PreparedActivation::new(Value::Null))
+    }
+    async fn activate(&self, plan: rsi_meta::ActivationPlan) -> rsi_meta::Result<()> {
+        let supply = plan
+            .context()
+            .provide_local::<MediaBackendContract>(self.0.clone())?;
+        plan.defer(
+            "remove test backend",
+            Box::new(move || {
+                Box::pin(async move {
+                    drop(supply);
+                    Ok(())
+                })
+            }),
+        )
+    }
+}
+
 #[tokio::test]
 async fn caller_encoding_limit_and_mime_mismatch_fail_before_backend_publication() {
-    use async_trait::async_trait;
-    use rsi_media_protocol::{
-        ImageImportOptions, MediaBackend, MediaBackendContract, MediaId, StoredMedia,
-    };
-    use std::sync::atomic::{AtomicUsize, Ordering};
-    #[derive(Debug, Default)]
-    struct CountWrites(AtomicUsize);
-    #[async_trait]
-    impl MediaBackend for CountWrites {
-        async fn put(&self, _: StoredMedia) -> rsi_media_protocol::Result<()> {
-            self.0.fetch_add(1, Ordering::SeqCst);
-            Ok(())
-        }
-        async fn get(&self, id: &MediaId) -> rsi_media_protocol::Result<StoredMedia> {
-            Err(MediaError::NotFound(id.clone()))
-        }
-    }
-    #[derive(Debug)]
-    struct TestBackend(Arc<CountWrites>);
-    #[async_trait]
-    impl rsi_meta::PluginFactory for TestBackend {
-        fn prepare(
-            &self,
-            _: &rsi_meta::ConfigValue,
-        ) -> rsi_meta::Result<rsi_meta::PreparedActivation> {
-            Ok(rsi_meta::PreparedActivation::new(Value::Null))
-        }
-        async fn activate(&self, plan: rsi_meta::ActivationPlan) -> rsi_meta::Result<()> {
-            let supply = plan
-                .context()
-                .provide_local::<MediaBackendContract>(self.0.clone())?;
-            plan.defer(
-                "remove test backend",
-                Box::new(move || {
-                    Box::pin(async move {
-                        drop(supply);
-                        Ok(())
-                    })
-                }),
-            )
-        }
-    }
     let runtime = Runtime::default();
     let backend = Arc::new(CountWrites::default());
     let supply = runtime

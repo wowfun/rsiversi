@@ -7,6 +7,11 @@ the injected backend to publish before returning a reference. Canonical image
 bytes must fit the same 32 MiB bound as `MediaRef` and AI image descriptors;
 an oversized canonical body is rejected before backend publication.
 
+Both reference and descriptor reads first consult the durable backend. A missing
+object can be supplied by the currently mounted `PublishedImagesContract`.
+Corruption, I/O failures and admission pressure propagate from the owning
+reader. Its verified encoded bytes and MIME type flow directly to the caller.
+
 Codec work runs on Tokio's blocking pool. Cancellation may stop waiting but
 cannot preempt an already-running safe-Rust codec call; no durable publication
 occurs until canonicalization completes. A configured generation-local

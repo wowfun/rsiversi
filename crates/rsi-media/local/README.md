@@ -1,5 +1,31 @@
 # rsi-media-local
 
+`LocalAttachmentReaderFactory` is an ordinary optional plugin configured with an
+absolute `root`. It creates the namespace directory when absent, opens one
+read-only `LocalAttachmentReader`, and provides `FileReadContract` and
+`PublishedImagesContract`. Uploaders publish
+into that same namespace; the reader never republishes objects or repairs their
+permissions. Consumers resolve it when admitting a file or preparing a model call.
+
+Normalized images occupy `objects/<first two digest characters>/<digest>` as
+exact raster bytes. The publisher owns image admission and normalization. The
+reader uses its retained directory and worker slot to open a regular file,
+charge its bounded allocation, verify SHA-256, and inspect encoded type and
+dimensions. Borrowed slices retain the read charge through their last owner.
+
+`LocalAttachmentReader` also reads a verbatim file namespace. An
+object is `files/<first two digest characters>/<digest>/<portable filename>`
+below its explicit root. Publishers commit immutable exact bytes before handing
+out a `FileRef`; the reader neither publishes nor repairs objects. This layout
+also permits a publisher to hard-link filename aliases to a shared digest object.
+Verification opens relative to a retained directory without following links,
+checks the exact length and streams SHA-256 with a 64 KiB buffer on one blocking
+worker. Concurrent reads wait for a bounded worker slot; dropping a waiting
+verification signals its running worker to stop between chunks. Path resolution
+performs no I/O. It does not promise access from another execution environment.
+This read-only namespace does not require the private-writer DACL or exclusive
+namespace pin used by the image publisher below, and never changes permissions.
+
 Factory preparation preserves malformed configuration as `MetaError::InvalidInput`
 and reports unavailable native capability as `MetaError::Activation`, the Meta
 category for plugin preparation and activation failure.

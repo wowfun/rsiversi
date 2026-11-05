@@ -126,11 +126,29 @@ impl MediaConfig {
 
 #[derive(Debug)]
 struct Service {
+    context: rsi_meta::Context,
     config: MediaConfig,
     backend: Arc<dyn MediaBackend>,
     import_admission: Arc<Semaphore>,
     source_admission: Arc<Semaphore>,
     decode_admission: Arc<Semaphore>,
+}
+
+impl Service {
+    async fn get(&self, id: &MediaId) -> Result<StoredMedia> {
+        match self.backend.get(id).await {
+            Err(error @ MediaError::NotFound(_)) => {
+                match self
+                    .context
+                    .lookup_local::<rsi_media_protocol::PublishedImagesContract>()
+                {
+                    Some(publisher) => publisher.get(id).await,
+                    None => Err(error),
+                }
+            }
+            result => result,
+        }
+    }
 }
 
 #[async_trait]
@@ -193,7 +211,7 @@ impl Media for Service {
 
     async fn read(&self, reference: &MediaRef) -> Result<StoredMedia> {
         reference.validate()?;
-        let stored = self.backend.get(&reference.id).await?;
+        let stored = self.get(&reference.id).await?;
         if stored.reference != *reference {
             return Err(MediaError::Corrupt(
                 "stored metadata does not match requested reference".into(),
@@ -206,14 +224,12 @@ impl Media for Service {
 #[async_trait]
 impl MediaRead for Service {
     async fn read_descriptor(&self, descriptor: &MediaDescriptor) -> Result<MediaBody> {
-        descriptor.validate()?;
         if descriptor.kind() != MediaKind::Image {
             return Err(MediaError::InvalidInput(
                 "the current durable Media service supports image descriptors only".into(),
             ));
         }
-        let id = MediaId::new(descriptor.sha256())?;
-        let stored = self.backend.get(&id).await?;
+        let stored = self.get(descriptor.id()).await?;
         let dimensions_match = descriptor.dimensions().is_none_or(|(width, height)| {
             stored.reference.width == width && stored.reference.height == height
         });
@@ -263,6 +279,7 @@ impl PluginFactory for MediaFactory {
         let maximum_inflight_source_bytes = config.maximum_inflight_source_bytes;
         let maximum_inflight_decode_bytes = config.maximum_inflight_decode_bytes;
         let service = Arc::new(Service {
+            context: plan.context().clone(),
             config,
             backend: plan.local::<MediaBackendContract>()?,
             import_admission: Arc::new(Semaphore::new(maximum_concurrent_imports)),

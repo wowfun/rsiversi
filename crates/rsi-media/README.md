@@ -16,8 +16,19 @@ each successive import. A failed later import does not delete earlier CAS object
 CAS; [`rsi-media-testkit`](testkit/README.md) provides memory storage.
 
 The public ref deliberately carries no normalizer version. Any change to final
-bytes produces a new identity. Audio, video, arbitrary files, URL fetches, CLI
-export, and garbage collection are outside the current contract.
+bytes produces a new identity. Audio, video, URL fetches, CLI export, and garbage
+collection are outside the current contract.
+
+Verbatim file attachments have a separate `FileRef`: the SHA-256 of the exact
+bytes, a portable leaf filename, and the exact length. They do not pass through
+image codecs. `FileRead` verifies a published object with bounded working memory
+and resolves its local read path without loading its contents. An uploader owns
+publication; successful verification does not copy or republish the object.
+The [local reader](local/README.md) consumes an explicit immutable file namespace.
+The same profile mount can supply already normalized image objects. Media
+reads preserve the publisher's exact encoded bytes and identity across Session
+admission, provider preparation and recovery.
+File references do not grant filesystem access or select a filesystem root.
 
 The ordinary Media API endpoint and client plugins expose independent import
 and canonical-reference reads. Remote upload is bounded to a 64 MiB frame,

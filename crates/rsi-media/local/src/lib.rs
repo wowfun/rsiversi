@@ -8,7 +8,7 @@ use async_trait::async_trait;
 use rsi_api_protocol::{ByteBudget, RetainedBytes};
 use rsi_media_protocol::{
     MAXIMUM_IMAGE_DESCRIPTOR_BYTES, MediaBackend, MediaBackendContract, MediaError, MediaId,
-    MediaRef, Result, StoredMedia,
+    MediaObjectReader, MediaRef, Result, StoredMedia,
 };
 use rsi_meta::{ActivationPlan, ConfigValue, MetaError, PluginFactory, PreparedActivation};
 use serde::{Deserialize, Serialize};
@@ -22,7 +22,11 @@ use std::sync::Arc;
 use std::sync::atomic::{AtomicU64, Ordering};
 
 #[cfg(any(unix, windows))]
+mod files;
+#[cfg(any(unix, windows))]
 mod native;
+#[cfg(any(unix, windows))]
+pub use files::{LocalAttachmentReader, LocalAttachmentReaderFactory};
 #[cfg(windows)]
 mod windows;
 #[cfg(windows)]
@@ -94,7 +98,10 @@ impl MediaBackend for Backend {
         .await
         .map_err(|_| publication_unknown())?
     }
+}
 
+#[async_trait]
+impl MediaObjectReader for Backend {
     async fn get(&self, id: &MediaId) -> Result<StoredMedia> {
         let id = id.clone();
         let permit = self
@@ -216,7 +223,12 @@ fn read_error(error: &std::io::Error, id: &MediaId) -> MediaError {
     }
 }
 
-fn read_opened_file(mut file: File, id: &MediaId, reads: &ByteBudget) -> Result<RetainedBytes> {
+fn read_opened_file(
+    mut file: File,
+    id: &MediaId,
+    reads: &ByteBudget,
+    maximum: u64,
+) -> Result<RetainedBytes> {
     let map_io = |error| read_error(&error, id);
     let metadata = file.metadata().map_err(map_io)?;
     if !metadata.is_file() {
@@ -225,8 +237,8 @@ fn read_opened_file(mut file: File, id: &MediaId, reads: &ByteBudget) -> Result<
         ));
     }
     let length = metadata.len();
-    if length > MAXIMUM_ENVELOPE_BYTES {
-        return Err(MediaError::Corrupt("object envelope is too large".into()));
+    if length > maximum {
+        return Err(MediaError::Corrupt("Media object is too large".into()));
     }
     let length = usize::try_from(length).expect("bounded file length");
     let capacity = reads

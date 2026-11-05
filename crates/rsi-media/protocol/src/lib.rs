@@ -10,6 +10,9 @@ use serde::{Deserialize, Serialize};
 use std::fmt;
 use thiserror::Error;
 
+mod files;
+pub use files::{FileRead, FileReadContract, FileRef};
+
 /// Maximum accepted source image bytes.
 pub const MAXIMUM_IMAGE_INPUT_BYTES: usize = 256 * 1024 * 1024;
 /// Maximum decoded pixels in one image.
@@ -38,7 +41,7 @@ pub struct MediaDescriptor {
     kind: MediaKind,
     mime_type: String,
     byte_len: u64,
-    sha256: String,
+    sha256: MediaId,
     width: Option<u32>,
     height: Option<u32>,
     duration_ms: Option<u64>,
@@ -55,7 +58,7 @@ impl<'de> Deserialize<'de> for MediaDescriptor {
             kind: MediaKind,
             mime_type: String,
             byte_len: u64,
-            sha256: String,
+            sha256: MediaId,
             width: Option<u32>,
             height: Option<u32>,
             duration_ms: Option<u64>,
@@ -90,7 +93,7 @@ impl MediaDescriptor {
             kind,
             mime_type: mime_type.into(),
             byte_len,
-            sha256: sha256.into(),
+            sha256: MediaId::new(sha256)?,
             width: None,
             height: None,
             duration_ms: None,
@@ -141,6 +144,11 @@ impl MediaDescriptor {
 
     /// Returns the lowercase SHA-256 identity.
     pub fn sha256(&self) -> &str {
+        self.sha256.as_str()
+    }
+
+    /// Borrows the validated identity for object lookup.
+    pub const fn id(&self) -> &MediaId {
         &self.sha256
     }
 
@@ -185,7 +193,6 @@ impl MediaDescriptor {
                 "media MIME type must be a bounded {prefix} value"
             )));
         }
-        MediaId::new(self.sha256.clone())?;
         match self.kind {
             MediaKind::Image => {
                 let invalid_dimensions = self.width.is_some() != self.height.is_some()
@@ -194,8 +201,7 @@ impl MediaDescriptor {
                             || height == 0
                             || width > MAXIMUM_IMAGE_DIMENSION
                             || height > MAXIMUM_IMAGE_DIMENSION
-                            || u64::from(width).saturating_mul(u64::from(height))
-                                > MAXIMUM_IMAGE_PIXELS
+                            || u64::from(width) * u64::from(height) > MAXIMUM_IMAGE_PIXELS
                     });
                 if self.duration_ms.is_some() || invalid_dimensions {
                     return Err(MediaError::InvalidInput(
@@ -259,13 +265,55 @@ impl fmt::Display for MediaId {
     }
 }
 
+/// Display metadata for one image occurrence, independent of its content identity.
+#[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct ImagePresentation {
+    /// Publisher-selected display name with local path components removed.
+    #[serde(
+        default,
+        skip_serializing_if = "Option::is_none",
+        deserialize_with = "image_display_name"
+    )]
+    name: Option<String>,
+    /// Oriented source dimensions before the publisher downscaled the raster.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub original_dimensions: Option<ImageDimensions>,
+}
+
+fn image_display_name<'de, D: serde::Deserializer<'de>>(
+    de: D,
+) -> std::result::Result<Option<String>, D::Error> {
+    let name = Option::<String>::deserialize(de)?;
+    if let Some(name) = &name
+        && (name.is_empty()
+            || name.len() > 3 * 255
+            || name.encode_utf16().count() > 255
+            || name.contains(['/', '\\'])
+            || name.chars().any(|c| c.is_ascii_control()))
+    {
+        return Err(serde::de::Error::custom("invalid image display name"));
+    }
+    Ok(name)
+}
+
+/// Positive source pixel dimensions supplied for display.
+#[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct ImageDimensions {
+    /// Width after orientation.
+    pub width: std::num::NonZeroU32,
+    /// Height after orientation.
+    pub height: std::num::NonZeroU32,
+}
+
 /// Immutable canonical image reference.
 #[derive(Clone, Debug, Eq, PartialEq, Serialize)]
 #[serde(deny_unknown_fields)]
 pub struct MediaRef {
     /// Content identity of final canonical bytes.
     pub id: MediaId,
-    /// Canonical MIME type. Current producers emit `image/png`.
+    /// MIME type of the published encoded raster.
     pub mime: String,
     /// Exact final byte length.
     pub bytes: u64,
@@ -308,9 +356,12 @@ impl<'de> Deserialize<'de> for MediaRef {
 impl MediaRef {
     /// Validates closed current image-reference invariants.
     pub fn validate(&self) -> Result<()> {
-        if self.mime != "image/png" {
+        if !matches!(
+            self.mime.as_str(),
+            "image/png" | "image/jpeg" | "image/webp" | "image/gif"
+        ) {
             return Err(MediaError::InvalidInput(
-                "current MediaRef MIME must be image/png".into(),
+                "unsupported published image MIME type".into(),
             ));
         }
         if self.bytes == 0 || self.bytes > MAXIMUM_IMAGE_DESCRIPTOR_BYTES {
@@ -318,9 +369,7 @@ impl MediaRef {
                 "MediaRef byte length is out of bounds".into(),
             ));
         }
-        let pixels = u64::from(self.width)
-            .checked_mul(u64::from(self.height))
-            .ok_or_else(|| MediaError::InvalidInput("image dimensions overflow".into()))?;
+        let pixels = u64::from(self.width) * u64::from(self.height);
         if self.width == 0
             || self.height == 0
             || self.width > MAXIMUM_IMAGE_DIMENSION
@@ -405,13 +454,26 @@ pub enum MediaError {
 /// Media result.
 pub type Result<T> = std::result::Result<T, MediaError>;
 
-/// Immutable canonical-object backend.
+/// Reads independently published encoded image objects.
 #[async_trait]
-pub trait MediaBackend: fmt::Debug + Send + Sync + 'static {
-    /// Idempotently publishes one complete canonical object.
-    async fn put(&self, media: StoredMedia) -> Result<()>;
+pub trait MediaObjectReader: fmt::Debug + Send + Sync + 'static {
     /// Loads and verifies one immutable object.
     async fn get(&self, id: &MediaId) -> Result<StoredMedia>;
+}
+
+/// Optional read authority over an external publisher's image namespace.
+#[derive(Debug)]
+pub struct PublishedImagesContract;
+impl LocalContract for PublishedImagesContract {
+    const KEY: &'static str = "rsi.media.published-images.read";
+    type Service = dyn MediaObjectReader;
+}
+
+/// Durable object backend for images imported by the Media service.
+#[async_trait]
+pub trait MediaBackend: MediaObjectReader {
+    /// Idempotently publishes one complete canonical object.
+    async fn put(&self, media: StoredMedia) -> Result<()>;
 }
 
 /// Nominal Local contract for [`MediaBackend`].

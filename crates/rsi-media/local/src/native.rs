@@ -150,7 +150,10 @@ fn object_name(id: &MediaId) -> PathBuf {
 fn read(shard: &native::Directory, id: &MediaId, reads: &ByteBudget) -> Result<StoredMedia> {
     let file = native::open_relative_file_no_follow(shard, &object_name(id))
         .map_err(|e| object_read_error(&e, id))?;
-    decode_object(read_opened_file(file, id, reads)?, id)
+    decode_object(
+        read_opened_file(file, id, reads, super::MAXIMUM_ENVELOPE_BYTES)?,
+        id,
+    )
 }
 
 fn verify_existing(existing: &StoredMedia, expected: &StoredMedia) -> Result<()> {

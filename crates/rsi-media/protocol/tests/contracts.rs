@@ -78,3 +78,21 @@ fn durable_media_reference_enforces_each_dimension_bound() {
     );
     assert!(serde_json::from_str::<MediaRef>(&oversized).is_err());
 }
+#[test]
+fn occurrence_metadata_preserves_publisher_names_and_bounds_source_dimensions() {
+    use rsi_media_protocol::ImagePresentation;
+    use serde_json::{from_value, json, to_value};
+    let name = "界".repeat(255);
+    let wire = json!({"name": name, "original_dimensions": {"width": 8012, "height": 5100}});
+    assert_eq!(
+        to_value(from_value::<ImagePresentation>(wire.clone()).unwrap()).unwrap(),
+        wire
+    );
+    for invalid in [
+        json!({"name":"folder/image.jpg"}),
+        json!({"name":"😀".repeat(128)}),
+        json!({"original_dimensions":{"width":0,"height":14}}),
+    ] {
+        assert!(from_value::<ImagePresentation>(invalid).is_err());
+    }
+}

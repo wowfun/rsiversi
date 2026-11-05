@@ -9,6 +9,7 @@ publish = false
 [dependencies]
 rsi-api-protocol = { path = "../../rsi-api/protocol" }
 bytes.workspace = true
+image.workspace = true
 async-trait.workspace = true
 hex.workspace = true
 rsi-media-protocol = { path = "../protocol" }
@@ -22,7 +23,6 @@ tokio = { workspace = true, features = ["fs", "io-util", "macros", "net", "proce
 rsi-files-native-fs = { path = "../../rsi-files/native-fs" }
 
 [dev-dependencies]
-image.workspace = true
 rsi-media = { path = "../core" }
 tempfile.workspace = true
 
