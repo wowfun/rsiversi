@@ -1040,6 +1040,9 @@ pub enum SessionError {
     /// Bounded live terminal failure, including explicit unsupported platform/policy.
     #[error(transparent)]
     Terminal(#[from] terminal::PtyError),
+    /// This caller's terminal creation key can no longer allocate or recover its shell.
+    #[error("terminal creation key has retired")]
+    TerminalKeyRetired,
     /// New Sessions require an explicitly configured default model.
     #[error(
         "Setup required: configure rsi.agent.default_model with its deployment and model fields"

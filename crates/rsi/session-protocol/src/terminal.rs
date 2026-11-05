@@ -43,6 +43,11 @@ pub enum Request {
         /// Initial character dimensions.
         size: Size,
     },
+    /// Retires the caller's creation key and closes any allocation it owns.
+    CloseKey {
+        /// The same caller-minted identity used by create.
+        key: String,
+    },
     /// Operates an already issued live identity.
     Operate {
         /// Finite scope operation.
@@ -53,20 +58,22 @@ pub enum Request {
 impl Request {
     /// Validates domain framing before dispatch.
     pub fn validate(&self) -> rsi_pty_protocol::Result<()> {
-        match self {
-            Self::Create { key, size } => {
-                if key.is_empty()
-                    || key.len() > 128
-                    || !key
-                        .bytes()
-                        .all(|c| c.is_ascii_alphanumeric() || matches!(c, b'-' | b'_'))
-                {
-                    return Err(PtyError::Invalid("invalid terminal creation key".into()));
-                }
-                size.validate()
-            }
-            Self::Operate { operation } => operation.validate(),
+        let key = match self {
+            Self::Operate { operation } => return operation.validate(),
+            Self::Create { key, .. } | Self::CloseKey { key } => key,
+        };
+        if key.is_empty()
+            || key.len() > 128
+            || !key
+                .bytes()
+                .all(|c| c.is_ascii_alphanumeric() || matches!(c, b'-' | b'_'))
+        {
+            return Err(PtyError::Invalid("invalid terminal creation key".into()));
         }
+        if let Self::Create { size, .. } = self {
+            size.validate()?;
+        }
+        Ok(())
     }
     /// Byte-array input has its own bounded data admission.
     #[must_use]
@@ -180,7 +187,8 @@ impl Request {
                     && value.size == *size
             }
             (
-                Self::Operate {
+                Self::CloseKey { .. }
+                | Self::Operate {
                     operation:
                         Operation::Detach { .. } | Operation::Close { .. } | Operation::CloseAll,
                 },

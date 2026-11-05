@@ -66,7 +66,7 @@ impl Drop for ScopeLease<'_> {
     }
 }
 impl Terminals {
-    pub(super) fn busy(&self, session: &SessionId) -> Result<bool> {
+    fn running(&self) -> Result<std::sync::MutexGuard<'_, Registry>> {
         let state = self
             .state
             .lock()
@@ -74,7 +74,10 @@ impl Terminals {
         if state.stopped {
             return Err(SessionError::ShuttingDown);
         }
-        Ok(state.scopes.get(session).is_some_and(|entry| {
+        Ok(state)
+    }
+    pub(super) fn busy(&self, session: &SessionId) -> Result<bool> {
+        Ok(self.running()?.scopes.get(session).is_some_and(|entry| {
             entry.operations.load(Ordering::Acquire) != 0 || !entry.scope.is_empty()
         }))
     }
@@ -92,13 +95,15 @@ impl Terminals {
         }
     }
     fn scope(&self, session: &SessionId, create: bool) -> Result<Option<ScopeLease<'_>>> {
-        let mut state = self
-            .state
-            .lock()
-            .unwrap_or_else(std::sync::PoisonError::into_inner);
-        if state.stopped {
-            return Err(SessionError::ShuttingDown);
-        }
+        let mut state = self.running()?;
+        self.scope_locked(&mut state, session, create)
+    }
+    fn scope_locked(
+        &self,
+        state: &mut Registry,
+        session: &SessionId,
+        create: bool,
+    ) -> Result<Option<ScopeLease<'_>>> {
         let entry = if let Some(entry) = state.scopes.get(session) {
             entry.clone()
         } else {
@@ -201,6 +206,7 @@ impl LocalSessionHandle {
         ) {
             return Err(PtyError::Invalid("expected an attachment operation".into()).into());
         }
+        let create = matches!(request, Request::Create { .. });
         let Reply::Attached(attachment) = self.terminal_request(request).await? else {
             return Err(PtyError::OutcomeUnknown.into());
         };
@@ -209,7 +215,13 @@ impl LocalSessionHandle {
             .as_ref()
             .ok_or_else(|| unavailable("terminal provider is absent"))?
             .scope(&self.session_id, false)?
-            .ok_or_else(|| unavailable("terminal scope retired"))?;
+            .ok_or_else(|| {
+                if create {
+                    SessionError::TerminalKeyRetired
+                } else {
+                    unavailable("terminal scope retired")
+                }
+            })?;
         Ok(Box::new(creation::Held {
             scope: scope.entry.scope.clone(),
             attachment,
@@ -278,7 +290,7 @@ impl LocalSessionHandle {
             .terminals
             .as_ref()
             .ok_or_else(|| unavailable("terminal provider is absent"))?;
-        match request {
+        let (key, create) = match request {
             Request::Create { key, size } => {
                 let header = self.header_snapshot().await?;
                 let persisted =
@@ -295,19 +307,9 @@ impl LocalSessionHandle {
                     return Err(unavailable("Session Header is no longer current"));
                 }
                 let launch = self.prepare_terminal(terminals, &header, size).await?;
-                let owner = self.terminal_owner().cloned();
-                let identity = (self.session_id.clone(), owner, key);
-                let terminals = terminals.clone();
-                let runtime = tokio::runtime::Handle::try_current()
-                    .map_err(|_| unavailable("terminal creation requires a runtime"))?;
-                runtime
-                    .spawn(async move {
-                        let _guards = (admission, activity);
-                        terminals.create_keyed(identity, size, launch).await
-                    })
-                    .await
-                    .map_err(|_| PtyError::OutcomeUnknown)?
+                (key, Some((size, launch)))
             }
+            Request::CloseKey { key } => (key, None),
             Request::Operate { operation } => {
                 let execution = if matches!(
                     operation,
@@ -317,11 +319,25 @@ impl LocalSessionHandle {
                 } else {
                     None
                 };
-                terminals
+                return terminals
                     .operate(&self.session_id, operation, execution)
-                    .await
+                    .await;
             }
-        }
+        };
+        let identity = (self.session_id.clone(), self.terminal_owner().cloned(), key);
+        let terminals = terminals.clone();
+        // The admitted key mutation settles even if its caller loses the reply.
+        tokio::runtime::Handle::try_current()
+            .map_err(|_| unavailable("terminal creation keys require a runtime"))?
+            .spawn(async move {
+                let _guards = (admission, activity);
+                match create {
+                    Some((size, launch)) => terminals.create_keyed(identity, size, launch).await,
+                    None => terminals.close_keyed(identity).await,
+                }
+            })
+            .await
+            .map_err(|_| PtyError::OutcomeUnknown)?
     }
 }
 enum TerminalLaunch {
@@ -491,6 +507,7 @@ mod tests {
     use async_trait::async_trait;
     use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
 
+    mod keyed;
     #[test]
     fn manual_terminal_policy_is_local_to_the_target() {
         use rsi_sandbox::SandboxMode;
@@ -570,9 +587,25 @@ mod tests {
         }
         async fn create(
             &self,
-            _: rsi_process::PtyProcessSpec,
+            spec: rsi_process::PtyProcessSpec,
         ) -> rsi_pty_protocol::Result<rsi_pty_protocol::Attachment> {
-            unreachable!()
+            self.release.notified().await;
+            assert!(self.empty.swap(false, Ordering::AcqRel));
+            Ok(rsi_pty_protocol::Attachment {
+                terminal: rsi_pty_protocol::Terminal {
+                    id: "shell".into(),
+                    size: rsi_pty_protocol::Size {
+                        rows: spec.size.rows,
+                        columns: spec.size.columns,
+                    },
+                    sandbox: spec.process.stamp.requested,
+                    phase: rsi_pty_protocol::Phase::Running,
+                    controller: Some("writer".into()),
+                    controller_epoch: 1,
+                },
+                id: "writer".into(),
+                stream_epoch: 1,
+            })
         }
         async fn execute(&self, operation: Operation) -> rsi_pty_protocol::Result<Reply> {
             assert!(

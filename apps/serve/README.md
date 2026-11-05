@@ -261,7 +261,9 @@ validated ordered content and native mailbox delivery mode. Success returns
 the existing or newly committed message receipt.
 `application.terminal` uses the browser owner and the addressed
 interactive Session. It exposes the Session terminal catalog and validated
-native PTY operations. Controller takeover, resize and input receipts remain
+native PTY operations. A create whose key retired before delivery returns
+`{"type":"retired"}` so clients can discard the missing terminal. Other
+failures keep their own diagnostics. Controller takeover, resize and input receipts remain
 owned by the native PTY.
 `application.cancel` passes the caller's `keep_inbox` choice to one native
 Session-wide cancellation operation, or uses inbox-only cancellation when

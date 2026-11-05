@@ -76,6 +76,38 @@ async fn uds_terminals_require_persistence_isolate_sessions_keep_facts_unchanged
     ));
     run_message_to_terminal(&handle, "publish-terminal").await;
     let before = handle.history_before(None, 128).await.unwrap().durable_seq;
+    let size = Size {
+        rows: 24,
+        columns: 80,
+    };
+    for key in ["close-before-create", "racing-close"] {
+        let create = Request::Create {
+            key: key.into(),
+            size,
+        };
+        let close = Request::CloseKey { key: key.into() };
+        if key == "racing-close" {
+            let (_, closed) = tokio::join!(
+                handle.terminal(create.clone()),
+                handle.terminal(close.clone())
+            );
+            assert_eq!(closed.unwrap(), Reply::Done);
+        }
+        assert_eq!(handle.terminal(close).await.unwrap(), Reply::Done);
+        assert!(matches!(
+            handle.terminal(create).await,
+            Err(SessionError::TerminalKeyRetired)
+        ));
+        assert_eq!(
+            handle
+                .terminal(Request::Operate {
+                    operation: Operation::List
+                })
+                .await
+                .unwrap(),
+            Reply::List(vec![])
+        );
+    }
     let (first, retry) = tokio::join!(
         handle.terminal(request.clone()),
         handle.terminal(request.clone())
@@ -101,6 +133,15 @@ async fn uds_terminals_require_persistence_isolate_sessions_keep_facts_unchanged
     ));
     let other = create(&daemon, &fixture, "other-terminal-session").await;
     run_message_to_terminal(&other, "publish-other").await;
+    assert_eq!(
+        other
+            .terminal(Request::CloseKey {
+                key: "public-api-shell".into()
+            })
+            .await
+            .unwrap(),
+        Reply::Done
+    );
     assert!(matches!(
         other
             .terminal(Request::Operate {
@@ -226,7 +267,7 @@ async fn uds_terminals_require_persistence_isolate_sessions_keep_facts_unchanged
     );
     assert!(matches!(
         resumed.terminal(request).await,
-        Err(SessionError::Terminal(PtyError::Unavailable(_)))
+        Err(SessionError::TerminalKeyRetired)
     ));
     let Reply::Attached(retired) = resumed
         .terminal(Request::Create {

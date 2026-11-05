@@ -376,7 +376,13 @@ A create carries a caller-generated key of 1–128 ASCII letters, digits,
 hyphens or underscores. Its scope is the service generation, Session and
 caller identity. Repeating an open key with the same initial dimensions
 returns its original attachment receipt. Different dimensions conflict.
-A closed or exited key cannot create another shell. The service retains
+A caller can close by creation key before it receives a terminal ID.
+Close retires the key immediately, including before creation. A shell allocated
+after close is cleaned up before close returns. The original and duplicate
+creates cannot claim that shell and receive `TerminalKeyRetired`. Later creates
+reject the key without waiting for the pending allocation.
+Repeated closes succeed, and failed cleanup can be retried by the same key.
+Creating with a closed or exited key returns `TerminalKeyRetired`. The service retains
 up to 8192 creation keys per generation, including closed keys.
 The terminal catalog reports the Session's selected shell and live bindings
 for the requesting caller. Each binding joins its original creation key to

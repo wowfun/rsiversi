@@ -1,6 +1,9 @@
 use super::Sessions;
 use rsi_extension::{Error, Result};
-use rsi_session_protocol::terminal::{Operation, Reply, Request};
+use rsi_session_protocol::{
+    SessionError, SessionHandle,
+    terminal::{Operation, Reply, Request},
+};
 use serde::Deserialize;
 use serde_json::{Value, json};
 use std::sync::Arc;
@@ -66,57 +69,66 @@ impl Sessions {
             }),
         ) = input.operation
         {
-            let create = matches!(operation, Request::Create { .. });
-            let opened = handle.clone();
-            let held = tokio::spawn(async move { opened.borrow_terminal(operation).await })
-                .await
-                .map_err(|_| Error::Disconnected)?
-                .map_err(|error| Error::Remote(error.to_string()))?;
-            let receipt = held.receipt().clone();
-            if create {
-                drop(held);
-                let Reply::List(rows) = handle
-                    .terminal(Request::Operate {
-                        operation: Operation::List,
-                    })
-                    .await
-                    .map_err(|e| Error::Remote(e.to_string()))?
-                else {
-                    return Err(Error::Protocol);
-                };
-                let terminal = rows
-                    .into_iter()
-                    .find(|row| row.id == receipt.terminal.id)
-                    .ok_or_else(|| Error::Remote("terminal retired during create".into()))?;
-                serde_json::to_value(Reply::Terminal(terminal))
-            } else {
-                self.routes
-                    .retain_resource(
-                        &input.request,
-                        format!("pty/{}", receipt.id),
-                        Arc::new(held),
-                    )
-                    .map_err(|_| Error::Cancelled)?;
-                serde_json::to_value(Reply::Attached(receipt))
-            }
+            self.open_terminal(&input.request, handle, operation)
+                .await?
         } else if let Some(operation) = input.operation {
             let reply = handle
                 .terminal(operation)
                 .await
                 .map_err(|e| Error::Remote(e.to_string()))?;
-            serde_json::to_value(reply)
+            serde_json::to_value(reply).map_err(|_| Error::Protocol)?
         } else {
             let catalog = handle
                 .terminal_catalog()
                 .await
                 .map_err(|e| Error::Remote(e.to_string()))?;
-            serde_json::to_value(catalog)
-        }
-        .map_err(|_| Error::Protocol)?;
+            serde_json::to_value(catalog).map_err(|_| Error::Protocol)?
+        };
         self.routes
             .caller(&input.request)
             .map_err(|_| Error::Cancelled)?;
         Ok(value)
+    }
+    async fn open_terminal(
+        &self,
+        request: &str,
+        handle: Arc<dyn SessionHandle>,
+        operation: Request,
+    ) -> Result<Value> {
+        let create = matches!(operation, Request::Create { .. });
+        let opened = handle.clone();
+        let held = match tokio::spawn(async move { opened.borrow_terminal(operation).await })
+            .await
+            .map_err(|_| Error::Disconnected)?
+        {
+            Ok(held) => held,
+            Err(SessionError::TerminalKeyRetired) => return Ok(json!({"type":"retired"})),
+            Err(error) => return Err(Error::Remote(error.to_string())),
+        };
+        let reply = if create {
+            let id = held.receipt().terminal.id.clone();
+            drop(held);
+            let Reply::List(rows) = handle
+                .terminal(Request::Operate {
+                    operation: Operation::List,
+                })
+                .await
+                .map_err(|e| Error::Remote(e.to_string()))?
+            else {
+                return Err(Error::Protocol);
+            };
+            let Some(terminal) = rows.into_iter().find(|row| row.id == id) else {
+                return Ok(json!({"type":"retired"}));
+            };
+            Reply::Terminal(terminal)
+        } else {
+            let receipt = held.receipt().clone();
+            self.routes
+                .retain_resource(request, format!("pty/{}", receipt.id), Arc::new(held))
+                .map_err(|_| Error::Cancelled)?;
+            Reply::Attached(receipt)
+        };
+        serde_json::to_value(reply).map_err(|_| Error::Protocol)
     }
     pub(super) fn release_terminal(&self, payload: Value) -> Result<Value> {
         #[derive(Deserialize)]

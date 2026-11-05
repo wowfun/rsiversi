@@ -238,6 +238,7 @@ impl Operation {
             Self::Inspect | Self::Recent | Self::DraftSnapshot | Self::SelectPreset => 10,
             Self::Submit => 6,
             Self::MessageStatus
+            | Self::Terminal
             | Self::TerminalOutput
             | Self::ReadHeader
             | Self::Jobs
@@ -249,8 +250,7 @@ impl Operation {
             | Self::Questions
             | Self::AnswerQuestion
             | Self::DiscardDraftInputs
-            | Self::ExecuteCommand
-            | Self::Terminal => 2,
+            | Self::ExecuteCommand => 2,
             Self::Attach | Self::Observe => 9,
             Self::History | Self::ReadMessage => 7,
             _ => 1,
@@ -360,6 +360,7 @@ pub(crate) enum Failure {
     Terminal {
         error: rsi_session_protocol::terminal::PtyError,
     },
+    TerminalKeyRetired {},
     SetupRequired {},
     Invalid {
         message: String,
@@ -411,6 +412,7 @@ pub(crate) fn domain<T>(
                 Failure::WorkflowOutcomeUnknown { session, run }
             }
             SessionError::Terminal(error) => Failure::Terminal { error },
+            SessionError::TerminalKeyRetired => Failure::TerminalKeyRetired {},
             SessionError::SetupRequired => Failure::SetupRequired {},
             SessionError::Api(error) => return Err(error),
             SessionError::Backend(_) => {
@@ -469,6 +471,7 @@ impl Failure {
                 SessionError::WorkflowOutcomeUnknown { session, run }
             }
             Self::Terminal { error } => SessionError::Terminal(error),
+            Self::TerminalKeyRetired {} => SessionError::TerminalKeyRetired,
             Self::SetupRequired {} => SessionError::SetupRequired,
             Self::Invalid { message } => SessionError::Invalid(message),
             Self::NotFound {} => SessionError::NotFound("remote Session object".into()),
@@ -573,6 +576,6 @@ mod terminal_admission_tests {
         assert_eq!(spec.class, OperationClass::Subscription);
         assert_eq!(spec.effect, OperationEffect::Read);
         assert_eq!(spec.id.version(), 3);
-        assert_eq!(Operation::Terminal.spec().id.version(), 2);
+        assert_eq!(Operation::Terminal.spec().id.version(), 3);
     }
 }
