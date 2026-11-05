@@ -43,7 +43,7 @@ pub struct StoreDomainState {
     pub snapshot: DomainSnapshot,
 }
 
-/// Complete bounded domain set at an explicit control horizon in one Store snapshot.
+/// Selected domain states at one control horizon in a single Store snapshot.
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct StoreDomainStatePage {
     /// Durable Fact tail of the same read snapshot.
@@ -64,8 +64,7 @@ impl StoreDomainStatePage {
                 "domain horizon exceeds the read snapshot".into(),
             ));
         }
-        let heads: Vec<_> = self.states.iter().map(|entry| entry.head.clone()).collect();
-        validate_domain_heads(&heads)?;
+        validate_domain_heads(self.states.iter().map(|entry| &entry.head))?;
         for entry in &self.states {
             if entry.head.control_seq > self.selected_control_seq
                 || &entry.head.identity != entry.snapshot.identity()
@@ -91,7 +90,7 @@ pub fn domain_heads_after(
     control_seq: u64,
     commit: &DomainStateCommit,
 ) -> Result<Vec<StoreDomainHead>> {
-    validate_domain_heads(heads)?;
+    validate_domain_heads(heads.iter())?;
     let baseline = matches!(commit.source(), DomainMutationSource::Baseline);
     if let DomainMutationSource::Command { invocation }
     | DomainMutationSource::Continuation { invocation, .. } = commit.source()
@@ -149,22 +148,26 @@ pub fn domain_heads_after(
             Err(index) => next.insert(index, head),
         }
     }
-    validate_domain_heads(&next).map_err(|error| StoreError::Invalid(error.to_string()))?;
+    validate_domain_heads(next.iter()).map_err(|error| StoreError::Invalid(error.to_string()))?;
     Ok(next)
 }
 
-fn validate_domain_heads(heads: &[StoreDomainHead]) -> Result<()> {
-    if heads.len() > MAXIMUM_SESSION_DOMAINS
-        || heads
-            .windows(2)
-            .any(|pair| pair[0].identity.id() >= pair[1].identity.id())
-    {
-        return Err(StoreError::Corrupt(
-            "domain heads exceed their count or name-order bounds".into(),
-        ));
+fn validate_domain_heads<'a>(
+    heads: impl ExactSizeIterator<Item = &'a StoreDomainHead>,
+) -> Result<()> {
+    if heads.len() > MAXIMUM_SESSION_DOMAINS {
+        return Err(StoreError::Corrupt("too many domain heads".into()));
     }
+    let mut previous = None;
     let mut bytes = 0_usize;
     for head in heads {
+        let id = head.identity.id();
+        if previous.is_some_and(|name| name >= id) {
+            return Err(StoreError::Corrupt(
+                "domain heads are not in name order".into(),
+            ));
+        }
+        previous = Some(id);
         if head.control_seq == 0
             || head.revision.get() == 0
             || head.update_index >= MAXIMUM_SESSION_DOMAINS

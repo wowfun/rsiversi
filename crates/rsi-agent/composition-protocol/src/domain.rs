@@ -56,6 +56,8 @@ pub enum DomainForkPolicy {
     Inherit,
     /// Retain this definition's initial state independently of parent history.
     ResetToInitial,
+    /// A fork contribution must supply a validated target initial state.
+    Transform,
 }
 
 /// Mandatory immutable reference semantics for a decoded Domain state.
@@ -508,6 +510,8 @@ impl Default for DomainCatalog {
 pub struct DomainBaseline {
     catalog: DomainCatalog,
     commit: Option<DomainStateCommit>,
+    retained: BTreeMap<String, Arc<dyn DomainRetention>>,
+    sources: Vec<Arc<dyn DomainRetention>>,
 }
 
 impl DomainBaseline {
@@ -524,7 +528,41 @@ impl DomainBaseline {
     /// Rejects a baseline that cannot satisfy the canonical complete-request bounds.
     pub fn new(catalog: DomainCatalog) -> Result<Self> {
         let commit = baseline_commit(catalog.baseline().to_vec())?;
-        Ok(Self { catalog, commit })
+        Ok(Self {
+            catalog,
+            commit,
+            retained: BTreeMap::new(),
+            sources: vec![],
+        })
+    }
+
+    /// Retains captured source resources until this baseline is released.
+    pub fn retain<T: fmt::Debug + Send + Sync + 'static>(&mut self, source: Arc<T>) {
+        self.sources.push(source);
+    }
+
+    /// Revalidates captured values in another generation without replaying callbacks.
+    ///
+    /// # Errors
+    /// Rejects missing, incompatible or invalid codecs and aggregate bounds.
+    pub fn rebind(&self, catalog: DomainCatalog) -> Result<Self> {
+        let mut states: BTreeMap<_, _> = catalog
+            .baseline()
+            .iter()
+            .map(|state| (state.identity().id().to_owned(), state.clone()))
+            .collect();
+        for state in self.snapshots() {
+            catalog.validate_snapshot(&state)?;
+            states.insert(state.identity().id().to_owned(), state);
+        }
+        let states: Vec<_> = states.into_values().collect();
+        catalog.validate_complete_states(&states)?;
+        Ok(Self {
+            catalog,
+            commit: baseline_commit(states)?,
+            retained: self.retained.clone(),
+            sources: self.sources.clone(),
+        })
     }
 
     /// Replaces one typed initial value without creating a durable revision.
@@ -562,6 +600,14 @@ impl DomainBaseline {
             snapshots[index] = proposal.snapshot().clone();
         }
         let next = baseline_commit(snapshots)?;
+        for proposal in proposals {
+            let id = proposal.snapshot().identity().id();
+            if let Some(owner) = &proposal.retained {
+                self.retained.insert(id.into(), owner.clone());
+            } else {
+                self.retained.remove(id);
+            }
+        }
         self.commit = next;
         Ok(())
     }
@@ -572,6 +618,19 @@ impl DomainBaseline {
     /// Rejects duplicate names, unsupported/invalid inherited state, or aggregate capacity.
     /// Failure preserves the candidate's prior initial states.
     pub fn inherit(&mut self, inherited: &[DomainSnapshot]) -> Result<()> {
+        self.inherit_transformed(inherited, &[])
+    }
+
+    /// Atomically inherits a captured cut and applies every required transform.
+    ///
+    /// # Errors
+    /// Rejects missing or unsolicited transforms, invalid parents, wrong-generation
+    /// proposals, nonzero predecessors and capacity without changing the candidate.
+    pub fn inherit_transformed(
+        &mut self,
+        inherited: &[DomainSnapshot],
+        transformed: &[ValidatedDomainProposal],
+    ) -> Result<()> {
         if inherited.len() > MAXIMUM_SESSION_DOMAINS {
             return Err(DomainError::Capacity);
         }
@@ -593,8 +652,40 @@ impl DomainBaseline {
                 snapshots[index] = snapshot.clone();
             }
         }
+        let required: std::collections::BTreeSet<_> = inherited
+            .iter()
+            .filter(|snapshot| {
+                self.catalog.inner.definitions[snapshot.identity().id()]
+                    .codec
+                    .fork_policy()
+                    == DomainForkPolicy::Transform
+            })
+            .map(|snapshot| snapshot.identity().id())
+            .collect();
+        if transformed.len() != required.len()
+            || transformed
+                .iter()
+                .any(|proposal| !required.contains(proposal.snapshot().identity().id()))
+        {
+            return Err(DomainError::InvalidState {
+                domain: "fork".into(),
+                reason: "fork requires the exact declared transform set".into(),
+            });
+        }
         let next = baseline_commit(snapshots)?;
-        self.commit = next;
+        let mut candidate = self.clone();
+        candidate.commit = next;
+        for snapshot in inherited {
+            if self.catalog.inner.definitions[snapshot.identity().id()]
+                .codec
+                .fork_policy()
+                == DomainForkPolicy::Inherit
+            {
+                candidate.retained.remove(snapshot.identity().id());
+            }
+        }
+        candidate.apply_batch(transformed)?;
+        *self = candidate;
         Ok(())
     }
 
@@ -619,6 +710,16 @@ impl DomainBaseline {
                 .map(|update| update.snapshot().clone())
                 .collect()
         })
+    }
+
+    /// Borrows one draft domain without materializing the baseline.
+    pub fn initial_state(&self, domain: &str) -> Option<&DomainSnapshot> {
+        self.commit
+            .as_ref()?
+            .updates()
+            .iter()
+            .map(rsi_agent_session_protocol::DomainStateUpdate::snapshot)
+            .find(|snapshot| snapshot.identity().id() == domain)
     }
 
     /// Returns actual bounded initial states, whose domain predecessors are all zero.
@@ -677,6 +778,7 @@ impl<T: Serialize + DeserializeOwned + Send + Sync + 'static> DomainHandle<T> {
             binding: self.binding.clone(),
             expected_revision,
             snapshot: DomainSnapshot::new(identity.clone(), state),
+            retained: None,
         })
     }
     /// Decodes only the exact version owned by this typed handle.
@@ -697,9 +799,20 @@ pub struct ValidatedDomainProposal {
     binding: DomainBinding,
     expected_revision: DomainRevision,
     snapshot: DomainSnapshot,
+    retained: Option<Arc<dyn DomainRetention>>,
 }
 
+trait DomainRetention: fmt::Debug + Send + Sync {}
+impl<T: fmt::Debug + Send + Sync> DomainRetention for T {}
+
 impl ValidatedDomainProposal {
+    /// Retains the complete snapshot's unpublished resources through owner admission.
+    /// This grants no Store mutation or execution authority.
+    #[must_use]
+    pub fn with_retained<T: fmt::Debug + Send + Sync + 'static>(mut self, owner: Arc<T>) -> Self {
+        self.retained = Some(owner);
+        self
+    }
     /// Returns the exact required predecessor revision.
     pub const fn expected_revision(&self) -> DomainRevision {
         self.expected_revision

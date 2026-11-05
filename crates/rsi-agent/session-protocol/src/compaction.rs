@@ -88,6 +88,8 @@ pub struct CompactionSource {
 #[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct CompactionSelection {
+    /// Exact source Session; Turn identities are Session-local.
+    pub session: SessionId,
     /// Exact projected Turn identity.
     pub turn: TurnId,
     /// Zero-based current message offset, before installation.
@@ -135,7 +137,7 @@ pub enum CompactionTrigger {
 pub struct ContextCompactionPlan {
     /// Session in which this model effect was planned.
     pub session: SessionId,
-    /// Policy and summary format version; currently one.
+    /// Policy and summary format version; currently two.
     pub version: u32,
     /// Selected builder identity.
     pub builder: CompactionBuilder,

@@ -42,7 +42,7 @@ impl QueueSlot {
     }
 }
 
-/// Human intent for one still-pending queue slot.
+/// Caller intent for one still-pending queue slot.
 #[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
 #[serde(tag = "action", rename_all = "snake_case", deny_unknown_fields)]
 pub enum QueueMutation {
@@ -153,6 +153,8 @@ pub enum QueueMutationRejection {
     Discarded,
     /// Only direct Human input is editable.
     NotHuman,
+    /// A ProgramRun-owned child's initial input requires its paired settlement.
+    ProgramOwned,
     /// New-Turn invocation options prevent conversion into an existing Turn.
     IncompatibleOptions,
     /// The exact requested Turn is absent, stopping or terminal.

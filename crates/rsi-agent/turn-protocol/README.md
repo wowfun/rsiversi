@@ -1,5 +1,56 @@
 # rsi-agent-turn-protocol
 
+`request_step` opens or reuses the claim's charged Step at a safe, flushed
+boundary. Pending Tool context is claimed before the Fact cut of either request
+capture, including the complete callback snapshot. It can read one current domain by name at that Fact cut. Omitting
+the name needs no domain read. This operation supplies no history reader.
+Preset callbacks use `contribution_context` for the complete snapshot.
+
+`wait_idle` observes this Session's driver quiescence: no accepted nonterminal
+Turn, active activation or unpaused waking input. Paused and nonwaking input do
+not keep it busy. The check does not reserve future idleness or wait for unrelated
+descendants. It follows replacement work until one idle cut is observed, uses
+Session change notification, and ends on Kernel shutdown or caller cancellation.
+
+`CancelTarget::Session { keep_inbox }` stops the Session's inbox and every
+accepted nonterminal Turn captured under submission admission. One atomic append
+pauses the inbox, requests Turn cancellation and, unless `keep_inbox`, discards
+pending messages. Discarding a Program child's initial message includes its
+exclusive parent settlement in that transaction. If either Session's inbox
+is stopped when an ordinary subagent settles as cancelled, the parent records
+the completion and its cancellation together. The receipt remains in history.
+It cannot queue another model Turn. Later waking inputs resume
+normally. The result acknowledges the stop request, not executor convergence.
+An already paused, unchanged Session returns `accepted = false`; a Session is
+never a terminal cancellation target. Turn and Message targets retain exact-id
+idempotence. A Session stop is a new capture on each explicit call and must not
+be automatically retried after an unknown transport outcome.
+
+`CancelTarget::Inbox` clears all pending input captured by that same admission,
+without cancelling any accepted Turn or changing inbox suspension. It includes
+the same exclusive settlement for a discarded Program initial message. An empty
+inbox is a no-op. Like a Session stop, it captures a new cut and is not replayed
+automatically after an unknown outcome.
+
+An authority for a started Tool exposes its durable effect and exact
+retained-result identity together. This lets an external executor correlate
+a read-only outcome lookup with the admitted call.
+
+`prepare_fork` captures an independent unpublished draft at the supplied
+`ForkPoint`, before an accepted source Turn or through a terminal source Turn.
+Before excludes the selected Turn without waiting for it; neither point copies
+an open execution into the child. The caller authorizes the source Header and execution
+location; Kernel rechecks its immutable identity, resolves the exact Fact/control
+cut, pins the target preset and transforms its baseline. The payload retains its
+Store validation proof; the caller must retain Session lifecycle ownership through
+publication or release to block source retirement. No Agent execution owner is inherited.
+
+An exact started Tool caller can request a bounded, read-only durable Fact prefix. The owner revalidates its live claim and effect across the watermark read. The prefix remains clamped to that captured horizon; it grants neither Store access nor Step preparation while effects are active.
+
+Tool caller authority retains the producing Step's optional Tool subset along
+with its model selection. A Program dispatcher may narrow that set further;
+later Steps cannot widen an already issued caller's authority.
+
 An optional execution observer returns either an admitted interval or an explicit
 evidence-capacity omission. The Executor reports an omitted claim before driving
 it without capture. Errors, cancellation and admission deadlines still prevent
@@ -97,6 +148,9 @@ page of at most 64 resident identities and their nonterminal-work flags. It does
 not read Store, resolve generations, pin sessions or acquire execution authority.
 `has_more` explicitly reports an incomplete roster. A durable open Turn without
 a current resident is not evidence of running work.
+For an already selected set of identities, `running_sessions` returns exactly
+the members with resident nonterminal work in one observation, including
+identities beyond the first roster page. Callers own visibility selection.
 
 `TurnService::controlled_work` reads process-local Executor settlement evidence
 for an exact Session/Turn. `Running` includes the claim drive and retained Tool
@@ -129,12 +183,17 @@ Missing retained output is `None`, never scope reacquisition or execution.
 Current-Turn Jobs observation is process-local. The Executor publishes a weak
 read-only source under its authenticated claim, retaining the strong source only
 for that claim. The source contains the exact originally acquired Jobs authority;
-it exposes status listing only. Kernel reads bind Session/Header/Turn, check the
+it exposes bounded reads. Cursor and preview reads bind Session/Header/Turn, check the
 live claim both before and after sampling, and never acquire a Jobs scope.
 Finalization's authority revocation, claim release and executor withdrawal make
 the source unavailable. No durable replay or historical Jobs lookup is provided.
 Pages follow the shared [current-Turn Jobs contract](../../rsi/session-protocol/README.md).
 Cancellation is checked before and after sampling.
+
+For a Session activity query, the Jobs port samples the resident claim once.
+It returns only the IDs and labels of running or stopping Jobs. A Session with
+no live Jobs source contributes no items. This query performs no Store read,
+opens no scope and does not report a Job or retain a page.
 
 `SessionContinuations` is a separate Local service for trusted Host controllers.
 Local lookup is not a sandbox against linked plugin code; the application-owned
@@ -212,6 +271,10 @@ a process-global mutable catalog. Every executor implementation must explicitly
 provide fork replay, next-Step admission, workspace refresh, Step closure, and
 activation settlement behavior; these durable lifecycle hooks never default to
 silent no-ops. Dropping an observation is detach.
+
+Fork replay supplies a bounded immutable Header chain: `All` includes ancestor
+selections, while `Last(n)` and `None` stop the chain. Page reads select one Header
+from that authorized chain and preserve its original parent Fact coordinates.
 
 Source mutation requests carry the Tool execution cancellation token separately
 from model JSON. Final source admission and retained commit ownership follow the
@@ -424,15 +487,20 @@ lineage separately; automatic-work adapters select allowed continuation domains.
 
 ## Queue mutation
 
-`mutate_queue` changes one Human message only while it remains Pending. The
+`mutate_queue` changes one message only while it remains Pending. The
 request names a stable QueueSlotId and uses `expected_message_id` as its sole
 compare-and-set predecessor. Replace supplies complete bounded content and a new
 MessageId, retaining delivery, options and Header. Convert supplies a new
 MessageId and the exact displayed TurnId; it requires default options and binds
 Steer to that Turn without an idle fallback. Withdraw discards only the pending
 message. A claim that wins admission makes these operations reject; withdrawal
-never becomes Turn cancellation. Other message sources remain observable but
-cannot be edited through this surface.
+never becomes Turn cancellation. Replacement and conversion require Human
+provenance. Withdrawal also accepts command context, Agent messages, completion
+notices and continuations: removing pending input does not impersonate its
+producer. A ProgramRun-owned child's initial input uses Program cancellation,
+which settles its operation graph, and rejects ordinary withdrawal as
+`program_owned`. This is determined by the immutable execution owner and its
+child admission, not the message source; Program completion notices are removable.
 
 `CancelTarget::Message` retains its stronger request-cancellation contract for
 ACP, Program and message-driving clients: pending input is discarded and claimed
@@ -486,3 +554,5 @@ are authenticated against that same snapshot and retain separate CAS admission.
 A supplied revision must match before CAS reads; lifecycle changes after the
 snapshot do not mix newer references into its reply. Live owners refresh their
 cached suffix; historical runs replay canonical records once per detail read.
+
+A directory observer may subscribe before reading a baseline. Kernel publication and confirmed Session retirement coalesce into a signal carrying no Session data. Subscription ends when the Kernel retires.

@@ -13,10 +13,16 @@ use tokio_util::sync::CancellationToken;
 
 mod batch;
 mod catalog;
+mod fork;
+mod publication;
 pub use batch::{ContributionBatch, ContributionInput};
 pub use catalog::{
     ContributionCatalog, ContributionKind, ContributionRegistrar, ContributionRegistrarContract,
     ContributionRegistration, ContributionStage,
+};
+pub use fork::{ForkTransform, ForkTransformContext};
+pub use publication::{
+    DraftPublicationReceipt, Publication, PublicationObserver, PublicationReceipt,
 };
 
 /// Maximum callbacks in one immutable Agent composition.
@@ -115,6 +121,47 @@ pub trait ContextContributor: fmt::Debug + Send + Sync + 'static {
     ) -> ContributionResult<ContributionOutput>;
 }
 
+/// Captured `BeforeStep` input plus exact publication identity and frozen catalog.
+#[derive(Debug)]
+pub struct BeforeStepContext<'a> {
+    /// Resolved provider, model and effort for this request series.
+    pub selection: &'a rsi_agent_session_protocol::ModelSelection,
+    /// Exact registered producer assigned to its durable context inputs.
+    pub producer: &'a ContributionId,
+    /// Read-only claim-scoped snapshot.
+    pub captured: &'a ContributionContext,
+    /// Result of preceding preset input editors, over the same captured claim set.
+    pub previous: Option<&'a rsi_agent_session_protocol::StepInputDecision>,
+    /// Framework identity allocated before any process callback begins.
+    pub request_id: &'a rsi_agent_session_protocol::DomainRequestId,
+    /// Complete admitted catalog names; a producer can only narrow this set.
+    pub tools: &'a [String],
+}
+/// One staged contribution to the complete atomic `BeforeStep` publication.
+#[derive(Debug, Default)]
+pub struct BeforeStepOutput {
+    /// Ordered edit of the captured inputs. None preserves the preceding decision.
+    pub decision: Option<rsi_agent_session_protocol::StepInputDecision>,
+    /// Current system guidance, replaced by the next preparation and cleared when the Step closes.
+    pub instructions: String,
+    /// Durable context inputs and typed domain replacements.
+    pub contribution: ContributionOutput,
+    /// Retained external resources awaiting the exact canonical receipt.
+    pub publications: Vec<Publication>,
+    /// Optional subset of the captured names; an empty set disables all Tools.
+    pub tools: Option<Vec<String>>,
+}
+/// Staged preparation without ownership of Step acceptance or effect execution.
+#[async_trait]
+pub trait BeforeStepContributor: fmt::Debug + Send + Sync + 'static {
+    /// Runs once per retry series; only canonical publication admits its output.
+    async fn prepare(
+        &self,
+        context: &BeforeStepContext<'_>,
+        cancellation: CancellationToken,
+    ) -> ContributionResult<BeforeStepOutput>;
+}
+
 /// Contribution after a source-ordered Tool batch has durably settled.
 #[async_trait]
 pub trait PostToolContributor: fmt::Debug + Send + Sync + 'static {
@@ -143,6 +190,8 @@ pub struct ToolSettlementContext<'a> {
 /// Pure typed state proposals committed atomically with one `ToolResult`.
 #[derive(Debug, Default)]
 pub struct ToolSettlement {
+    /// Retained resources and post-publication observers; no callback runs during proposal capture.
+    pub publications: Vec<Publication>,
     /// Requires an uncancelled Turn when Kernel admits the atomic mutation.
     /// Ordinary effect settlement may otherwise publish after cancellation.
     pub require_uncancelled_turn: bool,
@@ -201,4 +250,13 @@ pub trait ToolPolicy: fmt::Debug + Send + Sync + 'static {
         request: &ToolPolicyRequest<'_>,
         cancellation: CancellationToken,
     ) -> ContributionResult<ToolPolicyDecision>;
+}
+
+/// Read-only history at one owner-validated durable Fact horizon.
+#[derive(Clone, Debug)]
+pub struct CapturedFactHistory {
+    /// Highest visible durable Fact sequence.
+    pub through_seq: u64,
+    /// Cancellation-bound reader, never a Store writer.
+    pub facts: Arc<dyn ContributionFactReader>,
 }

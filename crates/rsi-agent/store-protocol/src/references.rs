@@ -50,6 +50,15 @@ impl ReferenceCodecs {
         snapshot: &DomainSnapshot,
         output: &mut ReferenceCollector,
     ) -> Result<()> {
+        if snapshot.identity().id() == rsi_agent_session_protocol::EXTENSION_JOURNAL_DOMAIN {
+            if snapshot.identity().version() != 1 {
+                return Err(StoreError::Unsupported("extension journal version".into()));
+            }
+            let journal: rsi_agent_session_protocol::ExtensionJournal =
+                serde_json::from_value(snapshot.state().value().clone())
+                    .map_err(|error| StoreError::Corrupt(error.to_string()))?;
+            return journal.references(output).map_err(StoreError::Corrupt);
+        }
         let codec = self
             .0
             .read()
@@ -72,10 +81,12 @@ impl ReferenceCodecs {
 /// Projects the immutable Header's typed lineage and execution ownership.
 pub fn header_references(header: &SessionHeader) -> Result<ReferenceCollector> {
     let mut output = ReferenceCollector::default();
-    if let Some(origin) = header.fork_origin() {
+    if let Some(origin) = header.history_origin() {
         output
             .session(&origin.parent_session_id)
             .map_err(StoreError::Invalid)?;
+    }
+    if let Some(origin) = header.fork_origin() {
         output
             .session(&origin.root_session_id)
             .map_err(StoreError::Invalid)?;
@@ -101,7 +112,9 @@ fn contents(
                     output.session(&source.session_id)?;
                 }
             }
-            AgentMessageContent::Text { .. } | AgentMessageContent::Image { .. } => {}
+            AgentMessageContent::Text { .. }
+            | AgentMessageContent::Image { .. }
+            | AgentMessageContent::File { .. } => {}
         }
     }
     Ok(())
@@ -132,7 +145,9 @@ fn source(
             output.session(child_session_id)?;
             outcome(value, output)?;
         }
-        AgentMessageSource::Human
+        AgentMessageSource::Human { .. }
+        | AgentMessageSource::Application { .. }
+        | AgentMessageSource::Command { .. }
         | AgentMessageSource::Continuation { .. }
         | AgentMessageSource::Program { .. } => {}
     }
@@ -216,7 +231,9 @@ pub fn native_control_references(record: &AgentControlRecord) -> Result<Referenc
             | AgentControlRecordBody::ActivationWaitingForDescendants { .. }
             | AgentControlRecordBody::WaitParked { .. }
             | AgentControlRecordBody::WaitResumed { .. }
-            | AgentControlRecordBody::ProgramCompletionReserved { .. } => {}
+            | AgentControlRecordBody::ProgramCompletionReserved { .. }
+            | AgentControlRecordBody::InboxPaused
+            | AgentControlRecordBody::InboxResumed => {}
         }
         Ok(())
     };
@@ -228,7 +245,20 @@ pub fn fact_references(record: &SessionFact) -> Result<ReferenceCollector> {
     let mut output = ReferenceCollector::default();
     let mut visit = || -> std::result::Result<(), String> {
         match record.body() {
-            SessionFactBody::InputMessageEntered {
+            SessionFactBody::StepInputsPrepared { decision, .. } => {
+                for input in decision.messages().unwrap_or_default() {
+                    match input {
+                        rsi_agent_session_protocol::PreparedInput::Claimed { .. } => {}
+                        rsi_agent_session_protocol::PreparedInput::Replacement {
+                            message, ..
+                        }
+                        | rsi_agent_session_protocol::PreparedInput::Added { message } => {
+                            contents(message.content(), &mut output)?;
+                        }
+                    }
+                }
+            }
+            SessionFactBody::InputMessageClaimed {
                 source, content, ..
             } => {
                 contents(content, &mut output)?;
@@ -245,12 +275,14 @@ pub fn fact_references(record: &SessionFact) -> Result<ReferenceCollector> {
                         outcome(value, &mut output)?;
                     }
                     InputMessageSource::Human { .. }
+                    | InputMessageSource::Application { .. }
                     | InputMessageSource::Continuation { .. }
                     | InputMessageSource::Program { .. }
                     | InputMessageSource::AgentInstructions { .. }
                     | InputMessageSource::SkillCatalog { .. }
                     | InputMessageSource::UserSkillInvocation { .. }
-                    | InputMessageSource::PluginContext { .. } => {}
+                    | InputMessageSource::PluginContext { .. }
+                    | InputMessageSource::Command { .. } => {}
                 }
             }
             SessionFactBody::TurnTerminal {
@@ -275,7 +307,9 @@ pub fn fact_references(record: &SessionFact) -> Result<ReferenceCollector> {
             | SessionFactBody::ToolRejected { .. }
             | SessionFactBody::ToolStarted { .. }
             | SessionFactBody::ToolResult { .. }
-            | SessionFactBody::TurnTerminal { result: None, .. } => {}
+            | SessionFactBody::TurnTerminal { result: None, .. }
+            | SessionFactBody::ToolContextsClaimed { .. }
+            | SessionFactBody::StepPrepared { .. } => {}
         }
         Ok(())
     };
@@ -293,6 +327,47 @@ mod tests {
     struct Codec {
         id: DomainIdentity,
         key: usize,
+    }
+    #[test]
+    fn extension_roots_survive_without_a_registered_plugin_codec() {
+        use rsi_agent_session_protocol::{
+            EXTENSION_JOURNAL_DOMAIN, ExtensionJournal, ExtensionSegment,
+        };
+        let journal = ExtensionJournal {
+            artifact_sha256: "a".repeat(64),
+            segments: vec![ExtensionSegment {
+                first: 0,
+                count: 1,
+                sha256: "b".repeat(64),
+                byte_len: 27,
+            }],
+            sessions: vec![],
+            checkpoint: DomainStateValue::new(serde_json::Value::Null).unwrap(),
+        };
+        let snapshot = DomainSnapshot::new(
+            DomainIdentity::new(EXTENSION_JOURNAL_DOMAIN, 1).unwrap(),
+            DomainStateValue::encode(&journal).unwrap(),
+        );
+        let codecs = ReferenceCodecs::default();
+        let mut roots = ReferenceCollector::default();
+        codecs.collect(&snapshot, &mut roots).unwrap();
+        assert_eq!(
+            roots.iter().next(),
+            Some(&DurableReference::Cas {
+                sha256: "b".repeat(64),
+                byte_len: 27
+            })
+        );
+        assert!(matches!(
+            codecs.collect(
+                &DomainSnapshot::new(
+                    DomainIdentity::new(EXTENSION_JOURNAL_DOMAIN, 2).unwrap(),
+                    snapshot.state().clone()
+                ),
+                &mut ReferenceCollector::default()
+            ),
+            Err(StoreError::Unsupported(_))
+        ));
     }
     impl DomainReferenceCodec for Codec {
         fn identity(&self) -> &DomainIdentity {

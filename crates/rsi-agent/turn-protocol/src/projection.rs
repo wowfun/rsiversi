@@ -46,6 +46,11 @@ pub struct ResidentActivityPage {
 /// Read-only generation selection and complete derived snapshot capture.
 #[async_trait]
 pub trait SessionProjections: fmt::Debug + Send + Sync + 'static {
+    /// Subscribes before a directory capture. Each wake invalidates the previous activity view.
+    /// Providers without publication notifications return no subscription.
+    fn watch_activity(&self) -> crate::Result<Option<SessionProjectionChanges>> {
+        Ok(None)
+    }
     /// Cheap durable-commit revision, without observers or pins; None disables caching.
     fn activity_revision(&self) -> Option<u64> {
         None
@@ -57,6 +62,11 @@ pub trait SessionProjections: fmt::Debug + Send + Sync + 'static {
             "resident activity is unavailable".into(),
         ))
     }
+    /// Returns the selected identities with resident nonterminal work in one observation.
+    fn running_sessions(
+        &self,
+        sessions: &[SessionId],
+    ) -> crate::Result<std::collections::BTreeSet<SessionId>>;
     /// Peeks at residency without Store reads, activation, preparation or pinning.
     fn resident_composition(&self, session_id: &SessionId) -> crate::Result<ResidentComposition>;
     /// Subscribes before capture; includes future publication and ends on retirement.

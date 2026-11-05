@@ -3,6 +3,44 @@ use rsi_agent_composition_protocol::{
 };
 
 #[test]
+fn frozen_baselines_retain_complete_resource_owners_until_replacement_is_admitted() {
+    use rsi_agent_composition_protocol::{DomainBaseline, DomainReferencePolicy};
+    use std::sync::Arc;
+    let definition = DomainDefinition::new(
+        DomainIdentity::new("retained", 1).unwrap(),
+        &false,
+        |_| Ok(()),
+        DomainReferencePolicy::None,
+    )
+    .unwrap();
+    let catalog = DomainCatalog::new([definition.registration()]).unwrap();
+    let handle = catalog.bind(&definition).unwrap();
+    let owner = Arc::new(String::from("unpublished CAS lease"));
+    let weak = Arc::downgrade(&owner);
+    let proposal = handle
+        .propose(DomainRevision::default(), &true)
+        .unwrap()
+        .with_retained(owner);
+    let mut baseline = DomainBaseline::new(catalog).unwrap();
+    baseline.apply(&proposal).unwrap();
+    let frozen = baseline.clone();
+    drop(proposal);
+    assert!(weak.upgrade().is_some());
+    let invalid = handle.propose(DomainRevision::new(1), &false).unwrap();
+    assert!(baseline.apply(&invalid).is_err());
+    assert!(weak.upgrade().is_some());
+    baseline
+        .apply(&handle.propose(DomainRevision::default(), &false).unwrap())
+        .unwrap();
+    assert!(
+        weak.upgrade().is_some(),
+        "frozen first-submit still owns the old snapshot"
+    );
+    drop(frozen);
+    assert!(weak.upgrade().is_none());
+}
+
+#[test]
 fn fork_resets_only_declared_domains_and_still_validates_parent_payloads() {
     use rsi_agent_composition_protocol::{DomainBaseline, DomainForkPolicy};
     use rsi_agent_session_protocol::{DomainSnapshot, DomainStateValue};
@@ -60,10 +98,74 @@ fn fork_resets_only_declared_domains_and_still_validates_parent_payloads() {
             .inherit(&[make("independent", serde_json::json!("invalid"))])
             .is_err()
     );
+    for update in baseline.commit().unwrap().updates() {
+        let snapshot = update.snapshot();
+        assert!(std::ptr::eq(
+            baseline.initial_state(snapshot.identity().id()).unwrap(),
+            snapshot
+        ));
+    }
+    assert!(baseline.initial_state("missing").is_none());
     assert_eq!(baseline.initial_states(), snapshots);
 }
 use rsi_agent_session_protocol::{DomainIdentity, DomainRevision};
 use serde::{Deserialize, Serialize};
+
+#[test]
+fn fork_transform_is_required_generation_bound_atomic_and_retained() {
+    use rsi_agent_composition_protocol::{DomainBaseline, DomainForkPolicy, DomainReferencePolicy};
+    use std::sync::Arc;
+    let definition = DomainDefinition::new(
+        DomainIdentity::new("cut-sensitive", 1).unwrap(),
+        &0_u32,
+        |_| Ok(()),
+        DomainReferencePolicy::None,
+    )
+    .unwrap()
+    .with_fork_policy(DomainForkPolicy::Transform);
+    let catalog = DomainCatalog::new([definition.registration()]).unwrap();
+    let handle = catalog.bind(&definition).unwrap();
+    let parent = handle
+        .propose(DomainRevision::new(8), &77)
+        .unwrap()
+        .snapshot()
+        .clone();
+    let mut baseline = DomainBaseline::new(catalog).unwrap();
+    let before = baseline.initial_states();
+    assert!(baseline.inherit(std::slice::from_ref(&parent)).is_err());
+    assert_eq!(baseline.initial_states(), before);
+    let foreign = DomainCatalog::new([definition.registration()])
+        .unwrap()
+        .bind(&definition)
+        .unwrap()
+        .propose(DomainRevision::default(), &12)
+        .unwrap();
+    assert!(
+        baseline
+            .inherit_transformed(std::slice::from_ref(&parent), &[foreign])
+            .is_err()
+    );
+    assert_eq!(baseline.initial_states(), before);
+    let owner = Arc::new(String::from("fork CAS"));
+    let weak = Arc::downgrade(&owner);
+    let transformed = handle
+        .propose(DomainRevision::default(), &12)
+        .unwrap()
+        .with_retained(owner);
+    baseline
+        .inherit_transformed(&[parent], &[transformed])
+        .unwrap();
+    assert_eq!(
+        baseline.initial_states()[0].state().value(),
+        &serde_json::json!(12)
+    );
+    assert!(weak.upgrade().is_some());
+    let frozen = baseline.clone();
+    drop(baseline);
+    assert!(weak.upgrade().is_some());
+    drop(frozen);
+    assert!(weak.upgrade().is_none());
+}
 
 #[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
 #[serde(deny_unknown_fields)]
@@ -388,4 +490,49 @@ fn reference_free_versions_skip_decoding_but_visitors_validate_durable_state() {
         );
         assert!(references.iter().next().is_none());
     }
+}
+
+#[test]
+fn captured_baseline_rebind_preserves_state_and_resource_lifetime() {
+    use rsi_agent_composition_protocol::{DomainBaseline, DomainReferencePolicy};
+    use std::sync::Arc;
+    let definition = DomainDefinition::new(
+        DomainIdentity::new("captured", 1).unwrap(),
+        &false,
+        |_| Ok(()),
+        DomainReferencePolicy::None,
+    )
+    .unwrap();
+    let original = DomainCatalog::new([definition.registration()]).unwrap();
+    let proposal = original
+        .bind(&definition)
+        .unwrap()
+        .propose(DomainRevision::new(0), &true)
+        .unwrap();
+    let owner = Arc::new(());
+    let weak = Arc::downgrade(&owner);
+    let mut baseline = DomainBaseline::new(original).unwrap();
+    baseline.apply(&proposal).unwrap();
+    baseline.retain(owner);
+    assert!(baseline.rebind(DomainCatalog::default()).is_err());
+    let replacement = DomainDefinition::new(
+        DomainIdentity::new("captured", 1).unwrap(),
+        &false,
+        |_| Ok(()),
+        DomainReferencePolicy::None,
+    )
+    .unwrap();
+    let catalog = DomainCatalog::new([replacement.registration()]).unwrap();
+    let rebound = baseline.rebind(catalog.clone()).unwrap();
+    assert!(
+        catalog
+            .bind(&replacement)
+            .unwrap()
+            .decode(&rebound.initial_states()[0])
+            .unwrap()
+    );
+    drop(baseline);
+    assert!(weak.upgrade().is_some());
+    drop(rebound);
+    assert!(weak.upgrade().is_none());
 }

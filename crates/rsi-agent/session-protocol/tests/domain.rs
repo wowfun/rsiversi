@@ -3,6 +3,90 @@ use rsi_agent_session_protocol::{
 };
 
 #[test]
+fn input_only_commits_bind_provenance_and_cannot_be_emptied() {
+    use rsi_agent_session_protocol::*;
+    let invocation = SessionCommandInvocation {
+        command: ContributionId::new("fixture.inject").unwrap(),
+        request_id: DomainRequestId::new("context").unwrap(),
+        expected_revision: CommandRevision::Durable { control_seq: 1 },
+        arguments: CommandArguments::new(serde_json::json!({"text":"boundary"})).unwrap(),
+    };
+    let provenance = CommandMessageSource {
+        command: invocation.command.clone(),
+        request_id: invocation.request_id.clone(),
+        invocation_sha256: invocation.digest().unwrap(),
+        ordinal: 0,
+        attribution: Some(MessageAttribution {
+            id: "original:context".into(),
+            source: serde_json::json!({"kind":"plugin:context","label":"原始来源"}),
+        }),
+    };
+    let input = CommandMessage {
+        message: AgentMessage {
+            message_id: provenance.message_id().unwrap(),
+            source: AgentMessageSource::Command { source: provenance },
+            content: vec![
+                AgentMessageContent::Text {
+                    text: "boundary".into(),
+                },
+                AgentMessageContent::Text {
+                    text: "second block".into(),
+                },
+            ],
+            options: MessageOptions::default(),
+        },
+        delivery: MessageDelivery::NextStep,
+    };
+    for (request, source) in [
+        (None, DomainMutationSource::Baseline),
+        (
+            Some(invocation.request_id.clone()),
+            DomainMutationSource::Command { invocation },
+        ),
+    ] {
+        assert!(DomainStateCommit::new(request.clone(), source.clone(), vec![]).is_err());
+        let commit = DomainStateCommit::new_with_command_inputs(
+            request,
+            source,
+            vec![],
+            vec![input.clone()],
+        )
+        .unwrap();
+        let encoded = serde_json::to_value(&commit).unwrap();
+        assert_eq!(
+            serde_json::from_value::<DomainStateCommit>(encoded.clone()).unwrap(),
+            commit
+        );
+        assert!(commit.with_command_inputs(vec![]).is_err());
+        let mut removed = encoded.clone();
+        removed["command_inputs"] = serde_json::json!([]);
+        assert!(serde_json::from_value::<DomainStateCommit>(removed).is_err());
+        let mut changed = encoded.clone();
+        changed["command_inputs"][0]["message"]["content"][0]["text"] = "different".into();
+        assert!(serde_json::from_value::<DomainStateCommit>(changed).is_err());
+        let mut changed = encoded.clone();
+        changed["command_inputs"][0]["message"]["source"]["source"]["attribution"]["id"] =
+            "different".into();
+        assert!(serde_json::from_value::<DomainStateCommit>(changed).is_err());
+        let mut changed = encoded;
+        changed["command_inputs"][0]["message"]["source"]["source"]["attribution"]["source"] =
+            serde_json::json!({"kind":"human"});
+        assert!(serde_json::from_value::<DomainStateCommit>(changed).is_err());
+    }
+    assert!(
+        DomainStateCommit::new_with_command_inputs(
+            Some(DomainRequestId::new("turn").unwrap()),
+            DomainMutationSource::Turn {
+                turn_id: TurnId::new("turn").unwrap()
+            },
+            vec![],
+            vec![input],
+        )
+        .is_err()
+    );
+}
+
+#[test]
 fn mixed_domain_receipts_bind_fact_bodies_but_not_allocated_positions() {
     use rsi_agent_session_protocol::{
         DomainFactSpan, DomainFactSpanBuilder, DomainMutationSource, DomainRequestId,

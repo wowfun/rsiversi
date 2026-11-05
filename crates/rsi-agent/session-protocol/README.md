@@ -1,5 +1,100 @@
 # rsi-agent-session-protocol
 
+`TurnOutcome::Blocked` records an input-preparation rejection. It is distinct from
+cancellation, provider failure and successful completion; no provider request is
+authorized by the rejected preparation. Initial `enter([])` completes normally.
+
+`StepInputDecision` describes a final ordered input decision independently of
+mailbox acceptance. Enter may preserve, reorder, replace or omit claimed messages,
+and may add attributed user/developer messages. Reject is distinct from entering
+an empty list. A claim coordinate is a nonzero local Fact sequence and its message
+ordinal; the execution owner must resolve it against the current captured input,
+not arbitrary historical Facts. Reusing a coordinate in the output does not claim
+or consume its mailbox receipt twice. Unchanged messages retain coordinates only,
+avoiding another copy of accepted text or attachments.
+
+Prepared messages preserve their original presentation identity and metadata;
+these are not execution authority. Empty blocks and empty message content are
+valid preparation results even though fresh ingress requires meaningful input.
+The serialized entered list has a 32 MiB prepared-input envelope. Typed
+construction and deserialization validate it; safe-Rust consumers borrow it
+without repeating serialization. Session format 34 retains verbatim files as
+typed `FileRef` content, independently of image and conversation references.
+Image blocks may include optional display metadata independent of the raster identity. File bytes and provider-local paths do not enter Facts. It separates `InputMessageClaimed`
+and `ToolContextsClaimed` from `StepInputsPrepared`. Direct `TurnAccepted` text is
+also a claim at ordinal zero of its acceptance Fact. A preparation consumes the
+owning Turn's current claimed set and records its final input decision. A prior claim uses its absolute Fact sequence. A context input published in the same batch can use a positive distance back from the preparation Fact. This keeps the message coordinate stable when another writer advances the Session during a callback. A claim
+reference cannot name another Turn or an already consumed preparation. An unchanged
+input keeps its source role. Agent instructions, the skill catalog and ordinary
+plugin guidance use developer; Tool-origin context and other inbox input use user.
+An authored or replaced message carries its own final role. Only the
+final decision enters model history. The complete activation is tracked in
+[the proposed input-preparation decision](../../../.agents/notes/proposed/architecture/2026-11-04-claimed-and-prepared-input.md).
+
+Entered tool context identifies the original Session, effect, result ordinal,
+message ID and source metadata. Its PluginContext provenance remains distinct
+from human input when a tool supplies a user-role model message.
+One or more deferred tool messages entering the same Step share one
+`ToolContextsClaimed` Fact. Its ordered entries each carry their own plugin
+attribution and original text blocks. The bundle is bounded to 4,096 messages
+and 16 MiB; Store paging and append limits remain independent of message count.
+
+The Session format records inbox suspension independently of message horizons.
+`InboxPaused` prevents the pending next-Turn mailbox from starting execution;
+`InboxResumed` restores its eligibility. Neither record removes or rewrites a
+message, changes a steering binding, or belongs to model conversation context.
+New Sessions start unpaused. Kernel owns when a waking operation resumes the
+inbox; queue replacement, non-waking injection and terminal promotion do not
+implicitly resume it. Both transitions replay from the durable control log.
+
+The format retains optional original message attribution on command and
+direct application/user inputs, independently of their native identity and
+provenance. Attribution has a nonempty safe-text ID of at most 256 UTF-8 bytes and structurally bounded JSON
+source; the complete attribution is at most 16 KiB of compact JSON. The same
+attribution and ordered text blocks enter the consumed input Fact and survive
+independent history replay and forks. No attribution value grants authority.
+Direct ingress records `Human` for user actions and `Application` for unattended
+submissions. Both reach the model as user messages. Only the former supplies
+initial human authority. Origin and attribution are part of the exact accepted message. Changing either while
+reusing a native message ID conflicts instead of changing the prior acceptance.
+
+`StepPrepared` records the optional application source.
+A ready source records its process generation and the admitted schemas,
+application registrations and native result owners. An unavailable selected
+source records its diagnostic. Absence denotes no selected application.
+`ToolIntent.identity.owner_id` binds an application call to the captured row.
+Sources with durable outcomes also record their stable receipt source on the
+ready view. An absent source carries no authority to look up an external result.
+
+Tool context messages originate in a ToolResult or in the ToolRejected Fact
+of a model call whose policy returned deferred messages. A refusal with no
+messages omits the optional field. Each claim records its
+source Session, effect and message ordinal. Plugin metadata grants no Human
+input authority.
+
+Command-produced mailbox input carries `Command` provenance: its registered
+contribution identity, exact request identity, invocation digest and output
+ordinal. It is never classified as direct Human input. This serialized provenance
+grants no dispatch authority; only the command owner may admit it, atomically with
+its state change (or with the first baseline for an unpublished draft). Text is
+bounded like other non-human Agent messages and cannot carry execution overrides.
+Command inputs retain one or more typed text, image or file blocks in their original
+order. Their external admission owner verifies referenced objects; the protocol
+validates descriptors, provenance and aggregate bounds without filesystem I/O.
+Session format 34 admits this content under both pending and claimed command
+provenance. Command input grants no execution overrides or frozen-reference authority.
+
+`ExtensionJournal` is the built-in version-1 envelope for a trusted process
+extension's event journal. It is one typed domain (`rsi.extension-journal`),
+not a second Session store. Immutable Agent-CAS segments hold extension data;
+the bounded domain records their contiguous event ranges, exact content hashes,
+artifact identity, and an optional recovery checkpoint. Checkpoint JSON cannot
+carry implicit Agent references: every retained CAS or Session edge must occur
+in the envelope's typed reference fields. Up to 256 segments and 64 MiB of
+segment bytes are admitted; a consumer must reject capacity before effects.
+The Store understands these reference semantics without an installed extension.
+Execution still requires the original artifact and its semantic adapter.
+
 `MAXIMUM_LIVE_TURNS` bounds concurrent nonterminal Turns in one Session. Kernel
 admission and durable timing projections share this cardinality limit.
 
@@ -48,6 +143,14 @@ settings validation trusts that typed value without reserializing it.
 Within the current format, omitted output policy means an empty output budget
 table. Serialization emits that table explicitly.
 These policy defaults do not admit any earlier Header format.
+
+Historical inheritance and execution ownership are distinct. A history origin
+binds one source Header, a `before_turn` or `through_turn` boundary, the selected
+completed local Turns, and exact Fact/control prefix digests. Agent spawn adds
+tree membership and a live creator's execution owner; a manual fork has historical
+origin only and starts an independent execution root. History links retain their
+source Session without becoming parent/child control authority. Full traversal is
+bounded to 32 source Headers; Last and None stop that traversal.
 
 Reference envelopes use version 2. Source identity distinguishes native Header
 bindings from observed product records; capture metadata distinguishes a bounded
@@ -121,8 +224,20 @@ durable cursors monotonically; a durable view never regresses to a draft.
 
 ## Session commands
 
+Queue withdrawal preserves the input's source and does not cancel a claimed Turn.
+Only replacement and steering conversion require Human provenance. The initial
+input of a ProgramRun-owned child requires Program cancellation rather than plain
+withdrawal; its execution owner, not the message source, determines that relation.
+
+A `DomainStateCommit` contains domain replacements, command-produced inputs, or
+both. An input-only commit is valid only for a command or first-publication
+baseline. Empty commits remain invalid; Turn and continuation domain mutations
+still require replacements. The digest covers the complete input batch even when
+the domain set is empty. Removing the last input cannot produce an empty commit,
+including through deserialization.
+
 Command invocations bind a ContributionId, DomainRequestId, typed draft or
-durable control revision, and at most 16 KiB of structurally validated JSON
+durable control revision, and at most 64 KiB of structurally validated JSON
 arguments. A durable command control retains that complete invocation alongside
 its domain replacements; the canonical request digest therefore binds command,
 arguments and expected revision. Its request identity must equal the control's
@@ -130,7 +245,7 @@ request identity, and a draft revision cannot appear in a durable command.
 Command controls contain no execution Facts and cannot claim a Turn's free
 mutation lane. Their consumers obtain Session authority through the owning
 Kernel service; serialized identities alone confer no authority. Only Header
-format 21 is accepted; all other formats are unsupported. Header protection is
+format 34 is accepted; all other formats are unsupported. Header protection is
 part of this format's immutable shape. The
 [SQLite contract](../store-sqlite/README.md) owns the exact database version;
 earlier authoritative formats are rejected without rewriting their files.
@@ -303,3 +418,15 @@ notice bound as their mailbox message; entering a Step cannot broaden content.
 Queue mutation fingerprints hash the canonical closed envelope while counting its
 encoded bytes in one pass. Shape and content limits apply before hashing; the
 streaming writer enforces the same request byte limit without retaining JSON.
+## Step Tool selection
+
+`StepPrepared` records the bounded, sorted names admitted by the complete
+BeforeStep stage within one exact open Step. A durable Step may contain multiple
+model retry series; each preparation replaces the previous one after its effects
+and Tool calls have settled. It precedes provider dispatch and is
+committed with that stage's context inputs and domain replacements. Absence means
+the complete frozen catalog. It is execution metadata, never model-visible text.
+Provider retries and Tools produced by that request retain its selection.
+It also records up to 64 producer-bound instruction sections, at most 64 KiB in
+aggregate. They apply until the next preparation or Step boundary; they
+are not appended as historical conversation messages.

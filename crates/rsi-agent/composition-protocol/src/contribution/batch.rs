@@ -42,6 +42,7 @@ impl ContributionInput {
     ) -> ContributionResult<SessionFactBody> {
         let source = match self.source {
             None => InputMessageSource::PluginContext {
+                tool: None,
                 contribution_id: producer.clone(),
             },
             Some(
@@ -55,7 +56,7 @@ impl ContributionInput {
                 ));
             }
         };
-        Ok(SessionFactBody::InputMessageEntered {
+        Ok(SessionFactBody::InputMessageClaimed {
             turn_id: turn.clone(),
             step_id: step.clone(),
             source,

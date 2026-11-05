@@ -187,10 +187,10 @@ mod decimal {
 pub struct ReferenceReadRequest {
     /// Current Session or the direct parent whose actual inherited interval contains this Fact.
     pub recorded_session_id: SessionId,
-    /// Positive durable `InputMessageEntered` Fact, serialized as an exact decimal string.
+    /// Positive durable claim or preparation Fact, serialized as an exact decimal string.
     #[serde(with = "decimal")]
     pub fact_seq: u64,
-    /// Reference's index in that Fact's content array.
+    /// Reference's index in original content or flattened authored preparation blocks.
     pub content_index: usize,
     /// Raw exported UTF-8 byte cursor, aligned by the reader.
     #[serde(default)]
@@ -209,7 +209,7 @@ impl ReferenceReadRequest {
             });
         }
         let origin = header
-            .fork_origin()
+            .history_origin()
             .filter(|origin| {
                 origin.parent_session_id == self.recorded_session_id
                     && self.fact_seq > origin.resolved_after_seq
@@ -227,10 +227,7 @@ impl ReferenceReadRequest {
     }
     /// Validates request bounds before Store work.
     pub fn validate(&self) -> Result<()> {
-        if self.fact_seq == 0
-            || self.fact_seq == u64::MAX
-            || self.content_index >= crate::MAXIMUM_AGENT_MESSAGE_CONTENT_BLOCKS
-        {
+        if self.fact_seq == 0 || self.fact_seq == u64::MAX {
             return Err(SessionError::Invalid(
                 "invalid reference read coordinates or page".into(),
             ));

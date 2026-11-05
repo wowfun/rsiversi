@@ -63,19 +63,23 @@ fn protection_is_bounded_immutable_and_part_of_header_identity() {
         Some(&scope)
     );
     let origin = ForkOrigin {
-        parent_session_id: protected.session_id().clone(),
+        history: rsi_agent_session_protocol::HistoryOrigin {
+            parent_session_id: protected.session_id().clone(),
+            parent_header_fingerprint: protected.fingerprint().unwrap(),
+            point: rsi_agent_session_protocol::ForkPoint::BeforeTurn {
+                turn_id: TurnId::new("turn").unwrap(),
+            },
+            resolved_after_seq: 0,
+            resolved_terminal_seq: 0,
+            terminal_prefix_sha256: "0".repeat(64),
+            resolved_terminal_control_seq: 0,
+            terminal_control_prefix_sha256: "0".repeat(64),
+            requested_turns: ForkTurnSelection::All,
+            effective_turns: 0,
+        },
         root_session_id: protected.session_id().clone(),
         path: AgentPath::new(vec![1]).unwrap(),
         task_name: "child".into(),
-        parent_header_fingerprint: protected.fingerprint().unwrap(),
-        invoking_turn_id: TurnId::new("turn").unwrap(),
-        resolved_after_seq: 0,
-        resolved_terminal_seq: 0,
-        terminal_prefix_sha256: "0".repeat(64),
-        resolved_terminal_control_seq: 0,
-        terminal_control_prefix_sha256: "0".repeat(64),
-        requested_turns: ForkTurnSelection::All,
-        effective_turns: 0,
     };
     let child = protected
         .forked_child(
@@ -106,9 +110,9 @@ fn protection_is_bounded_immutable_and_part_of_header_identity() {
 #[test]
 fn compaction_plan_guards_are_enforced_when_decoding_durable_model_intents() {
     let plan = json!({
-        "version":1,"session":"session","builder":{"id":"builder","semantic_version":"2.3.0","config_sha256":"a".repeat(64)},
+        "version":2,"session":"session","builder":{"id":"builder","semantic_version":"2.3.0","config_sha256":"a".repeat(64)},
         "header_fingerprint":"b".repeat(64),"sources":[{"session":"session","turn":"old","after_seq":0,"through_seq":5,"facts_sha256":"c".repeat(64)}],
-        "selections":[{"turn":"old","first":0,"count":1}],"prior":null,"trigger":{"kind":"canonical_limit"},
+        "selections":[{"session":"session","turn":"old","first":0,"count":1}],"prior":null,"trigger":{"kind":"canonical_limit"},
         "through_seq":5,"view_sha256":"d".repeat(64),"original_bytes":1000,"maximum_text_bytes":32768,"maximum_output_tokens":8192
     });
     let intent = SessionFact::new(
@@ -157,7 +161,7 @@ fn compaction_plan_guards_are_enforced_when_decoding_durable_model_intents() {
         (
             "/selections",
             json!(vec![
-                json!({"turn":"t".repeat(256),"first":0,"count":1});
+                json!({"session":"session","turn":"t".repeat(256),"first":0,"count":1});
                 4096
             ]),
         ),
@@ -425,9 +429,9 @@ fn header_reports_old_format_before_removed_fields_and_rejects_them_in_current_f
     )
     .unwrap();
     let current = serde_json::to_value(&header).unwrap();
-    assert_eq!(current["format_version"], 23);
+    assert_eq!(current["format_version"], 34);
     assert!(current.get("workspace_trust").is_none());
-    for version in [21, 20, 19, 18, 17, 16, 15, 14, 1] {
+    for version in 1..34 {
         // Put the obsolete field before the version to prove decoding is not key-order dependent.
         let wire = format!(
             r#"{{"workspace_trust":"trusted","settings":{{}},"format_version":{version}}}"#
@@ -750,7 +754,7 @@ fn entered_agent_and_completion_messages_keep_the_agent_text_bound() {
     let oversized = vec![AgentMessageContent::Text {
         text: "x".repeat(MAXIMUM_AGENT_MESSAGE_BYTES + 1),
     }];
-    let body = |source| SessionFactBody::InputMessageEntered {
+    let body = |source| SessionFactBody::InputMessageClaimed {
         turn_id: turn_id.clone(),
         step_id: step_id.clone(),
         source,
@@ -777,9 +781,12 @@ fn entered_agent_and_completion_messages_keep_the_agent_text_bound() {
         Err(SessionError::Invalid(message))
             if message.contains(&MAXIMUM_AGENT_MESSAGE_BYTES.to_string())
     ));
-    body(InputMessageSource::Human { message_id })
-        .validate()
-        .expect("the Human input bound remains the larger direct-turn bound");
+    body(InputMessageSource::Human {
+        message_id,
+        attribution: None,
+    })
+    .validate()
+    .expect("the Human input bound remains the larger direct-turn bound");
 }
 
 #[test]
@@ -805,19 +812,23 @@ fn fork_selection_and_lineage_are_exact_and_tamper_evident() {
     assert!(ForkTurnSelection::Last(0).validate().is_err());
 
     ForkOrigin {
-        parent_session_id: SessionId::new("session-parent").unwrap(),
+        history: rsi_agent_session_protocol::HistoryOrigin {
+            parent_session_id: SessionId::new("session-parent").unwrap(),
+            parent_header_fingerprint: "a".repeat(64),
+            point: rsi_agent_session_protocol::ForkPoint::BeforeTurn {
+                turn_id: TurnId::new("turn-first").unwrap(),
+            },
+            resolved_after_seq: 0,
+            resolved_terminal_seq: 0,
+            terminal_prefix_sha256: "0".repeat(64),
+            resolved_terminal_control_seq: 0,
+            terminal_control_prefix_sha256: "0".repeat(64),
+            requested_turns: ForkTurnSelection::All,
+            effective_turns: 0,
+        },
         root_session_id: SessionId::new("session-root").unwrap(),
         path: AgentPath::new(vec![1]).unwrap(),
         task_name: "first-turn-child".into(),
-        parent_header_fingerprint: "a".repeat(64),
-        invoking_turn_id: TurnId::new("turn-first").unwrap(),
-        resolved_after_seq: 0,
-        resolved_terminal_seq: 0,
-        terminal_prefix_sha256: "0".repeat(64),
-        resolved_terminal_control_seq: 0,
-        terminal_control_prefix_sha256: "0".repeat(64),
-        requested_turns: ForkTurnSelection::All,
-        effective_turns: 0,
     }
     .validate()
     .expect("all completed turns may resolve to an empty first-turn prefix");
@@ -831,30 +842,35 @@ fn fork_selection_and_lineage_are_exact_and_tamper_evident() {
     )
     .unwrap()
     .with_fork_origin(ForkOrigin {
-        parent_session_id: SessionId::new("session-parent").unwrap(),
+        history: rsi_agent_session_protocol::HistoryOrigin {
+            parent_session_id: SessionId::new("session-parent").unwrap(),
+            parent_header_fingerprint: "a".repeat(64),
+            point: rsi_agent_session_protocol::ForkPoint::BeforeTurn {
+                turn_id: TurnId::new("turn-spawn").unwrap(),
+            },
+            resolved_after_seq: 0,
+            resolved_terminal_seq: 7,
+            terminal_prefix_sha256: "b".repeat(64),
+            resolved_terminal_control_seq: 1,
+            terminal_control_prefix_sha256: "c".repeat(64),
+            requested_turns: ForkTurnSelection::All,
+            effective_turns: 2,
+        },
         root_session_id: SessionId::new("session-root").unwrap(),
         path: AgentPath::new(vec![1]).unwrap(),
         task_name: "reviewer".into(),
-        parent_header_fingerprint: "a".repeat(64),
-        invoking_turn_id: TurnId::new("turn-spawn").unwrap(),
-        resolved_after_seq: 0,
-        resolved_terminal_seq: 7,
-        terminal_prefix_sha256: "b".repeat(64),
-        resolved_terminal_control_seq: 1,
-        terminal_control_prefix_sha256: "c".repeat(64),
-        requested_turns: ForkTurnSelection::All,
-        effective_turns: 2,
     })
     .unwrap();
     assert_named_spawn_header(&child);
     assert_eq!(child.format_version(), SESSION_FORMAT_VERSION);
-    assert_eq!(child.fork_origin().unwrap().resolved_terminal_seq, 7);
+    assert_eq!(child.history_origin().unwrap().resolved_terminal_seq, 7);
+    assert_independent_fork(&child);
     for (field, value) in [
         ("resolved_terminal_control_seq", json!(0)),
         ("terminal_control_prefix_sha256", json!("bad-digest")),
     ] {
         let mut encoded = serde_json::to_value(&child).unwrap();
-        encoded["fork_origin"][field] = value;
+        encoded["fork_origin"]["origin"]["history"][field] = value;
         assert!(
             serde_json::from_value::<SessionHeader>(encoded).is_err(),
             "accepted invalid {field}"
@@ -864,26 +880,30 @@ fn fork_selection_and_lineage_are_exact_and_tamper_evident() {
     previous_format["format_version"] = json!(7);
     assert!(serde_json::from_value::<SessionHeader>(previous_format).is_err());
     let mut encoded = serde_json::to_value(&child).unwrap();
-    encoded["fork_origin"]["terminal_prefix_sha256"] = json!("not-a-digest");
+    encoded["fork_origin"]["origin"]["history"]["terminal_prefix_sha256"] = json!("not-a-digest");
     assert!(serde_json::from_value::<SessionHeader>(encoded).is_err());
 }
 
 #[test]
 fn fork_lineage_rejects_nonempty_intervals_with_zero_effective_turns() {
     let malformed = ForkOrigin {
-        parent_session_id: SessionId::new("parent").unwrap(),
+        history: rsi_agent_session_protocol::HistoryOrigin {
+            parent_session_id: SessionId::new("parent").unwrap(),
+            parent_header_fingerprint: "00".repeat(32),
+            point: rsi_agent_session_protocol::ForkPoint::BeforeTurn {
+                turn_id: TurnId::new("turn-1").unwrap(),
+            },
+            resolved_after_seq: 0,
+            resolved_terminal_seq: 7,
+            terminal_prefix_sha256: "11".repeat(32),
+            resolved_terminal_control_seq: 1,
+            terminal_control_prefix_sha256: "c".repeat(64),
+            requested_turns: ForkTurnSelection::All,
+            effective_turns: 0,
+        },
         root_session_id: SessionId::new("parent").unwrap(),
         path: AgentPath::new(vec![1]).unwrap(),
         task_name: "child".into(),
-        parent_header_fingerprint: "00".repeat(32),
-        invoking_turn_id: TurnId::new("turn-1").unwrap(),
-        resolved_after_seq: 0,
-        resolved_terminal_seq: 7,
-        terminal_prefix_sha256: "11".repeat(32),
-        resolved_terminal_control_seq: 1,
-        terminal_control_prefix_sha256: "c".repeat(64),
-        requested_turns: ForkTurnSelection::All,
-        effective_turns: 0,
     };
 
     assert!(malformed.validate().is_err());
@@ -918,7 +938,7 @@ fn durable_agent_tree_values_revalidate_nested_bounds() {
                 AgentControlRecordBody::MessageAccepted {
                     message: AgentMessage {
                         message_id: MessageId::new("message-invalid-wake-target").unwrap(),
-                        source: AgentMessageSource::Human,
+                        source: AgentMessageSource::Human { attribution: None },
                         content: vec![AgentMessageContent::Text {
                             text: "invalid scheduling tuple".into(),
                         }],
@@ -1033,9 +1053,14 @@ fn terminal_control_rejects_a_zero_fact_reference_on_construction_and_decode() {
 fn assert_source_kind_projection(source: &ContinuationSource, text: &str) {
     for (source, kind, tag) in [
         (
-            AgentMessageSource::Human,
+            AgentMessageSource::Human { attribution: None },
             AgentMessageSourceKind::Human,
             "human",
+        ),
+        (
+            AgentMessageSource::Application { attribution: None },
+            AgentMessageSourceKind::Application,
+            "application",
         ),
         (
             AgentMessageSource::Agent {
@@ -1068,14 +1093,14 @@ fn assert_source_kind_projection(source: &ContinuationSource, text: &str) {
             options: MessageOptions::default(),
         };
         message.validate().unwrap();
-        let entered = message.entered_source();
+        let entered = message.claimed_source();
         let mut expected = serde_json::to_value(&source).unwrap();
         expected
             .as_object_mut()
             .unwrap()
             .insert("message_id".into(), serde_json::json!("entered-projection"));
         assert_eq!(serde_json::to_value(&entered).unwrap(), expected);
-        SessionFactBody::InputMessageEntered {
+        SessionFactBody::InputMessageClaimed {
             turn_id: TurnId::new("entered-turn").unwrap(),
             step_id: StepId::new("entered-step").unwrap(),
             source: entered,
@@ -1247,10 +1272,10 @@ fn entered_program_notice_preserves_mailbox_content_and_envelope_bounds() {
         let entered = SessionFact::new(
             1,
             1,
-            SessionFactBody::InputMessageEntered {
+            SessionFactBody::InputMessageClaimed {
                 turn_id: TurnId::new("turn").unwrap(),
                 step_id: StepId::new("step").unwrap(),
-                source: message.entered_source(),
+                source: message.claimed_source(),
                 content,
             },
         );
@@ -1290,4 +1315,29 @@ fn model_output_schemas_share_validation_with_stricter_bytes_and_annotations() {
         json!("a".repeat(MAXIMUM_MODEL_OUTPUT_SCHEMA_BYTES - overhead + 1));
     assert!(OutputContract::from_model_schema(schema.clone()).is_err());
     assert!(OutputContract::new(schema).is_ok());
+}
+
+fn assert_independent_fork(child: &SessionHeader) {
+    let mut history = child.history_origin().unwrap().clone();
+    history.parent_session_id = child.session_id().clone();
+    history.parent_header_fingerprint = child.fingerprint().unwrap();
+    history.point = ForkPoint::through(&TurnId::new("completed-child-turn").unwrap());
+    let manual = child
+        .forked_independent(SessionId::new("manual-root").unwrap(), 3, history.clone())
+        .unwrap();
+    assert!(manual.fork_origin().is_none());
+    assert!(manual.execution_owner().is_none());
+    assert!(manual.delegation_policy().is_none());
+    assert!(manual.spawn_role().is_none());
+    assert_eq!(manual.history_origin(), Some(&history));
+    assert_eq!(
+        serde_json::from_value::<SessionHeader>(serde_json::to_value(&manual).unwrap()).unwrap(),
+        manual
+    );
+    let mut agent_origin = child.fork_origin().unwrap().clone();
+    agent_origin.history.point = history.point;
+    assert!(
+        agent_origin.validate().is_err(),
+        "an Agent child cannot reinterpret a through-Turn cut as creator authority"
+    );
 }

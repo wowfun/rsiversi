@@ -293,7 +293,7 @@ pub enum MessageState {
         /// Step which received the input.
         step_id: StepId,
         /// Fact sequence containing the model-visible input.
-        entered_fact_seq: u64,
+        claimed_fact_seq: u64,
     },
     /// Will never enter model context.
     Discarded {
@@ -339,13 +339,13 @@ impl MessageReceipt {
         }
         match &self.state {
             MessageState::Claimed {
-                entered_fact_seq, ..
-            } if *entered_fact_seq == 0 => Err(TurnError::Invariant(
+                claimed_fact_seq, ..
+            } if *claimed_fact_seq == 0 => Err(TurnError::Invariant(
                 "claimed message receipt has no entered Fact sequence".into(),
             )),
             MessageState::Claimed {
-                entered_fact_seq, ..
-            } if *entered_fact_seq > self.observed_fact_seq => Err(TurnError::Invariant(
+                claimed_fact_seq, ..
+            } if *claimed_fact_seq > self.observed_fact_seq => Err(TurnError::Invariant(
                 "claimed message receipt entered after its observed Fact tail".into(),
             )),
             MessageState::Discarded { control_seq, .. }
@@ -502,6 +502,25 @@ pub struct SendAgentMessage {
     pub start_new_turn: bool,
 }
 
+/// Authorized source and exact selection for an independent unpublished fork.
+#[derive(Debug)]
+pub struct PrepareFork {
+    /// Source Header already authorized by the application boundary.
+    pub source: SessionHeader,
+    /// Fresh caller-allocated identity.
+    pub session_id: SessionId,
+    /// Creation clock sampled by the owning application.
+    pub created_at_ms: u64,
+    /// Exact target generation selector.
+    pub agent_preset_id: rsi_agent_session_protocol::AgentPresetId,
+    /// Before an accepted source Turn or through a completed source Turn.
+    pub point: rsi_agent_session_protocol::ForkPoint,
+    /// Local completed Turns selected at that cut.
+    pub turns: rsi_agent_session_protocol::ForkTurnSelection,
+    /// Revocation or draft-owner cancellation.
+    pub cancellation: tokio_util::sync::CancellationToken,
+}
+
 /// Bounded runtime settlement diagnostics, independent of startup recovery.
 #[derive(Clone, Debug, Default, Eq, PartialEq)]
 pub struct SettlementHealth {
@@ -614,7 +633,7 @@ pub type SessionObservationStream =
 /// Subscribe before collecting a tree snapshot; no payload history is retained.
 pub type TreeMembershipChanges = Pin<Box<dyn Stream<Item = ()> + Send + 'static>>;
 
-/// Idempotent cancellation target before or after message claim.
+/// Cancellation of an exact identity, or a newly captured Session inbox/Turn cut.
 #[derive(Clone, Debug, Eq, PartialEq, serde::Serialize, serde::Deserialize)]
 #[serde(
     tag = "kind",
@@ -627,15 +646,22 @@ pub enum CancelTarget {
     Message(MessageId),
     /// Request cancellation of one accepted Turn.
     Turn(TurnId),
+    /// Clear the captured pending inbox without cancelling Turns or changing suspension.
+    Inbox,
+    /// Pause the inbox and cancel all currently accepted Turns, optionally retaining queued input.
+    Session {
+        /// Retain pending messages while suspending their scheduling.
+        keep_inbox: bool,
+    },
 }
 
-/// Idempotent cancellation result.
+/// Durable cancellation admission, independent of executor cleanup.
 #[derive(Clone, Debug, Eq, PartialEq, serde::Serialize, serde::Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct CancelResult {
-    /// Whether a new cancellation Fact entered the live stream.
+    /// Whether this call accepted a new cancellation or inbox transition.
     pub accepted: bool,
-    /// Whether the target was already terminal at call time.
+    /// Whether an exact Message or Turn target was already terminal; false for Session stops.
     pub already_terminal: bool,
 }
 
@@ -670,6 +696,21 @@ pub trait SessionRetirement: fmt::Debug + Send + Sync {
 /// Application-facing process-local Turn service.
 #[async_trait]
 pub trait TurnService: fmt::Debug + Send + Sync + 'static {
+    /// Waits for this Session's driver to have no Turn, activation or waking input.
+    /// An idle observation does not reserve the next admission.
+    async fn wait_idle(&self, session_id: &SessionId) -> Result<()> {
+        let _ = session_id;
+        Err(TurnError::Invalid(
+            "Session idle waiting is unavailable".into(),
+        ))
+    }
+    /// Captures history and transformed domains without publishing a new Session.
+    async fn prepare_fork(&self, request: PrepareFork) -> Result<PreparedFreshSession> {
+        let _ = request;
+        Err(TurnError::Invalid(
+            "independent fork preparation is unavailable".into(),
+        ))
+    }
     /// Reserves idle exact identities; unknown ownership fails closed.
     fn prepare_retirement(&self, sessions: &[SessionId]) -> Result<Box<dyn SessionRetirement>> {
         let _ = sessions;
@@ -853,7 +894,7 @@ pub trait TurnService: fmt::Debug + Send + Sync + 'static {
             "this Turn service does not support durable messages".into(),
         ))
     }
-    /// Atomically compares and edits one pending Human queue slot.
+    /// Edits Human input or withdraws pending input without cancelling a claimed Turn.
     async fn mutate_queue(
         &self,
         session: &SessionId,
@@ -901,7 +942,7 @@ pub trait TurnService: fmt::Debug + Send + Sync + 'static {
             "this Turn service does not support session observations".into(),
         ))
     }
-    /// Cancels either an unclaimed message or an accepted Turn.
+    /// Cancels an exact Message or Turn, or captures and stops the current Session inbox and Turns.
     async fn cancel_target(
         &self,
         session_id: &SessionId,
@@ -912,6 +953,12 @@ pub trait TurnService: fmt::Debug + Send + Sync + 'static {
             CancelTarget::Turn(turn_id) => self.cancel(session_id, &turn_id, reason).await,
             CancelTarget::Message(_) => Err(TurnError::Invalid(
                 "this Turn service cannot cancel unclaimed messages".into(),
+            )),
+            CancelTarget::Inbox => Err(TurnError::Invalid(
+                "this Turn service cannot clear a Session inbox".into(),
+            )),
+            CancelTarget::Session { .. } => Err(TurnError::Invalid(
+                "this Turn service cannot stop a Session inbox".into(),
             )),
         }
     }
@@ -1030,6 +1077,7 @@ impl TurnClaim {
         AgentCallerAuthority {
             claim: self.clone(),
             tool_origin: None,
+            source_tools: None,
         }
     }
 }
@@ -1152,10 +1200,17 @@ impl TurnClaimIssuer {
         &self,
         claim: &TurnClaim,
         effect_id: EffectId,
+        identity: rsi_tools_protocol::ToolResultIdentity,
         selection: rsi_agent_session_protocol::ModelSelection,
+        source_tools: Option<Arc<[String]>>,
     ) -> Result<AgentCallerAuthority> {
         let mut caller = self.agent_caller(claim)?;
-        caller.tool_origin = Some((effect_id, selection));
+        caller.tool_origin = Some(StartedToolOrigin {
+            effect_id,
+            identity,
+            selection,
+        });
+        caller.source_tools = source_tools;
         Ok(caller)
     }
 }
@@ -1196,10 +1251,22 @@ pub struct ForkFactPage {
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct AgentCallerAuthority {
     claim: TurnClaim,
-    tool_origin: Option<(EffectId, rsi_agent_session_protocol::ModelSelection)>,
+    tool_origin: Option<StartedToolOrigin>,
+    source_tools: Option<Arc<[String]>>,
+}
+
+#[derive(Clone, Debug, Eq, PartialEq)]
+struct StartedToolOrigin {
+    effect_id: EffectId,
+    identity: rsi_tools_protocol::ToolResultIdentity,
+    selection: rsi_agent_session_protocol::ModelSelection,
 }
 
 impl AgentCallerAuthority {
+    /// Borrows the producing Step's frozen subset; absent means its full catalog.
+    pub fn source_tools(&self) -> Option<&[String]> {
+        self.source_tools.as_deref()
+    }
     /// Borrows the original caller's execution owner without resolving a replacement.
     pub fn execution(&self) -> Option<&rsi_execution::ExecutionLease> {
         self.claim.execution()
@@ -1207,12 +1274,17 @@ impl AgentCallerAuthority {
 
     /// Returns the exact started Tool effect, absent for internal claim callers.
     pub fn tool_effect_id(&self) -> Option<&EffectId> {
-        self.tool_origin.as_ref().map(|(effect, _)| effect)
+        self.tool_origin.as_ref().map(|origin| &origin.effect_id)
+    }
+
+    /// Borrows the identity recorded by the exact started Tool intent and start.
+    pub fn tool_identity(&self) -> Option<&rsi_tools_protocol::ToolResultIdentity> {
+        self.tool_origin.as_ref().map(|origin| &origin.identity)
     }
 
     /// Returns the authenticated producing request's model and effective effort.
     pub fn source_selection(&self) -> Option<&rsi_agent_session_protocol::ModelSelection> {
-        self.tool_origin.as_ref().map(|(_, selection)| selection)
+        self.tool_origin.as_ref().map(|origin| &origin.selection)
     }
 
     /// Returns the exact calling Agent session.
@@ -1355,15 +1427,19 @@ pub trait TurnExecution: fmt::Debug + Send + Sync + 'static {
             "this executor does not expose Tool caller authority".into(),
         ))
     }
-    /// Reads one bounded immutable inherited parent-history page.
+    /// Captures the immutable fork source Headers, oldest first. `All` includes
+    /// the parent's prior selection; `Last` and `None` stop that chain.
+    async fn read_fork_sources(&self, claim: &TurnClaim) -> Result<Vec<SessionHeader>>;
+    /// Reads one bounded page from an exact Header in the authorized fork chain.
     async fn read_fork_facts(
         &self,
         claim: &TurnClaim,
+        source: &SessionId,
         after_parent_seq: u64,
         limit: usize,
     ) -> Result<Option<ForkFactPage>>;
     /// Atomically enters every pending next-Step message at one safe model boundary.
-    async fn enter_pending_step_messages(&self, claim: &TurnClaim) -> Result<usize>;
+    async fn claim_pending_step_messages(&self, claim: &TurnClaim) -> Result<usize>;
     /// Reads current bounded domains for an exact started Tool, including after cancellation.
     /// This does not open a Step or acquire new execution authority.
     async fn tool_settlement_domains(
@@ -1376,6 +1452,19 @@ pub trait TurnExecution: fmt::Debug + Send + Sync + 'static {
             "Tool settlement domain reads are unsupported".into(),
         ))
     }
+    /// Opens or reuses and flushes the charged request Step. Reads only the requested domain.
+    async fn request_step(
+        &self,
+        claim: &TurnClaim,
+        domain: Option<&str>,
+        pending: Vec<rsi_agent_session_protocol::SettledToolContext>,
+        cancellation: CancellationToken,
+    ) -> Result<(StepId, Option<DomainStateView>)> {
+        let _ = (claim, domain, pending, cancellation);
+        Err(TurnError::Invalid(
+            "request Step capture is unsupported".into(),
+        ))
+    }
     /// Captures a durable Fact/control horizon and complete domain state at a safe boundary.
     /// Opens a charged Step for a direct Turn when necessary. The reader expires with the
     /// exact claim or supplied stage cancellation; no callback executes under admission.
@@ -1383,12 +1472,22 @@ pub trait TurnExecution: fmt::Debug + Send + Sync + 'static {
     async fn contribution_context(
         &self,
         claim: &TurnClaim,
+        pending: Vec<rsi_agent_session_protocol::SettledToolContext>,
         cancellation: CancellationToken,
     ) -> Result<rsi_agent_composition_protocol::ContributionContext> {
-        let _ = (claim, cancellation);
+        let _ = (claim, pending, cancellation);
         Err(TurnError::Invalid(
             "execution contributions are unsupported".into(),
         ))
+    }
+    /// Lends a bounded durable prefix to this exact started Tool, independently of Step preparation.
+    async fn tool_history(
+        &self,
+        caller: &AgentCallerAuthority,
+        cancellation: CancellationToken,
+    ) -> Result<rsi_agent_composition_protocol::CapturedFactHistory> {
+        let _ = (caller, cancellation);
+        Err(TurnError::Invalid("Tool history is unsupported".into()))
     }
     /// Captures a read-only policy horizon for one exact started foreground coordinator.
     /// No nested effect may be active; this does not authorize contribution writes.
@@ -1431,16 +1530,25 @@ pub trait TurnExecution: fmt::Debug + Send + Sync + 'static {
         let _ = (claim, after_seq, limit);
         Ok(None)
     }
+    /// Captures source Headers for terminal-turn checkpoint maintenance.
+    async fn read_checkpoint_fork_sources(
+        &self,
+        claim: &TurnClaim,
+    ) -> Result<Option<Vec<SessionHeader>>> {
+        let _ = claim;
+        Ok(None)
+    }
     /// Reads inherited parent history for terminal-turn checkpoint maintenance.
     /// The implementation must authorize the immutable child Header and reject
     /// any session with a speculative local suffix.
     async fn read_checkpoint_fork_facts(
         &self,
         claim: &TurnClaim,
+        source: &SessionId,
         after_parent_seq: u64,
         limit: usize,
     ) -> Result<Option<ForkFactPage>> {
-        let _ = (claim, after_parent_seq, limit);
+        let _ = (claim, source, after_parent_seq, limit);
         Ok(None)
     }
     /// Reads one optional Context checkpoint cache.
@@ -1863,7 +1971,7 @@ mod tests {
                 activation_id: ActivationId::new("activation-receipt").unwrap(),
                 turn_id: TurnId::new("turn-receipt").unwrap(),
                 step_id: StepId::new("step-receipt").unwrap(),
-                entered_fact_seq: 5,
+                claimed_fact_seq: 5,
             },
         };
 

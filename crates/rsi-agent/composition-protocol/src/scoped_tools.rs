@@ -10,10 +10,31 @@ use tokio_util::sync::CancellationToken;
 #[derive(Debug)]
 pub(super) struct ScopedTools {
     pub inner: Arc<dyn ToolRuntime>,
-    pub allowed: BTreeSet<String>,
+    pub allowed: ToolScope,
+}
+#[derive(Debug)]
+pub(super) enum ToolScope {
+    Only(BTreeSet<String>),
+    Except(Arc<BTreeSet<String>>),
+}
+impl ToolScope {
+    fn contains(&self, name: &str) -> bool {
+        match self {
+            Self::Only(names) => names.contains(name),
+            Self::Except(names) => {
+                !names.contains(name) || name == rsi_agent_session_protocol::REPORT_RESULT_TOOL
+            }
+        }
+    }
 }
 #[async_trait]
 impl ToolRuntime for ScopedTools {
+    fn registration_owner(&self, name: &str) -> Option<&str> {
+        self.allowed
+            .contains(name)
+            .then(|| self.inner.registration_owner(name))
+            .flatten()
+    }
     fn visit_definitions(&self, visitor: &mut dyn FnMut(&rsi_tools_protocol::ToolDefinition)) {
         self.inner.visit_definitions(&mut |definition| {
             if self.allowed.contains(definition.name()) {

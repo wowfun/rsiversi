@@ -34,7 +34,7 @@ pub struct SessionCommandReceipt {
 }
 
 impl SessionCommandReceipt {
-    /// Binds a draft successor to the original invocation and entire new baseline.
+    /// Binds a draft successor to the invocation, baseline and held command inputs.
     pub fn draft_changed(
         invocation: &SessionCommandInvocation,
         baseline_sha256: impl Into<String>,

@@ -22,9 +22,11 @@ fn contribution_batches_assign_provenance_and_reject_transport_impersonation_ato
         .unwrap();
     for source in [
         InputMessageSource::Human {
+            attribution: None,
             message_id: MessageId::new("human").unwrap(),
         },
         InputMessageSource::PluginContext {
+            tool: None,
             contribution_id: ContributionId::new("another").unwrap(),
         },
     ] {
@@ -48,8 +50,8 @@ fn contribution_batches_assign_provenance_and_reject_transport_impersonation_ato
     let (facts, domains) = batch.into_parts();
     assert!(domains.is_empty());
     assert!(
-        matches!(facts.as_slice(), [SessionFactBody::InputMessageEntered {
-        source: InputMessageSource::PluginContext { contribution_id }, content, ..
+        matches!(facts.as_slice(), [SessionFactBody::InputMessageClaimed {
+        source: InputMessageSource::PluginContext { contribution_id, .. }, content, ..
     }] if contribution_id == &producer && content.len() == 1)
     );
 }

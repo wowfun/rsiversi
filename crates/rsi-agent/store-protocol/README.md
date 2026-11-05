@@ -1,5 +1,58 @@
 # rsi-agent-store-protocol
 
+A domain-state read can select one domain ID. It returns the same watermarks
+and canonical state as filtering the complete page at that cut. A missing
+domain yields an empty page. Readers can request the stored codec version by
+name even when the active preset no longer registers it.
+
+The mailbox names claim anchors as claimed Facts, independently of final
+model input. Claim validation still compares the complete original accepted source
+and content. References introduced by prepared replacements and additions retain
+their ordinary media/CAS/Session edges. Local claim coordinates do not grant read
+authority or add cross-Session retention edges.
+
+`read_inbox_control_state` captures Fact/control watermarks, inbox suspension,
+open-Turn and activation presence, unpaused waking-input presence and, when requested, all pending message identities in
+acceptance order. A metadata-only read does not enumerate pending messages.
+After ordinary Session validation, neither mode materializes message bodies,
+Header JSON or the Agent tree. The Store
+owns bounded identity decoding and completeness at that one snapshot; Kernel
+uses this metadata to prepare a Session stop and observe driver quiescence under
+submission admission. Activation and waking presence use existing indexes;
+quiescence reads do not enumerate queued identities.
+
+Inbox pause state is a mechanical projection of `InboxPaused` and
+`InboxResumed`, initially false. Ready roots/messages and subtree waking status
+exclude a paused Session without deleting its candidate messages. Mailbox and
+inspection snapshots expose this state at the same durable cut as their
+contents. Promotion and queue editing preserve it. The Store does not decide
+which user or Agent action requests a pause or resume; Kernel owns that policy.
+
+Each control record retains the immutable Fact watermark at the end of its
+own atomic append. `StoreControlPage.fact_cursors` pairs those watermarks with
+the returned records, and `durable_fact_seq` comes from the same read snapshot.
+Anchors are nondecreasing in control order and cannot exceed the Fact tail.
+For a single observed event sequence, Facts in one append precede that append's
+controls. Controls sharing an anchor keep their control order. This is a
+commit-order relation, independent of timestamps and caller timing; it adds no
+control message to the model's conversation context.
+
+Fork boundary selection accepts a typed point before an invoking Turn or through
+an already terminal Turn. Both modes resolve the same balanced completed-Turn
+window and exact Fact/control digests in one read snapshot. An open through-Turn
+is rejected; selection never advances to a later terminal. Historical references
+and Agent-tree membership remain separate Store edges.
+
+Command input is part of the canonical domain request digest. Every bound message
+must appear immediately after that domain control in the same atomic append, with
+identical identity, source, content and delivery intent. Extra unbound command
+messages, missing messages and reordered or substituted payloads are rejected.
+
+Reference maintenance recognizes the built-in `ExtensionJournal` envelope
+independently of plugin registration. It validates that exact version and visits
+only explicit typed references, so uninstalling an extension does not lose its
+Agent-CAS roots. Other domain identities retain exact registered-codec semantics.
+
 Product purge previews distinguish `UncertainWork` (missing native settlement
 evidence) from `Busy` (work that can still settle). Such a blocker does not admit
 deletion or imply that retrying the mutation can resolve the native owner.
@@ -47,7 +100,8 @@ and from an uncertain durable write outcome.
 Activity enumeration is a metadata-only live keyset over `(last_activity_ms,
 SessionId)` descending, globally or within exact execution coordinates. It reads
 neither transcript nor complete Headers and does not mount a Session. Each page
-and its newest cursor share one read snapshot. Activity commits atomically with
+and its newest cursor share one read snapshot. Each activity row includes its
+Session's durable Fact watermark from that snapshot. Activity commits atomically with
 the owning append and never regresses under wall-clock rollback. Header creation,
 new human MessageAccepted controls (excluding same-commit queue successors),
 TurnAccepted, ImageRequested, CancelRequested, ImageOutput, ToolResult,
@@ -106,8 +160,7 @@ Consumers retaining one selected source can transfer its owned String after
 the same binding check, releasing the other sections without copying that text.
 
 Stores implement only the current `AGENT_STORE_SCHEMA_VERSION` defined in
-[src/lib.rs](src/lib.rs). Earlier versions are rejected before recovery or writes; there is no implicit
-migration or legacy Tool-origin reconstruction. The [SQLite contract](../store-sqlite/README.md)
+[src/lib.rs](src/lib.rs). The [SQLite contract](../store-sqlite/README.md)
 owns database preflight and file-preservation guarantees.
 
 ## Domain mutations
@@ -139,6 +192,12 @@ Domain read consumers bind the returned selected horizon to their request:
 an explicit cursor must match exactly, and a current-state read must select the
 reported durable control tail. Structural page validation alone cannot distinguish
 a valid historical page returned in place of current state.
+
+A reader of an authorized Session's inherited history captures its parent
+intervals in replay order. Each interval holds a Store validation lease and
+matches its recorded parent Header fingerprint, effective turns, Fact boundary
+and control boundary. An `all` interval follows the parent's own inheritance.
+Other selections stop the walk at that parent.
 
 ## Correlated terminal commits
 
@@ -228,15 +287,18 @@ a byte-bounded prefix plus the exact pending-mailbox count and direct message
 status, and the one currently active activation per session. A lightweight
 mailbox summary returns the pending count, the bounded ordered identities of
 pending promotable next-Step messages, and Fact/control tails for capacity and
-terminal-promotion decisions. The full mailbox read is one Store snapshot:
+terminal-promotion decisions. Mailbox reads may select all pending messages,
+all pending messages plus one exact message status, or only next-Step messages.
+Selection applies to the count and ordered rows before the byte limit and
+payload decoding. Every read uses one Store snapshot:
 it never materializes the valid 64-message worst case at once, returns the Fact
 and control tails observed by that snapshot, and lets callers reserve its fixed
 page bound before I/O. Message admission
 and status reads use that index rather than replaying an unbounded control
 history. Each returned entry carries the exact encoded message length computed
-by the Store while it reads or indexes the payload; mailbox validation and
-Kernel next-Step batching reuse that value instead of serializing the same
-validated message again. A descendant
+by the Store while it reads or indexes the payload. The mailbox page takes at
+most half the atomic batch byte budget, leaving room for the claim envelope
+and controls. Kernel consumes the ordered page directly. A descendant
 status snapshot reads one subtree's immutable membership, parent/path/task,
 control watermarks, the last settlement control sequence, and open-Turn,
 active-activation and waking-message flags
@@ -278,6 +340,11 @@ separate allocation-admission refusal. Oversized durable records remain Corrupt.
 No separate size probe or durable length column is part of this contract.
 `admit_page_record` owns the shared first-record refusal versus short-page rule
 for implementations that have already validated their page limits and lengths.
+
+Each open-turn page includes the durable Fact and control tails from the same snapshot.
+Recovery can use both as commit preconditions without fetching a control record.
+Indexed Session activity summaries also carry both durable watermarks. Consumers
+can identify a changed log from a single batch of metadata reads.
 
 Forward and backward Session Fact reads, per-turn Fact reads, open-turn
 enumeration, lexical session enumeration, lexical enumeration restricted to
@@ -366,6 +433,10 @@ sequence. Append-only successor controls retain the predecessor and inherit its
 original ready-order key: root grouping, timestamp, SessionId and ready control
 sequence. Neither original payload nor delivery intent is rewritten, including
 prefixes already pinned by a fork. Steer promotion preserves that same order.
+Withdrawal permits every pending source and never changes the original source.
+Kernel refuses ordinary withdrawal of a ProgramRun-owned child's initial input;
+its cancellation commits the discard and parent settlement together. Store's
+Program graph validation checks that settlement against the discarded child input.
 
 Store admission discards the predecessor and its ready row before accepting the
 successor in one transaction. A full 64-message mailbox can therefore replace an

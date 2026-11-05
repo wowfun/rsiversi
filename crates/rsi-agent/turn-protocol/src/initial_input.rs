@@ -55,7 +55,9 @@ impl InitialInput {
         })
     }
     fn enter(&mut self, source: &InputMessageSource) {
-        let (InputMessageSource::Human { message_id: id }
+        let (InputMessageSource::Human { message_id: id, .. }
+        | InputMessageSource::Application { message_id: id, .. }
+        | InputMessageSource::Command { message_id: id, .. }
         | InputMessageSource::Continuation { message_id: id, .. }
         | InputMessageSource::Agent { message_id: id, .. }
         | InputMessageSource::Completion { message_id: id, .. }
@@ -97,7 +99,7 @@ pub async fn initial_turn_input(
             let initial = state
                 .as_mut()
                 .ok_or_else(|| TurnError::Invariant("initial Turn acceptance is absent".into()))?;
-            if let SessionFactBody::InputMessageEntered { source, .. } = fact.body() {
+            if let SessionFactBody::InputMessageClaimed { source, .. } = fact.body() {
                 initial.enter(source);
             }
             if initial.pending.is_empty()
@@ -122,22 +124,31 @@ mod tests {
     #[test]
     fn only_exact_initial_messages_classify_acceptance() {
         let initial = MessageId::new("initial").unwrap();
+        let automatic = MessageId::new("application").unwrap();
         let mut state = InitialInput::accepted(&SessionFactBody::MessageTurnAccepted {
             turn_id: TurnId::new("turn").unwrap(),
             activation_id: ActivationId::new("activation").unwrap(),
-            message_ids: vec![initial.clone()],
+            message_ids: vec![initial.clone(), automatic.clone()],
             model: None,
             reasoning_effort: None,
             sandbox: rsi_sandbox::SandboxMode::WorkspaceWrite,
             require_approval: true,
         })
         .unwrap();
+        state.enter(&InputMessageSource::Application {
+            message_id: automatic,
+            attribution: None,
+        });
+        assert!(!state.input.human);
+        assert!(state.input.continuation_domains.is_empty());
         state.enter(&InputMessageSource::Human {
+            attribution: None,
             message_id: MessageId::new("later-steering").unwrap(),
         });
         assert!(!state.input.human);
         assert_eq!(state.pending.len(), 1);
         state.enter(&InputMessageSource::Human {
+            attribution: None,
             message_id: initial,
         });
         assert!(state.input.human);

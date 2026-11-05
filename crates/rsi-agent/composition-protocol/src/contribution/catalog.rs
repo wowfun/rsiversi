@@ -26,11 +26,15 @@ pub enum ContributionStage {
     Projection,
     /// Finite resource discovery or body reads outside execution.
     ResourceRead,
+    /// Pure initial-domain transformation at an immutable fork cut.
+    ForkTransform,
 }
 
 /// One narrow callback registered in an Agent-only composition.
 #[derive(Clone, Debug)]
 pub enum ContributionKind {
+    /// Staged context, domain and Tool-subset preparation.
+    BeforeStep(Arc<dyn super::BeforeStepContributor>),
     /// Model context input producer.
     Context(Arc<dyn ContextContributor>),
     /// Consumer of a durably settled Tool batch.
@@ -45,6 +49,8 @@ pub enum ContributionKind {
     Projection(Arc<dyn crate::SessionProjection>),
     /// Bounded resource reader captured in this exact generation.
     ResourceRead(Arc<dyn crate::SessionResourceReader>),
+    /// Initial-state transform for domains that cannot copy a selected history cut.
+    ForkTransform(Arc<dyn super::ForkTransform>),
 }
 
 /// Stable identity, explicit priority and one callback.
@@ -75,13 +81,16 @@ impl ContributionRegistration {
     /// Returns its framework stage.
     pub const fn stage(&self) -> ContributionStage {
         match self.kind {
-            ContributionKind::Context(_) => ContributionStage::BeforeStep,
+            ContributionKind::Context(_) | ContributionKind::BeforeStep(_) => {
+                ContributionStage::BeforeStep
+            }
             ContributionKind::PostTool(_) => ContributionStage::AfterTools,
             ContributionKind::ToolSettlement(_) => ContributionStage::ToolSettlement,
             ContributionKind::ToolPolicy(_) => ContributionStage::ToolPolicy,
             ContributionKind::Command(_) => ContributionStage::Command,
             ContributionKind::Projection(_) => ContributionStage::Projection,
             ContributionKind::ResourceRead(_) => ContributionStage::ResourceRead,
+            ContributionKind::ForkTransform(_) => ContributionStage::ForkTransform,
         }
     }
 }

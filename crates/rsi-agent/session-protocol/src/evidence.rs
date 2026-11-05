@@ -115,6 +115,8 @@ pub enum EvidenceContentKind {
     Image,
     /// Declared audio bytes, without their bodies or locators.
     Audio,
+    /// Verbatim file handles; source file bytes are not sent to the provider.
+    File,
 }
 
 /// Number and source byte length of one ordinary content kind.

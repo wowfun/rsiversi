@@ -434,6 +434,7 @@ pub struct DomainStateCommit {
     source: DomainMutationSource,
     updates: Vec<DomainStateUpdate>,
     fact_span: Option<DomainFactSpan>,
+    command_inputs: Vec<crate::CommandMessage>,
     request_sha256: String,
 }
 
@@ -444,6 +445,16 @@ impl DomainStateCommit {
         request_id: Option<crate::DomainRequestId>,
         source: DomainMutationSource,
         updates: Vec<DomainStateUpdate>,
+    ) -> Result<Self> {
+        Self::new_with_command_inputs(request_id, source, updates, vec![])
+    }
+    /// Validates one atomic publication, including commands with inputs only.
+    /// At least one replacement or input is required.
+    pub fn new_with_command_inputs(
+        request_id: Option<crate::DomainRequestId>,
+        source: DomainMutationSource,
+        updates: Vec<DomainStateUpdate>,
+        inputs: Vec<crate::CommandMessage>,
     ) -> Result<Self> {
         source.validate()?;
         let baseline = matches!(source, DomainMutationSource::Baseline);
@@ -460,9 +471,9 @@ impl DomainStateCommit {
                 "command and domain request identities differ".into(),
             ));
         }
-        if updates.is_empty() || updates.len() > MAXIMUM_SESSION_DOMAINS {
+        if updates.len() > MAXIMUM_SESSION_DOMAINS {
             return Err(SessionError::Invalid(
-                "domain commit must contain 1..=64 complete replacements".into(),
+                "domain commit exceeds 64 complete replacements".into(),
             ));
         }
         if let DomainMutationSource::Continuation { domain, .. } = &source
@@ -498,14 +509,15 @@ impl DomainStateCommit {
                 actual: bytes,
             });
         }
-        let request_sha256 = request_digest(&source, &updates, None)?;
-        Ok(Self {
+        Self {
             request_id,
             source,
             updates,
             fact_span: None,
-            request_sha256,
-        })
+            command_inputs: vec![],
+            request_sha256: String::new(),
+        }
+        .with_command_inputs(inputs)
     }
     /// Binds all accompanying Facts of a Turn-origin request to its durable receipt.
     pub fn with_facts<'a>(
@@ -531,8 +543,52 @@ impl DomainStateCommit {
         } else {
             Some(DomainFactSpan::from_facts(facts)?)
         };
-        self.request_sha256 = request_digest(&self.source, &self.updates, self.fact_span.as_ref())?;
+        self.request_sha256 = request_digest(
+            &self.source,
+            &self.updates,
+            self.fact_span.as_ref(),
+            &self.command_inputs,
+        )?;
         Ok(self)
+    }
+    /// Binds exact command-produced messages to the same atomic control publication.
+    pub fn with_command_inputs(mut self, inputs: Vec<crate::CommandMessage>) -> Result<Self> {
+        if self.updates.is_empty() && inputs.is_empty() {
+            return Err(SessionError::Invalid(
+                "commit requires a domain replacement or command input".into(),
+            ));
+        }
+        if !inputs.is_empty()
+            && !matches!(
+                self.source,
+                DomainMutationSource::Baseline | DomainMutationSource::Command { .. }
+            )
+        {
+            return Err(SessionError::Invalid(
+                "only baseline and command commits bind command input".into(),
+            ));
+        }
+        let invocation = match &self.source {
+            DomainMutationSource::Command { invocation } => Some(invocation),
+            _ => None,
+        };
+        crate::CommandMessage::validate_batch(
+            &inputs,
+            invocation,
+            matches!(self.source, DomainMutationSource::Baseline),
+        )?;
+        self.command_inputs = inputs;
+        self.request_sha256 = request_digest(
+            &self.source,
+            &self.updates,
+            self.fact_span.as_ref(),
+            &self.command_inputs,
+        )?;
+        Ok(self)
+    }
+    /// Exact ordered inputs that must be accepted in this same transaction.
+    pub fn command_inputs(&self) -> &[crate::CommandMessage] {
+        &self.command_inputs
     }
     /// Returns the exact canonical Fact interval, absent for control-only requests.
     pub const fn fact_span(&self) -> Option<&DomainFactSpan> {
@@ -567,20 +623,30 @@ impl<'de> Deserialize<'de> for DomainStateCommit {
             source: DomainMutationSource,
             updates: Vec<DomainStateUpdate>,
             fact_span: Option<DomainFactSpan>,
+            command_inputs: Vec<crate::CommandMessage>,
             request_sha256: String,
         }
         let wire = Wire::deserialize(deserializer)?;
-        let mut commit = Self::new(wire.request_id, wire.source, wire.updates)
-            .map_err(serde::de::Error::custom)?;
+        let mut commit = Self::new_with_command_inputs(
+            wire.request_id,
+            wire.source,
+            wire.updates,
+            wire.command_inputs,
+        )
+        .map_err(serde::de::Error::custom)?;
         if wire.fact_span.is_some() && !matches!(commit.source, DomainMutationSource::Turn { .. }) {
             return Err(serde::de::Error::custom(
                 "only a Turn domain request binds Facts",
             ));
         }
         commit.fact_span = wire.fact_span;
-        commit.request_sha256 =
-            request_digest(&commit.source, &commit.updates, commit.fact_span.as_ref())
-                .map_err(serde::de::Error::custom)?;
+        commit.request_sha256 = request_digest(
+            &commit.source,
+            &commit.updates,
+            commit.fact_span.as_ref(),
+            &commit.command_inputs,
+        )
+        .map_err(serde::de::Error::custom)?;
         if commit.request_sha256 != wire.request_sha256 {
             return Err(serde::de::Error::custom(
                 "domain request digest does not match complete provenance and replacements",
@@ -594,19 +660,22 @@ fn request_digest(
     source: &DomainMutationSource,
     updates: &[DomainStateUpdate],
     fact_span: Option<&DomainFactSpan>,
+    command_inputs: &[crate::CommandMessage],
 ) -> Result<String> {
     #[derive(Serialize)]
     struct Payload<'a> {
         source: &'a DomainMutationSource,
         updates: &'a [DomainStateUpdate],
         facts_sha256: Option<&'a str>,
+        command_inputs: &'a [crate::CommandMessage],
     }
     payload_digest(
-        b"rsi-agent-domain-request-v1\0",
+        b"rsi-agent-domain-request-v2\0",
         &Payload {
             source,
             updates,
             facts_sha256: fact_span.map(DomainFactSpan::bodies_sha256),
+            command_inputs,
         },
     )
 }

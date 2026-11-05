@@ -14,6 +14,11 @@ use thiserror::Error;
 
 mod manifest;
 mod report;
+mod request_tools;
+pub use request_tools::{
+    RequestInputContext, RequestInputPreparer, RequestToolCatalog, RequestToolRoute,
+    RequestToolSource, RequestToolSourceContract,
+};
 mod scoped_tools;
 mod seed;
 mod tool_outputs;
@@ -23,21 +28,25 @@ pub use tool_outputs::ToolOutputCatalog;
 mod command;
 mod contribution;
 pub use command::{
-    ContinuationCommand, DraftCommandError, DraftCommandMutation, DraftCommandPreparation,
-    DraftCommandResult, MAXIMUM_DRAFT_COMMAND_RECEIPTS, PreparedDraftCommand, SessionCommand,
-    SessionCommandContext, SessionCommandRegistration,
+    AppliedDraftCommand, CommandInput, CommandInputDelivery, CommandOutcome,
+    CommandOutcomeEvidence, CommandOutcomeOwner, ContinuationCommand, DraftCommandError,
+    DraftCommandMutation, DraftCommandPreparation, DraftCommandResult,
+    MAXIMUM_DRAFT_COMMAND_RECEIPTS, PreparedCommandInput, PreparedDraftCommand, SessionCommand,
+    SessionCommandContext, SessionCommandOutput, SessionCommandRegistration,
 };
 mod domain;
 mod projection;
 mod resource;
 pub use contribution::{
+    BeforeStepContext, BeforeStepContributor, BeforeStepOutput, CapturedFactHistory,
     ContextContributor, ContributionBatch, ContributionCatalog, ContributionContext,
     ContributionError, ContributionFactPage, ContributionFactReader, ContributionHorizon,
     ContributionInput, ContributionKind, ContributionOutput, ContributionRegistrar,
     ContributionRegistrarContract, ContributionRegistration, ContributionResult, ContributionStage,
-    MAXIMUM_AGENT_CONTRIBUTIONS, MAXIMUM_CONTRIBUTION_INPUT_BYTES, MAXIMUM_CONTRIBUTION_INPUTS,
-    PostToolContributor, ToolPolicy, ToolPolicyDecision, ToolPolicyRequest, ToolSettlement,
-    ToolSettlementContext, ToolSettlementContributor,
+    DraftPublicationReceipt, ForkTransform, ForkTransformContext, MAXIMUM_AGENT_CONTRIBUTIONS,
+    MAXIMUM_CONTRIBUTION_INPUT_BYTES, MAXIMUM_CONTRIBUTION_INPUTS, PostToolContributor,
+    Publication, PublicationObserver, PublicationReceipt, ToolPolicy, ToolPolicyDecision,
+    ToolPolicyRequest, ToolSettlement, ToolSettlementContext, ToolSettlementContributor,
 };
 pub use domain::{
     DomainBaseline, DomainBinding, DomainCatalog, DomainCatalogBuilder, DomainDefinition,
@@ -58,6 +67,7 @@ pub struct AgentCompositionPin {
     preset_id: AgentPresetId,
     source_digest: String,
     tools: Arc<dyn ToolRuntime>,
+    application: Option<Arc<request_tools::RequestPreparation>>,
     tool_weight: Arc<OnceLock<Result<usize>>>,
     context_builder: Arc<dyn ModelContextBuilder>,
     domains: DomainCatalog,
@@ -97,6 +107,7 @@ impl AgentCompositionPin {
             preset_id,
             source_digest,
             tools,
+            application: None,
             tool_weight: Arc::default(),
             context_builder,
             domains,
@@ -206,7 +217,23 @@ impl AgentCompositionPin {
             self.tool_weight = Arc::default();
             self.tools = Arc::new(scoped_tools::ScopedTools {
                 inner: self.tools,
-                allowed: policy.tools().clone(),
+                allowed: scoped_tools::ToolScope::Only(policy.tools().clone()),
+            });
+        }
+        self
+    }
+
+    /// Reserves application-owned names without changing the underlying preset generation.
+    #[must_use]
+    pub fn without_preset_tools(
+        mut self,
+        names: Option<Arc<std::collections::BTreeSet<String>>>,
+    ) -> Self {
+        if let Some(names) = names {
+            self.tool_weight = Arc::default();
+            self.tools = Arc::new(scoped_tools::ScopedTools {
+                inner: self.tools,
+                allowed: scoped_tools::ToolScope::Except(names),
             });
         }
         self
@@ -325,6 +352,7 @@ struct PreparedFreshSessionInner {
     header: SessionHeader,
     composition: AgentCompositionPin,
     baseline: DomainBaseline,
+    command_inputs: Vec<PreparedCommandInput>,
 }
 
 impl PreparedFreshSession {
@@ -365,6 +393,7 @@ impl PreparedFreshSession {
                 header,
                 composition,
                 baseline,
+                command_inputs: vec![],
             }),
         })
     }
@@ -382,6 +411,19 @@ impl PreparedFreshSession {
     /// Returns the actual frozen initial states to be committed with first acceptance.
     pub const fn baseline(&self) -> &DomainBaseline {
         &self.inner.baseline
+    }
+    /// Returns command inputs retained by this exact unpublished payload.
+    pub fn command_inputs(&self) -> &[PreparedCommandInput] {
+        &self.inner.command_inputs
+    }
+    /// Complete initial publication, binding the baseline and all held command input.
+    ///
+    /// # Errors
+    /// Rejects an input batch inconsistent with this candidate's baseline.
+    pub fn initial_commit(
+        &self,
+    ) -> ContributionResult<Option<rsi_agent_session_protocol::DomainStateCommit>> {
+        command::initial_commit(&self.inner.baseline, &self.inner.command_inputs)
     }
 
     /// Selects already prepared initial state from the exact same generation.
@@ -414,6 +456,7 @@ pub struct AgentSessionDraft {
     composition_service: Arc<dyn AgentComposition>,
     composition: AgentCompositionPin,
     baseline: DomainBaseline,
+    command_inputs: Vec<PreparedCommandInput>,
 }
 
 /// Move-only replacement generation prepared for one exact draft predecessor.
@@ -427,6 +470,61 @@ pub struct PreparedDraftPreset {
 }
 
 impl AgentSessionDraft {
+    /// Returns the exact command inputs held by this draft revision.
+    pub fn command_inputs(&self) -> &[PreparedCommandInput] {
+        &self.command_inputs
+    }
+    /// Removes selected held inputs, retaining command retry receipts and domain state.
+    ///
+    /// # Errors
+    /// Rejects exhausted revision space before changing any input.
+    pub fn discard_command_inputs(
+        &mut self,
+        message_ids: &[rsi_agent_session_protocol::MessageId],
+    ) -> Result<()> {
+        if !self
+            .command_inputs
+            .iter()
+            .any(|input| message_ids.contains(&input.message().message_id))
+        {
+            return Ok(());
+        }
+        let revision = self.next_revision()?;
+        self.command_inputs
+            .retain(|input| !message_ids.contains(&input.message().message_id));
+        self.revision = revision;
+        Ok(())
+    }
+    /// Clears held inputs in one revision, retaining domain state and retry receipts.
+    ///
+    /// # Errors
+    /// Rejects exhausted revision space before dropping any input.
+    pub fn clear_command_inputs(&mut self) -> Result<bool> {
+        if self.command_inputs.is_empty() {
+            return Ok(false);
+        }
+        let revision = self.next_revision()?;
+        self.command_inputs.clear();
+        self.revision = revision;
+        Ok(true)
+    }
+    /// Opens an already captured unpublished payload for ordinary draft operations.
+    pub fn from_prepared(
+        prepared: PreparedFreshSession,
+        composition_service: Arc<dyn AgentComposition>,
+    ) -> Self {
+        let inner = *prepared.inner;
+        Self {
+            header: inner.header,
+            composition_service,
+            composition: inner.composition,
+            baseline: inner.baseline,
+            identity: Arc::new(()),
+            revision: 0,
+            command_receipts: std::collections::BTreeMap::new(),
+            command_inputs: inner.command_inputs,
+        }
+    }
     /// Resolves the Header's initial preset into one draft pin.
     ///
     /// # Errors
@@ -452,6 +550,7 @@ impl AgentSessionDraft {
             identity: Arc::new(()),
             revision: 0,
             command_receipts: std::collections::BTreeMap::new(),
+            command_inputs: vec![],
         })
     }
 
@@ -515,6 +614,7 @@ impl AgentSessionDraft {
                 header: self.header.clone(),
                 composition: self.composition.clone(),
                 baseline: self.baseline.clone(),
+                command_inputs: self.command_inputs.clone(),
             }),
         }
     }
@@ -544,6 +644,7 @@ impl AgentSessionDraft {
         let identity = self.identity.clone();
         let service = self.composition_service.clone();
         let header = self.header.clone();
+        let captured = self.header.history_origin().map(|_| self.baseline.clone());
         async move {
             next?;
             let header = header
@@ -555,7 +656,10 @@ impl AgentSessionDraft {
                     "Agent composition returned a different preset identity".into(),
                 ));
             }
-            let baseline = DomainBaseline::new(composition.domains().clone())?;
+            let baseline = match captured {
+                Some(baseline) => baseline.rebind(composition.domains().clone())?,
+                None => DomainBaseline::new(composition.domains().clone())?,
+            };
             Ok(PreparedDraftPreset {
                 identity,
                 expected_revision,
@@ -589,6 +693,7 @@ impl AgentSessionDraft {
         self.header = prepared.header;
         self.composition = prepared.composition;
         self.baseline = prepared.baseline;
+        self.command_inputs.clear();
         self.revision = prepared.expected_revision + 1;
         Ok(())
     }
@@ -601,6 +706,7 @@ impl AgentSessionDraft {
                 header: self.header,
                 composition: self.composition,
                 baseline: self.baseline,
+                command_inputs: self.command_inputs,
             }),
         }
     }

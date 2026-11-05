@@ -127,6 +127,8 @@ pub trait TurnJobStatusSource: fmt::Debug + Send + Sync + 'static {
     fn is_active(&self) -> bool;
     /// Samples status only; no read, wait, kill or scope acquisition is permitted.
     fn list(&self) -> Result<Vec<JobSummary>>;
+    /// Samples only running and stopping identities in this claim.
+    fn active(&self) -> Result<Vec<rsi_jobs::ActiveJob>>;
     /// Samples bounded tails without reporting, waiting or reacquiring a scope.
     fn peek(&self, request: &crate::JobPreviewRequest) -> Result<Option<rsi_jobs::JobRead>>;
 }
@@ -134,6 +136,8 @@ pub trait TurnJobStatusSource: fmt::Debug + Send + Sync + 'static {
 /// Kernel-owned public read port over current authenticated claim sources.
 #[async_trait]
 pub trait TurnJobs: fmt::Debug + Send + Sync + 'static {
+    /// Samples unsettled Jobs of an already authorized Session without activating it.
+    fn active_jobs(&self, session: &SessionId) -> Result<Vec<rsi_jobs::ActiveJob>>;
     /// Peeks one exact origin, validating current claim before and after capture.
     async fn peek_job(
         &self,

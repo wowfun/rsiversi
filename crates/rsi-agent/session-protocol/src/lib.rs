@@ -20,6 +20,18 @@ use thiserror::Error;
 /// Maximum concurrent nonterminal Turns in one Session.
 pub const MAXIMUM_LIVE_TURNS: usize = 256;
 
+mod application_tools;
+mod attribution;
+pub use attribution::MessageAttribution;
+mod step_input;
+pub use step_input::{
+    InputClaimRef, MAXIMUM_PREPARED_INPUT_BYTES, PreparedInput, PreparedInputMessage,
+    PreparedInputRole, StepInputDecision,
+};
+mod history;
+pub use application_tools::{ApplicationToolBinding, ApplicationToolView};
+use history::SessionOrigin;
+pub use history::{ForkOrigin, ForkPoint, HistoryOrigin, MAXIMUM_FORK_HISTORY_DEPTH};
 mod model_attempt;
 mod queue;
 pub use model_attempt::{
@@ -54,14 +66,19 @@ pub use compaction::{
     CompactionBuilder, CompactionPrior, CompactionSelection, CompactionSource, CompactionTrigger,
     ContextCompactionPlan, MAXIMUM_COMPACTION_PLAN_BYTES, ModelEventPurpose, ModelPurpose,
 };
-pub use contribution::ToolRejection;
+pub use contribution::{
+    MAXIMUM_STEP_INSTRUCTION_BYTES, StepInstruction, ToolRejection, validate_step_instructions,
+};
 mod command;
 pub use command::{
-    CommandArguments, CommandOutcome, CommandRevision, MAXIMUM_COMMAND_ARGUMENT_BYTES,
+    CommandArguments, CommandMessage, CommandMessageSource, CommandOutcome, CommandRevision,
+    MAXIMUM_COMMAND_ARGUMENT_BYTES, MAXIMUM_COMMAND_INPUT_BYTES, MAXIMUM_COMMAND_INPUTS,
     MAXIMUM_SESSION_COMMANDS, SessionCommandDescriptor, SessionCommandInvocation,
     SessionCommandReceipt, SessionCommandsView,
 };
 mod domain;
+mod extension;
+pub use extension::{EXTENSION_JOURNAL_DOMAIN, ExtensionJournal, ExtensionSegment};
 mod projection;
 mod reference;
 mod references;
@@ -95,7 +112,7 @@ pub use resource::{
 };
 
 /// Exact durable format accepted by this pre-release implementation.
-pub const SESSION_FORMAT_VERSION: u32 = 23;
+pub const SESSION_FORMAT_VERSION: u32 = 34;
 /// Maximum bytes in one session, turn, effect, profile, or error-code identity.
 pub const MAXIMUM_AGENT_IDENTIFIER_BYTES: usize = 256;
 /// Maximum bytes in one Agent preset directory-segment identity.
@@ -314,91 +331,6 @@ impl ForkTurnSelection {
     }
 }
 
-/// Immutable parent-history boundary retained by a forked session.
-#[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
-#[serde(deny_unknown_fields)]
-pub struct ForkOrigin {
-    /// Exact parent session.
-    pub parent_session_id: SessionId,
-    /// Exact Agent-tree root shared by every descendant.
-    pub root_session_id: SessionId,
-    /// Stable bounded path of this child below the root.
-    pub path: AgentPath,
-    /// Model-facing stable task name allocated by the parent.
-    pub task_name: String,
-    /// Fingerprint of the immutable parent Header.
-    pub parent_header_fingerprint: String,
-    /// Turn containing the spawn request and excluded from inherited history.
-    pub invoking_turn_id: TurnId,
-    /// Exclusive parent Fact cursor before the first inherited completed Turn.
-    pub resolved_after_seq: u64,
-    /// Last inherited terminal session sequence, or zero for `none`.
-    pub resolved_terminal_seq: u64,
-    /// Canonical Fact-prefix digest at the resolved terminal sequence.
-    pub terminal_prefix_sha256: String,
-    /// Exact canonical control horizon recorded with the selected terminal, or zero.
-    pub resolved_terminal_control_seq: u64,
-    /// Canonical control-prefix digest at that horizon.
-    pub terminal_control_prefix_sha256: String,
-    /// Caller-requested selection.
-    pub requested_turns: ForkTurnSelection,
-    /// Number of completed turns actually retained.
-    pub effective_turns: u64,
-}
-
-impl ForkOrigin {
-    /// Revalidates the immutable lineage boundary.
-    pub fn validate(&self) -> Result<()> {
-        self.requested_turns.validate()?;
-        validate_sha256("parent header fingerprint", &self.parent_header_fingerprint)?;
-        validate_sha256("fork terminal prefix", &self.terminal_prefix_sha256)?;
-        validate_sha256(
-            "fork terminal control prefix",
-            &self.terminal_control_prefix_sha256,
-        )?;
-        validate_identifier("subagent task name", &self.task_name)?;
-        if self.path.depth() == 0 {
-            return Err(SessionError::Invalid(
-                "fork lineage must describe a non-root child".into(),
-            ));
-        }
-        let cursors_empty = self.resolved_after_seq == 0 && self.resolved_terminal_seq == 0;
-        if (self.effective_turns == 0) != cursors_empty {
-            return Err(SessionError::Invalid(
-                "fork interval emptiness must match the effective turn count".into(),
-            ));
-        }
-        let empty = cursors_empty && self.effective_turns == 0;
-        if (self.resolved_terminal_control_seq == 0) != empty
-            || (empty
-                && (self.terminal_prefix_sha256 != hex::encode(EMPTY_FACT_PREFIX_DIGEST)
-                    || self.terminal_control_prefix_sha256
-                        != hex::encode(EMPTY_CONTROL_PREFIX_DIGEST)))
-        {
-            return Err(SessionError::Invalid(
-                "fork boundary requires an exact Fact/control pair".into(),
-            ));
-        }
-        if matches!(self.requested_turns, ForkTurnSelection::None) && !empty {
-            return Err(SessionError::Invalid(
-                "fork `none` selection must resolve to an empty parent prefix".into(),
-            ));
-        }
-        if self.resolved_terminal_seq == 0 && !empty {
-            return Err(SessionError::Invalid(
-                "fork effective turn count requires a terminal boundary".into(),
-            ));
-        }
-        if self.resolved_after_seq >= self.resolved_terminal_seq && self.resolved_terminal_seq != 0
-        {
-            return Err(SessionError::Invalid(
-                "fork inherited Fact interval must be nonempty and ordered".into(),
-            ));
-        }
-        Ok(())
-    }
-}
-
 /// Model-visible durable content in one accepted mailbox message.
 #[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
 #[serde(tag = "type", rename_all = "snake_case", deny_unknown_fields)]
@@ -407,7 +339,13 @@ pub enum AgentMessageContent {
     /// Safe UTF-8 text.
     Text { text: String },
     /// Immutable imported image reference.
-    Image { media: MediaRef },
+    Image {
+        media: MediaRef,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        presentation: Option<Box<rsi_media_protocol::ImagePresentation>>,
+    },
+    /// Immutable verbatim file; its reader owns the storage location.
+    File { file: rsi_media_protocol::FileRef },
     /// Immutable human-selected conversation data, with no instruction authority.
     /// Boxed so text and image blocks do not reserve the full descriptor inline;
     /// the serialized reference remains an ordinary object.
@@ -419,10 +357,22 @@ pub enum AgentMessageContent {
 #[serde(tag = "type", rename_all = "snake_case", deny_unknown_fields)]
 #[allow(missing_docs)] // Variant prose defines each source payload as one closed contract.
 pub enum AgentMessageSource {
+    /// Input emitted by an admitted Session command.
+    Command { source: CommandMessageSource },
     /// Kernel-issued, generation-bound program completion notification.
     Program { source: ProgramCompletionSource },
-    /// Direct application/user input.
-    Human,
+    /// Direct user input.
+    Human {
+        /// Original application identity and metadata, independent of native identity.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        attribution: Option<MessageAttribution>,
+    },
+    /// Unattended direct application input.
+    Application {
+        /// Original application identity and metadata.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        attribution: Option<MessageAttribution>,
+    },
     /// Kernel-authenticated automatic input; serialized provenance is not a live lease.
     Continuation { source: ContinuationSource },
     /// Another Agent activation.
@@ -439,10 +389,14 @@ pub enum AgentMessageSource {
 #[derive(Clone, Copy, Debug, Eq, PartialEq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum AgentMessageSourceKind {
+    /// Input emitted by an admitted Session command.
+    Command,
     /// Bounded `ProgramRun` terminal notice.
     Program,
-    /// Direct application/user input.
+    /// Direct user input.
     Human,
+    /// Unattended direct application input.
+    Application,
     /// Kernel-authenticated automatic input.
     Continuation,
     /// Another Agent activation.
@@ -452,11 +406,17 @@ pub enum AgentMessageSourceKind {
 }
 
 impl AgentMessageSource {
+    /// A submission through a user or application Session handle.
+    pub const fn is_direct(&self) -> bool {
+        matches!(self, Self::Human { .. } | Self::Application { .. })
+    }
     /// Classifies provenance without materializing its payload or granting authority.
     pub const fn kind(&self) -> AgentMessageSourceKind {
         match self {
+            Self::Command { .. } => AgentMessageSourceKind::Command,
             Self::Program { .. } => AgentMessageSourceKind::Program,
-            Self::Human => AgentMessageSourceKind::Human,
+            Self::Human { .. } => AgentMessageSourceKind::Human,
+            Self::Application { .. } => AgentMessageSourceKind::Application,
             Self::Continuation { .. } => AgentMessageSourceKind::Continuation,
             Self::Agent { .. } => AgentMessageSourceKind::Agent,
             Self::Completion { .. } => AgentMessageSourceKind::Completion,
@@ -514,7 +474,8 @@ impl MessageDelivery {
             Self::NextTurn if target == MessageTarget::NextTurn && bound_turn_id.is_none() => {}
             Self::NextStep if target == MessageTarget::NextStep && bound_turn_id.is_none() => {}
             Self::Steer
-                if matches!(message.source, AgentMessageSource::Human)
+                if (message.source.is_direct()
+                    || matches!(message.source, AgentMessageSource::Command { .. }))
                     && message.options == MessageOptions::default()
                     && (target == MessageTarget::NextStep) == bound_turn_id.is_some() => {}
             _ => {
@@ -560,8 +521,12 @@ pub struct AgentMessage {
 
 impl AgentMessage {
     /// Projects this message's identity and provenance into its model-visible input Fact.
-    pub fn entered_source(&self) -> InputMessageSource {
+    pub fn claimed_source(&self) -> InputMessageSource {
         match &self.source {
+            AgentMessageSource::Command { source } => InputMessageSource::Command {
+                message_id: self.message_id.clone(),
+                source: source.clone(),
+            },
             AgentMessageSource::Program { source } => InputMessageSource::Program {
                 message_id: self.message_id.clone(),
                 source: source.clone(),
@@ -570,8 +535,13 @@ impl AgentMessage {
                 message_id: self.message_id.clone(),
                 source: source.clone(),
             },
-            AgentMessageSource::Human => InputMessageSource::Human {
+            AgentMessageSource::Human { attribution } => InputMessageSource::Human {
                 message_id: self.message_id.clone(),
+                attribution: attribution.clone(),
+            },
+            AgentMessageSource::Application { attribution } => InputMessageSource::Application {
+                message_id: self.message_id.clone(),
+                attribution: attribution.clone(),
             },
             AgentMessageSource::Agent { source_session_id } => InputMessageSource::Agent {
                 message_id: self.message_id.clone(),
@@ -592,6 +562,24 @@ impl AgentMessage {
 
     /// Revalidates content, route, and byte bounds at admission.
     pub fn validate(&self) -> Result<()> {
+        if let AgentMessageSource::Human {
+            attribution: Some(attribution),
+        }
+        | AgentMessageSource::Application {
+            attribution: Some(attribution),
+        } = &self.source
+        {
+            attribution.validate()?;
+        }
+        if let AgentMessageSource::Command { source } = &self.source {
+            source.validate()?;
+            if source.message_id()? != self.message_id || self.options != MessageOptions::default()
+            {
+                return Err(SessionError::Invalid(
+                    "command input requires its exact identity and no overrides".into(),
+                ));
+            }
+        }
         if let AgentMessageSource::Program { source } = &self.source {
             source.validate()?;
             if self.options != MessageOptions::default()
@@ -618,7 +606,7 @@ impl AgentMessage {
                 ));
             }
         }
-        if !matches!(self.source, AgentMessageSource::Human)
+        if !matches!(self.source, AgentMessageSource::Human { .. })
             && self
                 .content
                 .iter()
@@ -628,7 +616,7 @@ impl AgentMessage {
                 "only direct human messages may contain frozen references".into(),
             ));
         }
-        let text_limit = if matches!(self.source, AgentMessageSource::Human) {
+        let text_limit = if self.source.is_direct() {
             MAXIMUM_TURN_TEXT_BYTES
         } else {
             MAXIMUM_AGENT_MESSAGE_BYTES
@@ -672,9 +660,19 @@ impl AgentMessage {
 }
 
 fn validate_message_content(content: &[AgentMessageContent], text_limit: usize) -> Result<()> {
-    if content.is_empty() || content.len() > MAXIMUM_AGENT_MESSAGE_CONTENT_BLOCKS {
+    validate_input_content(content, text_limit, false)
+}
+
+fn validate_input_content(
+    content: &[AgentMessageContent],
+    text_limit: usize,
+    allow_empty: bool,
+) -> Result<()> {
+    if (!allow_empty && content.is_empty()) || content.len() > MAXIMUM_AGENT_MESSAGE_CONTENT_BLOCKS
+    {
         return Err(SessionError::Invalid(format!(
-            "Agent message must contain 1..={MAXIMUM_AGENT_MESSAGE_CONTENT_BLOCKS} content blocks"
+            "Agent message must contain {}..={MAXIMUM_AGENT_MESSAGE_CONTENT_BLOCKS} content blocks",
+            usize::from(!allow_empty),
         )));
     }
     let mut text_bytes = 0_usize;
@@ -682,12 +680,13 @@ fn validate_message_content(content: &[AgentMessageContent], text_limit: usize) 
     for block in content {
         match block {
             AgentMessageContent::Text { text } => {
-                validate_safe_text("Agent message text", text, text_limit, false)?;
+                validate_safe_text("Agent message text", text, text_limit, allow_empty)?;
                 text_bytes = text_bytes.checked_add(text.len()).ok_or_else(|| {
                     SessionError::Invalid("Agent message text size overflowed".into())
                 })?;
             }
-            AgentMessageContent::Image { media } => media
+            AgentMessageContent::File { .. } => {}
+            AgentMessageContent::Image { media, .. } => media
                 .validate()
                 .map_err(|error| SessionError::Invalid(error.to_string()))?,
             AgentMessageContent::Reference { reference } => {
@@ -737,13 +736,28 @@ pub enum MessageDiscardReason {
 #[serde(tag = "type", rename_all = "snake_case", deny_unknown_fields)]
 #[allow(missing_docs)] // Variant prose defines each source payload as one closed contract.
 pub enum InputMessageSource {
+    /// Text emitted by an admitted command, retaining the original invocation.
+    Command {
+        message_id: MessageId,
+        source: CommandMessageSource,
+    },
     /// One typed `ProgramRun` completion, never authority to create a successor.
     Program {
         message_id: MessageId,
         source: ProgramCompletionSource,
     },
-    /// Direct user/application input.
-    Human { message_id: MessageId },
+    /// Direct user input.
+    Human {
+        message_id: MessageId,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        attribution: Option<MessageAttribution>,
+    },
+    /// Unattended direct application input.
+    Application {
+        message_id: MessageId,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        attribution: Option<MessageAttribution>,
+    },
     /// Automatic input admitted through a live continuation lease.
     Continuation {
         message_id: MessageId,
@@ -776,12 +790,100 @@ pub enum InputMessageSource {
     PluginContext {
         /// Stable contribution provenance, not an authorization credential.
         contribution_id: ContributionId,
+        /// Original tool message, when this input consumes a retained result.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        tool: Option<ToolContextOrigin>,
     },
 }
 
+/// Source coordinates of one message retained in an original `ToolResult`.
+#[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct ToolContextOrigin {
+    /// Original Session, including on independently forked histories.
+    pub session: SessionId,
+    /// Exact settled Tool effect.
+    pub effect: EffectId,
+    /// Zero-based ordinal in the Tool result.
+    pub ordinal: u16,
+    /// Message identity supplied by the tool hook.
+    pub message_id: String,
+    /// Original plugin attribution, independent of native authority.
+    pub source: serde_json::Value,
+}
+
+/// Producer for deferred context supplied by tool execution.
+pub const TOOL_CONTEXT_PRODUCER: &str = "rsi.tools.context";
+
+/// A deferred tool message and its durable position within the originating result.
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct SettledToolContext {
+    /// Originating Session, including across a fork boundary.
+    pub session: SessionId,
+    /// Settled tool invocation.
+    pub effect: EffectId,
+    /// Index within the result.
+    pub ordinal: u16,
+    /// Original identity, metadata and ordered text blocks.
+    pub message: rsi_tools_protocol::ToolContextMessage,
+}
+impl SettledToolContext {
+    /// Claims settled Tool messages under the Step that will prepare them.
+    pub fn claim(messages: Vec<Self>, turn: &TurnId, step: &StepId) -> Option<SessionFactBody> {
+        (!messages.is_empty()).then(|| SessionFactBody::ToolContextsClaimed {
+            turn_id: turn.clone(),
+            step_id: step.clone(),
+            messages,
+        })
+    }
+
+    /// Attribution used by a single entered input.
+    pub fn origin(&self) -> ToolContextOrigin {
+        ToolContextOrigin {
+            session: self.session.clone(),
+            effect: self.effect.clone(),
+            ordinal: self.ordinal,
+            message_id: self.message.id.clone(),
+            source: self.message.source.clone(),
+        }
+    }
+    /// Model-visible blocks in their original order.
+    pub fn content(&self) -> Vec<AgentMessageContent> {
+        self.message
+            .text
+            .iter()
+            .map(|text| AgentMessageContent::Text { text: text.clone() })
+            .collect()
+    }
+}
+/// Maximum messages in one captured tool inbox.
+pub const MAXIMUM_TOOL_CONTEXT_MESSAGES: usize = 4096;
+/// Maximum encoded message bytes in one captured tool inbox.
+pub const MAXIMUM_TOOL_CONTEXT_BYTES: usize = 16 * 1024 * 1024;
+
 impl InputMessageSource {
+    /// Model role of an unchanged input from this source.
+    #[must_use]
+    pub const fn input_role(&self) -> PreparedInputRole {
+        match self {
+            Self::AgentInstructions { .. }
+            | Self::SkillCatalog { .. }
+            | Self::PluginContext { tool: None, .. } => PreparedInputRole::Developer,
+            _ => PreparedInputRole::User,
+        }
+    }
+
     fn validate(&self) -> Result<()> {
         match self {
+            Self::Command { message_id, source } => {
+                if source.message_id()? != *message_id {
+                    return Err(SessionError::Invalid(
+                        "command input identity mismatch".into(),
+                    ));
+                }
+                Ok(())
+            }
             Self::Program { source, .. } => source.validate(),
             Self::Continuation { source, .. } => source.validate(),
             Self::AgentInstructions { source, sha256, .. } => {
@@ -793,7 +895,35 @@ impl InputMessageSource {
                 validate_safe_text("input source", source, MAXIMUM_WORKSPACE_PATH_BYTES, false)
             }
             Self::SkillCatalog { sha256 } => validate_sha256("skill catalog digest", sha256),
-            Self::Human { .. }
+            Self::PluginContext {
+                contribution_id,
+                tool: Some(origin),
+            } => {
+                if contribution_id.as_str() != TOOL_CONTEXT_PRODUCER || origin.ordinal >= 64 {
+                    return Err(SessionError::Invalid(
+                        "invalid tool context provenance".into(),
+                    ));
+                }
+                rsi_tools_protocol::ToolContextMessage::validate_source(
+                    &origin.message_id,
+                    &origin.source,
+                )
+                .map_err(|error| SessionError::Invalid(error.to_string()))
+            }
+            Self::Human {
+                attribution: Some(attribution),
+                ..
+            }
+            | Self::Application {
+                attribution: Some(attribution),
+                ..
+            } => attribution.validate(),
+            Self::Human {
+                attribution: None, ..
+            }
+            | Self::Application {
+                attribution: None, ..
+            }
             | Self::Agent { .. }
             | Self::Completion { .. }
             | Self::PluginContext { .. } => Ok(()),
@@ -867,6 +997,10 @@ pub enum WaitKind {
 #[serde(tag = "type", rename_all = "snake_case", deny_unknown_fields)]
 #[allow(missing_docs)] // Transition-level prose is the authoritative field contract.
 pub enum AgentControlRecordBody {
+    /// Suspend pending inbox activation without removing or retargeting messages.
+    InboxPaused,
+    /// Restore pending inbox activation after an explicit waking operation.
+    InboxResumed,
     /// Kernel-owned program lifecycle, separate from creator activation lifetime.
     ProgramRun {
         run_id: ProgramRunId,
@@ -904,7 +1038,7 @@ pub enum AgentControlRecordBody {
         activation_id: ActivationId,
         turn_id: TurnId,
         step_id: StepId,
-        entered_fact_seq: u64,
+        claimed_fact_seq: u64,
     },
     /// A pending next-Step completion or bound human steer became waking next-Turn input.
     MessagePromoted { message_id: MessageId },
@@ -1012,8 +1146,8 @@ impl AgentControlRecordBody {
                 Ok(())
             }
             Self::MessageClaimed {
-                entered_fact_seq, ..
-            } if *entered_fact_seq == 0 => Err(SessionError::Invalid(
+                claimed_fact_seq, ..
+            } if *claimed_fact_seq == 0 => Err(SessionError::Invalid(
                 "message claim must reference a nonzero Fact sequence".into(),
             )),
             Self::ActivationStarted {
@@ -1072,7 +1206,9 @@ impl AgentControlRecordBody {
                     "completion reservation must be within 1..={MAXIMUM_AGENT_MESSAGE_BYTES} bytes"
                 )))
             }
-            Self::MessageClaimed { .. }
+            Self::InboxPaused
+            | Self::InboxResumed
+            | Self::MessageClaimed { .. }
             | Self::DomainStateCommitted { .. }
             | Self::MessagePromoted { .. }
             | Self::MessageDiscarded { .. }
@@ -1489,7 +1625,7 @@ pub struct SessionHeader {
     settings: FrozenAgentSettings,
     #[serde(skip_serializing_if = "Option::is_none")]
     protection: Option<SessionProtectionScope>,
-    fork_origin: Option<ForkOrigin>,
+    fork_origin: Option<SessionOrigin>,
     #[serde(skip_serializing_if = "Option::is_none")]
     execution_owner: Option<ExecutionOwner>,
     delegation_policy: Option<DelegationPolicy>,
@@ -1676,7 +1812,7 @@ impl SessionHeader {
         }
         if let Some(record) = &self.spawn_role {
             record.validate()?;
-            if self.fork_origin.is_none()
+            if self.fork_origin().is_none()
                 || !self
                     .delegation_policy
                     .as_ref()
@@ -1689,7 +1825,7 @@ impl SessionHeader {
                 ));
             }
         }
-        if let Some(origin) = &self.fork_origin {
+        if let Some(origin) = self.history_origin() {
             origin.validate()?;
             if origin.parent_session_id == self.session_id {
                 return Err(SessionError::Invalid(
@@ -1697,16 +1833,18 @@ impl SessionHeader {
                 ));
             }
         }
-        match (&self.fork_origin, &self.execution_owner) {
+        match (self.fork_origin(), &self.execution_owner) {
             (None, None) => {}
             (Some(origin), Some(owner)) => {
+                origin.validate()?;
                 owner.validate()?;
                 let parent = match owner {
                     ExecutionOwner::TurnActivation {
                         session_id,
                         turn_id,
                     } => {
-                        if turn_id != &origin.invoking_turn_id {
+                        if !matches!(&origin.history.point, ForkPoint::BeforeTurn { turn_id: source } if source == turn_id)
+                        {
                             return Err(SessionError::Invalid(
                                 "activation owner differs from creator Turn".into(),
                             ));
@@ -1715,7 +1853,7 @@ impl SessionHeader {
                     }
                     ExecutionOwner::ProgramRun { session_id, .. } => session_id,
                 };
-                if parent != &origin.parent_session_id {
+                if parent != &origin.history.parent_session_id {
                     return Err(SessionError::Invalid(
                         "execution owner differs from lineage parent".into(),
                     ));
@@ -1798,10 +1936,11 @@ impl SessionHeader {
             ));
         }
         self.execution_owner = Some(ExecutionOwner::TurnActivation {
-            session_id: origin.parent_session_id.clone(),
-            turn_id: origin.invoking_turn_id.clone(),
+            session_id: origin.history.parent_session_id.clone(),
+            turn_id: origin.history.point.turn_id().clone(),
         });
-        self.fork_origin = Some(origin);
+        origin.validate()?;
+        self.fork_origin = Some(SessionOrigin::Agent { origin });
         self.validate()?;
         Ok(self)
     }
@@ -1814,7 +1953,7 @@ impl SessionHeader {
         origin: ForkOrigin,
         selection: ModelSelection,
     ) -> Result<Self> {
-        if origin.parent_session_id != self.session_id {
+        if origin.history.parent_session_id != self.session_id {
             return Err(SessionError::Invalid(
                 "fork origin parent does not match the source Header".into(),
             ));
@@ -1879,7 +2018,44 @@ impl SessionHeader {
 
     /// Returns the optional immutable fork lineage.
     pub const fn fork_origin(&self) -> Option<&ForkOrigin> {
-        self.fork_origin.as_ref()
+        match &self.fork_origin {
+            Some(SessionOrigin::Agent { origin }) => Some(origin),
+            _ => None,
+        }
+    }
+    /// Historical source selection, without granting Agent control authority.
+    pub const fn history_origin(&self) -> Option<&HistoryOrigin> {
+        match &self.fork_origin {
+            Some(SessionOrigin::Agent { origin }) => Some(&origin.history),
+            Some(SessionOrigin::Independent { history }) => Some(history),
+            None => None,
+        }
+    }
+    /// Derives a new independent execution root retaining an exact source history.
+    pub fn forked_independent(
+        &self,
+        session_id: SessionId,
+        created_at_ms: u64,
+        history: HistoryOrigin,
+    ) -> Result<Self> {
+        if history.parent_session_id != self.session_id
+            || history.parent_header_fingerprint != self.fingerprint()?
+        {
+            return Err(SessionError::Invalid(
+                "independent history differs from its source Header".into(),
+            ));
+        }
+        let mut header = Self::new(
+            session_id,
+            created_at_ms,
+            self.coordinates.clone(),
+            self.agent_preset_id.clone(),
+            self.settings.clone(),
+        )?;
+        header.fork_origin = Some(SessionOrigin::Independent { history });
+        header.protection.clone_from(&self.protection);
+        header.validate()?;
+        Ok(header)
     }
 
     /// Returns lowercase SHA-256 of the exact canonical immutable header.
@@ -1906,8 +2082,10 @@ pub enum EffectKind {
 #[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
 #[serde(tag = "status", rename_all = "snake_case", deny_unknown_fields)]
 pub enum TurnOutcome {
-    /// The Language stream reached a successful terminal event.
+    /// The request completed normally, including an initially empty input decision.
     Completed,
+    /// Input preparation declined to enter a provider request.
+    Blocked,
     /// Durable cancellation won terminal classification.
     Cancelled,
     /// A bounded runtime or provider failure ended the turn.
@@ -1941,7 +2119,7 @@ impl TurnOutcome {
     /// Revalidates bounded terminal diagnostics.
     pub fn validate(&self) -> Result<()> {
         match self {
-            Self::Completed | Self::Cancelled | Self::MaxTokens => Ok(()),
+            Self::Completed | Self::Blocked | Self::Cancelled | Self::MaxTokens => Ok(()),
             Self::Failed { code, message } => {
                 validate_identifier("turn failure code", code)?;
                 validate_safe_text(
@@ -2028,8 +2206,8 @@ pub enum SessionFactBody {
         /// Exact Step identity.
         step_id: StepId,
     },
-    /// One accepted message or instruction entered model-visible context.
-    InputMessageEntered {
+    /// One original message claimed for preparation, not yet model-visible.
+    InputMessageClaimed {
         /// Exact target Turn.
         turn_id: TurnId,
         /// Exact target Step.
@@ -2038,6 +2216,37 @@ pub enum SessionFactBody {
         source: InputMessageSource,
         /// Nonempty ordered content.
         content: Vec<AgentMessageContent>,
+    },
+    /// Original tool contexts claimed for preparation in the same Step.
+    ToolContextsClaimed {
+        /// Target Turn.
+        turn_id: TurnId,
+        /// Target Step.
+        step_id: StepId,
+        /// Ordered messages from settled tool results.
+        messages: Vec<SettledToolContext>,
+    },
+    /// Final input decision consuming the Turn's currently claimed inputs.
+    StepInputsPrepared {
+        /// Exact owning Turn.
+        turn_id: TurnId,
+        /// Exact open Step.
+        step_id: StepId,
+        /// Ordered final messages or rejection; every claim coordinate is local.
+        decision: StepInputDecision,
+    },
+    /// Complete narrowed Tool names for one Step, before any provider dispatch.
+    StepPrepared {
+        /// Exact Turn and open Step owning the selection.
+        turn_id: TurnId,
+        /// Exact open Step.
+        step_id: StepId,
+        /// Sorted unique subset; empty disables all Tools.
+        names: Vec<String>,
+        /// Application declarations and registration identities for this request series.
+        application: Option<ApplicationToolView>,
+        /// Current system instructions in contribution order, replaced at each preparation.
+        instructions: Vec<StepInstruction>,
     },
     /// One model Step ended before another Step or the Turn terminal.
     StepEnded {
@@ -2168,6 +2377,9 @@ pub enum SessionFactBody {
     },
     /// One prepared Tool call was denied before intent or external execution.
     ToolRejected {
+        /// Ordered messages supplied by policy to the next preparation of a model call.
+        #[serde(default, skip_serializing_if = "Vec::is_empty")]
+        additional_contexts: Vec<rsi_tools_protocol::ToolContextMessage>,
         /// Exact target turn.
         turn_id: TurnId,
         /// Exact producer, including rejected internal program calls.
@@ -2254,9 +2466,49 @@ impl SessionFactBody {
                     *require_approval,
                 )
             }
-            Self::InputMessageEntered {
+            Self::InputMessageClaimed {
                 source, content, ..
-            } => validate_entered_message(source, content),
+            } => validate_claimed_message(source, content),
+            Self::ToolContextsClaimed { messages, .. } => {
+                if !(1..=MAXIMUM_TOOL_CONTEXT_MESSAGES).contains(&messages.len()) {
+                    return Err(SessionError::Invalid(
+                        "invalid tool context batch length".into(),
+                    ));
+                }
+                bounded_compact_json_len(messages, MAXIMUM_TOOL_CONTEXT_BYTES)?;
+                for item in messages {
+                    if item.ordinal >= 64 {
+                        return Err(SessionError::Invalid("invalid tool context ordinal".into()));
+                    }
+                    item.message
+                        .validate()
+                        .map_err(|error| SessionError::Invalid(error.to_string()))?;
+                }
+                Ok(())
+            }
+            Self::StepPrepared {
+                names,
+                application,
+                instructions,
+                ..
+            } => {
+                validate_step_instructions(instructions)?;
+                if names.len() > rsi_tools_protocol::MAXIMUM_REGISTERED_TOOLS
+                    || names.windows(2).any(|pair| pair[0] >= pair[1])
+                {
+                    return Err(SessionError::Invalid(
+                        "Step Tool names must be bounded, sorted and unique".into(),
+                    ));
+                }
+                for name in names {
+                    rsi_tools_protocol::validate_model_tool_name(name)
+                        .map_err(|error| SessionError::Invalid(error.to_string()))?;
+                }
+                if let Some(view) = application {
+                    view.validate(names)?;
+                }
+                Ok(())
+            }
             Self::StepEnded { outcome, .. } => outcome.validate(),
             Self::WorkspaceTouched { paths, .. } => validate_workspace_touch(paths),
             Self::ImageRequested { model, request, .. } => {
@@ -2313,6 +2565,7 @@ impl SessionFactBody {
                     .map_err(|error| SessionError::Invalid(error.to_string()))
             }
             Self::StepStarted { .. }
+            | Self::StepInputsPrepared { .. }
             | Self::ModelStarted { .. }
             | Self::ImageStarted { .. }
             | Self::ToolStarted { .. }
@@ -2342,6 +2595,7 @@ impl SessionFactBody {
                 validate_tool_intent(identity, name, arguments, approval.as_ref())
             }
             Self::ToolRejected {
+                additional_contexts,
                 identity,
                 name,
                 arguments,
@@ -2352,6 +2606,13 @@ impl SessionFactBody {
                 ..
             } => {
                 origin.validate_for(effect_id, *program_role)?;
+                if !additional_contexts.is_empty() && !matches!(origin, ToolOrigin::Model { .. }) {
+                    return Err(SessionError::Invalid(
+                        "deferred Tool messages require a model call".into(),
+                    ));
+                }
+                rsi_tools_protocol::ToolContextMessage::validate_batch(additional_contexts)
+                    .map_err(|error| SessionError::Invalid(error.to_string()))?;
                 validate_tool_intent(identity, name, arguments, None)?;
                 rejection.validate()
             }
@@ -2399,7 +2660,10 @@ impl SessionFactBody {
             Self::TurnAccepted { turn_id, .. }
             | Self::MessageTurnAccepted { turn_id, .. }
             | Self::StepStarted { turn_id, .. }
-            | Self::InputMessageEntered { turn_id, .. }
+            | Self::InputMessageClaimed { turn_id, .. }
+            | Self::ToolContextsClaimed { turn_id, .. }
+            | Self::StepPrepared { turn_id, .. }
+            | Self::StepInputsPrepared { turn_id, .. }
             | Self::StepEnded { turn_id, .. }
             | Self::WorkspaceTouched { turn_id, .. }
             | Self::ImageRequested { turn_id, .. }
@@ -2495,7 +2759,7 @@ fn validate_snapshot_capability(
     Ok(())
 }
 
-fn validate_entered_message(
+fn validate_claimed_message(
     source: &InputMessageSource,
     content: &[AgentMessageContent],
 ) -> Result<()> {
@@ -2544,6 +2808,7 @@ fn validate_entered_message(
     let text_limit = if matches!(
         source,
         InputMessageSource::Agent { .. }
+            | InputMessageSource::Command { .. }
             | InputMessageSource::Completion { .. }
             | InputMessageSource::Program { .. }
     ) {
@@ -2680,6 +2945,15 @@ impl SessionFact {
     /// Returns the semantic body.
     pub const fn body(&self) -> &SessionFactBody {
         &self.body
+    }
+
+    /// Number of original input messages claimed by this Fact, before preparation.
+    pub fn claimed_input_count(&self) -> usize {
+        match self.body() {
+            SessionFactBody::TurnAccepted { .. } | SessionFactBody::InputMessageClaimed { .. } => 1,
+            SessionFactBody::ToolContextsClaimed { messages, .. } => messages.len(),
+            _ => 0,
+        }
     }
 
     /// Consumes the Fact and returns its body.

@@ -42,6 +42,10 @@ pub struct StoreActivityRow {
     pub created_at_ms: u64,
     /// Latest qualifying activity timestamp; never less than creation.
     pub last_activity_ms: u64,
+    /// Durable Fact watermark in the same metadata snapshot.
+    pub durable_fact_seq: u64,
+    /// Durable control watermark observed alongside the Fact watermark.
+    pub durable_control_seq: u64,
 }
 impl StoreActivityRow {
     /// Returns this row's exact live keyset position.
@@ -213,7 +217,7 @@ impl ActivityProjection {
                 self.successor = Some(successor_id.clone());
             }
             AgentControlRecordBody::MessageAccepted { message, .. }
-                if matches!(message.source, AgentMessageSource::Human)
+                if matches!(message.source, AgentMessageSource::Human { .. })
                     && successor.as_ref() != Some(&message.message_id) =>
             {
                 self.latest = self.latest.max(record.timestamp_ms());
@@ -295,7 +299,7 @@ mod tests {
             AgentControlRecordBody::MessageAccepted {
                 message: AgentMessage {
                     message_id: MessageId::new(id).unwrap(),
-                    source: AgentMessageSource::Human,
+                    source: AgentMessageSource::Human { attribution: None },
                     content: vec![AgentMessageContent::Text {
                         text: "input".into(),
                     }],

@@ -1,9 +1,9 @@
 //! Draft-local command preparation and atomic application; the lease owner schedules calls.
 
-use super::{SessionCommandContext, SessionCommandRegistration};
+use super::{SessionCommandContext, SessionCommandOutput, SessionCommandRegistration};
 use crate::{
-    AgentCompositionPin, AgentSessionDraft, ContributionError, ContributionKind, DomainError,
-    ValidatedDomainProposal,
+    AgentCompositionPin, AgentSessionDraft, ContributionError, ContributionKind, DomainBaseline,
+    DomainError, DraftPublicationReceipt, Publication,
 };
 use rsi_agent_session_protocol::{
     CommandRevision, DomainRequestId, DomainRevision, DomainStateView, SessionCommandDescriptor,
@@ -68,6 +68,7 @@ pub enum DraftCommandPreparation {
 /// One move-only callback input bound to a draft instance and generation.
 #[derive(Debug)]
 pub struct PreparedDraftCommand {
+    outcome: super::CommandOutcomeOwner,
     identity: Arc<()>,
     composition: AgentCompositionPin,
     context: SessionCommandContext,
@@ -84,23 +85,31 @@ impl PreparedDraftCommand {
         self,
         cancellation: CancellationToken,
     ) -> DraftCommandResult<DraftCommandMutation> {
-        let proposals = self
+        let mut output = self
             .command
             .callback()
             .execute(&self.context, &self.invocation.arguments, cancellation)
             .await?;
-        if proposals.is_empty()
-            || proposals.len() > rsi_agent_session_protocol::MAXIMUM_SESSION_DOMAINS
+        if (output.domains.is_empty() && output.inputs.is_empty())
+            || output.domains.len() > rsi_agent_session_protocol::MAXIMUM_SESSION_DOMAINS
+            || output.publications.len() > crate::MAXIMUM_AGENT_CONTRIBUTIONS
         {
+            // No state was swapped. Notification is outside the draft owner's admission.
+            for publication in &mut output.publications {
+                if publication.rejected().await.is_err() {
+                    break;
+                }
+            }
             return Err(DraftCommandError::Invalid(
-                "command requires 1..=64 typed initial replacements".into(),
+                "command requires inputs or at most 64 typed initial replacements".into(),
             ));
         }
         Ok(DraftCommandMutation {
+            outcome: self.outcome,
             identity: self.identity,
             _composition: self.composition,
             invocation: self.invocation,
-            proposals,
+            output,
         })
     }
 }
@@ -108,10 +117,52 @@ impl PreparedDraftCommand {
 /// Complete callback output, carrying no authority for a different draft or predecessor.
 #[derive(Debug)]
 pub struct DraftCommandMutation {
+    outcome: super::CommandOutcomeOwner,
     identity: Arc<()>,
     _composition: AgentCompositionPin,
     invocation: SessionCommandInvocation,
-    proposals: Vec<ValidatedDomainProposal>,
+    output: SessionCommandOutput,
+}
+
+/// Completed local admission with deferred notification outside the draft mutation lock.
+#[derive(Debug)]
+pub struct AppliedDraftCommand {
+    result: DraftCommandResult<SessionCommandReceipt>,
+    session: rsi_agent_session_protocol::SessionId,
+    baseline: DomainBaseline,
+    publications: Vec<Publication>,
+    inputs: Vec<super::PreparedCommandInput>,
+}
+impl AppliedDraftCommand {
+    /// Delivers exact success evidence or definite rejection, then returns the owner result.
+    /// Failed/cancelled notification never rolls back an already visible draft swap.
+    ///
+    /// # Errors
+    /// Propagates local admission or notification failure. The caller owns its deadline.
+    pub async fn finish(mut self) -> DraftCommandResult<SessionCommandReceipt> {
+        let notification = async {
+            for publication in &mut self.publications {
+                match &self.result {
+                    Ok(receipt) => {
+                        publication
+                            .draft_committed(&DraftPublicationReceipt {
+                                session_id: &self.session,
+                                receipt,
+                                baseline: &self.baseline,
+                                inputs: &self.inputs,
+                            })
+                            .await?;
+                    }
+                    Err(_) => publication.rejected().await?,
+                }
+            }
+            Ok::<_, ContributionError>(())
+        }
+        .await;
+        let receipt = self.result?;
+        notification?;
+        Ok(receipt)
+    }
 }
 
 impl AgentSessionDraft {
@@ -187,11 +238,16 @@ impl AgentSessionDraft {
                 snapshot,
             })
             .collect();
+        let outcome = super::CommandOutcomeOwner::default();
+        let outcome_view = outcome.view();
         Ok(DraftCommandPreparation::Run(Box::new(
             PreparedDraftCommand {
+                outcome,
                 identity: self.identity.clone(),
                 composition: self.composition.clone(),
                 context: SessionCommandContext {
+                    outcome: Some(outcome_view),
+                    history: None,
                     request_id: invocation.request_id.clone(),
                     continuation_input: None,
                     header: Arc::new(self.header.clone()),
@@ -206,11 +262,31 @@ impl AgentSessionDraft {
 
     /// Applies all replacements under the same admission as first submit and preset selection.
     ///
-    /// # Errors
-    /// Rejects another draft, stale revision, changed request, invalid proposals or capacity.
-    pub fn apply_command(
+    /// The returned completion carries refusal of another draft, stale revision,
+    /// changed request, invalid proposals or capacity, and must finish outside admission.
+    pub fn apply_command(&mut self, mut mutation: DraftCommandMutation) -> AppliedDraftCommand {
+        let result = self.apply_command_state(&mut mutation);
+        match &result {
+            Ok(receipt) => mutation.outcome.draft_committed(&DraftPublicationReceipt {
+                session_id: self.header.session_id(),
+                receipt,
+                baseline: &self.baseline,
+                inputs: &self.command_inputs,
+            }),
+            Err(_) => mutation.outcome.rejected(),
+        }
+        AppliedDraftCommand {
+            result,
+            session: self.header.session_id().clone(),
+            baseline: self.baseline.clone(),
+            inputs: self.command_inputs.clone(),
+            publications: std::mem::take(&mut mutation.output.publications),
+        }
+    }
+
+    fn apply_command_state(
         &mut self,
-        mutation: DraftCommandMutation,
+        mutation: &mut DraftCommandMutation,
     ) -> DraftCommandResult<SessionCommandReceipt> {
         if !Arc::ptr_eq(&self.identity, &mutation.identity) {
             return Err(DraftCommandError::WrongDraft);
@@ -223,16 +299,26 @@ impl AgentSessionDraft {
             return Err(DraftCommandError::Capacity);
         }
         let mut baseline = self.baseline.clone();
-        baseline.apply_batch(&mutation.proposals)?;
-        let receipt =
-            SessionCommandReceipt::draft_changed(&mutation.invocation, baseline.digest())?;
+        baseline.apply_batch(&mutation.output.domains)?;
+        let mut inputs = self.command_inputs.clone();
+        inputs.extend(super::PreparedCommandInput::prepare(
+            &mutation.invocation,
+            std::mem::take(&mut mutation.output.inputs),
+        )?);
+        super::PreparedCommandInput::validate_batch(&inputs)?;
+        let state_sha256 = super::initial_commit(&baseline, &inputs)?.map_or_else(
+            || baseline.digest().to_owned(),
+            |commit| commit.request_sha256().to_owned(),
+        );
+        let receipt = SessionCommandReceipt::draft_changed(&mutation.invocation, state_sha256)?;
         let CommandRevision::Draft { revision } = receipt.revision() else {
             unreachable!("draft receipt")
         };
         self.baseline = baseline;
+        self.command_inputs = inputs;
         self.revision = revision;
         self.command_receipts
-            .insert(mutation.invocation.request_id, receipt.clone());
+            .insert(mutation.invocation.request_id.clone(), receipt.clone());
         Ok(receipt)
     }
 

@@ -1,14 +1,145 @@
 //! Bounded invocation identity shared by draft, durable command and UI adapters.
 
-use crate::{ContributionId, DomainRequestId, Result, SessionError, compact_json_len};
+use crate::{
+    ContributionId, DomainRequestId, MessageAttribution, Result, SessionError, compact_json_len,
+};
 use serde::{Deserialize, Serialize};
 mod receipt;
 pub use receipt::{CommandOutcome, SessionCommandReceipt};
 
 /// Maximum canonical argument bytes accepted by one Session command.
-pub const MAXIMUM_COMMAND_ARGUMENT_BYTES: usize = 16 * 1024;
+pub const MAXIMUM_COMMAND_ARGUMENT_BYTES: usize = 64 * 1024;
 /// Maximum discoverable commands in one Session generation.
 pub const MAXIMUM_SESSION_COMMANDS: usize = 64;
+/// Maximum messages produced by one command or retained in an unpublished draft.
+pub const MAXIMUM_COMMAND_INPUTS: usize = 64;
+/// Maximum complete encoded command input batch, including provenance.
+pub const MAXIMUM_COMMAND_INPUT_BYTES: usize = 256 * 1024;
+
+/// Exact mailbox input bound to a domain publication, before active-Turn routing.
+#[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct CommandMessage {
+    /// Immutable command source, identity and typed content.
+    pub message: crate::AgentMessage,
+    /// Held next-Step or current-Turn-or-waking steering intent.
+    pub delivery: crate::MessageDelivery,
+}
+impl CommandMessage {
+    /// Exact compact publication size, including scheduling intent and provenance.
+    pub fn encoded_len(&self) -> Result<usize> {
+        compact_json_len(self)
+    }
+    /// Validates ordering, provenance and aggregate bounds for one command-input batch.
+    /// Draft batches must hold every input for their first Step.
+    pub fn validate_batch(
+        inputs: &[Self],
+        invocation: Option<&SessionCommandInvocation>,
+        draft: bool,
+    ) -> Result<()> {
+        if inputs.len() > MAXIMUM_COMMAND_INPUTS {
+            return Err(SessionError::Invalid("command input capacity".into()));
+        }
+        if inputs.is_empty() {
+            return Ok(());
+        }
+        let binding = invocation
+            .map(|invocation| invocation.digest().map(|digest| (invocation, digest)))
+            .transpose()?;
+        let mut ids = std::collections::BTreeSet::new();
+        let mut ordinals = std::collections::BTreeMap::new();
+        for input in inputs {
+            let source = input.validated_source()?;
+            if let Some((invocation, digest)) = &binding
+                && (source.command != invocation.command
+                    || source.request_id != invocation.request_id
+                    || source.invocation_sha256 != *digest)
+            {
+                return Err(SessionError::Invalid(
+                    "command input changed invocation".into(),
+                ));
+            }
+            let expected = ordinals
+                .entry((&source.request_id, &source.invocation_sha256))
+                .or_insert(0u32);
+            if source.ordinal != *expected {
+                return Err(SessionError::Invalid(
+                    "command inputs changed their output order".into(),
+                ));
+            }
+            *expected += 1;
+            if !ids.insert(&input.message.message_id) {
+                return Err(SessionError::Invalid("duplicate command input".into()));
+            }
+            if draft && input.delivery != crate::MessageDelivery::NextStep {
+                return Err(SessionError::Invalid(
+                    "draft input must be held for first Step".into(),
+                ));
+            }
+        }
+        if compact_json_len(&inputs)? > MAXIMUM_COMMAND_INPUT_BYTES {
+            return Err(SessionError::Invalid("command input byte capacity".into()));
+        }
+        Ok(())
+    }
+    fn validated_source(&self) -> Result<&CommandMessageSource> {
+        self.message.validate()?;
+        let crate::AgentMessageSource::Command { source } = &self.message.source else {
+            return Err(SessionError::Invalid(
+                "command message changed source".into(),
+            ));
+        };
+        if !matches!(
+            self.delivery,
+            crate::MessageDelivery::NextStep | crate::MessageDelivery::Steer
+        ) {
+            return Err(SessionError::Invalid(
+                "invalid command input delivery".into(),
+            ));
+        }
+        Ok(source)
+    }
+}
+
+/// Immutable provenance assigned by a command owner, never a dispatch credential.
+#[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct CommandMessageSource {
+    /// Registered producer identity.
+    pub command: ContributionId,
+    /// Exact command request.
+    pub request_id: DomainRequestId,
+    /// Digest of the complete immutable invocation.
+    pub invocation_sha256: String,
+    /// Zero-based position in that command's returned input batch.
+    pub ordinal: u32,
+    /// Original presentation metadata; native identity remains invocation-derived.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub attribution: Option<MessageAttribution>,
+}
+impl CommandMessageSource {
+    /// Checks digest and ordinal at the durable boundary.
+    pub fn validate(&self) -> Result<()> {
+        if let Some(attribution) = &self.attribution {
+            attribution.validate()?;
+        }
+        crate::validate_sha256("command invocation", &self.invocation_sha256)?;
+        if self.ordinal as usize >= MAXIMUM_COMMAND_INPUTS {
+            return Err(SessionError::Invalid(
+                "command input ordinal exceeds its bound".into(),
+            ));
+        }
+        Ok(())
+    }
+    /// Deterministic message identity scoped to the owning Session.
+    pub fn message_id(&self) -> Result<crate::MessageId> {
+        self.validate()?;
+        crate::MessageId::new(format!(
+            "command-{}-{}",
+            self.invocation_sha256, self.ordinal
+        ))
+    }
+}
 
 /// Exact predecessor in either the process-local draft or durable control stream.
 #[derive(Clone, Copy, Debug, Deserialize, Eq, PartialEq, Serialize)]
@@ -79,11 +210,10 @@ impl SessionCommandInvocation {
     /// Returns the exact bounded canonical invocation digest, including JSON order and CAS.
     pub fn digest(&self) -> Result<String> {
         use sha2::{Digest as _, Sha256};
-        let bytes =
-            serde_json::to_vec(self).map_err(|error| SessionError::Encoding(error.to_string()))?;
         let mut hash = Sha256::new();
         hash.update(b"rsi-session-command-v1\0");
-        hash.update(bytes);
+        serde_json::to_writer(&mut hash, self)
+            .map_err(|error| SessionError::Encoding(error.to_string()))?;
         Ok(format!("{:x}", hash.finalize()))
     }
 }

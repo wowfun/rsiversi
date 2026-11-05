@@ -145,6 +145,65 @@ fn header(preset_id: &str) -> SessionHeader {
     .unwrap()
 }
 
+#[tokio::test]
+async fn request_guidance_is_bounded_replaced_and_removed_without_changing_the_preset() {
+    let source = FakeComposition {
+        failures: Mutex::new(BTreeSet::new()),
+        domains: rsi_agent_composition_protocol::DomainCatalog::default(),
+    };
+    let header = header("alpha");
+    let base = source.pin(header.agent_preset_id(), None).await.unwrap();
+    let captured = |text: String| rsi_agent_composition_protocol::RequestToolCatalog {
+        middleware: None,
+        generation: "application".into(),
+        receipt_source: None,
+        registrations: std::collections::BTreeMap::new(),
+        runtime: Arc::new(EmptyTools::default()),
+        instructions: text,
+        inputs: None,
+    };
+    let first = base
+        .clone()
+        .with_request_catalog(captured("first".into()), &header)
+        .unwrap();
+    assert!(base.request_instruction().is_none());
+    assert_eq!(first.request_instruction().unwrap().text, "first");
+    assert_eq!(
+        first.request_instruction().unwrap().producer.as_str(),
+        "rsi.application.system-prompt"
+    );
+    let second = base
+        .clone()
+        .with_request_catalog(captured("second".into()), &header)
+        .unwrap();
+    assert_eq!(second.request_instruction().unwrap().text, "second");
+    assert_eq!(first.request_instruction().unwrap().text, "first");
+    assert!(
+        base.clone()
+            .with_request_catalog(captured(String::new()), &header)
+            .unwrap()
+            .request_instruction()
+            .is_none()
+    );
+    assert!(
+        first
+            .with_unavailable_request_tools("replaced worker")
+            .request_instruction()
+            .is_none()
+    );
+    for text in [
+        " ".into(),
+        "invalid\0text".into(),
+        "x".repeat(rsi_agent_session_protocol::MAXIMUM_STEP_INSTRUCTION_BYTES + 1),
+    ] {
+        assert!(
+            base.clone()
+                .with_request_catalog(captured(text), &header)
+                .is_err()
+        );
+    }
+}
+
 #[derive(Debug)]
 struct SessionSelection {
     base: FakeComposition,
@@ -348,6 +407,15 @@ async fn exact_name_lookup_observes_reporting_and_delegation_authority() {
         .clone()
         .with_output_contract("owner", contract.clone())
         .unwrap();
+    let assigned = [REPORT_RESULT_TOOL.to_owned()].into();
+    assert!(
+        reporting
+            .clone()
+            .without_preset_tools(Some(Arc::new(assigned)))
+            .tools()
+            .definition(REPORT_RESULT_TOOL)
+            .is_some()
+    );
     assert_eq!(
         reporting.tool_definition_weight().unwrap(),
         serde_json::to_vec(&reporting.tools().definitions())

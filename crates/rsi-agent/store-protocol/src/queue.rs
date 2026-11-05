@@ -9,7 +9,7 @@ fn corrupt() -> StoreError {
     StoreError::Corrupt("queue successor or receipt differs from its canonical boundary".into())
 }
 
-/// Checks a withdrawal's current slot and source before its discard changes the projection.
+/// Checks a withdrawal's current slot before its discard changes the projection.
 pub fn validate_queue_withdrawal(
     predecessor: &StoreAgentMessage,
     receipt: &rsi_agent_session_protocol::QueueMutationReceipt,
@@ -17,7 +17,6 @@ pub fn validate_queue_withdrawal(
     if receipt.outcome != QueueMutationOutcome::Withdrawn
         || predecessor.message.message_id != receipt.expected_message_id
         || predecessor.queue_slot.id != receipt.slot_id
-        || predecessor.message.source != AgentMessageSource::Human
         || predecessor.state != StoreAgentMessageState::Pending
     {
         return Err(corrupt());
@@ -140,8 +139,8 @@ pub fn validate_queue_successor(
     if predecessor.message.message_id != *predecessor_id
         || predecessor.queue_slot != *slot
         || !matches!(predecessor.state, StoreAgentMessageState::Pending)
-        || predecessor.message.source != AgentMessageSource::Human
-        || message.source != AgentMessageSource::Human
+        || !matches!(predecessor.message.source, AgentMessageSource::Human { .. })
+        || !matches!(message.source, AgentMessageSource::Human { .. })
         || message.message_id != *successor_id
         || message.options != predecessor.message.options
         || root_session_id != &predecessor.root_session_id
@@ -187,7 +186,7 @@ mod tests {
             queue_slot: QueueSlot::initial(&id, 1, 1),
             message: AgentMessage {
                 message_id: id.clone(),
-                source: AgentMessageSource::Human,
+                source: AgentMessageSource::Human { attribution: None },
                 options: MessageOptions::default(),
                 content: vec![AgentMessageContent::Text {
                     text: "hello".into(),

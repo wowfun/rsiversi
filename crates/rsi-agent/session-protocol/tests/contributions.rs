@@ -8,10 +8,11 @@ use serde_json::json;
 
 #[test]
 fn plugin_input_has_validated_provenance_and_preserves_actual_text() {
-    let body = SessionFactBody::InputMessageEntered {
+    let body = SessionFactBody::InputMessageClaimed {
         turn_id: TurnId::new("turn").unwrap(),
         step_id: StepId::new("step").unwrap(),
         source: InputMessageSource::PluginContext {
+            tool: None,
             contribution_id: ContributionId::new("fixture.time").unwrap(),
         },
         content: vec![AgentMessageContent::Text {
@@ -42,6 +43,7 @@ fn plugin_input_has_validated_provenance_and_preserves_actual_text() {
 #[test]
 fn rejected_tool_preserves_preparation_and_validates_the_actual_denial() {
     let body = |rejection| SessionFactBody::ToolRejected {
+        additional_contexts: Vec::new(),
         origin: rsi_agent_session_protocol::ToolOrigin::Model {
             effect_id: rsi_agent_session_protocol::EffectId::new("source-model").unwrap(),
         },
@@ -61,6 +63,23 @@ fn rejected_tool_preserves_preparation_and_validates_the_actual_denial() {
         },
     };
     let fact = SessionFact::new(4, 42, body(approval(ApprovalDecision::Deny))).unwrap();
+    let mut wire = serde_json::to_value(&fact).unwrap();
+    assert!(wire.get("additional_contexts").is_none());
+    wire["additional_contexts"] =
+        json!([{"id":"review","source":{"kind":"plugin"},"text":["Try reading the file"]}]);
+    let with_context = serde_json::from_value::<SessionFact>(wire.clone()).unwrap();
+    assert_eq!(serde_json::to_value(with_context).unwrap(), wire);
+    let mut program = wire.clone();
+    program["origin"] = json!({"kind":"program","parent_effect_id":"coordinator","ordinal":1});
+    program["program_role"] = json!("callable");
+    assert!(serde_json::from_value::<SessionFact>(program.clone()).is_err());
+    program
+        .as_object_mut()
+        .unwrap()
+        .remove("additional_contexts");
+    assert!(serde_json::from_value::<SessionFact>(program).is_ok());
+    wire["additional_contexts"][0]["text"] = json!([]);
+    assert!(serde_json::from_value::<SessionFact>(wire).is_err());
     assert_eq!(
         serde_json::from_value::<SessionFact>(serde_json::to_value(&fact).unwrap()).unwrap(),
         fact

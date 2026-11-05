@@ -13,6 +13,29 @@ fn invocation() -> SessionCommandInvocation {
     }
 }
 
+#[test]
+fn original_attribution_is_bounded_without_interpreting_plugin_metadata() {
+    use rsi_agent_session_protocol::MessageAttribution;
+    let mut value = MessageAttribution {
+        id: "original:message with spaces".into(),
+        source: serde_json::json!({"kind":"plugin:context","nested":["值",false,3]}),
+    };
+    value.validate().unwrap();
+    assert_eq!(
+        serde_json::from_value::<MessageAttribution>(serde_json::to_value(&value).unwrap())
+            .unwrap(),
+        value
+    );
+    value.id = "界".repeat(86);
+    assert!(value.validate().is_err());
+    value.id = "original".into();
+    value.source = serde_json::json!({"value":"x".repeat(16 * 1024)});
+    assert!(value.validate().is_err());
+    value.source = serde_json::json!({"kind":"anything"});
+    value.id = "nul\0byte".into();
+    assert!(value.validate().is_err());
+}
+
 fn commit(
     input: SessionCommandInvocation,
 ) -> rsi_agent_session_protocol::Result<DomainStateCommit> {
@@ -69,6 +92,10 @@ fn durable_commands_reject_draft_revisions_and_different_request_ids() {
 
 #[test]
 fn command_arguments_and_invocations_are_closed_and_bounded_on_decode() {
+    let snapshot = serde_json::json!({"text":"中文快照".repeat(2000)});
+    assert!(serde_json::to_vec(&snapshot).unwrap().len() > 16 * 1024);
+    assert!(CommandArguments::new(snapshot.clone()).is_ok());
+    assert!(serde_json::from_value::<CommandArguments>(snapshot).is_ok());
     let large = serde_json::json!("x".repeat(MAXIMUM_COMMAND_ARGUMENT_BYTES));
     assert!(CommandArguments::new(large.clone()).is_err());
     assert!(serde_json::from_value::<CommandArguments>(large).is_err());

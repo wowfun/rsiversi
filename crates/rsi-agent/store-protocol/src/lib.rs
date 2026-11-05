@@ -20,6 +20,8 @@ use std::sync::Arc;
 use thiserror::Error;
 
 mod activity;
+mod inherited;
+pub use inherited::{InheritedInterval, InheritedReadError, capture_inherited_intervals};
 mod maintenance;
 mod maintenance_id;
 pub use maintenance_id::MaintenanceOperationId;
@@ -54,7 +56,7 @@ pub use window::{
 };
 
 /// Exact `SQLite` and in-memory Store schema version.
-pub const AGENT_STORE_SCHEMA_VERSION: u32 = 38;
+pub const AGENT_STORE_SCHEMA_VERSION: u32 = 44;
 /// Maximum Facts in one atomic append.
 pub const MAXIMUM_STORE_BATCH_FACTS: usize = 512;
 /// Maximum encoded bytes in one atomic append.
@@ -64,7 +66,7 @@ pub const MAXIMUM_STORE_FACT_PAGE_BYTES: usize = MAXIMUM_STORE_BATCH_BYTES;
 /// Maximum aggregate encoded bytes returned by one Agent-control page.
 pub const MAXIMUM_STORE_CONTROL_PAGE_BYTES: usize = MAXIMUM_STORE_BATCH_BYTES;
 /// Maximum aggregate encoded Agent-message bytes returned in one mailbox prefix.
-pub const MAXIMUM_STORE_MAILBOX_PAGE_BYTES: usize = 32 * 1024 * 1024;
+pub const MAXIMUM_STORE_MAILBOX_PAGE_BYTES: usize = MAXIMUM_STORE_BATCH_BYTES / 2;
 
 /// Binds activation labels to the immutable Session Header lineage.
 pub fn validate_activation_lineage(
@@ -76,7 +78,7 @@ pub fn validate_activation_lineage(
     let matches = match header.fork_origin() {
         Some(origin) => {
             root == &origin.root_session_id
-                && parent == Some(&origin.parent_session_id)
+                && parent == Some(&origin.history.parent_session_id)
                 && path == &origin.path
         }
         None => root == header.session_id() && parent.is_none() && path.depth() == 0,
@@ -94,17 +96,17 @@ pub fn validate_message_claim_fact(
     message: &AgentMessage,
     turn_id: &TurnId,
     step_id: &StepId,
-    minimum_entered_fact_seq: u64,
+    minimum_claimed_fact_seq: u64,
     fact: Option<&SessionFact>,
 ) -> Result<()> {
-    let expected_source = message.entered_source();
-    let Some(fact) = fact.filter(|fact| fact.seq() >= minimum_entered_fact_seq) else {
+    let expected_source = message.claimed_source();
+    let Some(fact) = fact.filter(|fact| fact.seq() >= minimum_claimed_fact_seq) else {
         return Err(StoreError::Invalid(
             "mailbox claim must reference a newly appended input Fact".into(),
         ));
     };
     match fact.body() {
-        SessionFactBody::InputMessageEntered {
+        SessionFactBody::InputMessageClaimed {
             turn_id: entered_turn_id,
             step_id: entered_step_id,
             source,
@@ -414,8 +416,24 @@ impl AtomicSessionAppend {
     fn validate_domain_commits(&self) -> Result<()> {
         use rsi_agent_session_protocol::{AgentControlRecordBody, DomainMutationSource};
         let mut requests = BTreeSet::new();
-        for record in &self.controls {
+        let mut command_messages = BTreeSet::new();
+        for (index, record) in self.controls.iter().enumerate() {
             if let AgentControlRecordBody::DomainStateCommitted { commit } = record.body() {
+                for (offset, input) in commit.command_inputs().iter().enumerate() {
+                    let accepted = self.controls.get(index + offset + 1).ok_or_else(|| {
+                        StoreError::Invalid(
+                            "command input is missing from its atomic append".into(),
+                        )
+                    })?;
+                    if !matches!(accepted.body(), AgentControlRecordBody::MessageAccepted { message, delivery, .. }
+                        if message == &input.message && delivery == &input.delivery)
+                        || !command_messages.insert(input.message.message_id.clone())
+                    {
+                        return Err(StoreError::Invalid(
+                            "command input differs from its exact domain publication".into(),
+                        ));
+                    }
+                }
                 if matches!(commit.source(), DomainMutationSource::Turn { .. }) {
                     let bound = commit
                         .clone()
@@ -453,6 +471,19 @@ impl AtomicSessionAppend {
                         request_id: request.to_string(),
                     });
                 }
+            }
+        }
+        for control in &self.controls {
+            if let AgentControlRecordBody::MessageAccepted { message, .. } = control.body()
+                && matches!(
+                    message.source,
+                    rsi_agent_session_protocol::AgentMessageSource::Command { .. }
+                )
+                && !command_messages.contains(&message.message_id)
+            {
+                return Err(StoreError::Invalid(
+                    "command input requires a same-append domain binding".into(),
+                ));
             }
         }
         Ok(())
@@ -661,6 +692,10 @@ pub struct StoreControlPage {
     pub after_seq: u64,
     /// Ordered contiguous records after the cursor.
     pub records: Vec<AgentControlRecord>,
+    /// Final Fact watermark of each record's committing append, in record order.
+    pub fact_cursors: Vec<u64>,
+    /// Exact Fact tail captured in the same read snapshot.
+    pub durable_fact_seq: u64,
     /// Exact durable control tail at read time.
     pub durable_seq: u64,
 }
@@ -678,6 +713,17 @@ impl StoreControlPage {
     pub fn validate(&self) -> Result<()> {
         validate_control_sequence(self.after_seq, &self.records)
             .map_err(|error| StoreError::Corrupt(error.to_string()))?;
+        if self.fact_cursors.len() != self.records.len()
+            || self.fact_cursors.windows(2).any(|pair| pair[0] > pair[1])
+            || self
+                .fact_cursors
+                .last()
+                .is_some_and(|cursor| *cursor > self.durable_fact_seq)
+        {
+            return Err(StoreError::Corrupt(
+                "control Fact anchors are inconsistent".into(),
+            ));
+        }
         let encoded_bytes = self.records.iter().try_fold(0_usize, |total, record| {
             total
                 .checked_add(record.encoded_len())
@@ -766,7 +812,7 @@ pub enum StoreAgentMessageState {
         /// Step into which the message entered.
         step_id: StepId,
         /// Exact durable input Fact sequence.
-        entered_fact_seq: u64,
+        claimed_fact_seq: u64,
     },
     /// Accepted input which will never be claimed.
     Discarded {
@@ -888,8 +934,8 @@ impl StoreAgentMessage {
         }
         match &self.state {
             StoreAgentMessageState::Claimed {
-                entered_fact_seq, ..
-            } if *entered_fact_seq == 0 => {
+                claimed_fact_seq, ..
+            } if *claimed_fact_seq == 0 => {
                 return Err(StoreError::Corrupt(
                     "claimed mailbox message has no entered Fact".into(),
                 ));
@@ -1009,14 +1055,50 @@ impl StoreSessionInspection {
     }
 }
 
-/// Atomic bounded view of one session mailbox at one control watermark.
+/// One atomic inbox control cut, without Header, message bodies or tree materialization.
+#[derive(Clone, Debug, Eq, PartialEq)]
+#[expect(
+    clippy::struct_excessive_bools,
+    reason = "Independent indexed presence and pause facts; Kernel owns their scheduling policy"
+)]
+pub struct StoreInboxControlState {
+    /// Exact durable Fact tail at this snapshot.
+    pub durable_fact_seq: u64,
+    /// Exact durable control tail at this snapshot.
+    pub durable_control_seq: u64,
+    /// Whether queued inputs are suspended.
+    pub inbox_paused: bool,
+    /// Whether any accepted Turn lacks a terminal Fact.
+    pub has_open_turn: bool,
+    /// Whether a Conversation activation still owns driver work or cleanup.
+    pub has_active_activation: bool,
+    /// Whether unpaused input can wake a driver.
+    pub has_waking_message: bool,
+    /// Every pending identity in acceptance order, or empty when not requested.
+    pub pending_message_ids: Vec<MessageId>,
+}
+
+/// Selects the pending queue before paging and decoding its payloads.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub enum MailboxRead {
+    /// Both targets in acceptance order.
+    All,
+    /// Both targets and the exact status of one message, including a terminal one.
+    WithMessage(MessageId),
+    /// Only input for the next Step of the current Turn.
+    NextStep,
+}
+
+/// Atomic bounded view of one session mailbox selection at one control watermark.
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct StoreAgentMailbox {
+    /// Whether pending next-Turn inputs are suspended at this captured cut.
+    pub inbox_paused: bool,
     /// Optional exact message requested by identity, including terminal states.
     pub selected: Option<StoreAgentMessage>,
-    /// Every pending message in acceptance order.
+    /// Byte-bounded prefix of the selected pending messages in acceptance order.
     pub pending: Vec<StoreAgentMessage>,
-    /// Complete pending count at the same Store snapshot, including omitted suffix entries.
+    /// Complete count for the same selection, including omitted suffix entries.
     pub pending_count: usize,
     /// Exact durable control tail at read time.
     pub durable_control_seq: u64,
@@ -1027,6 +1109,8 @@ pub struct StoreAgentMailbox {
 /// Atomic metadata-only view of one session mailbox.
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct StoreAgentMailboxSummary {
+    /// Whether pending next-Turn inputs are suspended at this captured cut.
+    pub inbox_paused: bool,
     /// Complete pending-message count at the Store snapshot.
     pub pending_count: usize,
     /// Pending promotable next-Step identities in acceptance order at the same snapshot.
@@ -1182,6 +1266,8 @@ impl StoreAgentChildPage {
 #[serde(deny_unknown_fields)]
 #[allow(clippy::struct_excessive_bools)] // Independent indexed activity predicates can coexist; they are not lifecycle alternatives.
 pub struct StoreAgentSessionStatus {
+    /// Durable inbox suspension; queued inputs remain visible while paused.
+    pub inbox_paused: bool,
     /// Exact Session identity.
     pub session_id: SessionId,
     /// Durable control tail.
@@ -1628,6 +1714,8 @@ pub struct StoreOpenTurnPage {
     pub turns: Vec<StoreOpenTurn>,
     /// Exact session durable tail at read time.
     pub durable_seq: u64,
+    /// Control tail from the same snapshot as the open turns and Fact tail.
+    pub durable_control_seq: u64,
     /// Whether at least one later open turn existed at read time.
     pub has_more: bool,
 }
@@ -1955,13 +2043,14 @@ pub trait SessionStore: fmt::Debug + Send + Sync + 'static {
         sessions: &[SessionId],
     ) -> Result<Vec<Result<StoreActivityCut>>>;
 
-    /// Reads the complete bounded domain set at the current or explicit control horizon.
+    /// Reads the selected domain (or all domains) at the same durable snapshot as the watermarks.
     async fn read_domain_states(
         &self,
         session_id: &SessionId,
         at_control_seq: Option<u64>,
+        domain: Option<&str>,
     ) -> Result<StoreDomainStatePage> {
-        let _ = (session_id, at_control_seq);
+        let _ = (session_id, at_control_seq, domain);
         Err(StoreError::Invalid(
             "this Agent Store does not support domain state reads".into(),
         ))
@@ -2123,14 +2212,14 @@ pub trait SessionStore: fmt::Debug + Send + Sync + 'static {
         session_id: &SessionId,
         turn_id: &TurnId,
     ) -> Result<StoreTurnBoundary>;
-    /// Resolves the tamper-evident completed-turn prefix before one invoking Turn.
+    /// Resolves an exact completed-turn prefix at a typed immutable boundary.
     async fn resolve_fork_boundary(
         &self,
         session_id: &SessionId,
-        invoking_turn_id: &TurnId,
+        point: &rsi_agent_session_protocol::ForkPoint,
         selection: ForkTurnSelection,
     ) -> Result<StoreForkBoundary> {
-        let _ = (session_id, invoking_turn_id, selection);
+        let _ = (session_id, point, selection);
         Err(StoreError::Invalid(
             "this Agent Store does not support fork boundaries".into(),
         ))
@@ -2175,6 +2264,17 @@ pub trait SessionStore: fmt::Debug + Send + Sync + 'static {
             "this Agent Store does not support durable ready messages".into(),
         ))
     }
+    /// Captures inbox control metadata without Header, message bodies or tree reads.
+    async fn read_inbox_control_state(
+        &self,
+        session_id: &SessionId,
+        include_pending: bool,
+    ) -> Result<StoreInboxControlState> {
+        let _ = (session_id, include_pending);
+        Err(StoreError::Invalid(
+            "this Store does not support inbox control reads".into(),
+        ))
+    }
     /// Reads one atomic Session and subtree inspection without message bodies.
     async fn inspect_session(&self, session_id: &SessionId) -> Result<StoreSessionInspection> {
         let _ = session_id;
@@ -2201,13 +2301,13 @@ pub trait SessionStore: fmt::Debug + Send + Sync + 'static {
             "this Agent Store does not support exact message reads".into(),
         ))
     }
-    /// Reads the complete bounded pending mailbox and one optional message status atomically.
+    /// Reads the selected pending queue and its count at one durable cut.
     async fn read_agent_mailbox(
         &self,
         session_id: &SessionId,
-        selected_message_id: Option<&MessageId>,
+        query: MailboxRead,
     ) -> Result<StoreAgentMailbox> {
-        let _ = (session_id, selected_message_id);
+        let _ = (session_id, query);
         Err(StoreError::Invalid(
             "this Agent Store does not support indexed mailbox reads".into(),
         ))
@@ -2635,6 +2735,130 @@ pub fn store_fact_model_coordinate(
 #[cfg(test)]
 mod tests {
     #[test]
+    #[expect(
+        clippy::too_many_lines,
+        reason = "One atomic receipt fixture checks all independently tampered input and digest bindings"
+    )]
+    fn command_receipt_requires_exact_same_append_inputs_and_digest() {
+        use rsi_agent_session_protocol::*;
+        let invocation = SessionCommandInvocation {
+            command: ContributionId::new("fixture.command").unwrap(),
+            request_id: DomainRequestId::new("command-input").unwrap(),
+            expected_revision: CommandRevision::Durable { control_seq: 0 },
+            arguments: CommandArguments::new(true.into()).unwrap(),
+        };
+        let source = CommandMessageSource {
+            command: invocation.command.clone(),
+            request_id: invocation.request_id.clone(),
+            invocation_sha256: invocation.digest().unwrap(),
+            ordinal: 0,
+            attribution: None,
+        };
+        let input = CommandMessage {
+            delivery: MessageDelivery::NextStep,
+            message: AgentMessage {
+                message_id: source.message_id().unwrap(),
+                source: AgentMessageSource::Command { source },
+                content: vec![AgentMessageContent::Text {
+                    text: "Mode changed".into(),
+                }],
+                options: MessageOptions::default(),
+            },
+        };
+        let commit = DomainStateCommit::new(
+            Some(invocation.request_id.clone()),
+            DomainMutationSource::Command { invocation },
+            vec![
+                DomainStateUpdate::new(
+                    DomainRevision::new(1),
+                    DomainSnapshot::new(
+                        DomainIdentity::new("fixture.state", 1).unwrap(),
+                        DomainStateValue::new(true.into()).unwrap(),
+                    ),
+                )
+                .unwrap(),
+            ],
+        )
+        .unwrap()
+        .with_command_inputs(vec![input.clone()])
+        .unwrap();
+        let mut wire = serde_json::to_value(&commit).unwrap();
+        wire["command_inputs"][0]["message"]["content"][0]["text"] = "Substituted".into();
+        assert!(serde_json::from_value::<DomainStateCommit>(wire).is_err());
+        let control = AgentControlRecord::new(
+            1,
+            1,
+            AgentControlRecordBody::DomainStateCommitted { commit },
+        )
+        .unwrap();
+        let accepted = AgentControlRecord::new(
+            2,
+            1,
+            AgentControlRecordBody::MessageAccepted {
+                message: input.message.clone(),
+                delivery: input.delivery,
+                bound_turn_id: None,
+                root_session_id: SessionId::new("session").unwrap(),
+                target: MessageTarget::NextStep,
+                wake_required: false,
+            },
+        )
+        .unwrap();
+        let mut append = AtomicSessionAppend {
+            session_id: SessionId::new("session").unwrap(),
+            expected_fact_seq: 0,
+            expected_control_seq: 0,
+            header: None,
+            facts: vec![],
+            controls: vec![control.clone(), accepted.clone()],
+        };
+        append.validate().unwrap();
+        append.controls.pop();
+        assert!(
+            append
+                .validate_domain_commits()
+                .unwrap_err()
+                .to_string()
+                .contains("missing")
+        );
+        append.controls = vec![accepted.clone()];
+        assert!(
+            append
+                .validate_domain_commits()
+                .unwrap_err()
+                .to_string()
+                .contains("same-append")
+        );
+        let mut message = input.message;
+        message.content = vec![AgentMessageContent::Text {
+            text: "Substituted".into(),
+        }];
+        append.controls = vec![
+            control,
+            AgentControlRecord::new(
+                2,
+                1,
+                AgentControlRecordBody::MessageAccepted {
+                    message,
+                    delivery: input.delivery,
+                    bound_turn_id: None,
+                    root_session_id: SessionId::new("session").unwrap(),
+                    target: MessageTarget::NextStep,
+                    wake_required: false,
+                },
+            )
+            .unwrap(),
+        ];
+        assert!(
+            append
+                .validate_domain_commits()
+                .unwrap_err()
+                .to_string()
+                .contains("differs")
+        );
+    }
+
+    #[test]
     fn promotion_policy_covers_every_ingress_class_and_bound_steer() {
         use rsi_agent_session_protocol::{AgentMessageSourceKind as Kind, MessageDelivery, TurnId};
         let turn = TurnId::new("active").unwrap();
@@ -2878,7 +3102,9 @@ mod tests {
                         message: AgentMessage {
                             message_id: MessageId::new(format!("large-control-{sequence}"))
                                 .unwrap(),
-                            source: rsi_agent_session_protocol::AgentMessageSource::Human,
+                            source: rsi_agent_session_protocol::AgentMessageSource::Human {
+                                attribution: None,
+                            },
                             content: vec![AgentMessageContent::Text {
                                 text: "x"
                                     .repeat(rsi_agent_session_protocol::MAXIMUM_TURN_TEXT_BYTES),
@@ -2898,6 +3124,8 @@ mod tests {
         let page = StoreControlPage {
             after_seq: 0,
             records,
+            fact_cursors: vec![0; 65],
+            durable_fact_seq: 0,
             durable_seq: 65,
         };
 
@@ -2910,6 +3138,7 @@ mod tests {
     fn indexed_activation_membership_matches_lineage_at_the_tree_bound() {
         use rsi_agent_session_protocol::{ExecutionOwner, ProgramRunId};
         let status = |name: &str| StoreAgentSessionStatus {
+            inbox_paused: false,
             session_id: SessionId::new(name).unwrap(),
             durable_control_seq: 0,
             last_settled_control_seq: 0,
