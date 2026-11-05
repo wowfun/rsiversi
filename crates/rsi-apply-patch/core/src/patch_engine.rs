@@ -4,6 +4,7 @@ use std::ffi::OsString;
 use std::fs::File;
 use std::io::{Read as _, Write as _};
 use std::path::{Component, Path};
+use std::sync::Arc;
 use std::sync::atomic::{AtomicU64, Ordering};
 
 pub(crate) mod evidence;
@@ -320,7 +321,7 @@ struct PreparedOperation {
     content: Option<Vec<u8>>,
     kind: PreparedKind,
     move_path: Option<SafePath>,
-    prospective_directories: Vec<String>,
+    prospective_directories: Vec<Arc<str>>,
 }
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -353,7 +354,7 @@ struct PathExpectation<'a> {
 #[derive(Clone, Copy, Debug)]
 enum ParentCreation<'a> {
     Forbidden,
-    Planned(&'a [String]),
+    Planned(&'a [Arc<str>]),
 }
 
 #[cfg(test)]
@@ -747,20 +748,20 @@ impl Root {
     fn parent_plan(
         &self,
         path: &SafePath,
-    ) -> Result<(Option<DirectoryIdentity>, Vec<String>), EngineFailure> {
+        budget: &mut preflight::DirectoryBudget,
+    ) -> Result<(Option<DirectoryIdentity>, Vec<Arc<str>>), EngineFailure> {
         let mut directory = self.directory.try_clone().map_err(|error| {
             EngineFailure::new(
                 "open_workspace",
                 format!("failed to clone cwd handle: {error}"),
             )
         })?;
-        let mut prefix = Vec::new();
         let mut missing = false;
         let mut prospective = Vec::new();
-        for component in path.parents() {
-            prefix.push(component.to_string_lossy().into_owned());
+        for (component, (end, _)) in path.parents().iter().zip(path.text.match_indices('/')) {
+            let prefix = &path.text[..end];
             if missing {
-                prospective.push(prefix.join("/"));
+                prospective.push(budget.admit(prefix)?);
                 continue;
             }
             match rustix::fs::openat(
@@ -772,7 +773,7 @@ impl Root {
                 Ok(opened) => directory = File::from(opened),
                 Err(rustix::io::Errno::NOENT) => {
                     missing = true;
-                    prospective.push(prefix.join("/"));
+                    prospective.push(budget.admit(prefix)?);
                 }
                 Err(error) => {
                     return Err(io_failure(
@@ -955,7 +956,10 @@ impl Root {
                     let ParentCreation::Planned(prospective_directories) = parent_creation else {
                         unreachable!("guard admits planned parent creation only");
                     };
-                    if !prospective_directories.contains(&path) {
+                    if !prospective_directories
+                        .iter()
+                        .any(|planned| planned.as_ref() == path)
+                    {
                         return Err(EngineFailure::new(
                             "changed_since_preflight",
                             "an existing parent disappeared after patch preflight",

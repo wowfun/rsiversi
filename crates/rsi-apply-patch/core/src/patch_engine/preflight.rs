@@ -1,6 +1,7 @@
 #![allow(clippy::result_large_err)] // Failures retain the bounded fuzzy-match prefix.
 
 use std::collections::{BTreeMap, BTreeSet, HashMap};
+use std::sync::Arc;
 
 use rustix::fs::Mode;
 
@@ -33,6 +34,7 @@ struct Preflight<'a> {
     prepared: Vec<PreparedOperation>,
     fuzzy_matches: Vec<PatchFuzzyMatch>,
     content_bytes: usize,
+    directories: DirectoryBudget,
 }
 
 impl<'a> Preflight<'a> {
@@ -44,6 +46,7 @@ impl<'a> Preflight<'a> {
             prepared: Vec::with_capacity(operation_count),
             fuzzy_matches: Vec::new(),
             content_bytes: 0,
+            directories: DirectoryBudget::default(),
         }
     }
 
@@ -51,12 +54,29 @@ impl<'a> Preflight<'a> {
         mut self,
         operations: Vec<ParsedOperation>,
     ) -> Result<(Vec<PreparedOperation>, Vec<PatchFuzzyMatch>), PreflightFailure> {
+        self.directories.effects = operations
+            .iter()
+            .map(|operation| {
+                if matches!(
+                    operation,
+                    ParsedOperation::Update {
+                        move_path: Some(_),
+                        ..
+                    }
+                ) {
+                    2
+                } else {
+                    1
+                }
+            })
+            .sum();
+        if self.directories.effects > MAXIMUM_PATCH_EFFECTS {
+            return Err((effect_budget_failure(), Vec::new()));
+        }
         for (index, operation) in operations.into_iter().enumerate() {
             let prepared = self.prepare_operation(index, operation)?;
             self.prepared.push(prepared);
         }
-        validate_effect_budget(&self.prepared)
-            .map_err(|failure| (failure, self.fuzzy_matches.clone()))?;
         validate_response_budget(&self.prepared, &self.fuzzy_matches)
             .map_err(|failure| (failure, Vec::new()))?;
         Ok((self.prepared, self.fuzzy_matches))
@@ -94,7 +114,7 @@ impl<'a> Preflight<'a> {
         self.account_content(content.len(), index, &path)?;
         let (parent, prospective_directories) = self
             .root
-            .parent_plan(&path)
+            .parent_plan(&path, &mut self.directories)
             .map_err(|failure| self.at(failure, index, &path))?;
         self.virtual_files.insert(
             path.clone(),
@@ -194,7 +214,7 @@ impl<'a> Preflight<'a> {
         destination: Option<&SafePath>,
         content: &[u8],
         mode: Mode,
-    ) -> PreflightResult<(PreparedKind, Vec<String>)> {
+    ) -> PreflightResult<(PreparedKind, Vec<Arc<str>>)> {
         let Some(destination) = destination else {
             self.virtual_files.insert(
                 path.clone(),
@@ -225,7 +245,7 @@ impl<'a> Preflight<'a> {
         }
         let (destination_parent, prospective_directories) = self
             .root
-            .parent_plan(destination)
+            .parent_plan(destination, &mut self.directories)
             .map_err(|failure| self.at(failure, index, destination))?;
         self.virtual_files.insert(path.clone(), None);
         self.virtual_files.insert(
@@ -288,31 +308,29 @@ impl<'a> Preflight<'a> {
     }
 }
 
-fn validate_effect_budget(prepared: &[PreparedOperation]) -> Result<(), EngineFailure> {
-    let mut effects = 0_usize;
-    let mut potential_directories = BTreeSet::new();
-    for operation in prepared {
-        effects = effects
-            .checked_add(if matches!(operation.kind, PreparedKind::Move { .. }) {
-                2
-            } else {
-                1
-            })
-            .ok_or_else(|| EngineFailure::new("effect_budget", "patch effect budget overflow"))?;
-        if effects > MAXIMUM_PATCH_EFFECTS {
+#[derive(Default)]
+pub(super) struct DirectoryBudget {
+    effects: usize,
+    text_bytes: usize,
+    paths: BTreeSet<Arc<str>>,
+}
+
+impl DirectoryBudget {
+    pub(super) fn admit(&mut self, path: &str) -> Result<Arc<str>, EngineFailure> {
+        if let Some(existing) = self.paths.get(path) {
+            return Ok(Arc::clone(existing));
+        }
+        if self.effects >= MAXIMUM_PATCH_EFFECTS
+            || path.len() > MAXIMUM_PATCH_EFFECTS * MAXIMUM_PATCH_PATH_BYTES - self.text_bytes
+        {
             return Err(effect_budget_failure());
         }
-        for directory in &operation.prospective_directories {
-            if !potential_directories.contains(directory) {
-                if effects >= MAXIMUM_PATCH_EFFECTS {
-                    return Err(effect_budget_failure());
-                }
-                potential_directories.insert(directory.clone());
-                effects += 1;
-            }
-        }
+        let owned: Arc<str> = Arc::from(path);
+        self.effects += 1;
+        self.text_bytes += path.len();
+        self.paths.insert(Arc::clone(&owned));
+        Ok(owned)
     }
-    Ok(())
 }
 
 fn effect_budget_failure() -> EngineFailure {
@@ -425,7 +443,7 @@ fn projected_effects(prepared: &[PreparedOperation]) -> Result<Vec<PatchEffect>,
             .map(|(path, operation)| PatchEffect {
                 operation,
                 kind: PatchEffectKind::Mkdir,
-                path,
+                path: path.to_string(),
                 bytes_before: None,
                 bytes_after: None,
             }),
@@ -456,4 +474,33 @@ fn account_content(total: &mut usize, bytes: usize) -> Result<(), EngineFailure>
         ));
     }
     Ok(())
+}
+
+#[cfg(test)]
+mod admission_tests {
+    use super::*;
+
+    #[test]
+    fn directory_discovery_stops_before_retention_and_shares_sibling_prefixes() {
+        let directory = tempfile::tempdir().unwrap();
+        let root = Root::open(directory.path()).unwrap();
+        let mut budget = DirectoryBudget {
+            effects: 64,
+            ..DirectoryBudget::default()
+        };
+        let path = SafePath::parse(&format!("{}000", "a/".repeat(8190))).unwrap();
+        assert_eq!(
+            root.parent_plan(&path, &mut budget).unwrap_err().code,
+            "effect_budget"
+        );
+        assert_eq!(budget.paths.len(), 704);
+        assert_eq!(budget.text_bytes, 704 * 704);
+        assert_eq!(std::fs::read_dir(directory.path()).unwrap().count(), 0);
+        let first = budget.admit("a/a").unwrap();
+        let second = budget.admit("a/a").unwrap();
+        assert!(Arc::ptr_eq(&first, &second));
+        assert_eq!(budget.effects, MAXIMUM_PATCH_EFFECTS);
+        assert_eq!(budget.admit("different").unwrap_err().code, "effect_budget");
+        assert_eq!(budget.paths.len(), 704);
+    }
 }

@@ -4,6 +4,15 @@
 fn fuzz_seeds_use_the_bounded_production_parser() {
     use rsi_apply_patch::exercise_patch_parser as parse;
     assert_eq!(parse(include_bytes!("corpus/unicode.patch")), Ok(()));
+    for line in ["é", "中", "🦀"] {
+        assert_eq!(
+            parse(
+                format!("*** Begin Patch\n*** Update File: a.txt\n@@\n{line}\n*** End Patch\n")
+                    .as_bytes()
+            ),
+            Err("invalid_update_hunk".into())
+        );
+    }
     for operation in [
         "*** Delete File: file",
         "*** Update File: file\n*** Move to: moved\n@@\n-old\n+new",

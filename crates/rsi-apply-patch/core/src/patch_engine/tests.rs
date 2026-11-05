@@ -49,6 +49,28 @@ fn preflight_failure_has_no_file_effects() {
 }
 
 #[test]
+fn malformed_unicode_hunk_prefixes_reject_before_filesystem_effects() {
+    let root = tempfile::tempdir().unwrap();
+    fs::write(root.path().join("a.txt"), "old\n").unwrap();
+    for line in ["x", "é", "中", "🦀"] {
+        let result = patch(root.path(), &format!("*** Update File: a.txt\n@@\n{line}"));
+        assert_eq!(result.status, PatchStatus::Rejected);
+        assert_eq!(result.failure.unwrap().code, "invalid_update_hunk");
+        assert!(result.effects.is_empty());
+        assert_eq!(
+            fs::read_to_string(root.path().join("a.txt")).unwrap(),
+            "old\n"
+        );
+    }
+    let result = patch(root.path(), "*** Update File: a.txt\n@@\n-old\n+é中🦀");
+    assert_eq!(result.status, PatchStatus::Applied);
+    assert_eq!(
+        fs::read_to_string(root.path().join("a.txt")).unwrap(),
+        "é中🦀\n"
+    );
+}
+
+#[test]
 fn matcher_uses_global_layer_priority_and_audits_only_fuzzy_matches() {
     let root = tempfile::tempdir().unwrap();
     fs::write(root.path().join("match.txt"), "target   \nother\ntarget\n").unwrap();

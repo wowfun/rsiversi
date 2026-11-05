@@ -34,8 +34,11 @@ reaping that helper, the Tool returns the family's
 
 The private patch engine owns no-follow, descriptor-relative filesystem
 resolution, complete preflight, bounded fuzzy-match audits, and exact partial
-effect reporting. Fuzzy audit and prospective-directory budgets are enforced
-while preflight discovers them, before another path string is retained. Only
+effect reporting. Preflight reserves file effects before discovering missing
+directories and admits each distinct directory before retaining its text.
+Operations share directory strings. The 768-effect and 16 KiB path bounds limit
+retained directory text to 12 MiB; the response has its own encoded-byte budget.
+Fuzzy audits are bounded during discovery. Only
 directories absent during preflight are prospective `mkdir` effects; commit
 must not create an unplanned directory if the tree changes before mutation. A
 newly added regular file starts from mode `0644` filtered

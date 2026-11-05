@@ -231,9 +231,12 @@ impl PatchParser {
                 )
                 .at(operation, path));
             };
-            let text = line[1..].to_owned();
             match prefix {
                 b' ' => {
+                    let text = line
+                        .strip_prefix(' ')
+                        .expect("matched ASCII prefix")
+                        .to_owned();
                     chunk
                         .context_indices
                         .push((chunk.old_lines.len(), chunk.new_lines.len()));
@@ -242,11 +245,19 @@ impl PatchParser {
                 }
                 b'-' => {
                     changed = true;
-                    chunk.old_lines.push(text);
+                    chunk.old_lines.push(
+                        line.strip_prefix('-')
+                            .expect("matched ASCII prefix")
+                            .to_owned(),
+                    );
                 }
                 b'+' => {
                     changed = true;
-                    chunk.new_lines.push(text);
+                    chunk.new_lines.push(
+                        line.strip_prefix('+')
+                            .expect("matched ASCII prefix")
+                            .to_owned(),
+                    );
                 }
                 _ => {
                     return Err(EngineFailure::new(
