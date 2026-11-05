@@ -17,6 +17,8 @@ mod model_selection;
 mod reference_input;
 #[path = "remote_ui.rs"]
 mod remote_ui;
+#[path = "session_resource.rs"]
+mod session_resource;
 #[path = "source_details.rs"]
 mod source_details;
 #[path = "submissions.rs"]
@@ -520,6 +522,30 @@ impl GuiApplication {
         cleanup.and(replacement)
     }
 
+    pub(crate) async fn fork_conversation(
+        &self,
+        pane: crate::SurfaceId,
+        generation: &str,
+        turn: rsi_agent_session_protocol::TurnId,
+        turns: rsi_agent_session_protocol::ForkTurnSelection,
+    ) -> Result<()> {
+        let attached = self.pane(pane)?.attachment(generation)?;
+        let header = attached.handle.header().await.map_err(error)?;
+        let id = SessionId::new(rsi_ui::fresh_identity("fork")?).map_err(error)?;
+        let request = rsi_session_protocol::CreateSession {
+            session_id: id.clone(),
+            workspace_id: attached.workspace.clone(),
+            agent_preset_id: Some(header.agent_preset_id().clone()),
+            fork: Some(rsi_session_protocol::ForkDraft {
+                source_session_id: attached.id.clone(),
+                point: rsi_agent_session_protocol::ForkPoint::through(&turn),
+                turns,
+            }),
+        };
+        self.pane(pane)?.attachment(generation)?;
+        self.open(pane, id, Some(request)).await
+    }
+
     pub(crate) fn add_surface(&self, id: crate::SurfaceId) -> Result<()> {
         let mut surfaces = self.panes.lock().expect("GUI surfaces poisoned");
         if surfaces.contains_key(&id) {
@@ -691,6 +717,7 @@ impl GuiApplication {
                     pane,
                     id.clone(),
                     Some(rsi_session_protocol::CreateSession {
+                        fork: None,
                         session_id: id,
                         workspace_id: workspace,
                         // Saved Fresh intent follows the default-preset contract in ../README.md.
@@ -890,9 +917,10 @@ impl GuiApplication {
             })
             .await
             .map_err(error)?;
-            for fact in &history.facts {
-                transcript.fact(fact);
-            }
+            transcript
+                .history_inputs(handle.as_ref(), &history.facts)
+                .await
+                .map_err(error)?;
             transcript.omitted |= history.has_more;
             transcript.queue.seed(inspection.pending);
             transcript.active = inspection.active_turn_id;
@@ -934,7 +962,7 @@ impl GuiApplication {
         let ui_target = surface
             .lookup_local::<rsi_ui::UiTargetContract>()
             .ok_or("Surface UI target is unavailable")?;
-        renderer.bind_submission(draft.clone());
+        renderer.bind_submission(draft.clone(), handle.clone());
         renderer.seed(transcript, before, more);
         let attachment = Arc::new(Attachment {
             metrics: Mutex::new(None),
@@ -1114,9 +1142,10 @@ impl GuiApplication {
         .await
         .map_err(error)?;
         let mut transcript = Transcript::default();
-        for fact in &page.facts {
-            transcript.fact(fact);
-        }
+        transcript
+            .history_inputs(attachment.handle.as_ref(), &page.facts)
+            .await
+            .map_err(error)?;
         transcript.omitted |= page.has_more;
         let mut state = attachment
             .renderer
@@ -1320,7 +1349,7 @@ mod tests {
                         activation_id: ActivationId::new("activation").unwrap(),
                         turn_id: TurnId::new("turn").unwrap(),
                         step_id: StepId::new("step").unwrap(),
-                        entered_fact_seq: 1,
+                        claimed_fact_seq: 1,
                     },
                     1 => Control::MessageDiscarded {
                         message_id: message.clone(),

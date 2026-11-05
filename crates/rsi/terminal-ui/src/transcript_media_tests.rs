@@ -1,5 +1,35 @@
 use super::*;
-use rsi_agent_session_protocol::{EffectId, MessageId, StepId, TurnId};
+use rsi_agent_session_protocol::{
+    AgentMessageContent, EffectId, InputMessageSource, MessageId, StepId, TurnId,
+};
+
+fn input_with_image(media: &rsi_media_protocol::MediaRef) -> SessionFact {
+    SessionFact::new(
+        1,
+        1,
+        SessionFactBody::InputMessageClaimed {
+            turn_id: TurnId::new("turn").unwrap(),
+            step_id: StepId::new("step").unwrap(),
+            source: InputMessageSource::Human {
+                attribution: None,
+                message_id: MessageId::new("input").unwrap(),
+            },
+            content: vec![
+                AgentMessageContent::Text {
+                    text: "before".into(),
+                },
+                AgentMessageContent::Image {
+                    presentation: None,
+                    media: media.clone(),
+                },
+                AgentMessageContent::Text {
+                    text: "after".into(),
+                },
+            ],
+        },
+    )
+    .unwrap()
+}
 
 #[test]
 fn ordered_images_preserve_exact_sources_and_selection_mapping() {
@@ -10,29 +40,7 @@ fn ordered_images_preserve_exact_sources_and_selection_mapping() {
     let SessionFactBody::ImageOutput { media, .. } = image.body() else {
         unreachable!()
     };
-    let input = SessionFact::new(
-        1,
-        1,
-        SessionFactBody::InputMessageEntered {
-            turn_id: TurnId::new("turn").unwrap(),
-            step_id: StepId::new("step").unwrap(),
-            source: InputMessageSource::Human {
-                message_id: MessageId::new("input").unwrap(),
-            },
-            content: vec![
-                AgentMessageContent::Text {
-                    text: "before".into(),
-                },
-                AgentMessageContent::Image {
-                    media: media.clone(),
-                },
-                AgentMessageContent::Text {
-                    text: "after".into(),
-                },
-            ],
-        },
-    )
-    .unwrap();
+    let input = input_with_image(media);
     let tool = SessionFact::new(
         2,
         1,
@@ -60,6 +68,23 @@ fn ordered_images_preserve_exact_sources_and_selection_mapping() {
     .unwrap();
     let mut transcript = Transcript::default();
     for fact in [&image, &tool, &input, &input, &tool, &image] {
+        if let SessionFactBody::InputMessageClaimed {
+            source, content, ..
+        } = fact.body()
+        {
+            transcript.entered(
+                fact.seq(),
+                fact.timestamp_ms(),
+                rsi_conversation::EnteredInput {
+                    index: 0,
+                    seq: fact.seq(),
+                    offset: 0,
+                    source: Some(source),
+                    content: rsi_conversation::EnteredContent::Blocks(content),
+                },
+                false,
+            );
+        }
         transcript.apply(fact);
     }
     assert_eq!(transcript.blocks.len(), 3);

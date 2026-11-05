@@ -10,7 +10,9 @@ Use the stop control to cancel an active response. Wait for its settled state
 before retrying; closing a tab alone does not cancel work. File edits may already
 have happened before cancellation, so inspect the workspace before repeating a task.
 
-Browser reloads and additional tabs use the current browser cookie. If you clear
+Browsers signed in to the same Host share its workbench. You can start a draft
+in one window and approve a tool call in another. Browser reloads and additional
+tabs use the current browser cookie. If you clear
 cookies, revoke the browser device, or lose an unused launch link, restart Web and
 use its new link. The launch ticket expires after ten minutes and can be used once;
 the [Web launch contract](../../apps/serve/README.md) owns this behavior.

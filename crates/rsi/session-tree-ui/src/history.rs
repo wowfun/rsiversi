@@ -79,11 +79,14 @@ async fn history_page(
     ));
     elements.push(UiElement::Text { text: "Read-only history. Pages may begin within a Turn; record previews can be shortened. Open an exact field for complete pages.".into() });
     for fact in &page.facts {
-        let sources = sources(fact);
+        let first = read_fields(fact, |fields| fields.next()).map(|field| SourceRef {
+            seq: fact.seq(),
+            field,
+        });
         let title = title(fact);
-        let preview = preview(fact, &sources)?;
+        let preview = preview(fact, first)?;
         elements.push(field(&format!("Fact {} · {title}", fact.seq()), preview));
-        if !sources.is_empty() {
+        if first.is_some() {
             elements.push(button(
                 reader,
                 format!("Open Fact {} fields", fact.seq()),
@@ -128,7 +131,7 @@ async fn fields_page(
     handle: &dyn SessionHandle,
     selected: SessionId,
     seq: String,
-    start: u16,
+    start: u32,
     mut elements: Vec<UiElement>,
 ) -> Result<UiView> {
     let fact = exact(execution, handle, decimal(&seq)?).await?;
@@ -136,28 +139,34 @@ async fn fields_page(
         "Record",
         format!("Fact {} · {}", fact.seq(), title(&fact)),
     ));
-    let sources = sources(&fact);
-    let start = usize::from(start);
-    if start > sources.len() {
-        return Err(UiError::Invalid("Field page is out of range".into()));
-    }
-    let end = (start + SOURCE_PAGE_ROWS).min(sources.len());
-    elements.push(field(
-        "Fields",
-        format!(
-            "{}–{} of {}",
-            if start == end { 0 } else { start + 1 },
-            end,
-            sources.len()
-        ),
-    ));
-    for source in &sources[start..end] {
+    let start = start as usize;
+    let (page, more, total) = read_fields(&fact, |fields| {
+        let (min, max) = fields.size_hint();
+        let total = max.filter(|upper| *upper == min);
+        if start > 0 && fields.nth(start - 1).is_none() {
+            return Err(UiError::Invalid("Field page is out of range".into()));
+        }
+        let page: Vec<_> = fields.take(SOURCE_PAGE_ROWS).collect();
+        Ok((page, fields.next().is_some(), total))
+    })?;
+    let end = start + page.len();
+    let first = if page.is_empty() { 0 } else { start + 1 };
+    let range = total.map_or_else(
+        || format!("{first}–{end}"),
+        |total| format!("{first}–{end} of {total}"),
+    );
+    elements.push(field("Fields", range));
+    for field in page {
+        let source = SourceRef {
+            seq: fact.seq(),
+            field,
+        };
         elements.push(button(
             reader,
             source.field.to_string(),
             Operation::Source {
                 selected: selected.clone(),
-                source: *source,
+                source,
                 start: "0".into(),
             },
         ));
@@ -169,19 +178,19 @@ async fn fields_page(
             Operation::Sources {
                 selected: selected.clone(),
                 seq: seq.clone(),
-                start: u16::try_from(start.saturating_sub(SOURCE_PAGE_ROWS))
+                start: u32::try_from(start.saturating_sub(SOURCE_PAGE_ROWS))
                     .expect("bounded field index"),
             },
         ));
     }
-    if end < sources.len() {
+    if more {
         elements.push(button(
             reader,
             "More fields",
             Operation::Sources {
                 selected,
                 seq,
-                start: u16::try_from(end).expect("bounded field index"),
+                start: u32::try_from(end).expect("bounded field index"),
             },
         ));
     }
@@ -274,9 +283,14 @@ fn title(fact: &SessionFact) -> String {
         return tool.title();
     }
     match fact.body() {
-        SessionFactBody::InputMessageEntered { .. } | SessionFactBody::TurnAccepted { .. } => {
-            "Input".into()
+        SessionFactBody::InputMessageClaimed { .. } | SessionFactBody::TurnAccepted { .. } => {
+            "Input claimed".into()
         }
+        SessionFactBody::ToolContextsClaimed { .. } => "Tool inputs claimed".into(),
+        SessionFactBody::StepInputsPrepared { decision, .. } => decision.messages().map_or_else(
+            || "Input rejected".into(),
+            |messages| format!("Input prepared · {} messages", messages.len()),
+        ),
         SessionFactBody::ModelAttemptSettled { .. } => "Model output".into(),
         SessionFactBody::ModelIntent { .. } => "Model request".into(),
         SessionFactBody::ImageOutput { .. } => "Generated image".into(),
@@ -288,76 +302,85 @@ fn title(fact: &SessionFact) -> String {
         _ => "Session activity".into(),
     }
 }
-fn sources(fact: &SessionFact) -> Vec<SourceRef> {
-    let fields = match fact.body() {
-        SessionFactBody::TurnAccepted { .. } => vec![FactField::TurnInput],
-        SessionFactBody::InputMessageEntered { content, .. } => content
-            .iter()
-            .enumerate()
-            .map(|(index, item)| {
-                let index = u16::try_from(index).expect("bounded Session content");
-                match item {
-                    AgentMessageContent::Text { .. } => FactField::InputText { index },
-                    AgentMessageContent::Image { .. } => FactField::InputImage { index },
-                    AgentMessageContent::Reference { .. } => FactField::InputReference { index },
-                }
-            })
-            .collect(),
+fn read_fields<R>(
+    fact: &SessionFact,
+    read: impl FnOnce(&mut dyn Iterator<Item = FactField>) -> R,
+) -> R {
+    let input = |(index, block): (usize, &AgentMessageContent)| {
+        FactField::input(index.try_into().expect("bounded input Fact"), block)
+    };
+    let fixed: &[FactField] = match fact.body() {
+        SessionFactBody::InputMessageClaimed { content, .. } => {
+            return read(&mut content.iter().enumerate().map(input));
+        }
+        SessionFactBody::StepInputsPrepared { decision, .. } => {
+            return read(&mut decision.authored_content().enumerate().map(input));
+        }
+        SessionFactBody::ToolContextsClaimed { messages, .. } => {
+            return read(
+                &mut messages
+                    .iter()
+                    .flat_map(|row| &row.message.text)
+                    .enumerate()
+                    .map(|(index, _)| FactField::InputText {
+                        index: index.try_into().expect("bounded tool context"),
+                    }),
+            );
+        }
+        SessionFactBody::TurnAccepted { .. } => &[FactField::TurnInput],
         SessionFactBody::ModelAttemptSettled { attempt, .. } => {
-            let mut fields = Vec::new();
-            for (_, event) in attempt.events().filter_map(std::result::Result::ok) {
-                if let LanguageEvent::ContentStarted { index, content } = event {
-                    let index = u16::try_from(index).expect("validated model index");
-                    fields.push(match content {
-                        rsi_ai_protocol::ContentStart::Text => FactField::ModelText { index },
-                        rsi_ai_protocol::ContentStart::Reasoning => {
-                            FactField::ModelReasoning { index }
-                        }
-                        rsi_ai_protocol::ContentStart::ToolCall { .. } => {
-                            FactField::ModelToolArguments { index }
-                        }
-                    });
-                }
-            }
-            if matches!(attempt.terminal(), LanguageEvent::Failed { .. }) {
-                fields.push(FactField::ModelFailure);
-            }
-            fields
+            let fields = attempt.events().filter_map(|event| {
+                let (_, LanguageEvent::ContentStarted { index, content }) = event.ok()? else {
+                    return None;
+                };
+                let index = u16::try_from(index).expect("validated model index");
+                Some(match content {
+                    rsi_ai_protocol::ContentStart::Text => FactField::ModelText { index },
+                    rsi_ai_protocol::ContentStart::Reasoning => FactField::ModelReasoning { index },
+                    rsi_ai_protocol::ContentStart::ToolCall { .. } => {
+                        FactField::ModelToolArguments { index }
+                    }
+                })
+            });
+            return read(
+                &mut fields.chain(
+                    matches!(attempt.terminal(), LanguageEvent::Failed { .. })
+                        .then_some(FactField::ModelFailure),
+                ),
+            );
         }
         SessionFactBody::ModelIntent { .. } | SessionFactBody::ImageIntent { .. } => {
-            vec![FactField::ModelSnapshot]
+            &[FactField::ModelSnapshot]
         }
-        SessionFactBody::ToolIntent { .. } => vec![FactField::ToolArguments],
+        SessionFactBody::ToolIntent { .. } => &[FactField::ToolArguments],
         SessionFactBody::ToolRejected { .. } => {
-            vec![FactField::ToolRejection, FactField::ToolArguments]
+            &[FactField::ToolRejection, FactField::ToolArguments]
         }
         SessionFactBody::ToolResult { result, .. } => {
-            let mut fields = vec![FactField::ToolValue];
-            fields.extend(result.content.iter().enumerate().map(|(index, item)| {
-                let index = u16::try_from(index).expect("bounded Tool content");
-                match item {
-                    rsi_tools_protocol::ToolContent::Text { .. } => FactField::ToolText { index },
-                    rsi_tools_protocol::ToolContent::Image { .. } => FactField::ToolImage { index },
-                }
-            }));
-            fields
+            return read(&mut std::iter::once(FactField::ToolValue).chain(
+                result.content.iter().enumerate().map(|(index, item)| {
+                    let index = u16::try_from(index).expect("bounded Tool content");
+                    match item {
+                        rsi_tools_protocol::ToolContent::Text { .. } => {
+                            FactField::ToolText { index }
+                        }
+                        rsi_tools_protocol::ToolContent::Image { .. } => {
+                            FactField::ToolImage { index }
+                        }
+                    }
+                }),
+            ));
         }
-        SessionFactBody::TurnTerminal { .. } => vec![FactField::TurnOutcome],
-        SessionFactBody::ImageOutput { .. } => vec![FactField::ImageOutput],
-        _ => vec![],
+        SessionFactBody::TurnTerminal { .. } => &[FactField::TurnOutcome],
+        SessionFactBody::ImageOutput { .. } => &[FactField::ImageOutput],
+        _ => &[],
     };
-    fields
-        .into_iter()
-        .map(|field| SourceRef {
-            seq: fact.seq(),
-            field,
-        })
-        .collect()
+    read(&mut fixed.iter().copied())
 }
 
-fn preview(fact: &SessionFact, sources: &[SourceRef]) -> Result<String> {
-    Ok(if let Some(source) = sources.first() {
-        let window = rsi_conversation::select_field(fact, *source)
+fn preview(fact: &SessionFact, source: Option<SourceRef>) -> Result<String> {
+    Ok(if let Some(source) = source {
+        let window = rsi_conversation::select_field(fact, source)
             .expect("selected matching Fact field")
             .window(0, RECORD_PREVIEW_BYTES)
             .map_err(action_error)?;

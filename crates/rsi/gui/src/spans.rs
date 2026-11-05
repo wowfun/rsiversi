@@ -10,6 +10,18 @@ impl Transcript {
         source: SourceRef,
         text: &str,
     ) {
+        self.put_source_at(key, role, title, source, text, None);
+    }
+
+    pub(super) fn put_source_at(
+        &mut self,
+        key: String,
+        role: &'static str,
+        title: &str,
+        source: SourceRef,
+        text: &str,
+        display_seq: Option<u64>,
+    ) {
         let position = self
             .blocks
             .iter()
@@ -70,7 +82,8 @@ impl Transcript {
         block.source_bytes.insert(position, text_window.len());
         block.clipped |= text_window.len() < text.len();
         block.title = short(title, 512).into();
-        block.first_seq = block.sources.get(0).expect("inserted source").seq;
+        block.first_seq =
+            display_seq.unwrap_or_else(|| block.sources.get(0).expect("inserted source").seq);
         self.blocks
             .make_contiguous()
             .sort_by_key(|block| block.first_seq);
@@ -82,8 +95,7 @@ impl Transcript {
 mod tests {
     use super::*;
     use rsi_agent_session_protocol::{
-        AgentMessageContent, InputMessageSource, MessageId, SessionFact, SessionFactBody, StepId,
-        TurnId, TurnOutcome,
+        MessageId, SessionFact, SessionFactBody, TurnId, TurnOutcome,
     };
     use rsi_conversation::{BlockIdentity, FactField};
 
@@ -208,45 +220,45 @@ mod tests {
     }
 
     #[test]
-    fn direct_turn_and_claimed_message_cannot_collide_and_control_preview_reconciles() {
+    fn prepared_display_order_is_independent_of_the_claim_detail_source() {
         let mut transcript = Transcript::default();
         let turn = TurnId::new("same").unwrap();
-        let message = MessageId::new("same").unwrap();
-        let entered = vec![AgentMessageContent::Text {
-            text: "claimed input".into(),
-        }];
-        let key = BlockIdentity::Message { message: &message }.key();
-        transcript.message(&key, "user", "You", &entered, None);
-        transcript.fact(
-            &SessionFact::new(
-                2,
-                1,
-                SessionFactBody::InputMessageEntered {
-                    turn_id: turn.clone(),
-                    step_id: StepId::new("step").unwrap(),
-                    source: InputMessageSource::Human {
-                        message_id: message,
-                    },
-                    content: entered.clone(),
-                },
-            )
-            .unwrap(),
+        transcript.put_source_at(
+            "prepared:5:0:0".into(),
+            "user",
+            "You",
+            SourceRef {
+                seq: 4,
+                field: FactField::InputText { index: 0 },
+            },
+            "first",
+            Some(5),
         );
-        transcript.message(&key, "user", "You", &entered, None);
-        transcript.put_source(
-            BlockIdentity::TurnInput { turn: &turn }.key(),
+        transcript.put_source_at(
+            "prepared:5:1:0".into(),
             "user",
             "You",
             SourceRef {
                 seq: 1,
                 field: FactField::TurnInput,
             },
-            "direct input",
+            "second",
+            Some(5),
         );
-        assert_eq!(transcript.blocks.len(), 2);
-        assert_eq!(transcript.blocks[0].text, "direct input");
-        assert_eq!(transcript.blocks[1].text, "claimed input");
-        assert_eq!(transcript.blocks[1].sources.len(), 1);
+        transcript.put_source(
+            BlockIdentity::Terminal { turn: &turn }.key(),
+            "status",
+            "Completed",
+            SourceRef {
+                seq: 6,
+                field: FactField::TurnOutcome,
+            },
+            "Completed",
+        );
+        assert_eq!(transcript.blocks[0].text, "first");
+        assert_eq!(transcript.blocks[1].text, "second");
+        assert_eq!(transcript.blocks[1].sources.get(0).unwrap().seq, 1);
+        assert_eq!(transcript.history_before(), Some(5));
     }
 
     #[test]

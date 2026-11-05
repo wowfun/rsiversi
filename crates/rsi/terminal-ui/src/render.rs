@@ -1260,21 +1260,7 @@ mod tests {
     }
 
     fn user(state: &mut State, seq: u64, text: &str) {
-        state.transcript.apply(
-            &SessionFact::new(
-                seq,
-                seq,
-                SessionFactBody::TurnAccepted {
-                    turn_id: TurnId::new("user-turn").unwrap(),
-                    text: text.into(),
-                    model: None,
-                    reasoning_effort: None,
-                    sandbox: rsi_sandbox::SandboxMode::WorkspaceWrite,
-                    require_approval: false,
-                },
-            )
-            .unwrap(),
-        );
+        state.transcript.user_fixture(seq, seq, text);
     }
 
     #[test]
@@ -1634,21 +1620,7 @@ mod tests {
     #[test]
     fn user_time_is_first_below_message_without_background_or_copy_hits() {
         let mut state = state();
-        state.transcript.apply(
-            &SessionFact::new(
-                1,
-                86_340_000,
-                SessionFactBody::TurnAccepted {
-                    turn_id: TurnId::new("timed").unwrap(),
-                    text: "Question".into(),
-                    model: None,
-                    reasoning_effort: None,
-                    sandbox: rsi_sandbox::SandboxMode::WorkspaceWrite,
-                    require_approval: false,
-                },
-            )
-            .unwrap(),
-        );
+        state.transcript.user_fixture(1, 86_340_000, "Question");
         let mut screen = ratatui::Terminal::new(TestBackend::new(80, 24)).unwrap();
         let mut view = View::default();
         screen.draw(|frame| view = draw(frame, &state)).unwrap();
@@ -1904,21 +1876,7 @@ mod tests {
         use rsi_agent_todo::{TodoItem, TodoList, TodoStatus};
         for (width, height) in [(110, 35), (80, 24), (42, 12), (28, 9)] {
             let mut state = state();
-            state.transcript.apply(
-                &SessionFact::new(
-                    1,
-                    1,
-                    SessionFactBody::TurnAccepted {
-                        turn_id: TurnId::new("tasks").unwrap(),
-                        text: "Readable source".into(),
-                        model: None,
-                        reasoning_effort: None,
-                        sandbox: rsi_sandbox::SandboxMode::WorkspaceWrite,
-                        require_approval: false,
-                    },
-                )
-                .unwrap(),
-            );
+            state.transcript.user_fixture(1, 1, "Readable source");
             let anchor = state.transcript.blocks[0].anchor(0).unwrap();
             state.top = Some(anchor);
             let mut screen = ratatui::Terminal::new(TestBackend::new(width, height)).unwrap();
@@ -2091,19 +2049,23 @@ mod tests {
                 SessionId::new("child-session").unwrap(),
                 2,
                 rsi_agent_session_protocol::ForkOrigin {
-                    parent_session_id: state.header.session_id().clone(),
+                    history: rsi_agent_session_protocol::HistoryOrigin {
+                        parent_session_id: state.header.session_id().clone(),
+                        parent_header_fingerprint: state.header.fingerprint().unwrap(),
+                        point: rsi_agent_session_protocol::ForkPoint::BeforeTurn {
+                            turn_id: TurnId::new("spawn").unwrap(),
+                        },
+                        resolved_after_seq: 0,
+                        resolved_terminal_seq: 0,
+                        terminal_prefix_sha256: "0".repeat(64),
+                        resolved_terminal_control_seq: 0,
+                        terminal_control_prefix_sha256: "0".repeat(64),
+                        requested_turns: rsi_agent_session_protocol::ForkTurnSelection::None,
+                        effective_turns: 0,
+                    },
                     root_session_id: state.header.session_id().clone(),
                     path: rsi_agent_session_protocol::AgentPath::new(vec![1]).unwrap(),
                     task_name: "child".into(),
-                    parent_header_fingerprint: state.header.fingerprint().unwrap(),
-                    invoking_turn_id: TurnId::new("spawn").unwrap(),
-                    resolved_after_seq: 0,
-                    resolved_terminal_seq: 0,
-                    terminal_prefix_sha256: "0".repeat(64),
-                    resolved_terminal_control_seq: 0,
-                    terminal_control_prefix_sha256: "0".repeat(64),
-                    requested_turns: rsi_agent_session_protocol::ForkTurnSelection::None,
-                    effective_turns: 0,
                 },
                 selection,
             )
@@ -2230,21 +2192,7 @@ mod tests {
     #[test]
     fn cached_layout_reuses_unchanged_bodies_and_isolates_one_changed_block() {
         let mut state = state();
-        state.transcript.apply(
-            &SessionFact::new(
-                1,
-                1,
-                SessionFactBody::TurnAccepted {
-                    reasoning_effort: None,
-                    turn_id: TurnId::new("input").unwrap(),
-                    text: "first body".into(),
-                    model: None,
-                    sandbox: rsi_sandbox::SandboxMode::WorkspaceWrite,
-                    require_approval: false,
-                },
-            )
-            .unwrap(),
-        );
+        state.transcript.user_fixture(1, 1, "first body");
         delta(&mut state, 2, "## Header\n\nUnicode e");
         let mut terminal = ratatui::Terminal::new(TestBackend::new(80, 24)).unwrap();
         terminal

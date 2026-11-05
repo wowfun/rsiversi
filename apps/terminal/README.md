@@ -1,5 +1,16 @@
 # rsi-terminal
 
+Conversation rows follow the final Step input order. Source details read the
+exact entered field. A saved viewport reopens at the row's display Fact even
+when its text came from an earlier claim.
+
+
+Input-preparation rejection reports a Blocked outcome without a provider call.
+An initially empty final input list completes normally.
+
+Parent navigation follows the Header's history origin, including independently
+owned manual forks. Execution-root discovery remains separate from that history edge.
+
 Opening an approval reads current pending requests from its Session owner. A decision
 keeps the review visible until a known result; an uncertain reply offers only an
 explicit pending-state refresh before another decision. Cached interaction menus

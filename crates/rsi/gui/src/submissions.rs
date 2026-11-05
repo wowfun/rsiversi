@@ -159,6 +159,7 @@ fn queue_rejection(reason: rsi_agent_session_protocol::QueueMutationRejection) -
         Rejection::Claimed => "The agent already claimed this input",
         Rejection::Discarded => "This input was already discarded",
         Rejection::NotHuman => "Only your own inputs can be edited",
+        Rejection::ProgramOwned => "Cancel the owning operation to remove this input",
         Rejection::IncompatibleOptions => {
             "This input has options that cannot be used while steering"
         }
@@ -280,10 +281,12 @@ impl GuiApplication {
                 }
                 let mut content = Vec::with_capacity(input.images.len() + 1);
                 if !input.text.is_empty() { content.push(SessionInput::Text { text: input.text.clone() }); }
-                content.extend(input.images.iter().cloned().map(|media| SessionInput::Image { media }));
+                content.extend(input.images.iter().cloned().map(|media| SessionInput::Image { presentation: None, media }));
                 content.extend(input.references.iter().cloned().map(|reference| SessionInput::Reference { reference: Box::new(reference) }));
                 let id = MessageId::new(rsi_ui::fresh_identity("message")?).map_err(error)?;
                 let request = SubmitInput {
+                    origin: rsi_session_protocol::SubmissionOrigin::User,
+                    attribution: None,
                     reasoning_effort: None,
                     message_id: id.clone(), content: content.try_into().map_err(error)?,
                     delivery,
@@ -483,6 +486,7 @@ impl GuiApplication {
                 match block {
                     AgentMessageContent::Text { text } => text_bytes += text.len(),
                     AgentMessageContent::Image { .. } => images += 1,
+                    AgentMessageContent::File { .. } => {}
                     AgentMessageContent::Reference { reference } => {
                         references += 1;
                         text_bytes += reference.preview.len();

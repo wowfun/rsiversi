@@ -613,23 +613,19 @@ mod tests {
     #[tokio::test]
     #[ignore = "diagnostic typed Local versus JSON/render benchmark; no timing threshold"]
     async fn linked_visible_window_capture_and_render_cost() {
-        use rsi_agent_session_protocol::{SessionFact, SessionFactBody, TurnId};
         let mut transcript = rsi_terminal_ui::transcript::Transcript::default();
         for seq in 1..=2 {
-            transcript.apply(
-                &SessionFact::new(
+            transcript.entered(
+                seq,
+                seq,
+                rsi_conversation::EnteredInput {
+                    index: 0,
+                    source: None,
                     seq,
-                    seq,
-                    SessionFactBody::TurnAccepted {
-                        reasoning_effort: None,
-                        turn_id: TurnId::new(format!("turn-{seq}")).unwrap(),
-                        text: "word ".repeat(50_000),
-                        model: None,
-                        sandbox: rsi_sandbox::SandboxMode::WorkspaceWrite,
-                        require_approval: false,
-                    },
-                )
-                .unwrap(),
+                    offset: 0,
+                    content: rsi_conversation::EnteredContent::Direct(&"word ".repeat(50_000)),
+                },
+                false,
             );
         }
         let mut renderer = rsi_terminal_ui::scene::Renderer::default();

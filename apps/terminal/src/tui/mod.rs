@@ -119,14 +119,36 @@ struct Attachment {
     handle: Arc<dyn SessionHandle>,
     header: SessionHeader,
     inspection: Option<StoreSessionInspection>,
-    page: Option<rsi_session_protocol::SessionHistoryPage>,
-    live_page: Option<rsi_session_protocol::SessionHistoryPage>,
+    page: Option<HistoryPage>,
+    live_page: Option<HistoryPage>,
+}
+
+struct HistoryPage {
+    history: rsi_session_protocol::SessionHistoryPage,
+    inputs: transcript::Transcript,
+}
+
+async fn read_page(
+    handle: &dyn SessionHandle,
+    before: Option<u64>,
+    older: bool,
+) -> Result<HistoryPage> {
+    let history = read(|| handle.history_before(before, 128)).await?;
+    let mut inputs = transcript::Transcript::default();
+    for fact in &history.facts {
+        rsi_client::visit_prepared_inputs(handle, fact, &history.facts, |row| {
+            inputs.entered(fact.seq(), fact.timestamp_ms(), row, older);
+        })
+        .await
+        .map_err(error)?;
+    }
+    Ok(HistoryPage { history, inputs })
 }
 
 async fn attachment(
     handle: Arc<dyn SessionHandle>,
     durable: bool,
-    top: Option<transcript::Anchor>,
+    display_seq: Option<u64>,
 ) -> Result<Attachment> {
     let header = handle
         .header()
@@ -139,20 +161,25 @@ async fn attachment(
     };
     let page = match &inspection {
         Some(snapshot) => Some(
-            read(|| {
-                handle.history_before(
-                    top.map_or(snapshot.durable_fact_seq, |anchor| anchor.source.seq)
-                        .checked_add(1),
-                    128,
-                )
-            })
+            read_page(
+                handle.as_ref(),
+                display_seq
+                    .unwrap_or(snapshot.durable_fact_seq)
+                    .checked_add(1),
+                display_seq.is_some(),
+            )
             .await?,
         ),
         None => None,
     };
-    let live_page = match (&inspection, top) {
-        (Some(snapshot), Some(anchor)) if anchor.source.seq < snapshot.durable_fact_seq => Some(
-            read(|| handle.history_before(snapshot.durable_fact_seq.checked_add(1), 128)).await?,
+    let live_page = match (&inspection, display_seq) {
+        (Some(snapshot), Some(seq)) if seq < snapshot.durable_fact_seq => Some(
+            read_page(
+                handle.as_ref(),
+                snapshot.durable_fact_seq.checked_add(1),
+                false,
+            )
+            .await?,
         ),
         _ => None,
     };
@@ -165,12 +192,16 @@ async fn attachment(
     })
 }
 
-fn live_window(page: rsi_session_protocol::SessionHistoryPage) -> transcript::Transcript {
-    let mut transcript = transcript::Transcript::default();
+fn live_window(
+    HistoryPage {
+        history: page,
+        inputs: mut transcript,
+    }: HistoryPage,
+) -> transcript::Transcript {
     for fact in page.facts {
         transcript.apply(&fact);
     }
-    transcript.earlier = page.has_more;
+    transcript.earlier |= page.has_more;
     transcript
 }
 
@@ -196,7 +227,7 @@ enum Update {
     UiImage(String),
     Plugins(Box<rsi_workbench_ui::PluginsView>),
     Attached(Box<Attachment>),
-    History(rsi_session_protocol::SessionHistoryPage),
+    History(HistoryPage),
     Inspect(Box<StoreSessionInspection>),
     Metrics(Box<rsi_session_protocol::Result<rsi_session_protocol::MetricsRead>>),
     TreeMetrics(rsi_session_protocol::TreeMetricsRead),
@@ -312,7 +343,7 @@ struct SavedSession {
     reference_bytes: usize,
     model: Option<ModelRef>,
     reasoning_effort: Option<rsi_ai_protocol::ReasoningEffortId>,
-    top: Option<transcript::Anchor>,
+    top: Option<(transcript::Anchor, u64)>,
     folds: std::collections::VecDeque<(String, bool)>,
     last_used: u64,
     owned: BTreeSet<MessageId>,
@@ -362,6 +393,7 @@ struct Client {
     projection_notice: String,
     extension_view: Option<commands::ExtensionView>,
     history: History,
+    live_claims: rsi_client::LiveInputClaims,
     live_transcript: Option<transcript::Transcript>,
     inspecting: bool,
     metrics_loading: bool,
@@ -371,13 +403,23 @@ struct Client {
 
 impl Client {
     fn switch_session_draft(&mut self, header: SessionHeader) {
+        self.live_claims = rsi_client::LiveInputClaims::default();
         let old = self.state.header.session_id().clone();
         let draft = std::mem::take(&mut self.state.editor);
         let references = std::mem::take(&mut self.state.references);
         let model = self.state.model.take();
         let owned = std::mem::take(&mut self.owned);
         let command = std::mem::take(&mut self.command);
-        let top = self.state.top;
+        let top = self.state.top.map(|anchor| {
+            let display_seq = self
+                .state
+                .transcript
+                .locate(anchor)
+                .map_or(anchor.source.seq, |(index, _)| {
+                    self.state.transcript.blocks[index].first
+                });
+            (anchor, display_seq)
+        });
         let folds = std::mem::take(&mut self.state.folds);
         let reasoning_effort = self.state.reasoning_effort.clone();
         self.drafts.insert(
@@ -404,7 +446,7 @@ impl Client {
             self.state.refresh_references();
             self.state.model = saved.model;
             self.state.reasoning_effort = saved.reasoning_effort;
-            self.state.top = saved.top;
+            self.state.top = saved.top.map(|(anchor, _)| anchor);
             self.state.folds = saved.folds;
             self.owned = saved.owned;
             self.command = saved.command;
@@ -500,6 +542,7 @@ impl Client {
             projections: None,
             projection_notice: String::new(),
             extension_view: None,
+            live_claims: rsi_client::LiveInputClaims::default(),
             live_transcript: attached.live_page.map(live_window),
             history: History {
                 backfill: attached.page.is_some(),
@@ -617,8 +660,8 @@ impl Client {
                 .transcript
                 .blocks
                 .iter()
-                .flat_map(|block| block.pieces.iter())
-                .map(|piece| piece.source.seq)
+                .filter(|block| !block.pieces.is_empty())
+                .map(|block| block.first)
                 .min()
                 .filter(|seq| *seq > 1)
                 .or(self.history.before);
@@ -637,14 +680,24 @@ impl Client {
         }
         self.history.loading = true;
         let handle = self.handle.clone();
+        let older = self.live_transcript.is_some();
         self.spawn_as(WorkKind::History, async move {
-            read(|| handle.history_before(Some(before), 128))
+            read_page(handle.as_ref(), Some(before), older)
                 .await
                 .map(Update::History)
         });
     }
 
-    fn page(&mut self, page: rsi_session_protocol::SessionHistoryPage) {
+    fn page(
+        &mut self,
+        HistoryPage {
+            history: page,
+            inputs,
+        }: HistoryPage,
+    ) {
+        self.state
+            .transcript
+            .merge_inputs(inputs, self.live_transcript.is_some());
         self.history.loading = false;
         self.history.pages += 1;
         self.history.bytes = self.history.bytes.saturating_add(
@@ -766,6 +819,8 @@ impl Client {
                 }
             };
             self.submission.request = Some(SubmitInput {
+                origin: rsi_session_protocol::SubmissionOrigin::User,
+                attribution: None,
                 reasoning_effort: None,
                 delivery,
                 message_id,
@@ -932,11 +987,25 @@ impl Client {
         self.state.detail_actions = actions;
     }
 
-    fn live_fact(&mut self, fact: &SessionFact) {
-        self.live_transcript
+    async fn live_fact(&mut self, fact: &rsi_agent_turn_protocol::ObservedFact) {
+        self.live_claims.observe(fact);
+        let transcript = self
+            .live_transcript
             .as_mut()
-            .unwrap_or(&mut self.state.transcript)
-            .apply(fact);
+            .unwrap_or(&mut self.state.transcript);
+        let mut failure = None;
+        if matches!(fact.body(), SessionFactBody::StepInputsPrepared { .. }) {
+            failure = std::mem::take(&mut self.live_claims)
+                .prepare(self.handle.as_ref(), fact, |row| {
+                    transcript.entered(fact.seq(), fact.timestamp_ms(), row, false);
+                })
+                .await
+                .err();
+        }
+        transcript.apply(fact);
+        if let Some(error) = failure {
+            self.state.notice(error.to_string());
+        }
     }
 
     fn follow_live(&mut self) {
@@ -1142,6 +1211,9 @@ impl Client {
                                 reference.preview
                             )),
                             MessageInput::Image { .. } => None,
+                            MessageInput::File { file } => {
+                                Some(format!("File: {} ({} bytes)", file.name(), file.bytes()))
+                            }
                         })
                         .collect::<Vec<_>>()
                         .join("\n");
@@ -1195,6 +1267,7 @@ impl Client {
                             })?;
                     let handle = application
                         .create(CreateSession {
+                            fork: None,
                             workspace_id: registered.id,
                             session_id,
                             agent_preset_id: None,
@@ -1207,7 +1280,10 @@ impl Client {
                 });
             }
             Action::Attach(id) => {
-                let top = self.drafts.get(&id).and_then(|saved| saved.top);
+                let top = self
+                    .drafts
+                    .get(&id)
+                    .and_then(|saved| saved.top.map(|(_, seq)| seq));
                 self.spawn(async move {
                     attachment(read(|| application.attach(&id)).await?, true, top)
                         .await
@@ -1215,7 +1291,7 @@ impl Client {
                 });
             }
             Action::Parent => {
-                if let Some(origin) = self.state.header.fork_origin() {
+                if let Some(origin) = self.state.header.history_origin() {
                     return self.action(Action::Attach(origin.parent_session_id.clone()));
                 }
                 self.state.info("This is the root session");
@@ -2236,7 +2312,7 @@ async fn run_inner(
                         CliRenderMessage::Event(CliEvent::Fact { fact, .. }) => {
                             client.state.model_fact(&fact);
                             match fact.body() { SessionFactBody::TurnAccepted {turn_id,..} | SessionFactBody::MessageTurnAccepted {turn_id,..} => { client.state.active = true; client.state.live_turn = Some(turn_id.clone()); }, SessionFactBody::TurnTerminal {..} => { client.state.active = false; client.state.live_turn = None; client.inspect(); }, _ => {} }
-                            client.live_fact(&fact);
+                            client.live_fact(&fact).await;
                         },
                         CliRenderMessage::Event(CliEvent::Projections { snapshot }) => {
                             if let Some(value) = snapshot.snapshot().entries().iter().find(|entry| entry.producer().as_str() == rsi_agent_model_selection::VIEW).and_then(|entry| entry.view())

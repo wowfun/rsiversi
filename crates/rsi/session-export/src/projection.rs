@@ -1,7 +1,50 @@
 use super::{Result, SessionFact, SessionId, Value, encoding, json, render_value};
-use rsi_agent_session_protocol::{EffectId, InputMessageSource, SessionFactBody};
+use rsi_agent_session_protocol::{EffectId, SessionFactBody};
 use rsi_ai_protocol::{ContentDelta, ContentStart, LanguageEvent};
 use std::collections::BTreeSet;
+
+pub(super) fn records(
+    store: std::sync::Arc<dyn super::SessionStore>,
+    interval: super::Interval,
+    section: super::ExportInclude,
+    reasoning: bool,
+    effect: Option<EffectId>,
+) -> std::pin::Pin<Box<dyn futures_util::Stream<Item = Result<Value>> + Send>> {
+    use futures_util::StreamExt;
+    Box::pin(async_stream::try_stream! {
+        let id = interval.id.clone();
+        let mut claims = super::input::Claims::new(interval.after);
+        let mut source = super::facts(store.clone(), interval);
+        let mut projection = Projection::default();
+        while let Some(fact) = source.next().await {
+            let fact = fact?;
+            if section == super::ExportInclude::ProviderInputEvidence {
+                if let Some(record) = super::diagnostic::evidence_record(&*store, &id, &fact).await? { yield record; }
+                continue;
+            }
+            match fact.body() {
+                SessionFactBody::ModelAttemptSettled { effect_id, attempt, purpose: rsi_agent_session_protocol::ModelEventPurpose::Conversation, .. } => {
+                    if effect.as_ref().is_some_and(|wanted|wanted != effect_id) { continue; }
+                    for (index, item) in attempt.events().enumerate() {
+                        let (elapsed, event) = item.map_err(encoding)?;
+                        if let Some(row) = projection.event(&id, &fact, effect_id, &event, reasoning, (index, elapsed))? { yield row; }
+                    }
+                }
+                _ if effect.is_some() => {}
+                _ if fact.claimed_input_count() > 0 => claims.observe(fact),
+                SessionFactBody::StepInputsPrepared { decision, .. } => {
+                    let mut offset = 0;
+                    for (index, input) in decision.messages().unwrap_or_default().iter().enumerate() {
+                        if let Some(row) = claims.record(&*store, &id, &fact, input, index, &mut offset).await? { yield row; }
+                    }
+                    claims = super::input::Claims::new(fact.seq());
+                }
+                SessionFactBody::TurnTerminal { .. } => claims = super::input::Claims::new(fact.seq()),
+                _ => if let Some(row) = projection.record(&id, &fact)? { yield row; },
+            }
+        }
+    })
+}
 
 #[derive(Default)]
 pub(super) struct Projection {
@@ -51,34 +94,14 @@ impl Projection {
         ))
     }
 
-    pub(super) fn record(
-        &mut self,
-        id: &SessionId,
-        fact: &SessionFact,
-        effect: Option<&EffectId>,
-    ) -> Result<Option<Value>> {
+    pub(super) fn record(&mut self, id: &SessionId, fact: &SessionFact) -> Result<Option<Value>> {
         let body = fact.body();
         if let SessionFactBody::ModelIntent { .. } = body {
             self.reasoning.clear();
         }
         let value = match body {
-            _ if effect.is_some() => return Ok(None),
-            SessionFactBody::TurnAccepted { text, .. } => json!({"role":"user","text":text}),
             SessionFactBody::ImageRequested { request, .. } => {
                 json!({"role":"user","text":request.prompt()})
-            }
-            SessionFactBody::InputMessageEntered {
-                source, content, ..
-            } if matches!(
-                source,
-                InputMessageSource::Human { .. }
-                    | InputMessageSource::Agent { .. }
-                    | InputMessageSource::Completion { .. }
-                    | InputMessageSource::Continuation { .. }
-                    | InputMessageSource::Program { .. }
-            ) =>
-            {
-                json!({"role":"user","source":source,"content":content})
             }
             SessionFactBody::ToolIntent {
                 name,

@@ -1,6 +1,7 @@
 //! Fixed-cut, backpressured Session artifacts.
 #![deny(unsafe_code)]
 mod diagnostic;
+mod input;
 mod native;
 mod projection;
 #[cfg(test)]
@@ -22,6 +23,7 @@ use std::{pin::Pin, sync::Arc};
 use tokio_util::sync::CancellationToken;
 
 type TextStream = Pin<Box<dyn Stream<Item = Result<String>> + Send>>;
+const FACT_PAGE_COUNT: usize = 32;
 type FactStream = Pin<Box<dyn Stream<Item = Result<SessionFact>> + Send>>;
 
 #[derive(Clone)]
@@ -36,6 +38,7 @@ struct Cut {
     header: SessionHeader,
     through: u64,
     intervals: Vec<Interval>,
+    fork_sources: Vec<SessionHeader>,
     _leases: Vec<SessionValidationLease>,
 }
 
@@ -66,6 +69,7 @@ pub fn empty(
             header,
             through: 0,
             intervals: vec![],
+            fork_sources: vec![],
             _leases: vec![],
         },
         options,
@@ -102,41 +106,27 @@ pub async fn export(
         .map_err(store_error)?;
     let through = watermarks.durable_fact_seq;
     let mut intervals = vec![];
+    let mut fork_sources = vec![];
     let mut leases = vec![lease];
-    if let Some(origin) = header.fork_origin() {
-        leases.push(
-            store
-                .prepare_session(&origin.parent_session_id)
-                .await
-                .map_err(store_error)?,
-        );
-        let parent = store
-            .header(&origin.parent_session_id)
-            .await
-            .map_err(store_error)?;
-        let boundary = store
-            .resolve_fork_boundary(
-                &origin.parent_session_id,
-                &origin.invoking_turn_id,
-                origin.requested_turns.clone(),
-            )
-            .await
-            .map_err(store_error)?;
-        if parent.fingerprint().map_err(encoding)? != origin.parent_header_fingerprint
-            || boundary.resolved_after_seq != origin.resolved_after_seq
-            || boundary.resolved_terminal_seq != origin.resolved_terminal_seq
-            || boundary.terminal_prefix_sha256 != origin.terminal_prefix_sha256
-            || boundary.resolved_terminal_control_seq != origin.resolved_terminal_control_seq
-            || boundary.terminal_control_prefix_sha256 != origin.terminal_control_prefix_sha256
-            || boundary.effective_turns != origin.effective_turns
-        {
-            return Err(invalid("export inherited history binding changed"));
-        }
+    let inherited = rsi_agent_store_protocol::capture_inherited_intervals(store.as_ref(), &header)
+        .await
+        .map_err(|error| match error {
+            rsi_agent_store_protocol::InheritedReadError::Store(error) => store_error(error),
+            rsi_agent_store_protocol::InheritedReadError::Header(error) => encoding(error),
+            other => invalid(&format!("export {other}")),
+        })?;
+    for row in inherited {
+        let origin = row
+            .source
+            .history_origin()
+            .ok_or_else(|| invalid("captured interval has no fork origin"))?;
         intervals.push(Interval {
             id: origin.parent_session_id.clone(),
             after: origin.resolved_after_seq,
             through: origin.resolved_terminal_seq,
         });
+        fork_sources.push(row.source);
+        leases.push(row.lease);
     }
     intervals.push(Interval {
         id: header.session_id().clone(),
@@ -150,6 +140,7 @@ pub async fn export(
             header,
             through,
             intervals,
+            fork_sources,
             _leases: leases,
         },
         options,
@@ -204,7 +195,7 @@ fn facts(store: Arc<dyn SessionStore>, interval: Interval) -> FactStream {
     Box::pin(async_stream::try_stream! {
         let mut after = interval.after;
         while after < interval.through {
-            let limit = usize::try_from((interval.through - after).min(32)).expect("bounded page");
+            let limit = usize::try_from((interval.through - after).min(FACT_PAGE_COUNT as u64)).expect("bounded page");
             let page = store.read_facts(&interval.id, after, limit, rsi_agent_store_protocol::MAXIMUM_STORE_FACT_PAGE_BYTES).await.map_err(store_error)?;
             if page.facts.is_empty() { Err(invalid("export history made no progress"))?; }
             for fact in page.facts {
@@ -280,37 +271,14 @@ fn document(cut: Arc<Cut>, options: ExportOptions) -> TextStream {
                         vec![Interval { id:last.id.clone(), after:last.intent, through:last.end }]
                     } else { cut.intervals.clone() };
                     for interval in intervals {
-                        let id = interval.id.clone();
-                        let mut source = facts(cut.store(), interval);
-                        let mut projection = projection::Projection::default();
+                        let effect = (section == ExportInclude::LastProviderResponse).then(|| latest.as_ref().expect("selected attempt").effect.clone());
+                        let mut records = projection::records(cut.store(), interval, section, reasoning, effect);
                         let mut markdown = projection::Markdown::default();
-                        while let Some(fact) = source.next().await {
-                            let fact = fact?;
-                            if section != ExportInclude::ProviderInputEvidence
-                                && let rsi_agent_session_protocol::SessionFactBody::ModelAttemptSettled { effect_id, attempt,
-                                    purpose: rsi_agent_session_protocol::ModelEventPurpose::Conversation, .. } = fact.body() {
-                                if section == ExportInclude::LastProviderResponse && effect_id != &latest.as_ref().expect("selected attempt").effect { continue; }
-                                for (event_index, item) in attempt.events().enumerate() {
-                                    let (elapsed, event) = item.map_err(encoding)?;
-                                    if let Some(record) = projection.event(&id, &fact, effect_id, &event, reasoning, (event_index, elapsed))? {
-                                        if json_format && !first { yield ",\n".into(); }
-                                        first = false;
-                                        yield if json_format { serde_json::to_string(&record).map_err(encoding)? } else { markdown.record(&record)? };
-                                    }
-                                }
-                                continue;
-                            }
-                            let record = if section == ExportInclude::ProviderInputEvidence {
-                                diagnostic::evidence_record(&*cut.store(), &id, &fact).await?
-                            } else {
-                                let effect = (section == ExportInclude::LastProviderResponse).then(|| &latest.as_ref().expect("checked latest").effect);
-                                projection.record(&id, &fact, effect)?
-                            };
-                            if let Some(record) = record {
-                                if json_format && !first { yield ",\n".into(); }
-                                first = false;
-                                yield if json_format { serde_json::to_string(&record).map_err(encoding)? } else { markdown.record(&record)? };
-                            }
+                        while let Some(record) = records.next().await {
+                            let record = record?;
+                            if json_format && !first { yield ",\n".into(); }
+                            first = false;
+                            yield if json_format { serde_json::to_string(&record).map_err(encoding)? } else { markdown.record(&record)? };
                         }
                         if !json_format { yield markdown.finish().into(); }
                     }

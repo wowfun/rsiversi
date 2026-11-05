@@ -4,6 +4,9 @@
 #![warn(missing_docs)]
 #![allow(clippy::missing_errors_doc)]
 
+mod entered;
+pub use entered::{LiveInputClaims, visit_prepared_inputs};
+
 mod command_submission;
 mod export;
 pub use export::{ExportCommand, parse_export_arguments, parse_export_tokens};

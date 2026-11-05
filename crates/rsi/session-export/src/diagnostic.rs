@@ -278,25 +278,33 @@ async fn reconstruct(
             checkpoint: None,
         })
         .map_err(context_error)?;
-    // Only the exported Session's proven direct-parent interval may be consulted.
-    if let Some(origin) = header.fork_origin() {
+    // Only the exported Session's authenticated inherited chain may be consulted.
+    if header.history_origin().is_some() {
         if latest.id != *cut.header.session_id() {
             return Err(invalid(
                 "inherited request requires an ancestor outside the selected export",
             ));
         }
-        let mut source = facts(
-            cut.store(),
-            Interval {
-                id: origin.parent_session_id.clone(),
-                after: origin.resolved_after_seq,
-                through: origin.resolved_terminal_seq,
-            },
-        );
-        while let Some(fact) = source.next().await {
+        for source_header in &cut.fork_sources {
+            let origin = source_header
+                .history_origin()
+                .ok_or_else(|| invalid("fork source has no inherited interval"))?;
             cursor
-                .ingest(ContextPage::ForkSeed(&[Arc::new(fact?)]))
+                .ingest(ContextPage::ForkSource(source_header))
                 .map_err(context_error)?;
+            let mut source = facts(
+                cut.store(),
+                Interval {
+                    id: origin.parent_session_id.clone(),
+                    after: origin.resolved_after_seq,
+                    through: origin.resolved_terminal_seq,
+                },
+            );
+            while let Some(fact) = source.next().await {
+                cursor
+                    .ingest(ContextPage::ForkSeed(&[Arc::new(fact?)]))
+                    .map_err(context_error)?;
+            }
         }
         cursor
             .ingest(ContextPage::FinishSeed)

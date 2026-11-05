@@ -15,11 +15,13 @@ pub enum FactField {
     /// Original input in a directly accepted Turn.
     TurnInput,
     /// One entered message's text content.
-    InputText { index: u16 },
+    InputText { index: u32 },
     /// One entered message's image reference.
-    InputImage { index: u16 },
+    InputImage { index: u32 },
+    /// One entered message's verbatim file reference.
+    InputFile { index: u32 },
     /// Exact inline text preview of one frozen user reference.
-    InputReference { index: u16 },
+    InputReference { index: u32 },
     /// One assistant text delta.
     ModelText { index: u16 },
     /// One reasoning delta.
@@ -47,6 +49,17 @@ pub enum FactField {
     /// A generated durable image reference.
     ImageOutput,
 }
+impl FactField {
+    /// Exact input field for a claimed or authored block at its Fact-local position.
+    pub fn input(index: u32, content: &AgentMessageContent) -> Self {
+        match content {
+            AgentMessageContent::Text { .. } => Self::InputText { index },
+            AgentMessageContent::Image { .. } => Self::InputImage { index },
+            AgentMessageContent::File { .. } => Self::InputFile { index },
+            AgentMessageContent::Reference { .. } => Self::InputReference { index },
+        }
+    }
+}
 impl<'de> Deserialize<'de> for FactField {
     fn deserialize<D: serde::Deserializer<'de>>(deserializer: D) -> Result<Self, D::Error> {
         #[derive(Deserialize)]
@@ -54,19 +67,30 @@ impl<'de> Deserialize<'de> for FactField {
         struct Wire {
             kind: String,
             #[serde(default, deserialize_with = "index")]
-            index: Option<u16>,
+            index: Option<u32>,
         }
         fn index<'de, D: serde::Deserializer<'de>>(
             deserializer: D,
-        ) -> Result<Option<u16>, D::Error> {
-            u16::deserialize(deserializer).map(Some)
+        ) -> Result<Option<u32>, D::Error> {
+            u32::deserialize(deserializer).map(Some)
         }
         let wire = Wire::deserialize(deserializer)?;
-        let field = match (wire.kind.as_str(), wire.index) {
+        if let Some(index) = wire.index {
+            match wire.kind.as_str() {
+                "input_text" => return Ok(Self::InputText { index }),
+                "input_image" => return Ok(Self::InputImage { index }),
+                "input_file" => return Ok(Self::InputFile { index }),
+                "input_reference" => return Ok(Self::InputReference { index }),
+                _ => {}
+            }
+        }
+        let index = wire
+            .index
+            .map(u16::try_from)
+            .transpose()
+            .map_err(serde::de::Error::custom)?;
+        let field = match (wire.kind.as_str(), index) {
             ("turn_input", None) => Self::TurnInput,
-            ("input_text", Some(index)) => Self::InputText { index },
-            ("input_image", Some(index)) => Self::InputImage { index },
-            ("input_reference", Some(index)) => Self::InputReference { index },
             ("model_text", Some(index))
                 if usize::from(index) < rsi_ai_protocol::MAX_CONTENT_BLOCKS =>
             {
@@ -129,23 +153,24 @@ impl PartialOrd for SourceRef {
         Some(self.cmp(other))
     }
 }
-fn order(field: FactField) -> (u8, u16, u8) {
+fn order(field: FactField) -> (u8, u32, u8) {
     match field {
         FactField::TurnInput => (0, 0, 0),
         FactField::InputText { index } => (1, index, 0),
         FactField::InputImage { index } => (1, index, 1),
         FactField::InputReference { index } => (1, index, 2),
-        FactField::ModelText { index } => (2, index, 0),
-        FactField::ModelReasoning { index } => (3, index, 0),
-        FactField::ModelToolArguments { index } => (4, index, 0),
+        FactField::InputFile { index } => (1, index, 3),
+        FactField::ModelText { index } => (2, u32::from(index), 0),
+        FactField::ModelReasoning { index } => (3, u32::from(index), 0),
+        FactField::ModelToolArguments { index } => (4, u32::from(index), 0),
         FactField::ModelFailure => (5, 0, 0),
         FactField::ModelSnapshot => (6, 0, 0),
         FactField::ToolCommand => (7, 0, 0),
         FactField::ToolArguments => (7, 0, 1),
         FactField::ToolRejection => (8, 0, 0),
         FactField::ToolValue => (9, 0, 0),
-        FactField::ToolText { index } => (10, index, 0),
-        FactField::ToolImage { index } => (10, index, 1),
+        FactField::ToolText { index } => (10, u32::from(index), 0),
+        FactField::ToolImage { index } => (10, u32::from(index), 1),
         FactField::TurnOutcome => (11, 0, 0),
         FactField::ImageOutput => (12, 0, 0),
     }
@@ -188,6 +213,8 @@ pub enum FieldValue<'a> {
     Attempt(&'a rsi_agent_session_protocol::ModelAttemptLog, FactField),
     /// Immutable image reference.
     Media(&'a MediaRef),
+    /// Immutable verbatim file reference.
+    File(&'a rsi_media_protocol::FileRef),
 }
 impl FieldValue<'_> {
     /// Reads a bounded raw source window before renderer-specific sanitization.
@@ -210,11 +237,13 @@ impl FieldValue<'_> {
             Self::Rejection(value) => FieldWindow::json(value, start, maximum),
             Self::Model(value) => FieldWindow::json(value, start, maximum),
             Self::Media(value) => FieldWindow::json(value, start, maximum),
+            Self::File(value) => FieldWindow::json(value, start, maximum),
         }
     }
 }
 
 /// Selects only an exact matching source; missing or variant-mismatched fields are unavailable.
+#[allow(clippy::too_many_lines)] // Keep the exhaustive Fact-to-field mapping in one place.
 pub fn select_field(fact: &SessionFact, source: SourceRef) -> Option<FieldValue<'_>> {
     if fact.seq() != source.seq {
         return None;
@@ -240,26 +269,44 @@ pub fn select_field(fact: &SessionFact, source: SourceRef) -> Option<FieldValue<
     }
     let text = match (fact.body(), source.field) {
         (
-            SessionFactBody::InputMessageEntered { content, .. },
-            FactField::InputReference { index },
+            body,
+            field @ (FactField::InputReference { index }
+            | FactField::InputImage { index }
+            | FactField::InputFile { index }
+            | FactField::InputText { index }),
         ) => {
-            let AgentMessageContent::Reference { reference } = content.get(usize::from(index))?
-            else {
-                return None;
+            let block = match body {
+                SessionFactBody::InputMessageClaimed { content, .. } => {
+                    content.get(index as usize)?
+                }
+                SessionFactBody::StepInputsPrepared { decision, .. } => {
+                    decision.authored_content().nth(index as usize)?
+                }
+                SessionFactBody::ToolContextsClaimed { messages, .. }
+                    if matches!(field, FactField::InputText { .. }) =>
+                {
+                    let text = messages
+                        .iter()
+                        .flat_map(|row| &row.message.text)
+                        .nth(index as usize)?;
+                    return Some(FieldValue::Text(Cow::Borrowed(text)));
+                }
+                _ => return None,
             };
-            &reference.preview
-        }
-        (SessionFactBody::InputMessageEntered { content, .. }, FactField::InputText { index }) => {
-            let AgentMessageContent::Text { text } = content.get(usize::from(index))? else {
-                return None;
-            };
-            text
-        }
-        (SessionFactBody::InputMessageEntered { content, .. }, FactField::InputImage { index }) => {
-            let AgentMessageContent::Image { media } = content.get(usize::from(index))? else {
-                return None;
-            };
-            return Some(FieldValue::Media(media));
+            match (field, block) {
+                (FactField::InputText { .. }, AgentMessageContent::Text { text }) => text,
+                (
+                    FactField::InputReference { .. },
+                    AgentMessageContent::Reference { reference },
+                ) => &reference.preview,
+                (FactField::InputImage { .. }, AgentMessageContent::Image { media, .. }) => {
+                    return Some(FieldValue::Media(media));
+                }
+                (FactField::InputFile { .. }, AgentMessageContent::File { file }) => {
+                    return Some(FieldValue::File(file));
+                }
+                _ => return None,
+            }
         }
         (SessionFactBody::TurnAccepted { text, .. }, FactField::TurnInput) => text,
         (

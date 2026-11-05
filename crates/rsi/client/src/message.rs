@@ -25,7 +25,7 @@ pub enum MessageEvent {
         /// Claimed Turn identity.
         turn_id: TurnId,
         /// Observation boundary at which the Turn entered.
-        entered_fact_seq: u64,
+        claimed_fact_seq: u64,
     },
     /// An observed Fact after the claimed Turn's entry boundary.
     Fact {
@@ -92,7 +92,7 @@ pub async fn drive_message(
     let message_id = request.message_id.clone();
     let receipt = submit_with_reconciliation(handle, request).await?;
     sink.event(MessageEvent::Accepted(receipt.clone())).await?;
-    let (turn_id, entered_fact_seq) = match &receipt.state {
+    let (turn_id, claimed_fact_seq) = match &receipt.state {
         MessageState::Pending => {
             let mut message_cancellation_sent = false;
             let mut claim_observation = handle
@@ -114,8 +114,8 @@ pub async fn drive_message(
                         let update = update.ok_or(MessageRunError::Ended("the message claim"))??;
                         if let SessionObservation::Control { record, .. } = update {
                             match record.body() {
-                                AgentControlRecordBody::MessageClaimed { message_id: observed, turn_id, entered_fact_seq, .. }
-                                    if observed == &message_id => break (turn_id.clone(), *entered_fact_seq),
+                                AgentControlRecordBody::MessageClaimed { message_id: observed, turn_id, claimed_fact_seq, .. }
+                                    if observed == &message_id => break (turn_id.clone(), *claimed_fact_seq),
                                 AgentControlRecordBody::MessageSuccessor { predecessor_id, .. } if predecessor_id==&message_id => {
                                     return Err(MessageRunError::Discarded {message_id,reason:rsi_agent_session_protocol::MessageDiscardReason::Replaced});
                                 },
@@ -133,9 +133,9 @@ pub async fn drive_message(
         }
         MessageState::Claimed {
             turn_id,
-            entered_fact_seq,
+            claimed_fact_seq,
             ..
-        } => (turn_id.clone(), *entered_fact_seq),
+        } => (turn_id.clone(), *claimed_fact_seq),
         MessageState::Discarded { reason, .. } => {
             if cancellation.is_cancelled() {
                 return Ok(TurnOutcome::Cancelled);
@@ -150,13 +150,13 @@ pub async fn drive_message(
         session_id: receipt.session_id.clone(),
         message_id: receipt.message_id,
         turn_id: turn_id.clone(),
-        entered_fact_seq,
+        claimed_fact_seq,
     })
     .await?;
     let mut observation = handle
         .observe(ObservationCursor {
             control_seq: receipt.accepted_control_seq,
-            fact_seq: entered_fact_seq,
+            fact_seq: claimed_fact_seq,
         })
         .await?;
     let mut cancellation_sent = false;

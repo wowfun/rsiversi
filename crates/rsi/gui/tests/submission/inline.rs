@@ -159,6 +159,13 @@ async fn inline_close_failure_does_not_skip_replacement_and_failed_admission_can
             .unwrap()
         })
         .collect();
+    for seq in 1..=2 {
+        backend.facts.lock().unwrap().push(prepared_claim(
+            TurnId::new(format!("turn-{seq}")).unwrap(),
+            seq + 2,
+            seq,
+        ));
+    }
     let session = view(&app)["surfaces"]["main"]["session"].clone();
     app.command(&json!({"action":"open","pane":"main","session":session}).to_string())
         .await

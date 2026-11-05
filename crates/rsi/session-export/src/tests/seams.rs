@@ -189,33 +189,41 @@ async fn producer_rejects_each_changed_inherited_binding_before_emitting_start()
     )
     .await;
     let boundary = store
-        .resolve_fork_boundary(parent.session_id(), &invoking, ForkTurnSelection::All)
+        .resolve_fork_boundary(
+            parent.session_id(),
+            &rsi_agent_session_protocol::ForkPoint::before(&invoking),
+            ForkTurnSelection::All,
+        )
         .await
         .unwrap();
     for field in 0..7 {
         let mut origin = ForkOrigin {
-            parent_session_id: parent.session_id().clone(),
+            history: rsi_agent_session_protocol::HistoryOrigin {
+                parent_session_id: parent.session_id().clone(),
+                parent_header_fingerprint: parent.fingerprint().unwrap(),
+                point: rsi_agent_session_protocol::ForkPoint::BeforeTurn {
+                    turn_id: invoking.clone(),
+                },
+                resolved_after_seq: boundary.resolved_after_seq,
+                resolved_terminal_seq: boundary.resolved_terminal_seq,
+                terminal_prefix_sha256: boundary.terminal_prefix_sha256.clone(),
+                resolved_terminal_control_seq: boundary.resolved_terminal_control_seq,
+                terminal_control_prefix_sha256: boundary.terminal_control_prefix_sha256.clone(),
+                requested_turns: ForkTurnSelection::All,
+                effective_turns: boundary.effective_turns,
+            },
             root_session_id: parent.session_id().clone(),
             path: AgentPath::new(vec![field + 1]).unwrap(),
             task_name: format!("child-{field}"),
-            parent_header_fingerprint: parent.fingerprint().unwrap(),
-            invoking_turn_id: invoking.clone(),
-            resolved_after_seq: boundary.resolved_after_seq,
-            resolved_terminal_seq: boundary.resolved_terminal_seq,
-            terminal_prefix_sha256: boundary.terminal_prefix_sha256.clone(),
-            resolved_terminal_control_seq: boundary.resolved_terminal_control_seq,
-            terminal_control_prefix_sha256: boundary.terminal_control_prefix_sha256.clone(),
-            requested_turns: ForkTurnSelection::All,
-            effective_turns: boundary.effective_turns,
         };
         match field {
-            0 => origin.parent_header_fingerprint = "b".repeat(64),
-            1 => origin.resolved_after_seq += 1,
-            2 => origin.resolved_terminal_seq += 1,
-            3 => origin.terminal_prefix_sha256 = "b".repeat(64),
-            4 => origin.resolved_terminal_control_seq += 1,
-            5 => origin.terminal_control_prefix_sha256 = "b".repeat(64),
-            _ => origin.effective_turns += 1,
+            0 => origin.history.parent_header_fingerprint = "b".repeat(64),
+            1 => origin.history.resolved_after_seq += 1,
+            2 => origin.history.resolved_terminal_seq += 1,
+            3 => origin.history.terminal_prefix_sha256 = "b".repeat(64),
+            4 => origin.history.resolved_terminal_control_seq += 1,
+            5 => origin.history.terminal_control_prefix_sha256 = "b".repeat(64),
+            _ => origin.history.effective_turns += 1,
         }
         let child = parent
             .forked_child(

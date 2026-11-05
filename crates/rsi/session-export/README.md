@@ -1,7 +1,8 @@
 # rsi-session-export
 
 Session export reads one immutable Header, its accepted durable Fact watermark,
-and its exact direct-parent inherited interval. It never resumes execution,
+and its exact inherited intervals. `All` follows the immutable ancestor selection;
+`Last(n)` and `None` stop that chain, matching Context. It never resumes execution,
 contacts a provider, refreshes tools or reads current workspace instructions.
 An unpublished draft exports its frozen Header and empty history without publishing it.
 Every section selection, including last-request/response diagnostics, is valid for
@@ -17,6 +18,17 @@ content, optional readable reasoning, media references and partial output; they
 exclude injected instructions and opaque provider reasoning state. Each record
 retains its source Session and Fact coordinates. Internal compaction output is
 not an Assistant answer. Child Sessions are exported separately.
+
+Conversation inputs appear at their final `StepInputsPrepared` Fact in the
+order selected for entry. Each user row identifies that Fact and its zero-based
+`input_index`. An unchanged or replaced input also retains its original
+`claim` coordinate. Authored content has a `content_offset` within the
+preparation Fact. Repeated entries and empty user messages are preserved.
+Unentered claims, rejected input and developer guidance produce no user rows.
+The exporter retains at most one page of recent claim bodies and rereads an
+older referenced Fact within the same immutable interval and Turn. It keeps
+the last such reread for reuse. Entries are rendered one at
+a time, including when the final list repeats a large original message.
 
 Request and response diagnostics select the same latest completed Conversation
 effect within the accepted watermark. Request evidence resolves exact section

@@ -57,6 +57,21 @@ pub(super) fn accepted(text: &str) -> SessionFactBody {
         require_approval: false,
     }
 }
+fn prepared(turn_id: TurnId, claims: &[u64]) -> SessionFactBody {
+    SessionFactBody::StepInputsPrepared {
+        turn_id,
+        step_id: StepId::new("step").unwrap(),
+        decision: StepInputDecision::enter(
+            claims
+                .iter()
+                .map(|seq| PreparedInput::Claimed {
+                    claim: InputClaimRef::new(*seq, 0).unwrap(),
+                })
+                .collect(),
+        )
+        .unwrap(),
+    }
+}
 fn snapshot() -> PreparedCallSnapshot {
     PreparedCallSnapshot {
         language_settings: None,
@@ -186,6 +201,7 @@ async fn sections_are_exact_redacted_unicode_and_same_in_both_encodings() {
         0,
         vec![
             accepted("你好 🦀"),
+            prepared(turn(), &[1]),
             intent("one", evidence()),
             settlement(
                 "one",
@@ -364,7 +380,7 @@ async fn empty_history_and_missing_evidence_have_explicit_availability() {
                         AgentControlRecordBody::MessageAccepted {
                             message: AgentMessage {
                                 message_id: MessageId::new("queued").unwrap(),
-                                source: AgentMessageSource::Human,
+                                source: AgentMessageSource::Human { attribution: None },
                                 content: vec![AgentMessageContent::Text {
                                     text: "queued only".into(),
                                 }],
@@ -502,7 +518,8 @@ async fn complete_history_over_32_mib_is_read_lazily_in_bounded_pages() {
 }
 
 #[tokio::test]
-async fn inherits_only_the_frozen_direct_parent_interval() {
+#[allow(clippy::too_many_lines)] // Three immutable generations prove Full and Last selection through the public export stream.
+async fn inherits_frozen_ancestor_intervals_only_for_full_selections() {
     let store = Arc::new(MemoryStore::new());
     let parent = header();
     let mut spawn = accepted("not inherited");
@@ -515,6 +532,7 @@ async fn inherits_only_the_frozen_direct_parent_interval() {
         0,
         vec![
             accepted("parent inherited"),
+            prepared(turn(), &[1]),
             SessionFactBody::TurnTerminal {
                 turn_id: turn(),
                 outcome: TurnOutcome::Completed,
@@ -527,25 +545,29 @@ async fn inherits_only_the_frozen_direct_parent_interval() {
     let boundary = store
         .resolve_fork_boundary(
             parent.session_id(),
-            &TurnId::new("spawn").unwrap(),
+            &rsi_agent_session_protocol::ForkPoint::before(&TurnId::new("spawn").unwrap()),
             ForkTurnSelection::All,
         )
         .await
         .unwrap();
     let origin = ForkOrigin {
-        parent_session_id: parent.session_id().clone(),
+        history: rsi_agent_session_protocol::HistoryOrigin {
+            parent_session_id: parent.session_id().clone(),
+            parent_header_fingerprint: parent.fingerprint().unwrap(),
+            point: rsi_agent_session_protocol::ForkPoint::BeforeTurn {
+                turn_id: TurnId::new("spawn").unwrap(),
+            },
+            resolved_after_seq: boundary.resolved_after_seq,
+            resolved_terminal_seq: boundary.resolved_terminal_seq,
+            terminal_prefix_sha256: boundary.terminal_prefix_sha256,
+            resolved_terminal_control_seq: boundary.resolved_terminal_control_seq,
+            terminal_control_prefix_sha256: boundary.terminal_control_prefix_sha256,
+            requested_turns: ForkTurnSelection::All,
+            effective_turns: boundary.effective_turns,
+        },
         root_session_id: parent.session_id().clone(),
         path: AgentPath::new(vec![1]).unwrap(),
         task_name: "child".into(),
-        parent_header_fingerprint: parent.fingerprint().unwrap(),
-        invoking_turn_id: TurnId::new("spawn").unwrap(),
-        resolved_after_seq: boundary.resolved_after_seq,
-        resolved_terminal_seq: boundary.resolved_terminal_seq,
-        terminal_prefix_sha256: boundary.terminal_prefix_sha256,
-        resolved_terminal_control_seq: boundary.resolved_terminal_control_seq,
-        terminal_control_prefix_sha256: boundary.terminal_control_prefix_sha256,
-        requested_turns: ForkTurnSelection::All,
-        effective_turns: boundary.effective_turns,
     };
     let child = parent
         .forked_child(
@@ -555,13 +577,95 @@ async fn inherits_only_the_frozen_direct_parent_interval() {
             ModelSelection::baseline(parent.settings()),
         )
         .unwrap();
-    append(&store, &child, 0, vec![accepted("child own")]).await;
-    let text = collect(store.clone(), child, options("m", ExportFormat::Json)).await;
+    append(
+        &store,
+        &child,
+        0,
+        vec![accepted("child own"), prepared(turn(), &[1])],
+    )
+    .await;
+    let text = collect(
+        store.clone(),
+        child.clone(),
+        options("m", ExportFormat::Json),
+    )
+    .await;
     assert!(
         text.contains("parent inherited")
             && text.contains("child own")
             && !text.contains("not inherited")
     );
+    let mut invoking = accepted("nested excluded");
+    if let SessionFactBody::TurnAccepted { turn_id, .. } = &mut invoking {
+        *turn_id = TurnId::new("nested-spawn").unwrap();
+    }
+    append(
+        &store,
+        &child,
+        2,
+        vec![
+            SessionFactBody::TurnTerminal {
+                turn_id: turn(),
+                outcome: TurnOutcome::Completed,
+                result: None,
+            },
+            invoking,
+        ],
+    )
+    .await;
+    for (name, selection, inherits_ancestor) in [
+        ("full", ForkTurnSelection::All, true),
+        ("last", ForkTurnSelection::Last(1), false),
+    ] {
+        let boundary = store
+            .resolve_fork_boundary(
+                child.session_id(),
+                &rsi_agent_session_protocol::ForkPoint::before(
+                    &TurnId::new("nested-spawn").unwrap(),
+                ),
+                selection.clone(),
+            )
+            .await
+            .unwrap();
+        let origin = ForkOrigin {
+            history: rsi_agent_session_protocol::HistoryOrigin {
+                parent_session_id: child.session_id().clone(),
+                parent_header_fingerprint: child.fingerprint().unwrap(),
+                point: rsi_agent_session_protocol::ForkPoint::BeforeTurn {
+                    turn_id: TurnId::new("nested-spawn").unwrap(),
+                },
+                requested_turns: selection,
+                effective_turns: boundary.effective_turns,
+                resolved_after_seq: boundary.resolved_after_seq,
+                resolved_terminal_seq: boundary.resolved_terminal_seq,
+                terminal_prefix_sha256: boundary.terminal_prefix_sha256,
+                resolved_terminal_control_seq: boundary.resolved_terminal_control_seq,
+                terminal_control_prefix_sha256: boundary.terminal_control_prefix_sha256,
+            },
+            root_session_id: parent.session_id().clone(),
+            path: AgentPath::new(vec![1, if inherits_ancestor { 1 } else { 2 }]).unwrap(),
+            task_name: name.into(),
+        };
+        let grandchild = child
+            .forked_child(
+                SessionId::new(name).unwrap(),
+                3,
+                origin,
+                ModelSelection::baseline(child.settings()),
+            )
+            .unwrap();
+        append(
+            &store,
+            &grandchild,
+            0,
+            vec![accepted("grandchild own"), prepared(turn(), &[1])],
+        )
+        .await;
+        let text = collect(store.clone(), grandchild, options("m", ExportFormat::Json)).await;
+        assert_eq!(text.contains("parent inherited"), inherits_ancestor);
+        assert!(text.contains("child own") && text.contains("grandchild own"));
+        assert!(!text.contains("nested excluded") && !text.contains("not inherited"));
+    }
     let text = collect(store, parent, options("m", ExportFormat::Json)).await;
     assert!(!text.contains("child own"));
 }
@@ -605,25 +709,29 @@ async fn inherited_last_request_does_not_replay_before_the_selected_interval() {
     let boundary = store
         .resolve_fork_boundary(
             parent.session_id(),
-            &TurnId::new("spawn").unwrap(),
+            &rsi_agent_session_protocol::ForkPoint::before(&TurnId::new("spawn").unwrap()),
             selection.clone(),
         )
         .await
         .unwrap();
     let origin = ForkOrigin {
-        parent_session_id: parent.session_id().clone(),
+        history: rsi_agent_session_protocol::HistoryOrigin {
+            parent_session_id: parent.session_id().clone(),
+            parent_header_fingerprint: parent.fingerprint().unwrap(),
+            point: rsi_agent_session_protocol::ForkPoint::BeforeTurn {
+                turn_id: TurnId::new("spawn").unwrap(),
+            },
+            resolved_after_seq: boundary.resolved_after_seq,
+            resolved_terminal_seq: boundary.resolved_terminal_seq,
+            terminal_prefix_sha256: boundary.terminal_prefix_sha256,
+            resolved_terminal_control_seq: boundary.resolved_terminal_control_seq,
+            terminal_control_prefix_sha256: boundary.terminal_control_prefix_sha256,
+            requested_turns: selection,
+            effective_turns: boundary.effective_turns,
+        },
         root_session_id: parent.session_id().clone(),
         path: AgentPath::new(vec![1]).unwrap(),
         task_name: "child".into(),
-        parent_header_fingerprint: parent.fingerprint().unwrap(),
-        invoking_turn_id: TurnId::new("spawn").unwrap(),
-        resolved_after_seq: boundary.resolved_after_seq,
-        resolved_terminal_seq: boundary.resolved_terminal_seq,
-        terminal_prefix_sha256: boundary.terminal_prefix_sha256,
-        resolved_terminal_control_seq: boundary.resolved_terminal_control_seq,
-        terminal_control_prefix_sha256: boundary.terminal_control_prefix_sha256,
-        requested_turns: selection,
-        effective_turns: boundary.effective_turns,
     };
     let child = parent
         .forked_child(
@@ -784,6 +892,7 @@ async fn compaction_does_not_hide_original_history_or_replace_last_conversation(
     let header = header();
     let mut bodies = vec![
         accepted(&"original task ".repeat(5000)),
+        prepared(turn(), &[1]),
         intent("conversation", evidence()),
         settlement(
             "conversation",
@@ -815,6 +924,7 @@ async fn compaction_does_not_hide_original_history_or_replace_last_conversation(
         *turn_id = current.clone();
     }
     bodies.push(accepted);
+    bodies.push(prepared(current.clone(), &[bodies.len() as u64]));
     let end = append(&store, &header, 0, bodies).await;
     let facts: Vec<_> = store
         .read_facts(
@@ -1094,7 +1204,7 @@ fn program_tool_exports_preserve_exact_origin_and_internal_evidence() {
     .unwrap();
     let mut projection = projection::Projection::default();
     let record = projection
-        .record(header().session_id(), &fact, None)
+        .record(header().session_id(), &fact)
         .unwrap()
         .unwrap();
     assert_eq!(
@@ -1110,8 +1220,180 @@ fn program_tool_exports_preserve_exact_origin_and_internal_evidence() {
     assert_eq!(restored, fact);
 }
 
-#[test]
-fn workflow_completion_notice_is_visible_in_transcript_and_markdown() {
+fn authored(role: PreparedInputRole, text: Option<&str>) -> PreparedInputMessage {
+    PreparedInputMessage::new(
+        role,
+        MessageAttribution {
+            id: "hook".into(),
+            source: json!({"kind":"mod"}),
+        },
+        text.into_iter()
+            .map(|s| AgentMessageContent::Text { text: s.into() })
+            .collect(),
+    )
+    .unwrap()
+}
+
+#[tokio::test]
+async fn export_follows_only_entered_user_messages_in_final_order() {
+    let store = Arc::new(MemoryStore::new());
+    let header = header();
+    let claim = |seq| InputClaimRef::new(seq, 0).unwrap();
+    let mut bodies = vec![accepted("oldest")];
+    // Over a page of pending input exercises the fixed-cut reread for the oldest claim.
+    for i in 0..35 {
+        bodies.push(SessionFactBody::InputMessageClaimed {
+            turn_id: turn(),
+            step_id: StepId::new("step").unwrap(),
+            source: InputMessageSource::Human {
+                message_id: MessageId::new(format!("message-{i}")).unwrap(),
+                attribution: None,
+            },
+            content: vec![AgentMessageContent::Text {
+                text: format!("unentered-{i}"),
+            }],
+        });
+    }
+    bodies.push(SessionFactBody::StepInputsPrepared {
+        turn_id: turn(),
+        step_id: StepId::new("step").unwrap(),
+        decision: StepInputDecision::enter(vec![
+            PreparedInput::Added {
+                message: authored(PreparedInputRole::Developer, Some("hidden guidance")),
+            },
+            PreparedInput::Replacement {
+                claim: InputClaimRef::preceding(1).unwrap(),
+                message: authored(PreparedInputRole::User, Some("replacement")),
+            },
+            PreparedInput::Claimed { claim: claim(1) },
+            PreparedInput::Claimed { claim: claim(1) },
+            PreparedInput::Added {
+                message: authored(PreparedInputRole::User, None),
+            },
+        ])
+        .unwrap(),
+    });
+    let cut = append(&store, &header, 0, bodies).await;
+    let original = SessionFactBody::InputMessageClaimed {
+        turn_id: turn(),
+        step_id: StepId::new("step").unwrap(),
+        source: InputMessageSource::Human {
+            message_id: MessageId::new("rejected").unwrap(),
+            attribution: None,
+        },
+        content: vec![AgentMessageContent::Text {
+            text: "never entered".into(),
+        }],
+    };
+    append(
+        &store,
+        &header,
+        cut,
+        vec![
+            original,
+            SessionFactBody::StepInputsPrepared {
+                turn_id: turn(),
+                step_id: StepId::new("step").unwrap(),
+                decision: StepInputDecision::reject(),
+            },
+        ],
+    )
+    .await;
+    store.take_fact_read_cursors();
+    let text = collect(
+        store.clone(),
+        header.clone(),
+        options("m", ExportFormat::Json),
+    )
+    .await;
+    let document: Value = serde_json::from_str(&text).unwrap();
+    let rows = document["messages"].as_array().unwrap();
+    assert_eq!(rows.len(), 4);
+    assert_eq!(rows[0]["content"][0]["text"], "replacement");
+    assert_eq!(rows[0]["content_offset"], 1);
+    assert_eq!(rows[0]["claim"]["fact_seq"], 36);
+    assert_eq!(rows[1]["text"], "oldest");
+    assert_eq!(rows[2]["text"], "oldest");
+    assert_eq!(rows[3]["content"], json!([]));
+    for (i, row) in rows.iter().enumerate() {
+        assert_eq!(row["seq"], cut.to_string());
+        assert_eq!(row["input_index"], i + 1);
+    }
+    assert_eq!(
+        store
+            .take_fact_read_cursors()
+            .into_iter()
+            .filter(|after| *after == 0)
+            .count(),
+        2,
+        "one page scan and one reread of the repeated oldest claim"
+    );
+    let markdown = collect(store, header, options("m", ExportFormat::Markdown)).await;
+    for rendered in [text, markdown] {
+        assert!(rendered.contains("replacement"));
+        for absent in ["never entered", "unentered-", "hidden guidance"] {
+            assert!(!rendered.contains(absent));
+        }
+    }
+}
+
+#[tokio::test]
+async fn tool_context_messages_follow_the_selected_batch_ordinals() {
+    let store = Arc::new(MemoryStore::new());
+    let header = header();
+    let messages = (0..2)
+        .map(|ordinal| SettledToolContext {
+            session: header.session_id().clone(),
+            effect: EffectId::new("tool").unwrap(),
+            ordinal,
+            message: rsi_tools_protocol::ToolContextMessage {
+                id: format!("tool-message-{ordinal}"),
+                source: json!({"tool":ordinal}),
+                text: vec![format!("block-{ordinal}"), "tail".into()],
+            },
+        })
+        .collect();
+    let entries = [1, 0].map(|ordinal| PreparedInput::Claimed {
+        claim: InputClaimRef::new(2, ordinal).unwrap(),
+    });
+    append(
+        &store,
+        &header,
+        0,
+        vec![
+            accepted("wakeup"),
+            SessionFactBody::ToolContextsClaimed {
+                turn_id: turn(),
+                step_id: StepId::new("step").unwrap(),
+                messages,
+            },
+            SessionFactBody::StepInputsPrepared {
+                turn_id: turn(),
+                step_id: StepId::new("step").unwrap(),
+                decision: StepInputDecision::enter(entries.into()).unwrap(),
+            },
+        ],
+    )
+    .await;
+    let text = collect(store, header, options("m", ExportFormat::Json)).await;
+    let document: Value = serde_json::from_str(&text).unwrap();
+    let rows = document["messages"].as_array().unwrap();
+    assert_eq!(rows.len(), 2);
+    for (row, ordinal) in rows.iter().zip([1, 0]) {
+        assert_eq!(row["claim"]["ordinal"], ordinal);
+        assert_eq!(row["source"]["tool"], ordinal);
+        assert_eq!(row["message_id"], format!("tool-message-{ordinal}"));
+        assert_eq!(
+            row["content"],
+            json!([
+                {"type":"text","text":format!("block-{ordinal}")}, {"type":"text","text":"tail"}
+            ])
+        );
+    }
+}
+
+#[tokio::test]
+async fn workflow_completion_notice_is_visible_in_transcript_and_markdown() {
     let source = rsi_agent_session_protocol::InputMessageSource::Program {
         message_id: rsi_agent_session_protocol::MessageId::new("notice").unwrap(),
         source: rsi_agent_session_protocol::ProgramCompletionSource {
@@ -1123,7 +1405,7 @@ fn workflow_completion_notice_is_visible_in_transcript_and_markdown() {
     let fact = SessionFact::new(
         2,
         1,
-        SessionFactBody::InputMessageEntered {
+        SessionFactBody::InputMessageClaimed {
             turn_id: turn(),
             step_id: rsi_agent_session_protocol::StepId::new("step").unwrap(),
             source: source.clone(),
@@ -1133,12 +1415,20 @@ fn workflow_completion_notice_is_visible_in_transcript_and_markdown() {
         },
     )
     .unwrap();
-    let record = projection::Projection::default()
-        .record(header().session_id(), &fact, None)
-        .unwrap()
-        .unwrap();
+    let store = Arc::new(MemoryStore::new());
+    let header = header();
+    append(
+        &store,
+        &header,
+        0,
+        vec![accepted("Wake"), fact.into_body(), prepared(turn(), &[2])],
+    )
+    .await;
+    let text = collect(store, header, options("m", ExportFormat::Json)).await;
+    let document: Value = serde_json::from_str(&text).unwrap();
+    let record = &document["messages"][0];
     assert_eq!(record["source"], serde_json::to_value(source).unwrap());
-    let markdown = projection::Markdown::default().record(&record).unwrap();
+    let markdown = projection::Markdown::default().record(record).unwrap();
     assert!(markdown.contains("Workflow completed") && markdown.contains("workflow"));
 }
 
@@ -1225,6 +1515,7 @@ async fn reconstruction_capacity_is_reported_after_initial_diagnostic_admission(
     .await;
     let budget = rsi_agent_context::ContextBudget::new(64 * 1024).unwrap();
     let cut = Cut {
+        fork_sources: vec![],
         context_budget: budget.clone(),
         store: Some(store),
         header: header.clone(),

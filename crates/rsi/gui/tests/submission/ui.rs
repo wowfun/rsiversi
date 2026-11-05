@@ -49,6 +49,11 @@ async fn contributed_cards_read_exact_sources_and_close_reads_without_cancelling
         )
         .unwrap(),
     );
+    backend
+        .facts
+        .lock()
+        .unwrap()
+        .push(prepared_claim(TurnId::new("turn").unwrap(), 10, 9));
     app.command(&json!({"action":"open","pane":"main","session":session}).to_string())
         .await
         .unwrap();

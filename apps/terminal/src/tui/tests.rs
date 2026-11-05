@@ -1081,6 +1081,7 @@ async fn pending_menu_waits_for_transient_read_capacity_without_losing_the_draft
         activation_phase: None,
         tree: StoreAgentSubtreeSnapshot {
             session: StoreAgentSessionStatus {
+                inbox_paused: false,
                 last_settled_control_seq: 0,
                 session_id: client.state.header.session_id().clone(),
                 durable_control_seq: 0,
@@ -1237,6 +1238,7 @@ async fn stop_keeps_draft_and_pending_messages_and_targets_only_displayed_turn()
         .collect();
     let turn = TurnId::new("attached-turn").unwrap();
     let status = StoreAgentSessionStatus {
+        inbox_paused: false,
         last_settled_control_seq: 0,
         session_id: header.session_id().clone(),
         durable_control_seq: 2,
@@ -1378,17 +1380,23 @@ async fn saturated_queue_keeps_unknown_submission_identity_and_view_close_invali
     assert!(runtime.shutdown().await.is_clean());
 }
 
+fn observed_history(seq: u64) -> rsi_agent_turn_protocol::ObservedFact {
+    rsi_agent_turn_protocol::ObservationRetention::default()
+        .retain_fact(Arc::new(history_fact(seq)))
+        .unwrap()
+}
+
 fn history_fact(seq: u64) -> SessionFact {
     SessionFact::new(
         seq,
         1,
-        SessionFactBody::TurnAccepted {
-            reasoning_effort: None,
+        SessionFactBody::TurnTerminal {
             turn_id: TurnId::new(format!("turn-{seq}")).unwrap(),
-            text: format!("history-{seq}"),
-            model: Some(ModelRef::new("test", "model").unwrap()),
-            sandbox: rsi_sandbox::SandboxMode::WorkspaceWrite,
-            require_approval: false,
+            outcome: rsi_agent_session_protocol::TurnOutcome::Failed {
+                code: "fixture".into(),
+                message: format!("history-{seq}"),
+            },
+            result: None,
         },
     )
     .unwrap()
@@ -1403,11 +1411,14 @@ async fn full_history_window_advances_backwards_and_end_restores_live_output() {
     client.history.before = Some(1000);
     client.history(true);
     for seq in [999, 998] {
-        client.page(rsi_session_protocol::SessionHistoryPage {
-            before_seq: seq + 1,
-            durable_seq: 1512,
-            facts: vec![history_fact(seq)],
-            has_more: true,
+        client.page(HistoryPage {
+            inputs: transcript::Transcript::default(),
+            history: rsi_session_protocol::SessionHistoryPage {
+                before_seq: seq + 1,
+                durable_seq: 1512,
+                facts: vec![history_fact(seq)],
+                has_more: true,
+            },
         });
         assert_eq!(client.state.transcript.blocks[0].first, seq);
         assert_eq!(client.state.transcript.blocks.len(), 512);
@@ -1415,7 +1426,7 @@ async fn full_history_window_advances_backwards_and_end_restores_live_output() {
         assert_eq!(client.history.before, Some(seq));
     }
     // A new authoritative Fact advances only the retained live view while browsing.
-    client.live_fact(&history_fact(1512));
+    client.live_fact(&observed_history(1512)).await;
     assert_eq!(client.state.transcript.blocks[0].first, 998);
     client.follow_live();
     assert_eq!(client.state.transcript.blocks.last().unwrap().first, 1512);
@@ -1441,6 +1452,7 @@ async fn restoring_a_saved_anchor_reads_its_neighborhood_and_a_separate_live_tai
         activation_phase: None,
         tree: StoreAgentSubtreeSnapshot {
             session: StoreAgentSessionStatus {
+                inbox_paused: false,
                 session_id: client.state.header.session_id().clone(),
                 durable_control_seq: 0,
                 last_settled_control_seq: 0,
@@ -1455,11 +1467,11 @@ async fn restoring_a_saved_anchor_reads_its_neighborhood_and_a_separate_live_tai
     let anchor = transcript::Anchor {
         source: transcript::Source {
             seq: 25,
-            field: rsi_conversation::FactField::TurnInput,
+            field: rsi_conversation::FactField::TurnOutcome,
         },
         offset: 0,
     };
-    let attached = attachment(handle.clone(), true, Some(anchor))
+    let attached = attachment(handle.clone(), true, Some(anchor.source.seq))
         .await
         .unwrap();
     assert_eq!(
@@ -1471,7 +1483,7 @@ async fn restoring_a_saved_anchor_reads_its_neighborhood_and_a_separate_live_tai
     client.page(attached.page.unwrap());
     assert!(client.state.transcript.locate(anchor).is_some());
     assert_eq!(client.state.transcript.blocks.last().unwrap().first, 25);
-    client.live_fact(&history_fact(2001));
+    client.live_fact(&observed_history(2001)).await;
     assert_eq!(client.state.transcript.blocks.last().unwrap().first, 25);
     client.follow_live();
     assert!(client.state.top.is_none());
@@ -1705,7 +1717,7 @@ async fn accepted_message_detail_is_bounded_and_keeps_pending_only_compare_and_s
     let (mut client, _, runtime, surface) = client().await;
     let message = AgentMessage {
         message_id: MessageId::new("large-input").unwrap(),
-        source: AgentMessageSource::Human,
+        source: AgentMessageSource::Human { attribution: None },
         content: vec![AgentMessageContent::Text {
             text: "x".repeat(MAXIMUM_TURN_TEXT_BYTES),
         }],

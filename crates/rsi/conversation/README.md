@@ -1,5 +1,16 @@
 # rsi-conversation
 
+Entered file attachments retain a borrowed `FileRef` and an `InputFile` source
+coordinate. Detail reads expose immutable file metadata, never the file bytes
+or a stored host path. Presenters may label the file without loading its contents.
+
+An input source addresses the content owned by its Fact. For an original claim the
+index selects a block of the claimed message. For a preparation it selects a block
+among authored replacement and added messages, in final order, including developer
+blocks. Unchanged references consume no authored index. Tool context claims address
+the flattened text blocks of their messages. Details and recorded references use
+the same positions. Input indices cover the full preparation Fact.
+
 Assistant source fields address the ordered text, reasoning or Tool-argument
 deltas of one ModelAttemptSettled Fact. Field windows stream the compact log and
 retain only the requested UTF-8 window. Request and metric reducers read usage

@@ -765,6 +765,8 @@ async fn run(
                 }
                 notice(renderer, "submitting", json!({"session_id":controller.session_id(),"message_id":id})).await?;
                 let receipt = controller.submit_cancellable(SubmitInput {
+ origin: rsi_session_protocol::SubmissionOrigin::User,
+ attribution: None,
  reasoning_effort: None, delivery, message_id: id.clone(), content: vec![MessageInput::Text { text }].try_into().map_err(session_error)?, model: None, sandbox: None }, work.submissions.clone()).await.map_err(session_error)?;
                 durable = true;
                 owned.insert(id);
@@ -1003,6 +1005,7 @@ mod tests {
             activation_phase: None,
             tree: rsi_agent_store_protocol::StoreAgentSubtreeSnapshot {
                 session: rsi_agent_store_protocol::StoreAgentSessionStatus {
+                    inbox_paused: false,
                     last_settled_control_seq: 0,
                     session_id: header.session_id().clone(),
                     durable_control_seq: 3,

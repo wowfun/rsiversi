@@ -15,28 +15,32 @@ use std::{
     time::Duration,
 };
 use tokio_util::sync::CancellationToken;
-fn artifact(root: &Path, revision: &str) -> PathBuf {
-    let target = root.join("target/terminal-native-test").join(revision);
+fn artifact(root: &Path, target: &Path, output: &Path, revision: &str) -> PathBuf {
     let mut command = std::process::Command::new(env!("CARGO"));
     command
         .args(["build", "--locked", "--manifest-path"])
         .arg(root.join("crates/rsi/terminal-native/Cargo.toml"))
         .arg("--target-dir")
-        .arg(&target);
+        .arg(target);
     if revision == "b" {
         command.args(["--features", "revision-b"]);
     }
-    let output = command.output().unwrap();
+    let build = command.output().unwrap();
     assert!(
-        output.status.success(),
+        build.status.success(),
         "{}",
-        String::from_utf8_lossy(&output.stderr)
+        String::from_utf8_lossy(&build.stderr)
     );
-    target.join("debug").join(format!(
+    let name = format!(
         "{}rsi_terminal_native{}",
         std::env::consts::DLL_PREFIX,
         std::env::consts::DLL_SUFFIX
-    ))
+    );
+    let directory = output.join(revision);
+    std::fs::create_dir(&directory).unwrap();
+    let library = directory.join(&name);
+    std::fs::copy(target.join("debug").join(&name), &library).unwrap();
+    library
 }
 fn host(loader: &NativeCatalog, path: &Path) -> Host {
     let mut builder = HostBuilder::without_paths(std::env::consts::OS);
@@ -64,8 +68,7 @@ fn program() -> ProfileProgram {
 }
 fn scene() -> Vec<u8> {
     use rsi_agent_session_protocol::{
-        AgentPresetId, FrozenAgentSettings, SessionFact, SessionFactBody, SessionHeader, SessionId,
-        TurnId,
+        AgentPresetId, FrozenAgentSettings, SessionHeader, SessionId,
     };
     let header = SessionHeader::new_local(
         SessionId::new("native-scene").unwrap(),
@@ -83,20 +86,17 @@ fn scene() -> Vec<u8> {
     )
     .unwrap();
     let mut transcript = Transcript::default();
-    transcript.apply(
-        &SessionFact::new(
-            1,
-            1,
-            SessionFactBody::TurnAccepted {
-                reasoning_effort: None,
-                turn_id: TurnId::new("turn").unwrap(),
-                text: "Unicode 中 e\u{301} 👩🏽‍💻".repeat(8),
-                model: None,
-                sandbox: rsi_sandbox::SandboxMode::WorkspaceWrite,
-                require_approval: false,
-            },
-        )
-        .unwrap(),
+    transcript.entered(
+        1,
+        1,
+        rsi_conversation::EnteredInput {
+            index: 0,
+            source: None,
+            seq: 1,
+            offset: 0,
+            content: rsi_conversation::EnteredContent::Direct(&"Unicode 中 e\u{301} 👩🏽‍💻".repeat(8)),
+        },
+        false,
     );
     let editor = Editor::with_text("Unsubmitted draft stays resident".into(), 1024);
     Scene::capture(
@@ -209,10 +209,17 @@ async fn real_native_render_replacement_changes_cells_fences_old_service_and_rel
         .join("../..")
         .canonicalize()
         .unwrap();
-    let a = artifact(&root, "a");
-    let b = artifact(&root, "b");
     let temp = tempfile::tempdir().unwrap();
-    let loader = NativeCatalog::new(CatalogOptions::new(temp.path())).unwrap();
+    let target = Path::new(env!("CARGO_TARGET_TMPDIR")).join("terminal-native");
+    std::fs::create_dir_all(&target).unwrap();
+    // Cargo releases its lock before we copy its output; concurrent fixtures must
+    // keep each feature build and its private library snapshot together.
+    let build_lock = std::fs::File::create(target.join("fixture.lock")).unwrap();
+    build_lock.lock().unwrap();
+    let a = artifact(&root, &target, temp.path(), "a");
+    let b = artifact(&root, &target, temp.path(), "b");
+    drop(build_lock);
+    let loader = NativeCatalog::new(CatalogOptions::new(temp.path().join("catalog"))).unwrap();
     let runtime = Runtime::default();
     let original = host(&loader, &a);
     let profile = ScopedProfile::start(&original, &runtime.root(), program())

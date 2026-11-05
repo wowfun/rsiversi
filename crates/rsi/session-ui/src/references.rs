@@ -37,7 +37,7 @@ impl BlockRenderer for Renderer {
                     ReferenceReadRequest {
                         recorded_session_id: session.clone(),
                         fact_seq: source.seq,
-                        content_index: usize::from(index),
+                        content_index: index as usize,
                         offset: 0,
                         maximum: 8192,
                     }

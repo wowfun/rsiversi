@@ -72,8 +72,8 @@ pub(super) async fn fact_update(
         SessionFactBody::TurnAccepted { text: input, .. } if replay => {
             text(id, peer, "user_message_chunk", input).await?;
         }
-        SessionFactBody::InputMessageEntered {
-            source: InputMessageSource::Human { .. },
+        SessionFactBody::InputMessageClaimed {
+            source: InputMessageSource::Human { .. } | InputMessageSource::Application { .. },
             content,
             ..
         } if replay => {

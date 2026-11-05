@@ -225,6 +225,8 @@ pub(super) async fn run(
     let receipt = session
         .handle
         .submit(SubmitInput {
+            origin: rsi_session_protocol::SubmissionOrigin::User,
+            attribution: None,
             delivery: MessageDelivery::NextTurn,
             message_id: message.clone(),
             content,

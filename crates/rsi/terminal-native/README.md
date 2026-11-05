@@ -29,4 +29,6 @@ crates/rsi/terminal-native/Cargo.toml` and its lockfile diff, run Clippy with
 `--all-targets` with default features and with `--all-features`, check warning-free
 `cargo doc --no-deps --all-features`, and run the terminal application's
 `native_presentation` integration test. CI lints both presentation revisions;
-the real-loader test verifies compatibility with the current host.
+the real-loader test verifies compatibility with the current host. Its two revisions
+share one Cargo dependency directory under the selected target directory. Each test
+loads private library copies so a later build cannot replace an image under test.

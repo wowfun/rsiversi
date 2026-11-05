@@ -605,21 +605,7 @@ mod tests {
         )
     }
     fn add(state: &mut TestState, seq: u64, text: &str) {
-        state.transcript.apply(
-            &SessionFact::new(
-                seq,
-                seq,
-                SessionFactBody::TurnAccepted {
-                    reasoning_effort: None,
-                    turn_id: TurnId::new(format!("turn-{seq}")).unwrap(),
-                    text: text.into(),
-                    model: None,
-                    sandbox: rsi_sandbox::SandboxMode::WorkspaceWrite,
-                    require_approval: false,
-                },
-            )
-            .unwrap(),
-        );
+        state.transcript.user_fixture(seq, seq, text);
     }
     #[test]
     fn cached_scenes_render_successive_source_free_live_text() {

@@ -20,7 +20,7 @@ async fn modal_queue_editor_preserves_complete_content_and_unknown_identity_afte
     let image:Content=serde_json::from_value(serde_json::json!({"type":"image","media":{"id":"d".repeat(64),"mime":"image/png","bytes":72,"width":1,"height":1}})).unwrap();
     let message = AgentMessage {
         message_id: MessageId::new("old-queued").unwrap(),
-        source: AgentMessageSource::Human,
+        source: AgentMessageSource::Human { attribution: None },
         content: vec![
             Content::Text {
                 text: "first".into(),

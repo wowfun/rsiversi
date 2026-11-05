@@ -20,7 +20,11 @@ pub(crate) struct Pending {
 
 #[derive(Debug, Default)]
 pub(crate) struct RenderState {
-    submission: Option<Arc<crate::panes::SubmissionState>>,
+    binding: Option<(
+        Arc<crate::panes::SubmissionState>,
+        Arc<dyn rsi_session_protocol::SessionHandle>,
+    )>,
+    live_claims: rsi_client::LiveInputClaims,
     pub transcript: Transcript,
     pub history: Option<Transcript>,
     pub history_before: Option<u64>,
@@ -59,8 +63,12 @@ pub(crate) struct Renderer {
     stop: CancellationToken,
 }
 impl Renderer {
-    pub(crate) fn bind_submission(&self, submission: Arc<crate::panes::SubmissionState>) {
-        self.state.lock().expect("Web renderer poisoned").submission = Some(submission);
+    pub(crate) fn bind_submission(
+        &self,
+        submission: Arc<crate::panes::SubmissionState>,
+        handle: Arc<dyn rsi_session_protocol::SessionHandle>,
+    ) {
+        self.state.lock().expect("Web renderer poisoned").binding = Some((submission, handle));
     }
     pub fn seed(&self, transcript: Transcript, before: Option<u64>, more: bool) {
         let mut state = self.state.lock().expect("Web renderer poisoned");
@@ -133,12 +141,41 @@ impl ObservationSink for Renderer {
         update: rsi_agent_turn_protocol::SessionObservation,
     ) -> Result<(), ObservationFailure> {
         self.ready().await?;
+        let mut entered = None;
+        if let rsi_agent_turn_protocol::SessionObservation::Fact { fact, .. } = &update
+            && matches!(
+                fact.body(),
+                rsi_agent_session_protocol::SessionFactBody::StepInputsPrepared { .. }
+            )
+        {
+            let (handle, claims) = {
+                let mut state = self.state.lock().expect("Web renderer poisoned");
+                let handle = state
+                    .binding
+                    .as_ref()
+                    .map(|(_, handle)| handle.clone())
+                    .ok_or(ObservationFailure::SinkStopped)?;
+                (handle, std::mem::take(&mut state.live_claims))
+            };
+            let mut inputs = Transcript::default();
+            tokio::select! { biased;
+                () = self.stop.cancelled() => return Err(ObservationFailure::SinkStopped),
+                result = claims.prepare(handle.as_ref(), fact, |row| inputs.entered(fact, row)) => result?,
+            }
+            entered = Some((fact.seq(), inputs));
+        }
         let mut state = self.state.lock().expect("Web renderer poisoned");
         if self.stop.is_cancelled() {
             return Err(ObservationFailure::SinkStopped);
         }
-        if let Some(submission) = &state.submission {
+        if let Some((submission, _)) = &state.binding {
             submission.observe(&update);
+        }
+        if let Some((seq, inputs)) = entered {
+            state.transcript.merge_entered(seq, inputs);
+        }
+        if let rsi_agent_turn_protocol::SessionObservation::Fact { fact, .. } = &update {
+            state.live_claims.observe(fact);
         }
         state.transcript.observation(&update);
         state.fact_notice.clear();

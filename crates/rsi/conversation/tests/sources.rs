@@ -185,6 +185,14 @@ fn source_identity_is_lossless_and_its_wire_grammar_is_closed() {
     let value = serde_json::to_value(source).unwrap();
     assert_eq!(value["seq"], u64::MAX.to_string());
     assert_eq!(serde_json::from_value::<SourceRef>(value).unwrap(), source);
+    let wide = SourceRef {
+        seq: 1,
+        field: FactField::InputText { index: 65_536 },
+    };
+    assert_eq!(
+        serde_json::from_value::<SourceRef>(serde_json::to_value(wide).unwrap()).unwrap(),
+        wide
+    );
     for value in [
         json!({"seq":1,"field":{"kind":"tool_value"}}),
         json!({"seq":"0","field":{"kind":"tool_value"}}),
@@ -412,6 +420,33 @@ fn media() -> rsi_media_protocol::MediaRef {
 }
 
 #[test]
+fn authored_input_detail_counts_hidden_blocks_and_skips_claim_coordinates() {
+    let image = media();
+    let msg = |role, content| json!({"role":role, "attribution":{"id":"plugin","source":{}}, "content":content});
+    let fact: SessionFact = serde_json::from_value(json!({
+        "seq":8, "timestamp_ms":1, "type":"step_inputs_prepared", "turn_id":"turn", "step_id":"step",
+        "decision":{"kind":"enter","messages":[
+            {"kind":"added","message":msg("developer",json!([{"type":"text","text":"guidance"}]))},
+            {"kind":"claimed","claim":{"fact_seq":1,"ordinal":0}},
+            {"kind":"replacement","claim":{"fact_seq":2,"ordinal":0},"message":msg("user", json!([{"type":"image","media":image},{"type":"text","text":"after image"}]))}
+        ]}
+    })).unwrap();
+    let field = |field| select_field(&fact, SourceRef { seq: 8, field });
+    assert!(
+        matches!(field(FactField::InputImage {index:1}), Some(rsi_conversation::FieldValue::Media(found)) if found == &image)
+    );
+    assert_eq!(
+        field(FactField::InputText { index: 2 })
+            .unwrap()
+            .window(0, 64)
+            .unwrap()
+            .text,
+        "after image"
+    );
+    assert!(field(FactField::InputText { index: 1 }).is_none());
+}
+
+#[test]
 fn input_sources_preserve_text_and_media_kinds() {
     use rsi_agent_session_protocol::{AgentMessageContent, InputMessageSource, MessageId, StepId};
 
@@ -427,17 +462,18 @@ fn input_sources_preserve_text_and_media_kinds() {
         &[(FactField::TurnInput, "original input")],
     );
     check_fields(
-        SessionFactBody::InputMessageEntered {
+        SessionFactBody::InputMessageClaimed {
             turn_id: TurnId::new("turn").unwrap(),
             step_id: StepId::new("step").unwrap(),
             source: InputMessageSource::Human {
+                attribution: None,
                 message_id: MessageId::new("input").unwrap(),
             },
             content: vec![
                 AgentMessageContent::Text {
                     text: "entered input".into(),
                 },
-                AgentMessageContent::Image { media: media() },
+                AgentMessageContent::Image { presentation: None, media: media() },
             ],
         },
         &[
@@ -590,6 +626,7 @@ fn structured_sources_keep_rejected_arguments_and_redacted_provider_identity() {
     );
     check_fields(
         SessionFactBody::ToolRejected {
+            additional_contexts: Vec::new(),
             origin: model_tool_origin(),
             program_role: rsi_tools_protocol::ToolProgramRole::Unavailable,
             turn_id: turn.clone(),

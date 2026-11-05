@@ -16,6 +16,7 @@ fn fact(seq: u64, kind: &str, owner: &str) -> SessionFact {
         },
         "started" => SessionFactBody::ToolStarted { turn_id, effect_id, identity },
         "rejected" => SessionFactBody::ToolRejected {
+            additional_contexts: Vec::new(),
             origin: rsi_agent_session_protocol::ToolOrigin::Model { effect_id: EffectId::new("source-model").unwrap() },
             program_role: rsi_tools_protocol::ToolProgramRole::Unavailable,
             turn_id, effect_id, identity, name: "bash".into(), arguments: json!({"command":"exit 7"}),

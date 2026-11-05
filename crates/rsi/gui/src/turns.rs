@@ -169,6 +169,7 @@ impl Index {
             Fact::TurnTerminal { outcome, .. } => {
                 let label = match outcome {
                     TurnOutcome::Completed => "Completed",
+                    TurnOutcome::Blocked => "Blocked",
                     TurnOutcome::Cancelled => "Cancelled",
                     TurnOutcome::Failed { .. } => "Failed",
                     TurnOutcome::PartialFailed { .. } => "Partially failed",
@@ -513,7 +514,42 @@ mod tests {
         match input {
             Input::Fact(body) => {
                 let seq = transcript.seq + 1;
-                transcript.fact(&SessionFact::new(seq, 1, *body).unwrap());
+                let fact = SessionFact::new(seq, 1, *body).unwrap();
+                transcript.fact(&fact);
+                if let Fact::InputMessageClaimed {
+                    turn_id,
+                    step_id,
+                    source,
+                    content,
+                } = fact.body()
+                {
+                    let claim = rsi_agent_session_protocol::InputClaimRef::new(seq, 0).unwrap();
+                    let decision = rsi_agent_session_protocol::StepInputDecision::enter(vec![
+                        rsi_agent_session_protocol::PreparedInput::Claimed { claim },
+                    ])
+                    .unwrap();
+                    let prepared = SessionFact::new(
+                        seq + 1,
+                        1,
+                        Fact::StepInputsPrepared {
+                            turn_id: turn_id.clone(),
+                            step_id: step_id.clone(),
+                            decision,
+                        },
+                    )
+                    .unwrap();
+                    transcript.entered(
+                        &prepared,
+                        rsi_conversation::EnteredInput {
+                            index: 0,
+                            seq,
+                            offset: 0,
+                            source: Some(source),
+                            content: rsi_conversation::EnteredContent::Blocks(content),
+                        },
+                    );
+                    transcript.fact(&prepared);
+                }
             }
             Input::Event {
                 effect,
@@ -736,10 +772,11 @@ mod tests {
             .clone();
         apply(
             &mut t,
-            Fact::InputMessageEntered {
+            Fact::InputMessageClaimed {
                 turn_id: TurnId::new("turn").unwrap(),
                 step_id: StepId::new("step").unwrap(),
                 source: InputMessageSource::Human {
+                    attribution: None,
                     message_id: MessageId::new("steer").unwrap(),
                 },
                 content: vec![AgentMessageContent::Text {
@@ -1043,7 +1080,7 @@ mod tests {
         for (source, text, title) in inputs {
             apply(
                 &mut t,
-                Fact::InputMessageEntered {
+                Fact::InputMessageClaimed {
                     turn_id: TurnId::new("turn").unwrap(),
                     step_id: StepId::new("step").unwrap(),
                     source,

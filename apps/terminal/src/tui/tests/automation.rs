@@ -157,7 +157,7 @@ async fn protected_queue_has_read_access_without_mutation_or_editor_controls() {
         .unwrap();
     let message = AgentMessage {
         message_id: MessageId::new("queued-protected").unwrap(),
-        source: AgentMessageSource::Human,
+        source: AgentMessageSource::Human { attribution: None },
         content: vec![rsi_agent_session_protocol::AgentMessageContent::Text {
             text: "retained input".into(),
         }],

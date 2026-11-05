@@ -1,5 +1,4 @@
 //! Partial historical projection; no model-context replay or retained observation leases.
-use rsi_agent_session_protocol::{AgentMessageContent, InputMessageSource};
 use rsi_agent_session_protocol::{SessionFact, SessionFactBody};
 #[cfg(test)]
 use rsi_ai_protocol::ContentDelta;
@@ -631,6 +630,70 @@ impl Transcript {
         }
     }
 
+    #[cfg(test)]
+    pub(crate) fn user_fixture(&mut self, seq: u64, timestamp_ms: u64, text: &str) {
+        self.entered(
+            seq,
+            timestamp_ms,
+            rsi_conversation::EnteredInput {
+                index: 0,
+                source: None,
+                seq,
+                offset: 0,
+                content: rsi_conversation::EnteredContent::Direct(text),
+            },
+            false,
+        );
+    }
+
+    pub fn entered(
+        &mut self,
+        seq: u64,
+        timestamp_ms: u64,
+        row: rsi_conversation::EnteredInput<'_>,
+        older: bool,
+    ) {
+        let attributed = row.attribution();
+        let role = if attributed.is_some() {
+            Role::Status
+        } else {
+            Role::User
+        };
+        let title = attributed.unwrap_or_else(|| user_time(timestamp_ms).into());
+        let key = format!("prepared:{}:{}", seq, row.index);
+        self.block_index(key.clone(), &title, role, seq);
+        for (source, part) in row.parts() {
+            let piece = match part {
+                rsi_conversation::InputPart::Text(text) => Piece::new(source, text, 0, WINDOW),
+                rsi_conversation::InputPart::Image(media) => Piece::json(source, media, 0),
+                rsi_conversation::InputPart::File(file) => Piece::json(source, file, 0),
+            };
+            self.add(key.clone(), &title, role, piece);
+        }
+        if let Some(block) = self.blocks.iter_mut().find(|block| block.key == key) {
+            block.first = seq;
+            block.last = seq;
+        }
+        self.trim(older);
+    }
+
+    pub fn merge_inputs(&mut self, mut inputs: Self, older: bool) {
+        if inputs.blocks.is_empty() {
+            return;
+        }
+        if !self.blocks.is_empty() {
+            let keys: std::collections::BTreeSet<_> =
+                self.blocks.iter().map(|block| block.key.as_str()).collect();
+            inputs
+                .blocks
+                .retain(|block| !keys.contains(block.key.as_str()));
+        }
+        self.blocks.append(&mut inputs.blocks);
+        self.earlier |= inputs.earlier;
+        self.blocks.sort_by_key(Block::order);
+        self.trim(older);
+    }
+
     pub fn apply(&mut self, fact: &SessionFact) {
         self.project(fact);
         if !self.blocks.is_sorted_by_key(Block::order) {
@@ -740,99 +803,7 @@ impl Transcript {
             return;
         }
         let seq = fact.seq();
-        let mut add = |key: String, title: String, role, field, text: &str| {
-            let source = Source { seq, field };
-            self.add(key, &title, role, Piece::new(source, text, 0, WINDOW));
-        };
         match fact.body() {
-            SessionFactBody::TurnAccepted { turn_id, text, .. } => add(
-                BlockIdentity::TurnInput { turn: turn_id }.key(),
-                user_time(fact.timestamp_ms()),
-                Role::User,
-                FactField::TurnInput,
-                text,
-            ),
-            SessionFactBody::InputMessageEntered {
-                source, content, ..
-            } => {
-                let time = user_time(fact.timestamp_ms());
-                let agent_title = match source {
-                    InputMessageSource::Agent {
-                        source_session_id, ..
-                    } => format!("Message from {source_session_id}"),
-                    InputMessageSource::Completion {
-                        child_session_id, ..
-                    } => format!("Completion from {child_session_id}"),
-                    _ => String::new(),
-                };
-                let (key, title, role) = match source {
-                    InputMessageSource::Human { message_id } => (
-                        BlockIdentity::Message {
-                            message: message_id,
-                        }
-                        .key(),
-                        time.as_str(),
-                        Role::User,
-                    ),
-                    InputMessageSource::Agent { message_id, .. }
-                    | InputMessageSource::Completion { message_id, .. } => (
-                        BlockIdentity::Message {
-                            message: message_id,
-                        }
-                        .key(),
-                        agent_title.as_str(),
-                        Role::Status,
-                    ),
-                    _ => return,
-                };
-                for (index, content) in content.iter().enumerate() {
-                    if let AgentMessageContent::Reference { reference } = content {
-                        self.add(
-                            key.clone(),
-                            title,
-                            role,
-                            Piece::new(
-                                Source {
-                                    seq,
-                                    field: FactField::InputReference {
-                                        index: u16::try_from(index).expect("bounded content"),
-                                    },
-                                },
-                                &reference.preview,
-                                0,
-                                WINDOW,
-                            ),
-                        );
-                    } else if let AgentMessageContent::Image { media } = content {
-                        let source = Source {
-                            seq,
-                            field: FactField::InputImage {
-                                index: u16::try_from(index)
-                                    .expect("validated message content index"),
-                            },
-                        };
-                        self.add(key.clone(), title, role, Piece::json(source, media, 0));
-                    } else if let AgentMessageContent::Text { text } = content {
-                        self.add(
-                            key.clone(),
-                            title,
-                            role,
-                            Piece::new(
-                                Source {
-                                    seq,
-                                    field: FactField::InputText {
-                                        index: u16::try_from(index)
-                                            .expect("validated message content index"),
-                                    },
-                                },
-                                text,
-                                0,
-                                WINDOW,
-                            ),
-                        );
-                    }
-                }
-            }
             SessionFactBody::ImageOutput {
                 turn_id,
                 effect_id,
@@ -1644,6 +1615,7 @@ mod tests {
                 1,
                 1,
                 SessionFactBody::ToolRejected {
+                    additional_contexts: Vec::new(),
                     origin: rsi_agent_session_protocol::ToolOrigin::Model {
                         effect_id: rsi_agent_session_protocol::EffectId::new("source-model")
                             .unwrap(),

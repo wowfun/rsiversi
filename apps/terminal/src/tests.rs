@@ -586,6 +586,11 @@ impl SessionHandle for UnknownThenAcceptedHandle {
     ) -> rsi_session_protocol::Result<rsi_session_protocol::SessionDraftView> {
         panic!("unexpected draft snapshot")
     }
+    async fn observe_draft(
+        &self,
+    ) -> rsi_session_protocol::Result<rsi_session_protocol::DraftRevisionStream> {
+        panic!("unexpected draft observation")
+    }
     async fn select_preset(
         &self,
         _: rsi_session_protocol::SelectDraftPreset,
@@ -885,7 +890,7 @@ impl SessionHandle for UnknownThenAcceptedHandle {
                                 activation_id: ActivationId::new("activation-reconcile").unwrap(),
                                 turn_id,
                                 step_id: StepId::new("step-reconcile").unwrap(),
-                                entered_fact_seq: 1,
+                                claimed_fact_seq: 1,
                             },
                         )
                         .unwrap(),
@@ -989,6 +994,8 @@ async fn unknown_message_outcome_retries_the_same_identity_once() {
     let receipt = submit_with_reconciliation(
         handle.as_ref(),
         SubmitInput {
+            origin: rsi_session_protocol::SubmissionOrigin::User,
+            attribution: None,
             reasoning_effort: None,
             delivery: rsi_agent_session_protocol::MessageDelivery::NextTurn,
             message_id: message_id.clone(),
@@ -1252,6 +1259,8 @@ async fn interrupt_that_loses_message_claim_race_still_cancels_the_claimed_turn(
     drive_application_turn(
         concrete.clone(),
         SubmitInput {
+            origin: rsi_session_protocol::SubmissionOrigin::User,
+            attribution: None,
             reasoning_effort: None,
             delivery: rsi_agent_session_protocol::MessageDelivery::NextTurn,
             message_id: MessageId::new("message-reconcile").unwrap(),
@@ -1290,6 +1299,8 @@ async fn unknown_message_outcome_queries_before_resending_input() {
     let receipt = submit_with_reconciliation(
         handle.as_ref(),
         SubmitInput {
+            origin: rsi_session_protocol::SubmissionOrigin::User,
+            attribution: None,
             reasoning_effort: None,
             delivery: rsi_agent_session_protocol::MessageDelivery::NextTurn,
             message_id: MessageId::new("message-reconcile").unwrap(),
@@ -1330,6 +1341,8 @@ async fn interaction_refresh_cannot_deadlock_a_suspended_observation_read() {
     let task = tokio::spawn(drive_application_turn(
         concrete,
         SubmitInput {
+            origin: rsi_session_protocol::SubmissionOrigin::User,
+            attribution: None,
             reasoning_effort: None,
             delivery: rsi_agent_session_protocol::MessageDelivery::NextTurn,
             message_id: MessageId::new("message-reconcile").unwrap(),
@@ -1721,7 +1734,7 @@ async fn headless_observations_start_only_after_claimed_turn_is_admitted() {
         session_id: SessionId::new("session").unwrap(),
         message_id: MessageId::new("message").unwrap(),
         turn_id: TurnId::new("turn").unwrap(),
-        entered_fact_seq: 1,
+        claimed_fact_seq: 1,
     };
     let mut delivery = Box::pin(sink.event(claimed()));
     assert!(futures_util::poll!(&mut delivery).is_pending());

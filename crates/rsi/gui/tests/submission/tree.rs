@@ -105,6 +105,7 @@ fn add_child(
             turn_id: rsi_agent_session_protocol::TurnId::new("parent-turn").unwrap(),
         },
         status: StoreAgentSessionStatus {
+            inbox_paused: false,
             last_settled_control_seq: 0,
             session_id: id,
             durable_control_seq: 1,

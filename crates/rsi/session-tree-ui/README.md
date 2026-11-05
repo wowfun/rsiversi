@@ -23,10 +23,14 @@ open-Turn, activation and queued work flags. Idle does not assert successful
 completion. Membership and activity
 are snapshots; explicit refresh reads them again.
 
+The history inspector distinguishes claimed input, entered input and rejected
+preparation. The preparation exposes its own authored fields. Unchanged messages
+retain their original claim sources. Field navigation materializes one page.
+
 History reads at most 64 Facts before a captured watermark. Earlier-page actions
 retain that watermark; Latest captures a new one. The inspector displays bounded
 semantic previews, including shared Tool outcome classification, and lets a user
-open exact Fact fields. Each record preview has 512 UTF-8 bytes; exact fields use
+open exact Fact fields. Field navigation reads the displayed range and one lookahead for the next page. Each record preview has 512 UTF-8 bytes; exact fields use
 16 KiB windows with explicit truncation and paging, and field choices use 32-row
 pages. Sequence and byte cursors travel as decimal
 strings, remain within the selected watermark, and never carry complete Facts.

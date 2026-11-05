@@ -508,7 +508,7 @@ async fn terminal_refusals_and_detach_retry_preserve_exact_ownership() {
         |value| json!({"pane":"main","generation":generation,"request":value}).to_string();
     let refused = app
         .terminal(&request(
-            json!({"type":"create","size":{"rows":24,"cols":80}}),
+            json!({"type":"create","key":"refused","size":{"rows":24,"cols":80}}),
         ))
         .await
         .unwrap_err();

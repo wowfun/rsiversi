@@ -1,5 +1,16 @@
 # rsi-gui
 
+Conversation rows follow the final input order of each durable preparation.
+The queue shows accepted submissions while waiting. A rejected or omitted
+input contributes no conversation row. Text, image and reference details use
+the Fact that owns each final block. A history page resolves unchanged inputs
+outside its interval from the same Session.
+
+Completed native Turns expose a manual fork action bound to the current pane
+generation. Full, Last(n), and None create a fresh independent draft in the source
+workspace and preset through the ordinary Session creation service. The document
+flushes its editor before switching, and first input remains the publication point.
+
 Composer preparation accepts an optional typed sandbox mode for a next-Turn
 message and freezes it with the request. Steering rejects sandbox overrides;
 queue edits and uncertain retries retain their original options. Dispatch admits
@@ -105,6 +116,8 @@ to an answer or folding the completed Turn’s process. Direct Image output is a
 answer of its own fact type. Missing evidence
 produces a completion row, not an invented answer. Failed, cancelled, interrupted,
 partially failed and MaxTokens Turns retain content and expanded process.
+A preparation rejection displays a Blocked terminal row without inventing an
+assistant response or a provider failure.
 
 The device-local detail mode is Compact, Standard (default), Detailed or Verbose.
 Verbose includes the former Trajectory view. Compact collapses successful process
@@ -407,8 +420,8 @@ ignored only while that source is retained; missing interior text is inserted in
 source order. Evicting a span removes its source membership and byte-length
 metadata together. A bounded single-field preview stays UTF-8 aligned; admitting
 newer or older spans evicts from the opposite end and marks omitted content.
-Accepted control previews reconcile to their entered Message fields, while direct
-Turn input keeps a distinct identity. Older backfill cannot regress the current
+Accepted controls update the queue. The conversation renders only final user messages
+from Step input preparation, in their entered order. Older backfill cannot regress the current
 Turn's status. The highest Fact sequence remains a cursor, not a duplicate set.
 
 Login consumes a device registration receipt; the token is exchanged through
@@ -690,3 +703,9 @@ presented as a complete Turn total. A generation-bound `metrics` command reads t
 Session metrics API, preserves its watermark/completeness, and publishes only to
 the still-current attachment. It does not infer whole-Session totals from loaded
 blocks or block streaming progress on a metrics read.
+
+Trusted document contributions read finite Session resources through
+`read_session_resource`, bound to an exact pane generation. Request size is
+bounded to 8 KiB; the existing controller owns read admission, response correlation
+and retirement. A replaced attachment cannot receive a completed old read. This
+path returns data without replacing the composer resource preview.

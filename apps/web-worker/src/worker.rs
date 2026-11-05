@@ -458,6 +458,15 @@ pub async fn resource_open(source: String) -> Result<String, JsValue> {
         .map_err(failure)
 }
 
+/// Reads one exact pane-bound Session resource without changing its preview.
+#[wasm_bindgen]
+pub async fn read_session_resource(source: String) -> Result<String, JsValue> {
+    application()?
+        .read_session_resource(&source)
+        .await
+        .map_err(failure)
+}
+
 /// Freezes input before the document persists its execution intent.
 #[wasm_bindgen]
 pub async fn prepare_submission(source: String) -> Result<String, JsValue> {

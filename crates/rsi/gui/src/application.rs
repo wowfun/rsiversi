@@ -66,6 +66,12 @@ pub(crate) enum Command {
     NewConversation {
         pane: crate::SurfaceId,
     },
+    ForkConversation {
+        pane: crate::SurfaceId,
+        generation: String,
+        turn: rsi_agent_session_protocol::TurnId,
+        turns: rsi_agent_session_protocol::ForkTurnSelection,
+    },
     AddSurface {
         pane: crate::SurfaceId,
     },
@@ -269,6 +275,7 @@ impl Command {
     fn affected_pane(&self) -> Option<crate::SurfaceId> {
         match self {
             Self::Open { pane, .. }
+            | Self::ForkConversation { pane, .. }
             | Self::DelegationOpen { pane, .. }
             | Self::AttentionOpen { pane, .. }
             | Self::ExternalOpen { pane, .. }
@@ -926,6 +933,12 @@ impl GuiApplication {
                 start,
             } => self.external_source(pane, &generation, source, start).await,
             Command::NewConversation { pane } => self.new_conversation(pane).await,
+            Command::ForkConversation {
+                pane,
+                generation,
+                turn,
+                turns,
+            } => self.fork_conversation(pane, &generation, turn, turns).await,
             Command::AddSurface { pane } => self.add_surface(pane),
             Command::CloseSurface { pane } => self.close_surface(pane).await,
             Command::Plugins { command } => {

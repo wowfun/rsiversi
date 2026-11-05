@@ -1,5 +1,12 @@
 # rsi-client
 
+Native transcript preparation borrows claimed inputs from the current history
+page or the current live batch. The live batch shares observation handles until
+preparation or Turn termination, bounded by one presentation window and one
+Session read page. For a referenced claim outside that window it reads the exact Fact through
+the same Session handle. Authored entries and rejections require no claim-body read.
+Presentation callbacks receive borrowed content with its durable source.
+
 `ExternalController` retains a detachable external conversation view over the
 Host capability. It owns one polling read, one non-queued control operation and a
 128-record / 1 MiB text window. History reads advance within the exact replay

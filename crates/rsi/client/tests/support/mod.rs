@@ -125,6 +125,11 @@ impl SessionHandle for Handle {
     ) -> rsi_session_protocol::Result<rsi_session_protocol::SessionDraftView> {
         panic!("unexpected draft snapshot")
     }
+    async fn observe_draft(
+        &self,
+    ) -> rsi_session_protocol::Result<rsi_session_protocol::DraftRevisionStream> {
+        panic!("unexpected draft observation")
+    }
     async fn select_preset(
         &self,
         _: rsi_session_protocol::SelectDraftPreset,
@@ -534,6 +539,8 @@ pub async fn controller(
 }
 pub fn input(id: &str) -> SubmitInput {
     SubmitInput {
+        origin: rsi_session_protocol::SubmissionOrigin::User,
+        attribution: None,
         reasoning_effort: None,
         delivery: rsi_agent_session_protocol::MessageDelivery::NextTurn,
         message_id: MessageId::new(id).unwrap(),

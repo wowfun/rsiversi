@@ -56,7 +56,7 @@ impl Scenario {
                     activation_id: ActivationId::new("activation").unwrap(),
                     turn_id: TurnId::new("turn").unwrap(),
                     step_id: StepId::new("step").unwrap(),
-                    entered_fact_seq: 1,
+                    claimed_fact_seq: 1,
                 }
             };
             return vec![Ok(SessionObservation::Control {
@@ -266,7 +266,7 @@ async fn resolved_claims_and_failures() {
             activation_id: ActivationId::new("activation").unwrap(),
             turn_id: TurnId::new("turn").unwrap(),
             step_id: StepId::new("step").unwrap(),
-            entered_fact_seq: 1,
+            claimed_fact_seq: 1,
         },
         ..Scenario::default()
     });

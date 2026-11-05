@@ -137,8 +137,9 @@ async fn ordered_images_and_image_only_retry_freeze_complete_content() {
         assert_eq!(
             &*original.content,
             &[
-                SessionInput::Image { media: second },
+                SessionInput::Image { presentation: None, media: second },
                 SessionInput::Image {
+                    presentation: None,
                     media: first.clone()
                 }
             ]

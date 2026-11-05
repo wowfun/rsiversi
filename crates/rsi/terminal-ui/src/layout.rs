@@ -233,21 +233,7 @@ mod tests {
     use rsi_agent_session_protocol::{SessionFact, SessionFactBody, TurnId};
     fn transcript(text: &str) -> Transcript {
         let mut transcript = Transcript::default();
-        transcript.apply(
-            &SessionFact::new(
-                1,
-                1,
-                SessionFactBody::TurnAccepted {
-                    reasoning_effort: None,
-                    turn_id: TurnId::new("turn").unwrap(),
-                    text: text.into(),
-                    model: None,
-                    sandbox: rsi_sandbox::SandboxMode::WorkspaceWrite,
-                    require_approval: false,
-                },
-            )
-            .unwrap(),
-        );
+        transcript.user_fixture(1, 1, text);
         transcript
     }
     #[test]

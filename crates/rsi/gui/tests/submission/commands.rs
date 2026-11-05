@@ -4,6 +4,70 @@ use serde_json::json;
 fn view(app: &rsi_gui::GuiApplication) -> serde_json::Value {
     serde_json::from_slice(app.view().unwrap().as_bytes()).unwrap()
 }
+
+#[tokio::test]
+async fn document_resource_admission_rejects_stale_or_oversized_requests_before_backend_reads() {
+    let (runtime, backend, app, generation) = admission::fixture().await;
+    let request = json!({"pane":"main","generation":generation,"request":{"kind":"sources"}});
+    let before = backend
+        .resource_discoveries
+        .load(std::sync::atomic::Ordering::SeqCst);
+    assert!(
+        app.read_session_resource(&request.to_string())
+            .await
+            .is_err()
+    );
+    assert_eq!(
+        backend
+            .resource_discoveries
+            .load(std::sync::atomic::Ordering::SeqCst),
+        before + 1
+    );
+    let mut stale = request;
+    stale["generation"] = json!("obsolete");
+    assert!(app.read_session_resource(&stale.to_string()).await.is_err());
+    assert!(app.read_session_resource(&" ".repeat(8193)).await.is_err());
+    assert_eq!(
+        backend
+            .resource_discoveries
+            .load(std::sync::atomic::Ordering::SeqCst),
+        before + 1
+    );
+    assert!(runtime.shutdown().await.is_clean());
+}
+
+#[tokio::test]
+async fn manual_fork_binds_source_generation_and_passes_the_exact_cut_to_creation() {
+    let (runtime, backend, app, generation) = admission::fixture().await;
+    let initial = view(&app)["surfaces"]["main"].clone();
+    let before = backend.creations.lock().unwrap().len();
+    let request = json!({"action":"fork_conversation","pane":"main","generation":generation,"turn":"terminal-turn","turns":{"last":2}});
+    app.command(&request.to_string()).await.unwrap();
+    {
+        let requests = backend.creations.lock().unwrap();
+        assert_eq!(requests.len(), before + 1);
+        let created = requests.last().unwrap();
+        assert_ne!(
+            created.session_id.as_str(),
+            initial["session"].as_str().unwrap()
+        );
+        let fork = created.fork.as_ref().unwrap();
+        assert_eq!(
+            fork.source_session_id.as_str(),
+            initial["session"].as_str().unwrap()
+        );
+        assert_eq!(
+            fork.point,
+            rsi_agent_session_protocol::ForkPoint::through(
+                &rsi_agent_session_protocol::TurnId::new("terminal-turn").unwrap()
+            )
+        );
+        assert_eq!(fork.turns, ForkTurnSelection::Last(2));
+    }
+    assert!(app.command(&request.to_string()).await.is_err());
+    assert_eq!(backend.creations.lock().unwrap().len(), before + 1);
+    assert!(runtime.shutdown().await.is_clean());
+}
 #[tokio::test]
 async fn slash_commands_do_not_require_message_delivery_authority() {
     let (runtime, backend, app, generation) = admission::fixture().await;

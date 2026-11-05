@@ -81,6 +81,7 @@ fn missing<T>() -> rsi_session_protocol::Result<T> {
 }
 #[derive(Debug, Default)]
 struct Backend {
+    creations: Mutex<Vec<CreateSession>>,
     metrics: Mutex<Option<rsi_session_protocol::MetricsRead>>,
     metrics_gate: Mutex<Option<Arc<admission::HeaderGate>>>,
     workspace_lists: std::sync::atomic::AtomicUsize,
@@ -137,6 +138,7 @@ impl SessionService for Service {
         &self,
         r: CreateSession,
     ) -> rsi_session_protocol::Result<Arc<dyn SessionHandle>> {
+        self.0.creations.lock().unwrap().push(r.clone());
         *self.0.header.lock().unwrap() = Some(
             SessionHeader::new_local(
                 r.session_id,
@@ -289,6 +291,11 @@ impl SessionHandle for Backend {
     ) -> rsi_session_protocol::Result<JobsSnapshot> {
         self.task_panels.jobs(self, request).await
     }
+    async fn observe_draft(
+        &self,
+    ) -> rsi_session_protocol::Result<rsi_session_protocol::DraftRevisionStream> {
+        panic!("unexpected draft observation")
+    }
     async fn draft_snapshot(
         &self,
     ) -> rsi_session_protocol::Result<rsi_session_protocol::SessionDraftView> {
@@ -296,6 +303,7 @@ impl SessionHandle for Backend {
             Ok(SessionDraftView {
                 header: self.header().await?,
                 revision: 0,
+                command_inputs: vec![],
             })
         } else {
             Err(rsi_session_protocol::SessionError::NotFound(
@@ -564,6 +572,7 @@ impl SessionHandle for Backend {
         Ok(StoreSessionInspection {
             tree: StoreAgentSubtreeSnapshot {
                 session: StoreAgentSessionStatus {
+                    inbox_paused: false,
                     last_settled_control_seq: 0,
                     session_id: header.session_id().clone(),
                     durable_control_seq: 1,
@@ -1030,6 +1039,24 @@ async fn failed_navigation_at_submission_capacity_keeps_the_current_pane_usable(
         current["surfaces"]["main"]["generation"]
     );
     assert!(rt.shutdown().await.is_clean());
+}
+
+fn prepared_claim(turn: TurnId, seq: u64, source: u64) -> SessionFact {
+    let claim = rsi_agent_session_protocol::InputClaimRef::new(source, 0).unwrap();
+    let decision = rsi_agent_session_protocol::StepInputDecision::enter(vec![
+        rsi_agent_session_protocol::PreparedInput::Claimed { claim },
+    ])
+    .unwrap();
+    SessionFact::new(
+        seq,
+        seq,
+        SessionFactBody::StepInputsPrepared {
+            turn_id: turn,
+            step_id: rsi_agent_session_protocol::StepId::new("step").unwrap(),
+            decision,
+        },
+    )
+    .unwrap()
 }
 
 #[tokio::test]

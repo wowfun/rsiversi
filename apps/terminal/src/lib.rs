@@ -156,7 +156,7 @@ pub(crate) enum CliEvent {
         session_id: SessionId,
         message_id: MessageId,
         turn_id: TurnId,
-        entered_fact_seq: u64,
+        claimed_fact_seq: u64,
     },
     Control {
         session_id: SessionId,
@@ -216,14 +216,14 @@ impl CliEvent {
                 session_id,
                 message_id,
                 turn_id,
-                entered_fact_seq,
+                claimed_fact_seq,
             } => serde_json::to_string(&TurnEnvelope {
                 version: 6,
                 kind: "turn",
                 session_id,
                 message_id,
                 turn_id,
-                entered_fact_seq: *entered_fact_seq,
+                claimed_fact_seq: *claimed_fact_seq,
             }),
             Self::Control {
                 session_id,
@@ -299,7 +299,7 @@ pub(crate) struct TurnEnvelope<'a> {
     session_id: &'a SessionId,
     message_id: &'a MessageId,
     turn_id: &'a TurnId,
-    entered_fact_seq: u64,
+    claimed_fact_seq: u64,
 }
 
 #[derive(Serialize)]
@@ -524,6 +524,7 @@ pub(crate) async fn resolve_application_handle(
                 .map_err(|error| RsiError::Boot(error.to_string()))?;
             application
                 .create(CreateSession {
+                    fork: None,
                     workspace_id: registered.id,
                     session_id,
                     agent_preset_id,
@@ -618,12 +619,12 @@ impl rsi_client::MessageSink for CliMessageSink {
                 session_id,
                 message_id,
                 turn_id,
-                entered_fact_seq,
+                claimed_fact_seq,
             } => CliEvent::Turn {
                 session_id,
                 message_id,
                 turn_id,
-                entered_fact_seq,
+                claimed_fact_seq,
             },
             MessageEvent::Fact {
                 session_id,
@@ -994,6 +995,8 @@ pub(crate) async fn run_headless_application(
             tokio_util::task::AbortOnDropHandle::new(work.tasks.spawn(drive_application_turn(
                 handle,
                 SubmitInput {
+                    origin: rsi_session_protocol::SubmissionOrigin::User,
+                    attribution: None,
                     reasoning_effort: None,
                     delivery: rsi_agent_session_protocol::MessageDelivery::NextTurn,
                     message_id,
@@ -1074,7 +1077,7 @@ async fn headless_inputs(
             .import_image(source)
             .await
             .map_err(|error| RsiError::Run(format!("image upload: {error}")))?;
-        content.push(MessageInput::Image { media });
+        content.push(MessageInput::Image { media, presentation: None });
     }
     Ok(content)
 }
@@ -1315,6 +1318,7 @@ pub(crate) async fn arm_signal(
 
 pub(crate) fn report_terminal_diagnostic(outcome: &TurnOutcome) {
     match outcome {
+        TurnOutcome::Blocked => eprintln!("Input preparation blocked the request."),
         TurnOutcome::Failed { code, message }
         | TurnOutcome::PartialFailed { code, message, .. } => eprintln!("{code}: {message}"),
         TurnOutcome::Interrupted { reason, .. } => eprintln!("interrupted: {reason}"),

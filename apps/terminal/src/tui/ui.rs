@@ -252,7 +252,7 @@ impl Client {
             menu.items
                 .retain(|(_, action)| !matches!(action, Action::Todos));
         }
-        if self.state.header.fork_origin().is_none() {
+        if self.state.header.history_origin().is_none() {
             menu.items
                 .retain(|(_, action)| !matches!(action, Action::Parent));
         }

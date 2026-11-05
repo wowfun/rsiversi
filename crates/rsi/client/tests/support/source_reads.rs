@@ -7,6 +7,7 @@ use tokio_util::sync::CancellationToken;
 #[derive(Debug)]
 pub struct Scenario {
     pub requests: Mutex<Vec<(Option<u64>, usize)>>,
+    pub fact: Mutex<Option<SessionFact>>,
     pub active: Arc<AtomicUsize>,
     pub block: AtomicBool,
     pub seq: AtomicU64,
@@ -15,6 +16,7 @@ impl Default for Scenario {
     fn default() -> Self {
         Self {
             requests: Mutex::new(Vec::new()),
+            fact: Mutex::default(),
             active: Arc::default(),
             block: AtomicBool::new(false),
             seq: AtomicU64::new(9),
@@ -31,6 +33,14 @@ impl Scenario {
         self.requests.lock().unwrap().push((before, limit));
         if self.block.load(Ordering::SeqCst) {
             std::future::pending::<()>().await;
+        }
+        if let Some(fact) = self.fact.lock().unwrap().as_ref() {
+            return Ok(rsi_session_protocol::SessionHistoryPage {
+                before_seq: before.unwrap_or(u64::MAX),
+                durable_seq: fact.seq(),
+                has_more: true,
+                facts: vec![fact.clone()],
+            });
         }
         let seq = self.seq.load(Ordering::SeqCst);
         Ok(rsi_session_protocol::SessionHistoryPage {

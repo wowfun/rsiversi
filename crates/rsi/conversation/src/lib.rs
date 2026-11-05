@@ -6,7 +6,9 @@ mod conversation;
 pub use conversation::{
     ConversationCapabilities, ConversationIdentity, ConversationSource, ExternalSource,
 };
+mod entered;
 mod identity;
+pub use entered::{EnteredContent, EnteredInput, InputPart};
 mod index;
 mod media;
 mod metrics;

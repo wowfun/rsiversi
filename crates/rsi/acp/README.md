@@ -40,7 +40,7 @@ before closing private Session resources.
 Load captures one durable Fact horizon and replays ascending windows of at most
 64 Facts. It reads through the Session interface and crosses the peer writer
 barrier before returning. Resume performs the same private preparation without
-replay. Neither method can race an active prompt. Replay contains human input,
+replay. Neither method can race an active prompt. Replay contains human and unattended application input,
 visible conversation model text and explicit Tool records, excluding reasoning,
 provider-private state and internal compaction. Oversized wire records fail the
 operation explicitly; they are not silently omitted. Text and ResourceLink

@@ -3,10 +3,7 @@ mod spans;
 #[path = "turns.rs"]
 mod turns;
 
-use rsi_agent_session_protocol::{
-    AgentControlRecordBody, AgentMessageContent, InputMessageSource, SessionFact, SessionFactBody,
-    TurnId,
-};
+use rsi_agent_session_protocol::{AgentControlRecordBody, SessionFact, SessionFactBody, TurnId};
 use rsi_agent_turn_protocol::SessionObservation;
 use rsi_conversation::{BlockIdentity, FactField, FieldWindow, SourceIndex, SourceRef, ToolState};
 use rsi_tools_protocol::ToolContent;
@@ -22,7 +19,6 @@ const MAX_METADATA: usize = 512 * 1024;
 pub(crate) struct Block {
     pub(crate) revision: std::sync::Arc<()>,
     pub key: String,
-    message_id: Option<rsi_agent_session_protocol::MessageId>,
     pub role: &'static str,
     pub title: String,
     pub text: String,
@@ -251,7 +247,6 @@ impl Transcript {
             self.blocks.push_back(Block {
                 revision: std::sync::Arc::new(()),
                 key,
-                message_id: None,
                 role,
                 title: short(title, 512).into(),
                 text: String::new(),
@@ -337,98 +332,82 @@ impl Transcript {
             self.omitted = true;
         }
     }
-    fn message(
-        &mut self,
-        key: &str,
-        role: &'static str,
-        title: &str,
-        content: &[AgentMessageContent],
-        fact: Option<&SessionFact>,
-    ) {
-        for (index, item) in content.iter().enumerate() {
-            let text = match item {
-                AgentMessageContent::Text { text } => text.as_str(),
-                AgentMessageContent::Image { .. } => "[Image]",
-                AgentMessageContent::Reference { reference } => reference.preview.as_str(),
-            };
-            let key = format!("{key}:{index}");
-            if let Some(fact) = fact {
-                let seq = fact.seq();
-                let index = u16::try_from(index).expect("validated input content index");
-                let field = match item {
-                    AgentMessageContent::Text { .. } => FactField::InputText { index },
-                    AgentMessageContent::Image { .. } => FactField::InputImage { index },
-                    AgentMessageContent::Reference { .. } => FactField::InputReference { index },
-                };
-                let source = SourceRef { seq, field };
-                let image = rsi_conversation::MediaSource::select(fact, source)
-                    .map(rsi_conversation::MediaSource::label);
-                self.put_source(key, role, title, source, image.as_deref().unwrap_or(text));
-            } else {
-                self.add(key, role, title, text, false);
-            }
-        }
-    }
-    fn message_key(&self, id: &rsi_agent_session_protocol::MessageId) -> String {
+    pub(crate) fn merge_entered(&mut self, seq: u64, inputs: Self) {
         self.blocks
-            .iter()
-            .find(|block| block.message_id.as_ref() == Some(id))
-            .and_then(|block| block.key.rsplit_once(':').map(|(key, _)| key.to_owned()))
-            .unwrap_or_else(|| BlockIdentity::Message { message: id }.key())
+            .retain(|block| block.first_seq != seq || !block.key.starts_with("prepared:"));
+        self.blocks.extend(inputs.blocks);
+        self.blocks
+            .make_contiguous()
+            .sort_by_key(|block| block.first_seq);
+        self.omitted |= inputs.omitted;
+        self.trim();
     }
-    fn tag_message(&mut self, key: &str, id: &rsi_agent_session_protocol::MessageId) {
-        for block in &mut self.blocks {
-            if block
-                .key
-                .rsplit_once(':')
-                .is_some_and(|(prefix, _)| prefix == key)
-            {
-                block.message_id = Some(id.clone());
-            }
+
+    pub(crate) async fn history_inputs(
+        &mut self,
+        handle: &dyn rsi_session_protocol::SessionHandle,
+        facts: &[SessionFact],
+    ) -> Result<(), rsi_session_protocol::SessionError> {
+        for fact in facts {
+            rsi_client::visit_prepared_inputs(handle, fact, facts, |row| self.entered(fact, row))
+                .await?;
+            self.fact(fact);
+        }
+        Ok(())
+    }
+
+    pub(crate) fn entered(&mut self, fact: &SessionFact, row: rsi_conversation::EnteredInput<'_>) {
+        let attribution = row.attribution();
+        let role = if attribution.is_some() {
+            "status"
+        } else {
+            "user"
+        };
+        let title = attribution.as_deref().unwrap_or("You");
+        let mut parts = row.parts().peekable();
+        let seq = fact.seq();
+        self.seq = self.seq.max(seq);
+        if parts.peek().is_none() {
+            self.add(
+                format!("prepared:{seq}:{}:0", row.index),
+                role,
+                title,
+                "",
+                false,
+            );
+        }
+        for (index, (source, value)) in parts.enumerate() {
+            let image;
+            let text = match value {
+                rsi_conversation::InputPart::Text(text) => text,
+                rsi_conversation::InputPart::Image(media) => {
+                    image = rsi_conversation::MediaSource { source, media }.label();
+                    &image
+                }
+                rsi_conversation::InputPart::File(file) => {
+                    image = format!("File: {} ({} bytes)", file.name(), file.bytes());
+                    &image
+                }
+            };
+            self.put_source_at(
+                format!("prepared:{seq}:{}:{index}", row.index),
+                role,
+                title,
+                source,
+                text,
+                Some(seq),
+            );
         }
     }
+
     pub fn observation(&mut self, update: &SessionObservation) {
-        if let SessionObservation::Control { record, .. } = update {
-            self.queue.observe(record);
-        }
         match update {
             SessionObservation::Fact { fact, .. } => self.fact(fact),
-            SessionObservation::Control { record, .. } => match record.body() {
-                AgentControlRecordBody::MessageSuccessor {
-                    predecessor_id,
-                    successor_id,
-                    ..
-                } => {
-                    for block in &mut self.blocks {
-                        if block.message_id.as_ref() == Some(predecessor_id) {
-                            block.message_id = Some(successor_id.clone());
-                        }
-                    }
-                }
-                AgentControlRecordBody::MessageAccepted { message, .. } => {
-                    let human = matches!(
-                        message.source,
-                        rsi_agent_session_protocol::AgentMessageSource::Human
-                    );
-                    let key = self.message_key(&message.message_id);
-                    self.blocks.retain(|block| {
-                        block.message_id.as_ref() != Some(&message.message_id)
-                            || block
-                                .key
-                                .rsplit_once(':')
-                                .and_then(|(_, index)| index.parse::<usize>().ok())
-                                .is_some_and(|index| index < message.content.len())
-                    });
-                    self.message(
-                        &key,
-                        if human { "user" } else { "status" },
-                        if human { "You" } else { "Agent message" },
-                        &message.content,
-                        None,
-                    );
-                    self.tag_message(&key, &message.message_id);
-                }
-                AgentControlRecordBody::MessageDiscarded { message_id, reason } => {
+            SessionObservation::Control { record, .. } => {
+                self.queue.observe(record);
+                if let AgentControlRecordBody::MessageDiscarded { message_id, reason } =
+                    record.body()
+                {
                     self.add(
                         format!("discard:{message_id}"),
                         "status",
@@ -437,8 +416,7 @@ impl Transcript {
                         false,
                     );
                 }
-                _ => {}
-            },
+            }
         }
         if matches!(update, SessionObservation::Control { .. }) {
             self.turns.retain(&self.blocks, self.active.as_ref());
@@ -559,51 +537,12 @@ impl Transcript {
             field,
         };
         match fact.body() {
-            SessionFactBody::TurnAccepted { turn_id, text, .. } => {
+            SessionFactBody::TurnAccepted { turn_id, .. }
+            | SessionFactBody::MessageTurnAccepted { turn_id, .. } => {
                 if latest {
                     self.active = Some(turn_id.clone());
                     self.status = "Running".into();
                 }
-                self.put_source(
-                    BlockIdentity::TurnInput { turn: turn_id }.key(),
-                    "user",
-                    "You",
-                    source(FactField::TurnInput),
-                    text,
-                );
-            }
-            SessionFactBody::MessageTurnAccepted { turn_id, .. } => {
-                if latest {
-                    self.active = Some(turn_id.clone());
-                    self.status = "Running".into();
-                }
-            }
-            SessionFactBody::InputMessageEntered {
-                source, content, ..
-            } => {
-                let agent_title = match source {
-                    InputMessageSource::Agent {
-                        source_session_id, ..
-                    } => format!("Message from {source_session_id}"),
-                    InputMessageSource::Completion {
-                        child_session_id, ..
-                    } => format!("Completion from {child_session_id}"),
-                    _ => String::new(),
-                };
-                let (id, role, title) = match source {
-                    InputMessageSource::Human { message_id } => (message_id, "user", "You"),
-                    InputMessageSource::Continuation { message_id, .. } => {
-                        (message_id, "status", "Goal continuation")
-                    }
-                    InputMessageSource::Agent { message_id, .. }
-                    | InputMessageSource::Completion { message_id, .. } => {
-                        (message_id, "status", agent_title.as_str())
-                    }
-                    _ => return,
-                };
-                let key = self.message_key(id);
-                self.message(&key, role, title, content, Some(fact));
-                self.tag_message(&key, id);
             }
             SessionFactBody::ImageOutput {
                 turn_id,
@@ -672,6 +611,9 @@ impl Transcript {
                 let (status, detail) = match outcome {
                     rsi_agent_session_protocol::TurnOutcome::Completed => {
                         ("Completed", String::new())
+                    }
+                    rsi_agent_session_protocol::TurnOutcome::Blocked => {
+                        ("Blocked", "Input preparation blocked the request".into())
                     }
                     rsi_agent_session_protocol::TurnOutcome::Cancelled => {
                         ("Cancelled", String::new())
@@ -833,10 +775,11 @@ mod tests {
     }
 
     #[test]
-    fn queue_successor_updates_one_user_block_and_claim_adds_sources_without_duplicates() {
+    fn queue_successor_updates_the_pending_slot_without_publishing_conversation_rows() {
         use rsi_agent_session_protocol::{
-            AgentControlRecord, AgentMessage, AgentMessageSource, MessageDelivery, MessageId,
-            MessageOptions, MessageTarget, QueueSlot, SessionId, StepId,
+            AgentControlRecord, AgentMessage, AgentMessageContent, AgentMessageSource,
+            InputMessageSource, MessageDelivery, MessageId, MessageOptions, MessageTarget,
+            QueueSlot, SessionId, StepId,
         };
         let mut transcript = Transcript::default();
         let original = MessageId::new("original").unwrap();
@@ -844,7 +787,7 @@ mod tests {
         let session = SessionId::new("session").unwrap();
         let mut message = AgentMessage {
             message_id: original.clone(),
-            source: AgentMessageSource::Human,
+            source: AgentMessageSource::Human { attribution: None },
             content: vec![
                 AgentMessageContent::Text {
                     text: "old first".into(),
@@ -877,7 +820,7 @@ mod tests {
             });
         };
         observe(&mut transcript, 1, acceptance(message.clone()));
-        let key = transcript.blocks[0].key.clone();
+        assert!(transcript.blocks.is_empty());
         observe(
             &mut transcript,
             2,
@@ -892,9 +835,7 @@ mod tests {
             text: "new content".into(),
         }];
         observe(&mut transcript, 3, acceptance(message.clone()));
-        assert_eq!(transcript.blocks.len(), 1);
-        assert_eq!(transcript.blocks[0].key, key);
-        assert_eq!(transcript.blocks[0].text, "new content");
+        assert!(transcript.blocks.is_empty());
         let queue = transcript.queue.view(None);
         assert_eq!(queue.len(), 1);
         assert_eq!(queue[0].message.queue_slot.id.as_str(), "original");
@@ -902,10 +843,11 @@ mod tests {
         let fact = SessionFact::new(
             1,
             4,
-            SessionFactBody::InputMessageEntered {
+            SessionFactBody::InputMessageClaimed {
                 turn_id: TurnId::new("turn").unwrap(),
                 step_id: StepId::new("step").unwrap(),
                 source: InputMessageSource::Human {
+                    attribution: None,
                     message_id: successor,
                 },
                 content: message.content,
@@ -913,9 +855,10 @@ mod tests {
         )
         .unwrap();
         transcript.fact(&fact);
-        assert_eq!(transcript.blocks.len(), 1);
-        assert_eq!(transcript.blocks[0].key, key);
-        assert_eq!(transcript.blocks[0].sources.len(), 1);
+        assert!(
+            transcript.blocks.is_empty(),
+            "claim does not enter a message"
+        );
     }
 
     #[test]
