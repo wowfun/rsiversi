@@ -67,6 +67,7 @@ impl LocalSettingsConfig {
 #[derive(Debug)]
 struct LocalProvider {
     config: LocalSettingsConfig,
+    gate: Arc<tokio::sync::Mutex<()>>,
 }
 
 #[async_trait]
@@ -77,9 +78,13 @@ impl SettingsProvider for LocalProvider {
 
     async fn load(&self) -> Result<SettingsDocument> {
         let config = self.config.clone();
-        tokio::task::spawn_blocking(move || read_document(&config))
-            .await
-            .map_err(|error| join_error(&error))?
+        let gate = self.gate.clone().lock_owned().await;
+        tokio::task::spawn_blocking(move || {
+            let _gate = gate;
+            read_document(&config)
+        })
+        .await
+        .map_err(|error| join_error(&error))?
     }
 
     async fn compare_and_set(
@@ -96,7 +101,9 @@ impl SettingsProvider for LocalProvider {
         let namespace = namespace.to_owned();
         let expected = expected.cloned();
         let replacement = replacement.cloned();
+        let gate = self.gate.clone().lock_owned().await;
         tokio::task::spawn_blocking(move || {
+            let _gate = gate;
             let _lock = acquire_lock(&config.path)?;
             let mut document = read_document(&config)?;
             if document.get(&namespace) != expected.as_ref() {
@@ -114,7 +121,9 @@ impl SettingsProvider for LocalProvider {
             Ok(document.get(&namespace).cloned())
         })
         .await
-        .map_err(|error| join_error(&error))?
+        .map_err(|error| {
+            SettingsError::OutcomeUnknown(format!("Settings write worker failed: {error}"))
+        })?
     }
 }
 
@@ -142,7 +151,10 @@ impl PluginFactory for LocalSettingsFactory {
     async fn activate(&self, mut plan: ActivationPlan) -> rsi_meta::Result<()> {
         require_native_platform().map_err(|error| MetaError::Activation(error.to_string()))?;
         let config = plan.take_state::<LocalSettingsConfig>()?;
-        let provider = LocalProvider { config };
+        let provider = LocalProvider {
+            config,
+            gate: Arc::default(),
+        };
         provider
             .load()
             .await
@@ -320,6 +332,15 @@ fn join_error(error: &tokio::task::JoinError) -> SettingsError {
 
 #[cfg(not(windows))]
 fn atomic_write(path: &Path, bytes: &[u8]) -> Result<()> {
+    atomic_write_with_sync(path, bytes, sync_parent_directory)
+}
+
+#[cfg(not(windows))]
+fn atomic_write_with_sync(
+    path: &Path,
+    bytes: &[u8],
+    sync: impl FnOnce(&Path) -> Result<()>,
+) -> Result<()> {
     let parent = path
         .parent()
         .ok_or_else(|| SettingsError::InvalidInput("Settings path has no parent".into()))?;
@@ -334,12 +355,69 @@ fn atomic_write(path: &Path, bytes: &[u8]) -> Result<()> {
             .and_then(|()| file.sync_all())
             .map_err(|error| SettingsError::Io(error.to_string()))?;
         fs::rename(&temporary, path).map_err(|error| SettingsError::Io(error.to_string()))?;
-        sync_parent_directory(parent)
+        sync(parent).map_err(|error| SettingsError::OutcomeUnknown(error.to_string()))
     })();
     if result.is_err() {
         let _ = fs::remove_file(&temporary);
     }
     result
+}
+
+#[cfg(all(test, unix))]
+mod publication_tests {
+    use super::*;
+    #[test]
+    fn final_sync_failure_is_unknown_and_the_new_document_is_visible() {
+        let root = tempfile::tempdir().unwrap();
+        let path = root.path().join("settings.json");
+        fs::write(&path, b"old").unwrap();
+        let result = atomic_write_with_sync(&path, b"new", |_| {
+            Err(SettingsError::Io("injected final sync EIO".into()))
+        });
+        assert!(matches!(result, Err(SettingsError::OutcomeUnknown(_))));
+        assert_eq!(fs::read(&path).unwrap(), b"new");
+        assert_eq!(fs::read_dir(root.path()).unwrap().count(), 1);
+    }
+
+    #[tokio::test]
+    async fn readback_cannot_overtake_an_abandoned_write_worker() {
+        let root = tempfile::tempdir().unwrap();
+        let path = root.path().join("settings.json");
+        let provider = Arc::new(LocalProvider {
+            config: LocalSettingsConfig {
+                path: path.clone(),
+                maximum_document_bytes: 4096,
+            },
+            gate: Arc::default(),
+        });
+        // Hold the native writer lock so the actual CAS worker must wait after dispatch.
+        let lock = acquire_lock(&path).unwrap();
+        let write = tokio::spawn({
+            let provider = provider.clone();
+            async move {
+                provider
+                    .compare_and_set("target", None, Some(&serde_json::json!({"value":1})))
+                    .await
+            }
+        });
+        while provider.gate.try_lock().is_ok() {
+            tokio::task::yield_now().await;
+        }
+        write.abort();
+        assert!(write.await.unwrap_err().is_cancelled());
+        let mut read = Box::pin(provider.load());
+        assert!(
+            tokio::time::timeout(Duration::from_millis(20), read.as_mut())
+                .await
+                .is_err()
+        );
+        drop(lock);
+        let observed = tokio::time::timeout(Duration::from_secs(2), read)
+            .await
+            .unwrap()
+            .unwrap();
+        assert_eq!(observed["target"]["value"], 1);
+    }
 }
 
 #[cfg(not(windows))]
@@ -651,7 +729,7 @@ fn atomic_write_with_sequence(path: &Path, bytes: &[u8], sequence: &AtomicU64) -
         .and_then(|()| {
             namespace
                 .sync_all()
-                .map_err(|e| SettingsError::Io(format!("Settings directory sync: {e}")))
+                .map_err(|e| SettingsError::OutcomeUnknown(format!("Settings directory sync: {e}")))
         });
     if result.is_err() {
         let _ = namespace.remove_child(&staging_name);
@@ -735,6 +813,7 @@ mod windows_tests {
         };
         let provider = LocalProvider {
             config: config.clone(),
+            gate: Arc::default(),
         };
         provider
             .compare_and_set("first", None, Some(&serde_json::json!({"value":1})))
@@ -750,7 +829,13 @@ mod windows_tests {
                 .await,
             Err(SettingsError::ConcurrentDocumentChange)
         ));
-        let reopened = LocalProvider { config }.load().await.unwrap();
+        let reopened = LocalProvider {
+            config,
+            gate: Arc::default(),
+        }
+        .load()
+        .await
+        .unwrap();
         assert_eq!(reopened["first"], serde_json::json!({"value":1}));
         assert_eq!(reopened["second"], serde_json::json!({"value":2}));
         assert_eq!(std::fs::read_dir(directory).unwrap().count(), 3);
@@ -763,6 +848,7 @@ mod windows_tests {
         let path = directory.join("settings.json");
         std::fs::write(&path, br#"{"other":{"keep":true}}"#).unwrap();
         let provider = LocalProvider {
+            gate: Arc::default(),
             config: LocalSettingsConfig {
                 path,
                 maximum_document_bytes: 4096,
@@ -787,7 +873,10 @@ mod windows_tests {
             path: temp.path().join("settings.json"),
             maximum_document_bytes: 4096,
         };
-        let provider = LocalProvider { config };
+        let provider = LocalProvider {
+            config,
+            gate: Arc::default(),
+        };
         assert!(
             provider
                 .compare_and_set("first", None, Some(&serde_json::json!({})))

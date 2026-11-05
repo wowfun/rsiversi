@@ -25,6 +25,7 @@ fn service() -> Service {
         state: Arc::new(ServiceState {
             inner: Mutex::new(ServiceInner {
                 raw: SettingsDocument::new(),
+                pending: HashMap::new(),
                 migrations: HashSet::new(),
                 next_registration: 0,
                 namespaces: HashMap::new(),

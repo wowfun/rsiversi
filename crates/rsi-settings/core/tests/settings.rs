@@ -390,9 +390,21 @@ async fn panicking_provider_does_not_strand_retiring_namespace_ownership() {
             .scope
             .replace(0, json!({"model":"never-committed"}))
             .await,
-        Err(SettingsError::Io(_))
+        Err(SettingsError::OutcomeUnknown(_))
     ));
     drop(registration);
+    assert!(matches!(
+        settings.register(spec()),
+        Err(SettingsError::RecoveryRequired(_))
+    ));
+    let access = runtime
+        .root()
+        .lookup_local::<rsi_settings_protocol::SettingsAccessContract>()
+        .unwrap();
+    assert!(matches!(
+        access.read("agent").await,
+        Err(SettingsError::UnknownNamespace(_))
+    ));
     let replacement = settings
         .register(spec())
         .expect("provider panic cleanup must release retiring ownership");

@@ -1,5 +1,11 @@
 # rsi-settings-local
 
+Loads and writes share a gate owned by the blocking filesystem worker, so a
+dropped waiter cannot let a read overtake its write. Failures before publication
+are definite I/O failures; failures after rename or a dispatched write worker
+failure return `OutcomeUnknown`. Readback establishes visible state only and
+does not certify that a failed directory sync became durable.
+
 Factory preparation preserves malformed configuration as `MetaError::InvalidInput`
 and reports unavailable native capability as `MetaError::Activation`, the Meta
 category for plugin preparation and activation failure.

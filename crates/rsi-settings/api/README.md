@@ -1,5 +1,10 @@
 # rsi-settings-api
 
+Wire version 4 distinguishes namespace `recovery_required` from ordinary
+failures. An uncertain mutation maps to API `OutcomeUnknown`; prepublication I/O
+maps to `Unavailable`. Refresh uses the existing read operation to reconcile
+visible state; it does not acknowledge the failed mutation as durable.
+
 The [Settings contract](../protocol/README.md) owns the shared domain types and semantics.
 
 Ordinary endpoint and client plugins expose the registered-namespace
@@ -12,7 +17,7 @@ the actual section remains limited to 4 MiB. All operations use the Data lane.
 Replace and clear carry both registration identity and revision. Successful
 responses must retain that identity and advance the revision exactly once.
 Retired scope identities and stale revisions remain distinct domain failures.
-Malformed mutation responses and native I/O/commit-task failures preserve unknown
+Malformed mutation responses and uncertain native publication/commit-task failures preserve unknown
 outcomes; clients never replay writes. Connection failures retain their API
 classification. No secret or raw-document access is introduced by this interface.
 

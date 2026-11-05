@@ -68,6 +68,12 @@ pub enum SettingsError {
     /// Provider I/O failed.
     #[error("settings I/O failed: {0}")]
     Io(String),
+    /// Publication may have occurred; the original operation must not be replayed implicitly.
+    #[error("settings publication outcome unknown: {0}")]
+    OutcomeUnknown(String),
+    /// This namespace needs an explicit asynchronous read before further use.
+    #[error("settings namespace `{0}` requires recovery; refresh settings")]
+    RecoveryRequired(String),
 }
 
 /// Settings result.
@@ -81,6 +87,8 @@ pub trait SettingsProvider: fmt::Debug + Send + Sync + 'static {
     /// Loads and validates the complete raw document.
     async fn load(&self) -> Result<SettingsDocument>;
     /// Atomically compares and replaces one raw namespace section.
+    /// A failure after publication may begin must return `OutcomeUnknown`.
+    /// A subsequent load must follow any still-running mutation worker.
     async fn compare_and_set(
         &self,
         namespace: &str,

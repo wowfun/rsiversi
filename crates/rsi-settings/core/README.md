@@ -9,15 +9,28 @@ rechecks namespace availability and its raw snapshot before publication. A raw
 value changed by a concurrent namespace generation returns `StaleRegistration`.
 Revision exhaustion is rejected before durable write admission.
 
-Failed provider writes or validation leave the published value and revision
-unchanged. Once a durable write begins, a service-owned operation completes its
+Validation and definite prepublication failures leave the value and revision
+unchanged. An uncertain publication returns `OutcomeUnknown` and marks only its
+namespace for reconciliation. While holding write ownership, the service makes
+one provider read, bounded to five seconds, and validates the observed section
+against the namespace spec. Success replaces that section and advances its
+reserved revision even when the value is unchanged. This observation does not
+turn the original failure into a durability receipt. Failed reconciliation
+leaves synchronous reads, descriptions and writes returning `RecoveryRequired`;
+an explicit asynchronous read makes one further attempt. Other namespaces remain
+usable. Recovery markers survive registration retirement; an unregistered read
+may repair the raw cache but still returns `UnknownNamespace`. Registration must
+wait for recovery; asynchronous registration may perform that recovery first.
+Once a durable write begins, a service-owned operation completes its
 live-state publication even if the requesting future is dropped. The complete
 raw document is the sole retained raw-section authority and is updated with the
 same commit. CAS captures it after checking registration identity; later registration cannot
 reload stale activation-time state. Dropping a registration lease makes all
 escaped scopes stale and defers namespace handoff until any in-flight commit
-has converged. A provider panic fails that commit but still releases its
-in-flight namespace ownership so retirement cannot strand the name.
+has converged. A publication guard fences uncertain state on provider panic or
+task cancellation while releasing in-flight ownership. Migration uses the same
+reconciliation rule and never converts an uncertain write into a successful
+registration or automatically replays it.
 Final namespace destruction runs outside the registry lock, both on immediate
 withdrawal and after a retained commit converges. Validators may own dependent leases.
 Meta withdrawal removes service discovery and does not revoke an escaped typed

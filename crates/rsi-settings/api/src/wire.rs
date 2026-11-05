@@ -92,6 +92,7 @@ pub(crate) enum Failure {
     ConcurrentDocumentChange,
     ReadOnly,
     Corrupt,
+    RecoveryRequired,
 }
 pub(crate) fn result<T>(
     result: rsi_settings_protocol::Result<T>,
@@ -108,7 +109,12 @@ pub(crate) fn result<T>(
             SettingsError::ConcurrentDocumentChange => Failure::ConcurrentDocumentChange,
             SettingsError::ReadOnly => Failure::ReadOnly,
             SettingsError::Corrupt(_) => Failure::Corrupt,
-            SettingsError::Io(_) | SettingsError::DuplicateNamespace(_) => {
+            SettingsError::RecoveryRequired(_) => Failure::RecoveryRequired,
+            SettingsError::OutcomeUnknown(_) => return Err(ApiError::OutcomeUnknown),
+            SettingsError::Io(_) => {
+                return Err(ApiError::Unavailable);
+            }
+            SettingsError::DuplicateNamespace(_) => {
                 return Err(ApiError::Backend(
                     "settings provider or commit task failed".into(),
                 ));
@@ -139,6 +145,7 @@ impl Failure {
             Self::ConcurrentDocumentChange => SettingsError::ConcurrentDocumentChange,
             Self::ReadOnly => SettingsError::ReadOnly,
             Self::Corrupt => SettingsError::Corrupt("remote settings document is invalid".into()),
+            Self::RecoveryRequired => SettingsError::RecoveryRequired(namespace.into()),
         }
     }
 }
@@ -146,6 +153,28 @@ impl Failure {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn publication_uncertainty_and_recovery_remain_distinct_on_the_wire() {
+        assert!(matches!(
+            result::<()>(Err(SettingsError::OutcomeUnknown("private detail".into()))),
+            Err(ApiError::OutcomeUnknown)
+        ));
+        assert!(matches!(
+            result::<()>(Err(SettingsError::Io("private detail".into()))),
+            Err(ApiError::Unavailable)
+        ));
+        let failure = result::<()>(Err(SettingsError::RecoveryRequired("target".into())))
+            .unwrap()
+            .unwrap_err();
+        let encoded = serde_json::to_value(failure).unwrap();
+        assert_eq!(encoded, serde_json::json!({"code":"recovery_required"}));
+        let decoded: Failure = serde_json::from_value(encoded).unwrap();
+        assert_eq!(
+            decoded.into_error("target", None),
+            SettingsError::RecoveryRequired("target".into())
+        );
+    }
 
     #[test]
     fn unsupported_capability_is_distinct_from_invalid_input_and_redacts_provider_text() {

@@ -5,6 +5,8 @@
 #![allow(clippy::missing_errors_doc)]
 
 #[cfg(test)]
+mod recovery_tests;
+#[cfg(test)]
 mod retirement_tests;
 
 use async_trait::async_trait;
@@ -36,9 +38,111 @@ struct ServiceState {
 #[derive(Debug)]
 struct ServiceInner {
     raw: SettingsDocument,
+    pending: HashMap<String, Reconciliation>,
     migrations: HashSet<String>,
     next_registration: u64,
     namespaces: HashMap<String, NamespaceState>,
+}
+
+#[derive(Clone, Debug)]
+struct Reconciliation {
+    defaults: Value,
+    base: Value,
+    validator: Arc<dyn rsi_settings_protocol::SettingsValidator>,
+    version: Option<(u64, u64)>,
+}
+
+struct PublicationGuard {
+    state: Arc<ServiceState>,
+    namespace: String,
+    recovery: Reconciliation,
+    armed: bool,
+    in_flight: Option<InFlightCommit>,
+    write: Option<tokio::sync::OwnedMutexGuard<()>>,
+}
+impl PublicationGuard {
+    fn uncertain(&mut self) {
+        let replaced = self
+            .state
+            .inner
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .pending
+            .insert(self.namespace.clone(), self.recovery.clone());
+        self.armed = false;
+        drop(replaced);
+    }
+}
+impl Drop for PublicationGuard {
+    fn drop(&mut self) {
+        if self.armed {
+            self.uncertain();
+        }
+    }
+}
+
+/// Caller holds `write_lock` through observation and publication.
+async fn reconcile(
+    state: &ServiceState,
+    provider: &dyn SettingsProvider,
+    namespace: &str,
+) -> Result<()> {
+    let pending = state
+        .inner
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner)
+        .pending
+        .get(namespace)
+        .cloned();
+    let Some(pending) = pending else {
+        return Ok(());
+    };
+    let observed = tokio::time::timeout(std::time::Duration::from_secs(5), provider.load())
+        .await
+        .map_err(|_| SettingsError::RecoveryRequired(namespace.into()))?
+        .map_err(|_| SettingsError::RecoveryRequired(namespace.into()))?
+        .remove(namespace);
+    if let Some(raw) = &observed {
+        validate_section(raw).map_err(|_| SettingsError::RecoveryRequired(namespace.into()))?;
+    }
+    let resolved = resolve(&pending.defaults, &pending.base, observed.as_ref());
+    validate_section(&resolved)
+        .and_then(|_| pending.validator.validate(&resolved))
+        .map_err(|_| SettingsError::RecoveryRequired(namespace.into()))?;
+    let removed = {
+        let mut inner = state
+            .inner
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        match observed {
+            Some(raw) => {
+                inner.raw.insert(namespace.into(), raw);
+            }
+            None => {
+                inner.raw.remove(namespace);
+            }
+        }
+        if let Some((registration, revision)) = pending.version
+            && let Some(entry) = inner
+                .namespaces
+                .get_mut(namespace)
+                .filter(|entry| entry.registration == registration)
+        {
+            entry.resolved = resolved;
+            entry.revision = revision;
+        }
+        inner.pending.remove(namespace)
+    };
+    drop(removed);
+    Ok(())
+}
+
+fn require_reconciled(inner: &ServiceInner, namespace: &str) -> Result<()> {
+    if inner.pending.contains_key(namespace) {
+        Err(SettingsError::RecoveryRequired(namespace.into()))
+    } else {
+        Ok(())
+    }
 }
 
 #[derive(Debug)]
@@ -126,6 +230,7 @@ impl SettingsAccess for Service {
             .inner
             .lock()
             .unwrap_or_else(std::sync::PoisonError::into_inner);
+        require_reconciled(&state, namespace)?;
         let entry = state
             .namespaces
             .get(namespace)
@@ -143,6 +248,18 @@ impl SettingsAccess for Service {
         })
     }
     async fn read(&self, namespace: &str) -> Result<SettingsSnapshot> {
+        validate_namespace(namespace)?;
+        let pending = self
+            .state
+            .inner
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .pending
+            .contains_key(namespace);
+        if pending {
+            let _write = self.state.write_lock.lock().await;
+            reconcile(&self.state, self.provider.as_ref(), namespace).await?;
+        }
         self.scope(namespace)?.get()
     }
     async fn replace(
@@ -181,11 +298,30 @@ impl Service {
             if !self.provider.writable() {
                 return Err(SettingsError::ReadOnly);
             }
-            match self
+            let mut publication = PublicationGuard {
+                state: Arc::clone(&self.state),
+                namespace: spec.namespace.clone(),
+                recovery: Reconciliation {
+                    defaults: spec.defaults.clone(),
+                    base: spec.base.clone(),
+                    validator: Arc::clone(&spec.validator),
+                    version: None,
+                },
+                armed: true,
+                in_flight: None,
+                write: None,
+            };
+            let result = self
                 .provider
                 .compare_and_set(&spec.namespace, raw.as_ref(), replacement.as_ref())
-                .await
-            {
+                .await;
+            if matches!(result, Err(SettingsError::OutcomeUnknown(_))) {
+                publication.uncertain();
+                let _ = reconcile(&self.state, self.provider.as_ref(), &spec.namespace).await;
+                return result;
+            }
+            publication.armed = false;
+            match result {
                 Err(SettingsError::ConcurrentDocumentChange) if attempt < 2 => {
                     raw = self.provider.load().await?.remove(&spec.namespace);
                 }
@@ -238,6 +374,7 @@ impl Settings for Service {
         let service = self.clone();
         tokio::spawn(async move {
             let _write = service.state.write_lock.clone().lock_owned().await;
+            reconcile(&service.state, service.provider.as_ref(), &spec.namespace).await?;
             let raw = {
                 let mut state = service
                     .state
@@ -276,7 +413,9 @@ impl Settings for Service {
             service.register_inner(spec, true)
         })
         .await
-        .map_err(|error| SettingsError::Io(format!("Settings migration task failed: {error}")))?
+        .map_err(|error| {
+            SettingsError::OutcomeUnknown(format!("Settings migration task failed: {error}"))
+        })?
     }
 
     fn register(&self, spec: SettingsSpec) -> Result<SettingsRegistration> {
@@ -399,6 +538,7 @@ impl Service {
 }
 
 fn check_namespace_vacant(state: &ServiceInner, namespace: &str, migrating: bool) -> Result<()> {
+    require_reconciled(state, namespace)?;
     if state.namespaces.contains_key(namespace)
         || (!migrating && state.migrations.contains(namespace))
     {
@@ -496,28 +636,51 @@ impl Scope {
         let provider = Arc::clone(&self.provider);
         let namespace = self.namespace.clone();
         let registration = self.registration;
-        tokio::spawn(async move {
-            let in_flight = InFlightCommit {
+        let mut publication = PublicationGuard {
+            state: Arc::clone(&state),
+            namespace: namespace.clone(),
+            recovery: Reconciliation {
+                defaults,
+                base,
+                validator,
+                version: Some((registration, expected_revision + 1)),
+            },
+            armed: false,
+            in_flight: Some(InFlightCommit {
                 state: Arc::clone(&state),
                 namespace: namespace.clone(),
                 registration,
-            };
+            }),
+            write: Some(write_guard),
+        };
+        tokio::spawn(async move {
+            publication.armed = true;
             let committed = provider
                 .compare_and_set(&namespace, raw.as_ref(), replacement.as_ref())
                 .await;
+            if matches!(committed, Err(SettingsError::OutcomeUnknown(_))) {
+                publication.uncertain();
+                let _ = reconcile(&state, provider.as_ref(), &namespace).await;
+                drop(publication.in_flight.take());
+                drop(publication.write.take());
+                return Err(committed.unwrap_err());
+            }
             let result = publish_settings_commit(
                 &state,
                 &namespace,
                 registration,
                 expected_revision,
                 committed,
+                &mut publication,
             );
-            drop(in_flight);
-            drop(write_guard);
+            drop(publication.in_flight.take());
+            drop(publication.write.take());
             result
         })
         .await
-        .map_err(|error| SettingsError::Io(format!("Settings commit task failed: {error}")))?
+        .map_err(|error| {
+            SettingsError::OutcomeUnknown(format!("Settings commit task failed: {error}"))
+        })?
     }
 }
 
@@ -526,6 +689,7 @@ fn active_entry<'a>(
     namespace: &str,
     registration: u64,
 ) -> Result<&'a NamespaceState> {
+    require_reconciled(inner, namespace)?;
     inner
         .namespaces
         .get(namespace)
@@ -538,6 +702,7 @@ fn active_entry_mut<'a>(
     namespace: &str,
     registration: u64,
 ) -> Result<&'a mut NamespaceState> {
+    require_reconciled(inner, namespace)?;
     inner
         .namespaces
         .get_mut(namespace)
@@ -551,11 +716,13 @@ fn publish_settings_commit(
     registration: u64,
     expected_revision: u64,
     committed: Result<Option<Value>>,
+    publication: &mut PublicationGuard,
 ) -> Result<SettingsSnapshot> {
     let mut inner = state
         .inner
         .lock()
         .unwrap_or_else(std::sync::PoisonError::into_inner);
+    publication.armed = false;
     if let Ok(committed) = &committed {
         match committed {
             Some(value) => {
@@ -654,6 +821,7 @@ impl PluginFactory for SettingsFactory {
             state: Arc::new(ServiceState {
                 inner: Mutex::new(ServiceInner {
                     raw,
+                    pending: HashMap::new(),
                     migrations: HashSet::new(),
                     next_registration: 0,
                     namespaces: HashMap::new(),
