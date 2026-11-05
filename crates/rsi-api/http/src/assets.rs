@@ -21,6 +21,12 @@ pub enum AssetType {
     Png,
     /// Scalable SVG asset.
     Svg,
+    /// Web Open Font Format.
+    Woff,
+    /// Web Open Font Format version two.
+    Woff2,
+    /// TrueType font.
+    Ttf,
 }
 impl AssetType {
     /// Canonical media type shared by HTTP and native application delivery.
@@ -33,6 +39,9 @@ impl AssetType {
             Self::Json => "application/json",
             Self::Png => "image/png",
             Self::Svg => "image/svg+xml",
+            Self::Woff => "font/woff",
+            Self::Woff2 => "font/woff2",
+            Self::Ttf => "font/ttf",
         }
     }
 }
@@ -43,6 +52,11 @@ pub enum DocumentPolicy {
     /// Trusted application; scripts remain external and only named documents may be framed.
     Application {
         /// Root asset paths or single-segment directory prefixes ending in `/`; never URL or CSP text.
+        frame_paths: Vec<String>,
+    },
+    /// Explicit trusted extension document; permits inline styles, never inline scripts.
+    TrustedExtensionApplication {
+        /// The same bounded frame allowlist as Application.
         frame_paths: Vec<String>,
     },
     /// Opaque script-enabled document with local data resources only.
@@ -61,7 +75,7 @@ impl DocumentPolicy {
     /// Application requests retain their concrete Origin; opaque previews disclose no referrer.
     pub fn referrer_policy(&self) -> &'static str {
         match self {
-            Self::Application { .. } => "same-origin",
+            Self::Application { .. } | Self::TrustedExtensionApplication { .. } => "same-origin",
             Self::SandboxLocal | Self::SandboxHttps => "no-referrer",
         }
     }
@@ -83,7 +97,8 @@ impl DocumentPolicy {
             return Err(ApiError::Invalid("invalid document origin".into()));
         }
         match self {
-            Self::Application { frame_paths } => {
+            Self::Application { frame_paths }
+            | Self::TrustedExtensionApplication { frame_paths } => {
                 if frame_paths.len() > 32
                     || frame_paths.iter().any(|path| {
                         let name = path
@@ -114,8 +129,13 @@ impl DocumentPolicy {
                 let socket = origin
                     .strip_prefix("http://")
                     .map_or_else(String::new, |authority| format!(" ws://{authority}"));
+                let styles = if matches!(self, Self::TrustedExtensionApplication { .. }) {
+                    "style-src 'self'; style-src-elem 'self' 'unsafe-inline'; style-src-attr 'unsafe-inline'"
+                } else {
+                    "style-src 'self'"
+                };
                 Ok(format!(
-                    "default-src 'none'; script-src 'self' 'wasm-unsafe-eval'; style-src 'self'; connect-src 'self'{socket}; worker-src 'self'; img-src 'self' blob:; font-src 'self'; frame-src {frames}; base-uri 'none'; object-src 'none'; frame-ancestors 'none'; form-action 'none'"
+                    "default-src 'none'; script-src 'self' 'wasm-unsafe-eval'; {styles}; connect-src 'self'{socket}; worker-src 'self'; img-src 'self' blob:; font-src 'self'; frame-src {frames}; base-uri 'none'; object-src 'none'; frame-ancestors 'none'; form-action 'none'"
                 ))
             }
             Self::SandboxLocal | Self::SandboxHttps => {
@@ -195,6 +215,24 @@ pub(crate) fn response(
 #[cfg(test)]
 mod tests {
     use super::*;
+    #[test]
+    fn trusted_extension_styles_do_not_relax_scripts_or_the_default_policy() {
+        let policy = DocumentPolicy::TrustedExtensionApplication {
+            frame_paths: vec![],
+        }
+        .content_security_policy("http://127.0.0.1:8787")
+        .unwrap();
+        assert!(policy.contains("style-src-elem 'self' 'unsafe-inline'"));
+        assert!(policy.contains("style-src-attr 'unsafe-inline'"));
+        assert!(policy.contains("script-src 'self' 'wasm-unsafe-eval';"));
+        assert!(policy.contains("img-src 'self' blob:; font-src 'self'; frame-src 'none'"));
+        assert!(
+            !DocumentPolicy::default()
+                .content_security_policy("http://127.0.0.1:8787")
+                .unwrap()
+                .contains("unsafe-inline")
+        );
+    }
     #[test]
     fn document_origins_and_frame_paths_cannot_inject_directives() {
         assert!(

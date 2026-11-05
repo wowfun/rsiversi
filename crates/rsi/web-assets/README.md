@@ -15,11 +15,18 @@ an explicit absolute bundle directory and a closed list of flat filenames at
 activation. The compiled [bundle manifest](bundle.json) owns the fixed bootstrap set, each
 file's production stage, and initial renderer filenames. Rust admission, the
 frontend producer and development proxy consume that same source. It is build
-input, never a receipt- or renderer-supplied override. Only HTML, JavaScript, CSS, WASM, JSON, PNG and SVG
+input, never a receipt- or renderer-supplied override. Only HTML, JavaScript, CSS, WASM, JSON, PNG, SVG, WOFF, WOFF2 and TTF
 extensions are accepted; names contain ASCII letters, digits, dot, dash or
 underscore and cannot begin with dot. At most 128 files, 128 bytes per name and
 64 MiB of aggregate retained file capacity are admitted. The root document must
 be index.html and is also served at `/`.
+
+An explicitly selected application may set `trusted_inline_styles = true` for
+its root document. This selects the closed TrustedExtensionApplication policy;
+it permits style elements and attributes, while scripts and fonts remain
+same-origin. The default is false. The setting changes bootstrap identity and
+requires restart even when the HTML bytes are identical. Ordinary renderer
+staging preserves the current document policy.
 
 The native `check_bundle` example accepts one absolute bundle directory and admits
 the default bundle through this provider in an isolated Host, reports retained
@@ -97,11 +104,23 @@ metadata-only equality substitutes for byte verification.
 
 ## Product bundle admission
 
-Receipt format 2 includes the explicit `desktop_bridge` name and version baked
+Receipt format 3 includes the explicit `desktop_bridge` name and version baked
 into that build's JavaScript. The loader retains this descriptor with the verified
 bootstrap bytes. It participates in bundle identity and cannot change during a
 renderer-only publication. Desktop admission reads this retained descriptor;
 it never reopens a selected package's receipt to describe an older listener.
+
+An optional `document` section binds a closed map of additional filenames to
+SHA-256 values and the `trusted_inline_styles` choice. Verified admission reads
+this section once with the receipt, validates the ordinary filename/count bounds,
+and verifies every byte before publication. With no explicit `files` configuration,
+this selects the complete optional application document without native application
+special cases. With explicit files, the declared closure and policy must agree.
+The fixed bootstrap set remains mandatory. `pairing_receipt_with_document` is the
+build-producer entry; `check_bundle --document JSON_PATH` consumes its bounded
+`files` array and `trusted_inline_styles` boolean before writing and checking the
+receipt. Document code, additional non-renderer assets and policy remain restart
+bound. Package signatures, when present, bind this receipt as an ordinary file.
 
 The official application catalog and local Web adapter use
 `VerifiedWebAssetsFactory`, including custom application Profiles. It validates

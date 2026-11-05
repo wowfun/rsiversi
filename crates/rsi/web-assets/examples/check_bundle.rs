@@ -36,14 +36,40 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     } else {
         None
     };
+    #[derive(serde::Deserialize)]
+    #[serde(deny_unknown_fields)]
+    struct Document {
+        files: Vec<String>,
+        trusted_inline_styles: bool,
+    }
+    let document = match arguments.next() {
+        Some(flag) if flag == "--document" => {
+            use std::io::Read as _;
+            let mut bytes = Vec::new();
+            std::fs::File::open(PathBuf::from(
+                arguments.next().ok_or("missing document JSON path")?,
+            ))?
+            .take(32 * 1024 + 1)
+            .read_to_end(&mut bytes)?;
+            if bytes.len() > 32 * 1024 {
+                return Err("document JSON exceeds 32 KiB".into());
+            }
+            Some(serde_json::from_slice::<Document>(&bytes)?)
+        }
+        Some(_) => return Err("unknown option".into()),
+        None => None,
+    };
     if !directory.is_absolute() || arguments.next().is_some() {
         return Err("expected one absolute bundle directory".into());
     }
     if let Some(family) = family {
-        let receipt = rsi_web_assets::pairing_receipt(
+        let receipt = rsi_web_assets::pairing_receipt_with_document(
             &directory,
             &family,
             bridge.expect("producer descriptor"),
+            document
+                .as_ref()
+                .map(|d| (d.files.clone(), d.trusted_inline_styles)),
         )?;
         std::fs::write(directory.join("rsi-build.json"), receipt)?;
     }
@@ -61,7 +87,8 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         .start(Profile::new(vec![ProfileEntry::new(
             "assets",
             "assets",
-            serde_json::json!({"directory": directory}),
+            if let Some(document) = document { serde_json::json!({"directory":directory,"files":document.files,"trusted_inline_styles":document.trusted_inline_styles}) }
+            else { serde_json::json!({"directory": directory}) },
         )]))
         .await?;
     let bytes = running

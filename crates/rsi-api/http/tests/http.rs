@@ -18,18 +18,81 @@ use tokio::{
 use tokio_util::sync::CancellationToken;
 
 const TOKEN: &str = "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa";
+const SECOND_TOKEN: &str = "1905c16e76c5449284d7c08419d4128950e3de60fb9f47d9ad5800b17b3c36bd";
+fn browser_cookie(origin: &str, token: &str) -> String {
+    use sha2::Digest as _;
+    let uri: http::Uri = origin.parse().unwrap();
+    format!(
+        "rsi-device-{}={token}",
+        hex::encode(sha2::Sha256::digest(
+            uri.authority().unwrap().as_str().as_bytes()
+        ))
+    )
+}
+
+#[tokio::test]
+async fn login_cookies_cover_application_paths_and_are_scoped_to_authority() {
+    let first = Harness::start().await;
+    let second = Harness::start_with_bootstrap(
+        false,
+        None,
+        Some(Arc::new(Bootstrap(std::sync::atomic::AtomicBool::new(
+            false,
+        )))),
+    )
+    .await;
+    let mut saved = Vec::new();
+    for listener in [&first, &second] {
+        let response = Harness::client()
+            .post(format!("{}/api/v2/login", listener.origin))
+            .header("origin", &listener.origin)
+            .header("x-rsi-csrf", "1")
+            .bearer_auth(TOKEN)
+            .send()
+            .await
+            .unwrap();
+        let value = response
+            .headers()
+            .get("set-cookie")
+            .unwrap()
+            .to_str()
+            .unwrap();
+        assert!(value.contains("; Path=/; HttpOnly; SameSite=Strict;"));
+        saved.push(value.split(';').next().unwrap().to_owned());
+    }
+    assert_ne!(saved[0], saved[1]);
+    let request = Harness::client()
+        .post(format!("{}/api/v2/browser-bootstrap", second.origin))
+        .header("origin", &second.origin)
+        .header("x-rsi-csrf", "1")
+        .header("cookie", &saved[0]);
+    assert_eq!(request.send().await.unwrap().status(), 401);
+    first.close().await;
+    second.close().await;
+}
+
+#[path = "http/application_upstream.rs"]
+mod application_upstream;
 #[path = "http/browser_stream.rs"]
 mod browser_stream;
-#[derive(Debug)]
-struct Authentication(CancellationToken);
+#[derive(Debug, Default)]
+struct Authentication {
+    first: CancellationToken,
+    second: CancellationToken,
+}
 impl DeviceAuthentication for Authentication {
     fn authenticate(&self, token: &SecretValue) -> Result<AuthenticatedDevice> {
-        if token.expose_secret() != TOKEN || self.0.is_cancelled() {
+        let (id, revoked) = match token.expose_secret() {
+            TOKEN => (DeviceId::from_bytes([1; 16]), &self.first),
+            SECOND_TOKEN => (DeviceId::from_bytes([2; 16]), &self.second),
+            _ => return Err(ApiError::Unauthorized),
+        };
+        if revoked.is_cancelled() {
             return Err(ApiError::Unauthorized);
         }
         Ok(AuthenticatedDevice {
-            id: DeviceId::from_bytes([1; 16]),
-            revoked: self.0.clone(),
+            id,
+            revoked: revoked.clone(),
         })
     }
 }
@@ -78,12 +141,20 @@ impl Harness {
         assets: Option<Arc<dyn rsi_api_http::HttpAssets>>,
         bootstrap: Option<Arc<dyn rsi_api_http::BrowserBootstrap>>,
     ) -> Self {
+        Self::start_with_surfaces(tls, assets, bootstrap, None).await
+    }
+    async fn start_with_surfaces(
+        tls: bool,
+        assets: Option<Arc<dyn rsi_api_http::HttpAssets>>,
+        bootstrap: Option<Arc<dyn rsi_api_http::BrowserBootstrap>>,
+        upstream: Option<Arc<rsi_api_http::ApplicationUpstream>>,
+    ) -> Self {
         let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
         let address = listener.local_addr().unwrap();
         let origin = format!("{}://{address}", if tls { "https" } else { "http" });
         let execution = Execution::native(tokio::runtime::Handle::current());
         let registry = Arc::new(ApiRegistry::new(execution.clone()));
-        let authentication = Arc::new(Authentication(CancellationToken::new()));
+        let authentication = Arc::new(Authentication::default());
         let epoch = HostEpoch::from_bytes([3; 16]);
         let connection = rsi_api::ConnectionApi::register(
             registry.clone(),
@@ -107,6 +178,12 @@ impl Harness {
         let server = HttpServer::from_listener(execution, listener, config, services)
             .await
             .unwrap();
+        let server = if let Some(upstream) = upstream {
+            server
+                .with_application_upstream(Arc::new(rsi_api_http::ApplicationRoutes::new(upstream)))
+        } else {
+            server
+        };
         let server = if let Some(assets) = assets {
             server.with_assets(assets)
         } else {
@@ -189,7 +266,7 @@ async fn expected_device_is_checked_before_domain_dispatch_and_cookie_removal() 
             .post(format!("{}/api/v2/logout", harness.origin))
             .header("origin", &harness.origin)
             .header("x-rsi-csrf", "1")
-            .header("cookie", format!("rsi-device={TOKEN}"))
+            .header("cookie", browser_cookie(&harness.origin, TOKEN))
             .header("x-rsi-expected-device", identity.as_str())
             .send()
             .await
@@ -219,7 +296,7 @@ async fn expected_device_is_checked_before_domain_dispatch_and_cookie_removal() 
         .post(format!("{}/api/v2/logout", harness.origin))
         .header("origin", &harness.origin)
         .header("x-rsi-csrf", "1")
-        .header("cookie", format!("rsi-device={TOKEN}"))
+        .header("cookie", browser_cookie(&harness.origin, TOKEN))
         .send()
         .await
         .unwrap();
@@ -1272,7 +1349,7 @@ async fn revocation_releases_read_work_but_preserves_already_admitted_writes() {
         let (gate, registration) = blocked(&harness, effect);
         let socket = harness.raw("test/blocked").await;
         gate.entered.acquire().await.unwrap().forget();
-        harness.authentication.0.cancel();
+        harness.authentication.first.cancel();
         if effect == OperationEffect::Mutation {
             assert_eq!(gate.dropped.available_permits(), 0);
             gate.release.add_permits(1);
@@ -1352,7 +1429,7 @@ impl rsi_meta::PluginFactory for EndpointDependencies {
         let authentication = plan
             .context()
             .provide_local::<rsi_api_protocol::DeviceAuthenticationContract>(Arc::new(
-                Authentication(CancellationToken::new()),
+                Authentication::default(),
             ))?;
         let endpoint = plan
             .context()
@@ -1510,7 +1587,7 @@ async fn revocation_releases_an_idle_domain_subscription_without_polling_the_htt
         .await
         .unwrap();
     assert_eq!(response.status(), 200);
-    harness.authentication.0.cancel();
+    harness.authentication.first.cancel();
     tokio::time::timeout(Duration::from_secs(2), dropped.acquire())
         .await
         .unwrap()
@@ -2093,7 +2170,7 @@ async fn browser_bootstrap_fences_before_consumption_and_recovers_only_authentic
             .status(),
         401
     );
-    harness.authentication.0.cancel();
+    harness.authentication.first.cancel();
     assert_eq!(
         request()
             .header("origin", &harness.origin)
@@ -2112,7 +2189,7 @@ async fn browser_bootstrap_explicit_ticket_replaces_cookies_without_authenticati
     for old_token in ["a".repeat(64), "c".repeat(64)] {
         let ticket = Arc::new(Bootstrap(std::sync::atomic::AtomicBool::new(false)));
         let harness = Harness::start_with_bootstrap(false, None, Some(ticket.clone())).await;
-        let cookie = format!("rsi-device={old_token}");
+        let cookie = browser_cookie(&harness.origin, &old_token);
         let request = || {
             Harness::client()
                 .post(format!("{}/api/v2/browser-bootstrap", harness.origin))
@@ -2143,7 +2220,7 @@ async fn browser_bootstrap_explicit_ticket_replaces_cookies_without_authenticati
             .next()
             .unwrap()
             .to_owned();
-        assert_eq!(new_cookie, format!("rsi-device={}", "a".repeat(64)));
+        assert_eq!(new_cookie, browser_cookie(&harness.origin, &"a".repeat(64)));
         // Even a valid cookie cannot conceal a definitively rejected launch ticket.
         assert_eq!(
             request()
@@ -2172,7 +2249,7 @@ async fn browser_bootstrap_explicit_ticket_replaces_cookies_without_authenticati
 async fn browser_bootstrap_revocation_during_launch_never_restores_device_authority() {
     let ticket = Arc::new(Bootstrap(std::sync::atomic::AtomicBool::new(false)));
     let harness = Harness::start_with_bootstrap(false, None, Some(ticket.clone())).await;
-    harness.authentication.0.cancel();
+    harness.authentication.first.cancel();
     let response = Harness::client()
         .post(format!("{}/api/v2/browser-bootstrap", harness.origin))
         .header("origin", &harness.origin)

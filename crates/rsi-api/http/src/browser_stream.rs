@@ -42,7 +42,7 @@ pub(crate) struct Pending {
     revoked: CancellationToken,
 }
 
-pub(crate) fn prepare(
+pub(crate) async fn prepare(
     state: &State,
     mut request: Request<Incoming>,
     delivery: &Delivery,
@@ -92,9 +92,12 @@ pub(crate) fn prepare(
         "sec-websocket-protocol",
         protocol.parse().map_err(|_| ApiError::Unauthorized)?,
     );
-    let caller = state
+    let mut caller = state
         .access
         .authenticate_socket(request.headers(), &preface.device)?;
+    if let rsi_api_protocol::CallOrigin::Device(device) = &mut caller.origin {
+        state.bind_browser(device).await?;
+    }
     if preface.epoch != state.epoch {
         return Err(ApiError::ShuttingDown);
     }

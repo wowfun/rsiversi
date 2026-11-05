@@ -27,6 +27,25 @@ pub(crate) struct Caller {
     pub origin: CallOrigin,
     pub revoked: CancellationToken,
 }
+impl crate::server::State {
+    pub(super) async fn bind_browser(&self, device: &mut AuthenticatedDevice) -> Result<()> {
+        use sha2::{Digest, Sha256};
+        device.id = if let Some(owner) = &self.browser_owner {
+            owner.owner_id().await?
+        } else {
+            let mut hash = Sha256::new();
+            hash.update(b"rsi.http.browser-owner\0");
+            hash.update(self.endpoint.as_str().as_bytes());
+            let mut bytes = [0; 16];
+            bytes.copy_from_slice(&hash.finalize()[..16]);
+            DeviceId::from_bytes(bytes)
+        };
+        if device.revoked.is_cancelled() {
+            return Err(ApiError::Unauthorized);
+        }
+        Ok(())
+    }
+}
 impl Access {
     #[cfg_attr(
         not(any(unix, windows)),
@@ -92,10 +111,40 @@ impl Access {
         }
         Ok(caller)
     }
+
+    /// Application documents use ordinary fetch, image and WebSocket requests.
+    /// Browser-supplied Fetch Metadata and Origin fence their cookie authority;
+    /// native API authentication keeps its independent CSRF and epoch rules.
+    pub(super) fn application_device(
+        &self,
+        headers: &http::HeaderMap,
+        safe_read: bool,
+        websocket: bool,
+    ) -> Result<AuthenticatedDevice> {
+        let (policy, authentication) = self.remote()?;
+        let site = one(headers, "sec-fetch-site")?;
+        let direct_navigation = safe_read
+            && site == Some("none")
+            && one(headers, "sec-fetch-mode")? == Some("navigate")
+            && one(headers, "sec-fetch-dest")? == Some("document");
+        let socket_without_metadata = websocket && site.is_none();
+        if (site != Some("same-origin") && !direct_navigation && !socket_without_metadata)
+            || (!safe_read && one(headers, "origin")? != Some(policy.origin.as_str()))
+            || one(headers, "authorization")?.is_some()
+        {
+            return Err(ApiError::Unauthorized);
+        }
+        let token = device_cookie(headers, policy)?.ok_or(ApiError::Unauthorized)?;
+        let device = authenticate_token(authentication.as_ref(), token)?;
+        if expected_device(headers)?.is_some_and(|expected| expected != device.id) {
+            return Err(ApiError::Unauthorized);
+        }
+        Ok(device)
+    }
     fn authenticate_device(&self, headers: &http::HeaderMap) -> Result<AuthenticatedDevice> {
         let (policy, authentication) = self.remote()?;
         let bearer = one(headers, "authorization")?;
-        let cookie = device_cookie(headers)?;
+        let cookie = device_cookie(headers, policy)?;
         let token = match (bearer, cookie) {
             (Some(bearer), None) => bearer
                 .strip_prefix("Bearer ")
@@ -121,7 +170,7 @@ impl Access {
         {
             return Err(ApiError::Unauthorized);
         }
-        let token = device_cookie(headers)?.ok_or(ApiError::Unauthorized)?;
+        let token = device_cookie(headers, policy)?.ok_or(ApiError::Unauthorized)?;
         let device = authenticate_token(authentication.as_ref(), token)?;
         if &device.id != expected {
             return Err(ApiError::Unauthorized);
@@ -145,7 +194,7 @@ impl Access {
             return Err(ApiError::Unauthorized);
         }
         // Classify all credential headers before consuming one-use authority.
-        let _cookie = device_cookie(headers)?;
+        let _cookie = device_cookie(headers, policy)?;
         let expected = expected_device(headers)?;
         let (device, token) = if let Some(ticket) = one(headers, "x-rsi-launch-ticket")? {
             if expected.is_some()
@@ -182,7 +231,7 @@ impl Access {
         if let Some(token) = token {
             response.headers_mut().insert(
                 "set-cookie",
-                device_cookie_value(token.expose_secret(), policy.secure)?,
+                device_cookie_value(token.expose_secret(), policy)?,
             );
         }
         Ok(response)
@@ -200,7 +249,7 @@ impl Access {
             return Err(ApiError::Invalid("cookie operations have no body".into()));
         }
         let expected = expected_device(headers)?;
-        let cookie_present = device_cookie(headers)?.is_some();
+        let cookie_present = device_cookie(headers, policy)?.is_some();
         if path.ends_with("/logout") && cookie_present && expected.is_none() {
             return Err(ApiError::Unauthorized);
         }
@@ -215,12 +264,16 @@ impl Access {
             let bearer = one(headers, "authorization")?
                 .and_then(|value| value.strip_prefix("Bearer "))
                 .ok_or(ApiError::Unauthorized)?;
-            device_cookie_value(bearer, policy.secure)?
+            device_cookie_value(bearer, policy)?
                 .to_str()
                 .map_err(|_| ApiError::Unauthorized)?
                 .to_owned()
         } else {
-            "rsi-device=; Path=/api; HttpOnly; SameSite=Strict; Max-Age=0".into()
+            format!(
+                "{}=; Path=/; HttpOnly; SameSite=Strict; Max-Age=0{}",
+                cookie_name(policy),
+                if policy.secure { "; Secure" } else { "" }
+            )
         };
         let mut response = Response::new(full(Bytes::from_static(b"{}")));
         response.headers_mut().insert(
@@ -251,11 +304,16 @@ fn expected_device(headers: &http::HeaderMap) -> Result<Option<DeviceId>> {
         .map(DeviceId::parse)
         .transpose()
 }
-fn device_cookie(headers: &http::HeaderMap) -> Result<Option<&str>> {
+fn device_cookie<'a>(
+    headers: &'a http::HeaderMap,
+    policy: &crate::policy::Policy,
+) -> Result<Option<&'a str>> {
+    let name = cookie_name(policy);
     let mut cookie = None;
     if let Some(cookies) = one(headers, "cookie")? {
         for part in cookies.split(';') {
-            if let Some(value) = part.trim().strip_prefix("rsi-device=")
+            if let Some((key, value)) = part.trim().split_once('=')
+                && key == name
                 && cookie.replace(value).is_some()
             {
                 return Err(ApiError::Unauthorized);
@@ -265,10 +323,18 @@ fn device_cookie(headers: &http::HeaderMap) -> Result<Option<&str>> {
     Ok(cookie)
 }
 
-fn device_cookie_value(token: &str, secure: bool) -> Result<http::HeaderValue> {
+fn cookie_name(policy: &crate::policy::Policy) -> String {
+    use sha2::Digest as _;
     format!(
-        "rsi-device={token}; Path=/api; HttpOnly; SameSite=Strict; Max-Age=2592000{}",
-        if secure { "; Secure" } else { "" }
+        "rsi-device-{}",
+        hex::encode(sha2::Sha256::digest(policy.authority.as_bytes()))
+    )
+}
+fn device_cookie_value(token: &str, policy: &crate::policy::Policy) -> Result<http::HeaderValue> {
+    format!(
+        "{}={token}; Path=/; HttpOnly; SameSite=Strict; Max-Age=2592000{}",
+        cookie_name(policy),
+        if policy.secure { "; Secure" } else { "" }
     )
     .parse()
     .map_err(|_| ApiError::Unauthorized)

@@ -49,7 +49,9 @@ pub struct HttpServices {
 #[derive(Debug)]
 pub(crate) struct State {
     pub assets: Option<Arc<dyn crate::HttpAssets>>,
+    pub upstream: Option<Arc<crate::ApplicationRoutes>>,
     pub bootstrap: Option<Arc<dyn crate::BrowserBootstrap>>,
+    pub browser_owner: Option<Arc<dyn crate::BrowserOwner>>,
     pub asset_deliveries: Arc<Semaphore>,
     pub diagnostics: crate::HttpDiagnostics,
     pub dispatch: Arc<dyn ApiDispatch>,
@@ -79,6 +81,9 @@ impl std::fmt::Debug for HttpServer {
 }
 
 impl HttpServer {
+    pub(crate) fn set_browser_owner(&mut self, owner: Option<Arc<dyn crate::BrowserOwner>>) {
+        self.state.browser_owner = owner;
+    }
     /// Validates policy and TLS assets before binding its configured listening address.
     pub async fn bind(
         execution: Execution,
@@ -131,7 +136,9 @@ impl HttpServer {
             listener,
             state: State {
                 assets: None,
+                upstream: None,
                 bootstrap: None,
+                browser_owner: None,
                 asset_deliveries: Arc::new(Semaphore::new(8)),
                 diagnostics: crate::HttpDiagnostics::default(),
                 dispatch: services.dispatch,
@@ -147,6 +154,13 @@ impl HttpServer {
             },
             tls,
         }
+    }
+
+    /// Binds streaming application routes before this listener starts.
+    #[must_use]
+    pub fn with_application_upstream(mut self, upstream: Arc<crate::ApplicationRoutes>) -> Self {
+        self.state.upstream = Some(upstream);
+        self
     }
 
     /// Adds an explicitly owned immutable asset capability before this listener starts.
@@ -262,8 +276,13 @@ pub(crate) async fn serve_connection<T: AsyncRead + AsyncWrite + Unpin + Send + 
         let connection = connection.clone();
         let pending = pending.clone();
         async move {
-            let mut response = if crate::browser_stream::is_upgrade(&request) {
-                match crate::browser_stream::prepare(&state, request, &connection) {
+            let application_route = state
+                .upstream
+                .as_ref()
+                .is_some_and(|u| u.current().owns(request.uri().path()));
+            let mut response = if !application_route && crate::browser_stream::is_upgrade(&request)
+            {
+                match crate::browser_stream::prepare(&state, request, &connection).await {
                     Ok((response, socket)) => {
                         *pending.lock().expect("upgrade slot poisoned") = Some(socket);
                         state.decorate(response, http::Version::HTTP_11)
@@ -377,6 +396,13 @@ impl State {
 
     fn decorate(&self, mut response: Response<Body>, version: http::Version) -> Response<Body> {
         self.diagnostics.response(response.status());
+        let cache = response
+            .extensions_mut()
+            .remove::<crate::upstream::ApplicationCache>()
+            .map_or_else(
+                || http::HeaderValue::from_static("no-store"),
+                |cache| cache.0,
+            );
         let headers = response.headers_mut();
         headers.insert(
             "x-rsi-http-version",
@@ -386,7 +412,7 @@ impl State {
                 "1.1"
             }),
         );
-        headers.insert("cache-control", http::HeaderValue::from_static("no-store"));
+        headers.insert("cache-control", cache);
         headers.insert(
             "x-content-type-options",
             http::HeaderValue::from_static("nosniff"),
@@ -412,6 +438,11 @@ impl State {
         connection: &Delivery,
     ) -> Result<Response<Body>> {
         self.access.fence(&request)?;
+        if let Some(upstream) = self.upstream.as_ref().map(|routes| routes.current())
+            && upstream.owns(request.uri().path())
+        {
+            return upstream.forward(self, request).await;
+        }
         if request.method() == http::Method::GET
             && let Some(assets) = &self.assets
         {
@@ -437,6 +468,13 @@ impl State {
                 origin,
             );
         }
+        self.handle_api(request, connection).await
+    }
+    async fn handle_api(
+        &self,
+        request: Request<Incoming>,
+        connection: &Delivery,
+    ) -> Result<Response<Body>> {
         if request.method() != http::Method::POST || request.uri().query().is_some() {
             return Err(ApiError::Invalid(
                 "API requires POST without query parameters".into(),
@@ -459,7 +497,7 @@ impl State {
         ) {
             return self.access.cookie(path, &parts.headers, &body);
         }
-        let caller = self.access.authenticate(&parts.headers)?;
+        let mut caller = self.access.authenticate(&parts.headers)?;
         let operation = operation(path)?;
         if operation != rsi_api_protocol::describe_operation().call()
             && one(&parts.headers, "x-rsi-host-epoch")? != Some(self.epoch.as_str())
@@ -472,6 +510,12 @@ impl State {
             return Err(ApiError::Unavailable);
         }
         let content_type = request_content_type(&parts.headers)?;
+        if !parts.headers.contains_key(http::header::AUTHORIZATION)
+            && operation != rsi_api_protocol::caller_operation().call()
+            && let rsi_api_protocol::CallOrigin::Device(device) = &mut caller.origin
+        {
+            self.bind_browser(device).await?;
+        }
         let invocation = self.dispatch.admit(&operation, caller.origin)?;
         let spec = invocation.spec().clone();
         let mime = match spec.encoding {

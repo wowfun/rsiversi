@@ -7,13 +7,16 @@ license.workspace = true
 publish = false
 
 [dependencies]
+getrandom.workspace = true
+hex.workspace = true
+sha2.workspace = true
 async-stream.workspace = true
 async-trait.workspace = true
 bytes.workspace = true
 futures-util.workspace = true
 http.workspace = true
 http-body-util.workspace = true
-hyper = { workspace = true, features = ["http2"] }
+hyper = { workspace = true, features = ["client", "http2"] }
 hyper-util.workspace = true
 rsi-api-protocol = { path = "../protocol" }
 rsi-credentials-protocol = { path = "../../rsi-credentials/protocol" }

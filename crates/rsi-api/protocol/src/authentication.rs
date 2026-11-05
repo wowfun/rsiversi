@@ -36,7 +36,8 @@ pub struct RegisteredDevice {
     pub token: SecretValue,
 }
 
-/// Authentication result issued by the credential owner, never decoded from a request.
+/// Revocable device-authenticated actor. A browser transport can bind the
+/// verified credential to the deployment's shared owner for domain operations.
 #[derive(Clone, Debug)]
 pub struct AuthenticatedDevice {
     /// Identity used for admission and domain draft ownership.

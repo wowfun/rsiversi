@@ -9,6 +9,100 @@ use std::{path::Path, sync::Arc};
 
 const FAMILY: &str = "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa";
 
+#[tokio::test]
+async fn declared_document_closure_is_verified_and_policy_changes_require_restart() {
+    let root = bundle();
+    renderer(root.path(), b"fixture renderer");
+    std::fs::write(root.path().join("original.js"), b"original plugin").unwrap();
+    std::fs::write(root.path().join("font.woff2"), b"font bytes").unwrap();
+    let mut declared = files(root.path());
+    declared.extend(["original.js".into(), "font.woff2".into()]);
+    let write = |inline| {
+        std::fs::write(
+            root.path().join("rsi-build.json"),
+            rsi_web_assets::pairing_receipt_with_document(
+                root.path(),
+                FAMILY,
+                rsi_api_protocol::ProtocolDescriptor {
+                    name: "rsi.desktop.bridge".into(),
+                    version: 5,
+                },
+                Some((declared.clone(), inline)),
+            )
+            .unwrap(),
+        )
+        .unwrap()
+    };
+    write(true);
+    let mut builder = HostBuilder::without_paths("document-closure");
+    builder
+        .register_local_contract::<HttpAssetsContract>()
+        .unwrap();
+    builder
+        .register_local_contract::<WebAssetControlContract>()
+        .unwrap();
+    builder
+        .register_linked(
+            "assets",
+            "1",
+            UpdateMode::RestartRequired,
+            Arc::new(rsi_web_assets::VerifiedWebAssetsFactory),
+        )
+        .unwrap();
+    let host = builder.build().unwrap();
+    let profile = || {
+        Profile::new(vec![ProfileEntry::new(
+            "assets",
+            "assets",
+            serde_json::json!({"directory":root.path()}),
+        )])
+    };
+    let running = host.start(profile()).await.unwrap();
+    let assets = running.lookup_local::<HttpAssetsContract>().unwrap();
+    assert_eq!(
+        assets.get("/font.woff2").unwrap().unwrap().kind.mime(),
+        "font/woff2"
+    );
+    assert_eq!(
+        assets
+            .get("/original.js")
+            .unwrap()
+            .unwrap()
+            .bytes
+            .as_bytes(),
+        b"original plugin"
+    );
+    assert!(matches!(
+        assets.get("/").unwrap().unwrap().policy,
+        rsi_api_http::DocumentPolicy::TrustedExtensionApplication { .. }
+    ));
+    let control = running.lookup_local::<WebAssetControlContract>().unwrap();
+    let revision = control.revision().unwrap();
+    write(false);
+    let candidate = control
+        .stage_verified(root.path().to_owned())
+        .unwrap()
+        .wait()
+        .await
+        .unwrap();
+    assert!(matches!(
+        candidate.publish(&revision),
+        Err(rsi_web_assets::AssetError::RestartRequired)
+    ));
+    drop(candidate);
+    assert_eq!(control.revision().unwrap(), revision);
+    std::fs::write(root.path().join("original.js"), b"tampered").unwrap();
+    assert!(
+        control
+            .stage_verified(root.path().to_owned())
+            .unwrap()
+            .wait()
+            .await
+            .is_err()
+    );
+    assert!(running.shutdown().await.is_clean());
+}
+
 fn bundle() -> tempfile::TempDir {
     let root = tempfile::tempdir().unwrap();
     for file in BOOTSTRAP_FILES {

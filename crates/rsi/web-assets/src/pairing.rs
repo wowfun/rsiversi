@@ -45,11 +45,50 @@ impl PluginFactory for VerifiedWebAssetsFactory {
 
 #[derive(Deserialize, Serialize)]
 #[serde(deny_unknown_fields)]
-struct Receipt {
+pub(super) struct Receipt {
     format: u8,
     family_sha256: String,
     bootstrap: BTreeMap<String, String>,
     desktop_bridge: rsi_api_protocol::ProtocolDescriptor,
+    document: Option<Document>,
+}
+
+#[derive(Deserialize, Serialize)]
+#[serde(deny_unknown_fields)]
+struct Document {
+    files: BTreeMap<String, String>,
+    trusted_inline_styles: bool,
+}
+
+impl Receipt {
+    pub(super) fn configure(&self, config: &mut Config) -> AssetResult<()> {
+        if let Some(document) = &self.document {
+            let declared: Vec<_> = BOOTSTRAP
+                .iter()
+                .map(|s| (*s).to_owned())
+                .chain(document.files.keys().cloned())
+                .collect();
+            if config.discover_renderers {
+                config.files = declared;
+                config.trusted_inline_styles = document.trusted_inline_styles;
+                config.discover_renderers = false;
+            } else if config.trusted_inline_styles != document.trusted_inline_styles
+                || config
+                    .files
+                    .iter()
+                    .collect::<std::collections::BTreeSet<_>>()
+                    != declared.iter().collect()
+            {
+                return Err(AssetError::Invalid(
+                    "explicit assets differ from the document receipt".into(),
+                ));
+            }
+            config
+                .validate()
+                .map_err(|e| AssetError::Invalid(e.to_string()))?;
+        }
+        Ok(())
+    }
 }
 
 /// Exact-family fixture admission; expected identity cannot come from Profile config.
@@ -115,12 +154,11 @@ impl PluginFactory for PairedWebAssetsFactory {
     }
 }
 
-pub(super) fn verify(
+pub(super) fn read(
     directory: &AssetDirectory,
     path: &Path,
     identity: &Identity,
-    files: &BTreeMap<String, HttpAsset>,
-) -> AssetResult<rsi_api_protocol::ProtocolDescriptor> {
+) -> AssetResult<Receipt> {
     let failure = |detail: String| AssetError::Invalid(format!("Web bundle: {detail}. {REBUILD}"));
     let file = open_file(directory, path, RECEIPT)
         .map_err(|_| failure(format!("missing or unreadable {RECEIPT}")))?;
@@ -139,7 +177,7 @@ pub(super) fn verify(
     }
     let receipt: Receipt =
         serde_json::from_slice(&bytes).map_err(|_| failure("invalid receipt JSON".into()))?;
-    if receipt.format != 2
+    if receipt.format != 3
         || receipt.family_sha256.len() != 64
         || !receipt.family_sha256.bytes().all(|b| b.is_ascii_hexdigit())
         || matches!(identity, Identity::Exact(expected) if &receipt.family_sha256 != expected)
@@ -155,6 +193,14 @@ pub(super) fn verify(
             "receipt format or family mismatch (actual {actual})"
         )));
     }
+    Ok(receipt)
+}
+
+pub(super) fn verify(
+    receipt: Receipt,
+    files: &BTreeMap<String, HttpAsset>,
+) -> AssetResult<rsi_api_protocol::ProtocolDescriptor> {
+    let failure = |detail: String| AssetError::Invalid(format!("Web bundle: {detail}. {REBUILD}"));
     if receipt.bootstrap.len() != BOOTSTRAP.len() {
         return Err(failure("bootstrap file set differs".into()));
     }
@@ -166,6 +212,25 @@ pub(super) fn verify(
         if receipt.bootstrap.get(*name) != Some(&actual) {
             return Err(failure(format!("bootstrap digest mismatch for {name}")));
         }
+    }
+    if let Some(document) = &receipt.document {
+        for (name, digest) in &document.files {
+            let asset = files
+                .get(&format!("/{name}"))
+                .ok_or_else(|| failure(format!("missing document asset {name}")))?;
+            if format!("{:x}", Sha256::digest(asset.bytes.as_bytes())) != *digest {
+                return Err(failure(format!(
+                    "document asset digest mismatch for {name}"
+                )));
+            }
+        }
+    }
+    let inline = receipt
+        .document
+        .as_ref()
+        .is_some_and(|document| document.trusted_inline_styles);
+    if files["/index.html"].policy != super::application_policy(inline) {
+        return Err(failure("document policy differs from its receipt".into()));
     }
     receipt
         .desktop_bridge
@@ -184,6 +249,17 @@ pub fn pairing_receipt(
     family: &str,
     desktop_bridge: rsi_api_protocol::ProtocolDescriptor,
 ) -> AssetResult<Vec<u8>> {
+    pairing_receipt_with_document(directory, family, desktop_bridge, None)
+}
+
+/// Creates a receipt binding an optional complete document closure and style policy.
+/// The file list includes the fixed bootstrap and all additional assets.
+pub fn pairing_receipt_with_document(
+    directory: &Path,
+    family: &str,
+    desktop_bridge: rsi_api_protocol::ProtocolDescriptor,
+    document: Option<(Vec<String>, bool)>,
+) -> AssetResult<Vec<u8>> {
     desktop_bridge
         .validate()
         .map_err(|e| AssetError::Invalid(e.to_string()))?;
@@ -197,8 +273,12 @@ pub fn pairing_receipt(
     }
     let config = Config {
         directory: directory.to_owned(),
-        files: BOOTSTRAP.iter().map(|s| (*s).to_owned()).collect(),
+        files: document.as_ref().map_or_else(
+            || BOOTSTRAP.iter().map(|s| (*s).to_owned()).collect(),
+            |(files, _)| files.clone(),
+        ),
         watch: false,
+        trusted_inline_styles: document.as_ref().is_some_and(|(_, inline)| *inline),
         pairing: None,
         discover_renderers: false,
     };
@@ -211,6 +291,28 @@ pub fn pairing_receipt(
         &rsi_api_protocol::ByteBudget::default(),
         None,
     )?;
+    if BOOTSTRAP
+        .iter()
+        .any(|name| !files.files.contains_key(&format!("/{name}")))
+    {
+        return Err(AssetError::Invalid(
+            "document is missing a fixed bootstrap asset".into(),
+        ));
+    }
+    let document = document.map(|(_, trusted_inline_styles)| Document {
+        trusted_inline_styles,
+        files: files
+            .files
+            .iter()
+            .filter(|(path, _)| !BOOTSTRAP.contains(&path.trim_start_matches('/')))
+            .map(|(path, asset)| {
+                (
+                    path.trim_start_matches('/').to_owned(),
+                    format!("{:x}", Sha256::digest(asset.bytes.as_bytes())),
+                )
+            })
+            .collect(),
+    });
     let bootstrap = BOOTSTRAP
         .iter()
         .map(|name| {
@@ -224,7 +326,8 @@ pub fn pairing_receipt(
         })
         .collect();
     serde_json::to_vec(&Receipt {
-        format: 2,
+        format: 3,
+        document,
         desktop_bridge,
         family_sha256: family.to_owned(),
         bootstrap,

@@ -122,7 +122,9 @@ async fn verify() {
         .unwrap();
     let state = Arc::new(State {
         assets: None,
+        upstream: None,
         bootstrap: None,
+        browser_owner: None,
         asset_deliveries: Arc::new(Semaphore::new(8)),
         diagnostics: crate::HttpDiagnostics::default(),
         dispatch: registry.clone(),

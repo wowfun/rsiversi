@@ -1,5 +1,13 @@
 # rsi-api-http
 
+A resident application route can replace its process after disconnection.
+Each incoming request selects one process generation. Replacement retires
+that generation's requests, sockets and resources and forwards subsequent
+requests to the new generation.
+
+Application assets include WOFF, WOFF2 and TrueType fonts with their fixed MIME
+types. Their URL authority and retained-byte limits are unchanged.
+
 `LoopbackBrowserOrigin` admits an explicit canonical loopback HTTP frontend
 Origin for a caller-owned local proxy. The supplying application must establish
 and retain that proxy's socket ownership before constructing the listener.
@@ -20,6 +28,28 @@ the declared length does not shorten that ownership.
 
 StaticHttpFactory adds an explicitly required HttpAssets capability to the same
 listener and delivery machinery. The ordinary HttpFactory remains API-only.
+An application may additionally supply a private loopback upstream for a closed
+set of route prefixes. A trusted application can exercise host-user privileges.
+Every authenticated browser uses the deployment's shared browser owner for
+native operations, subscriptions and application callbacks. Authentication,
+expected-device checks, `connection/caller` and revocation still use the actual cookie credential.
+An application request that supplies `X-Rsi-Expected-Device` must match that
+credential before the listener forwards it. Browsers may omit this header.
+Bearer API calls retain their registered device identity. The product supplies
+its managed browser owner. An independently embedded HTTP server scopes its
+default browser owner to its stable deployment endpoint. Browser requests must
+pass the public Host/Origin policy and the resource's own authorization rules.
+A browser credential is never copied to the application process.
+WebSocket upgrades require the listener's exact Origin and device cookie.
+If the client sends Fetch Metadata, its site must also be same-origin.
+HTTP request/response bodies and WebSocket upgrades stream independently from
+process-extension JSON frames. Exact static files and native API/bootstrap
+routes retain their own handlers.
+For authenticated GET and HEAD requests, a successful JavaScript or CSS
+response that its publisher explicitly marks public and immutable may be
+retained in the browser's private cache. For unversioned JS and CSS, an ETag
+and no-cache allow private storage with authenticated revalidation on every
+reuse. Its 304 reply retains that policy. Other upstream responses use no-store.
 Assets use exact GET paths without queries, bodies, Range or encoded requests;
 unknown paths return 404. Host/Origin checks apply before lookup. Assets are
 public application code, require no device credential, and cannot expose API
@@ -29,6 +59,12 @@ immutable budget lease; no response copy or filesystem lookup occurs here.
 Responses use a closed MIME set, no-store, nosniff and a same-origin CSP permitting
 WASM compilation but no inline or remote scripts. The provider owns bundle input
 validation, aggregate retention and retirement.
+`TrustedExtensionApplication` is an explicit document-wide policy for installed
+trusted UI code requiring inline style elements and attributes. It retains the
+Application script, frame and resource restrictions. Selecting it grants no
+isolation between extensions and the application. The default Application policy
+continues to forbid inline styles; a bootstrap policy change remains an
+application-restart boundary owned by the asset publisher.
 `AssetType` owns MIME selection shared by HTTP and native document transports.
 SVG application assets use `image/svg+xml`; their bytes follow the same immutable
 delivery, budget and document policy as the other admitted application assets.
@@ -50,7 +86,10 @@ operations through the [shared OperationCall path codec](../protocol/README.md).
 The API v2 path carries protocol name/version, operation domain/name/version and
 call shape. Domain plugins own all business
 DTOs. Native clients use a bearer token; browser login transfers that token into
-an HttpOnly, SameSite=Strict cookie, with Secure enabled under TLS. Cookie calls
+an HttpOnly, SameSite=Strict cookie, with Secure enabled under TLS. Its name
+includes the hash of the validated authority, isolating listeners on separate
+ports of the same host. Its path is `/` so authenticated application routes
+receive the same credential. Native API cookie calls
 require the exact configured Origin and `X-Rsi-Csrf: 1`. Every request checks the
 exact configured Host; foreign Origin, query parameters, conflicting credentials,
 duplicate security headers and unsupported methods are rejected before dispatch.
@@ -214,3 +253,37 @@ configuration grants are outside the transport. Other listeners do not expose
 this route. Durable device credentials remain forbidden in URLs; the local Web
 application may hand off its short-lived bootstrap ticket in a URL fragment,
 which the document removes before starting the Worker.
+Application processes may own unversioned `/api` resources. Versioned native
+`/api/vN` paths are always dispatched by RSI.
+A preparing application may declare prefixes before publishing its loopback
+endpoint. Waiting requests consume the same per-process capacity and stop
+on device revocation or retirement. The published endpoint must own each
+forwarded path.
+An authenticated user may open an application document directly from the
+location bar. The read-only navigation carries Fetch Metadata with site
+`none`, mode `navigate` and destination `document`.
+The native listener supplies an opaque request handle alongside the admitted
+device. It resolves to that caller only while the response body or upgraded
+socket is alive. Revocation and process retirement invalidate the handle.
+The connection deadline bounds opening the private socket. Once forwarded,
+an installation can take as long as its application operation permits. Device
+revocation and application retirement still terminate the wait.
+The HTTP-only, SameSite=Strict device cookie uses path `/` and a name
+derived from the validated public authority. Independent local listeners
+on the same hostname use separate cookies. The native forwarder strips
+all cookies before sending a request to an application process.
+An application request may retain bounded process-local resources by key. An
+explicit release or retirement of its exact upstream request drops those
+resources. Resource release does not grant authority to invoke an operation.
+A retaining caller supplies an `Arc<T>`. A continuing operation borrows the
+same type and receives a shared handle tied to that request's retirement.
+Its lifetime token is cancelled when the key or its physical request retires.
+
+Native application composition may also retain an `ApplicationCallback` for an
+explicitly supplied device and lifetime. This uses the same bounded callback
+and resource pool as forwarded requests, but its guard owns the lifetime instead
+of an HTTP response. Cancelling the supplied lifetime closes access and cancels
+resource work. Dropping the guard or retiring the application also releases
+its retained resources. The transport
+does not choose that principal or upgrade it to local authority. Browser cookies
+and expected-device checks still apply to every incoming browser request.

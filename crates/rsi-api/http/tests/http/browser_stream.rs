@@ -13,9 +13,10 @@ fn request(harness: &Harness, name: &str) -> http::Request<()> {
     request
         .headers_mut()
         .insert("origin", harness.origin.parse().unwrap());
-    request
-        .headers_mut()
-        .insert("cookie", format!("rsi-device={TOKEN}").parse().unwrap());
+    request.headers_mut().insert(
+        "cookie",
+        browser_cookie(&harness.origin, TOKEN).parse().unwrap(),
+    );
     request.headers_mut().insert(
         "sec-websocket-protocol",
         Preface {
@@ -30,8 +31,14 @@ fn request(harness: &Harness, name: &str) -> http::Request<()> {
     request
 }
 async fn connect(harness: &Harness, name: &str) -> WebSocketStream<TcpStream> {
+    connect_request(harness, request(harness, name)).await
+}
+async fn connect_request(
+    harness: &Harness,
+    request: http::Request<()>,
+) -> WebSocketStream<TcpStream> {
     let (mut socket, response) = tokio_tungstenite::client_async(
-        request(harness, name),
+        request,
         TcpStream::connect(harness.address).await.unwrap(),
     )
     .await
@@ -49,6 +56,82 @@ async fn connect(harness: &Harness, name: &str) -> WebSocketStream<TcpStream> {
     socket
 }
 use bytes::Bytes;
+
+#[tokio::test]
+async fn browser_subscriptions_share_the_domain_owner_and_revoke_only_the_addressed_socket() {
+    #[derive(Debug)]
+    struct ObserveOwner(PendingEvents, tokio::sync::mpsc::Sender<DeviceId>);
+    #[async_trait]
+    impl ApiHandler for ObserveOwner {
+        async fn invoke(
+            &self,
+            ctx: ApiContext,
+            input: RetainedBytes,
+            output: ApiResponseCapacity,
+        ) -> Result<ApiOutput> {
+            let rsi_api_protocol::CallOrigin::Device(ref actor) = ctx.origin else {
+                panic!("expected browser owner")
+            };
+            self.1.try_send(actor.id.clone()).unwrap();
+            self.0.invoke(ctx, input, output).await
+        }
+    }
+    let h = Harness::start().await;
+    let (sender, mut owners) = tokio::sync::mpsc::channel(2);
+    let closed = Arc::new(Semaphore::new(0));
+    let registration = h
+        .registry
+        .register(
+            spec(
+                "owner_stream",
+                OperationClass::Subscription,
+                OperationEffect::Read,
+            ),
+            Arc::new(ObserveOwner(PendingEvents(closed.clone()), sender)),
+        )
+        .unwrap();
+    let mut first = connect(&h, "test/owner_stream").await;
+    let mut second = request(&h, "test/owner_stream");
+    second.headers_mut().insert(
+        "cookie",
+        browser_cookie(&h.origin, SECOND_TOKEN).parse().unwrap(),
+    );
+    second.headers_mut().insert(
+        "sec-websocket-protocol",
+        Preface {
+            device: DeviceId::from_bytes([2; 16]),
+            epoch: h.epoch.clone(),
+            length: 2,
+        }
+        .encode()
+        .parse()
+        .unwrap(),
+    );
+    let second = connect_request(&h, second).await;
+    assert_eq!(owners.recv().await.unwrap(), owners.recv().await.unwrap());
+    h.authentication.second.cancel();
+    tokio::time::timeout(Duration::from_secs(2), closed.acquire())
+        .await
+        .unwrap()
+        .unwrap()
+        .forget();
+    consume_ready(&mut first).await;
+    consume_first_event(&mut first).await;
+    drop((first, second));
+    registration.close().await;
+    h.close().await;
+}
+
+async fn consume_ready(socket: &mut WebSocketStream<TcpStream>) {
+    socket
+        .send(Message::Binary(Bytes::from_static(&[1])))
+        .await
+        .unwrap();
+    assert_eq!(
+        socket.next().await.unwrap().unwrap(),
+        Message::Binary(Bytes::from_static(b": ready\n\n"))
+    );
+}
 
 async fn consume_first_event(socket: &mut WebSocketStream<TcpStream>) {
     let mut event = Vec::new();
@@ -73,7 +156,7 @@ async fn consume_first_event(socket: &mut WebSocketStream<TcpStream>) {
 #[tokio::test]
 async fn unauthenticated_stale_epoch_is_unauthorized() {
     let harness = Harness::start().await;
-    for cookie in [None, Some("rsi-device=wrong")] {
+    for cookie in [None, Some(browser_cookie(&harness.origin, "wrong"))] {
         let mut request = request(&harness, "connection/caller");
         request.headers_mut().remove("cookie");
         if let Some(cookie) = cookie {
@@ -152,14 +235,7 @@ async fn control_frames_preserve_input_credit_and_idle_subscription() {
             .is_err(),
         "control frames must not grant credit"
     );
-    socket
-        .send(Message::Binary(Bytes::from_static(&[1])))
-        .await
-        .unwrap();
-    assert_eq!(
-        socket.next().await.unwrap().unwrap(),
-        Message::Binary(Bytes::from_static(b": ready\n\n"))
-    );
+    consume_ready(&mut socket).await;
     // PendingEvents emits one complete domain item before it becomes pending.
     // Pong may interleave with available body bytes; drain them before testing
     // control progress during an actually idle body read.
@@ -291,10 +367,10 @@ async fn socket_handshake_fences_origin_cookie_device_generation_and_operation_c
         .unwrap();
     for (field, value, status) in [
         ("origin", "http://other.invalid".to_owned(), 401),
-        ("cookie", "rsi-device=wrong".to_owned(), 401),
+        ("cookie", browser_cookie(&harness.origin, "wrong"), 401),
         (
             "cookie",
-            format!("rsi-device={TOKEN}; rsi-device={TOKEN}"),
+            format!("{0}; {0}", browser_cookie(&harness.origin, TOKEN)),
             401,
         ),
         ("authorization", format!("Bearer {TOKEN}"), 401),
@@ -393,7 +469,7 @@ async fn socket_revocation_retirement_shutdown_and_invalid_credit_release_idle_s
         let mut socket = connect(&harness, "test/idle").await;
         let mut registration = Some(registration);
         match action {
-            "revoke" => harness.authentication.0.cancel(),
+            "revoke" => harness.authentication.first.cancel(),
             "retire" => registration.take().unwrap().close().await,
             "shutdown" => harness.stop.cancel(),
             "extra-credit" => {

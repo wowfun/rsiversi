@@ -80,7 +80,7 @@ impl PluginFactory for HttpFactory {
         )
     }
     async fn activate(&self, plan: ActivationPlan) -> rsi_meta::Result<()> {
-        activate(plan, None, None, None).await
+        activate(plan, None, None, None, None).await
     }
 }
 
@@ -96,7 +96,7 @@ impl PluginFactory for StaticHttpFactory {
     }
     async fn activate(&self, plan: ActivationPlan) -> rsi_meta::Result<()> {
         let assets = plan.local::<crate::HttpAssetsContract>()?;
-        activate(plan, Some(assets), None, None).await
+        activate(plan, Some(assets), None, None, None).await
     }
 }
 async fn activate(
@@ -104,6 +104,7 @@ async fn activate(
     assets: Option<Arc<dyn crate::HttpAssets>>,
     bootstrap: Option<Arc<dyn crate::BrowserBootstrap>>,
     frontend_origin: Option<crate::LoopbackBrowserOrigin>,
+    upstream: Option<Arc<crate::ApplicationRoutes>>,
 ) -> rsi_meta::Result<()> {
     let mut config = plan.take_state::<HttpConfig>()?;
     let execution = plan.context().runtime().execution().clone();
@@ -140,10 +141,16 @@ async fn activate(
         HttpServer::bind(execution.clone(), config, services).await
     }
     .map_err(|error| MetaError::Activation(error.to_string()))?;
+    let mut server = server;
+    server.set_browser_owner(plan.context().lookup_local::<crate::BrowserOwnerContract>());
     let server = if let Some(assets) = assets {
         server.with_assets(assets)
     } else {
         server
+    };
+    let server = match upstream {
+        Some(upstream) => server.with_application_upstream(upstream),
+        None => server,
     };
     let address = server
         .local_addr()
@@ -192,6 +199,7 @@ pub struct LocalBrowserHttpFactory {
     bootstrap: Arc<dyn crate::BrowserBootstrap>,
     diagnostic: std::sync::Mutex<Option<String>>,
     frontend_origin: Option<crate::LoopbackBrowserOrigin>,
+    upstream: Option<Arc<crate::ApplicationRoutes>>,
 }
 impl LocalBrowserHttpFactory {
     /// Freezes the explicit launch exchange without opening a listener.
@@ -200,7 +208,14 @@ impl LocalBrowserHttpFactory {
             bootstrap,
             diagnostic: std::sync::Mutex::new(None),
             frontend_origin: None,
+            upstream: None,
         }
+    }
+    /// Attaches the application process selected for this document.
+    #[must_use]
+    pub fn with_application_upstream(mut self, upstream: Arc<crate::ApplicationRoutes>) -> Self {
+        self.upstream = Some(upstream);
+        self
     }
     /// Supplies the exact Origin of a frontend whose socket the caller owns.
     /// The caller must retain that ownership until this listener is retired.
@@ -244,6 +259,7 @@ impl PluginFactory for LocalBrowserHttpFactory {
             Some(assets),
             Some(self.bootstrap.clone()),
             self.frontend_origin.clone(),
+            self.upstream.clone(),
         )
         .await
         .inspect_err(|error| {

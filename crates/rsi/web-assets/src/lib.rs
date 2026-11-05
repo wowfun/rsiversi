@@ -22,7 +22,10 @@ type AssetDirectory = File;
 type AssetDirectory = PathBuf;
 
 mod pairing;
-pub use pairing::{PairedWebAssetsFactory, VerifiedWebAssetsFactory, pairing_receipt};
+pub use pairing::{
+    PairedWebAssetsFactory, VerifiedWebAssetsFactory, pairing_receipt,
+    pairing_receipt_with_document,
+};
 mod publication;
 mod manifest {
     include!(concat!(env!("OUT_DIR"), "/bundle.rs"));
@@ -40,6 +43,8 @@ struct Config {
     files: Vec<String>,
     #[serde(default)]
     watch: bool,
+    #[serde(default)]
+    trusted_inline_styles: bool,
     #[serde(skip)]
     pairing: Option<pairing::Identity>,
     #[serde(skip)]
@@ -60,6 +65,9 @@ fn kind(name: &str) -> Option<AssetType> {
         "json" => Some(AssetType::Json),
         "png" => Some(AssetType::Png),
         "svg" => Some(AssetType::Svg),
+        "woff" => Some(AssetType::Woff),
+        "woff2" => Some(AssetType::Woff2),
+        "ttf" => Some(AssetType::Ttf),
         _ => None,
     }
 }
@@ -151,6 +159,16 @@ fn load(
     previous: Option<&BTreeMap<String, HttpAsset>>,
 ) -> AssetResult<LoadedAssets> {
     let directory = open_directory(&config.directory).map_err(io_error)?;
+    let receipt = config
+        .pairing
+        .as_ref()
+        .map(|identity| pairing::read(&directory, &config.directory, identity))
+        .transpose()?;
+    let mut config = config.clone();
+    if let Some(receipt) = &receipt {
+        receipt.configure(&mut config)?;
+    }
+    let config = &config;
     let mut files = BTreeMap::new();
     let mut pending = std::collections::VecDeque::from(config.files.clone());
     let mut admitted = config.clone();
@@ -168,7 +186,11 @@ fn load(
         let size = usize::try_from(metadata.len()).expect("bounded asset length");
         if let Some(old) = previous.and_then(|files| files.get(&format!("/{name}"))) {
             if old.bytes.len() == size && identical(&mut file, old.bytes.as_bytes(), stop)? {
-                files.insert(format!("/{name}"), old.clone());
+                let mut asset = old.clone();
+                if name == "index.html" {
+                    asset.policy = application_policy(config.trusted_inline_styles);
+                }
+                files.insert(format!("/{name}"), asset);
                 discover_renderer_files(config, &mut admitted, &mut pending, &name, old)?;
                 continue;
             }
@@ -192,14 +214,7 @@ fn load(
             policy: match name.as_str() {
                 "preview-local.html" => rsi_api_http::DocumentPolicy::SandboxLocal,
                 "preview-online.html" => rsi_api_http::DocumentPolicy::SandboxHttps,
-                "index.html" => rsi_api_http::DocumentPolicy::Application {
-                    frame_paths: vec![
-                        "/preview-local.html".into(),
-                        "/preview-online.html".into(),
-                        "/downloads/".into(),
-                        "/download-worker.js".into(),
-                    ],
-                },
+                "index.html" => application_policy(config.trusted_inline_styles),
                 _ => rsi_api_http::DocumentPolicy::default(),
             },
             kind: kind(&name).expect("validated extension"),
@@ -208,15 +223,26 @@ fn load(
         discover_renderer_files(config, &mut admitted, &mut pending, &name, &asset)?;
         files.insert(format!("/{name}"), asset);
     }
-    let desktop_bridge = config
-        .pairing
-        .as_ref()
-        .map(|expected| pairing::verify(&directory, &config.directory, expected, &files))
+    let desktop_bridge = receipt
+        .map(|receipt| pairing::verify(receipt, &files))
         .transpose()?;
     Ok(LoadedAssets {
         files,
         desktop_bridge,
     })
+}
+fn application_policy(inline: bool) -> rsi_api_http::DocumentPolicy {
+    let frame_paths = vec![
+        "/preview-local.html".into(),
+        "/preview-online.html".into(),
+        "/downloads/".into(),
+        "/download-worker.js".into(),
+    ];
+    if inline {
+        rsi_api_http::DocumentPolicy::TrustedExtensionApplication { frame_paths }
+    } else {
+        rsi_api_http::DocumentPolicy::Application { frame_paths }
+    }
 }
 fn discover_renderer_files(
     config: &Config,

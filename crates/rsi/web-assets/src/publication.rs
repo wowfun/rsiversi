@@ -273,6 +273,7 @@ impl WebAssetControl {
             directory,
             files,
             watch: false,
+            trusted_inline_styles: self.inline_styles(),
             pairing: None,
             discover_renderers: false,
         })
@@ -283,9 +284,24 @@ impl WebAssetControl {
             directory,
             files: super::default_files(),
             watch: false,
+            trusted_inline_styles: false,
             pairing: Some(super::pairing::Identity::Internal),
             discover_renderers: true,
         })
+    }
+    fn inline_styles(&self) -> bool {
+        self.state
+            .lock()
+            .expect("Web assets poisoned")
+            .current
+            .as_ref()
+            .and_then(|bundle| bundle.files.get("/index.html"))
+            .is_some_and(|asset| {
+                matches!(
+                    asset.policy,
+                    rsi_api_http::DocumentPolicy::TrustedExtensionApplication { .. }
+                )
+            })
     }
     fn stage_config(self: &Arc<Self>, config: Config) -> AssetResult<StageTicket> {
         config

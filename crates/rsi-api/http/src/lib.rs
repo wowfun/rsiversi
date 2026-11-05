@@ -6,9 +6,11 @@
 
 mod access;
 mod bootstrap;
-pub use bootstrap::BrowserBootstrap;
+pub use bootstrap::{BrowserBootstrap, BrowserOwner, BrowserOwnerContract};
 mod assets;
+mod upstream;
 pub use assets::{AssetType, DocumentPolicy, HttpAsset, HttpAssets, HttpAssetsContract};
+pub use upstream::{ApplicationCallback, ApplicationRoutes, ApplicationUpstream};
 mod bounded_io;
 mod browser_stream;
 #[cfg(any(unix, windows))]

@@ -16,6 +16,9 @@ Windows native Agent/ACP workspaces and private state require fixed local NTFS;
 ReFS Dev Drives, exFAT and network roots are refused by the current filesystem
 backend. Ordinary Windows and Linux applications attach to the same resident
 Service Host. Closing an attachment leaves the Host and other attachments alive.
+Signed-in browser windows share the Host's browser owner, including unpublished
+drafts and pending approvals. Native API credentials identify their own callers.
+The [HTTP contract](../rsi-api/http/README.md) defines authentication and revocation.
 Windows SQLite storage requires
 private parent directories, including pre-existing ones. See the owning
 [filesystem contract](../rsi-files/native-fs/README.md) and

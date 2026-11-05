@@ -32,6 +32,62 @@ fn profile(root: &std::path::Path, files: &[&str]) -> Profile {
 }
 
 #[tokio::test]
+async fn selected_extension_styles_and_fonts_survive_renderer_staging() {
+    let root = tempfile::tempdir().unwrap();
+    let files = ["index.html", "font.woff", "font.woff2", "font.ttf"];
+    for file in files {
+        std::fs::write(root.path().join(file), b"fixture").unwrap();
+    }
+    let running = host()
+        .start(Profile::new(vec![ProfileEntry::new(
+            "assets",
+            "assets",
+            serde_json::json!({"directory":root.path(),"files":files,"trusted_inline_styles":true}),
+        )]))
+        .await
+        .unwrap();
+    let assets = running.lookup_local::<HttpAssetsContract>().unwrap();
+    let control = running.lookup_local::<WebAssetControlContract>().unwrap();
+    let revision = control.revision().unwrap();
+    let policy = assets.get("/").unwrap().unwrap().policy;
+    assert!(matches!(
+        policy,
+        rsi_api_http::DocumentPolicy::TrustedExtensionApplication { .. }
+    ));
+    let csp = policy
+        .content_security_policy("http://127.0.0.1:4319")
+        .unwrap();
+    assert!(csp.contains("style-src-attr 'unsafe-inline'"));
+    assert!(csp.contains("script-src 'self' 'wasm-unsafe-eval';"));
+    for (file, mime) in [
+        ("font.woff", "font/woff"),
+        ("font.woff2", "font/woff2"),
+        ("font.ttf", "font/ttf"),
+    ] {
+        assert_eq!(
+            assets
+                .get(&format!("/{file}"))
+                .unwrap()
+                .unwrap()
+                .kind
+                .mime(),
+            mime
+        );
+    }
+    let candidate = control
+        .stage(
+            root.path().to_owned(),
+            files.into_iter().map(str::to_owned).collect(),
+        )
+        .unwrap()
+        .wait()
+        .await
+        .unwrap();
+    assert_eq!(candidate.publish(&revision).unwrap(), revision);
+    assert!(running.shutdown().await.is_clean());
+}
+
+#[tokio::test]
 async fn rejected_current_can_be_replaced_without_losing_last_good_renderer() {
     let root = tempfile::tempdir().unwrap();
     let files = renderer_bundle(&root.path().join("a"), b'a', 16);
