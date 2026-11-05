@@ -2,6 +2,7 @@ use super::*;
 use rsi_agent_session_protocol::{
     ActivationOutcome, AgentResultLocator, OutputContract, ToolConclusion,
 };
+use rsi_agent_store_protocol::MailboxRead;
 
 #[tokio::test]
 async fn foreign_tool_cannot_forge_a_structured_conclusion() {
@@ -195,7 +196,7 @@ async fn structured_result(tool_name: &str) {
     wrong.activation_id = ActivationId::new("other-activation").unwrap();
     assert!(kernel.read_agent_result(&caller, &wrong).await.is_err());
     let completion = store
-        .read_agent_mailbox(root.session_id(), None)
+        .read_agent_mailbox(root.session_id(), MailboxRead::All)
         .await
         .unwrap()
         .pending

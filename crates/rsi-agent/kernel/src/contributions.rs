@@ -5,7 +5,7 @@ use rsi_agent_composition_protocol::{
     ContributionContext, ContributionError, ContributionFactPage, ContributionFactReader,
     ContributionHorizon, ContributionResult,
 };
-use rsi_agent_session_protocol::{DomainStateView, StepId};
+use rsi_agent_session_protocol::{DomainStateView, SettledToolContext, StepId};
 
 #[derive(Debug)]
 struct CapturedFacts {
@@ -49,18 +49,74 @@ impl AgentKernel {
     pub(super) async fn capture_contribution_context(
         &self,
         claim: &TurnClaim,
+        pending: Vec<SettledToolContext>,
         cancellation: CancellationToken,
         program: Option<&EffectId>,
     ) -> TurnResult<ContributionContext> {
+        let (_admission, live, step_id) = self
+            .open_step_snapshot(claim, pending, &cancellation, program)
+            .await?;
+        let page = self.read_step_domains(claim, live, None).await?;
+        self.finish_step_snapshot(claim, &cancellation, program)?;
+        Ok(ContributionContext {
+            header: Arc::new(claim.header().clone()),
+            execution: claim.execution().cloned(),
+            turn_id: claim.turn_id().clone(),
+            accepted_fact_seq: claim.accepted_seq(),
+            step_id,
+            horizon: ContributionHorizon {
+                fact_seq: live,
+                control_seq: page.durable_control_seq,
+            },
+            domains: page.states.into_iter().map(domain_view).collect(),
+            facts: Arc::new(CapturedFacts {
+                kernel: self.clone(),
+                claim: claim.clone(),
+                through: live,
+                cancellation,
+            }),
+        })
+    }
+
+    pub(super) async fn capture_request_step(
+        &self,
+        claim: &TurnClaim,
+        domain: Option<&str>,
+        pending: Vec<SettledToolContext>,
+        cancellation: CancellationToken,
+    ) -> TurnResult<(StepId, Option<DomainStateView>)> {
+        let (_admission, live, step_id) = self
+            .open_step_snapshot(claim, pending, &cancellation, None)
+            .await?;
+        let selection = match domain {
+            Some(id) => self
+                .read_step_domains(claim, live, Some(id))
+                .await?
+                .states
+                .pop()
+                .map(domain_view),
+            None => None,
+        };
+        self.finish_step_snapshot(claim, &cancellation, None)?;
+        Ok((step_id, selection))
+    }
+
+    async fn open_step_snapshot(
+        &self,
+        claim: &TurnClaim,
+        pending: Vec<SettledToolContext>,
+        cancellation: &CancellationToken,
+        program: Option<&EffectId>,
+    ) -> TurnResult<(SubmissionAdmissionLease, u64, StepId)> {
         if cancellation.is_cancelled() {
             return Err(TurnError::Invalid(
                 "contribution capture was cancelled".into(),
             ));
         }
         if program.is_none() {
-            self.ensure_contribution_step(claim).await?;
+            self.ensure_contribution_step(claim, pending).await?;
         }
-        let _admission = self
+        let admission = self
             .inner
             .submission_admission
             .acquire(claim.session_id())
@@ -79,66 +135,77 @@ impl AgentKernel {
             )
         };
         self.flush(claim, live).await?;
-        let page = observation::read_domain_states_bounded(&self.inner, claim.session_id(), None)
-            .await
-            .map_err(turn_store_error)?;
+        Ok((admission, live, step_id))
+    }
+
+    async fn read_step_domains(
+        &self,
+        claim: &TurnClaim,
+        live: u64,
+        domain: Option<&str>,
+    ) -> TurnResult<rsi_agent_store_protocol::StoreDomainStatePage> {
+        let page = observation::read_domain_state_page_bounded(
+            &self.inner,
+            claim.session_id(),
+            None,
+            domain,
+        )
+        .await
+        .map_err(turn_store_error)?;
         if page.durable_fact_seq != live {
             return Err(TurnError::Invariant(
                 "contribution capture lost its flushed prefix".into(),
             ));
         }
+        Ok(page)
+    }
+
+    fn finish_step_snapshot(
+        &self,
+        claim: &TurnClaim,
+        cancellation: &CancellationToken,
+        program: Option<&EffectId>,
+    ) -> TurnResult<()> {
         self.validate_contribution_claim(&lock_state(&self.inner), claim, program)?;
         if cancellation.is_cancelled() {
             return Err(TurnError::Invalid(
                 "contribution capture was cancelled".into(),
             ));
         }
-        Ok(ContributionContext {
-            header: Arc::new(claim.header().clone()),
-            execution: claim.execution().cloned(),
-            turn_id: claim.turn_id().clone(),
-            accepted_fact_seq: claim.accepted_seq(),
-            step_id,
-            horizon: ContributionHorizon {
-                fact_seq: live,
-                control_seq: page.durable_control_seq,
-            },
-            domains: page
-                .states
-                .into_iter()
-                .map(|state| DomainStateView {
-                    revision: state.head.revision,
-                    snapshot: state.snapshot,
-                })
-                .collect(),
-            facts: Arc::new(CapturedFacts {
-                kernel: self.clone(),
-                claim: claim.clone(),
-                through: live,
-                cancellation,
-            }),
-        })
+        Ok(())
     }
 
-    async fn ensure_contribution_step(&self, claim: &TurnClaim) -> TurnResult<()> {
-        let next = {
+    async fn ensure_contribution_step(
+        &self,
+        claim: &TurnClaim,
+        pending: Vec<SettledToolContext>,
+    ) -> TurnResult<()> {
+        let mut bodies = Vec::new();
+        {
             let state = lock_state(&self.inner);
             let turn = self.validate_contribution_claim(&state, claim, None)?;
-            if turn.current_step.is_some() {
-                return Ok(());
-            }
-            state.sessions[claim.session_id()]
-                .live_seq()
-                .map_err(turn_kernel_error)?
-                .checked_add(1)
-                .ok_or_else(|| TurnError::Invariant("Step sequence exhausted".into()))?
-        };
-        let step_id = StepId::new(format!("step-context-{next}"))
-            .map_err(|error| TurnError::Invalid(error.to_string()))?;
-        let mut bodies = vec![SessionFactBody::StepStarted {
-            turn_id: claim.turn_id().clone(),
-            step_id,
-        }];
+            let new_step;
+            let step = if let Some(step) = &turn.current_step {
+                if pending.is_empty() {
+                    return Ok(());
+                }
+                step
+            } else {
+                let next = state.sessions[claim.session_id()]
+                    .live_seq()
+                    .map_err(turn_kernel_error)?
+                    .checked_add(1)
+                    .ok_or_else(|| TurnError::Invariant("Step sequence exhausted".into()))?;
+                new_step = StepId::new(format!("step-context-{next}"))
+                    .map_err(|error| TurnError::Invalid(error.to_string()))?;
+                bodies.push(SessionFactBody::StepStarted {
+                    turn_id: claim.turn_id().clone(),
+                    step_id: new_step.clone(),
+                });
+                &new_step
+            };
+            bodies.extend(SettledToolContext::claim(pending, claim.turn_id(), step));
+        }
         loop {
             match self.publish(claim, bodies).await? {
                 PublishAttempt::Published(_) => return Ok(()),
@@ -188,5 +255,12 @@ impl AgentKernel {
             turn_state::ensure_no_active_effect(turn)?;
         }
         Ok(turn)
+    }
+}
+
+fn domain_view(state: rsi_agent_store_protocol::StoreDomainState) -> DomainStateView {
+    DomainStateView {
+        revision: state.head.revision,
+        snapshot: state.snapshot,
     }
 }

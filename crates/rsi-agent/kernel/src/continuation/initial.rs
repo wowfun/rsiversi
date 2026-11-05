@@ -57,6 +57,8 @@ impl AgentKernel {
                 TurnError::Invalid("initial reservation requires a reserve command".into())
             })?;
         let context = SessionCommandContext {
+            outcome: None,
+            history: None,
             request_id: invocation.request_id.clone(),
             continuation_input: Some(input.clone()),
             header: Arc::new(prepared.header().clone()),
@@ -71,13 +73,26 @@ impl AgentKernel {
         };
         let cancellation = self.inner.submission_admission.closed.child_token();
         let _cancel = cancellation.clone().drop_guard();
-        let proposals = tokio::time::timeout(
+        let mut output = tokio::time::timeout(
             Duration::from_secs(30),
             callback.execute(&context, &invocation.arguments, cancellation),
         )
         .await
         .map_err(|_| TurnError::Invalid("initial reservation exceeded its deadline".into()))?
         .map_err(|error| TurnError::Invalid(bounded_diagnostic(&error.to_string())))?;
+        if !output.publications.is_empty() || !output.inputs.is_empty() {
+            let _ = tokio::time::timeout(Duration::from_secs(5), async {
+                for publication in &mut output.publications {
+                    publication.rejected().await?;
+                }
+                Ok::<_, rsi_agent_composition_protocol::ContributionError>(())
+            })
+            .await;
+            return Err(TurnError::Invalid(
+                "initial continuation reservation admits neither extra input nor publication observers".into(),
+            ));
+        }
+        let proposals = output.domains;
         if proposals.len() != 1 || proposals[0].snapshot().identity() != &lease.binding().domain {
             return Err(TurnError::Invalid(
                 "initial reservation must replace only its bound domain".into(),

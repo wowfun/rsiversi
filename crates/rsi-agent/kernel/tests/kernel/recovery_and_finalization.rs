@@ -1,5 +1,203 @@
 use super::*;
 
+fn application_crash_facts(turn: &TurnId, started: bool) -> Vec<Arc<SessionFact>> {
+    use rsi_agent_session_protocol::{ApplicationToolBinding, ApplicationToolView, StepId};
+    let step = StepId::new("step").unwrap();
+    let effect = EffectId::new("effect").unwrap();
+    let identity = ToolResultIdentity::new("tool-owner", "effect", "call", "a".repeat(64)).unwrap();
+    let mut bodies = vec![
+        accepted_fact(1, turn).body().clone(),
+        SessionFactBody::StepStarted {
+            turn_id: turn.clone(),
+            step_id: step.clone(),
+        },
+        SessionFactBody::StepPrepared {
+            turn_id: turn.clone(),
+            step_id: step,
+            names: vec!["read".into()],
+            instructions: vec![],
+            application: Some(ApplicationToolView::Ready {
+                generation: "old-worker".into(),
+                receipt_source: Some("market".into()),
+                tools: vec![ApplicationToolBinding {
+                    definition: ToolDefinition::new(
+                        "read",
+                        "read",
+                        serde_json::json!({"type":"object"}),
+                    )
+                    .unwrap(),
+                    owner: "tool-owner".into(),
+                    registration: "exact-registration".into(),
+                }],
+            }),
+        },
+    ];
+    let model = rejection_recovery_facts(turn, true);
+    for fact in model.iter().filter(|fact| {
+        matches!(
+            fact.body(),
+            SessionFactBody::ModelIntent { .. }
+                | SessionFactBody::ModelStarted { .. }
+                | SessionFactBody::ModelAttemptSettled { .. }
+        )
+    }) {
+        let mut body = fact.body().clone();
+        if let SessionFactBody::ModelIntent {
+            snapshot: prepared, ..
+        } = &mut body
+        {
+            prepared.language_settings = snapshot().language_settings;
+        }
+        bodies.push(body);
+    }
+    bodies.push(SessionFactBody::ToolIntent {
+        turn_id: turn.clone(),
+        effect_id: effect.clone(),
+        origin: rsi_agent_session_protocol::ToolOrigin::Model {
+            effect_id: EffectId::new("model").unwrap(),
+        },
+        program_role: rsi_tools_protocol::ToolProgramRole::Unavailable,
+        identity: identity.clone(),
+        name: "read".into(),
+        arguments: serde_json::json!({}),
+        approval: None,
+        parallel_safe: false,
+    });
+    if started {
+        bodies.push(SessionFactBody::ToolStarted {
+            turn_id: turn.clone(),
+            effect_id: effect,
+            identity,
+        });
+    }
+    prepared_history(
+        bodies
+            .into_iter()
+            .enumerate()
+            .map(|(i, body)| SessionFact::new(i as u64 + 1, 1, body).unwrap())
+            .collect(),
+    )
+    .into_iter()
+    .map(Arc::new)
+    .collect()
+}
+
+#[derive(Debug)]
+struct Receipts(AtomicUsize);
+#[async_trait]
+impl rsi_agent_kernel::ApplicationReceiptReader for Receipts {
+    async fn read(
+        &self,
+        receipt: rsi_agent_kernel::ApplicationReceipt,
+    ) -> rsi_tools_protocol::Result<Option<rsi_tools_protocol::ToolResult>> {
+        self.0.fetch_add(1, Ordering::SeqCst);
+        assert_eq!(receipt.source, "market");
+        assert_eq!(receipt.registration, "exact-registration");
+        assert_eq!(receipt.effect.as_str(), "effect");
+        assert_eq!(receipt.identity.call_id(), "call");
+        Ok((receipt.session.as_str() == "settled").then(|| {
+            rsi_tools_protocol::ToolResult::new(serde_json::json!("original result"), vec![], false)
+                .unwrap()
+        }))
+    }
+}
+#[tokio::test]
+async fn cold_application_receipt_repairs_only_a_started_bound_result_and_never_reopens_the_turn() {
+    let store = Arc::new(MemoryStore::new());
+    let turn = TurnId::new("turn").unwrap();
+    for session in ["settled", "orphan", "never-started"] {
+        store
+            .append(AppendBatch {
+                session_id: SessionId::new(session).unwrap(),
+                expected_seq: 0,
+                header: Some(header(session)),
+                facts: application_crash_facts(&turn, session != "never-started"),
+            })
+            .await
+            .unwrap();
+    }
+    let runtime = Runtime::default();
+    let root = runtime.root();
+    let _store = root
+        .apply(
+            ResolvedFactory::linked(
+                "fixture.store",
+                "store",
+                UpdateMode::Replayable,
+                Arc::new(MemoryStoreFactory::new(store.clone())),
+            ),
+            Value::Null,
+        )
+        .await
+        .unwrap();
+    let _composition = root
+        .apply(
+            ResolvedFactory::linked(
+                "fixture.composition",
+                "composition",
+                UpdateMode::Replayable,
+                Arc::new(TestCompositionFactory),
+            ),
+            Value::Null,
+        )
+        .await
+        .unwrap();
+    let receipts = Arc::new(Receipts(AtomicUsize::new(0)));
+    let kernel = root
+        .apply(
+            ResolvedFactory::linked(
+                "fixture.kernel",
+                "kernel",
+                UpdateMode::Replayable,
+                Arc::new(KernelFactory::with_application_receipts(receipts.clone())),
+            ),
+            Value::Null,
+        )
+        .await
+        .unwrap();
+    let status = kernel.wait_settled().await;
+    assert!(
+        root.lookup_local::<rsi_agent_turn_protocol::TurnServiceContract>()
+            .is_some(),
+        "{status:?}"
+    );
+    assert_eq!(receipts.0.load(Ordering::SeqCst), 2);
+    for session in ["settled", "orphan", "never-started"] {
+        let page = store
+            .read_facts(
+                &SessionId::new(session).unwrap(),
+                0,
+                32,
+                rsi_agent_store_protocol::MAXIMUM_STORE_FACT_PAGE_BYTES,
+            )
+            .await
+            .unwrap();
+        let results = page
+            .facts
+            .iter()
+            .filter_map(|f| match f.body() {
+                SessionFactBody::ToolResult { result, .. } => Some(result),
+                _ => None,
+            })
+            .collect::<Vec<_>>();
+        if session == "settled" {
+            assert_eq!(results.len(), 1);
+            assert_eq!(results[0].value, "original result");
+        } else {
+            assert!(results.is_empty());
+        }
+        let SessionFactBody::TurnTerminal {
+            outcome: TurnOutcome::Interrupted { effect, .. },
+            ..
+        } = page.facts.last().unwrap().body()
+        else {
+            panic!("expected interrupted terminal")
+        };
+        assert_eq!(*effect, (session == "orphan").then_some(EffectKind::Tool));
+    }
+    assert!(runtime.shutdown().await.is_clean());
+}
+
 #[tokio::test]
 async fn recovery_requires_rejection_source_but_not_execution_settings() {
     for with_source in [false, true] {
@@ -116,6 +314,7 @@ fn rejection_recovery_facts(turn: &TurnId, with_source: bool) -> Vec<SessionFact
             seq,
             seq,
             SessionFactBody::ToolRejected {
+                additional_contexts: Vec::new(),
                 origin: rsi_agent_session_protocol::ToolOrigin::Model {
                     effect_id: effect.clone(),
                 },
@@ -135,7 +334,11 @@ fn rejection_recovery_facts(turn: &TurnId, with_source: bool) -> Vec<SessionFact
         )
         .unwrap(),
     );
-    facts
+    if with_source {
+        prepared_history(facts)
+    } else {
+        facts
+    }
 }
 
 #[derive(Debug)]
@@ -268,7 +471,18 @@ async fn finalizer_registry_rejects_foreign_runtime_capacity_and_shutdown() {
 
 #[tokio::test]
 async fn recovery_appends_interrupted_for_a_started_external_effect_and_never_requeues_it() {
-    let store = Arc::new(MemoryStore::new());
+    assert_started_effect_repair(Arc::new(MemoryStore::new())).await;
+}
+
+#[cfg(any(unix, windows))]
+#[tokio::test]
+async fn sqlite_recovery_keeps_one_interruption_and_its_control_boundary() {
+    let dir = tempfile::tempdir().unwrap();
+    let store = rsi_agent_store_sqlite::SqliteStore::open(dir.path().join("store")).unwrap();
+    assert_started_effect_repair(Arc::new(store)).await;
+}
+
+async fn assert_started_effect_repair(store: Arc<dyn SessionStore>) {
     let session = SessionId::new("session-recovery").unwrap();
     let turn = TurnId::new("turn-recovery").unwrap();
     let effect = EffectId::new("effect-recovery").unwrap();
@@ -316,11 +530,20 @@ async fn recovery_appends_interrupted_for_a_started_external_effect_and_never_re
             session_id: session.clone(),
             expected_seq: 0,
             header: Some(header("session-recovery")),
-            facts: (facts).into_iter().map(Into::into).collect(),
+            facts: prepared_history(facts)
+                .into_iter()
+                .map(Into::into)
+                .collect(),
         })
         .await
         .unwrap();
-    let kernel = kernel(store.clone()).await;
+    let kernel =
+        AgentKernel::recover_with_clock(store.clone(), composition(), Arc::new(FixedClock))
+            .await
+            .unwrap();
+    let page = store.list_open_turns(&session, 0, 1).await.unwrap();
+    assert!(page.turns.is_empty());
+    assert_eq!(page.durable_control_seq, 1);
     assert_eq!(
         kernel.outcome(&session, &turn).await.unwrap(),
         Some(TurnOutcome::Interrupted {
@@ -331,7 +554,7 @@ async fn recovery_appends_interrupted_for_a_started_external_effect_and_never_re
     let repaired = store
         .read_facts(
             &session,
-            3,
+            6,
             8,
             rsi_agent_store_protocol::MAXIMUM_STORE_FACT_PAGE_BYTES,
         )
@@ -381,9 +604,18 @@ async fn startup_recovery_repairs_open_turns_without_resolving_the_preset() {
     composition.set_unavailable();
     let composition_contract: Arc<dyn AgentComposition> = composition.clone();
 
-    let kernel = AgentKernel::recover_with_clock(store, composition_contract, Arc::new(FixedClock))
-        .await
-        .expect("startup repair must not require an executable Agent preset");
+    let observed = Arc::new(FactReadRaceStore::new(store.clone()));
+    *observed.count_control_reads_for.lock().unwrap() = Some(session.clone());
+    let kernel = AgentKernel::recover_with_clock(
+        observed.clone(),
+        composition_contract,
+        Arc::new(FixedClock),
+    )
+    .await
+    .expect("startup repair must not require an executable Agent preset");
+    assert_eq!(observed.control_read_attempts.load(Ordering::Acquire), 0);
+    assert_eq!(store.open_turn_read_count(), 1);
+    assert_eq!(store.history_read_counts().0, 0);
 
     assert!(matches!(
         kernel.outcome(&session, &turn).await.unwrap(),
@@ -472,6 +704,7 @@ async fn recovery_preserves_a_durable_max_tokens_terminal() {
         .await
         .unwrap()
         .unwrap();
+    tool_origin::prepare_claimed_inputs(&initial, &claim).await;
     let session = claim.session_id().clone();
     let turn = claim.turn_id().clone();
     for body in super::model_attempts::source_bodies(&turn) {
@@ -501,7 +734,7 @@ async fn recovery_preserves_a_durable_max_tokens_terminal() {
             .unwrap()
             .facts
             .len(),
-        5
+        8
     );
 }
 
@@ -516,7 +749,7 @@ async fn ordinary_factory_waits_for_store_and_withdraws_all_turn_contracts() {
                 "rsi.agent.kernel",
                 "kernel",
                 UpdateMode::Replayable,
-                Arc::new(KernelFactory),
+                Arc::new(KernelFactory::default()),
             ),
             Value::Null,
         )

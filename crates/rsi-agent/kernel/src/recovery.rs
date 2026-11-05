@@ -1,26 +1,45 @@
 use super::*;
 
+/// Exact durable authority for a read-only application outcome lookup.
+#[derive(Clone, Debug)]
+pub struct ApplicationReceipt {
+    /// Stable source selected for the producing Step.
+    pub source: String,
+    /// Session containing the started effect.
+    pub session: SessionId,
+    /// Durable Tool effect.
+    pub effect: EffectId,
+    /// Registration captured for that tool name.
+    pub registration: String,
+    /// Result identity recorded by both the intent and the start.
+    pub identity: rsi_tools_protocol::ToolResultIdentity,
+}
+
+/// Optional embedding authority available before any application process starts.
+#[async_trait]
+pub trait ApplicationReceiptReader: std::fmt::Debug + Send + Sync + 'static {
+    /// Returns only a settled result bound to the exact receipt. Never executes a tool.
+    async fn read(
+        &self,
+        receipt: ApplicationReceipt,
+    ) -> rsi_tools_protocol::Result<Option<rsi_tools_protocol::ToolResult>>;
+}
+
 #[allow(clippy::too_many_lines)] // Recovery classifies each unfinished Turn and commits its Fact/control boundary atomically.
 pub(super) async fn repair_unfinished_session(
     store: &Arc<dyn SessionStore>,
     clock: &dyn Clock,
     session_id: &SessionId,
+    receipts: Option<&dyn ApplicationReceiptReader>,
 ) -> Result<()> {
-    let open = store.list_open_turns(session_id, 0, 1).await?;
-    if open.turns.is_empty() {
-        return Ok(());
-    }
     store.validate_session(session_id).await?;
-    let (durable_seq, turns, turn_order) = load_control_state(store, None, session_id).await?;
-    if turns.len() != turn_order.len()
-        || turn_order
-            .iter()
-            .any(|turn_id| !turns.contains_key(turn_id))
-    {
-        return Err(KernelError::Invariant(
-            "recovery control state and turn order disagree".into(),
-        ));
-    }
+    let header = store.header(session_id).await?;
+    let LoadedTurns {
+        fact_seq: mut durable_seq,
+        control_seq: mut durable_control_seq,
+        turns,
+        order: turn_order,
+    } = load_control_state(store, None, &header).await?;
     if turns.is_empty() {
         return Ok(());
     }
@@ -35,36 +54,93 @@ pub(super) async fn repair_unfinished_session(
         ));
     }
     let timestamp = clock.now_ms().max(1);
-    let mut durable_seq = durable_seq;
-    let mut durable_control_seq = store
-        .read_controls(
-            session_id,
-            0,
-            1,
-            rsi_agent_store_protocol::MAXIMUM_STORE_FACT_PAGE_BYTES,
-        )
-        .await?
-        .durable_seq;
     for turn_id in turn_order {
         let turn = turns
             .get(&turn_id)
-            .expect("validated recovery turn order references exact state");
+            .expect("turn replay updates acceptance order and control state together");
         let mut final_seq = durable_seq;
         let mut repair = Vec::with_capacity(2);
+        let mut recovered = None;
+        let mut receipt_error = false;
+        if let (Some(reader), Some(source)) = (receipts, &turn.application.source) {
+            for (effect, active) in &turn.effects {
+                let ActiveEffect::Tool {
+                    name,
+                    started: true,
+                    identity,
+                    origin: rsi_agent_session_protocol::ToolOrigin::Model { .. },
+                    ..
+                } = active
+                else {
+                    continue;
+                };
+                let Some(binding) = turn
+                    .application
+                    .tools
+                    .get(name)
+                    .filter(|row| row.owner == identity.owner_id())
+                else {
+                    continue;
+                };
+                let receipt = ApplicationReceipt {
+                    source: source.clone(),
+                    session: session_id.clone(),
+                    effect: effect.clone(),
+                    registration: binding.registration.clone(),
+                    identity: identity.clone(),
+                };
+                match reader.read(receipt).await {
+                    Ok(Some(result)) => {
+                        // Request-scoped tools are exclusive, so at most one can have started.
+                        if recovered.is_some() {
+                            return Err(KernelError::Invariant(
+                                "overlapping application Tool starts".into(),
+                            ));
+                        }
+                        final_seq = final_seq.checked_add(1).ok_or_else(|| {
+                            KernelError::Invariant("recovery Fact sequence exhausted".into())
+                        })?;
+                        repair.push(SessionFact::new(
+                            final_seq,
+                            timestamp,
+                            SessionFactBody::ToolResult {
+                                turn_id: turn_id.clone(),
+                                effect_id: effect.clone(),
+                                identity: identity.clone(),
+                                result,
+                                conclusion: None,
+                            },
+                        )?);
+                        recovered = Some(effect);
+                    }
+                    Ok(None) => {}
+                    Err(_) => receipt_error = true,
+                }
+            }
+        }
         let outcome = if turn.cancel_requested {
             TurnOutcome::Cancelled
         } else {
-            let effect = turn.effects.values().find_map(|effect| match effect {
-                ActiveEffect::Model { started: true, .. } => Some(EffectKind::Model),
-                ActiveEffect::Image { started: true, .. } => Some(EffectKind::Image),
-                ActiveEffect::Tool { started: true, .. } => Some(EffectKind::Tool),
-                ActiveEffect::Model { started: false, .. }
-                | ActiveEffect::Image { started: false, .. }
-                | ActiveEffect::Tool { started: false, .. } => None,
-            });
+            let effect = turn
+                .effects
+                .iter()
+                .filter(|(id, _)| Some(*id) != recovered)
+                .find_map(|(_, effect)| match effect {
+                    ActiveEffect::Model { started: true, .. } => Some(EffectKind::Model),
+                    ActiveEffect::Image { started: true, .. } => Some(EffectKind::Image),
+                    ActiveEffect::Tool { started: true, .. } => Some(EffectKind::Tool),
+                    ActiveEffect::Model { started: false, .. }
+                    | ActiveEffect::Image { started: false, .. }
+                    | ActiveEffect::Tool { started: false, .. } => None,
+                });
             TurnOutcome::Interrupted {
                 effect,
-                reason: "Kernel recovery found a turn without a durable terminal Fact".into(),
+                reason: if receipt_error {
+                    "Kernel recovery could not read the started application Tool receipt"
+                } else {
+                    "Kernel recovery found a turn without a durable terminal Fact"
+                }
+                .into(),
             }
         };
         if let Some(step_id) = &turn.current_step {
@@ -268,13 +344,20 @@ pub(super) fn validate_durable_intent_fence(
 }
 
 #[allow(clippy::too_many_lines)] // One snapshot joins open-Turn Facts and domain usage.
+pub(super) struct LoadedTurns {
+    pub(super) fact_seq: u64,
+    pub(super) control_seq: u64,
+    pub(super) turns: BTreeMap<TurnId, TurnControl>,
+    pub(super) order: Vec<TurnId>,
+}
+
 pub(super) async fn load_control_state(
     store: &Arc<dyn SessionStore>,
     admission: Option<&KernelInner>,
-    session_id: &SessionId,
-) -> Result<(u64, BTreeMap<TurnId, TurnControl>, Vec<TurnId>)> {
+    header: &SessionHeader,
+) -> Result<LoadedTurns> {
     let evidence_cache = Mutex::default();
-    let header = store.header(session_id).await?;
+    let session_id = header.session_id();
     let mut open_cursor = 0_u64;
     let mut durable_seq = None;
     let mut turns = BTreeMap::new();
@@ -331,9 +414,9 @@ pub(super) async fn load_control_state(
                     )
                     .await
                     .map_err(|error| KernelError::Invariant(error.to_string()))?;
-                    super::execution::validate_intent_price(&header, fact.body())
+                    super::execution::validate_intent_price(header, fact.body())
                         .map_err(|error| KernelError::Invariant(error.to_string()))?;
-                    apply_recovered_fact(&mut turns, &mut order, &header, fact)?;
+                    apply_recovered_fact(&mut turns, &mut order, header, fact)?;
                     turn_cursor = fact.seq();
                 }
                 if !turn_page.has_more {
@@ -353,7 +436,12 @@ pub(super) async fn load_control_state(
             open_cursor = open_turn.accepted_seq;
         }
         if !page.has_more {
-            return Ok((durable_seq.unwrap_or(page.durable_seq), turns, order));
+            return Ok(LoadedTurns {
+                fact_seq: page.durable_seq,
+                control_seq: page.durable_control_seq,
+                turns,
+                order,
+            });
         }
         if page.turns.is_empty() {
             return Err(KernelError::Invariant(

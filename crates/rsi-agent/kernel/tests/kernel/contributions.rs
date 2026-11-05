@@ -2,10 +2,11 @@ use super::*;
 use rsi_agent_session_protocol::{ContributionId, InputMessageSource, ToolRejection};
 
 fn plugin_input(turn: &TurnId) -> SessionFactBody {
-    SessionFactBody::InputMessageEntered {
+    SessionFactBody::InputMessageClaimed {
         turn_id: turn.clone(),
         step_id: StepId::new("step").unwrap(),
         source: InputMessageSource::PluginContext {
+            tool: None,
             contribution_id: ContributionId::new("fixture.time").unwrap(),
         },
         content: vec![AgentMessageContent::Text {
@@ -16,6 +17,7 @@ fn plugin_input(turn: &TurnId) -> SessionFactBody {
 
 fn rejection(turn: &TurnId) -> SessionFactBody {
     SessionFactBody::ToolRejected {
+        additional_contexts: Vec::new(),
         origin: rsi_agent_session_protocol::ToolOrigin::Model {
             effect_id: rsi_agent_session_protocol::EffectId::new("source-model").unwrap(),
         },
@@ -87,7 +89,7 @@ async fn plugin_context_requires_the_open_step_and_no_active_effect() {
     for body in [
         plugin_input(&submitted.turn_id),
         rejection(&submitted.turn_id),
-        SessionFactBody::InputMessageEntered {
+        SessionFactBody::InputMessageClaimed {
             turn_id: submitted.turn_id.clone(),
             step_id: StepId::new("step").unwrap(),
             source: InputMessageSource::AgentInstructions {
@@ -161,13 +163,18 @@ async fn contribution_capture_rejects_cancelled_and_terminal_turns() {
             .unwrap();
         let stopped = CancellationToken::new();
         stopped.cancel();
-        assert!(kernel.contribution_context(&claim, stopped).await.is_err());
+        assert!(
+            kernel
+                .contribution_context(&claim, Vec::new(), stopped)
+                .await
+                .is_err()
+        );
         assert_eq!(
             kernel.read_facts(&claim, 0, 16).await.unwrap().through_seq,
             1
         );
         kernel
-            .contribution_context(&claim, CancellationToken::new())
+            .contribution_context(&claim, Vec::new(), CancellationToken::new())
             .await
             .unwrap();
         if cancelled {
@@ -183,7 +190,7 @@ async fn contribution_capture_rejects_cancelled_and_terminal_turns() {
         }
         assert!(
             kernel
-                .contribution_context(&claim, CancellationToken::new())
+                .contribution_context(&claim, Vec::new(), CancellationToken::new())
                 .await
                 .is_err()
         );
@@ -230,6 +237,16 @@ async fn rejection_is_single_assignment_and_replays_on_both_stores() {
             .await
             .unwrap()
             .unwrap();
+        kernel
+            .publish(
+                &claim,
+                vec![SessionFactBody::StepStarted {
+                    turn_id: submitted.turn_id.clone(),
+                    step_id: StepId::new("step").unwrap(),
+                }],
+            )
+            .await
+            .unwrap();
         tool_origin::publish_model_calls(
             &kernel,
             &claim,
@@ -247,14 +264,7 @@ async fn rejection_is_single_assignment_and_replays_on_both_stores() {
                 ToolResultIdentity::new("owner", "other-tool", "other-call", "a".repeat(64))
                     .unwrap();
         }
-        let bodies = vec![
-            SessionFactBody::StepStarted {
-                turn_id: submitted.turn_id.clone(),
-                step_id: StepId::new("step").unwrap(),
-            },
-            plugin_input(&submitted.turn_id),
-            denied.clone(),
-        ];
+        let bodies = vec![plugin_input(&submitted.turn_id), denied.clone()];
         let published = kernel
             .publish(&claim, bodies.clone())
             .await
@@ -320,7 +330,7 @@ async fn rejection_is_single_assignment_and_replays_on_both_stores() {
                 .await
                 .unwrap();
             assert_eq!(
-                page.facts[..3]
+                page.facts[..bodies.len()]
                     .iter()
                     .map(|f| f.body().clone())
                     .collect::<Vec<_>>(),

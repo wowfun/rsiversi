@@ -1,4 +1,5 @@
 use super::*;
+use rsi_agent_store_protocol::MailboxRead;
 
 #[tokio::test(start_paused = true)]
 async fn fresh_submission_returns_only_after_its_acceptance_is_durable() {
@@ -92,6 +93,7 @@ async fn permanent_flush_failure_rejects_later_mailbox_submission() {
         .await
         .unwrap()
         .unwrap();
+    tool_origin::prepare_claimed_inputs(&kernel, &claim).await;
     let published = kernel
         .publish(
             &claim,
@@ -126,7 +128,7 @@ async fn permanent_flush_failure_rejects_later_mailbox_submission() {
     assert_eq!(result, Err(TurnError::Flush(expected)));
     assert!(
         memory
-            .read_agent_mailbox(&session_id, None)
+            .read_agent_mailbox(&session_id, MailboxRead::All)
             .await
             .unwrap()
             .pending
@@ -892,6 +894,7 @@ async fn explicit_effect_flush_waits_through_transient_failure_without_reorderin
         .await
         .unwrap()
         .unwrap();
+    tool_origin::prepare_claimed_inputs(&kernel, &claim).await;
     let effect = EffectId::new("model-1").unwrap();
     let facts = kernel
         .publish(
@@ -930,7 +933,7 @@ async fn explicit_effect_flush_waits_through_transient_failure_without_reorderin
             .await
             .unwrap()
             .durable_seq,
-        submitted.accepted_seq
+        through - 1
     );
     tokio::time::advance(std::time::Duration::from_millis(199)).await;
     tokio::task::yield_now().await;
@@ -947,13 +950,13 @@ async fn explicit_effect_flush_waits_through_transient_failure_without_reorderin
         )
         .await
         .unwrap();
-    assert_eq!(stored.facts.len(), 2);
+    assert_eq!(stored.facts.len(), 5);
     assert!(matches!(
         stored.facts[0].body(),
         SessionFactBody::TurnAccepted { .. }
     ));
     assert!(matches!(
-        stored.facts[1].body(),
+        stored.facts.last().unwrap().body(),
         SessionFactBody::ModelIntent { .. }
     ));
     kernel.shutdown(worker).await.unwrap();
@@ -971,6 +974,7 @@ async fn effect_start_requires_its_intent_to_be_durable() {
         .await
         .unwrap()
         .unwrap();
+    tool_origin::prepare_claimed_inputs(&kernel, &claim).await;
     let effect = EffectId::new("model-effect-fence").unwrap();
 
     let error = kernel
@@ -1132,6 +1136,12 @@ async fn claim_horizon_hides_later_accepted_turns_but_admits_claimed_turn_facts(
     ));
 
     let effect_id = EffectId::new("effect-horizon").unwrap();
+    tool_origin::prepare_claimed_inputs(&kernel, &claim).await;
+    let prepared_through = kernel
+        .read_facts(&claim, initial.through_seq, 8)
+        .await
+        .unwrap()
+        .through_seq;
     let published = kernel
         .publish(
             &claim,
@@ -1150,7 +1160,7 @@ async fn claim_horizon_hides_later_accepted_turns_but_admits_claimed_turn_facts(
         .unwrap()
         .published();
     let incremental = kernel
-        .read_facts(&claim, initial.through_seq, 8)
+        .read_facts(&claim, prepared_through, 8)
         .await
         .unwrap();
     assert_eq!(incremental.facts, published);
@@ -1512,6 +1522,7 @@ async fn claim_fact_read_does_not_cross_the_live_horizon_captured_before_store_i
         .await
         .unwrap()
         .unwrap();
+    tool_origin::prepare_claimed_inputs(&kernel, &claim).await;
     kernel.flush(&claim, submitted.accepted_seq).await.unwrap();
     worker.abort().await;
 
@@ -1810,7 +1821,10 @@ async fn message_admission_waits_for_terminal_control_before_and_after_store_app
         );
         assert!(
             memory
-                .read_agent_mailbox(&submitted.session_id, Some(&message.message_id))
+                .read_agent_mailbox(
+                    &submitted.session_id,
+                    MailboxRead::WithMessage(message.message_id.clone())
+                )
                 .await
                 .unwrap()
                 .selected

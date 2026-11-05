@@ -71,7 +71,6 @@ pub const WRITE_BEHIND_INTERVAL: Duration = Duration::from_millis(200);
 const DURABLE_OBSERVER_FALLBACK_INTERVAL: Duration = Duration::from_secs(5);
 const READY_SCHEDULER_FALLBACK_INTERVAL: Duration = Duration::from_secs(5);
 const WAITING_SETTLEMENT_FALLBACK_INTERVAL: Duration = Duration::from_secs(5);
-const MAXIMUM_NEXT_STEP_MESSAGE_PAYLOAD_BYTES: usize = MAXIMUM_STORE_BATCH_BYTES / 2;
 
 fn rebase_write_behind_tick(scheduled: Instant, now: Instant) -> Instant {
     scheduled.max(now + WRITE_BEHIND_INTERVAL)
@@ -585,7 +584,8 @@ struct SessionRuntime {
     pending: VecDeque<Arc<SessionFact>>,
     pending_bytes: usize,
     header_pending: bool,
-    pending_domain_baseline: Option<AgentControlRecord>,
+    pending_initial_controls: Vec<AgentControlRecord>,
+    pending_baseline_resources: Option<rsi_agent_composition_protocol::DomainBaseline>,
     turns: BTreeMap<TurnId, TurnControl>,
     turn_order: Vec<TurnId>,
     updates: watch::Sender<LiveWatermarks>,
@@ -622,11 +622,11 @@ struct PreparedFlushBatch {
     expected_seq: u64,
     header: Option<SessionHeader>,
     facts: Vec<Arc<SessionFact>>,
-    baseline: Option<AgentControlRecord>,
+    baseline: Vec<AgentControlRecord>,
 }
 
 impl PreparedFlushBatch {
-    fn into_store_batch(self) -> (AppendBatch, Option<AgentControlRecord>) {
+    fn into_store_batch(self) -> (AppendBatch, Vec<AgentControlRecord>) {
         (
             AppendBatch {
                 session_id: self.session_id,
@@ -646,6 +646,8 @@ struct LiveWatermarks {
 }
 
 struct TurnControl {
+    pending_inputs: BTreeMap<u64, u32>,
+    input_rejected: bool,
     execution: Option<rsi_execution::ExecutionLease>,
     initial_messages: BTreeSet<MessageId>,
     claim_composition: Option<AgentCompositionPin>,
@@ -653,6 +655,8 @@ struct TurnControl {
     conclusion: Option<(u64, rsi_agent_session_protocol::ToolConclusion)>,
 
     tool_source: Option<Arc<tool_origin::ToolSource>>,
+    selected_tools: Option<Arc<[String]>>,
+    application: Arc<ApplicationRegistrations>,
 
     accepted_at_ms: u64,
     accepted_seq: u64,
@@ -671,7 +675,6 @@ struct TurnControl {
 struct DurableMessageEntry {
     delivery: rsi_agent_session_protocol::MessageDelivery,
     message: AgentMessage,
-    encoded_message_bytes: usize,
     root_session_id: SessionId,
     target: MessageTarget,
     wake_required: bool,
@@ -679,7 +682,19 @@ struct DurableMessageEntry {
     state: MessageState,
 }
 
+#[derive(Default)]
+struct ApplicationRegistrations {
+    source: Option<String>,
+    tools: BTreeMap<String, CapturedRegistration>,
+}
+
+struct CapturedRegistration {
+    owner: String,
+    registration: String,
+}
+
 struct DurableMessageScan {
+    inbox_paused: bool,
     selected: Option<DurableMessageEntry>,
     pending_count: usize,
     pending: Vec<DurableMessageEntry>,
@@ -716,6 +731,7 @@ enum ActiveEffect {
     Tool {
         name: String,
         source_selection: Arc<rsi_agent_session_protocol::ModelSelection>,
+        source_tools: Option<Arc<[String]>>,
         identity: rsi_tools_protocol::ToolResultIdentity,
         started: bool,
         parallel_safe: bool,
@@ -726,14 +742,38 @@ enum ActiveEffect {
 }
 
 impl TurnControl {
+    // Both live acceptance and recovery have selected an acceptance Fact.
+    fn accepted(fact: &SessionFact) -> Self {
+        let mut control = Self::new(fact.timestamp_ms(), fact.seq());
+        match fact.body() {
+            SessionFactBody::TurnAccepted { .. } => {
+                control.pending_inputs.insert(fact.seq(), 1);
+            }
+            SessionFactBody::MessageTurnAccepted {
+                activation_id,
+                message_ids,
+                ..
+            } => {
+                control.activation_id = Some(activation_id.clone());
+                control.initial_messages = message_ids.iter().cloned().collect();
+            }
+            _ => {}
+        }
+        control
+    }
+
     fn new(accepted_at_ms: u64, accepted_seq: u64) -> Self {
         Self {
+            pending_inputs: BTreeMap::new(),
+            input_rejected: false,
             execution: None,
             initial_messages: BTreeSet::new(),
             claim_composition: None,
             program_roles: Arc::new(BTreeMap::new()),
             conclusion: None,
             tool_source: None,
+            selected_tools: None,
+            application: Arc::default(),
 
             accepted_at_ms,
             accepted_seq,
@@ -751,6 +791,10 @@ impl TurnControl {
 }
 
 impl SessionRuntime {
+    fn has_open_turn(&self) -> bool {
+        self.turns.values().any(|turn| turn.terminal.is_none())
+    }
+
     fn new(
         header: SessionHeader,
         composition: AgentCompositionPin,
@@ -772,7 +816,8 @@ impl SessionRuntime {
             pending: VecDeque::new(),
             pending_bytes: 0,
             header_pending,
-            pending_domain_baseline: None,
+            pending_initial_controls: vec![],
+            pending_baseline_resources: None,
             turns: BTreeMap::new(),
             turn_order: Vec::new(),
             updates,
@@ -839,7 +884,8 @@ fn apply_committed_flush(
     }
     session.durable_seq = commit.durable_seq;
     session.header_pending = false;
-    session.pending_domain_baseline = None;
+    session.pending_initial_controls.clear();
+    session.pending_baseline_resources = None;
     session.retry_failures = 0;
     session.retry_not_before = None;
     let _previous = session.flush_status.send_replace(FlushStatus {
@@ -869,6 +915,7 @@ fn apply_committed_flush(
 }
 
 mod admission;
+mod captured_history;
 mod commands;
 mod continuation;
 mod contributions;
@@ -879,13 +926,16 @@ mod evidence;
 mod execution;
 mod execution_admission;
 mod finalization;
+mod fork_domains;
 mod human_wait;
+mod inbox;
 mod jobs;
 mod lifecycle;
 mod maintenance;
 mod notifications;
 mod program;
 mod projection;
+mod reconciliation;
 mod resource;
 mod structured;
 use notifications::{SessionWatch, SessionWatchHub};
@@ -893,18 +943,18 @@ mod completion_reply;
 mod observation;
 mod queue_mutation;
 mod recovery;
+pub use recovery::{ApplicationReceipt, ApplicationReceiptReader};
 mod store_reads;
 mod tool_origin;
 mod turn_service;
 mod turn_state;
 
 use observation::{
-    activation_outcome, activation_terminal_controls, agent_root_and_path,
-    bounded_step_message_prefix, completion_message, completion_message_id, control_tail,
-    descendant_session_ids, durable_observation_next, fill_observation_page,
-    list_agent_descendants, list_direct_agent_children, message_receipt, observation_next,
-    observe_agent_wait_change, read_facts_bounded, read_fork_page_from_header, read_header_bounded,
-    read_observed_facts, read_turn_boundary_bounded, read_turn_facts_bounded,
+    activation_outcome, activation_terminal_controls, agent_root_and_path, completion_message,
+    completion_message_id, control_tail, descendant_session_ids, durable_observation_next,
+    fill_observation_page, list_agent_descendants, list_direct_agent_children, message_receipt,
+    observation_next, observe_agent_wait_change, read_facts_bounded, read_fork_page_from_header,
+    read_header_bounded, read_observed_facts, read_turn_boundary_bounded, read_turn_facts_bounded,
     read_validated_header_bounded, scan_durable_messages,
 };
 use recovery::{
@@ -990,7 +1040,18 @@ pub type Result<T> = std::result::Result<T, KernelError>;
 
 /// Ordinary Kernel factory requiring exact Agent Store and composition supplies.
 #[derive(Clone, Debug, Default)]
-pub struct KernelFactory;
+pub struct KernelFactory {
+    receipts: Option<Arc<dyn ApplicationReceiptReader>>,
+}
+impl KernelFactory {
+    /// Supplies a read-only receipt authority for Kernel startup repair.
+    #[must_use]
+    pub fn with_application_receipts(receipts: Arc<dyn ApplicationReceiptReader>) -> Self {
+        Self {
+            receipts: Some(receipts),
+        }
+    }
+}
 
 #[async_trait]
 impl PluginFactory for KernelFactory {
@@ -1022,6 +1083,7 @@ impl PluginFactory for KernelFactory {
             plan.local::<AgentCompositionContract>()?,
             Arc::new(SystemClock),
             limits,
+            self.receipts.as_deref(),
         )
         .await
         .map_err(|error| MetaError::Activation(error.to_string()))?;

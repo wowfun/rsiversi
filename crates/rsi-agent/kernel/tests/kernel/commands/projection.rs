@@ -106,6 +106,38 @@ async fn resident_manifest_peek_never_resolves_cold_or_replaces_a_retained_gener
 }
 
 #[tokio::test]
+async fn selected_running_sessions_include_work_beyond_the_roster_page() {
+    let fixture = Fixture::start(Arc::new(MemoryStore::new()), false).await;
+    for index in 0..65 {
+        fixture
+            .kernel
+            .submit(SubmitTurn {
+                session: fresh(header(&format!("selected-{index:02}"))),
+                turn_id: TurnId::new("running").unwrap(),
+                text: "open".into(),
+                model: None,
+                reasoning_effort: None,
+                sandbox: None,
+            })
+            .await
+            .unwrap();
+    }
+    let later = SessionId::new("selected-64").unwrap();
+    let cold = SessionId::new("absent").unwrap();
+    let roster = fixture.kernel.resident_activity().unwrap();
+    assert!(roster.has_more);
+    assert!(roster.entries.iter().all(|row| row.session != later));
+    assert_eq!(
+        fixture
+            .kernel
+            .running_sessions(&[later.clone(), cold])
+            .unwrap(),
+        std::collections::BTreeSet::from([later])
+    );
+    fixture.stop().await;
+}
+
+#[tokio::test]
 async fn failed_cold_capture_yields_to_a_concurrently_published_resident_pin() {
     let fixture = Fixture::start(Arc::new(MemoryStore::new()), false).await;
     let prepared = fixture
@@ -313,7 +345,7 @@ async fn snapshot_is_one_captured_cut_even_when_a_command_commits_during_its_cal
     let input = fixture.invocation("racing-view", true).await;
     let before = fixture
         .store
-        .read_domain_states(&fixture.session_id, None)
+        .read_domain_states(&fixture.session_id, None, None)
         .await
         .unwrap();
     fixture.projection.blocked.store(true, Ordering::SeqCst);
@@ -693,7 +725,7 @@ async fn capture_uses_actual_cut_when_a_commit_follows_its_demand_watermark() {
     let fixture = Fixture::start(store.clone(), false).await;
     let input = fixture.invocation("watermark-race", true).await;
     let before = store
-        .read_domain_states(&fixture.session_id, None)
+        .read_domain_states(&fixture.session_id, None, None)
         .await
         .unwrap();
     let update = DomainStateUpdate::new(

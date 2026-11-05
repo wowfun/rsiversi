@@ -88,6 +88,7 @@ async fn model_identity_is_per_turn_and_rejected_before_live_publication() {
                 .await
                 .unwrap()
                 .unwrap();
+            tool_origin::prepare_claimed_inputs(&kernel, &claim).await;
             for body in source_bodies(claim.turn_id()) {
                 tool_origin::flush_bodies(&kernel, &claim, vec![body]).await;
             }
@@ -278,6 +279,7 @@ async fn settlement_and_live_commit_require_exact_started_identity_and_durable_s
         .await
         .unwrap()
         .unwrap();
+    tool_origin::prepare_claimed_inputs(&kernel, &claim).await;
     let effect = EffectId::new("cut").unwrap();
     let mut stream = kernel.observe_models(claim.session_id()).await.unwrap();
     let mut live = kernel
@@ -489,6 +491,7 @@ async fn receipts_reject_other_claims_effects_purposes_and_retired_executors() {
             .await
             .unwrap()
             .unwrap();
+        tool_origin::prepare_claimed_inputs(&kernel, &claim).await;
         let mut live = kernel
             .reserve_model_attempt(
                 &claim,
@@ -521,6 +524,7 @@ async fn receipts_reject_other_claims_effects_purposes_and_retired_executors() {
             .await
             .unwrap()
             .unwrap();
+        tool_origin::prepare_claimed_inputs(&kernel, &other).await;
         let PublishAttempt::Published(other_receipt) = kernel
             .publish(&other, vec![source_bodies(other.turn_id()).remove(0)])
             .await
@@ -666,7 +670,10 @@ async fn cold_recovery_at_attempt_boundaries_interrupts_without_replaying() {
                 session_id: session.clone(),
                 expected_seq: 0,
                 header: Some(header(session.as_str())),
-                facts: facts.into_iter().map(Into::into).collect(),
+                facts: prepared_history(facts)
+                    .into_iter()
+                    .map(Into::into)
+                    .collect(),
             })
             .await
             .unwrap();

@@ -1,4 +1,5 @@
 use super::*;
+use rsi_agent_store_protocol::MailboxRead;
 
 #[async_trait]
 impl TurnExecution for AgentKernel {
@@ -42,13 +43,52 @@ impl TurnExecution for AgentKernel {
         owner.jobs = Some(source);
         Ok(())
     }
+    async fn request_step(
+        &self,
+        claim: &TurnClaim,
+        domain: Option<&str>,
+        pending: Vec<rsi_agent_session_protocol::SettledToolContext>,
+        cancellation: CancellationToken,
+    ) -> TurnResult<(
+        rsi_agent_session_protocol::StepId,
+        Option<rsi_agent_session_protocol::DomainStateView>,
+    )> {
+        self.capture_request_step(claim, domain, pending, cancellation)
+            .await
+    }
     async fn contribution_context(
         &self,
         claim: &TurnClaim,
+        pending: Vec<rsi_agent_session_protocol::SettledToolContext>,
         cancellation: CancellationToken,
     ) -> TurnResult<rsi_agent_composition_protocol::ContributionContext> {
-        self.capture_contribution_context(claim, cancellation, None)
+        self.capture_contribution_context(claim, pending, cancellation, None)
             .await
+    }
+    async fn tool_history(
+        &self,
+        caller: &AgentCallerAuthority,
+        cancellation: CancellationToken,
+    ) -> TurnResult<rsi_agent_composition_protocol::CapturedFactHistory> {
+        if caller.tool_effect_id().is_none() || cancellation.is_cancelled() {
+            return Err(TurnError::StaleClaim);
+        }
+        self.validate_agent_caller(caller)?;
+        let marks = self
+            .inner
+            .store
+            .read_watermarks(caller.session_id())
+            .await
+            .map_err(turn_store_error)?;
+        self.validate_agent_caller(caller)?;
+        if cancellation.is_cancelled() {
+            return Err(TurnError::StaleClaim);
+        }
+        let through = marks.durable_fact_seq;
+        Ok(rsi_agent_composition_protocol::CapturedFactHistory {
+            through_seq: through,
+            facts: captured_history::capture(self, caller.session_id(), through, cancellation),
+        })
     }
     async fn program_policy_context(
         &self,
@@ -56,7 +96,7 @@ impl TurnExecution for AgentKernel {
         parent: &EffectId,
         cancellation: CancellationToken,
     ) -> TurnResult<rsi_agent_composition_protocol::ContributionContext> {
-        self.capture_contribution_context(claim, cancellation, Some(parent))
+        self.capture_contribution_context(claim, Vec::new(), cancellation, Some(parent))
             .await
     }
     async fn park_human_wait(
@@ -286,6 +326,8 @@ impl TurnExecution for AgentKernel {
         let Some(ActiveEffect::Tool {
             started: true,
             source_selection,
+            source_tools,
+            identity,
             ..
         }) = turn.effects.get(effect_id)
         else {
@@ -296,7 +338,9 @@ impl TurnExecution for AgentKernel {
         self.inner.claim_issuer.tool_caller(
             claim,
             effect_id.clone(),
+            identity.clone(),
             source_selection.as_ref().clone(),
+            source_tools.clone(),
         )
     }
 
@@ -311,9 +355,18 @@ impl TurnExecution for AgentKernel {
         Ok(domains)
     }
 
+    async fn read_fork_sources(&self, claim: &TurnClaim) -> TurnResult<Vec<SessionHeader>> {
+        {
+            let state = lock_state(&self.inner);
+            self.validate_claim(&state, claim)?;
+        }
+        observation::fork_sources_from_header(&self.inner, claim.header()).await
+    }
+
     async fn read_fork_facts(
         &self,
         claim: &TurnClaim,
+        source: &SessionId,
         after_parent_seq: u64,
         limit: usize,
     ) -> TurnResult<Option<ForkFactPage>> {
@@ -326,11 +379,12 @@ impl TurnExecution for AgentKernel {
             let state = lock_state(&self.inner);
             self.validate_claim(&state, claim)?;
         }
-        read_fork_page_from_header(&self.inner, claim.header(), after_parent_seq, limit).await
+        read_fork_page_from_header(&self.inner, claim.header(), source, after_parent_seq, limit)
+            .await
     }
 
     #[allow(clippy::too_many_lines)] // Safe-boundary entry atomically binds ordered messages, context, and one new Step.
-    async fn enter_pending_step_messages(&self, claim: &TurnClaim) -> TurnResult<usize> {
+    async fn claim_pending_step_messages(&self, claim: &TurnClaim) -> TurnResult<usize> {
         {
             let state = lock_state(&self.inner);
             if self.validate_claim(&state, claim)?.activation_id.is_none() {
@@ -342,14 +396,9 @@ impl TurnExecution for AgentKernel {
             .submission_admission
             .acquire(claim.session_id())
             .await?;
-        let scan = scan_durable_messages(&self.inner, claim.session_id(), None).await?;
-        let pending = scan
-            .pending
-            .into_iter()
-            .filter(|entry| entry.target == MessageTarget::NextStep)
-            .collect::<Vec<_>>();
-        let pending =
-            bounded_step_message_prefix(pending, MAXIMUM_NEXT_STEP_MESSAGE_PAYLOAD_BYTES)?;
+        let scan =
+            scan_durable_messages(&self.inner, claim.session_id(), MailboxRead::NextStep).await?;
+        let mut pending = scan.pending;
         if pending.is_empty() {
             return Ok(0);
         }
@@ -419,12 +468,12 @@ impl TurnExecution for AgentKernel {
         let input_fact_offset = bodies.len();
         bodies.extend(
             pending
-                .iter()
-                .map(|entry| SessionFactBody::InputMessageEntered {
+                .iter_mut()
+                .map(|entry| SessionFactBody::InputMessageClaimed {
                     turn_id: claim.turn_id().clone(),
                     step_id: next_step.clone(),
-                    source: entry.message.entered_source(),
-                    content: entry.message.content.clone(),
+                    source: entry.message.claimed_source(),
+                    content: std::mem::take(&mut entry.message.content),
                 }),
         );
         let timestamp_ms = self.inner.clock.now_ms().max(1);
@@ -453,7 +502,7 @@ impl TurnExecution for AgentKernel {
             .collect::<TurnResult<Vec<_>>>()?;
         let mut staged = original;
         for fact in &facts {
-            apply_executor_body(&mut staged, fact.body())?;
+            apply_executor_body(&mut staged, fact.body(), fact.seq())?;
         }
         let controls = pending
             .iter()
@@ -477,7 +526,7 @@ impl TurnExecution for AgentKernel {
                         activation_id: activation_id.clone(),
                         turn_id: claim.turn_id().clone(),
                         step_id: next_step.clone(),
-                        entered_fact_seq: facts
+                        claimed_fact_seq: facts
                             .get(fact_index)
                             .ok_or_else(|| {
                                 TurnError::Invariant(
@@ -713,9 +762,26 @@ impl TurnExecution for AgentKernel {
         }))
     }
 
+    async fn read_checkpoint_fork_sources(
+        &self,
+        claim: &TurnClaim,
+    ) -> TurnResult<Option<Vec<SessionHeader>>> {
+        self.validate_issued_claim(claim)?;
+        if read_stored_outcome(&self.inner, claim.session_id(), claim.turn_id())
+            .await?
+            .is_none()
+        {
+            return Ok(None);
+        }
+        observation::fork_sources_from_header(&self.inner, claim.header())
+            .await
+            .map(Some)
+    }
+
     async fn read_checkpoint_fork_facts(
         &self,
         claim: &TurnClaim,
+        source: &SessionId,
         after_parent_seq: u64,
         limit: usize,
     ) -> TurnResult<Option<ForkFactPage>> {
@@ -743,7 +809,8 @@ impl TurnExecution for AgentKernel {
         {
             return Ok(None);
         }
-        read_fork_page_from_header(&self.inner, claim.header(), after_parent_seq, limit).await
+        read_fork_page_from_header(&self.inner, claim.header(), source, after_parent_seq, limit)
+            .await
     }
 
     async fn read_context_checkpoint(
@@ -1070,10 +1137,10 @@ pub(super) fn stage_execution_facts(
         validate_program_role(&turn, &body)?;
         validate_tool_admission(claim.header(), &turn, &body)?;
         super::structured::validate_conclusion(claim.header(), &turn, &body)?;
-        apply_executor_body(&mut turn, &body)?;
         next_seq = next_seq
             .checked_add(1)
             .ok_or_else(|| TurnError::Invariant("Fact sequence exhausted".into()))?;
+        apply_executor_body(&mut turn, &body, next_seq)?;
         let fact = SessionFact::new(next_seq, kernel.inner.clock.now_ms().max(1), body)
             .map_err(|error| TurnError::Invalid(error.to_string()))?;
         if let SessionFactBody::ToolResult {
@@ -1297,6 +1364,58 @@ pub(super) fn validate_tool_admission(
     turn: &TurnControl,
     body: &SessionFactBody,
 ) -> TurnResult<()> {
+    if let SessionFactBody::ToolResult {
+        effect_id, result, ..
+    } = body
+        && !result.additional_contexts.is_empty()
+        && !matches!(
+            turn.effects.get(effect_id),
+            Some(ActiveEffect::Tool {
+                started: true,
+                origin: rsi_agent_session_protocol::ToolOrigin::Model { .. },
+                ..
+            })
+        )
+    {
+        return Err(TurnError::Invalid(
+            "deferred tool context requires a started model-origin tool".into(),
+        ));
+    }
+    let registration = match body {
+        SessionFactBody::ToolIntent {
+            name,
+            identity,
+            origin,
+            ..
+        }
+        | SessionFactBody::ToolRejected {
+            name,
+            identity,
+            origin,
+            ..
+        } => Some((name, identity, origin)),
+        _ => None,
+    };
+    if let Some((name, id, origin)) = registration {
+        if let Some(binding) = turn.application.tools.get(name) {
+            if binding.owner != id.owner_id()
+                || !matches!(origin, rsi_agent_session_protocol::ToolOrigin::Model { .. })
+            {
+                return Err(TurnError::Invalid(
+                    "application Tool differs from its captured request registration".into(),
+                ));
+            }
+        } else if turn
+            .application
+            .tools
+            .values()
+            .any(|binding| binding.owner == id.owner_id())
+        {
+            return Err(TurnError::Invalid(
+                "application Tool owner belongs to another name".into(),
+            ));
+        }
+    }
     if let SessionFactBody::ToolIntent { name, .. } = body
         && header
             .delegation_policy()

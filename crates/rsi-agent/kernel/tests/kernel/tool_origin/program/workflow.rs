@@ -1,5 +1,6 @@
 use super::*;
 use rsi_agent_session_protocol::{ExecutionOwner, ProgramOutcome, ProgramRunEvent};
+use rsi_agent_store_protocol::MailboxRead;
 use rsi_agent_turn_protocol::{PrepareProgram, ProgramAgentRequest, ProgramRead, ProgramRun};
 struct Fixture {
     store: Arc<dyn SessionStore>,
@@ -389,8 +390,8 @@ async fn workflow_detaches_and_routes_128_initial_completions_without_parent_mai
             matches!(claim.header().execution_owner(),Some(ExecutionOwner::ProgramRun{ordinal:actual,..}) if *actual==ordinal)
         );
         assert_eq!(
-            claim.header().fork_origin().unwrap().invoking_turn_id,
-            *f.root.turn_id()
+            claim.header().history_origin().unwrap().point.turn_id(),
+            f.root.turn_id()
         );
         assert_eq!(
             f.kernel.composition(&claim).unwrap().source_digest(),
@@ -541,7 +542,7 @@ async fn workflow_detaches_and_routes_128_initial_completions_without_parent_mai
         .unwrap();
     assert!(entered.facts.iter().any(|fact| matches!(
         fact.body(),
-        SessionFactBody::InputMessageEntered {
+        SessionFactBody::InputMessageClaimed {
             source: rsi_agent_session_protocol::InputMessageSource::Program { .. },
             ..
         }
@@ -659,6 +660,7 @@ async fn workflow_cancellation_wins_before_detach_and_recovery_discards_unclaime
     })
     .await
     .unwrap();
+    reject_queue_withdrawal_of_program_input(&f).await;
     waiting.abort();
     let _ = waiting.await;
     // Closing the Kernel does not replay accepted but unclaimed workflow work.
@@ -712,6 +714,231 @@ async fn workflow_cancellation_wins_before_detach_and_recovery_discards_unclaime
     assert!(g.run.detach().await.is_err());
     g.run.finish(ProgramOutcome::Cancelled, None).await.unwrap();
     g.kernel.shutdown(g.workers).await.unwrap();
+}
+
+async fn reject_queue_withdrawal_of_program_input(f: &Fixture) {
+    use rsi_agent_session_protocol::{
+        QueueMutation, QueueMutationOutcome, QueueMutationRejection, QueueMutationRequest,
+        QueueOperationId, QueueSlotId,
+    };
+    let child = f.run.descriptor().child_session_id(1).unwrap();
+    let ready = f
+        .store
+        .list_ready_messages(f.root.session_id(), None, 64)
+        .await
+        .unwrap();
+    let message = &ready.messages[0].message_id;
+    let request = QueueMutationRequest {
+        operation_id: QueueOperationId::new("direct-program-withdrawal").unwrap(),
+        slot_id: QueueSlotId::new(message.as_str()).unwrap(),
+        expected_message_id: message.clone(),
+        mutation: QueueMutation::Withdraw,
+    };
+    let receipt = f.kernel.mutate_queue(&child, request, None).await.unwrap();
+    assert!(matches!(
+        receipt.outcome,
+        QueueMutationOutcome::Rejected {
+            reason: QueueMutationRejection::ProgramOwned,
+            ..
+        }
+    ));
+    let after = f
+        .store
+        .list_ready_messages(f.root.session_id(), None, 64)
+        .await
+        .unwrap();
+    assert_eq!(after.messages.len(), 1);
+    assert_eq!(&after.messages[0].message_id, message);
+}
+
+#[tokio::test]
+#[expect(
+    clippy::too_many_lines,
+    reason = "The two Store implementations exercise the same correlated child/parent commit barrier"
+)]
+async fn session_stop_retains_or_atomically_settles_an_unclaimed_program_child() {
+    for sqlite in [false, true] {
+        let directory = tempfile::tempdir().unwrap();
+        let store: Arc<dyn SessionStore> = if sqlite {
+            Arc::new(rsi_agent_store_sqlite::SqliteStore::open(directory.path()).unwrap())
+        } else {
+            Arc::new(MemoryStore::new())
+        };
+        let f = fixture_with_store(false, None, store, true).await;
+        let owner = f.run.clone();
+        let waiting = tokio::spawn(async move {
+            owner
+                .agent(ProgramAgentRequest {
+                    message: "stop before execution".into(),
+                    output_contract: None,
+                    role: None,
+                })
+                .await
+        });
+        let child = f.run.descriptor().child_session_id(1).unwrap();
+        let mut events = f
+            .kernel
+            .observe_session(
+                f.root.session_id(),
+                ObservationCursor {
+                    fact_seq: 0,
+                    control_seq: 0,
+                },
+            )
+            .await
+            .unwrap();
+        tokio::time::timeout(std::time::Duration::from_secs(5), async {
+            loop {
+                let records = f
+                    .store
+                    .read_program_records(f.root.session_id(), &f.run.descriptor().run_id)
+                    .await
+                    .unwrap()
+                    .unwrap();
+                if records.records.iter().any(|record| {
+                    matches!(
+                        record.body(),
+                        AgentControlRecordBody::ProgramRun {
+                            event: ProgramRunEvent::ChildAdmitted { .. },
+                            ..
+                        }
+                    )
+                }) {
+                    break;
+                }
+                events.next().await.unwrap().unwrap();
+            }
+        })
+        .await
+        .unwrap();
+        assert!(
+            f.kernel
+                .cancel_target(&child, CancelTarget::Session { keep_inbox: true }, None)
+                .await
+                .unwrap()
+                .accepted
+        );
+        let paused = f
+            .store
+            .read_inbox_control_state(&child, true)
+            .await
+            .unwrap();
+        assert!(paused.inbox_paused);
+        assert_eq!(paused.pending_message_ids.len(), 1);
+        assert!(!waiting.is_finished());
+        let parent_before = f.store.read_watermarks(f.root.session_id()).await.unwrap();
+        f.faults.pause_next_agent_commit_before_apply();
+        let mut stop = {
+            let kernel = f.kernel.clone();
+            let child = child.clone();
+            tokio::spawn(async move {
+                kernel
+                    .cancel_target(&child, CancelTarget::Session { keep_inbox: false }, None)
+                    .await
+            })
+        };
+        tokio::select! {
+            () = f.faults.wait_until_agent_commit_is_before_apply() => {}
+            result = &mut stop => panic!("child stop returned before atomic commit: {result:?}"),
+        }
+        assert_eq!(
+            f.store
+                .read_inbox_control_state(&child, true)
+                .await
+                .unwrap(),
+            paused
+        );
+        assert_eq!(
+            f.store.read_watermarks(f.root.session_id()).await.unwrap(),
+            parent_before
+        );
+        assert!(!waiting.is_finished());
+        f.faults.release_agent_commit_before_apply();
+        assert!(stop.await.unwrap().unwrap().accepted);
+        let result = tokio::time::timeout(std::time::Duration::from_secs(5), waiting)
+            .await
+            .unwrap()
+            .unwrap()
+            .unwrap();
+        assert_eq!(result.receipt.outcome, ProgramOutcome::Cancelled);
+        assert!(result.receipt.activation_id.is_none());
+        assert_eq!(result.receipt.child_session_id, child);
+        assert!(
+            f.store
+                .read_inbox_control_state(&child, true)
+                .await
+                .unwrap()
+                .pending_message_ids
+                .is_empty()
+        );
+        f.run.finish(ProgramOutcome::Completed, None).await.unwrap();
+        f.kernel.shutdown(f.workers).await.unwrap();
+    }
+}
+
+#[tokio::test]
+async fn queue_withdrawal_accepts_program_completion_notices_without_changing_the_run() {
+    use rsi_agent_session_protocol::{
+        QueueMutation, QueueMutationOutcome, QueueMutationRequest, QueueOperationId, QueueSlotId,
+    };
+    for end_first in [false, true] {
+        let f = fixture().await;
+        f.run.detach().await.unwrap();
+        if end_first {
+            end_creator(&f).await;
+        }
+        f.run.finish(ProgramOutcome::Completed, None).await.unwrap();
+        let records = f
+            .store
+            .read_program_records(f.root.session_id(), &f.run.descriptor().run_id)
+            .await
+            .unwrap()
+            .unwrap();
+        let notices = f.store.list_program_notices(None, 64).await.unwrap();
+        assert_eq!(notices.notices.len(), 1);
+        let message = &notices.notices[0].message_id;
+        let request = QueueMutationRequest {
+            operation_id: QueueOperationId::new("withdraw-program-notice").unwrap(),
+            slot_id: QueueSlotId::new(message.as_str()).unwrap(),
+            expected_message_id: message.clone(),
+            mutation: QueueMutation::Withdraw,
+        };
+        let receipt = f
+            .kernel
+            .mutate_queue(f.root.session_id(), request.clone(), None)
+            .await
+            .unwrap();
+        assert_eq!(receipt.outcome, QueueMutationOutcome::Withdrawn);
+        assert_eq!(
+            f.kernel
+                .mutate_queue(f.root.session_id(), request, None)
+                .await
+                .unwrap(),
+            receipt
+        );
+        assert!(
+            f.store
+                .list_program_notices(None, 64)
+                .await
+                .unwrap()
+                .notices
+                .is_empty()
+        );
+        assert_eq!(
+            f.store
+                .read_program_records(f.root.session_id(), &f.run.descriptor().run_id)
+                .await
+                .unwrap()
+                .unwrap()
+                .records,
+            records.records
+        );
+        f.store.validate_session(f.root.session_id()).await.unwrap();
+        if !end_first {
+            end_creator(&f).await;
+        }
+        f.kernel.shutdown(f.workers).await.unwrap();
+    }
 }
 
 #[tokio::test]
@@ -810,7 +1037,7 @@ async fn workflow_restart_discards_both_next_step_and_next_turn_notices() {
             .unwrap();
         let mailbox = f
             .store
-            .read_agent_mailbox(f.root.session_id(), None)
+            .read_agent_mailbox(f.root.session_id(), MailboxRead::All)
             .await
             .unwrap();
         assert_eq!(mailbox.pending_count, 1);

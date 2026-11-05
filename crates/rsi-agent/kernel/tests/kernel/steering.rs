@@ -1,6 +1,18 @@
 use super::*;
 use rsi_agent_session_protocol::MessageDelivery;
+use rsi_agent_store_protocol::MailboxRead;
 use rsi_agent_store_protocol::StoreAgentMessageState;
+
+fn attributed_message(id: &str) -> AgentMessage {
+    let mut message = mailbox_message(id);
+    message.source = AgentMessageSource::Human {
+        attribution: Some(rsi_agent_session_protocol::MessageAttribution {
+            id: format!("原始消息: {id}"),
+            source: serde_json::json!({"kind":"plugin:input", "meta":[true, "保留"]}),
+        }),
+    };
+    message
+}
 
 async fn submit(
     kernel: &AgentKernel,
@@ -11,7 +23,7 @@ async fn submit(
     kernel
         .submit_message(SubmitMessage {
             session: resume(kernel, session.clone()).await,
-            message: mailbox_message(id),
+            message: attributed_message(id),
             delivery,
         })
         .await
@@ -35,7 +47,7 @@ async fn promotion_scenario(store: Arc<dyn SessionStore>, ending: &str) {
         .await
         .unwrap();
     let idle = store
-        .read_agent_mailbox(&session, Some(&first.message_id))
+        .read_agent_mailbox(&session, MailboxRead::WithMessage(first.message_id.clone()))
         .await
         .unwrap()
         .selected
@@ -72,7 +84,7 @@ async fn promotion_scenario(store: Arc<dyn SessionStore>, ending: &str) {
         .unwrap();
     submit(&initial, &session, "fixed-step", MessageDelivery::NextStep).await;
     let bound = store
-        .read_agent_mailbox(&session, Some(&steer.message_id))
+        .read_agent_mailbox(&session, MailboxRead::WithMessage(steer.message_id.clone()))
         .await
         .unwrap()
         .selected
@@ -80,6 +92,7 @@ async fn promotion_scenario(store: Arc<dyn SessionStore>, ending: &str) {
     assert_eq!(bound.target, MessageTarget::NextStep);
     assert_eq!(bound.bound_turn_id.as_ref(), Some(claim.turn_id()));
     assert!(!bound.wake_required);
+    assert_eq!(bound.message, attributed_message("steer"));
 
     if ending == "recovery" {
         initial.shutdown(worker).await.unwrap();
@@ -110,7 +123,7 @@ async fn promotion_scenario(store: Arc<dyn SessionStore>, ending: &str) {
             .await
             .unwrap();
     let promoted = store
-        .read_agent_mailbox(&session, Some(&steer.message_id))
+        .read_agent_mailbox(&session, MailboxRead::WithMessage(steer.message_id.clone()))
         .await
         .unwrap()
         .selected
@@ -118,6 +131,7 @@ async fn promotion_scenario(store: Arc<dyn SessionStore>, ending: &str) {
     assert_eq!(promoted.target, MessageTarget::NextTurn, "ending={ending}");
     assert_eq!(promoted.bound_turn_id, bound.bound_turn_id);
     assert_eq!(promoted.delivery, MessageDelivery::Steer);
+    assert_eq!(promoted.message, bound.message);
     let ready = store.list_ready_messages(&session, None, 16).await.unwrap();
     assert_eq!(
         ready
@@ -139,14 +153,20 @@ async fn promotion_scenario(store: Arc<dyn SessionStore>, ending: &str) {
     assert_eq!(retry.accepted_control_seq, steer.accepted_control_seq);
     assert_eq!(retry.state, MessageState::Pending);
     let fixed = store
-        .read_agent_mailbox(&session, Some(&MessageId::new("fixed-step").unwrap()))
+        .read_agent_mailbox(
+            &session,
+            MailboxRead::WithMessage(MessageId::new("fixed-step").unwrap()),
+        )
         .await
         .unwrap()
         .selected
         .unwrap();
     assert_eq!(fixed.target, MessageTarget::NextStep);
     let discarded = store
-        .read_agent_mailbox(&session, Some(&discarded.message_id))
+        .read_agent_mailbox(
+            &session,
+            MailboxRead::WithMessage(discarded.message_id.clone()),
+        )
         .await
         .unwrap()
         .selected
@@ -198,17 +218,53 @@ async fn consumed_steer_retries_retain_the_original_turn_and_conflicting_text_is
         .await
         .unwrap()
         .unwrap();
+    let queued = submit(&kernel, &session, "queued", MessageDelivery::NextTurn).await;
     let accepted = submit(&kernel, &session, "steer", MessageDelivery::Steer).await;
-    assert_eq!(kernel.enter_pending_step_messages(&claim).await.unwrap(), 1);
+    assert_eq!(kernel.claim_pending_step_messages(&claim).await.unwrap(), 1);
+    assert!(matches!(
+        store
+            .read_agent_message(&session, &queued.message_id)
+            .await
+            .unwrap()
+            .unwrap()
+            .state,
+        StoreAgentMessageState::Pending
+    ));
+    let page = kernel.read_facts(&claim, 0, 64).await.unwrap();
+    assert!(page.facts.iter().any(|fact| matches!(
+        fact.body(),
+        SessionFactBody::InputMessageClaimed {
+            source: rsi_agent_session_protocol::InputMessageSource::Human { message_id, .. },
+            content, ..
+        } if message_id == &accepted.message_id && content == &attributed_message("steer").content
+    )));
     let retried = submit(&kernel, &session, "steer", MessageDelivery::Steer).await;
     assert_eq!(retried.accepted_control_seq, accepted.accepted_control_seq);
     assert!(
         matches!(retried.state, MessageState::Claimed { ref turn_id, .. } if turn_id == claim.turn_id())
     );
-    let mut changed = mailbox_message("steer");
+    let mut changed = attributed_message("steer");
     changed.content = vec![AgentMessageContent::Text {
         text: "different text".into(),
     }];
+    assert!(matches!(
+        kernel
+            .submit_message(SubmitMessage {
+                session: resume(&kernel, session.clone()).await,
+                message: changed,
+                delivery: MessageDelivery::Steer,
+            })
+            .await,
+        Err(TurnError::MessageConflict { .. })
+    ));
+    let mut changed = attributed_message("steer");
+    let AgentMessageSource::Human {
+        attribution: Some(attribution),
+    } = &mut changed.source
+    else {
+        unreachable!()
+    };
+    attribution.source = serde_json::json!({"kind":"different"});
     assert!(matches!(
         kernel
             .submit_message(SubmitMessage {
@@ -223,13 +279,8 @@ async fn consumed_steer_retries_retain_the_original_turn_and_conflicting_text_is
         .finish_turn(&claim, &TurnOutcome::Completed)
         .await
         .unwrap();
-    assert!(
-        store
-            .list_ready_messages(&session, None, 8)
-            .await
-            .unwrap()
-            .messages
-            .is_empty()
-    );
+    let ready = store.list_ready_messages(&session, None, 8).await.unwrap();
+    assert_eq!(ready.messages.len(), 1);
+    assert_eq!(ready.messages[0].message_id, queued.message_id);
     kernel.shutdown(worker).await.unwrap();
 }

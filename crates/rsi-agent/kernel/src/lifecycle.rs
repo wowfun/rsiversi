@@ -1,22 +1,50 @@
 use super::*;
 
-pub(super) fn initial_domain_control(
-    header: &SessionHeader,
-    baseline: &rsi_agent_composition_protocol::DomainBaseline,
-) -> TurnResult<Option<AgentControlRecord>> {
-    baseline
-        .commit()
-        .map(|commit| {
+pub(super) fn initial_controls(
+    prepared: &PreparedFreshSession,
+) -> TurnResult<Vec<AgentControlRecord>> {
+    let header = prepared.header();
+    let inputs = prepared
+        .command_inputs()
+        .iter()
+        .map(|input| input.publication(true))
+        .collect::<Vec<_>>();
+    let mut controls = Vec::new();
+    if let Some(commit) = prepared
+        .initial_commit()
+        .map_err(|error| TurnError::Invalid(error.to_string()))?
+    {
+        controls.push(
             AgentControlRecord::new(
                 1,
                 header.created_at_ms(),
-                AgentControlRecordBody::DomainStateCommitted {
-                    commit: commit.clone(),
+                AgentControlRecordBody::DomainStateCommitted { commit },
+            )
+            .map_err(|error| TurnError::Invalid(error.to_string()))?,
+        );
+    } else if !inputs.is_empty() {
+        return Err(TurnError::Invariant(
+            "draft command input requires its domain baseline".into(),
+        ));
+    }
+    for input in inputs {
+        controls.push(
+            AgentControlRecord::new(
+                controls.len() as u64 + 1,
+                header.created_at_ms(),
+                AgentControlRecordBody::MessageAccepted {
+                    message: input.message,
+                    delivery: input.delivery,
+                    bound_turn_id: None,
+                    root_session_id: agent_root_and_path(header).0,
+                    target: MessageTarget::NextStep,
+                    wake_required: false,
                 },
             )
-            .map_err(|error| TurnError::Invalid(error.to_string()))
-        })
-        .transpose()
+            .map_err(|error| TurnError::Invalid(error.to_string()))?,
+        );
+    }
+    Ok(controls)
 }
 
 impl AgentKernel {
@@ -39,12 +67,14 @@ impl AgentKernel {
             }
             _ => None,
         });
-        if stored
-            != prepared
-                .baseline()
-                .commit()
-                .map(rsi_agent_session_protocol::DomainStateCommit::request_sha256)
-        {
+        let controls = initial_controls(prepared)?;
+        let expected = controls.first().and_then(|record| match record.body() {
+            AgentControlRecordBody::DomainStateCommitted { commit } => {
+                Some(commit.request_sha256())
+            }
+            _ => None,
+        });
+        if stored != expected {
             return Err(TurnError::Invalid(
                 "fresh submission baseline disagrees with the durable session".into(),
             ));
@@ -82,6 +112,7 @@ impl AgentKernel {
             composition,
             clock,
             ValidatedKernelLimits::new(limits)?,
+            None,
         )
         .await
     }
@@ -91,6 +122,7 @@ impl AgentKernel {
         composition: Arc<dyn AgentComposition>,
         clock: Arc<dyn Clock>,
         limits: ValidatedKernelLimits,
+        receipts: Option<&dyn ApplicationReceiptReader>,
     ) -> Result<Self> {
         let limits = limits.0;
         let mut after = None;
@@ -101,7 +133,7 @@ impl AgentKernel {
             let has_more = page.has_more;
             let next_after = page.sessions.last().cloned();
             for session_id in page.sessions {
-                repair_unfinished_session(&store, clock.as_ref(), &session_id).await?;
+                repair_unfinished_session(&store, clock.as_ref(), &session_id, receipts).await?;
             }
             if !has_more {
                 break;
@@ -334,12 +366,12 @@ impl AgentKernel {
                 .map_or(header.session_id(), |origin| &origin.root_session_id)
                 .clone()
         });
-        let result = if baseline.is_some() || batch.facts.iter().any(|fact| is_terminal_fact(fact))
-        {
-            self.flush_control_batch(batch, baseline).await
-        } else {
-            self.inner.store.append(batch).await
-        };
+        let result =
+            if !baseline.is_empty() || batch.facts.iter().any(|fact| is_terminal_fact(fact)) {
+                self.flush_control_batch(batch, baseline).await
+            } else {
+                self.inner.store.append(batch).await
+            };
         if result.is_ok() {
             self.inner.session_changes.committed(&session_id);
         }
@@ -354,7 +386,7 @@ impl AgentKernel {
     async fn flush_control_batch(
         &self,
         batch: AppendBatch,
-        baseline: Option<AgentControlRecord>,
+        baseline: Vec<AgentControlRecord>,
     ) -> rsi_agent_store_protocol::Result<rsi_agent_store_protocol::AppendCommit> {
         // Control writers hold submission admission and fence queued terminals before sampling
         // their control cursor. The flusher must not acquire that admission while they wait.
@@ -376,7 +408,7 @@ impl AgentKernel {
                     expected_control_seq: control_seq,
                     header: batch.header,
                     facts: batch.facts,
-                    controls: baseline.into_iter().collect(),
+                    controls: baseline,
                 }],
                 required_active_activations: Vec::new(),
                 quiescent_descendants_of: None,
@@ -392,6 +424,30 @@ impl AgentKernel {
         Ok(rsi_agent_store_protocol::AppendCommit {
             durable_seq: watermark.durable_fact_seq,
         })
+    }
+
+    /// Drains a resident Fact suffix while its submission admission prevents growth.
+    pub(super) async fn flush_resident_admitted(&self, id: &SessionId) -> TurnResult<()> {
+        let wait = {
+            let state = lock_state(&self.inner);
+            if let Some(session) = state.sessions.get(id) {
+                if let Some(error) = &session.permanent_flush_error {
+                    return Err(TurnError::Flush(error.clone()));
+                }
+                Some(DurabilityWait::new(
+                    session,
+                    session.live_seq().map_err(turn_kernel_error)?,
+                ))
+            } else {
+                None
+            }
+        };
+        if let Some(wait) = wait {
+            self.wait_for_durable(wait)
+                .await
+                .map_err(turn_kernel_error)?;
+        }
+        Ok(())
     }
 
     /// Caller holds this Session's submission admission through its ensuing control commit.
@@ -429,11 +485,15 @@ impl AgentKernel {
             return None;
         }
         let mut facts = Vec::new();
-        let baseline = session
-            .header_pending
-            .then(|| session.pending_domain_baseline.clone())
-            .flatten();
-        let mut bytes = baseline.as_ref().map_or(0, AgentControlRecord::encoded_len);
+        let baseline = if session.header_pending {
+            session.pending_initial_controls.clone()
+        } else {
+            vec![]
+        };
+        let mut bytes = baseline
+            .iter()
+            .map(AgentControlRecord::encoded_len)
+            .sum::<usize>();
         for fact in &session.pending {
             if facts.len() == MAXIMUM_STORE_BATCH_FACTS {
                 break;
@@ -795,7 +855,10 @@ impl AgentKernel {
                     )
                     .await;
                 if let Err(error) = claimed
-                    && !matches!(error, TurnError::ContinuationDisarmed)
+                    && !matches!(
+                        error,
+                        TurnError::ContinuationDisarmed | TurnError::StaleClaim
+                    )
                 {
                     return Err(error);
                 }
@@ -1106,23 +1169,21 @@ impl AgentKernel {
         prepared: &PreparedResumeSession,
     ) -> TurnResult<()> {
         let (header, composition) = self.inner.resume_issuer.inspect(prepared)?;
-        let header = header.clone();
-        let composition = composition.clone();
-        let session_id = header.session_id().clone();
+        let session_id = header.session_id();
         let (load, leader) = {
             let mut state = lock_state(&self.inner);
             if !state.accepting {
                 return Err(TurnError::ShuttingDown);
             }
-            if state.sessions.contains_key(&session_id) {
+            if state.sessions.contains_key(session_id) {
                 return Ok(());
             }
-            if state.fresh_reservations.contains(&session_id) {
+            if state.fresh_reservations.contains(session_id) {
                 return Err(TurnError::Invalid(
                     "resume selected a session that is still being created".into(),
                 ));
             }
-            if let Some(load) = state.loading_sessions.get(&session_id) {
+            if let Some(load) = state.loading_sessions.get(session_id) {
                 (Arc::clone(load), false)
             } else {
                 if state
@@ -1145,28 +1206,31 @@ impl AgentKernel {
             return load.wait().await;
         }
         let load_guard = SessionLoadGuard::new(&self.inner, session_id.clone(), Arc::clone(&load));
-        let loaded = load_control_state(&self.inner.store, Some(&self.inner), &session_id)
+        let loaded = load_control_state(&self.inner.store, Some(&self.inner), header)
             .await
             .map_err(turn_kernel_error);
         let result = {
             let mut state = lock_state(&self.inner);
             if !state.accepting {
                 Err(TurnError::ShuttingDown)
-            } else if state.sessions.contains_key(&session_id) {
+            } else if state.sessions.contains_key(session_id) {
                 Ok(())
             } else {
                 match loaded {
                     Err(error) => Err(error),
-                    Ok((durable_seq, turns, turn_order)) => {
-                        let mut session =
-                            SessionRuntime::new(header, composition, durable_seq, false);
-                        session.turns = turns;
-                        session.turn_order = turn_order;
-                        let queued = session.turn_order.clone();
-                        state.sessions.insert(session_id.clone(), session);
-                        for turn_id in queued {
-                            enqueue(&mut state, session_id.clone(), turn_id);
+                    Ok(loaded) => {
+                        let mut session = SessionRuntime::new(
+                            header.clone(),
+                            composition.clone(),
+                            loaded.fact_seq,
+                            false,
+                        );
+                        session.turns = loaded.turns;
+                        session.turn_order = loaded.order;
+                        for turn_id in &session.turn_order {
+                            enqueue(&mut state, session_id.clone(), turn_id.clone());
                         }
+                        state.sessions.insert(session_id.clone(), session);
                         Ok(())
                     }
                 }
@@ -1220,10 +1284,8 @@ impl AgentKernel {
             execution_admission::admit(session_selection.header(), execution.as_ref())?;
         let session_id = session_selection.session_id().clone();
         let baseline = match &session_selection {
-            SubmitSession::Fresh(prepared) => {
-                initial_domain_control(prepared.header(), prepared.baseline())?
-            }
-            SubmitSession::Resume(_) => None,
+            SubmitSession::Fresh(prepared) => initial_controls(prepared)?,
+            SubmitSession::Resume(_) => vec![],
         };
         let mut state = lock_state(&self.inner);
         if !state.accepting {
@@ -1235,7 +1297,7 @@ impl AgentKernel {
         let inserted_fresh = matches!(&session_selection, SubmitSession::Fresh(_));
         match session_selection {
             SubmitSession::Fresh(prepared) => {
-                let (header, composition, _baseline) = prepared.into_parts();
+                let (header, composition, resources) = prepared.into_parts();
                 if state.sessions.contains_key(&session_id)
                     || !state.fresh_reservations.remove(&session_id)
                 {
@@ -1244,7 +1306,8 @@ impl AgentKernel {
                     ));
                 }
                 let mut resident = SessionRuntime::new(header, composition, 0, true);
-                resident.pending_domain_baseline = baseline;
+                resident.pending_initial_controls = baseline;
+                resident.pending_baseline_resources = Some(resources);
                 state.sessions.insert(session_id.clone(), resident);
             }
             SubmitSession::Resume(prepared) => {
@@ -1297,7 +1360,7 @@ impl AgentKernel {
             turn_id.clone(),
             TurnControl {
                 execution,
-                ..TurnControl::new(fact.timestamp_ms(), accepted_seq)
+                ..TurnControl::accepted(&fact)
             },
         );
         session.turn_order.push(turn_id.clone());
@@ -1402,6 +1465,12 @@ impl AgentKernel {
         turn_id: TurnId,
         body: SessionFactBody,
     ) -> TurnResult<SubmittedTurn> {
+        if matches!(&session, SubmitSession::Fresh(prepared) if !prepared.command_inputs().is_empty())
+        {
+            return Err(TurnError::Invalid(
+                "draft command input requires Agent mailbox submission".into(),
+            ));
+        }
         let _execution_admission =
             execution_admission::admit(session.header(), session.execution())?;
         body.validate()

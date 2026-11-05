@@ -1,6 +1,7 @@
 //! Live Host continuation admission over ordinary command and mailbox transactions.
 
 use super::*;
+use rsi_agent_store_protocol::MailboxRead;
 
 mod initial;
 use rsi_agent_composition_protocol::{ContinuationCommand, ContributionKind};
@@ -257,7 +258,12 @@ impl SessionContinuations for AgentKernel {
             .acquire(lease.session_id())
             .await?;
         self.fence_pending_terminal(lease.session_id()).await?;
-        let scan = scan_durable_messages(&self.inner, lease.session_id(), Some(message_id)).await?;
+        let scan = scan_durable_messages(
+            &self.inner,
+            lease.session_id(),
+            MailboxRead::WithMessage(message_id.clone()),
+        )
+        .await?;
         let entry = scan
             .selected
             .as_ref()
@@ -552,7 +558,12 @@ impl AgentKernel {
     ) -> TurnResult<bool> {
         let _admission = self.inner.submission_admission.acquire(session).await?;
         self.fence_pending_terminal(session).await?;
-        let scan = scan_durable_messages(&self.inner, session, Some(message)).await?;
+        let scan = scan_durable_messages(
+            &self.inner,
+            session,
+            MailboxRead::WithMessage(message.clone()),
+        )
+        .await?;
         let Some(entry) = &scan.selected else {
             return Ok(false);
         };
@@ -624,7 +635,7 @@ impl AgentKernel {
         if lock_state(&self.inner)
             .sessions
             .get(session)
-            .is_some_and(|state| state.turns.values().any(|turn| turn.terminal.is_none()))
+            .is_some_and(SessionRuntime::has_open_turn)
         {
             return Ok(false);
         }

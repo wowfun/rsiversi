@@ -4,7 +4,7 @@ use rsi_agent_session_protocol::{
     MessageDelivery, QueueMutation, QueueMutationOutcome as Outcome,
     QueueMutationRejection as Rejection, QueueMutationRequest, QueueOperationId, QueueSlotId,
 };
-use rsi_agent_store_protocol::{AtomicAgentCommit, AtomicSessionAppend};
+use rsi_agent_store_protocol::{AtomicAgentCommit, AtomicSessionAppend, MailboxRead};
 
 fn edit(
     operation: &str,
@@ -46,6 +46,163 @@ async fn submit(kernel: &AgentKernel, session: &SessionId, id: &str, delivery: M
         })
         .await
         .unwrap();
+}
+
+#[tokio::test]
+#[expect(
+    clippy::too_many_lines,
+    reason = "One paused-inbox scenario holds the commit barrier across retries, edits, stale claims and a new wake on both Stores."
+)]
+async fn inbox_pause_rejects_claims_and_only_new_waking_input_resumes_atomically() {
+    for sqlite in [false, true] {
+        let directory = tempfile::tempdir().unwrap();
+        let backend: Arc<dyn SessionStore> = if sqlite {
+            Arc::new(rsi_agent_store_sqlite::SqliteStore::open(directory.path()).unwrap())
+        } else {
+            Arc::new(MemoryStore::new())
+        };
+        let store = Arc::new(FactReadRaceStore::new(backend));
+        let kernel =
+            AgentKernel::recover_with_clock(store.clone(), composition(), Arc::new(FixedClock))
+                .await
+                .unwrap();
+        let worker = kernel.start_workers();
+        let session = SessionId::new("inbox-pause").unwrap();
+        create(&kernel, &session, "initial").await;
+        store
+            .commit_agent(AtomicAgentCommit {
+                sessions: vec![AtomicSessionAppend {
+                    session_id: session.clone(),
+                    expected_fact_seq: 0,
+                    expected_control_seq: 1,
+                    header: None,
+                    facts: vec![],
+                    controls: vec![
+                        AgentControlRecord::new(2, 42, AgentControlRecordBody::InboxPaused)
+                            .unwrap(),
+                    ],
+                }],
+                required_active_activations: vec![],
+                quiescent_descendants_of: None,
+            })
+            .await
+            .unwrap();
+        submit(&kernel, &session, "initial", MessageDelivery::NextTurn).await;
+        submit(
+            &kernel,
+            &session,
+            "held-injection",
+            MessageDelivery::NextStep,
+        )
+        .await;
+        kernel
+            .mutate_queue(
+                &session,
+                edit("replace-held", "initial", "initial", replace("successor")),
+                None,
+            )
+            .await
+            .unwrap();
+        assert!(
+            store
+                .read_agent_mailbox_summary(&session)
+                .await
+                .unwrap()
+                .inbox_paused
+        );
+        assert!(
+            store
+                .list_ready_roots(None, 10)
+                .await
+                .unwrap()
+                .roots
+                .is_empty()
+        );
+        let rejected = kernel
+            .claim_message(ClaimMessage {
+                session: kernel.prepare_resume(&session).await.unwrap(),
+                message_id: MessageId::new("successor").unwrap(),
+                activation_id: ActivationId::new("held-activation").unwrap(),
+                path: AgentPath::root(),
+                turn_id: TurnId::new("held-turn").unwrap(),
+                step_id: StepId::new("held-step").unwrap(),
+            })
+            .await;
+        assert!(matches!(rejected, Err(TurnError::StaleClaim)));
+        store.pause_next_agent_commit_before_apply();
+        let waking = {
+            let (kernel, session) = (kernel.clone(), session.clone());
+            tokio::spawn(async move {
+                kernel
+                    .submit_message(SubmitMessage {
+                        session: resume(&kernel, session).await,
+                        message: mailbox_message("new-wake"),
+                        delivery: MessageDelivery::Steer,
+                    })
+                    .await
+                    .unwrap()
+            })
+        };
+        store.wait_until_agent_commit_is_before_apply().await;
+        let before = store
+            .read_agent_mailbox(&session, MailboxRead::All)
+            .await
+            .unwrap();
+        assert!(before.inbox_paused);
+        assert!(
+            !before
+                .pending
+                .iter()
+                .any(|row| row.message.message_id.as_str() == "new-wake")
+        );
+        store.release_agent_commit_before_apply();
+        let receipt = waking.await.unwrap();
+        let after = store
+            .read_agent_mailbox(&session, MailboxRead::All)
+            .await
+            .unwrap();
+        assert!(!after.inbox_paused);
+        assert_eq!(after.pending.len(), 3);
+        let controls = store
+            .read_controls(
+                &session,
+                receipt.accepted_control_seq - 1,
+                2,
+                rsi_agent_store_protocol::MAXIMUM_STORE_FACT_PAGE_BYTES,
+            )
+            .await
+            .unwrap();
+        assert!(matches!(
+            controls.records[0].body(),
+            AgentControlRecordBody::MessageAccepted { .. }
+        ));
+        assert!(matches!(
+            controls.records[1].body(),
+            AgentControlRecordBody::InboxResumed
+        ));
+        assert_eq!(controls.fact_cursors[0], controls.fact_cursors[1]);
+        assert_eq!(
+            store
+                .list_ready_messages(&session, None, 10)
+                .await
+                .unwrap()
+                .messages
+                .len(),
+            2
+        );
+        let lease = kernel.register("pause-executor".into()).unwrap();
+        let claim = kernel
+            .claim("pause-executor", CancellationToken::new())
+            .await
+            .unwrap()
+            .unwrap();
+        kernel
+            .finish_turn(&claim, &TurnOutcome::Completed)
+            .await
+            .unwrap();
+        drop(lease);
+        kernel.shutdown(worker).await.unwrap();
+    }
 }
 
 #[tokio::test]
@@ -512,7 +669,7 @@ async fn queue_withdraw_and_replace_serialize_with_next_step_claims_without_canc
         let request = edit("race", "step", "step", mutation);
         let (edited, claimed) = tokio::join!(
             kernel.mutate_queue(&session, request, None),
-            kernel.enter_pending_step_messages(&claim)
+            kernel.claim_pending_step_messages(&claim)
         );
         let receipt = edited.unwrap();
         let count = claimed.unwrap();
@@ -788,7 +945,7 @@ async fn queue_edits_preserve_tree_ready_order_and_pinned_fork_prefix() {
                     "non-human",
                     "agent-input",
                     "agent-input",
-                    QueueMutation::Withdraw,
+                    replace("edited-agent-input"),
                 ),
                 None,
             )
@@ -851,7 +1008,7 @@ async fn queue_edits_preserve_tree_ready_order_and_pinned_fork_prefix() {
             .unwrap();
         assert_eq!(child_claim.session_id(), &child);
         let inherited = kernel
-            .read_fork_facts(&child_claim, 0, 64)
+            .read_fork_facts(&child_claim, child_claim.session_id(), 0, 64)
             .await
             .unwrap()
             .unwrap();

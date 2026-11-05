@@ -8,6 +8,7 @@ pub(super) struct SessionWatchHub(
 
 #[derive(Clone, Eq, PartialEq, Ord, PartialOrd)]
 enum WatchKey {
+    Directory,
     Session(SessionId),
     TreeMembership(SessionId),
 }
@@ -19,6 +20,9 @@ pub(super) struct SessionWatch {
 }
 
 impl SessionWatchHub {
+    pub(super) fn directory(&self) -> SessionWatch {
+        self.subscribe(WatchKey::Directory)
+    }
     pub(super) fn revision(&self) -> Option<u64> {
         let revision = self.1.load(Ordering::Acquire);
         (revision != u64::MAX).then_some(revision)
@@ -54,13 +58,14 @@ impl SessionWatchHub {
                 value.checked_add(1)
             });
 
-        if let Some(sender) = self
+        let watchers = self
             .0
             .lock()
-            .unwrap_or_else(std::sync::PoisonError::into_inner)
-            .get(key)
-        {
-            sender.send_modify(|revision| *revision = revision.wrapping_add(1));
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        for key in [key, &WatchKey::Directory] {
+            if let Some(sender) = watchers.get(key) {
+                sender.send_modify(|revision| *revision = revision.wrapping_add(1));
+            }
         }
     }
 
@@ -176,18 +181,33 @@ impl KernelInner {
                     })
             })
             .collect::<Vec<_>>();
-        let program_proof = commit
+        let needs_proof = commit
             .sessions
             .iter()
             .flat_map(|append| &append.controls)
-            .any(|record| matches!(record.body(), AgentControlRecordBody::ProgramRun { .. }))
-            .then(|| commit.clone());
+            .any(|record| {
+                matches!(
+                    record.body(),
+                    AgentControlRecordBody::ProgramRun { .. }
+                        | AgentControlRecordBody::InboxPaused
+                        | AgentControlRecordBody::MessageDiscarded { .. }
+                )
+            })
+            || commit
+                .sessions
+                .iter()
+                .flat_map(|append| &append.facts)
+                .any(|fact| matches!(fact.body(), SessionFactBody::CancelRequested { .. }));
+        let proof = needs_proof.then(|| commit.clone());
         let mut result = self.store.commit_agent(commit).await;
         if matches!(&result, Err(StoreError::Io(_)))
-            && let Some(proof) = &program_proof
-            && let Ok(Some(receipt)) = self.reconcile_program_commit(proof).await
+            && let Some(proof) = &proof
         {
-            result = Ok(receipt);
+            match self.reconcile_commit(proof).await {
+                Ok(Some(receipt)) => result = Ok(receipt),
+                Ok(None) => {}
+                Err(error) => self.fail_unverified_cancellations(proof, &error),
+            }
         }
         if result.is_ok() || matches!(&result, Err(rsi_agent_store_protocol::StoreError::Io(_))) {
             self.revoke_program_guards(&domain_changes);

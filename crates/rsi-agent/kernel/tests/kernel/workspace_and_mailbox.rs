@@ -149,7 +149,7 @@ async fn message_claim_atomically_enters_activation_turn_step_and_input() {
             activation_id,
             turn_id: turn_id.clone(),
             step_id,
-            entered_fact_seq: 3,
+            claimed_fact_seq: 3,
         }
     );
     let facts = store
@@ -172,7 +172,7 @@ async fn message_claim_atomically_enters_activation_turn_step_and_input() {
     ));
     assert!(matches!(
         facts.facts[2].body(),
-        SessionFactBody::InputMessageEntered { .. }
+        SessionFactBody::InputMessageClaimed { .. }
     ));
     let controls = store
         .read_controls(
@@ -260,7 +260,7 @@ async fn durable_tree_membership_for_approval_routing_survives_a_cold_restart() 
     tool_origin::finish_control_tool(&initial, &root_claim).await;
     assert_eq!(
         initial
-            .enter_pending_step_messages(&root_claim)
+            .claim_pending_step_messages(&root_claim)
             .await
             .unwrap(),
         1
@@ -465,19 +465,23 @@ async fn spawn_rejects_the_two_hundred_fifty_seventh_tree_session() {
         .map(|index| {
             let child_id = SessionId::new(format!("session-tree-capacity-child-{index}")).unwrap();
             let origin = rsi_agent_session_protocol::ForkOrigin {
-                parent_session_id: root_id.clone(),
+                history: rsi_agent_session_protocol::HistoryOrigin {
+                    parent_session_id: root_id.clone(),
+                    parent_header_fingerprint: parent_fingerprint.clone(),
+                    point: rsi_agent_session_protocol::ForkPoint::BeforeTurn {
+                        turn_id: root_claim.turn_id().clone(),
+                    },
+                    resolved_after_seq: 0,
+                    resolved_terminal_seq: 0,
+                    terminal_prefix_sha256: empty_fact_prefix.clone(),
+                    resolved_terminal_control_seq: 0,
+                    terminal_control_prefix_sha256: "0".repeat(64),
+                    requested_turns: ForkTurnSelection::None,
+                    effective_turns: 0,
+                },
                 root_session_id: root_id.clone(),
                 path: AgentPath::new(vec![u16::try_from(index).unwrap()]).unwrap(),
                 task_name: format!("capacity-child-{index}"),
-                parent_header_fingerprint: parent_fingerprint.clone(),
-                invoking_turn_id: root_claim.turn_id().clone(),
-                resolved_after_seq: 0,
-                resolved_terminal_seq: 0,
-                terminal_prefix_sha256: empty_fact_prefix.clone(),
-                resolved_terminal_control_seq: 0,
-                terminal_control_prefix_sha256: "0".repeat(64),
-                requested_turns: ForkTurnSelection::None,
-                effective_turns: 0,
             };
             let child_header = parent_header
                 .forked_child(
@@ -503,7 +507,7 @@ async fn spawn_rejects_the_two_hundred_fifty_seventh_tree_session() {
                                     "message-tree-capacity-child-{index}"
                                 ))
                                 .unwrap(),
-                                source: AgentMessageSource::Human,
+                                source: AgentMessageSource::Human { attribution: None },
                                 content: vec![AgentMessageContent::Text {
                                     text: "remain ready".into(),
                                 }],

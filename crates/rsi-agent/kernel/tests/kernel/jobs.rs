@@ -72,6 +72,52 @@ impl TurnJobStatusSource for Source {
         }
         Ok(self.rows.clone())
     }
+    fn active(&self) -> rsi_agent_turn_protocol::Result<Vec<rsi_jobs::ActiveJob>> {
+        if !self.is_active() {
+            return Err(TurnError::StaleClaim);
+        }
+        Ok(self
+            .rows
+            .iter()
+            .filter(|row| !row.status.is_terminal())
+            .map(|row| rsi_jobs::ActiveJob {
+                id: row.id.clone(),
+                label: row.name.clone(),
+            })
+            .collect())
+    }
+}
+
+#[tokio::test]
+async fn session_activity_follows_only_its_live_jobs_claim() {
+    let kernel = kernel(Arc::new(MemoryStore::new())).await;
+    let workers = kernel.start_workers();
+    let session = submit(&kernel, "jobs-activity", "work").await.session_id;
+    let _registration = kernel.register("executor".into()).unwrap();
+    let claim = kernel
+        .claim("executor", CancellationToken::new())
+        .await
+        .unwrap()
+        .unwrap();
+    assert!(kernel.active_jobs(&session).unwrap().is_empty());
+    let mut source = Source::new(2);
+    let running = &mut Arc::get_mut(&mut source).unwrap().rows[0];
+    running.status = JobStatus::Stopping;
+    running.terminal = None;
+    let source: Arc<dyn TurnJobStatusSource> = source;
+    kernel
+        .publish_job_status(&claim, Arc::downgrade(&source))
+        .unwrap();
+    assert_eq!(
+        kernel.active_jobs(&session).unwrap(),
+        [rsi_jobs::ActiveJob {
+            id: "job-000".into(),
+            label: "background".into(),
+        }]
+    );
+    kernel.release(&claim).unwrap();
+    assert!(kernel.active_jobs(&session).unwrap().is_empty());
+    kernel.shutdown(workers).await.unwrap();
 }
 
 #[tokio::test]

@@ -92,12 +92,29 @@ impl AgentKernel {
         .map_err(turn_store_error)?;
         // Live Turns and flush failures stay resident; startup repairs unfinished Turns.
         // Loading a cold Session cannot recreate live conversion authority.
+        let program_owned = if matches!(request.mutation, QueueMutation::Withdraw)
+            && entry
+                .as_ref()
+                .is_some_and(|entry| entry.message.message_id == request.expected_message_id)
+        {
+            let header = read_validated_header_bounded(&self.inner, session)
+                .await
+                .map_err(turn_store_error)?;
+            self.is_program_initial_message(&header, &request.expected_message_id)
+                .await?
+        } else {
+            false
+        };
         let rejection = match &entry {
             None => Some(Rejection::MissingSlot),
             Some(entry) if entry.message.message_id != request.expected_message_id => {
                 Some(Rejection::StaleMessage)
             }
-            Some(entry) if entry.message.source != AgentMessageSource::Human => {
+            Some(_) if program_owned => Some(Rejection::ProgramOwned),
+            Some(entry)
+                if !matches!(request.mutation, QueueMutation::Withdraw)
+                    && !matches!(entry.message.source, AgentMessageSource::Human { .. }) =>
+            {
                 Some(Rejection::NotHuman)
             }
             Some(entry) if matches!(entry.state, StoreAgentMessageState::Claimed { .. }) => {
@@ -161,8 +178,7 @@ impl AgentKernel {
                 current_message_id: entry.as_ref().map(|entry| entry.message.message_id.clone()),
             }
         } else {
-            let predecessor =
-                entry.expect("accepted preconditions require a pending Human predecessor");
+            let predecessor = entry.expect("accepted preconditions require a pending predecessor");
             match &request.mutation {
                 QueueMutation::Withdraw => {
                     controls.push(record(

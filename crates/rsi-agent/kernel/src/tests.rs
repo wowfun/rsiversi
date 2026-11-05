@@ -217,6 +217,60 @@ fn tool_intent(turn_id: &TurnId, suffix: &str, parallel_safe: bool) -> SessionFa
 }
 
 #[test]
+fn producing_step_selection_fences_model_and_nested_program_intents() {
+    let turn_id = TurnId::new("selected-step").unwrap();
+    let mut turn = TurnControl::new(1, 1);
+    turn.tool_source = Some(Arc::new(tool_origin::tests::selected_source(
+        &[("call-first", "tool_first"), ("call-hidden", "tool_hidden")],
+        &["tool_first"],
+    )));
+    let hidden = tool_intent(&turn_id, "hidden", true);
+    assert!(apply_tool_body(&mut turn, &hidden).is_err());
+    assert!(turn.effects.is_empty());
+    let mut first = tool_intent(&turn_id, "first", true);
+    let SessionFactBody::ToolIntent {
+        effect_id,
+        identity,
+        program_role,
+        ..
+    } = &mut first
+    else {
+        unreachable!()
+    };
+    *program_role = rsi_tools_protocol::ToolProgramRole::Coordinator;
+    let parent = effect_id.clone();
+    let identity = identity.clone();
+    apply_tool_body(&mut turn, &first).unwrap();
+    apply_tool_body(
+        &mut turn,
+        &SessionFactBody::ToolStarted {
+            turn_id: turn_id.clone(),
+            effect_id: parent.clone(),
+            identity,
+        },
+    )
+    .unwrap();
+    // Changing the live Step selection cannot enlarge the coordinator's captured set.
+    turn.selected_tools = Some(vec!["tool_hidden".to_owned()].into());
+    let mut nested = hidden;
+    let SessionFactBody::ToolIntent {
+        origin,
+        program_role,
+        ..
+    } = &mut nested
+    else {
+        unreachable!()
+    };
+    *origin = rsi_agent_session_protocol::ToolOrigin::Program {
+        parent_effect_id: parent,
+        ordinal: 1,
+    };
+    *program_role = rsi_tools_protocol::ToolProgramRole::Callable;
+    assert!(apply_tool_body(&mut turn, &nested).is_err());
+    assert_eq!(turn.effects.len(), 1);
+}
+
+#[test]
 fn overlapping_tool_intents_require_every_definition_to_be_parallel_safe() {
     let turn_id = TurnId::new("turn-parallel-tool-intents").unwrap();
     let first = tool_intent(&turn_id, "first", true);
@@ -291,35 +345,83 @@ fn overlapping_tool_intents_require_every_definition_to_be_parallel_safe() {
 }
 
 #[test]
-fn next_step_message_claim_selects_an_ordered_byte_bounded_prefix() {
-    let entry = |suffix: &str| {
-        let message = AgentMessage {
-            message_id: MessageId::new(format!("message-{suffix}")).unwrap(),
-            source: AgentMessageSource::Human,
-            content: vec![AgentMessageContent::Text {
-                text: format!("payload-{suffix}"),
-            }],
-            options: MessageOptions::default(),
+fn tool_refusal_consumes_only_its_proven_call_while_a_sibling_effect_remains_active() {
+    let turn_id = TurnId::new("refusal-with-active-sibling").unwrap();
+    let mut turn = TurnControl::new(1, 1);
+    turn.tool_source = Some(Arc::new(tool_origin::tests::source(&[
+        ("call-first", "tool_first"),
+        ("call-second", "tool_second"),
+    ])));
+    let first = tool_intent(&turn_id, "first", false);
+    apply_tool_body(&mut turn, &first).unwrap();
+    let SessionFactBody::ToolIntent {
+        effect_id,
+        identity,
+        ..
+    } = &first
+    else {
+        unreachable!()
+    };
+    apply_tool_body(
+        &mut turn,
+        &SessionFactBody::ToolStarted {
+            turn_id: turn_id.clone(),
+            effect_id: effect_id.clone(),
+            identity: identity.clone(),
+        },
+    )
+    .unwrap();
+    let refusal = |suffix| {
+        let SessionFactBody::ToolIntent {
+            origin,
+            program_role,
+            turn_id,
+            effect_id,
+            identity,
+            name,
+            arguments,
+            ..
+        } = tool_intent(&turn_id, suffix, false)
+        else {
+            unreachable!()
         };
-        DurableMessageEntry {
-            delivery: rsi_agent_session_protocol::MessageDelivery::NextStep,
-            encoded_message_bytes: serde_json::to_vec(&message).unwrap().len(),
-            message,
-            root_session_id: SessionId::new("message-prefix-root").unwrap(),
-            target: MessageTarget::NextStep,
-            wake_required: false,
-            accepted_control_seq: 1,
-            state: MessageState::Pending,
+        SessionFactBody::ToolRejected {
+            additional_contexts: Vec::new(),
+            origin,
+            program_role,
+            turn_id,
+            effect_id,
+            identity,
+            name,
+            arguments,
+            rejection: rsi_agent_session_protocol::ToolRejection::PolicyDenied {
+                contribution_id: rsi_agent_session_protocol::ContributionId::new("test.policy")
+                    .unwrap(),
+                reason: "refused".into(),
+            },
         }
     };
-    let first = entry("first");
-    let first_bytes = serde_json::to_vec(&first.message).unwrap().len();
-    let selected =
-        bounded_step_message_prefix(vec![first, entry("second"), entry("third")], first_bytes)
-            .unwrap();
-
-    assert_eq!(selected.len(), 1);
-    assert_eq!(selected[0].message.message_id.as_str(), "message-first");
+    let second = refusal("second");
+    let mut wrong = second.clone();
+    if let SessionFactBody::ToolRejected { arguments, .. } = &mut wrong {
+        *arguments = serde_json::json!({"changed":true});
+    }
+    assert!(apply_tool_body(&mut turn, &wrong).is_err());
+    assert!(
+        apply_tool_body(&mut turn, &refusal("first")).is_err(),
+        "refusal cannot settle an admitted body"
+    );
+    apply_tool_body(&mut turn, &second).unwrap();
+    assert!(
+        apply_tool_body(&mut turn, &second).is_err(),
+        "source identity is consumed once"
+    );
+    assert_eq!(turn.effects.len(), 1);
+    assert!(turn.effects.contains_key(effect_id));
+    assert!(
+        crate::turn_state::ensure_no_active_effect(&turn).is_err(),
+        "the sibling still fences the next model request"
+    );
 }
 
 #[tokio::test]

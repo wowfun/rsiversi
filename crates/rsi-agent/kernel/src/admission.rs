@@ -94,16 +94,14 @@ impl AgentKernel {
                 .await
                 .map_err(turn_store_error)?;
             snapshot.validate().map_err(turn_store_error)?;
-            let descendants = snapshot
+            let cancellations = snapshot
                 .descendants
                 .iter()
                 .filter(|child| snapshot.activation_owns(child))
-                .map(|child| child.status.session_id.clone())
-                .collect::<Vec<_>>();
-            let cancellations = descendants.iter().map(|child_session_id| async move {
-                let result = self.cancel_open_descendant_turns(child_session_id).await;
-                (child_session_id.clone(), result)
-            });
+                .map(|child| async move {
+                    let id = &child.status.session_id;
+                    (id, self.cancel_open_descendant_turns(id).await)
+                });
             let deadline = Instant::now() + DURABILITY_WAIT_TIMEOUT;
             let results =
                 tokio::time::timeout_at(deadline, futures_util::future::join_all(cancellations))
@@ -116,17 +114,12 @@ impl AgentKernel {
                     })?;
             let mut failures = results
                 .into_iter()
-                .filter_map(|(session_id, result)| {
-                    result
-                        .err()
-                        .map(|error| format!("{}: {error}", session_id.as_str()))
-                })
-                .collect::<Vec<_>>();
-            if !failures.is_empty() {
-                let count = failures.len();
-                let first = failures.remove(0);
+                .filter_map(|(id, result)| result.err().map(|error| (id, error)));
+            if let Some((id, first)) = failures.next() {
+                let count = failures.count() + 1;
                 return Err(TurnError::Store(format!(
-                    "{count} descendant cancellation(s) failed; first failure: {first}"
+                    "{count} descendant cancellation(s) failed; first failure: {}: {first}",
+                    id.as_str()
                 )));
             }
         }
@@ -134,7 +127,7 @@ impl AgentKernel {
         let parent_session_id = claim
             .header()
             .fork_origin()
-            .map(|origin| origin.parent_session_id.clone());
+            .map(|origin| origin.history.parent_session_id.clone());
         let live_seq = {
             let state = lock_state(&self.inner);
             state
@@ -180,6 +173,9 @@ impl AgentKernel {
                 .sessions
                 .get(claim.session_id())
                 .expect("validated claim session exists");
+            if let Some(error) = &session.permanent_flush_error {
+                return Err(TurnError::Flush(error.clone()));
+            }
             if !session.pending.is_empty() || session.durable_seq != live_seq {
                 return Err(TurnError::Invariant(
                     "activation terminal flush did not close its speculative suffix".into(),
@@ -244,19 +240,17 @@ impl AgentKernel {
             facts: facts.clone(),
             controls: settled_controls,
         }];
-        if let Some(parent_session_id) = &parent_session_id {
-            sessions.extend(
-                self.completion_append(
-                    (claim.session_id(), reply),
-                    &activation_id,
-                    parent_session_id,
-                    &outcome,
-                    terminal_result(&terminal),
-                    terminal.timestamp_ms(),
-                )
-                .await?,
-            );
-        }
+        sessions.extend(
+            self.completion_append(
+                (claim.header(), reply),
+                &activation_id,
+                mailbox.inbox_paused,
+                &outcome,
+                terminal_result(&terminal),
+                terminal.timestamp_ms(),
+            )
+            .await?,
+        );
         let terminal_lease = self.retain_terminal_mutation(claim)?;
         let kernel = self.clone();
         let claim = claim.clone();
@@ -334,25 +328,23 @@ impl AgentKernel {
         .await
     }
 
-    #[expect(
-        clippy::too_many_lines,
-        reason = "Reply projection, reservation sizing and parent mailbox coordinates form one completion append"
-    )]
-    pub(super) async fn completion_append(
+    async fn completion_append(
         &self,
-        child: (&SessionId, Option<String>),
+        child: (&SessionHeader, Option<String>),
         activation_id: &rsi_agent_session_protocol::ActivationId,
-        parent_session_id: &SessionId,
+        child_paused: bool,
         outcome: &TurnOutcome,
         result: Option<rsi_agent_session_protocol::AgentResultRef>,
         timestamp_ms: u64,
     ) -> TurnResult<Option<AtomicSessionAppend>> {
-        let (child_session_id, reply) = child;
-        let header = read_validated_header_bounded(&self.inner, child_session_id)
-            .await
-            .map_err(turn_store_error)?;
+        let (header, reply) = child;
+        let Some(origin) = header.fork_origin() else {
+            return Ok(None);
+        };
+        let child_session_id = header.session_id();
+        let parent_session_id = &origin.history.parent_session_id;
         match self
-            .program_completion_append(&header, activation_id, outcome, result.as_ref())
+            .program_completion_append(header, activation_id, outcome, result.as_ref())
             .await?
         {
             program::CompletionRoute::Append(append) => return Ok(Some(*append)),
@@ -385,35 +377,15 @@ impl AgentKernel {
                 "reserved completion found a full parent mailbox".into(),
             ));
         }
-        let expected_fact_seq = mailbox.durable_fact_seq;
-        let open = self
-            .inner
-            .store
-            .list_open_turns(parent_session_id, 0, 1)
-            .await
-            .map_err(turn_store_error)?;
-        let parent_has_step = if let Some(turn) = open.turns.first() {
-            self.inner
-                .store
-                .active_activation(parent_session_id)
-                .await
-                .map_err(turn_store_error)?
-                .is_some_and(|active| {
-                    active.turn_id.as_ref() == Some(&turn.turn_id)
-                        && matches!(
-                            active.phase,
-                            StoreActivationPhase::Running | StoreActivationPhase::Parked
-                        )
-                })
+        let stopped =
+            matches!(outcome, TurnOutcome::Cancelled) && (child_paused || mailbox.inbox_paused);
+        let target = if stopped || self.parent_has_step(parent_session_id).await? {
+            MessageTarget::NextStep
         } else {
-            false
+            MessageTarget::NextTurn
         };
-        let parent_header = read_validated_header_bounded(&self.inner, parent_session_id)
-            .await
-            .map_err(turn_store_error)?;
-        let message_id = completion_message_id(child_session_id, activation_id)?;
         let mut message = AgentMessage {
-            message_id,
+            message_id: completion_message_id(child_session_id, activation_id)?,
             source: AgentMessageSource::Completion {
                 child_session_id: child_session_id.clone(),
                 activation_id: activation_id.clone(),
@@ -427,6 +399,7 @@ impl AgentKernel {
         if matches!(outcome, TurnOutcome::Completed) && result.is_none() {
             completion_reply::bound_message(&mut message)?;
         }
+        let discarded = stopped.then(|| message.message_id.clone());
         let control = AgentControlRecord::new(
             mailbox
                 .durable_control_seq
@@ -434,31 +407,61 @@ impl AgentKernel {
                 .ok_or_else(|| TurnError::Invariant("control sequence exhausted".into()))?,
             timestamp_ms,
             AgentControlRecordBody::MessageAccepted {
-                delivery: if parent_has_step {
-                    rsi_agent_session_protocol::MessageDelivery::NextStep
-                } else {
-                    rsi_agent_session_protocol::MessageDelivery::NextTurn
-                },
+                delivery: target.into(),
                 bound_turn_id: None,
                 message,
-                root_session_id: agent_root_and_path(&parent_header).0,
-                target: if parent_has_step {
-                    MessageTarget::NextStep
-                } else {
-                    MessageTarget::NextTurn
-                },
-                wake_required: !parent_has_step,
+                root_session_id: origin.root_session_id.clone(),
+                target,
+                wake_required: target == MessageTarget::NextTurn,
             },
         )
         .map_err(|error| TurnError::Invalid(error.to_string()))?;
+        let mut controls = vec![control];
+        if let Some(message_id) = discarded {
+            // The parent's terminal settlement promotes pending completion notices.
+            // Record this explicit stop in the same transaction as its receipt.
+            inbox::append_cancelled_message(
+                &mut controls,
+                mailbox.durable_control_seq,
+                timestamp_ms,
+                message_id,
+            )?;
+        } else if mailbox.inbox_paused && target == MessageTarget::NextTurn {
+            inbox::append_resume(&mut controls, timestamp_ms)?;
+        }
         Ok(Some(AtomicSessionAppend {
             session_id: parent_session_id.clone(),
-            expected_fact_seq,
+            expected_fact_seq: mailbox.durable_fact_seq,
             expected_control_seq: mailbox.durable_control_seq,
             header: None,
             facts: Vec::new(),
-            controls: vec![control],
+            controls,
         }))
+    }
+
+    async fn parent_has_step(&self, id: &SessionId) -> TurnResult<bool> {
+        let open = self
+            .inner
+            .store
+            .list_open_turns(id, 0, 1)
+            .await
+            .map_err(turn_store_error)?;
+        let Some(turn) = open.turns.first() else {
+            return Ok(false);
+        };
+        Ok(self
+            .inner
+            .store
+            .active_activation(id)
+            .await
+            .map_err(turn_store_error)?
+            .is_some_and(|active| {
+                active.turn_id.as_ref() == Some(&turn.turn_id)
+                    && matches!(
+                        active.phase,
+                        StoreActivationPhase::Running | StoreActivationPhase::Parked
+                    )
+            }))
     }
 
     pub(super) fn install_committed_terminal(
@@ -582,7 +585,7 @@ impl AgentKernel {
                     .map_err(turn_store_error)?;
                 let parent_session_id = header
                     .fork_origin()
-                    .map(|origin| origin.parent_session_id.clone());
+                    .map(|origin| origin.history.parent_session_id.clone());
                 let reply = if parent_session_id.is_some()
                     && matches!(outcome, TurnOutcome::Completed)
                     && terminal_result(terminal).is_none()
@@ -634,19 +637,17 @@ impl AgentKernel {
                     facts: Vec::new(),
                     controls,
                 }];
-                if let Some(parent_session_id) = &parent_session_id {
-                    sessions.extend(
-                        self.completion_append(
-                            (&session_id, reply),
-                            &active.activation_id,
-                            parent_session_id,
-                            &outcome,
-                            terminal_result(terminal),
-                            timestamp_ms,
-                        )
-                        .await?,
-                    );
-                }
+                sessions.extend(
+                    self.completion_append(
+                        (&header, reply),
+                        &active.activation_id,
+                        mailbox.inbox_paused,
+                        &outcome,
+                        terminal_result(terminal),
+                        timestamp_ms,
+                    )
+                    .await?,
+                );
 
                 let result = self
                     .commit_agent_with_flush_conflict_retry(AtomicAgentCommit {

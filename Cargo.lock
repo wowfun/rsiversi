@@ -5068,6 +5068,7 @@ dependencies = [
  "rsi-execution",
  "rsi-files-protocol",
  "rsi-jobs",
+ "rsi-media-protocol",
  "rsi-meta",
  "rsi-process",
  "rsi-sandbox",

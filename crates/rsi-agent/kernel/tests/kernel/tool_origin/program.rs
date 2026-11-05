@@ -255,7 +255,7 @@ async fn nested_program_calls_bind_frozen_catalog_parent_and_ordinals_and_stay_o
 
     assert!(
         kernel
-            .contribution_context(&claim, CancellationToken::new())
+            .contribution_context(&claim, Vec::new(), CancellationToken::new())
             .await
             .is_err()
     );

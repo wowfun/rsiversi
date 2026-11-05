@@ -2,7 +2,7 @@ use super::*;
 use rsi_agent_composition_protocol::{
     ContributionCatalog, ContributionKind, ContributionRegistration, ContributionResult,
     DomainCatalog, DomainDefinition, DomainHandle, SessionCommand, SessionCommandContext,
-    SessionCommandRegistration, ValidatedDomainProposal,
+    SessionCommandRegistration,
 };
 use rsi_agent_session_protocol::{
     CommandArguments, ContributionId, DomainIdentity, DomainRequestId, SessionCommandDescriptor,
@@ -78,7 +78,7 @@ async fn current_domain_reads_reject_a_structurally_valid_historical_page() {
     let fixture = Fixture::start(store.clone(), false).await;
     let historical = store
         .inner
-        .read_domain_states(&fixture.session_id, Some(1))
+        .read_domain_states(&fixture.session_id, Some(1), None)
         .await
         .unwrap();
     historical.validate().unwrap();
@@ -114,6 +114,10 @@ struct Toggle {
     entered: tokio::sync::Semaphore,
     release: tokio::sync::Semaphore,
     blocked: bool,
+    observer:
+        std::sync::Mutex<Option<Arc<dyn rsi_agent_composition_protocol::PublicationObserver>>>,
+    inputs: std::sync::Mutex<Vec<rsi_agent_composition_protocol::CommandInput>>,
+    contexts: std::sync::Mutex<Vec<SessionCommandContext>>,
 }
 
 #[async_trait]
@@ -123,18 +127,32 @@ impl SessionCommand for Toggle {
         context: &SessionCommandContext,
         arguments: &CommandArguments,
         _: CancellationToken,
-    ) -> ContributionResult<Vec<ValidatedDomainProposal>> {
+    ) -> ContributionResult<rsi_agent_composition_protocol::SessionCommandOutput> {
         self.calls.fetch_add(1, Ordering::SeqCst);
+        self.contexts.lock().unwrap().push(context.clone());
         self.entered.add_permits(1);
         if self.blocked {
             self.release.acquire().await.unwrap().forget();
         }
-        let value = arguments.value().as_bool().unwrap();
-        Ok(vec![
-            self.handle
-                .propose(context.domains[0].revision, &value)
-                .unwrap(),
-        ])
+        let mut output: rsi_agent_composition_protocol::SessionCommandOutput = arguments
+            .value()
+            .as_bool()
+            .map(|value| {
+                vec![
+                    self.handle
+                        .propose(context.domains[0].revision, &value)
+                        .unwrap(),
+                ]
+            })
+            .unwrap_or_default()
+            .into();
+        if let Some(observer) = self.observer.lock().unwrap().take() {
+            output
+                .publications
+                .push(rsi_agent_composition_protocol::Publication::new(observer));
+        }
+        output.inputs = std::mem::take(&mut *self.inputs.lock().unwrap());
+        Ok(output)
     }
 }
 
@@ -229,6 +247,9 @@ impl Fixture {
             entered: tokio::sync::Semaphore::new(0),
             release: tokio::sync::Semaphore::new(0),
             blocked,
+            observer: std::sync::Mutex::new(None),
+            inputs: std::sync::Mutex::new(vec![]),
+            contexts: std::sync::Mutex::new(vec![]),
         });
         let id = ContributionId::new("fixture.command").unwrap();
         let descriptor =
@@ -635,7 +656,7 @@ async fn command_capacity_precedes_callback_and_shutdown_cancels_precommit_work(
     assert_eq!(
         fixture
             .store
-            .read_domain_states(&fixture.session_id, None)
+            .read_domain_states(&fixture.session_id, None, None)
             .await
             .unwrap()
             .states[0]
@@ -689,6 +710,15 @@ async fn lost_commit_acknowledgements_reconcile_or_remain_queryable_without_call
                 result,
                 Err(TurnError::DomainOutcomeUnknown { .. })
             ));
+            assert!(
+                fixture.callback.contexts.lock().unwrap()[0]
+                    .outcome
+                    .as_ref()
+                    .unwrap()
+                    .evidence()
+                    .is_none(),
+                "unknown Store outcome must not become rollback authority when its owner drops"
+            );
             store.domain_lookup_fails.store(false, Ordering::Release);
         } else {
             assert!(result.is_ok());
@@ -739,7 +769,7 @@ async fn draft_commands_bind_the_actual_first_baseline_and_reject_cross_draft_or
         panic!("new invocation")
     };
     let mutation = prepared.execute(CancellationToken::new()).await.unwrap();
-    let receipt = draft.apply_command(mutation).unwrap();
+    let receipt = draft.apply_command(mutation).finish().await.unwrap();
     assert_eq!(receipt.state_sha256(), draft.baseline().digest());
     assert_ne!(receipt.state_sha256(), before.baseline().digest());
     let DraftCommandPreparation::Completed(retry) = draft.prepare_command(input).unwrap() else {
@@ -789,7 +819,10 @@ async fn draft_commands_bind_the_actual_first_baseline_and_reject_cross_draft_or
         panic!("new invocation")
     };
     assert!(matches!(
-        other.apply_command(prepared.execute(CancellationToken::new()).await.unwrap()),
+        other
+            .apply_command(prepared.execute(CancellationToken::new()).await.unwrap())
+            .finish()
+            .await,
         Err(DraftCommandError::WrongDraft)
     ));
     let DraftCommandPreparation::Run(prepared) = draft.prepare_command(next).unwrap() else {
@@ -801,7 +834,7 @@ async fn draft_commands_bind_the_actual_first_baseline_and_reject_cross_draft_or
         .await
         .unwrap();
     assert!(matches!(
-        draft.apply_command(mutation),
+        draft.apply_command(mutation).finish().await,
         Err(DraftCommandError::Revision { .. })
     ));
     assert_eq!(draft.baseline().digest(), before.baseline().digest());
@@ -811,3 +844,9 @@ async fn draft_commands_bind_the_actual_first_baseline_and_reject_cross_draft_or
 
 #[path = "commands/continuation.rs"]
 mod continuation;
+
+#[path = "commands/publication.rs"]
+mod publication;
+
+#[path = "commands/inputs.rs"]
+mod inputs;

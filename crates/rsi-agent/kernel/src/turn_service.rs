@@ -1,8 +1,39 @@
 use super::*;
 use rsi_agent_session_protocol::MessageDelivery;
+use rsi_agent_store_protocol::MailboxRead;
 
 #[async_trait]
 impl TurnService for AgentKernel {
+    async fn wait_idle(&self, session_id: &SessionId) -> TurnResult<()> {
+        let mut changes = self.inner.session_changes.session(session_id);
+        loop {
+            changes.mark_seen();
+            {
+                let _admission = self.inner.submission_admission.acquire(session_id).await?;
+                self.flush_resident_admitted(session_id).await?;
+                let state = self
+                    .inner
+                    .store
+                    .read_inbox_control_state(session_id, false)
+                    .await
+                    .map_err(turn_store_error)?;
+                if !state.has_open_turn && !state.has_active_activation && !state.has_waking_message
+                {
+                    return Ok(());
+                }
+            }
+            tokio::select! {
+                () = self.inner.submission_admission.closed.cancelled() => return Err(TurnError::ShuttingDown),
+                () = changes.changed() => {},
+            }
+        }
+    }
+    async fn prepare_fork(
+        &self,
+        request: rsi_agent_turn_protocol::PrepareFork,
+    ) -> TurnResult<PreparedFreshSession> {
+        self.prepare_independent_fork(request).await
+    }
     fn prepare_retirement(
         &self,
         sessions: &[SessionId],
@@ -306,10 +337,12 @@ impl TurnService for AgentKernel {
     async fn submit_message(&self, request: SubmitMessage) -> TurnResult<MessageReceipt> {
         if matches!(
             request.message.source,
-            AgentMessageSource::Continuation { .. } | AgentMessageSource::Program { .. }
+            AgentMessageSource::Continuation { .. }
+                | AgentMessageSource::Program { .. }
+                | AgentMessageSource::Command { .. }
         ) {
             return Err(TurnError::Invalid(
-                "continuation input requires its live admission service".into(),
+                "owned input requires its dedicated admission service".into(),
             ));
         }
         self.submit_message_authorized(request, None).await
@@ -320,7 +353,12 @@ impl TurnService for AgentKernel {
         session_id: &SessionId,
         message_id: &MessageId,
     ) -> TurnResult<MessageReceipt> {
-        let scan = scan_durable_messages(&self.inner, session_id, Some(message_id)).await?;
+        let scan = scan_durable_messages(
+            &self.inner,
+            session_id,
+            MailboxRead::WithMessage(message_id.clone()),
+        )
+        .await?;
         scan.selected
             .as_ref()
             .map(|entry| message_receipt(session_id, scan.durable_fact_seq, entry))
@@ -392,11 +430,19 @@ impl TurnService for AgentKernel {
         target: CancelTarget,
         reason: Option<String>,
     ) -> TurnResult<CancelResult> {
-        let CancelTarget::Message(message_id) = target else {
-            let CancelTarget::Turn(turn_id) = target else {
-                unreachable!("closed cancellation target")
-            };
-            return self.cancel(session_id, &turn_id, reason).await;
+        let message_id = match target {
+            CancelTarget::Message(message_id) => message_id,
+            CancelTarget::Turn(turn_id) => return self.cancel(session_id, &turn_id, reason).await,
+            CancelTarget::Inbox => {
+                return self
+                    .cancel_inbox(session_id, inbox::InboxCancel::Clear, reason)
+                    .await;
+            }
+            CancelTarget::Session { keep_inbox } => {
+                return self
+                    .cancel_inbox(session_id, inbox::InboxCancel::Stop { keep_inbox }, reason)
+                    .await;
+            }
         };
         if reason.is_some() {
             return Err(TurnError::Invalid(
@@ -418,7 +464,12 @@ impl TurnService for AgentKernel {
         }
         let admission = self.inner.submission_admission.acquire(session_id).await?;
         self.fence_pending_terminal(session_id).await?;
-        let scan = scan_durable_messages(&self.inner, session_id, Some(&message_id)).await?;
+        let scan = scan_durable_messages(
+            &self.inner,
+            session_id,
+            MailboxRead::WithMessage(message_id.clone()),
+        )
+        .await?;
         let entry = scan.selected.ok_or_else(|| {
             TurnError::Invalid(format!(
                 "message `{}` does not exist in session `{}`",
@@ -909,10 +960,15 @@ impl AgentKernel {
         }
 
         let scan = if durable_header.is_some() {
-            scan_durable_messages(&self.inner, &session_id, Some(&request.message.message_id))
-                .await?
+            scan_durable_messages(
+                &self.inner,
+                &session_id,
+                MailboxRead::WithMessage(request.message.message_id.clone()),
+            )
+            .await?
         } else {
             DurableMessageScan {
+                inbox_paused: false,
                 selected: None,
                 pending_count: 0,
                 pending: Vec::new(),
@@ -963,11 +1019,11 @@ impl AgentKernel {
             .map_err(turn_store_error)?;
         let expected_fact_seq = scan.durable_fact_seq;
         let bound_turn_id = if request.delivery == MessageDelivery::Steer {
-            if !matches!(request.message.source, AgentMessageSource::Human)
+            if !request.message.source.is_direct()
                 || request.message.options != MessageOptions::default()
             {
                 return Err(TurnError::Invalid(
-                    "steering requires Human input without new-Turn options".into(),
+                    "steering requires direct input without new-Turn options".into(),
                 ));
             }
             let state = lock_state(&self.inner);
@@ -1025,19 +1081,17 @@ impl AgentKernel {
             return Err(TurnError::Capacity);
         }
         let baseline = match &request.session {
-            SubmitSession::Fresh(prepared) => {
-                lifecycle::initial_domain_control(prepared.header(), prepared.baseline())?
-            }
-            SubmitSession::Resume(_) => None,
+            SubmitSession::Fresh(prepared) => lifecycle::initial_controls(prepared)?,
+            SubmitSession::Resume(_) => vec![],
         };
         let control_seq = scan
             .durable_control_seq
             .checked_add(
-                1 + u64::from(baseline.is_some())
+                1 + baseline.len() as u64
                     + u64::try_from(superseded.len()).map_err(|_| TurnError::Capacity)?,
             )
             .ok_or_else(|| TurnError::Invariant("control sequence exhausted".into()))?;
-        let mut controls = baseline.into_iter().collect::<Vec<_>>();
+        let mut controls = baseline;
         for message_id in superseded {
             let seq = scan
                 .durable_control_seq
@@ -1069,14 +1123,17 @@ impl AgentKernel {
         )
         .map_err(|error| TurnError::Invalid(error.to_string()))?;
         controls.push(control);
-        let header = match request.session {
+        if scan.inbox_paused && request.delivery != MessageDelivery::NextStep {
+            inbox::append_resume(&mut controls, self.inner.clock.now_ms().max(1))?;
+        }
+        let (header, baseline_resources) = match request.session {
             SubmitSession::Fresh(prepared) => {
-                let (header, _composition, _baseline) = prepared.into_parts();
-                Some(header)
+                let (header, _composition, baseline) = prepared.into_parts();
+                (Some(header), Some(baseline))
             }
             SubmitSession::Resume(prepared) => {
                 let _parts = self.inner.resume_issuer.consume(prepared)?;
-                None
+                (None, None)
             }
         };
         let source_lease = source
@@ -1090,6 +1147,7 @@ impl AgentKernel {
         let kernel = self.clone();
         self.owned_commit(async move {
             let _admission = admission;
+            let _baseline_resources = baseline_resources;
             let _execution_admission = execution_admission;
             let _source_lease = source_lease;
             let commit = kernel
@@ -1146,7 +1204,7 @@ impl AgentKernel {
         let session_id = header.session_id().clone();
         let parent_session_id = header
             .fork_origin()
-            .map(|origin| origin.parent_session_id.clone());
+            .map(|origin| origin.history.parent_session_id.clone());
         let admissions = self
             .inner
             .submission_admission
@@ -1171,8 +1229,12 @@ impl AgentKernel {
             .await
             .map_err(turn_kernel_error)?;
 
-        let scan =
-            scan_durable_messages(&self.inner, &session_id, Some(&request.message_id)).await?;
+        let scan = scan_durable_messages(
+            &self.inner,
+            &session_id,
+            MailboxRead::WithMessage(request.message_id.clone()),
+        )
+        .await?;
         let entry = scan.selected.clone().ok_or_else(|| {
             TurnError::Invalid(format!(
                 "message `{}` does not exist in session `{}`",
@@ -1185,7 +1247,7 @@ impl AgentKernel {
                 activation_id,
                 turn_id,
                 step_id,
-                entered_fact_seq: _,
+                claimed_fact_seq: _,
             } if activation_id == &request.activation_id
                 && turn_id == &request.turn_id
                 && step_id == &request.step_id =>
@@ -1227,6 +1289,9 @@ impl AgentKernel {
             }
         }
 
+        if scan.inbox_paused {
+            return Err(TurnError::StaleClaim);
+        }
         if entry.target != MessageTarget::NextTurn {
             return Err(TurnError::Invalid(
                 "next-Step message requires its owning active Turn".into(),
@@ -1287,12 +1352,33 @@ impl AgentKernel {
             .unwrap_or(header.settings().sandbox());
         let require_approval = header.settings().require_approval()
             || sandbox == rsi_sandbox::SandboxMode::DangerFullAccess;
+        let selected = {
+            let mut selected = scan.pending.iter().filter(|pending| {
+                if pending.message.message_id == entry.message.message_id { return true; }
+                let AgentMessageSource::Command { source: candidate } = &pending.message.source else { return false; };
+                if pending.delivery == MessageDelivery::NextStep && pending.target == MessageTarget::NextStep { return true; }
+                matches!(&entry.message.source, AgentMessageSource::Command { source }
+                    if candidate.request_id == source.request_id && candidate.invocation_sha256 == source.invocation_sha256)
+            }).cloned().collect::<Vec<_>>();
+            selected.sort_by_key(|pending| pending.accepted_control_seq);
+            if selected.is_empty()
+                || selected.len() > rsi_agent_session_protocol::MAXIMUM_COMMAND_INPUTS + 1
+            {
+                return Err(TurnError::Invariant(
+                    "invalid pending command input batch".into(),
+                ));
+            }
+            selected
+        };
         let timestamp_ms = self.inner.clock.now_ms().max(1);
         let mut fact_bodies = vec![
             SessionFactBody::MessageTurnAccepted {
                 turn_id: request.turn_id.clone(),
                 activation_id: request.activation_id.clone(),
-                message_ids: vec![request.message_id.clone()],
+                message_ids: selected
+                    .iter()
+                    .map(|pending| pending.message.message_id.clone())
+                    .collect(),
                 reasoning_effort: entry.message.options.reasoning_effort.clone(),
                 model,
                 sandbox,
@@ -1303,12 +1389,14 @@ impl AgentKernel {
                 step_id: request.step_id.clone(),
             },
         ];
-        fact_bodies.push(SessionFactBody::InputMessageEntered {
-            turn_id: request.turn_id.clone(),
-            step_id: request.step_id.clone(),
-            source: entry.message.entered_source(),
-            content: entry.message.content.clone(),
-        });
+        for pending in &selected {
+            fact_bodies.push(SessionFactBody::InputMessageClaimed {
+                turn_id: request.turn_id.clone(),
+                step_id: request.step_id.clone(),
+                source: pending.message.claimed_source(),
+                content: pending.message.content.clone(),
+            });
+        }
         let facts = fact_bodies
             .into_iter()
             .enumerate()
@@ -1322,7 +1410,7 @@ impl AgentKernel {
                     .map_err(|error| TurnError::Invalid(error.to_string()))
             })
             .collect::<TurnResult<Vec<_>>>()?;
-        let entered_fact_seq = expected_fact_seq
+        let claimed_fact_seq = expected_fact_seq
             .checked_add(3)
             .ok_or_else(|| TurnError::Invariant("message Fact sequence exhausted".into()))?;
         let final_fact_seq = facts
@@ -1344,9 +1432,10 @@ impl AgentKernel {
                 .await
                 .map_err(turn_store_error)?;
             if active.is_none()
+                && !entry.message.source.is_direct()
                 && !matches!(
                     entry.message.source,
-                    AgentMessageSource::Human | AgentMessageSource::Continuation { .. }
+                    AgentMessageSource::Continuation { .. }
                 )
             {
                 return Err(TurnError::Invalid(
@@ -1373,39 +1462,39 @@ impl AgentKernel {
         } else {
             None
         };
-        let mut controls = vec![
-            AgentControlRecord::new(
+        let mut controls = vec![AgentControlRecord::new(
+            scan.durable_control_seq
+                .checked_add(1)
+                .ok_or(TurnError::Capacity)?,
+            timestamp_ms,
+            AgentControlRecordBody::ActivationStarted {
+                activation_id: request.activation_id.clone(),
+                root_session_id: entry.root_session_id,
+                parent_session_id: parent_session_id.clone(),
+                path: request.path,
+            },
+        )];
+        for (index, pending) in selected.iter().enumerate() {
+            controls.push(AgentControlRecord::new(
                 scan.durable_control_seq
-                    .checked_add(1)
-                    .ok_or_else(|| TurnError::Invariant("control sequence exhausted".into()))?,
-                timestamp_ms,
-                AgentControlRecordBody::ActivationStarted {
-                    activation_id: request.activation_id.clone(),
-                    root_session_id: entry.root_session_id,
-                    parent_session_id: parent_session_id.clone(),
-                    path: request.path,
-                },
-            ),
-            AgentControlRecord::new(
-                scan.durable_control_seq
-                    .checked_add(2)
-                    .ok_or_else(|| TurnError::Invariant("control sequence exhausted".into()))?,
+                    .checked_add(controls.len() as u64 + 1)
+                    .ok_or(TurnError::Capacity)?,
                 timestamp_ms,
                 AgentControlRecordBody::MessageClaimed {
-                    message_id: request.message_id,
+                    message_id: pending.message.message_id.clone(),
                     activation_id: request.activation_id.clone(),
                     turn_id: request.turn_id.clone(),
-                    step_id: request.step_id,
-                    entered_fact_seq,
+                    step_id: request.step_id.clone(),
+                    claimed_fact_seq: claimed_fact_seq + index as u64,
                 },
-            ),
-        ];
+            ));
+        }
         if let Some(parent_session_id) = &parent_session_id
             && !program_sink
         {
             controls.push(AgentControlRecord::new(
                 scan.durable_control_seq
-                    .checked_add(3)
+                    .checked_add(controls.len() as u64 + 1)
                     .ok_or_else(|| TurnError::Invariant("control sequence exhausted".into()))?,
                 timestamp_ms,
                 AgentControlRecordBody::CompletionReserved {
@@ -1431,7 +1520,7 @@ impl AgentKernel {
             };
             controls.push(AgentControlRecord::new(
                 scan.durable_control_seq
-                    .checked_add(3)
+                    .checked_add(controls.len() as u64 + 1)
                     .ok_or_else(|| TurnError::Invariant("control sequence exhausted".into()))?,
                 timestamp_ms,
                 AgentControlRecordBody::ProgramCompletionReserved {
@@ -1636,27 +1725,31 @@ impl AgentKernel {
             .store
             .resolve_fork_boundary(
                 &parent_session_id,
-                request.caller.turn_id(),
+                &rsi_agent_session_protocol::ForkPoint::before(request.caller.turn_id()),
                 request.fork_turns.clone(),
             )
             .await
             .map_err(turn_store_error)?;
         let origin = ForkOrigin {
-            parent_session_id: parent_session_id.clone(),
+            history: rsi_agent_session_protocol::HistoryOrigin {
+                parent_session_id: parent_session_id.clone(),
+                parent_header_fingerprint: parent_header
+                    .fingerprint()
+                    .map_err(|error| TurnError::Invalid(error.to_string()))?,
+                point: rsi_agent_session_protocol::ForkPoint::BeforeTurn {
+                    turn_id: request.caller.turn_id().clone(),
+                },
+                resolved_after_seq: boundary.resolved_after_seq,
+                resolved_terminal_seq: boundary.resolved_terminal_seq,
+                terminal_prefix_sha256: boundary.terminal_prefix_sha256.clone(),
+                resolved_terminal_control_seq: boundary.resolved_terminal_control_seq,
+                terminal_control_prefix_sha256: boundary.terminal_control_prefix_sha256.clone(),
+                requested_turns: request.fork_turns.clone(),
+                effective_turns: boundary.effective_turns,
+            },
             root_session_id: root_session_id.clone(),
             path: path.clone(),
             task_name: request.task_name,
-            parent_header_fingerprint: parent_header
-                .fingerprint()
-                .map_err(|error| TurnError::Invalid(error.to_string()))?,
-            invoking_turn_id: request.caller.turn_id().clone(),
-            resolved_after_seq: boundary.resolved_after_seq,
-            resolved_terminal_seq: boundary.resolved_terminal_seq,
-            terminal_prefix_sha256: boundary.terminal_prefix_sha256,
-            resolved_terminal_control_seq: boundary.resolved_terminal_control_seq,
-            terminal_control_prefix_sha256: boundary.terminal_control_prefix_sha256,
-            requested_turns: request.fork_turns,
-            effective_turns: boundary.effective_turns,
         };
         let child_header = parent_header
             .forked_child(
@@ -1711,28 +1804,18 @@ impl AgentKernel {
         }
         let mut prepared =
             PreparedFreshSession::new(child_header, composition).map_err(turn_composition_error)?;
-        if boundary.resolved_terminal_control_seq > 0 {
-            let states = observation::read_domain_states_bounded(
-                &self.inner,
-                &parent_session_id,
-                Some(boundary.resolved_terminal_control_seq),
+        let baseline = self
+            .fork_baseline(
+                &parent_header,
+                prepared.composition(),
+                &request.fork_turns,
+                &boundary,
+                request.cancellation.clone(),
             )
-            .await
-            .map_err(turn_store_error)?;
-            let mut baseline = prepared.baseline().clone();
-            baseline
-                .inherit(
-                    &states
-                        .states
-                        .into_iter()
-                        .map(|state| state.snapshot)
-                        .collect::<Vec<_>>(),
-                )
-                .map_err(|error| turn_composition_error(error.into()))?;
-            prepared = prepared
-                .with_baseline(baseline)
-                .map_err(turn_composition_error)?;
-        }
+            .await?;
+        prepared = prepared
+            .with_baseline(baseline)
+            .map_err(turn_composition_error)?;
         self.validate_agent_caller(&request.caller)?;
         let receipt = self
             .submit_message_admitted(
@@ -1770,10 +1853,10 @@ impl AgentKernel {
         let origin = header
             .fork_origin()
             .filter(|origin| {
-                &origin.parent_session_id == request.caller.session_id()
-                    && &origin.invoking_turn_id == request.caller.turn_id()
+                &origin.history.parent_session_id == request.caller.session_id()
+                    && origin.history.point.turn_id() == request.caller.turn_id()
                     && origin.task_name == request.task_name
-                    && origin.requested_turns == request.fork_turns
+                    && origin.history.requested_turns == request.fork_turns
             })
             .ok_or_else(|| {
                 TurnError::Invalid("spawn retry disagrees with existing child lineage".into())
@@ -1824,7 +1907,7 @@ impl AgentKernel {
             })
             .map_err(|error| TurnError::Invalid(error.to_string()))?;
         if expected != header
-            || origin.parent_header_fingerprint
+            || origin.history.parent_header_fingerprint
                 != parent
                     .fingerprint()
                     .map_err(|error| TurnError::Invalid(error.to_string()))?
@@ -1836,7 +1919,7 @@ impl AgentKernel {
         let scan = scan_durable_messages(
             &self.inner,
             &request.child_session_id,
-            Some(&request.message_id),
+            MailboxRead::WithMessage(request.message_id.clone()),
         )
         .await?;
         let initial = observation::read_domain_states_bounded(
@@ -1890,10 +1973,10 @@ impl AgentKernel {
             .caller
             .header()
             .fork_origin()
-            .map(|origin| &origin.parent_session_id);
+            .map(|origin| &origin.history.parent_session_id);
         let target_parent = target_header
             .fork_origin()
-            .map(|origin| &origin.parent_session_id);
+            .map(|origin| &origin.history.parent_session_id);
         if caller_parent != Some(&request.target_session_id)
             && target_parent != Some(caller_session_id)
         {
@@ -1949,13 +2032,14 @@ impl AgentKernel {
             let Some(origin) = candidate.fork_origin() else {
                 break;
             };
-            if &origin.parent_session_id == caller.session_id() {
+            if &origin.history.parent_session_id == caller.session_id() {
                 authorized = true;
                 break;
             }
-            candidate = read_validated_header_bounded(&self.inner, &origin.parent_session_id)
-                .await
-                .map_err(turn_store_error)?;
+            candidate =
+                read_validated_header_bounded(&self.inner, &origin.history.parent_session_id)
+                    .await
+                    .map_err(turn_store_error)?;
         }
         if !authorized {
             return Err(TurnError::Invalid(

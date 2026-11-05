@@ -2,6 +2,7 @@ use super::*;
 use rsi_agent_store_protocol::MAXIMUM_STORE_FACT_PAGE_BYTES as FACT_PAGE_BYTES;
 
 #[tokio::test]
+#[allow(clippy::too_many_lines)] // One captured boundary is reused across pages and nested Full/Last descendants.
 async fn fork_replay_validates_its_immutable_boundary_only_at_the_initial_cursor() {
     let store = Arc::new(MemoryStore::new());
     append_terminal_history(&store, "session-fork-page-root", 300).await;
@@ -49,7 +50,12 @@ async fn fork_replay_validates_its_immutable_boundary_only_at_the_initial_cursor
         .unwrap();
     assert_eq!(child_claim.session_id(), &child_id);
     let first = kernel
-        .read_fork_facts(&child_claim, 0, MAXIMUM_FACTS_PER_READ)
+        .read_fork_facts(
+            &child_claim,
+            child_claim.session_id(),
+            0,
+            MAXIMUM_FACTS_PER_READ,
+        )
         .await
         .unwrap()
         .unwrap();
@@ -58,6 +64,7 @@ async fn fork_replay_validates_its_immutable_boundary_only_at_the_initial_cursor
     let second = kernel
         .read_fork_facts(
             &child_claim,
+            child_claim.session_id(),
             first.through_parent_seq,
             MAXIMUM_FACTS_PER_READ,
         )
@@ -71,6 +78,59 @@ async fn fork_replay_validates_its_immutable_boundary_only_at_the_initial_cursor
         2,
         "later pages must reuse the boundary established at the initial cursor"
     );
+
+    // A nested Full retains the parent's inherited selection even before the
+    // parent has completed a local Turn. A Last window contains only local Turns.
+    for (name, selection, expected) in [
+        ("grand-full", ForkTurnSelection::All, 2),
+        ("grand-last", ForkTurnSelection::Last(1), 1),
+    ] {
+        kernel
+            .spawn_agent(SpawnAgentRequest {
+                output_contract: None,
+                role: None,
+                model: None,
+                reasoning_effort: None,
+                cancellation: CancellationToken::new(),
+                caller: control_tool_caller(&kernel, &child_claim).await,
+                child_session_id: SessionId::new(name).unwrap(),
+                task_name: name.into(),
+                message_id: MessageId::new(format!("message-{name}")).unwrap(),
+                message: "nested source cut".into(),
+                fork_turns: selection,
+            })
+            .await
+            .unwrap();
+        let lease = kernel.register(name.into()).unwrap();
+        let claim = kernel
+            .claim(name, CancellationToken::new())
+            .await
+            .unwrap()
+            .unwrap();
+        let sources = kernel.read_fork_sources(&claim).await.unwrap();
+        assert_eq!(sources.len(), expected);
+        assert_eq!(sources.last().unwrap(), claim.header());
+        if expected == 2 {
+            assert_eq!(sources[0], *child_claim.header());
+            let inherited = kernel
+                .read_fork_facts(&claim, sources[0].session_id(), 0, 1)
+                .await
+                .unwrap()
+                .unwrap();
+            assert_eq!(inherited.facts[0], first.facts[0]);
+        }
+        assert!(
+            kernel
+                .read_fork_facts(&claim, &root_id, 0, 1)
+                .await
+                .is_err()
+        );
+        kernel
+            .finish_turn(&claim, &TurnOutcome::Completed)
+            .await
+            .unwrap();
+        drop(lease);
+    }
 
     kernel
         .finish_turn(&child_claim, &TurnOutcome::Completed)
@@ -578,7 +638,7 @@ async fn claimed_message_retry_reuses_the_stored_acceptance_boundary_after_cold_
             activation_id: activation_id.clone(),
             turn_id: turn_id.clone(),
             step_id: step_id.clone(),
-            entered_fact_seq: 3,
+            claimed_fact_seq: 3,
         }
     );
     initial.shutdown(worker).await.unwrap();
@@ -773,6 +833,7 @@ async fn controls_only_message_commit_retries_a_concurrent_fact_flush() {
         .unwrap()
         .unwrap();
     assert_eq!(claim.turn_id(), &submitted.turn_id);
+    tool_origin::prepare_claimed_inputs(&kernel, &claim).await;
 
     store.pause_next_append();
     let pending = kernel

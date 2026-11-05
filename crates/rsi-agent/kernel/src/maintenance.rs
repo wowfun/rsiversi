@@ -25,6 +25,10 @@ impl rsi_agent_turn_protocol::SessionRetirement for Retirement {
                 .expect("evidence cache poisoned")
                 .remove_session(id);
         }
+        drop(state);
+        for id in &self.ids {
+            self.kernel.inner.session_changes.committed(id);
+        }
     }
 }
 pub(super) fn reserve(
@@ -70,7 +74,7 @@ pub(super) fn reserve(
                 || state.sessions.get(id).is_some_and(|session| {
                     session.header_pending
                         || !session.pending.is_empty()
-                        || session.pending_domain_baseline.is_some()
+                        || !session.pending_initial_controls.is_empty()
                         || session.flush_inflight
                         || session.permanent_flush_error.is_some()
                         || session.admission_reservations != 0

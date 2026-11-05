@@ -3,13 +3,16 @@
 use super::continuation::CommandAuthorization;
 use super::*;
 use rsi_agent_composition_protocol::{
-    ContributionKind, SessionCommandContext, SessionCommandRegistration, ValidatedDomainProposal,
+    CommandOutcomeOwner, ContributionKind, SessionCommandContext, SessionCommandRegistration,
+    ValidatedDomainProposal,
 };
+use rsi_agent_composition_protocol::{Publication, PublicationReceipt};
 use rsi_agent_session_protocol::SessionCommandsView;
 use rsi_agent_session_protocol::{
     CommandRevision, DomainMutationSource, DomainRequestId, DomainStateCommit, DomainStateUpdate,
     DomainStateView, SessionCommandInvocation,
 };
+use rsi_agent_store_protocol::MailboxRead;
 use rsi_agent_turn_protocol::{DomainMutationReceipt, SessionCommands};
 
 type CommandKey = (SessionId, DomainRequestId);
@@ -115,6 +118,7 @@ struct CommandCandidate {
     session: PreparedResumeSession,
     invocation: SessionCommandInvocation,
     proposals: Vec<ValidatedDomainProposal>,
+    inputs: Vec<rsi_agent_session_protocol::CommandMessage>,
     authorization: CommandAuthorization,
 }
 
@@ -124,6 +128,8 @@ struct PreparedCommandCommit {
     append: AtomicSessionAppend,
     receipt: DomainMutationReceipt,
     execution: Option<execution_admission::Reservation>,
+    command_execution: Vec<Option<execution_admission::Reservation>>,
+    publications: Vec<Publication>,
 }
 
 impl AgentKernel {
@@ -223,16 +229,17 @@ impl AgentKernel {
         let cancellation = self.inner.submission_admission.closed.child_token();
         let _cancel = cancellation.clone().drop_guard();
         let deadline = Instant::now() + Duration::from_secs(30);
+        let outcome = CommandOutcomeOwner::default();
         let candidate = tokio::select! {
             biased;
             () = cancellation.cancelled() => return Err(TurnError::ShuttingDown),
-            result = tokio::time::timeout_at(deadline, self.prepare_session_command(session, invocation, authorization, cancellation.clone())) => {
+            result = tokio::time::timeout_at(deadline, self.prepare_session_command(session, invocation, authorization, cancellation.clone(), &outcome)) => {
                 result.map_err(|_| TurnError::Invalid("command preparation exceeded its deadline".into()))??
             }
         };
         match candidate {
             Ok(receipt) => Ok(receipt),
-            Err(candidate) => self.commit_session_command(candidate).await,
+            Err(candidate) => self.commit_session_command(candidate, &outcome).await,
         }
     }
 
@@ -242,6 +249,7 @@ impl AgentKernel {
         invocation: SessionCommandInvocation,
         authorization: CommandAuthorization,
         cancellation: CancellationToken,
+        outcome: &CommandOutcomeOwner,
     ) -> TurnResult<std::result::Result<DomainMutationReceipt, PreparedCommandCommit>> {
         let (header, composition) = self.inner.resume_issuer.inspect(&session)?;
         if let Some(receipt) = self
@@ -298,6 +306,16 @@ impl AgentKernel {
             )
             .map_err(|error| turn_composition_error(error.into()))?;
         let context = SessionCommandContext {
+            outcome: Some(outcome.view()),
+            history: Some(rsi_agent_composition_protocol::CapturedFactHistory {
+                through_seq: page.durable_fact_seq,
+                facts: captured_history::capture(
+                    self,
+                    header.session_id(),
+                    page.durable_fact_seq,
+                    cancellation.clone(),
+                ),
+            }),
             request_id: invocation.request_id.clone(),
             continuation_input: match &authorization {
                 CommandAuthorization::Continuation { reservation, .. } => reservation.clone(),
@@ -314,7 +332,7 @@ impl AgentKernel {
                 })
                 .collect(),
         };
-        let proposals = callback
+        let output = callback
             .callback()
             .execute(&context, &invocation.arguments, cancellation)
             .await
@@ -325,13 +343,58 @@ impl AgentKernel {
                     bounded_diagnostic(&error.to_string())
                 ))
             })?;
-        self.stage_session_command(CommandCandidate {
-            session,
-            invocation,
-            proposals,
-            authorization,
-        })
-        .await
+        self.stage_command_output(session, invocation, authorization, output, outcome)
+            .await
+    }
+
+    async fn stage_command_output(
+        &self,
+        session: PreparedResumeSession,
+        invocation: SessionCommandInvocation,
+        authorization: CommandAuthorization,
+        mut output: rsi_agent_composition_protocol::SessionCommandOutput,
+        outcome: &CommandOutcomeOwner,
+    ) -> TurnResult<std::result::Result<DomainMutationReceipt, PreparedCommandCommit>> {
+        if output.publications.len() > rsi_agent_composition_protocol::MAXIMUM_AGENT_CONTRIBUTIONS {
+            return Err(TurnError::Invalid("command publication capacity".into()));
+        }
+        let inputs = match rsi_agent_composition_protocol::PreparedCommandInput::prepare(
+            &invocation,
+            output.inputs,
+        ) {
+            Ok(inputs) => inputs
+                .into_iter()
+                .map(|input| input.into_publication(false))
+                .collect(),
+            Err(error) => {
+                let _ = notify_publications(&mut output.publications, None).await;
+                return Err(TurnError::Invalid(error.to_string()));
+            }
+        };
+        let result = self
+            .stage_session_command(CommandCandidate {
+                session,
+                invocation,
+                proposals: output.domains,
+                inputs,
+                authorization,
+            })
+            .await;
+        match result {
+            Ok(Err(mut prepared)) => {
+                prepared.publications = output.publications;
+                Ok(Err(prepared))
+            }
+            Ok(Ok(receipt)) => {
+                record_outcome(outcome, &receipt);
+                notify_publications(&mut output.publications, Some(&receipt)).await?;
+                Ok(Ok(receipt))
+            }
+            Err(error) => {
+                let _ = notify_publications(&mut output.publications, None).await;
+                Err(error)
+            }
+        }
     }
 
     #[allow(
@@ -342,11 +405,11 @@ impl AgentKernel {
         &self,
         mut candidate: CommandCandidate,
     ) -> TurnResult<std::result::Result<DomainMutationReceipt, PreparedCommandCommit>> {
-        if candidate.proposals.is_empty()
+        if (candidate.proposals.is_empty() && candidate.inputs.is_empty())
             || candidate.proposals.len() > rsi_agent_session_protocol::MAXIMUM_SESSION_DOMAINS
         {
             return Err(TurnError::Invalid(
-                "command requires 1..=64 typed domain replacements".into(),
+                "command requires inputs or at most 64 typed domain replacements".into(),
             ));
         }
         candidate
@@ -402,10 +465,11 @@ impl AgentKernel {
             })
             .collect::<TurnResult<Vec<_>>>()?;
         candidate.authorization.validate_updates(&updates)?;
-        let commit = DomainStateCommit::new(
+        let commit = DomainStateCommit::new_with_command_inputs(
             Some(candidate.invocation.request_id.clone()),
             candidate.authorization.source(candidate.invocation.clone()),
             updates,
+            candidate.inputs.clone(),
         )
         .map_err(|error| TurnError::Invalid(error.to_string()))?;
         let seq = page
@@ -431,6 +495,118 @@ impl AgentKernel {
         let receipt = DomainMutationReceipt::new(session_id.clone(), control.clone())?;
         let mut execution = None;
         let mut controls = vec![control];
+        let mut command_execution = Vec::new();
+        if !candidate.inputs.is_empty() {
+            let scan = scan_durable_messages(&self.inner, &session_id, MailboxRead::All).await?;
+            if scan
+                .pending
+                .iter()
+                .filter(|entry| matches!(entry.message.source, AgentMessageSource::Command { .. }))
+                .count()
+                .saturating_add(candidate.inputs.len())
+                > rsi_agent_session_protocol::MAXIMUM_COMMAND_INPUTS
+            {
+                return Err(TurnError::Capacity);
+            }
+            let reserved = self
+                .inner
+                .store
+                .completion_reservation_count(&session_id)
+                .await
+                .map_err(turn_store_error)?;
+            let active = {
+                let state = lock_state(&self.inner);
+                state.sessions.get(&session_id).and_then(|session| {
+                    session.turns.iter().find_map(|(id, turn)| {
+                        (turn.activation_id.is_some()
+                            && turn.terminal.is_none()
+                            && !turn.cancel_requested)
+                            .then(|| id.clone())
+                    })
+                })
+            };
+            let wakes = active.is_none()
+                && candidate.inputs.iter().any(|input| {
+                    input.delivery == rsi_agent_session_protocol::MessageDelivery::Steer
+                });
+            let superseded = scan
+                .pending
+                .iter()
+                .filter(|entry| {
+                    wakes
+                        && matches!(
+                            entry.message.source,
+                            AgentMessageSource::Continuation { .. }
+                        )
+                })
+                .map(|entry| entry.message.message_id.clone())
+                .collect::<Vec<_>>();
+            if scan
+                .pending_count
+                .saturating_sub(superseded.len())
+                .saturating_add(reserved)
+                .saturating_add(candidate.inputs.len())
+                > MAXIMUM_PENDING_AGENT_MESSAGES
+            {
+                return Err(TurnError::Capacity);
+            }
+            for input in &candidate.inputs {
+                let bound_turn_id = (input.delivery
+                    == rsi_agent_session_protocol::MessageDelivery::Steer)
+                    .then(|| active.clone())
+                    .flatten();
+                let target = if input.delivery
+                    == rsi_agent_session_protocol::MessageDelivery::NextStep
+                    || bound_turn_id.is_some()
+                {
+                    MessageTarget::NextStep
+                } else {
+                    MessageTarget::NextTurn
+                };
+                command_execution.push(self.inner.execution_messages.reserve(
+                    &session_id,
+                    &input.message.message_id,
+                    candidate.session.execution(),
+                )?);
+                controls.push(
+                    AgentControlRecord::new(
+                        seq.checked_add(controls.len() as u64)
+                            .ok_or(TurnError::Capacity)?,
+                        self.inner.clock.now_ms().max(1),
+                        AgentControlRecordBody::MessageAccepted {
+                            message: input.message.clone(),
+                            delivery: input.delivery,
+                            bound_turn_id,
+                            root_session_id: agent_root_and_path(header).0,
+                            target,
+                            wake_required: target == MessageTarget::NextTurn,
+                        },
+                    )
+                    .map_err(|error| TurnError::Invalid(error.to_string()))?,
+                );
+            }
+            if scan.inbox_paused
+                && candidate.inputs.iter().any(|input| {
+                    input.delivery != rsi_agent_session_protocol::MessageDelivery::NextStep
+                })
+            {
+                inbox::append_resume(&mut controls, self.inner.clock.now_ms().max(1))?;
+            }
+            for message_id in superseded {
+                controls.push(
+                    AgentControlRecord::new(
+                        seq.checked_add(controls.len() as u64)
+                            .ok_or(TurnError::Capacity)?,
+                        self.inner.clock.now_ms().max(1),
+                        AgentControlRecordBody::MessageDiscarded {
+                            message_id,
+                            reason: MessageDiscardReason::Superseded,
+                        },
+                    )
+                    .map_err(|error| TurnError::Invalid(error.to_string()))?,
+                );
+            }
+        }
         if let CommandAuthorization::Continuation {
             lease,
             reservation: Some(input),
@@ -474,8 +650,10 @@ impl AgentKernel {
                 )
                 .map_err(|error| TurnError::Invalid(error.to_string()))?,
             );
+            inbox::append_resume(&mut controls, self.inner.clock.now_ms().max(1))?;
         }
         Ok(Err(PreparedCommandCommit {
+            publications: vec![],
             candidate,
             _admission: admission,
             append: AtomicSessionAppend {
@@ -488,16 +666,50 @@ impl AgentKernel {
             },
             receipt,
             execution,
+            command_execution,
         }))
     }
 
-    async fn commit_session_command(&self, prepared: PreparedCommandCommit) -> CommandResult {
+    async fn commit_session_command(
+        &self,
+        mut prepared: PreparedCommandCommit,
+        outcome: &CommandOutcomeOwner,
+    ) -> CommandResult {
+        let mut publications = std::mem::take(&mut prepared.publications);
+        let canonical_candidate = prepared.receipt.clone();
+        let result = self.commit_session_command_inner(prepared, outcome).await;
+        match &result {
+            Ok(receipt) => notify_publications(&mut publications, Some(receipt)).await?,
+            Err(TurnError::DomainOutcomeUnknown { .. }) => {}
+            Err(_)
+                if matches!(
+                    outcome.view().evidence().as_deref(),
+                    Some(rsi_agent_composition_protocol::CommandOutcomeEvidence::Durable { .. })
+                ) =>
+            {
+                let _ = notify_publications(&mut publications, Some(&canonical_candidate)).await;
+            }
+            Err(_) => {
+                outcome.rejected();
+                let _ = notify_publications(&mut publications, None).await;
+            }
+        }
+        result
+    }
+
+    async fn commit_session_command_inner(
+        &self,
+        prepared: PreparedCommandCommit,
+        outcome: &CommandOutcomeOwner,
+    ) -> CommandResult {
         let PreparedCommandCommit {
             candidate,
             _admission,
             append,
             receipt,
             execution,
+            command_execution,
+            publications: _,
         } = prepared;
         let session_id = append.session_id.clone();
         candidate
@@ -508,8 +720,13 @@ impl AgentKernel {
                 lease,
                 reservation: Some(_),
             } => execution_admission::admit(candidate.session.header(), lease.execution())?,
+            _ if !candidate.inputs.is_empty() => execution_admission::admit(
+                candidate.session.header(),
+                candidate.session.execution(),
+            )?,
             _ => None,
         };
+        outcome.begin_publication();
         let result = self
             .commit_agent_with_flush_conflict_retry(AtomicAgentCommit {
                 sessions: vec![append],
@@ -553,6 +770,23 @@ impl AgentKernel {
                 }
             }
         }
+        record_outcome(outcome, &receipt);
+        self.complete_command_continuation(&candidate, &receipt, execution)?;
+        for reservation in command_execution {
+            self.inner.execution_messages.publish(reservation);
+        }
+        if !candidate.inputs.is_empty() {
+            self.request_ready_scan();
+        }
+        self.inner.session_changes.committed(&session_id);
+        Ok(receipt)
+    }
+    fn complete_command_continuation(
+        &self,
+        candidate: &CommandCandidate,
+        receipt: &DomainMutationReceipt,
+        execution: Option<execution_admission::Reservation>,
+    ) -> TurnResult<()> {
         if let CommandAuthorization::Continuation {
             lease,
             reservation: Some(input),
@@ -581,9 +815,52 @@ impl AgentKernel {
                 .admitted_round(lease, receipt.control_seq() + 1)?;
             self.request_ready_scan();
         }
-        self.inner.session_changes.committed(&session_id);
-        Ok(receipt)
+        Ok(())
     }
+}
+
+async fn notify_publications(
+    publications: &mut [Publication],
+    receipt: Option<&DomainMutationReceipt>,
+) -> TurnResult<()> {
+    if publications.len() > rsi_agent_composition_protocol::MAXIMUM_AGENT_CONTRIBUTIONS {
+        return Err(TurnError::Invalid("command publication capacity".into()));
+    }
+    tokio::time::timeout(Duration::from_secs(5), async {
+        for publication in publications {
+            match receipt {
+                Some(receipt) => {
+                    publication
+                        .committed(&PublicationReceipt {
+                            session_id: receipt.session_id(),
+                            facts: &[],
+                            domain_commit: Some((receipt.control_seq(), receipt.commit())),
+                        })
+                        .await
+                }
+                None => publication.rejected().await,
+            }
+            .map_err(|error| {
+                TurnError::Invalid(format!(
+                    "command publication notification failed; query its receipt: {}",
+                    bounded_diagnostic(&error.to_string())
+                ))
+            })?;
+        }
+        Ok(())
+    })
+    .await
+    .map_err(|_| {
+        TurnError::Invalid("command publication notification timed out; query its receipt".into())
+    })?
+}
+
+fn record_outcome(outcome: &CommandOutcomeOwner, receipt: &DomainMutationReceipt) {
+    outcome.committed(&PublicationReceipt {
+        session_id: receipt.session_id(),
+        facts: &[],
+        domain_commit: Some((receipt.control_seq(), receipt.commit())),
+    });
 }
 
 fn request_conflict(invocation: &SessionCommandInvocation) -> TurnError {

@@ -10,7 +10,6 @@ use rsi_agent_turn_protocol::{
 mod children;
 mod notice;
 mod owner;
-mod reconciliation;
 mod state;
 mod view;
 mod workbench;
@@ -64,11 +63,20 @@ impl AgentKernel {
             .store
             .resolve_fork_boundary(
                 header.session_id(),
-                request.caller.turn_id(),
+                &rsi_agent_session_protocol::ForkPoint::before(request.caller.turn_id()),
                 request.fork_turns.clone(),
             )
             .await
             .map_err(turn_store_error)?;
+        let baseline = self
+            .fork_baseline(
+                &header,
+                &composition,
+                &request.fork_turns,
+                &boundary,
+                request.cancellation.clone(),
+            )
+            .await?;
         let script: Arc<[u8]> = Arc::from(request.script.into_bytes());
         let run_id = ProgramRunId::new(format!(
             "program-{:x}",
@@ -107,9 +115,6 @@ impl AgentKernel {
             guard: request.guard,
         };
         descriptor.validate().map_err(session_error)?;
-        let baseline = self
-            .program_baseline(&header, &composition, &descriptor)
-            .await?;
         let _admission = self
             .inner
             .submission_admission
@@ -145,36 +150,6 @@ impl AgentKernel {
             registry.insert(run.header.session_id().clone(), Arc::downgrade(&run));
         }
         Ok(run)
-    }
-    async fn program_baseline(
-        &self,
-        header: &SessionHeader,
-        composition: &AgentCompositionPin,
-        descriptor: &ProgramRunDescriptor,
-    ) -> TurnResult<rsi_agent_composition_protocol::DomainBaseline> {
-        let mut baseline = PreparedFreshSession::new(header.clone(), composition.clone())
-            .map_err(turn_composition_error)?
-            .baseline()
-            .clone();
-        if descriptor.fork.resolved_terminal_control_seq > 0 {
-            let inherited = observation::read_domain_states_bounded(
-                &self.inner,
-                header.session_id(),
-                Some(descriptor.fork.resolved_terminal_control_seq),
-            )
-            .await
-            .map_err(turn_store_error)?;
-            baseline
-                .inherit(
-                    &inherited
-                        .states
-                        .into_iter()
-                        .map(|state| state.snapshot)
-                        .collect::<Vec<_>>(),
-                )
-                .map_err(session_error)?;
-        }
-        Ok(baseline)
     }
     async fn program_creator_authority(
         &self,

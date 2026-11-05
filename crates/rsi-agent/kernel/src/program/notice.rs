@@ -1,5 +1,6 @@
 use super::*;
 use rsi_agent_session_protocol::ProgramCompletionSource;
+use rsi_agent_store_protocol::MailboxRead;
 impl LiveRun {
     pub(super) fn reserve_notice_execution(
         &self,
@@ -114,6 +115,13 @@ impl LiveRun {
             )
             .map_err(session_error)?,
         );
+        if target == MessageTarget::NextTurn {
+            // This explicit wake is already in the owned terminal append; it needs no extra Store read.
+            crate::inbox::append_resume(
+                &mut append.controls,
+                self.kernel.inner.clock.now_ms().max(1),
+            )?;
+        }
         Ok(append)
     }
 }
@@ -157,7 +165,7 @@ impl AgentKernel {
                 let scan = scan_durable_messages(
                     &self.inner,
                     &notice.session_id,
-                    Some(&notice.message_id),
+                    MailboxRead::WithMessage(notice.message_id.clone()),
                 )
                 .await?;
                 let entry = scan

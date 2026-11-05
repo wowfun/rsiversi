@@ -17,9 +17,9 @@ use rsi_agent_session_protocol::{
     fact_prefix_sha256,
 };
 use rsi_agent_store_protocol::{
-    AppendBatch, AppendCommit, CasObjectRef, SessionStore, StoreActivationPhase, StoreError,
-    StoreFactPage, StoreOpenTurnPage, StoreSessionPage, StoreTurnBoundary, StoreTurnFactPage,
-    StoreWaitingActivationPage, StoredContextCheckpoint, WriteContextCheckpoint,
+    AppendBatch, AppendCommit, CasObjectRef, MailboxRead, SessionStore, StoreActivationPhase,
+    StoreError, StoreFactPage, StoreOpenTurnPage, StoreSessionPage, StoreTurnBoundary,
+    StoreTurnFactPage, StoreWaitingActivationPage, StoredContextCheckpoint, WriteContextCheckpoint,
 };
 use rsi_agent_testkit::{MemoryStore, MemoryStoreFactory};
 use rsi_agent_turn_protocol::{
@@ -94,6 +94,7 @@ struct FactReadRaceStore {
     release_reply_read: Notify,
     stale_domain_read: AtomicBool,
     projection_reads: AtomicUsize,
+    selected_domain_reads: AtomicUsize,
     watermark_reads: tokio::sync::Semaphore,
     pause_domain_read: AtomicBool,
     domain_read_entered: Notify,
@@ -111,6 +112,7 @@ struct FactReadRaceStore {
     subtree_reads: Mutex<std::collections::BTreeMap<SessionId, usize>>,
     mailbox_summary_reads: Mutex<std::collections::BTreeMap<SessionId, usize>>,
     mailbox_reads: Mutex<std::collections::BTreeMap<SessionId, usize>>,
+    inbox_control_reads: AtomicUsize,
     read_captured: Notify,
     release_read: Notify,
     read_error: Mutex<Option<String>>,
@@ -120,6 +122,8 @@ struct FactReadRaceStore {
     control_page_override: Mutex<Option<rsi_agent_store_protocol::StoreControlPage>>,
     fail_agent_creation_after_apply: AtomicBool,
     fail_program_after_apply: AtomicBool,
+    fail_inbox_stop_before_apply: AtomicBool,
+    fail_inbox_stop_after_apply: AtomicBool,
     panic_program_after_apply: AtomicBool,
     program_read_fault: Mutex<
         Option<(
@@ -199,6 +203,7 @@ impl FactReadRaceStore {
             release_reply_read: Notify::new(),
             stale_domain_read: AtomicBool::new(false),
             projection_reads: AtomicUsize::new(0),
+            selected_domain_reads: AtomicUsize::new(0),
             watermark_reads: tokio::sync::Semaphore::new(0),
             pause_domain_read: AtomicBool::new(false),
             domain_read_entered: Notify::new(),
@@ -216,6 +221,7 @@ impl FactReadRaceStore {
             subtree_reads: Mutex::default(),
             mailbox_summary_reads: Mutex::default(),
             mailbox_reads: Mutex::new(std::collections::BTreeMap::new()),
+            inbox_control_reads: AtomicUsize::new(0),
             read_captured: Notify::new(),
             release_read: Notify::new(),
             read_error: Mutex::new(None),
@@ -225,6 +231,8 @@ impl FactReadRaceStore {
             control_page_override: Mutex::new(None),
             fail_agent_creation_after_apply: AtomicBool::new(false),
             fail_program_after_apply: AtomicBool::new(false),
+            fail_inbox_stop_before_apply: AtomicBool::new(false),
+            fail_inbox_stop_after_apply: AtomicBool::new(false),
             panic_program_after_apply: AtomicBool::new(false),
             program_read_fault: Mutex::new(None),
             watermark_read_fault: Mutex::new(None),
@@ -656,16 +664,25 @@ impl SessionStore for FactReadRaceStore {
         &self,
         session_id: &SessionId,
         horizon: Option<u64>,
+        domain: Option<&str>,
     ) -> rsi_agent_store_protocol::Result<rsi_agent_store_protocol::StoreDomainStatePage> {
         self.projection_reads.fetch_add(1, Ordering::SeqCst);
+        if domain.is_some() {
+            self.selected_domain_reads.fetch_add(1, Ordering::SeqCst);
+        }
         if self.pause_domain_read.swap(false, Ordering::AcqRel) {
             self.domain_read_entered.notify_one();
             self.release_domain_read.notified().await;
         }
         if self.stale_domain_read.load(Ordering::Acquire) {
-            return self.inner.read_domain_states(session_id, Some(1)).await;
+            return self
+                .inner
+                .read_domain_states(session_id, Some(1), domain)
+                .await;
         }
-        self.inner.read_domain_states(session_id, horizon).await
+        self.inner
+            .read_domain_states(session_id, horizon, domain)
+            .await
     }
 
     async fn read_domain_request(
@@ -738,6 +755,26 @@ impl SessionStore for FactReadRaceStore {
             .iter()
             .flat_map(|append| &append.controls)
             .any(|record| matches!(record.body(), AgentControlRecordBody::ProgramRun { .. }));
+        let inbox_stop = commit
+            .sessions
+            .iter()
+            .flat_map(|append| &append.controls)
+            .any(|record| {
+                matches!(
+                    record.body(),
+                    AgentControlRecordBody::InboxPaused
+                        | AgentControlRecordBody::MessageDiscarded { .. }
+                )
+            });
+        if inbox_stop
+            && self
+                .fail_inbox_stop_before_apply
+                .swap(false, Ordering::AcqRel)
+        {
+            return Err(StoreError::Io(
+                "injected inbox stop failure before apply".into(),
+            ));
+        }
         let ends_turn = commit
             .sessions
             .iter()
@@ -785,6 +822,16 @@ impl SessionStore for FactReadRaceStore {
             });
         }
         let result = self.inner.commit_agent(commit).await;
+        if result.is_ok()
+            && inbox_stop
+            && self
+                .fail_inbox_stop_after_apply
+                .swap(false, Ordering::AcqRel)
+        {
+            return Err(StoreError::Io(
+                "injected inbox stop acknowledgement loss".into(),
+            ));
+        }
         assert!(
             !(result.is_ok()
                 && program
@@ -1034,11 +1081,11 @@ impl SessionStore for FactReadRaceStore {
     async fn resolve_fork_boundary(
         &self,
         session_id: &SessionId,
-        invoking_turn_id: &TurnId,
+        point: &rsi_agent_session_protocol::ForkPoint,
         selection: ForkTurnSelection,
     ) -> rsi_agent_store_protocol::Result<rsi_agent_store_protocol::StoreForkBoundary> {
         self.inner
-            .resolve_fork_boundary(session_id, invoking_turn_id, selection)
+            .resolve_fork_boundary(session_id, point, selection)
             .await
     }
 
@@ -1152,7 +1199,7 @@ impl SessionStore for FactReadRaceStore {
     async fn read_agent_mailbox(
         &self,
         session_id: &SessionId,
-        selected_message_id: Option<&MessageId>,
+        query: MailboxRead,
     ) -> rsi_agent_store_protocol::Result<rsi_agent_store_protocol::StoreAgentMailbox> {
         *self
             .mailbox_reads
@@ -1160,9 +1207,20 @@ impl SessionStore for FactReadRaceStore {
             .unwrap()
             .entry(session_id.clone())
             .or_default() += 1;
-        self.inner
-            .read_agent_mailbox(session_id, selected_message_id)
-            .await
+        self.inner.read_agent_mailbox(session_id, query).await
+    }
+
+    async fn read_inbox_control_state(
+        &self,
+        session_id: &SessionId,
+        include_pending: bool,
+    ) -> rsi_agent_store_protocol::Result<rsi_agent_store_protocol::StoreInboxControlState> {
+        let result = self
+            .inner
+            .read_inbox_control_state(session_id, include_pending)
+            .await;
+        self.inbox_control_reads.fetch_add(1, Ordering::Release);
+        result
     }
 
     async fn read_agent_mailbox_summary(
@@ -1859,7 +1917,7 @@ async fn submit(
 fn mailbox_message(message_id: &str) -> AgentMessage {
     AgentMessage {
         message_id: MessageId::new(message_id).unwrap(),
-        source: AgentMessageSource::Human,
+        source: AgentMessageSource::Human { attribution: None },
         content: vec![AgentMessageContent::Text {
             text: "hello from mailbox".into(),
         }],
@@ -1918,6 +1976,8 @@ mod steering;
 #[path = "kernel/human_wait.rs"]
 mod human_wait;
 
+#[path = "kernel/prepared_input.rs"]
+mod prepared_input;
 #[path = "kernel/request_evidence.rs"]
 mod request_evidence;
 #[path = "kernel/tool_origin.rs"]
@@ -1927,6 +1987,8 @@ use tool_origin::control_tool_caller;
 #[path = "kernel/structured.rs"]
 mod structured;
 
+#[path = "kernel/inbox_stop.rs"]
+mod inbox_stop;
 #[path = "kernel/queue.rs"]
 mod queue;
 
@@ -1946,6 +2008,47 @@ fn start_step(turn: &TurnId) -> SessionFactBody {
         turn_id: turn.clone(),
         step_id: StepId::new("fixture-step").unwrap(),
     }
+}
+
+/// Durable recovery fixtures include the same unchanged input decision as the executor.
+fn prepared_history(facts: Vec<SessionFact>) -> Vec<SessionFact> {
+    use rsi_agent_session_protocol::{
+        InputClaimRef, PreparedInput, StepInputDecision, StepOutcome,
+    };
+    let mut prepared = Vec::new();
+    for fact in facts {
+        let seq = prepared.len() as u64 + 1;
+        let body = fact.into_body();
+        let turn =
+            matches!(body, SessionFactBody::TurnAccepted { .. }).then(|| body.turn_id().clone());
+        prepared.push(SessionFact::new(seq, seq, body).unwrap());
+        if let Some(turn_id) = turn {
+            let step_id = StepId::new("fixture-input").unwrap();
+            for body in [
+                SessionFactBody::StepStarted {
+                    turn_id: turn_id.clone(),
+                    step_id: step_id.clone(),
+                },
+                SessionFactBody::StepInputsPrepared {
+                    turn_id: turn_id.clone(),
+                    step_id: step_id.clone(),
+                    decision: StepInputDecision::enter(vec![PreparedInput::Claimed {
+                        claim: InputClaimRef::new(seq, 0).unwrap(),
+                    }])
+                    .unwrap(),
+                },
+                SessionFactBody::StepEnded {
+                    turn_id,
+                    step_id,
+                    outcome: StepOutcome::Completed,
+                },
+            ] {
+                let seq = prepared.len() as u64 + 1;
+                prepared.push(SessionFact::new(seq, seq, body).unwrap());
+            }
+        }
+    }
+    prepared
 }
 fn text_attempt(turn: &TurnId, effect: &EffectId, text: String) -> SessionFactBody {
     SessionFactBody::ModelAttemptSettled {

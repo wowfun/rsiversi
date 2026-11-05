@@ -1,8 +1,8 @@
 # Sessions and recovery
 
 The Store root has one cross-process exclusive writer lease held from open
-through the final admitted operation and connection close. SQLite uses one exact schema version and never silently
-migrates or accepts an older layout. Store commits are atomic append operations
+through the final admitted operation and connection close. The [SQLite Store](../../store-sqlite/README.md)
+owns schema admission and upgrades. Store commits are atomic append operations
 against an expected durable sequence. The Store does not allocate identities,
 interpret effect transitions, choose recovery outcomes, or schedule turns. It
 does transactionally index exact turn membership and the presence of a
@@ -75,6 +75,10 @@ with no durable effect-start Fact. Mailbox messages are a distinct durable
 queue contract: an unclaimed waking message remains discoverable through the
 bounded ready index and creates a new Turn exactly once at claim. External
 model, Image, and Tool effects are never repeated by recovery.
+For a started request-scoped application tool, an embedding can recover its
+recorded result using the Session, effect, captured source, registration and
+full Tool result identity. The repair records that result and the terminal
+boundary atomically. An effect with no confirmed result remains uncertain.
 `NextTurn` is exactly the waking delivery horizon and `NextStep` is exactly the
 non-waking horizon; no other target/wake tuple is valid durable input.
 

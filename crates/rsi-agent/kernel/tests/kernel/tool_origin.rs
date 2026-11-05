@@ -116,6 +116,7 @@ pub(super) async fn publish_model_calls_named(
     calls: &[(&str, &str)],
     prepared: &PreparedCallSnapshot,
 ) {
+    prepare_claimed_inputs(kernel, claim).await;
     let model = EffectId::new(model).unwrap();
     let turn_id = claim.turn_id().clone();
     flush_bodies(
@@ -182,6 +183,67 @@ pub(super) async fn publish_model_calls_named(
     .await;
 }
 
+/// Builds the ordinary input-preparation phase for model-source fixtures.
+pub(super) async fn prepare_claimed_inputs(kernel: &AgentKernel, claim: &TurnClaim) {
+    use rsi_agent_session_protocol::{
+        InputClaimRef, PreparedInput, StepInputDecision, StepOutcome,
+    };
+    let mut after = 0;
+    let mut inputs = Vec::new();
+    let mut step = None;
+    loop {
+        let page = kernel
+            .read_facts(claim, after, MAXIMUM_FACTS_PER_READ)
+            .await
+            .unwrap();
+        for fact in &page.facts {
+            if fact.body().turn_id() != claim.turn_id() {
+                continue;
+            }
+            match fact.body() {
+                SessionFactBody::StepStarted { step_id, .. } => step = Some(step_id.clone()),
+                SessionFactBody::StepEnded { .. } => step = None,
+                SessionFactBody::StepInputsPrepared { .. } => inputs.clear(),
+                _ => {}
+            }
+            for ordinal in 0..fact.claimed_input_count() {
+                inputs.push(PreparedInput::Claimed {
+                    claim: InputClaimRef::new(fact.seq(), u32::try_from(ordinal).unwrap()).unwrap(),
+                });
+            }
+        }
+        if page.through_seq == after {
+            break;
+        }
+        after = page.through_seq;
+    }
+    if inputs.is_empty() {
+        return;
+    }
+    let opened_here = step.is_none();
+    let step_id = step.unwrap_or_else(|| StepId::new("fixture-input-preparation").unwrap());
+    let mut bodies = Vec::new();
+    if opened_here {
+        bodies.push(SessionFactBody::StepStarted {
+            turn_id: claim.turn_id().clone(),
+            step_id: step_id.clone(),
+        });
+    }
+    bodies.push(SessionFactBody::StepInputsPrepared {
+        turn_id: claim.turn_id().clone(),
+        step_id: step_id.clone(),
+        decision: StepInputDecision::enter(inputs).unwrap(),
+    });
+    if opened_here {
+        bodies.push(SessionFactBody::StepEnded {
+            turn_id: claim.turn_id().clone(),
+            step_id,
+            outcome: StepOutcome::Completed,
+        });
+    }
+    flush_bodies(kernel, claim, bodies).await;
+}
+
 pub(super) async fn finish_control_tool(kernel: &AgentKernel, claim: &TurnClaim) {
     flush_bodies(
         kernel,
@@ -202,6 +264,90 @@ pub(super) async fn finish_control_tool(kernel: &AgentKernel, claim: &TurnClaim)
         }],
     )
     .await;
+}
+
+#[tokio::test]
+async fn application_registration_binds_owner_without_forcing_approval() {
+    use rsi_agent_session_protocol::{ApplicationToolBinding, ApplicationToolView};
+    let kernel = kernel(Arc::new(MemoryStore::new())).await;
+    let workers = kernel.start_workers();
+    submit(&kernel, "application-policy", "work").await;
+    let lease = kernel.register("worker".into()).unwrap();
+    let claim = kernel
+        .claim("worker", CancellationToken::new())
+        .await
+        .unwrap()
+        .unwrap();
+    let turn = claim.turn_id().clone();
+    let step = StepId::new("step").unwrap();
+    flush_bodies(
+        &kernel,
+        &claim,
+        vec![
+            SessionFactBody::StepStarted {
+                turn_id: turn.clone(),
+                step_id: step.clone(),
+            },
+            SessionFactBody::StepPrepared {
+                turn_id: turn.clone(),
+                step_id: step,
+                names: vec!["other".into(), "probe".into()],
+                instructions: vec![],
+                application: Some(ApplicationToolView::Ready {
+                    generation: "worker".into(),
+                    receipt_source: Some("market".into()),
+                    tools: vec![ApplicationToolBinding {
+                        definition: ToolDefinition::new(
+                            "probe",
+                            "probe",
+                            serde_json::json!({"type":"object"}),
+                        )
+                        .unwrap(),
+                        owner: "application-owner".into(),
+                        registration: "original".into(),
+                    }],
+                }),
+            },
+        ],
+    )
+    .await;
+    publish_model_calls(
+        &kernel,
+        &claim,
+        &[("call", "probe"), ("other-call", "other")],
+        &snapshot(),
+    )
+    .await;
+    let intent = |owner, name: &str, call| SessionFactBody::ToolIntent {
+        turn_id: turn.clone(),
+        effect_id: EffectId::new("effect").unwrap(),
+        origin: rsi_agent_session_protocol::ToolOrigin::Model {
+            effect_id: EffectId::new("source-model").unwrap(),
+        },
+        program_role: rsi_tools_protocol::ToolProgramRole::Unavailable,
+        identity: ToolResultIdentity::new(owner, "effect", call, "a".repeat(64)).unwrap(),
+        name: name.into(),
+        arguments: serde_json::json!({}),
+        approval: None,
+        parallel_safe: false,
+    };
+    for invalid in [
+        intent("replacement", "probe", "call"),
+        intent("application-owner", "other", "other-call"),
+    ] {
+        assert!(matches!(
+            kernel.publish(&claim, vec![invalid]).await,
+            Err(TurnError::Invalid(_))
+        ));
+    }
+    flush_bodies(
+        &kernel,
+        &claim,
+        vec![intent("application-owner", "probe", "call")],
+    )
+    .await;
+    drop(lease);
+    kernel.shutdown(workers).await.unwrap();
 }
 
 #[tokio::test]

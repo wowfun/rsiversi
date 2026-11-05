@@ -516,7 +516,7 @@ impl AgentKernel {
         self.wait_for_durable(wait)
             .await
             .map_err(turn_kernel_error)?;
-        let (fact, turn_cancellation) = {
+        let fact = {
             let state = lock_state(&self.inner);
             let Some(session) = state.sessions.get(session_id) else {
                 return Ok(CancelResult {
@@ -536,24 +536,20 @@ impl AgentKernel {
                     already_terminal: turn.terminal.is_some(),
                 });
             }
-            (
-                next_fact(
-                    &self.inner,
-                    session,
-                    SessionFactBody::CancelRequested {
-                        turn_id: turn_id.clone(),
-                        reason: None,
-                    },
-                )
-                .map_err(turn_kernel_error)?,
-                turn.cancellation.clone(),
+            next_fact(
+                &self.inner,
+                session,
+                SessionFactBody::CancelRequested {
+                    turn_id: turn_id.clone(),
+                    reason: None,
+                },
             )
+            .map_err(turn_kernel_error)?
         };
         let expected_control_seq = control_tail(&self.inner, session_id).await?;
         let source = self.admit_agent_mutation(caller, cancellation)?;
         let kernel = self.clone();
         let session_id = session_id.clone();
-        let turn_id = turn_id.clone();
         self.owned_commit(async move {
             let _admission = admission;
             let _source = source;
@@ -573,8 +569,11 @@ impl AgentKernel {
                 })
                 .await
                 .map_err(turn_store_error)?;
-            kernel.install_committed_interrupt(&session_id, &turn_id, live_seq, fact.seq())?;
-            turn_cancellation.cancel();
+            kernel.install_committed_cancellations(
+                &session_id,
+                live_seq,
+                std::slice::from_ref(&fact),
+            )?;
             kernel.inner.claim_changed.notify_waiters();
             Ok(CancelResult {
                 accepted: true,
@@ -582,39 +581,5 @@ impl AgentKernel {
             })
         })
         .await
-    }
-}
-
-impl AgentKernel {
-    fn install_committed_interrupt(
-        &self,
-        session_id: &SessionId,
-        turn_id: &TurnId,
-        live_seq: u64,
-        cancel_seq: u64,
-    ) -> TurnResult<()> {
-        let mut state = lock_state(&self.inner);
-        let session = state.sessions.get_mut(session_id).ok_or_else(|| {
-            TurnError::Invariant("interrupt target disappeared during admitted commit".into())
-        })?;
-        if session.durable_seq != live_seq || !session.pending.is_empty() {
-            return Err(TurnError::Invariant(
-                "interrupt target changed during admitted commit".into(),
-            ));
-        }
-        session
-            .turns
-            .get_mut(turn_id)
-            .ok_or_else(|| {
-                TurnError::Invariant("interrupt Turn disappeared during admitted commit".into())
-            })?
-            .cancel_requested = true;
-        session.durable_seq = cancel_seq;
-        session.flush_status.send_replace(FlushStatus {
-            durable_seq: cancel_seq,
-            permanent_error: session.permanent_flush_error.clone(),
-        });
-        publish_live_watermarks(session);
-        Ok(())
     }
 }

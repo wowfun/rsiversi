@@ -10,6 +10,7 @@ const CHUNK_BYTES: usize = 64 * 1024;
 pub(super) struct ToolSource {
     effect_id: EffectId,
     selection: Option<ModelSelection>,
+    tools: Option<Arc<[String]>>,
     completed: bool,
     bytes: usize,
     calls: BTreeMap<u32, Arc<Call>>,
@@ -95,6 +96,7 @@ impl ToolSource {
     pub(super) fn new(
         effect_id: EffectId,
         snapshot: &rsi_ai_protocol::PreparedCallSnapshot,
+        tools: Option<Arc<[String]>>,
     ) -> TurnResult<Self> {
         let selection = snapshot
             .language_settings
@@ -111,10 +113,15 @@ impl ToolSource {
         Ok(Self {
             effect_id,
             selection,
+            tools,
             completed: false,
             bytes: 0,
             calls: BTreeMap::new(),
         })
+    }
+
+    pub(super) const fn tools(&self) -> Option<&Arc<[String]>> {
+        self.tools.as_ref()
     }
 
     pub(super) fn observe_shared(source: &mut Arc<Self>, event: &LanguageEvent) -> TurnResult<()> {
@@ -315,8 +322,10 @@ pub(super) fn validate_caller(turn: &TurnControl, caller: &AgentCallerAuthority)
             Some(ActiveEffect::Tool {
                 started: true,
                 source_selection,
+                source_tools,
                 ..
-            }) if Some(source_selection.as_ref()) == caller.source_selection() => {}
+            }) if Some(source_selection.as_ref()) == caller.source_selection()
+                && source_tools.as_deref() == caller.source_tools() => {}
             _ => return Err(TurnError::StaleClaim),
         }
     }
@@ -360,7 +369,7 @@ pub(super) mod tests {
             ),
         };
         let mut source =
-            ToolSource::new(EffectId::new("source-model").unwrap(), &snapshot).unwrap();
+            ToolSource::new(EffectId::new("source-model").unwrap(), &snapshot, None).unwrap();
         for (index, (id, name)) in calls.iter().enumerate() {
             let index = u32::try_from(index).unwrap();
             source
@@ -390,6 +399,12 @@ pub(super) mod tests {
             })
             .unwrap();
         source
+    }
+
+    pub(crate) fn selected_source(calls: &[(&str, &str)], names: &[&str]) -> ToolSource {
+        let mut selected = source(calls);
+        selected.tools = Some(names.iter().map(|name| (*name).to_owned()).collect());
+        selected
     }
 
     #[test]

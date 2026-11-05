@@ -103,6 +103,7 @@ async fn evidence_references_require_original_inline_bytes_in_the_same_session()
         .unwrap()
         .unwrap();
     let original = package("unique system source".into());
+    tool_origin::prepare_claimed_inputs(&kernel, &claim).await;
     let seq = publish_close(&kernel, &claim, "original", original.clone()).await;
     let all = all_references(seq, &original);
     store.take_fact_read_cursors();
@@ -205,6 +206,7 @@ async fn inline_capacity_is_per_request_and_recovery_preserves_evidence() {
         .unwrap()
         .unwrap();
     let original = package("x".repeat(8 * 1024 * 1024));
+    tool_origin::prepare_claimed_inputs(&initial, &claim).await;
     let seq = publish_close(&initial, &claim, "large-original", original.clone()).await;
     publish_close(&initial, &claim, "second-large-original", original.clone()).await;
     assert!(
@@ -278,6 +280,7 @@ async fn inline_capacity_is_per_request_and_recovery_preserves_evidence() {
     .unwrap()
     .unwrap();
     // A later Turn can still inspect and reuse the original evidence.
+    tool_origin::prepare_claimed_inputs(&restored, &claim).await;
     publish_close(&restored, &claim, "new-turn-inline", original.clone()).await;
     publish_close(
         &restored,

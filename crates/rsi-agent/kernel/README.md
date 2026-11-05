@@ -1,5 +1,103 @@
 # rsi-agent-kernel
 
+Input claiming and model entry are separate. Kernel retains only the Fact
+coordinates and message counts of unprepared claims, including direct Turn text.
+`StepInputsPrepared` resolves every referenced coordinate against that set, clears
+the set once and retains whether preparation was rejected. Reordered or repeated
+presentation cannot consume an acceptance twice. Conversation model admission
+requires no outstanding input claim and no rejected decision. Claiming still
+retains exact original content and acceptance provenance for Store validation.
+Rejection ends input preparation for that Turn; a later empty decision cannot
+reopen model admission.
+
+Session idle waiting subscribes before checking indexed control state under
+submission admission. It includes all accepted Turns and activation cleanup,
+then follows pending waking input until one idle cut is observed. It does not
+poll, load a composition, read message bodies or capture an Agent subtree.
+Dropping a waiter releases its subscription; shutdown terminates pending waits.
+
+At a model Step boundary, and when checking for a message that resumes a
+waiting Tool, Kernel requests the next-Step mailbox directly. Earlier next-Turn
+payloads cannot consume its page or hide a pending steer.
+
+Inbox suspension is durable and independent of pending message horizons. Ready
+selection and direct mailbox claims honor the captured pause state. A genuinely
+new waking submission or command batch resumes a paused inbox in the same atomic
+append as acceptance; replaying an old message or command receipt does not resume
+it. Non-waking next-Step inputs and queue edits preserve suspension. New child or
+Program completion notices retain their existing wake policy. Kernel supplies
+the resume controls; Store only projects them.
+
+Session cancellation captures one admitted inbox/Turn cut, drains the resident
+Fact tail and atomically commits pause, optional discards and CancelRequested
+Facts. A Program child's unclaimed initial input settles its parent in the same
+commit. Only durable acknowledgement or an exact control/Fact-prefix proof can
+install cancellation into resident state and signal executors. Caller detachment
+does not abandon that installation. Receipt proof reads bounded pages rather
+than one Store request per record, and checks the controls' Fact anchors as well
+as their bodies. An idle stop does not load a composition merely to clear input.
+If both a cancellation write acknowledgement and its proof read fail, the affected
+resident Fact stream stops accepting work until recovery. A proved absent commit
+does not impose this state; the caller may make another explicit attempt.
+
+Inbox-only cancellation uses the same admitted batch and Program settlement,
+but preserves accepted Turns and the pause bit. It does not load an execution
+composition. Both inbox-only clear and Session stop reconcile lost commit
+acknowledgements from their exact canonical records, without retargeting later
+input.
+
+Cold recovery can consult an explicitly supplied read-only receipt provider
+for a started model-origin application tool bound by the current Step. An
+exact returned result is appended before the interrupted Step and Turn in the
+same recovery commit. Missing receipts, unstarted effects and other tool
+owners cannot manufacture results. Recovery does not run the tool or start
+another model request. A cancelled Turn retains its cancellation outcome.
+Startup enumerates the open-Turn index once per selected Session. The same
+snapshot supplies both watermarks for the repair commit.
+
+For an application tool, the producing request's `StepPrepared` binds the
+tool name to its native result owner and external registration. Kernel checks
+the owner on admission, including rejections. A new request can capture a new
+registration only after outstanding calls from the preceding request settle.
+An exact model call can be rejected while another call is active: recording a
+refusal starts no effect and consumes only that unconsumed source identity.
+The original source, call name, arguments and registration-owner checks still
+apply. Rejection cannot close an already admitted execution or authorize a new
+model request while any sibling effect remains active.
+
+Fork baseline preparation captures the domain state at the Store's immutable
+completed-turn control cut. Frozen target-generation transforms receive only a
+bounded source Fact reader and those snapshots. The whole stage has a 30-second
+deadline; completion, cancellation or owner loss withdraws its reader. Required
+transforms and ordinary inheritance publish only as the child baseline. Program
+runs retain the transformed baseline at their captured cut for later children.
+Before a forked source has completed any local Turn, its immutable creation
+baseline at control 1 supplies that state; current-Turn mutations are excluded.
+`None` always uses target defaults. Full history follows inherited Header bindings;
+Last windows select local parent Turns and never broaden into ancestor messages.
+
+Command callbacks may retain publication observers with their typed replacements.
+The Kernel releases Session mutation admission before notifying them with the
+exact canonical control. Definite precommit refusal sends rejection; uncertain
+Store outcomes retain the observer's uncertainty. Notification has one five-second
+budget for the complete batch. A failed acknowledgement does not revoke a stored
+receipt or allow the callback to run again on an identical request.
+Initial automatic continuation reservations accept one bound-domain proposal and
+no publication observers; their existing first-message admission owns the receipt.
+
+Fresh Session admission retains the complete draft baseline's resource owners
+until its first durable publication. Speculative resident acceptance and a caller
+dropping its submission future do not release unpublished CAS roots. Rejected
+admission drops only its own frozen copy; a retained draft may still retry.
+
+`StepPrepared` freezes narrowed Tool names before each provider retry series.
+One durable Step may contain multiple series. Replacement requires no active
+effect and no unconsumed Tool call from the preceding model response.
+Kernel carries that exact set through model-origin and nested Program Tool
+intents, and through their caller authorities. New Step selection cannot widen
+an outstanding effect. A name outside the producing selection has no Tool start
+authority even if it occurs in a provider response or the full sealed catalog.
+
 Projection captures admit at most 16 callers, each with a 30-second deadline
 including generation selection. Pending captures share a domain read and pure
 producer execution only for the same Session, Header, exact generation pin and
@@ -256,6 +354,9 @@ these fingerprints are recomputed during recovery and never persisted.
 Model effect IDs cannot be reused within a Turn. Their bounded set is charged
 by the existing maximum-provider-attempt count and rebuilt during recovery.
 The caller captures the source request's actual model and effective effort.
+Application Tool admission also binds the name to its captured result owner and
+requires model origin. Approval evidence follows the execution policy; membership
+in an application catalog does not independently require an approval receipt.
 Pre-start rejection consumes the same exact call proof without requiring
 execution settings and grants no caller authority. Invalid JSON has no typed argument digest and cannot be
 replaced with an invented value to record a rejection; executor preparation fails

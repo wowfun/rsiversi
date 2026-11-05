@@ -2,6 +2,7 @@ use super::*;
 use rsi_agent_session_protocol::{
     ContinuationInput, DomainMutationSource, DomainRevision, MessageDelivery, MessageDiscardReason,
 };
+use rsi_agent_store_protocol::MailboxRead;
 use rsi_agent_turn_protocol::{ContinuationBinding, ContinuationLease, SessionContinuations};
 
 fn input() -> ContinuationInput {
@@ -253,7 +254,7 @@ pub(super) async fn arm(fixture: &Fixture) -> ContinuationLease {
 async fn arm_at(fixture: &Fixture, session: &SessionId) -> ContinuationLease {
     let page = fixture
         .store
-        .read_domain_states(session, None)
+        .read_domain_states(session, None, None)
         .await
         .unwrap();
     let state = &page.states[0];
@@ -373,10 +374,9 @@ async fn internal_dispatch_authority_is_separate_and_reservation_acceptance_is_a
     );
     let accepted = fixture
         .store
-        .read_agent_mailbox(&fixture.session_id, Some(&input().message_id))
+        .read_agent_message(&fixture.session_id, &input().message_id)
         .await
         .unwrap()
-        .selected
         .unwrap();
     assert_eq!(accepted.accepted_control_seq, receipt.control_seq() + 1);
     let retried = SessionContinuations::execute(
@@ -455,7 +455,7 @@ async fn ordinary_input_atomically_supersedes_pending_automatic_input_in_both_st
                 delivery: MessageDelivery::NextTurn,
                 message: AgentMessage {
                     message_id: MessageId::new("human-priority").unwrap(),
-                    source: AgentMessageSource::Human,
+                    source: AgentMessageSource::Human { attribution: None },
                     content: vec![AgentMessageContent::Text {
                         text: "Work on this first".into(),
                     }],
@@ -472,7 +472,7 @@ async fn ordinary_input_atomically_supersedes_pending_automatic_input_in_both_st
         assert!(
             matches!(old.state, MessageState::Discarded { reason: MessageDiscardReason::Superseded, control_seq } if control_seq == human.accepted_control_seq - 1)
         );
-        assert_eq!(human.accepted_control_seq, auto.accepted_control_seq + 2);
+        assert_eq!(human.accepted_control_seq, auto.accepted_control_seq + 3);
         assert!(claim(&fixture).await.is_err());
         let controls = fixture
             .store
@@ -484,13 +484,17 @@ async fn ordinary_input_atomically_supersedes_pending_automatic_input_in_both_st
             )
             .await
             .unwrap();
-        assert_eq!(controls.records.len(), 2);
+        assert_eq!(controls.records.len(), 3);
         assert!(matches!(
             controls.records[0].body(),
-            AgentControlRecordBody::MessageDiscarded { .. }
+            AgentControlRecordBody::InboxResumed
         ));
         assert!(matches!(
             controls.records[1].body(),
+            AgentControlRecordBody::MessageDiscarded { .. }
+        ));
+        assert!(matches!(
+            controls.records[2].body(),
             AgentControlRecordBody::MessageAccepted { .. }
         ));
         drop(lease);
@@ -655,10 +659,9 @@ async fn frozen_receipt_rejects_changed_input_and_ordinary_route_rejects_forged_
         .unwrap();
     let message = fixture
         .store
-        .read_agent_mailbox(&fixture.session_id, Some(&input().message_id))
+        .read_agent_message(&fixture.session_id, &input().message_id)
         .await
         .unwrap()
-        .selected
         .unwrap()
         .message;
     assert!(
@@ -737,7 +740,7 @@ async fn first_draft_input_publishes_header_baseline_and_acceptance_together() {
     );
     let states = fixture
         .store
-        .read_domain_states(header.session_id(), None)
+        .read_domain_states(header.session_id(), None, None)
         .await
         .unwrap();
     assert_eq!(states.states[0].snapshot.state().value(), &true);
@@ -945,10 +948,9 @@ async fn busy_ordinary_backlog_skips_mailbox_while_same_tree_disarmed_input_is_c
         );
         assert!(matches!(
             store
-                .read_agent_mailbox(&auto_id, Some(&input().message_id))
+                .read_agent_message(&auto_id, &input().message_id)
                 .await
                 .unwrap()
-                .selected
                 .unwrap()
                 .state,
             rsi_agent_store_protocol::StoreAgentMessageState::Discarded {
@@ -1071,7 +1073,7 @@ async fn busy_reservation_preserves_authority_and_budget_then_accepts_once_when_
         .unwrap();
     let before = fixture
         .store
-        .read_domain_states(&fixture.session_id, None)
+        .read_domain_states(&fixture.session_id, None, None)
         .await
         .unwrap();
     let request = invocation(&fixture, "reserve", "busy-reservation", true).await;
@@ -1096,7 +1098,7 @@ async fn busy_reservation_preserves_authority_and_budget_then_accepts_once_when_
     assert_eq!(lease.revision(), revision);
     let after = fixture
         .store
-        .read_domain_states(&fixture.session_id, None)
+        .read_domain_states(&fixture.session_id, None, None)
         .await
         .unwrap();
     assert_eq!(after.durable_control_seq, before.durable_control_seq);
@@ -1112,10 +1114,9 @@ async fn busy_reservation_preserves_authority_and_budget_then_accepts_once_when_
     assert!(
         fixture
             .store
-            .read_agent_mailbox(&fixture.session_id, Some(&input().message_id))
+            .read_agent_message(&fixture.session_id, &input().message_id)
             .await
             .unwrap()
-            .selected
             .is_none()
     );
     let executor = fixture.kernel.register("human".into()).unwrap();
@@ -1147,10 +1148,9 @@ async fn busy_reservation_preserves_authority_and_budget_then_accepts_once_when_
         .unwrap();
     let accepted = fixture
         .store
-        .read_agent_mailbox(&fixture.session_id, Some(&input().message_id))
+        .read_agent_message(&fixture.session_id, &input().message_id)
         .await
         .unwrap()
-        .selected
         .unwrap();
     assert_eq!(accepted.accepted_control_seq, receipt.control_seq() + 1);
     drop(executor);
@@ -1170,13 +1170,13 @@ impl SessionCommand for AutomaticToggle {
         context: &SessionCommandContext,
         _: &CommandArguments,
         _: CancellationToken,
-    ) -> ContributionResult<Vec<ValidatedDomainProposal>> {
+    ) -> ContributionResult<rsi_agent_composition_protocol::SessionCommandOutput> {
         let view = context
             .domains
             .iter()
             .find(|view| view.snapshot.identity().id() == self.domain)
             .unwrap();
-        Ok(vec![self.state.propose(view.revision, &true).unwrap()])
+        Ok(vec![self.state.propose(view.revision, &true).unwrap()].into())
     }
 }
 
@@ -1313,7 +1313,7 @@ async fn queued_automatic_domains_alternate_without_charging_the_loser() {
         .unwrap();
     let states = fixture
         .store
-        .read_domain_states(&session_id, None)
+        .read_domain_states(&session_id, None, None)
         .await
         .unwrap();
     let mut leases = Vec::new();
@@ -1367,7 +1367,7 @@ async fn queued_automatic_domains_alternate_without_charging_the_loser() {
         .unwrap();
     let before = fixture
         .store
-        .read_domain_states(&session_id, None)
+        .read_domain_states(&session_id, None, None)
         .await
         .unwrap();
     assert_eq!(
@@ -1377,7 +1377,7 @@ async fn queued_automatic_domains_alternate_without_charging_the_loser() {
     assert_eq!(
         fixture
             .store
-            .read_domain_states(&session_id, None)
+            .read_domain_states(&session_id, None, None)
             .await
             .unwrap()
             .states,
@@ -1615,7 +1615,7 @@ async fn fresh_reservation_busy_leaves_baseline_and_authority_uncharged() {
         .unwrap();
     let before = fixture
         .store
-        .read_domain_states(header.session_id(), None)
+        .read_domain_states(header.session_id(), None, None)
         .await
         .unwrap();
     let result = SessionContinuations::reserve_initial(
@@ -1636,7 +1636,7 @@ async fn fresh_reservation_busy_leaves_baseline_and_authority_uncharged() {
     assert_eq!(lease.revision(), DomainRevision::new(0));
     let after = fixture
         .store
-        .read_domain_states(header.session_id(), None)
+        .read_domain_states(header.session_id(), None, None)
         .await
         .unwrap();
     assert_eq!(before.states, after.states);
@@ -1644,7 +1644,10 @@ async fn fresh_reservation_busy_leaves_baseline_and_authority_uncharged() {
     assert!(
         fixture
             .store
-            .read_agent_mailbox(header.session_id(), Some(&input().message_id))
+            .read_agent_mailbox(
+                header.session_id(),
+                MailboxRead::WithMessage(input().message_id)
+            )
             .await
             .unwrap()
             .selected

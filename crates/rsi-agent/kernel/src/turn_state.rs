@@ -17,16 +17,7 @@ pub(super) fn apply_recovered_fact(
                     "durable session exceeds the live turn bound".into(),
                 ));
             }
-            let mut control = TurnControl::new(fact.timestamp_ms(), fact.seq());
-            if let SessionFactBody::MessageTurnAccepted {
-                activation_id,
-                message_ids,
-                ..
-            } = fact.body()
-            {
-                control.activation_id = Some(activation_id.clone());
-                control.initial_messages = message_ids.iter().cloned().collect();
-            }
+            let control = TurnControl::accepted(fact);
             if turns.insert(turn_id.clone(), control).is_some() {
                 return Err(KernelError::Invariant(
                     "durable turn was accepted more than once".into(),
@@ -50,7 +41,7 @@ pub(super) fn apply_recovered_fact(
             let turn = turns
                 .get_mut(turn_id)
                 .ok_or_else(|| KernelError::Invariant("terminal references unknown turn".into()))?;
-            apply_executor_body(turn, fact.body())
+            apply_executor_body(turn, fact.body(), fact.seq())
                 .map_err(|error| KernelError::Invariant(error.to_string()))?;
             turns.remove(turn_id);
             order.retain(|candidate| candidate != turn_id);
@@ -63,7 +54,7 @@ pub(super) fn apply_recovered_fact(
                 .map_err(|error| KernelError::Invariant(error.to_string()))?;
             super::structured::validate_conclusion(header, turn, body)
                 .map_err(|error| KernelError::Invariant(error.to_string()))?;
-            apply_executor_body(turn, body)
+            apply_executor_body(turn, body, fact.seq())
                 .map_err(|error| KernelError::Invariant(error.to_string()))?;
             if let SessionFactBody::ToolResult {
                 conclusion: Some(conclusion),
@@ -80,6 +71,7 @@ pub(super) fn apply_recovered_fact(
 pub(super) fn apply_executor_body(
     turn: &mut TurnControl,
     body: &SessionFactBody,
+    seq: u64,
 ) -> TurnResult<()> {
     if turn.terminal.is_some() {
         return Err(TurnError::Invalid("Fact follows a terminal turn".into()));
@@ -107,9 +99,12 @@ pub(super) fn apply_executor_body(
         | SessionFactBody::ToolStarted { .. }
         | SessionFactBody::ToolResult { .. } => apply_tool_body(turn, body)?,
         SessionFactBody::StepStarted { .. }
-        | SessionFactBody::InputMessageEntered { .. }
+        | SessionFactBody::InputMessageClaimed { .. }
+        | SessionFactBody::ToolContextsClaimed { .. }
+        | SessionFactBody::StepInputsPrepared { .. }
+        | SessionFactBody::StepPrepared { .. }
         | SessionFactBody::WorkspaceTouched { .. }
-        | SessionFactBody::StepEnded { .. } => apply_step_body(turn, body)?,
+        | SessionFactBody::StepEnded { .. } => apply_step_body(turn, body, seq)?,
         SessionFactBody::TurnTerminal { outcome, .. } => {
             if turn.current_step.is_some() {
                 return Err(TurnError::Invalid(
@@ -135,24 +130,90 @@ pub(super) fn apply_executor_body(
     Ok(())
 }
 
-fn apply_step_body(turn: &mut TurnControl, body: &SessionFactBody) -> TurnResult<()> {
+fn apply_step_body(turn: &mut TurnControl, body: &SessionFactBody, seq: u64) -> TurnResult<()> {
     match body {
         SessionFactBody::StepStarted { step_id, .. } => {
+            turn.selected_tools = None;
+            turn.application = Arc::default();
+            turn.tool_source = None;
             if turn.current_step.replace(step_id.clone()).is_some() {
                 return Err(TurnError::Invalid(
                     "Step start follows another open Step".into(),
                 ));
             }
         }
-        SessionFactBody::InputMessageEntered { step_id, .. }
+        SessionFactBody::InputMessageClaimed { step_id, .. }
+        | SessionFactBody::ToolContextsClaimed { step_id, .. }
+        | SessionFactBody::StepInputsPrepared { step_id, .. }
+        | SessionFactBody::StepPrepared { step_id, .. }
         | SessionFactBody::WorkspaceTouched { step_id, .. } => {
             if turn.current_step.as_ref() != Some(step_id) {
                 return Err(TurnError::Invalid(
                     "Step-scoped Fact does not match the open Step".into(),
                 ));
             }
-            if matches!(body, SessionFactBody::InputMessageEntered { .. }) {
+            if matches!(
+                body,
+                SessionFactBody::InputMessageClaimed { .. }
+                    | SessionFactBody::ToolContextsClaimed { .. }
+                    | SessionFactBody::StepInputsPrepared { .. }
+                    | SessionFactBody::StepPrepared { .. }
+            ) {
                 ensure_no_active_effect(turn)?;
+            }
+            match body {
+                SessionFactBody::InputMessageClaimed { .. } => {
+                    turn.pending_inputs.insert(seq, 1);
+                }
+                SessionFactBody::ToolContextsClaimed { messages, .. } => {
+                    turn.pending_inputs.insert(
+                        seq,
+                        u32::try_from(messages.len()).map_err(|_| TurnError::Capacity)?,
+                    );
+                }
+                SessionFactBody::StepInputsPrepared { decision, .. } => {
+                    prepare_inputs(turn, decision, seq)?;
+                }
+                _ => {}
+            }
+            if let SessionFactBody::StepPrepared {
+                names, application, ..
+            } = body
+            {
+                if turn
+                    .tool_source
+                    .as_ref()
+                    .is_some_and(|source| source.pending_source().is_some())
+                {
+                    return Err(TurnError::Invalid(
+                        "Step preparation precedes outstanding Tool call settlement".into(),
+                    ));
+                }
+                turn.selected_tools = Some(names.clone().into());
+                if let Some(rsi_agent_session_protocol::ApplicationToolView::Ready {
+                    receipt_source,
+                    tools,
+                    ..
+                }) = application
+                {
+                    turn.application = Arc::new(ApplicationRegistrations {
+                        source: receipt_source.clone(),
+                        tools: tools
+                            .iter()
+                            .map(|row| {
+                                (
+                                    row.definition.name().to_owned(),
+                                    CapturedRegistration {
+                                        owner: row.owner.clone(),
+                                        registration: row.registration.clone(),
+                                    },
+                                )
+                            })
+                            .collect(),
+                    });
+                } else {
+                    turn.application = Arc::default();
+                }
             }
         }
         SessionFactBody::StepEnded { step_id, .. } => {
@@ -168,6 +229,32 @@ fn apply_step_body(turn: &mut TurnControl, body: &SessionFactBody) -> TurnResult
     Ok(())
 }
 
+fn prepare_inputs(
+    turn: &mut TurnControl,
+    decision: &rsi_agent_session_protocol::StepInputDecision,
+    seq: u64,
+) -> TurnResult<()> {
+    if turn.input_rejected {
+        return Err(TurnError::Invalid(
+            "input preparation follows rejection".into(),
+        ));
+    }
+    for claim in decision.claims() {
+        if turn
+            .pending_inputs
+            .get(&claim.fact_seq(seq))
+            .is_none_or(|count| claim.ordinal() >= *count)
+        {
+            return Err(TurnError::Invalid(
+                "prepared input is outside the Turn's current claim set".into(),
+            ));
+        }
+    }
+    turn.pending_inputs.clear();
+    turn.input_rejected = decision.messages().is_none();
+    Ok(())
+}
+
 pub(super) fn apply_model_body(turn: &mut TurnControl, body: &SessionFactBody) -> TurnResult<()> {
     match body {
         SessionFactBody::ModelIntent {
@@ -177,6 +264,15 @@ pub(super) fn apply_model_body(turn: &mut TurnControl, body: &SessionFactBody) -
             ..
         } => {
             ensure_no_active_effect(turn)?;
+            if matches!(
+                purpose,
+                rsi_agent_session_protocol::ModelPurpose::Conversation
+            ) && (!turn.pending_inputs.is_empty() || turn.input_rejected)
+            {
+                return Err(TurnError::Invalid(
+                    "Conversation requires an entered input preparation".into(),
+                ));
+            }
             turn.tool_source = if matches!(
                 purpose,
                 rsi_agent_session_protocol::ModelPurpose::Conversation
@@ -184,6 +280,7 @@ pub(super) fn apply_model_body(turn: &mut TurnControl, body: &SessionFactBody) -
                 Some(Arc::new(tool_origin::ToolSource::new(
                     effect_id.clone(),
                     snapshot,
+                    turn.selected_tools.clone(),
                 )?))
             } else {
                 None
@@ -291,7 +388,6 @@ pub(super) fn apply_tool_body(turn: &mut TurnControl, body: &SessionFactBody) ->
             ..
         } => match origin {
             ToolOrigin::Model { effect_id } => {
-                ensure_no_active_effect(turn)?;
                 turn.tool_source
                     .as_mut()
                     .ok_or_else(|| {
@@ -330,6 +426,26 @@ pub(super) fn apply_tool_body(turn: &mut TurnControl, body: &SessionFactBody) ->
             parallel_safe,
             ..
         } => {
+            let source_tools = match origin {
+                ToolOrigin::Model { .. } => turn
+                    .tool_source
+                    .as_ref()
+                    .and_then(|source| source.tools().cloned()),
+                ToolOrigin::Program {
+                    parent_effect_id, ..
+                } => match turn.effects.get(parent_effect_id) {
+                    Some(ActiveEffect::Tool { source_tools, .. }) => source_tools.clone(),
+                    _ => None,
+                },
+            };
+            if source_tools
+                .as_ref()
+                .is_some_and(|names| names.binary_search(name).is_err())
+            {
+                return Err(TurnError::Invalid(
+                    "Tool is outside its producing Step selection".into(),
+                ));
+            }
             let source_selection = match origin {
                 ToolOrigin::Model { effect_id: source } => {
                     if !turn.effects.is_empty()
@@ -375,6 +491,7 @@ pub(super) fn apply_tool_body(turn: &mut TurnControl, body: &SessionFactBody) ->
                     ActiveEffect::Tool {
                         name: name.clone(),
                         source_selection: Arc::new(source_selection),
+                        source_tools,
                         identity: identity.clone(),
                         started: false,
                         parallel_safe: *parallel_safe,
@@ -479,6 +596,8 @@ pub(super) fn ensure_no_active_effect(turn: &TurnControl) -> TurnResult<()> {
 
 pub(super) fn clone_turn_control(turn: &TurnControl) -> TurnControl {
     TurnControl {
+        pending_inputs: turn.pending_inputs.clone(),
+        input_rejected: turn.input_rejected,
         execution: turn.execution.clone(),
         initial_messages: turn.initial_messages.clone(),
         claim_composition: turn.claim_composition.clone(),
@@ -490,6 +609,8 @@ pub(super) fn clone_turn_control(turn: &TurnControl) -> TurnControl {
         accepted_seq: turn.accepted_seq,
         activation_id: turn.activation_id.clone(),
         current_step: turn.current_step.clone(),
+        selected_tools: turn.selected_tools.clone(),
+        application: turn.application.clone(),
         terminal: turn.terminal.clone(),
         terminal_seq: turn.terminal_seq,
         cancel_requested: turn.cancel_requested,

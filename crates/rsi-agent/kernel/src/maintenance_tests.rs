@@ -43,7 +43,7 @@ async fn retirement_refuses_every_pending_owner_and_preserves_residency() {
                 }
                 "header" => session.header_pending = true,
                 "facts" => session.pending.push_back(fact.clone()),
-                "domain" => session.pending_domain_baseline = Some(baseline.clone()),
+                "domain" => session.pending_initial_controls = vec![baseline.clone()],
                 "flush" => session.flush_inflight = true,
                 "failed" => session.permanent_flush_error = Some("unacknowledged".into()),
                 "admission" => session.admission_reservations = 1,
@@ -125,7 +125,10 @@ async fn retirement_waits_for_continuations_and_releases_residency_explicitly() 
         TurnService::prepare_retirement(&kernel, std::slice::from_ref(&id)),
         Err(TurnError::Capacity)
     ));
+    let directory = kernel.inner.session_changes.directory();
+    assert!(!directory.has_changed());
     retirement.release_residency();
+    assert!(directory.has_changed());
     assert!(!lock_state(&kernel.inner).sessions.contains_key(&id));
     drop(retirement);
     assert!(TurnService::prepare_retirement(&kernel, std::slice::from_ref(&id)).is_ok());

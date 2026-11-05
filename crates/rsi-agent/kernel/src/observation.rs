@@ -1,4 +1,5 @@
 use super::*;
+use rsi_agent_store_protocol::MailboxRead;
 
 pub(super) async fn read_facts_bounded(
     inner: &Arc<KernelInner>,
@@ -53,18 +54,42 @@ pub(super) async fn read_domain_states_bounded(
     session_id: &SessionId,
     at_control_seq: Option<u64>,
 ) -> std::result::Result<rsi_agent_store_protocol::StoreDomainStatePage, StoreError> {
+    read_domain_state_page_bounded(inner, session_id, at_control_seq, None).await
+}
+
+pub(super) async fn read_domain_state_page_bounded(
+    inner: &Arc<KernelInner>,
+    session_id: &SessionId,
+    at_control_seq: Option<u64>,
+    domain: Option<&str>,
+) -> std::result::Result<rsi_agent_store_protocol::StoreDomainStatePage, StoreError> {
+    let selected = domain.map(str::to_owned);
     let (page, _permit, _lease) = store_reads::read(
         inner,
         session_id,
         MAXIMUM_SESSION_FACT_BYTES,
         true,
-        move |store, id| async move { store.read_domain_states(&id, at_control_seq).await },
+        move |store, id| async move {
+            store
+                .read_domain_states(&id, at_control_seq, selected.as_deref())
+                .await
+        },
     )
     .await?;
     page.validate()?;
     if page.selected_control_seq != at_control_seq.unwrap_or(page.durable_control_seq) {
         return Err(StoreError::Corrupt(
             "domain read changed its requested control horizon".into(),
+        ));
+    }
+    if let Some(id) = domain
+        && page
+            .states
+            .iter()
+            .any(|state| state.head.identity.id() != id)
+    {
+        return Err(StoreError::Corrupt(
+            "domain read returned an unrequested domain".into(),
         ));
     }
     Ok(page)
@@ -97,13 +122,59 @@ pub(super) async fn read_domain_request_bounded(
     Ok(Some(receipt))
 }
 
+pub(super) async fn fork_sources_from_header(
+    inner: &Arc<KernelInner>,
+    header: &SessionHeader,
+) -> TurnResult<Vec<SessionHeader>> {
+    let mut sources = Vec::new();
+    let mut current = header.clone();
+    while let Some(origin) = current.history_origin() {
+        if sources.len() >= rsi_agent_session_protocol::MAXIMUM_FORK_HISTORY_DEPTH {
+            return Err(TurnError::Invariant(
+                "fork source chain exceeds lineage depth".into(),
+            ));
+        }
+        let parent = read_validated_header_bounded(inner, &origin.parent_session_id)
+            .await
+            .map_err(turn_store_error)?;
+        if parent
+            .fingerprint()
+            .map_err(|error| TurnError::Invalid(error.to_string()))?
+            != origin.parent_header_fingerprint
+        {
+            return Err(TurnError::Invariant(
+                "fork source Header binding changed".into(),
+            ));
+        }
+        let include_parent = matches!(
+            origin.requested_turns,
+            rsi_agent_session_protocol::ForkTurnSelection::All
+        );
+        sources.push(current);
+        if !include_parent {
+            break;
+        }
+        current = parent;
+    }
+    sources.reverse();
+    Ok(sources)
+}
+
 pub(super) async fn read_fork_page_from_header(
     inner: &Arc<KernelInner>,
     header: &SessionHeader,
+    source: &SessionId,
     after_parent_seq: u64,
     limit: usize,
 ) -> TurnResult<Option<ForkFactPage>> {
-    let Some(origin) = header.fork_origin().cloned() else {
+    let sources = fork_sources_from_header(inner, header).await?;
+    let header = sources
+        .iter()
+        .find(|header| header.session_id() == source)
+        .ok_or_else(|| {
+            TurnError::Invalid("fork source is outside the immutable selection".into())
+        })?;
+    let Some(origin) = header.history_origin().cloned() else {
         return Ok(None);
     };
     if after_parent_seq < origin.resolved_after_seq
@@ -130,7 +201,7 @@ pub(super) async fn read_fork_page_from_header(
             .store
             .resolve_fork_boundary(
                 &origin.parent_session_id,
-                &origin.invoking_turn_id,
+                &origin.point,
                 origin.requested_turns.clone(),
             )
             .await
@@ -234,37 +305,33 @@ pub(super) async fn observe_agent_wait_change(
         let _execution = kernel.admit_agent_read(caller)?;
         return Ok(None);
     }
-    let mailbox = scan_durable_messages(&kernel.inner, caller.session_id(), None).await?;
+    let mailbox =
+        scan_durable_messages(&kernel.inner, caller.session_id(), MailboxRead::NextStep).await?;
     drop(execution);
     let _execution = kernel.admit_agent_read(caller)?;
-    Ok(mailbox
-        .pending
-        .iter()
-        .find(|entry| entry.target == MessageTarget::NextStep)
-        .map(|entry| {
-            if matches!(entry.message.source, AgentMessageSource::Completion { .. }) {
-                WaitResumeCause::Completion
-            } else {
-                WaitResumeCause::Message
-            }
-        }))
+    Ok(mailbox.pending.first().map(|entry| {
+        if matches!(entry.message.source, AgentMessageSource::Completion { .. }) {
+            WaitResumeCause::Completion
+        } else {
+            WaitResumeCause::Message
+        }
+    }))
 }
 
 pub(super) async fn scan_durable_messages(
     inner: &Arc<KernelInner>,
     session_id: &SessionId,
-    selected_id: Option<&MessageId>,
+    query: MailboxRead,
 ) -> TurnResult<DurableMessageScan> {
     // One mailbox page contains at most 32 MiB of pending message payload plus
     // one selected message and bounded index metadata, below one maximum-Fact
     // reservation. Keep that reservation through decoding and validation.
-    let selected_id = selected_id.cloned();
     let (mailbox, _permit, _lease) = store_reads::read(
         inner,
         session_id,
         MAXIMUM_SESSION_FACT_BYTES,
         true,
-        move |store, id| async move { store.read_agent_mailbox(&id, selected_id.as_ref()).await },
+        move |store, id| async move { store.read_agent_mailbox(&id, query).await },
     )
     .await
     .map_err(turn_store_error)?;
@@ -275,34 +342,13 @@ pub(super) async fn scan_durable_messages(
         .map(durable_message_entry)
         .collect::<Vec<_>>();
     Ok(DurableMessageScan {
+        inbox_paused: mailbox.inbox_paused,
         selected: mailbox.selected.map(durable_message_entry),
         pending_count,
         pending,
         durable_control_seq: mailbox.durable_control_seq,
         durable_fact_seq: mailbox.durable_fact_seq,
     })
-}
-
-pub(super) fn bounded_step_message_prefix(
-    pending: Vec<DurableMessageEntry>,
-    maximum_payload_bytes: usize,
-) -> TurnResult<Vec<DurableMessageEntry>> {
-    let mut selected = Vec::new();
-    let mut bytes = 0_usize;
-    for entry in pending {
-        let projected = bytes
-            .checked_add(entry.encoded_message_bytes)
-            .ok_or_else(|| TurnError::Invalid("message batch size overflowed".into()))?;
-        if !selected.is_empty() && projected > maximum_payload_bytes {
-            break;
-        }
-        if projected > maximum_payload_bytes {
-            return Err(TurnError::Capacity);
-        }
-        bytes = projected;
-        selected.push(entry);
-    }
-    Ok(selected)
 }
 
 pub(super) fn durable_message_entry(entry: StoreAgentMessage) -> DurableMessageEntry {
@@ -312,12 +358,12 @@ pub(super) fn durable_message_entry(entry: StoreAgentMessage) -> DurableMessageE
             activation_id,
             turn_id,
             step_id,
-            entered_fact_seq,
+            claimed_fact_seq,
         } => MessageState::Claimed {
             activation_id,
             turn_id,
             step_id,
-            entered_fact_seq,
+            claimed_fact_seq,
         },
         StoreAgentMessageState::Discarded {
             reason,
@@ -330,7 +376,6 @@ pub(super) fn durable_message_entry(entry: StoreAgentMessage) -> DurableMessageE
     DurableMessageEntry {
         delivery: entry.delivery,
         message: entry.message,
-        encoded_message_bytes: entry.encoded_message_bytes,
         root_session_id: entry.root_session_id,
         target: entry.target,
         wake_required: entry.wake_required,
@@ -401,6 +446,10 @@ pub(super) fn activation_outcome(
 ) -> ActivationOutcome {
     match outcome {
         TurnOutcome::Completed => ActivationOutcome::Completed { result },
+        TurnOutcome::Blocked => ActivationOutcome::Failed {
+            code: "input.rejected".into(),
+            message: "Input preparation blocked the request.".into(),
+        },
         TurnOutcome::Cancelled => ActivationOutcome::Cancelled,
         TurnOutcome::Failed { code, message }
         | TurnOutcome::PartialFailed { code, message, .. } => ActivationOutcome::Failed {
@@ -421,6 +470,7 @@ pub(super) fn activation_outcome(
 pub(super) fn completion_message(outcome: &TurnOutcome) -> String {
     match outcome {
         TurnOutcome::Completed => "Subagent activation completed.".into(),
+        TurnOutcome::Blocked => "Subagent input preparation blocked the request.".into(),
         TurnOutcome::Cancelled => "Subagent activation was cancelled.".into(),
         TurnOutcome::Failed { message, .. } | TurnOutcome::PartialFailed { message, .. } => {
             bounded_diagnostic(&format!("Subagent activation failed: {message}"))

@@ -27,30 +27,50 @@ impl AgentKernel {
         {
             return Err(TurnError::StaleClaim);
         }
-        let turn = session
+        session
             .turns
             .get(turn_id)
-            .filter(|turn| turn.terminal.is_none())
-            .ok_or(TurnError::StaleClaim)?;
-        let owner = turn
-            .claim
-            .as_ref()
-            .filter(|owner| {
-                !owner.mutations.is_retiring()
-                    && state.executors.get(&owner.executor) == Some(&owner.registration)
-            })
-            .ok_or(TurnError::StaleClaim)?;
-        let source = owner
-            .jobs
-            .as_ref()
-            .and_then(Weak::upgrade)
-            .ok_or(TurnError::StaleClaim)?;
-        Ok((owner.claim, source))
+            .and_then(|turn| live_job_source(&state, turn))
+            .ok_or(TurnError::StaleClaim)
     }
+}
+
+fn live_job_source(
+    state: &KernelState,
+    turn: &TurnControl,
+) -> Option<(u64, Arc<dyn TurnJobStatusSource>)> {
+    let owner = turn.claim.as_ref()?;
+    if turn.terminal.is_some()
+        || owner.mutations.is_retiring()
+        || state.executors.get(&owner.executor) != Some(&owner.registration)
+    {
+        return None;
+    }
+    Some((owner.claim, owner.jobs.as_ref()?.upgrade()?))
 }
 
 #[async_trait]
 impl TurnJobs for AgentKernel {
+    fn active_jobs(&self, session: &SessionId) -> TurnResult<Vec<rsi_jobs::ActiveJob>> {
+        let source = {
+            let state = lock_state(&self.inner);
+            if !state.accepting {
+                return Err(TurnError::ShuttingDown);
+            }
+            state.sessions.get(session).and_then(|runtime| {
+                let turn = runtime.turns.get(runtime.oldest_claimable()?)?;
+                live_job_source(&state, turn)
+            })
+        };
+        let Some((_, source)) = source else {
+            return Ok(Vec::new());
+        };
+        match source.active() {
+            Err(TurnError::StaleClaim) => Ok(Vec::new()),
+            result => result,
+        }
+    }
+
     async fn peek_job(
         &self,
         session: &SessionId,

@@ -229,7 +229,7 @@ impl AgentKernel {
         for fact in &facts {
             execution::validate_program_role(&staged, fact.body())?;
             super::structured::validate_conclusion(claim.header(), &staged, fact.body())?;
-            apply_executor_body(&mut staged, fact.body())?;
+            apply_executor_body(&mut staged, fact.body(), fact.seq())?;
             if let SessionFactBody::ToolResult {
                 conclusion: Some(conclusion),
                 ..

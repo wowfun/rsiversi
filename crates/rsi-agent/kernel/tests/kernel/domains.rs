@@ -58,6 +58,7 @@ struct DomainRun {
 async fn domain_mutation_cannot_forge_executor_owned_model_settlement() {
     let store = Arc::new(MemoryStore::new());
     let run = DomainRun::start(store.clone()).await;
+    tool_origin::prepare_claimed_inputs(&run.kernel, &run.claim).await;
     let mut bodies = super::model_attempts::source_bodies(run.claim.turn_id());
     let recovery = bodies.pop().unwrap();
     for body in bodies {
@@ -306,7 +307,7 @@ async fn tool_result_and_domain_settle_together_across_faults_and_cancellation()
         assert!(facts.iter().any(|fact| fact.seq() == span.first_seq()
             && matches!(fact.body(), SessionFactBody::ToolResult { .. })));
         let state = memory
-            .read_domain_states(run.claim.session_id(), None)
+            .read_domain_states(run.claim.session_id(), None, None)
             .await
             .unwrap();
         assert_eq!(state.states[0].head.revision, DomainRevision::new(2));
@@ -321,13 +322,109 @@ async fn tool_result_and_domain_settle_together_across_faults_and_cancellation()
 }
 
 #[tokio::test]
+async fn request_step_flushes_one_step_and_only_reads_the_requested_domain() {
+    let store = Arc::new(FactReadRaceStore::new(Arc::new(MemoryStore::new())));
+    let run = DomainRun::start(store.clone()).await;
+    let reads = store.projection_reads.load(Ordering::SeqCst);
+    let selected = store.selected_domain_reads.load(Ordering::SeqCst);
+    let (step, state) = run
+        .kernel
+        .request_step(&run.claim, None, Vec::new(), CancellationToken::new())
+        .await
+        .unwrap();
+    assert!(state.is_none());
+    assert_eq!(store.projection_reads.load(Ordering::SeqCst), reads);
+    let facts = store
+        .inner
+        .read_facts(
+            run.claim.session_id(),
+            0,
+            16,
+            rsi_agent_store_protocol::MAXIMUM_STORE_FACT_PAGE_BYTES,
+        )
+        .await
+        .unwrap();
+    assert!(
+        matches!(facts.facts.last().unwrap().body(), SessionFactBody::StepStarted { step_id, .. } if step_id == &step)
+    );
+
+    let (same, state) = run
+        .kernel
+        .request_step(
+            &run.claim,
+            Some("fixture.plan"),
+            Vec::new(),
+            CancellationToken::new(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(same, step);
+    assert_eq!(state.unwrap().snapshot.identity().id(), "fixture.plan");
+    let (_, absent) = run
+        .kernel
+        .request_step(
+            &run.claim,
+            Some("fixture.absent"),
+            Vec::new(),
+            CancellationToken::new(),
+        )
+        .await
+        .unwrap();
+    assert!(absent.is_none());
+    assert_eq!(store.projection_reads.load(Ordering::SeqCst), reads + 2);
+    assert_eq!(
+        store.selected_domain_reads.load(Ordering::SeqCst),
+        selected + 2
+    );
+
+    let message = rsi_tools_protocol::ToolContextMessage {
+        id: "post-tool".into(),
+        source: serde_json::json!({"kind":"tool-hook"}),
+        text: vec!["first block".into(), "second block".into()],
+    };
+    let settled = rsi_agent_session_protocol::SettledToolContext {
+        session: run.claim.session_id().clone(),
+        effect: EffectId::new("settled-effect").unwrap(),
+        ordinal: 0,
+        message,
+    };
+    let context = run
+        .kernel
+        .contribution_context(&run.claim, vec![settled], CancellationToken::new())
+        .await
+        .unwrap();
+    assert_eq!(context.step_id, step);
+    let page = context
+        .facts
+        .read(facts.facts.last().unwrap().seq(), 2)
+        .await
+        .unwrap();
+    assert_eq!(page.through_seq, context.horizon.fact_seq);
+    let [claim] = page.facts.as_slice() else {
+        panic!("expected one newly claimed input")
+    };
+    assert!(
+        matches!(claim.body(), SessionFactBody::ToolContextsClaimed { step_id, messages, .. }
+        if step_id == &step && matches!(messages.as_slice(), [input]
+            if input.message.id == "post-tool" && input.message.text.len() == 2))
+    );
+    assert_eq!(context.domains.len(), 1);
+    assert_eq!(store.projection_reads.load(Ordering::SeqCst), reads + 3);
+    assert_eq!(
+        store.selected_domain_reads.load(Ordering::SeqCst),
+        selected + 2
+    );
+    run.stop().await;
+}
+
+#[tokio::test]
 async fn contribution_snapshot_freezes_both_watermarks_and_revokes_its_reader() {
     let store = Arc::new(MemoryStore::new());
     let run = DomainRun::start(store).await;
     let scope = CancellationToken::new();
     let context = run
         .kernel
-        .contribution_context(&run.claim, scope.clone())
+        .contribution_context(&run.claim, Vec::new(), scope.clone())
         .await
         .unwrap();
     assert_eq!(context.horizon.control_seq, 1);
@@ -348,10 +445,11 @@ async fn contribution_snapshot_freezes_both_watermarks_and_revokes_its_reader() 
         require_uncancelled_turn: false,
         request_id: rsi_agent_session_protocol::DomainRequestId::new("after-snapshot").unwrap(),
         proposals: vec![run.handle.propose(DomainRevision::new(1), &true).unwrap()],
-        facts: vec![SessionFactBody::InputMessageEntered {
+        facts: vec![SessionFactBody::InputMessageClaimed {
             turn_id: run.claim.turn_id().clone(),
             step_id: context.step_id.clone(),
             source: rsi_agent_session_protocol::InputMessageSource::PluginContext {
+                tool: None,
                 contribution_id: rsi_agent_session_protocol::ContributionId::new("fixture.context")
                     .unwrap(),
             },
@@ -824,7 +922,7 @@ async fn domain_work_has_no_elapsed_limit_and_ending_closes_the_open_step() {
         .unwrap();
     clock.0.store(86_400_042, Ordering::Release);
     run.kernel
-        .contribution_context(&run.claim, CancellationToken::new())
+        .contribution_context(&run.claim, Vec::new(), CancellationToken::new())
         .await
         .unwrap();
     run.kernel
@@ -1309,7 +1407,10 @@ async fn first_turn_and_message_atomically_commit_the_actual_draft_baseline() {
                 .unwrap();
         }
         let session = SessionId::new("domain-fresh").unwrap();
-        let states = store.read_domain_states(&session, None).await.unwrap();
+        let states = store
+            .read_domain_states(&session, None, None)
+            .await
+            .unwrap();
         assert_eq!(states.states.len(), 1);
         assert_eq!(states.states[0].head.revision, DomainRevision::new(1));
         assert_eq!(
@@ -1335,6 +1436,83 @@ async fn first_turn_and_message_atomically_commit_the_actual_draft_baseline() {
             header("domain-fresh")
         );
         kernel.shutdown(worker).await.unwrap();
+    }
+}
+
+#[tokio::test]
+async fn first_publication_retains_baseline_resources_after_the_submit_waiter_is_cancelled() {
+    for mailbox in [false, true] {
+        let store = Arc::new(FactReadRaceStore::new(Arc::new(MemoryStore::new())));
+        let (composition, handle) = domain_composition();
+        let mut draft = AgentSessionDraft::new(header("retained-fresh"), composition.clone())
+            .await
+            .unwrap();
+        let resource = Arc::new(String::from("unpublished object"));
+        let weak = Arc::downgrade(&resource);
+        draft
+            .apply_domain_initial(
+                &handle
+                    .propose(DomainRevision::default(), &true)
+                    .unwrap()
+                    .with_retained(resource),
+            )
+            .unwrap();
+        let initial = draft.into_fresh();
+        let kernel =
+            AgentKernel::recover_with_clock(store.clone(), composition, Arc::new(FixedClock))
+                .await
+                .unwrap();
+        let workers = kernel.start_workers();
+        store.pause_next_agent_commit_before_apply();
+        store.pause_next_agent_commit_after_apply();
+        let submitted = {
+            let kernel = kernel.clone();
+            tokio::spawn(async move {
+                if mailbox {
+                    kernel
+                        .submit_message(SubmitMessage {
+                            session: SubmitSession::Fresh(initial),
+                            message: mailbox_message("initial"),
+                            delivery: MessageDelivery::NextTurn,
+                        })
+                        .await
+                        .unwrap();
+                } else {
+                    kernel
+                        .submit(SubmitTurn {
+                            session: SubmitSession::Fresh(initial),
+                            turn_id: client_turn_id(),
+                            text: "hello".into(),
+                            model: None,
+                            reasoning_effort: None,
+                            sandbox: None,
+                        })
+                        .await
+                        .unwrap();
+                }
+            })
+        };
+        tokio::time::timeout(
+            std::time::Duration::from_secs(5),
+            store.wait_until_agent_commit_is_before_apply(),
+        )
+        .await
+        .unwrap();
+        submitted.abort();
+        assert!(submitted.await.unwrap_err().is_cancelled());
+        assert!(weak.upgrade().is_some(), "publication outlives its caller");
+        store.release_agent_commit_before_apply();
+        store.wait_until_agent_commit_is_applied().await;
+        assert!(
+            weak.upgrade().is_some(),
+            "Store still owns the publication outcome"
+        );
+        store.release_applied_agent_commit();
+        kernel.shutdown(workers).await.unwrap();
+        assert!(
+            weak.upgrade().is_none(),
+            "durable receipt releases temporary resource ownership"
+        );
     }
 }
 
@@ -1367,7 +1545,7 @@ async fn cold_execution_rejects_missing_domain_codecs_while_history_remains_read
     ));
     assert_eq!(
         store
-            .read_domain_states(&session, None)
+            .read_domain_states(&session, None, None)
             .await
             .unwrap()
             .states
@@ -1493,7 +1671,7 @@ async fn fork_domain_baseline_uses_terminal_state_and_none_uses_target_defaults(
     kernel.shutdown(worker).await.unwrap();
 
     // An idle command changes the current state after the inherited terminal horizon.
-    let page = store.read_domain_states(&parent, None).await.unwrap();
+    let page = store.read_domain_states(&parent, None, None).await.unwrap();
     let update = rsi_agent_session_protocol::DomainStateUpdate::new(
         page.states[0].head.revision,
         rsi_agent_session_protocol::DomainSnapshot::new(
@@ -1584,7 +1762,7 @@ async fn fork_domain_baseline_uses_terminal_state_and_none_uses_target_defaults(
             first, retry,
             "retry must reuse the immutable child baseline"
         );
-        let inherited = store.read_domain_states(&child, None).await.unwrap();
+        let inherited = store.read_domain_states(&child, None, None).await.unwrap();
         assert_eq!(inherited.states.len(), 1);
         assert_eq!(inherited.states[0].head.revision, DomainRevision::new(1));
         assert_eq!(
@@ -1593,6 +1771,44 @@ async fn fork_domain_baseline_uses_terminal_state_and_none_uses_target_defaults(
             "{name} selected the wrong domain horizon"
         );
     }
+    let child_claim = reopened
+        .claim("domain-forker", CancellationToken::new())
+        .await
+        .unwrap()
+        .unwrap();
+    assert_eq!(child_claim.session_id().as_str(), "domain-child-all");
+    for (name, selection, expected) in [
+        ("nested-all", ForkTurnSelection::All, true),
+        ("nested-last", ForkTurnSelection::Last(1), true),
+        ("nested-none", ForkTurnSelection::None, false),
+    ] {
+        let child = SessionId::new(name).unwrap();
+        reopened
+            .spawn_agent(SpawnAgentRequest {
+                output_contract: None,
+                role: None,
+                model: None,
+                reasoning_effort: None,
+                cancellation: CancellationToken::new(),
+                caller: control_tool_caller(&reopened, &child_claim).await,
+                child_session_id: child.clone(),
+                task_name: name.into(),
+                message_id: MessageId::new(name).unwrap(),
+                message: "fork before a local terminal".into(),
+                fork_turns: selection,
+            })
+            .await
+            .unwrap();
+        let inherited = store.read_domain_states(&child, None, None).await.unwrap();
+        assert_eq!(
+            inherited.states[0].snapshot.state().value(),
+            &serde_json::Value::Bool(expected)
+        );
+    }
+    reopened
+        .finish_turn(&child_claim, &TurnOutcome::Completed)
+        .await
+        .unwrap();
     reopened
         .finish_turn(&invoking, &TurnOutcome::Completed)
         .await
@@ -1622,6 +1838,7 @@ async fn request_evidence_capacity_is_independent_for_fact_and_domain_batches() 
             },
         };
         let run = DomainRun::start(store.clone()).await;
+        tool_origin::prepare_claimed_inputs(&run.kernel, &run.claim).await;
         let before = run
             .kernel
             .read_facts(&run.claim, 0, 128)
@@ -1701,7 +1918,7 @@ async fn cold_projection_and_resume_supply_original_baseline_before_composition_
     let run = DomainRun::start(store.clone()).await;
     let session = run.claim.session_id().clone();
     let baseline = store
-        .read_domain_states(&session, Some(1))
+        .read_domain_states(&session, Some(1), None)
         .await
         .unwrap()
         .states[0]
@@ -1934,7 +2151,7 @@ async fn started_tool_domain_mutations_reconcile_receipts_and_reject_retired_aut
             .unwrap();
         assert_eq!(receipt.is_some(), matches!(mode, "after" | "unknown"));
         let view = memory
-            .read_domain_states(run.claim.session_id(), None)
+            .read_domain_states(run.claim.session_id(), None, None)
             .await
             .unwrap();
         assert_eq!(
@@ -2029,4 +2246,101 @@ async fn store_admission_domain_refusal_preserves_known_prewrite_capacity() {
             .unwrap();
         run.kernel.shutdown(run.workers).await.unwrap();
     }
+}
+
+#[tokio::test]
+async fn manual_fork_is_unpublished_and_uses_terminal_domains_with_independent_ownership() {
+    let store = Arc::new(MemoryStore::new());
+    let run = DomainRun::start(store.clone()).await;
+    let source = run.claim.header().clone();
+    let request = |name: &str, turns| rsi_agent_turn_protocol::PrepareFork {
+        source: source.clone(),
+        session_id: SessionId::new(name).unwrap(),
+        created_at_ms: 43,
+        agent_preset_id: source.agent_preset_id().clone(),
+        point: rsi_agent_session_protocol::ForkPoint::through(run.claim.turn_id()),
+        turns,
+        cancellation: CancellationToken::new(),
+    };
+    assert!(
+        run.kernel
+            .prepare_fork(request("still-open", ForkTurnSelection::None))
+            .await
+            .is_err()
+    );
+    run.kernel
+        .commit_domains(&run.claim, run.mutation("terminal-state", 1, true, vec![]))
+        .await
+        .unwrap();
+    run.kernel
+        .finish_turn(&run.claim, &TurnOutcome::Completed)
+        .await
+        .unwrap();
+    let source_cut = store.read_watermarks(source.session_id()).await.unwrap();
+    for (name, turns, expected) in [
+        ("manual-full", ForkTurnSelection::All, true),
+        ("manual-last", ForkTurnSelection::Last(1), true),
+        ("manual-none", ForkTurnSelection::None, false),
+    ] {
+        let prepared = run.kernel.prepare_fork(request(name, turns)).await.unwrap();
+        assert!(matches!(
+            store.header(prepared.header().session_id()).await,
+            Err(StoreError::NotFound(_))
+        ));
+        assert!(prepared.header().fork_origin().is_none());
+        assert!(prepared.header().execution_owner().is_none());
+        assert!(prepared.header().history_origin().is_some());
+        assert_eq!(
+            prepared.baseline().initial_states()[0].state().value(),
+            &serde_json::json!(expected)
+        );
+        run.kernel
+            .submit_message(SubmitMessage {
+                session: SubmitSession::Fresh(prepared),
+                message: mailbox_message(name),
+                delivery: MessageDelivery::NextTurn,
+            })
+            .await
+            .unwrap();
+        let claim = run
+            .kernel
+            .claim("domain-worker", CancellationToken::new())
+            .await
+            .unwrap()
+            .unwrap();
+        assert_eq!(claim.session_id().as_str(), name);
+        assert!(claim.header().execution_owner().is_none());
+        assert!(
+            run.kernel
+                .tree_sessions(source.session_id())
+                .await
+                .unwrap()
+                .iter()
+                .all(|id| id.as_str() != name)
+        );
+        let sources = run.kernel.read_fork_sources(&claim).await.unwrap();
+        assert_eq!(sources.len(), 1);
+        let origin = sources[0].history_origin().unwrap();
+        let page = run
+            .kernel
+            .read_fork_facts(
+                &claim,
+                sources[0].session_id(),
+                origin.resolved_after_seq,
+                32,
+            )
+            .await
+            .unwrap()
+            .unwrap();
+        assert_eq!(page.facts.is_empty(), !expected);
+        run.kernel
+            .finish_turn(&claim, &TurnOutcome::Completed)
+            .await
+            .unwrap();
+    }
+    assert_eq!(
+        store.read_watermarks(source.session_id()).await.unwrap(),
+        source_cut
+    );
+    run.stop().await;
 }

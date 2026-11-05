@@ -105,7 +105,10 @@ unknown-start external effects are never replayed. Unclaimed waking Messages
 instead remain in the bounded mailbox and ready indexes: the executor scans a
 bounded root page after restart and claim atomically creates their Activation,
 Turn, Step, and model-visible input. Recovery does not materialize every mailbox
-or historical Agent tree into resident scheduler state. Mailbox reads return the
+or historical Agent tree into resident scheduler state. The open-turn index and
+repair preconditions share a Store snapshot. Asking for a control record just
+to learn its sequence would add a read and decode payload unrelated to repair.
+Mailbox reads return the
 complete pending count but only an ordered 32 MiB payload prefix and one selected
 status from a single Store snapshot; Kernel holds its process-wide Store-read
 reservation through decode and validation. Capacity and completion decisions use

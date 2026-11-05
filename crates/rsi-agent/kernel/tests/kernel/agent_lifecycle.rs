@@ -1,4 +1,5 @@
 use super::*;
+use rsi_agent_store_protocol::MailboxRead;
 
 #[tokio::test]
 #[allow(clippy::too_many_lines)] // Exercise the same public terminal/admission seam under each scan outcome.
@@ -161,7 +162,7 @@ async fn child_reply_scan_does_not_hold_parent_submission_admission() {
             );
             let mailbox = store
                 .inner
-                .read_agent_mailbox(parent.session_id(), None)
+                .read_agent_mailbox(parent.session_id(), MailboxRead::All)
                 .await
                 .unwrap();
             assert!(mailbox.pending.iter().any(|entry| {
@@ -173,7 +174,7 @@ async fn child_reply_scan_does_not_hold_parent_submission_admission() {
         if case == "large-prefix" {
             let mailbox = store
                 .inner
-                .read_agent_mailbox(parent.session_id(), None)
+                .read_agent_mailbox(parent.session_id(), MailboxRead::All)
                 .await
                 .unwrap();
             assert!(mailbox.pending.iter().any(|entry| {
@@ -189,7 +190,7 @@ async fn child_reply_scan_does_not_hold_parent_submission_admission() {
             assert_eq!(store.reply_pages.load(Ordering::Acquire), 1);
             let mailbox = store
                 .inner
-                .read_agent_mailbox(parent.session_id(), None)
+                .read_agent_mailbox(parent.session_id(), MailboxRead::All)
                 .await
                 .unwrap();
             assert!(mailbox.pending.iter().any(|entry| {
@@ -274,7 +275,10 @@ async fn send_and_followup_delivery_horizons_do_not_depend_on_a_target_race() {
         .await
         .unwrap();
 
-    let mailbox = store.read_agent_mailbox(&child_id, None).await.unwrap();
+    let mailbox = store
+        .read_agent_mailbox(&child_id, MailboxRead::All)
+        .await
+        .unwrap();
     assert!(mailbox.pending.iter().any(|entry| {
         entry.message.message_id == step_message
             && entry.target == MessageTarget::NextStep
@@ -303,7 +307,7 @@ async fn send_and_followup_delivery_horizons_do_not_depend_on_a_target_race() {
         .unwrap();
     assert_eq!(
         kernel
-            .enter_pending_step_messages(&child_claim)
+            .claim_pending_step_messages(&child_claim)
             .await
             .unwrap(),
         1
@@ -314,7 +318,7 @@ async fn send_and_followup_delivery_horizons_do_not_depend_on_a_target_race() {
         .unwrap();
     assert_eq!(
         kernel
-            .enter_pending_step_messages(&root_claim)
+            .claim_pending_step_messages(&root_claim)
             .await
             .unwrap(),
         1
@@ -504,7 +508,10 @@ async fn child_completion_settles_a_waiting_parent_and_wakes_its_idle_mailbox() 
     assert_eq!(ready.messages.len(), 1);
     assert_eq!(ready.messages[0].session_id, root_id);
     assert_eq!(ready.messages[0].target, MessageTarget::NextTurn);
-    let mailbox = store.read_agent_mailbox(&root_id, None).await.unwrap();
+    let mailbox = store
+        .read_agent_mailbox(&root_id, MailboxRead::All)
+        .await
+        .unwrap();
     let reply = serde_json::to_string(&mailbox.pending[0].message.content).unwrap();
     assert!(reply.contains("Child public reply:"));
     assert!(reply.contains("A deterministic public answer."));
@@ -523,7 +530,7 @@ async fn child_completion_settles_a_waiting_parent_and_wakes_its_idle_mailbox() 
 #[allow(clippy::too_many_lines)] // Both Store backends exercise completion delivery across each terminal boundary.
 async fn parent_terminal_promotes_a_completion_that_arrived_after_its_last_step_scan() {
     for sqlite in [false, true] {
-        for ending in ["completed", "cancelled", "max_tokens"] {
+        for ending in ["completed", "cancelled", "max_tokens", "paused"] {
             let temporary = tempfile::tempdir().unwrap();
             let path = temporary.path().join("store");
             let store: Arc<dyn SessionStore> = if sqlite {
@@ -584,13 +591,13 @@ async fn parent_terminal_promotes_a_completion_that_arrived_after_its_last_step_
 
             assert_eq!(
                 kernel
-                    .enter_pending_step_messages(&root_claim)
+                    .claim_pending_step_messages(&root_claim)
                     .await
                     .unwrap(),
                 0
             );
             let outcome = match ending {
-                "cancelled" => {
+                "cancelled" | "paused" => {
                     kernel
                         .cancel(&root_id, root_claim.turn_id(), None)
                         .await
@@ -606,21 +613,49 @@ async fn parent_terminal_promotes_a_completion_that_arrived_after_its_last_step_
                 }
                 _ => TurnOutcome::Completed,
             };
+            if ending == "paused" {
+                let tail = store.read_watermarks(&root_id).await.unwrap();
+                store
+                    .commit_agent(rsi_agent_store_protocol::AtomicAgentCommit {
+                        sessions: vec![rsi_agent_store_protocol::AtomicSessionAppend {
+                            session_id: root_id.clone(),
+                            expected_fact_seq: tail.durable_fact_seq,
+                            expected_control_seq: tail.durable_control_seq,
+                            header: None,
+                            facts: vec![],
+                            controls: vec![
+                                rsi_agent_session_protocol::AgentControlRecord::new(
+                                    tail.durable_control_seq + 1,
+                                    42,
+                                    AgentControlRecordBody::InboxPaused,
+                                )
+                                .unwrap(),
+                            ],
+                        }],
+                        required_active_activations: vec![],
+                        quiescent_descendants_of: None,
+                    })
+                    .await
+                    .unwrap();
+            }
             kernel
                 .finish_turn(&child_claim, &TurnOutcome::Completed)
                 .await
                 .unwrap();
-            let before_terminal = store.read_agent_mailbox(&root_id, None).await.unwrap();
+            let before_terminal = store
+                .read_agent_mailbox(&root_id, MailboxRead::All)
+                .await
+                .unwrap();
             assert!(before_terminal.pending.iter().any(|entry| {
                 matches!(entry.message.source, AgentMessageSource::Completion { .. })
                     && entry.target == MessageTarget::NextStep
                     && !entry.wake_required
             }));
 
-            if ending == "cancelled" {
+            if matches!(ending, "cancelled" | "paused") {
                 assert_eq!(
                     kernel
-                        .enter_pending_step_messages(&root_claim)
+                        .claim_pending_step_messages(&root_claim)
                         .await
                         .unwrap(),
                     0
@@ -628,16 +663,24 @@ async fn parent_terminal_promotes_a_completion_that_arrived_after_its_last_step_
             }
             kernel.finish_turn(&root_claim, &outcome).await.unwrap();
 
-            let after_terminal = store.read_agent_mailbox(&root_id, None).await.unwrap();
+            let after_terminal = store
+                .read_agent_mailbox(&root_id, MailboxRead::All)
+                .await
+                .unwrap();
             assert!(after_terminal.pending.iter().any(|entry| {
                 matches!(entry.message.source, AgentMessageSource::Completion { .. })
                     && entry.target == MessageTarget::NextTurn
                     && entry.wake_required
             }));
             let ready = store.list_ready_messages(&root_id, None, 8).await.unwrap();
-            assert_eq!(ready.messages.len(), 1);
-            assert_eq!(ready.messages[0].session_id, root_id);
-            assert_eq!(ready.messages[0].target, MessageTarget::NextTurn);
+            assert_eq!(after_terminal.inbox_paused, ending == "paused");
+            if ending == "paused" {
+                assert!(ready.messages.is_empty());
+            } else {
+                assert_eq!(ready.messages.len(), 1);
+                assert_eq!(ready.messages[0].session_id, root_id);
+                assert_eq!(ready.messages[0].target, MessageTarget::NextTurn);
+            }
             wait_for_settlement(store.as_ref(), &root_id).await;
             assert!(store.active_activation(&root_id).await.unwrap().is_none());
             kernel.shutdown(worker).await.unwrap();
@@ -1230,7 +1273,7 @@ async fn wait_completion_cause_uses_snapshot_without_control_replay() {
                     AgentControlRecordBody::MessageAccepted {
                         message: AgentMessage {
                             message_id: message_id.clone(),
-                            source: AgentMessageSource::Human,
+                            source: AgentMessageSource::Human { attribution: None },
                             content: vec![AgentMessageContent::Text {
                                 text: "transient input".into(),
                             }],
@@ -1587,7 +1630,7 @@ async fn idle_child_admits_human_input_but_rejects_expired_agent_callers() {
         .finish_turn(&child, &TurnOutcome::Completed)
         .await
         .unwrap();
-    kernel.enter_pending_step_messages(&parent).await.unwrap();
+    kernel.claim_pending_step_messages(&parent).await.unwrap();
     kernel
         .finish_turn(&parent, &TurnOutcome::Completed)
         .await
@@ -1748,10 +1791,74 @@ async fn agent_wait_resumes_for_a_message_to_its_own_mailbox() {
     );
     tool_origin::finish_control_tool(&kernel, &parent).await;
     assert_eq!(
-        kernel.enter_pending_step_messages(&parent).await.unwrap(),
+        kernel.claim_pending_step_messages(&parent).await.unwrap(),
         1
     );
     kernel.shutdown(worker).await.unwrap();
+}
+
+#[tokio::test]
+async fn a_session_stop_keeps_the_childs_cancelled_receipt_without_waking_its_idle_parent() {
+    for stop_child in [true, false] {
+        let store = Arc::new(MemoryStore::new());
+        let kernel = kernel(store.clone()).await;
+        let worker = kernel.start_workers();
+        let (parent, child, _lease) = active_parent_and_child(&kernel).await;
+        kernel
+            .finish_turn(&parent, &TurnOutcome::Completed)
+            .await
+            .unwrap();
+        let stopped = if stop_child {
+            child.session_id()
+        } else {
+            parent.session_id()
+        };
+        kernel
+            .cancel_target(stopped, CancelTarget::Session { keep_inbox: false }, None)
+            .await
+            .unwrap();
+        if !stop_child {
+            kernel
+                .cancel(child.session_id(), child.turn_id(), None)
+                .await
+                .unwrap();
+        }
+        kernel
+            .finish_turn(&child, &TurnOutcome::Cancelled)
+            .await
+            .unwrap();
+        let mailbox = store
+            .read_agent_mailbox(parent.session_id(), MailboxRead::All)
+            .await
+            .unwrap();
+        assert!(
+            !mailbox
+                .pending
+                .iter()
+                .any(|entry| matches!(entry.message.source, AgentMessageSource::Completion { .. })),
+            "stop_child={stop_child}: {mailbox:?}"
+        );
+        let controls = store
+            .read_controls(parent.session_id(), 0, 64, 65_536)
+            .await
+            .unwrap();
+        assert!(controls.records.windows(2).any(|pair| matches!(
+            (pair[0].body(), pair[1].body()),
+            (AgentControlRecordBody::MessageAccepted { message, wake_required: false, .. },
+             AgentControlRecordBody::MessageDiscarded { message_id, reason: rsi_agent_session_protocol::MessageDiscardReason::Cancelled })
+            if matches!(&message.source, AgentMessageSource::Completion { child_session_id, .. } if child_session_id == child.session_id())
+                && &message.message_id == message_id
+        )));
+        assert_eq!(mailbox.inbox_paused, !stop_child);
+        assert!(
+            !store
+                .read_inbox_control_state(parent.session_id(), false)
+                .await
+                .unwrap()
+                .has_waking_message
+        );
+        kernel.shutdown(worker).await.unwrap();
+    }
 }
 
 #[tokio::test]
@@ -1792,7 +1899,7 @@ async fn a_direct_parent_turn_holds_step_messages_and_completion_wakes_its_next_
         .await
         .unwrap();
     assert_eq!(
-        kernel.enter_pending_step_messages(&direct).await.unwrap(),
+        kernel.claim_pending_step_messages(&direct).await.unwrap(),
         0
     );
     kernel
@@ -1800,7 +1907,7 @@ async fn a_direct_parent_turn_holds_step_messages_and_completion_wakes_its_next_
         .await
         .unwrap();
     let mailbox = store
-        .read_agent_mailbox(parent.session_id(), None)
+        .read_agent_mailbox(parent.session_id(), MailboxRead::All)
         .await
         .unwrap();
     assert!(mailbox.pending.iter().any(|entry| matches!(
@@ -2012,7 +2119,7 @@ async fn concurrent_parent_child_claim_retries_preserve_one_durable_activation()
         .finish_turn(&child, &TurnOutcome::Completed)
         .await
         .unwrap();
-    kernel.enter_pending_step_messages(&parent).await.unwrap();
+    kernel.claim_pending_step_messages(&parent).await.unwrap();
     kernel
         .finish_turn(&parent, &TurnOutcome::Completed)
         .await
@@ -2091,6 +2198,7 @@ async fn publish_reply_parts(
     parts: &[String],
 ) {
     use rsi_ai_protocol::{ContentDelta, ContentStart, FinishReason};
+    tool_origin::prepare_claimed_inputs(kernel, claim).await;
     let effect_id = EffectId::new(effect).unwrap();
     let turn_id = claim.turn_id().clone();
     let intent = vec![SessionFactBody::ModelIntent {

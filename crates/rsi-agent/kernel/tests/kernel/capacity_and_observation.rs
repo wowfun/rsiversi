@@ -209,6 +209,7 @@ async fn shutdown_timeout_retains_the_store_until_background_drain_finishes() {
         .await
         .unwrap()
         .unwrap();
+    tool_origin::prepare_claimed_inputs(&kernel, &claim).await;
     store.fail_next_appends(usize::MAX);
     kernel
         .publish(
@@ -320,6 +321,7 @@ async fn shutdown_fences_publish_before_its_final_flush_snapshot_can_be_extended
         .await
         .unwrap()
         .unwrap();
+    tool_origin::prepare_claimed_inputs(&kernel, &claim).await;
     let effect_id = EffectId::new("shutdown-publish").unwrap();
     store.pause_next_append();
     kernel
@@ -369,7 +371,7 @@ async fn shutdown_fences_publish_before_its_final_flush_snapshot_can_be_extended
         )
         .await
         .unwrap();
-    assert_eq!(page.durable_seq, 2);
+    assert_eq!(page.durable_seq, 5);
 }
 
 #[tokio::test]
@@ -873,11 +875,13 @@ async fn cross_session_process_pressure_waits_for_global_durable_progress() {
         .await
         .unwrap()
         .unwrap();
+    tool_origin::prepare_claimed_inputs(&kernel, &first_claim).await;
     let second_claim = kernel
         .claim("executor-pressure-b", CancellationToken::new())
         .await
         .unwrap()
         .unwrap();
+    tool_origin::prepare_claimed_inputs(&kernel, &second_claim).await;
     assert_eq!(first_claim.turn_id(), &first.turn_id);
     assert_eq!(second_claim.turn_id(), &second.turn_id);
     let first_fact = kernel
@@ -914,7 +918,7 @@ async fn cross_session_process_pressure_waits_for_global_durable_progress() {
     assert_eq!(receipt.claim(), &second_claim);
     assert_eq!(receipt.facts().len(), 1);
     assert_eq!(receipt.facts()[0].body(), &expected_body);
-    assert_eq!(receipt.facts()[0].seq(), 2);
+    assert_eq!(receipt.facts()[0].seq(), 5);
     kernel.shutdown(worker).await.unwrap();
 }
 
@@ -1099,9 +1103,11 @@ async fn observation_reports_durability_that_advanced_while_unpolled() {
         .await
         .unwrap()
         .unwrap();
+    tool_origin::prepare_claimed_inputs(&kernel, &claim).await;
     kernel.flush(&claim, submitted.accepted_seq).await.unwrap();
+    let prepared_through = kernel.read_facts(&claim, 0, 8).await.unwrap().through_seq;
     let mut observation = kernel
-        .observe(&submitted.session_id, submitted.accepted_seq)
+        .observe(&submitted.session_id, prepared_through)
         .await
         .unwrap();
     let published = kernel
@@ -1496,6 +1502,7 @@ async fn concurrent_resumes_join_one_control_state_load() {
         1,
         "concurrent resumes of one idle session must join one Store load"
     );
+    assert_eq!(store.header_read_attempts(), 1);
     kernel.shutdown(worker).await.unwrap();
 }
 
@@ -2297,6 +2304,8 @@ async fn durable_observation_rejects_mismatched_and_oversized_store_pages() {
             *store.control_page_override.lock().unwrap() = Some(StoreControlPage {
                 after_seq: if controls { after_seq } else { 0 },
                 durable_seq: if controls { tail } else { 0 },
+                durable_fact_seq: 0,
+                fact_cursors: vec![0; usize::try_from(if controls { count } else { 0 }).unwrap()],
                 records: if controls {
                     (first_seq..first_seq + count)
                         .map(|seq| {

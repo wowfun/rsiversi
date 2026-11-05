@@ -140,7 +140,7 @@ impl AgentKernel {
             .map_err(turn_store_error)?;
         if header
             .fork_origin()
-            .is_none_or(|origin| &origin.parent_session_id != caller.session_id())
+            .is_none_or(|origin| &origin.history.parent_session_id != caller.session_id())
         {
             return Err(TurnError::Invalid(
                 "only the immediate parent can read this result".into(),

@@ -1,9 +1,5 @@
 use super::*;
 impl LiveRun {
-    #[expect(
-        clippy::too_many_lines,
-        reason = "One parent admission owns child identity, execution reservation and the atomic two-Session commit."
-    )]
     pub(super) async fn admit_child(&self, request: ProgramAgentRequest) -> TurnResult<u32> {
         rsi_agent_session_protocol::validate_turn_text(&request.message).map_err(session_error)?;
         if let Some(role) = &request.role {
@@ -44,10 +40,7 @@ impl LiveRun {
             }],
             options: MessageOptions::default(),
         };
-        let mut controls = Vec::new();
-        if let Some(baseline) = lifecycle::initial_domain_control(&header, prepared.baseline())? {
-            controls.push(baseline);
-        }
+        let mut controls = lifecycle::initial_controls(&prepared)?;
         controls.push(
             AgentControlRecord::new(
                 controls.len() as u64 + 1,
@@ -109,6 +102,10 @@ impl LiveRun {
             })
             .await
     }
+    #[expect(
+        clippy::too_many_lines,
+        reason = "One captured Program binding validates its child tree position, execution owner and output policy together"
+    )]
     async fn prepare_child(
         &self,
         ordinal: u32,
@@ -143,19 +140,23 @@ impl LiveRun {
         segments.push(segment);
         let fork = &self.descriptor.fork;
         let origin = ForkOrigin {
-            parent_session_id: self.descriptor.session_id.clone(),
+            history: rsi_agent_session_protocol::HistoryOrigin {
+                parent_session_id: self.descriptor.session_id.clone(),
+                parent_header_fingerprint: self.descriptor.parent_header_sha256.clone(),
+                point: rsi_agent_session_protocol::ForkPoint::BeforeTurn {
+                    turn_id: self.descriptor.creator_turn_id.clone(),
+                },
+                resolved_after_seq: fork.resolved_after_seq,
+                resolved_terminal_seq: fork.resolved_terminal_seq,
+                terminal_prefix_sha256: fork.terminal_prefix_sha256.clone(),
+                resolved_terminal_control_seq: fork.resolved_terminal_control_seq,
+                terminal_control_prefix_sha256: fork.terminal_control_prefix_sha256.clone(),
+                requested_turns: fork.requested_turns.clone(),
+                effective_turns: fork.effective_turns,
+            },
             root_session_id: root.clone(),
             path: AgentPath::new(segments).map_err(session_error)?,
             task_name: format!("{}-{ordinal}", self.descriptor.run_id),
-            parent_header_fingerprint: self.descriptor.parent_header_sha256.clone(),
-            invoking_turn_id: self.descriptor.creator_turn_id.clone(),
-            resolved_after_seq: fork.resolved_after_seq,
-            resolved_terminal_seq: fork.resolved_terminal_seq,
-            terminal_prefix_sha256: fork.terminal_prefix_sha256.clone(),
-            resolved_terminal_control_seq: fork.resolved_terminal_control_seq,
-            terminal_control_prefix_sha256: fork.terminal_control_prefix_sha256.clone(),
-            requested_turns: fork.requested_turns.clone(),
-            effective_turns: fork.effective_turns,
         };
         let policy = rsi_agent_session_protocol::DelegationPolicy::freeze(
             request.role.as_ref(),
@@ -322,7 +323,7 @@ impl AgentKernel {
                     .map_err(turn_store_error)?
                     .ok_or_else(|| invalid("pending program branch message is absent"))?;
                 if matches!(entry.state, StoreAgentMessageState::Pending)
-                    && !matches!(entry.message.source, AgentMessageSource::Human)
+                    && !matches!(entry.message.source, AgentMessageSource::Human { .. })
                 {
                     discarded = true;
                     self.cancel_target(session, CancelTarget::Message(pending.message_id), None)
@@ -413,7 +414,7 @@ impl AgentKernel {
                 code: code.clone(),
                 message: message.clone(),
             },
-            TurnOutcome::MaxTokens => {
+            TurnOutcome::MaxTokens | TurnOutcome::Blocked => {
                 let rsi_agent_session_protocol::ActivationOutcome::Failed { code, message } =
                     observation::activation_outcome(outcome, None)
                 else {
@@ -441,6 +442,74 @@ impl AgentKernel {
         .await
         .map(|append| CompletionRoute::Append(Box::new(append)))
     }
+    pub(crate) async fn is_program_initial_message(
+        &self,
+        header: &SessionHeader,
+        message: &MessageId,
+    ) -> TurnResult<bool> {
+        let Some(ExecutionOwner::ProgramRun {
+            session_id,
+            run_id,
+            ordinal,
+        }) = header.execution_owner()
+        else {
+            return Ok(false);
+        };
+        let state = self.read_program_state(session_id, run_id).await?;
+        let child = state
+            .children
+            .get(ordinal)
+            .ok_or_else(|| invalid("program child admission is absent"))?;
+        Ok(&child.message_id == message)
+    }
+
+    /// Caller holds child and Program-owner submission admission through the resulting commit.
+    pub(crate) async fn stopped_program_input_append(
+        &self,
+        header: &SessionHeader,
+        discarded: &[MessageId],
+    ) -> TurnResult<Option<AtomicSessionAppend>> {
+        if discarded.is_empty() {
+            return Ok(None);
+        }
+        let Some(ExecutionOwner::ProgramRun {
+            session_id,
+            run_id,
+            ordinal,
+        }) = header.execution_owner()
+        else {
+            return Ok(None);
+        };
+        let state = self.read_program_state(session_id, run_id).await?;
+        let child = state
+            .children
+            .get(ordinal)
+            .ok_or_else(|| invalid("program child admission is absent"))?;
+        if !discarded.contains(&child.message_id) {
+            return Ok(None);
+        }
+        if child.receipt.is_some() {
+            return Err(invalid(
+                "pending program initial message already has a completion receipt",
+            ));
+        }
+        self.program_append(
+            session_id,
+            run_id,
+            ProgramRunEvent::ChildSettled {
+                receipt: ProgramChildReceipt {
+                    ordinal: *ordinal,
+                    child_session_id: header.session_id().clone(),
+                    activation_id: None,
+                    outcome: ProgramOutcome::Cancelled,
+                    result: None,
+                },
+            },
+        )
+        .await
+        .map(Some)
+    }
+
     #[allow(clippy::too_many_lines)] // Correlated initial-message discard and its exclusive receipt must share admission and commit.
     pub(crate) async fn cancel_program_message(
         &self,

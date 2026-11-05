@@ -83,11 +83,27 @@ impl SessionProjections for AgentKernel {
                 .take(64)
                 .map(|(id, session)| rsi_agent_turn_protocol::ResidentActivity {
                     session: id.clone(),
-                    running: session.turns.values().any(|turn| turn.terminal.is_none()),
+                    running: session.has_open_turn(),
                 })
                 .collect(),
             has_more: state.sessions.len() > 64,
         })
+    }
+    fn running_sessions(&self, sessions: &[SessionId]) -> TurnResult<BTreeSet<SessionId>> {
+        let state = lock_state(&self.inner);
+        if !state.accepting {
+            return Err(TurnError::ShuttingDown);
+        }
+        Ok(sessions
+            .iter()
+            .filter(|id| {
+                state
+                    .sessions
+                    .get(*id)
+                    .is_some_and(SessionRuntime::has_open_turn)
+            })
+            .cloned()
+            .collect())
     }
     fn resident_composition(
         &self,
@@ -108,21 +124,18 @@ impl SessionProjections for AgentKernel {
         &self,
         session_id: &SessionId,
     ) -> TurnResult<rsi_agent_turn_protocol::SessionProjectionChanges> {
-        let observer = ObserverLease::acquire(&self.inner, ObserverKind::Projection)?;
-        let watch = self.inner.session_changes.session(session_id);
-        let inner = Arc::downgrade(&self.inner);
-        Ok(stream::unfold(
-            (watch, inner, observer),
-            |(mut watch, owner, observer)| async move {
-                let inner = owner.upgrade()?;
-                tokio::select! {
-                    () = inner.stop_worker.cancelled() => None,
-                    () = watch.changed() => Some(((), (watch, owner, observer))),
-                }
-            },
-        )
-        .boxed())
+        self.watch_changes(self.inner.session_changes.session(session_id))
     }
+
+    fn watch_activity(
+        &self,
+    ) -> TurnResult<Option<rsi_agent_turn_protocol::SessionProjectionChanges>> {
+        match self.watch_changes(self.inner.session_changes.directory()) {
+            Err(TurnError::ObserverCapacity) => Ok(None),
+            result => result.map(Some),
+        }
+    }
+
     async fn projection_snapshot(
         &self,
         session_id: &SessionId,
@@ -146,6 +159,25 @@ impl SessionProjections for AgentKernel {
 }
 
 impl AgentKernel {
+    fn watch_changes(
+        &self,
+        watch: notifications::SessionWatch,
+    ) -> TurnResult<rsi_agent_turn_protocol::SessionProjectionChanges> {
+        let observer = ObserverLease::acquire(&self.inner, ObserverKind::Projection)?;
+        let inner = Arc::downgrade(&self.inner);
+        Ok(stream::unfold(
+            (watch, inner, observer),
+            |(mut watch, owner, observer)| async move {
+                let inner = owner.upgrade()?;
+                tokio::select! {
+                    () = inner.stop_worker.cancelled() => None,
+                    () = watch.changed() => Some(((), (watch, owner, observer))),
+                }
+            },
+        )
+        .boxed())
+    }
+
     async fn shared_projection(
         &self,
         session: &SessionId,
