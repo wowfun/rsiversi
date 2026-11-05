@@ -12,6 +12,36 @@ use serde_json::{Value, json};
 const LANGUAGE: &str = include_str!("../../../../schemas/rsi-ai/language-request.schema.json");
 const IMAGE: &str = include_str!("../../../../schemas/rsi-ai/image-request.schema.json");
 
+#[test]
+fn file_inputs_are_locator_free_handles_outside_binary_media_budgets() {
+    let file = rsi_media_protocol::FileRef::new(
+        rsi_media_protocol::MediaId::new("a".repeat(64)).unwrap(),
+        "large-data.bin",
+        (1_u64 << 53) - 1,
+    )
+    .unwrap();
+    for local_execution in [true, false] {
+        let block = MessageContent::File {
+            file: file.clone(),
+            local_execution,
+        };
+        assert!(Message::assistant(vec![block.clone()]).is_err());
+        let request = LanguageRequest::new(vec![Message::user(vec![block]).unwrap()]).unwrap();
+        assert_contract(LANGUAGE, &request);
+        assert!(request.encoded_weight() < 1024);
+        let value = serde_json::to_value(&request).unwrap();
+        let decoded: LanguageRequest = serde_json::from_value(value.clone()).unwrap();
+        assert_eq!(request.messages(), decoded.messages());
+        for unknown in ["path", "url"] {
+            let mut injected = value.clone();
+            injected["messages"][0]["content"][0]["content"][unknown] = json!("/host/file");
+            assert!(serde_json::from_value::<LanguageRequest>(injected.clone()).is_err());
+            let schema = Validator::new(&serde_json::from_str(LANGUAGE).unwrap()).unwrap();
+            assert!(!schema.is_valid(&injected));
+        }
+    }
+}
+
 fn image() -> MediaDescriptor {
     MediaDescriptor::new(MediaKind::Image, "image/png", 4, "1".repeat(64)).expect("image")
 }

@@ -52,6 +52,13 @@ locator-free image/audio metadata validation. This package imports those
 validated values into Language and Image requests and adds capability-specific
 aggregate and relationship limits without defining competing grammar, MIME,
 digest, size, or dimension semantics.
+`MessageContent::File` retains a locator-free verbatim `FileRef` and the caller's
+`local_execution` fact. Files are model-facing handles, not provider file uploads.
+The provider SDK resolves a path from its frozen optional file reader only for
+local execution and formats it with `file_handle_text`; absent or nonlocal access
+produces an explicit unavailable handle. The execution fact grants no authority.
+No provider reads or uploads the complete file, and a file reference does not
+imply image/audio capability or filesystem authority.
 Each normalized language event exposes the same context-free field validation
 for durable envelopes; `LanguageAssembler` adds ordering, aggregate, and
 terminal grammar across the complete event stream.
@@ -124,7 +131,7 @@ length. Frame lengths are byte-retention bounds, not RSS promises. Semantic
 Language/Image DTO and terminal validation remain with their existing owners.
 
 
-The version-1 `rsi.ai.portable` control protocol uses closed Describe,
+The version-3 `rsi.ai.portable` control protocol uses closed Describe,
 PrepareLanguage/PrepareImage and StartLanguage/StartImage requests. Describe
 provides exact bounded model declarations, including the features usable during
 synchronous compatibility checks. Unsupported declared features are rejected
@@ -178,3 +185,7 @@ Portable `LanguageInput.request` preserves the caller's original settings. For
 translation, its explicit output cap wins; otherwise the captured
 `LanguageInput.snapshot.language_settings.profile.default_output_tokens()`
 supplies the declared default. Its request digest does not include this resolution.
+Portable provider protocol 3 also carries the frozen `file_handles` for local
+file references. Provider authors use `LanguageInput::file_handle` when translating
+file blocks. The original request and digest remain unchanged; handles contain
+only model-facing text, and resolving them requires no dependency RPC or file I/O.

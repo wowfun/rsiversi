@@ -200,6 +200,42 @@ async fn generic_chat_preserves_the_distinct_developer_role_by_default() {
 }
 
 #[tokio::test]
+async fn file_input_becomes_an_explicit_handle_without_upload_or_media_admission() {
+    let capture = Capture::default();
+    let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let address = listener.local_addr().unwrap();
+    let app = Router::new()
+        .route("/v1/chat/completions", post(chat))
+        .with_state(capture.clone());
+    let server = tokio::spawn(async move { axum::serve(listener, app).await.unwrap() });
+    let adapter = ChatCompletionsAdapter::new(
+        ChatCompletionsConfig::new(format!("http://{address}"))
+            .unwrap()
+            .with_model_profile("fixture-model", model_limits())
+            .unwrap(),
+        Arc::new(ReqwestTransport::new().unwrap()),
+    );
+    let block: MessageContent = serde_json::from_value(json!({
+        "type":"file", "content":{"file":{"id":"a".repeat(64), "name":"report.csv", "bytes":8_000_000_000_u64}, "local_execution":false}
+    })).unwrap();
+    complete(
+        &adapter,
+        LanguageRequest::new(vec![Message::user(vec![block]).unwrap()]).unwrap(),
+        Arc::new(MissingMediaResolver),
+    )
+    .await
+    .unwrap();
+    let (_, body) = capture.0.lock().unwrap().take().unwrap();
+    let part = &body["messages"][0]["content"][0];
+    assert_eq!(part["type"], "text");
+    assert!(part["text"].as_str().unwrap().contains("no readable path"));
+    assert!(part["text"].as_str().unwrap().contains("8000000000 bytes"));
+    assert!(serde_json::to_vec(&body).unwrap().len() < 4096);
+    server.abort();
+    assert!(server.await.unwrap_err().is_cancelled());
+}
+
+#[tokio::test]
 async fn chat_stream_rejects_tool_state_before_exceeding_content_bounds() {
     let app = Router::new().route("/v1/chat/completions", post(too_many_tool_calls));
     let listener = tokio::net::TcpListener::bind("127.0.0.1:0")

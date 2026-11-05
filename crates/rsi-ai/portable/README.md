@@ -14,6 +14,11 @@ replies are bounded to 256 KiB. Prepare preserves the caller's snapshot and
 retains only the frozen typed input and bounded transient state. It sends no
 credential or media bytes. The consuming Start opens exactly one attempt;
 there is no adapter retry or deferred-operation implementation.
+File blocks keep their typed identity in the frozen request. Prepare includes
+one SDK-formatted handle per distinct local file reference in `file_handles`;
+the peer uses `LanguageInput::file_handle` during provider translation. Missing
+or nonlocal access yields the ordinary unavailable handle. No file bytes or
+extra dependency round trips are transferred.
 
 Start permits at most 2048 dependency requests and 256 MiB of dependency reply
 bytes per attempt. Each reply is at most one binary packet; Media pages must

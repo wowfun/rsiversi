@@ -394,6 +394,61 @@ fn request(media: bool) -> LanguageRequest {
 fn model() -> ModelRef {
     ModelRef::new("native", "native-text").unwrap()
 }
+
+#[tokio::test]
+async fn file_handles_cross_prepare_and_start_without_dependency_reads() {
+    let (runtime, endpoint, reads, _) = harness(Behavior::Echo).await;
+    let calls = runtime
+        .root()
+        .lookup_local::<LanguageCallContract>()
+        .unwrap();
+    let file = rsi_media_protocol::FileRef::new(
+        rsi_media_protocol::MediaId::new("a".repeat(64)).unwrap(),
+        "data.bin",
+        8_000_000_000,
+    )
+    .unwrap();
+    let block = MessageContent::File {
+        file: file.clone(),
+        local_execution: true,
+    };
+    let request = LanguageRequest::new(vec![
+        AiMessage::user(vec![
+            block.clone(),
+            block,
+            MessageContent::File {
+                file: file.clone(),
+                local_execution: false,
+            },
+        ])
+        .unwrap(),
+    ])
+    .unwrap();
+    let original = request.canonical_bytes().unwrap();
+    let prepared = calls.prepare(model(), request).await.unwrap();
+    let frozen: portable::LanguageInput =
+        serde_json::from_value(endpoint.frozen.lock().unwrap().clone().unwrap()).unwrap();
+    assert_eq!(frozen.request.canonical_bytes().unwrap(), original);
+    assert_eq!(frozen.file_handles.len(), 1);
+    assert!(frozen.file_handle(&file, true).contains("no readable path"));
+    assert!(
+        frozen
+            .file_handle(&file, false)
+            .contains("no readable path")
+    );
+    let mut stream = prepared.start(CancellationToken::new()).await.unwrap();
+    let mut assembler = LanguageAssembler::default();
+    while let Some(event) = stream.next().await {
+        assembler.push(&event.unwrap()).unwrap();
+    }
+    assert_eq!(assembler.finish().unwrap().visible_text(), "received");
+    assert_eq!(reads.load(Ordering::SeqCst), 0);
+    assert_eq!(endpoint.prepares.load(Ordering::SeqCst), 1);
+    assert_eq!(endpoint.starts.load(Ordering::SeqCst), 1);
+    drop(stream);
+    drop(calls);
+    assert!(runtime.shutdown().await.is_clean());
+}
 #[tokio::test]
 async fn frozen_prepare_fragmented_start_and_request_owned_media() {
     for behavior in [Behavior::Echo, Behavior::Media] {

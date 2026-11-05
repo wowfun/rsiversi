@@ -515,6 +515,13 @@ pub enum MessageRole {
     deny_unknown_fields
 )]
 pub enum MessageContent {
+    /// Verbatim file identity awaiting execution-environment handle projection.
+    File {
+        /// Immutable verbatim object identity.
+        file: rsi_media_protocol::FileRef,
+        /// Whether the caller's Tools execute locally; grants no access authority.
+        local_execution: bool,
+    },
     /// Plain UTF-8 message content.
     Text {
         /// Bounded nonempty text.
@@ -668,6 +675,7 @@ fn validate_message_content(
     }
 
     match block {
+        MessageContent::File { .. } => {}
         MessageContent::Text { text } => {
             validation::safe_text(field, text, MAX_REQUEST_BYTES, false)
                 .map_err(|reason| SemanticError::new("message.invalid_content", field, reason))?;
@@ -755,7 +763,10 @@ fn message_content_allowed(role: MessageRole, block: &MessageContent) -> bool {
             MessageContent::Text { .. }
         ) | (
             MessageRole::User,
-            MessageContent::Text { .. } | MessageContent::Image(_) | MessageContent::Audio(_),
+            MessageContent::Text { .. }
+                | MessageContent::Image(_)
+                | MessageContent::Audio(_)
+                | MessageContent::File { .. },
         ) | (
             MessageRole::Assistant,
             MessageContent::Text { .. }
@@ -1522,7 +1533,8 @@ impl LanguageRequest {
                     MessageContent::Text { .. }
                     | MessageContent::Image(_)
                     | MessageContent::Audio(_)
-                    | MessageContent::Reasoning { .. } => {}
+                    | MessageContent::Reasoning { .. }
+                    | MessageContent::File { .. } => {}
                 }
             }
         }
@@ -1612,7 +1624,8 @@ fn validate_language_media(messages: &[Message]) -> Result<(), SemanticError> {
             }
             MessageContent::Text { .. }
             | MessageContent::Reasoning { .. }
-            | MessageContent::ToolCall(_) => {}
+            | MessageContent::ToolCall(_)
+            | MessageContent::File { .. } => {}
         }
         Ok(())
     }

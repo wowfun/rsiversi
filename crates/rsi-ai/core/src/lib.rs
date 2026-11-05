@@ -158,7 +158,11 @@ impl Router {
             request_sha256,
         };
         let context = PrepareContext::new(snapshot, credential, media, media_admission_bytes)
-            .map_err(|error| invalid(error.to_string()))?;
+            .map_err(|error| invalid(error.to_string()))?
+            .with_files(
+                self.context
+                    .lookup_local::<rsi_media_protocol::FileReadContract>(),
+            );
         Ok((request, context))
     }
 
@@ -576,7 +580,8 @@ fn collect_media_descriptors<'a>(
             }
             MessageContent::Text { .. }
             | MessageContent::Reasoning { .. }
-            | MessageContent::ToolCall(_) => {}
+            | MessageContent::ToolCall(_)
+            | MessageContent::File { .. } => {}
         }
     }
 }

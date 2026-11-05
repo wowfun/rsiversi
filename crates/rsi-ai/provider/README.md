@@ -29,6 +29,12 @@ otherwise the frozen profile supplies its declared default. This scalar
 resolution does not mutate, clone, or release a retained request allocation.
 Portable providers apply the same rule to `LanguageInput.snapshot` and `request`.
 
+`PrepareContext` freezes optional `FileRead` access alongside media access.
+Concrete request serializers use `file_handle` for verbatim file blocks. It
+performs no I/O: local execution resolves the immutable file's path, while
+missing or nonlocal access produces an explicit unavailable handle. File bytes
+stay outside the Language request and media admission budget.
+
 Starting a Language or Image call returns a normalized raw stream, not a
 terminal success value. The caller must pass every event through the matching
 `LanguageAssembler` or `ImageAssembler` and finish that assembler before

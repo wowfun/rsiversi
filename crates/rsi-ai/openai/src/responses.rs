@@ -265,7 +265,7 @@ fn validate_responses_request(
                             ));
                         }
                         MessageContent::Text { .. } | MessageContent::ToolCall(_) => {}
-                        MessageContent::ToolResult { .. } => {
+                        MessageContent::ToolResult { .. } | MessageContent::File { .. } => {
                             unreachable!("validated assistant message")
                         }
                     }
@@ -640,6 +640,12 @@ async fn responses_request(
                         MessageContent::Text { text } => {
                             wire_blocks.push(json!({"type":"input_text", "text":text}));
                         }
+                        MessageContent::File {
+                            file,
+                            local_execution,
+                        } => {
+                            wire_blocks.push(json!({"type":"input_text", "text":context.file_handle(file, *local_execution)}));
+                        }
                         MessageContent::Image(media) => {
                             let bytes = context.resolve_media(media, abort.clone()).await?;
                             media_replacements.push(JsonBase64Replacement::new(
@@ -725,7 +731,7 @@ async fn responses_request(
                                 "OpenAI Responses assistant history cannot contain media",
                             ));
                         }
-                        MessageContent::ToolResult { .. } => {
+                        MessageContent::ToolResult { .. } | MessageContent::File { .. } => {
                             unreachable!("message role validation")
                         }
                     }

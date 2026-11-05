@@ -746,6 +746,12 @@ async fn serialize_message(
                     MessageContent::Text { text } => {
                         wire_blocks.push(json!({"type":"text", "text":text}));
                     }
+                    MessageContent::File {
+                        file,
+                        local_execution,
+                    } => {
+                        wire_blocks.push(json!({"type":"text", "text":context.file_handle(file, *local_execution)}));
+                    }
                     MessageContent::Image(media) if config.allow_image_input && role == "user" => {
                         let bytes = context.resolve_media(media, abort.clone()).await?;
                         media_replacements.push(JsonBase64Replacement::new(
@@ -799,7 +805,9 @@ async fn serialize_message(
                             "Chat Completions assistant history cannot contain media",
                         ));
                     }
-                    MessageContent::ToolResult { .. } => unreachable!("role validation"),
+                    MessageContent::ToolResult { .. } | MessageContent::File { .. } => {
+                        unreachable!("role validation")
+                    }
                 }
             }
             let mut value = Map::new();

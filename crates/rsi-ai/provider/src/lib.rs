@@ -23,7 +23,7 @@ use rsi_ai_protocol::{
 };
 pub use rsi_ai_protocol::{DeferredLanguageBatch, DeferredLanguageCheckpoint, DeferredStatus};
 use rsi_credentials_protocol::{CredentialRef, ResolvedCredential};
-use rsi_media_protocol::{MediaDescriptor, MediaRead};
+use rsi_media_protocol::{FileRead, FileRef, MediaDescriptor, MediaRead};
 use rsi_meta_contract::LocalContract;
 use sha2::{Digest, Sha256};
 use thiserror::Error;
@@ -56,6 +56,7 @@ pub struct PrepareContext {
     credential: Option<ResolvedCredential>,
     media: Arc<dyn MediaResolver>,
     resolved_media: Arc<MediaResolutions>,
+    files: Option<Arc<dyn FileRead>>,
 }
 
 const MEDIA_ADMISSION_UNIT_BYTES: u64 = 1024 * 1024;
@@ -399,7 +400,23 @@ impl PrepareContext {
             credential,
             media,
             resolved_media: Arc::new(MediaResolutions::new(media_admission_bytes)?),
+            files: None,
         })
+    }
+
+    /// Freezes optional file location access without reading or copying objects.
+    #[must_use]
+    pub fn with_files(mut self, files: Option<Arc<dyn FileRead>>) -> Self {
+        self.files = files;
+        self
+    }
+
+    /// Formats a Tool-readable handle without loading file bytes.
+    pub fn file_handle(&self, file: &FileRef, local_execution: bool) -> String {
+        let path = local_execution
+            .then(|| self.files.as_ref()?.local_path(file))
+            .flatten();
+        rsi_ai_protocol::file_handle_text(file, path.as_deref().and_then(std::path::Path::to_str))
     }
 
     /// Returns persistable redacted call facts.
@@ -1263,6 +1280,7 @@ mod tests {
             },
             credential: None,
             media: Arc::new(MissingMediaResolver),
+            files: None,
             resolved_media: Arc::new(
                 MediaResolutions::new_with_semaphore(
                     MEDIA_ADMISSION_UNIT_BYTES,

@@ -42,6 +42,51 @@ fn snapshot() -> PreparedCallSnapshot {
     }
 }
 
+#[derive(Debug)]
+struct FilePaths(AtomicUsize);
+
+#[async_trait::async_trait]
+impl rsi_media_protocol::FileRead for FilePaths {
+    async fn verify(&self, _: &rsi_media_protocol::FileRef) -> rsi_media_protocol::Result<()> {
+        panic!("provider serialization must not reread file bytes")
+    }
+    fn local_path(&self, file: &rsi_media_protocol::FileRef) -> Option<std::path::PathBuf> {
+        self.0.fetch_add(1, Ordering::Relaxed);
+        Some(std::path::Path::new("/shared attachments").join(file.name()))
+    }
+}
+
+#[test]
+fn file_handles_resolve_only_the_current_local_environment_without_reading_bytes() {
+    let file = rsi_media_protocol::FileRef::new(
+        rsi_media_protocol::MediaId::new("b".repeat(64)).unwrap(),
+        "report.txt",
+        0,
+    )
+    .unwrap();
+    let context = PrepareContext::new(snapshot(), None, Arc::new(MissingMediaResolver), 0).unwrap();
+    assert!(
+        context
+            .file_handle(&file, true)
+            .contains("no readable path")
+    );
+    let paths = Arc::new(FilePaths(AtomicUsize::new(0)));
+    let context = context.with_files(Some(paths.clone()));
+    assert!(
+        context
+            .file_handle(&file, false)
+            .contains("no readable path")
+    );
+    assert_eq!(paths.0.load(Ordering::Relaxed), 0);
+    let handle = context.file_handle(&file, true);
+    assert!(handle.contains("report.txt"));
+    assert!(handle.contains("shared attachments"));
+    assert!(handle.contains("0 bytes"));
+    assert!(handle.contains("sha256:bbbbbbbb)"));
+    assert!(!handle.contains(&"b".repeat(64)));
+    assert_eq!(paths.0.load(Ordering::Relaxed), 1);
+}
+
 #[test]
 fn prepare_context_rejects_an_invalid_public_snapshot() {
     let mut invalid = snapshot();

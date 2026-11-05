@@ -86,10 +86,24 @@ impl LanguageAdapter for Adapter {
         Box::pin(async move {
             validation?;
             let allowed = compatibility::language_media(&request);
+            let mut seen = std::collections::HashSet::new();
+            let file_handles = request
+                .messages()
+                .iter()
+                .flat_map(rsi_ai_protocol::Message::content)
+                .filter_map(|block| match block {
+                    rsi_ai_protocol::MessageContent::File {
+                        file,
+                        local_execution: true,
+                    } if seen.insert(file) => Some((file.clone(), context.file_handle(file, true))),
+                    _ => None,
+                })
+                .collect();
             let input = Box::new(LanguageInput {
                 model,
                 request,
                 snapshot: context.snapshot().clone(),
+                file_handles,
             });
             let prepare = ControlRequest::PrepareLanguage { input };
             let state = prepare_state(&capability, &prepare, &context).await?;

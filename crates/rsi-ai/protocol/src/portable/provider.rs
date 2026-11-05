@@ -10,7 +10,7 @@ use std::fmt;
 /// Native provider business service contract.
 pub const PROVIDER_CONTRACT: &str = "rsi.ai.portable";
 /// Native provider business protocol version.
-pub const PROVIDER_VERSION: u32 = 2;
+pub const PROVIDER_VERSION: u32 = 3;
 /// Maximum encoded provider description or prepared response.
 pub const MAXIMUM_METADATA_BYTES: usize = 256 * 1024;
 /// Maximum transient native state retained with a prepared call.
@@ -96,6 +96,27 @@ pub struct LanguageInput {
     pub request: LanguageRequest,
     /// Caller-owned, redacted route and request identity.
     pub snapshot: PreparedCallSnapshot,
+    /// SDK-formatted handles for distinct local file references; never file bytes.
+    pub file_handles: Vec<(rsi_media_protocol::FileRef, String)>,
+}
+
+impl LanguageInput {
+    /// Resolves model-facing file text from the frozen caller environment.
+    pub fn file_handle(
+        &self,
+        file: &rsi_media_protocol::FileRef,
+        local_execution: bool,
+    ) -> std::borrow::Cow<'_, str> {
+        if local_execution
+            && let Some((_, text)) = self
+                .file_handles
+                .iter()
+                .find(|(reference, _)| reference == file)
+        {
+            return std::borrow::Cow::Borrowed(text);
+        }
+        crate::file_handle_text(file, None).into()
+    }
 }
 
 /// Frozen Image input shared unchanged by Prepare and Start.

@@ -618,6 +618,28 @@ async fn text_only_language_request_is_buffered_with_content_length() {
     assert!(!calls[0].1.contains_key("transfer-encoding"));
 }
 
+#[tokio::test]
+async fn file_input_becomes_an_explicit_handle_without_upload_or_media_admission() {
+    let capture = Capture::default();
+    let block: MessageContent = serde_json::from_value(json!({
+        "type":"file", "content":{"file":{"id":"a".repeat(64), "name":"report.csv", "bytes":8_000_000_000_u64}, "local_execution":false}
+    })).unwrap();
+    language_model(capture.clone())
+        .await
+        .complete(LanguageRequest::new(vec![Message::user(vec![block]).unwrap()]).unwrap())
+        .await
+        .unwrap();
+    let calls = capture.0.lock().unwrap();
+    assert_eq!(calls.len(), 1);
+    let body: Value = serde_json::from_slice(&calls[0].2).unwrap();
+    let part = &body["input"][0]["content"][0];
+    assert_eq!(part["type"], "input_text");
+    let text = part["text"].as_str().unwrap();
+    assert!(text.contains("report.csv") && text.contains("8000000000 bytes"));
+    assert!(text.contains("no readable path"));
+    assert!(calls[0].2.len() < 4096);
+}
+
 fn freeform_patch_tool() -> ToolDefinition {
     function_patch_tool()
         .with_freeform(

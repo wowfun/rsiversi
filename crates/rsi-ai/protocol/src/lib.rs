@@ -11,10 +11,12 @@ mod error;
 pub use discovery::{
     DiscoveredModel, MAX_DISCOVERED_MODELS, MAX_DISCOVERY_BYTES, validate_discovered_models,
 };
+mod files;
 mod language;
 mod media;
 mod runtime;
 mod semantic;
+pub use files::file_handle_text;
 mod validation;
 
 pub use error::{AiError, DispatchStatus, ErrorKind, ErrorPhase, sanitize_error_summary};
