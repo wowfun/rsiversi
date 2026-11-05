@@ -135,7 +135,7 @@ impl DeepSeekConfig {
             .default_output_tokens
             .get(&model)
             .copied()
-            .unwrap_or(256_000);
+            .unwrap_or(256_000.min(limits.max_output_reserve_tokens()));
         if cap > limits.max_output_reserve_tokens() {
             return Err(rsi_ai_transport::invalid_request_error(
                 "DeepSeek default_output_tokens exceeds the model's declared maximum output reserve",

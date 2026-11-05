@@ -29,6 +29,11 @@ custom-Tool admission. The [provider contract](../../../../crates/rsi-ai/deepsee
 owns current capabilities; [shared Responses](../../../../crates/rsi-ai/openai/README.md)
 owns bounded translation and stream validation.
 
+A deployment's declared output capacity is sufficient to choose a usable
+DeepSeek default. Requiring a second setting for a smaller model makes a valid
+local deployment fail activation. The provider resolves the implicit default
+against capacity for both protocols and diagnoses conflicting explicit settings.
+
 ## Alternatives considered
 
 Using a previous response identity on a stateless endpoint would silently lose

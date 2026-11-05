@@ -43,9 +43,9 @@ selected model and validated usage, never the credential.
 
 ## Generation policy
 
-Each exact model has a request output default of 256,000 tokens, overridden by
-`default_output_tokens.<model>`. Configuration preparation rejects defaults
-above the model's declared maximum reserve. Explicit request limits take
+Each exact model defaults to the smaller of 256,000 output tokens and its
+declared maximum output reserve. An explicit `default_output_tokens.<model>`
+overrides that choice and must fit the model. Explicit request limits take
 precedence, and summary requests keep their own cap. Capacity reserves do not
 substitute for the request default.
 

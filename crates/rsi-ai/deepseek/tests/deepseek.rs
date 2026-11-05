@@ -389,7 +389,7 @@ async fn deepseek_rejects_unsupported_settings_during_prepare() {
 }
 
 #[test]
-fn default_output_is_256000_overridable_per_model_and_validated_against_capacity() {
+fn output_default_fits_the_model_and_honors_explicit_overrides() {
     for protocol in [
         DeepSeekProtocol::Responses,
         DeepSeekProtocol::ChatCompletions,
@@ -401,11 +401,16 @@ fn default_output_is_256000_overridable_per_model_and_validated_against_capacity
                 LanguageModelLimits::new(1_000_000, 256_000, 256_000).unwrap(),
             )
             .unwrap()
-            .with_default_output_tokens("small", 65_536)
-            .unwrap()
             .with_model_profile(
                 "small",
-                LanguageModelLimits::new(128_000, 65_536, 65_536).unwrap(),
+                LanguageModelLimits::new(128_000, 4096, 65_536).unwrap(),
+            )
+            .unwrap()
+            .with_default_output_tokens("custom", 8192)
+            .unwrap()
+            .with_model_profile(
+                "custom",
+                LanguageModelLimits::new(128_000, 4096, 65_536).unwrap(),
             )
             .unwrap();
         let adapter = DeepSeekAdapter::new(config, Arc::new(ReqwestTransport::new().unwrap()));
@@ -417,9 +422,15 @@ fn default_output_is_256000_overridable_per_model_and_validated_against_capacity
             adapter.describe("small").unwrap().default_output_tokens(),
             Some(65_536)
         );
+        assert_eq!(
+            adapter.describe("custom").unwrap().default_output_tokens(),
+            Some(8192)
+        );
     }
     assert!(
         DeepSeekConfig::default()
+            .with_default_output_tokens("model", 65_537)
+            .unwrap()
             .with_model_profile(
                 "model",
                 LanguageModelLimits::new(128_000, 4096, 65_536).unwrap()
