@@ -14,12 +14,11 @@ mod tools;
 pub use plugin::{ReferencesContract, ReferencesFactory};
 use rsi_agent_session_protocol::{
     AgentMessageContent, EffectId, FrozenReference, InputMessageSource,
-    MAXIMUM_AGENT_IDENTIFIER_BYTES, MAXIMUM_AGENT_MESSAGE_CONTENT_BLOCKS,
-    MAXIMUM_REFERENCE_PAGE_BYTES, MAXIMUM_REFERENCE_PREVIEW_BYTES, MAXIMUM_REFERENCE_SCAN_BYTES,
-    MAXIMUM_REFERENCE_SCAN_FACTS, MAXIMUM_REFERENCE_TEXT_BYTES, ModelEventPurpose,
-    ReferenceBinding, ReferenceCapture, ReferenceMetadata, ReferenceOmission, ReferenceReadRequest,
-    ReferenceSnapshotEnvelope, ReferenceSnapshotRef, ReferenceSource, ReferenceSuffix,
-    ReferenceTextPage, SessionFact, SessionFactBody, SessionHeader, TurnId,
+    MAXIMUM_AGENT_IDENTIFIER_BYTES, MAXIMUM_REFERENCE_PAGE_BYTES, MAXIMUM_REFERENCE_PREVIEW_BYTES,
+    MAXIMUM_REFERENCE_SCAN_BYTES, MAXIMUM_REFERENCE_SCAN_FACTS, MAXIMUM_REFERENCE_TEXT_BYTES,
+    ModelEventPurpose, ReferenceBinding, ReferenceCapture, ReferenceMetadata, ReferenceOmission,
+    ReferenceReadRequest, ReferenceSnapshotEnvelope, ReferenceSnapshotRef, ReferenceSource,
+    ReferenceSuffix, ReferenceTextPage, SessionFact, SessionFactBody, SessionHeader, TurnId,
 };
 use rsi_agent_store_protocol::{CasObjectRef, PreparedCasObject, SessionStore, StoreError};
 use sha2::{Digest as _, Sha256};
@@ -322,17 +321,18 @@ impl References {
                 if fact.seq() != request.fact_seq {
                     return Err(invalid("recorded reference Fact mismatch"));
                 }
-                let SessionFactBody::InputMessageEntered {
-                    source: InputMessageSource::Human { .. },
-                    content,
-                    ..
-                } = fact.body()
-                else {
-                    return Err(invalid("reference must name direct Human input"));
+                let content = match fact.body() {
+                    SessionFactBody::InputMessageClaimed {
+                        source: InputMessageSource::Human { .. },
+                        content,
+                        ..
+                    } => content.get(request.content_index),
+                    SessionFactBody::StepInputsPrepared { decision, .. } => {
+                        decision.authored_content().nth(request.content_index)
+                    }
+                    _ => return Err(invalid("reference must name recorded input")),
                 };
-                let Some(AgentMessageContent::Reference { reference }) =
-                    content.get(request.content_index)
-                else {
+                let Some(AgentMessageContent::Reference { reference }) = content else {
                     return Err(invalid("recorded content is not a reference"));
                 };
                 reference.clone()

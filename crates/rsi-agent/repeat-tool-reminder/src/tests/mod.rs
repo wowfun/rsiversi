@@ -20,7 +20,7 @@ struct Reader {
 #[async_trait]
 impl ContributionFactReader for Reader {
     async fn read(&self, after: u64, limit: usize) -> ContributionResult<ContributionFactPage> {
-        assert_eq!(limit, 1, "one bounded retained Fact per read");
+        assert!(limit <= 128, "bounded retained Fact page");
         self.reads.lock().unwrap().push(after);
         let facts: Vec<_> = self
             .facts
@@ -114,15 +114,17 @@ impl Fixture {
         })
     }
     fn input(&mut self, human: bool) {
-        self.append(SessionFactBody::InputMessageEntered {
+        self.append(SessionFactBody::InputMessageClaimed {
             turn_id: self.context.turn_id.clone(),
             step_id: self.context.step_id.clone(),
             source: if human {
                 InputMessageSource::Human {
+                    attribution: None,
                     message_id: MessageId::new(format!("message-{}", self.facts.len())).unwrap(),
                 }
             } else {
                 InputMessageSource::PluginContext {
+                    tool: None,
                     contribution_id: ContributionId::new("fixture.other").unwrap(),
                 }
             },

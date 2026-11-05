@@ -1,13 +1,17 @@
 //! Pure pressure planning, source binding and summary installation.
 
+use crate::TurnKey;
 use crate::pruning::InteractionUnit;
+fn selection_key(selection: &CompactionSelection) -> TurnKey {
+    TurnKey::new(&selection.session, &selection.turn)
+}
 use crate::{
     ContextBuilderIdentity, ContextError, ContextFold, ContextLimits, Result, encoded_message_bytes,
 };
 use rsi_agent_session_protocol::{
     CompactionBuilder, CompactionPrior, CompactionSelection, CompactionSource, CompactionTrigger,
     ContextCompactionPlan, EffectId, MAXIMUM_COMPACTION_PLAN_BYTES, ModelPurpose, SessionFact,
-    SessionId, TurnId,
+    SessionId,
 };
 use rsi_ai_protocol::{
     ContentBlock, FinishReason, LanguageOutput, LanguageProfile, LanguageRequest,
@@ -28,7 +32,7 @@ struct SummaryReplacement {
     batches: crate::outcomes::Batches,
     remap: TurnRemap,
 }
-type SummaryReplacements = BTreeMap<TurnId, SummaryReplacement>;
+type SummaryReplacements = BTreeMap<TurnKey, SummaryReplacement>;
 
 pub(super) struct TurnRemap(Vec<Option<usize>>);
 impl TurnRemap {
@@ -97,9 +101,9 @@ pub struct PlannedCompaction {
 #[serde(deny_unknown_fields)]
 pub(crate) struct SemanticState {
     pub identity: CompactionBuilder,
-    sources: BTreeMap<TurnId, CompactionSource>,
-    instructions: BTreeMap<TurnId, BTreeMap<usize, InstructionKind>>,
-    last_human: BTreeMap<TurnId, usize>,
+    sources: BTreeMap<TurnKey, CompactionSource>,
+    instructions: BTreeMap<TurnKey, BTreeMap<usize, InstructionKind>>,
+    last_human: BTreeMap<TurnKey, usize>,
     usage: Option<ConversationUsage>,
     summary: Option<InstalledSummary>,
 }
@@ -143,7 +147,7 @@ impl SemanticState {
     pub(super) fn usage_weight(&self) -> Result<usize> {
         crate::budget::weight(&self.usage)
     }
-    pub(super) fn turn_weight(&self, turn: &TurnId) -> Result<usize> {
+    pub(super) fn turn_weight(&self, turn: &TurnKey) -> Result<usize> {
         let source = self.sources.get(turn).map(|source| {
             let mut source = source.clone();
             source.after_seq = u64::MAX;
@@ -164,7 +168,7 @@ impl SemanticState {
         let source_bytes = if first_in_turn {
             encoded(
                 self.sources
-                    .get(&selection.turn)
+                    .get(&selection_key(selection))
                     .ok_or_else(|| invalid("missing compaction source binding"))?,
             )?
             .len()
@@ -189,23 +193,22 @@ impl SemanticState {
         }
     }
 
-    pub fn record(
+    pub fn record_input(
         &mut self,
-        session: &SessionId,
-        fact: &SessionFact,
+        turn: &TurnKey,
+        body: &rsi_agent_session_protocol::SessionFactBody,
         message_index: usize,
-    ) -> Result<Vec<TurnId>> {
-        let turn = fact.body().turn_id();
-        let changed = match fact.body() {
+    ) -> Vec<TurnKey> {
+        match body {
             rsi_agent_session_protocol::SessionFactBody::TurnAccepted { .. }
-            | rsi_agent_session_protocol::SessionFactBody::InputMessageEntered {
+            | rsi_agent_session_protocol::SessionFactBody::InputMessageClaimed {
                 source: rsi_agent_session_protocol::InputMessageSource::Human { .. },
                 ..
             } => {
                 self.last_human.insert(turn.clone(), message_index);
                 Vec::new()
             }
-            rsi_agent_session_protocol::SessionFactBody::InputMessageEntered {
+            rsi_agent_session_protocol::SessionFactBody::InputMessageClaimed {
                 source:
                     rsi_agent_session_protocol::InputMessageSource::AgentInstructions {
                         source,
@@ -220,18 +223,23 @@ impl SemanticState {
                 InstructionKind::Agent(source.clone()),
                 *replacement || *tombstone,
             ),
-            rsi_agent_session_protocol::SessionFactBody::InputMessageEntered {
+            rsi_agent_session_protocol::SessionFactBody::InputMessageClaimed {
                 source: rsi_agent_session_protocol::InputMessageSource::SkillCatalog { .. },
                 ..
             } => self.protect_instruction(turn, message_index, InstructionKind::SkillCatalog, true),
             _ => Vec::new(),
-        };
+        }
+    }
+
+    pub fn record(&mut self, session: &SessionId, fact: &SessionFact) -> Result<Vec<TurnKey>> {
+        let key = TurnKey::new(session, fact.body().turn_id());
+        let turn = &key;
         let source = self
             .sources
             .entry(turn.clone())
             .or_insert_with(|| CompactionSource {
                 session: session.clone(),
-                turn: turn.clone(),
+                turn: turn.turn.clone(),
                 after_seq: fact.seq() - 1,
                 through_seq: fact.seq(),
                 facts_sha256: hex::encode([0_u8; 32]),
@@ -242,16 +250,16 @@ impl SemanticState {
         if self.sources.len() > crate::MAXIMUM_CONTEXT_MESSAGES {
             return Err(ContextError::TooLarge);
         }
-        Ok(changed)
+        Ok(Vec::new())
     }
 
     fn protect_instruction(
         &mut self,
-        turn: &TurnId,
+        turn: &TurnKey,
         index: usize,
         kind: InstructionKind,
         replacement: bool,
-    ) -> Vec<TurnId> {
+    ) -> Vec<TurnKey> {
         let mut changed = Vec::new();
         if replacement {
             self.instructions.retain(|previous_turn, indices| {
@@ -388,21 +396,12 @@ impl ContextFold {
         &mut self,
         session: &SessionId,
         fact: &SessionFact,
-    ) -> Result<Vec<TurnId>> {
+    ) -> Result<Vec<TurnKey>> {
         if self.semantic.is_none() {
             return Ok(Vec::new());
         }
-        let index = self
-            .turn_index
-            .get(fact.body().turn_id())
-            .copied()
-            .map(|index| self.relative_index(index))
-            .transpose()?
-            .map_or(0, |index| {
-                self.turns[index].messages.len().saturating_sub(1)
-            });
         if let Some(state) = &mut self.semantic {
-            return state.record(session, fact, index);
+            return state.record(session, fact);
         }
         Ok(Vec::new())
     }
@@ -435,7 +434,7 @@ impl ContextFold {
             return Err(invalid("semantic cache metadata exceeds its bounds"));
         }
         for (turn, source) in &state.sources {
-            if turn != &source.turn
+            if turn != &TurnKey::new(&source.session, &source.turn)
                 || source.after_seq >= source.through_seq
                 || !self.turn_index.contains_key(turn)
             {
@@ -612,14 +611,14 @@ impl ContextFold {
         for selection in &selected {
             let source = state
                 .sources
-                .get(&selection.turn)
+                .get(&selection_key(selection))
                 .ok_or_else(|| invalid("missing compaction source binding"))?;
             sources.insert(
                 (source.session.clone(), source.turn.clone()),
                 source.clone(),
             );
             let messages = projected
-                .get(&selection.turn)
+                .get(&selection_key(selection))
                 .ok_or_else(|| invalid("missing selected Turn"))?;
             materialized.extend_from_slice(
                 &messages[selection.first as usize..(selection.first + selection.count) as usize],
@@ -627,7 +626,7 @@ impl ContextFold {
         }
         let plan = ContextCompactionPlan {
             session: self.header.session_id().clone(),
-            version: 1,
+            version: 2,
             builder: state.identity.clone(),
             header_fingerprint: self
                 .header
@@ -675,7 +674,7 @@ impl ContextFold {
         for turn in &self.turns {
             let count = remaining
                 .iter()
-                .take_while(|selection| selection.turn == turn.id)
+                .take_while(|selection| selection_key(selection) == turn.id)
                 .count();
             if count == 0 {
                 continue;
@@ -744,7 +743,8 @@ impl ContextFold {
             .iter()
             .map(|unit| {
                 Ok(CompactionSelection {
-                    turn: unit.turn.clone(),
+                    session: unit.turn.session.clone(),
+                    turn: unit.turn.turn.clone(),
                     first: u32::try_from(unit.first)
                         .map_err(|_| invalid("compaction position overflow"))?,
                     count: u32::try_from(unit.count)
@@ -892,7 +892,8 @@ impl ContextFold {
                 break;
             }
             let selection = CompactionSelection {
-                turn: turn.clone(),
+                session: turn.session.clone(),
+                turn: turn.turn.clone(),
                 first: u32::try_from(*first)
                     .map_err(|_| invalid("compaction position overflow"))?,
                 count: u32::try_from(*count).map_err(|_| invalid("compaction count overflow"))?,
@@ -940,7 +941,7 @@ impl ContextFold {
         let Some(state) = &self.semantic else {
             return false;
         };
-        if plan.version != 1
+        if plan.version != 2
             || plan.builder != state.identity
             || plan.prior.as_ref() != state.summary.as_ref().map(|s| &s.prior)
         {
@@ -950,7 +951,7 @@ impl ContextFold {
             let visible = if &prior.session == self.header.session_id() {
                 prior.finished_seq <= self.through_seq
             } else {
-                self.header.fork_origin().is_some_and(|origin| {
+                self.header.history_origin().is_some_and(|origin| {
                     prior.session == origin.parent_session_id
                         && prior.finished_seq > origin.resolved_after_seq
                         && prior.finished_seq <= origin.resolved_terminal_seq
@@ -977,7 +978,8 @@ impl ContextFold {
         }
         if plan.selections.iter().any(|selection| {
             !plan.sources.iter().any(|source| {
-                source.turn == selection.turn && state.sources.get(&selection.turn) == Some(source)
+                source.turn == selection.turn
+                    && state.sources.get(&selection_key(selection)) == Some(source)
             })
         }) {
             return false;
@@ -985,7 +987,7 @@ impl ContextFold {
         if plan.session != *self.header.session_id()
             && self
                 .header
-                .fork_origin()
+                .history_origin()
                 .is_none_or(|origin| plan.session != origin.parent_session_id)
         {
             return false;
@@ -994,7 +996,7 @@ impl ContextFold {
         let header_matches = own_header.as_ref() == Some(&plan.header_fingerprint)
             || self
                 .header
-                .fork_origin()
+                .history_origin()
                 .is_some_and(|origin| origin.parent_header_fingerprint == plan.header_fingerprint);
         if !header_matches {
             return false;
@@ -1003,7 +1005,7 @@ impl ContextFold {
             let visible = if &source.session == self.header.session_id() {
                 source.through_seq <= self.through_seq
             } else {
-                self.header.fork_origin().is_some_and(|origin| {
+                self.header.history_origin().is_some_and(|origin| {
                     source.session == origin.parent_session_id
                         && source.after_seq >= origin.resolved_after_seq
                         && source.through_seq <= origin.resolved_terminal_seq
@@ -1012,7 +1014,11 @@ impl ContextFold {
             if !visible {
                 return false;
             }
-            if state.sources.get(&source.turn) != Some(source) {
+            if state
+                .sources
+                .get(&TurnKey::new(&source.session, &source.turn))
+                != Some(source)
+            {
                 return false;
             }
         }
@@ -1070,8 +1076,10 @@ impl ContextFold {
     }
 
     fn observed_session(&self) -> SessionId {
-        self.header
-            .fork_origin()
+        self.seed_source
+            .as_ref()
+            .map_or(&self.header, |(header, _)| header)
+            .history_origin()
             .filter(|origin| {
                 self.through_seq == 0 && self.seed_through_seq < origin.resolved_terminal_seq
             })
@@ -1212,6 +1220,7 @@ impl ContextFold {
 #[cfg(test)]
 mod view_tests {
     use super::*;
+    use rsi_agent_session_protocol::TurnId;
     use rsi_ai_protocol::MessageContent;
 
     #[test]
@@ -1226,6 +1235,7 @@ mod view_tests {
                 let count = ((seed >> 32) as usize % 7 + 1).min(size - index);
                 if seed & 1 == 0 {
                     selections.push(CompactionSelection {
+                        session: SessionId::new("fixture").unwrap(),
                         turn: turn.clone(),
                         first: u32::try_from(index).unwrap(),
                         count: u32::try_from(count).unwrap(),
@@ -1283,10 +1293,14 @@ mod view_tests {
             let message_bytes = encoded_message_bytes(&messages[0]).unwrap();
             fold.retained_messages += 1;
             fold.retained_message_bytes += message_bytes;
-            fold.turn_index
-                .insert(TurnId::new(id).unwrap(), fold.turns.len());
+            fold.turn_index.insert(
+                TurnKey::new(fold.header.session_id(), &TurnId::new(id).unwrap()),
+                fold.turns.len(),
+            );
             fold.turns.push_back(ProjectedTurn {
-                id: TurnId::new(id).unwrap(),
+                id: TurnKey::new(fold.header.session_id(), &TurnId::new(id).unwrap()),
+                claimed: Vec::new(),
+                claimed_bytes: 0,
                 messages,
                 message_bytes,
                 terminal: true,
@@ -1342,7 +1356,7 @@ mod view_tests {
             }])
             .unwrap(),
         ] {
-            fold.push_turn_message(&affected, message).unwrap();
+            fold.push_turn_message(&affected.turn, message).unwrap();
         }
         fold.turns[0].batches.insert(3, batch);
         let state = fold.semantic.as_mut().unwrap();
@@ -1361,18 +1375,20 @@ mod view_tests {
         .unwrap();
         let mut plan = ContextCompactionPlan {
             session: fold.header.session_id().clone(),
-            version: 1,
+            version: 2,
             builder: fold.semantic.as_ref().unwrap().identity.clone(),
             header_fingerprint: fold.header.fingerprint().unwrap(),
             sources: vec![],
             selections: vec![
                 CompactionSelection {
-                    turn: fold.turns[0].id.clone(),
+                    session: fold.turns[0].id.session.clone(),
+                    turn: fold.turns[0].id.turn.clone(),
                     first: 0,
                     count: 1,
                 },
                 CompactionSelection {
-                    turn: affected.clone(),
+                    session: affected.session.clone(),
+                    turn: affected.turn.clone(),
                     first: 5,
                     count: 1,
                 },

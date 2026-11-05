@@ -293,7 +293,7 @@ async fn captured_calls(
         if cancellation.is_cancelled() {
             return Err(ContributionError::Closed);
         }
-        let page = context.facts.read(cursor, 1).await?;
+        let page = context.facts.read(cursor, 128).await?;
         if page.through_seq <= cursor || page.through_seq > context.horizon.fact_seq {
             return Err(invalid(
                 "repeat Fact reader did not advance within its capture",
@@ -304,7 +304,7 @@ async fn captured_calls(
                 continue;
             }
             match fact.body() {
-                SessionFactBody::InputMessageEntered {
+                SessionFactBody::InputMessageClaimed {
                     source: InputMessageSource::Human { .. },
                     ..
                 } => human = Some(fact.seq()),

@@ -129,6 +129,9 @@ fn tool_images_follow_each_target_without_changing_facts_checkpoint_or_fork() {
         rsi_agent_context::ContextBudget::default(),
     )
     .unwrap();
+    child
+        .ingest(ContextPage::ForkSource(&child.header().clone()))
+        .unwrap();
     child.ingest(ContextPage::ForkSeed(&source)).unwrap();
     child.ingest(ContextPage::FinishSeed).unwrap();
     assert_eq!(

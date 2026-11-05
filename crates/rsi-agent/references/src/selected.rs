@@ -36,7 +36,7 @@ pub fn reference_texts(fact: &SessionFact) -> Vec<ReferenceText<'_>> {
         SessionFactBody::ImageRequested { request, .. } => {
             vec![item(ReferenceContentKind::Human, 0, request.prompt())]
         }
-        SessionFactBody::InputMessageEntered {
+        SessionFactBody::InputMessageClaimed {
             source: InputMessageSource::Human { .. },
             content,
             ..

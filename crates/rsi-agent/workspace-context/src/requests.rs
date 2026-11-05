@@ -23,7 +23,7 @@ impl WorkspaceSkillRequests {
         }
         let mut requests = Self::default();
         for message in messages {
-            if matches!(message.source, AgentMessageSource::Human) {
+            if matches!(message.source, AgentMessageSource::Human { .. }) {
                 requests.push_content(&message.content)?;
             }
         }

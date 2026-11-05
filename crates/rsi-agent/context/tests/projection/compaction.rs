@@ -355,7 +355,14 @@ fn quoted_summary_requests_fit_the_protocol_and_make_progress_through_large_hist
 #[allow(clippy::too_many_lines)] // One fork chain proves the usage horizon before and after installing summaries.
 fn a_child_summary_consumes_parent_usage_until_new_conversation_usage_arrives() {
     let (_, mut parent, _) = history(Some(80_000));
-    parent.pop(); // Only balanced completed parent Turns are inherited.
+    // Only balanced completed parent Turns are inherited, without the final
+    // current Turn's acceptance and preparation.
+    while !matches!(
+        parent.last().unwrap().body(),
+        SessionFactBody::TurnTerminal { .. }
+    ) {
+        parent.pop();
+    }
     let child_header = fork_header("instructions", parent.last().unwrap().seq(), 1);
     let open = || {
         ModelContextState::open(
@@ -367,6 +374,9 @@ fn a_child_summary_consumes_parent_usage_until_new_conversation_usage_arrives() 
         .unwrap()
     };
     let mut child = open();
+    child
+        .ingest(ContextPage::ForkSource(&child.header().clone()))
+        .unwrap();
     child.ingest(ContextPage::ForkSeed(&parent)).unwrap();
     child.ingest(ContextPage::FinishSeed).unwrap();
     let mut own = Vec::new();
@@ -445,6 +455,9 @@ fn a_child_summary_consumes_parent_usage_until_new_conversation_usage_arrives() 
             .is_none()
     );
     let mut replay = open();
+    replay
+        .ingest(ContextPage::ForkSource(&replay.header().clone()))
+        .unwrap();
     replay.ingest(ContextPage::ForkSeed(&parent)).unwrap();
     replay.ingest(ContextPage::FinishSeed).unwrap();
     replay.ingest(ContextPage::Canonical(&own)).unwrap();
@@ -495,7 +508,7 @@ fn replay_rejects_a_model_event_with_a_purpose_differing_from_its_intent() {
             *purpose = rsi_agent_session_protocol::ModelEventPurpose::ContextCompaction;
         }
     }
-    let facts = facts_after(0, bodies)
+    let facts = entered_facts_after(0, bodies)
         .into_iter()
         .map(Arc::new)
         .collect::<Vec<_>>();
@@ -704,6 +717,8 @@ fn interrupted_tool_batches_are_protected_through_compaction_replay_and_fork() {
             rsi_agent_context::ContextBudget::default(),
         )
         .unwrap();
+        fork.ingest(ContextPage::ForkSource(&fork.header().clone()))
+            .unwrap();
         fork.ingest(ContextPage::ForkSeed(&history)).unwrap();
         fork.ingest(ContextPage::FinishSeed).unwrap();
         assert_eq!(wire(&fork), expected);
@@ -872,7 +887,7 @@ pub(super) fn append(
     history: &mut Vec<Arc<SessionFact>>,
     bodies: Vec<SessionFactBody>,
 ) {
-    let page: Vec<_> = facts_after(history.last().map_or(0, |fact| fact.seq()), bodies)
+    let page: Vec<_> = entered_facts_after(history.last().map_or(0, |fact| fact.seq()), bodies)
         .into_iter()
         .map(Arc::new)
         .collect();
@@ -1231,7 +1246,7 @@ fn invalid_stale_and_unsupported_summaries_are_inert_without_becoming_assistant_
             "oversized" => text = "X".repeat(32 * 1024 + 1),
             "builder" => frozen.builder.semantic_version = "99.0.0".into(),
             "view" => frozen.view_sha256 = "a".repeat(64),
-            "unsupported" => frozen.version = 2,
+            "unsupported" => frozen.version = 3,
             "source" => frozen.sources[0].facts_sha256 = "a".repeat(64),
             "foreign_prior" => {
                 frozen.prior = Some(rsi_agent_session_protocol::CompactionPrior {
@@ -1294,9 +1309,9 @@ fn fork_reuses_only_summaries_whose_complete_transitive_sources_are_visible() {
             .fork_origin()
             .unwrap()
             .clone();
-        origin.resolved_after_seq = after_seq;
-        origin.effective_turns = if reused { 2 } else { 1 };
-        origin.requested_turns = if reused {
+        origin.history.resolved_after_seq = after_seq;
+        origin.history.effective_turns = if reused { 2 } else { 1 };
+        origin.history.requested_turns = if reused {
             ForkTurnSelection::All
         } else {
             ForkTurnSelection::Last(1)
@@ -1321,6 +1336,9 @@ fn fork_reuses_only_summaries_whose_complete_transitive_sources_are_visible() {
             .filter(|fact| fact.seq() > after_seq)
             .cloned()
             .collect();
+        child
+            .ingest(ContextPage::ForkSource(&child.header().clone()))
+            .unwrap();
         child.ingest(ContextPage::ForkSeed(&selected)).unwrap();
         child.ingest(ContextPage::FinishSeed).unwrap();
         assert_eq!(
@@ -1371,7 +1389,7 @@ fn long_lived_turns(replace_instructions: bool) {
                 append(
                     &mut state,
                     &mut history,
-                    vec![SessionFactBody::InputMessageEntered {
+                    vec![SessionFactBody::InputMessageClaimed {
                         turn_id: TurnId::new(&turn).unwrap(),
                         step_id: StepId::new(format!("step-{index}")).unwrap(),
                         source,
@@ -1457,7 +1475,7 @@ fn check_instruction_supersession(tombstone: bool) {
         vec![accepted("old", &"old task ".repeat(10_000))],
     );
     let instruction =
-        |turn: &str, source: &str, replacement, text: &str| SessionFactBody::InputMessageEntered {
+        |turn: &str, source: &str, replacement, text: &str| SessionFactBody::InputMessageClaimed {
             turn_id: TurnId::new(turn).unwrap(),
             step_id: StepId::new("step").unwrap(),
             source: InputMessageSource::AgentInstructions {
@@ -1619,9 +1637,9 @@ fn fork_checks_prior_chain_after_transitive_bindings_are_released() {
             .fork_origin()
             .unwrap()
             .clone();
-        origin.resolved_after_seq = after;
-        origin.effective_turns = if reuse { 2 } else { 1 };
-        origin.requested_turns = if reuse {
+        origin.history.resolved_after_seq = after;
+        origin.history.effective_turns = if reuse { 2 } else { 1 };
+        origin.history.requested_turns = if reuse {
             ForkTurnSelection::All
         } else {
             ForkTurnSelection::Last(1)
@@ -1648,6 +1666,9 @@ fn fork_checks_prior_chain_after_transitive_bindings_are_released() {
             .filter(|fact| fact.seq() > after)
             .cloned()
             .collect();
+        child
+            .ingest(ContextPage::ForkSource(&child.header().clone()))
+            .unwrap();
         child.ingest(ContextPage::ForkSeed(&selected)).unwrap();
         child.ingest(ContextPage::FinishSeed).unwrap();
         assert_eq!(wire(&child).contains("TRANSITIVE_PRIVATE_SUMMARY"), reuse);
@@ -1700,7 +1721,7 @@ fn outcome_ingestion_rejects_duplicate_results_and_reused_call_ids() {
     let mut state = cursor();
     let mut history = Vec::new();
     append(&mut state, &mut history, bodies.clone());
-    let duplicate = facts_after(
+    let duplicate = entered_facts_after(
         history.last().unwrap().seq(),
         vec![bodies.last().unwrap().clone()],
     );
@@ -1729,7 +1750,7 @@ fn outcome_ingestion_rejects_duplicate_results_and_reused_call_ids() {
             body
         })
         .collect();
-    let repeated = facts_after(history.last().unwrap().seq(), repeated)
+    let repeated = entered_facts_after(history.last().unwrap().seq(), repeated)
         .into_iter()
         .map(Arc::new)
         .collect::<Vec<_>>();
@@ -1746,7 +1767,7 @@ fn live_unfinished_batch_checkpoint_restores_before_supersession() {
     append(&mut state, &mut history, partial_tool_batch(None));
     let checkpoint = state.checkpoint().unwrap();
     let mut restored = state.restored(&checkpoint).unwrap();
-    let marker = facts_after(
+    let marker = entered_facts_after(
         history.last().unwrap().seq(),
         vec![SessionFactBody::ToolCallsSuperseded {
             turn_id: TurnId::new("interrupted").unwrap(),
@@ -1768,12 +1789,13 @@ fn semantic_materialization_ceiling_rejects_retention_before_planning() {
     let mut history = Vec::new();
     append(&mut state, &mut history, vec![accepted("limit", "small")]);
     for index in 0..rsi_agent_context::MAXIMUM_CONTEXT_MESSAGES {
-        let page = facts_after(
-            index as u64 + 1,
-            vec![SessionFactBody::InputMessageEntered {
+        let page = entered_facts_after(
+            state.position().through_seq,
+            vec![SessionFactBody::InputMessageClaimed {
                 turn_id: TurnId::new("limit").unwrap(),
                 step_id: StepId::new(format!("step-{index}")).unwrap(),
                 source: InputMessageSource::Human {
+                    attribution: None,
                     message_id: MessageId::new(format!("message-{index}")).unwrap(),
                 },
                 content: vec![AgentMessageContent::Text {
@@ -1802,10 +1824,11 @@ fn superseded_live_calls_have_prompt_only_outcomes_and_stable_replay() {
         turn_id: TurnId::new("interrupted").unwrap(),
         source_model_effect_id: EffectId::new("tool-model").unwrap(),
     });
-    bodies.push(SessionFactBody::InputMessageEntered {
+    bodies.push(SessionFactBody::InputMessageClaimed {
         turn_id: TurnId::new("interrupted").unwrap(),
         step_id: rsi_agent_session_protocol::StepId::new("steer").unwrap(),
         source: rsi_agent_session_protocol::InputMessageSource::Human {
+            attribution: None,
             message_id: rsi_agent_session_protocol::MessageId::new("steer").unwrap(),
         },
         content: vec![rsi_agent_session_protocol::AgentMessageContent::Text {
@@ -2195,6 +2218,7 @@ fn tool_outcome_transitions_reject_late_denial_superseded_results_and_wrong_effe
         append(&mut state, &mut history, bodies);
         let body = if case == "late-denial" {
             SessionFactBody::ToolRejected {
+                additional_contexts: Vec::new(),
                 origin: rsi_agent_session_protocol::ToolOrigin::Model {
                     effect_id: rsi_agent_session_protocol::EffectId::new("tool-model").unwrap(),
                 },
@@ -2219,7 +2243,7 @@ fn tool_outcome_transitions_reject_late_denial_superseded_results_and_wrong_effe
                 conclusion: None,
             }
         };
-        let invalid = facts_after(history.last().unwrap().seq(), vec![body])
+        let invalid = entered_facts_after(history.last().unwrap().seq(), vec![body])
             .into_iter()
             .map(Arc::new)
             .collect::<Vec<_>>();
@@ -2247,7 +2271,7 @@ fn nonsemantic_request_budgets_synthesized_results_before_retaining_old_turns() 
         result: None,
     });
     bodies.push(accepted("current", "continue"));
-    fold.apply(&facts(bodies)).unwrap();
+    fold.apply(&entered_facts(bodies)).unwrap();
     // The raw five-message projection fits, but two missing tool results require
     // eviction of the completed old Turn to preserve an adjacent provider view.
     let raw_bytes = serde_json::to_vec(fold.project(ContextLimits::default()).unwrap().messages())
@@ -2482,7 +2506,7 @@ fn partial_output_reserves_capacity_before_omitting_complete_turns() {
         FinishReason::MaxTokens,
     );
     history.extend(
-        facts_after(history.len() as u64, bodies)
+        entered_facts_after(history.len() as u64, bodies)
             .into_iter()
             .map(std::sync::Arc::new),
     );
@@ -2600,4 +2624,125 @@ fn raw_pressure_compacts_one_active_turn_beyond_4096_cumulative_messages() {
             .iter()
             .any(|fact| matches!(fact.body(), SessionFactBody::TurnTerminal { .. }))
     );
+}
+
+#[test]
+fn equal_turn_ids_keep_source_bindings_through_compaction_checkpoint_and_replay() {
+    let parent = same_id_parent();
+    let child_header = fork_header("instructions", parent.last().unwrap().seq(), 1);
+    let open = || {
+        let mut state = ModelContextState::open(
+            Arc::new(DefaultContextBuilder::default()),
+            child_header.clone(),
+            ContextLimits::default(),
+            rsi_agent_context::ContextBudget::default(),
+        )
+        .unwrap();
+        state
+            .ingest(ContextPage::ForkSource(&child_header))
+            .unwrap();
+        state.ingest(ContextPage::ForkSeed(&parent)).unwrap();
+        state.ingest(ContextPage::FinishSeed).unwrap();
+        state
+    };
+    let mut child = open();
+    let mut own = Vec::new();
+    let mut bodies = vec![accepted("shared", "LOCAL_INPUT")];
+    for (effect, text) in [
+        ("same-effect", "LOCAL_EVIDENCE "),
+        ("tail", "RECENT_EVIDENCE "),
+    ] {
+        bodies.extend(model_bodies(
+            "shared",
+            effect,
+            ModelPurpose::Conversation,
+            &text.repeat(8000),
+            None,
+            FinishReason::Stop,
+        ));
+    }
+    append(&mut child, &mut own, bodies);
+    let plan = |state: &ModelContextState| {
+        state
+            .plan_compaction(
+                &rsi_ai_protocol::LanguageRequestOptions::default(),
+                &ModelRef::new("deployment", "model").unwrap(),
+                &profile(),
+                Some(CompactionTrigger::ProviderContextLimit),
+                false,
+            )
+            .unwrap()
+            .unwrap()
+    };
+    let planned = plan(&child);
+    assert!(
+        planned
+            .plan
+            .selections
+            .iter()
+            .any(|s| s.session == *header("instructions").session_id()
+                && s.turn.as_str() == "shared")
+    );
+    assert!(
+        planned
+            .plan
+            .selections
+            .iter()
+            .any(|s| s.session == *child_header.session_id() && s.turn.as_str() == "shared")
+    );
+    for selection in &planned.plan.selections {
+        assert!(
+            planned
+                .plan
+                .sources
+                .iter()
+                .any(|s| s.session == selection.session && s.turn == selection.turn)
+        );
+    }
+    let restored = child.restored(&child.checkpoint().unwrap()).unwrap();
+    assert_eq!(plan(&restored).plan, planned.plan);
+    append(
+        &mut child,
+        &mut own,
+        model_bodies(
+            "shared",
+            "summary",
+            ModelPurpose::ContextCompaction(Box::new(planned.plan)),
+            "Both sources summarized.",
+            None,
+            FinishReason::Stop,
+        ),
+    );
+    assert!(child.summary_installed(&EffectId::new("summary").unwrap()));
+    let expected = wire(&child);
+    assert!(expected.contains("Both sources summarized."));
+    assert!(expected.contains("LOCAL_INPUT"));
+    assert_eq!(
+        wire(&child.restored(&child.checkpoint().unwrap()).unwrap()),
+        expected
+    );
+    let mut replay = open();
+    replay.ingest(ContextPage::Canonical(&own)).unwrap();
+    assert_eq!(wire(&replay), expected);
+}
+
+fn same_id_parent() -> Vec<Arc<SessionFact>> {
+    let mut source = cursor();
+    let mut parent = Vec::new();
+    let mut bodies = vec![accepted("shared", "SOURCE_INPUT")];
+    bodies.extend(model_bodies(
+        "shared",
+        "same-effect",
+        ModelPurpose::Conversation,
+        &"SOURCE_EVIDENCE ".repeat(8000),
+        None,
+        FinishReason::Stop,
+    ));
+    bodies.push(SessionFactBody::TurnTerminal {
+        turn_id: TurnId::new("shared").unwrap(),
+        outcome: TurnOutcome::Completed,
+        result: None,
+    });
+    append(&mut source, &mut parent, bodies);
+    parent
 }

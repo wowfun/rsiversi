@@ -165,7 +165,7 @@ fn groups(facts: &[SessionFact]) -> Vec<Group<'_>> {
                 fact.seq(),
                 request.prompt(),
             ),
-            SessionFactBody::InputMessageEntered {
+            SessionFactBody::InputMessageClaimed {
                 source: InputMessageSource::Human { .. },
                 content,
                 ..
@@ -265,7 +265,7 @@ mod tests {
         }
     }
     fn input(source: InputMessageSource, content: Vec<AgentMessageContent>) -> SessionFactBody {
-        SessionFactBody::InputMessageEntered {
+        SessionFactBody::InputMessageClaimed {
             turn_id: TurnId::new("turn").unwrap(),
             step_id: StepId::new("step").unwrap(),
             source,
@@ -286,6 +286,7 @@ mod tests {
                     0,
                     vec![input(
                         InputMessageSource::Human {
+                            attribution: None,
                             message_id: MessageId::new("human").unwrap(),
                         },
                         text("visible \\\n界"),
@@ -371,6 +372,7 @@ mod tests {
                 0,
                 vec![input(
                     InputMessageSource::Human {
+                        attribution: None,
                         message_id: MessageId::new("nested").unwrap(),
                     },
                     text("nested-secret"),
@@ -393,6 +395,7 @@ mod tests {
                 vec![
                     input(
                         InputMessageSource::Human {
+                            attribution: None,
                             message_id: MessageId::new("human").unwrap(),
                         },
                         vec![
@@ -428,6 +431,7 @@ mod tests {
                     ),
                     input(
                         InputMessageSource::PluginContext {
+                            tool: None,
                             contribution_id: ContributionId::new("test.context").unwrap(),
                         },
                         text("plugin-secret"),

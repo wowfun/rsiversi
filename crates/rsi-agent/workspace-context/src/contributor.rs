@@ -164,7 +164,7 @@ async fn pending_requests(
                 SessionFactBody::TurnAccepted { text, .. } => {
                     requests.push_text(text).map_err(workspace_error)?;
                 }
-                SessionFactBody::InputMessageEntered {
+                SessionFactBody::InputMessageClaimed {
                     source: InputMessageSource::Human { .. },
                     content,
                     ..

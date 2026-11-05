@@ -1,10 +1,10 @@
 //! Pure, coordinate-preserving views of original interaction units.
 
+use crate::TurnKey;
 use crate::{ContextError, Result, encoded_message_bytes};
-use rsi_agent_session_protocol::TurnId;
 use rsi_ai_protocol::{Message, MessageContent, MessageRole};
 use std::{borrow::Cow, collections::BTreeMap};
-pub(crate) type ProjectedTurns<'a> = BTreeMap<TurnId, Cow<'a, [Message]>>;
+pub(crate) type ProjectedTurns<'a> = BTreeMap<TurnKey, Cow<'a, [Message]>>;
 
 const THRESHOLD: usize = 8192;
 const HEAD: usize = 4096;
@@ -12,7 +12,7 @@ const TAIL: usize = 1024;
 const MARKER: &str = "\n\n[... tool result middle pruned ...]\n\n";
 
 pub(crate) struct InteractionUnit {
-    pub turn: TurnId,
+    pub turn: TurnKey,
     pub first: usize,
     pub count: usize,
     pub bytes: usize,
@@ -26,7 +26,7 @@ struct UnitShape {
 }
 
 pub(crate) fn units(
-    turn: &TurnId,
+    turn: &TurnKey,
     messages: &[Message],
     allow_incomplete: bool,
 ) -> Result<Vec<InteractionUnit>> {
@@ -88,7 +88,7 @@ fn shapes(messages: &[Message], allow_incomplete: bool) -> Result<Vec<UnitShape>
 }
 
 pub(crate) fn project<'a>(
-    turns: impl IntoIterator<Item = (&'a TurnId, &'a [Message])>,
+    turns: impl IntoIterator<Item = (&'a TurnKey, &'a [Message])>,
 ) -> Result<ProjectedTurns<'a>> {
     let mut all_units = Vec::new();
     let mut projected = BTreeMap::new();
@@ -190,8 +190,14 @@ mod tests {
 
     #[test]
     fn unchanged_projection_borrows_messages_and_only_pruned_turns_are_owned() {
-        let id = TurnId::new("first").unwrap();
-        let tail = TurnId::new("last").unwrap();
+        let id = TurnKey::new(
+            &rsi_agent_session_protocol::SessionId::new("fixture").unwrap(),
+            &rsi_agent_session_protocol::TurnId::new("first").unwrap(),
+        );
+        let tail = TurnKey::new(
+            &rsi_agent_session_protocol::SessionId::new("fixture").unwrap(),
+            &rsi_agent_session_protocol::TurnId::new("last").unwrap(),
+        );
         let plain = vec![Message::user_text("plain").unwrap()];
         let long = batch("x".repeat(THRESHOLD + 1));
         let unchanged = project([(&id, plain.as_slice()), (&tail, long.as_slice())]).unwrap();
@@ -207,7 +213,10 @@ mod tests {
 
     #[test]
     fn latest_unit_moves_without_destroying_original_unicode_or_json_fallback() {
-        let id = TurnId::new("turn").unwrap();
+        let id = TurnKey::new(
+            &rsi_agent_session_protocol::SessionId::new("fixture").unwrap(),
+            &rsi_agent_session_protocol::TurnId::new("turn").unwrap(),
+        );
         let original = batch(format!("{{\"data\":\"{}\"}}", "界🦀".repeat(6000)));
         assert_eq!(
             project([(&id, original.as_slice())]).unwrap()[&id],
@@ -328,7 +337,10 @@ mod tests {
 
     #[test]
     fn partial_units_stay_intact_and_misordered_results_are_rejected() {
-        let id = TurnId::new("turn").unwrap();
+        let id = TurnKey::new(
+            &rsi_agent_session_protocol::SessionId::new("fixture").unwrap(),
+            &rsi_agent_session_protocol::TurnId::new("turn").unwrap(),
+        );
         let mut messages = batch("x".repeat(9000));
         let MessageContent::ToolCall(call) = &messages[0].content()[0] else {
             panic!()

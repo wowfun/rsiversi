@@ -130,7 +130,9 @@ pub enum ContextPage<'a> {
         /// Highest scanned child sequence.
         through_seq: u64,
     },
-    /// A contiguous page in the Header's exact inherited parent interval.
+    /// Begin an authenticated immutable source interval, in ancestor-to-child order.
+    ForkSource(&'a SessionHeader),
+    /// A contiguous page in the selected source Header's inherited parent interval.
     ForkSeed(&'a [Arc<SessionFact>]),
     /// Validate that the complete inherited interval has arrived.
     FinishSeed,
@@ -174,6 +176,8 @@ impl RawContextPressure {
 
 /// Exclusive incremental context state for one immutable Session Header.
 pub trait ModelContextCursor: fmt::Debug + Send + 'static {
+    /// Original input Facts awaiting the owning Turn's final preparation decision.
+    fn claimed_inputs(&self, turn: &rsi_agent_session_protocol::TurnId) -> Result<&[SessionFact]>;
     /// Raw retention pressure, when this builder owns semantic compaction.
     fn raw_pressure(&self) -> Option<RawContextPressure> {
         None
@@ -228,6 +232,8 @@ pub struct ModelContextState {
     budget: crate::ContextBudget,
     _header_credit: crate::ContextCredit,
     cursor: Box<dyn ModelContextCursor>,
+    pending: crate::tool_context::Pending,
+    inherited_source: Option<rsi_agent_session_protocol::SessionId>,
 }
 
 #[derive(Serialize, Deserialize)]
@@ -237,9 +243,22 @@ struct Metadata {
     header_fingerprint: String,
     limits: ContextLimits,
     position: ContextPosition,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pending_bytes: Option<std::num::NonZeroUsize>,
 }
 
 impl ModelContextState {
+    /// Borrows original claimed inputs without another history read or payload copy.
+    pub fn claimed_inputs(
+        &self,
+        turn: &rsi_agent_session_protocol::TurnId,
+    ) -> Result<&[SessionFact]> {
+        self.cursor.claimed_inputs(turn)
+    }
+    /// Immutable identity and interpretation owned by this cursor.
+    pub const fn header(&self) -> &SessionHeader {
+        &self.header
+    }
     /// Returns the selected builder's independent raw-retention pressure.
     pub fn raw_pressure(&self) -> Option<RawContextPressure> {
         self.cursor.raw_pressure()
@@ -278,12 +297,39 @@ impl ModelContextState {
             budget,
             _header_credit: header_credit,
             cursor,
+            pending: crate::tool_context::Pending::default(),
+            inherited_source: None,
         })
     }
 
     /// Consumes one bounded typed page from the owning execution path.
     pub fn ingest(&mut self, page: ContextPage<'_>) -> Result<()> {
-        self.cursor.ingest(page)
+        self.cursor.ingest(page)?;
+        match page {
+            ContextPage::ForkSource(source) => {
+                let origin = source
+                    .history_origin()
+                    .ok_or_else(|| invalid("missing fork history origin"))?;
+                self.inherited_source = Some(origin.parent_session_id.clone());
+            }
+            ContextPage::FinishSeed => self.inherited_source = None,
+            ContextPage::ForkSeed(facts) => {
+                let source = self
+                    .inherited_source
+                    .as_ref()
+                    .ok_or_else(|| invalid("missing tool context fork source"))?;
+                self.pending.ingest(source, facts, true, &self.budget)?;
+            }
+            ContextPage::Canonical(facts) | ContextPage::ClaimVisible { facts, .. } => {
+                self.pending
+                    .ingest(self.header.session_id(), facts, false, &self.budget)?;
+            }
+        }
+        Ok(())
+    }
+    /// Settled messages awaiting their next durable Step claim, in source order.
+    pub fn pending_tool_inputs(&self) -> Vec<rsi_agent_session_protocol::SettledToolContext> {
+        self.pending.messages()
     }
     /// Builds the next bounded request preserving the pin's complete frozen options.
     pub fn build(
@@ -324,14 +370,16 @@ impl ModelContextState {
         if payload.is_empty() || payload.len() > MAXIMUM_CONTEXT_CHECKPOINT_BYTES {
             return Err(invalid("builder checkpoint payload is empty or oversized"));
         }
+        let (pending, _pending_credit) = self.pending.encode(&self.budget)?;
         let metadata = serde_json::to_vec(&Metadata {
             builder: self.identity.clone(),
             header_fingerprint: self.header_fingerprint.clone(),
             limits: self.limits,
             position,
+            pending_bytes: std::num::NonZeroUsize::new(pending.len()),
         })
         .map_err(|error| invalid(&error.to_string()))?;
-        let size = MAGIC.len() + 32 + 4 + metadata.len() + payload.len();
+        let size = MAGIC.len() + 32 + 4 + metadata.len() + pending.len() + payload.len();
         if metadata.len() > MAXIMUM_METADATA_BYTES || size > MAXIMUM_CONTEXT_CHECKPOINT_BYTES {
             return Err(invalid(
                 "context checkpoint envelope exceeds its byte bound",
@@ -344,6 +392,7 @@ impl ModelContextState {
         digest.update(MAGIC);
         digest.update(length);
         digest.update(&metadata);
+        digest.update(&pending);
         digest.update(&payload);
         let credit = self.budget.reserve(size)?;
         let reservation = rsi_api_protocol::ByteReservation::from_retention(size, credit)
@@ -353,6 +402,7 @@ impl ModelContextState {
         bytes.extend_from_slice(&digest.finalize());
         bytes.extend_from_slice(&length);
         bytes.extend_from_slice(&metadata);
+        bytes.extend_from_slice(&pending);
         bytes.extend_from_slice(&payload);
         drop(payload);
         reservation
@@ -413,6 +463,14 @@ impl ModelContextState {
                 "context checkpoint builder, header, limits, or position mismatch",
             ));
         }
+        let (pending, payload) = payload
+            .split_at_checked(
+                metadata
+                    .pending_bytes
+                    .map_or(0, std::num::NonZeroUsize::get),
+            )
+            .ok_or_else(|| invalid("invalid pending tool context frame"))?;
+        let pending = crate::tool_context::Pending::restore(pending, &self.budget)?;
         let header_credit = self.budget.reserve(crate::budget::weight(&self.header)?)?;
         let cursor = self.builder.open(ContextInit {
             identity: &self.identity,
@@ -433,6 +491,8 @@ impl ModelContextState {
             budget: self.budget.clone(),
             _header_credit: header_credit,
             cursor,
+            pending,
+            inherited_source: None,
         })
     }
 }

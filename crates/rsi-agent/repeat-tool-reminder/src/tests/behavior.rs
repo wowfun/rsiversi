@@ -1,6 +1,25 @@
 use super::*;
 
 #[tokio::test]
+async fn captured_history_uses_bounded_pages_instead_of_one_read_per_fact() {
+    let mut f = Fixture::new(Config::default());
+    for _ in 0..511 {
+        f.input(false);
+    }
+    let call = f.call("read", json!({}));
+    let reader = f.capture();
+    let output = f
+        .reminder
+        .contribute(&f.context, &[call], CancellationToken::new())
+        .await
+        .unwrap();
+    f.apply(&output);
+    assert_eq!(f.state().count, 1);
+    assert_eq!(f.state().through_fact_seq, 513);
+    assert!(reader.reads.lock().unwrap().len() <= 5);
+}
+
+#[tokio::test]
 async fn source_order_thresholds_failed_results_and_replay_share_one_cursor() {
     let mut f = Fixture::new(Config::default());
     f.input(true);

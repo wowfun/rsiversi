@@ -13,7 +13,11 @@ mod pruning;
 pub use compaction::{PlannedCompaction, validate_summary_output};
 mod default_provider;
 mod emission;
+mod turn_key;
+use turn_key::TurnKey;
 
+mod input;
+mod tool_context;
 pub use builder::{
     ContextBuilderIdentity, ContextInit, ContextPage, ContextPosition, ModelContextBuilder,
     ModelContextBuilderContract, ModelContextCursor, ModelContextState, RawContextPressure,
@@ -48,9 +52,9 @@ pub const MAXIMUM_CONTEXT_BYTES: usize = 32 * 1024 * 1024;
 /// Maximum encoded Context-owned checkpoint bytes.
 pub const MAXIMUM_CONTEXT_CHECKPOINT_BYTES: usize =
     rsi_agent_session_protocol::MAXIMUM_CONTEXT_CHECKPOINT_BYTES;
-const CONTEXT_CHECKPOINT_VERSION: u32 = 12;
-const CHECKPOINT_BINDING_DOMAIN: &[u8] = b"rsi-agent-context-checkpoint-v12\0";
-const CHECKPOINT_MAGIC: &[u8] = b"rsi-agent-context-checkpoint-v12\0";
+const CONTEXT_CHECKPOINT_VERSION: u32 = 18;
+const CHECKPOINT_BINDING_DOMAIN: &[u8] = b"rsi-agent-context-checkpoint-v18\0";
+const CHECKPOINT_MAGIC: &[u8] = b"rsi-agent-context-checkpoint-v18\0";
 
 /// Explicit compaction limits.
 #[derive(Clone, Copy, Debug, Eq, PartialEq, Serialize, Deserialize)]
@@ -137,7 +141,7 @@ pub struct ContextFold {
     budget: ContextBudget,
     credit: ContextCredit,
     header_weight: usize,
-    metadata_weights: BTreeMap<TurnId, usize>,
+    metadata_weights: BTreeMap<TurnKey, usize>,
     metadata_bytes: usize,
     global_metadata_bytes: usize,
     global_weights: [usize; 3],
@@ -145,26 +149,34 @@ pub struct ContextFold {
     semantic: Option<compaction::SemanticState>,
     system_message: Option<Message>,
     system_message_bytes: usize,
+    step_instructions: Vec<rsi_agent_session_protocol::StepInstruction>,
+    step_instruction_bytes: usize,
     through_seq: u64,
     seed_through_seq: u64,
+    seed_source: Option<(SessionHeader, ContextCredit)>,
+    seed_sources: usize,
     fact_prefix_digest: [u8; 32],
     checkpointable_prefix: bool,
     omitted_turns: usize,
     retention_limits: Option<ContextLimits>,
     turns: VecDeque<ProjectedTurn>,
     base_ordinal: usize,
-    turn_index: BTreeMap<TurnId, usize>,
+    turn_index: BTreeMap<TurnKey, usize>,
     assemblers: BTreeMap<EffectId, ActiveAssembler>,
     retained_messages: usize,
     retained_message_bytes: usize,
     ingestion_failed: bool,
+    ingesting_source: Option<rsi_agent_session_protocol::SessionId>,
     #[cfg(test)]
     metadata_recounts: std::cell::Cell<usize>,
 }
 
 #[derive(Debug, Serialize)]
 struct ProjectedTurn {
-    id: TurnId,
+    id: TurnKey,
+    claimed: Vec<SessionFact>,
+    #[serde(skip)]
+    claimed_bytes: usize,
     messages: Vec<Message>,
     message_bytes: usize,
     terminal: bool,
@@ -184,6 +196,7 @@ struct ActiveAssembler {
 #[derive(Debug, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 struct ContextCheckpointPayload {
+    step_instructions: Vec<rsi_agent_session_protocol::StepInstruction>,
     version: u32,
     header_fingerprint: String,
     through_seq: u64,
@@ -197,7 +210,8 @@ struct ContextCheckpointPayload {
 #[derive(Debug, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 struct CheckpointTurn {
-    id: TurnId,
+    id: TurnKey,
+    claimed: Vec<SessionFact>,
     messages: Vec<Message>,
     terminal: bool,
     batches: outcomes::Batches,
@@ -206,6 +220,7 @@ struct CheckpointTurn {
 #[derive(Debug, Serialize)]
 #[serde(deny_unknown_fields)]
 struct ContextCheckpointPayloadRef<'a> {
+    step_instructions: &'a [rsi_agent_session_protocol::StepInstruction],
     version: u32,
     header_fingerprint: &'a str,
     through_seq: u64,
@@ -219,13 +234,58 @@ struct ContextCheckpointPayloadRef<'a> {
 #[derive(Debug, Serialize)]
 #[serde(deny_unknown_fields)]
 struct CheckpointTurnRef<'a> {
-    id: &'a TurnId,
+    id: &'a TurnKey,
+    claimed: &'a [SessionFact],
     messages: &'a [Message],
     terminal: bool,
     batches: &'a outcomes::Batches,
 }
 
+fn assembled_system(
+    header: &SessionHeader,
+    sections: &[rsi_agent_session_protocol::StepInstruction],
+) -> Result<(Option<Message>, usize)> {
+    let mut instructions = header.settings().system_prompt().to_owned();
+    if let Some(persona) = header
+        .delegation_policy()
+        .and_then(|policy| policy.persona())
+    {
+        if !instructions.is_empty() {
+            instructions.push_str("\n\n");
+        }
+        instructions.push_str(persona);
+    }
+    for section in sections {
+        if !instructions.is_empty() {
+            instructions.push_str("\n\n");
+        }
+        instructions.push_str(&section.text);
+    }
+    let system_message = if instructions.is_empty() {
+        None
+    } else {
+        Some(
+            Message::system_text(instructions)
+                .map_err(|error| ContextError::Invalid(error.to_string()))?,
+        )
+    };
+    let system_message_bytes = system_message
+        .as_ref()
+        .map(encoded_message_bytes)
+        .transpose()?
+        .unwrap_or(0);
+    Ok((system_message, system_message_bytes))
+}
+
 impl ContextFold {
+    fn turn_key(&self, turn: &TurnId) -> TurnKey {
+        TurnKey::new(
+            self.ingesting_source
+                .as_ref()
+                .unwrap_or_else(|| self.header.session_id()),
+            turn,
+        )
+    }
     /// Starts an empty projection for one immutable session.
     pub fn new(header: SessionHeader, budget: ContextBudget) -> Result<Self> {
         // Cursor Header and derived instruction/message copy; README defines the separate wrapper charge.
@@ -234,31 +294,9 @@ impl ContextFold {
         header
             .validate()
             .map_err(|error| ContextError::Invalid(error.to_string()))?;
-        let mut instructions = header.settings().system_prompt().to_owned();
-        if let Some(persona) = header
-            .delegation_policy()
-            .and_then(|policy| policy.persona())
-        {
-            if !instructions.is_empty() {
-                instructions.push_str("\n\n");
-            }
-            instructions.push_str(persona);
-        }
-        let system_message = if instructions.is_empty() {
-            None
-        } else {
-            Some(
-                Message::system_text(instructions)
-                    .map_err(|error| ContextError::Invalid(error.to_string()))?,
-            )
-        };
-        let system_message_bytes = system_message
-            .as_ref()
-            .map(encoded_message_bytes)
-            .transpose()?
-            .unwrap_or(0);
+        let (system_message, system_message_bytes) = assembled_system(&header, &[])?;
         let seed_through_seq = header
-            .fork_origin()
+            .history_origin()
             .map_or(0, |origin| origin.resolved_after_seq);
         let mut state = Self {
             header,
@@ -273,8 +311,12 @@ impl ContextFold {
             semantic: None,
             system_message,
             system_message_bytes,
+            step_instructions: vec![],
+            step_instruction_bytes: 0,
             through_seq: 0,
             seed_through_seq,
+            seed_source: None,
+            seed_sources: 0,
             fact_prefix_digest: EMPTY_FACT_PREFIX_DIGEST,
             checkpointable_prefix: true,
             omitted_turns: 0,
@@ -286,6 +328,7 @@ impl ContextFold {
             retained_messages: 0,
             retained_message_bytes: 0,
             ingestion_failed: false,
+            ingesting_source: None,
             #[cfg(test)]
             metadata_recounts: std::cell::Cell::new(0),
         };
@@ -314,6 +357,7 @@ impl ContextFold {
             .and_then(|n| n.checked_add(self.global_metadata_bytes))
             .ok_or(ContextError::Capacity)?
             .checked_add(self.system_message_bytes)
+            .and_then(|n| n.checked_add(self.step_instruction_bytes))
             .and_then(|n| n.checked_add(self.retained_message_bytes))
             .ok_or(ContextError::Capacity)?;
         for assembler in self.assemblers.values() {
@@ -370,13 +414,14 @@ impl ContextFold {
             .map_or(Ok(0), |state| state.turn_weight(&turn.id))?;
         budget::weight(&(turn.terminal, usize::MAX))?
             .checked_add(turn.batches.weight()?)
+            .and_then(|bytes| bytes.checked_add(turn.claimed_bytes))
             .and_then(|bytes| bytes.checked_add(1))
             .ok_or(ContextError::Capacity)?
             .checked_add(identity)
             .and_then(|n| n.checked_add(semantic))
             .ok_or(ContextError::Capacity)
     }
-    fn reaccount_fact(&mut self, fact: &SessionFact, changed: Vec<TurnId>) -> Result<()> {
+    fn reaccount_fact(&mut self, fact: &SessionFact, changed: Vec<TurnKey>) -> Result<()> {
         if self.accounting_impact == AccountingImpact::Full {
             return self.reaccount();
         }
@@ -389,14 +434,14 @@ impl ContextFold {
         }
         let changed: std::collections::BTreeSet<_> = changed
             .into_iter()
-            .chain(std::iter::once(fact.body().turn_id().clone()))
+            .chain(std::iter::once(self.turn_key(fact.body().turn_id())))
             .collect();
         for id in changed {
             self.reaccount_turn(&id)?;
         }
         self.credit.resize(self.retained_weight()?)
     }
-    fn reaccount_turn(&mut self, id: &TurnId) -> Result<()> {
+    fn reaccount_turn(&mut self, id: &TurnKey) -> Result<()> {
         let next = self
             .turn_index
             .get(id)
@@ -449,13 +494,15 @@ impl ContextFold {
         source: &rsi_agent_session_protocol::SessionId,
     ) -> Result<()> {
         self.admit_fact(fact)?;
+        self.ingesting_source = Some(source.clone());
         self.accounting_impact = AccountingImpact::Turns;
         let result = (|| {
-            self.apply_body(fact.body(), fact.seq())?;
+            self.apply_body(fact)?;
             let changed = self.record_semantic_fact(source, fact)?;
             self.compact_retained()?;
             self.reaccount_fact(fact, changed)
         })();
+        self.ingesting_source = None;
         if result.is_err() {
             // Mutations can precede a refusal. Drop their ownership before releasing
             // credit rather than pretending that the old prefix was rolled back.
@@ -465,8 +512,11 @@ impl ContextFold {
             self.turn_index.clear();
             self.assemblers.clear();
             self.semantic = None;
+            self.seed_source = None;
             self.system_message = None;
             self.system_message_bytes = 0;
+            self.step_instructions.clear();
+            self.step_instruction_bytes = 0;
             self.metadata_weights.clear();
             self.metadata_bytes = 0;
             self.global_metadata_bytes = 0;
@@ -510,17 +560,9 @@ impl ContextFold {
         let retention_limits = self.retention_limits.ok_or_else(|| {
             ContextError::Invalid("checkpoint requires explicit retention limits".into())
         })?;
-        if self.through_seq == 0
-            || !self.checkpointable_prefix
-            || !self.assemblers.is_empty()
-            || self
-                .turns
-                .iter()
-                .any(|turn| turn.messages.is_empty() && !turn.terminal)
-        {
+        if self.through_seq == 0 || !self.checkpointable_prefix || !self.assemblers.is_empty() {
             return Err(ContextError::Invalid(
-                "checkpoint requires a nonempty exact prefix without an active assembler or empty turn"
-                    .into(),
+                "checkpoint requires a nonempty exact prefix without an active assembler".into(),
             ));
         }
         let header_fingerprint = self
@@ -529,6 +571,7 @@ impl ContextFold {
             .map_err(|error| ContextError::Invalid(error.to_string()))?;
         let fact_prefix_sha256 = self.fact_prefix_sha256();
         let payload = ContextCheckpointPayloadRef {
+            step_instructions: &self.step_instructions,
             version: CONTEXT_CHECKPOINT_VERSION,
             semantic: self.semantic.as_ref(),
             header_fingerprint: &header_fingerprint,
@@ -541,6 +584,7 @@ impl ContextFold {
                 .iter()
                 .map(|turn| CheckpointTurnRef {
                     id: &turn.id,
+                    claimed: &turn.claimed,
                     messages: &turn.messages,
                     terminal: turn.terminal,
                     batches: &turn.batches,
@@ -626,6 +670,7 @@ impl ContextFold {
             ));
         }
         let mut fold = Self::with_limits(header, limits, budget)?;
+        fold.set_step_instructions(&checkpoint.step_instructions)?;
         fold.semantic = checkpoint.semantic;
         fold.through_seq = checkpoint.through_seq;
         fold.fact_prefix_digest = fact_prefix_digest;
@@ -649,7 +694,17 @@ impl ContextFold {
     fn restore_checkpoint_turns(&mut self, turns: Vec<CheckpointTurn>) -> Result<()> {
         for turn in turns {
             if self.turn_index.contains_key(&turn.id)
-                || (turn.messages.is_empty() && !turn.terminal)
+                || turn.terminal && !turn.claimed.is_empty()
+                || turn
+                    .claimed
+                    .windows(2)
+                    .any(|pair| pair[0].seq() >= pair[1].seq())
+                || turn.claimed.iter().any(|fact| {
+                    fact.claimed_input_count() == 0
+                        || fact.body().turn_id() != &turn.id.turn
+                        || turn.id.session == *self.header.session_id()
+                            && fact.seq() > self.through_seq
+                })
             {
                 return Err(ContextError::Invalid(
                     "checkpoint contains duplicate, empty, or misaligned turns".into(),
@@ -682,6 +737,11 @@ impl ContextFold {
             self.turn_index.insert(turn.id.clone(), absolute);
             self.turns.push_back(ProjectedTurn {
                 id: turn.id,
+                claimed_bytes: turn.claimed.iter().try_fold(0usize, |sum, fact| {
+                    sum.checked_add(fact.encoded_len())
+                        .ok_or(ContextError::Capacity)
+                })?,
+                claimed: turn.claimed,
                 messages: turn.messages,
                 message_bytes,
                 terminal: turn.terminal,
@@ -715,11 +775,65 @@ impl ContextFold {
             let next_digest = advance_fact_prefix(self.fact_prefix_digest, fact)?;
             self.apply_admitted_fact(fact, &session)?;
             self.through_seq = fact.seq();
+            self.seed_source = None;
             self.fact_prefix_digest = next_digest;
             expected = expected
                 .checked_add(1)
                 .ok_or_else(|| ContextError::Invalid("Fact sequence exhausted".into()))?;
         }
+        Ok(())
+    }
+
+    /// Begins one authenticated source interval, oldest first. The I/O owner
+    /// resolves the chain; this fold checks adjacent bindings and exact coverage.
+    pub fn begin_seed_source(&mut self, source: &SessionHeader) -> Result<()> {
+        self.ensure_usable()?;
+        source
+            .validate()
+            .map_err(|error| ContextError::Invalid(error.to_string()))?;
+        let origin = source
+            .history_origin()
+            .ok_or_else(|| ContextError::Invalid("fork source has no inherited interval".into()))?;
+        let target = self
+            .header
+            .history_origin()
+            .ok_or_else(|| ContextError::Invalid("fork source requires child lineage".into()))?;
+        if self.through_seq != 0
+            || self.seed_sources == rsi_agent_session_protocol::MAXIMUM_FORK_HISTORY_DEPTH
+        {
+            return Err(ContextError::Invalid(
+                "fork source is outside the child lineage".into(),
+            ));
+        }
+        if let Some((previous, _)) = &self.seed_source {
+            self.validate_source_complete()?;
+            if !matches!(
+                origin.requested_turns,
+                rsi_agent_session_protocol::ForkTurnSelection::All
+            ) || origin.parent_session_id != *previous.session_id()
+                || origin.parent_header_fingerprint
+                    != previous
+                        .fingerprint()
+                        .map_err(|error| ContextError::Invalid(error.to_string()))?
+            {
+                return Err(ContextError::Invalid(
+                    "fork source chain changed its parent binding".into(),
+                ));
+            }
+        } else if source != &self.header
+            && !matches!(
+                target.requested_turns,
+                rsi_agent_session_protocol::ForkTurnSelection::All
+            )
+        {
+            return Err(ContextError::Invalid(
+                "windowed fork cannot include ancestor history".into(),
+            ));
+        }
+        let credit = self.budget.reserve(budget::weight(source)?)?;
+        self.seed_through_seq = origin.resolved_after_seq;
+        self.seed_source = Some((source.clone(), credit));
+        self.seed_sources += 1;
         Ok(())
     }
 
@@ -739,8 +853,11 @@ impl ContextFold {
             ));
         }
         let origin = self
-            .header
-            .fork_origin()
+            .seed_source
+            .as_ref()
+            .map(|(header, _)| header)
+            .ok_or_else(|| ContextError::Invalid("fork source must precede its Facts".into()))?
+            .history_origin()
             .ok_or_else(|| ContextError::Invalid("fork seed requires fork lineage".into()))?;
         let terminal_seq = origin.resolved_terminal_seq;
         let parent_session = origin.parent_session_id.clone();
@@ -779,9 +896,25 @@ impl ContextFold {
     }
 
     fn validate_complete_seed(&self) -> Result<()> {
+        if self
+            .seed_source
+            .as_ref()
+            .is_none_or(|(source, _)| source != &self.header)
+        {
+            return Err(ContextError::Invalid(
+                "fork source chain did not reach the child Header".into(),
+            ));
+        }
+        self.validate_source_complete()
+    }
+
+    fn validate_source_complete(&self) -> Result<()> {
         let terminal_seq = self
-            .header
-            .fork_origin()
+            .seed_source
+            .as_ref()
+            .map(|(header, _)| header)
+            .ok_or_else(|| ContextError::Invalid("fork source is absent".into()))?
+            .history_origin()
             .ok_or_else(|| ContextError::Invalid("fork seed requires fork lineage".into()))?
             .resolved_terminal_seq;
         if self.seed_through_seq != terminal_seq {
@@ -799,7 +932,7 @@ impl ContextFold {
 
     fn ensure_child_facts_may_begin(&self) -> Result<()> {
         self.ensure_usable()?;
-        if self.through_seq == 0 && self.header.fork_origin().is_some() {
+        if self.through_seq == 0 && self.header.history_origin().is_some() {
             self.validate_complete_seed()?;
         }
         Ok(())
@@ -833,6 +966,7 @@ impl ContextFold {
                 self.checkpointable_prefix = false;
             }
             self.through_seq = fact.seq();
+            self.seed_source = None;
             self.fact_prefix_digest = next_digest;
             previous = fact.seq();
         }
@@ -840,6 +974,9 @@ impl ContextFold {
             self.checkpointable_prefix = false;
         }
         self.through_seq = through_seq;
+        if through_seq > 0 {
+            self.seed_source = None;
+        }
         Ok(())
     }
 
@@ -1086,8 +1223,8 @@ impl ContextFold {
         without_unscoped_provider_state(self.projected_messages(limits, true)?.messages)
     }
 
-    fn apply_body(&mut self, body: &SessionFactBody, seq: u64) -> Result<()> {
-        let result = self.apply_body_inner(body, seq);
+    fn apply_body(&mut self, fact: &SessionFact) -> Result<()> {
+        let result = self.apply_body_inner(fact);
         if result.is_err() {
             // A failed assembler or ingestion may have consumed transient state.
             // It must never be cached as the preceding exact Fact prefix.
@@ -1096,24 +1233,31 @@ impl ContextFold {
         result
     }
 
-    fn apply_body_inner(&mut self, body: &SessionFactBody, seq: u64) -> Result<()> {
+    fn apply_body_inner(&mut self, fact: &SessionFact) -> Result<()> {
+        let body = fact.body();
+        let seq = fact.seq();
         match body {
-            SessionFactBody::TurnAccepted { turn_id, text, .. } => {
-                let message = Message::user_text(text)
-                    .map_err(|error| ContextError::Invalid(error.to_string()))?;
-                self.insert_turn(turn_id, message)?;
+            SessionFactBody::StepPrepared { instructions, .. } => {
+                self.set_step_instructions(instructions)?;
+            }
+            SessionFactBody::StepStarted { .. } | SessionFactBody::StepEnded { .. } => {
+                self.set_step_instructions(&[])?;
+            }
+            SessionFactBody::TurnAccepted { turn_id, .. } => {
+                self.insert_empty_turn(turn_id)?;
+                self.claim_input(turn_id, fact)?;
             }
             SessionFactBody::MessageTurnAccepted { turn_id, .. } => {
                 self.insert_empty_turn(turn_id)?;
             }
-            SessionFactBody::InputMessageEntered {
-                turn_id,
-                source,
-                content,
-                ..
+            SessionFactBody::InputMessageClaimed { turn_id, .. }
+            | SessionFactBody::ToolContextsClaimed { turn_id, .. } => {
+                self.claim_input(turn_id, fact)?;
+            }
+            SessionFactBody::StepInputsPrepared {
+                turn_id, decision, ..
             } => {
-                let message = input_message(source, content, seq)?;
-                self.push_turn_message(turn_id, message)?;
+                self.enter_prepared_inputs(turn_id, decision, seq)?;
             }
             SessionFactBody::ImageRequested {
                 turn_id, request, ..
@@ -1170,6 +1314,8 @@ impl ContextFold {
                     ));
                 }
                 turn.terminal = true;
+                turn.claimed.clear();
+                turn.claimed_bytes = 0;
                 // A terminal Turn cannot emit more events. Unfinished effects
                 // remain visible as raw Facts but cannot poison the next cursor
                 // boundary or install an uncompleted internal summary.
@@ -1177,13 +1323,32 @@ impl ContextFold {
                     .retain(|_, active| &active.turn_id != turn_id);
             }
             SessionFactBody::CancelRequested { .. }
-            | SessionFactBody::StepStarted { .. }
-            | SessionFactBody::StepEnded { .. }
             | SessionFactBody::WorkspaceTouched { .. }
             | SessionFactBody::ModelStarted { .. }
             | SessionFactBody::ImageIntent { .. }
             | SessionFactBody::ImageStarted { .. } => {}
         }
+        Ok(())
+    }
+
+    fn set_step_instructions(
+        &mut self,
+        sections: &[rsi_agent_session_protocol::StepInstruction],
+    ) -> Result<()> {
+        rsi_agent_session_protocol::validate_step_instructions(sections)
+            .map_err(|error| ContextError::Invalid(error.to_string()))?;
+        if self.step_instructions == sections {
+            return Ok(());
+        }
+        let (message, bytes) = assembled_system(&self.header, sections)?;
+        self.step_instruction_bytes = if sections.is_empty() {
+            0
+        } else {
+            budget::weight(&sections)?
+        };
+        self.step_instructions = sections.to_vec();
+        self.system_message = message;
+        self.system_message_bytes = bytes;
         Ok(())
     }
 
@@ -1361,7 +1526,7 @@ impl ContextFold {
     fn require_live_turn(&self, turn_id: &TurnId) -> Result<()> {
         let index = self
             .turn_index
-            .get(turn_id)
+            .get(&self.turn_key(turn_id))
             .copied()
             .ok_or_else(|| ContextError::Invalid("Fact references an unknown turn".into()))?;
         let index = self.relative_index(index)?;
@@ -1374,7 +1539,7 @@ impl ContextFold {
     }
 
     fn insert_turn(&mut self, turn_id: &TurnId, message: Message) -> Result<()> {
-        if self.turn_index.contains_key(turn_id) {
+        if self.turn_index.contains_key(&self.turn_key(turn_id)) {
             return Err(ContextError::Invalid(
                 "turn was accepted more than once".into(),
             ));
@@ -1394,20 +1559,22 @@ impl ContextFold {
             .checked_add(self.turns.len())
             .ok_or_else(|| ContextError::Invalid("turn ordinal overflowed".into()))?;
         self.turns.push_back(ProjectedTurn {
-            id: turn_id.clone(),
+            id: self.turn_key(turn_id),
+            claimed: Vec::new(),
+            claimed_bytes: 0,
             messages: vec![message],
             message_bytes,
             terminal: false,
             batches: outcomes::Batches::new(),
         });
-        self.turn_index.insert(turn_id.clone(), index);
+        self.turn_index.insert(self.turn_key(turn_id), index);
         self.retained_messages = retained_messages;
         self.retained_message_bytes = retained_message_bytes;
         Ok(())
     }
 
     fn insert_empty_turn(&mut self, turn_id: &TurnId) -> Result<()> {
-        if self.turn_index.contains_key(turn_id) {
+        if self.turn_index.contains_key(&self.turn_key(turn_id)) {
             return Err(ContextError::Invalid(
                 "turn was accepted more than once".into(),
             ));
@@ -1417,13 +1584,15 @@ impl ContextFold {
             .checked_add(self.turns.len())
             .ok_or_else(|| ContextError::Invalid("turn ordinal overflowed".into()))?;
         self.turns.push_back(ProjectedTurn {
-            id: turn_id.clone(),
+            id: self.turn_key(turn_id),
+            claimed: Vec::new(),
+            claimed_bytes: 0,
             messages: Vec::new(),
             message_bytes: 0,
             terminal: false,
             batches: outcomes::Batches::new(),
         });
-        self.turn_index.insert(turn_id.clone(), index);
+        self.turn_index.insert(self.turn_key(turn_id), index);
         Ok(())
     }
 
@@ -1441,7 +1610,7 @@ impl ContextFold {
     ) -> Result<()> {
         let index = self
             .turn_index
-            .get(turn_id)
+            .get(&self.turn_key(turn_id))
             .copied()
             .ok_or_else(|| ContextError::Invalid("Fact references an unknown turn".into()))?;
         let message_bytes = encoded_message_bytes(&message)?;
@@ -1473,7 +1642,7 @@ impl ContextFold {
     fn turn_mut(&mut self, turn_id: &TurnId) -> Result<&mut ProjectedTurn> {
         let index = self
             .turn_index
-            .get(turn_id)
+            .get(&self.turn_key(turn_id))
             .copied()
             .ok_or_else(|| ContextError::Invalid("Fact references an unknown turn".into()))?;
         let index = self.relative_index(index)?;
@@ -1645,27 +1814,11 @@ fn input_message(
     source: &InputMessageSource,
     content: &[AgentMessageContent],
     seq: u64,
+    local_execution: bool,
 ) -> Result<Message> {
-    let content = content
-        .iter()
-        .enumerate()
-        .map(|(index, content)| match content {
-            AgentMessageContent::Text { text } => Ok(MessageContent::Text { text: text.clone() }),
-            AgentMessageContent::Image { media } => {
-                media_descriptor(media).map(MessageContent::Image)
-            }
-            AgentMessageContent::Reference { reference } => Ok(MessageContent::Text { text: format!(
-                "Referenced conversation data from {} through record {}.{}\n{}\nRead more with reference_read using recorded_session_id={}, fact_seq=\"{}\", content_index={}.",
-                reference.metadata.source, reference.metadata.through_seq(),
-                if reference.metadata.omissions().is_empty() { "" } else { " Earlier material was omitted by capture limits." },
-                reference.preview, serde_json::to_string(&reference.metadata.target.session_id).expect("Session identity"), seq, index,
-            ) }),
-        })
-        .collect::<Result<Vec<_>>>()?;
-    match source {
-        InputMessageSource::AgentInstructions { .. }
-        | InputMessageSource::SkillCatalog { .. }
-        | InputMessageSource::PluginContext { .. } => {
+    let content = input_content(content, seq, 0, local_execution)?;
+    match source.input_role() {
+        rsi_agent_session_protocol::PreparedInputRole::Developer => {
             let text = content
                 .iter()
                 .filter_map(|content| match content {
@@ -1676,15 +1829,35 @@ fn input_message(
                 .join("\n");
             Message::developer_text(text).map_err(|error| ContextError::Invalid(error.to_string()))
         }
-        InputMessageSource::Human { .. }
-        | InputMessageSource::Continuation { .. }
-        | InputMessageSource::Program { .. }
-        | InputMessageSource::Agent { .. }
-        | InputMessageSource::Completion { .. }
-        | InputMessageSource::UserSkillInvocation { .. } => {
+        rsi_agent_session_protocol::PreparedInputRole::User => {
             Message::user(content).map_err(|error| ContextError::Invalid(error.to_string()))
         }
     }
+}
+
+fn input_content(
+    content: &[AgentMessageContent],
+    seq: u64,
+    offset: usize,
+    local_execution: bool,
+) -> Result<Vec<MessageContent>> {
+    content
+        .iter()
+        .enumerate()
+        .map(|(index, content)| match content {
+            AgentMessageContent::Text { text } => Ok(MessageContent::Text { text: text.clone() }),
+            AgentMessageContent::File { file } => Ok(MessageContent::File { file: file.clone(), local_execution }),
+            AgentMessageContent::Image { media, .. } => {
+                media_descriptor(media).map(MessageContent::Image)
+            }
+            AgentMessageContent::Reference { reference } => Ok(MessageContent::Text { text: format!(
+                "Referenced conversation data from {} through record {}.{}\n{}\nRead more with reference_read using recorded_session_id={}, fact_seq=\"{}\", content_index={}.",
+                reference.metadata.source, reference.metadata.through_seq(),
+                if reference.metadata.omissions().is_empty() { "" } else { " Earlier material was omitted by capture limits." },
+                reference.preview, serde_json::to_string(&reference.metadata.target.session_id).expect("Session identity"), seq, offset + index,
+            ) }),
+        })
+        .collect()
 }
 
 fn media_descriptor(media: &rsi_media_protocol::MediaRef) -> Result<MediaDescriptor> {
@@ -1845,7 +2018,9 @@ mod checkpoint_encoding_tests {
 
     #[test]
     fn instruction_replacement_reaccounts_only_changed_turns() {
-        use rsi_agent_session_protocol::{StepId, TurnOutcome};
+        use rsi_agent_session_protocol::{
+            InputClaimRef, PreparedInput, StepId, StepInputDecision, TurnOutcome,
+        };
         let header = accounting_header();
         let mut fold = ContextFold::with_limits(
             header,
@@ -1868,25 +2043,36 @@ mod checkpoint_encoding_tests {
         ];
         let apply = |fold: &mut ContextFold, body| {
             let seq = fold.through_seq() + 1;
-            fold.apply(&[SessionFact::new(seq, seq, body).unwrap()])
-                .unwrap();
-        };
-        let accepted = |turn: &TurnId| SessionFactBody::TurnAccepted {
-            turn_id: turn.clone(),
-            text: "task".into(),
-            reasoning_effort: None,
-            model: None,
-            sandbox: rsi_sandbox::SandboxMode::ReadOnly,
-            require_approval: false,
+            let fact = SessionFact::new(seq, seq, body).unwrap();
+            let turn_id = fact.body().turn_id().clone();
+            let count = fact.claimed_input_count();
+            fold.apply(&[fact]).unwrap();
+            if count != 0 {
+                fold.metadata_recounts.set(0);
+                fold.apply(&[SessionFact::new(
+                    seq + 1,
+                    seq + 1,
+                    SessionFactBody::StepInputsPrepared {
+                        turn_id,
+                        step_id: StepId::new("fixture-input").unwrap(),
+                        decision: StepInputDecision::enter(vec![PreparedInput::Claimed {
+                            claim: InputClaimRef::new(seq, 0).unwrap(),
+                        }])
+                        .unwrap(),
+                    },
+                )
+                .unwrap()])
+                    .unwrap();
+            }
         };
         for index in 0..128 {
             let turn_id = TurnId::new(format!("turn-{index}")).unwrap();
-            apply(&mut fold, accepted(&turn_id));
+            apply(&mut fold, accounting_acceptance(&turn_id, "task"));
             if index == 0 {
                 for source in &instructions {
                     apply(
                         &mut fold,
-                        SessionFactBody::InputMessageEntered {
+                        SessionFactBody::InputMessageClaimed {
                             turn_id: turn_id.clone(),
                             step_id: StepId::new("old-step").unwrap(),
                             source: source.clone(),
@@ -1907,12 +2093,12 @@ mod checkpoint_encoding_tests {
             );
         }
         let turn_id = TurnId::new("current").unwrap();
-        apply(&mut fold, accepted(&turn_id));
+        apply(&mut fold, accounting_acceptance(&turn_id, "task"));
         for source in instructions {
             fold.metadata_recounts.set(0);
             apply(
                 &mut fold,
-                SessionFactBody::InputMessageEntered {
+                SessionFactBody::InputMessageClaimed {
                     turn_id: turn_id.clone(),
                     step_id: StepId::new("new-step").unwrap(),
                     source,
@@ -1921,11 +2107,7 @@ mod checkpoint_encoding_tests {
                     }],
                 },
             );
-            assert_eq!(
-                fold.metadata_recounts.get(),
-                2,
-                "only the old instruction owner and current Turn need accounting"
-            );
+            assert_eq!(fold.metadata_recounts.get(), 2, "only changed Turn owners");
             let retained = fold.credit.bytes();
             fold.reaccount().unwrap();
             assert_eq!(
@@ -1933,6 +2115,88 @@ mod checkpoint_encoding_tests {
                 retained,
                 "incremental accounting equals full accounting"
             );
+        }
+    }
+
+    fn accounting_acceptance(turn: &TurnId, text: &str) -> SessionFactBody {
+        SessionFactBody::TurnAccepted {
+            turn_id: turn.clone(),
+            text: text.into(),
+            reasoning_effort: None,
+            model: None,
+            sandbox: rsi_sandbox::SandboxMode::ReadOnly,
+            require_approval: false,
+        }
+    }
+
+    #[test]
+    fn pending_claim_weight_survives_checkpoint_and_is_released_on_consumption() {
+        use rsi_agent_session_protocol::{StepId, StepInputDecision, TurnOutcome};
+        for terminal in [false, true] {
+            let header = accounting_header();
+            let mut fold = ContextFold::with_limits(
+                header.clone(),
+                ContextLimits::default(),
+                ContextBudget::default(),
+            )
+            .unwrap();
+            let turn_id = TurnId::new("pending").unwrap();
+            let mut expected = 0;
+            for seq in 1..=32 {
+                let body = if seq == 1 {
+                    accounting_acceptance(&turn_id, "input")
+                } else {
+                    SessionFactBody::InputMessageClaimed {
+                        turn_id: turn_id.clone(),
+                        step_id: StepId::new("step").unwrap(),
+                        source: InputMessageSource::Human {
+                            message_id: rsi_agent_session_protocol::MessageId::new(format!(
+                                "message-{seq}"
+                            ))
+                            .unwrap(),
+                            attribution: None,
+                        },
+                        content: vec![AgentMessageContent::Text {
+                            text: "queued".repeat(usize::try_from(seq).unwrap()),
+                        }],
+                    }
+                };
+                let fact = SessionFact::new(seq, seq, body).unwrap();
+                expected += fact.encoded_len();
+                fold.apply(&[fact]).unwrap();
+                assert_eq!(fold.turns[0].claimed_bytes, expected);
+            }
+            let checkpoint = fold.checkpoint_bytes().unwrap();
+            let mut restored = ContextFold::from_checkpoint(
+                header,
+                ContextLimits::default(),
+                &checkpoint,
+                ContextBudget::default(),
+            )
+            .unwrap();
+            assert_eq!(restored.turns[0].claimed_bytes, expected);
+            assert_eq!(restored.credit.bytes(), fold.credit.bytes());
+            let body = if terminal {
+                SessionFactBody::TurnTerminal {
+                    turn_id,
+                    outcome: TurnOutcome::Cancelled,
+                    result: None,
+                }
+            } else {
+                SessionFactBody::StepInputsPrepared {
+                    turn_id,
+                    step_id: StepId::new("step").unwrap(),
+                    decision: StepInputDecision::reject(),
+                }
+            };
+            restored
+                .apply(&[SessionFact::new(33, 33, body).unwrap()])
+                .unwrap();
+            assert_eq!(restored.turns[0].claimed_bytes, 0);
+            assert!(restored.turns[0].claimed.is_empty());
+            let retained = restored.credit.bytes();
+            restored.reaccount().unwrap();
+            assert_eq!(restored.credit.bytes(), retained);
         }
     }
 

@@ -23,7 +23,9 @@ callback; a new Turn after restart starts a new chain. Reobserving an already
 processed settled batch produces no duplicate advice or state mutation.
 
 Callbacks consume the supplied source-ordered batch, bounded by the AI output's
-256-block limit. They read one bounded captured Fact page at a time from the
+256-block limit. They request up to 128 captured Facts per page under the reader's
+byte budget and release each page before reading the next, checking cancellation
+between pages. They scan from the
 retained cursor through the exact horizon and correlate each settled ToolResult
 to its ToolIntent using both EffectId and full ToolResultIdentity. Only the
 current batch's bounded name/digest tuples are retained. Missing or inconsistent

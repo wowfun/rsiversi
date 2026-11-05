@@ -139,19 +139,23 @@ fn inherited(parent: &SessionHeader, after: u64, terminal: u64) -> SessionHeader
             SessionId::new("child").unwrap(),
             2,
             ForkOrigin {
-                parent_session_id: parent.session_id().clone(),
+                history: rsi_agent_session_protocol::HistoryOrigin {
+                    parent_session_id: parent.session_id().clone(),
+                    parent_header_fingerprint: parent.fingerprint().unwrap(),
+                    point: rsi_agent_session_protocol::ForkPoint::BeforeTurn {
+                        turn_id: TurnId::new("spawn").unwrap(),
+                    },
+                    resolved_after_seq: after,
+                    resolved_terminal_seq: terminal,
+                    terminal_prefix_sha256: "a".repeat(64),
+                    resolved_terminal_control_seq: 1,
+                    terminal_control_prefix_sha256: "b".repeat(64),
+                    requested_turns: ForkTurnSelection::All,
+                    effective_turns: 1,
+                },
                 root_session_id: parent.session_id().clone(),
                 path: AgentPath::new(vec![1]).unwrap(),
                 task_name: "child".into(),
-                parent_header_fingerprint: parent.fingerprint().unwrap(),
-                invoking_turn_id: TurnId::new("spawn").unwrap(),
-                resolved_after_seq: after,
-                resolved_terminal_seq: terminal,
-                terminal_prefix_sha256: "a".repeat(64),
-                resolved_terminal_control_seq: 1,
-                terminal_control_prefix_sha256: "b".repeat(64),
-                requested_turns: ForkTurnSelection::All,
-                effective_turns: 1,
             },
             ModelSelection::baseline(parent.settings()),
         )
@@ -274,10 +278,11 @@ async fn capture_is_immutable_target_bound_and_only_recorded_references_cross_th
         0,
         vec![
             accepted("target-turn", "read selected material"),
-            SessionFactBody::InputMessageEntered {
+            SessionFactBody::InputMessageClaimed {
                 turn_id: TurnId::new("target-turn").unwrap(),
                 step_id: StepId::new("step").unwrap(),
                 source: InputMessageSource::Human {
+                    attribution: None,
                     message_id: MessageId::new("message").unwrap(),
                 },
                 content: vec![AgentMessageContent::Reference {
@@ -301,6 +306,110 @@ async fn capture_is_immutable_target_bound_and_only_recorded_references_cross_th
         .unwrap();
     assert_eq!(page.recorded, Some(request.clone()));
     assert!(page.has_more);
+    // Prepared input can contain several bounded messages. Its flattened
+    // content index is bounded by the selected Fact, not by one message's 64 blocks.
+    let prepared_turn = TurnId::new("prepared-turn").unwrap();
+    let prepared_step = StepId::new("prepared-step").unwrap();
+    let added = |id: &str, content| PreparedInput::Added {
+        message: PreparedInputMessage::new(
+            PreparedInputRole::User,
+            MessageAttribution {
+                id: id.into(),
+                source: serde_json::json!({"kind":"plugin"}),
+            },
+            content,
+        )
+        .unwrap(),
+    };
+    append(
+        &*store,
+        &target,
+        3,
+        vec![
+            accepted("prepared-turn", "prepare reference"),
+            SessionFactBody::StepStarted {
+                turn_id: prepared_turn.clone(),
+                step_id: prepared_step.clone(),
+            },
+            SessionFactBody::StepInputsPrepared {
+                turn_id: prepared_turn.clone(),
+                step_id: prepared_step.clone(),
+                decision: StepInputDecision::enter(vec![
+                    added(
+                        "text",
+                        vec![
+                            AgentMessageContent::Text {
+                                text: "prefix".into()
+                            };
+                            64
+                        ],
+                    ),
+                    added(
+                        "reference",
+                        vec![AgentMessageContent::Reference {
+                            reference: Box::new(frozen.clone()),
+                        }],
+                    ),
+                ])
+                .unwrap(),
+            },
+            SessionFactBody::StepEnded {
+                turn_id: prepared_turn,
+                step_id: prepared_step,
+                outcome: StepOutcome::Completed,
+            },
+            terminal("prepared-turn"),
+        ],
+    )
+    .await;
+    let prepared_request = ReferenceReadRequest {
+        fact_seq: 6,
+        content_index: 64,
+        ..request.clone()
+    };
+    let recorded = store
+        .read_facts(
+            target.session_id(),
+            5,
+            1,
+            rsi_agent_store_protocol::MAXIMUM_STORE_FACT_PAGE_BYTES,
+        )
+        .await
+        .unwrap();
+    let roots = rsi_agent_store_protocol::fact_references(&recorded.facts[0]).unwrap();
+    for expected in [
+        DurableReference::Cas {
+            sha256: frozen.snapshot.sha256.clone(),
+            byte_len: frozen.snapshot.byte_len,
+        },
+        DurableReference::Session(source.session_id().clone()),
+        DurableReference::Session(target.session_id().clone()),
+    ] {
+        assert!(roots.iter().any(|root| *root == expected));
+    }
+    let prepared_page = owner
+        .read_recorded(
+            target.clone(),
+            prepared_request.clone(),
+            CancellationToken::new(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(prepared_page.text, page.text);
+    assert_eq!(prepared_page.recorded, Some(prepared_request.clone()));
+    assert!(
+        owner
+            .read_recorded(
+                target.clone(),
+                ReferenceReadRequest {
+                    content_index: 65,
+                    ..prepared_request
+                },
+                CancellationToken::new()
+            )
+            .await
+            .is_err()
+    );
     let child = inherited(&target, 0, 3);
     assert_eq!(
         owner

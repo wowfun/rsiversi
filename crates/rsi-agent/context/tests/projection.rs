@@ -20,6 +20,177 @@ mod compaction;
 mod contributions;
 #[path = "projection/images.rs"]
 mod images;
+#[path = "projection/prepared_input.rs"]
+mod prepared_input;
+
+#[test]
+fn command_content_keeps_user_role_and_file_identity_through_checkpoint() {
+    use rsi_agent_session_protocol::{CommandMessageSource, ContributionId, DomainRequestId};
+    let source = CommandMessageSource {
+        command: ContributionId::new("fixture.command").unwrap(),
+        request_id: DomainRequestId::new("command-request").unwrap(),
+        invocation_sha256: "a".repeat(64),
+        ordinal: 0,
+        attribution: None,
+    };
+    let turn = TurnId::new("command-context").unwrap();
+    let step = StepId::new("command-step").unwrap();
+    let file = rsi_media_protocol::FileRef::new(
+        rsi_media_protocol::MediaId::new("f".repeat(64)).unwrap(),
+        "context.txt",
+        9_000_000_000,
+    )
+    .unwrap();
+    let history = entered_facts(vec![
+        SessionFactBody::TurnAccepted {
+            turn_id: turn.clone(),
+            text: "work".into(),
+            model: None,
+            reasoning_effort: None,
+            sandbox: SandboxMode::WorkspaceWrite,
+            require_approval: false,
+        },
+        SessionFactBody::StepStarted {
+            turn_id: turn.clone(),
+            step_id: step.clone(),
+        },
+        SessionFactBody::InputMessageClaimed {
+            turn_id: turn,
+            step_id: step,
+            source: InputMessageSource::Command {
+                message_id: source.message_id().unwrap(),
+                source,
+            },
+            content: vec![
+                AgentMessageContent::Text {
+                    text: "The user switched to plan mode.".into(),
+                },
+                AgentMessageContent::File { file: file.clone() },
+            ],
+        },
+    ]);
+    let mut fold = ContextFold::with_limits(
+        header("system"),
+        ContextLimits::default(),
+        rsi_agent_context::ContextBudget::default(),
+    )
+    .unwrap();
+    fold.apply(&history).unwrap();
+    let options = rsi_ai_protocol::LanguageRequestOptions::default();
+    let before = fold
+        .request(ContextLimits::default(), options.clone())
+        .unwrap();
+    let message = before.messages().last().unwrap();
+    assert_eq!(message.role(), MessageRole::User);
+    assert!(
+        matches!(message.content(), [MessageContent::Text { text }, MessageContent::File { file: preserved, local_execution: true }] if text == "The user switched to plan mode." && preserved == &file)
+    );
+    let bytes = fold.checkpoint_bytes().unwrap();
+    let restored = ContextFold::from_checkpoint(
+        header("system"),
+        ContextLimits::default(),
+        &bytes,
+        rsi_agent_context::ContextBudget::default(),
+    )
+    .unwrap();
+    assert_eq!(
+        serde_json::to_value(before).unwrap(),
+        serde_json::to_value(restored.request(ContextLimits::default(), options).unwrap()).unwrap()
+    );
+}
+
+#[test]
+fn step_instructions_survive_checkpoint_but_do_not_leak_into_a_later_step() {
+    let turn = TurnId::new("turn-step-instructions").unwrap();
+    let step = StepId::new("step-one").unwrap();
+    let history = entered_facts(vec![
+        SessionFactBody::TurnAccepted {
+            turn_id: turn.clone(),
+            text: "work".into(),
+            model: None,
+            reasoning_effort: None,
+            sandbox: SandboxMode::WorkspaceWrite,
+            require_approval: false,
+        },
+        SessionFactBody::StepStarted {
+            turn_id: turn.clone(),
+            step_id: step.clone(),
+        },
+        SessionFactBody::StepPrepared {
+            turn_id: turn.clone(),
+            step_id: step.clone(),
+            names: vec![],
+            application: None,
+            instructions: vec![rsi_agent_session_protocol::StepInstruction {
+                producer: rsi_agent_session_protocol::ContributionId::new("fixture.plan").unwrap(),
+                text: "Only plan during this Step".into(),
+            }],
+        },
+    ]);
+    let mut fold = ContextFold::with_limits(
+        header("system"),
+        ContextLimits::default(),
+        rsi_agent_context::ContextBudget::default(),
+    )
+    .unwrap();
+    fold.apply(&history).unwrap();
+    let options = rsi_ai_protocol::LanguageRequestOptions::default();
+    let request = fold
+        .request(ContextLimits::default(), options.clone())
+        .unwrap();
+    assert!(
+        serde_json::to_string(&request)
+            .unwrap()
+            .contains("Only plan during this Step")
+    );
+    let bytes = fold.checkpoint_bytes().unwrap();
+    let mut restored = ContextFold::from_checkpoint(
+        header("system"),
+        ContextLimits::default(),
+        &bytes,
+        rsi_agent_context::ContextBudget::default(),
+    )
+    .unwrap();
+    assert_eq!(
+        serde_json::to_value(
+            restored
+                .request(ContextLimits::default(), options.clone())
+                .unwrap()
+        )
+        .unwrap(),
+        serde_json::to_value(request).unwrap()
+    );
+    let next = StepId::new("step-two").unwrap();
+    restored
+        .apply(&entered_facts_after(
+            restored.through_seq(),
+            vec![
+                SessionFactBody::StepEnded {
+                    turn_id: turn.clone(),
+                    step_id: step,
+                    outcome: rsi_agent_session_protocol::StepOutcome::Completed,
+                },
+                SessionFactBody::StepStarted {
+                    turn_id: turn.clone(),
+                    step_id: next.clone(),
+                },
+                SessionFactBody::StepPrepared {
+                    turn_id: turn,
+                    step_id: next,
+                    names: vec![],
+                    application: None,
+                    instructions: vec![],
+                },
+            ],
+        ))
+        .unwrap();
+    let request = restored.request(ContextLimits::default(), options).unwrap();
+    assert!(
+        !serde_json::to_string(&request)
+            .unwrap()
+            .contains("Only plan during this Step")
+    );
+}
 
 #[test]
 fn truncated_call_diagnostics_have_identical_checkpoint_and_replay_views() {
@@ -68,7 +239,7 @@ fn truncated_call_diagnostics_have_identical_checkpoint_and_replay_views() {
             .unwrap(),
         request
     );
-    let terminal = facts_after(
+    let terminal = entered_facts_after(
         history.len() as u64,
         vec![SessionFactBody::TurnTerminal {
             turn_id: turn,
@@ -96,10 +267,11 @@ fn truncated_call_diagnostics_have_identical_checkpoint_and_replay_views() {
         rsi_agent_context::ContextBudget::default(),
     )
     .unwrap();
+    child.begin_seed_source(&child.header().clone()).unwrap();
     child.apply_seed_page(&seed).unwrap();
     child.finish_seed().unwrap();
     child
-        .apply(&facts(vec![SessionFactBody::TurnAccepted {
+        .apply(&entered_facts(vec![SessionFactBody::TurnAccepted {
             turn_id: TurnId::new("child-turn").unwrap(),
             text: "child task".into(),
             model: None,
@@ -142,27 +314,31 @@ fn fork_header(system: &str, terminal_seq: u64, effective_turns: u64) -> Session
             SessionId::new("session-child").unwrap(),
             2,
             ForkOrigin {
-                parent_session_id: parent_id.clone(),
+                history: rsi_agent_session_protocol::HistoryOrigin {
+                    parent_session_id: parent_id.clone(),
+                    parent_header_fingerprint: parent_fingerprint,
+                    point: rsi_agent_session_protocol::ForkPoint::BeforeTurn {
+                        turn_id: TurnId::new("turn-spawn").unwrap(),
+                    },
+                    resolved_after_seq: 0,
+                    resolved_terminal_seq: terminal_seq,
+                    terminal_prefix_sha256: if terminal_seq == 0 {
+                        "0".repeat(64)
+                    } else {
+                        "a".repeat(64)
+                    },
+                    resolved_terminal_control_seq: effective_turns,
+                    terminal_control_prefix_sha256: if terminal_seq == 0 {
+                        "0".repeat(64)
+                    } else {
+                        "c".repeat(64)
+                    },
+                    requested_turns: ForkTurnSelection::All,
+                    effective_turns,
+                },
                 root_session_id: parent_id,
                 path: AgentPath::new(vec![1]).unwrap(),
                 task_name: "child".into(),
-                parent_header_fingerprint: parent_fingerprint,
-                invoking_turn_id: TurnId::new("turn-spawn").unwrap(),
-                resolved_after_seq: 0,
-                resolved_terminal_seq: terminal_seq,
-                terminal_prefix_sha256: if terminal_seq == 0 {
-                    "0".repeat(64)
-                } else {
-                    "a".repeat(64)
-                },
-                resolved_terminal_control_seq: effective_turns,
-                terminal_control_prefix_sha256: if terminal_seq == 0 {
-                    "0".repeat(64)
-                } else {
-                    "c".repeat(64)
-                },
-                requested_turns: ForkTurnSelection::All,
-                effective_turns,
             },
             rsi_agent_session_protocol::ModelSelection::baseline(parent.settings()),
         )
@@ -187,6 +363,10 @@ fn snapshot() -> PreparedCallSnapshot {
     }
 }
 
+fn entered_facts(bodies: Vec<SessionFactBody>) -> Vec<SessionFact> {
+    entered_facts_after(0, bodies)
+}
+
 fn facts(bodies: Vec<SessionFactBody>) -> Vec<SessionFact> {
     bodies
         .into_iter()
@@ -198,15 +378,46 @@ fn facts(bodies: Vec<SessionFactBody>) -> Vec<SessionFact> {
         .collect()
 }
 
-fn facts_after(after_seq: u64, bodies: Vec<SessionFactBody>) -> Vec<SessionFact> {
-    bodies
-        .into_iter()
-        .enumerate()
-        .map(|(index, body)| {
-            let seq = after_seq + u64::try_from(index).unwrap() + 1;
-            SessionFact::new(seq, seq, body).unwrap()
-        })
-        .collect()
+fn entered_facts_after(after_seq: u64, bodies: Vec<SessionFactBody>) -> Vec<SessionFact> {
+    use rsi_agent_session_protocol::{InputClaimRef, PreparedInput, StepInputDecision};
+    // Projection fixtures explicitly enter their inputs unchanged. Tests of the
+    // claim/preparation boundary use raw `facts` and supply their own decisions.
+    let mut result = Vec::new();
+    for body in bodies {
+        let seq = after_seq + u64::try_from(result.len()).unwrap() + 1;
+        let fact = SessionFact::new(seq, seq, body).unwrap();
+        let count = fact.claimed_input_count();
+        let turn_id = fact.body().turn_id().clone();
+        let step_id = match fact.body() {
+            SessionFactBody::InputMessageClaimed { step_id, .. }
+            | SessionFactBody::ToolContextsClaimed { step_id, .. } => step_id.clone(),
+            _ => StepId::new("fixture-input").unwrap(),
+        };
+        result.push(fact);
+        if count != 0 {
+            result.push(
+                SessionFact::new(
+                    seq + 1,
+                    seq + 1,
+                    SessionFactBody::StepInputsPrepared {
+                        turn_id,
+                        step_id,
+                        decision: StepInputDecision::enter(
+                            (0..count)
+                                .map(|ordinal| PreparedInput::Claimed {
+                                    claim: InputClaimRef::new(seq, u32::try_from(ordinal).unwrap())
+                                        .unwrap(),
+                                })
+                                .collect(),
+                        )
+                        .unwrap(),
+                    },
+                )
+                .unwrap(),
+            );
+        }
+    }
+    result
 }
 
 #[allow(clippy::too_many_lines)] // Complete correlated model and Tool Fact fixture.
@@ -215,7 +426,7 @@ fn tool_result_facts(result: ToolResult) -> Vec<SessionFact> {
     let effect = EffectId::new("model-1").unwrap();
     let tool_identity =
         ToolResultIdentity::new("tool-f1-g1-r1", "effect-1", "tool-call", "b".repeat(64)).unwrap();
-    facts(vec![
+    entered_facts(vec![
         SessionFactBody::TurnAccepted {
             reasoning_effort: None,
             turn_id: turn.clone(),
@@ -348,7 +559,7 @@ fn provider_replay_does_not_elide_history_without_an_exact_route_identity() {
         rsi_agent_context::ContextBudget::default(),
     )
     .unwrap();
-    fold.apply(&facts(vec![
+    fold.apply(&entered_facts(vec![
         SessionFactBody::TurnAccepted {
             reasoning_effort: None,
             turn_id: previous.clone(),
@@ -447,7 +658,7 @@ fn fork_seed_keeps_canonical_history_when_replay_route_is_not_preflighted() {
         json!({"response_id": "resp-parent"}),
     )
     .unwrap();
-    let seed = facts(vec![
+    let seed = entered_facts(vec![
         SessionFactBody::TurnAccepted {
             reasoning_effort: None,
             turn_id: parent_turn.clone(),
@@ -511,7 +722,7 @@ fn fork_seed_keeps_canonical_history_when_replay_route_is_not_preflighted() {
     ]);
     let child_turn = TurnId::new("turn-fork-child").unwrap();
     let child_step = StepId::new("step-fork-child").unwrap();
-    let child = facts(vec![
+    let child = entered_facts(vec![
         SessionFactBody::MessageTurnAccepted {
             reasoning_effort: None,
             turn_id: child_turn.clone(),
@@ -525,7 +736,7 @@ fn fork_seed_keeps_canonical_history_when_replay_route_is_not_preflighted() {
             turn_id: child_turn.clone(),
             step_id: child_step.clone(),
         },
-        SessionFactBody::InputMessageEntered {
+        SessionFactBody::InputMessageClaimed {
             turn_id: child_turn,
             step_id: child_step,
             source: InputMessageSource::Agent {
@@ -543,6 +754,7 @@ fn fork_seed_keeps_canonical_history_when_replay_route_is_not_preflighted() {
         rsi_agent_context::ContextBudget::default(),
     )
     .unwrap();
+    fold.begin_seed_source(&fold.header().clone()).unwrap();
     fold.apply_seed_page(&seed).unwrap();
     fold.finish_seed().unwrap();
     fold.apply(&child).unwrap();
@@ -563,7 +775,7 @@ fn fork_seed_keeps_canonical_history_when_replay_route_is_not_preflighted() {
 #[test]
 fn fork_seed_rejects_cross_page_overlap_and_incomplete_coverage() {
     let turn = TurnId::new("turn-seed").unwrap();
-    let seed = facts(vec![
+    let seed = entered_facts(vec![
         SessionFactBody::TurnAccepted {
             reasoning_effort: None,
             turn_id: turn.clone(),
@@ -584,6 +796,9 @@ fn fork_seed_rejects_cross_page_overlap_and_incomplete_coverage() {
         rsi_agent_context::ContextBudget::default(),
     )
     .unwrap();
+    overlap
+        .begin_seed_source(&overlap.header().clone())
+        .unwrap();
     overlap.apply_seed_page(&seed[..1]).unwrap();
     assert!(matches!(
         overlap.apply_seed_page(&seed),
@@ -595,13 +810,16 @@ fn fork_seed_rejects_cross_page_overlap_and_incomplete_coverage() {
         rsi_agent_context::ContextBudget::default(),
     )
     .unwrap();
+    incomplete
+        .begin_seed_source(&incomplete.header().clone())
+        .unwrap();
     incomplete.apply_seed_page(&seed[..1]).unwrap();
     assert!(matches!(
         incomplete.finish_seed(),
         Err(ContextError::Invalid(message)) if message.contains("complete inherited interval")
     ));
 
-    let child = facts(vec![SessionFactBody::TurnAccepted {
+    let child = entered_facts(vec![SessionFactBody::TurnAccepted {
         reasoning_effort: None,
         turn_id: TurnId::new("turn-child-before-seed").unwrap(),
         text: "child".into(),
@@ -618,11 +836,88 @@ fn fork_seed_rejects_cross_page_overlap_and_incomplete_coverage() {
         rsi_agent_context::ContextBudget::default(),
     )
     .unwrap();
+    incomplete_page
+        .begin_seed_source(&incomplete_page.header().clone())
+        .unwrap();
     incomplete_page.apply_seed_page(&seed[..1]).unwrap();
     assert!(matches!(
         incomplete_page.apply_page(&child, 1),
         Err(ContextError::Invalid(message)) if message.contains("complete inherited interval")
     ));
+}
+
+#[test]
+fn nested_full_seed_keeps_ancestor_sources_and_last_refuses_the_ancestor_window() {
+    let parent = fork_header("system", 3, 1);
+    let page = |id: &str, text: &str| {
+        entered_facts(vec![
+            SessionFactBody::TurnAccepted {
+                turn_id: TurnId::new(id).unwrap(),
+                text: text.into(),
+                model: None,
+                reasoning_effort: None,
+                sandbox: SandboxMode::WorkspaceWrite,
+                require_approval: false,
+            },
+            SessionFactBody::TurnTerminal {
+                turn_id: TurnId::new(id).unwrap(),
+                outcome: TurnOutcome::Completed,
+                result: None,
+            },
+        ])
+    };
+    let ancestors = page("ancestor-turn", "ANCESTOR_INPUT");
+    let local = page("local-turn", "PARENT_INPUT");
+    for selection in [ForkTurnSelection::All, ForkTurnSelection::Last(1)] {
+        let mut origin = parent.fork_origin().unwrap().clone();
+        origin.history.parent_session_id = parent.session_id().clone();
+        origin.history.parent_header_fingerprint = parent.fingerprint().unwrap();
+        origin.path = AgentPath::new(vec![1, 1]).unwrap();
+        origin.history.requested_turns = selection.clone();
+        let child = parent
+            .forked_child(
+                SessionId::new("nested-child").unwrap(),
+                3,
+                origin,
+                rsi_agent_session_protocol::ModelSelection::baseline(parent.settings()),
+            )
+            .unwrap();
+        let budget = rsi_agent_context::ContextBudget::default();
+        let mut fold = ContextFold::new(child.clone(), budget.clone()).unwrap();
+        assert!(
+            fold.apply_seed_page(&local).is_err(),
+            "a source must precede its Facts"
+        );
+        if selection == ForkTurnSelection::All {
+            fold.begin_seed_source(&parent).unwrap();
+            fold.apply_seed_page(&ancestors).unwrap();
+            assert!(
+                fold.finish_seed().is_err(),
+                "the direct-parent interval is still missing"
+            );
+        } else {
+            assert!(fold.begin_seed_source(&parent).is_err());
+        }
+        fold.begin_seed_source(&child).unwrap();
+        fold.apply_seed_page(&local).unwrap();
+        fold.finish_seed().unwrap();
+        let request = fold
+            .request(
+                ContextLimits::default(),
+                rsi_ai_protocol::LanguageRequestOptions::default(),
+            )
+            .unwrap();
+        let text = serde_json::to_string(&request).unwrap();
+        assert_eq!(
+            text.contains("ANCESTOR_INPUT"),
+            selection == ForkTurnSelection::All
+        );
+        assert!(text.contains("PARENT_INPUT"));
+        assert_eq!(fold.through_seq(), 0);
+        drop(request);
+        drop(fold);
+        assert_eq!(budget.used(), 0);
+    }
 }
 
 #[test]
@@ -634,7 +929,7 @@ fn compaction_drops_only_a_complete_oldest_turn_and_inserts_one_notice() {
         rsi_agent_context::ContextBudget::default(),
     )
     .unwrap();
-    fold.apply(&facts(vec![
+    fold.apply(&entered_facts(vec![
         SessionFactBody::TurnAccepted {
             reasoning_effort: None,
             turn_id: old.clone(),
@@ -676,7 +971,7 @@ fn projection_uses_the_exact_canonical_json_byte_boundary() {
         rsi_agent_context::ContextBudget::default(),
     )
     .unwrap();
-    fold.apply(&facts(vec![
+    fold.apply(&entered_facts(vec![
         SessionFactBody::TurnAccepted {
             reasoning_effort: None,
             turn_id: old.clone(),
@@ -721,7 +1016,7 @@ fn projection_uses_the_exact_canonical_json_byte_boundary() {
 fn active_turn_is_never_split_to_force_a_fit() {
     let mut fold =
         ContextFold::new(header(""), rsi_agent_context::ContextBudget::default()).unwrap();
-    fold.apply(&facts(vec![SessionFactBody::TurnAccepted {
+    fold.apply(&entered_facts(vec![SessionFactBody::TurnAccepted {
         reasoning_effort: None,
         turn_id: TurnId::new("turn-current").unwrap(),
         text: "x".repeat(1_000),
@@ -740,7 +1035,7 @@ fn active_turn_is_never_split_to_force_a_fit() {
 fn incremental_fold_rejects_gaps_and_replays() {
     let mut fold =
         ContextFold::new(header(""), rsi_agent_context::ContextBudget::default()).unwrap();
-    let first = facts(vec![SessionFactBody::TurnAccepted {
+    let first = entered_facts(vec![SessionFactBody::TurnAccepted {
         reasoning_effort: None,
         turn_id: TurnId::new("turn-1").unwrap(),
         text: "hello".into(),
@@ -762,7 +1057,7 @@ fn checkpoint_round_trip_preserves_projection_and_accepts_only_the_suffix() {
         rsi_agent_context::ContextBudget::default(),
     )
     .unwrap();
-    fold.apply(&facts(vec![
+    fold.apply(&entered_facts(vec![
         SessionFactBody::TurnAccepted {
             reasoning_effort: None,
             turn_id: old.clone(),
@@ -790,8 +1085,8 @@ fn checkpoint_round_trip_preserves_projection_and_accepts_only_the_suffix() {
     assert_eq!(restored.project(limits).unwrap(), expected);
 
     restored
-        .apply(&facts_after(
-            2,
+        .apply(&entered_facts_after(
+            restored.through_seq(),
             vec![SessionFactBody::TurnAccepted {
                 reasoning_effort: None,
                 turn_id: TurnId::new("turn-current").unwrap(),
@@ -803,7 +1098,7 @@ fn checkpoint_round_trip_preserves_projection_and_accepts_only_the_suffix() {
         ))
         .unwrap();
     let projected = restored.project(limits).unwrap();
-    assert_eq!(projected.through_seq, 3);
+    assert_eq!(projected.through_seq, 5);
     assert!(
         serde_json::to_string(projected.messages())
             .unwrap()
@@ -818,7 +1113,7 @@ fn checkpoint_capacity_refusal_preserves_prefix_and_exact_credit_follows_last_sl
         ContextFold::with_limits(header("system"), ContextLimits::default(), budget.clone())
             .unwrap();
     let turn = TurnId::new("checkpoint-capacity").unwrap();
-    fold.apply(&facts(vec![
+    fold.apply(&entered_facts(vec![
         SessionFactBody::TurnAccepted {
             turn_id: turn.clone(),
             text: "quote\" slash\\ line\n中文".repeat(32),
@@ -878,7 +1173,7 @@ fn checkpoint_rejects_active_assembler_corruption_and_identity_mismatch() {
     )
     .unwrap();
     empty_turn
-        .apply(&facts(vec![SessionFactBody::MessageTurnAccepted {
+        .apply(&entered_facts(vec![SessionFactBody::MessageTurnAccepted {
             reasoning_effort: None,
             turn_id: TurnId::new("turn-empty").unwrap(),
             activation_id: ActivationId::new("activation-empty").unwrap(),
@@ -888,10 +1183,18 @@ fn checkpoint_rejects_active_assembler_corruption_and_identity_mismatch() {
             require_approval: false,
         }]))
         .unwrap();
-    assert!(matches!(
-        empty_turn.checkpoint_bytes(),
-        Err(ContextError::Invalid(message)) if message.contains("empty turn")
-    ));
+    let empty_checkpoint = empty_turn.checkpoint_bytes().unwrap();
+    let restored_empty = ContextFold::from_checkpoint(
+        header("system"),
+        limits,
+        &empty_checkpoint,
+        rsi_agent_context::ContextBudget::default(),
+    )
+    .unwrap();
+    assert_eq!(
+        restored_empty.project(limits).unwrap(),
+        empty_turn.project(limits).unwrap()
+    );
 
     let mut active = ContextFold::with_limits(
         header("system"),
@@ -901,7 +1204,7 @@ fn checkpoint_rejects_active_assembler_corruption_and_identity_mismatch() {
     .unwrap();
     let active_turn = TurnId::new("turn-active").unwrap();
     active
-        .apply(&facts(vec![
+        .apply(&entered_facts(vec![
             SessionFactBody::TurnAccepted {
                 reasoning_effort: None,
                 turn_id: active_turn.clone(),
@@ -932,7 +1235,7 @@ fn checkpoint_rejects_active_assembler_corruption_and_identity_mismatch() {
     )
     .unwrap();
     complete
-        .apply(&facts(vec![
+        .apply(&entered_facts(vec![
             SessionFactBody::TurnAccepted {
                 reasoning_effort: None,
                 turn_id: turn.clone(),
@@ -1049,7 +1352,7 @@ fn checkpoint_round_trip_preserves_accepted_queued_turn_state() {
         rsi_agent_context::ContextBudget::default(),
     )
     .unwrap();
-    fold.apply(&facts(vec![
+    fold.apply(&entered_facts(vec![
         SessionFactBody::TurnAccepted {
             reasoning_effort: None,
             turn_id: first.clone(),
@@ -1087,8 +1390,8 @@ fn checkpoint_round_trip_preserves_accepted_queued_turn_state() {
         fold.project(limits).unwrap()
     );
     restored
-        .apply(&facts_after(
-            3,
+        .apply(&entered_facts_after(
+            restored.through_seq(),
             vec![SessionFactBody::TurnTerminal {
                 turn_id: queued,
                 outcome: TurnOutcome::Completed,
@@ -1112,35 +1415,30 @@ fn active_oldest_turn_cannot_bypass_absolute_message_retention() {
         }
         .unwrap();
         for seq in 1..=rsi_agent_context::MAXIMUM_CONTEXT_MESSAGES as u64 {
-            let fact = SessionFact::new(
-                seq,
-                seq,
-                SessionFactBody::TurnAccepted {
+            let input = entered_facts_after(
+                fold.through_seq(),
+                vec![SessionFactBody::TurnAccepted {
                     turn_id: TurnId::new(format!("retained-{seq}")).unwrap(),
                     text: "still active".into(),
                     model: None,
                     reasoning_effort: None,
                     sandbox: SandboxMode::WorkspaceWrite,
                     require_approval: false,
-                },
-            )
-            .unwrap();
-            fold.apply(&[fact]).unwrap();
+                }],
+            );
+            fold.apply(&input).unwrap();
         }
-        let seq = rsi_agent_context::MAXIMUM_CONTEXT_MESSAGES as u64 + 1;
-        let fact = SessionFact::new(
-            seq,
-            seq,
-            SessionFactBody::TurnAccepted {
+        let input = entered_facts_after(
+            fold.through_seq(),
+            vec![SessionFactBody::TurnAccepted {
                 turn_id: TurnId::new("over-limit").unwrap(),
                 text: "overflow".into(),
                 model: None,
                 reasoning_effort: None,
                 sandbox: SandboxMode::WorkspaceWrite,
                 require_approval: false,
-            },
-        )
-        .unwrap();
+            }],
+        );
         assert_eq!(
             fold.project(
                 ContextLimits::new(
@@ -1154,12 +1452,9 @@ fn active_oldest_turn_cannot_bypass_absolute_message_retention() {
             .len(),
             rsi_agent_context::MAXIMUM_CONTEXT_MESSAGES
         );
-        assert!(matches!(
-            fold.apply(std::slice::from_ref(&fact)),
-            Err(ContextError::TooLarge)
-        ));
-        assert_eq!(fold.through_seq(), seq - 1);
-        assert!(matches!(fold.apply(&[fact]), Err(ContextError::Invalid(_))));
+        assert!(matches!(fold.apply(&input), Err(ContextError::TooLarge)));
+        assert_eq!(fold.through_seq(), input[0].seq());
+        assert!(matches!(fold.apply(&input), Err(ContextError::Invalid(_))));
         assert!(matches!(
             fold.project(ContextLimits::default()),
             Err(ContextError::Invalid(_))
@@ -1177,24 +1472,22 @@ fn active_turn_bytes_fail_before_retaining_the_overflowing_message() {
     .unwrap();
     let mut rejected = false;
     for seq in 1..=128 {
-        let fact = SessionFact::new(
-            seq,
-            seq,
-            SessionFactBody::TurnAccepted {
+        let input = entered_facts_after(
+            fold.through_seq(),
+            vec![SessionFactBody::TurnAccepted {
                 turn_id: TurnId::new(format!("bytes-{seq}")).unwrap(),
                 text: "x".repeat(512 * 1024),
                 model: None,
                 reasoning_effort: None,
                 sandbox: SandboxMode::WorkspaceWrite,
                 require_approval: false,
-            },
-        )
-        .unwrap();
-        match fold.apply(std::slice::from_ref(&fact)) {
+            }],
+        );
+        match fold.apply(&input) {
             Ok(()) => {}
             Err(ContextError::TooLarge) => {
-                assert_eq!(fold.through_seq(), seq - 1);
-                assert!(matches!(fold.apply(&[fact]), Err(ContextError::Invalid(_))));
+                assert_eq!(fold.through_seq(), input[0].seq());
+                assert!(matches!(fold.apply(&input), Err(ContextError::Invalid(_))));
                 rejected = true;
                 break;
             }
@@ -1208,7 +1501,7 @@ fn active_turn_bytes_fail_before_retaining_the_overflowing_message() {
 fn request_materialization_uses_one_projection_admission() {
     let budget = rsi_agent_context::ContextBudget::default();
     let mut fold = ContextFold::new(header("system"), budget.clone()).unwrap();
-    fold.apply(&facts(vec![SessionFactBody::TurnAccepted {
+    fold.apply(&entered_facts(vec![SessionFactBody::TurnAccepted {
         reasoning_effort: None,
         turn_id: TurnId::new("projection-credit").unwrap(),
         text: "large input ".repeat(1024),
@@ -1276,6 +1569,9 @@ fn failed_fact_releases_workspace_and_fences_all_projection_entry_points() {
                 .unwrap(),
             },
         ]);
+        if path == 2 {
+            fold.begin_seed_source(&fold.header().clone()).unwrap();
+        }
         let apply = |fold: &mut ContextFold, input: &[SessionFact]| match path {
             0 => fold.apply(input),
             1 => fold.apply_page(input, input.last().unwrap().seq()),
@@ -1354,7 +1650,7 @@ fn immutable_fact_weight_preserves_the_exact_ingestion_admission_boundary() {
 fn small_shared_pool_requires_projection_headroom_above_retained_state() {
     let budget = rsi_agent_context::ContextBudget::new(512 * 1024).unwrap();
     let mut fold = ContextFold::new(header("system"), budget.clone()).unwrap();
-    fold.apply(&facts(vec![SessionFactBody::TurnAccepted {
+    fold.apply(&entered_facts(vec![SessionFactBody::TurnAccepted {
         turn_id: TurnId::new("small-pool").unwrap(),
         text: "x".repeat(32 * 1024),
         model: None,
@@ -1393,7 +1689,7 @@ fn workspace_refusal_preserves_exact_prefix_before_a_hidden_page_hole() {
     let budget = rsi_agent_context::ContextBudget::new(64 * 1024).unwrap();
     let mut fold =
         ContextFold::with_limits(header(""), ContextLimits::default(), budget.clone()).unwrap();
-    fold.apply(&facts(vec![
+    fold.apply(&entered_facts(vec![
         SessionFactBody::TurnAccepted {
             turn_id: TurnId::new("completed").unwrap(),
             text: "input".into(),
@@ -1430,7 +1726,7 @@ fn workspace_refusal_preserves_exact_prefix_before_a_hidden_page_hole() {
         fold.apply_page(&[next], 4),
         Err(ContextError::Capacity)
     ));
-    assert_eq!(fold.through_seq(), 2);
+    assert_eq!(fold.through_seq(), 3);
     assert_eq!(budget.used(), used);
     let after = fold.checkpoint_bytes().unwrap();
     assert_eq!(after.as_bytes(), bytes);
@@ -1442,7 +1738,7 @@ fn shared_parked_folds_release_pressure_without_process_restart_or_cursor_rebuil
     let mut folds = Vec::new();
     for _ in 0..6 {
         let mut fold = ContextFold::new(header("system"), budget.clone()).unwrap();
-        fold.apply(&facts(vec![SessionFactBody::TurnAccepted {
+        fold.apply(&entered_facts(vec![SessionFactBody::TurnAccepted {
             turn_id: TurnId::new("parked").unwrap(),
             text: "x".repeat(32 * 1024),
             model: None,
@@ -1455,8 +1751,8 @@ fn shared_parked_folds_release_pressure_without_process_restart_or_cursor_rebuil
     }
     let before = budget.used();
     let next = SessionFact::new(
-        2,
-        2,
+        3,
+        3,
         SessionFactBody::TurnTerminal {
             turn_id: TurnId::new("parked").unwrap(),
             outcome: TurnOutcome::Completed,
@@ -1472,12 +1768,51 @@ fn shared_parked_folds_release_pressure_without_process_restart_or_cursor_rebuil
         folds[0].apply(std::slice::from_ref(&next)),
         Err(ContextError::Capacity)
     ));
-    assert_eq!(folds[0].through_seq(), 1);
+    assert_eq!(folds[0].through_seq(), 2);
     assert_eq!(budget.used(), before + pressure.bytes());
     drop(folds.pop().unwrap());
     folds[0].apply(&[next]).unwrap();
-    assert_eq!(folds[0].through_seq(), 2);
+    assert_eq!(folds[0].through_seq(), 3);
     drop(folds);
     drop(pressure);
     assert_eq!(budget.used(), 0);
+}
+
+#[test]
+fn fork_history_namespaces_equal_turn_ids_by_source_session() {
+    let mut fold = ContextFold::new(
+        fork_header("system", 3, 1),
+        rsi_agent_context::ContextBudget::default(),
+    )
+    .unwrap();
+    let page = |text: &str| {
+        entered_facts(vec![
+            SessionFactBody::TurnAccepted {
+                turn_id: TurnId::new("reused-turn").unwrap(),
+                text: text.into(),
+                model: None,
+                reasoning_effort: None,
+                sandbox: SandboxMode::WorkspaceWrite,
+                require_approval: false,
+            },
+            SessionFactBody::TurnTerminal {
+                turn_id: TurnId::new("reused-turn").unwrap(),
+                outcome: TurnOutcome::Completed,
+                result: None,
+            },
+        ])
+    };
+    fold.begin_seed_source(&fold.header().clone()).unwrap();
+    fold.apply_seed_page(&page("SOURCE_INPUT")).unwrap();
+    fold.finish_seed().unwrap();
+    fold.apply(&page("LOCAL_INPUT")).unwrap();
+    let request = fold
+        .request(
+            ContextLimits::default(),
+            rsi_ai_protocol::LanguageRequestOptions::default(),
+        )
+        .unwrap();
+    let text = serde_json::to_string(&request).unwrap();
+    assert!(text.contains("SOURCE_INPUT"));
+    assert!(text.contains("LOCAL_INPUT"));
 }

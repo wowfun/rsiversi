@@ -1,5 +1,12 @@
 # rsi-agent-references
 
+Recorded reference reads accept original Human claim Facts and authored content
+in `StepInputsPrepared`. For prepared input, `content_index` addresses the ordered
+flattening of replacement and added message blocks; unchanged claim entries add
+no blocks to that Fact. Bounds come from the selected validated Fact rather than
+a single-message constant. Existing Session and inherited-interval authority
+checks remain the read boundary.
+
 This owner captures, verifies and reads immutable human-selected conversation
 references. It consumes mechanical SessionStore operations and the Agent-owned
 wire values. The Context builder consumes only their inline previews; it never

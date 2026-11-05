@@ -18,10 +18,11 @@ fn contribution_history() -> Vec<SessionFact> {
             turn_id: turn.clone(),
             step_id: step.clone(),
         },
-        SessionFactBody::InputMessageEntered {
+        SessionFactBody::InputMessageClaimed {
             turn_id: turn.clone(),
             step_id: step,
             source: InputMessageSource::PluginContext {
+                tool: None,
                 contribution_id: ContributionId::new("fixture.time").unwrap(),
             },
             content: vec![AgentMessageContent::Text {
@@ -74,6 +75,7 @@ fn contribution_history() -> Vec<SessionFact> {
         .unwrap(),
     });
     bodies.push(SessionFactBody::ToolRejected {
+        additional_contexts: Vec::new(),
         origin: rsi_agent_session_protocol::ToolOrigin::Model {
             effect_id: model.clone(),
         },
@@ -88,7 +90,7 @@ fn contribution_history() -> Vec<SessionFact> {
             reason: "Only reading is permitted".into(),
         },
     });
-    facts(bodies)
+    entered_facts(bodies)
 }
 
 #[test]

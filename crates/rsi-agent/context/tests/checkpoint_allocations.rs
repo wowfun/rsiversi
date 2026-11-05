@@ -60,7 +60,7 @@ unsafe impl GlobalAlloc for Counting {
 #[global_allocator]
 static ALLOCATOR: Counting = Counting;
 #[test]
-fn full_builder_preserves_v12_payload_and_v6_envelope_without_a_third_full_copy() {
+fn full_builder_preserves_v18_payload_and_v6_envelope_without_a_third_full_copy() {
     let header = SessionHeader::new_local(
         SessionId::new("checkpoint-probe").unwrap(),
         1,
@@ -88,7 +88,7 @@ fn full_builder_preserves_v12_payload_and_v6_envelope_without_a_third_full_copy(
         let turn = TurnId::new(format!("turn-{i}")).unwrap();
         facts.push(
             SessionFact::new(
-                i * 2 + 1,
+                i * 3 + 1,
                 1,
                 SessionFactBody::TurnAccepted {
                     reasoning_effort: None,
@@ -103,7 +103,22 @@ fn full_builder_preserves_v12_payload_and_v6_envelope_without_a_third_full_copy(
         );
         facts.push(
             SessionFact::new(
-                i * 2 + 2,
+                i * 3 + 2,
+                1,
+                SessionFactBody::StepInputsPrepared {
+                    turn_id: turn.clone(),
+                    step_id: StepId::new("fixture-input").unwrap(),
+                    decision: StepInputDecision::enter(vec![PreparedInput::Claimed {
+                        claim: InputClaimRef::new(i * 3 + 1, 0).unwrap(),
+                    }])
+                    .unwrap(),
+                },
+            )
+            .unwrap(),
+        );
+        facts.push(
+            SessionFact::new(
+                i * 3 + 3,
                 1,
                 SessionFactBody::TurnTerminal {
                     turn_id: turn,
@@ -127,20 +142,33 @@ fn full_builder_preserves_v12_payload_and_v6_envelope_without_a_third_full_copy(
         additional,
         hex::encode(Sha256::digest(&bytes))
     );
-    // The v12 fold additionally carries the live Turn recovery instruction binding; the generic
-    // v6 outer envelope is unchanged; Session 23 and builder 2.9.0 bind the current cache.
+    assert_checkpoint_contract(&bytes);
+    assert!(
+        additional < 3 * bytes.len(),
+        "full builder retained an avoidable complete checkpoint: {additional}"
+    );
+    state.restore(&bytes).unwrap();
+    assert_planning_allocations(&state, bytes.len());
+    assert_installation_allocations(&mut state);
+}
+
+fn assert_checkpoint_contract(bytes: &[u8]) {
+    // v18 binds each projected Turn to its source Session and keeps pending
+    // claims separate from prepared messages and current Step instructions;
+    // the v6 outer envelope, Session 34 and builder 2.15.0 bind the cache.
     let prefix = b"rsi-agent-model-context-v6\0".len() + 32;
     let metadata_len = u32::from_le_bytes(bytes[prefix..prefix + 4].try_into().unwrap()) as usize;
     let metadata: serde_json::Value =
         serde_json::from_slice(&bytes[prefix + 4..prefix + 4 + metadata_len]).unwrap();
-    assert_eq!(metadata["builder"]["semantic_version"], "2.9.0");
+    assert_eq!(metadata["builder"]["semantic_version"], "2.15.0");
     println!("checkpoint_metadata={metadata}");
     let payload = &bytes[prefix + 4 + metadata_len..];
-    let fold_magic = b"rsi-agent-context-checkpoint-v12\0";
+    let fold_magic = b"rsi-agent-context-checkpoint-v18\0";
     assert!(payload.starts_with(fold_magic));
     let decoded: serde_json::Value =
         serde_json::from_slice(&payload[fold_magic.len() + 32..]).unwrap();
-    assert_eq!(decoded["version"], 12);
+    assert_eq!(decoded["version"], 18);
+    assert!(decoded["step_instructions"].as_array().unwrap().is_empty());
     assert_eq!(decoded["turns"].as_array().unwrap().len(), 24);
     assert!(
         decoded["turns"]
@@ -149,17 +177,19 @@ fn full_builder_preserves_v12_payload_and_v6_envelope_without_a_third_full_copy(
             .iter()
             .all(|turn| turn["batches"].as_object().unwrap().is_empty())
     );
+    for (index, turn) in decoded["turns"].as_array().unwrap().iter().enumerate() {
+        assert!(turn["claimed"].as_array().unwrap().is_empty());
+        let key: (String, String) = serde_json::from_str(turn["id"].as_str().unwrap()).unwrap();
+        assert_eq!(key, ("checkpoint-probe".into(), format!("turn-{index}")));
+        assert!(
+            turn["messages"][0]["content"][0]["content"]["text"] == "payload-界\"".repeat(65536),
+            "retained message changed"
+        );
+    }
     assert_eq!(
-        hex::encode(Sha256::digest(&bytes)),
-        "2c6540516876c7c2be6758908b430af0f79af3db6eef70282da407054ee9a9b5"
+        hex::encode(Sha256::digest(bytes)),
+        "521f08c3ef66073bff2d13641c0031e9c61498c6020b72ea2642924649594ba3"
     );
-    assert!(
-        additional < 3 * bytes.len(),
-        "full builder retained an avoidable complete checkpoint: {additional}"
-    );
-    state.restore(&bytes).unwrap();
-    assert_planning_allocations(&state, bytes.len());
-    assert_installation_allocations(&mut state);
 }
 
 fn assert_planning_allocations(state: &ModelContextState, checkpoint_bytes: usize) {
@@ -192,7 +222,7 @@ fn assert_installation_allocations(state: &mut ModelContextState) {
     use rsi_ai_protocol::{ContentDelta, ContentStart, FinishReason, LanguageEvent};
     let turn = TurnId::new("install-probe").unwrap();
     let effect = EffectId::new("install-summary").unwrap();
-    let mut sequence = 49_u64;
+    let mut sequence = state.position().through_seq + 1;
     let mut ingest = |state: &mut ModelContextState, body| {
         let fact = Arc::new(SessionFact::new(sequence, 1, body).unwrap());
         sequence += 1;

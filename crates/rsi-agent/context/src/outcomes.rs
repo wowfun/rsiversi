@@ -1001,7 +1001,10 @@ mod tests {
             )
             .unwrap(),
         };
-        assert_eq!(fold.apply_body(&body, 1), Err(ContextError::TooLarge));
+        assert_eq!(
+            fold.apply_body(&rsi_agent_session_protocol::SessionFact::new(1, 1, body).unwrap()),
+            Err(ContextError::TooLarge)
+        );
         assert!(!fold.checkpointable_prefix);
         let turn = fold.turn_mut(&turn).unwrap();
         assert!(turn.batches.is_empty());

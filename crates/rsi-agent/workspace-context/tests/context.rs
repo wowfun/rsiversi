@@ -160,7 +160,7 @@ async fn non_utf8_agent_filename_does_not_hide_valid_definitions() {
 }
 
 fn human(text: &str) -> AgentMessage {
-    message(AgentMessageSource::Human, text)
+    message(AgentMessageSource::Human { attribution: None }, text)
 }
 
 fn message(source: AgentMessageSource, text: &str) -> AgentMessage {
@@ -417,19 +417,23 @@ async fn selected_workspace_loads_project_and_user_sources_by_default() {
             SessionId::new("workspace-child").unwrap(),
             2,
             ForkOrigin {
-                parent_session_id: created.session_id().clone(),
+                history: rsi_agent_session_protocol::HistoryOrigin {
+                    parent_session_id: created.session_id().clone(),
+                    parent_header_fingerprint: created.fingerprint().unwrap(),
+                    point: rsi_agent_session_protocol::ForkPoint::BeforeTurn {
+                        turn_id: TurnId::new("spawn").unwrap(),
+                    },
+                    resolved_after_seq: 0,
+                    resolved_terminal_seq: 0,
+                    terminal_prefix_sha256: "0".repeat(64),
+                    resolved_terminal_control_seq: 0,
+                    terminal_control_prefix_sha256: "0".repeat(64),
+                    requested_turns: ForkTurnSelection::None,
+                    effective_turns: 0,
+                },
                 root_session_id: created.session_id().clone(),
                 path: AgentPath::new(vec![1]).unwrap(),
                 task_name: "child".into(),
-                parent_header_fingerprint: created.fingerprint().unwrap(),
-                invoking_turn_id: TurnId::new("spawn").unwrap(),
-                resolved_after_seq: 0,
-                resolved_terminal_seq: 0,
-                terminal_prefix_sha256: "0".repeat(64),
-                resolved_terminal_control_seq: 0,
-                terminal_control_prefix_sha256: "0".repeat(64),
-                requested_turns: ForkTurnSelection::None,
-                effective_turns: 0,
             },
             ModelSelection::baseline(created.settings()),
         )

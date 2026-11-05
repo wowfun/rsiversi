@@ -181,7 +181,7 @@ impl MentionHistory {
                 }
                 let texts: Vec<&str> = match fact.body() {
                     SessionFactBody::TurnAccepted { text, .. } => vec![text],
-                    SessionFactBody::InputMessageEntered {
+                    SessionFactBody::InputMessageClaimed {
                         source: InputMessageSource::Human { .. },
                         content,
                         ..

@@ -60,6 +60,12 @@ fn selected(id: &str, version: &str, digest: &str) -> Arc<SelectedBuilder> {
 #[derive(Debug)]
 struct WrongPosition(Box<dyn ModelContextCursor>);
 impl ModelContextCursor for WrongPosition {
+    fn claimed_inputs(
+        &self,
+        turn: &rsi_agent_session_protocol::TurnId,
+    ) -> rsi_agent_context::Result<&[rsi_agent_session_protocol::SessionFact]> {
+        self.0.claimed_inputs(turn)
+    }
     fn ingest(&mut self, page: ContextPage<'_>) -> rsi_agent_context::Result<()> {
         self.0.ingest(page)
     }
@@ -131,7 +137,7 @@ fn builder_identity_constructor_and_decode_share_the_same_bounds() {
 
 fn complete_facts() -> Vec<Arc<SessionFact>> {
     let turn = TurnId::new("turn-builder").unwrap();
-    facts(vec![
+    entered_facts(vec![
         SessionFactBody::TurnAccepted {
             reasoning_effort: None,
             turn_id: turn.clone(),
@@ -149,6 +155,88 @@ fn complete_facts() -> Vec<Arc<SessionFact>> {
     .into_iter()
     .map(Arc::new)
     .collect()
+}
+
+#[test]
+fn pending_tool_messages_survive_checkpoint_and_selected_fork_until_each_root_enters_them() {
+    use rsi_tools_protocol::ToolContextMessage;
+    let message = ToolContextMessage {
+        id: "from-hook".into(),
+        source: json!({"kind":"post-tool","hook":"original"}),
+        text: vec!["first".into(), "second".into()],
+    };
+    let mut result = ToolResult::new(json!("done"), vec![], false).unwrap();
+    result.additional_contexts.push(message.clone());
+    let mut facts: Vec<_> = tool_result_facts(result)
+        .into_iter()
+        .map(Arc::new)
+        .collect();
+    let terminal = facts.last().unwrap().seq() + 1;
+    facts.push(Arc::new(
+        SessionFact::new(
+            terminal,
+            terminal,
+            SessionFactBody::TurnTerminal {
+                turn_id: TurnId::new("turn-1").unwrap(),
+                outcome: TurnOutcome::Completed,
+                result: None,
+            },
+        )
+        .unwrap(),
+    ));
+    let open = |header| {
+        ModelContextState::open(
+            Arc::new(DefaultContextBuilder::default()),
+            header,
+            ContextLimits::default(),
+            rsi_agent_context::ContextBudget::default(),
+        )
+        .unwrap()
+    };
+    let parent = header("");
+    let mut state = open(parent.clone());
+    state.ingest(ContextPage::Canonical(&facts)).unwrap();
+    let mut restored = open(parent.clone());
+    restored.restore(&state.checkpoint().unwrap()).unwrap();
+    let mut fork = open(fork_header("", terminal, 1));
+    fork.ingest(ContextPage::ForkSource(&fork.header().clone()))
+        .unwrap();
+    fork.ingest(ContextPage::ForkSeed(&facts)).unwrap();
+    fork.ingest(ContextPage::FinishSeed).unwrap();
+    let turn = TurnId::new("follow-up").unwrap();
+    let step = StepId::new("next").unwrap();
+    for (cursor, after) in [(&mut restored, terminal), (&mut fork, 0)] {
+        let pending = cursor.pending_tool_inputs();
+        assert_eq!(pending.len(), 1);
+        assert_eq!(pending[0].message, message);
+        let inputs: Vec<_> =
+            rsi_agent_session_protocol::SettledToolContext::claim(pending, &turn, &step)
+                .into_iter()
+                .collect();
+        assert!(matches!(inputs.as_slice(),
+            [SessionFactBody::ToolContextsClaimed { messages, .. }]
+            if matches!(messages.as_slice(), [input] if input.session == *parent.session_id()
+                && input.effect.as_str() == "tool-1" && input.ordinal == 0 && input.message == message)
+        ));
+        let mut next = vec![SessionFactBody::TurnAccepted {
+            reasoning_effort: None,
+            turn_id: turn.clone(),
+            text: "continue".into(),
+            model: None,
+            sandbox: SandboxMode::WorkspaceWrite,
+            require_approval: false,
+        }];
+        next.extend(inputs);
+        let entered: Vec<_> = entered_facts_after(after, next)
+            .into_iter()
+            .map(Arc::new)
+            .collect();
+        cursor.ingest(ContextPage::Canonical(&entered)).unwrap();
+        assert!(cursor.pending_tool_inputs().is_empty());
+        cursor.restore(&cursor.checkpoint().unwrap()).unwrap();
+        assert!(cursor.pending_tool_inputs().is_empty());
+    }
+    assert!(!state.pending_tool_inputs().is_empty());
 }
 
 #[test]
@@ -276,11 +364,14 @@ fn selected_cursor_retains_claim_holes_and_fork_seed_ownership() {
     let history = complete_facts();
     let mut child = ModelContextState::open(
         builder.clone(),
-        fork_header("system", 2, 1),
+        fork_header("system", history.last().unwrap().seq(), 1),
         ContextLimits::default(),
         rsi_agent_context::ContextBudget::default(),
     )
     .unwrap();
+    child
+        .ingest(ContextPage::ForkSource(&child.header().clone()))
+        .unwrap();
     child.ingest(ContextPage::ForkSeed(&history[..1])).unwrap();
     assert!(child.ingest(ContextPage::FinishSeed).is_err());
     child.ingest(ContextPage::ForkSeed(&history[1..])).unwrap();
@@ -313,10 +404,13 @@ fn selected_cursor_retains_claim_holes_and_fork_seed_ownership() {
     claim
         .ingest(ContextPage::ClaimVisible {
             facts: &history,
-            through_seq: 3,
+            through_seq: history.last().unwrap().seq() + 1,
         })
         .unwrap();
-    assert_eq!(claim.position().through_seq, 3);
+    assert_eq!(
+        claim.position().through_seq,
+        history.last().unwrap().seq() + 1
+    );
     assert!(
         claim.checkpoint().is_err(),
         "filtered scan became canonical checkpoint"

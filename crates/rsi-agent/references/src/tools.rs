@@ -28,7 +28,7 @@ impl PluginFactory for ReferenceToolsFactory {
             "type":"object","properties":{
                 "recorded_session_id":{"type":"string","minLength":1,"maxLength":MAXIMUM_AGENT_IDENTIFIER_BYTES},
                 "fact_seq":{"type":"string","pattern":"^[1-9][0-9]{0,19}$"},
-                "content_index":{"type":"integer","minimum":0,"maximum":MAXIMUM_AGENT_MESSAGE_CONTENT_BLOCKS-1},
+                "content_index":{"type":"integer","minimum":0},
                 "offset":{"type":"integer","minimum":0,"maximum":MAXIMUM_REFERENCE_TEXT_BYTES},
                 "maximum":{"type":"integer","minimum":4,"maximum":MAXIMUM_REFERENCE_PAGE_BYTES}
             },"required":["recorded_session_id","fact_seq","content_index","maximum"],"additionalProperties":false

@@ -1,5 +1,53 @@
 # rsi-agent-context
 
+Accepted direct text and claimed input remain outside model messages until
+`StepInputsPrepared`. The fold retains their original Facts by Turn and source
+Session, resolves the final decision from that exact set, and drops consumed
+claims even when the decision enters nothing or rejects. A pending capture borrows
+that retained set; it does not reread history per message. Checkpoints retain
+unprepared claims separately from entered model history. Fold checkpoint v18 and
+builder 2.15.0 invalidate earlier projection caches.
+
+Verbatim file blocks remain typed in the fold and checkpoints. The receiving
+Session's execution location determines whether a block permits local path
+projection. The AI provider resolves that location when assembling its request;
+the fold never stores host paths or reads file contents.
+Pending claim bytes are accounted incrementally on admission and released on
+preparation or terminal cleanup. Checkpoint restoration rebuilds that derived
+weight once from the retained Facts.
+
+The builder-independent cursor retains a bounded pending tool context queue
+from Tool results, model-call rejections and input Facts. It folds both local and inherited
+Facts, includes pending messages in its checkpoint envelope and retains their
+original effect order across compaction. Only a committed matching input
+consumes a message. Fork windows inherit the tool outcomes in their selected
+source interval. A preparation can read the captured IDs, source metadata and
+text blocks before its own additions. Retained tool messages enter model
+history with user role and keep their plugin attribution.
+The cursor expands a multi-message entry into separate user messages in the
+same order as individually entered inputs.
+
+The executor supplies the request's captured definitions to Context as the
+ordinary model request options. Retries retain those definitions and their
+encoded-byte budget through the request series.
+
+For model-origin calls, `ToolRejected` closes the named call with an error reply
+containing its policy or approval reason. This uses the same outcome fold for
+live requests, full replay and checkpoints; rejection does not imply Tool body
+execution. Program-origin rejections are returned to their coordinator and do
+not enter model history independently of its curated result.
+
+Inherited and local Turns are indexed by their complete `(SessionId, TurnId)`
+coordinate. Turn IDs are only Session-local; projection, pruning, accounting,
+checkpoint restore and compaction selection must preserve both coordinates.
+Durable compaction selections use policy v2 and carry the source Session explicitly.
+
+Step preparation instructions are current system guidance, not historical chat
+messages. `StepPrepared` replaces that guidance; the next Step or terminal Turn
+clears it. Ordinary contributed inputs retain their existing history semantics.
+The bounded guidance participates in context accounting, compaction requests and
+checkpoint v18, so recovery cannot retain an exited Plan's old instructions.
+
 Language history is projected from atomic `ModelAttemptSettled` evidence.
 Final failed, cancelled and max-token attempts contribute their safe text and
 reasoning with an explicit interruption marker; incomplete calls never enter
@@ -21,7 +69,7 @@ interrupted-output projection.
 Target-specific Tool image fallback consumes the assembled messages before request
 construction, moving unaffected messages and request options without cloning. Only Tool results containing
 images are rebuilt; complete-request validation still bounds the projection.
-The allocation golden binds builder 2.9.0, Session format 23, the v12 fold
+The allocation golden binds builder 2.15.0, Session format 34, the v18 fold
 and the v6 envelope.
 
 The single deep module for prompt projection, incremental model context, and
@@ -90,7 +138,7 @@ reuses retained per-Turn totals and serializes only synthesized outcomes.
 Raw Facts remain unchanged.
 
 Retention and emission are distinct. Each attempt supplies its described target
-LanguageProfile along with frozen Language request options. Builder 2.9.0 emits
+LanguageProfile along with frozen Language request options. Builder 2.15.0 emits
 nested ToolResult images only when that profile positively declares image Tool
 results. No or Unknown uses deterministic descriptor text in the same block
 position, without reading Media or changing call IDs and error status. Ordinary
@@ -245,10 +293,18 @@ tool calls, tool results, and the complete retained turn prefix remain. This is
 the fail-closed boundary that prevents one deployment's response identity from
 crossing into another deployment that accepts the same extension format.
 
-A fork fold owns the complete inherited interval recorded in the child Header.
+A fork fold owns the inherited history selected by the child Header. `All`
+recursively includes the parent's already selected history, then its completed
+local interval. `Last(n)` selects completed local parent Turns and starts a new
+history window; it does not broaden that window with earlier ancestor messages.
+The history owner supplies immutable source Headers oldest first, followed by
+the child Header. Every adjacent Header fingerprint must match its successor's
+parent binding, and only `All` can continue an inherited chain. The fold retains
+one bounded source Header at a time and keeps the original source Session on
+model replay and compaction references.
 Seed pages must begin immediately after `resolved_after_seq`, remain contiguous
 across page boundaries, and finish exactly at `resolved_terminal_seq` before
-child Facts may be projected. The inherited interval must also contain only
+the next source or child Facts may be projected. Each inherited interval contains only
 balanced completed turns at that boundary. The parent interval does not advance
 the child's Fact cursor or Fact-prefix digest.
 

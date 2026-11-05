@@ -1147,7 +1147,7 @@ mod capacity_tests {
         let messages = (0..64)
             .map(|message| AgentMessage {
                 message_id: MessageId::new(format!("message-{message}")).unwrap(),
-                source: AgentMessageSource::Human,
+                source: AgentMessageSource::Human { attribution: None },
                 content: (0..64)
                     .map(|block| AgentMessageContent::Text {
                         text: if message == 63 && block == 63 {

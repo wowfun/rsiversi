@@ -21,7 +21,7 @@ impl Default for DefaultContextBuilder {
         Self {
             identity: ContextBuilderIdentity::new(
                 "rsi.agent.context.default",
-                "2.9.0",
+                "2.15.0",
                 hex::encode(Sha256::digest(b"null")),
             )
             .expect("static builder identity is valid"),
@@ -54,6 +54,12 @@ struct DefaultCursor {
     limits: ContextLimits,
 }
 impl ModelContextCursor for DefaultCursor {
+    fn claimed_inputs(
+        &self,
+        turn: &rsi_agent_session_protocol::TurnId,
+    ) -> Result<&[rsi_agent_session_protocol::SessionFact]> {
+        self.fold.claimed_inputs(turn)
+    }
     fn raw_pressure(&self) -> Option<crate::RawContextPressure> {
         Some(crate::RawContextPressure {
             messages: self.fold.retained_messages,
@@ -67,6 +73,7 @@ impl ModelContextCursor for DefaultCursor {
             ContextPage::ClaimVisible { facts, through_seq } => {
                 self.fold.apply_page(facts, through_seq)
             }
+            ContextPage::ForkSource(header) => self.fold.begin_seed_source(header),
             ContextPage::ForkSeed(facts) => self.fold.apply_seed_page(facts),
             ContextPage::FinishSeed => self.fold.finish_seed(),
         }

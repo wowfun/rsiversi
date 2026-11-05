@@ -474,7 +474,7 @@ async fn workspace_last_good_tombstone_and_dedup_are_atomic_domain_behavior() {
             .iter()
             .filter(|fact| matches!(
                 fact.body(),
-                SessionFactBody::InputMessageEntered { content, .. }
+                SessionFactBody::InputMessageClaimed { content, .. }
                     if content.iter().any(|block| matches!(
                         block,
                         AgentMessageContent::Text { text } if text.contains(source_failure)
@@ -489,7 +489,7 @@ async fn workspace_last_good_tombstone_and_dedup_are_atomic_domain_behavior() {
             .iter()
             .filter(|fact| matches!(
                 fact.body(),
-                SessionFactBody::InputMessageEntered {
+                SessionFactBody::InputMessageClaimed {
                     source: InputMessageSource::AgentInstructions {
                         tombstone: true,
                         ..
@@ -505,7 +505,7 @@ async fn workspace_last_good_tombstone_and_dedup_are_atomic_domain_behavior() {
             .iter()
             .filter(|fact| matches!(
                 fact.body(),
-                SessionFactBody::InputMessageEntered {
+                SessionFactBody::InputMessageClaimed {
                     source: InputMessageSource::UserSkillInvocation { .. },
                     ..
                 }
@@ -579,7 +579,7 @@ async fn cold_sqlite_resume_uses_new_codec_generation_without_replaying_workspac
         assert_eq!(
             facts
                 .iter()
-                .filter(|fact| matches!(fact.body(), SessionFactBody::InputMessageEntered { .. }))
+                .filter(|fact| matches!(fact.body(), SessionFactBody::InputMessageClaimed { .. }))
                 .count(),
             2
         );
@@ -632,7 +632,7 @@ async fn initial_empty_workspace_does_not_emit_replacement_or_tombstone() {
     assert!(
         !facts
             .iter()
-            .any(|fact| matches!(fact.body(), SessionFactBody::InputMessageEntered { .. }))
+            .any(|fact| matches!(fact.body(), SessionFactBody::InputMessageClaimed { .. }))
     );
     drop(lease);
     kernel.shutdown(workers).await.unwrap();
@@ -670,7 +670,7 @@ async fn fork_rebinds_the_inherited_cursor_and_only_new_human_input_invokes_skil
             ),
             message: AgentMessage {
                 message_id: MessageId::new("parent-task").unwrap(),
-                source: AgentMessageSource::Human,
+                source: AgentMessageSource::Human { attribution: None },
                 content: vec![AgentMessageContent::Text {
                     text: "parent work".into(),
                 }],
@@ -695,10 +695,11 @@ async fn fork_rebinds_the_inherited_cursor_and_only_new_human_input_invokes_skil
         .await
         .unwrap();
     let bodies = (0..20)
-        .map(|index| SessionFactBody::InputMessageEntered {
+        .map(|index| SessionFactBody::InputMessageClaimed {
             turn_id: parent.turn_id().clone(),
             step_id: context.step_id.clone(),
             source: InputMessageSource::PluginContext {
+                tool: None,
                 contribution_id: ContributionId::new("fixture.history").unwrap(),
             },
             content: vec![AgentMessageContent::Text {
@@ -722,7 +723,7 @@ async fn fork_rebinds_the_inherited_cursor_and_only_new_human_input_invokes_skil
             ),
             message: AgentMessage {
                 message_id: MessageId::new("parent-invoking").unwrap(),
-                source: AgentMessageSource::Human,
+                source: AgentMessageSource::Human { attribution: None },
                 content: vec![AgentMessageContent::Text {
                     text: "spawn child".into(),
                 }],
@@ -883,7 +884,7 @@ async fn fork_rebinds_the_inherited_cursor_and_only_new_human_input_invokes_skil
             session: SubmitSession::Resume(kernel.prepare_resume(&child.session_id).await.unwrap()),
             message: AgentMessage {
                 message_id: MessageId::new("human-child").unwrap(),
-                source: AgentMessageSource::Human,
+                source: AgentMessageSource::Human { attribution: None },
                 content: vec![AgentMessageContent::Text {
                     text: "/manual".into(),
                 }],
@@ -893,7 +894,7 @@ async fn fork_rebinds_the_inherited_cursor_and_only_new_human_input_invokes_skil
         })
         .await
         .unwrap();
-    assert_eq!(kernel.enter_pending_step_messages(&claim).await.unwrap(), 1);
+    assert_eq!(kernel.claim_pending_step_messages(&claim).await.unwrap(), 1);
     assert_eq!(enter(&kernel, &claim, "child-input").await, 1);
     assert_eq!(
         kernel.domain_states(parent.session_id()).await.unwrap(),
@@ -915,7 +916,7 @@ async fn fork_rebinds_the_inherited_cursor_and_only_new_human_input_invokes_skil
         .facts;
     assert!(!child_facts.iter().any(|fact| matches!(
         fact.body(),
-        SessionFactBody::InputMessageEntered {
+        SessionFactBody::InputMessageClaimed {
             source: InputMessageSource::AgentInstructions { .. },
             ..
         }
