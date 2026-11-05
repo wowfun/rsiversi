@@ -34,6 +34,8 @@ pub(crate) fn operations() -> Vec<OperationSpec> {
             | Operation::ExecuteCommand
             | Operation::CommandStatus
             | Operation::DraftSnapshot
+            | Operation::DraftObserve
+            | Operation::DiscardDraftInputs
             | Operation::SelectPreset
             | Operation::Image
             | Operation::MutateQueue
@@ -41,6 +43,7 @@ pub(crate) fn operations() -> Vec<OperationSpec> {
             | Operation::MessageStatus
             | Operation::ReadMessage
             | Operation::Cancel
+            | Operation::WaitIdle
             | Operation::History
             | Operation::ModelObserve
             | Operation::Observe

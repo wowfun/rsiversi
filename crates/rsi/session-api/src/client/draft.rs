@@ -6,8 +6,34 @@ impl Handle {
     pub(super) async fn checked_draft_snapshot(&self) -> Result<SessionDraftView> {
         let frozen = self.frozen();
         let view: SessionDraftView = frozen.call(Operation::DraftSnapshot, &()).await?;
-        if view.header != frozen.binding().header {
-            return Err(malformed(Operation::DraftSnapshot));
+        self.adopt_draft_view(&frozen, view, Operation::DraftSnapshot)
+    }
+
+    pub(super) async fn discard_checked_inputs(
+        &self,
+        request: rsi_session_protocol::DiscardDraftInputs,
+    ) -> Result<SessionDraftView> {
+        request.validate()?;
+        let frozen = self.frozen();
+        let view: SessionDraftView = frozen.call(Operation::DiscardDraftInputs, &request).await?;
+        if view
+            .command_inputs
+            .iter()
+            .any(|input| request.message_ids.contains(&input.message.message_id))
+        {
+            return Err(malformed(Operation::DiscardDraftInputs));
+        }
+        self.adopt_draft_view(&frozen, view, Operation::DiscardDraftInputs)
+    }
+
+    fn adopt_draft_view(
+        &self,
+        frozen: &Self,
+        view: SessionDraftView,
+        operation: Operation,
+    ) -> Result<SessionDraftView> {
+        if view.validate().is_err() || view.header != frozen.binding().header {
+            return Err(malformed(operation));
         }
         let mut binding = self.binding.write().expect("Session binding poisoned");
         if binding.target == frozen.target() {
@@ -36,7 +62,11 @@ impl Handle {
             return Err(malformed(Operation::SelectPreset));
         }
         let view = result?;
-        if view.header != expected_header || view.revision != revision {
+        if view.validate().is_err()
+            || !view.command_inputs.is_empty()
+            || view.header != expected_header
+            || view.revision != revision
+        {
             return Err(malformed(Operation::SelectPreset));
         }
         let mut binding = self.binding.write().expect("Session binding poisoned");

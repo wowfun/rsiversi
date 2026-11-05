@@ -72,6 +72,8 @@ impl PluginFactory for Providers {
 }
 fn input(id: &str) -> SubmitInput {
     SubmitInput {
+        origin: rsi_session_protocol::SubmissionOrigin::User,
+        attribution: None,
         reasoning_effort: None,
         message_id: MessageId::new(id).unwrap(),
         delivery: rsi_agent_session_protocol::MessageDelivery::NextTurn,

@@ -260,6 +260,12 @@ async fn maximum_activity_roster_uses_one_access_and_two_cut_batches() {
 }
 #[async_trait]
 impl SessionProjections for Roster {
+    fn running_sessions(
+        &self,
+        _: &[SessionId],
+    ) -> TurnResult<std::collections::BTreeSet<SessionId>> {
+        panic!("attention uses the resident roster")
+    }
     fn activity_revision(&self) -> Option<u64> {
         Some(self.revision.load(Ordering::Acquire))
     }

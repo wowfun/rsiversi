@@ -59,7 +59,7 @@ async fn preset_failure_preserves_values_and_success_resets_defaults_on_the_same
         .unwrap();
     let states = fixture
         .store
-        .read_domain_states(&SessionId::new("preset").unwrap(), None)
+        .read_domain_states(&SessionId::new("preset").unwrap(), None, None)
         .await
         .unwrap();
     assert!(

@@ -339,6 +339,12 @@ impl Drop for PolicyOwner {
     }
 }
 impl rsi_session_protocol::SessionProtection for PolicyOwner {
+    fn catalog_generation(&self) -> Option<Arc<dyn Send + Sync>> {
+        self.snapshot()
+            .ok()
+            .map(|policy| policy as Arc<dyn Send + Sync>)
+    }
+
     fn view(
         &self,
         scope: &SessionProtectionScope,

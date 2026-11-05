@@ -18,6 +18,7 @@ const SWEEP: Duration = Duration::from_mins(1);
 type Created = Result<Arc<LocalSessionHandle>>;
 
 pub(super) struct Drafts {
+    membership: watch::Sender<()>,
     entries: Mutex<BTreeMap<SessionId, Arc<Entry>>>,
     execution: Execution,
     stopped: CancellationToken,
@@ -40,16 +41,22 @@ struct Entry {
 struct LeaseState {
     deadline: Deadline,
     active: usize,
+    owners: usize,
     retired: bool,
 }
 
 impl Entry {
+    fn is_catalog_draft(&self) -> bool {
+        self.device.is_some()
+            && matches!(&*self.result.borrow(), Some(Ok(handle)) if !handle.private_owner && !handle.published.load(std::sync::atomic::Ordering::Acquire))
+    }
+
     fn expired(&self) -> bool {
         let mut state = self
             .state
             .lock()
             .unwrap_or_else(std::sync::PoisonError::into_inner);
-        if state.active == 0 && state.deadline.has_elapsed() {
+        if state.active == 0 && state.owners == 0 && state.deadline.has_elapsed() {
             state.retired = true;
         }
         state.retired
@@ -75,6 +82,7 @@ impl Drop for Drafts {
 impl Drafts {
     pub(super) fn new(execution: Execution) -> Arc<Self> {
         let drafts = Arc::new(Self {
+            membership: watch::channel(()).0,
             entries: Mutex::new(BTreeMap::new()),
             execution: execution.clone(),
             stopped: CancellationToken::new(),
@@ -100,6 +108,10 @@ impl Drafts {
                 })),
         );
         drafts
+    }
+
+    pub(super) fn watch_membership(&self) -> watch::Receiver<()> {
+        self.membership.subscribe()
     }
 
     pub(super) fn accepting(&self) -> Result<()> {
@@ -157,7 +169,12 @@ impl Drafts {
             state.retired = true;
             handle.expire_draft();
         }
-        drop(entries.remove(session));
+        if entries
+            .remove(session)
+            .is_some_and(|entry| entry.is_catalog_draft())
+        {
+            self.membership.send_replace(());
+        }
         DraftRelease::Released
     }
 
@@ -167,17 +184,14 @@ impl Drafts {
                 .entries
                 .lock()
                 .unwrap_or_else(std::sync::PoisonError::into_inner);
-            let expired = entries
-                .iter()
-                .filter(|(_, entry)| entry.expired())
-                .map(|(id, _)| id.clone())
-                .collect::<Vec<_>>();
-            expired
-                .into_iter()
-                .filter_map(|id| entries.remove(&id))
+            entries
+                .extract_if(.., |_, entry| entry.expired())
+                .map(|(_, entry)| entry)
                 .collect::<Vec<_>>()
         };
-        drop(removed);
+        if removed.iter().any(|entry| entry.is_catalog_draft()) {
+            self.membership.send_replace(());
+        }
     }
 
     fn remove(&self, entry: &Arc<Entry>) {
@@ -200,7 +214,9 @@ impl Drafts {
                 None
             }
         };
-        drop(removed);
+        if removed.is_some_and(|entry| entry.is_catalog_draft()) {
+            self.membership.send_replace(());
+        }
     }
 
     pub(super) async fn create(
@@ -243,6 +259,7 @@ impl Drafts {
                     state: Mutex::new(LeaseState {
                         deadline: self.execution.deadline_after(IDLE),
                         active: 0,
+                        owners: 0,
                         retired: false,
                     }),
                     result,
@@ -278,7 +295,11 @@ impl Drafts {
                 entry.state.lock().unwrap_or_else(std::sync::PoisonError::into_inner).deadline = drafts.execution.deadline_after(IDLE);
                 let failed = result.is_err();
                 entry.result.send_replace(Some(result));
-                if failed || drafts.stopped.is_cancelled() { drafts.remove(&entry); }
+                if failed || drafts.stopped.is_cancelled() {
+                    drafts.remove(&entry);
+                } else if entry.is_catalog_draft() {
+                    drafts.membership.send_replace(());
+                }
             })));
         } else {
             drop(entry);
@@ -307,6 +328,19 @@ impl Drafts {
         let _activity = handle.begin_activity()?;
         Ok(Some(handle))
     }
+    pub(super) fn ready_for(
+        &self,
+        device: &rsi_api_protocol::DeviceId,
+    ) -> Vec<Arc<LocalSessionHandle>> {
+        self.entries
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .values()
+            .filter(|entry| entry.device.as_ref() == Some(device) && !entry.expired())
+            .filter_map(|entry| entry.result.borrow().as_ref()?.as_ref().ok().cloned())
+            .filter(|handle| !handle.private_owner)
+            .collect()
+    }
 }
 
 async fn wait(mut receiver: watch::Receiver<Option<Created>>) -> Created {
@@ -328,7 +362,7 @@ pub(super) struct DraftLease {
 }
 
 impl DraftLease {
-    pub(super) fn begin(&self) -> Result<Activity> {
+    pub(super) fn retain(&self) -> Result<Owner> {
         let drafts = self.drafts.upgrade().ok_or_else(expired)?;
         drafts.accepting()?;
         let entry = self.entry.upgrade().ok_or_else(expired)?;
@@ -336,18 +370,50 @@ impl DraftLease {
             .state
             .lock()
             .unwrap_or_else(std::sync::PoisonError::into_inner);
-        if state.retired || (state.active == 0 && state.deadline.has_elapsed()) {
+        if state.retired || (state.active == 0 && state.owners == 0 && state.deadline.has_elapsed())
+        {
+            state.retired = true;
+            drop(state);
+            drafts.remove(&entry);
+            return Err(expired());
+        }
+        state.owners = state.owners.checked_add(1).ok_or(SessionError::Capacity)?;
+        Ok(Owner {
+            lease: self.clone(),
+        })
+    }
+    pub(super) fn begin(&self) -> Result<Activity> {
+        self.acquire(true)
+    }
+
+    /// Pins an in-flight catalog read without renewing its idle deadline.
+    pub(super) fn inspect(&self) -> Result<Activity> {
+        self.acquire(false)
+    }
+
+    fn acquire(&self, renew: bool) -> Result<Activity> {
+        let drafts = self.drafts.upgrade().ok_or_else(expired)?;
+        drafts.accepting()?;
+        let entry = self.entry.upgrade().ok_or_else(expired)?;
+        let mut state = entry
+            .state
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        if state.retired || (state.active == 0 && state.owners == 0 && state.deadline.has_elapsed())
+        {
             state.retired = true;
             drop(state);
             drafts.remove(&entry);
             return Err(expired());
         }
         state.active = state.active.checked_add(1).ok_or(SessionError::Capacity)?;
-        state.deadline = drafts.execution.deadline_after(IDLE);
+        if renew {
+            state.deadline = drafts.execution.deadline_after(IDLE);
+        }
         drop(state);
         Ok(Activity {
             entry,
-            execution: drafts.execution.clone(),
+            renewal: renew.then(|| drafts.execution.clone()),
         })
     }
 
@@ -358,9 +424,48 @@ impl DraftLease {
     }
 }
 
+pub(super) struct Owner {
+    lease: DraftLease,
+}
+impl fmt::Debug for Owner {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.debug_struct("DraftOwner").finish_non_exhaustive()
+    }
+}
+impl rsi_session_protocol::DraftOwner for Owner {
+    fn is_active(&self) -> bool {
+        let Some(entry) = self.lease.entry.upgrade() else {
+            return false;
+        };
+        let state = entry
+            .state
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        !state.retired
+    }
+}
+impl Drop for Owner {
+    fn drop(&mut self) {
+        let Some(entry) = self.lease.entry.upgrade() else {
+            return;
+        };
+        let mut state = entry
+            .state
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        state.owners -= 1;
+        if state.owners == 0
+            && !state.retired
+            && let Some(drafts) = self.lease.drafts.upgrade()
+        {
+            state.deadline = drafts.execution.deadline_after(IDLE);
+        }
+    }
+}
+
 pub(super) struct Activity {
     entry: Arc<Entry>,
-    execution: Execution,
+    renewal: Option<Execution>,
 }
 
 impl Drop for Activity {
@@ -371,7 +476,9 @@ impl Drop for Activity {
             .lock()
             .unwrap_or_else(std::sync::PoisonError::into_inner);
         state.active -= 1;
-        state.deadline = self.execution.deadline_after(IDLE);
+        if let Some(renewal) = &self.renewal {
+            state.deadline = renewal.deadline_after(IDLE);
+        }
     }
 }
 

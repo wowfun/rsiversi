@@ -97,6 +97,29 @@ pub(super) async fn goal(
     }))
 }
 
+pub(super) async fn draft(
+    handle: &Handle,
+) -> rsi_session_protocol::Result<rsi_session_protocol::DraftRevisionStream> {
+    let handle = handle.frozen();
+    let operation = Operation::DraftObserve;
+    let mut source = open(&handle, operation, ()).await?;
+    Ok(Box::pin(async_stream::try_stream! {
+        let mut previous = None;
+        while let Some(message) = source.next().await {
+            let message = message.map_err(|error| stream_error(operation, error))?;
+            let revision: Option<u64> = decode(&handle, operation, &message)?;
+            if let Some(next) = revision {
+                if previous.is_some_and(|old| next <= old) { Err(client::malformed(operation))?; }
+                previous = Some(next);
+            }
+            drop(message);
+            yield revision;
+            if revision.is_none() { return; }
+        }
+        Err(client::malformed(operation))?;
+    }))
+}
+
 pub(super) async fn projections(
     handle: &Handle,
 ) -> rsi_session_protocol::Result<rsi_session_protocol::ProjectionStream> {

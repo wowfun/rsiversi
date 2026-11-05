@@ -7,6 +7,8 @@ use rsi_session_protocol::{RecentSessionCursor, SessionError};
 use serde::{Deserialize, Serialize};
 
 pub(crate) const HEADER_REPLY: usize = rsi_agent_session_protocol::MAXIMUM_SESSION_HEADER_BYTES;
+const DRAFT_REPLY: usize =
+    HEADER_REPLY + rsi_agent_session_protocol::MAXIMUM_COMMAND_INPUT_BYTES + 8192;
 pub(crate) const LARGE_REPLY: usize = rsi_api_protocol::MAXIMUM_API_BYTES;
 pub(crate) const OBSERVATION_REPLY: usize =
     rsi_agent_session_protocol::MAXIMUM_SESSION_FACT_BYTES + 64 * 1024;
@@ -41,6 +43,8 @@ pub enum Operation {
     ExecuteCommand,
     CommandStatus,
     DraftSnapshot,
+    DraftObserve,
+    DiscardDraftInputs,
     SelectPreset,
     Image,
     MutateQueue,
@@ -48,6 +52,7 @@ pub enum Operation {
     MessageStatus,
     ReadMessage,
     Cancel,
+    WaitIdle,
     History,
     Observe,
     ModelObserve,
@@ -74,7 +79,7 @@ pub enum Operation {
 }
 impl Operation {
     /// Current Session operation descriptors.
-    pub const ALL: [Self; 53] = [
+    pub const ALL: [Self; 56] = [
         Self::CasGcPreview,
         Self::CasGc,
         Self::CasGcStatus,
@@ -98,6 +103,8 @@ impl Operation {
         Self::ExecuteCommand,
         Self::CommandStatus,
         Self::DraftSnapshot,
+        Self::DraftObserve,
+        Self::DiscardDraftInputs,
         Self::SelectPreset,
         Self::Image,
         Self::MutateQueue,
@@ -105,6 +112,7 @@ impl Operation {
         Self::MessageStatus,
         Self::ReadMessage,
         Self::Cancel,
+        Self::WaitIdle,
         Self::History,
         Self::Observe,
         Self::ModelObserve,
@@ -151,22 +159,31 @@ impl Operation {
             Self::Terminal => ("terminal", Control, Mutation, 8192, 128 * 1024),
             Self::TerminalInput => ("terminal-input", Data, Mutation, 512 * 1024, 8192),
             Self::TerminalOutput => ("terminal-output", Subscription, Read, 8192, 128 * 1024),
-            Self::Create => ("create", Data, Mutation, 8192, HEADER_REPLY + 16 * 1024),
+            Self::Create => ("create", Data, Mutation, 8192, DRAFT_REPLY + 8192),
             Self::ReadHeader => ("read-header", Data, Read, 4096, HEADER_REPLY),
             Self::Attach => ("attach", Data, Read, 4096, HEADER_REPLY),
             Self::Recent => ("recent", Data, Read, 4096, LARGE_REPLY),
             Self::Submit => ("submit", Data, Mutation, 8 * 1024 * 1024, 16 * 1024),
             Self::Commands => ("commands", Data, Read, 8192, 512 * 1024),
-            Self::ExecuteCommand => ("execute-command", Data, Mutation, 32 * 1024, 8192),
+            Self::ExecuteCommand => ("execute-command", Data, Mutation, 128 * 1024, 8192),
+            Self::DiscardDraftInputs => (
+                "discard-draft-inputs",
+                Data,
+                Mutation,
+                32 * 1024,
+                DRAFT_REPLY,
+            ),
             Self::CommandStatus => ("command-status", Data, Read, 8192, 8192),
-            Self::DraftSnapshot => ("draft-snapshot", Data, Read, 8192, HEADER_REPLY + 8192),
-            Self::SelectPreset => ("select-preset", Data, Mutation, 8192, HEADER_REPLY + 8192),
+            Self::DraftSnapshot => ("draft-snapshot", Data, Read, 8192, DRAFT_REPLY),
+            Self::DraftObserve => ("draft-observe", Subscription, Read, 8192, 8192),
+            Self::SelectPreset => ("select-preset", Data, Mutation, 8192, DRAFT_REPLY),
             Self::Image => ("image", Data, Mutation, LARGE_REPLY, 16 * 1024),
             Self::MutateQueue => ("mutate-queue", Data, Mutation, 8 * 1024 * 1024, 8192),
             Self::QueueMutationStatus => ("queue-mutation-status", Control, Read, 8192, 8192),
             Self::MessageStatus => ("message-status", Control, Read, 8192, 16 * 1024),
             Self::ReadMessage => ("read-message", Data, Read, 8192, OBSERVATION_REPLY),
             Self::Cancel => ("cancel", Control, Mutation, 128 * 1024, 8192),
+            Self::WaitIdle => ("wait-idle", Control, Read, 8192, 8192),
             Self::History => ("history", Data, Read, 8192, LARGE_REPLY),
             Self::ModelObserve => ("model-observe", Subscription, Read, 8192, 256 * 1024),
             Self::Observe => ("observe", Subscription, Read, 8192, OBSERVATION_REPLY),
@@ -205,32 +222,38 @@ impl Operation {
         };
         OperationSpec {
             protocol: rsi_api_protocol::wire_contract!(),
-            id: OperationId::new(
-                "session",
-                name,
-                match self {
-                    Self::Create | Self::Inspect | Self::Recent => 8,
-                    Self::Submit => 5,
-                    Self::MessageStatus | Self::TerminalOutput => 3,
-                    Self::ModelObserve
-                    | Self::ListWorkflows
-                    | Self::Jobs
-                    | Self::Interactions
-                    | Self::Questions
-                    | Self::AnswerQuestion
-                    | Self::Terminal => 2,
-                    Self::Attach | Self::DraftSnapshot | Self::SelectPreset | Self::Observe => 7,
-                    Self::History | Self::ReadMessage => 6,
-                    _ => 1,
-                },
-            )
-            .expect("constant operation"),
+            id: OperationId::new("session", name, self.version()).expect("constant operation"),
             class,
             effect,
             access: rsi_api_protocol::OperationAccess::Authenticated,
             encoding: RequestEncoding::Json,
             maximum_request_bytes: input,
             maximum_response_bytes: output,
+        }
+    }
+
+    const fn version(self) -> u16 {
+        match self {
+            Self::Create => 12,
+            Self::Inspect | Self::Recent | Self::DraftSnapshot | Self::SelectPreset => 10,
+            Self::Submit => 6,
+            Self::MessageStatus
+            | Self::TerminalOutput
+            | Self::ReadHeader
+            | Self::Jobs
+            | Self::MutateQueue
+            | Self::Cancel => 3,
+            Self::ModelObserve
+            | Self::ListWorkflows
+            | Self::Interactions
+            | Self::Questions
+            | Self::AnswerQuestion
+            | Self::DiscardDraftInputs
+            | Self::ExecuteCommand
+            | Self::Terminal => 2,
+            Self::Attach | Self::Observe => 9,
+            Self::History | Self::ReadMessage => 7,
+            _ => 1,
         }
     }
 }
@@ -486,6 +509,33 @@ impl Failure {
 #[cfg(test)]
 mod setup_tests {
     use super::*;
+    #[test]
+    fn session_stop_uses_the_extended_cancel_contract() {
+        use rsi_agent_turn_protocol::CancelTarget;
+        assert_eq!(Operation::Cancel.spec().id.version(), 3);
+        let clear = serde_json::json!({"kind":"inbox"});
+        assert_eq!(serde_json::to_value(CancelTarget::Inbox).unwrap(), clear);
+        assert_eq!(
+            serde_json::from_value::<CancelTarget>(clear).unwrap(),
+            CancelTarget::Inbox
+        );
+        for keep_inbox in [false, true] {
+            let target = CancelTarget::Session { keep_inbox };
+            let wire = serde_json::to_value(&target).unwrap();
+            assert_eq!(
+                wire,
+                serde_json::json!({"kind":"session","id":{"keep_inbox":keep_inbox}})
+            );
+            assert_eq!(
+                serde_json::from_value::<CancelTarget>(wire).unwrap(),
+                target
+            );
+        }
+        assert!(
+            serde_json::from_value::<CancelTarget>(serde_json::json!({"kind":"session","id":{}}))
+                .is_err()
+        );
+    }
     #[test]
     fn closed_review_operations_advertise_the_new_wire_version() {
         for operation in [

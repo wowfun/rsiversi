@@ -57,6 +57,9 @@ mod activity;
 #[path = "attachment/commands.rs"]
 mod commands;
 
+#[path = "attachment/files.rs"]
+mod files;
+
 #[derive(Debug, Default)]
 struct UnavailableTurns {
     tree: Option<Vec<SessionId>>,
@@ -1073,6 +1076,7 @@ async fn new_drafts_read_current_defaults_while_existing_headers_remain_frozen()
         Arc::new(NoApprovalControl),
     );
     let request = |id| CreateSession {
+        fork: None,
         workspace_id: workspace_id(),
         session_id: SessionId::new(id).unwrap(),
         agent_preset_id: Some(AgentPresetId::new("image-preset").unwrap()),
@@ -1124,6 +1128,7 @@ async fn repeated_create_shares_one_live_draft_and_conflicts_on_changed_input() 
         Arc::new(NoApprovalControl),
     );
     let request = CreateSession {
+        fork: None,
         workspace_id: workspace_id(),
         session_id: SessionId::new("same-draft").unwrap(),
         agent_preset_id: None,
@@ -1150,6 +1155,8 @@ async fn submit_text(
 ) -> rsi_session_protocol::Result<MessageReceipt> {
     handle
         .submit(SubmitInput {
+            origin: rsi_session_protocol::SubmissionOrigin::User,
+            attribution: None,
             reasoning_effort: None,
             delivery: rsi_agent_session_protocol::MessageDelivery::NextTurn,
             message_id: MessageId::new(message_id).unwrap(),
@@ -1192,6 +1199,7 @@ fn session_input_validation_is_complete_before_any_backend_operation() {
     }
     assert!(
         validate_session_input(&[SessionInput::Image {
+            presentation: None,
             media: MediaRef {
                 id: rsi_media_protocol::MediaId::new("a".repeat(64)).unwrap(),
                 mime: "image/png".into(),
@@ -1207,6 +1215,7 @@ fn session_input_validation_is_complete_before_any_backend_operation() {
             text: "inspect".into(),
         },
         SessionInput::Image {
+            presentation: None,
             media: MediaRef {
                 id: rsi_media_protocol::MediaId::new("a".repeat(64)).unwrap(),
                 mime: "image/png".into(),
@@ -1362,6 +1371,7 @@ async fn assert_competing_message_publication(change_created_at: bool, concurren
     );
     let handle = application
         .create(CreateSession {
+            fork: None,
             workspace_id: workspace_id(),
             session_id: SessionId::new("session-competing-publication").unwrap(),
             agent_preset_id: Some(preset_id),
@@ -1381,6 +1391,8 @@ async fn assert_competing_message_publication(change_created_at: bool, concurren
     assert!(
         handle
             .submit(SubmitInput {
+                origin: rsi_session_protocol::SubmissionOrigin::User,
+                attribution: None,
                 reasoning_effort: None,
                 delivery: rsi_agent_session_protocol::MessageDelivery::NextTurn,
                 message_id: MessageId::new("message-lost-publication-race").unwrap(),
@@ -1405,6 +1417,8 @@ async fn assert_competing_message_publication(change_created_at: bool, concurren
     }
     let receipt = handle
         .submit(SubmitInput {
+            origin: rsi_session_protocol::SubmissionOrigin::User,
+            attribution: None,
             reasoning_effort: None,
             delivery: rsi_agent_session_protocol::MessageDelivery::NextTurn,
             message_id: MessageId::new("message-after-publication-race").unwrap(),
@@ -1470,6 +1484,7 @@ async fn assert_competing_image_publication(concurrent: bool) {
     );
     let handle = application
         .create(CreateSession {
+            fork: None,
             workspace_id: workspace_id(),
             session_id,
             agent_preset_id: Some(AgentPresetId::new("image-preset").unwrap()),
@@ -1634,6 +1649,7 @@ async fn fresh_preset_failure_precedes_workspace_registration() {
 
     let result = application
         .create(CreateSession {
+            fork: None,
             workspace_id: workspace_id(),
             session_id: SessionId::new("session-failing-fresh-preset").unwrap(),
             agent_preset_id: Some(AgentPresetId::new("missing-preset").unwrap()),
@@ -1720,6 +1736,8 @@ async fn cold_resume_preset_failure_precedes_workspace_registration() {
 
     let result = handle
         .submit(SubmitInput {
+            origin: rsi_session_protocol::SubmissionOrigin::User,
+            attribution: None,
             reasoning_effort: None,
             delivery: rsi_agent_session_protocol::MessageDelivery::NextTurn,
             message_id: MessageId::new("message-must-not-start").unwrap(),
@@ -1973,6 +1991,7 @@ async fn image_only_draft_defers_language_and_workspace_until_the_selected_opera
     );
     let handle = application
         .create(CreateSession {
+            fork: None,
             workspace_id: workspace_id(),
             session_id: SessionId::new("session-image-only").unwrap(),
             agent_preset_id: None,
@@ -2061,6 +2080,7 @@ async fn question_operations_preserve_shutdown_and_capacity_errors() {
         .with_questions(Some(Arc::new(FailedQuestions(error))));
         let handle = application
             .create(CreateSession {
+                fork: None,
                 workspace_id: workspace_id(),
                 session_id: SessionId::new("question-errors").unwrap(),
                 agent_preset_id: None,
@@ -2165,6 +2185,7 @@ async fn fresh_interactions_release_composition_pin_and_follow_tree_publication_
     let child = SessionId::new("interaction-child").unwrap();
     let handle = application
         .create(CreateSession {
+            fork: None,
             workspace_id: workspace_id(),
             session_id: root.clone(),
             agent_preset_id: None,
@@ -2252,6 +2273,7 @@ async fn registered_workspace_is_resolved_once_and_live_retries_ignore_later_rem
         Arc::new(NoApprovalControl),
     );
     let request = CreateSession {
+        fork: None,
         workspace_id: workspace_id(),
         session_id: SessionId::new("registered-draft").unwrap(),
         agent_preset_id: None,
@@ -2288,6 +2310,12 @@ struct UnavailableCommands;
 struct UnavailableProjections;
 #[async_trait]
 impl rsi_agent_turn_protocol::SessionProjections for UnavailableProjections {
+    fn running_sessions(
+        &self,
+        _: &[SessionId],
+    ) -> rsi_agent_turn_protocol::Result<std::collections::BTreeSet<SessionId>> {
+        panic!("unexpected resident work lookup")
+    }
     fn resident_composition(
         &self,
         _: &SessionId,

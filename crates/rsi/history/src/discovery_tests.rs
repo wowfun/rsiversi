@@ -42,6 +42,12 @@ mod sessions {
     }
     #[async_trait::async_trait]
     impl SessionIngress for Fixture {
+        async fn device_drafts(
+            &self,
+            _: &rsi_api_protocol::AuthenticatedDevice,
+        ) -> rsi_session_protocol::Result<Vec<rsi_session_protocol::DeviceDraft>> {
+            Ok(Vec::new())
+        }
         fn scoped(&self, origin: rsi_api_protocol::CallOrigin) -> Arc<dyn SessionService> {
             panic!("unused history fixture facet")
         }

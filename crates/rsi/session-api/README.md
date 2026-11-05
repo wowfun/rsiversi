@@ -1,5 +1,29 @@
 # rsi-session-api
 
+Interface version 19 adds `wait-idle` v1, a Session-bound read that waits for
+whole-driver quiescence without retaining inbox bodies or reserving future work.
+It retains `cancel` v3 with Session-wide stop and inbox-only
+clear targets as defined by the Turn protocol. Each captures a new cut, so
+transport failure never triggers an automatic replay. Exact Turn/Message targets
+retain their identity-based semantics. Inspection includes the durable `inbox_paused` flag in each inspected
+Agent-tree Session status. Pending messages remain visible when paused, while
+`has_waking_message` is false until native wake policy resumes the inbox.
+
+`draft-observe` v1 is a Session-bound Subscription Read carrying an initial draft
+revision and strictly increasing coalesced revisions, then `null` on publication.
+Premature EOF does not establish publication. Each request and reply fits 8 KiB;
+the observation preserves the Session protocol's draft lifetime and access rules.
+
+`discard-draft-inputs` v2 accepts a bounded MessageId list and returns the
+unchanged Header, current draft revision and remaining command inputs. The client
+validates the snapshot and that none of the selected identities remain.
+`mutate-queue` v3 permits withdrawal regardless of source and includes the
+`program_owned` rejection for a ProgramRun-owned child's initial input.
+Replacement and steering conversion retain Human-only semantics.
+
+`execute-command` v2 admits the Session protocol's 64 KiB encoded argument
+budget within a 128 KiB request envelope, including the target and invocation.
+
 Purge previews include UncertainWork for missing native settlement evidence.
 The decoder bounds total refusal evidence by the Store protocol limit and checks
 selected identities and uniqueness, without mirroring a per-target server count.
@@ -31,9 +55,18 @@ subscriptions to the authenticated `ApiContext.origin`. It never falls through t
 the unscoped Local Session service. Handles recheck location Use for new operations;
 stream frames recheck before publication without retaining draft or composition pins.
 
-The current Session format is 22. Operations negotiate their own versions:
-create, recent and inspect v8; attach, draft-snapshot, select-preset and observe v7;
-history and read-message v6; submit v5. Message-status is v3. Interactions, questions
+The current Session format is 30. Operations negotiate their own versions:
+create v12; recent, inspect, draft-snapshot and select-preset v10;
+attach and observe v9. Draft responses include the exact held command-input
+batch, bounded by 256 KiB in addition to the Header and envelope. Clients validate
+the batch's Command provenance, first-Step delivery, identity and ordering.
+read-header v3. Create admits an optional fork selection before an accepted Turn
+or through a completed Turn, using the existing typed `ForkPoint`. Its
+clients verify the returned Header's exact immutable history binding.
+history and read-message v7; submit v6; discard-draft-inputs v2 and mutate-queue v3.
+Direct submitted messages and their consumed Facts retain optional original
+application attribution under the Session protocol contract. Message-status is
+v3. Interactions, questions
 and answer-question are v2 for typed closed reviews; older closed decoders are not
 compatible. Metrics is a read-only v1 operation returning a
 validated fixed watermark, progress and checked Session totals in at most 64 KiB.
@@ -121,7 +154,8 @@ and limit live diagnostics to 4 KiB. A malformed control reply preserves the
 original request as `CommandOutcomeUnknown`. Disconnect never retries or cancels
 an owned Goal. Durable Goal values use the existing projection subscription.
 
-`jobs` v1 is a finite Data read for the exact current active Turn. Its capture
+`jobs` v3 is a finite Data read for the exact current active Turn. Job names
+carry the producer's bounded UTF-8 display text. Its capture
 and page bounds follow the [shared Jobs contract](../session-protocol/README.md),
 with a separate bounded transport envelope.
 Both sides validate Session/Header/Turn, claim generation, cursor, ordering and

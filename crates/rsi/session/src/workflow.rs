@@ -63,11 +63,7 @@ impl LocalSessionHandle {
                             Some(
                                 draft
                                     .baseline()
-                                    .initial_states()
-                                    .into_iter()
-                                    .find(|s| {
-                                        s.identity().id() == rsi_agent_plan_policy::PLAN_POLICY_DOMAIN
-                                    })
+                                    .initial_state(rsi_agent_plan_policy::PLAN_POLICY_DOMAIN)
                                     .and_then(|s| s.state().value().as_bool()),
                             ),
                         ),
@@ -93,15 +89,13 @@ impl LocalSessionHandle {
                     plan
                 } else {
                     self.store
-                        .read_domain_states(self.session_id(), None)
+                        .read_domain_states(self.session_id(), None, Some(rsi_agent_plan_policy::PLAN_POLICY_DOMAIN))
                         .await
                         .ok()
                         .and_then(|page| {
                             page.states
                                 .into_iter()
-                                .find(|s| {
-                                    s.snapshot.identity().id() == rsi_agent_plan_policy::PLAN_POLICY_DOMAIN
-                                })
+                                .next()
                                 .and_then(|s| s.snapshot.state().value().as_bool())
                         })
                 };

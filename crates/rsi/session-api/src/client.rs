@@ -350,7 +350,7 @@ impl SessionService for SessionClient {
             return Err(malformed(Operation::Create));
         }
         let created = result?;
-        if created.creation != request {
+        if created.creation != request || created.draft.validate().is_err() {
             return Err(malformed(Operation::Create));
         }
         let header = created.draft.header;
@@ -361,6 +361,16 @@ impl SessionService for SessionClient {
             coordinates: header.coordinates().clone(),
         };
         if header.session_id() != &request.session_id
+            || header.execution_owner().is_some()
+            || !match (&request.fork, header.history_origin()) {
+                (None, None) => true,
+                (Some(fork), Some(origin)) => {
+                    origin.parent_session_id == fork.source_session_id
+                        && origin.point == fork.point
+                        && origin.requested_turns == fork.turns
+                }
+                _ => false,
+            }
             || workspace.validate().is_err()
             || (created.draft.revision == 0
                 && request
@@ -712,11 +722,22 @@ impl SessionHandle for Handle {
     ) -> rsi_session_protocol::Result<rsi_session_protocol::SessionDraftView> {
         self.checked_draft_snapshot().await
     }
+    async fn observe_draft(
+        &self,
+    ) -> rsi_session_protocol::Result<rsi_session_protocol::DraftRevisionStream> {
+        crate::client_stream::draft(self).await
+    }
     async fn select_preset(
         &self,
         request: rsi_session_protocol::SelectDraftPreset,
     ) -> rsi_session_protocol::Result<rsi_session_protocol::SessionDraftView> {
         self.select_checked_preset(request).await
+    }
+    async fn discard_draft_inputs(
+        &self,
+        request: rsi_session_protocol::DiscardDraftInputs,
+    ) -> rsi_session_protocol::Result<rsi_session_protocol::SessionDraftView> {
+        self.discard_checked_inputs(request).await
     }
 
     async fn commands(
@@ -864,6 +885,9 @@ impl SessionHandle for Handle {
             return Err(malformed(Operation::Image));
         }
         Ok(receipt)
+    }
+    async fn wait_idle(&self) -> rsi_session_protocol::Result<()> {
+        self.call(Operation::WaitIdle, &()).await
     }
     async fn cancel(
         &self,

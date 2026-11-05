@@ -234,6 +234,27 @@ impl Drop for PendingGuard {
 }
 
 impl LocalSessionHandle {
+    pub(super) async fn discard_held_inputs(
+        &self,
+        request: rsi_session_protocol::DiscardDraftInputs,
+    ) -> Result<SessionDraftView> {
+        let _admission = self.admit_mutation()?;
+        let _activity = self.begin_activity()?;
+        request.validate()?;
+        self.reconcile_fresh_read().await?;
+        let mut state = self.state.lock().await;
+        let HandleState::Fresh(draft) = &mut *state else {
+            return Err(SessionError::NotFound("unpublished draft".into()));
+        };
+        draft
+            .discard_command_inputs(&request.message_ids)
+            .map_err(|error| SessionError::Invalid(error.to_string()))?;
+        let view = draft_view(&state)?;
+        drop(state);
+        self.projection_changed();
+        Ok(view)
+    }
+
     pub(super) async fn read_draft_snapshot(&self) -> Result<SessionDraftView> {
         self.read_until_retired(async {
             self.reconcile_fresh_read().await?;
@@ -390,8 +411,10 @@ impl LocalSessionHandle {
         let HandleState::Fresh(draft) = &mut *state else {
             return Err(SessionError::NotFound("unpublished draft".into()));
         };
-        let receipt = draft.apply_command(mutation).map_err(draft_error)?;
+        let applied = draft.apply_command(mutation);
+        drop(state);
         self.projection_changed();
+        let receipt = applied.finish().await.map_err(draft_error)?;
         Ok(receipt)
     }
 }
@@ -410,6 +433,11 @@ fn draft_view(state: &HandleState) -> Result<SessionDraftView> {
     Ok(SessionDraftView {
         header: draft.header().clone(),
         revision,
+        command_inputs: draft
+            .command_inputs()
+            .iter()
+            .map(|input| input.publication(true))
+            .collect(),
     })
 }
 

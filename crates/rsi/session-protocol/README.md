@@ -1,5 +1,62 @@
 # rsi-session-protocol
 
+`SessionInput::File` carries an immutable `FileRef`, never a caller-supplied host
+path. The native Session adapter verifies that object through its configured
+file reader before mailbox admission. Queuing, replay, forks and input
+preparation retain the typed reference; uploading remains independently durable.
+
+`SessionHandle::wait_idle` observes the Session's own whole driver quiescence,
+including replacement waking work and activation cleanup. It ignores held draft,
+paused and nonwaking input; completion is an idle observation, not an admission
+lease or a particular message receipt.
+
+`SessionDraftView` captures the Header, draft revision and ordered held command
+inputs under the same draft lock. Inputs retain their assigned message IDs and
+Command provenance and target the first Step without waking execution. Reading
+this view neither publishes a Session nor consumes input. The complete batch
+obeys the Agent command count and encoded-byte bounds. Publication keeps those
+identities; preset replacement clears held inputs along with the prior baseline.
+
+Authenticated ingress can enumerate the calling device's ready, unpublished
+draft locations in the current Host generation. Preparing, expired, private,
+published and other devices' drafts are absent. This view has the per-device
+draft admission bound and does not enter the durable recent Session catalog.
+Each row includes the count of completed turns retained by its immutable
+inherited-history selection. A nonempty inherited conversation is distinct from
+an empty unpublished draft; enumeration reads that count from the Header rather
+than opening the source transcript. A `None` history selection has count zero.
+An observation opened at cursor zero on a ready draft waits for publication.
+It then delivers committed controls and Facts from the start. Discard or
+expiry ends the observation and browsing the draft catalog preserves its
+original idle deadline.
+
+`SessionHandle::observe_draft` emits the current draft revision and coalesced
+revision changes. A final `None` indicates publication; an already published
+Session emits only `None`. Expiry, retirement and revoked access end with an
+error. Observation does not retain draft activity or extend its idle deadline.
+Subscribers register before reading the current state, so a concurrent command
+or publication cannot be lost. This notification carries no Header, held-input
+copy or domain projection; consumers capture their own view after a change.
+
+`SessionHandle::retain_draft` gives an in-process Agent an opaque draft owner.
+It prevents idle expiration without holding command activity, running a timer or
+granting execution authority. Multiple owners share the same exact draft
+generation. Releasing the last owner starts the ordinary idle grace period.
+Explicit discard and service shutdown override owners; publication ends their
+effect. A stale owner cannot retain or release a replacement draft with the same
+Session ID. `DraftOwner::is_active` is an advisory lifetime check, not authority.
+This Local-only capability is not serialized by Session API, like native terminal
+attachment ownership. Ordinary observation remains non-owning.
+
+`CreateSession.fork` optionally selects an authorized durable source and an exact
+`ForkPoint`: before an accepted local Turn, or through a completed local Turn.
+Both cuts contain only completed history; a before point excludes the selected
+Turn and does not wait for or interrupt it. Full, Last(n), and None produce an independent unpublished
+draft in the same execution workspace. Retries bind the complete creation request;
+first input publishes the captured Header and transformed baseline atomically.
+The Session service refuses protected workflow sources: read visibility alone
+does not grant authority to create another executable owner of private state.
+
 Session lifecycle admission distinguishes cancellable reads from hard source and
 mutation owners. Closing atomically refuses hard owners before cancelling any
 read. Read-to-source promotion uses the same gate lock, so either promotion wins
@@ -112,6 +169,12 @@ draft requests join one service-owned callback, with a 30-second deadline and
 64 distinct in-flight mutations, shared with preset preparation, per Session
 service. Retirement cancels draft
 callbacks, and a published or expired draft cannot accept their late results.
+`discard_draft_inputs` withdraws up to 64 selected command MessageIds from an
+unpublished draft and returns its atomic snapshot. It never publishes the draft.
+Retries are idempotent by message identity, so no new operation ledger or revision
+precondition is needed. A concurrent first publication wins the same state lock;
+the draft-only operation then returns NotFound and the caller must recapture the
+published inbox before using ordinary queue withdrawal.
 Durable commands retain the Kernel's canonical receipt semantics. Unknown
 outcomes preserve the typed request identity for explicit query; no adapter
 automatically repeats a callback.
@@ -238,7 +301,15 @@ rooted at the attached root Session, so a child request is never hidden behind
 a root-only client surface.
 
 Human ingress carries immutable `NextTurn` or `Steer` intent; the Kernel alone
-resolves its current route. Read-only inspection captures Header, durable Fact
+resolves its current route. Applications set `SubmitInput.origin` to
+`application` for unattended work. Interactive submissions default to `user`.
+`SubmitInput.attribution` optionally preserves the
+application's original message ID and source under the
+[Agent attribution contract](../../rsi-agent/session-protocol/README.md).
+The caller still supplies an independent native `MessageId` for idempotency.
+Attribution survives first draft publication, queue acceptance and consumption;
+it does not select scheduling or grant execution authority.
+Read-only inspection captures Header, durable Fact
 and control cursors, bounded mailbox state, and the Agent tree in one Store
 snapshot. An attaching client inspects, reads history at the captured Fact
 boundary, then observes with both captured cursors across subsequent Turns.
@@ -300,6 +371,24 @@ nor changes Session state. The pure reducer belongs to Conversation; acquisition
 and bounded cache policy belong to Session.
 
 ## Live Session terminals
+
+A create carries a caller-generated key of 1–128 ASCII letters, digits,
+hyphens or underscores. Its scope is the service generation, Session and
+caller identity. Repeating an open key with the same initial dimensions
+returns its original attachment receipt. Different dimensions conflict.
+A closed or exited key cannot create another shell. The service retains
+up to 8192 creation keys per generation, including closed keys.
+The terminal catalog reports the Session's selected shell and live bindings
+for the requesting caller. Each binding joins its original creation key to
+the current terminal status, including size and controller epoch. This lets
+a reconnected application rediscover a shell without allocating one.
+An in-process consumer can borrow an attachment for the lifetime of its
+request. Dropping that capability releases only its issued attachment, even
+after revocation. The process survives until an explicit terminal close or
+generation retirement.
+A retained view can wait for a creation binding to disappear without
+acquiring a writer or an output follower. Native close and generation
+retirement wake waiters.
 
 A persisted Session creates local Windows PowerShell terminals with current-user
 permissions, separately from Agent sandbox settings. Actual terminal permissions
@@ -403,3 +492,7 @@ status observes durable metadata absence; only explicit purge retries perform cl
 Workflow readiness/history/detail and Goal snapshots hold cancellable read ownership.
 Goal arm/retain-for-settlement and initial-round reservation hold hard ownership:
 they can create live continuation authority or commit work.
+
+A caller-bound directory subscription precedes its first catalog read. It invalidates that read on Kernel publication or admitted Session retirement, draft membership changes, or a change in visibility. Each new read uses current authority. Standard providers expose process-local visibility generations. A change to any grant can wake the shared observer. A provider without a generation requires periodic reconciliation.
+
+An image submission may retain publisher presentation metadata alongside its verified Media reference. The optional display name and original dimensions travel with the message through draft promotion and subsequent replay.

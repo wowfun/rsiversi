@@ -55,6 +55,8 @@ use rsi_session_protocol::{
 type PurgeCleanupLookup =
     dyn Fn() -> Option<Arc<dyn rsi_session_protocol::SessionPurgeCleanup>> + Send + Sync;
 
+type FileLookup = Arc<dyn Fn() -> Option<Arc<dyn rsi_media_protocol::FileRead>> + Send + Sync>;
+
 /// Process-local adapter over the Agent Kernel and mechanical Store.
 #[derive(Clone)]
 pub struct LocalSessionService {
@@ -100,6 +102,7 @@ pub struct LocalSessionService {
     language: Arc<dyn LanguageCall>,
     image: Arc<dyn ImageCall>,
     media: Arc<dyn Media>,
+    files: Option<FileLookup>,
     approvals: Arc<dyn SessionApprovalControl>,
     questions: Option<Arc<dyn rsi_user_questions_protocol::UserQuestions>>,
     interaction_retention: InteractionRetention,
@@ -159,6 +162,7 @@ impl LocalSessionService {
             ..self.clone()
         };
         let request = CreateSession {
+            fork: None,
             workspace_id,
             session_id: header.session_id().clone(),
             agent_preset_id: Some(header.agent_preset_id().clone()),
@@ -268,11 +272,22 @@ impl LocalSessionService {
             language,
             image,
             media,
+            files: None,
             approvals,
             questions: None,
             interaction_retention: InteractionRetention::default(),
             drafts: drafts::Drafts::new(execution),
         }
+    }
+
+    /// Resolves independently published file attachments when input is admitted.
+    #[must_use]
+    pub fn with_files(
+        mut self,
+        files: impl Fn() -> Option<Arc<dyn rsi_media_protocol::FileRead>> + Send + Sync + 'static,
+    ) -> Self {
+        self.files = Some(Arc::new(files));
+        self
     }
 
     /// Supplies the Host-generation human question capability.
@@ -366,6 +381,7 @@ impl LocalSessionService {
             language: Arc::clone(&self.language),
             image: Arc::clone(&self.image),
             media: Arc::clone(&self.media),
+            files: self.files.clone(),
             approvals: Arc::clone(&self.approvals),
             questions: self.questions.clone(),
             interaction_retention: self.interaction_retention.clone(),
@@ -426,6 +442,11 @@ impl LocalSessionService {
             .await
             .map_err(|error| map_workspace_error(&error))?;
         let _admission = self.admit(workspace.coordinates.location())?;
+        if let Some(fork) = &request.fork {
+            return self
+                .prepare_fork_draft(&request, fork, &workspace.coordinates, lease)
+                .await;
+        }
         let agent_preset_id = match request.agent_preset_id {
             Some(id) => id,
             None => self
@@ -490,6 +511,69 @@ impl LocalSessionService {
                     _ => SessionError::Backend(error.to_string()),
                 }
             })?;
+        self.handle_from_state(HandleState::Fresh(Box::new(draft)), Some(lease))
+    }
+
+    async fn prepare_fork_draft(
+        &self,
+        request: &CreateSession,
+        fork: &rsi_session_protocol::ForkDraft,
+        coordinates: &rsi_agent_session_protocol::ExecutionCoordinates,
+        lease: drafts::DraftLease,
+    ) -> Result<Arc<LocalSessionHandle>> {
+        if self.frozen.is_some() {
+            return Err(SessionError::Invalid(
+                "frozen workflows cannot create manual fork drafts".into(),
+            ));
+        }
+        let source_lifetime = self.lifecycles.attach(&fork.source_session_id)?.hard()?;
+        let source = self.read_header(&fork.source_session_id).await?;
+        let protection = self.protect_header(&source)?;
+        if source.protection().is_some() {
+            return Err(SessionError::Api(rsi_api_protocol::ApiError::Unauthorized));
+        }
+        if source.coordinates() != coordinates {
+            return Err(SessionError::Invalid(
+                "fork workspace must match its source".into(),
+            ));
+        }
+        match self.store.header(&request.session_id).await {
+            Ok(_) => {
+                return Err(SessionError::Invalid(
+                    "fork target Session already exists".into(),
+                ));
+            }
+            Err(StoreError::NotFound(_)) => {}
+            Err(error) => return Err(map_store_error(error)),
+        }
+        let preset = request
+            .agent_preset_id
+            .clone()
+            .unwrap_or_else(|| source.agent_preset_id().clone());
+        workflow::require_preset(self.workflow.as_deref(), &preset)?;
+        let preparation = self
+            .turns
+            .prepare_fork(rsi_agent_turn_protocol::PrepareFork {
+                source,
+                session_id: request.session_id.clone(),
+                created_at_ms: now_ms()?,
+                agent_preset_id: preset,
+                point: fork.point.clone(),
+                turns: fork.turns.clone(),
+                cancellation: protection.clone(),
+            });
+        let prepared = tokio::select! {
+            () = protection.cancelled() => return Err(SessionError::Api(rsi_api_protocol::ApiError::Unauthorized)),
+            result = preparation => result.map_err(map_turn_error)?,
+        };
+        self.check_origin()?;
+        let _admission = self.admit(coordinates.location())?;
+        let mut baseline = prepared.baseline().clone();
+        baseline.retain(Arc::new(source_lifetime));
+        let prepared = prepared
+            .with_baseline(baseline)
+            .map_err(|error| SessionError::Invalid(error.to_string()))?;
+        let draft = AgentSessionDraft::from_prepared(prepared, Arc::clone(&self.composition));
         self.handle_from_state(HandleState::Fresh(Box::new(draft)), Some(lease))
     }
 }
@@ -616,6 +700,113 @@ impl SessionService for LocalSessionService {
 
 #[async_trait]
 impl rsi_session_protocol::SessionIngress for LocalSessionService {
+    fn watch_directory(
+        &self,
+        device: &rsi_api_protocol::AuthenticatedDevice,
+    ) -> Result<Option<rsi_session_protocol::DirectoryChanges>> {
+        use futures_util::StreamExt;
+        let Some(mut durable) = self
+            .projection_service
+            .watch_activity()
+            .map_err(map_turn_error)?
+        else {
+            return Ok(None);
+        };
+        let mut drafts = self.drafts.watch_membership();
+        let revoked = device.revoked.clone();
+        let stopped = self.projection_stopped.clone();
+        let resolver = self.resolver.clone();
+        let policy = self.protection.clone();
+        let mut locations = resolver.as_ref().and_then(|r| r.visibility_revision());
+        let mut protection = policy.as_ref().and_then(|p| p.catalog_generation());
+        Ok(Some(Box::pin(async_stream::try_stream! {
+            let interval = std::time::Duration::from_secs(1);
+            let mut grants = tokio::time::interval_at(tokio::time::Instant::now() + interval, interval);
+            grants.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
+            loop {
+                let check_grants = tokio::select! {
+                    biased;
+                    () = revoked.cancelled() => break,
+                    () = stopped.cancelled() => break,
+                    updated = drafts.changed() => { if updated.is_err() { break; } false },
+                    updated = durable.next() => { if updated.is_none() { break; } false },
+                    _ = grants.tick(), if resolver.is_some() || policy.is_some() => true,
+                };
+                if check_grants {
+                    let mut changed = false;
+                    if let Some(resolver) = &resolver {
+                        let current = resolver.visibility_revision();
+                        changed = current.is_none() || current != locations;
+                        locations = current;
+                    }
+                    if let Some(policy) = &policy {
+                        let current = policy.catalog_generation();
+                        changed |= !protection.as_ref().zip(current.as_ref())
+                            .is_some_and(|(a, b)| Arc::ptr_eq(a, b));
+                        protection = current;
+                    }
+                    if !changed { continue; }
+                }
+                yield ();
+            }
+        })))
+    }
+
+    async fn device_drafts(
+        &self,
+        device: &rsi_api_protocol::AuthenticatedDevice,
+    ) -> Result<Vec<rsi_session_protocol::DeviceDraft>> {
+        let scope = Self {
+            origin: rsi_api_protocol::CallOrigin::Device(device.clone()),
+            ..self.clone()
+        };
+        let visible = scope.visibility()?;
+        let mut protections = Vec::new();
+        let mut rows = Vec::new();
+        for handle in self.drafts.ready_for(&device.id) {
+            if !visible.locations().contains(handle.coordinates.location()) {
+                continue;
+            }
+            // Enumeration must not extend the idle lease of every blank conversation.
+            let protection = match scope.protect_scope(handle.scope.as_ref()) {
+                Ok(token) => token,
+                Err(SessionError::Api(rsi_api_protocol::ApiError::Unauthorized)) => continue,
+                Err(error) => return Err(error),
+            };
+            let Some(lease) = &handle.lease else { continue };
+            let _inspection = match lease.inspect() {
+                Ok(guard) => guard,
+                Err(SessionError::NotFound(_)) => continue,
+                Err(error) => return Err(error),
+            };
+            match handle.reconcile_fresh_read().await {
+                Ok(false) => {}
+                Ok(true) | Err(SessionError::NotFound(_)) => continue,
+                Err(error) => return Err(error),
+            }
+            let state = handle.state.lock().await;
+            if let HandleState::Fresh(draft) = &*state {
+                let header = draft.header();
+                rows.push(rsi_session_protocol::DeviceDraft {
+                    session_id: header.session_id().clone(),
+                    coordinates: header.coordinates().clone(),
+                    created_at_ms: header.created_at_ms(),
+                    inherited_turns: header
+                        .history_origin()
+                        .map_or(0, |origin| origin.effective_turns),
+                });
+                protections.push(protection);
+            }
+        }
+        scope.check_origin()?;
+        if protections
+            .iter()
+            .any(tokio_util::sync::CancellationToken::is_cancelled)
+        {
+            return Err(SessionError::Api(rsi_api_protocol::ApiError::Unauthorized));
+        }
+        Ok(rows)
+    }
     fn scoped(&self, origin: rsi_api_protocol::CallOrigin) -> Arc<dyn SessionService> {
         Arc::new(Self {
             origin,
@@ -654,6 +845,7 @@ impl HandleState {
 
 #[derive(Clone)]
 struct LocalSessionHandle {
+    files: Option<FileLookup>,
     lifecycle: rsi_session_protocol::SessionEpoch,
     origin: rsi_api_protocol::CallOrigin,
     protection: Option<Arc<dyn rsi_session_protocol::SessionProtection>>,
@@ -886,12 +1078,24 @@ impl LocalSessionHandle {
         for block in blocks {
             content.push(match block {
                 SessionInput::Text { text } => AgentMessageContent::Text { text },
-                SessionInput::Image { media } => {
+                SessionInput::File { file } => {
+                    self.files
+                        .as_ref()
+                        .and_then(|lookup| lookup())
+                        .ok_or_else(|| {
+                            SessionError::Backend("File attachment reader is unavailable".into())
+                        })?
+                        .verify(&file)
+                        .await
+                        .map_err(|error| map_media_error(&error))?;
+                    AgentMessageContent::File { file }
+                }
+                SessionInput::Image { media, presentation } => {
                     self.media
                         .read(&media)
                         .await
                         .map_err(|error| map_media_error(&error))?;
-                    AgentMessageContent::Image { media }
+                    AgentMessageContent::Image { media, presentation }
                 }
                 SessionInput::Reference { reference } => {
                     publications.push(
@@ -924,7 +1128,16 @@ impl LocalSessionHandle {
             self.prepare_input_content(request.content, header).await?;
         let message = AgentMessage {
             message_id: request.message_id,
-            source: AgentMessageSource::Human,
+            source: match request.origin {
+                rsi_session_protocol::SubmissionOrigin::User => AgentMessageSource::Human {
+                    attribution: request.attribution,
+                },
+                rsi_session_protocol::SubmissionOrigin::Application => {
+                    AgentMessageSource::Application {
+                        attribution: request.attribution,
+                    }
+                }
+            },
             content,
             options: MessageOptions {
                 reasoning_effort: request.reasoning_effort,
@@ -959,9 +1172,19 @@ impl SessionHandle for LocalSessionHandle {
         &self,
         request: rsi_session_protocol::terminal::Request,
     ) -> Result<rsi_session_protocol::terminal::Reply> {
-        let _admission = self.admit_mutation()?;
-        let _activity = self.begin_activity()?;
         self.terminal_request(request).await
+    }
+    async fn terminal_catalog(&self) -> Result<rsi_session_protocol::terminal::Catalog> {
+        self.read_until_retired(self.read_terminal_catalog()).await
+    }
+    async fn wait_terminal_closed(&self, key: &str) -> Result<()> {
+        self.read_until_retired(self.wait_for_terminal(key)).await
+    }
+    async fn borrow_terminal(
+        &self,
+        request: rsi_session_protocol::terminal::Request,
+    ) -> Result<Box<dyn rsi_session_protocol::terminal::AttachmentLease>> {
+        self.borrow_attachment(request).await
     }
     async fn read_recorded_reference(
         &self,
@@ -1193,6 +1416,12 @@ impl SessionHandle for LocalSessionHandle {
         let _admission = self.admit()?;
         self.read_draft_snapshot().await
     }
+    async fn discard_draft_inputs(
+        &self,
+        request: rsi_session_protocol::DiscardDraftInputs,
+    ) -> Result<rsi_session_protocol::SessionDraftView> {
+        self.discard_held_inputs(request).await
+    }
     async fn select_preset(
         &self,
         request: rsi_session_protocol::SelectDraftPreset,
@@ -1386,7 +1615,8 @@ impl SessionHandle for LocalSessionHandle {
                         .into_iter()
                         .map(|block| match block {
                             AgentMessageContent::Text { text } => SessionInput::Text { text },
-                            AgentMessageContent::Image { media } => SessionInput::Image { media },
+                            AgentMessageContent::File { file } => SessionInput::File { file },
+                            AgentMessageContent::Image { media, presentation } => SessionInput::Image { media, presentation },
                             AgentMessageContent::Reference { reference } => {
                                 SessionInput::Reference { reference }
                             }
@@ -1490,9 +1720,49 @@ impl SessionHandle for LocalSessionHandle {
         result.map(TurnReceipt::from).map_err(map_turn_error)
     }
 
+    async fn wait_idle(&self) -> Result<()> {
+        self.read_until_retired(async {
+            let _admission = self.admit()?;
+            if !self.reconcile_fresh_read().await? {
+                return Ok(());
+            }
+            self.turns
+                .wait_idle(self.session_id())
+                .await
+                .map_err(map_turn_error)
+        })
+        .await
+    }
+
     async fn cancel(&self, target: CancelTarget, reason: Option<String>) -> Result<CancelResult> {
         let _admission = self.admit_mutation()?;
         let _activity = self.begin_activity()?;
+        if let CancelTarget::Session { .. } | CancelTarget::Inbox = &target {
+            let keep_inbox = matches!(target, CancelTarget::Session { keep_inbox: true });
+            self.reconcile_fresh_read().await?;
+            let mut state = self.state.lock().await;
+            if let HandleState::Fresh(draft) = &mut *state {
+                if let Some(reason) = &reason {
+                    rsi_agent_session_protocol::validate_safe_diagnostic(
+                        "cancellation reason",
+                        reason,
+                    )
+                    .map_err(|error| SessionError::Invalid(error.to_string()))?;
+                }
+                let accepted = !keep_inbox
+                    && draft
+                        .clear_command_inputs()
+                        .map_err(|error| SessionError::Invalid(error.to_string()))?;
+                drop(state);
+                if accepted {
+                    self.projection_changed();
+                }
+                return Ok(CancelResult {
+                    accepted,
+                    already_terminal: false,
+                });
+            }
+        }
         self.turns
             .cancel_target(self.session_id(), target, reason)
             .await
@@ -1591,12 +1861,94 @@ impl SessionHandle for LocalSessionHandle {
         use futures_util::StreamExt as _;
         let _admission = self.admit()?;
         let _activity = self.begin_read()?;
+        let mut publication = self.projection_changes.subscribe();
+        if !self.reconcile_fresh_read().await? {
+            if cursor.control_seq != 0 || cursor.fact_seq != 0 {
+                return Err(SessionError::Invalid(
+                    "draft observation requires cursor zero".into(),
+                ));
+            }
+            let published = self.published.clone();
+            let lease = self
+                .lease
+                .clone()
+                .ok_or_else(|| SessionError::NotFound("draft lease".into()))?;
+            let turns = self.turns.clone();
+            let session = self.session_id().clone();
+            return Ok(self.guard_stream(async_stream::try_stream!{
+                loop {
+                    if begin_draft_activity(&published,||lease.inspect())?.is_none(){break;}
+                    publication.changed().await.map_err(|_|SessionError::ShuttingDown)?;
+                }
+                let mut source=turns.observe_session(&session,cursor).await.map_err(map_turn_error)?;
+                while let Some(item)=source.next().await {yield item.map_err(map_turn_error)?;}
+            }));
+        }
         let source = self
             .turns
             .observe_session(self.session_id(), cursor)
             .await
             .map_err(map_turn_error)?;
         Ok(self.guard_stream(source.map(|item| item.map_err(map_turn_error))))
+    }
+
+    async fn observe_draft(&self) -> Result<rsi_session_protocol::DraftRevisionStream> {
+        let _admission = self.admit()?;
+        let _read = self.lifecycle.read()?;
+        let mut changes = self.projection_changes.subscribe();
+        let published = self.published.clone();
+        let lease = self.lease.clone();
+        let inspect = || {
+            lease
+                .as_ref()
+                .ok_or_else(|| SessionError::NotFound("draft lease".into()))?
+                .inspect()
+        };
+        {
+            let _activity = begin_draft_activity(&published, inspect)?;
+            self.reconcile_fresh_read().await?;
+        }
+        let state = self.state.clone();
+        Ok(self.guard_stream(async_stream::try_stream! {
+            let mut previous = None;
+            loop {
+                // Mark before reading: a mutation racing the read remains observable.
+                changes.borrow_and_update();
+                let revision = {
+                  let _activity = begin_draft_activity(&published, || lease.as_ref().ok_or_else(|| SessionError::NotFound("draft lease".into()))?.inspect())?;
+                  let state = state.lock().await;
+                  match &*state {
+                    HandleState::Fresh(draft) => {
+                        let rsi_agent_session_protocol::CommandRevision::Draft { revision } = draft.revision()
+                            else { unreachable!("draft revision") };
+                        Some(revision)
+                    }
+                    HandleState::Attached(_) => None,
+                    HandleState::Expired => Err(SessionError::NotFound("draft lease".into()))?,
+                  }
+                };
+                if previous != Some(revision) {
+                    previous = Some(revision);
+                    yield revision;
+                }
+                if revision.is_none() { break; }
+                changes.changed().await.map_err(|_| SessionError::ShuttingDown)?;
+            }
+        }))
+    }
+
+    fn retain_draft(&self) -> Result<Option<Box<dyn rsi_session_protocol::DraftOwner>>> {
+        let _admission = self.admit()?;
+        self.lifecycle.check()?;
+        begin_draft_activity(&self.published, || {
+            self.lease
+                .as_ref()
+                .ok_or_else(|| SessionError::NotFound("draft lease".into()))?
+                .retain()
+        })
+        .map(|owner| {
+            owner.map(|owner| Box::new(owner) as Box<dyn rsi_session_protocol::DraftOwner>)
+        })
     }
 
     async fn metrics(&self) -> Result<rsi_session_protocol::MetricsRead> {

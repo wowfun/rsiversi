@@ -6,11 +6,14 @@ use rsi_session_protocol::SessionIngress as _;
 use std::sync::atomic::AtomicBool;
 
 #[derive(Debug, Default)]
-struct Access {
-    granted: AtomicBool,
+pub(super) struct Access {
+    pub(super) granted: AtomicBool,
     slots: Option<Arc<Semaphore>>,
 }
 impl ExecutionResolver for Access {
+    fn visibility_revision(&self) -> Option<u64> {
+        Some(u64::from(self.granted.load(Ordering::SeqCst)))
+    }
     fn visibility(
         &self,
         origin: &rsi_api_protocol::CallOrigin,
@@ -532,6 +535,7 @@ async fn ssh_draft_requires_current_use_without_resolving_connection_or_local_pa
         revoked: CancellationToken::new(),
     }));
     let request = CreateSession {
+        fork: None,
         workspace_id: workspace_id(),
         session_id: SessionId::new("remote-draft").unwrap(),
         agent_preset_id: Some(AgentPresetId::new("image-preset").unwrap()),

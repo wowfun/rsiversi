@@ -217,6 +217,12 @@ async fn maintenance_rejects_malformed_or_uncorrelated_purge_evidence() {
 struct Ingress(Arc<SessionClient>);
 #[async_trait]
 impl SessionIngress for Ingress {
+    async fn device_drafts(
+        &self,
+        _: &rsi_api_protocol::AuthenticatedDevice,
+    ) -> rsi_session_protocol::Result<Vec<rsi_session_protocol::DeviceDraft>> {
+        panic!("local-only fixture cannot enumerate device drafts")
+    }
     fn scoped(&self, origin: rsi_api_protocol::CallOrigin) -> Arc<dyn SessionService> {
         assert!(matches!(origin, rsi_api_protocol::CallOrigin::Local));
         self.0.clone()

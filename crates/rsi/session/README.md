@@ -1,5 +1,36 @@
 # rsi-session
 
+File submission resolves the optional file reader at admission time, so a
+Profile-installed namespace can become available after the Session service
+starts. The selected reader verifies the immutable object before mailbox
+admission. Session facts retain only `FileRef`; provider request assembly owns
+location projection and never makes file bytes part of the prompt.
+
+`wait_idle` returns immediately for an unpublished draft and delegates published
+driver quiescence to Kernel. It is a read owned by the handle lifetime, with no
+mutation, publication or reservation of future idle state.
+
+Session-wide cancellation delegates one atomic durable inbox/Turn stop to Kernel.
+For an unpublished draft, clearing input drops all held command inputs in one
+revision while retaining command receipts and domain state; keeping input is a
+no-op. Neither form publishes the draft. The result acknowledges the operation,
+not executor convergence, and the adapter does not replay an unknown stop.
+Inbox-only cancellation clears a draft identically; for a published Session it
+preserves execution and suspension while atomically discarding pending input.
+
+An unpublished manual fork retains a hard source lifecycle owner until first
+publication or release. This blocks product purge while preserving source Turn
+admission. A Store validation lease alone is not collection ownership. Once the
+child Header commits, its canonical history reference retains the source instead.
+
+A manual ForkDraft authorizes the source's protection and execution location,
+captures an immutable completed-turn history boundary and prepares its transformed
+domain baseline without publishing a Session. Creation retries keep that exact
+draft cut. Its first input publishes an independent root with historical provenance;
+the source's active execution, child controls and completion notices are not
+inherited. Expiry or discard releases unpublished CAS retention. Draft preset
+changes must revalidate the captured domain baseline against the selected catalog.
+
 Purge response waits have a 60-second deadline and report the original operation
 identity as an unknown outcome on expiry. Actual Store work retains its maintenance
 permit and lifecycle fences until completion; a timeout cannot prove that native
@@ -93,6 +124,9 @@ this handle's exact Header. Capture and returned-page retention have a separate
 bounded owner. No Jobs scope is acquired by Session, and a missing, finalized or
 replaced claim returns unavailable rather than a fabricated empty historical list.
 Page semantics and bounds belong to the [shared Jobs contract](../session-protocol/README.md).
+
+Model selection, Goal state and workflow readiness read their own named domain
+from a draft or durable Session.
 
 Goal controls delegate to the separately owned Host Goal controller. The Session
 adapter supplies a narrow `GoalSession` bridge: current typed domain plus command

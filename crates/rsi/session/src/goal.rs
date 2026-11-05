@@ -33,9 +33,7 @@ impl LocalSessionHandle {
                 let (revision, domain) = if let HandleState::Fresh(draft) = &*state {
                     let snapshot = draft
                         .baseline()
-                        .initial_states()
-                        .into_iter()
-                        .find(|snapshot| snapshot.identity().id() == GOAL_DOMAIN)
+                        .initial_state(GOAL_DOMAIN).cloned()
                         .ok_or(GoalError::Unavailable)?;
                     (
                         draft.revision(),
@@ -48,7 +46,7 @@ impl LocalSessionHandle {
                     drop(state);
                     let page = self
                         .store
-                        .read_domain_states(self.session_id(), None)
+                        .read_domain_states(self.session_id(), None, Some(GOAL_DOMAIN))
                         .await
                         .map_err(backend)?;
                     page.validate().map_err(backend)?;
@@ -60,7 +58,7 @@ impl LocalSessionHandle {
                     let state = page
                         .states
                         .into_iter()
-                        .find(|state| state.snapshot.identity().id() == GOAL_DOMAIN)
+                        .next()
                         .ok_or(GoalError::Unavailable)?;
                     (
                         CommandRevision::Durable {

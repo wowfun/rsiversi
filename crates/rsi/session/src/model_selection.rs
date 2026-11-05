@@ -3,7 +3,7 @@ use super::{
     HandleState, LocalSessionHandle, Result, SessionError, SessionHeader, map_ai_error,
     map_store_error,
 };
-use rsi_agent_session_protocol::{DomainRevision, DomainStateView, ModelSelection};
+use rsi_agent_session_protocol::ModelSelection;
 
 impl LocalSessionHandle {
     pub(super) async fn current_model_read(
@@ -36,41 +36,34 @@ impl LocalSessionHandle {
         &self,
         header: &SessionHeader,
     ) -> Result<ModelSelection> {
-        let initial = {
+        let resolve = |snapshot: Option<&rsi_agent_session_protocol::DomainSnapshot>| {
+            rsi_agent_model_selection::resolve_selection(header, snapshot, None)
+                .map_err(|error| SessionError::Invalid(error.to_string()))
+        };
+        {
             let state = self.state.lock().await;
             match &*state {
-                HandleState::Fresh(draft) => Some(
-                    draft
-                        .baseline()
-                        .initial_states()
-                        .into_iter()
-                        .map(|snapshot| DomainStateView {
-                            revision: DomainRevision::new(0),
-                            snapshot,
-                        })
-                        .collect::<Vec<_>>(),
-                ),
-                HandleState::Attached(_) => None,
+                HandleState::Fresh(draft) => {
+                    return resolve(
+                        draft
+                            .baseline()
+                            .initial_state(rsi_agent_model_selection::DOMAIN),
+                    );
+                }
+                HandleState::Attached(_) => {}
                 HandleState::Expired => return Err(SessionError::NotFound("draft lease".into())),
             }
-        };
-        let domains = if let Some(initial) = initial {
-            initial
-        } else {
-            self.store
-                .read_domain_states(self.session_id(), None)
-                .await
-                .map_err(map_store_error)?
-                .states
-                .into_iter()
-                .map(|state| DomainStateView {
-                    revision: state.head.revision,
-                    snapshot: state.snapshot,
-                })
-                .collect()
-        };
-        rsi_agent_model_selection::resolve_selection(header, &domains, None)
-            .map_err(|error| SessionError::Invalid(error.to_string()))
+        }
+        let page = self
+            .store
+            .read_domain_states(
+                self.session_id(),
+                None,
+                Some(rsi_agent_model_selection::DOMAIN),
+            )
+            .await
+            .map_err(map_store_error)?;
+        resolve(page.states.first().map(|state| &state.snapshot))
     }
     pub(super) fn validate_model_selection(&self, selection: &ModelSelection) -> Result<()> {
         selection

@@ -11,7 +11,7 @@ fn request() -> TurnJobsRequest {
 }
 fn page() -> Value {
     json!({"session_id":header().session_id(),"header_sha256":header().fingerprint().unwrap(),"turn_id":"active","generation":7,"after":"job-0","has_more":false,
-        "jobs":[{"id":"job-1","name":"work","producer":"bash","status":"completed","requires_report":true,"reported":false,"terminal":{"status":"completed","exit_code":0,"signal":null,"message":null},"output_retained":true}]})
+        "jobs":[{"id":"job-1","name":"cat 工作区.txt","producer":"bash","status":"completed","requires_report":true,"reported":false,"terminal":{"status":"completed","exit_code":0,"signal":null,"message":null},"output_retained":true}]})
 }
 
 #[tokio::test]

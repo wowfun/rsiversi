@@ -59,6 +59,10 @@ pub type GoalStream = std::pin::Pin<
     Box<dyn futures_util::Stream<Item = Result<rsi_goal::GoalLiveState>> + Send + 'static>,
 >;
 
+/// Current and coalesced draft revisions; `None` is the final publication notice.
+pub type DraftRevisionStream =
+    std::pin::Pin<Box<dyn futures_util::Stream<Item = Result<Option<u64>>> + Send + 'static>>;
+
 /// Coalesced model snapshots, independently retained from durable observations.
 pub type ModelLiveStream = std::pin::Pin<
     Box<
@@ -158,6 +162,40 @@ pub struct CreateSession {
     pub session_id: SessionId,
     /// Explicit preset or the current catalog default.
     pub agent_preset_id: Option<AgentPresetId>,
+    /// Optional immutable completed-history selection for an independent draft.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub fork: Option<ForkDraft>,
+}
+
+/// Manual fork selection; source identity is authorized before any history is read.
+#[derive(Clone, Debug, Eq, PartialEq, serde::Serialize, serde::Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct ForkDraft {
+    /// Exact durable source Session.
+    pub source_session_id: SessionId,
+    /// Before an accepted local Turn or through a completed local Turn.
+    pub point: rsi_agent_session_protocol::ForkPoint,
+    /// Full history, a bounded local suffix, or no history.
+    pub turns: rsi_agent_session_protocol::ForkTurnSelection,
+}
+
+/// Idempotent withdrawal of selected unpublished command inputs.
+#[derive(Clone, Debug, Eq, PartialEq, serde::Serialize, serde::Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct DiscardDraftInputs {
+    /// Exact held identities; missing identities are already absent.
+    pub message_ids: Vec<MessageId>,
+}
+impl DiscardDraftInputs {
+    /// Bounds external selection before entering the draft owner.
+    pub fn validate(&self) -> Result<()> {
+        if self.message_ids.len() > rsi_agent_session_protocol::MAXIMUM_COMMAND_INPUTS {
+            return Err(SessionError::Invalid(
+                "draft input selection exceeds 64 messages".into(),
+            ));
+        }
+        Ok(())
+    }
 }
 
 /// One atomic view of a still-unpublished draft.
@@ -168,6 +206,18 @@ pub struct SessionDraftView {
     pub header: SessionHeader,
     /// Current lease-local mutation revision.
     pub revision: u64,
+    /// Ordered held inputs; their assigned identities survive first publication.
+    pub command_inputs: Vec<rsi_agent_session_protocol::CommandMessage>,
+}
+impl SessionDraftView {
+    /// Validates an external draft snapshot using the owning Agent input contract.
+    pub fn validate(&self) -> Result<()> {
+        self.header
+            .validate()
+            .map_err(|error| SessionError::Invalid(error.to_string()))?;
+        rsi_agent_session_protocol::CommandMessage::validate_batch(&self.command_inputs, None, true)
+            .map_err(|error| SessionError::Invalid(error.to_string()))
+    }
 }
 
 /// Compare-and-select request for a new unpublished preset generation.
@@ -184,6 +234,11 @@ pub struct SelectDraftPreset {
 #[derive(Clone, Debug, Eq, PartialEq, serde::Serialize, serde::Deserialize)]
 #[serde(tag = "kind", rename_all = "snake_case", deny_unknown_fields)]
 pub enum SessionInput {
+    /// Already published verbatim file, verified before durable admission.
+    File {
+        /// Locator-free immutable identity and metadata.
+        file: rsi_media_protocol::FileRef,
+    },
     /// Immutable captured conversation data, verified before durable admission.
     Reference {
         /// Exact server-captured descriptor, retained unchanged for retries.
@@ -199,6 +254,9 @@ pub enum SessionInput {
     Image {
         /// Exact immutable reference returned by Media import.
         media: rsi_media_protocol::MediaRef,
+        /// Optional display metadata supplied by the publisher.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        presentation: Option<Box<rsi_media_protocol::ImagePresentation>>,
     },
 }
 
@@ -214,6 +272,7 @@ pub fn validate_session_input(content: &[SessionInput]) -> Result<()> {
     let mut references = 0_usize;
     for block in content {
         match block {
+            SessionInput::File { .. } => {}
             SessionInput::Reference { reference } => {
                 reference
                     .validate()
@@ -241,7 +300,7 @@ pub fn validate_session_input(content: &[SessionInput]) -> Result<()> {
                     SessionError::Invalid("Session input text byte total overflowed".into())
                 })?;
             }
-            SessionInput::Image { media } => {
+            SessionInput::Image { media, .. } => {
                 media
                     .validate()
                     .map_err(|error| SessionError::Invalid(error.to_string()))?;
@@ -314,14 +373,31 @@ impl<'a> IntoIterator for &'a ValidatedSessionInput {
     }
 }
 
+/// Initiator of a direct mailbox submission.
+#[derive(Clone, Copy, Debug, Default, Eq, PartialEq, serde::Serialize, serde::Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum SubmissionOrigin {
+    /// Interactive user action.
+    #[default]
+    User,
+    /// Work initiated by the application itself.
+    Application,
+}
+
 /// One idempotent multimodal mailbox submission.
 #[derive(Clone, Debug, serde::Serialize, serde::Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct SubmitInput {
-    /// Immutable human ingress intent: `NextTurn` or `Steer`.
+    /// Author of the submission, independently of its presentation attribution.
+    #[serde(default)]
+    pub origin: SubmissionOrigin,
+    /// Immutable direct ingress intent: `NextTurn` or `Steer`.
     pub delivery: rsi_agent_session_protocol::MessageDelivery,
     /// Caller-preallocated durable message identity.
     pub message_id: MessageId,
+    /// Original application presentation identity; never execution authority.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub attribution: Option<rsi_agent_session_protocol::MessageAttribution>,
     /// Nonempty ordered text and image content.
     pub content: ValidatedSessionInput,
     /// Optional invocation-scoped model route.
@@ -500,7 +576,33 @@ pub trait SessionHandle: fmt::Debug + Send + Sync + 'static {
         let _ = options;
         Err(SessionError::NotFound("Session export".into()))
     }
+    /// Reads the manual shell and the caller's current terminal bindings.
+    async fn terminal_catalog(&self) -> Result<terminal::Catalog> {
+        Err(
+            terminal::PtyError::Unavailable("this Session service has no terminal catalog".into())
+                .into(),
+        )
+    }
+    /// Waits until the caller's exact terminal key no longer identifies a live binding.
+    async fn wait_terminal_closed(&self, key: &str) -> Result<()> {
+        let _ = key;
+        Err(terminal::PtyError::Unavailable(
+            "this Session service has no terminal retention".into(),
+        )
+        .into())
+    }
     /// Operates a live terminal bound to this persisted Session and frozen workspace policy.
+    async fn borrow_terminal(
+        &self,
+        request: terminal::Request,
+    ) -> Result<Box<dyn terminal::AttachmentLease>> {
+        let _ = request;
+        Err(terminal::PtyError::Unavailable(
+            "this Session service has no process-local attachment owner".into(),
+        )
+        .into())
+    }
+    /// Executes a finite terminal request under this Session's authority.
     async fn terminal(&self, request: terminal::Request) -> Result<terminal::Reply> {
         let _ = request;
         Err(
@@ -577,6 +679,21 @@ pub trait SessionHandle: fmt::Debug + Send + Sync + 'static {
     /// Returns `NotFound` when this handle has no unpublished draft; other failures
     /// do not establish that durable history is available.
     async fn draft_snapshot(&self) -> Result<SessionDraftView>;
+    /// Observes draft revisions until publication (`None`), without extending draft lifetime.
+    async fn observe_draft(&self) -> Result<DraftRevisionStream>;
+    /// Retains an exact draft generation against idle expiry; Local-only, without execution authority.
+    fn retain_draft(&self) -> Result<Option<Box<dyn DraftOwner>>> {
+        Err(SessionError::Invalid(
+            "process-local draft ownership is unavailable".into(),
+        ))
+    }
+    /// Removes selected held inputs without publishing or changing domain state.
+    async fn discard_draft_inputs(&self, request: DiscardDraftInputs) -> Result<SessionDraftView> {
+        let _ = request;
+        Err(SessionError::Invalid(
+            "draft input withdrawal is unsupported".into(),
+        ))
+    }
     /// Selects a fully prepared preset only at the expected unpublished revision.
     async fn select_preset(&self, request: SelectDraftPreset) -> Result<SessionDraftView>;
     /// Lists the pinned command catalog and exact draft or durable predecessor.
@@ -603,7 +720,7 @@ pub trait SessionHandle: fmt::Debug + Send + Sync + 'static {
     async fn submit(&self, request: SubmitInput) -> Result<MessageReceipt>;
     /// Reads the latest durable claim or discard state for one message.
     async fn message_status(&self, message_id: &MessageId) -> Result<MessageReceipt>;
-    /// Compares and mutates one pending Human queue slot in this exact Session.
+    /// Edits Human input or withdraws pending input without cancelling a claimed Turn.
     async fn mutate_queue(
         &self,
         request: rsi_agent_session_protocol::QueueMutationRequest,
@@ -617,6 +734,10 @@ pub trait SessionHandle: fmt::Debug + Send + Sync + 'static {
     async fn generate_image(&self, request: SubmitDirectImage) -> Result<TurnReceipt>;
     /// Idempotently cancels an unclaimed message or an accepted Turn.
     async fn cancel(&self, target: CancelTarget, reason: Option<String>) -> Result<CancelResult>;
+    /// Waits for whole-driver quiescence without reserving the next admission.
+    async fn wait_idle(&self) -> Result<()> {
+        Err(SessionError::NotFound("Session idle waiting".into()))
+    }
     /// Reads one bounded backward history page.
     async fn history_before(
         &self,
@@ -682,6 +803,12 @@ pub trait SessionHandle: fmt::Debug + Send + Sync + 'static {
         approval_id: &str,
         decision: ApprovalDecision,
     ) -> Result<bool>;
+}
+
+/// Opaque process-local ownership against idle draft expiration.
+pub trait DraftOwner: fmt::Debug + Send + Sync + 'static {
+    /// Whether this retained generation remains unpublished and unretired; not execution authority.
+    fn is_active(&self) -> bool;
 }
 
 /// Exact outcome of explicit unpublished-draft retirement.
@@ -814,9 +941,35 @@ pub trait SessionService: fmt::Debug + Send + Sync + 'static {
     ) -> Result<RecentSessionPage>;
 }
 
+/// Navigation metadata for an unpublished conversation on one device.
+#[derive(Debug, Clone)]
+pub struct DeviceDraft {
+    /// An unpublished Session owned by the enumerated device.
+    pub session_id: SessionId,
+    /// Actual draft location.
+    pub coordinates: rsi_agent_session_protocol::ExecutionCoordinates,
+    /// Time the draft was created.
+    pub created_at_ms: u64,
+    /// Completed turns retained by the immutable inherited-history selection.
+    pub inherited_turns: u64,
+}
+
 /// Trusted server ingress to the same draft owner used by ordinary local callers.
 #[async_trait]
 pub trait SessionIngress: fmt::Debug + Send + Sync + 'static {
+    /// Subscribes before listing this caller's drafts and durable Sessions. Wakes carry no rows or authority.
+    fn watch_directory(
+        &self,
+        _device: &rsi_api_protocol::AuthenticatedDevice,
+    ) -> Result<Option<DirectoryChanges>> {
+        Ok(None)
+    }
+
+    /// Reads only ready, visible, unpublished draft locations for this authenticated device.
+    async fn device_drafts(
+        &self,
+        device: &rsi_api_protocol::AuthenticatedDevice,
+    ) -> Result<Vec<DeviceDraft>>;
     /// Binds every service operation and returned handle to this authenticated caller.
     fn scoped(&self, origin: rsi_api_protocol::CallOrigin) -> Arc<dyn SessionService>;
     /// Creates or reconciles a live draft with an authenticated, non-serialized origin.
@@ -826,6 +979,9 @@ pub trait SessionIngress: fmt::Debug + Send + Sync + 'static {
         origin: rsi_api_protocol::CallOrigin,
     ) -> Result<Arc<dyn SessionHandle>>;
 }
+
+/// Coalesced directory invalidations. An error or stream end retires the observation.
+pub type DirectoryChanges = std::pin::Pin<Box<dyn futures_util::Stream<Item = Result<()>> + Send>>;
 
 /// Server-only creation authority; ordinary clients never publish this contract.
 #[derive(Debug)]
@@ -1108,6 +1264,11 @@ mod creation_tests {
 
 /// Caller-bound access to immutable product-protected Session data.
 pub trait SessionProtection: fmt::Debug + Send + Sync + 'static {
+    /// Immutable generation of the current visibility rules. Unversioned policies require a fresh directory read.
+    fn catalog_generation(&self) -> Option<Arc<dyn Send + Sync>> {
+        None
+    }
+
     /// Returns a reading lease cancelled on grant revocation. Unknown scopes deny.
     fn view(
         &self,
@@ -1161,6 +1322,14 @@ impl SessionProtectionLookup {
     }
 }
 impl SessionProtection for SessionProtectionLookup {
+    fn catalog_generation(&self) -> Option<Arc<dyn Send + Sync>> {
+        static ABSENT: std::sync::LazyLock<Arc<()>> = std::sync::LazyLock::new(Arc::default);
+        if let Some(policy) = (self.0)() {
+            return policy.catalog_generation();
+        }
+        Some(ABSENT.clone())
+    }
+
     fn view(
         &self,
         scope: &rsi_agent_session_protocol::SessionProtectionScope,

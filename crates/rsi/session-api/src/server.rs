@@ -126,34 +126,29 @@ impl SessionApi {
                 rsi_api_protocol::MAXIMUM_API_BYTES,
             )),
         };
-        let mut registrations = root_operations(registrar, service.clone(), scratch.clone())?;
+        let mut registrations = Vec::new();
         for (operation, handler) in handle_operations(&service, &scratch) {
             registrations.push(registrar.register(operation.spec(), handler)?);
         }
-        for (operation, service) in [
+        for operation in [
             Operation::Export,
             Operation::Observe,
             Operation::ModelObserve,
             Operation::Interactions,
             Operation::Projections,
+            Operation::DraftObserve,
             Operation::GoalObserve,
             Operation::TerminalOutput,
-        ]
-        .into_iter()
-        .zip([
-            service.clone(),
-            service.clone(),
-            service.clone(),
-            service.clone(),
-            service.clone(),
-            service.clone(),
-            service,
-        ]) {
+        ] {
             registrations.push(registrar.register(
                 operation.spec(),
-                Arc::new(crate::server_stream::Handler { service, operation }),
+                Arc::new(crate::server_stream::Handler {
+                    service: service.clone(),
+                    operation,
+                }),
             )?);
         }
+        registrations.extend(root_operations(registrar, service, scratch)?);
         Ok(Self { registrations })
     }
     /// Retires admission and drains server-owned mutations before dependencies retire.
@@ -432,6 +427,13 @@ fn handle_operations(
             owner.draft_snapshot().await
         }),
         add!(
+            DiscardDraftInputs,
+            |owner, request: rsi_session_protocol::DiscardDraftInputs| async move {
+                request.validate()?;
+                owner.discard_draft_inputs(request).await
+            }
+        ),
+        add!(
             SelectPreset,
             |owner, request: rsi_session_protocol::SelectDraftPreset| async move {
                 owner.select_preset(request).await
@@ -490,6 +492,10 @@ fn handle_operations(
         add!(Cancel, |owner, request: wire::Cancel| async move {
             owner.cancel(request.target, request.reason).await
         }),
+        add!(
+            WaitIdle,
+            |owner, (): ()| async move { owner.wait_idle().await }
+        ),
         add!(History, |owner, request: wire::History| async move {
             Ok(bound_history(
                 owner.history_before(request.before, request.limit).await?,

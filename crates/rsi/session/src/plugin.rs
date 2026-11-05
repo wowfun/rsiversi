@@ -70,6 +70,10 @@ impl PluginFactory for SessionFactory {
             plan.local::<MediaContract>()?,
             plan.local::<SessionApprovalControlContract>()?,
         )
+        .with_files({
+            let context = plan.context().clone();
+            move || context.lookup_local::<rsi_media_protocol::FileReadContract>()
+        })
         .with_protection(Arc::new({
             let context = plan.context().clone();
             rsi_session_protocol::SessionProtectionLookup::new(move || {

@@ -4,6 +4,138 @@ use rsi_agent_session_protocol::{AgentControlRecord, AgentControlRecordBody, Tur
 use rsi_agent_store_protocol::{AtomicAgentCommit, AtomicSessionAppend, PurgeRequest, PurgeTarget};
 use rsi_session_protocol::SessionIngress as _;
 use rsi_session_protocol::{SessionReads, SessionTarget};
+
+async fn publish_observed_source(
+    service: &LocalSessionService,
+    source_id: &SessionId,
+) -> Arc<dyn rsi_session_protocol::SessionHandle> {
+    let source = service
+        .create(CreateSession {
+            fork: None,
+            workspace_id: workspace_id(),
+            session_id: source_id.clone(),
+            agent_preset_id: None,
+        })
+        .await
+        .unwrap();
+    let mut observer = source
+        .observe(rsi_agent_turn_protocol::ObservationCursor {
+            control_seq: 0,
+            fact_seq: 0,
+        })
+        .await
+        .unwrap();
+    submit_text(source.clone(), "source-input", "retained source")
+        .await
+        .unwrap();
+    tokio::time::timeout(std::time::Duration::from_secs(5), observer.next())
+        .await
+        .unwrap()
+        .unwrap()
+        .unwrap();
+    source
+}
+
+#[tokio::test]
+async fn fork_draft_blocks_source_purge_then_hands_retention_to_its_durable_header() {
+    use rsi_agent_store_protocol::PurgeBlocker;
+    use rsi_agent_turn_protocol::TurnExecution;
+    use rsi_session_protocol::SessionDraftControl;
+    let directory = tempfile::tempdir().unwrap();
+    let store = Arc::new(
+        rsi_agent_store_sqlite::SqliteStore::open(directory.path().join("store")).unwrap(),
+    );
+    let composition = Arc::new(AvailableComposition);
+    let kernel = Arc::new(
+        rsi_agent_kernel::AgentKernel::recover(store.clone(), composition.clone())
+            .await
+            .unwrap(),
+    );
+    let workers = kernel.start_workers();
+    let service = LocalSessionService::new(
+        rsi_meta::Execution::native(tokio::runtime::Handle::current()),
+        kernel.clone(),
+        kernel.clone(),
+        kernel.clone(),
+        store.clone(),
+        rsi_agent_context::ContextBudget::default(),
+        composition,
+        Arc::new(AvailableWorkspace::at(directory.path())),
+        Arc::new(TextSettings),
+        Arc::new(AvailableLanguage),
+        Arc::new(UnavailableImage),
+        Arc::new(UnavailableMedia),
+        Arc::new(NoApprovalControl),
+    );
+    let source_id = SessionId::new("fork-retention-source").unwrap();
+    let source = publish_observed_source(&service, &source_id).await;
+    let executor = kernel.register("fork-retention".into()).unwrap();
+    let claim = kernel
+        .claim("fork-retention", CancellationToken::new())
+        .await
+        .unwrap()
+        .unwrap();
+    kernel
+        .finish_turn(&claim, &TurnOutcome::Completed)
+        .await
+        .unwrap();
+    let header = source.header().await.unwrap();
+    let cut = store.read_watermarks(&source_id).await.unwrap();
+    let purge = PurgeRequest {
+        operation_id: rsi_agent_store_protocol::MaintenanceOperationId::new("fork-retention-purge")
+            .unwrap(),
+        targets: vec![PurgeTarget {
+            session_id: source_id.clone(),
+            header_sha256: header.fingerprint().unwrap(),
+            fact_seq: cut.durable_fact_seq,
+            control_seq: cut.durable_control_seq,
+        }],
+    };
+    let request = |name| CreateSession {
+        workspace_id: workspace_id(),
+        session_id: SessionId::new(name).unwrap(),
+        agent_preset_id: None,
+        fork: Some(rsi_session_protocol::ForkDraft {
+            source_session_id: source_id.clone(),
+            point: rsi_agent_session_protocol::ForkPoint::through(claim.turn_id()),
+            turns: rsi_agent_session_protocol::ForkTurnSelection::All,
+        }),
+    };
+    let released_id = SessionId::new("released-draft").unwrap();
+    service.create(request("released-draft")).await.unwrap();
+    assert!(
+        service
+            .preview_purge(purge.clone())
+            .await
+            .unwrap()
+            .blockers
+            .contains(&PurgeBlocker::Busy {
+                session_id: source_id.clone()
+            })
+    );
+    assert!(service.purge(purge.clone()).await.unwrap().is_err());
+    assert_eq!(
+        service.release_draft(&released_id),
+        rsi_session_protocol::DraftRelease::Released
+    );
+    assert!(
+        service
+            .preview_purge(purge.clone())
+            .await
+            .unwrap()
+            .blockers
+            .is_empty()
+    );
+    let draft = service.create(request("published-fork")).await.unwrap();
+    submit_text(draft, "child-input", "publish history reference")
+        .await
+        .unwrap();
+    let preview = service.preview_purge(purge).await.unwrap();
+    assert!(preview.blockers.iter().any(|blocker| matches!(blocker, PurgeBlocker::Referenced {source: Some(source), target} if source.as_str() == "published-fork" && target == &source_id)));
+    drop(executor);
+    service.stop().await.unwrap();
+    kernel.shutdown(workers).await.unwrap();
+}
 #[derive(Debug)]
 struct RemovedExecution;
 impl rsi_execution::ExecutionResolver for RemovedExecution {

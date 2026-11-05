@@ -42,12 +42,12 @@ pub async fn observe_message_claim(
                     && let AgentControlRecordBody::MessageClaimed {
                         message_id,
                         turn_id,
-                        entered_fact_seq,
+                        claimed_fact_seq,
                         ..
                     } = record.body()
                     && message_id == &receipt.message_id
                 {
-                    return (turn_id.clone(), *entered_fact_seq);
+                    return (turn_id.clone(), *claimed_fact_seq);
                 }
             }
         })
@@ -144,6 +144,8 @@ pub async fn assert_session_contract(
 
     let message_id = MessageId::new(format!("{session}-message")).unwrap();
     let submission = SubmitInput {
+        origin: rsi_session_protocol::SubmissionOrigin::User,
+        attribution: None,
         reasoning_effort: None,
         delivery: rsi_agent_session_protocol::MessageDelivery::NextTurn,
         message_id: message_id.clone(),
@@ -205,6 +207,8 @@ pub async fn assert_session_contract(
     assert!(matches!(
         handle
             .submit(SubmitInput {
+                origin: rsi_session_protocol::SubmissionOrigin::User,
+                attribution: None,
                 reasoning_effort: None,
                 delivery: rsi_agent_session_protocol::MessageDelivery::NextTurn,
                 message_id: message_id.clone(),
@@ -220,15 +224,15 @@ pub async fn assert_session_contract(
         Err(SessionError::MessageConflict { .. })
     ));
 
-    let (turn_id, entered_fact_seq) = observe_message_claim(&handle, &first, execution).await;
+    let (turn_id, claimed_fact_seq) = observe_message_claim(&handle, &first, execution).await;
     let claimed = handle.message_status(&message_id).await.unwrap();
     assert_eq!(claimed.session_id, first.session_id);
     assert_eq!(claimed.message_id, first.message_id);
     assert_eq!(claimed.accepted_control_seq, first.accepted_control_seq);
     assert!(matches!(
         &claimed.state,
-        MessageState::Claimed { turn_id: observed, entered_fact_seq: seq, .. }
-            if observed == &turn_id && *seq == entered_fact_seq
+        MessageState::Claimed { turn_id: observed, claimed_fact_seq: seq, .. }
+            if observed == &turn_id && *seq == claimed_fact_seq
     ));
     let claimed_retry = handle.submit(submission).await.unwrap();
     assert_eq!(claimed_retry.state, claimed.state);
@@ -271,7 +275,7 @@ pub async fn assert_session_contract(
     let mut observation = handle
         .observe(ObservationCursor {
             control_seq: first.accepted_control_seq,
-            fact_seq: entered_fact_seq,
+            fact_seq: claimed_fact_seq,
         })
         .await
         .unwrap();
@@ -292,7 +296,7 @@ pub async fn assert_session_contract(
     .expect("turn reached a durable terminal Fact");
 
     let history = handle.history_before(None, 64).await.unwrap();
-    assert!(history.durable_seq >= entered_fact_seq);
+    assert!(history.durable_seq >= claimed_fact_seq);
     assert!(history.facts.iter().any(|fact| matches!(
         fact.body(),
         SessionFactBody::TurnTerminal { turn_id: observed, .. } if observed == &turn_id

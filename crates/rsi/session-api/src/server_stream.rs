@@ -64,6 +64,7 @@ impl ApiHandler for Handler {
                 terminal_output(service.as_ref(), input, budget, maximum).await
             }
             Operation::GoalObserve => goal(service.as_ref(), input, budget, maximum).await,
+            Operation::DraftObserve => draft(service.as_ref(), input, budget, maximum).await,
             Operation::Projections => projections(service.as_ref(), input, budget, maximum).await,
             Operation::ModelObserve => models(service.as_ref(), input, budget, maximum).await,
             Operation::Observe => {
@@ -186,6 +187,37 @@ async fn goal(
         }
     })))
 }
+async fn draft(
+    service: &dyn SessionService,
+    input: RetainedBytes,
+    budget: rsi_api_protocol::ByteBudget,
+    maximum: usize,
+) -> rsi_api_protocol::Result<ApiOutput> {
+    let request: HandleRequest<()> = serde_json::from_slice(input.as_bytes())
+        .map_err(|_| ApiError::Invalid("invalid Session draft observation request".into()))?;
+    let result = async {
+        handle(service, &request.target)
+            .await?
+            .observe_draft()
+            .await
+    }
+    .await;
+    let mut source = match wire::domain(result)? {
+        Ok(source) => source,
+        Err(failure) => return Err(ApiError::Domain(budget.encode(&failure, maximum)?)),
+    };
+    Ok(ApiOutput::Stream(Box::pin(async_stream::try_stream! {
+        while let Some(revision) = source.next().await {
+            let revision = match wire::domain(revision)? {
+                Ok(revision) => revision,
+                Err(failure) => Err(ApiError::Domain(budget.encode(&failure, maximum)?))?,
+            };
+            let json = budget.encode(&HandleReply { target: request.target.clone(), body: revision }, maximum)?;
+            yield ApiMessage { json, binary: None };
+        }
+    })))
+}
+
 async fn projections(
     service: &dyn SessionService,
     input: RetainedBytes,

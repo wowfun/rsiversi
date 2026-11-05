@@ -1,5 +1,9 @@
 use super::*;
 
+#[path = "commands/draft_observation.rs"]
+mod draft_observation;
+#[path = "commands/fork.rs"]
+mod fork;
 #[path = "commands/preset.rs"]
 mod preset;
 #[path = "commands/projections.rs"]
@@ -9,7 +13,7 @@ mod resources;
 use rsi_agent_composition_protocol::{
     ContributionCatalog, ContributionKind, ContributionRegistration, ContributionResult,
     DomainCatalog, DomainDefinition, DomainHandle, SessionCommand, SessionCommandContext,
-    SessionCommandRegistration, ValidatedDomainProposal,
+    SessionCommandRegistration,
 };
 use rsi_agent_kernel::AgentKernel;
 use rsi_agent_session_protocol::{
@@ -21,6 +25,7 @@ use rsi_agent_session_protocol::{
 struct Toggle {
     handle: DomainHandle<bool>,
     calls: AtomicUsize,
+    hold_inputs: std::sync::atomic::AtomicBool,
     entered: Semaphore,
     release: Semaphore,
     view_gate: std::sync::Mutex<Option<Arc<projections::Gate>>>,
@@ -53,18 +58,31 @@ impl SessionCommand for Toggle {
         context: &SessionCommandContext,
         arguments: &CommandArguments,
         _: CancellationToken,
-    ) -> ContributionResult<Vec<ValidatedDomainProposal>> {
+    ) -> ContributionResult<rsi_agent_composition_protocol::SessionCommandOutput> {
         self.calls.fetch_add(1, Ordering::SeqCst);
         self.entered.add_permits(1);
         self.release.acquire().await.unwrap().forget();
-        Ok(vec![
+        let mut output: rsi_agent_composition_protocol::SessionCommandOutput = vec![
             self.handle
                 .propose(
                     context.domains[0].revision,
                     &arguments.value().as_bool().unwrap(),
                 )
                 .unwrap(),
-        ])
+        ]
+        .into();
+        if self.hold_inputs.load(Ordering::Acquire) {
+            output
+                .inputs
+                .push(rsi_agent_composition_protocol::CommandInput {
+                    delivery: rsi_agent_composition_protocol::CommandInputDelivery::Inject,
+                    content: vec![rsi_agent_session_protocol::AgentMessageContent::Text {
+                        text: "held context".into(),
+                    }],
+                    attribution: None,
+                });
+        }
+        Ok(output)
     }
 }
 
@@ -138,6 +156,7 @@ impl Fixture {
         let callback = Arc::new(Toggle {
             handle: domains.bind(&definition).unwrap(),
             calls: AtomicUsize::new(0),
+            hold_inputs: std::sync::atomic::AtomicBool::new(false),
             entered: Semaphore::new(0),
             release: Semaphore::new(0),
             view_gate: std::sync::Mutex::new(None),
@@ -214,6 +233,7 @@ impl Fixture {
     }
     fn request(id: &str) -> CreateSession {
         CreateSession {
+            fork: None,
             workspace_id: workspace_id(),
             session_id: SessionId::new(id).unwrap(),
             agent_preset_id: None,
@@ -294,7 +314,7 @@ async fn draft_reconnect_retains_receipt_and_first_submit_freezes_the_changed_st
         .unwrap();
     let states = fixture
         .store
-        .read_domain_states(&SessionId::new("draft-command").unwrap(), Some(1))
+        .read_domain_states(&SessionId::new("draft-command").unwrap(), Some(1), None)
         .await
         .unwrap();
     assert_eq!(states.states.len(), 1);
@@ -453,7 +473,7 @@ async fn first_submission_prevents_a_late_draft_callback_from_replacing_its_base
     ));
     let states = fixture
         .store
-        .read_domain_states(&SessionId::new("publication-race").unwrap(), None)
+        .read_domain_states(&SessionId::new("publication-race").unwrap(), None, None)
         .await
         .unwrap();
     assert!(

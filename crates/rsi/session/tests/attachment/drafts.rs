@@ -198,6 +198,7 @@ fn service(path: &Path, preparation: Arc<dyn AgentComposition>) -> Arc<LocalSess
 
 fn request(_path: &Path, id: impl Into<String>) -> CreateSession {
     CreateSession {
+        fork: None,
         workspace_id: workspace_id(),
         session_id: SessionId::new(id).unwrap(),
         agent_preset_id: None,
@@ -833,5 +834,38 @@ async fn absent_workflow_runtime_gates_default_and_switch_before_generation_prep
             .await,
         Err(SessionError::Invalid(_))
     ));
+    service.stop().await.unwrap();
+}
+
+#[tokio::test(start_paused = true)]
+async fn enumerating_device_drafts_is_private_and_does_not_renew_the_idle_lease() {
+    let directory = tempfile::tempdir().unwrap();
+    let preparation = Preparation::new(true);
+    let service = service(directory.path(), preparation.clone());
+    let origin = device(1);
+    let rsi_api_protocol::CallOrigin::Device(owner) = origin.clone() else {
+        unreachable!()
+    };
+    let rsi_api_protocol::CallOrigin::Device(other) = device(2) else {
+        unreachable!()
+    };
+    let source = request(directory.path(), "blank");
+    let creating = tokio::spawn({
+        let service = service.clone();
+        async move { service.create_from(source, origin).await }
+    });
+    preparation.entered.acquire().await.unwrap().forget();
+    assert!(service.device_drafts(&owner).await.unwrap().is_empty());
+    preparation.release.as_ref().unwrap().add_permits(1);
+    let handle = creating.await.unwrap().unwrap();
+    tokio::time::advance(std::time::Duration::from_mins(30)).await;
+    let drafts = service.device_drafts(&owner).await.unwrap();
+    assert_eq!(drafts.len(), 1);
+    assert_eq!(drafts[0].session_id.as_str(), "blank");
+    assert_eq!(drafts[0].inherited_turns, 0);
+    assert!(service.device_drafts(&other).await.unwrap().is_empty());
+    tokio::time::advance(std::time::Duration::from_mins(31)).await;
+    assert!(service.device_drafts(&owner).await.unwrap().is_empty());
+    assert!(handle.header().await.is_err());
     service.stop().await.unwrap();
 }

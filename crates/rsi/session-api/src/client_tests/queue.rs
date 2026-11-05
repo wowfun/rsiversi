@@ -3,6 +3,31 @@ use rsi_agent_session_protocol::{
     QueueMutation, QueueMutationOutcome, QueueMutationReceipt, QueueMutationRequest,
     QueueOperationId, QueueSlotId,
 };
+
+#[tokio::test]
+async fn idle_wait_uses_one_session_bound_read_and_preserves_retirement() {
+    let (remote, _, handle) = fixture().await;
+    remote.reply(&envelope(Value::Null));
+    let before = remote.calls.load(Ordering::Acquire);
+    handle.wait_idle().await.unwrap();
+    {
+        let requests = remote.requests.lock().unwrap();
+        let (operation, request) = requests.last().unwrap();
+        assert_eq!(operation, &Operation::WaitIdle.spec());
+        assert!(request["input"].is_null());
+    }
+    assert_eq!(remote.calls.load(Ordering::Acquire), before + 1);
+    remote
+        .replies
+        .lock()
+        .unwrap()
+        .push_back(Err(ApiError::ShuttingDown));
+    assert!(matches!(
+        handle.wait_idle().await,
+        Err(SessionError::Api(ApiError::ShuttingDown))
+    ));
+    assert_eq!(remote.calls.load(Ordering::Acquire), before + 2);
+}
 fn request() -> QueueMutationRequest {
     QueueMutationRequest {
         operation_id: QueueOperationId::new("edit").unwrap(),

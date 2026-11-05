@@ -178,6 +178,8 @@ fn envelope(body: Value) -> Value {
 }
 fn submit() -> SubmitInput {
     SubmitInput {
+        origin: rsi_session_protocol::SubmissionOrigin::User,
+        attribution: None,
         reasoning_effort: None,
         delivery: MessageDelivery::NextTurn,
         message_id: MessageId::new("message").unwrap(),
@@ -376,7 +378,7 @@ async fn finite_reads_reject_foreign_cursors_discontinuous_history_and_wrong_err
     let (remote, _, handle) = fixture().await;
     let message = AgentMessage {
         message_id: MessageId::new("message").unwrap(),
-        source: AgentMessageSource::Human,
+        source: AgentMessageSource::Human { attribution: None },
         content: vec![AgentMessageContent::Text {
             text: "hello".into(),
         }],
@@ -517,6 +519,7 @@ async fn descendant_approvals_use_one_validated_tree_and_reuse_its_membership() 
     for foreign in [false, true] {
         let (remote, client, handle) = fixture().await;
         let status = |session_id| StoreAgentSessionStatus {
+            inbox_paused: false,
             last_settled_control_seq: 0,
             session_id,
             durable_control_seq: 0,
@@ -593,13 +596,21 @@ async fn descendant_approvals_use_one_validated_tree_and_reuse_its_membership() 
 #[test]
 fn session_proxy_keeps_local_call_versions_without_constructor_admission() {
     let versions = [
-        (Operation::Create, 8),
-        (Operation::Attach, 7),
-        (Operation::Recent, 8),
-        (Operation::DraftSnapshot, 7),
-        (Operation::SelectPreset, 7),
-        (Operation::Inspect, 8),
+        (Operation::Create, 12),
+        (Operation::Attach, 9),
+        (Operation::Recent, 10),
+        (Operation::DraftSnapshot, 10),
+        (Operation::SelectPreset, 10),
+        (Operation::Inspect, 10),
+        (Operation::Submit, 6),
+        (Operation::Observe, 9),
+        (Operation::History, 7),
+        (Operation::ReadMessage, 7),
+        (Operation::ReadHeader, 3),
+        (Operation::DiscardDraftInputs, 2),
+        (Operation::MutateQueue, 3),
         (Operation::ModelObserve, 2),
+        (Operation::MessageStatus, 3),
     ];
     for (operation, version) in versions {
         let current = operation.spec();
@@ -618,13 +629,6 @@ fn session_proxy_keeps_local_call_versions_without_constructor_admission() {
             &(remote as Arc<dyn ApiClient>)
         ));
     }
-    for operation in [Operation::History, Operation::ReadMessage] {
-        assert_eq!(operation.spec().id.version(), 6);
-    }
-    assert_eq!(Operation::Observe.spec().id.version(), 7);
-    assert_eq!(Operation::ModelObserve.spec().id.version(), 2);
-    assert_eq!(Operation::Submit.spec().id.version(), 5);
-    assert_eq!(Operation::MessageStatus.spec().id.version(), 3);
     let _proxy = SessionClient::new(Remote::new());
 }
 
@@ -698,6 +702,12 @@ async fn terminal_output_uses_a_bounded_subscription_and_preserves_typed_failure
 struct LocalIngress(Arc<dyn SessionService>);
 #[async_trait]
 impl rsi_session_protocol::SessionIngress for LocalIngress {
+    async fn device_drafts(
+        &self,
+        _: &rsi_api_protocol::AuthenticatedDevice,
+    ) -> rsi_session_protocol::Result<Vec<rsi_session_protocol::DeviceDraft>> {
+        panic!("local-only fixture cannot enumerate device drafts")
+    }
     fn scoped(&self, origin: rsi_api_protocol::CallOrigin) -> Arc<dyn SessionService> {
         assert!(matches!(origin, rsi_api_protocol::CallOrigin::Local));
         self.0.clone()
