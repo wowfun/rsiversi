@@ -106,6 +106,12 @@ the durable Tool intent. Start returns the settled outcome after the Worker has
 committed it. A lost start response triggers only read-only outcome queries.
 The source can read the same receipt from a replacement process. The effect
 body is admitted once. An absent or mismatched receipt cannot prove a result.
+Execution admission requires the original live captured view and registration.
+Duplicate start can return an existing matching receipt without that live view;
+it cannot enter a replacement registration. The native source sends only outcome
+queries after losing a start reply. The durable native Tool intent is the
+execution admission record; the application keeps live pending state in memory and persists only a settled
+result before returning it. Process loss without that result remains unknown.
 Capture includes `modelSelection` with the native request's provider, model and
 optional reasoning effort. This is the admitted request choice, independent of
 the immutable Session Header and any later model-selection command.

@@ -38,6 +38,16 @@ a read-only receipt directory for each named source. A matching record lets
 the Kernel recover the original output without dispatching plugin code.
 Bounded retention and a process exit before recording its result can both
 leave the effect uncertain. Startup still closes the interrupted Turn.
+
+The native Tool intent already owns durable admission. The application does not
+write another pending marker before entering a plugin. The native transport sends
+start once to its captured process; a lost reply and a replacement process permit
+only outcome queries. Start is bound to a live view and its original registration,
+so an old invocation cannot enter a replacement plugin. Bounded live records retain
+unknown results and duplicate-call identities until retirement or eviction. Only
+settled results need an application file, preserving cold recovery before the
+Worker starts while removing one atomic write from every execution.
+
 ## Tool hook input and recovery
 
 A tool can finish while its siblings are still running. Entering its messages
