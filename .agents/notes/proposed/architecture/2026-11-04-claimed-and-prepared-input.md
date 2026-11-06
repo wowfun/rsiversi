@@ -89,6 +89,32 @@ therefore distinguishes those roles. Waiting for the participating source
 before starting the Step clock keeps a slow first launch cancellable without
 replaying the original input or delaying unrelated Host operations.
 
+### Accepted input body ownership
+
+The accepted control already owns the immutable mailbox message. Persisting its
+unchanged content again in the claim is a remaining duplication; removing the
+mailbox index's body and using references in the final preparation do not remove
+this copy. DSH also appends inbox messages into its model-visible event stream,
+so its current JSONL representation is not itself a durable deduplication scheme.
+
+Normalize queued claim bodies at the Store boundary while retaining the existing
+logical Fact contract for consumers. The physical claim should identify its
+same-Session acceptance; one bounded joined read can decode both records into
+the typed logical input without creating an intermediate expanded JSON document.
+Inline contribution claims without an acceptance remain self-contained. The
+original typed append must be compared with the accepted payload before removing
+any body: validating only a rehydrated row could hide a conflicting submitted
+claim. The current append already owns those typed values and need not reread
+the rows it just inserted.
+
+This normalization is not yet activated. Activation must cover admission of
+resolved bytes before allocation, exact physical schema handling, canonical
+prefix and reference-coverage verification, point/page/window/suffix reads,
+same-append acceptances, and retirement ordering. Logical Fact fingerprints and
+model-visible provenance must not change merely because storage is normalized.
+Cold recovery, selected forks and application history must use that same reader;
+no consumer-specific fallback or secondary body cache is proposed.
+
 ## Alternatives considered
 
 Rewriting only the provider request preserves a different recovery history.
@@ -97,6 +123,12 @@ Mutating old journal rows violates the accepted-prefix contract. Repeating all
 unchanged text in the preparation record adds avoidable durable bytes and cloning.
 Replaying a callback after a missing acknowledgement can duplicate plugin effects.
 Keeping claim and entry as one operation excludes DSH's drop/reject semantics.
+An expanded SQLite JSON view would conceal the physical distinction, but must
+parse and serialize the accepted payload before Rust parses it again. A local
+large-input probe showed a substantial read-cost increase. Returning bounded raw
+records for one typed decoder avoids that extra representation. Making every
+Context, fork and browser consumer resolve mailbox references separately would
+spread a mechanical storage concern into the product state machine.
 
 ## Acceptance criteria
 
