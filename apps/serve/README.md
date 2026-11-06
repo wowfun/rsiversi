@@ -133,6 +133,20 @@ Cancellation allows five seconds for a receipt. A body that ignores its
 signal keeps its Worker admission until it actually exits. The native caller
 receives an unknown outcome when that grace expires.
 
+The opt-in `application::tools::tests::transport_probe::native_tool_transport`
+test drives the existing Rust `View::start_and_observe` path against an isolated
+application listener. Its line-delimited stdin accepts `{"type":"bind","path":...}`
+for a private listener descriptor containing `port` and `key`, then
+`{"type":"start","request":...}` for already captured fixture invocations.
+Output lines prefixed `RSI_TOOL_TRANSPORT ` carry readiness, binding confirmation,
+or elapsed milliseconds and the typed Tool result; credentials are never output.
+EOF closes the probe; a run without any invocation fails. Build the optimized test executable with
+`cargo test -p rsi-serve --lib --release --no-run`, and run the exact ignored test
+with `--ignored --exact --nocapture`. The measured interval includes native
+transport, application execution and receipt settlement, but excludes fixture
+stdin/stdout, capture, browser startup and subsequent Kernel Fact publication.
+This probe does not replace live Kernel execution or recovery acceptance.
+
 An application observing a root Session can follow its pending human
 interactions under the shared browser owner's authority. The observation
 starts with the native complete snapshot. Its bounded fragments retain the
