@@ -123,6 +123,15 @@ compact codec and sole durable Fact remain unchanged. The Agent extension owns
 this shared wire projection; workbench, inherited history and captured Agent
 operations use it together.
 
+Merging native controls does not make each Fact anchor a new read horizon. DSH's
+stored-log reader resolves one current logical prefix before returning its
+requested slice. The bridge uses one bounded page cursor per captured update,
+consuming only through each control's anchor while retaining the rest of that
+page. Restarting pagination at every anchor added IPC and decoding without
+changing visibility. Page retention ends with the update; it is not another
+history cache or source of request authority. The existing staging transaction
+still prevents failed or cancelled observations from publishing a partial log.
+
 ## Alternatives considered
 
 A predicted sequence breaks immutable identity. A Promise or missing event breaks
