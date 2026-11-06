@@ -1,6 +1,7 @@
 use super::Sessions;
 use futures_util::StreamExt;
 use rsi_agent_session_protocol::SessionId;
+use rsi_agent_store_protocol::{SessionStore, StoreError};
 use rsi_agent_turn_protocol::{ObservationCursor, SessionObservation};
 use rsi_extension::{Error, Result};
 use rsi_session_protocol::SessionHandle;
@@ -41,6 +42,7 @@ enum Operation {
     },
     Fact {
         after_seq: u64,
+        through_seq: u64,
         offset: usize,
     },
     Attempt {
@@ -124,6 +126,7 @@ impl Sessions {
                 _ => Err(Error::Remote("Session unavailable to caller".into())),
             };
         };
+        let store = self.store.as_ref();
         let result = match input.operation {
             Operation::SeedOpen { key } => {
                 self.open_inherited(
@@ -169,20 +172,16 @@ impl Sessions {
                 let encoded = serde_json::to_string(&message).map_err(|_| Error::Protocol)?;
                 fragment(&encoded, offset, accepted_control_seq)?
             }
-            Operation::Fact { after_seq, offset } => {
-                read(handle.as_ref(), after_seq, offset, false).await?
-            }
+            Operation::Fact {
+                after_seq,
+                through_seq,
+                offset,
+            } => read_facts(store, &input.session_id, after_seq, through_seq, offset).await?,
             Operation::Attempt { after_seq, offset } => {
-                read(handle.as_ref(), after_seq, offset, true).await?
+                read_attempt(handle.as_ref(), after_seq, offset).await?
             }
             Operation::Wait { cursor } => {
-                wait(handle.as_ref(), cursor).await?;
-                let current = self
-                    .store
-                    .read_watermarks(&input.session_id)
-                    .await
-                    .map_err(|error| Error::Remote(error.to_string()))?;
-                json!({"control_seq":current.durable_control_seq,"fact_seq":current.durable_fact_seq})
+                wait(handle.as_ref(), store, &input.session_id, cursor).await?
             }
             Operation::ModelOpen { key, effect } => {
                 self.open_model(
@@ -332,12 +331,7 @@ fn remote(error: &rsi_session_protocol::SessionError) -> Error {
     Error::Remote(error.to_string().chars().take(1000).collect())
 }
 
-async fn read(
-    handle: &dyn SessionHandle,
-    after: u64,
-    offset: usize,
-    attempt: bool,
-) -> Result<Value> {
+async fn read_attempt(handle: &dyn SessionHandle, after: u64, offset: usize) -> Result<Value> {
     let before = after.checked_add(2).ok_or(Error::Protocol)?;
     let page = handle
         .history_before(Some(before), 1)
@@ -346,23 +340,47 @@ async fn read(
     let [fact] = page.facts.as_slice() else {
         return Err(Error::Protocol);
     };
-    fact_fragment(fact, after, offset, attempt)
+    attempt_fragment(fact, after, offset)
 }
-pub(super) fn fact_fragment(
+pub(super) fn attempt_fragment(
     fact: &rsi_agent_session_protocol::SessionFact,
     after: u64,
     offset: usize,
-    attempt: bool,
 ) -> Result<Value> {
     if after.checked_add(1) != Some(fact.seq()) {
         return Err(Error::Protocol);
     }
-    let encoded = if attempt {
-        rsi_extension_agent::project_model_attempt(fact, after)?
-    } else {
-        serde_json::to_string(std::slice::from_ref(fact)).map_err(|_| Error::Protocol)?
-    };
+    let encoded = rsi_extension_agent::project_model_attempt(fact, after)?;
     fragment(&encoded, offset, fact.seq())
+}
+
+/// The Store bounds body allocation before decoding. Oversized individual Facts
+/// retain the existing fragmented transport, without widening ordinary pages.
+pub(super) async fn read_facts(
+    store: &dyn SessionStore,
+    session: &SessionId,
+    after: u64,
+    through: u64,
+    offset: usize,
+) -> Result<Value> {
+    let count = through
+        .checked_sub(after)
+        .filter(|count| *count > 0)
+        .ok_or(Error::Protocol)?;
+    let limit = count.min(512) as usize;
+    let page = match store.read_facts(session, after, limit, 128 * 1024).await {
+        Err(StoreError::ReadRequiresCapacity { minimum_bytes }) => {
+            store.read_facts(session, after, 1, minimum_bytes).await
+        }
+        result => result,
+    }
+    .map_err(|error| Error::Remote(error.to_string()))?;
+    if through > page.durable_seq {
+        return Err(Error::Protocol);
+    }
+    let last = page.facts.last().ok_or(Error::Protocol)?.seq();
+    let encoded = serde_json::to_string(&page.facts).map_err(|_| Error::Protocol)?;
+    fragment(&encoded, offset, last)
 }
 
 pub(super) fn fragment(encoded: &str, offset: usize, through: u64) -> Result<Value> {
@@ -383,27 +401,34 @@ pub(super) fn fragment_text(encoded: &str, offset: usize) -> Result<(usize, &str
     Ok((end, &encoded[offset..end]))
 }
 
-async fn wait(handle: &dyn SessionHandle, mut cursor: ObservationCursor) -> Result<Value> {
+async fn wait(
+    handle: &dyn SessionHandle,
+    store: &dyn SessionStore,
+    session: &SessionId,
+    cursor: ObservationCursor,
+) -> Result<Value> {
     let mut observations = handle
         .observe(cursor)
         .await
         .map_err(|error| remote(&error))?;
     while let Some(item) = observations.next().await {
-        match item.map_err(|error| remote(&error))? {
+        let advanced = match item.map_err(|error| remote(&error))? {
             SessionObservation::Control {
                 durable_control_seq,
                 ..
-            } if durable_control_seq > cursor.control_seq => {
-                cursor.control_seq = durable_control_seq;
-                return Ok(json!(cursor));
-            }
+            } => durable_control_seq > cursor.control_seq,
             SessionObservation::Fact {
                 durable_fact_seq, ..
-            } if durable_fact_seq > cursor.fact_seq => {
-                cursor.fact_seq = durable_fact_seq;
-                return Ok(json!(cursor));
-            }
-            SessionObservation::Fact { .. } | SessionObservation::Control { .. } => {}
+            } => durable_fact_seq > cursor.fact_seq,
+        };
+        if advanced {
+            let current = store
+                .read_watermarks(session)
+                .await
+                .map_err(|error| Error::Remote(error.to_string()))?;
+            return Ok(
+                json!({"control_seq":current.durable_control_seq,"fact_seq":current.durable_fact_seq}),
+            );
         }
     }
     Err(Error::Disconnected)
@@ -412,6 +437,99 @@ async fn wait(handle: &dyn SessionHandle, mut cursor: ObservationCursor) -> Resu
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[tokio::test]
+    async fn fact_pages_bound_the_captured_horizon_and_read_large_records_alone() {
+        use rsi_agent_session_protocol::{
+            AgentPresetId, FrozenAgentSettings, SessionFact, SessionFactBody, SessionHeader, TurnId,
+        };
+        use rsi_agent_store_protocol::AppendBatch;
+        use rsi_agent_testkit::MemoryStore;
+        use rsi_ai_protocol::ModelRef;
+        use rsi_sandbox::SandboxMode;
+        use std::sync::Arc;
+
+        let store = MemoryStore::default();
+        let id = SessionId::new("page-test").unwrap();
+        let turn = TurnId::new("turn").unwrap();
+        let header = SessionHeader::new_local(
+            id.clone(),
+            1,
+            "/workspace",
+            AgentPresetId::new("test").unwrap(),
+            FrozenAgentSettings::new(
+                "default",
+                "system",
+                ModelRef::new("test", "test").unwrap(),
+                SandboxMode::WorkspaceWrite,
+                false,
+            )
+            .unwrap(),
+        )
+        .unwrap();
+        let facts: Vec<_> = (1..=600)
+            .map(|seq| {
+                Arc::new(
+                    SessionFact::new(
+                        seq,
+                        seq,
+                        if seq == 1 {
+                            SessionFactBody::TurnAccepted {
+                                turn_id: turn.clone(),
+                                text: "history".repeat(24_000),
+                                model: None,
+                                reasoning_effort: None,
+                                sandbox: SandboxMode::WorkspaceWrite,
+                                require_approval: false,
+                            }
+                        } else {
+                            SessionFactBody::CancelRequested {
+                                turn_id: turn.clone(),
+                                reason: None,
+                            }
+                        },
+                    )
+                    .unwrap(),
+                )
+            })
+            .collect();
+        for (index, chunk) in facts.chunks(64).enumerate() {
+            store
+                .append(AppendBatch {
+                    session_id: id.clone(),
+                    expected_seq: (index * 64) as u64,
+                    header: (index == 0).then(|| header.clone()),
+                    facts: chunk.to_vec(),
+                })
+                .await
+                .unwrap();
+        }
+        let large = read_facts(&store, &id, 0, 600, 0).await.unwrap();
+        assert_eq!(large["through_seq"], 1);
+        assert_eq!(large["next_offset"], 128 * 1024);
+        let tail = read_facts(&store, &id, 0, 600, 128 * 1024).await.unwrap();
+        assert_eq!(tail["through_seq"], 1);
+        assert_eq!(large["total_bytes"], tail["total_bytes"]);
+        let encoded = format!(
+            "{}{}",
+            large["json"].as_str().unwrap(),
+            tail["json"].as_str().unwrap()
+        );
+        assert_eq!(
+            serde_json::from_str::<Vec<SessionFact>>(&encoded).unwrap(),
+            vec![facts[0].as_ref().clone()]
+        );
+        let cut = read_facts(&store, &id, 1, 10, 0).await.unwrap();
+        let page: Vec<SessionFact> = serde_json::from_str(cut["json"].as_str().unwrap()).unwrap();
+        assert_eq!(page.len(), 9);
+        assert_eq!(page.first().unwrap().seq(), 2);
+        assert_eq!(cut["through_seq"], 10);
+        let capped = read_facts(&store, &id, 1, 600, 0).await.unwrap();
+        assert_eq!(capped["through_seq"], 513);
+        assert!(read_facts(&store, &id, 10, 10, 0).await.is_err());
+        assert!(read_facts(&store, &id, 11, 10, 0).await.is_err());
+        assert!(read_facts(&store, &id, 1, 601, 0).await.is_err());
+    }
 
     #[test]
     fn model_projection_retains_effort_absence_and_does_not_default_a_failed_producer() {

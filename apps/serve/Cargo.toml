@@ -56,6 +56,7 @@ tokio = { workspace = true, features = ["sync", "signal", "process", "time"] }
 tokio-util.workspace = true
 
 [dev-dependencies]
+rsi-agent-testkit = { path = "../../crates/rsi-agent/testkit" }
 tempfile.workspace = true
 tokio = { workspace = true, features = ["rt-multi-thread", "time", "test-util"] }
 

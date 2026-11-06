@@ -1,6 +1,6 @@
 use super::{
     Sessions,
-    session_history::{fact_fragment, resource_key},
+    session_history::{attempt_fragment, read_facts, resource_key},
 };
 use rsi_agent_session_protocol::{
     ForkTurnSelection, MAXIMUM_SESSION_FACT_BYTES, SessionHeader, SessionId,
@@ -22,6 +22,7 @@ pub(super) struct ReadInterval {
     key: String,
     interval: usize,
     after_seq: u64,
+    through_seq: u64,
     offset: usize,
     attempt: bool,
 }
@@ -73,8 +74,16 @@ impl Sessions {
             .history_origin()
             .expect("captured inherited interval");
         if read.after_seq < origin.resolved_after_seq
-            || read.after_seq >= origin.resolved_terminal_seq
+            || read.after_seq >= read.through_seq
+            || read.through_seq > origin.resolved_terminal_seq
         {
+            return Err(Error::Protocol);
+        }
+        if !read.attempt {
+            return tokio::select! {biased;()=retired.cancelled()=>Err(Error::Cancelled),
+            result=read_facts(self.store.as_ref(),&origin.parent_session_id,read.after_seq,read.through_seq,read.offset)=>result};
+        }
+        if read.through_seq != read.after_seq + 1 {
             return Err(Error::Protocol);
         }
         let page = tokio::select! {biased;()=retired.cancelled()=>return Err(Error::Cancelled),
@@ -82,6 +91,6 @@ impl Sessions {
         let [fact] = page.facts.as_slice() else {
             return Err(Error::Protocol);
         };
-        fact_fragment(fact, read.after_seq, read.offset, read.attempt)
+        attempt_fragment(fact, read.after_seq, read.offset)
     }
 }

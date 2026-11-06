@@ -55,7 +55,7 @@ A Service Profile can select an application process with
 asset selection as the browser), a private `profile` name, and a `process`
 using the installed package process descriptor. One supervised process owns
 the application's routes across local browser attachments. At activation the
-host sends `application.open` with protocol 5, a private profile directory
+host sends `application.open` with protocol 6, a private profile directory
 and a random upstream key over the generation's private process connection.
 The opening payload also supplies an opaque `owner` callback handle. Native
 composition gives it the product's shared browser identity and the application
@@ -296,7 +296,13 @@ Control history uses the same authorized handle and a captured control horizon.
 Pages expose model-selection commits with their Store-owned Fact anchors;
 the native model-selection codec resolves complete replacements. A wait returns
 a coherent pair of current watermarks after either stream advances.
-Fact and decoded model-attempt reads are UTF-8 fragments. Waiting subscribes to
+Fact reads supply an exclusive `after_seq` and inclusive captured `through_seq`.
+They return contiguous pages of at most 512 Facts, normally within 128 KiB of
+encoded Fact bodies. An individual larger Fact is read alone using its exact
+Store-reported length. The response never advances beyond the captured horizon;
+inherited reads also stay inside their retained fork interval. Pages and decoded
+single model attempts use UTF-8 fragments. No second durable history is created.
+Waiting subscribes to
 native observations after the supplied control and Fact cursors. A retired
 upstream request loses access. Session listing uses its independent cold path.
 Draft and published catalog rows include the native creation timestamp, so an
