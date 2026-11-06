@@ -41,8 +41,13 @@ which acceptance a delayed native claim consumes. The journal hashes the raw
 source and verifies the translated body separately. Cold replay uses the stored
 application prefix at each source position, not the final inbox state.
 
-The application persists events, the source map and typed mutation identities
-together. Before dispatch, it records and flushes the exact native invocation.
+The application persists its locally owned events, the source map and typed
+mutation identities together. Native event bodies remain in Store and are rebuilt
+at their mapped positions on cold loading. Inbox reconstruction uses the same
+prefix fold as live observation; a generic JSON patch format would introduce a
+second interpreter for those semantics. Local acceptances, including their exact
+timestamp and original queue target, remain durable after acknowledgement.
+Before dispatch, the application records and flushes the exact native invocation.
 Recovery reuses that invocation and request identity; it never silently restamps
 a revision or invokes under a fresh identity. A failed attempt does not erase an
 accepted event. The latest unresolved choice blocks dependent Agent submissions;
@@ -92,6 +97,13 @@ Separate application logs for live and cold readers give the same Session differ
 cursors. Rejecting all synchronous plugin writes avoids implementation work but
 breaks compatible local UX without establishing an additional trust boundary.
 
+DSH's JSONL provider persists its owned Session event stream. In RSI, copying the
+complete native-derived stream into every application snapshot instead duplicates
+already durable message and tool bodies. Sparse application records retain only
+the information this owner contributes. A current full-log file is rewritten after
+successful native reconciliation, preserving existing plugin state without ongoing
+dual writes. A failed reconciliation must not rewrite it during owner disposal.
+
 ## Consequences
 
 Original Side Chat model selection now runs unchanged. The application accepts
@@ -132,8 +144,9 @@ original browser route, two independent browser contexts, the actual provider,
 and a Host restart. These checks do not establish general DSH Agent compatibility.
 
 The application needs its own durable lifecycle. Native and application cursors
-must not be interchanged. Whole-document atomic snapshots currently retain the
-bounded log; large-history paging, incremental persistence and expired native
+must not be interchanged. Whole-document atomic snapshots retain local events and
+mapping metadata; cold reconstruction shares the first native read batch but still
+materializes the dense Session in memory. Large-history paging, incremental persistence and expired native
 draft-file cleanup remain work. A native draft receipt is process-local and does
 not justify recreating a lost draft after restart. These are implementation limits,
 not reasons to impose more confirmation steps on ordinary local model selection.
