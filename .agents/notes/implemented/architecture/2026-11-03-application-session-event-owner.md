@@ -75,6 +75,13 @@ application journal metadata. Reconstructing each conversation to discover
 its parent would make an export pay for every Session's history. Keeping the
 application event count beside the stored header also lets metadata readers
 observe plugin appends between native commits.
+History reconstruction uses bounded Fact pages within a captured horizon and
+borrows referenced evidence from the page already being folded. The normal page
+byte bound does not force a large individual Fact into an unrepresentable log:
+the existing fragmented transport handles that record alone. Warm durable mirrors
+compare indexed cursors before opening full model projections. These changes
+reduce IPC and repeated work without another durable event corpus or an unbounded
+body cache. The exact application interface is owned by Serve's contract.
 
 ## Alternatives considered
 
