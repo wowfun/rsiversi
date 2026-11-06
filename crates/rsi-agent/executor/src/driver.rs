@@ -184,17 +184,17 @@ impl Driver {
                 return;
             }
         };
-        let drive = select_drive_or_stop(
-            &claim_stop,
-            self.drive(
+        let drive = {
+            let driving = self.drive(
                 claim,
                 &composition,
                 job_scope.as_ref(),
                 &claim_stop,
                 &mut fold,
-            ),
-        )
-        .await;
+            );
+            tokio::pin!(driving);
+            select_drive_or_stop(&claim_stop, driving.as_mut()).await
+        };
         self.settle_drive(claim, &composition, job_scope.as_ref(), drive, stop)
             .await;
     }
@@ -1354,6 +1354,12 @@ impl Driver {
         cancellation: &CancellationToken,
         stop: &CancellationToken,
     ) -> std::result::Result<ToolPreparation, DriveFailure> {
+        if stop.is_cancelled() {
+            return Err(DriveFailure::Stopped);
+        }
+        if cancellation.is_cancelled() {
+            return Err(DriveFailure::Turn(TurnOutcome::Cancelled));
+        }
         let (effect_id, arguments) = prepare_tool_effect(&call).map_err(|failure| *failure)?;
         let name = call.name;
         let program_role = composition
@@ -1943,7 +1949,8 @@ impl Driver {
         stop: &CancellationToken,
         program: Option<rsi_agent_turn_protocol::ProgramToolCalls>,
     ) -> std::result::Result<ToolResult, DriveFailure> {
-        let combined = combine_cancellation(cancellation, stop);
+        let execution_cancel = cancellation.child_token();
+        let _cancel_on_drop = execution_cancel.clone().drop_guard();
         let cwd = std::path::PathBuf::from(claim.header().canonical_cwd());
         let mut extensions = crate::execution_support::tool_start_extensions(
             self.turns.as_ref(),
@@ -1964,25 +1971,21 @@ impl Driver {
             let program = super::program::selected_dispatch(program, caller.source_tools());
             extensions = extensions.with(Arc::new(program)).map_err(fatal)?;
         }
-        let result = tokio::select! {
-            biased;
-            result = prepared
-            .start(ToolStart {
-                cancellation: combined.token(),
-                policy: ToolExecutionPolicy {
-                    mode: sandbox_mode,
-                    cwd: cwd.clone(),
-                    workspace: cwd,
-                },
-                sandbox: Arc::clone(&self.sandbox),
-                job_scope: job_scope.cloned(),
-                extensions,
-            })
-            => result,
-            () = cancellation.cancelled() => return Err(DriveFailure::Turn(TurnOutcome::Cancelled)),
-            () = stop.cancelled() => return Err(DriveFailure::Stopped),
-        };
-        combined.cancel();
+        let started = prepared.start(ToolStart {
+            cancellation: execution_cancel,
+            policy: ToolExecutionPolicy {
+                mode: sandbox_mode,
+                cwd: cwd.clone(),
+                workspace: cwd,
+            },
+            sandbox: Arc::clone(&self.sandbox),
+            job_scope: job_scope.cloned(),
+            extensions,
+        });
+        tokio::pin!(started);
+        let result = self
+            .wait_tool_settlement(started.as_mut(), cancellation, stop)
+            .await?;
         if stop.is_cancelled() {
             return Err(DriveFailure::Stopped);
         }
@@ -2070,11 +2073,11 @@ impl Driver {
         let tools = composition.tools();
         self.track_tool(claim, composition.clone(), identity.clone());
         let cancellation = self.turns.cancellation(claim).map_err(fatal)?;
-        let retained = tokio::select! {
-            biased;
-            result = tools.wait(identity, stop.clone()) => result,
-            () = cancellation.cancelled() => return Err(DriveFailure::Turn(TurnOutcome::Cancelled)),
-            () = stop.cancelled() => return Err(DriveFailure::Stopped),
+        let retained = {
+            let waiting = tools.wait(identity, stop.clone());
+            tokio::pin!(waiting);
+            self.wait_tool_settlement(waiting.as_mut(), &cancellation, stop)
+                .await?
         };
         if stop.is_cancelled() {
             return Err(DriveFailure::Stopped);

@@ -172,7 +172,7 @@ async fn cancellation_retires_an_admitted_tool_after_it_settles() {
         .await;
     let executor_fiber = stack
         .activate_executor_with_config(
-            json!({"executor_id":"executor-elapsed-tool","observe_execution":true}),
+            json!({"executor_id":"executor-elapsed-tool","observe_execution":true,"retained_tool_wait_ms":1_000}),
         )
         .await;
     let fresh = stack.fresh(header()).await;

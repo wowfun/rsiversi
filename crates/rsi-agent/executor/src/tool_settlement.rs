@@ -3,6 +3,29 @@ use super::*;
 use rsi_agent_composition_protocol::{ContributionKind, ToolSettlement, ToolSettlementContext};
 
 impl Driver {
+    /// Keep an admitted body's result through cancellation without waiting
+    /// indefinitely for a non-cooperative implementation.
+    pub(super) async fn wait_tool_settlement<T>(
+        &self,
+        mut future: std::pin::Pin<&mut impl std::future::Future<Output = T>>,
+        cancellation: &CancellationToken,
+        stop: &CancellationToken,
+    ) -> std::result::Result<T, DriveFailure> {
+        tokio::select! {
+            biased;
+            result = &mut future => return Ok(result),
+            () = stop.cancelled() => return Err(DriveFailure::Stopped),
+            () = cancellation.cancelled() => {},
+        }
+        tokio::select! {
+            biased;
+            result = &mut future => Ok(result),
+            () = stop.cancelled() => Err(DriveFailure::Stopped),
+            () = tokio::time::sleep(self.config.retained_tool_wait()) =>
+                Err(DriveFailure::Turn(TurnOutcome::Cancelled)),
+        }
+    }
+
     #[allow(clippy::too_many_lines)] // One bounded pure stage aggregates domains, conclusions and retained publication observers.
     pub(super) async fn tool_settlement_proposals(
         &self,

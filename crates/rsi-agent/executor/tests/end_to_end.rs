@@ -1748,6 +1748,8 @@ impl TurnFinalizer for HangingFinalizer {
 
 #[path = "end_to_end/budgets_and_recovery.rs"]
 mod budgets_and_recovery;
+#[path = "end_to_end/cancellation.rs"]
+mod cancellation;
 #[path = "end_to_end/compaction.rs"]
 mod compaction;
 #[path = "end_to_end/context_builder.rs"]

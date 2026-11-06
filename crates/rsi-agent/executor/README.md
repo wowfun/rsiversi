@@ -300,6 +300,20 @@ recovery and one ordinary resubmission. Unknown dispatch and transport errors
 gain no new retry. An interrupted original Turn remains interrupted even when
 its valid durable summary can be used by a later explicit resume.
 
+Cancellation signals an admitted Tool immediately, then waits at most
+`retained_tool_wait_ms` for its actual settlement before publishing the cancelled
+Turn's terminal Fact. A returned result, including an error result supplied by
+the Tool, is published and retired through the normal exact-identity path before
+that terminal; cancellation does not discard already-confirmed external effects.
+This applies to new starts and retained-result recovery. Parallel started calls
+settle concurrently. Cancellation does not authorize another Tool or model call.
+Executor shutdown and the Turn's elapsed budget still interrupt this wait.
+If the Tool does not settle within the window, the cancelled Turn can end without
+a result and its existing bounded background retirement retains the generation;
+neither the terminal nor a later retirement is proof of a recorded Tool result.
+The cancellation command acknowledges the durable request independently of this
+settlement window.
+
 The immutable session settings supply the mandatory elapsed, provider, Tool,
 generated-Fact, and generated-byte budget. Tool start also receives a typed
 optional-evidence allowance: generated-byte maximum divided by eight and then

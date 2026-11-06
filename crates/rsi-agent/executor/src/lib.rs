@@ -161,7 +161,7 @@ pub struct ExecutorConfig {
     /// Maximum wait for the complete pre-terminal finalizer snapshot.
     #[serde(default = "default_finalization_wait_ms")]
     pub finalization_wait_ms: u64,
-    /// Maximum background wait for a retained Tool to settle after terminal durability.
+    /// Maximum settlement wait after cancellation or during post-terminal retirement.
     #[serde(default = "default_retained_tool_wait_ms")]
     pub retained_tool_wait_ms: u64,
 }
