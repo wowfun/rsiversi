@@ -391,7 +391,7 @@ pub struct SubmitInput {
     /// Author of the submission, independently of its presentation attribution.
     #[serde(default)]
     pub origin: SubmissionOrigin,
-    /// Immutable direct ingress intent: `NextTurn` or `Steer`.
+    /// Immutable direct ingress intent, including non-waking `NextStep`.
     pub delivery: rsi_agent_session_protocol::MessageDelivery,
     /// Caller-preallocated durable message identity.
     pub message_id: MessageId,
@@ -717,6 +717,7 @@ pub trait SessionHandle: fmt::Debug + Send + Sync + 'static {
     /// Reads the immutable candidate or durable Header.
     async fn header(&self) -> Result<SessionHeader>;
     /// Accepts one multimodal message and waits for durable mailbox acceptance.
+    /// `NextStep` publishes held context without waking execution.
     async fn submit(&self, request: SubmitInput) -> Result<MessageReceipt>;
     /// Reads the latest durable claim or discard state for one message.
     async fn message_status(&self, message_id: &MessageId) -> Result<MessageReceipt>;

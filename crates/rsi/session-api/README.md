@@ -1,6 +1,10 @@
 # rsi-session-api
 
-Interface version 19 adds `wait-idle` v1, a Session-bound read that waits for
+Interface version 21 admits `submit` v7 with non-waking `NextStep` input under
+the [Session input contract](../session-protocol/README.md). It publishes accepted
+context without starting a Turn; ordinary message bounds and receipts apply.
+
+`wait-idle` v1 is a Session-bound read that waits for
 whole-driver quiescence without retaining inbox bodies or reserving future work.
 It retains `cancel` v3 with Session-wide stop and inbox-only
 clear targets as defined by the Turn protocol. Each captures a new cut, so
@@ -63,7 +67,7 @@ the batch's Command provenance, first-Step delivery, identity and ordering.
 read-header v3. Create admits an optional fork selection before an accepted Turn
 or through a completed Turn, using the existing typed `ForkPoint`. Its
 clients verify the returned Header's exact immutable history binding.
-history and read-message v7; submit v6; discard-draft-inputs v2 and mutate-queue v3.
+history and read-message v7; submit v7; discard-draft-inputs v2 and mutate-queue v3.
 Direct submitted messages and their consumed Facts retain optional original
 application attribution under the Session protocol contract. Message-status is
 v3. Interactions, questions

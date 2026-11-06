@@ -60,18 +60,77 @@ impl Sessions {
                     items.push(super::session_history::stored_snapshot(header, &summary));
                     continue;
                 }
-                let mut item = json!({"id":header.session_id(),"cwd":header.canonical_cwd(),"createdAt":header.created_at_ms(),"updatedAt":summary.last_activity_ms,
-                    "blank":summary.durable_fact_seq==0,"running":running.contains(header.session_id())});
-                if let Some(origin) = header.fork_origin() {
-                    item["parent"] = json!(origin.history.parent_session_id);
-                }
-                items.push(item);
+                items.push(catalog_item(
+                    header,
+                    &summary,
+                    running.contains(header.session_id()),
+                ));
             }
         }
         self.routes
             .caller(&request.request)
             .map_err(|_| Error::Cancelled)?;
         Ok(json!({"items":items,"next":page.next}))
+    }
+}
+
+fn catalog_item(
+    header: &rsi_agent_session_protocol::SessionHeader,
+    summary: &rsi_agent_store_protocol::StoreActivityRow,
+    running: bool,
+) -> Value {
+    let mut item = json!({"id":header.session_id(),"cwd":header.canonical_cwd(),"createdAt":header.created_at_ms(),"updatedAt":summary.last_activity_ms,
+        "blank":summary.durable_fact_seq==0 && summary.durable_control_seq==0,"running":running});
+    if let Some(origin) = header.fork_origin() {
+        item["parent"] = json!(origin.history.parent_session_id);
+    }
+    item
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use rsi_agent_session_protocol::{
+        AgentPresetId, FrozenAgentSettings, SessionHeader, SessionId,
+    };
+
+    #[test]
+    fn catalog_keeps_accepted_context_visible_before_the_first_turn() {
+        let header = SessionHeader::new_local(
+            SessionId::new("held-context").unwrap(),
+            1,
+            "/workspace",
+            AgentPresetId::new("test").unwrap(),
+            FrozenAgentSettings::new(
+                "default",
+                "system",
+                rsi_ai_protocol::ModelRef::new("test", "test").unwrap(),
+                rsi_sandbox::SandboxMode::WorkspaceWrite,
+                false,
+            )
+            .unwrap(),
+        )
+        .unwrap();
+        let mut summary = rsi_agent_store_protocol::StoreActivityRow {
+            session_id: header.session_id().clone(),
+            coordinates: header.coordinates().clone(),
+            created_at_ms: 1,
+            last_activity_ms: 2,
+            durable_fact_seq: 0,
+            durable_control_seq: 2,
+        };
+        assert_eq!(
+            catalog_item(&header, &summary, false),
+            json!({
+                "id":"held-context","cwd":"/workspace","createdAt":1,"updatedAt":2,"blank":false,"running":false,
+            })
+        );
+        summary.durable_control_seq = 0;
+        assert_eq!(catalog_item(&header, &summary, false)["blank"], true);
+        summary.durable_fact_seq = 1;
+        let started = catalog_item(&header, &summary, true);
+        assert_eq!(started["blank"], false);
+        assert_eq!(started["running"], true);
     }
 }
 

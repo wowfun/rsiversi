@@ -602,7 +602,7 @@ fn session_proxy_keeps_local_call_versions_without_constructor_admission() {
         (Operation::DraftSnapshot, 10),
         (Operation::SelectPreset, 10),
         (Operation::Inspect, 10),
-        (Operation::Submit, 6),
+        (Operation::Submit, 7),
         (Operation::Observe, 9),
         (Operation::History, 7),
         (Operation::ReadMessage, 7),

@@ -77,6 +77,18 @@ its blocks without repeating content validation. Its wire representation remains
 the ordered input array. Media existence, captured-reference binding, execution
 authority and durable admission are independently validated by their owners.
 
+Direct input uses `NextTurn`, `Steer` or non-waking `NextStep` delivery with the
+same content and attribution contract. `NextStep` accepts durable context without
+starting a Turn or resuming a paused inbox. It carries no new-Turn model, effort
+or sandbox overrides. The first accepted message publishes the Session, including
+non-waking input; an empty draft stays unpublished. Publication also fixes its
+Header and composition, so draft-only preset replacement ends at this boundary.
+A held message survives Host
+restart and is consumed at the next Step once separate waking work is admitted.
+Its native message identity owns retry and withdrawal, independently of any
+reusable presentation ID. Command-generated draft inputs retain their separate
+atomic command publication contract.
+
 Recent listing returns descending visible Headers and an optional opaque `next`
 cursor. `has_more` means more scanning work exists, including hidden rows; clients
 continue with `next` even when a page is empty. Cursors never expose skipped

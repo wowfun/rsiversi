@@ -55,7 +55,7 @@ A Service Profile can select an application process with
 asset selection as the browser), a private `profile` name, and a `process`
 using the installed package process descriptor. One supervised process owns
 the application's routes across local browser attachments. At activation the
-host sends `application.open` with protocol 6, a private profile directory
+host sends `application.open` with protocol 7, a private profile directory
 and a random upstream key over the generation's private process connection.
 The opening payload also supplies an opaque `owner` callback handle. Native
 composition gives it the product's shared browser identity and the application
@@ -64,6 +64,9 @@ a browser credential or a completed HTTP request. It remains a device caller
 through Session ingress and cannot perform local-only administration. Browser
 closure or credential revocation retires that browser's requests; application
 replacement retires the owner handle and all resources it retained.
+The application Session catalog treats either durable Facts or controls as
+nonempty state. Held input remains discoverable before any Turn starts; empty
+unpublished drafts retain their separate draft presentation.
 The reply names its loopback port and owned route prefixes. Only the selected
 assets' listeners forward those paths. After a published process disconnects,
 the Host retires its sockets and request handles and prepares a fresh process

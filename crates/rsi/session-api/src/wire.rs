@@ -236,7 +236,7 @@ impl Operation {
         match self {
             Self::Create => 12,
             Self::Inspect | Self::Recent | Self::DraftSnapshot | Self::SelectPreset => 10,
-            Self::Submit => 6,
+            Self::Submit => 7,
             Self::MessageStatus
             | Self::Terminal
             | Self::TerminalOutput

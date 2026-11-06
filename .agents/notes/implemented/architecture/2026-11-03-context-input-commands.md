@@ -30,12 +30,27 @@ of content type; a text-only command transport would introduce a second input
 contract without an execution or durability reason.
 
 Direct application/user submission retains the same bounded attribution. DSH
-`followup()` and `steer()` wake the Agent, unlike `inject()`. They therefore use
-native `NextTurn`/`Steer` ingress, which already owns first draft publication and
-active-Turn routing. `Human` names that ingress, not proof of human authorship.
+`inject()`, `followup()` and `steer()` use one inbox mutation contract; delivery
+and waking are independent of body size or authorship. Native direct ingress
+therefore accepts `NextStep`, `NextTurn` and `Steer`, using Kernel's existing
+mailbox routing. The DSH bridge uses this ingress for all new input rather than
+wrapping injection in a command. This removes command discovery, a second
+invocation encoding and the command-specific content ceilings. The context-input
+command remains available for callers requiring atomic command publication.
+`Human` names interactive ingress, not proof of human authorship.
 Presentation identity must not double as the native idempotency key: the same
 original message ID can legitimately be reused after an earlier acceptance is
 consumed. Queue controls and consumed Facts retain both identities.
+
+An accepted direct non-waking input publishes the Session and its mailbox entry,
+without starting a Turn or resuming a paused inbox. DSH's `ReactLoopInbox.mutate`
+likewise appends accepted context to the Session regardless of waking. Keeping
+such content unpublished would require an additional draft receipt and recovery
+owner; durable native acceptance instead uses existing retry, withdrawal and
+restart semantics. Empty drafts remain unpublished; first acceptance ends their
+draft-only preset replacement along with fixing the Header. Clearing accepted context
+does not retract the durable Session. New-Turn options and model availability
+are irrelevant to held input; execution validates the eventual waking request.
 
 ## Alternatives considered
 
