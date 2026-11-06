@@ -24,6 +24,9 @@ mod activity_cuts;
 #[path = "tests/admission.rs"]
 mod admission;
 #[cfg(any(unix, windows))]
+#[path = "tests/claim_admission.rs"]
+mod claim_admission;
+#[cfg(any(unix, windows))]
 #[path = "tests/maintenance.rs"]
 mod maintenance;
 

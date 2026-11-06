@@ -8,6 +8,10 @@ its JSON. Typed decoding transfers the accepted message without cloning its body
 the exact compact message byte count uses a counting writer rather than a JSON copy.
 Metadata-only queue queries do not join or decode control bodies. Canonical replay
 checks the routing index against the original acceptance and later transitions.
+Claim admission compares the canonical accepted message with the exact typed
+Fact in the current atomic append. It does not reread or decode the just-inserted
+Fact row. An old, absent or mismatched Fact cannot satisfy that admission;
+cold replay still independently verifies the durable claim and its indexes.
 Opening an exact schema 44 under the writer lease removes its redundant message
 column in one transaction. Canonical controls and Facts retain their bytes;
 this physical migration does not upgrade an unsupported Session format.

@@ -207,14 +207,15 @@ pub(super) fn apply_atomic_sqlite_append(
                 &append.controls[index + 2],
             )?;
         }
-        insert_control(
+        ControlIndexer {
             transaction,
-            &append.session_id,
+            session_id: &append.session_id,
+            facts: &append.facts,
             minimum_claimed_fact_seq,
-            durable_fact_seq,
+            after_fact_seq: durable_fact_seq,
             record,
-            &references,
-        )?;
+        }
+        .insert(&references)?;
         control_digest = advance_control_prefix_digest(control_digest, record)
             .map_err(|error| StoreError::Invalid(error.to_string()))?;
         if let AgentControlRecordBody::TurnBoundaryRecorded {
@@ -289,27 +290,10 @@ pub(super) fn apply_atomic_sqlite_append(
     })
 }
 
-pub(super) fn insert_control(
-    transaction: &Transaction<'_>,
-    session_id: &SessionId,
-    minimum_claimed_fact_seq: u64,
-    after_fact_seq: u64,
-    record: &AgentControlRecord,
-    references: &super::reference_index::Writer<'_>,
-) -> Result<()> {
-    ControlIndexer {
-        transaction,
-        session_id,
-        minimum_claimed_fact_seq,
-        after_fact_seq,
-        record,
-    }
-    .insert(references)
-}
-
-pub(super) struct ControlIndexer<'a, 'connection> {
+struct ControlIndexer<'a, 'connection> {
     transaction: &'a Transaction<'connection>,
     session_id: &'a SessionId,
+    facts: &'a [std::sync::Arc<SessionFact>],
     minimum_claimed_fact_seq: u64,
     after_fact_seq: u64,
     record: &'a AgentControlRecord,
@@ -630,37 +614,17 @@ impl ControlIndexer<'_, '_> {
         }
         entry.validate_claim_turn(turn_id)?;
         let message = entry.message;
-        let fact_projection = self
-            .transaction
-            .query_row(
-                "SELECT length(CAST(fact_json AS BLOB)),
-                        CASE WHEN length(CAST(fact_json AS BLOB)) <= ?3 THEN fact_json END
-                 FROM facts WHERE session_id = ?1 AND seq = ?2",
-                params![
-                    self.session_id.as_str(),
-                    sqlite_u64("entered Fact sequence", claimed_fact_seq)?,
-                    i64::try_from(MAXIMUM_SESSION_FACT_BYTES)
-                        .expect("session Fact bound fits SQLite INTEGER"),
-                ],
-                |row| Ok((row.get::<_, i64>(0)?, row.get::<_, Option<String>>(1)?)),
-            )
-            .optional()
-            .map_err(sql_error)?;
-        let fact = fact_projection
-            .map(|projection| {
-                decode_projected_json::<SessionFact>(
-                    "session Fact",
-                    projection,
-                    MAXIMUM_SESSION_FACT_BYTES,
-                )
-            })
-            .transpose()?;
+        let fact = self
+            .facts
+            .binary_search_by_key(&claimed_fact_seq, |fact| fact.seq())
+            .ok()
+            .map(|index| self.facts[index].as_ref());
         validate_message_claim_fact(
             &message,
             turn_id,
             step_id,
             self.minimum_claimed_fact_seq,
-            fact.as_ref(),
+            fact,
         )?;
         self.transaction
             .execute(
