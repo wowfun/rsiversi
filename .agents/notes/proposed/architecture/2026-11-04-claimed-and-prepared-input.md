@@ -29,6 +29,17 @@ valid journal data and are normalized at model projection, not rejected as new
 ingress. Reuse the ordinary message/block and durable byte boundaries; do not add
 a second pending queue, JSON hash gate or per-message RPC.
 
+DSH's inbox claim drains next-Step input before taking the waking next-Turn input.
+Applying that order at native claim admission avoids an empty first Step and
+keeps the pre-step waterfall's input order independent of message provenance.
+Sorting all sources together by acceptance time is insufficient: a held Step
+message may arrive after the queued follow-up that eventually wakes it.
+
+A bounded Store mailbox page remains the admission unit; this ordering change
+does not remove its aggregate byte limit or establish parity for a queue spanning
+several pages. That case needs a separate claim/publication design, rather than
+unbounded materialization on small devices.
+
 Preparation belongs to a provider request series, not the native Step lifetime.
 A native Step may contain several model/Tool rounds; retries reuse one captured
 decision. An application capture retains its scoped Agent, resolved tools, prompt

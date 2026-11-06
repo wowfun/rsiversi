@@ -1354,19 +1354,27 @@ impl AgentKernel {
             || sandbox == rsi_sandbox::SandboxMode::DangerFullAccess;
         let mut selected = {
             let mut selected = scan.pending.into_iter().filter(|pending| {
-                if pending.message.message_id == entry.message.message_id { return true; }
-                let AgentMessageSource::Command { source: candidate } = &pending.message.source else { return false; };
-                if pending.delivery == MessageDelivery::NextStep && pending.target == MessageTarget::NextStep { return true; }
-                matches!(&entry.message.source, AgentMessageSource::Command { source }
+                if pending.target == MessageTarget::NextStep
+                    || pending.message.message_id == entry.message.message_id {
+                    return true;
+                }
+                matches!((&pending.message.source, &entry.message.source),
+                    (AgentMessageSource::Command { source: candidate }, AgentMessageSource::Command { source })
                     if candidate.request_id == source.request_id && candidate.invocation_sha256 == source.invocation_sha256)
             }).collect::<Vec<_>>();
-            selected.sort_by_key(|pending| pending.accepted_control_seq);
-            if selected.is_empty()
-                || selected.len() > rsi_agent_session_protocol::MAXIMUM_COMMAND_INPUTS + 1
+            // Store owns the cardinality bound and FIFO cursors. Step input comes
+            // first even when accepted after the waking message.
+            selected.sort_unstable_by_key(|pending| {
+                (
+                    pending.target != MessageTarget::NextStep,
+                    pending.accepted_control_seq,
+                )
+            });
+            if !selected
+                .iter()
+                .any(|pending| pending.message.message_id == entry.message.message_id)
             {
-                return Err(TurnError::Invariant(
-                    "invalid pending command input batch".into(),
-                ));
+                return Err(TurnError::Capacity);
             }
             selected
         };

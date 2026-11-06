@@ -89,7 +89,12 @@ until its prefix is durable. A latched permanent Store failure terminates every
 attached observation with the same flush error instead of leaving an
 application waiter blocked behind an unreachable terminal Fact.
 
-One next-Turn mailbox claim starts an activation and one Step. Safe-boundary
+One next-Turn mailbox claim starts an activation and one Step. Within the bounded
+mailbox batch, it claims pending next-Step input first, in acceptance order,
+then the selected waking input and its same-command siblings, also in acceptance
+order. This applies to every message source. Other next-Turn inputs stay queued;
+the selected waking input supplies the Turn policy. Claim Facts, their ordered
+Turn membership and all mailbox receipts commit together. Further safe-boundary
 messages close the current Step, start the next, and become Facts atomically
 with their durable claims. Turn terminal and activation settlement are distinct:
 the terminal closes model execution, while an activation with non-quiescent

@@ -84,6 +84,23 @@ type ProgramReadBarrier = (
     tokio::sync::oneshot::Receiver<()>,
 );
 #[derive(Debug)]
+struct MailboxProbe {
+    reads: Mutex<std::collections::BTreeMap<SessionId, usize>>,
+    claim_body_buffers: Mutex<Option<std::collections::BTreeSet<usize>>>,
+    prefix_limit: AtomicUsize,
+}
+
+impl Default for MailboxProbe {
+    fn default() -> Self {
+        Self {
+            reads: Mutex::default(),
+            claim_body_buffers: Mutex::default(),
+            prefix_limit: AtomicUsize::new(usize::MAX),
+        }
+    }
+}
+
+#[derive(Debug)]
 struct FactReadRaceStore {
     inner: Arc<dyn SessionStore>,
     pause_reply_for: Mutex<Option<SessionId>>,
@@ -111,8 +128,7 @@ struct FactReadRaceStore {
     count_control_reads_for: Mutex<Option<SessionId>>,
     subtree_reads: Mutex<std::collections::BTreeMap<SessionId, usize>>,
     mailbox_summary_reads: Mutex<std::collections::BTreeMap<SessionId, usize>>,
-    mailbox_reads: Mutex<std::collections::BTreeMap<SessionId, usize>>,
-    claim_body_buffers: Mutex<Option<std::collections::BTreeSet<usize>>>,
+    mailbox: MailboxProbe,
     inbox_control_reads: AtomicUsize,
     read_captured: Notify,
     release_read: Notify,
@@ -221,8 +237,7 @@ impl FactReadRaceStore {
             count_control_reads_for: Mutex::new(None),
             subtree_reads: Mutex::default(),
             mailbox_summary_reads: Mutex::default(),
-            mailbox_reads: Mutex::new(std::collections::BTreeMap::new()),
-            claim_body_buffers: Mutex::new(None),
+            mailbox: MailboxProbe::default(),
             inbox_control_reads: AtomicUsize::new(0),
             read_captured: Notify::new(),
             release_read: Notify::new(),
@@ -747,7 +762,7 @@ impl SessionStore for FactReadRaceStore {
         &self,
         commit: rsi_agent_store_protocol::AtomicAgentCommit,
     ) -> rsi_agent_store_protocol::Result<rsi_agent_store_protocol::AtomicAgentCommitResult> {
-        if let Some(buffers) = self.claim_body_buffers.lock().unwrap().as_mut() {
+        if let Some(buffers) = self.mailbox.claim_body_buffers.lock().unwrap().as_mut() {
             for fact in commit.sessions.iter().flat_map(|append| &append.facts) {
                 if let SessionFactBody::InputMessageClaimed { content, .. } = fact.body() {
                     assert!(
@@ -1214,13 +1229,17 @@ impl SessionStore for FactReadRaceStore {
         query: MailboxRead,
     ) -> rsi_agent_store_protocol::Result<rsi_agent_store_protocol::StoreAgentMailbox> {
         *self
-            .mailbox_reads
+            .mailbox
+            .reads
             .lock()
             .unwrap()
             .entry(session_id.clone())
             .or_default() += 1;
-        let mailbox = self.inner.read_agent_mailbox(session_id, query).await?;
-        if let Some(buffers) = self.claim_body_buffers.lock().unwrap().as_mut() {
+        let mut mailbox = self.inner.read_agent_mailbox(session_id, query).await?;
+        mailbox
+            .pending
+            .truncate(self.mailbox.prefix_limit.load(Ordering::Relaxed));
+        if let Some(buffers) = self.mailbox.claim_body_buffers.lock().unwrap().as_mut() {
             *buffers = mailbox
                 .pending
                 .iter()
@@ -1967,6 +1986,8 @@ mod domains;
 mod fork_and_scheduler;
 #[path = "kernel/jobs.rs"]
 mod jobs;
+#[path = "kernel/mailbox_claim.rs"]
+mod mailbox_claim;
 #[path = "kernel/model_attempts.rs"]
 mod model_attempts;
 #[path = "kernel/recovery_and_finalization.rs"]

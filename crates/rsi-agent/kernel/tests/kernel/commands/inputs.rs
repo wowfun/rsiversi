@@ -369,7 +369,11 @@ async fn command_inputs_publish_atomically_keep_provenance_and_retry_once() {
         };
         let store = Arc::new(FactReadRaceStore::new(store));
         let fixture = Fixture::start(store.clone(), false).await;
-        inputs(&fixture);
+        *fixture.callback.inputs.lock().unwrap() = vec![
+            text_input(CommandInputDelivery::Steer, "Prepare a plan"),
+            text_input(CommandInputDelivery::Inject, "Mode changed"),
+            text_input(CommandInputDelivery::Steer, "Continue that plan"),
+        ];
         for (ordinal, input) in fixture
             .callback
             .inputs
@@ -400,7 +404,7 @@ async fn command_inputs_publish_atomically_keep_provenance_and_retry_once() {
             .await
             .unwrap();
         let emitted = receipt.commit().command_inputs();
-        assert_eq!(emitted.len(), 2);
+        assert_eq!(emitted.len(), 3);
         for (ordinal, input) in emitted.iter().enumerate() {
             let entry = fixture
                 .store
@@ -418,7 +422,7 @@ async fn command_inputs_publish_atomically_keep_provenance_and_retry_once() {
                 panic!("command provenance")
             };
             assert_eq!(source.invocation_sha256, invocation.digest().unwrap());
-            assert_eq!(entry.wake_required, ordinal == 1);
+            assert_eq!(entry.wake_required, ordinal != 1);
         }
         assert_eq!(
             fixture
@@ -458,7 +462,8 @@ async fn command_inputs_publish_atomically_keep_provenance_and_retry_once() {
             .kernel
             .register("command-input-executor".into())
             .unwrap();
-        *store.claim_body_buffers.lock().unwrap() = Some(Default::default());
+        *store.mailbox.claim_body_buffers.lock().unwrap() =
+            Some(std::collections::BTreeSet::default());
         let claim = tokio::time::timeout(
             std::time::Duration::from_secs(2),
             fixture
@@ -471,6 +476,7 @@ async fn command_inputs_publish_atomically_keep_provenance_and_retry_once() {
         .unwrap();
         assert!(
             store
+                .mailbox
                 .claim_body_buffers
                 .lock()
                 .unwrap()
@@ -541,7 +547,7 @@ async fn command_inputs_publish_atomically_keep_provenance_and_retry_once() {
                 )
             })
             .count();
-        assert_eq!(entered, 2);
+        assert_eq!(entered, 3);
         let texts = page
             .facts
             .iter()
@@ -556,9 +562,9 @@ async fn command_inputs_publish_atomically_keep_provenance_and_retry_once() {
             .collect::<Vec<_>>();
         assert_eq!(
             texts,
-            emitted
-                .iter()
-                .map(|input| input.message.content.clone())
+            [1, 0, 2]
+                .into_iter()
+                .map(|index| emitted[index].message.content.clone())
                 .collect::<Vec<_>>()
         );
         let initial = rsi_agent_turn_protocol::initial_turn_input(&fixture.kernel, &claim)

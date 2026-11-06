@@ -2294,7 +2294,7 @@ async fn agent_wait_ignores_unrelated_claims_and_skips_empty_mailbox_payloads() 
         .await
         .unwrap()
         .unwrap();
-    store.mailbox_reads.lock().unwrap().clear();
+    store.mailbox.reads.lock().unwrap().clear();
     store.mailbox_summary_reads.lock().unwrap().clear();
     let cancellation = CancellationToken::new();
     let wait = tokio::spawn({
@@ -2329,7 +2329,8 @@ async fn agent_wait_ignores_unrelated_claims_and_skips_empty_mailbox_payloads() 
     );
     assert_eq!(
         store
-            .mailbox_reads
+            .mailbox
+            .reads
             .lock()
             .unwrap()
             .get(parent.session_id())
