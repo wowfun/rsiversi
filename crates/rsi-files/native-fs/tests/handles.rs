@@ -9,6 +9,61 @@ use std::{
 };
 
 #[test]
+fn direct_file_open_uses_one_available_descriptor() {
+    const CHILD: &str = "RSI_NATIVE_FS_DESCRIPTOR_BUDGET_CHILD";
+    if std::env::var_os(CHILD).is_none() {
+        let output = std::process::Command::new(std::env::current_exe().unwrap())
+            .args([
+                "--exact",
+                "direct_file_open_uses_one_available_descriptor",
+                "--nocapture",
+                "--test-threads=1",
+            ])
+            .env(CHILD, "1")
+            .output()
+            .unwrap();
+        assert!(
+            output.status.success(),
+            "{}{}",
+            String::from_utf8_lossy(&output.stdout),
+            String::from_utf8_lossy(&output.stderr)
+        );
+        return;
+    }
+
+    let temporary = tempfile::tempdir().unwrap();
+    let base = temporary.path().canonicalize().unwrap();
+    fs::write(base.join("value"), "inside").unwrap();
+    let root = open_absolute_directory_no_follow(&base).unwrap();
+    let limits = rustix::process::getrlimit(rustix::process::Resource::Nofile);
+    rustix::process::setrlimit(
+        rustix::process::Resource::Nofile,
+        rustix::process::Rlimit {
+            current: Some(limits.current.unwrap_or(64).min(64)),
+            ..limits
+        },
+    )
+    .unwrap();
+    let mut occupied = Vec::new();
+    loop {
+        match fs::File::open("/dev/null") {
+            Ok(file) => occupied.push(file),
+            Err(error) => {
+                assert_eq!(error.raw_os_error(), Some(libc::EMFILE));
+                break;
+            }
+        }
+    }
+    drop(occupied.pop().unwrap());
+    let opened = open_relative_file_no_follow(&root, Path::new("value"));
+    drop(occupied);
+    rustix::process::setrlimit(rustix::process::Resource::Nofile, limits).unwrap();
+    let mut value = String::new();
+    opened.unwrap().read_to_string(&mut value).unwrap();
+    assert_eq!(value, "inside");
+}
+
+#[test]
 fn roots_and_relative_opens_reject_links_and_parent_traversal() {
     let temporary = tempfile::tempdir().unwrap();
     let base = temporary.path().canonicalize().unwrap();

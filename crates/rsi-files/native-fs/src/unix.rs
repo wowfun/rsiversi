@@ -273,7 +273,12 @@ pub fn open_relative_file_no_follow(directory: &Directory, path: &Path) -> std::
     let name = path.file_name().ok_or_else(|| {
         std::io::Error::new(std::io::ErrorKind::InvalidInput, "file path has no name")
     })?;
-    let parent = open_relative_directory_no_follow(directory, parent)?;
+    let opened_parent = if parent.as_os_str().is_empty() {
+        None
+    } else {
+        Some(open_relative_directory_no_follow(directory, parent)?)
+    };
+    let parent = opened_parent.as_ref().unwrap_or(directory);
     let file = openat(
         parent.as_fd(),
         Path::new(name),

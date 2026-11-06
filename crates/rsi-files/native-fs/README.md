@@ -14,6 +14,8 @@ components cannot redirect an operation through a symlink. Parent traversal and
 absolute paths are rejected at relative entry points. Empty relative directory
 paths clone the supplied handle. Renaming the root leaves existing handles bound
 to the original directory.
+Direct-child file reads borrow the retained parent and allocate only the returned
+file handle. They do not duplicate the parent or reopen its absolute path.
 Single-child kind lookup uses the retained directory without enumeration or link
 traversal; accumulated sibling archives cannot block a lookup by capacity.
 

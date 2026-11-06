@@ -335,11 +335,12 @@ pub fn open_relative_file_no_follow(parent: &Directory, path: &Path) -> io::Resu
     let name = components
         .pop()
         .ok_or_else(|| names::invalid("file path has no name"))?;
-    let mut directory = parent.try_clone()?;
+    let mut directory: Option<Directory> = None;
     for component in components {
-        directory = Directory(native::relative(&directory.0, &component, true)?);
+        let current = directory.as_ref().unwrap_or(parent);
+        directory = Some(Directory(native::relative(&current.0, &component, true)?));
     }
-    native::relative(&directory.0, &name, false)
+    native::relative(&directory.as_ref().unwrap_or(parent).0, &name, false)
 }
 
 fn file_parent(parent: &Directory, path: &Path) -> io::Result<(Directory, Vec<u16>)> {
