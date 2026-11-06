@@ -1087,6 +1087,9 @@ pub enum MailboxRead {
     WithMessage(MessageId),
     /// Only input for the next Step of the current Turn.
     NextStep,
+    /// Next-Step input, the selected waking message and its same-command siblings.
+    /// Includes the exact selected status even when that message is terminal.
+    TurnClaim(MessageId),
 }
 
 /// Atomic bounded view of one session mailbox selection at one control watermark.
@@ -1094,6 +1097,8 @@ pub enum MailboxRead {
 pub struct StoreAgentMailbox {
     /// Whether pending next-Turn inputs are suspended at this captured cut.
     pub inbox_paused: bool,
+    /// Any pending next-Turn input other than a continuation, before page selection.
+    pub has_ordinary_pending_turn: bool,
     /// Optional exact message requested by identity, including terminal states.
     pub selected: Option<StoreAgentMessage>,
     /// Byte-bounded prefix of the selected pending messages in acceptance order.

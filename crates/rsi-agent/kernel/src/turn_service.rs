@@ -969,6 +969,7 @@ impl AgentKernel {
         } else {
             DurableMessageScan {
                 inbox_paused: false,
+                has_ordinary_pending_turn: false,
                 selected: None,
                 pending_count: 0,
                 pending: Vec::new(),
@@ -1232,7 +1233,7 @@ impl AgentKernel {
         let mut scan = scan_durable_messages(
             &self.inner,
             &session_id,
-            MailboxRead::WithMessage(request.message_id.clone()),
+            MailboxRead::TurnClaim(request.message_id.clone()),
         )
         .await?;
         let entry = scan.selected.take().ok_or_else(|| {
@@ -1312,13 +1313,7 @@ impl AgentKernel {
             return Err(TurnError::StaleClaim);
         }
         if let AgentMessageSource::Continuation { source } = &entry.message.source {
-            let ordinary_pending = scan.pending.iter().any(|pending| {
-                pending.target == MessageTarget::NextTurn
-                    && !matches!(
-                        pending.message.source,
-                        AgentMessageSource::Continuation { .. }
-                    )
-            });
+            let ordinary_pending = scan.has_ordinary_pending_turn;
             if ordinary_pending
                 || !self
                     .continuation_claim_allowed(&session_id, source, Some(&request.session))
@@ -1353,15 +1348,10 @@ impl AgentKernel {
         let require_approval = header.settings().require_approval()
             || sandbox == rsi_sandbox::SandboxMode::DangerFullAccess;
         let mut selected = {
-            let mut selected = scan.pending.into_iter().filter(|pending| {
-                if pending.target == MessageTarget::NextStep
-                    || pending.message.message_id == entry.message.message_id {
-                    return true;
-                }
-                matches!((&pending.message.source, &entry.message.source),
-                    (AgentMessageSource::Command { source: candidate }, AgentMessageSource::Command { source })
-                    if candidate.request_id == source.request_id && candidate.invocation_sha256 == source.invocation_sha256)
-            }).collect::<Vec<_>>();
+            let mut selected = scan.pending;
+            if selected.len() != scan.pending_count {
+                return Err(TurnError::Capacity);
+            }
             // Store owns the cardinality bound and FIFO cursors. Step input comes
             // first even when accepted after the waking message.
             selected.sort_unstable_by_key(|pending| {
@@ -1370,12 +1360,6 @@ impl AgentKernel {
                     pending.accepted_control_seq,
                 )
             });
-            if !selected
-                .iter()
-                .any(|pending| pending.message.message_id == entry.message.message_id)
-            {
-                return Err(TurnError::Capacity);
-            }
             selected
         };
         let timestamp_ms = self.inner.clock.now_ms().max(1);

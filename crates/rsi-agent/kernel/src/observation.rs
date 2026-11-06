@@ -343,6 +343,7 @@ pub(super) async fn scan_durable_messages(
         .collect::<Vec<_>>();
     Ok(DurableMessageScan {
         inbox_paused: mailbox.inbox_paused,
+        has_ordinary_pending_turn: mailbox.has_ordinary_pending_turn,
         selected: mailbox.selected.map(durable_message_entry),
         pending_count,
         pending,

@@ -200,6 +200,23 @@ async fn mailbox_initial_claim_orders_both_horizons_and_retries_on_memory_and_sq
 }
 
 #[tokio::test]
+async fn mailbox_initial_claim_does_not_let_unrelated_turns_hide_held_input() {
+    let store = Arc::new(FactReadRaceStore::new(Arc::new(MemoryStore::new())));
+    let ordered = seed(store.clone(), 2, true).await;
+    let kernel =
+        AgentKernel::recover_with_clock(store.clone(), composition(), Arc::new(FixedClock))
+            .await
+            .unwrap();
+    let worker = kernel.start_workers();
+    // A mixed prefix holds step-0, wake and other-turn, hiding step-1. The
+    // selected claim fits this page after unrelated Turn input is excluded.
+    store.mailbox.prefix_limit.store(3, Ordering::Relaxed);
+    claim_batch(&kernel).await.unwrap();
+    check_claims(&kernel, store.as_ref(), &ordered, true).await;
+    kernel.shutdown(worker).await.unwrap();
+}
+
+#[tokio::test]
 async fn mailbox_initial_claim_cannot_omit_its_waking_input_at_a_page_boundary() {
     let store = Arc::new(FactReadRaceStore::new(Arc::new(MemoryStore::new())));
     seed(store.clone(), 2, true).await;
@@ -211,19 +228,21 @@ async fn mailbox_initial_claim_cannot_omit_its_waking_input_at_a_page_boundary()
     let session = SessionId::new("claim-order").unwrap();
     let before = store.read_watermarks(&session).await.unwrap();
     // Model a valid byte-bounded prefix without allocating tens of megabytes.
-    store.mailbox.prefix_limit.store(1, Ordering::Relaxed);
-    assert!(matches!(
-        claim_batch(&kernel).await,
-        Err(TurnError::Capacity)
-    ));
-    assert_eq!(store.read_watermarks(&session).await.unwrap(), before);
-    assert_eq!(
-        kernel
-            .message_status(&session, &MessageId::new("wake").unwrap())
-            .await
-            .unwrap()
-            .state,
-        MessageState::Pending
-    );
+    for limit in [1, 2] {
+        store.mailbox.prefix_limit.store(limit, Ordering::Relaxed);
+        assert!(matches!(
+            claim_batch(&kernel).await,
+            Err(TurnError::Capacity)
+        ));
+        assert_eq!(store.read_watermarks(&session).await.unwrap(), before);
+        assert_eq!(
+            kernel
+                .message_status(&session, &MessageId::new("wake").unwrap())
+                .await
+                .unwrap()
+                .state,
+            MessageState::Pending
+        );
+    }
     kernel.shutdown(worker).await.unwrap();
 }

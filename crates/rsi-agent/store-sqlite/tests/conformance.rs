@@ -2247,11 +2247,7 @@ async fn current_schema_preflight_reads_the_committed_wal_before_writer_recovery
     drop(live);
 }
 
-#[tokio::test]
-async fn step_mailbox_reaches_steers_beyond_a_full_page_of_next_turn_messages() {
-    let root = tempfile::tempdir().unwrap();
-    let store = SqliteStore::open(root.path()).unwrap();
-    let session = SessionId::new("mixed-mailbox").unwrap();
+async fn fill_large_mixed_mailbox(store: &SqliteStore, session: &SessionId) {
     for first in (1..=35_u64).step_by(8) {
         let controls = (first..=(first + 7).min(35))
             .map(|seq| {
@@ -2307,6 +2303,14 @@ async fn step_mailbox_reaches_steers_beyond_a_full_page_of_next_turn_messages() 
             .await
             .unwrap();
     }
+}
+
+#[tokio::test]
+async fn step_mailbox_reaches_steers_beyond_a_full_page_of_next_turn_messages() {
+    let root = tempfile::tempdir().unwrap();
+    let store = SqliteStore::open(root.path()).unwrap();
+    let session = SessionId::new("mixed-mailbox").unwrap();
+    fill_large_mixed_mailbox(&store, &session).await;
     let all = store
         .read_agent_mailbox(&session, MailboxRead::All)
         .await
@@ -2334,6 +2338,25 @@ async fn step_mailbox_reaches_steers_beyond_a_full_page_of_next_turn_messages() 
         step.pending
             .iter()
             .all(|entry| entry.target == MessageTarget::NextStep)
+    );
+    let claim = store
+        .read_agent_mailbox(
+            &session,
+            MailboxRead::TurnClaim(MessageId::new("input-33").unwrap()),
+        )
+        .await
+        .unwrap();
+    assert_eq!(claim.pending_count, 3);
+    assert!(claim.has_ordinary_pending_turn);
+    assert_eq!(claim.durable_control_seq, all.durable_control_seq);
+    assert_eq!(claim.selected.unwrap().accepted_control_seq, 33);
+    assert_eq!(
+        claim
+            .pending
+            .iter()
+            .map(|entry| entry.accepted_control_seq)
+            .collect::<Vec<_>>(),
+        [33, 34, 35]
     );
 }
 
@@ -2378,6 +2401,13 @@ async fn exact_message_read_does_not_decode_unrelated_pending_payloads() {
         store.read_agent_message(&session, &selected).await.unwrap(),
         Some(expected)
     );
+    let claim = store
+        .read_agent_mailbox(&session, MailboxRead::TurnClaim(selected.clone()))
+        .await
+        .unwrap();
+    assert_eq!(claim.pending_count, 1);
+    assert!(claim.has_ordinary_pending_turn);
+    assert_eq!(claim.pending[0].message.message_id, selected);
     assert!(matches!(
         store.read_agent_message(&session, &unrelated).await,
         Err(StoreError::Corrupt(_))

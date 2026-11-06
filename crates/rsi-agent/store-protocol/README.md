@@ -289,6 +289,11 @@ mailbox summary returns the pending count, the bounded ordered identities of
 pending promotable next-Step messages, and Fact/control tails for capacity and
 terminal-promotion decisions. Mailbox reads may select all pending messages,
 all pending messages plus one exact message status, or only next-Step messages.
+Turn-claim reads return the exact waking message status and select only pending
+next-Step inputs, that waking message and its same-command invocation siblings.
+The selection also reports whether any ordinary next-Turn input is pending,
+independent of the returned payload page, so continuation priority needs no
+unrelated message bodies.
 Selection applies to the count and ordered rows before the byte limit and
 payload decoding. Every read uses one Store snapshot:
 it never materializes the valid 64-message worst case at once, returns the Fact

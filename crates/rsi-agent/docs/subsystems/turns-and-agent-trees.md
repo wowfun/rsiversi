@@ -93,7 +93,10 @@ One next-Turn mailbox claim starts an activation and one Step. Within the bounde
 mailbox batch, it claims pending next-Step input first, in acceptance order,
 then the selected waking input and its same-command siblings, also in acceptance
 order. This applies to every message source. Other next-Turn inputs stay queued;
-the selected waking input supplies the Turn policy. Claim Facts, their ordered
+their bodies do not consume the claim page budget. The Store selects this batch
+before loading payloads. A truncated selected batch cannot start a Turn or
+silently leave out held input.
+The selected waking input supplies the Turn policy. Claim Facts, their ordered
 Turn membership and all mailbox receipts commit together. Further safe-boundary
 messages close the current Step, start the next, and become Facts atomically
 with their durable claims. Turn terminal and activation settlement are distinct:

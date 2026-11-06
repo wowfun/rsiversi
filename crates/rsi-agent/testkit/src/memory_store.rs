@@ -15,6 +15,7 @@ use super::{
     TurnId, WriteContextCheckpoint, advance_control_prefix_digest, advance_fact_prefix_digest,
     async_trait, validate_message_claim_fact, validate_read_limit, validate_session_read_limit,
 };
+use rsi_agent_session_protocol::AgentMessageSource;
 use rsi_agent_store_protocol::MailboxRead;
 use rsi_agent_store_protocol::admit_page_record;
 
@@ -1642,19 +1643,37 @@ impl SessionStore for MemoryStore {
         let durable_control_seq = session.controls.last().map_or(0, AgentControlRecord::seq);
         let durable_fact_seq = session.facts.last().map_or(0, |fact| fact.seq());
         let step_only = query == MailboxRead::NextStep;
+        let turn_claim = matches!(query, MailboxRead::TurnClaim(_));
         let selected = match query {
-            MailboxRead::WithMessage(id) => {
+            MailboxRead::WithMessage(id) | MailboxRead::TurnClaim(id) => {
                 state.agent_messages.get(&(session_id.clone(), id)).cloned()
             }
             MailboxRead::All | MailboxRead::NextStep => None,
         };
+        let has_ordinary_pending_turn =
+            state.agent_messages.iter().any(|((candidate, _), entry)| {
+                candidate == session_id
+                    && matches!(entry.state, StoreAgentMessageState::Pending)
+                    && entry.target == MessageTarget::NextTurn
+                    && !matches!(
+                        entry.message.source,
+                        AgentMessageSource::Continuation { .. }
+                    )
+            });
         let mut pending = state
             .agent_messages
             .iter()
             .filter_map(|((candidate, _), entry)| {
                 (candidate == session_id
                     && matches!(entry.state, StoreAgentMessageState::Pending)
-                    && (!step_only || entry.target == MessageTarget::NextStep))
+                    && (!step_only || entry.target == MessageTarget::NextStep)
+                    && (!turn_claim || entry.target == MessageTarget::NextStep
+                        || selected.as_ref().is_some_and(|selected| {
+                            entry.message.message_id == selected.message.message_id
+                                || matches!((&entry.message.source, &selected.message.source),
+                                    (AgentMessageSource::Command { source: candidate }, AgentMessageSource::Command { source })
+                                    if candidate.request_id == source.request_id && candidate.invocation_sha256 == source.invocation_sha256)
+                        })))
                     .then_some(entry)
             })
             .collect::<Vec<_>>();
@@ -1674,6 +1693,7 @@ impl SessionStore for MemoryStore {
         }
         let mailbox = StoreAgentMailbox {
             inbox_paused: state.sessions[session_id].inbox_paused,
+            has_ordinary_pending_turn,
             selected,
             pending: bounded,
             pending_count,

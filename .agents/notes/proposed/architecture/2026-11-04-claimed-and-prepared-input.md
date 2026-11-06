@@ -39,6 +39,12 @@ A bounded Store mailbox page remains the admission unit; this ordering change
 does not remove its aggregate byte limit or establish parity for a queue spanning
 several pages. That case needs a separate claim/publication design, rather than
 unbounded materialization on small devices.
+The claim page selects held Step inputs and the waking message's command batch
+before loading payloads. Unrelated queued Turns cannot consume that budget or
+hide later held input. This follows DSH's separate queue claim while retaining
+RSI's atomic publication and finite admission bound. Ordinary-input precedence
+over continuations comes from indexed metadata in the same Store snapshot;
+it must not depend on which bodies fit in a page. No extra body index is needed.
 
 Preparation belongs to a provider request series, not the native Step lifetime.
 A native Step may contain several model/Tool rounds; retries reuse one captured

@@ -695,6 +695,7 @@ struct CapturedRegistration {
 
 struct DurableMessageScan {
     inbox_paused: bool,
+    has_ordinary_pending_turn: bool,
     selected: Option<DurableMessageEntry>,
     pending_count: usize,
     pending: Vec<DurableMessageEntry>,

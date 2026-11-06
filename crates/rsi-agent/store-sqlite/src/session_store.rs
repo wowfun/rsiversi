@@ -1,6 +1,15 @@
 use super::*;
 use rsi_agent_store_protocol::{MailboxRead, admit_page_record};
 
+const MAILBOX_PENDING_FROM_SQL: &str = "FROM agent_messages AS m LEFT JOIN agent_controls AS c
+       ON c.session_id = m.session_id AND c.seq = m.accepted_control_seq
+     WHERE m.session_id = ?1 AND m.state = 'pending'
+       AND (NOT ?2 OR m.target = 'next_step')
+       AND (?3 IS NULL OR m.target = 'next_step' OR m.message_id = ?3
+         OR (?4 IS NOT NULL AND m.message_source = 'command'
+           AND json_extract(c.control_json, '$.message.source.source.request_id') = ?4
+           AND json_extract(c.control_json, '$.message.source.source.invocation_sha256') = ?5))";
+
 pub(super) const LIST_READY_MESSAGES_AFTER_SQL: &str =
     "SELECT r.session_id, r.message_id, r.ready_control_seq, r.timestamp_ms, r.target,
             CASE WHEN length(CAST(m.message_source AS BLOB)) <= 12
@@ -1639,11 +1648,14 @@ impl SessionStore for SqliteStore {
             let transaction = connection
                 .transaction_with_behavior(TransactionBehavior::Deferred)
                 .map_err(sql_error)?;
-            let (durable_fact_seq, durable_control_seq, inbox_paused) = transaction
+            let (durable_fact_seq, durable_control_seq, inbox_paused, has_ordinary_pending_turn) = transaction
                 .query_row(
-                    "SELECT durable_seq, control_seq, inbox_paused FROM sessions WHERE session_id NOT IN (SELECT session_id FROM session_tombstones) AND session_id = ?1",
+                    "SELECT durable_seq, control_seq, inbox_paused,
+                       EXISTS (SELECT 1 FROM agent_messages AS m WHERE m.session_id = s.session_id
+                         AND m.state = 'pending' AND m.target = 'next_turn' AND m.message_source != 'continuation')
+                     FROM sessions AS s WHERE session_id NOT IN (SELECT session_id FROM session_tombstones) AND session_id = ?1",
                     [session_id.as_str()],
-                    |row| Ok((row.get::<_, i64>(0)?, row.get::<_, i64>(1)?, row.get::<_, bool>(2)?)),
+                    |row| Ok((row.get::<_, i64>(0)?, row.get::<_, i64>(1)?, row.get::<_, bool>(2)?, row.get::<_, bool>(3)?)),
                 )
                 .optional()
                 .map_err(sql_error)?
@@ -1652,15 +1664,23 @@ impl SessionStore for SqliteStore {
             let durable_control_seq =
                 decode_u64("mailbox durable control sequence", durable_control_seq)?;
             let step_only = query == MailboxRead::NextStep;
-            let selected = match query {
-                MailboxRead::WithMessage(id) => read_indexed_message(&transaction, &session_id, &id)?,
+            let claim_id = match &query {
+                MailboxRead::TurnClaim(id) => Some(id.as_str()),
+                _ => None,
+            };
+            let selected = match &query {
+                MailboxRead::WithMessage(id) | MailboxRead::TurnClaim(id) => read_indexed_message(&transaction, &session_id, id)?,
                 MailboxRead::All | MailboxRead::NextStep => None,
+            };
+            let (command_request, command_digest) = match selected.as_ref().map(|entry| &entry.message.source) {
+                Some(AgentMessageSource::Command { source }) if claim_id.is_some() =>
+                    (Some(source.request_id.as_str()), Some(source.invocation_sha256.as_str())),
+                _ => (None, None),
             };
             let pending_count = transaction
                 .query_row(
-                    "SELECT COUNT(*) FROM agent_messages
-                     WHERE session_id = ?1 AND state = 'pending' AND (NOT ?2 OR target = 'next_step')",
-                    params![session_id.as_str(), step_only],
+                    &format!("SELECT COUNT(*) {MAILBOX_PENDING_FROM_SQL}"),
+                    params![session_id.as_str(), step_only, claim_id, command_request, command_digest],
                     |row| row.get::<_, i64>(0),
                 )
                 .map_err(sql_error)
@@ -1671,31 +1691,31 @@ impl SessionStore for SqliteStore {
                 })?;
             let mut statement = transaction
                 .prepare(
-                    "SELECT coalesce(length(CAST(c.control_json AS BLOB)), -1),
-                            CASE WHEN length(CAST(c.control_json AS BLOB)) <= ?2
+                    &format!("SELECT coalesce(length(CAST(c.control_json AS BLOB)), -1),
+                            CASE WHEN length(CAST(c.control_json AS BLOB)) <= ?6
                                  THEN c.control_json END,
                             message_source, root_session_id, target, wake_required,
                             accepted_control_seq, state,
                             length(CAST(state_json AS BLOB)),
-                            CASE WHEN length(CAST(state_json AS BLOB)) <= ?3
+                            CASE WHEN length(CAST(state_json AS BLOB)) <= ?7
                                  THEN state_json END,
                     delivery, CASE WHEN bound_turn_id IS NULL OR length(CAST(bound_turn_id AS BLOB)) <= 256 THEN bound_turn_id ELSE '' END, accepted_timestamp_ms, CASE WHEN length(CAST(queue_slot_id AS BLOB)) <= 256 THEN queue_slot_id ELSE '' END, queue_timestamp_ms, queue_control_seq, has_turn_options,
                     CASE WHEN length(CAST(m.message_id AS BLOB)) <= 256 THEN m.message_id ELSE '' END
-                     FROM agent_messages AS m LEFT JOIN agent_controls AS c
-                       ON c.session_id = m.session_id AND c.seq = m.accepted_control_seq
-                     WHERE m.session_id = ?1 AND state = 'pending' AND (NOT ?4 OR target = 'next_step')
-                     ORDER BY accepted_control_seq",
+                     {MAILBOX_PENDING_FROM_SQL} ORDER BY accepted_control_seq"),
                 )
                 .map_err(sql_error)?;
             let rows = statement
                 .query_map(
                     params![
                         session_id.as_str(),
+                        step_only,
+                        claim_id,
+                        command_request,
+                        command_digest,
                         i64::try_from(MAXIMUM_SESSION_FACT_BYTES)
                             .expect("control record bound fits SQLite INTEGER"),
                         i64::try_from(MAXIMUM_INDEXED_MESSAGE_STATE_BYTES)
                             .expect("message state bound fits SQLite INTEGER"),
-                        step_only,
                     ],
                     indexed_message_row,
                 )
@@ -1715,6 +1735,7 @@ impl SessionStore for SqliteStore {
             }
             let mailbox = StoreAgentMailbox {
                 inbox_paused,
+                has_ordinary_pending_turn,
                 selected,
                 pending,
                 pending_count,
