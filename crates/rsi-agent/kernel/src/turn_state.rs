@@ -202,7 +202,7 @@ fn apply_step_body(turn: &mut TurnControl, body: &SessionFactBody, seq: u64) -> 
                             .iter()
                             .map(|row| {
                                 (
-                                    row.definition.name().to_owned(),
+                                    row.name.clone(),
                                     CapturedRegistration {
                                         owner: row.owner.clone(),
                                         registration: row.registration.clone(),

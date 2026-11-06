@@ -112,7 +112,7 @@ pub use resource::{
 };
 
 /// Exact durable format accepted by this pre-release implementation.
-pub const SESSION_FORMAT_VERSION: u32 = 34;
+pub const SESSION_FORMAT_VERSION: u32 = 35;
 /// Maximum bytes in one session, turn, effect, profile, or error-code identity.
 pub const MAXIMUM_AGENT_IDENTIFIER_BYTES: usize = 256;
 /// Maximum bytes in one Agent preset directory-segment identity.
@@ -2253,7 +2253,7 @@ pub enum SessionFactBody {
         step_id: StepId,
         /// Sorted unique subset; empty disables all Tools.
         names: Vec<String>,
-        /// Application declarations and registration identities for this request series.
+        /// Application names and registration identities for this request series.
         application: Option<ApplicationToolView>,
         /// Current system instructions in contribution order, replaced at each preparation.
         instructions: Vec<StepInstruction>,

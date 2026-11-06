@@ -20,12 +20,7 @@ fn application_crash_facts(turn: &TurnId, started: bool) -> Vec<Arc<SessionFact>
                 generation: "old-worker".into(),
                 receipt_source: Some("market".into()),
                 tools: vec![ApplicationToolBinding {
-                    definition: ToolDefinition::new(
-                        "read",
-                        "read",
-                        serde_json::json!({"type":"object"}),
-                    )
-                    .unwrap(),
+                    name: "read".into(),
                     owner: "tool-owner".into(),
                     registration: "exact-registration".into(),
                 }],

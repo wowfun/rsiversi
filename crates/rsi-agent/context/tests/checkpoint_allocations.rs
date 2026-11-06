@@ -155,7 +155,7 @@ fn full_builder_preserves_v18_payload_and_v6_envelope_without_a_third_full_copy(
 fn assert_checkpoint_contract(bytes: &[u8]) {
     // v18 binds each projected Turn to its source Session and keeps pending
     // claims separate from prepared messages and current Step instructions;
-    // the v6 outer envelope, Session 34 and builder 2.15.0 bind the cache.
+    // the v6 outer envelope, Session 35 and builder 2.15.0 bind the cache.
     let prefix = b"rsi-agent-model-context-v6\0".len() + 32;
     let metadata_len = u32::from_le_bytes(bytes[prefix..prefix + 4].try_into().unwrap()) as usize;
     let metadata: serde_json::Value =
@@ -188,7 +188,7 @@ fn assert_checkpoint_contract(bytes: &[u8]) {
     }
     assert_eq!(
         hex::encode(Sha256::digest(bytes)),
-        "521f08c3ef66073bff2d13641c0031e9c61498c6020b72ea2642924649594ba3"
+        "20abcf62259521ab82c4393d7fd0a17a977832af6c91765b4f72e8f1dbfd099c"
     );
 }
 

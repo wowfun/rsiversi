@@ -229,7 +229,8 @@ async fn previous_session_format_is_rejected_without_rewriting_database_bytes() 
         )
         .unwrap();
     let mut header: serde_json::Value = serde_json::from_str(&header).unwrap();
-    header["format_version"] = 16.into();
+    let previous = rsi_agent_session_protocol::SESSION_FORMAT_VERSION - 1;
+    header["format_version"] = previous.into();
     connection
         .execute(
             "UPDATE sessions SET header_json=?1 WHERE session_id=?2",
@@ -243,7 +244,7 @@ async fn previous_session_format_is_rejected_without_rewriting_database_bytes() 
     let before = std::fs::read(&path).unwrap();
     let store = SqliteStore::open(root.path()).unwrap();
     assert!(
-        matches!(store.header(&id).await, Err(StoreError::Corrupt(message)) if message.contains("unsupported session format version 16"))
+        matches!(store.header(&id).await, Err(StoreError::Corrupt(message)) if message.contains(&format!("unsupported session format version {previous}")))
     );
     drop(store);
     assert_eq!(std::fs::read(&path).unwrap(), before);

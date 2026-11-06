@@ -470,7 +470,44 @@ async fn model_retry_reuses_application_registration_and_next_round_drops_it() {
     assert_eq!(views.len(), 2);
     assert!(views[1].is_empty());
     let binding = &views[0][0];
+    assert_eq!(binding.name, "echo");
     assert_eq!(binding.registration, "first-registration");
+    // The model request owns schema inspection; preparation retains only routing identities.
+    let requests = provider.requests.lock().unwrap();
+    let mut intents = 0;
+    for fact in &page.facts {
+        let SessionFactBody::ModelIntent { evidence, .. } = fact.body() else {
+            continue;
+        };
+        let rsi_agent_session_protocol::RequestEvidence::Available { tools, .. } = evidence else {
+            panic!("request evidence missing");
+        };
+        let original = match tools {
+            rsi_agent_session_protocol::EvidencePart::Inline { .. } => tools,
+            rsi_agent_session_protocol::EvidencePart::Reference { seq, .. } => {
+                let original = page.facts.iter().find(|f| f.seq() == *seq).unwrap();
+                let SessionFactBody::ModelIntent {
+                    evidence: rsi_agent_session_protocol::RequestEvidence::Available { tools, .. },
+                    ..
+                } = original.body()
+                else {
+                    panic!("reference must target original request evidence");
+                };
+                tools
+            }
+        };
+        let rsi_agent_session_protocol::EvidencePart::Inline { text, .. } = original else {
+            panic!("evidence reference must be direct");
+        };
+        let schema: serde_json::Value = serde_json::from_str(text).unwrap();
+        assert_eq!(
+            schema["definitions"],
+            serde_json::to_value(requests[intents].tools()).unwrap()
+        );
+        intents += 1;
+    }
+    assert_eq!(intents, requests.len());
+    drop(requests);
     assert!(page.facts.iter().any(|f|matches!(f.body(),
         SessionFactBody::ToolIntent{identity,approval:None,..} if identity.owner_id()==binding.owner)));
     assert!(page.facts.iter().any(|f|matches!(f.body(),

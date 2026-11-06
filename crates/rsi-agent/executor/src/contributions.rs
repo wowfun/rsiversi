@@ -546,11 +546,7 @@ impl Driver {
                 if let rsi_agent_session_protocol::ApplicationToolView::Ready { tools, .. } =
                     &mut view
                 {
-                    tools.retain(|row| {
-                        names
-                            .binary_search_by(|name| name.as_str().cmp(row.definition.name()))
-                            .is_ok()
-                    });
+                    tools.retain(|row| names.binary_search(&row.name).is_ok());
                 }
                 view
             });

@@ -308,12 +308,7 @@ async fn application_registration_binds_owner_without_forcing_approval() {
                     generation: "worker".into(),
                     receipt_source: Some("market".into()),
                     tools: vec![ApplicationToolBinding {
-                        definition: ToolDefinition::new(
-                            "file_read",
-                            "Application reader",
-                            serde_json::json!({"type":"object"}),
-                        )
-                        .unwrap(),
+                        name: "file_read".into(),
                         owner: "application-owner".into(),
                         registration: "original".into(),
                     }],

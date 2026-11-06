@@ -6,6 +6,58 @@ use rsi_tools_protocol::{ToolContent, ToolResult, ToolResultIdentity};
 use serde_json::json;
 
 #[test]
+fn application_bindings_retain_only_selected_unambiguous_identities() {
+    let fact = SessionFact::new(
+        1,
+        1,
+        SessionFactBody::StepPrepared {
+            turn_id: TurnId::new("turn").unwrap(),
+            step_id: StepId::new("step").unwrap(),
+            names: vec!["read".into(), "write".into()],
+            instructions: vec![],
+            application: Some(ApplicationToolView::Ready {
+                generation: "worker".into(),
+                receipt_source: Some("market".into()),
+                tools: vec![ApplicationToolBinding {
+                    name: "read".into(),
+                    registration: "occurrence".into(),
+                    owner: "owner".into(),
+                }],
+            }),
+        },
+    )
+    .unwrap();
+    let wire = serde_json::to_value(&fact).unwrap();
+    assert_eq!(
+        wire["application"]["tools"][0],
+        json!({"name":"read", "registration":"occurrence", "owner":"owner"})
+    );
+    assert_eq!(
+        serde_json::from_value::<SessionFact>(wire.clone()).unwrap(),
+        fact
+    );
+    for invalid in ["unselected", "bad name", ""] {
+        let mut changed = wire.clone();
+        changed["application"]["tools"][0]["name"] = invalid.into();
+        assert!(serde_json::from_value::<SessionFact>(changed).is_err());
+    }
+    for field in ["name", "registration", "owner"] {
+        let mut changed = wire.clone();
+        let mut second = json!({"name":"write", "registration":"other", "owner":"other"});
+        second[field] = wire["application"]["tools"][0][field].clone();
+        changed["application"]["tools"]
+            .as_array_mut()
+            .unwrap()
+            .push(second);
+        assert!(serde_json::from_value::<SessionFact>(changed).is_err());
+    }
+    let mut obsolete = wire;
+    obsolete["application"]["tools"][0]["definition"] =
+        json!({"name":"read", "description":"read", "input_schema":{"type":"object"}});
+    assert!(serde_json::from_value::<SessionFact>(obsolete).is_err());
+}
+
+#[test]
 fn message_byte_count_and_owned_control_preserve_escaped_unicode_payload() {
     let message = AgentMessage {
         message_id: MessageId::new("bytes").unwrap(),
@@ -466,9 +518,9 @@ fn header_reports_old_format_before_removed_fields_and_rejects_them_in_current_f
     )
     .unwrap();
     let current = serde_json::to_value(&header).unwrap();
-    assert_eq!(current["format_version"], 34);
+    assert_eq!(current["format_version"], 35);
     assert!(current.get("workspace_trust").is_none());
-    for version in 1..34 {
+    for version in 1..SESSION_FORMAT_VERSION {
         // Put the obsolete field before the version to prove decoding is not key-order dependent.
         let wire = format!(
             r#"{{"workspace_trust":"trusted","settings":{{}},"format_version":{version}}}"#

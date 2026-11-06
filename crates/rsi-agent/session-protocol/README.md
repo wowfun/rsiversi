@@ -18,7 +18,7 @@ these are not execution authority. Empty blocks and empty message content are
 valid preparation results even though fresh ingress requires meaningful input.
 The serialized entered list has a 32 MiB prepared-input envelope. Typed
 construction and deserialization validate it; safe-Rust consumers borrow it
-without repeating serialization. Session format 34 retains verbatim files as
+without repeating serialization. Session format 35 retains verbatim files as
 typed `FileRef` content, independently of image and conversation references.
 Image blocks may include optional display metadata independent of the raster identity. File bytes and provider-local paths do not enter Facts. It separates `InputMessageClaimed`
 and `ToolContextsClaimed` from `StepInputsPrepared`. Direct `TurnAccepted` text is
@@ -59,8 +59,13 @@ initial human authority. Origin and attribution are part of the exact accepted m
 reusing a native message ID conflicts instead of changing the prior acceptance.
 
 `StepPrepared` records the optional application source.
-A ready source records its process generation and the admitted schemas,
-application registrations and native result owners. An unavailable selected
+A ready source records its process generation and the admitted tool names,
+application registrations and native result owners. The captured runtime owns
+the schemas used for execution; `ModelIntent` request evidence owns their durable
+inspection representation and may reference an earlier identical section.
+`StepPrepared` does not persist a second schema catalog. When request evidence is
+unavailable, schema inspection is unavailable; registration routing and cold
+outcome recovery still use the complete captured identities. An unavailable selected
 source records its diagnostic. Absence denotes no selected application.
 `ToolIntent.identity.owner_id` binds an application call to the captured row.
 Sources with durable outcomes also record their stable receipt source on the
@@ -81,7 +86,7 @@ bounded like other non-human Agent messages and cannot carry execution overrides
 Command inputs retain one or more typed text, image or file blocks in their original
 order. Their external admission owner verifies referenced objects; the protocol
 validates descriptors, provenance and aggregate bounds without filesystem I/O.
-Session format 34 admits this content under both pending and claimed command
+Session format 35 admits this content under both pending and claimed command
 provenance. Command input grants no execution overrides or frozen-reference authority.
 
 `ExtensionJournal` is the built-in version-1 envelope for a trusted process
@@ -245,7 +250,7 @@ request identity, and a draft revision cannot appear in a durable command.
 Command controls contain no execution Facts and cannot claim a Turn's free
 mutation lane. Their consumers obtain Session authority through the owning
 Kernel service; serialized identities alone confer no authority. Only Header
-format 34 is accepted; all other formats are unsupported. Header protection is
+format 35 is accepted; all other formats are unsupported. Header protection is
 part of this format's immutable shape. The
 [SQLite contract](../store-sqlite/README.md) owns the exact database version;
 earlier authoritative formats are rejected without rewriting their files.

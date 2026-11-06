@@ -30,7 +30,9 @@ A `RequestToolSource` captures a supplemental sealed catalog for a single
 provider request series. The generation pin continues to own preset tools.
 Capture receives the resolved model and reasoning effort for that series, after
 the executing claim's selection is resolved and before preparation callbacks.
-The same selection and catalog survive provider retries; a later request series
+The runtime is the only retained owner of captured tool schemas. Its registration
+view contains names and identities, without cloning the definitions into another
+catalog. The same selection and catalog survive provider retries; a later request series
 resolves both again. A source must not infer that selection from the Header or a
 fresh Session read, which may describe a different choice.
 The captured catalog also carries the application's rendered current system

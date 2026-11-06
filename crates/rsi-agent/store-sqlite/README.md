@@ -1,6 +1,6 @@
 # rsi-agent-store-sqlite
 
-Schema 45 stores Header format 34 with separate history provenance and Agent
+Schema 45 stores Header format 35 with separate history provenance and Agent
 execution ownership. A mailbox row retains routing, lifecycle and acceptance
 coordinates, never a second message body. Body reads join the indexed acceptance
 to its canonical control in the same query and bound that control before allocating
@@ -9,7 +9,8 @@ the exact compact message byte count uses a counting writer rather than a JSON c
 Metadata-only queue queries do not join or decode control bodies. Canonical replay
 checks the routing index against the original acceptance and later transitions.
 Opening an exact schema 44 under the writer lease removes its redundant message
-column in one transaction. Canonical controls and Facts retain their bytes.
+column in one transaction. Canonical controls and Facts retain their bytes;
+this physical migration does not upgrade an unsupported Session format.
 Other incompatible versions are rejected during read-only preflight.
 The opt-in `preserves_live_history_while_removing_the_mailbox_body_copy` test
 accepts a cleanly closed schema-44 database through `RSI_STORE_SCHEMA44_FIXTURE`.
