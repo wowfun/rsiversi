@@ -48,6 +48,12 @@ prefix fold as live observation; a generic JSON patch format would introduce a
 second interpreter for those semantics. Local acceptances, including their exact
 timestamp and original queue target, remain durable after acknowledgement.
 Before dispatch, the application records and flushes the exact native invocation.
+For inbox operations, the accepted event is also the invocation's body owner.
+Recovery metadata retains only the operation kind and, for context-input commands,
+the command, original native revision and digest. Request construction borrows
+the immutable event; neither a retained second body nor a second body cache is
+needed. This adopts DSH's event-backed inbox ownership across RSI's asynchronous
+native boundary. Cold loading checks the digest against the reconstructed request.
 Recovery reuses that invocation and request identity; it never silently restamps
 a revision or invokes under a fresh identity. A failed attempt does not erase an
 accepted event. The latest unresolved choice blocks dependent Agent submissions;
