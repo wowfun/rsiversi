@@ -79,6 +79,11 @@ copy. External mutable inputs and restored local records still cross a lossless
 JSON snapshot boundary; an internal ownership contract avoids repeating that
 copy for the same native body. No global interning table or durable projection
 cache is needed, and a failed batch cannot modify the shared frozen prefix.
+The same ownership contract avoids repeatedly freezing admitted payload graphs:
+only new envelopes and remapped reference containers need freezing on transfer.
+Canonical request headers add a shallow wrapper over the event's immutable
+configuration and schemas. This follows DSH's shared restore path without using
+an arbitrary caller's shallow-frozen object as proof of immutable descendants.
 
 Inbox reads follow DSH's retained projection cursor: immutable event prefixes do
 not need copying or refolding when more events arrive. Mutable operation metadata
