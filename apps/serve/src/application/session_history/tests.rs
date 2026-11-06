@@ -208,8 +208,11 @@ async fn metadata_parent_address_requires_visible_direct_parent() {
     );
 }
 
-#[tokio::test]
-async fn exact_message_reads_preserve_withdrawn_bodies_and_fragment_identity() {
+async fn withdrawn_message_fixture() -> (
+    rsi_agent_testkit::MemoryStore,
+    SessionHeader,
+    rsi_agent_session_protocol::AgentMessage,
+) {
     use rsi_agent_session_protocol::{
         AgentControlRecord, AgentControlRecordBody as Body, AgentMessage, AgentMessageContent,
         AgentMessageSource, MessageDelivery, MessageDiscardReason, MessageId, MessageOptions,
@@ -233,7 +236,7 @@ async fn exact_message_reads_preserve_withdrawn_bodies_and_fragment_identity() {
                 session_id: id.clone(),
                 expected_fact_seq: 0,
                 expected_control_seq: 0,
-                header: Some(header),
+                header: Some(header.clone()),
                 facts: vec![],
                 controls: vec![
                     AgentControlRecord::new(
@@ -265,10 +268,58 @@ async fn exact_message_reads_preserve_withdrawn_bodies_and_fragment_identity() {
         })
         .await
         .unwrap();
+    (store, header, message)
+}
+
+#[tokio::test]
+async fn control_pages_deliver_acceptances_once_and_bound_large_records() {
+    let (store, header, message) = withdrawn_message_fixture().await;
+    let mut controls = String::new();
+    loop {
+        let page =
+            super::super::session_controls::read_controls(&store, &header, 0, 2, controls.len())
+                .await
+                .unwrap();
+        assert_eq!(
+            page["through_seq"], 1,
+            "one oversized acceptance stays on its own page"
+        );
+        assert!(page["json"].as_str().unwrap().len() <= 128 * 1024);
+        controls.push_str(page["json"].as_str().unwrap());
+        if page["next_offset"] == page["total_bytes"] {
+            break;
+        }
+    }
+    let events: Value = serde_json::from_str(&controls).unwrap();
+    assert_eq!(events.as_array().unwrap().len(), 1);
+    assert_eq!(events[0]["message"], json!(message));
+    assert_eq!(events[0]["after_fact_seq"], 0);
+    let discarded = super::super::session_controls::read_controls(&store, &header, 1, 2, 0)
+        .await
+        .unwrap();
+    assert_eq!(discarded["through_seq"], 2);
+    assert_eq!(
+        serde_json::from_str::<Value>(discarded["json"].as_str().unwrap()).unwrap()[0]["kind"],
+        "discarded"
+    );
+    for (after, through) in [(0, 0), (2, 1), (0, 3)] {
+        assert!(
+            super::super::session_controls::read_controls(&store, &header, after, through, 0)
+                .await
+                .is_err()
+        );
+    }
+}
+
+#[tokio::test]
+async fn exact_message_reads_preserve_withdrawn_bodies_and_fragment_identity() {
+    use rsi_agent_session_protocol::MessageId;
+    let (store, header, message) = withdrawn_message_fixture().await;
+    let id = header.session_id();
     let expected = serde_json::to_string(&message).unwrap();
     let mut restored = String::new();
     while restored.len() < expected.len() {
-        let page = read_message(&store, &id, &message.message_id, 1, restored.len())
+        let page = read_message(&store, id, &message.message_id, 1, restored.len())
             .await
             .unwrap();
         assert_eq!(page["through_seq"], 1);
@@ -280,19 +331,19 @@ async fn exact_message_reads_preserve_withdrawn_bodies_and_fragment_identity() {
     assert_eq!(restored, expected);
     for seq in [0, 2, 3] {
         assert!(
-            read_message(&store, &id, &message.message_id, seq, 0)
+            read_message(&store, id, &message.message_id, seq, 0)
                 .await
                 .is_err()
         );
     }
     assert!(
-        read_message(&store, &id, &MessageId::new("missing").unwrap(), 1, 0)
+        read_message(&store, id, &MessageId::new("missing").unwrap(), 1, 0)
             .await
             .is_err()
     );
     for offset in [expected.find('界').unwrap() + 1, expected.len(), usize::MAX] {
         assert!(
-            read_message(&store, &id, &message.message_id, 1, offset)
+            read_message(&store, id, &message.message_id, 1, offset)
                 .await
                 .is_err()
         );

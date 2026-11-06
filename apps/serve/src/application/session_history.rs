@@ -34,6 +34,7 @@ enum Operation {
     Controls {
         after_seq: u64,
         through_seq: u64,
+        offset: usize,
     },
     Message {
         message_id: rsi_agent_session_protocol::MessageId,
@@ -120,9 +121,16 @@ impl Sessions {
             Operation::Controls {
                 after_seq,
                 through_seq,
+                offset,
             } => {
-                self.history_controls(&header().await?, after_seq, through_seq)
-                    .await?
+                super::session_controls::read_controls(
+                    store,
+                    &header().await?,
+                    after_seq,
+                    through_seq,
+                    offset,
+                )
+                .await?
             }
             Operation::Message {
                 message_id,

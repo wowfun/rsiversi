@@ -186,9 +186,10 @@ in-flight submission cannot still commit.
 
 Application history control pages include committed model selections and mailbox
 acceptance, successor, claim, promotion and discard transitions, with their stored
-Fact anchors. Acceptance metadata names its immutable control sequence; the
-separate history message read fragments that exact acceptance through the Session
-read contract. Pending state is never reconstructed from the mutable mailbox tail.
+Fact anchors. Each acceptance carries its immutable message body in that same
+page, so replay does not read the acceptance again. The separate exact-message
+read remains available for receipt recovery. Pending state is never reconstructed
+from the mutable mailbox tail.
 Model controls originating from a command include its exact invocation and
 committed receipt. Baselines have neither: a draft baseline folds multiple
 changes together and cannot identify an individual command by matching its value.
@@ -328,6 +329,10 @@ addressed parent access and lineage still apply. Exact message reads bind both
 the message ID and its acceptance control sequence through the canonical control
 record, moving its body directly into serialization.
 Control history uses a captured control horizon.
+Its exclusive `after_seq`, inclusive `through_seq` and UTF-8 byte `offset` select
+fragments of one JSON event array. Pages contain at most 64 control records,
+normally within 128 KiB of stored bodies; one larger record uses its exact
+Store-reported size. Non-projected records still advance the returned watermark.
 Pages expose model-selection commits with their Store-owned Fact anchors;
 the native model-selection codec resolves complete replacements. A wait returns
 a coherent pair of current watermarks after either stream advances.

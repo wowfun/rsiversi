@@ -120,6 +120,15 @@ would additionally decode and validate unrelated queue-state fields. This follow
 DSH's separation of stored log reading from live Session execution without
 introducing another persistent or in-memory body cache.
 
+Control replay carries each accepted message in the control page that already
+read its canonical record. Returning an identity and fetching that record again
+added a Store decode and IPC round trip per input. DSH's stored event reader
+likewise delivers the body that its inbox fold consumes. Control pages reuse
+the existing bounded UTF-8 fragment mechanism; small ordinary pages and an
+isolated oversized record avoid materializing a whole queue on small devices.
+Exact acceptance lookup remains a separate operation for receipt recovery,
+which starts from an identity rather than a streamed control record.
+
 A model-attempt row transfers its normalized events in the Fact page. Sending
 encoded chunks and then re-reading the same Fact through a second callback
 would duplicate both transport and durable decoding. Like DSH's directly readable

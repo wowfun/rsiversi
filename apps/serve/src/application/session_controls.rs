@@ -1,47 +1,51 @@
-use super::Sessions;
 use rsi_agent_session_protocol::{
     AgentControlRecord, AgentControlRecordBody as Body, DomainMutationSource, DomainStateCommit,
     SessionCommandReceipt, SessionHeader,
 };
+use rsi_agent_store_protocol::{SessionStore, StoreError};
 use rsi_extension::{Error, Result};
 use serde_json::{Value, json};
 
-impl Sessions {
-    pub(super) async fn history_controls(
-        &self,
-        header: &SessionHeader,
-        after: u64,
-        through: u64,
-    ) -> Result<Value> {
-        if after > through {
-            return Err(Error::Protocol);
+pub(super) async fn read_controls(
+    store: &dyn SessionStore,
+    header: &SessionHeader,
+    after: u64,
+    through: u64,
+    offset: usize,
+) -> Result<Value> {
+    let limit = through
+        .checked_sub(after)
+        .filter(|count| *count > 0)
+        .ok_or(Error::Protocol)?
+        .min(64) as usize;
+    let page = match store
+        .read_controls(header.session_id(), after, limit, 128 * 1024)
+        .await
+    {
+        Err(StoreError::ReadRequiresCapacity { minimum_bytes }) => {
+            store
+                .read_controls(header.session_id(), after, 1, minimum_bytes)
+                .await
         }
-        let page = self
-            .store
-            .read_controls(
-                header.session_id(),
-                after,
-                64,
-                rsi_agent_store_protocol::MAXIMUM_STORE_CONTROL_PAGE_BYTES,
-            )
-            .await
-            .map_err(|error| Error::Remote(error.to_string()))?;
-        if through > page.durable_seq {
-            return Err(Error::Protocol);
-        }
-        let mut cursor = after;
-        let mut events = Vec::new();
-        for (record, anchor) in page.records.iter().zip(page.fact_cursors) {
-            if record.seq() > through {
-                break;
-            }
-            cursor = record.seq();
-            if let Some(event) = project_control(header, record, anchor)? {
-                events.push(event);
-            }
-        }
-        Ok(json!({"through":cursor,"events":events}))
+        result => result,
     }
+    .map_err(|error| Error::Remote(error.to_string()))?;
+    if through > page.durable_seq {
+        return Err(Error::Protocol);
+    }
+    let mut cursor = after;
+    let mut events = Vec::new();
+    for (record, anchor) in page.records.iter().zip(page.fact_cursors) {
+        if record.seq() > through {
+            break;
+        }
+        cursor = record.seq();
+        if let Some(event) = project_control(header, record, anchor)? {
+            events.push(event);
+        }
+    }
+    let encoded = serde_json::to_string(&events).map_err(|_| Error::Protocol)?;
+    super::session_history::fragment(&encoded, offset, cursor)
 }
 
 fn project_control(
@@ -91,7 +95,9 @@ fn mailbox_event(body: &Body) -> Option<Value> {
     Some(match body {
         Body::MessageAccepted {
             message, target, ..
-        } => json!({"kind":"accepted", "message_id":message.message_id,"target":target}),
+        } => {
+            json!({"kind":"accepted", "message_id":message.message_id,"message":message,"target":target})
+        }
         Body::MessageSuccessor {
             predecessor_id,
             successor_id,
@@ -170,7 +176,7 @@ mod tests {
     }
 
     #[test]
-    fn acceptance_metadata_stays_small_and_body_reads_preserve_exact_multibyte_input() {
+    fn acceptance_control_fragments_preserve_exact_multibyte_input() {
         use rsi_agent_session_protocol::{
             AgentMessage, AgentMessageContent, AgentMessageSource, MessageDelivery, MessageId,
             MessageOptions, MessageTarget, SessionId,
@@ -193,8 +199,8 @@ mod tests {
         };
         let metadata = mailbox_event(&body).unwrap();
         assert_eq!(metadata["message_id"], "large-context");
-        assert!(serde_json::to_vec(&metadata).unwrap().len() < 256);
-        let encoded = serde_json::to_string(&message).unwrap();
+        assert_eq!(metadata["message"], json!(message));
+        let encoded = serde_json::to_string(&vec![metadata]).unwrap();
         let mut offset = 0;
         let mut restored = String::new();
         while offset < encoded.len() {
@@ -204,8 +210,8 @@ mod tests {
             offset = usize::try_from(fragment["next_offset"].as_u64().unwrap()).unwrap();
         }
         assert_eq!(
-            serde_json::from_str::<AgentMessage>(&restored).unwrap(),
-            message
+            serde_json::from_str::<Value>(&restored).unwrap()[0]["message"],
+            json!(message)
         );
     }
 }
