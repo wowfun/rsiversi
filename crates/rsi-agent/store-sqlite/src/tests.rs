@@ -269,8 +269,12 @@ mod settlement;
 mod selection_work;
 
 #[path = "tests/ready_metadata.rs"]
-#[cfg(unix)]
+#[cfg(any(unix, windows))]
 mod ready_metadata;
+
+#[path = "tests/mailbox_migration_live.rs"]
+#[cfg(any(unix, windows))]
+mod mailbox_migration_live;
 
 #[tokio::test]
 #[cfg(unix)]
@@ -3667,30 +3671,4 @@ async fn recent_page_uses_one_bounded_header_query() {
         page.sessions[0].header.session_id().as_str(),
         "recent-query-11"
     );
-}
-
-#[test]
-fn schema_43_mailbox_upgrades_on_open_and_reopens() {
-    let temporary = private_tempdir();
-    let path = temporary.path().join("sessions.sqlite3");
-    let db = Connection::open(&path).unwrap();
-    for (name, sql) in EXPECTED_TABLES {
-        if name == "agent_messages" {
-            db.execute_batch(&sql.replace("message_source TEXT NOT NULL,",
-                "message_source TEXT NOT NULL CHECK (message_source IN ('human', 'agent', 'completion', 'continuation', 'program', 'command')),")).unwrap();
-        } else {
-            db.execute_batch(sql).unwrap();
-        }
-    }
-    for (_, sql) in EXPECTED_INDEXES {
-        db.execute_batch(sql).unwrap();
-    }
-    db.pragma_update(None, "user_version", 43).unwrap();
-    drop(db);
-    drop(SqliteStore::open(temporary.path()).unwrap());
-    let db = Connection::open(&path).unwrap();
-    assert_eq!(pragma_user_version(&db).unwrap(), 44);
-    validate_schema_shape(&db).unwrap();
-    drop(db);
-    drop(SqliteStore::open(temporary.path()).unwrap());
 }

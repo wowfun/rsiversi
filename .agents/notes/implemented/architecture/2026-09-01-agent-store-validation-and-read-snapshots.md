@@ -57,6 +57,13 @@ Mailbox payload and metadata-only summary reads use the same first-access
 Session validation gate. SQLite projects the encoded length before returning a
 Header, Fact, control, mailbox message, or mailbox lifecycle body, and omits an
 oversized value rather than materializing it in Rust.
+Mailbox bodies come from their canonical acceptance controls through one indexed
+join. The mailbox table retains routing and lifecycle projections, not another
+encoded message. The decoder moves the validated message out of its control and
+counts compact JSON bytes without allocating another encoded copy. Metadata-only
+queue reads still avoid bodies. Exact schema-44 admission removes its redundant
+body column transactionally before exposing the current Store; canonical bytes
+remain unchanged.
 The Store interface also provides one exact indexed
 turn-boundary read while Kernel retains outcome interpretation.
 Atomic appends without a new Header require an existing Session and return
@@ -71,6 +78,11 @@ incomplete offline-audit input; it never substitutes for the full validation.
 A configurable pool was rejected because one writer plus one snapshot reader
 provides the required concurrency without tuning policy. Full validation
 at open was rejected because dormant history would remain an availability gate.
+Keeping a second mailbox payload makes writes and retained disk usage scale twice
+with accepted message size. Looking up each canonical control in a separate query
+would exchange that storage saving for extra query dispatch; the indexed join
+keeps one body-selection query. It still requires decoding the control envelope,
+so reduced bytes alone are not a claim of reduced read CPU or device RAM.
 
 Activation lineage is derived from immutable Headers at control admission and
 offline audit. A matching control digest and activation index cannot substitute

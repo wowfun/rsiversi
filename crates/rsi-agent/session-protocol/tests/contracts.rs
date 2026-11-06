@@ -6,6 +6,43 @@ use rsi_tools_protocol::{ToolContent, ToolResult, ToolResultIdentity};
 use serde_json::json;
 
 #[test]
+fn message_byte_count_and_owned_control_preserve_escaped_unicode_payload() {
+    let message = AgentMessage {
+        message_id: MessageId::new("bytes").unwrap(),
+        source: AgentMessageSource::Human { attribution: None },
+        content: vec![AgentMessageContent::Text {
+            text: "雪\n\"\\\t".repeat(1024),
+        }],
+        options: MessageOptions::default(),
+    };
+    assert_eq!(
+        message.encoded_len().unwrap(),
+        serde_json::to_vec(&message).unwrap().len()
+    );
+    let record = AgentControlRecord::new(
+        1,
+        1,
+        AgentControlRecordBody::MessageAccepted {
+            message: message.clone(),
+            delivery: MessageDelivery::NextTurn,
+            bound_turn_id: None,
+            root_session_id: SessionId::new("root").unwrap(),
+            target: MessageTarget::NextTurn,
+            wake_required: true,
+        },
+    )
+    .unwrap();
+    let AgentControlRecordBody::MessageAccepted {
+        message: transferred,
+        ..
+    } = record.into_body()
+    else {
+        panic!("message acceptance");
+    };
+    assert_eq!(transferred, message);
+}
+
+#[test]
 fn agent_path_compact_encoding_fits_its_protocol_owned_byte_bound() {
     for depth in 0..=MAXIMUM_AGENT_TREE_DEPTH {
         let path = AgentPath::new(vec![u16::MAX; depth]).unwrap();

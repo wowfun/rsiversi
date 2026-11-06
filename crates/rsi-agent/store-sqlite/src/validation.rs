@@ -40,7 +40,7 @@ pub(super) fn initialize_or_validate_schema(
         transaction.execute_batch(&schema).map_err(sql_error)?;
         transaction.commit().map_err(sql_error)?;
         version = AGENT_STORE_SCHEMA_VERSION;
-    } else if version != AGENT_STORE_SCHEMA_VERSION && version != 43 {
+    } else if version != AGENT_STORE_SCHEMA_VERSION && version != 44 {
         return Err(StoreError::SchemaMismatch {
             expected: AGENT_STORE_SCHEMA_VERSION,
             actual: version,
@@ -54,25 +54,14 @@ pub(super) fn validate_schema_shape(connection: &Connection) -> Result<()> {
     validate_version_shape(connection, AGENT_STORE_SCHEMA_VERSION)
 }
 
-/// The exclusive Store lease covers the exact schema-43 preflight and this transaction.
-pub(super) fn upgrade_mailbox_sources(connection: &mut Connection) -> Result<()> {
+/// The exclusive Store lease covers the exact schema-44 preflight and this transaction.
+pub(super) fn remove_mailbox_body_copy(connection: &mut Connection) -> Result<()> {
     let transaction = connection
         .transaction_with_behavior(TransactionBehavior::Immediate)
         .map_err(sql_error)?;
-    let (_, table_sql) = EXPECTED_TABLES
-        .iter()
-        .find(|(name, _)| *name == "agent_messages")
-        .expect("declared mailbox table");
     transaction
-        .execute_batch("ALTER TABLE agent_messages RENAME TO schema_43_messages")
+        .execute_batch("ALTER TABLE agent_messages DROP COLUMN message_json")
         .map_err(sql_error)?;
-    transaction.execute_batch(table_sql).map_err(sql_error)?;
-    transaction.execute_batch("INSERT INTO agent_messages SELECT * FROM schema_43_messages; DROP TABLE schema_43_messages").map_err(sql_error)?;
-    for (_, sql) in EXPECTED_INDEXES {
-        if sql.contains("ON agent_messages") {
-            transaction.execute_batch(sql).map_err(sql_error)?;
-        }
-    }
     transaction
         .pragma_update(None, "user_version", AGENT_STORE_SCHEMA_VERSION)
         .map_err(sql_error)?;
@@ -92,8 +81,11 @@ fn validate_version_shape(connection: &Connection, version: u32) -> Result<()> {
     }
     for (table, current_sql) in EXPECTED_TABLES {
         let previous;
-        let expected_sql = if version == 43 && table == "agent_messages" {
-            previous = current_sql.replace("message_source TEXT NOT NULL", "message_source TEXT NOT NULL CHECK (message_source IN ('human', 'agent', 'completion', 'continuation', 'program', 'command'))");
+        let expected_sql = if version == 44 && table == "agent_messages" {
+            previous = current_sql.replace(
+                "message_source TEXT NOT NULL,",
+                "message_source TEXT NOT NULL,\n            message_json TEXT NOT NULL,",
+            );
             previous.as_str()
         } else {
             current_sql
@@ -743,9 +735,9 @@ impl MailboxProjection {
                             bound_turn_id: bound_turn_id.clone(),
                             accepted_timestamp_ms: record.timestamp_ms(),
                             message: message.clone(),
-                            encoded_message_bytes: serde_json::to_vec(message)
-                                .map_err(|error| StoreError::Corrupt(error.to_string()))?
-                                .len(),
+                            encoded_message_bytes: message
+                                .encoded_len()
+                                .map_err(|error| StoreError::Corrupt(error.to_string()))?,
                             root_session_id: root_session_id.clone(),
                             target: *target,
                             wake_required: *wake_required,
@@ -887,33 +879,9 @@ pub(super) fn read_indexed_agent_message(
     session_id: &SessionId,
     message_id: &MessageId,
 ) -> Result<StoreAgentMessage> {
-    connection
-        .query_row(
-            "SELECT length(CAST(message_json AS BLOB)),
-                    CASE WHEN length(CAST(message_json AS BLOB)) <= ?3 THEN message_json END,
-                    message_source, root_session_id, target, wake_required,
-                    accepted_control_seq, state,
-                    length(CAST(state_json AS BLOB)),
-                    CASE WHEN length(CAST(state_json AS BLOB)) <= ?4 THEN state_json END,
-                    delivery, CASE WHEN bound_turn_id IS NULL OR length(CAST(bound_turn_id AS BLOB)) <= 256 THEN bound_turn_id ELSE '' END, accepted_timestamp_ms, CASE WHEN length(CAST(queue_slot_id AS BLOB)) <= 256 THEN queue_slot_id ELSE '' END, queue_timestamp_ms, queue_control_seq, has_turn_options
-             FROM agent_messages WHERE session_id = ?1 AND message_id = ?2",
-            params![
-                session_id.as_str(),
-                message_id.as_str(),
-                i64::try_from(MAXIMUM_STORE_MAILBOX_PAGE_BYTES)
-                    .expect("mailbox page bound fits SQLite INTEGER"),
-                i64::try_from(MAXIMUM_INDEXED_MESSAGE_STATE_BYTES)
-                    .expect("message state bound fits SQLite INTEGER"),
-            ],
-            indexed_message_row,
-        )
-        .optional()
-        .map_err(sql_error)?
-        .map(decode_indexed_message)
-        .transpose()?
-        .ok_or_else(|| {
-            StoreError::Corrupt("canonical mailbox control has no indexed message".into())
-        })
+    super::session_store::read_indexed_message(connection, session_id, message_id)?.ok_or_else(
+        || StoreError::Corrupt("canonical mailbox control has no indexed message".into()),
+    )
 }
 
 #[derive(Default)]

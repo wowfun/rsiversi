@@ -1232,7 +1232,7 @@ fn dormant_turn_index_corruption_is_lazy_and_explicit_verify_finds_it() {
 }
 
 #[test]
-fn mailbox_read_rejects_an_oversized_indexed_message_before_loading_its_json() {
+fn mailbox_read_rejects_an_oversized_acceptance_before_loading_its_json() {
     let root = tempfile::tempdir().unwrap();
     let store = SqliteStore::open(root.path()).unwrap();
     let runtime = tokio::runtime::Runtime::new().unwrap();
@@ -1254,20 +1254,21 @@ fn mailbox_read_rejects_an_oversized_indexed_message_before_loading_its_json() {
         .unwrap();
 
     let connection = Connection::open(root.path().join("sessions.sqlite3")).unwrap();
-    let original_message_json = connection
+    let original_control_json = connection
         .query_row(
-            "SELECT message_json FROM agent_messages
-             WHERE session_id = ?1 AND message_id = ?2",
+            "SELECT c.control_json FROM agent_messages AS m JOIN agent_controls AS c
+               ON c.session_id=m.session_id AND c.seq=m.accepted_control_seq
+             WHERE m.session_id = ?1 AND message_id = ?2",
             rusqlite::params![session.as_str(), message.as_str()],
             |row| row.get::<_, String>(0),
         )
         .unwrap();
     connection
         .execute(
-            "UPDATE agent_messages SET message_json = printf('%.*c', ?1, 'x')
-             WHERE session_id = ?2 AND message_id = ?3",
+            "UPDATE agent_controls SET control_json = control_json || printf('%*s', ?1, '')
+             WHERE session_id = ?2 AND seq = (SELECT accepted_control_seq FROM agent_messages WHERE session_id=?2 AND message_id=?3)",
             rusqlite::params![
-                i64::try_from(MAXIMUM_STORE_MAILBOX_PAGE_BYTES + 1).unwrap(),
+                i64::try_from(rsi_agent_session_protocol::MAXIMUM_SESSION_FACT_BYTES + 1).unwrap(),
                 session.as_str(),
                 message.as_str(),
             ],
@@ -1284,11 +1285,16 @@ fn mailbox_read_rejects_an_oversized_indexed_message_before_loading_its_json() {
     let connection = Connection::open(root.path().join("sessions.sqlite3")).unwrap();
     connection
         .execute(
+            "UPDATE agent_controls SET control_json=?1 WHERE session_id=?2 AND seq=1",
+            rusqlite::params![original_control_json, session.as_str()],
+        )
+        .unwrap();
+    connection
+        .execute(
             "UPDATE agent_messages
-             SET message_json = ?1, state_json = printf('%.*c', ?2, 'x')
-             WHERE session_id = ?3 AND message_id = ?4",
+             SET state_json = printf('%.*c', ?1, 'x')
+             WHERE session_id = ?2 AND message_id = ?3",
             rusqlite::params![
-                original_message_json,
                 i64::try_from(MAXIMUM_STORE_MAILBOX_PAGE_BYTES + 1).unwrap(),
                 session.as_str(),
                 message.as_str(),
@@ -1347,13 +1353,13 @@ fn mailbox_summary_bounds_completion_identity_rows_before_decoding() {
              )
              INSERT INTO agent_messages
                  (session_id, message_id, accepted_control_seq, root_session_id,
-                  message_source, message_json, target, wake_required, state, state_json,
+                  message_source, target, wake_required, state, state_json,
                   delivery, bound_turn_id, accepted_timestamp_ms, queue_slot_id, queue_timestamp_ms, queue_control_seq, has_turn_options)
              SELECT '{session}',
                     CASE WHEN value = {corrupt_count}
                          THEN printf('%.*c', 257, 'x')
                          ELSE printf('completion-%03d', value) END,
-                    value, '{session}', 'completion', source.message_json,
+                    value, '{session}', 'completion',
                     'next_step', 0, 'pending', source.state_json,
                     'next_step', NULL, 1, printf('completion-slot-%03d', value), 1, value, 0
              FROM counter
@@ -1756,7 +1762,7 @@ fn verify_refuses_a_snapshot_with_an_uncheckpointed_wal() {
 
 #[test]
 fn unsupported_or_incomplete_schema_is_rejected_before_any_write() {
-    for (version, partial) in [(43, false), (42, false), (2, false), (0, true)] {
+    for (version, partial) in [(44, false), (43, false), (42, false), (2, false), (0, true)] {
         let root = tempfile::tempdir().unwrap();
         let connection = Connection::open(root.path().join("sessions.sqlite3")).unwrap();
         if partial {
@@ -1778,7 +1784,7 @@ fn unsupported_or_incomplete_schema_is_rejected_before_any_write() {
         )
         .unwrap();
         let result = SqliteStore::open(root.path());
-        if version == 43 {
+        if version == 44 {
             assert!(matches!(result, Err(StoreError::Corrupt(_))));
         } else {
             assert!(
@@ -2355,7 +2361,7 @@ async fn exact_message_read_does_not_decode_unrelated_pending_payloads() {
     let connection = Connection::open(root.path().join("sessions.sqlite3")).unwrap();
     connection
         .execute(
-            "UPDATE agent_messages SET message_json = 'invalid' WHERE message_id = ?1",
+            "UPDATE agent_controls SET control_json = '{}' WHERE (session_id, seq) IN (SELECT session_id, accepted_control_seq FROM agent_messages WHERE message_id = ?1)",
             [unrelated.as_str()],
         )
         .unwrap();
@@ -2512,14 +2518,14 @@ async fn pending_option_projection_avoids_payload_reads_and_detects_index_drift_
     let connection = Connection::open(root.path().join("sessions.sqlite3")).unwrap();
     let original: String = connection
         .query_row(
-            "SELECT message_json FROM agent_messages WHERE message_id='message-1'",
+            "SELECT control_json FROM agent_controls WHERE (session_id,seq) IN (SELECT session_id,accepted_control_seq FROM agent_messages WHERE message_id='message-1')",
             [],
             |row| row.get(0),
         )
         .unwrap();
     connection
         .execute(
-            "UPDATE agent_messages SET message_json='not JSON' WHERE message_id='message-1'",
+            "UPDATE agent_controls SET control_json='{}' WHERE (session_id,seq) IN (SELECT session_id,accepted_control_seq FROM agent_messages WHERE message_id='message-1')",
             [],
         )
         .unwrap();
@@ -2527,7 +2533,13 @@ async fn pending_option_projection_avoids_payload_reads_and_detects_index_drift_
         store.inspect_session(&session).await.unwrap().pending,
         pending
     );
-    connection.execute("UPDATE agent_messages SET message_json=?1, has_turn_options=1 WHERE message_id='message-1'", [&original]).unwrap();
+    connection.execute("UPDATE agent_controls SET control_json=?1 WHERE (session_id,seq) IN (SELECT session_id,accepted_control_seq FROM agent_messages WHERE message_id='message-1')", [&original]).unwrap();
+    connection
+        .execute(
+            "UPDATE agent_messages SET has_turn_options=1 WHERE message_id='message-1'",
+            [],
+        )
+        .unwrap();
     drop(connection);
     drop(store);
     let store = SqliteStore::open(root.path()).unwrap();

@@ -41,7 +41,7 @@ async fn program_index_corruption_is_rejected_before_selected_record_read() {
 }
 
 #[tokio::test]
-async fn program_notice_graph_rejects_coordinated_control_and_mailbox_corruption() {
+async fn program_notice_graph_rejects_canonical_control_corruption() {
     let root = private_tempdir();
     let store = SqliteStore::open(root.path()).unwrap();
     let (id, _) = program_contract(&store).await;
@@ -58,9 +58,6 @@ async fn program_notice_graph_rejects_coordinated_control_and_mailbox_corruption
     let mut value = serde_json::to_value(&*notice).unwrap();
     value["message"]["source"]["source"]["run_id"] = serde_json::json!("missing-run");
     *notice = serde_json::from_value(value).unwrap();
-    let AgentControlRecordBody::MessageAccepted { message, .. } = notice.body() else {
-        panic!("notice");
-    };
     connection
         .execute(
             "UPDATE agent_controls SET control_json=?1 WHERE session_id=?2 AND seq=?3",
@@ -68,16 +65,6 @@ async fn program_notice_graph_rejects_coordinated_control_and_mailbox_corruption
                 serde_json::to_string(notice).unwrap(),
                 id.as_str(),
                 i64::try_from(notice.seq()).unwrap()
-            ],
-        )
-        .unwrap();
-    connection
-        .execute(
-            "UPDATE agent_messages SET message_json=?1 WHERE session_id=?2 AND message_id=?3",
-            params![
-                serde_json::to_string(message).unwrap(),
-                id.as_str(),
-                message.message_id.as_str()
             ],
         )
         .unwrap();

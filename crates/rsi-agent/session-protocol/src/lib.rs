@@ -520,6 +520,11 @@ pub struct AgentMessage {
 }
 
 impl AgentMessage {
+    /// Counts compact JSON bytes without allocating an encoded copy of the message.
+    pub fn encoded_len(&self) -> Result<usize> {
+        compact_json_len(self)
+    }
+
     /// Projects this message's identity and provenance into its model-visible input Fact.
     pub fn claimed_source(&self) -> InputMessageSource {
         match &self.source {
@@ -1295,6 +1300,11 @@ impl AgentControlRecord {
     /// Returns the validated control body.
     pub const fn body(&self) -> &AgentControlRecordBody {
         &self.body
+    }
+
+    /// Transfers the validated control body without cloning its payloads.
+    pub fn into_body(self) -> AgentControlRecordBody {
+        self.body
     }
 
     /// Returns exact compact JSON bytes counted at construction.

@@ -518,16 +518,15 @@ impl ControlIndexer<'_, '_> {
             .execute(
                 "INSERT INTO agent_messages
                     (session_id, message_id, accepted_control_seq, root_session_id,
-                     message_source, message_json, target, wake_required, state, state_json,
+                     message_source, target, wake_required, state, state_json,
                      delivery, bound_turn_id, accepted_timestamp_ms, queue_slot_id, queue_timestamp_ms, queue_control_seq, has_turn_options)
-                 VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, 'pending', ?9, ?10, ?11, ?12, ?13, ?14, ?15, ?16)",
+                 VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, 'pending', ?8, ?9, ?10, ?11, ?12, ?13, ?14, ?15)",
                 params![
                     self.session_id.as_str(),
                     message.message_id.as_str(),
                     sqlite_u64("accepted control sequence", self.record.seq())?,
                     root_session_id.as_str(),
                     message_source_name(&message.source),
-                    encode_json("Agent message", message)?,
                     message_target_name(target),
                     wake_required,
                     encode_json("Agent message state", &StoreAgentMessageState::Pending)?,
@@ -944,6 +943,7 @@ pub(super) type IndexedMessageRow = (
     i64,
     i64,
     bool,
+    String,
 );
 
 pub(super) fn indexed_message_row(row: &rusqlite::Row<'_>) -> rusqlite::Result<IndexedMessageRow> {
@@ -965,17 +965,43 @@ pub(super) fn indexed_message_row(row: &rusqlite::Row<'_>) -> rusqlite::Result<I
         row.get(14)?,
         row.get(15)?,
         row.get(16)?,
+        row.get(17)?,
     ))
 }
 
 pub(super) fn decode_indexed_message(row: IndexedMessageRow) -> Result<StoreAgentMessage> {
-    let encoded_message_bytes = usize::try_from(row.0)
-        .map_err(|_| StoreError::Corrupt("Agent message has a negative byte length".into()))?;
-    let message = decode_projected_json::<AgentMessage>(
-        "Agent message",
+    let acceptance = decode_projected_json::<AgentControlRecord>(
+        "Agent message acceptance",
         (row.0, row.1),
-        MAXIMUM_STORE_MAILBOX_PAGE_BYTES,
+        MAXIMUM_SESSION_FACT_BYTES,
     )?;
+    let accepted_control_seq = decode_u64("message acceptance control sequence", row.6)?;
+    let accepted_timestamp_ms = decode_u64("acceptance timestamp", row.12)?;
+    if acceptance.seq() != accepted_control_seq
+        || acceptance.timestamp_ms() != accepted_timestamp_ms
+    {
+        return Err(StoreError::Corrupt(
+            "mailbox acceptance coordinates differ from its control".into(),
+        ));
+    }
+    let AgentControlRecordBody::MessageAccepted { message, .. } = acceptance.into_body() else {
+        return Err(StoreError::Corrupt(
+            "mailbox acceptance is not a message control".into(),
+        ));
+    };
+    if row.17 != message.message_id.as_str() {
+        return Err(StoreError::Corrupt(
+            "mailbox identity differs from its acceptance".into(),
+        ));
+    }
+    let encoded_message_bytes = message
+        .encoded_len()
+        .map_err(|error| StoreError::Corrupt(error.to_string()))?;
+    if encoded_message_bytes > MAXIMUM_STORE_MAILBOX_PAGE_BYTES {
+        return Err(StoreError::Corrupt(
+            "Agent message exceeds mailbox byte capacity".into(),
+        ));
+    }
     if row.2 != message_source_name(&message.source) {
         return Err(StoreError::Corrupt(
             "mailbox source discriminator differs from its typed message".into(),
@@ -1024,14 +1050,14 @@ pub(super) fn decode_indexed_message(row: IndexedMessageRow) -> Result<StoreAgen
             .map(TurnId::new)
             .transpose()
             .map_err(|error| StoreError::Corrupt(error.to_string()))?,
-        accepted_timestamp_ms: decode_u64("acceptance timestamp", row.12)?,
+        accepted_timestamp_ms,
         message,
         encoded_message_bytes,
         root_session_id: SessionId::new(row.3)
             .map_err(|error| StoreError::Corrupt(error.to_string()))?,
         target,
         wake_required: row.5,
-        accepted_control_seq: decode_u64("message acceptance control sequence", row.6)?,
+        accepted_control_seq,
         state,
     })
 }

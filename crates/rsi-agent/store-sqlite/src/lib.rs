@@ -263,7 +263,6 @@ const EXPECTED_TABLES: [(&str, &str); 22] = [
             queue_control_seq INTEGER NOT NULL CHECK (queue_control_seq > 0 AND queue_control_seq <= accepted_control_seq),
             root_session_id TEXT NOT NULL,
             message_source TEXT NOT NULL,
-            message_json TEXT NOT NULL,
             has_turn_options INTEGER NOT NULL CHECK (has_turn_options IN (0, 1)),
             target TEXT NOT NULL CHECK (target IN ('next_turn', 'next_step')),
             wake_required INTEGER NOT NULL CHECK (wake_required IN (0, 1)),
@@ -737,8 +736,8 @@ impl SqliteStore {
         )
         .map_err(sql_error)?;
         configure_writer(&writer_connection)?;
-        if matches!(validated_reader, Some((_, 43))) {
-            validation::upgrade_mailbox_sources(&mut writer_connection)?;
+        if matches!(validated_reader, Some((_, 44))) {
+            validation::remove_mailbox_body_copy(&mut writer_connection)?;
         } else if may_initialize {
             initialize_or_validate_schema(&mut writer_connection, true)?;
         }

@@ -1729,17 +1729,19 @@ impl SessionStore for SqliteStore {
                 })?;
             let mut statement = transaction
                 .prepare(
-                    "SELECT length(CAST(message_json AS BLOB)),
-                            CASE WHEN length(CAST(message_json AS BLOB)) <= ?2
-                                 THEN message_json END,
+                    "SELECT coalesce(length(CAST(c.control_json AS BLOB)), -1),
+                            CASE WHEN length(CAST(c.control_json AS BLOB)) <= ?2
+                                 THEN c.control_json END,
                             message_source, root_session_id, target, wake_required,
                             accepted_control_seq, state,
                             length(CAST(state_json AS BLOB)),
                             CASE WHEN length(CAST(state_json AS BLOB)) <= ?3
                                  THEN state_json END,
-                    delivery, CASE WHEN bound_turn_id IS NULL OR length(CAST(bound_turn_id AS BLOB)) <= 256 THEN bound_turn_id ELSE '' END, accepted_timestamp_ms, CASE WHEN length(CAST(queue_slot_id AS BLOB)) <= 256 THEN queue_slot_id ELSE '' END, queue_timestamp_ms, queue_control_seq, has_turn_options
-                     FROM agent_messages
-                     WHERE session_id = ?1 AND state = 'pending' AND (NOT ?4 OR target = 'next_step')
+                    delivery, CASE WHEN bound_turn_id IS NULL OR length(CAST(bound_turn_id AS BLOB)) <= 256 THEN bound_turn_id ELSE '' END, accepted_timestamp_ms, CASE WHEN length(CAST(queue_slot_id AS BLOB)) <= 256 THEN queue_slot_id ELSE '' END, queue_timestamp_ms, queue_control_seq, has_turn_options,
+                    CASE WHEN length(CAST(m.message_id AS BLOB)) <= 256 THEN m.message_id ELSE '' END
+                     FROM agent_messages AS m LEFT JOIN agent_controls AS c
+                       ON c.session_id = m.session_id AND c.seq = m.accepted_control_seq
+                     WHERE m.session_id = ?1 AND state = 'pending' AND (NOT ?4 OR target = 'next_step')
                      ORDER BY accepted_control_seq",
                 )
                 .map_err(sql_error)?;
@@ -1747,8 +1749,8 @@ impl SessionStore for SqliteStore {
                 .query_map(
                     params![
                         session_id.as_str(),
-                        i64::try_from(MAXIMUM_STORE_MAILBOX_PAGE_BYTES)
-                            .expect("mailbox page bound fits SQLite INTEGER"),
+                        i64::try_from(MAXIMUM_SESSION_FACT_BYTES)
+                            .expect("control record bound fits SQLite INTEGER"),
                         i64::try_from(MAXIMUM_INDEXED_MESSAGE_STATE_BYTES)
                             .expect("message state bound fits SQLite INTEGER"),
                         step_only,
@@ -2659,29 +2661,31 @@ pub(super) fn read_agent_subtree(
     Ok(snapshot)
 }
 
-fn read_indexed_message(
+pub(super) fn read_indexed_message(
     connection: &Connection,
     session_id: &SessionId,
     message_id: &MessageId,
 ) -> Result<Option<StoreAgentMessage>> {
     connection
                         .query_row(
-                            "SELECT length(CAST(message_json AS BLOB)),
-                                    CASE WHEN length(CAST(message_json AS BLOB)) <= ?3
-                                         THEN message_json END,
+                            "SELECT coalesce(length(CAST(c.control_json AS BLOB)), -1),
+                                    CASE WHEN length(CAST(c.control_json AS BLOB)) <= ?3
+                                         THEN c.control_json END,
                                     message_source, root_session_id, target, wake_required,
                                     accepted_control_seq, state,
                                     length(CAST(state_json AS BLOB)),
                                     CASE WHEN length(CAST(state_json AS BLOB)) <= ?4
                                          THEN state_json END,
-                    delivery, CASE WHEN bound_turn_id IS NULL OR length(CAST(bound_turn_id AS BLOB)) <= 256 THEN bound_turn_id ELSE '' END, accepted_timestamp_ms, CASE WHEN length(CAST(queue_slot_id AS BLOB)) <= 256 THEN queue_slot_id ELSE '' END, queue_timestamp_ms, queue_control_seq, has_turn_options
-                             FROM agent_messages
-                             WHERE session_id = ?1 AND message_id = ?2",
+                    delivery, CASE WHEN bound_turn_id IS NULL OR length(CAST(bound_turn_id AS BLOB)) <= 256 THEN bound_turn_id ELSE '' END, accepted_timestamp_ms, CASE WHEN length(CAST(queue_slot_id AS BLOB)) <= 256 THEN queue_slot_id ELSE '' END, queue_timestamp_ms, queue_control_seq, has_turn_options,
+                    CASE WHEN length(CAST(m.message_id AS BLOB)) <= 256 THEN m.message_id ELSE '' END
+                             FROM agent_messages AS m LEFT JOIN agent_controls AS c
+                               ON c.session_id = m.session_id AND c.seq = m.accepted_control_seq
+                             WHERE m.session_id = ?1 AND message_id = ?2",
                             params![
                                 session_id.as_str(),
                                 message_id.as_str(),
-                                i64::try_from(MAXIMUM_STORE_MAILBOX_PAGE_BYTES)
-                                    .expect("mailbox page bound fits SQLite INTEGER"),
+                                i64::try_from(MAXIMUM_SESSION_FACT_BYTES)
+                                    .expect("control record bound fits SQLite INTEGER"),
                                 i64::try_from(MAXIMUM_INDEXED_MESSAGE_STATE_BYTES)
                                     .expect("message state bound fits SQLite INTEGER"),
                             ],

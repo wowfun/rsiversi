@@ -1,13 +1,21 @@
 # rsi-agent-store-sqlite
 
-Schema 44 stores Header format 34 with separate history provenance and Agent
-execution ownership. The mailbox index admits the explicit command message source. The
-canonical domain receipt binds the complete input batch; rebuilding the index
-uses those validated records. When opening an exact schema 43 under the writer
-lease, the Store rebuilds the mailbox table and its indexes in one transaction.
-Only its redundant SQL enumeration of message sources changes. Canonical messages
-and Facts retain their bytes. Typed readers validate the source at the storage
-boundary. Other incompatible versions are rejected during read-only preflight.
+Schema 45 stores Header format 34 with separate history provenance and Agent
+execution ownership. A mailbox row retains routing, lifecycle and acceptance
+coordinates, never a second message body. Body reads join the indexed acceptance
+to its canonical control in the same query and bound that control before allocating
+its JSON. Typed decoding transfers the accepted message without cloning its body;
+the exact compact message byte count uses a counting writer rather than a JSON copy.
+Metadata-only queue queries do not join or decode control bodies. Canonical replay
+checks the routing index against the original acceptance and later transitions.
+Opening an exact schema 44 under the writer lease removes its redundant message
+column in one transaction. Canonical controls and Facts retain their bytes.
+Other incompatible versions are rejected during read-only preflight.
+The opt-in `preserves_live_history_while_removing_the_mailbox_body_copy` test
+accepts a cleanly closed schema-44 database through `RSI_STORE_SCHEMA44_FIXTURE`.
+It copies the database into an isolated private root, compares canonical bytes,
+reads its accepted messages, verifies the Store and reopens it. Run that test with
+`-- --ignored --nocapture`; the supplied database is never modified.
 The Session row projects inbox suspension from canonical controls. Ready queries
 filter suspended Sessions without rewriting their message candidates; canonical
 validation compares the stored flag with control replay.
