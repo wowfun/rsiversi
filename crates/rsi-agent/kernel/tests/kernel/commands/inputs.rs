@@ -367,8 +367,25 @@ async fn command_inputs_publish_atomically_keep_provenance_and_retry_once() {
         } else {
             Arc::new(MemoryStore::new())
         };
-        let fixture = Fixture::start(store, false).await;
+        let store = Arc::new(FactReadRaceStore::new(store));
+        let fixture = Fixture::start(store.clone(), false).await;
         inputs(&fixture);
+        for (ordinal, input) in fixture
+            .callback
+            .inputs
+            .lock()
+            .unwrap()
+            .iter_mut()
+            .enumerate()
+        {
+            input.content.push(AgentMessageContent::Text {
+                text: "消息🦀".repeat(4096),
+            });
+            input.attribution = Some(rsi_agent_session_protocol::MessageAttribution {
+                id: format!("original:{ordinal}"),
+                source: serde_json::json!({"kind":"plugin:input", "ordinal":ordinal}),
+            });
+        }
         let invocation = fixture.invocation("command-with-inputs", true).await;
         let receipt = fixture
             .kernel
@@ -441,6 +458,7 @@ async fn command_inputs_publish_atomically_keep_provenance_and_retry_once() {
             .kernel
             .register("command-input-executor".into())
             .unwrap();
+        *store.claim_body_buffers.lock().unwrap() = Some(Default::default());
         let claim = tokio::time::timeout(
             std::time::Duration::from_secs(2),
             fixture
@@ -451,6 +469,56 @@ async fn command_inputs_publish_atomically_keep_provenance_and_retry_once() {
         .unwrap()
         .unwrap()
         .unwrap();
+        assert!(
+            store
+                .claim_body_buffers
+                .lock()
+                .unwrap()
+                .take()
+                .unwrap()
+                .is_empty()
+        );
+        for input in emitted {
+            let stored = store
+                .read_agent_message(&fixture.session_id, &input.message.message_id)
+                .await
+                .unwrap()
+                .unwrap();
+            assert_eq!(
+                stored.message, input.message,
+                "claim must not empty canonical acceptance"
+            );
+            let rsi_agent_store_protocol::StoreAgentMessageState::Claimed {
+                activation_id,
+                turn_id,
+                step_id,
+                ..
+            } = stored.state
+            else {
+                panic!("message was not claimed");
+            };
+            let tail = store.read_watermarks(&fixture.session_id).await.unwrap();
+            fixture
+                .kernel
+                .claim_message(rsi_agent_turn_protocol::ClaimMessage {
+                    session: fixture
+                        .kernel
+                        .prepare_resume(&fixture.session_id)
+                        .await
+                        .unwrap(),
+                    message_id: input.message.message_id.clone(),
+                    activation_id,
+                    turn_id,
+                    step_id,
+                    path: AgentPath::root(),
+                })
+                .await
+                .unwrap();
+            assert_eq!(
+                store.read_watermarks(&fixture.session_id).await.unwrap(),
+                tail
+            );
+        }
         assert_eq!(
             fixture
                 .kernel

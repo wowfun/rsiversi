@@ -112,6 +112,7 @@ struct FactReadRaceStore {
     subtree_reads: Mutex<std::collections::BTreeMap<SessionId, usize>>,
     mailbox_summary_reads: Mutex<std::collections::BTreeMap<SessionId, usize>>,
     mailbox_reads: Mutex<std::collections::BTreeMap<SessionId, usize>>,
+    claim_body_buffers: Mutex<Option<std::collections::BTreeSet<usize>>>,
     inbox_control_reads: AtomicUsize,
     read_captured: Notify,
     release_read: Notify,
@@ -221,6 +222,7 @@ impl FactReadRaceStore {
             subtree_reads: Mutex::default(),
             mailbox_summary_reads: Mutex::default(),
             mailbox_reads: Mutex::new(std::collections::BTreeMap::new()),
+            claim_body_buffers: Mutex::new(None),
             inbox_control_reads: AtomicUsize::new(0),
             read_captured: Notify::new(),
             release_read: Notify::new(),
@@ -745,6 +747,16 @@ impl SessionStore for FactReadRaceStore {
         &self,
         commit: rsi_agent_store_protocol::AtomicAgentCommit,
     ) -> rsi_agent_store_protocol::Result<rsi_agent_store_protocol::AtomicAgentCommitResult> {
+        if let Some(buffers) = self.claim_body_buffers.lock().unwrap().as_mut() {
+            for fact in commit.sessions.iter().flat_map(|append| &append.facts) {
+                if let SessionFactBody::InputMessageClaimed { content, .. } = fact.body() {
+                    assert!(
+                        buffers.remove(&(content.as_ptr() as usize)),
+                        "claim copied its mailbox body"
+                    );
+                }
+            }
+        }
         if let Some(error) = self.commit_admission_refusal.lock().unwrap().clone() {
             self.domain_lookup_fails.store(true, Ordering::Release);
             return Err(error);
@@ -1207,7 +1219,15 @@ impl SessionStore for FactReadRaceStore {
             .unwrap()
             .entry(session_id.clone())
             .or_default() += 1;
-        self.inner.read_agent_mailbox(session_id, query).await
+        let mailbox = self.inner.read_agent_mailbox(session_id, query).await?;
+        if let Some(buffers) = self.claim_body_buffers.lock().unwrap().as_mut() {
+            *buffers = mailbox
+                .pending
+                .iter()
+                .map(|entry| entry.message.content.as_ptr() as usize)
+                .collect();
+        }
+        Ok(mailbox)
     }
 
     async fn read_inbox_control_state(

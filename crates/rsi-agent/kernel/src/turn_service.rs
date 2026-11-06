@@ -1229,13 +1229,13 @@ impl AgentKernel {
             .await
             .map_err(turn_kernel_error)?;
 
-        let scan = scan_durable_messages(
+        let mut scan = scan_durable_messages(
             &self.inner,
             &session_id,
             MailboxRead::WithMessage(request.message_id.clone()),
         )
         .await?;
-        let entry = scan.selected.clone().ok_or_else(|| {
+        let entry = scan.selected.take().ok_or_else(|| {
             TurnError::Invalid(format!(
                 "message `{}` does not exist in session `{}`",
                 request.message_id.as_str(),
@@ -1352,14 +1352,14 @@ impl AgentKernel {
             .unwrap_or(header.settings().sandbox());
         let require_approval = header.settings().require_approval()
             || sandbox == rsi_sandbox::SandboxMode::DangerFullAccess;
-        let selected = {
-            let mut selected = scan.pending.iter().filter(|pending| {
+        let mut selected = {
+            let mut selected = scan.pending.into_iter().filter(|pending| {
                 if pending.message.message_id == entry.message.message_id { return true; }
                 let AgentMessageSource::Command { source: candidate } = &pending.message.source else { return false; };
                 if pending.delivery == MessageDelivery::NextStep && pending.target == MessageTarget::NextStep { return true; }
                 matches!(&entry.message.source, AgentMessageSource::Command { source }
                     if candidate.request_id == source.request_id && candidate.invocation_sha256 == source.invocation_sha256)
-            }).cloned().collect::<Vec<_>>();
+            }).collect::<Vec<_>>();
             selected.sort_by_key(|pending| pending.accepted_control_seq);
             if selected.is_empty()
                 || selected.len() > rsi_agent_session_protocol::MAXIMUM_COMMAND_INPUTS + 1
@@ -1389,12 +1389,12 @@ impl AgentKernel {
                 step_id: request.step_id.clone(),
             },
         ];
-        for pending in &selected {
+        for pending in &mut selected {
             fact_bodies.push(SessionFactBody::InputMessageClaimed {
                 turn_id: request.turn_id.clone(),
                 step_id: request.step_id.clone(),
                 source: pending.message.claimed_source(),
-                content: pending.message.content.clone(),
+                content: std::mem::take(&mut pending.message.content),
             });
         }
         let facts = fact_bodies

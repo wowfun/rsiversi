@@ -7,6 +7,8 @@ the set once and retains whether preparation was rejected. Reordered or repeated
 presentation cannot consume an acceptance twice. Conversation model admission
 requires no outstanding input claim and no rejected decision. Claiming still
 retains exact original content and acceptance provenance for Store validation.
+Mailbox claims move their already owned message bodies into the atomic Fact batch;
+selecting and ordering that batch does not copy the pending message payloads.
 Rejection ends input preparation for that Turn; a later empty decision cannot
 reopen model admission.
 
