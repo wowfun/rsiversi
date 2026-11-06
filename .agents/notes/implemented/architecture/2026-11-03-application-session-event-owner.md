@@ -70,6 +70,16 @@ a replacement. Retained readers share a projector that processes only new native
 observations. Each caller supplies its own authorized read; sharing content grants
 no request authority. Native projection batches publish atomically.
 
+Distinct event coordinates do not require distinct message bodies. Following
+DSH's `shared-frozen` restore contract, the native projector supplies already
+admitted immutable values to the application owner. Remapping creates independent
+envelopes and reference fields while retaining unchanged bodies by identity.
+Inbox transitions retain the admitted message rather than their pre-admission
+copy. External mutable inputs and restored local records still cross a lossless
+JSON snapshot boundary; an internal ownership contract avoids repeating that
+copy for the same native body. No global interning table or durable projection
+cache is needed, and a failed batch cannot modify the shared frozen prefix.
+
 Inbox reads follow DSH's retained projection cursor: immutable event prefixes do
 not need copying or refolding when more events arrive. Mutable operation metadata
 has a different lifetime. The journal indexes operation identities by accepted
@@ -89,8 +99,9 @@ observe plugin appends between native commits.
 History reconstruction uses bounded Fact pages within a captured horizon and
 borrows referenced evidence from the page already being folded. The normal page
 byte bound does not force a large individual Fact into an unrepresentable log:
-the existing fragmented transport handles that record alone. Warm durable mirrors
-compare indexed cursors before opening full model projections. These changes
+the existing fragmented transport handles that record alone. Persisted mirrors
+reconstruct from the indexed cut and immutable model baseline without opening
+live model projections. These changes
 reduce IPC and repeated work without another durable event corpus or an unbounded
 body cache. The exact application interface is owned by Serve's contract.
 
