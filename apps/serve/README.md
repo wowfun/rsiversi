@@ -55,7 +55,7 @@ A Service Profile can select an application process with
 asset selection as the browser), a private `profile` name, and a `process`
 using the installed package process descriptor. One supervised process owns
 the application's routes across local browser attachments. At activation the
-host sends `application.open` with protocol 7, a private profile directory
+host sends `application.open` with protocol 8, a private profile directory
 and a random upstream key over the generation's private process connection.
 The opening payload also supplies an opaque `owner` callback handle. Native
 composition gives it the product's shared browser identity and the application
@@ -309,9 +309,13 @@ root commands reject an Agent-owned child.
 For an explicitly opened Session, `application.history` reads immutable Facts
 under the active browser owner's Session handle. Opening returns the durable cursor
 and the current native model-selection projection. An open with `metadata_only:
-true` reads the authorized durable Header and indexed cursor without attaching
+true` reads the authorized durable Header, immutable model baseline and indexed
+Fact/control cut without attaching
 a Session handle, opening activity, or creating projection subscriptions. The
 caller's location access and any addressed direct-parent relationship still apply.
+Its `through` equals the durable cursor's Fact watermark. Persisted history can
+reconstruct selection from that baseline and canonical controls without requesting
+a live model projection; catalog rows retain their smaller metadata shape.
 Opening an absent or inaccessible Session returns null. A metadata-only read also
 returns null for an unpublished draft. Other read failures remain errors. The captured Fact watermark
 selects the history cut, while the control watermark identifies its independent

@@ -228,8 +228,7 @@ impl Sessions {
         metadata["through"] = json!(through);
         metadata["model_selection"] = json!(selection);
         metadata["selection_cursor"] = json!(cursor);
-        metadata["model_baseline"] = json!({"model":header.settings().default_model(),
-        "reasoning_effort":header.settings().default_reasoning_effort()});
+        metadata["model_baseline"] = json!(model_baseline(&header));
         Ok(metadata)
     }
 }
@@ -281,7 +280,10 @@ async fn metadata_snapshot(
             if row.session_id == *header.session_id()
                 && row.created_at_ms == header.created_at_ms() =>
         {
-            Ok(stored_snapshot(&header, row))
+            let mut metadata = stored_snapshot(&header, row);
+            metadata["through"] = json!(row.durable_fact_seq);
+            metadata["model_baseline"] = json!(model_baseline(&header));
+            Ok(metadata)
         }
         [None] => Ok(Value::Null),
         _ => Err(Error::Remote("Session catalog changed during read".into())),
@@ -326,13 +328,16 @@ async fn current_selection(
         .ok_or(Error::Disconnected)?
         .map_err(|error| remote(&error))?;
     let snapshot = retained.snapshot();
-    let selection = projected_selection(snapshot.entries())?.unwrap_or_else(|| {
-        rsi_agent_session_protocol::ModelSelection {
-            model: header.settings().default_model().clone(),
-            reasoning_effort: header.settings().default_reasoning_effort().cloned(),
-        }
-    });
+    let selection =
+        projected_selection(snapshot.entries())?.unwrap_or_else(|| model_baseline(header));
     Ok((selection, snapshot.cursor()))
+}
+
+fn model_baseline(header: &SessionHeader) -> rsi_agent_session_protocol::ModelSelection {
+    rsi_agent_session_protocol::ModelSelection {
+        model: header.settings().default_model().clone(),
+        reasoning_effort: header.settings().default_reasoning_effort().cloned(),
+    }
 }
 
 fn projected_selection(

@@ -96,6 +96,23 @@ async fn metadata_reads_do_not_attach_and_preserve_visibility_and_failures() {
     let snapshot = metadata_snapshot(&service, &store, id, None).await.unwrap();
     assert_eq!(snapshot["id"], id.as_str());
     assert_eq!(snapshot["created_at"], 1);
+    assert_eq!(snapshot["through"], 1);
+    assert_eq!(
+        snapshot["model_baseline"],
+        json!({"model":header.settings().default_model(), "reasoning_effort":null})
+    );
+    assert!(snapshot.get("model_selection").is_none());
+    let catalog = stored_snapshot(
+        &header,
+        store
+            .session_activity_summaries(std::slice::from_ref(id))
+            .await
+            .unwrap()[0]
+            .as_ref()
+            .unwrap(),
+    );
+    assert!(catalog.get("model_baseline").is_none());
+    assert!(catalog.get("through").is_none());
     assert_eq!(
         snapshot["selection_cursor"],
         json!({"kind":"durable", "fact_seq":1, "control_seq":0})
