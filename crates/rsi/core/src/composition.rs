@@ -1919,6 +1919,12 @@ fn register_runtime_factories(
     )?;
     register(
         builder,
+        "rsi.agent-presets.api",
+        UpdateMode::Replayable,
+        crate::agent_preset::api::AgentPresetsApiFactory,
+    )?;
+    register(
+        builder,
         "rsi.retrieval.api",
         UpdateMode::RestartRequired,
         crate::retrieval_api::RetrievalApiFactory,
@@ -2299,6 +2305,11 @@ fn base_fragment(
         ProfileEntry::new("rsi-ai-language", LANGUAGE_FACTORY, Value::Null),
         ProfileEntry::new("rsi-ai-image", IMAGE_FACTORY, Value::Null),
         ProfileEntry::new("rsi-inspector-api", "rsi.inspector.api", Value::Null),
+        ProfileEntry::new(
+            "rsi-agent-presets-api",
+            "rsi.agent-presets.api",
+            Value::Null,
+        ),
     ];
     #[cfg(target_os = "linux")]
     entries.push(ProfileEntry::new(

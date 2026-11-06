@@ -37,6 +37,7 @@ pub(crate) fn standard_system_presets(root: &std::path::Path) -> [(AgentPresetId
     })
 }
 
+pub(crate) mod api;
 mod plugin;
 mod service_settings;
 pub(crate) use service_settings::ServicePresetSettingsFactory;

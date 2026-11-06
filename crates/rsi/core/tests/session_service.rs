@@ -39,6 +39,8 @@ mod terminals;
 mod acp;
 #[path = "session_service/addon_acceptance.rs"]
 mod addon_acceptance;
+#[path = "session_service/agent_presets.rs"]
+mod agent_presets;
 #[path = "session_service/attention.rs"]
 mod attention;
 #[path = "session_service/automation.rs"]

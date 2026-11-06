@@ -8,6 +8,8 @@ use rsi_api_protocol::{
 };
 use serde::{Deserialize, Serialize, de::DeserializeOwned};
 use std::sync::Arc;
+/// Read-only catalog from the Host's current Agent composition source.
+pub mod agent_presets;
 mod exa;
 /// Reviewed Host Profile leaf management, separate from Settings grants.
 pub mod leaf;

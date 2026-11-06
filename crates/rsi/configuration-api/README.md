@@ -1,5 +1,22 @@
 # rsi-configuration-api
 
+`agent-presets` version 1 exposes read-only `list` and `document` operations under
+the caller's retained configuration grant. Each read captures the current Agent
+composition source, using its existing preset catalog and compiler; it neither
+activates a generation nor creates a second catalog. Filesystem discovery and
+document compilation run outside the async executor. Lists preserve catalog
+order, current default and broken-preset diagnostics. Health means pure Profile
+compilation succeeded, not that activation has been tested.
+
+Documents return exact native TOML with an explicit `toml` format, never a
+purported DSH plugin program. Missing and broken documents have distinct domain
+errors. Requests are at most 1 KiB; encoded lists are at most 16 MiB and documents
+4 MiB. The catalog owns filesystem and metadata limits; the API encoder owns the
+wire-size limit and returns capacity exhaustion instead of truncating content.
+Default changes continue through the existing `rsi.agent-presets` Settings
+namespace. Session selection continues through the revision-checked Draft
+command; these reads confer neither mutation nor Session authority.
+
 Host pages also carry an optional last completed update with decimal command identity, closed origin, outcome and failure categories. This is not an action receipt or an authorization to retry. Non-Host pages omit it.
 
 The typed configuration-grant API carries redacted authority status and a

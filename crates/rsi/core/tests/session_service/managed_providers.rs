@@ -47,8 +47,19 @@ async fn replace(
     .await
 }
 
+fn default_preset_id(
+    list: rsi_configuration_api::agent_presets::AgentPresetList,
+) -> rsi_agent_session_protocol::AgentPresetId {
+    list.presets
+        .into_iter()
+        .find(|row| row.is_default)
+        .unwrap()
+        .id
+}
+
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 async fn service_preset_settings_select_future_headers_through_the_actual_api_scope() {
+    use rsi_configuration_api::agent_presets::AgentPresetsClient;
     use rsi_settings_protocol::SettingsAccess;
     let fixture = fixture("http://127.0.0.1:1");
     let alternate = fixture.paths.config().join("agent-presets/alternate");
@@ -67,6 +78,15 @@ async fn service_preset_settings_select_future_headers_through_the_actual_api_sc
     .await
     .unwrap();
     let settings = rsi_settings_api::SettingsClient::new(connection.api_client());
+    let presets = AgentPresetsClient::new(connection.api_client());
+    let initial = presets.list().await.unwrap();
+    assert!(
+        initial
+            .presets
+            .iter()
+            .any(|row| row.id.as_str() == "alternate" && row.broken.is_none())
+    );
+    assert_eq!(default_preset_id(initial).as_str(), "standard");
     let workspace = connection
         .workspace_registry()
         .get_or_create(&fixture.workspace)
@@ -102,11 +122,20 @@ async fn service_preset_settings_select_future_headers_through_the_actual_api_sc
         "alternate"
     );
     assert_eq!(original.header().await.unwrap(), header);
+    assert_eq!(
+        default_preset_id(presets.list().await.unwrap()).as_str(),
+        "alternate"
+    );
     drop(original);
     drop(selected);
     connection.shutdown().await.unwrap();
     assert!(runtime.shutdown().await.is_clean());
     let daemon = DaemonFixture::new(&fixture).await;
+    let presets = AgentPresetsClient::new(daemon.connection.api_client());
+    assert_eq!(
+        default_preset_id(presets.list().await.unwrap()).as_str(),
+        "alternate"
+    );
     let selected = daemon
         .connection
         .session_service()

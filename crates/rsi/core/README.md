@@ -41,7 +41,7 @@ the standard child environment scrub. Proxy URLs containing user information are
 excluded. The importer retains its private home and configuration.
 
 The route adapters for workspace-review, history, ACP, device operations,
-workspace, models, settings, media, output and Session use Replayable registration.
+workspace, models, Agent presets, settings, media, output and Session use Replayable registration.
 Disable/enable and regrouping affect routes while admitted mutations drain; linked
 implementation changes still require rebuilding the binary and replacing its catalog.
 Profile apply can wait for that drain and reports Pending until convergence. A
