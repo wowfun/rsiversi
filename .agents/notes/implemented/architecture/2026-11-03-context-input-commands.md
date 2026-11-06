@@ -52,6 +52,16 @@ draft-only preset replacement along with fixing the Header. Clearing accepted co
 does not retract the durable Session. New-Turn options and model availability
 are irrelevant to held input; execution validates the eventual waking request.
 
+After native observation verifies an application's accepted input, its original
+event retains only local coordinates and time in the application journal. The
+existing source correlation supplies the native-owned message during cold load.
+DSH's inbox derives pending state from its one durable acceptance event; retaining
+another full body in RSI's presentation journal would add storage and rewrite
+cost without adding recovery authority. Before correlation, the original body
+remains necessary to recover dispatch. Reconstruction uses the already captured
+native history, with no additional read or persistent body cache. Event values
+and array order are preserved; JSON object key order is not semantic identity.
+
 ## Alternatives considered
 
 A dummy counter or last-request domain would duplicate receipts solely to satisfy
