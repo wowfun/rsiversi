@@ -12,13 +12,8 @@ use tokio::sync::{OwnedSemaphorePermit, Semaphore};
 use tokio_util::sync::CancellationToken;
 
 const FRAGMENT_BYTES: usize = 128 * 1024;
-mod attempt;
-pub use attempt::project_model_attempt;
-#[derive(Clone, Copy, Debug, Eq, PartialEq)]
-enum PageKind {
-    Facts,
-    Attempt,
-}
+mod facts;
+pub use facts::project_history_page;
 #[derive(Deserialize)]
 #[serde(deny_unknown_fields)]
 struct Request {
@@ -30,7 +25,6 @@ struct Request {
 }
 #[derive(Debug)]
 struct Page {
-    kind: PageKind,
     after: u64,
     requested_end: u64,
     through: u64,
@@ -121,19 +115,11 @@ impl HistoryRouter {
             cancellation,
         })
     }
-    async fn read(
-        &self,
-        authority: &Authority,
-        request: &Request,
-        kind: PageKind,
-    ) -> Result<Value> {
+    async fn read(&self, authority: &Authority, request: &Request) -> Result<Value> {
         let end = request
             .through_seq
             .unwrap_or_else(|| request.after_seq.saturating_add(1).min(authority.horizon));
-        if end < request.after_seq
-            || end > authority.horizon
-            || (kind == PageKind::Attempt && end.checked_sub(request.after_seq) != Some(1))
-        {
+        if end < request.after_seq || end > authority.horizon {
             return Err(Error::Protocol);
         }
         let mut slot = authority.page.lock().await;
@@ -162,42 +148,11 @@ impl HistoryRouter {
             {
                 return Err(Error::Protocol);
             }
-            let mut through = page.through_seq.min(end);
-            let json = match kind {
-                PageKind::Facts => {
-                    let mut bytes = 2;
-                    let facts: Vec<_> = page
-                        .facts
-                        .iter()
-                        .take_while(|fact| {
-                            if fact.seq() > through {
-                                return false;
-                            }
-                            if bytes + fact.encoded_len()
-                                > rsi_agent_session_protocol::MAXIMUM_SESSION_FACT_BYTES + 2
-                            {
-                                through = fact.seq() - 1;
-                                return false;
-                            }
-                            bytes += fact.encoded_len() + 1;
-                            true
-                        })
-                        .map(Arc::as_ref)
-                        .collect();
-                    serde_json::to_string(&facts).map_err(|_| Error::Protocol)?
-                }
-                PageKind::Attempt => {
-                    let [fact] = page.facts.as_slice() else {
-                        return Err(Error::Protocol);
-                    };
-                    project_model_attempt(fact, request.after_seq)?
-                }
-            };
-            if json.len() > rsi_agent_session_protocol::MAXIMUM_SESSION_FACT_BYTES + 2 {
-                return Err(Error::Capacity);
-            }
+            let (through, json) = project_history_page(
+                page.facts.iter().map(Arc::as_ref),
+                page.through_seq.min(end),
+            )?;
             *slot = Some(Page {
-                kind,
                 after: request.after_seq,
                 requested_end: end,
                 through,
@@ -210,7 +165,6 @@ impl HistoryRouter {
         if request.after_seq != page.after
             || end != page.requested_end
             || request.offset != page.offset
-            || kind != page.kind
         {
             return Err(Error::Protocol);
         }
@@ -267,11 +221,9 @@ impl Handler for HistoryRouter {
                     .to_owned(),
             ));
         }
-        let kind = match method {
-            "agent.history.read" => PageKind::Facts,
-            "agent.history.attempt.read" => PageKind::Attempt,
-            _ => return Err(Error::Protocol),
-        };
+        if method != "agent.history.read" {
+            return Err(Error::Protocol);
+        }
         let request: Request = serde_json::from_value(value).map_err(|_| Error::Protocol)?;
         let authority =
             self.authority(&(request.session_id.clone(), request.operation_id.clone()))?;
@@ -279,7 +231,7 @@ impl Handler for HistoryRouter {
             biased;
             () = authority.cancellation.cancelled() => Err(Error::Cancelled),
             () = cancellation.cancelled() => Err(Error::Cancelled),
-            result = self.read(&authority, &request, kind) => result,
+            result = self.read(&authority, &request) => result,
         }
     }
 }
@@ -307,7 +259,7 @@ mod tests {
         }
     }
     #[tokio::test]
-    async fn attempt_projection_preserves_timing_and_unicode_and_cannot_switch_page_identity() {
+    async fn history_page_normalizes_attempts_and_preserves_timing_unicode_and_scope() {
         let events = vec![
             (
                 0,
@@ -357,7 +309,7 @@ mod tests {
         loop {
             let page = router
                 .call(
-                    "agent.history.attempt.read",
+                    "agent.history.read",
                     request.clone(),
                     CancellationToken::new(),
                 )
@@ -373,7 +325,11 @@ mod tests {
                 router
                     .call(
                         "agent.history.read",
-                        request.clone(),
+                        {
+                            let mut changed = request.clone();
+                            changed["through_seq"] = json!(2);
+                            changed
+                        },
                         CancellationToken::new()
                     )
                     .await
@@ -383,18 +339,14 @@ mod tests {
         let projection: Value = serde_json::from_str(&encoded).unwrap();
         assert_eq!(
             projection,
-            json!({"seq":1,"retain_context":true,"events":events})
+            json!([{ "seq":1,"timestamp_ms":10,"type":"model_attempt_settled","turn_id":"turn","effect_id":"model","purpose":"conversation","attempt":{"retain_context":true,"events":events} }])
         );
         assert_eq!(router.pages.available_permits(), 2);
         drop(scope);
         request["offset"] = json!(0);
         assert!(
             router
-                .call(
-                    "agent.history.attempt.read",
-                    request,
-                    CancellationToken::new()
-                )
+                .call("agent.history.read", request, CancellationToken::new())
                 .await
                 .is_err()
         );

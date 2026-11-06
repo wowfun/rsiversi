@@ -115,6 +115,14 @@ would additionally decode and validate unrelated queue-state fields. This follow
 DSH's separation of stored log reading from live Session execution without
 introducing another persistent or in-memory body cache.
 
+A model-attempt row transfers its normalized events in the Fact page. Sending
+encoded chunks and then re-reading the same Fact through a second callback
+would duplicate both transport and durable decoding. Like DSH's directly readable
+Session events, this read view supplies the body the consumer folds. The native
+compact codec and sole durable Fact remain unchanged. The Agent extension owns
+this shared wire projection; workbench, inherited history and captured Agent
+operations use it together.
+
 ## Alternatives considered
 
 A predicted sequence breaks immutable identity. A Promise or missing event breaks

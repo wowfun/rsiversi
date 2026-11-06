@@ -55,7 +55,7 @@ A Service Profile can select an application process with
 asset selection as the browser), a private `profile` name, and a `process`
 using the installed package process descriptor. One supervised process owns
 the application's routes across local browser attachments. At activation the
-host sends `application.open` with protocol 8, a private profile directory
+host sends `application.open` with protocol 9, a private profile directory
 and a random upstream key over the generation's private process connection.
 The opening payload also supplies an opaque `owner` callback handle. Native
 composition gives it the product's shared browser identity and the application
@@ -321,7 +321,7 @@ returns null for an unpublished draft. Other read failures remain errors. The ca
 selects the history cut, while the control watermark identifies its independent
 selection revision. An absent producer uses the immutable Header baseline.
 A failed producer is reported rather than replaced with a default.
-Fact, control, exact acceptance and model-attempt history reads authorize the
+Fact, control and exact acceptance history reads authorize the
 durable Header directly and use the Store, without allocating a Session handle
 or opening runtime activity. Every read checks caller retirement before returning;
 addressed parent access and lineage still apply. Exact message reads bind both
@@ -336,7 +336,11 @@ They return contiguous pages of at most 512 Facts, normally within 128 KiB of
 encoded Fact bodies. An individual larger Fact is read alone using its exact
 Store-reported length. The response never advances beyond the captured horizon;
 inherited reads also stay inside their retained fork interval. Pages and decoded
-single model attempts use UTF-8 fragments. No second durable history is created.
+model attempts embedded in Fact pages use UTF-8 fragments. The
+[Agent extension history view](../../crates/rsi-extension/agent/README.md) owns
+the normalized attempt representation and serialized-page ceiling. Workbench and
+inherited reads use that same view, without a second attempt lookup or durable
+history copy.
 Waiting subscribes to
 native observations after the supplied control and Fact cursors. A retired
 upstream request loses access. Session listing uses its independent cold path.

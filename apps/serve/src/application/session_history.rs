@@ -45,10 +45,6 @@ enum Operation {
         through_seq: u64,
         offset: usize,
     },
-    Attempt {
-        after_seq: u64,
-        offset: usize,
-    },
     Wait {
         cursor: ObservationCursor,
     },
@@ -155,9 +151,6 @@ impl Sessions {
                     offset,
                 )
                 .await?
-            }
-            Operation::Attempt { after_seq, offset } => {
-                read_attempt(store, header().await?.session_id(), after_seq, offset).await?
             }
             Operation::SeedOpen { key } => {
                 let handle = attach().await?;
@@ -442,39 +435,6 @@ async fn read_message(
     Err(Error::Remote("exact message acceptance unavailable".into()))
 }
 
-async fn read_attempt(
-    store: &dyn SessionStore,
-    session: &SessionId,
-    after: u64,
-    offset: usize,
-) -> Result<Value> {
-    let before = after.checked_add(2).ok_or(Error::Protocol)?;
-    let page = store
-        .read_facts_before(
-            session,
-            before,
-            1,
-            rsi_agent_store_protocol::MAXIMUM_STORE_FACT_PAGE_BYTES,
-        )
-        .await
-        .map_err(|error| Error::Remote(error.to_string()))?;
-    let [fact] = page.facts.as_slice() else {
-        return Err(Error::Protocol);
-    };
-    attempt_fragment(fact, after, offset)
-}
-pub(super) fn attempt_fragment(
-    fact: &rsi_agent_session_protocol::SessionFact,
-    after: u64,
-    offset: usize,
-) -> Result<Value> {
-    if after.checked_add(1) != Some(fact.seq()) {
-        return Err(Error::Protocol);
-    }
-    let encoded = rsi_extension_agent::project_model_attempt(fact, after)?;
-    fragment(&encoded, offset, fact.seq())
-}
-
 /// The Store bounds body allocation before decoding. Oversized individual Facts
 /// retain the existing fragmented transport, without widening ordinary pages.
 pub(super) async fn read_facts(
@@ -500,8 +460,8 @@ pub(super) async fn read_facts(
         return Err(Error::Protocol);
     }
     let last = page.facts.last().ok_or(Error::Protocol)?.seq();
-    let encoded = serde_json::to_string(&page.facts).map_err(|_| Error::Protocol)?;
-    fragment(&encoded, offset, last)
+    let (through, encoded) = rsi_extension_agent::project_history_page(&page.facts, last)?;
+    fragment(&encoded, offset, through)
 }
 
 pub(super) fn fragment(encoded: &str, offset: usize, through: u64) -> Result<Value> {

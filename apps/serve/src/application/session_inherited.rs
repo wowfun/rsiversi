@@ -1,10 +1,8 @@
 use super::{
     Sessions,
-    session_history::{attempt_fragment, read_facts, resource_key},
+    session_history::{read_facts, resource_key},
 };
-use rsi_agent_session_protocol::{
-    ForkTurnSelection, MAXIMUM_SESSION_FACT_BYTES, SessionHeader, SessionId,
-};
+use rsi_agent_session_protocol::{ForkTurnSelection, SessionHeader, SessionId};
 use rsi_agent_store_protocol::{InheritedInterval, capture_inherited_intervals};
 use rsi_extension::{Error, Result};
 use serde::Deserialize;
@@ -24,7 +22,6 @@ pub(super) struct ReadInterval {
     after_seq: u64,
     through_seq: u64,
     offset: usize,
-    attempt: bool,
 }
 impl Sessions {
     pub(super) async fn open_inherited(
@@ -79,18 +76,7 @@ impl Sessions {
         {
             return Err(Error::Protocol);
         }
-        if !read.attempt {
-            return tokio::select! {biased;()=retired.cancelled()=>Err(Error::Cancelled),
-            result=read_facts(self.store.as_ref(),&origin.parent_session_id,read.after_seq,read.through_seq,read.offset)=>result};
-        }
-        if read.through_seq != read.after_seq + 1 {
-            return Err(Error::Protocol);
-        }
-        let page = tokio::select! {biased;()=retired.cancelled()=>return Err(Error::Cancelled),
-        result=self.store.read_facts(&origin.parent_session_id,read.after_seq,1,MAXIMUM_SESSION_FACT_BYTES)=>result.map_err(|e|Error::Remote(e.to_string()))?};
-        let [fact] = page.facts.as_slice() else {
-            return Err(Error::Protocol);
-        };
-        attempt_fragment(fact, read.after_seq, read.offset)
+        tokio::select! {biased;()=retired.cancelled()=>Err(Error::Cancelled),
+        result=read_facts(self.store.as_ref(),&origin.parent_session_id,read.after_seq,read.through_seq,read.offset)=>result}
     }
 }

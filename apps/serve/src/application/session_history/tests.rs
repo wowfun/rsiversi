@@ -300,7 +300,7 @@ async fn exact_message_reads_preserve_withdrawn_bodies_and_fragment_identity() {
 }
 
 #[tokio::test]
-async fn stored_attempt_reads_require_the_exact_fact_and_preserve_unicode() {
+async fn stored_pages_inline_normalized_attempts_and_preserve_unicode() {
     use rsi_agent_session_protocol::{
         EffectId, ModelAttemptLog, ModelEventPurpose, SessionFact, SessionFactBody, TurnId,
     };
@@ -375,21 +375,26 @@ async fn stored_attempt_reads_require_the_exact_fact_and_preserve_unicode() {
         })
         .await
         .unwrap();
-    let expected = rsi_extension_agent::project_model_attempt(&fact, 1).unwrap();
+    let (_, expected) = rsi_extension_agent::project_history_page([fact.as_ref()], 2).unwrap();
+    let projected: Value = serde_json::from_str(&expected).unwrap();
+    assert!(projected[0]["attempt"].get("chunks").is_none());
+    assert!(projected[0]["attempt"]["events"].is_array());
+    assert!(serde_json::to_value(&fact).unwrap()["attempt"]["chunks"].is_array());
+
     let mut restored = String::new();
     while restored.len() < expected.len() {
-        let page = read_attempt(&store, &id, 1, restored.len()).await.unwrap();
+        let page = read_facts(&store, &id, 1, 2, restored.len()).await.unwrap();
         assert_eq!(page["through_seq"], 2);
         assert_eq!(page["total_bytes"], expected.len());
         restored.push_str(page["json"].as_str().unwrap());
         assert_eq!(page["next_offset"], restored.len());
     }
     assert_eq!(restored, expected);
-    for after in [0, 2, 3, u64::MAX] {
-        assert!(read_attempt(&store, &id, after, 0).await.is_err());
+    for after in [2, 3, u64::MAX] {
+        assert!(read_facts(&store, &id, after, 2, 0).await.is_err());
     }
     assert!(
-        read_attempt(&store, &id, 1, expected.find('中').unwrap() + 1)
+        read_facts(&store, &id, 1, 2, expected.find('中').unwrap() + 1)
             .await
             .is_err()
     );
