@@ -71,75 +71,96 @@ impl Sessions {
         session: &SessionId,
         parent: Option<&SessionId>,
     ) -> Result<std::sync::Arc<dyn SessionHandle>> {
-        self.find_handle(request, session, parent)
-            .await?
-            .ok_or_else(|| Error::Remote("Session unavailable to caller".into()))
-    }
-
-    async fn find_handle(
-        &self,
-        request: &str,
-        session: &SessionId,
-        parent: Option<&SessionId>,
-    ) -> Result<Option<std::sync::Arc<dyn SessionHandle>>> {
         let origin = self.routes.caller(request).map_err(|_| Error::Cancelled)?;
         let service = self.ingress.scoped(origin);
-        let handle = match service.attach(session).await {
-            Ok(handle) => handle,
-            Err(
-                rsi_session_protocol::SessionError::NotFound(_)
-                | rsi_session_protocol::SessionError::Api(rsi_api_protocol::ApiError::Unauthorized),
-            ) => return Ok(None),
-            Err(_) => return Err(Error::Remote("Session unavailable to caller".into())),
-        };
-        if let Some(parent) = parent {
-            let header = handle.header().await.map_err(|error| remote(&error))?;
-            check_parent(service.as_ref(), &header, parent).await?;
-        }
-        Ok(Some(handle))
+        find_handle(service.as_ref(), session, parent)
+            .await?
+            .ok_or_else(unavailable)
     }
 
     pub(super) async fn history(&self, payload: Value) -> Result<Value> {
         let input: HistoryRead = serde_json::from_value(payload).map_err(|_| Error::Protocol)?;
-        if matches!(
-            input.operation,
-            Operation::Open {
-                metadata_only: true
-            }
-        ) {
-            let origin = self
-                .routes
-                .caller(&input.request)
-                .map_err(|_| Error::Cancelled)?;
-            let service = self.ingress.scoped(origin);
-            let result = metadata_snapshot(
+        let origin = self
+            .routes
+            .caller(&input.request)
+            .map_err(|_| Error::Cancelled)?;
+        let service = self.ingress.scoped(origin);
+        let store = self.store.as_ref();
+        let find = || {
+            find_handle(
                 service.as_ref(),
-                self.store.as_ref(),
                 &input.session_id,
                 input.parent_session_id.as_ref(),
             )
-            .await?;
-            self.routes
-                .caller(&input.request)
-                .map_err(|_| Error::Cancelled)?;
-            return Ok(result);
-        }
-        let Some(handle) = self
-            .find_handle(
-                &input.request,
+        };
+        let attach = || async { find().await?.ok_or_else(unavailable) };
+        let header = || async {
+            find_header(
+                service.as_ref(),
                 &input.session_id,
                 input.parent_session_id.as_ref(),
             )
             .await?
-        else {
-            return match input.operation {
-                Operation::Open { .. } => Ok(Value::Null),
-                _ => Err(Error::Remote("Session unavailable to caller".into())),
-            };
+            .ok_or_else(unavailable)
         };
-        let store = self.store.as_ref();
         let result = match input.operation {
+            Operation::Open {
+                metadata_only: true,
+            } => {
+                metadata_snapshot(
+                    service.as_ref(),
+                    store,
+                    &input.session_id,
+                    input.parent_session_id.as_ref(),
+                )
+                .await?
+            }
+            Operation::Open {
+                metadata_only: false,
+            } => match find().await? {
+                Some(handle) => self.opening_snapshot(handle.as_ref()).await?,
+                None => Value::Null,
+            },
+            Operation::Controls {
+                after_seq,
+                through_seq,
+            } => {
+                self.history_controls(&header().await?, after_seq, through_seq)
+                    .await?
+            }
+            Operation::Message {
+                message_id,
+                accepted_control_seq,
+                offset,
+            } => {
+                read_message(
+                    store,
+                    header().await?.session_id(),
+                    &message_id,
+                    accepted_control_seq,
+                    offset,
+                )
+                .await?
+            }
+            Operation::Fact {
+                after_seq,
+                through_seq,
+                offset,
+            } => {
+                read_facts(
+                    store,
+                    header().await?.session_id(),
+                    after_seq,
+                    through_seq,
+                    offset,
+                )
+                .await?
+            }
+            Operation::Attempt { after_seq, offset } => {
+                read_attempt(store, header().await?.session_id(), after_seq, offset).await?
+            }
             Operation::SeedOpen { key } => {
+                let handle = attach().await?;
                 self.open_inherited(
                     &input.request,
                     &key,
@@ -148,64 +169,38 @@ impl Sessions {
                 .await?
             }
             Operation::SeedRead(read) => {
+                let _handle = attach().await?;
                 self.read_inherited(&input.request, &input.session_id, read)
                     .await?
             }
             Operation::SeedClose { key } => {
+                let _handle = attach().await?;
                 self.routes
                     .release_resource(&input.request, &resource_key("seed", &key)?);
                 Value::Null
             }
-            Operation::Open { .. } => self.opening_snapshot(handle.as_ref()).await?,
-            Operation::Controls {
-                after_seq,
-                through_seq,
-            } => {
-                self.history_controls(
-                    &handle.header().await.map_err(|error| remote(&error))?,
-                    after_seq,
-                    through_seq,
-                )
-                .await?
-            }
-            Operation::Message {
-                message_id,
-                accepted_control_seq,
-                offset,
-            } => {
-                let message = handle
-                    .read_message(&message_id, accepted_control_seq)
-                    .await
-                    .map_err(|error| remote(&error))?;
-                let encoded = serde_json::to_string(&message).map_err(|_| Error::Protocol)?;
-                fragment(&encoded, offset, accepted_control_seq)?
-            }
-            Operation::Fact {
-                after_seq,
-                through_seq,
-                offset,
-            } => read_facts(store, &input.session_id, after_seq, through_seq, offset).await?,
-            Operation::Attempt { after_seq, offset } => {
-                read_attempt(handle.as_ref(), after_seq, offset).await?
-            }
             Operation::Wait { cursor } => {
+                let handle = attach().await?;
                 wait(handle.as_ref(), store, &input.session_id, cursor).await?
             }
             Operation::ModelOpen { key, effect } => {
+                let handle = attach().await?;
                 self.open_model(
                     &input.request,
                     &key,
-                    input.session_id,
+                    input.session_id.clone(),
                     effect,
                     handle.as_ref(),
                 )
                 .await?
             }
             Operation::ModelNext { key } => {
+                let _handle = attach().await?;
                 self.next_model(&input.request, &key, &input.session_id)
                     .await?
             }
             Operation::ModelClose { key } => {
+                let _handle = attach().await?;
                 self.routes
                     .release_resource(&input.request, &resource_key("model", &key)?);
                 Value::Null
@@ -231,6 +226,53 @@ impl Sessions {
         metadata["model_baseline"] = json!(model_baseline(&header));
         Ok(metadata)
     }
+}
+
+fn unavailable() -> Error {
+    Error::Remote("Session unavailable to caller".into())
+}
+
+async fn find_handle(
+    service: &dyn SessionService,
+    session: &SessionId,
+    parent: Option<&SessionId>,
+) -> Result<Option<std::sync::Arc<dyn SessionHandle>>> {
+    let handle = match service.attach(session).await {
+        Ok(handle) => handle,
+        Err(
+            rsi_session_protocol::SessionError::NotFound(_)
+            | rsi_session_protocol::SessionError::Api(rsi_api_protocol::ApiError::Unauthorized),
+        ) => return Ok(None),
+        Err(_) => return Err(unavailable()),
+    };
+    if let Some(parent) = parent {
+        check_parent(
+            service,
+            &handle.header().await.map_err(|error| remote(&error))?,
+            parent,
+        )
+        .await?;
+    }
+    Ok(Some(handle))
+}
+
+async fn find_header(
+    service: &dyn SessionService,
+    session: &SessionId,
+    parent: Option<&SessionId>,
+) -> Result<Option<SessionHeader>> {
+    let header = match service.read_header(session).await {
+        Ok(header) => header,
+        Err(
+            rsi_session_protocol::SessionError::NotFound(_)
+            | rsi_session_protocol::SessionError::Api(rsi_api_protocol::ApiError::Unauthorized),
+        ) => return Ok(None),
+        Err(_) => return Err(unavailable()),
+    };
+    if let Some(parent) = parent {
+        check_parent(service, &header, parent).await?;
+    }
+    Ok(Some(header))
 }
 
 async fn check_parent(
@@ -260,17 +302,9 @@ async fn metadata_snapshot(
     session: &SessionId,
     parent: Option<&SessionId>,
 ) -> Result<Value> {
-    let header = match service.read_header(session).await {
-        Ok(header) => header,
-        Err(
-            rsi_session_protocol::SessionError::NotFound(_)
-            | rsi_session_protocol::SessionError::Api(rsi_api_protocol::ApiError::Unauthorized),
-        ) => return Ok(Value::Null),
-        Err(_) => return Err(Error::Remote("Session unavailable to caller".into())),
+    let Some(header) = find_header(service, session, parent).await? else {
+        return Ok(Value::Null);
     };
-    if let Some(parent) = parent {
-        check_parent(service, &header, parent).await?;
-    }
     let rows = store
         .session_activity_summaries(std::slice::from_ref(header.session_id()))
         .await
@@ -377,12 +411,53 @@ fn remote(error: &rsi_session_protocol::SessionError) -> Error {
     Error::Remote(error.to_string().chars().take(1000).collect())
 }
 
-async fn read_attempt(handle: &dyn SessionHandle, after: u64, offset: usize) -> Result<Value> {
-    let before = after.checked_add(2).ok_or(Error::Protocol)?;
-    let page = handle
-        .history_before(Some(before), 1)
+async fn read_message(
+    store: &dyn SessionStore,
+    session: &SessionId,
+    message: &rsi_agent_session_protocol::MessageId,
+    accepted_control_seq: u64,
+    offset: usize,
+) -> Result<Value> {
+    let after = accepted_control_seq.checked_sub(1).ok_or(Error::Protocol)?;
+    let page = store
+        .read_controls(
+            session,
+            after,
+            1,
+            rsi_agent_store_protocol::MAXIMUM_STORE_CONTROL_PAGE_BYTES,
+        )
         .await
-        .map_err(|error| remote(&error))?;
+        .map_err(|error| Error::Remote(error.to_string()))?;
+    if let Some(record) = page.records.into_iter().next()
+        && record.seq() == accepted_control_seq
+        && let rsi_agent_session_protocol::AgentControlRecordBody::MessageAccepted {
+            message: accepted,
+            ..
+        } = record.into_body()
+        && accepted.message_id == *message
+    {
+        let encoded = serde_json::to_string(&accepted).map_err(|_| Error::Protocol)?;
+        return fragment(&encoded, offset, accepted_control_seq);
+    }
+    Err(Error::Remote("exact message acceptance unavailable".into()))
+}
+
+async fn read_attempt(
+    store: &dyn SessionStore,
+    session: &SessionId,
+    after: u64,
+    offset: usize,
+) -> Result<Value> {
+    let before = after.checked_add(2).ok_or(Error::Protocol)?;
+    let page = store
+        .read_facts_before(
+            session,
+            before,
+            1,
+            rsi_agent_store_protocol::MAXIMUM_STORE_FACT_PAGE_BYTES,
+        )
+        .await
+        .map_err(|error| Error::Remote(error.to_string()))?;
     let [fact] = page.facts.as_slice() else {
         return Err(Error::Protocol);
     };

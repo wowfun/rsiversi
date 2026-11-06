@@ -233,7 +233,8 @@ Model enumeration belongs to AI's independent `LanguageModelsContract`.
 immutable acceptance body at a positive `accepted_control_seq` and requires
 that exact control record to be `MessageAccepted` for the requested message.
 It uses the existing Store control log, without a second body index or replay
-subscription. A stale or mismatched identity is not a neighboring record.
+subscription. A stale or mismatched identity is not a neighboring record;
+claiming or withdrawing the message does not change its acceptance body.
 
 Attachment is a durable-data operation: it reads the Store Header and builds a
 handle without resolving the current preset generation, Language/Image route,

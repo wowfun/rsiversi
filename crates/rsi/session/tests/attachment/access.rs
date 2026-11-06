@@ -253,6 +253,16 @@ async fn remote_session_reads_are_offline_caller_bound_and_live_streams_recheck_
     );
     assert!(scoped.read_header(headers[0].session_id()).await.is_ok());
     access.granted.store(false, Ordering::SeqCst);
+    assert!(matches!(
+        scoped.read_header(remote).await,
+        Err(SessionError::Api(ApiError::Unauthorized))
+    ));
+    assert!(matches!(
+        handle
+            .read_message(&MessageId::new("absent").unwrap(), 1)
+            .await,
+        Err(SessionError::Api(ApiError::Unauthorized))
+    ));
     assert!(
         matches!(
             handle.evidence(evidence).await,

@@ -1471,24 +1471,23 @@ impl SessionHandle for LocalSessionHandle {
                 self.session_id(),
                 after,
                 1,
-                rsi_agent_store_protocol::MAXIMUM_STORE_FACT_PAGE_BYTES,
+                rsi_agent_store_protocol::MAXIMUM_STORE_CONTROL_PAGE_BYTES,
             )
             .await
             .map_err(map_store_error)?;
-        let record = page
-            .records
-            .first()
-            .filter(|record| record.seq() == accepted_control_seq)
-            .ok_or_else(|| SessionError::NotFound("exact message acceptance".into()))?;
-        if let rsi_agent_session_protocol::AgentControlRecordBody::MessageAccepted {
-            message, ..
-        } = record.body()
+        if let Some(record) = page.records.into_iter().next()
+            && record.seq() == accepted_control_seq
+            && let rsi_agent_session_protocol::AgentControlRecordBody::MessageAccepted {
+                message,
+                ..
+            } = record.into_body()
             && message.message_id == *message_id
         {
-            return Ok(message.clone());
+            return Ok(message);
         }
         Err(SessionError::NotFound("exact message acceptance".into()))
     }
+
     async fn header(&self) -> Result<SessionHeader> {
         let _admission = self.admit()?;
         let _activity = self.begin_read()?;

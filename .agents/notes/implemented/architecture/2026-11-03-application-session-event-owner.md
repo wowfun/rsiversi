@@ -105,6 +105,16 @@ live model projections. These changes
 reduce IPC and repeated work without another durable event corpus or an unbounded
 body cache. The exact application interface is owned by Serve's contract.
 
+Immutable history pages also use authorized durable Headers and direct Store
+reads. Creating a Session handle for each page adds runtime lifetime state to a
+read that does not need it. Draft and live observation operations retain handles;
+caller retirement and addressed parent visibility still gate durable reads.
+Exact acceptance reads already have the canonical control sequence: they move
+that record's owned body instead of cloning it. Going through the message index
+would additionally decode and validate unrelated queue-state fields. This follows
+DSH's separation of stored log reading from live Session execution without
+introducing another persistent or in-memory body cache.
+
 ## Alternatives considered
 
 A predicted sequence breaks immutable identity. A Promise or missing event breaks

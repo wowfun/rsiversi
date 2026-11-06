@@ -10,6 +10,11 @@ location projection and never makes file bytes part of the prompt.
 driver quiescence to Kernel. It is a read owned by the handle lifetime, with no
 mutation, publication or reservation of future idle state.
 
+The [exact acceptance read](../session-protocol/README.md) moves the Store's
+owned control-record body directly into the reply. It avoids both a body clone
+and an additional queue-index lookup; handle admission and read lifetime still
+apply.
+
 Session-wide cancellation delegates one atomic durable inbox/Turn stop to Kernel.
 For an unpublished draft, clearing input drops all held command inputs in one
 revision while retaining command receipts and domain state; keeping input is a

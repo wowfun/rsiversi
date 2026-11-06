@@ -307,7 +307,7 @@ inspect an active Turn or enumerate message-removal requests. The standard
 Session adapter handles unpublished drafts without publication. Interactive
 root commands reject an Agent-owned child.
 For an explicitly opened Session, `application.history` reads immutable Facts
-under the active browser owner's Session handle. Opening returns the durable cursor
+under the active browser owner's authority. Opening returns the durable cursor
 and the current native model-selection projection. An open with `metadata_only:
 true` reads the authorized durable Header, immutable model baseline and indexed
 Fact/control cut without attaching
@@ -321,7 +321,13 @@ returns null for an unpublished draft. Other read failures remain errors. The ca
 selects the history cut, while the control watermark identifies its independent
 selection revision. An absent producer uses the immutable Header baseline.
 A failed producer is reported rather than replaced with a default.
-Control history uses the same authorized handle and a captured control horizon.
+Fact, control, exact acceptance and model-attempt history reads authorize the
+durable Header directly and use the Store, without allocating a Session handle
+or opening runtime activity. Every read checks caller retirement before returning;
+addressed parent access and lineage still apply. Exact message reads bind both
+the message ID and its acceptance control sequence through the canonical control
+record, moving its body directly into serialization.
+Control history uses a captured control horizon.
 Pages expose model-selection commits with their Store-owned Fact anchors;
 the native model-selection codec resolves complete replacements. A wait returns
 a coherent pair of current watermarks after either stream advances.

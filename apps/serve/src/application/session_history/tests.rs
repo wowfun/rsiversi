@@ -209,6 +209,193 @@ async fn metadata_parent_address_requires_visible_direct_parent() {
 }
 
 #[tokio::test]
+async fn exact_message_reads_preserve_withdrawn_bodies_and_fragment_identity() {
+    use rsi_agent_session_protocol::{
+        AgentControlRecord, AgentControlRecordBody as Body, AgentMessage, AgentMessageContent,
+        AgentMessageSource, MessageDelivery, MessageDiscardReason, MessageId, MessageOptions,
+        MessageTarget,
+    };
+    use rsi_agent_store_protocol::{AtomicAgentCommit, AtomicSessionAppend};
+    let store = rsi_agent_testkit::MemoryStore::default();
+    let header = metadata_header("exact-message");
+    let id = header.session_id().clone();
+    let message = AgentMessage {
+        message_id: MessageId::new("message").unwrap(),
+        source: AgentMessageSource::Human { attribution: None },
+        content: vec![AgentMessageContent::Text {
+            text: "界".repeat(100_000),
+        }],
+        options: MessageOptions::default(),
+    };
+    store
+        .commit_agent(AtomicAgentCommit {
+            sessions: vec![AtomicSessionAppend {
+                session_id: id.clone(),
+                expected_fact_seq: 0,
+                expected_control_seq: 0,
+                header: Some(header),
+                facts: vec![],
+                controls: vec![
+                    AgentControlRecord::new(
+                        1,
+                        1,
+                        Body::MessageAccepted {
+                            message: message.clone(),
+                            delivery: MessageDelivery::NextTurn,
+                            bound_turn_id: None,
+                            root_session_id: id.clone(),
+                            target: MessageTarget::NextTurn,
+                            wake_required: true,
+                        },
+                    )
+                    .unwrap(),
+                    AgentControlRecord::new(
+                        2,
+                        2,
+                        Body::MessageDiscarded {
+                            message_id: message.message_id.clone(),
+                            reason: MessageDiscardReason::Cancelled,
+                        },
+                    )
+                    .unwrap(),
+                ],
+            }],
+            required_active_activations: vec![],
+            quiescent_descendants_of: None,
+        })
+        .await
+        .unwrap();
+    let expected = serde_json::to_string(&message).unwrap();
+    let mut restored = String::new();
+    while restored.len() < expected.len() {
+        let page = read_message(&store, &id, &message.message_id, 1, restored.len())
+            .await
+            .unwrap();
+        assert_eq!(page["through_seq"], 1);
+        assert_eq!(page["total_bytes"], expected.len());
+        assert_eq!(page["offset"], restored.len());
+        restored.push_str(page["json"].as_str().unwrap());
+        assert_eq!(page["next_offset"], restored.len());
+    }
+    assert_eq!(restored, expected);
+    for seq in [0, 2, 3] {
+        assert!(
+            read_message(&store, &id, &message.message_id, seq, 0)
+                .await
+                .is_err()
+        );
+    }
+    assert!(
+        read_message(&store, &id, &MessageId::new("missing").unwrap(), 1, 0)
+            .await
+            .is_err()
+    );
+    for offset in [expected.find('界').unwrap() + 1, expected.len(), usize::MAX] {
+        assert!(
+            read_message(&store, &id, &message.message_id, 1, offset)
+                .await
+                .is_err()
+        );
+    }
+}
+
+#[tokio::test]
+async fn stored_attempt_reads_require_the_exact_fact_and_preserve_unicode() {
+    use rsi_agent_session_protocol::{
+        EffectId, ModelAttemptLog, ModelEventPurpose, SessionFact, SessionFactBody, TurnId,
+    };
+    let store = rsi_agent_testkit::MemoryStore::default();
+    let header = metadata_header("stored-attempt");
+    let id = header.session_id().clone();
+    let events = [
+        (
+            0,
+            json!({"type":"content_started","index":0,"content":{"type":"text"}}),
+        ),
+        (
+            7,
+            json!({"type":"content_delta","index":0,"delta":{"type":"text","value":"中文".repeat(35_000)}}),
+        ),
+        (11, json!({"type":"content_finished","index":0})),
+        (13, json!({"type":"finished","reason":"stop","replay":null})),
+    ];
+    let fact = Arc::new(
+        SessionFact::new(
+            2,
+            10,
+            SessionFactBody::ModelAttemptSettled {
+                turn_id: TurnId::new("turn").unwrap(),
+                effect_id: EffectId::new("model").unwrap(),
+                attempt: ModelAttemptLog::from_events(
+                    events
+                        .into_iter()
+                        .map(|(time, event)| (time, serde_json::from_value(event).unwrap())),
+                    true,
+                )
+                .unwrap(),
+                purpose: ModelEventPurpose::Conversation,
+            },
+        )
+        .unwrap(),
+    );
+    store
+        .append(rsi_agent_store_protocol::AppendBatch {
+            session_id: id.clone(),
+            expected_seq: 0,
+            header: Some(header),
+            facts: vec![
+                Arc::new(
+                    SessionFact::new(
+                        1,
+                        1,
+                        SessionFactBody::TurnAccepted {
+                            turn_id: TurnId::new("turn").unwrap(),
+                            text: "input".into(),
+                            model: None,
+                            reasoning_effort: None,
+                            sandbox: rsi_sandbox::SandboxMode::WorkspaceWrite,
+                            require_approval: false,
+                        },
+                    )
+                    .unwrap(),
+                ),
+                fact.clone(),
+                Arc::new(
+                    SessionFact::new(
+                        3,
+                        11,
+                        SessionFactBody::CancelRequested {
+                            turn_id: TurnId::new("turn").unwrap(),
+                            reason: None,
+                        },
+                    )
+                    .unwrap(),
+                ),
+            ],
+        })
+        .await
+        .unwrap();
+    let expected = rsi_extension_agent::project_model_attempt(&fact, 1).unwrap();
+    let mut restored = String::new();
+    while restored.len() < expected.len() {
+        let page = read_attempt(&store, &id, 1, restored.len()).await.unwrap();
+        assert_eq!(page["through_seq"], 2);
+        assert_eq!(page["total_bytes"], expected.len());
+        restored.push_str(page["json"].as_str().unwrap());
+        assert_eq!(page["next_offset"], restored.len());
+    }
+    assert_eq!(restored, expected);
+    for after in [0, 2, 3, u64::MAX] {
+        assert!(read_attempt(&store, &id, after, 0).await.is_err());
+    }
+    assert!(
+        read_attempt(&store, &id, 1, expected.find('中').unwrap() + 1)
+            .await
+            .is_err()
+    );
+}
+
+#[tokio::test]
 async fn fact_pages_bound_the_captured_horizon_and_read_large_records_alone() {
     use rsi_agent_session_protocol::{
         AgentPresetId, FrozenAgentSettings, SessionFact, SessionFactBody, SessionHeader, TurnId,
