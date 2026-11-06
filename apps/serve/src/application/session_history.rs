@@ -1,10 +1,10 @@
 use super::Sessions;
 use futures_util::StreamExt;
-use rsi_agent_session_protocol::SessionId;
+use rsi_agent_session_protocol::{SessionHeader, SessionId};
 use rsi_agent_store_protocol::{SessionStore, StoreError};
 use rsi_agent_turn_protocol::{ObservationCursor, SessionObservation};
 use rsi_extension::{Error, Result};
-use rsi_session_protocol::SessionHandle;
+use rsi_session_protocol::{SessionHandle, SessionService};
 use serde::Deserialize;
 use serde_json::{Value, json};
 
@@ -93,26 +93,37 @@ impl Sessions {
             Err(_) => return Err(Error::Remote("Session unavailable to caller".into())),
         };
         if let Some(parent) = parent {
-            service
-                .read_header(parent)
-                .await
-                .map_err(|_| Error::Remote("Parent unavailable to caller".into()))?;
             let header = handle.header().await.map_err(|error| remote(&error))?;
-            if header
-                .fork_origin()
-                .map(|fork| &fork.history.parent_session_id)
-                != Some(parent)
-            {
-                return Err(Error::Remote(
-                    "Session address does not identify a direct child".into(),
-                ));
-            }
+            check_parent(service.as_ref(), &header, parent).await?;
         }
         Ok(Some(handle))
     }
 
     pub(super) async fn history(&self, payload: Value) -> Result<Value> {
         let input: HistoryRead = serde_json::from_value(payload).map_err(|_| Error::Protocol)?;
+        if matches!(
+            input.operation,
+            Operation::Open {
+                metadata_only: true
+            }
+        ) {
+            let origin = self
+                .routes
+                .caller(&input.request)
+                .map_err(|_| Error::Cancelled)?;
+            let service = self.ingress.scoped(origin);
+            let result = metadata_snapshot(
+                service.as_ref(),
+                self.store.as_ref(),
+                &input.session_id,
+                input.parent_session_id.as_ref(),
+            )
+            .await?;
+            self.routes
+                .caller(&input.request)
+                .map_err(|_| Error::Cancelled)?;
+            return Ok(result);
+        }
         let Some(handle) = self
             .find_handle(
                 &input.request,
@@ -145,10 +156,7 @@ impl Sessions {
                     .release_resource(&input.request, &resource_key("seed", &key)?);
                 Value::Null
             }
-            Operation::Open { metadata_only } => {
-                self.opening_snapshot(handle.as_ref(), metadata_only)
-                    .await?
-            }
+            Operation::Open { .. } => self.opening_snapshot(handle.as_ref()).await?,
             Operation::Controls {
                 after_seq,
                 through_seq,
@@ -209,29 +217,8 @@ impl Sessions {
         Ok(result)
     }
 
-    async fn opening_snapshot(
-        &self,
-        handle: &dyn SessionHandle,
-        metadata_only: bool,
-    ) -> Result<Value> {
+    async fn opening_snapshot(&self, handle: &dyn SessionHandle) -> Result<Value> {
         let header = handle.header().await.map_err(|error| remote(&error))?;
-        if metadata_only {
-            let rows = self
-                .store
-                .session_activity_summaries(std::slice::from_ref(header.session_id()))
-                .await
-                .map_err(|_| Error::Remote("Session metadata unavailable".into()))?;
-            return match rows.as_slice() {
-                [Some(row)]
-                    if row.session_id == *header.session_id()
-                        && row.created_at_ms == header.created_at_ms() =>
-                {
-                    Ok(stored_snapshot(&header, row))
-                }
-                [None] => Ok(Value::Null),
-                _ => Err(Error::Remote("Session catalog changed during read".into())),
-            };
-        }
         let (selection, cursor) = current_selection(handle, &header).await?;
         let through = match cursor {
             rsi_agent_session_protocol::ProjectionCursor::Durable { fact_seq, .. } => fact_seq,
@@ -244,6 +231,60 @@ impl Sessions {
         metadata["model_baseline"] = json!({"model":header.settings().default_model(),
         "reasoning_effort":header.settings().default_reasoning_effort()});
         Ok(metadata)
+    }
+}
+
+async fn check_parent(
+    service: &dyn SessionService,
+    header: &SessionHeader,
+    parent: &SessionId,
+) -> Result<()> {
+    service
+        .read_header(parent)
+        .await
+        .map_err(|_| Error::Remote("Parent unavailable to caller".into()))?;
+    if header
+        .fork_origin()
+        .map(|fork| &fork.history.parent_session_id)
+        != Some(parent)
+    {
+        return Err(Error::Remote(
+            "Session address does not identify a direct child".into(),
+        ));
+    }
+    Ok(())
+}
+
+async fn metadata_snapshot(
+    service: &dyn SessionService,
+    store: &dyn SessionStore,
+    session: &SessionId,
+    parent: Option<&SessionId>,
+) -> Result<Value> {
+    let header = match service.read_header(session).await {
+        Ok(header) => header,
+        Err(
+            rsi_session_protocol::SessionError::NotFound(_)
+            | rsi_session_protocol::SessionError::Api(rsi_api_protocol::ApiError::Unauthorized),
+        ) => return Ok(Value::Null),
+        Err(_) => return Err(Error::Remote("Session unavailable to caller".into())),
+    };
+    if let Some(parent) = parent {
+        check_parent(service, &header, parent).await?;
+    }
+    let rows = store
+        .session_activity_summaries(std::slice::from_ref(header.session_id()))
+        .await
+        .map_err(|_| Error::Remote("Session metadata unavailable".into()))?;
+    match rows.as_slice() {
+        [Some(row)]
+            if row.session_id == *header.session_id()
+                && row.created_at_ms == header.created_at_ms() =>
+        {
+            Ok(stored_snapshot(&header, row))
+        }
+        [None] => Ok(Value::Null),
+        _ => Err(Error::Remote("Session catalog changed during read".into())),
     }
 }
 
@@ -435,132 +476,4 @@ async fn wait(
 }
 
 #[cfg(test)]
-mod tests {
-    use super::*;
-
-    #[tokio::test]
-    async fn fact_pages_bound_the_captured_horizon_and_read_large_records_alone() {
-        use rsi_agent_session_protocol::{
-            AgentPresetId, FrozenAgentSettings, SessionFact, SessionFactBody, SessionHeader, TurnId,
-        };
-        use rsi_agent_store_protocol::AppendBatch;
-        use rsi_agent_testkit::MemoryStore;
-        use rsi_ai_protocol::ModelRef;
-        use rsi_sandbox::SandboxMode;
-        use std::sync::Arc;
-
-        let store = MemoryStore::default();
-        let id = SessionId::new("page-test").unwrap();
-        let turn = TurnId::new("turn").unwrap();
-        let header = SessionHeader::new_local(
-            id.clone(),
-            1,
-            "/workspace",
-            AgentPresetId::new("test").unwrap(),
-            FrozenAgentSettings::new(
-                "default",
-                "system",
-                ModelRef::new("test", "test").unwrap(),
-                SandboxMode::WorkspaceWrite,
-                false,
-            )
-            .unwrap(),
-        )
-        .unwrap();
-        let facts: Vec<_> = (1..=600)
-            .map(|seq| {
-                Arc::new(
-                    SessionFact::new(
-                        seq,
-                        seq,
-                        if seq == 1 {
-                            SessionFactBody::TurnAccepted {
-                                turn_id: turn.clone(),
-                                text: "history".repeat(24_000),
-                                model: None,
-                                reasoning_effort: None,
-                                sandbox: SandboxMode::WorkspaceWrite,
-                                require_approval: false,
-                            }
-                        } else {
-                            SessionFactBody::CancelRequested {
-                                turn_id: turn.clone(),
-                                reason: None,
-                            }
-                        },
-                    )
-                    .unwrap(),
-                )
-            })
-            .collect();
-        for (index, chunk) in facts.chunks(64).enumerate() {
-            store
-                .append(AppendBatch {
-                    session_id: id.clone(),
-                    expected_seq: (index * 64) as u64,
-                    header: (index == 0).then(|| header.clone()),
-                    facts: chunk.to_vec(),
-                })
-                .await
-                .unwrap();
-        }
-        let large = read_facts(&store, &id, 0, 600, 0).await.unwrap();
-        assert_eq!(large["through_seq"], 1);
-        assert_eq!(large["next_offset"], 128 * 1024);
-        let tail = read_facts(&store, &id, 0, 600, 128 * 1024).await.unwrap();
-        assert_eq!(tail["through_seq"], 1);
-        assert_eq!(large["total_bytes"], tail["total_bytes"]);
-        let encoded = format!(
-            "{}{}",
-            large["json"].as_str().unwrap(),
-            tail["json"].as_str().unwrap()
-        );
-        assert_eq!(
-            serde_json::from_str::<Vec<SessionFact>>(&encoded).unwrap(),
-            vec![facts[0].as_ref().clone()]
-        );
-        let cut = read_facts(&store, &id, 1, 10, 0).await.unwrap();
-        let page: Vec<SessionFact> = serde_json::from_str(cut["json"].as_str().unwrap()).unwrap();
-        assert_eq!(page.len(), 9);
-        assert_eq!(page.first().unwrap().seq(), 2);
-        assert_eq!(cut["through_seq"], 10);
-        let capped = read_facts(&store, &id, 1, 600, 0).await.unwrap();
-        assert_eq!(capped["through_seq"], 513);
-        assert!(read_facts(&store, &id, 10, 10, 0).await.is_err());
-        assert!(read_facts(&store, &id, 11, 10, 0).await.is_err());
-        assert!(read_facts(&store, &id, 1, 601, 0).await.is_err());
-    }
-
-    #[test]
-    fn model_projection_retains_effort_absence_and_does_not_default_a_failed_producer() {
-        use rsi_agent_session_protocol::{ContributionId, ProjectionEntry, ProjectionValue};
-        let producer = ContributionId::new(rsi_agent_model_selection::VIEW).unwrap();
-        assert!(projected_selection(&[]).unwrap().is_none());
-        let selection = json!({"model":{"deployment":"native","model":"selected"}});
-        let row = ProjectionEntry::value(
-            producer.clone(),
-            ProjectionValue::encode(&selection).unwrap(),
-        );
-        let parsed = projected_selection(&[row]).unwrap().unwrap();
-        assert_eq!(parsed.model.model(), "selected");
-        assert!(parsed.reasoning_effort.is_none());
-        let failed = ProjectionEntry::failed(producer, "state unavailable").unwrap();
-        assert!(
-            matches!(projected_selection(&[failed]), Err(Error::Remote(message)) if message == "state unavailable")
-        );
-    }
-
-    #[test]
-    fn history_fragments_preserve_multibyte_text_and_reject_invalid_offsets() {
-        let prefix = "x".repeat(128 * 1024 - 1);
-        let data = format!("{prefix}历史");
-        let first = fragment(&data, 0, 7).unwrap();
-        assert_eq!(first["json"], prefix);
-        let next = prefix.len();
-        let last = fragment(&data, next, 7).unwrap();
-        assert_eq!(last["json"], "历史");
-        assert_eq!(last["next_offset"], data.len());
-        assert!(fragment(&data, next + 1, 7).is_err());
-        assert!(fragment(&data, data.len(), 7).is_err());
-    }
-}
+mod tests;

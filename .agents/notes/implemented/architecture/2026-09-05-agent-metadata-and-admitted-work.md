@@ -24,6 +24,14 @@ lineage and activity, with mechanical proofs for uncached descendants in that
 same snapshot. Quiescence checks every strict descendant after applying all
 appends, before committing; newly obtained proofs are cached only after commit.
 
+The [Serve application history contract](../../../../apps/serve/README.md)
+uses the existing authorized Header read for metadata-only requests. Attaching a
+Session merely to return its stored cursor would register runtime activity and
+allocate handle services and watch state. DSH's JSONL persistence separates
+`stat()` from `open()` for the same reason: observation does not need a live log
+handle. RSI keeps its location authorization, direct-parent check and request
+retirement boundary, without adding another metadata cache or durable index.
+
 The [Kernel contract](../../../../crates/rsi-agent/kernel/README.md) gives
 accepted Agent mutations an owned commit task and a move-only source lease.
 Source release closes new admission and defers claim retirement until accepted
