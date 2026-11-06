@@ -40,35 +40,17 @@ pub(super) fn initialize_or_validate_schema(
         transaction.execute_batch(&schema).map_err(sql_error)?;
         transaction.commit().map_err(sql_error)?;
         version = AGENT_STORE_SCHEMA_VERSION;
-    } else if version != AGENT_STORE_SCHEMA_VERSION && version != 44 {
+    } else if version != AGENT_STORE_SCHEMA_VERSION {
         return Err(StoreError::SchemaMismatch {
             expected: AGENT_STORE_SCHEMA_VERSION,
             actual: version,
         });
     }
-    validate_version_shape(connection, version)?;
+    validate_schema_shape(connection)?;
     Ok(version)
 }
 
 pub(super) fn validate_schema_shape(connection: &Connection) -> Result<()> {
-    validate_version_shape(connection, AGENT_STORE_SCHEMA_VERSION)
-}
-
-/// The exclusive Store lease covers the exact schema-44 preflight and this transaction.
-pub(super) fn remove_mailbox_body_copy(connection: &mut Connection) -> Result<()> {
-    let transaction = connection
-        .transaction_with_behavior(TransactionBehavior::Immediate)
-        .map_err(sql_error)?;
-    transaction
-        .execute_batch("ALTER TABLE agent_messages DROP COLUMN message_json")
-        .map_err(sql_error)?;
-    transaction
-        .pragma_update(None, "user_version", AGENT_STORE_SCHEMA_VERSION)
-        .map_err(sql_error)?;
-    transaction.commit().map_err(sql_error)
-}
-
-fn validate_version_shape(connection: &Connection, version: u32) -> Result<()> {
     let expected = EXPECTED_TABLES
         .iter()
         .map(|(name, _)| (*name).to_owned())
@@ -80,16 +62,7 @@ fn validate_version_shape(connection: &Connection, version: u32) -> Result<()> {
         ));
     }
     for (table, current_sql) in EXPECTED_TABLES {
-        let previous;
-        let expected_sql = if version == 44 && table == "agent_messages" {
-            previous = current_sql.replace(
-                "message_source TEXT NOT NULL,",
-                "message_source TEXT NOT NULL,\n            message_json TEXT NOT NULL,",
-            );
-            previous.as_str()
-        } else {
-            current_sql
-        };
+        let expected_sql = current_sql;
         let observed_sql = connection
             .query_row(
                 "SELECT sql FROM sqlite_master WHERE type = 'table' AND name = ?1",
@@ -1170,12 +1143,7 @@ pub(super) fn validate_canonical_fact_prefix(
     let mut digest = EMPTY_FACT_PREFIX_DIGEST;
     let mut next_sequence = 1_u64;
     let mut statement = connection
-        .prepare(
-            "SELECT seq, turn_id, fact_kind, length(CAST(fact_json AS BLOB)),
-                    CASE WHEN length(CAST(fact_json AS BLOB)) <= ?2
-                         THEN fact_json END
-             FROM facts WHERE session_id = ?1 ORDER BY seq",
-        )
+        .prepare(fact_rows!("?2", "WHERE f.session_id = ?1 ORDER BY f.seq"))
         .map_err(sql_error)?;
     let mut rows = statement
         .query(params![
@@ -1186,25 +1154,10 @@ pub(super) fn validate_canonical_fact_prefix(
         .map_err(sql_error)?;
     while let Some(row) = rows.next().map_err(sql_error)? {
         observer.checkpoint()?;
-        let sequence = decode_u64("Fact sequence", row.get::<_, i64>(0).map_err(sql_error)?)?;
-        let turn_id = bounded_text(row, 1, 256).map_err(sql_error)?;
-        let fact_kind = bounded_text(row, 2, 8).map_err(sql_error)?;
-        let (fact, encoded): (SessionFact, _) = super::cas::decode_projected_json_with_source(
-            "session Fact",
-            (
-                row.get::<_, i64>(3).map_err(sql_error)?,
-                row.get::<_, Option<String>>(4).map_err(sql_error)?,
-            ),
-            MAXIMUM_SESSION_FACT_BYTES,
-        )?;
-        if sequence != next_sequence || fact.seq() != sequence {
+        let (fact, encoded) = super::fact_storage::decode(row)?;
+        if fact.seq() != next_sequence {
             return Err(StoreError::Corrupt(
-                "session Fact JSON sequence differs from its contiguous durable row".into(),
-            ));
-        }
-        if fact.body().turn_id().as_str() != turn_id || fact_index_kind(fact.body()) != fact_kind {
-            return Err(StoreError::Corrupt(
-                "session Fact JSON differs from its durable turn index columns".into(),
+                "session Fact sequence differs from its contiguous durable row".into(),
             ));
         }
         observer.fact(session_id, &fact, &encoded)?;

@@ -93,7 +93,7 @@ async fn mailbox_claim_checks_the_append_without_rereading_its_fact() {
     );
 }
 
-fn claim_append(
+pub(super) fn claim_append(
     session_id: &SessionId,
     message: &AgentMessage,
     claimed_fact_seq: u64,
@@ -168,7 +168,10 @@ fn claim_append(
     }
 }
 
-fn accepted_append(header: SessionHeader, message: &AgentMessage) -> AtomicSessionAppend {
+pub(super) fn accepted_append(
+    header: SessionHeader,
+    message: &AgentMessage,
+) -> AtomicSessionAppend {
     let session_id = header.session_id().clone();
     AtomicSessionAppend {
         session_id: session_id.clone(),

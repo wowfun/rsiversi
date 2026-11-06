@@ -203,6 +203,9 @@ const EXPECTED_TABLES: [(&str, &str); 22] = [
             fact_kind TEXT NOT NULL
                 CHECK (fact_kind IN ('accepted', 'terminal', 'event')),
             fact_json TEXT NOT NULL,
+            acceptance_control_seq INTEGER CHECK (acceptance_control_seq > 0),
+            logical_bytes INTEGER CHECK (logical_bytes > 0),
+            CHECK ((acceptance_control_seq IS NULL) = (logical_bytes IS NULL)),
             PRIMARY KEY (session_id, seq)
          ) STRICT",
     ),
@@ -725,8 +728,8 @@ impl SqliteStore {
             )
             .map_err(sql_error)?;
             configure_reader(&reader)?;
-            let version = initialize_or_validate_schema(&mut reader, false)?;
-            Some((reader, version))
+            initialize_or_validate_schema(&mut reader, false)?;
+            Some(reader)
         };
         prepare_owned_directory(&cas_dir, "CAS directory")?;
         prepare_cas_staging_directory(&cas_staging_dir)?;
@@ -736,12 +739,10 @@ impl SqliteStore {
         )
         .map_err(sql_error)?;
         configure_writer(&writer_connection)?;
-        if matches!(validated_reader, Some((_, 44))) {
-            validation::remove_mailbox_body_copy(&mut writer_connection)?;
-        } else if may_initialize {
+        if may_initialize {
             initialize_or_validate_schema(&mut writer_connection, true)?;
         }
-        let reader_connection = if let Some((reader, _)) = validated_reader {
+        let reader_connection = if let Some(reader) = validated_reader {
             reader
         } else {
             let reader = Connection::open_with_flags(
@@ -1126,6 +1127,8 @@ impl SqliteStore {
     }
 }
 
+#[macro_use]
+mod fact_storage;
 mod activity;
 mod maintenance;
 mod offline_maintenance;

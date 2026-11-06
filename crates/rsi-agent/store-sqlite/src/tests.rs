@@ -27,6 +27,12 @@ mod admission;
 #[path = "tests/claim_admission.rs"]
 mod claim_admission;
 #[cfg(any(unix, windows))]
+#[path = "tests/claim_storage.rs"]
+mod claim_storage;
+#[cfg(any(unix, windows))]
+#[path = "tests/claim_storage_bench.rs"]
+mod claim_storage_bench;
+#[cfg(any(unix, windows))]
 #[path = "tests/maintenance.rs"]
 mod maintenance;
 
@@ -275,10 +281,6 @@ mod selection_work;
 #[path = "tests/ready_metadata.rs"]
 #[cfg(any(unix, windows))]
 mod ready_metadata;
-
-#[path = "tests/mailbox_migration_live.rs"]
-#[cfg(any(unix, windows))]
-mod mailbox_migration_live;
 
 #[tokio::test]
 #[cfg(unix)]

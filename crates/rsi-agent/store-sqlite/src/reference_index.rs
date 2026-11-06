@@ -123,6 +123,13 @@ impl<'a> Writer<'a> {
     pub(super) fn fact(&self, fact: &SessionFact) -> Result<String> {
         self.encode("fact", fact.seq(), fact, fact_references(fact))
     }
+    pub(super) fn fact_encoding(
+        &self,
+        fact: &SessionFact,
+        physical: &impl Serialize,
+    ) -> Result<String> {
+        self.encode("fact", fact.seq(), physical, fact_references(fact))
+    }
     pub(super) fn control(&self, control: &AgentControlRecord) -> Result<String> {
         self.encode(
             "control",
@@ -319,13 +326,6 @@ pub(super) fn validate_retiring_operation(
             rsi_agent_session_protocol::MAXIMUM_SESSION_HEADER_BYTES,
         ),
         (
-            "facts",
-            "fact",
-            "fact_json",
-            "seq",
-            rsi_agent_session_protocol::MAXIMUM_SESSION_FACT_BYTES,
-        ),
-        (
             "agent_controls",
             "control",
             "control_json",
@@ -344,6 +344,22 @@ pub(super) fn validate_retiring_operation(
             )?;
             let encoded = bounded_text(row, 2, maximum).map_err(sql_error)?;
             verify_encoded(connection, codecs, &id, stream, seq, &encoded)?;
+            records += 1;
+        }
+    }
+    {
+        let mut statement = connection.prepare(fact_rows!("?2", "WHERE f.session_id IN (SELECT session_id FROM session_tombstones WHERE state='retiring' AND (?1 IS NULL OR operation_id=?1)) ORDER BY f.session_id,f.seq")).map_err(sql_error)?;
+        let mut rows = statement
+            .query(params![
+                operation,
+                i64::try_from(super::MAXIMUM_SESSION_FACT_BYTES).expect("bounded Fact length")
+            ])
+            .map_err(sql_error)?;
+        while let Some(row) = rows.next().map_err(sql_error)? {
+            let id = SessionId::new(bounded_text(row, 9, 256).map_err(sql_error)?)
+                .map_err(|error| StoreError::Corrupt(error.to_string()))?;
+            let (fact, encoded) = super::fact_storage::decode(row)?;
+            verify_fact(connection, &id, &fact, &encoded)?;
             records += 1;
         }
     }
@@ -376,32 +392,37 @@ pub(super) fn verify_encoded(
     seq: u64,
     encoded: &str,
 ) -> Result<()> {
-    let refs = match stream {
-        "header" => {
-            let value: SessionHeader =
-                serde_json::from_str(encoded).map_err(|e| StoreError::Corrupt(e.to_string()))?;
-            header_references(&value)?
+    let refs = if stream == "header" {
+        let value: SessionHeader =
+            serde_json::from_str(encoded).map_err(|e| StoreError::Corrupt(e.to_string()))?;
+        header_references(&value)?
+    } else {
+        let value: AgentControlRecord =
+            serde_json::from_str(encoded).map_err(|e| StoreError::Corrupt(e.to_string()))?;
+        if value.seq() != seq {
+            return Err(StoreError::Corrupt(
+                "retiring control sequence differs".into(),
+            ));
         }
-        "fact" => {
-            let value: SessionFact =
-                serde_json::from_str(encoded).map_err(|e| StoreError::Corrupt(e.to_string()))?;
-            if value.seq() != seq {
-                return Err(StoreError::Corrupt("retiring Fact sequence differs".into()));
-            }
-            fact_references(&value)?
-        }
-        _ => {
-            let value: AgentControlRecord =
-                serde_json::from_str(encoded).map_err(|e| StoreError::Corrupt(e.to_string()))?;
-            if value.seq() != seq {
-                return Err(StoreError::Corrupt(
-                    "retiring control sequence differs".into(),
-                ));
-            }
-            control_references(&value, codecs)?
-        }
+        control_references(&value, codecs)?
     };
     verify(connection, id, stream, seq, &digest(encoded), &refs)
+}
+
+pub(super) fn verify_fact(
+    connection: &Connection,
+    id: &SessionId,
+    fact: &SessionFact,
+    encoded: &str,
+) -> Result<()> {
+    verify(
+        connection,
+        id,
+        "fact",
+        fact.seq(),
+        &digest(encoded),
+        &fact_references(fact)?,
+    )
 }
 
 struct Rebuilder<'a> {

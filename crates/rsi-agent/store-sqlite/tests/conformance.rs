@@ -1762,7 +1762,16 @@ fn verify_refuses_a_snapshot_with_an_uncheckpointed_wal() {
 
 #[test]
 fn unsupported_or_incomplete_schema_is_rejected_before_any_write() {
-    for (version, partial) in [(44, false), (43, false), (42, false), (2, false), (0, true)] {
+    let current = rsi_agent_store_protocol::AGENT_STORE_SCHEMA_VERSION;
+    for (version, partial) in [
+        (current, false),
+        (45, false),
+        (44, false),
+        (43, false),
+        (42, false),
+        (2, false),
+        (0, true),
+    ] {
         let root = tempfile::tempdir().unwrap();
         let connection = Connection::open(root.path().join("sessions.sqlite3")).unwrap();
         if partial {
@@ -1784,7 +1793,7 @@ fn unsupported_or_incomplete_schema_is_rejected_before_any_write() {
         )
         .unwrap();
         let result = SqliteStore::open(root.path());
-        if version == 44 {
+        if version == current {
             assert!(matches!(result, Err(StoreError::Corrupt(_))));
         } else {
             assert!(

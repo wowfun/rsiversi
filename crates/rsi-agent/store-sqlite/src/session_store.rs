@@ -546,11 +546,7 @@ impl SessionStore for SqliteStore {
                 let page = {
                     let mut statement = transaction
                         .prepare(
-                            "SELECT length(CAST(fact_json AS BLOB)),
-                            CASE WHEN length(CAST(fact_json AS BLOB)) <= ?4
-                                 THEN fact_json END
-                     FROM facts
-                     WHERE session_id = ?1 AND seq > ?2 ORDER BY seq LIMIT ?3",
+                            fact_rows!("?4", "WHERE f.session_id = ?1 AND f.seq > ?2 ORDER BY f.seq LIMIT ?3"),
                         )
                         .map_err(sql_error)?;
                     let mut rows = statement
@@ -567,15 +563,7 @@ impl SessionStore for SqliteStore {
                     let mut facts = Vec::new();
                     let mut encoded_bytes = 0_usize;
                     while let Some(row) = rows.next().map_err(sql_error)? {
-                        let encoded_len = usize::try_from(row.get::<_, i64>(0).map_err(sql_error)?)
-                            .map_err(|_| {
-                                StoreError::Corrupt("negative session Fact length".into())
-                            })?;
-                        if encoded_len > MAXIMUM_SESSION_FACT_BYTES {
-                            return Err(StoreError::Corrupt(
-                                "session Fact exceeds its byte bound".into(),
-                            ));
-                        }
+                        let encoded_len = super::fact_storage::logical_len(row)?;
                         let projected = encoded_bytes
                             .checked_add(encoded_len)
                             .ok_or_else(|| StoreError::Corrupt("Fact page size overflow".into()))?;
@@ -584,16 +572,7 @@ impl SessionStore for SqliteStore {
                         }
                         #[cfg(any(test, feature = "test-support"))]
                         materializations.fetch_add(1, Ordering::Relaxed);
-                        let projection = (
-                            i64::try_from(encoded_len)
-                                .expect("bounded Fact length fits SQLite INTEGER"),
-                            row.get::<_, Option<String>>(1).map_err(sql_error)?,
-                        );
-                        let fact: SessionFact = decode_projected_json(
-                            "session Fact",
-                            projection,
-                            MAXIMUM_SESSION_FACT_BYTES,
-                        )?;
+                        let fact = super::fact_storage::decode(row)?.0;
                         encoded_bytes = projected;
                         facts.push(fact);
                     }
@@ -765,12 +744,8 @@ impl SessionStore for SqliteStore {
             let page = {
                 let mut statement = transaction
                     .prepare(
-                        "SELECT length(CAST(fact_json AS BLOB)),
-                                CASE WHEN length(CAST(fact_json AS BLOB)) <= ?4
-                                     THEN fact_json END
-                         FROM facts
-                         WHERE session_id = ?1 AND seq < ?2
-                         ORDER BY seq DESC LIMIT ?3",
+                        fact_rows!("?4", "WHERE f.session_id = ?1 AND f.seq < ?2
+                         ORDER BY f.seq DESC LIMIT ?3"),
                     )
                     .map_err(sql_error)?;
                 let mut rows = statement
@@ -787,13 +762,7 @@ impl SessionStore for SqliteStore {
                 let mut facts = Vec::new();
                 let mut encoded_bytes = 0_usize;
                 while let Some(row) = rows.next().map_err(sql_error)? {
-                    let encoded_len = usize::try_from(row.get::<_, i64>(0).map_err(sql_error)?)
-                        .map_err(|_| StoreError::Corrupt("negative session Fact length".into()))?;
-                    if encoded_len > MAXIMUM_SESSION_FACT_BYTES {
-                        return Err(StoreError::Corrupt(
-                            "session Fact exceeds its byte bound".into(),
-                        ));
-                    }
+                    let encoded_len = super::fact_storage::logical_len(row)?;
                     let projected = encoded_bytes
                         .checked_add(encoded_len)
                         .ok_or_else(|| StoreError::Corrupt("Fact page size overflow".into()))?;
@@ -802,15 +771,7 @@ impl SessionStore for SqliteStore {
                     }
                     #[cfg(any(test, feature = "test-support"))]
                     materializations.fetch_add(1, Ordering::Relaxed);
-                    let fact: SessionFact = decode_projected_json(
-                        "session Fact",
-                        (
-                            i64::try_from(encoded_len)
-                                .expect("bounded Fact length fits SQLite INTEGER"),
-                            row.get::<_, Option<String>>(1).map_err(sql_error)?,
-                        ),
-                        MAXIMUM_SESSION_FACT_BYTES,
-                    )?;
+                    let fact = super::fact_storage::decode(row)?.0;
                     encoded_bytes = projected;
                     facts.push(fact);
                 }
@@ -884,12 +845,8 @@ impl SessionStore for SqliteStore {
             let page = {
                 let mut statement = transaction
                     .prepare(
-                        "SELECT length(CAST(fact_json AS BLOB)),
-                            CASE WHEN length(CAST(fact_json AS BLOB)) <= ?5
-                                 THEN fact_json END
-                     FROM facts
-                     WHERE session_id = ?1 AND turn_id = ?2 AND seq > ?3
-                     ORDER BY seq LIMIT ?4",
+                        fact_rows!("?5", "WHERE f.session_id = ?1 AND f.turn_id = ?2 AND f.seq > ?3
+                     ORDER BY f.seq LIMIT ?4"),
                     )
                     .map_err(sql_error)?;
                 let mut rows = statement
@@ -906,13 +863,7 @@ impl SessionStore for SqliteStore {
                 let mut encoded_bytes = 0_usize;
                 let mut has_more = false;
                 while let Some(row) = rows.next().map_err(sql_error)? {
-                    let encoded_len = usize::try_from(row.get::<_, i64>(0).map_err(sql_error)?)
-                        .map_err(|_| StoreError::Corrupt("negative session Fact length".into()))?;
-                    if encoded_len > MAXIMUM_SESSION_FACT_BYTES {
-                        return Err(StoreError::Corrupt(
-                            "session Fact exceeds its byte bound".into(),
-                        ));
-                    }
+                    let encoded_len = super::fact_storage::logical_len(row)?;
                     let projected = encoded_bytes
                         .checked_add(encoded_len)
                         .ok_or_else(|| StoreError::Corrupt("Fact page size overflow".into()))?;
@@ -926,16 +877,7 @@ impl SessionStore for SqliteStore {
                     }
                     #[cfg(any(test, feature = "test-support"))]
                     materializations.fetch_add(1, Ordering::Relaxed);
-                    let projection = (
-                        i64::try_from(encoded_len)
-                            .expect("bounded Fact length fits SQLite INTEGER"),
-                        row.get::<_, Option<String>>(1).map_err(sql_error)?,
-                    );
-                    let fact: SessionFact = decode_projected_json(
-                        "session Fact",
-                        projection,
-                        MAXIMUM_SESSION_FACT_BYTES,
-                    )?;
+                    let fact = super::fact_storage::decode(row)?.0;
                     encoded_bytes = projected;
                     facts.push(fact);
                 }

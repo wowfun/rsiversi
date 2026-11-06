@@ -61,9 +61,11 @@ Mailbox bodies come from their canonical acceptance controls through one indexed
 join. The mailbox table retains routing and lifecycle projections, not another
 encoded message. The decoder moves the validated message out of its control and
 counts compact JSON bytes without allocating another encoded copy. Metadata-only
-queue reads still avoid bodies. Exact schema-44 admission removes its redundant
-body column transactionally before exposing the current Store; canonical bytes
-remain unchanged.
+queue reads still avoid bodies. Queued claim bodies use the same acceptance
+owner, with their physical encoding kept inside the Store. The
+[Store contract](../../../../crates/rsi-agent/store-sqlite/README.md) owns schema
+admission and logical reconstruction; earlier encodings are rejected before a
+writer opens them.
 The Store interface also provides one exact indexed
 turn-boundary read while Kernel retains outcome interpretation.
 Atomic appends without a new Header require an existing Session and return

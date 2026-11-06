@@ -527,40 +527,49 @@ impl AgentMessage {
 
     /// Projects this message's identity and provenance into its model-visible input Fact.
     pub fn claimed_source(&self) -> InputMessageSource {
-        match &self.source {
-            AgentMessageSource::Command { source } => InputMessageSource::Command {
-                message_id: self.message_id.clone(),
-                source: source.clone(),
-            },
-            AgentMessageSource::Program { source } => InputMessageSource::Program {
-                message_id: self.message_id.clone(),
-                source: source.clone(),
-            },
-            AgentMessageSource::Continuation { source } => InputMessageSource::Continuation {
-                message_id: self.message_id.clone(),
-                source: source.clone(),
-            },
+        Self::claim_source(self.message_id.clone(), self.source.clone())
+    }
+
+    /// Moves the original provenance and content into a claimed input without cloning either.
+    pub fn into_claimed_parts(self) -> (InputMessageSource, Vec<AgentMessageContent>) {
+        (
+            Self::claim_source(self.message_id, self.source),
+            self.content,
+        )
+    }
+
+    fn claim_source(message_id: MessageId, source: AgentMessageSource) -> InputMessageSource {
+        match source {
+            AgentMessageSource::Command { source } => {
+                InputMessageSource::Command { message_id, source }
+            }
+            AgentMessageSource::Program { source } => {
+                InputMessageSource::Program { message_id, source }
+            }
+            AgentMessageSource::Continuation { source } => {
+                InputMessageSource::Continuation { message_id, source }
+            }
             AgentMessageSource::Human { attribution } => InputMessageSource::Human {
-                message_id: self.message_id.clone(),
-                attribution: attribution.clone(),
+                message_id,
+                attribution,
             },
             AgentMessageSource::Application { attribution } => InputMessageSource::Application {
-                message_id: self.message_id.clone(),
-                attribution: attribution.clone(),
+                message_id,
+                attribution,
             },
             AgentMessageSource::Agent { source_session_id } => InputMessageSource::Agent {
-                message_id: self.message_id.clone(),
-                source_session_id: source_session_id.clone(),
+                message_id,
+                source_session_id,
             },
             AgentMessageSource::Completion {
                 child_session_id,
                 activation_id,
                 outcome,
             } => InputMessageSource::Completion {
-                message_id: self.message_id.clone(),
-                child_session_id: child_session_id.clone(),
-                activation_id: activation_id.clone(),
-                outcome: outcome.clone(),
+                message_id,
+                child_session_id,
+                activation_id,
+                outcome,
             },
         }
     }

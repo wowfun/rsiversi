@@ -144,7 +144,13 @@ pub(super) fn apply_atomic_sqlite_append(
         .map_err(sql_error)
         .and_then(|digest| decode_sha256("Fact-prefix digest", &digest))?;
     for fact in &append.facts {
-        insert_fact(transaction, &append.session_id, fact, &references)?;
+        if matches!(fact.body(), SessionFactBody::InputMessageClaimed { .. }) {
+            // Claims are encoded only after their original typed bodies pass
+            // control admission. Other Fact-dependent controls can use the index.
+            update_turn_index(transaction, &append.session_id, fact)?;
+        } else {
+            insert_fact(transaction, &append.session_id, fact, &references)?;
+        }
         fact_digest = advance_fact_prefix_digest(fact_digest, fact)
             .map_err(|error| StoreError::Invalid(error.to_string()))?;
         if matches!(fact.body(), SessionFactBody::TurnTerminal { .. }) {
@@ -181,6 +187,7 @@ pub(super) fn apply_atomic_sqlite_append(
         )
         .map_err(sql_error)
         .and_then(|digest| decode_sha256("control-prefix digest", &digest))?;
+    let mut claimed_acceptances = Vec::new();
     for (index, record) in append.controls.iter().enumerate() {
         if let AgentControlRecordBody::MessageDiscarded { message_id, .. } = record.body()
             && let Some(AgentControlRecordBody::QueueMutationRecorded { receipt }) =
@@ -207,15 +214,18 @@ pub(super) fn apply_atomic_sqlite_append(
                 &append.controls[index + 2],
             )?;
         }
-        ControlIndexer {
+        if let Some(claim) = (ControlIndexer {
             transaction,
             session_id: &append.session_id,
             facts: &append.facts,
             minimum_claimed_fact_seq,
             after_fact_seq: durable_fact_seq,
             record,
+        })
+        .insert(&references)?
+        {
+            claimed_acceptances.push(claim);
         }
-        .insert(&references)?;
         control_digest = advance_control_prefix_digest(control_digest, record)
             .map_err(|error| StoreError::Invalid(error.to_string()))?;
         if let AgentControlRecordBody::TurnBoundaryRecorded {
@@ -235,6 +245,22 @@ pub(super) fn apply_atomic_sqlite_append(
                     "SQLite lost the terminal Fact/control correlation".into(),
                 ));
             }
+        }
+    }
+    claimed_acceptances.sort_unstable_by_key(|&(seq, _)| seq);
+    for fact in &append.facts {
+        if matches!(fact.body(), SessionFactBody::InputMessageClaimed { .. }) {
+            let acceptance = claimed_acceptances
+                .binary_search_by_key(&fact.seq(), |&(seq, _)| seq)
+                .ok()
+                .map(|index| claimed_acceptances[index].1);
+            insert_fact_row(
+                transaction,
+                &append.session_id,
+                fact,
+                &references,
+                acceptance,
+            )?;
         }
     }
     let durable_control_seq = append
@@ -301,7 +327,10 @@ struct ControlIndexer<'a, 'connection> {
 
 impl ControlIndexer<'_, '_> {
     #[allow(clippy::too_many_lines)] // One transaction projects the closed set of control records into mechanical indexes.
-    fn insert(&self, references: &super::reference_index::Writer<'_>) -> Result<()> {
+    fn insert(
+        &self,
+        references: &super::reference_index::Writer<'_>,
+    ) -> Result<Option<(u64, u64)>> {
         self.transaction
             .execute(
                 "INSERT INTO agent_controls (session_id, seq, control_json, fact_seq) VALUES (?1, ?2, ?3, ?4)",
@@ -380,13 +409,13 @@ impl ControlIndexer<'_, '_> {
                 turn_id,
                 step_id,
                 claimed_fact_seq,
-            } => self.insert_message_claimed(
+            } => return self.insert_message_claimed(
                 message_id,
                 activation_id,
                 turn_id,
                 step_id,
                 *claimed_fact_seq,
-            ),
+            ).map(Some),
             AgentControlRecordBody::MessageDiscarded { message_id, reason } => {
                 self.insert_message_discarded(message_id, *reason)
             }
@@ -426,7 +455,7 @@ impl ControlIndexer<'_, '_> {
                 turn_id,
                 ..
             } => self.insert_wait_resumed(activation_id, turn_id),
-        }
+        }.map(|()| None)
     }
 
     #[allow(clippy::too_many_lines)] // Canonical acceptance and its route indexes share one transaction.
@@ -601,7 +630,7 @@ impl ControlIndexer<'_, '_> {
         turn_id: &TurnId,
         step_id: &StepId,
         claimed_fact_seq: u64,
-    ) -> Result<()> {
+    ) -> Result<(u64, u64)> {
         let entry = super::validation::read_indexed_agent_message(
             self.transaction,
             self.session_id,
@@ -667,7 +696,8 @@ impl ControlIndexer<'_, '_> {
         ensure_changed(
             changed,
             "message claim disagrees with its active activation",
-        )
+        )?;
+        Ok((claimed_fact_seq, entry.accepted_control_seq))
     }
 
     fn insert_message_discarded(
@@ -1266,6 +1296,17 @@ pub(super) fn insert_fact(
     fact: &SessionFact,
     references: &super::reference_index::Writer<'_>,
 ) -> Result<()> {
+    insert_fact_row(transaction, session_id, fact, references, None)?;
+    update_turn_index(transaction, session_id, fact)
+}
+
+fn insert_fact_row(
+    transaction: &Transaction<'_>,
+    session_id: &SessionId,
+    fact: &SessionFact,
+    references: &super::reference_index::Writer<'_>,
+    acceptance: Option<u64>,
+) -> Result<()> {
     if let Some((effect, role)) = rsi_agent_store_protocol::store_fact_model_coordinate(fact.body())
     {
         let exists = transaction
@@ -1290,18 +1331,20 @@ pub(super) fn insert_fact(
     }
     transaction
         .execute(
-            "INSERT INTO facts (session_id, seq, turn_id, fact_kind, fact_json)
-             VALUES (?1, ?2, ?3, ?4, ?5)",
+            "INSERT INTO facts (session_id, seq, turn_id, fact_kind, fact_json, acceptance_control_seq, logical_bytes)
+             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7)",
             params![
                 session_id.as_str(),
                 sqlite_u64("fact sequence", fact.seq())?,
                 fact.body().turn_id().as_str(),
                 fact_index_kind(fact.body()),
-                references.fact(fact)?,
+                super::fact_storage::encode(fact, acceptance, references)?,
+                acceptance.map(|seq| sqlite_u64("claim acceptance", seq)).transpose()?,
+                acceptance.map(|_| i64::try_from(fact.encoded_len()).expect("bounded Fact length")),
             ],
         )
         .map_err(sql_error)?;
-    update_turn_index(transaction, session_id, fact)
+    Ok(())
 }
 
 pub(super) fn update_turn_index(

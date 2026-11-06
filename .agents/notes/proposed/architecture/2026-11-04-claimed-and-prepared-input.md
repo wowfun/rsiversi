@@ -102,29 +102,35 @@ replaying the original input or delaying unrelated Host operations.
 
 ### Accepted input body ownership
 
-The accepted control already owns the immutable mailbox message. Persisting its
-unchanged content again in the claim is a remaining duplication; removing the
-mailbox index's body and using references in the final preparation do not remove
-this copy. DSH also appends inbox messages into its model-visible event stream,
+The accepted control owns the immutable mailbox message. Neither the mailbox
+index nor the queued claim needs to persist that content and attribution again.
+DSH also appends inbox messages into its model-visible event stream,
 so its current JSONL representation is not itself a durable deduplication scheme.
 
-Normalize queued claim bodies at the Store boundary while retaining the existing
-logical Fact contract for consumers. The physical claim should identify its
+Queued claim bodies are normalized at the Store boundary while retaining the
+logical Fact contract for consumers. The physical claim identifies its
 same-Session acceptance; one bounded joined read can decode both records into
 the typed logical input without creating an intermediate expanded JSON document.
 Inline contribution claims without an acceptance remain self-contained. The
-original typed append must be compared with the accepted payload before removing
+original typed append is compared with the accepted payload before removing
 any body: validating only a rehydrated row could hide a conflicting submitted
 claim. The current append already owns those typed values and need not reread
 the rows it just inserted.
 
-This normalization is not yet activated. Activation must cover admission of
-resolved bytes before allocation, exact physical schema handling, canonical
-prefix and reference-coverage verification, point/page/window/suffix reads,
-same-append acceptances, and retirement ordering. Logical Fact fingerprints and
-model-visible provenance must not change merely because storage is normalized.
-Cold recovery, selected forks and application history must use that same reader;
-no consumer-specific fallback or secondary body cache is proposed.
+All Fact readers share this reconstruction, including cold recovery, selected
+forks and application history. Indexed logical lengths preserve read budgets;
+bounded physical projections govern allocation. Prefix fingerprints remain
+logical while reference coverage hashes the stored bytes and retains logical
+edges. Fact retirement precedes acceptance retirement. Schema 46 rejects earlier
+physical encodings without touching them; this pre-release compatibility choice
+avoids a migration branch, but migration remains technically possible.
+
+A paired read experiment exposed the cost of constructing and counting a full
+control before constructing and counting the resulting Fact. The Fact decoder
+therefore reads the acceptance identity and message projection and validates the
+logical Fact once. Canonical control replay still validates the entire acceptance,
+including routing and options. This keeps validation at its owning boundary
+without a second body cache or an expanded JSON representation.
 
 ## Alternatives considered
 

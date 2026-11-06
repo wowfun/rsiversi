@@ -1,6 +1,6 @@
 # rsi-agent-store-sqlite
 
-Schema 45 stores Header format 35 with separate history provenance and Agent
+Schema 46 stores Header format 35 with separate history provenance and Agent
 execution ownership. A mailbox row retains routing, lifecycle and acceptance
 coordinates, never a second message body. Body reads join the indexed acceptance
 to its canonical control in the same query and bound that control before allocating
@@ -8,19 +8,26 @@ its JSON. Typed decoding transfers the accepted message without cloning its body
 the exact compact message byte count uses a counting writer rather than a JSON copy.
 Metadata-only queue queries do not join or decode control bodies. Canonical replay
 checks the routing index against the original acceptance and later transitions.
-Claim admission compares the canonical accepted message with the exact typed
-Fact in the current atomic append. It does not reread or decode the just-inserted
-Fact row. An old, absent or mismatched Fact cannot satisfy that admission;
-cold replay still independently verifies the durable claim and its indexes.
-Opening an exact schema 44 under the writer lease removes its redundant message
-column in one transaction. Canonical controls and Facts retain their bytes;
-this physical migration does not upgrade an unsupported Session format.
-Other incompatible versions are rejected during read-only preflight.
-The opt-in `preserves_live_history_while_removing_the_mailbox_body_copy` test
-accepts a cleanly closed schema-44 database through `RSI_STORE_SCHEMA44_FIXTURE`.
-It copies the database into an isolated private root, compares canonical bytes,
-reads its accepted messages, verifies the Store and reopens it. Run that test with
-`-- --ignored --nocapture`; the supplied database is never modified.
+Queued input claims retain their Fact coordinates and a same-Session acceptance
+reference, rather than another copy of content and attribution. Claim admission
+compares the canonical accepted message with the original typed Fact in the
+atomic append before encoding that reference. It does not validate a rehydrated
+substitute or reread a just-inserted Fact. Same-append acceptance is supported;
+claims without a mailbox acceptance remain inline.
+
+The Store returns the same self-contained logical Facts through all read paths.
+One bounded joined query supplies the physical Fact and its accepted control;
+typed decoding moves the accepted content into the logical Fact without SQL JSON
+rehydration or per-message follow-up queries. The Fact reader decodes the acceptance
+identity and message projection, validating the resulting logical Fact once. Full
+control routing and options are validated by canonical control replay; reading a
+Fact does not construct and count a second complete control value. Logical byte lengths govern page,
+window and suffix admission, and cold validation checks their indexed lengths
+against reconstructed Facts. Physical JSON lengths are bounded before allocation.
+Prefix fingerprints remain logical; reference coverage hashes the exact physical
+record and verifies the logical reference edges. Purge removes Facts before their
+accepted controls. Unsupported schemas, including 44 and 45, are rejected during
+read-only preflight; no automatic migration or reset is performed.
 The Session row projects inbox suspension from canonical controls. Ready queries
 filter suspended Sessions without rewriting their message candidates; canonical
 validation compares the stored flag with control replay.
@@ -38,6 +45,12 @@ at two pending evidence that a different policy improves the mixed workload.
 `RSI_STORE_BENCH_ACTIVITY_ONLY=1` compares sequential and batched activity reads
 on the same validated 128-Session fixture. `RSI_STORE_BENCH_EVIDENCE` retains the
 bounded raw lane samples; cold validation is reported separately from warm reads.
+
+The ignored `compare_referenced_and_inline_claim_storage` test accepts an explicit
+`RSI_STORE_CLAIM_BENCH_OUTPUT` JSON path. It compares identical logical Facts with
+referenced and inline claim encodings, alternating read order and reporting
+database bytes and latency without a nondeterministic timing gate. Its cold
+samples reopen the Store and validate the Session; they do not flush OS caches.
 
 An activity-cut batch obtains up to 64 canonical-history proofs sequentially
 before its single snapshot query. Warm proofs reuse the cache; a fully cold batch
@@ -216,7 +229,7 @@ and hash chunks, and cannot interrupt an active syscall or visitor callback.
 SQLite and filesystem-CAS ordinary plugin for
 `rsi-agent-store-protocol`. Opening the Store acquires one cross-process writer
 lease for the entire root before schema validation or recovery reads. Only the
-current schema or its documented upgrade source is accepted. For an existing nonempty database, the retained read-only
+current schema is accepted. For an existing nonempty database, the retained read-only
 foreground connection validates the exact schema before opening a writer or
 cleaning CAS staging. Rejected-version database bytes and staging contents stay
 unchanged. A current WAL is read in that preflight snapshot before ordinary
