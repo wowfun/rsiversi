@@ -1,7 +1,7 @@
 use super::*;
 use rsi_agent_session_protocol::{
-    AgentPath, AgentPresetId, ForkOrigin, ForkTurnSelection, FrozenAgentSettings, SessionHeader,
-    SessionId, TurnId,
+    AgentPath, AgentPresetId, ForkOrigin, ForkTurnSelection, FrozenAgentSettings, InputClaimRef,
+    PreparedInput, SessionHeader, SessionId, StepId, StepInputDecision, TurnId,
 };
 use rsi_agent_turn_protocol::{ContextCheckpoint, ExecutorLease, ForkFactPage};
 use rsi_media_protocol::MediaId;
@@ -772,10 +772,11 @@ fn completed_turn_facts(turn_id: TurnId, text: &str) -> Vec<Arc<SessionFact>> {
             )
             .unwrap(),
         ),
+        Arc::new(entered_input_fact(turn_id.clone(), 2, 1)),
         Arc::new(
             SessionFact::new(
-                2,
-                2,
+                3,
+                3,
                 SessionFactBody::TurnTerminal {
                     turn_id,
                     outcome: TurnOutcome::Completed,
@@ -785,6 +786,22 @@ fn completed_turn_facts(turn_id: TurnId, text: &str) -> Vec<Arc<SessionFact>> {
             .unwrap(),
         ),
     ]
+}
+
+fn entered_input_fact(turn_id: TurnId, seq: u64, claimed_seq: u64) -> SessionFact {
+    SessionFact::new(
+        seq,
+        seq,
+        SessionFactBody::StepInputsPrepared {
+            turn_id,
+            step_id: StepId::new("fixture-input").unwrap(),
+            decision: StepInputDecision::enter(vec![PreparedInput::Claimed {
+                claim: InputClaimRef::new(claimed_seq, 0).unwrap(),
+            }])
+            .unwrap(),
+        },
+    )
+    .unwrap()
 }
 
 fn fork_checkpoint_claim(parent_session_id: SessionId) -> TurnClaim {
@@ -813,7 +830,7 @@ fn fork_checkpoint_claim(parent_session_id: SessionId) -> TurnClaim {
                 turn_id: TurnId::new("turn-checkpoint-spawn").unwrap(),
             },
             resolved_after_seq: 0,
-            resolved_terminal_seq: 2,
+            resolved_terminal_seq: 3,
             terminal_prefix_sha256: "b".repeat(64),
             resolved_terminal_control_seq: 1,
             terminal_control_prefix_sha256: "c".repeat(64),
@@ -833,7 +850,7 @@ fn fork_checkpoint_claim(parent_session_id: SessionId) -> TurnClaim {
         Arc::new(header),
         1,
         1,
-        2,
+        3,
     )
 }
 
@@ -1059,7 +1076,7 @@ async fn checkpoint_writer_drains_a_coalesced_request_after_close() {
                     3,
                     SessionFactBody::TurnAccepted {
                         reasoning_effort: None,
-                        turn_id: queued_turn,
+                        turn_id: queued_turn.clone(),
                         text: "queued task".into(),
                         model: None,
                         sandbox: SandboxMode::WorkspaceWrite,
@@ -1108,19 +1125,31 @@ async fn checkpoint_writer_drains_a_coalesced_request_after_close() {
     .unwrap();
     restored.restore(&writes[0].bytes).unwrap();
     assert_eq!(restored.position().through_seq, 3);
-    assert!(
+    let has_queued_input = |state: &mut ModelContextState| {
         serde_json::to_string(
-            &restored
+            &state
                 .build(
                     rsi_ai_protocol::LanguageRequestOptions::default(),
-                    &context_test_profile()
+                    &context_test_profile(),
                 )
                 .unwrap()
-                .messages()
+                .messages(),
         )
         .unwrap()
         .contains("queued task")
+    };
+    assert!(
+        !has_queued_input(&mut restored),
+        "checkpoint restoration must not enter pending input before preparation"
     );
+    restored
+        .ingest(ContextPage::Canonical(&[Arc::new(entered_input_fact(
+            queued_turn,
+            4,
+            3,
+        ))]))
+        .unwrap();
+    assert!(has_queued_input(&mut restored));
 }
 
 #[tokio::test]
@@ -1180,7 +1209,7 @@ async fn first_fork_checkpoint_includes_the_terminal_parent_prefix() {
     .unwrap();
     assert!(messages.contains("inherited task"));
     assert!(messages.contains("child task"));
-    assert_eq!(checkpoint.through_seq, 2);
+    assert_eq!(checkpoint.through_seq, 3);
 }
 
 fn completed_model_with_tool_call() -> (TurnClaim, Vec<Arc<SessionFact>>) {
