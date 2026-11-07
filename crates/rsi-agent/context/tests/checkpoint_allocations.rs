@@ -60,7 +60,7 @@ unsafe impl GlobalAlloc for Counting {
 #[global_allocator]
 static ALLOCATOR: Counting = Counting;
 #[test]
-fn full_builder_preserves_v18_payload_and_v6_envelope_without_a_third_full_copy() {
+fn full_builder_preserves_v19_payload_and_v6_envelope_without_a_third_full_copy() {
     let header = SessionHeader::new_local(
         SessionId::new("checkpoint-probe").unwrap(),
         1,
@@ -153,8 +153,9 @@ fn full_builder_preserves_v18_payload_and_v6_envelope_without_a_third_full_copy(
 }
 
 fn assert_checkpoint_contract(bytes: &[u8]) {
-    // v18 binds each projected Turn to its source Session and keeps pending
-    // claims separate from prepared messages and current Step instructions;
+    // v19 binds each projected Turn to its source Session and keeps pending
+    // claims separate from prepared messages and current Step instructions,
+    // plus entered context timestamps per producer and retained Turn;
     // the v6 outer envelope, Session 35 and builder 2.15.0 bind the cache.
     let prefix = b"rsi-agent-model-context-v6\0".len() + 32;
     let metadata_len = u32::from_le_bytes(bytes[prefix..prefix + 4].try_into().unwrap()) as usize;
@@ -163,11 +164,11 @@ fn assert_checkpoint_contract(bytes: &[u8]) {
     assert_eq!(metadata["builder"]["semantic_version"], "2.15.0");
     println!("checkpoint_metadata={metadata}");
     let payload = &bytes[prefix + 4 + metadata_len..];
-    let fold_magic = b"rsi-agent-context-checkpoint-v18\0";
+    let fold_magic = b"rsi-agent-context-checkpoint-v19\0";
     assert!(payload.starts_with(fold_magic));
     let decoded: serde_json::Value =
         serde_json::from_slice(&payload[fold_magic.len() + 32..]).unwrap();
-    assert_eq!(decoded["version"], 18);
+    assert_eq!(decoded["version"], 19);
     assert!(decoded["step_instructions"].as_array().unwrap().is_empty());
     assert_eq!(decoded["turns"].as_array().unwrap().len(), 24);
     assert!(
@@ -179,6 +180,10 @@ fn assert_checkpoint_contract(bytes: &[u8]) {
     );
     for (index, turn) in decoded["turns"].as_array().unwrap().iter().enumerate() {
         assert!(turn["claimed"].as_array().unwrap().is_empty());
+        assert!(
+            turn.get("context_input_times").is_none(),
+            "empty timing metadata is not stored"
+        );
         let key: (String, String) = serde_json::from_str(turn["id"].as_str().unwrap()).unwrap();
         assert_eq!(key, ("checkpoint-probe".into(), format!("turn-{index}")));
         assert!(
@@ -188,7 +193,7 @@ fn assert_checkpoint_contract(bytes: &[u8]) {
     }
     assert_eq!(
         hex::encode(Sha256::digest(bytes)),
-        "20abcf62259521ab82c4393d7fd0a17a977832af6c91765b4f72e8f1dbfd099c"
+        "c2d8b7722ba378d8961fe45b9b670b707b87f98ae9360cd37471557dcf83be4a"
     );
 }
 

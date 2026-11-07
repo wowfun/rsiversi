@@ -11,6 +11,8 @@ async-trait.workspace = true
 rsi-agent-composition-protocol = { path = "../composition-protocol" }
 rsi-agent-session-protocol = { path = "../session-protocol" }
 rsi-meta = { path = "../../rsi-meta/core" }
+serde.workspace = true
+serde_json.workspace = true
 time.workspace = true
 tokio-util.workspace = true
 

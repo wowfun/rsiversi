@@ -5,8 +5,17 @@ Accepted direct text and claimed input remain outside model messages until
 Session, resolves the final decision from that exact set, and drops consumed
 claims even when the decision enters nothing or rejects. A pending capture borrows
 that retained set; it does not reread history per message. Checkpoints retain
-unprepared claims separately from entered model history. Fold checkpoint v18 and
-builder 2.15.0 invalidate earlier projection caches.
+unprepared claims separately from entered model history. Fold checkpoint v19
+invalidates earlier projection caches. Builder semantics remain 2.15.0: derived
+input timing changes neither message projection nor summary eligibility.
+
+Each retained Turn records the last entered PluginContext Fact timestamp per
+producer, excluding Tool-result context. BeforeStep borrows the latest such
+timestamp from retained Turns in reverse order. Claimed, omitted or emptied
+inputs do not advance it. This derived metadata contains no message text,
+requires no historical read or separate durable domain, and shares the Turn's
+accounting, checkpoint and selected fork lifetime. Partial compaction preserves
+it; removing the entire Turn releases it and permits a fresh contribution.
 
 Verbatim file blocks remain typed in the fold and checkpoints. The receiving
 Session's execution location determines whether a block permits local path
@@ -46,7 +55,7 @@ Step preparation instructions are current system guidance, not historical chat
 messages. `StepPrepared` replaces that guidance; the next Step or terminal Turn
 clears it. Ordinary contributed inputs retain their existing history semantics.
 The bounded guidance participates in context accounting, compaction requests and
-checkpoint v18, so recovery cannot retain an exited Plan's old instructions.
+checkpoint v19, so recovery cannot retain an exited Plan's old instructions.
 
 Language history is projected from atomic `ModelAttemptSettled` evidence.
 Final failed, cancelled and max-token attempts contribute their safe text and
@@ -69,7 +78,7 @@ interrupted-output projection.
 Target-specific Tool image fallback consumes the assembled messages before request
 construction, moving unaffected messages and request options without cloning. Only Tool results containing
 images are rebuilt; complete-request validation still bounds the projection.
-The allocation golden binds builder 2.15.0, Session format 35, the v18 fold
+The allocation golden binds builder 2.15.0, Session format 35, the v19 fold
 and the v6 envelope.
 
 The single deep module for prompt projection, incremental model context, and

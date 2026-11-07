@@ -60,6 +60,12 @@ fn selected(id: &str, version: &str, digest: &str) -> Arc<SelectedBuilder> {
 #[derive(Debug)]
 struct WrongPosition(Box<dyn ModelContextCursor>);
 impl ModelContextCursor for WrongPosition {
+    fn previous_context_input_at_ms(
+        &self,
+        producer: &rsi_agent_session_protocol::ContributionId,
+    ) -> Option<u64> {
+        self.0.previous_context_input_at_ms(producer)
+    }
     fn claimed_inputs(
         &self,
         turn: &rsi_agent_session_protocol::TurnId,

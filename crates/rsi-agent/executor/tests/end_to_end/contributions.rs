@@ -217,6 +217,115 @@ async fn provider_retry_reuses_the_committed_sample() {
     stack.dispose(language_fiber, executor).await;
 }
 
+#[derive(Debug, Default)]
+struct EnteredTime(Mutex<Vec<Option<u64>>>);
+#[async_trait]
+impl rsi_agent_composition_protocol::BeforeStepContributor for EnteredTime {
+    async fn prepare(
+        &self,
+        context: &rsi_agent_composition_protocol::BeforeStepContext<'_>,
+        _: CancellationToken,
+    ) -> ContributionResult<rsi_agent_composition_protocol::BeforeStepOutput> {
+        self.0.lock().unwrap().push(context.previous_input_at_ms);
+        Ok(rsi_agent_composition_protocol::BeforeStepOutput {
+            contribution: ContributionOutput {
+                inputs: if context.previous_input_at_ms.is_none() {
+                    vec![ContributionInput::context("one committed time sample")]
+                } else {
+                    vec![]
+                },
+                domains: vec![],
+            },
+            ..Default::default()
+        })
+    }
+}
+
+#[tokio::test]
+async fn before_step_receives_its_entered_input_time_after_tool_round_trip() {
+    let stack = BaseStack::activate().await;
+    let sample = Arc::new(EnteredTime::default());
+    let callbacks = install(
+        &stack,
+        vec![ContributionRegistration::new(
+            ContributionId::new("fixture.entered-time").unwrap(),
+            0,
+            ContributionKind::BeforeStep(sample.clone()),
+        )],
+    )
+    .await;
+    let calls = Arc::new(AtomicUsize::new(0));
+    let lease = stack
+        .tool_registrar
+        .register(ToolRegistration {
+            definition: ToolDefinition::new("echo", "echo", json!({"type":"object"})).unwrap(),
+            output: None,
+            executor: Arc::new(EchoTool {
+                store: stack.store.clone(),
+                calls: calls.clone(),
+            }),
+            timeout: rsi_tools_protocol::ToolTimeoutPolicy::Execution { timeout_ms: 1000 },
+        })
+        .unwrap();
+    let language = Arc::new(LanguageFixture {
+        outcomes: Mutex::new(VecDeque::from([
+            StartOutcome::Stream(tool_script()),
+            StartOutcome::Stream(answer_script()),
+        ])),
+        requests: Mutex::new(vec![]),
+        starts: Arc::new(AtomicUsize::new(0)),
+        store: stack.store.clone(),
+        retry_policy: RetryPolicy::default(),
+    });
+    let language_fiber = stack
+        .activate_language("test.entered-time", language.clone())
+        .await;
+    let executor = stack.activate_executor("entered-time-executor").await;
+    let (submitted, outcome) = stack.submit_and_wait("work").await;
+    assert_eq!(outcome, TurnOutcome::Completed);
+    assert_eq!(calls.load(Ordering::Acquire), 1);
+    let facts = stack
+        .store
+        .read_facts(
+            &submitted.session_id,
+            0,
+            64,
+            rsi_agent_store_protocol::MAXIMUM_STORE_FACT_PAGE_BYTES,
+        )
+        .await
+        .unwrap()
+        .facts;
+    let samples: Vec<_> = facts
+        .iter()
+        .filter(|fact| {
+            matches!(
+                fact.body(),
+                SessionFactBody::InputMessageClaimed {
+                    source: InputMessageSource::PluginContext { .. },
+                    ..
+                }
+            )
+        })
+        .collect();
+    assert_eq!(samples.len(), 1);
+    assert_eq!(
+        *sample.0.lock().unwrap(),
+        vec![None, Some(samples[0].timestamp_ms())]
+    );
+    for request in language.requests.lock().unwrap().iter() {
+        assert_eq!(
+            serde_json::to_string(request)
+                .unwrap()
+                .matches("one committed time sample")
+                .count(),
+            1
+        );
+    }
+    drop(lease);
+    assert!(callbacks.dispose().await.is_clean());
+    stack.dispose(language_fiber, executor).await;
+}
+
 #[derive(Debug)]
 struct BrokenContext;
 #[async_trait]

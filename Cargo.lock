@@ -5344,6 +5344,8 @@ dependencies = [
  "rsi-agent-composition-protocol",
  "rsi-agent-session-protocol",
  "rsi-meta",
+ "serde",
+ "serde_json",
  "time",
  "tokio",
  "tokio-util",

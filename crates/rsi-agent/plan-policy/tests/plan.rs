@@ -506,6 +506,7 @@ async fn prepared_instructions(
     };
     let request_id = DomainRequestId::new("prepare-plan").unwrap();
     let captured = rsi_agent_composition_protocol::BeforeStepContext {
+        previous_input_at_ms: None,
         selection: &selection,
         producer: entry.id(),
         previous: None,

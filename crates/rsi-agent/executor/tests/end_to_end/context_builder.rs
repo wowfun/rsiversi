@@ -62,6 +62,12 @@ struct SelectedCursor {
     drop_effort: bool,
 }
 impl ModelContextCursor for SelectedCursor {
+    fn previous_context_input_at_ms(
+        &self,
+        producer: &rsi_agent_session_protocol::ContributionId,
+    ) -> Option<u64> {
+        self.inner.previous_context_input_at_ms(producer)
+    }
     fn claimed_inputs(
         &self,
         turn: &rsi_agent_session_protocol::TurnId,

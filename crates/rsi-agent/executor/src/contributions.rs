@@ -387,6 +387,12 @@ impl Driver {
                 {
                     break;
                 }
+                let previous_input_at_ms = match entry.kind() {
+                    ContributionKind::BeforeStep(_) => {
+                        fold.previous_context_input_at_ms(entry.id())
+                    }
+                    _ => None,
+                };
                 let output = run
                     .callback(entry.id(), async {
                         match entry.kind() {
@@ -396,6 +402,7 @@ impl Driver {
                                         &rsi_agent_composition_protocol::BeforeStepContext {
                                             selection: selection.expect("BeforeStep selection"),
                                             producer: entry.id(),
+                                            previous_input_at_ms,
                                             previous: previous.as_ref(),
                                             captured: context,
                                             request_id: &id,

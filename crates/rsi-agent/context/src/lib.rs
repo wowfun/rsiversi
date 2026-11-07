@@ -52,9 +52,9 @@ pub const MAXIMUM_CONTEXT_BYTES: usize = 32 * 1024 * 1024;
 /// Maximum encoded Context-owned checkpoint bytes.
 pub const MAXIMUM_CONTEXT_CHECKPOINT_BYTES: usize =
     rsi_agent_session_protocol::MAXIMUM_CONTEXT_CHECKPOINT_BYTES;
-const CONTEXT_CHECKPOINT_VERSION: u32 = 18;
-const CHECKPOINT_BINDING_DOMAIN: &[u8] = b"rsi-agent-context-checkpoint-v18\0";
-const CHECKPOINT_MAGIC: &[u8] = b"rsi-agent-context-checkpoint-v18\0";
+const CONTEXT_CHECKPOINT_VERSION: u32 = 19;
+const CHECKPOINT_BINDING_DOMAIN: &[u8] = b"rsi-agent-context-checkpoint-v19\0";
+const CHECKPOINT_MAGIC: &[u8] = b"rsi-agent-context-checkpoint-v19\0";
 
 /// Explicit compaction limits.
 #[derive(Clone, Copy, Debug, Eq, PartialEq, Serialize, Deserialize)]
@@ -174,6 +174,7 @@ pub struct ContextFold {
 #[derive(Debug, Serialize)]
 struct ProjectedTurn {
     id: TurnKey,
+    context_input_times: BTreeMap<rsi_agent_session_protocol::ContributionId, std::num::NonZeroU64>,
     claimed: Vec<SessionFact>,
     #[serde(skip)]
     claimed_bytes: usize,
@@ -211,6 +212,8 @@ struct ContextCheckpointPayload {
 #[serde(deny_unknown_fields)]
 struct CheckpointTurn {
     id: TurnKey,
+    #[serde(default)]
+    context_input_times: BTreeMap<rsi_agent_session_protocol::ContributionId, std::num::NonZeroU64>,
     claimed: Vec<SessionFact>,
     messages: Vec<Message>,
     terminal: bool,
@@ -235,6 +238,9 @@ struct ContextCheckpointPayloadRef<'a> {
 #[serde(deny_unknown_fields)]
 struct CheckpointTurnRef<'a> {
     id: &'a TurnKey,
+    #[serde(skip_serializing_if = "BTreeMap::is_empty")]
+    context_input_times:
+        &'a BTreeMap<rsi_agent_session_protocol::ContributionId, std::num::NonZeroU64>,
     claimed: &'a [SessionFact],
     messages: &'a [Message],
     terminal: bool,
@@ -412,7 +418,7 @@ impl ContextFold {
             .semantic
             .as_ref()
             .map_or(Ok(0), |state| state.turn_weight(&turn.id))?;
-        budget::weight(&(turn.terminal, usize::MAX))?
+        budget::weight(&(turn.terminal, usize::MAX, &turn.context_input_times))?
             .checked_add(turn.batches.weight()?)
             .and_then(|bytes| bytes.checked_add(turn.claimed_bytes))
             .and_then(|bytes| bytes.checked_add(1))
@@ -584,6 +590,7 @@ impl ContextFold {
                 .iter()
                 .map(|turn| CheckpointTurnRef {
                     id: &turn.id,
+                    context_input_times: &turn.context_input_times,
                     claimed: &turn.claimed,
                     messages: &turn.messages,
                     terminal: turn.terminal,
@@ -737,6 +744,7 @@ impl ContextFold {
             self.turn_index.insert(turn.id.clone(), absolute);
             self.turns.push_back(ProjectedTurn {
                 id: turn.id,
+                context_input_times: turn.context_input_times,
                 claimed_bytes: turn.claimed.iter().try_fold(0usize, |sum, fact| {
                     sum.checked_add(fact.encoded_len())
                         .ok_or(ContextError::Capacity)
@@ -1560,6 +1568,7 @@ impl ContextFold {
             .ok_or_else(|| ContextError::Invalid("turn ordinal overflowed".into()))?;
         self.turns.push_back(ProjectedTurn {
             id: self.turn_key(turn_id),
+            context_input_times: BTreeMap::new(),
             claimed: Vec::new(),
             claimed_bytes: 0,
             messages: vec![message],
@@ -1585,6 +1594,7 @@ impl ContextFold {
             .ok_or_else(|| ContextError::Invalid("turn ordinal overflowed".into()))?;
         self.turns.push_back(ProjectedTurn {
             id: self.turn_key(turn_id),
+            context_input_times: BTreeMap::new(),
             claimed: Vec::new(),
             claimed_bytes: 0,
             messages: Vec::new(),

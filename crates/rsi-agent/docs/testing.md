@@ -15,6 +15,11 @@ curated-result bounds without Node. Native Node tests require explicit `RSI_TEST
 and are opt-in locally; the Linux Agent CI job supplies pinned Node and runs them; they join cancelled RPC handlers and verify direct-process reaping.
 Live browser probes and provider usage belong to the standard product fixtures;
 deterministic suites do not resolve developer credentials or call live providers.
+Time-context tests cover the default refresh interval, exact expiry, clock
+rollback and zero interval. Context tests distinguish claimed, omitted, emptied
+and entered input, including checkpoint recovery, selected fork history and Turn
+eviction. The executor checks that the next preparation after a Tool result sees
+the entered input's original Fact timestamp without adding another copy.
 Workflow settlement tests drive the production observation loop and terminal
 cleanup, including runtime retirement with a still-pending Program result.
 Paused-clock tests bound both queued and admitted observation commands, preserve

@@ -103,6 +103,16 @@ fn plugin_text_and_tool_rejection_replay_without_live_producers() {
     )
     .unwrap();
     fold.apply(&history).unwrap();
+    let producer = ContributionId::new("fixture.time").unwrap();
+    let timestamp = history
+        .iter()
+        .find(|fact| matches!(fact.body(), SessionFactBody::InputMessageClaimed { .. }))
+        .unwrap()
+        .timestamp_ms();
+    assert_eq!(
+        fold.previous_context_input_at_ms(&producer),
+        Some(timestamp)
+    );
     let projected = fold.project(ContextLimits::default()).unwrap();
     assert_eq!(
         projected
@@ -132,7 +142,167 @@ fn plugin_text_and_tool_rejection_replay_without_live_producers() {
     )
     .unwrap();
     assert_eq!(
+        restored.previous_context_input_at_ms(&producer),
+        Some(timestamp)
+    );
+    assert_eq!(
         restored.project(ContextLimits::default()).unwrap(),
         projected
     );
+}
+
+#[test]
+fn only_entered_context_advances_producer_time() {
+    use rsi_agent_session_protocol::{
+        InputClaimRef, MessageAttribution, PreparedInput, PreparedInputMessage, PreparedInputRole,
+        StepInputDecision,
+    };
+    let producer = ContributionId::new("fixture.time").unwrap();
+    let turn = TurnId::new("time-turn").unwrap();
+    let step = StepId::new("time-step").unwrap();
+    let history = facts(vec![
+        SessionFactBody::TurnAccepted {
+            turn_id: turn.clone(),
+            text: "work".into(),
+            model: None,
+            reasoning_effort: None,
+            sandbox: SandboxMode::WorkspaceWrite,
+            require_approval: false,
+        },
+        SessionFactBody::StepStarted {
+            turn_id: turn.clone(),
+            step_id: step.clone(),
+        },
+        SessionFactBody::InputMessageClaimed {
+            turn_id: turn.clone(),
+            step_id: step.clone(),
+            source: InputMessageSource::PluginContext {
+                contribution_id: producer.clone(),
+                tool: None,
+            },
+            content: vec![AgentMessageContent::Text {
+                text: "time".into(),
+            }],
+        },
+    ]);
+    let claim = InputClaimRef::new(3, 0).unwrap();
+    for (decision, entered) in [
+        (StepInputDecision::enter(vec![]).unwrap(), false),
+        (
+            StepInputDecision::enter(vec![PreparedInput::Replacement {
+                claim,
+                message: PreparedInputMessage::new(
+                    PreparedInputRole::Developer,
+                    MessageAttribution {
+                        id: "empty".into(),
+                        source: json!({"kind":"fixture"}),
+                    },
+                    vec![],
+                )
+                .unwrap(),
+            }])
+            .unwrap(),
+            false,
+        ),
+        (
+            StepInputDecision::enter(vec![PreparedInput::Claimed { claim }]).unwrap(),
+            true,
+        ),
+    ] {
+        let mut fold = ContextFold::with_limits(
+            header(""),
+            ContextLimits::default(),
+            rsi_agent_context::ContextBudget::default(),
+        )
+        .unwrap();
+        fold.apply(&history).unwrap();
+        assert_eq!(fold.previous_context_input_at_ms(&producer), None);
+        let mut fold = ContextFold::from_checkpoint(
+            header(""),
+            ContextLimits::default(),
+            &fold.checkpoint_bytes().unwrap(),
+            rsi_agent_context::ContextBudget::default(),
+        )
+        .unwrap();
+        assert_eq!(fold.previous_context_input_at_ms(&producer), None);
+        fold.apply(&[SessionFact::new(
+            4,
+            900,
+            SessionFactBody::StepInputsPrepared {
+                turn_id: turn.clone(),
+                step_id: step.clone(),
+                decision,
+            },
+        )
+        .unwrap()])
+            .unwrap();
+        assert_eq!(
+            fold.previous_context_input_at_ms(&producer),
+            entered.then_some(3)
+        );
+        assert_eq!(
+            fold.previous_context_input_at_ms(&ContributionId::new("other").unwrap()),
+            None
+        );
+    }
+}
+
+#[test]
+fn context_time_follows_selected_fork_history_and_retained_turn_lifetime() {
+    let producer = ContributionId::new("fixture.time").unwrap();
+    let mut seed = contribution_history();
+    let timestamp = seed
+        .iter()
+        .find(|fact| matches!(fact.body(), SessionFactBody::InputMessageClaimed { .. }))
+        .unwrap()
+        .timestamp_ms();
+    seed.extend(entered_facts_after(
+        seed.len() as u64,
+        vec![SessionFactBody::TurnTerminal {
+            turn_id: TurnId::new("contribution-turn").unwrap(),
+            outcome: TurnOutcome::Completed,
+            result: None,
+        }],
+    ));
+    let limits = ContextLimits::new(5, 1024 * 1024).unwrap();
+    let mut child = ContextFold::with_limits(
+        fork_header("", seed.len() as u64, 1),
+        limits,
+        rsi_agent_context::ContextBudget::default(),
+    )
+    .unwrap();
+    child.begin_seed_source(&child.header().clone()).unwrap();
+    child.apply_seed_page(&seed).unwrap();
+    child.finish_seed().unwrap();
+    assert_eq!(
+        child.previous_context_input_at_ms(&producer),
+        Some(timestamp)
+    );
+    child
+        .apply(&entered_facts(vec![SessionFactBody::TurnAccepted {
+            turn_id: TurnId::new("child-turn").unwrap(),
+            text: "one more message".into(),
+            model: None,
+            reasoning_effort: None,
+            sandbox: SandboxMode::WorkspaceWrite,
+            require_approval: false,
+        }]))
+        .unwrap();
+    child
+        .apply(&entered_facts_after(
+            child.through_seq(),
+            vec![SessionFactBody::InputMessageClaimed {
+                turn_id: TurnId::new("child-turn").unwrap(),
+                step_id: StepId::new("child-step").unwrap(),
+                source: InputMessageSource::PluginContext {
+                    contribution_id: ContributionId::new("other").unwrap(),
+                    tool: None,
+                },
+                content: vec![AgentMessageContent::Text {
+                    text: "different plugin".into(),
+                }],
+            }],
+        ))
+        .unwrap();
+    assert_eq!(child.previous_context_input_at_ms(&producer), None);
 }

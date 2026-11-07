@@ -78,6 +78,19 @@ request, multiplying old copies in durable request inspection. Reusing the slot
 requires neither another state cache nor another durable policy owner. The typed
 plan domain and Tool policy retain their existing authority.
 
+Time context follows DSH's committed-event refresh model: the default ten-minute
+interval is measured against entered input, so failed callbacks cannot suppress
+the next sample. The existing Context fold supplies per-producer timestamps
+without rereading history. DSH retains its last injection time across Session
+history; native markers share retained Turn lifetime, so dropping that Turn
+permits a fresh clock sample.
+Adding a business domain just for a refresh timer would add commits and change
+complete Session domain baselines; a callback-local cache would lose recovery
+and fork semantics. Neither is needed for derived input metadata.
+The fold cache format changes independently of the builder's message semantics.
+Keeping the semantic identity avoids rejecting existing, still-valid summaries
+just to rebuild timing metadata from their source Facts.
+
 Operation-scoped history reads borrow the captured claim-visible reader. Their
 consumed cursor is extension checkpoint data and advances with the journal's
 atomic publication. UTF-8 fragment transfer preserves the existing maximum Fact
