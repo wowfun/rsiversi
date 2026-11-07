@@ -56,6 +56,21 @@ async fn native_process_handshake_multiplex_cancellation_and_cleanup() {
         .await
         .unwrap();
     assert_eq!(result, json!({"original":"中文"}));
+    connection
+        .request("pause-input", json!(null), CancellationToken::new())
+        .await
+        .unwrap();
+    let payload = json!({"original": "中文".repeat(90_000)});
+    let started = std::time::Instant::now();
+    let result = tokio::time::timeout(
+        std::time::Duration::from_secs(10),
+        connection.request("echo", payload.clone(), CancellationToken::new()),
+    )
+    .await
+    .unwrap()
+    .unwrap();
+    assert_eq!(result, payload);
+    assert!(started.elapsed() >= std::time::Duration::from_secs(1));
     cancellation.cancel();
     assert!(hold.await.unwrap().is_err());
     drop(connection);

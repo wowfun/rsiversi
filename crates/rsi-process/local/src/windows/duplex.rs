@@ -1,57 +1,11 @@
 //! Bounded ongoing pipes over the same Windows process/Job admission owner.
 use super::*;
+use crate::duplex::input::{Input, write_input};
 use rsi_process::{
     DuplexControl, DuplexInput, DuplexOutput, DuplexProcessSpec, DuplexRead,
     MAXIMUM_DUPLEX_CHUNK_BYTES, ManagedDuplexProcess,
 };
-use tokio::sync::{mpsc, oneshot};
-
-#[derive(Debug)]
-struct InputMessage {
-    bytes: Option<Vec<u8>>,
-    reply: oneshot::Sender<Result<usize>>,
-    _slot: OwnedSemaphorePermit,
-}
-#[derive(Debug)]
-struct Input {
-    sender: mpsc::Sender<InputMessage>,
-    slot: Arc<Semaphore>,
-    _capture: Arc<OwnedSemaphorePermit>,
-}
-impl Input {
-    async fn command(&self, bytes: Option<&[u8]>) -> Result<usize> {
-        let slot = self
-            .slot
-            .clone()
-            .try_acquire_owned()
-            .map_err(|_| ProcessError::Capacity)?;
-        let (reply, result) = oneshot::channel();
-        self.sender
-            .try_send(InputMessage {
-                bytes: bytes.map(<[u8]>::to_vec),
-                reply,
-                _slot: slot,
-            })
-            .map_err(|_| ProcessError::ShuttingDown)?;
-        result
-            .await
-            .map_err(|_| ProcessError::Io("Windows input acknowledgement unavailable".into()))?
-    }
-}
-#[async_trait::async_trait]
-impl DuplexInput for Input {
-    async fn write(&self, bytes: &[u8]) -> Result<usize> {
-        if bytes.is_empty() || bytes.len() > MAXIMUM_DUPLEX_CHUNK_BYTES {
-            return Err(ProcessError::InvalidInput(
-                "duplex input chunk exceeds bound".into(),
-            ));
-        }
-        self.command(Some(bytes)).await
-    }
-    async fn close(&self) -> Result<()> {
-        self.command(None).await.map(|_| ())
-    }
-}
+use tokio::sync::mpsc;
 #[derive(Debug)]
 struct Chunk {
     bytes: Vec<u8>,
@@ -126,7 +80,7 @@ impl DuplexOutput for Output {
 #[derive(Debug)]
 struct Control {
     child: Arc<Child>,
-    input: Arc<Input>,
+    input: Arc<Input<OwnedSemaphorePermit>>,
     output: Arc<Output>,
 }
 #[async_trait::async_trait]
@@ -177,7 +131,7 @@ impl Service {
         spec.validate()?;
         let budget = spec.stdout_buffer_bytes;
         let (mut process, child, _, grace) = self.start(spec.into_process_spec(), false).await?;
-        let mut stdin = process
+        let stdin = process
             .stdin
             .take()
             .expect("successful piped spawn retains stdin");
@@ -189,12 +143,7 @@ impl Service {
             .stderr
             .take()
             .expect("successful piped spawn retains stderr");
-        let (send, mut messages) = mpsc::channel::<InputMessage>(1);
-        let input = Arc::new(Input {
-            sender: send,
-            slot: Arc::new(Semaphore::new(1)),
-            _capture: child.stderr.reservation.clone(),
-        });
+        let (input, messages) = Input::new(child.stderr.reservation.clone());
         let (chunks, receiver) = mpsc::channel::<Chunk>(32);
         let error = Arc::new(Mutex::new(None));
         let output = Arc::new(Output {
@@ -207,36 +156,7 @@ impl Service {
             error: error.clone(),
             _capture: child.stderr.reservation.clone(),
         });
-        let input_stop = child.stop.clone();
-        let input_task = tokio::spawn(async move {
-            loop {
-                let message = tokio::select! { () = input_stop.cancelled() => break, message = messages.recv() => message };
-                let Some(message) = message else {
-                    break;
-                };
-                let result = if let Some(bytes) = message.bytes {
-                    match tokio::time::timeout(Duration::from_millis(500), stdin.write(&bytes))
-                        .await
-                    {
-                        Ok(Ok(0)) => Err(ProcessError::Io("Windows duplex stdin closed".into())),
-                        Ok(Ok(count)) => Ok(count),
-                        Ok(Err(error)) => Err(io_error(error)),
-                        Err(_) => Err(ProcessError::Capacity),
-                    }
-                } else {
-                    let result =
-                        match tokio::time::timeout(Duration::from_millis(500), stdin.shutdown())
-                            .await
-                        {
-                            Ok(result) => result.map(|()| 0).map_err(io_error),
-                            Err(_) => Err(ProcessError::Capacity),
-                        };
-                    let _ = message.reply.send(result);
-                    break;
-                };
-                let _ = message.reply.send(result);
-            }
-        });
+        let input_task = tokio::spawn(write_input(stdin, messages, child.stop.clone()));
         let stop = child.stop.clone();
         let state = child.clone();
         let receipt = OutputReceipt {
@@ -294,60 +214,4 @@ impl Service {
 }
 
 #[cfg(test)]
-mod tests {
-    use super::*;
-    use rsi_sandbox::{
-        ConfinedProcess, EnforcementStamp, ProcessStdio, SandboxBackend, SandboxFileSystem,
-        SandboxMode, SandboxNetwork, SandboxScratch,
-    };
-    #[tokio::test]
-    async fn native_duplex_round_trip_preserves_bytes_under_small_backpressure_window() {
-        let temporary = tempfile::tempdir().unwrap();
-        let workspace = temporary.path().to_owned();
-        let service = Service::new(ProcessLocalConfig::default());
-        let process = service
-            .spawn_duplex(DuplexProcessSpec {
-                process: ConfinedProcess {
-                    owner: None,
-                    stdio: ProcessStdio::Pipes,
-                    program: r"C:\Windows\System32\cmd.exe".into(),
-                    arguments: ["/d", "/v:on", "/c", "set /p line=&echo !line!"]
-                        .map(std::ffi::OsString::from)
-                        .into(),
-                    cwd: workspace.clone(),
-                    stamp: EnforcementStamp {
-                        requested: SandboxMode::DangerFullAccess,
-                        backend: SandboxBackend::Unconfined,
-                        workspace,
-                        filesystem: SandboxFileSystem::Unconfined,
-                        scratch: SandboxScratch::Host,
-                        network: SandboxNetwork::Host,
-                    },
-                },
-                environment: vec![],
-                stdout_buffer_bytes: 4,
-                stderr_max_bytes: 8,
-                termination_grace_ms: 1000,
-            })
-            .await
-            .unwrap();
-        assert_eq!(process.stdin().write(b"abcdef\r\n").await.unwrap(), 8);
-        process.stdin().close().await.unwrap();
-        let mut output = Vec::new();
-        tokio::time::timeout(Duration::from_secs(10), async {
-            loop {
-                let read = process.stdout().read(2).await.unwrap();
-                output.extend(read.bytes);
-                if read.eof {
-                    break;
-                }
-            }
-        })
-        .await
-        .unwrap();
-        assert_eq!(output, b"abcdef\r\n");
-        assert_eq!(process.wait().await.unwrap().exit_code, Some(0));
-        process.wait_settlement().await.unwrap();
-        service.shutdown().await.unwrap();
-    }
-}
+mod tests;

@@ -102,10 +102,14 @@ The same provider also publishes the sibling duplex capability. Both spawn paths
 use the same validated confined-plan admission, process registry, capture budget,
 identity-fenced TERM/KILL and reaping mechanics. Duplex stdout waits for free queue
 space before reading another bounded pipe chunk. Its explicit stdin port serializes
-one write and closes on termination or direct-child exit. Each native pipe write
-waits at most 500 ms and either reports its exact accepted prefix or Capacity
-before accepting bytes. The writer remains usable after backpressure. Its task,
-not the RPC waiter, owns this deadline and any accepted input. The stdout task publishes
+one write and closes on termination or direct-child exit. Unix and Windows use
+the same input owner: one bounded command retains admission through its write,
+releases it before acknowledgement, and waits through pipe backpressure
+until completion or process cancellation. Its task, not the RPC waiter, owns any
+accepted input. Closing stdin flushes accepted bytes and drops the pipe before
+acknowledgement. Writes report the pipe adapter's accepted prefix; they do not
+establish that the subprocess consumed it.
+The stdout task publishes
 its own EOF or error promptly, independently of child and stderr settlement.
 Task cancellation or panic publishes a stream error after buffered bytes;
 whole-process failures remain observable through `wait`. The reaper retains
