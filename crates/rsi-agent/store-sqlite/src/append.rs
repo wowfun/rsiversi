@@ -950,6 +950,14 @@ pub(super) const fn message_target_name(target: MessageTarget) -> &'static str {
     }
 }
 
+pub(super) const fn message_state_name(state: &StoreAgentMessageState) -> &'static str {
+    match state {
+        StoreAgentMessageState::Pending => "pending",
+        StoreAgentMessageState::Claimed { .. } => "claimed",
+        StoreAgentMessageState::Discarded { .. } => "discarded",
+    }
+}
+
 pub(super) const fn message_delivery_name(
     delivery: rsi_agent_session_protocol::MessageDelivery,
 ) -> &'static str {
@@ -1071,12 +1079,7 @@ pub(super) fn decode_indexed_message(row: IndexedMessageRow) -> Result<StoreAgen
         (row.8, row.9),
         MAXIMUM_INDEXED_MESSAGE_STATE_BYTES,
     )?;
-    let expected_state = match &state {
-        StoreAgentMessageState::Pending => "pending",
-        StoreAgentMessageState::Claimed { .. } => "claimed",
-        StoreAgentMessageState::Discarded { .. } => "discarded",
-    };
-    if row.7 != expected_state {
+    if row.7 != message_state_name(&state) {
         return Err(StoreError::Corrupt(
             "mailbox state discriminator differs from its typed state".into(),
         ));

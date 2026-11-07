@@ -305,6 +305,10 @@ still grows with session history and may repeat after validation-cache eviction.
 Rejected receipts have no preceding mutation controls to read; successful edits
 also validate their one- or two-control mutation boundary. Receipt retention has
 no expiry, so these costs remain part of opening long-lived sessions.
+Mailbox index checks compare bounded metadata and state against the already
+replayed acceptance and transitions. They do not reload the canonical acceptance
+body to reconstruct a second message. The acceptance coordinates, source,
+options presence, route, queue slot, and final state must all agree.
 Completed pending payloads
 are released during that pass. All projections borrow the same immutable Header
 already decoded in that validation transaction; control history length does not

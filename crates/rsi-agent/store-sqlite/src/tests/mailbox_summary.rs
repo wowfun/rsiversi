@@ -4,10 +4,150 @@ use rsi_agent_session_protocol::{
 };
 use rusqlite::trace::{TraceEvent, TraceEventCodes};
 
+async fn validation_mailbox() -> (tempfile::TempDir, SqliteStore, SessionId) {
+    let root = private_tempdir();
+    let store = SqliteStore::open(root.path()).unwrap();
+    let header = test_header("mailbox-validation");
+    let id = header.session_id().clone();
+    let mut controls = Vec::new();
+    for (seq, name) in [(1, "pending"), (2, "discarded")] {
+        controls.push(
+            AgentControlRecord::new(
+                seq,
+                seq,
+                AgentControlRecordBody::MessageAccepted {
+                    message: AgentMessage {
+                        message_id: MessageId::new(name).unwrap(),
+                        source: AgentMessageSource::Human { attribution: None },
+                        content: vec![AgentMessageContent::Text {
+                            text: "input".repeat(200_000),
+                        }],
+                        options: MessageOptions::default(),
+                    },
+                    root_session_id: id.clone(),
+                    delivery: MessageDelivery::NextTurn,
+                    bound_turn_id: None,
+                    target: MessageTarget::NextTurn,
+                    wake_required: true,
+                },
+            )
+            .unwrap(),
+        );
+    }
+    controls.push(
+        AgentControlRecord::new(
+            3,
+            3,
+            AgentControlRecordBody::MessageDiscarded {
+                message_id: MessageId::new("discarded").unwrap(),
+                reason: MessageDiscardReason::Cancelled,
+            },
+        )
+        .unwrap(),
+    );
+    store
+        .commit_agent(AtomicAgentCommit {
+            sessions: vec![AtomicSessionAppend {
+                session_id: id.clone(),
+                header: Some(header),
+                expected_fact_seq: 0,
+                expected_control_seq: 0,
+                facts: vec![],
+                controls,
+            }],
+            required_active_activations: vec![],
+            quiescent_descendants_of: None,
+        })
+        .await
+        .unwrap();
+    (root, store, id)
+}
+
 #[tokio::test]
-async fn summary_observes_pending_step_order_without_materializing_bodies() {
-    static SELECTS: AtomicU64 = AtomicU64::new(0);
-    static BODY_SELECTS: AtomicU64 = AtomicU64::new(0);
+async fn cold_mailbox_validation_does_not_reload_acceptance_bodies() {
+    static BODY_RESELECTS: AtomicU64 = AtomicU64::new(0);
+    let (_root, store, id) = validation_mailbox().await;
+    let mut writer = store.inner.connections.writer.lock().unwrap();
+    let writer = writer.as_mut().unwrap();
+    writer.trace_v2(
+        TraceEventCodes::SQLITE_TRACE_STMT,
+        Some(|event| {
+            if let TraceEvent::Stmt(_, sql) = event
+                && sql.contains("FROM agent_messages")
+                && sql.contains("control_json")
+            {
+                BODY_RESELECTS.fetch_add(1, Ordering::Relaxed);
+            }
+        }),
+    );
+    BODY_RESELECTS.store(0, Ordering::Relaxed);
+    validation::validate_session(writer, &id).unwrap();
+    writer.trace_v2(TraceEventCodes::empty(), None);
+    assert_eq!(
+        BODY_RESELECTS.load(Ordering::Relaxed),
+        0,
+        "pending and settled index checks reuse the canonical acceptance already replayed"
+    );
+}
+
+#[tokio::test]
+async fn mailbox_index_check_rejects_each_changed_coordinate_and_state() {
+    let (_root, store, id) = validation_mailbox().await;
+    let mut writer = store.inner.connections.writer.lock().unwrap();
+    let writer = writer.as_mut().unwrap();
+    let expected =
+        validation::read_indexed_agent_message(writer, &id, &MessageId::new("discarded").unwrap())
+            .unwrap();
+    validation::validate_indexed_message(writer, &id, &expected).unwrap();
+    for change in [
+        "message_id = 'different'",
+        "message_source = 'application'",
+        "root_session_id = 'foreign'",
+        "target = 'next_step'",
+        "wake_required = 0",
+        "accepted_control_seq = 3",
+        "state = 'pending'",
+        "delivery = 'next_step'",
+        "bound_turn_id = 'other-turn'",
+        "accepted_timestamp_ms = 9",
+        "queue_slot_id = 'different'",
+        "queue_timestamp_ms = 9",
+        "queue_control_seq = 1",
+        "has_turn_options = 1",
+        "state_json = '{}'",
+        "state_json = json_set(state_json, '$.control_seq', 2)",
+        "state_json = printf('%4097s', '') || state_json",
+    ] {
+        let transaction = writer.transaction().unwrap();
+        transaction.execute(
+            &format!("UPDATE agent_messages SET {change} WHERE session_id = ?1 AND message_id = 'discarded'"),
+            [id.as_str()],
+        ).unwrap();
+        assert!(
+            matches!(
+                validation::validate_indexed_message(&transaction, &id, &expected),
+                Err(StoreError::Corrupt(_))
+            ),
+            "{change}"
+        );
+        transaction.rollback().unwrap();
+    }
+    let transaction = writer.transaction().unwrap();
+    transaction.execute(
+        "UPDATE agent_messages SET state_json = ?1 WHERE session_id = ?2 AND message_id = 'discarded'",
+        params![serde_json::to_string_pretty(&expected.state).unwrap(), id.as_str()],
+    ).unwrap();
+    validation::validate_indexed_message(&transaction, &id, &expected).unwrap();
+    transaction.rollback().unwrap();
+    let mut oversized = expected;
+    oversized.encoded_message_bytes = MAXIMUM_STORE_MAILBOX_PAGE_BYTES + 1;
+    assert!(matches!(
+        validation::validate_indexed_message(writer, &id, &oversized),
+        Err(StoreError::Corrupt(_))
+    ));
+}
+
+async fn summary_mailbox() -> (tempfile::TempDir, SqliteStore, SessionId) {
     let root = private_tempdir();
     let store = SqliteStore::open(root.path()).unwrap();
     let header = test_header("wait-summary");
@@ -72,6 +212,14 @@ async fn summary_observes_pending_step_order_without_materializing_bodies() {
         })
         .await
         .unwrap();
+    (root, store, id)
+}
+
+#[tokio::test]
+async fn summary_observes_pending_step_order_without_materializing_bodies() {
+    static SELECTS: AtomicU64 = AtomicU64::new(0);
+    static BODY_SELECTS: AtomicU64 = AtomicU64::new(0);
+    let (root, store, id) = summary_mailbox().await;
     store.validate_session(&id).await.unwrap();
     for connection in store.inner.connections.readers.lock().unwrap().iter_mut() {
         connection.trace_v2(

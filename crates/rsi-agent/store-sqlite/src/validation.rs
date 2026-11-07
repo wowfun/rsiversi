@@ -671,13 +671,7 @@ impl MailboxProjection {
                     reason: MessageDiscardReason::Replaced,
                     control_seq: record.seq(),
                 };
-                if read_indexed_agent_message(connection, session_id, predecessor_id)?
-                    != predecessor
-                {
-                    return Err(StoreError::Corrupt(
-                        "queue predecessor projection differs".into(),
-                    ));
-                }
+                validate_indexed_message(connection, session_id, &predecessor)?;
             }
             AgentControlRecordBody::MessageAccepted {
                 message,
@@ -804,11 +798,7 @@ impl MailboxProjection {
             let expected = expected_messages
                 .remove(&(session_id.clone(), message_id.clone()))
                 .expect("validated closing message");
-            if read_indexed_agent_message(connection, session_id, message_id)? != expected {
-                return Err(StoreError::Corrupt(
-                    "mailbox index final projection differs from canonical controls".into(),
-                ));
-            }
+            validate_indexed_message(connection, session_id, &expected)?;
         }
         if expected_messages.len() > rsi_agent_session_protocol::MAXIMUM_PENDING_AGENT_MESSAGES {
             return Err(StoreError::Corrupt(
@@ -823,12 +813,8 @@ impl MailboxProjection {
             expected_messages,
         } = self;
 
-        for ((session_id, message_id), expected) in expected_messages {
-            if read_indexed_agent_message(connection, &session_id, &message_id)? != expected {
-                return Err(StoreError::Corrupt(
-                    "mailbox index final projection differs from canonical controls".into(),
-                ));
-            }
+        for ((session_id, _), expected) in expected_messages {
+            validate_indexed_message(connection, &session_id, &expected)?;
         }
         let indexed_messages = connection
             .query_row(
@@ -855,6 +841,73 @@ pub(super) fn read_indexed_agent_message(
     super::session_store::read_indexed_message(connection, session_id, message_id)?.ok_or_else(
         || StoreError::Corrupt("canonical mailbox control has no indexed message".into()),
     )
+}
+
+pub(super) fn validate_indexed_message(
+    connection: &Connection,
+    session_id: &SessionId,
+    expected: &StoreAgentMessage,
+) -> Result<()> {
+    if expected.encoded_message_bytes > MAXIMUM_STORE_MAILBOX_PAGE_BYTES {
+        return Err(StoreError::Corrupt(
+            "Agent message exceeds mailbox byte capacity".into(),
+        ));
+    }
+    let (matches, length, state) = connection
+        .query_row(
+            "SELECT message_source = ?3 AND root_session_id = ?4 AND target = ?5
+                AND wake_required = ?6 AND accepted_control_seq = ?7
+                AND state = ?8 AND delivery = ?9 AND bound_turn_id IS ?10
+                AND accepted_timestamp_ms = ?11 AND queue_slot_id = ?12
+                AND queue_timestamp_ms = ?13 AND queue_control_seq = ?14
+                AND has_turn_options = ?15,
+                length(CAST(state_json AS BLOB)),
+                CASE WHEN length(CAST(state_json AS BLOB)) <= ?16 THEN state_json END
+         FROM agent_messages WHERE session_id = ?1 AND message_id = ?2",
+            params![
+                session_id.as_str(),
+                expected.message.message_id.as_str(),
+                super::append::message_source_name(&expected.message.source),
+                expected.root_session_id.as_str(),
+                message_target_name(expected.target),
+                expected.wake_required,
+                sqlite_u64("acceptance control", expected.accepted_control_seq)?,
+                super::append::message_state_name(&expected.state),
+                super::append::message_delivery_name(expected.delivery),
+                expected.bound_turn_id.as_ref().map(TurnId::as_str),
+                sqlite_u64("acceptance timestamp", expected.accepted_timestamp_ms)?,
+                expected.queue_slot.id.as_str(),
+                sqlite_u64("queue timestamp", expected.queue_slot.timestamp_ms)?,
+                sqlite_u64("queue control", expected.queue_slot.control_seq)?,
+                expected.message.options != rsi_agent_session_protocol::MessageOptions::default(),
+                i64::try_from(MAXIMUM_INDEXED_MESSAGE_STATE_BYTES)
+                    .expect("state bound fits SQLite INTEGER"),
+            ],
+            |row| {
+                Ok((
+                    row.get::<_, bool>(0)?,
+                    row.get::<_, i64>(1)?,
+                    row.get::<_, Option<String>>(2)?,
+                ))
+            },
+        )
+        .optional()
+        .map_err(sql_error)?
+        .ok_or_else(|| {
+            StoreError::Corrupt("canonical mailbox control has no indexed message".into())
+        })?;
+    if !matches
+        || decode_projected_json::<StoreAgentMessageState>(
+            "Agent message state",
+            (length, state),
+            MAXIMUM_INDEXED_MESSAGE_STATE_BYTES,
+        )? != expected.state
+    {
+        return Err(StoreError::Corrupt(
+            "mailbox index final projection differs from canonical controls".into(),
+        ));
+    }
+    Ok(())
 }
 
 #[derive(Default)]
