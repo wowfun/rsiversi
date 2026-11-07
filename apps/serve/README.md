@@ -343,17 +343,22 @@ preparation retains no page. A single-fragment response retains no resource.
 At most two page preparations/transfers share native storage at once. The
 application queues page readers before sending their first RPC, leaving native
 request slots available for continuation and close. No durable cache is created.
+Each UTF-8 fragment uses the available process-frame payload budget, counting
+JSON string escaping before choosing its boundary. Eight KiB of the existing
+1 MiB frame remains reserved for bounded reply coordinates and framing. Ordinary
+Store pages use half the frame's byte capacity; larger individual records retain
+their existing exact-size read and fragmentation path.
 Control history uses a captured control horizon.
 Its exclusive `after_seq`, inclusive `through_seq` and UTF-8 byte `offset` select
 fragments of one JSON event array. Pages contain at most 64 control records,
-normally within 128 KiB of stored bodies; one larger record uses its exact
+normally within that ordinary page budget; one larger record uses its exact
 Store-reported size. Non-projected records still advance the returned watermark.
 Pages expose model-selection commits with their Store-owned Fact anchors;
 the native model-selection codec resolves complete replacements. A wait returns
 a coherent pair of current watermarks after either stream advances.
 Fact reads supply an exclusive `after_seq` and inclusive captured `through_seq`.
-They return contiguous pages of at most 512 Facts, normally within 128 KiB of
-encoded Fact bodies. An individual larger Fact is read alone using its exact
+They return contiguous pages of at most 512 Facts, within the same ordinary
+encoded-body budget. An individual larger Fact is read alone using its exact
 Store-reported length. The response never advances beyond the captured horizon;
 inherited reads also stay inside their retained fork interval. Pages and decoded
 model attempts embedded in Fact pages use UTF-8 fragments. The

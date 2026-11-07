@@ -498,7 +498,7 @@ mod tests {
                         message_id: id.clone(),
                         source: AgentMessageSource::Human { attribution: None },
                         content: vec![AgentMessageContent::Text {
-                            text: "排队".repeat(100_000),
+                            text: "排队\n".repeat(120_000),
                         }],
                         options: MessageOptions::default(),
                     })
@@ -519,7 +519,7 @@ mod tests {
         assert_eq!(
             message.content,
             vec![AgentMessageContent::Text {
-                text: "排队".repeat(100_000)
+                text: "排队\n".repeat(120_000)
             }]
         );
         assert!(
@@ -637,7 +637,7 @@ mod tests {
         while offset < encoded.len() {
             let value = fragment(&encoded, offset).unwrap();
             let part = value["json"].as_str().unwrap();
-            assert!(part.len() <= 128 * 1024);
+            assert!(part.len() <= rsi_extension::MAXIMUM_FRAME_BYTES);
             assert_eq!(value["offset"], offset);
             assert_eq!(value["total_bytes"], encoded.len());
             offset = usize::try_from(value["next_offset"].as_u64().unwrap()).unwrap();

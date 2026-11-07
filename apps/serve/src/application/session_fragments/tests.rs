@@ -156,7 +156,10 @@ async fn continuation_preserves_parent_authority_and_rejects_revoked_callers() {
         let reader = FragmentReader::new();
         let first = reader
             .read("page", 0, original, async {
-                Ok((1, format!("[\"{}\"]", "x".repeat(150_000))))
+                Ok((
+                    1,
+                    format!("[\"{}\"]", "x".repeat(rsi_extension::MAXIMUM_FRAME_BYTES)),
+                ))
             })
             .await
             .unwrap();
@@ -190,7 +193,7 @@ async fn retained_pages_bind_the_request_and_coordinates_and_release_capacity() 
         after: 0,
         through: 1,
     };
-    let body = || format!("[\"{}\"]", "界".repeat(50_000));
+    let body = || format!("[\"{}\"]", "界".repeat(350_000));
     let first = reader
         .read("first", 0, identity("one"), async { Ok((1, body())) })
         .await
@@ -310,7 +313,10 @@ async fn failed_cancelled_and_single_fragment_reads_leave_no_retained_page() {
     for key in ["first", "second"] {
         reader
             .read(key, 0, identity(), async {
-                Ok((1, format!("[\"{}\"]", "x".repeat(150_000))))
+                Ok((
+                    1,
+                    format!("[\"{}\"]", "x".repeat(rsi_extension::MAXIMUM_FRAME_BYTES)),
+                ))
             })
             .await
             .unwrap();

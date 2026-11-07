@@ -30,6 +30,13 @@ page, as DSH's history controller borrows one `SessionObservation` for its
 consumer. Repeating Header I/O cannot make that captured body fresher. The
 retained page includes the addressed parent, while the owning request remains
 subject to retirement on every fragment. New reads still authorize independently.
+DSH's persistence reader obtains a contiguous log slice in one read. The process
+adapter preserves that intent within its existing frame limit: it packs fragments
+by their escaped wire size instead of imposing a smaller fixed text prefix.
+Ordinary Store pages follow the transport capacity, so a moderate control body
+does not force separate reads for its preceding records, body and trailing records.
+The bounded reader count and oversized-record path remain the memory boundary;
+neither a second durable event log nor a larger process frame is needed.
 Persisted opens obtain their immutable model baseline and Fact/control cut from
 authorized stored metadata. Like DSH's JSONL read handles, they do not need a
 live Agent projection to reconstruct history. Requesting a full model projection

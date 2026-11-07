@@ -18,7 +18,12 @@ pub(super) async fn read_controls(
         .ok_or(Error::Protocol)?
         .min(64) as usize;
     let page = match store
-        .read_controls(header.session_id(), after, limit, 128 * 1024)
+        .read_controls(
+            header.session_id(),
+            after,
+            limit,
+            super::session_history::HISTORY_PAGE_BYTES,
+        )
         .await
     {
         Err(StoreError::ReadRequiresCapacity { minimum_bytes }) => {

@@ -336,29 +336,17 @@ async fn withdrawn_message_fixture() -> (
 }
 
 #[tokio::test]
-async fn control_pages_deliver_acceptances_once_and_bound_large_records() {
+async fn control_pages_keep_moderate_acceptances_and_transitions_in_one_read() {
     let reader = FragmentReader::new();
     let (store, header, message) = withdrawn_message_fixture().await;
-    let mut controls = String::new();
-    loop {
-        let page = reader
-            .controls(&store, &header, 0, 2, controls.len())
-            .await
-            .unwrap();
-        assert_eq!(
-            page["through_seq"], 1,
-            "one oversized acceptance stays on its own page"
-        );
-        assert!(page["json"].as_str().unwrap().len() <= 128 * 1024);
-        controls.push_str(page["json"].as_str().unwrap());
-        if page["next_offset"] == page["total_bytes"] {
-            break;
-        }
-    }
-    let events: Value = serde_json::from_str(&controls).unwrap();
-    assert_eq!(events.as_array().unwrap().len(), 1);
+    let page = reader.controls(&store, &header, 0, 2, 0).await.unwrap();
+    assert_eq!(page["through_seq"], 2);
+    assert_eq!(page["next_offset"], page["total_bytes"]);
+    let events: Value = serde_json::from_str(page["json"].as_str().unwrap()).unwrap();
+    assert_eq!(events.as_array().unwrap().len(), 2);
     assert_eq!(events[0]["message"], json!(message));
     assert_eq!(events[0]["after_fact_seq"], 0);
+    assert_eq!(events[1]["kind"], "discarded");
     let discarded = reader.controls(&store, &header, 1, 2, 0).await.unwrap();
     assert_eq!(discarded["through_seq"], 2);
     assert_eq!(
@@ -555,7 +543,7 @@ async fn fact_pages_bound_the_captured_horizon_and_read_large_records_alone() {
                     if seq == 1 {
                         SessionFactBody::TurnAccepted {
                             turn_id: turn.clone(),
-                            text: "history".repeat(24_000),
+                            text: "\n".repeat(400_000),
                             model: None,
                             reasoning_effort: None,
                             sandbox: SandboxMode::WorkspaceWrite,
@@ -585,8 +573,9 @@ async fn fact_pages_bound_the_captured_horizon_and_read_large_records_alone() {
     }
     let large = reader.facts(&store, &id, 0, 600, 0).await.unwrap();
     assert_eq!(large["through_seq"], 1);
-    assert_eq!(large["next_offset"], 128 * 1024);
-    let tail = reader.facts(&store, &id, 0, 600, 128 * 1024).await.unwrap();
+    let offset = usize::try_from(large["next_offset"].as_u64().unwrap()).unwrap();
+    assert!(offset < usize::try_from(large["total_bytes"].as_u64().unwrap()).unwrap());
+    let tail = reader.facts(&store, &id, 0, 600, offset).await.unwrap();
     assert_eq!(tail["through_seq"], 1);
     assert_eq!(large["total_bytes"], tail["total_bytes"]);
     let encoded = format!(
@@ -630,8 +619,38 @@ fn model_projection_retains_effort_absence_and_does_not_default_a_failed_produce
 }
 
 #[test]
+fn history_fragments_pack_json_escaped_text_inside_the_process_frame() {
+    use rsi_extension::{Frame, MAXIMUM_FRAME_BYTES, Message, Response};
+    for unit in ["x", "\"\\\n\r\t\u{0008}\u{000c}\u{0000}", "历史🦀"] {
+        let data = unit.repeat(MAXIMUM_FRAME_BYTES / unit.len() + 1);
+        let mut offset = 0;
+        let mut joined = String::new();
+        while offset < data.len() {
+            let mut page = fragment(&data, offset, u64::MAX).unwrap();
+            let part = page["json"].as_str().unwrap();
+            // Fill the existing wire capacity even for heavily escaped text.
+            if page["next_offset"] != page["total_bytes"] {
+                assert!(serde_json::to_vec(part).unwrap().len() > MAXIMUM_FRAME_BYTES * 9 / 10);
+            }
+            joined.push_str(part);
+            offset = usize::try_from(page["next_offset"].as_u64().unwrap()).unwrap();
+            page["reader"] = json!("r".repeat(64));
+            let frame = Frame {
+                generation: "g".repeat(128),
+                message: Message::Reply {
+                    id: (1_u64 << 53) - 1,
+                    result: Response::Ok(page),
+                },
+            };
+            assert!(serde_json::to_vec(&frame).unwrap().len() <= MAXIMUM_FRAME_BYTES);
+        }
+        assert_eq!(joined, data);
+    }
+}
+
+#[test]
 fn history_fragments_preserve_multibyte_text_and_reject_invalid_offsets() {
-    let prefix = "x".repeat(128 * 1024 - 1);
+    let prefix = "x".repeat(FRAGMENT_JSON_BYTES - 1);
     let data = format!("{prefix}历史");
     let first = fragment(&data, 0, 7).unwrap();
     assert_eq!(first["json"], prefix);

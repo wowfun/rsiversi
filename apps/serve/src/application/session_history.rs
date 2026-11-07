@@ -511,7 +511,10 @@ pub(super) async fn read_facts(
         .filter(|count| *count > 0)
         .ok_or(Error::Protocol)?;
     let limit = count.min(512) as usize;
-    let page = match store.read_facts(session, after, limit, 128 * 1024).await {
+    let page = match store
+        .read_facts(session, after, limit, HISTORY_PAGE_BYTES)
+        .await
+    {
         Err(StoreError::ReadRequiresCapacity { minimum_bytes }) => {
             store.read_facts(session, after, 1, minimum_bytes).await
         }
@@ -532,11 +535,32 @@ pub(super) fn fragment(encoded: &str, offset: usize, through: u64) -> Result<Val
     )
 }
 
+pub(super) const HISTORY_PAGE_BYTES: usize = rsi_extension::MAXIMUM_FRAME_BYTES / 2;
+const FRAGMENT_JSON_BYTES: usize = rsi_extension::MAXIMUM_FRAME_BYTES - 8 * 1024;
+
 pub(super) fn fragment_text(encoded: &str, offset: usize) -> Result<(usize, &str)> {
     if offset >= encoded.len() || !encoded.is_char_boundary(offset) {
         return Err(Error::Protocol);
     }
-    let mut end = offset.saturating_add(128 * 1024).min(encoded.len());
+    // Any byte takes at most six bytes in a JSON string. Small pages fit without
+    // scanning; larger pages count the same escapes as serde_json's formatter.
+    if encoded.len() - offset <= FRAGMENT_JSON_BYTES / 6 {
+        return Ok((encoded.len(), &encoded[offset..]));
+    }
+    let mut end = offset;
+    let mut wire_bytes = 0;
+    for byte in &encoded.as_bytes()[offset..] {
+        let width = match byte {
+            b'"' | b'\\' | b'\x08' | b'\t' | b'\n' | b'\x0c' | b'\r' => 2,
+            0..=0x1f => 6,
+            _ => 1,
+        };
+        if wire_bytes + width > FRAGMENT_JSON_BYTES {
+            break;
+        }
+        wire_bytes += width;
+        end += 1;
+    }
     while !encoded.is_char_boundary(end) {
         end -= 1;
     }
