@@ -30,12 +30,12 @@ package has at most 65,536 expanded files plus directories. Archive and expanded
 bytes are both reserved against the store budget. The materialized payload retains
 its complete PackageLease, so selection changes and GC cannot remove a live tree.
 There is no second expansion cache or installation registry.
-Acquisition streams each archive once to authenticate the manifest digest and
-the ordered file records. It then walks the expanded tree once, matching each
+Ordinary acquisition streams each archive once to authenticate its declared digest
+and ordered file records. It then walks the expanded tree once, matching each
 exact name and type to that header and hashing each file through its retained
 parent directory. A missing, extra, changed or substituted entry fails the
 acquisition. Windows excludes the filesystem-owned `.rsi-namespace-pin` guard
-of each pinned directory. The last live process lease still ends reuse.
+of each pinned directory.
 Installation writes in archive order and holds only the current ancestor chain.
 For large acquisitions the directory walk sends bounded batches from retained
 parents to at most seven additional readers across the process. All readers
@@ -164,17 +164,21 @@ immutable object passes verification, including an unselected generation.
 An unselected, unleased candidate that fails verification can be reclaimed
 and staged again from the supplied source.
 One lease can materialize payload exports of its exact direct dependencies.
-Callers retain the selection lease while using those paths. Reopening the
-same dependency to acquire another lease would repeat verification of bytes
-already owned by that process generation.
+Callers retain the selection lease while using those paths.
+Process acquisition authenticates bounded manifests and exact dependency
+identities, opens each declared payload root without following links, and pins
+the complete closure. It relies on installation's content verification rather
+than rescanning archives and expanded files at startup. Process launch additionally
+authenticates its bounded descriptor and admits the referenced working directory
+and argument paths. This applies to both process extensions and importers.
+Manual changes or corruption of other installed content are detected by ordinary
+acquisition or installation reuse verification, not proactively at process startup.
+Installed code executes with the operator's native authority.
 Process and importer exports resolved by the same store may share an already
 live lease of the exact named generation. Each launch resolves its own export
 role, descriptor bytes and arguments. Releasing the last consumer ends this
-reuse. Opening a different store or acquiring an ordinary lease verifies the
-durable closure afresh.
-When the running process adds another selection, its store can transfer
-already held immutable dependency objects to that selection. Each new lease
-holds its own locks. New object bytes still undergo full verification.
+reuse. A new process lease rereads the durable metadata and holds its own locks;
+an ordinary lease verifies the complete durable content afresh.
 For an opt-in cold-start measurement, `RSI_PACKAGE_TIMINGS=1` writes Store
 writer-lock wait, manifest and regular content verification, payload verification
 (archive plus expanded tree) and process-closure acquisition times to stderr. Records use

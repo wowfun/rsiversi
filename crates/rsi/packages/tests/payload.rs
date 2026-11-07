@@ -149,7 +149,7 @@ fn bad_payload_does_not_publish_or_break_previous_selection() {
     }
 }
 #[test]
-fn expanded_unknown_entry_is_not_trusted_on_reacquisition() {
+fn ordinary_acquisition_detects_unknown_entries_without_rescanning_on_process_start() {
     let root = tempfile::tempdir().unwrap();
     let store = PackageStore::open(&root.path().join("store")).unwrap();
     store
@@ -187,9 +187,10 @@ fn expanded_unknown_entry_is_not_trusted_on_reacquisition() {
     .unwrap();
     assert!(store.acquire("plugin").is_err());
     let independent = PackageStore::open(&root.path().join("store")).unwrap();
-    assert!(independent.acquire_for_process("plugin", &digest).is_err());
+    assert!(independent.acquire_for_process("plugin", &digest).is_ok());
     drop(lease);
-    assert!(store.acquire_for_process("plugin", &digest).is_err());
+    assert!(store.acquire_for_process("plugin", &digest).is_ok());
+    assert!(store.acquire_exact("plugin", &digest).is_err());
 }
 
 #[test]
@@ -358,6 +359,152 @@ fn process_source(
     );
     candidate.manifest = serde_json::to_vec(&manifest).unwrap();
     candidate
+}
+
+#[test]
+fn fresh_process_launch_skips_archives_and_unused_files_but_requires_its_entry() {
+    let root = tempfile::tempdir().unwrap();
+    let path = root.path().join("store");
+    let store = PackageStore::open(&path).unwrap();
+    let runtime = source(
+        root.path(),
+        "runtime",
+        &tree(&[("host.mjs", b"entry"), ("unused.txt", b"unused")]),
+    );
+    let runtime_digest = hash(&runtime.manifest);
+    let bridge = process_source(root.path(), "bridge", &runtime, "host.mjs");
+    let digest = hash(&bridge.manifest);
+    store
+        .install(
+            &[runtime, bridge],
+            &[],
+            &[Interface {
+                name: "rsi.extension.process".into(),
+                version: 1,
+            }],
+            "portable",
+        )
+        .unwrap();
+    drop(store);
+    let object = path.join("objects").join(runtime_digest);
+    std::fs::remove_file(object.join("content/payload.rsi")).unwrap();
+    std::fs::remove_file(object.join("payloads/runtime/unused.txt")).unwrap();
+    let store = PackageStore::open(&path).unwrap();
+    let process = store
+        .process_extension("bridge", &digest, "process", "fresh")
+        .unwrap();
+    assert_eq!(std::fs::read(&process.arguments[0]).unwrap(), b"entry");
+    assert!(store.acquire_exact("bridge", &digest).is_err());
+    std::fs::remove_file(object.join("payloads/runtime/host.mjs")).unwrap();
+    assert!(
+        store
+            .process_extension("bridge", &digest, "process", "live")
+            .is_err()
+    );
+    drop(process);
+    assert!(
+        store
+            .process_extension("bridge", &digest, "process", "new")
+            .is_err()
+    );
+}
+
+#[test]
+fn process_admission_authenticates_every_manifest_and_requires_payload_roots() {
+    let root = tempfile::tempdir().unwrap();
+    let path = root.path().join("store");
+    let store = PackageStore::open(&path).unwrap();
+    let runtime = source(root.path(), "runtime", &tree(&[("host.mjs", b"entry")]));
+    let dependency = hash(&runtime.manifest);
+    let bridge = process_source(root.path(), "bridge", &runtime, "host.mjs");
+    let digest = hash(&bridge.manifest);
+    store
+        .install(
+            &[runtime, bridge],
+            &[],
+            &[Interface {
+                name: "rsi.extension.process".into(),
+                version: 1,
+            }],
+            "portable",
+        )
+        .unwrap();
+    for current in [&digest, &dependency] {
+        let object = path.join("objects").join(current);
+        let manifest = object.join("manifest.json");
+        let bytes = std::fs::read(&manifest).unwrap();
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt as _;
+            std::fs::set_permissions(&manifest, std::fs::Permissions::from_mode(0o600)).unwrap();
+        }
+        std::fs::write(&manifest, b"{}").unwrap();
+        assert!(matches!(
+            store.acquire_for_process("bridge", &digest),
+            Err(Error::Digest)
+        ));
+        std::fs::write(&manifest, bytes).unwrap();
+        let payload = object.join("payloads/runtime");
+        let moved = object.join("payloads/moved");
+        std::fs::rename(&payload, &moved).unwrap();
+        assert!(store.acquire_for_process("bridge", &digest).is_err());
+        #[cfg(unix)]
+        {
+            std::os::unix::fs::symlink(&moved, &payload).unwrap();
+            assert!(store.acquire_for_process("bridge", &digest).is_err());
+            std::fs::remove_file(&payload).unwrap();
+        }
+        std::fs::rename(moved, payload).unwrap();
+    }
+    assert!(store.acquire_for_process("wrong-name", &digest).is_err());
+    assert!(
+        store
+            .process_extension("bridge", &digest, "process", "restored")
+            .is_ok()
+    );
+}
+
+#[test]
+fn each_launch_authenticates_its_descriptor_even_with_a_live_lease() {
+    let root = tempfile::tempdir().unwrap();
+    let path = root.path().join("store");
+    let store = PackageStore::open(&path).unwrap();
+    let runtime = source(root.path(), "runtime", &tree(&[("host.mjs", b"entry")]));
+    let bridge = process_source(root.path(), "bridge", &runtime, "host.mjs");
+    let digest = hash(&bridge.manifest);
+    store
+        .install(
+            &[runtime, bridge],
+            &[],
+            &[Interface {
+                name: "rsi.extension.process".into(),
+                version: 1,
+            }],
+            "portable",
+        )
+        .unwrap();
+    let process = store
+        .process_extension("bridge", &digest, "process", "live")
+        .unwrap();
+    let descriptor = path
+        .join("objects")
+        .join(&digest)
+        .join("content/process.json");
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt as _;
+        std::fs::set_permissions(&descriptor, std::fs::Permissions::from_mode(0o600)).unwrap();
+    }
+    std::fs::write(descriptor, b"{}").unwrap();
+    assert!(matches!(
+        store.process_extension("bridge", &digest, "process", "cached"),
+        Err(Error::Digest)
+    ));
+    drop(process);
+    assert!(matches!(
+        store.process_extension("bridge", &digest, "process", "fresh"),
+        Err(Error::Digest)
+    ));
 }
 
 #[test]

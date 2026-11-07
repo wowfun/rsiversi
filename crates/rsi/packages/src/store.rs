@@ -47,6 +47,11 @@ pub use profile::ProfileAdmission;
 #[path = "migration_tests.rs"]
 mod migration_tests;
 const MAX_OBJECTS: usize = 256;
+#[derive(Clone, Copy)]
+enum Verification {
+    Full,
+    Metadata,
+}
 /// One installed selection and its exact admitted provenance.
 #[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
 #[serde(deny_unknown_fields)]
@@ -114,7 +119,7 @@ pub struct ResolvedProcessExtension {
     /// Complete arguments after the externally selected executable.
     pub arguments: Vec<String>,
 }
-/// Verified expanded bytes retaining the entire admitted package closure.
+/// An installed payload retaining the entire admitted package closure.
 #[derive(Debug)]
 pub struct MaterializedPayload {
     package: Arc<PackageLease>,
@@ -170,7 +175,7 @@ impl PackageLease {
             .ok_or_else(|| invalid("missing export or wrong role"))?;
         Ok(self.root.join(&export.path))
     }
-    /// Pins a payload expanded and verified by `PackageStore`, without a second cache.
+    /// Pins a payload expanded and verified at installation, without a second cache.
     pub fn payload(self: &Arc<Self>, name: &str) -> Result<MaterializedPayload> {
         self.export(name, ExportKind::PayloadTree)?;
         Ok(MaterializedPayload {
@@ -596,37 +601,37 @@ impl PackageStore {
             .packages
             .get(name)
             .ok_or_else(|| invalid("package is not installed"))?;
-        self.acquire_unlocked(name, &selected.digest, &[])
+        self.acquire_unlocked(name, &selected.digest, Verification::Full)
     }
     /// Pins an exact admitted generation, even after its name selects a newer one.
     pub fn acquire_exact(&self, name: &str, digest: &str) -> Result<PackageLease> {
         crate::identifier(name)?;
         crate::hash(digest)?;
         let _writer = self.root.lock("writer.lock", true)?;
-        self.acquire_unlocked(name, digest, &[])
+        self.acquire_unlocked(name, digest, Verification::Full)
     }
-    /// Leases a process selection, reusing only immutable objects of live process
-    /// leases from this store instance. Ordinary exact acquisition remains fresh.
+    /// Pins an installed process closure after authenticating its metadata and
+    /// admitting payload roots. Content is verified at installation; use ordinary
+    /// acquisition to check it again. Exact live process leases may be shared.
     pub fn acquire_for_process(&self, name: &str, digest: &str) -> Result<Arc<PackageLease>> {
         crate::identifier(name)?;
         crate::hash(digest)?;
-        let parents: Vec<_> = self
+        let cached = self
             .processes
             .lock()
             .unwrap_or_else(std::sync::PoisonError::into_inner)
-            .values()
-            .filter_map(std::sync::Weak::upgrade)
-            .collect();
-        if let Some(lease) = parents.iter().find(|lease| lease.digest() == digest) {
+            .get(digest)
+            .and_then(std::sync::Weak::upgrade);
+        if let Some(lease) = cached {
             if lease.manifest().name != name {
                 return Err(invalid("package identity differs from manifest"));
             }
-            return Ok(lease.clone());
+            return Ok(lease);
         }
         let mut timing = Timing::start();
         let _writer = self.root.lock("writer.lock", true)?;
         timing.mark(digest, "lock");
-        let lease = Arc::new(self.acquire_unlocked(name, digest, &parents)?);
+        let lease = Arc::new(self.acquire_unlocked(name, digest, Verification::Metadata)?);
         timing.mark(digest, "closure");
         let mut active = self
             .processes
@@ -787,13 +792,8 @@ impl PackageStore {
         &self,
         name: &str,
         digest: &str,
-        parents: &[Arc<PackageLease>],
+        verification: Verification,
     ) -> Result<PackageLease> {
-        let held: BTreeSet<_> = parents
-            .iter()
-            .flat_map(|lease| &lease.directories)
-            .filter_map(|dir| dir.path.file_name()?.to_str())
-            .collect();
         let mut pending = vec![(name.to_owned(), digest.to_owned())];
         let mut seen = BTreeSet::new();
         let mut files = Vec::new();
@@ -808,10 +808,17 @@ impl PackageStore {
                 return Err(invalid("package closure capacity"));
             }
             files.push(self.leases.lock(&current_digest, true)?);
-            let (directory, manifest) = if held.contains(current_digest.as_str()) {
-                self.read_object(&current_digest)?
-            } else {
-                self.verify_object(&current_digest)?
+            let (directory, manifest) = match verification {
+                Verification::Full => self.verify_object(&current_digest)?,
+                Verification::Metadata => {
+                    let (directory, manifest) = self.read_object(&current_digest)?;
+                    for (name, export) in &manifest.exports {
+                        if export.kind == ExportKind::PayloadTree {
+                            directory.child(&Path::new("payloads").join(name), false)?;
+                        }
+                    }
+                    (directory, manifest)
+                }
             };
             if manifest.name != name {
                 return Err(invalid("package identity differs from manifest"));

@@ -20,6 +20,12 @@ optional [Agent adapter](../../../../crates/rsi-extension/agent/README.md) owns
 retained Tool settlement over the Agent's existing atomic domain commit.
 Meta has no knowledge of extension event types or DSH services.
 
+Installed process closures use PackageStore's bounded metadata admission and
+lifetime leases. Launch authenticates the descriptor and resolves the paths it
+uses. Full archive and expanded-file verification belongs to installation and
+ordinary acquisition, as specified by the
+[package contract](../../../../crates/rsi/packages/README.md).
+
 The published Better Sidebar resolves explicit filesystem paths with the
 host user's permissions, including paths outside the Session's default
 directory. A marketplace can also install executable code. Applying a path
@@ -94,6 +100,16 @@ Using Tool runtime `commit` as acknowledgement would confuse cleanup with durabl
 publication. Inferring rejection from an absent receipt before terminal admission
 could race an already owned Kernel commit.
 
+Rehashing every installed process dependency at startup makes activation cost
+proportional to all shipped assets, including files that execution never reads.
+The DSH boot profile resolves installed package manifests and module locations
+instead. In the Windows fixture, restoring Better Sidebar spent about 64 seconds
+acquiring a payload containing 13,079 files before the workbench could open.
+Reusing only live leases cannot remove that cost after Host restart. More hashing
+threads shift the same work onto scarce CPU and storage; timestamp caches add
+state and invalidation rules. Metadata admission removes that work without an
+additional cache or durable copy.
+
 ## Consequences
 
 The process can overlap requests and reverse callbacks, but it is not a sandbox:
@@ -101,6 +117,12 @@ heap and CPU are not confined by the protocol's I/O bounds. A failed watchdog
 terminates the generation, preserving effect uncertainty. Payload trees are
 expanded under PackageStore's immutable object, lease and GC authority; large npm
 closures do not use an independent mutable cache.
+Process startup consequently does not proactively detect manual changes or
+corruption in unused installed files. Installation still verifies every byte,
+and ordinary acquisition remains the complete integrity check. This is an
+intentional local execution trade-off: installed plugins already have the
+operator's native authority, while bounded metadata, descriptor authentication,
+no-follow path admission and GC leases remain enforced.
 The standard package factory resolves a versioned descriptor from an exact
 PackageStore digest. Descriptor paths can name the declaring package or its
 exact direct dependencies; installation validates them before selection. The
