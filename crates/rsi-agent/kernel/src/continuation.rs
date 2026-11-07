@@ -280,7 +280,7 @@ impl SessionContinuations for AgentKernel {
         }
         self.discard_continuation_admitted(
             lease.session_id(),
-            &scan,
+            (scan.durable_fact_seq, scan.durable_control_seq),
             entry,
             MessageDiscardReason::ContinuationDisarmed,
         )
@@ -504,15 +504,15 @@ impl AgentKernel {
     pub(super) async fn discard_continuation_admitted(
         &self,
         session: &SessionId,
-        scan: &DurableMessageScan,
+        watermarks: (u64, u64),
         entry: &DurableMessageEntry,
         reason: MessageDiscardReason,
     ) -> TurnResult<MessageReceipt> {
         if entry.state != MessageState::Pending {
-            return Ok(message_receipt(session, scan.durable_fact_seq, entry));
+            return Ok(message_receipt(session, watermarks.0, entry));
         }
-        let seq = scan
-            .durable_control_seq
+        let seq = watermarks
+            .1
             .checked_add(1)
             .ok_or_else(|| TurnError::Invariant("control sequence exhausted".into()))?;
         let control = AgentControlRecord::new(
@@ -527,8 +527,8 @@ impl AgentKernel {
         self.commit_agent_with_flush_conflict_retry(AtomicAgentCommit {
             sessions: vec![AtomicSessionAppend {
                 session_id: session.clone(),
-                expected_fact_seq: scan.durable_fact_seq,
-                expected_control_seq: scan.durable_control_seq,
+                expected_fact_seq: watermarks.0,
+                expected_control_seq: watermarks.1,
                 header: None,
                 facts: Vec::new(),
                 controls: vec![control],
@@ -543,7 +543,7 @@ impl AgentKernel {
             session_id: session.clone(),
             message_id: entry.message.message_id.clone(),
             accepted_control_seq: entry.accepted_control_seq,
-            observed_fact_seq: scan.durable_fact_seq,
+            observed_fact_seq: watermarks.0,
             state: MessageState::Discarded {
                 reason,
                 control_seq: seq,
@@ -575,7 +575,7 @@ impl AgentKernel {
         {
             self.discard_continuation_admitted(
                 session,
-                &scan,
+                (scan.durable_fact_seq, scan.durable_control_seq),
                 entry,
                 MessageDiscardReason::ContinuationDisarmed,
             )

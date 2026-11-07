@@ -311,6 +311,30 @@ pub(super) async fn observe_agent_wait_change(
     }))
 }
 
+pub(super) async fn read_mailbox_claim(
+    inner: &Arc<KernelInner>,
+    session_id: &SessionId,
+    waking: Option<MessageId>,
+) -> TurnResult<rsi_agent_store_protocol::StoreMailboxClaim> {
+    // A Step selection carries at most 64 short identities and no bodies.
+    // Only a waking selection can decode a full accepted message.
+    let bytes = if waking.is_some() {
+        MAXIMUM_SESSION_FACT_BYTES
+    } else {
+        store_reads::INITIAL_PAGE_BYTES
+    };
+    let (selection, _permit, _lease) = store_reads::read(
+        inner,
+        session_id,
+        bytes,
+        true,
+        move |store, id| async move { store.read_mailbox_claim(&id, waking).await },
+    )
+    .await
+    .map_err(turn_store_error)?;
+    Ok(selection)
+}
+
 pub(super) async fn scan_durable_messages(
     inner: &Arc<KernelInner>,
     session_id: &SessionId,
@@ -336,7 +360,6 @@ pub(super) async fn scan_durable_messages(
         .collect::<Vec<_>>();
     Ok(DurableMessageScan {
         inbox_paused: mailbox.inbox_paused,
-        has_ordinary_pending_turn: mailbox.has_ordinary_pending_turn,
         selected: mailbox.selected.map(durable_message_entry),
         pending_count,
         pending,

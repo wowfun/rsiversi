@@ -40,7 +40,7 @@ use super::{
     StoreAgentMailboxSummary, StoreError, StoredContextCheckpoint, TurnId, TurnOutcome,
     WriteContextCheckpoint, fact_prefix_sha256,
 };
-use rsi_agent_store_protocol::MailboxRead;
+use rsi_agent_store_protocol::{MailboxRead, StoreAgentMessageState};
 
 /// Exercises the backend-independent observable Store contract against one
 /// empty implementation.
@@ -810,47 +810,62 @@ pub async fn assert_mechanical_store_contract(
     let message_turn_id = TurnId::new("turn-message-contract").unwrap();
     let message_step_id = StepId::new("step-contract").unwrap();
     let step_message_id = MessageId::new("message-step-contract").unwrap();
-    assert!(matches!(
+    let before_claim = store.read_watermarks(&session_id).await.unwrap();
+    let obsolete_claim = store
+        .commit_agent(AtomicAgentCommit {
+            sessions: vec![AtomicSessionAppend {
+                session_id: session_id.clone(),
+                expected_fact_seq: 3,
+                expected_control_seq: 2,
+                header: None,
+                facts: Vec::new(),
+                controls: vec![
+                    AgentControlRecord::new(
+                        3,
+                        11,
+                        AgentControlRecordBody::ActivationStarted {
+                            activation_id: activation_id.clone(),
+                            root_session_id: session_id.clone(),
+                            parent_session_id: None,
+                            path: rsi_agent_session_protocol::AgentPath::root(),
+                        },
+                    )
+                    .unwrap(),
+                    AgentControlRecord::new(
+                        4,
+                        11,
+                        AgentControlRecordBody::MessageClaimed {
+                            message_id: message_id.clone(),
+                            activation_id: activation_id.clone(),
+                            turn_id: message_turn_id.clone(),
+                            step_id: message_step_id.clone(),
+                            claimed_fact_seq: 3,
+                        },
+                    )
+                    .unwrap(),
+                ],
+            }],
+            required_active_activations: Vec::new(),
+            quiescent_descendants_of: None,
+        })
+        .await;
+    assert!(
+        matches!(obsolete_claim, Err(StoreError::Invalid(_))),
+        "{obsolete_claim:?}"
+    );
+    assert_eq!(
+        store.read_watermarks(&session_id).await.unwrap(),
+        before_claim
+    );
+    assert_eq!(
         store
-            .commit_agent(AtomicAgentCommit {
-                sessions: vec![AtomicSessionAppend {
-                    session_id: session_id.clone(),
-                    expected_fact_seq: 3,
-                    expected_control_seq: 2,
-                    header: None,
-                    facts: Vec::new(),
-                    controls: vec![
-                        AgentControlRecord::new(
-                            3,
-                            11,
-                            AgentControlRecordBody::ActivationStarted {
-                                activation_id: activation_id.clone(),
-                                root_session_id: session_id.clone(),
-                                parent_session_id: None,
-                                path: rsi_agent_session_protocol::AgentPath::root(),
-                            },
-                        )
-                        .unwrap(),
-                        AgentControlRecord::new(
-                            4,
-                            11,
-                            AgentControlRecordBody::MessageClaimed {
-                                message_id: message_id.clone(),
-                                activation_id: activation_id.clone(),
-                                turn_id: message_turn_id.clone(),
-                                step_id: message_step_id.clone(),
-                                claimed_fact_seq: 3,
-                            },
-                        )
-                        .unwrap(),
-                    ],
-                }],
-                required_active_activations: Vec::new(),
-                quiescent_descendants_of: None,
-            })
-            .await,
-        Err(StoreError::Invalid(message)) if message.contains("newly appended input Fact")
-    ));
+            .read_agent_message(&session_id, &message_id)
+            .await
+            .unwrap()
+            .unwrap()
+            .state,
+        StoreAgentMessageState::Pending
+    );
     let message_facts = vec![
         SessionFact::new(
             4,
@@ -2021,12 +2036,9 @@ pub async fn assert_mechanical_store_contract(
     );
     assert_eq!(promoted.target, MessageTarget::NextTurn);
     assert!(promoted.wake_required);
-    let step = store
-        .read_agent_mailbox(&session_id, MailboxRead::NextStep)
-        .await
-        .unwrap();
+    let step = store.read_mailbox_claim(&session_id, None).await.unwrap();
     assert_eq!(
-        step.pending_count,
+        step.pending.len(),
         rsi_agent_session_protocol::MAXIMUM_PENDING_AGENT_MESSAGES - 1
     );
     assert!(

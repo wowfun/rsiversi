@@ -2,9 +2,74 @@
 
 use crate::{Result, StoreError};
 use rsi_agent_session_protocol::{
-    DomainIdentity, DomainMutationSource, DomainRevision, DomainSnapshot, DomainStateCommit,
-    MAXIMUM_DOMAIN_BASELINE_BYTES, MAXIMUM_SESSION_DOMAINS,
+    AgentControlRecord, AgentControlRecordBody, DomainFactSpanBuilder, DomainIdentity,
+    DomainMutationSource, DomainRevision, DomainSnapshot, DomainStateCommit,
+    MAXIMUM_DOMAIN_BASELINE_BYTES, MAXIMUM_SESSION_DOMAINS, SessionFact,
 };
+
+/// Streaming check of each Turn-origin receipt against its complete Fact suffix.
+#[derive(Debug)]
+pub struct StoreDomainFactCheck<'a> {
+    requests: Vec<&'a DomainStateCommit>,
+    span: Option<DomainFactSpanBuilder>,
+}
+
+impl<'a> StoreDomainFactCheck<'a> {
+    /// Returns no checker when the append contains no Turn-origin domain receipts.
+    #[must_use]
+    pub fn new(controls: &'a [AgentControlRecord]) -> Option<Self> {
+        let requests: Vec<_> = controls
+            .iter()
+            .filter_map(|record| match record.body() {
+                AgentControlRecordBody::DomainStateCommitted { commit }
+                    if matches!(commit.source(), DomainMutationSource::Turn { .. }) =>
+                {
+                    Some(commit)
+                }
+                _ => None,
+            })
+            .collect();
+        (!requests.is_empty()).then_some(Self {
+            requests,
+            span: None,
+        })
+    }
+
+    /// Adds one logical Fact without cloning the receipt, state or Fact body.
+    pub fn push(&mut self, fact: &SessionFact) -> Result<()> {
+        for request in &self.requests {
+            if !matches!(request.source(), DomainMutationSource::Turn { turn_id } if turn_id == fact.body().turn_id())
+            {
+                return Err(StoreError::Invalid(
+                    "domain request Facts changed the originating Turn".into(),
+                ));
+            }
+        }
+        self.span
+            .get_or_insert_with(DomainFactSpanBuilder::default)
+            .push(fact)
+            .map_err(|error| StoreError::Invalid(error.to_string()))
+    }
+
+    /// Compares the bound spans; typed receipts already validate their request digest.
+    pub fn finish(self) -> Result<()> {
+        let span = self
+            .span
+            .map(DomainFactSpanBuilder::finish)
+            .transpose()
+            .map_err(|error| StoreError::Invalid(error.to_string()))?;
+        if self
+            .requests
+            .iter()
+            .any(|request| request.fact_span() != span.as_ref())
+        {
+            return Err(StoreError::Invalid(
+                "domain request does not bind its complete same-append Fact span".into(),
+            ));
+        }
+        Ok(())
+    }
+}
 
 /// Derived Turn-attributed control usage at one durable Session snapshot.
 #[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]

@@ -143,13 +143,56 @@ pub(super) fn apply_atomic_sqlite_append(
         )
         .map_err(sql_error)
         .and_then(|digest| decode_sha256("Fact-prefix digest", &digest))?;
-    for fact in &append.facts {
-        if matches!(fact.body(), SessionFactBody::InputMessageClaimed { .. }) {
+    let suffix = append.fact_suffix()?;
+    let durable_fact_seq = suffix
+        .last()
+        .map_or(actual_fact, rsi_agent_store_protocol::StoreFactAppend::seq);
+    let mut resolved_claims = std::collections::BTreeMap::new();
+    let mut domain_facts = if append.has_referenced_claims() {
+        rsi_agent_store_protocol::StoreDomainFactCheck::new(&append.controls)
+    } else {
+        None
+    };
+    for item in suffix {
+        let materialized;
+        let (fact, acceptance) = match item {
+            rsi_agent_store_protocol::StoreFactAppend::Inline(fact) => (fact.as_ref(), None),
+            rsi_agent_store_protocol::StoreFactAppend::Claimed(claim) => {
+                let entry = super::validation::read_indexed_agent_message(
+                    transaction,
+                    &append.session_id,
+                    claim.message_id,
+                )?;
+                if entry.state != StoreAgentMessageState::Pending {
+                    return Err(StoreError::Corrupt(
+                        "claim acceptance is not pending".into(),
+                    ));
+                }
+                entry.validate_claim_turn(claim.turn_id)?;
+                let acceptance = entry.accepted_control_seq;
+                materialized = claim.materialize(entry.message)?;
+                resolved_claims.insert(claim.seq, acceptance);
+                (&materialized, Some(acceptance))
+            }
+        };
+        if let Some(acceptance) = acceptance {
+            insert_fact_row(
+                transaction,
+                &append.session_id,
+                fact,
+                &references,
+                Some(acceptance),
+            )?;
+            update_turn_index(transaction, &append.session_id, fact)?;
+        } else if matches!(fact.body(), SessionFactBody::InputMessageClaimed { .. }) {
             // Claims are encoded only after their original typed bodies pass
             // control admission. Other Fact-dependent controls can use the index.
             update_turn_index(transaction, &append.session_id, fact)?;
         } else {
             insert_fact(transaction, &append.session_id, fact, &references)?;
+        }
+        if let Some(domain_facts) = &mut domain_facts {
+            domain_facts.push(fact)?;
         }
         fact_digest = advance_fact_prefix_digest(fact_digest, fact)
             .map_err(|error| StoreError::Invalid(error.to_string()))?;
@@ -173,7 +216,9 @@ pub(super) fn apply_atomic_sqlite_append(
             }
         }
     }
-    let durable_fact_seq = append.facts.last().map_or(actual_fact, |fact| fact.seq());
+    if let Some(domain_facts) = domain_facts {
+        domain_facts.finish()?;
+    }
     let minimum_claimed_fact_seq = append
         .expected_fact_seq
         .checked_add(1)
@@ -218,6 +263,7 @@ pub(super) fn apply_atomic_sqlite_append(
             transaction,
             session_id: &append.session_id,
             facts: &append.facts,
+            resolved_claims: &resolved_claims,
             minimum_claimed_fact_seq,
             after_fact_seq: durable_fact_seq,
             record,
@@ -320,6 +366,7 @@ struct ControlIndexer<'a, 'connection> {
     transaction: &'a Transaction<'connection>,
     session_id: &'a SessionId,
     facts: &'a [std::sync::Arc<SessionFact>],
+    resolved_claims: &'a std::collections::BTreeMap<u64, u64>,
     minimum_claimed_fact_seq: u64,
     after_fact_seq: u64,
     record: &'a AgentControlRecord,
@@ -631,30 +678,38 @@ impl ControlIndexer<'_, '_> {
         step_id: &StepId,
         claimed_fact_seq: u64,
     ) -> Result<(u64, u64)> {
-        let entry = super::validation::read_indexed_agent_message(
-            self.transaction,
-            self.session_id,
-            message_id,
-        )?;
-        if !matches!(entry.state, StoreAgentMessageState::Pending) {
-            return Err(StoreError::Corrupt(
-                "mailbox claim has no pending indexed message".into(),
-            ));
-        }
-        entry.validate_claim_turn(turn_id)?;
-        let message = entry.message;
-        let fact = self
-            .facts
-            .binary_search_by_key(&claimed_fact_seq, |fact| fact.seq())
-            .ok()
-            .map(|index| self.facts[index].as_ref());
-        validate_message_claim_fact(
-            &message,
-            turn_id,
-            step_id,
-            self.minimum_claimed_fact_seq,
-            fact,
-        )?;
+        let accepted_control_seq =
+            if let Some(acceptance) = self.resolved_claims.get(&claimed_fact_seq) {
+                // Resolved from this exact control before indexing. The pending-state
+                // UPDATE below still rejects an intervening discard or duplicate.
+                *acceptance
+            } else {
+                let entry = super::validation::read_indexed_agent_message(
+                    self.transaction,
+                    self.session_id,
+                    message_id,
+                )?;
+                if !matches!(entry.state, StoreAgentMessageState::Pending) {
+                    return Err(StoreError::Corrupt(
+                        "mailbox claim has no pending indexed message".into(),
+                    ));
+                }
+                entry.validate_claim_turn(turn_id)?;
+                let message = entry.message;
+                let fact = self
+                    .facts
+                    .binary_search_by_key(&claimed_fact_seq, |fact| fact.seq())
+                    .ok()
+                    .map(|index| self.facts[index].as_ref());
+                validate_message_claim_fact(
+                    &message,
+                    turn_id,
+                    step_id,
+                    self.minimum_claimed_fact_seq,
+                    fact,
+                )?;
+                entry.accepted_control_seq
+            };
         self.transaction
             .execute(
                 "DELETE FROM ready_messages WHERE session_id = ?1 AND message_id = ?2",
@@ -697,7 +752,7 @@ impl ControlIndexer<'_, '_> {
             changed,
             "message claim disagrees with its active activation",
         )?;
-        Ok((claimed_fact_seq, entry.accepted_control_seq))
+        Ok((claimed_fact_seq, accepted_control_seq))
     }
 
     fn insert_message_discarded(

@@ -20,6 +20,8 @@ use std::sync::Arc;
 use thiserror::Error;
 
 mod activity;
+mod claim;
+pub use claim::{StoreClaimableMessage, StoreFactAppend, StoreInputClaim, StoreMailboxClaim};
 mod inherited;
 pub use inherited::{InheritedInterval, InheritedReadError, capture_inherited_intervals};
 mod maintenance;
@@ -46,8 +48,8 @@ mod evidence;
 mod suffix;
 mod window;
 pub use domain::{
-    StoreDomainHead, StoreDomainState, StoreDomainStatePage, StoreTurnDomainUsage,
-    domain_heads_after,
+    StoreDomainFactCheck, StoreDomainHead, StoreDomainState, StoreDomainStatePage,
+    StoreTurnDomainUsage, domain_heads_after,
 };
 pub use evidence::{EvidenceDigests, EvidenceOriginal, EvidenceResolveError};
 pub use suffix::{MAXIMUM_STORE_SUFFIX_FACTS, StoreFactSuffix, validate_suffix_limits};
@@ -318,7 +320,7 @@ pub struct AtomicSessionAppend {
     pub expected_control_seq: u64,
     /// Header supplied only for the single newly durable session.
     pub header: Option<SessionHeader>,
-    /// Optional exact contiguous Fact suffix.
+    /// Explicit Facts, completed by canonical inputs referenced by claim controls.
     pub facts: Vec<Arc<SessionFact>>,
     /// Optional exact contiguous Agent-control suffix.
     pub controls: Vec<AgentControlRecord>,
@@ -351,8 +353,11 @@ impl AtomicSessionAppend {
                 ));
             }
         }
-        validate_fact_sequence(self.expected_fact_seq, self.facts.iter().map(AsRef::as_ref))
-            .map_err(|error| StoreError::Invalid(error.to_string()))?;
+        for fact in &self.facts {
+            fact.validate()
+                .map_err(|error| StoreError::Invalid(error.to_string()))?;
+        }
+        self.fact_suffix()?;
         validate_control_sequence(self.expected_control_seq, &self.controls)
             .map_err(|error| StoreError::Invalid(error.to_string()))?;
         self.validate_terminal_boundary()?;
@@ -415,6 +420,14 @@ impl AtomicSessionAppend {
 
     fn validate_domain_commits(&self) -> Result<()> {
         use rsi_agent_session_protocol::{AgentControlRecordBody, DomainMutationSource};
+        if !self.has_referenced_claims()
+            && let Some(mut check) = StoreDomainFactCheck::new(&self.controls)
+        {
+            for fact in &self.facts {
+                check.push(fact)?;
+            }
+            check.finish()?;
+        }
         let mut requests = BTreeSet::new();
         let mut command_messages = BTreeSet::new();
         for (index, record) in self.controls.iter().enumerate() {
@@ -431,18 +444,6 @@ impl AtomicSessionAppend {
                     {
                         return Err(StoreError::Invalid(
                             "command input differs from its exact domain publication".into(),
-                        ));
-                    }
-                }
-                if matches!(commit.source(), DomainMutationSource::Turn { .. }) {
-                    let bound = commit
-                        .clone()
-                        .with_facts(self.facts.iter().map(AsRef::as_ref))
-                        .map_err(|error| StoreError::Invalid(error.to_string()))?;
-                    if &bound != commit {
-                        return Err(StoreError::Invalid(
-                            "domain request does not bind its complete same-append Fact span"
-                                .into(),
                         ));
                     }
                 }
@@ -1085,11 +1086,6 @@ pub enum MailboxRead {
     All,
     /// Both targets and the exact status of one message, including a terminal one.
     WithMessage(MessageId),
-    /// Only input for the next Step of the current Turn.
-    NextStep,
-    /// Next-Step input, the selected waking message and its same-command siblings.
-    /// Includes the exact selected status even when that message is terminal.
-    TurnClaim(MessageId),
 }
 
 /// Atomic bounded view of one session mailbox selection at one control watermark.
@@ -1097,8 +1093,6 @@ pub enum MailboxRead {
 pub struct StoreAgentMailbox {
     /// Whether pending next-Turn inputs are suspended at this captured cut.
     pub inbox_paused: bool,
-    /// Any pending next-Turn input other than a continuation, before page selection.
-    pub has_ordinary_pending_turn: bool,
     /// Optional exact message requested by identity, including terminal states.
     pub selected: Option<StoreAgentMessage>,
     /// Byte-bounded prefix of the selected pending messages in acceptance order.
@@ -2309,7 +2303,18 @@ pub trait SessionStore: fmt::Debug + Send + Sync + 'static {
             "this Agent Store does not support exact message reads".into(),
         ))
     }
-    /// Reads the selected pending queue and its count at one durable cut.
+    /// Captures all claimable identities and optional waking status at one durable cut.
+    async fn read_mailbox_claim(
+        &self,
+        session_id: &SessionId,
+        waking: Option<MessageId>,
+    ) -> Result<StoreMailboxClaim> {
+        let _ = (session_id, waking);
+        Err(StoreError::Invalid(
+            "this Store does not support mailbox claim selection".into(),
+        ))
+    }
+    /// Reads a byte-bounded pending payload page at one durable cut.
     async fn read_agent_mailbox(
         &self,
         session_id: &SessionId,

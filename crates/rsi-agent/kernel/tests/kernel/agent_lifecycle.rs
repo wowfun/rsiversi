@@ -1760,7 +1760,7 @@ async fn agent_wait_resumes_for_a_message_to_its_own_mailbox() {
     })
     .await
     .expect("parent must durably park");
-    store.mailbox.step_reads.store(0, Ordering::Relaxed);
+    store.mailbox.claim_selections.store(0, Ordering::Relaxed);
     kernel
         .send_agent_message(SendAgentMessage {
             cancellation: CancellationToken::new(),
@@ -1774,9 +1774,9 @@ async fn agent_wait_resumes_for_a_message_to_its_own_mailbox() {
         .unwrap();
     assert_eq!(waiter.await.unwrap().unwrap(), AgentWaitResult::Changed);
     assert_eq!(
-        store.mailbox.step_reads.load(Ordering::Relaxed),
+        store.mailbox.claim_selections.load(Ordering::Relaxed),
         0,
-        "wait observation must not load pending message bodies"
+        "wait observation must not select the claim queue"
     );
     assert!(
         store

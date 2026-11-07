@@ -462,8 +462,10 @@ async fn command_inputs_publish_atomically_keep_provenance_and_retry_once() {
             .kernel
             .register("command-input-executor".into())
             .unwrap();
-        *store.mailbox.claim_body_buffers.lock().unwrap() =
-            Some(std::collections::BTreeSet::default());
+        store
+            .mailbox
+            .claim_references
+            .store(true, Ordering::Relaxed);
         let claim = tokio::time::timeout(
             std::time::Duration::from_secs(2),
             fixture
@@ -477,12 +479,8 @@ async fn command_inputs_publish_atomically_keep_provenance_and_retry_once() {
         assert!(
             store
                 .mailbox
-                .claim_body_buffers
-                .lock()
-                .unwrap()
-                .take()
-                .unwrap()
-                .is_empty()
+                .claim_references
+                .swap(false, Ordering::Relaxed)
         );
         for input in emitted {
             let stored = store

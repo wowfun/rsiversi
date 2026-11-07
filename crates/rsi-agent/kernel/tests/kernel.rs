@@ -86,8 +86,8 @@ type ProgramReadBarrier = (
 #[derive(Debug)]
 struct MailboxProbe {
     reads: Mutex<std::collections::BTreeMap<SessionId, usize>>,
-    step_reads: AtomicUsize,
-    claim_body_buffers: Mutex<Option<std::collections::BTreeSet<usize>>>,
+    claim_selections: AtomicUsize,
+    claim_references: AtomicBool,
     prefix_limit: AtomicUsize,
 }
 
@@ -95,8 +95,8 @@ impl Default for MailboxProbe {
     fn default() -> Self {
         Self {
             reads: Mutex::default(),
-            step_reads: AtomicUsize::new(0),
-            claim_body_buffers: Mutex::default(),
+            claim_selections: AtomicUsize::new(0),
+            claim_references: AtomicBool::new(false),
             prefix_limit: AtomicUsize::new(usize::MAX),
         }
     }
@@ -764,15 +764,18 @@ impl SessionStore for FactReadRaceStore {
         &self,
         commit: rsi_agent_store_protocol::AtomicAgentCommit,
     ) -> rsi_agent_store_protocol::Result<rsi_agent_store_protocol::AtomicAgentCommitResult> {
-        if let Some(buffers) = self.mailbox.claim_body_buffers.lock().unwrap().as_mut() {
-            for fact in commit.sessions.iter().flat_map(|append| &append.facts) {
-                if let SessionFactBody::InputMessageClaimed { content, .. } = fact.body() {
-                    assert!(
-                        buffers.remove(&(content.as_ptr() as usize)),
-                        "claim copied its mailbox body"
-                    );
-                }
-            }
+        if self.mailbox.claim_references.load(Ordering::Relaxed) {
+            assert!(
+                commit
+                    .sessions
+                    .iter()
+                    .flat_map(|append| &append.facts)
+                    .all(|fact| !matches!(
+                        fact.body(),
+                        SessionFactBody::InputMessageClaimed { .. }
+                    )),
+                "Kernel claim must reference acceptance without copying its body"
+            );
         }
         if let Some(error) = self.commit_admission_refusal.lock().unwrap().clone() {
             self.domain_lookup_fails.store(true, Ordering::Release);
@@ -1225,14 +1228,24 @@ impl SessionStore for FactReadRaceStore {
         self.inner.read_agent_message(session_id, message_id).await
     }
 
+    async fn read_mailbox_claim(
+        &self,
+        session_id: &SessionId,
+        waking: Option<MessageId>,
+    ) -> rsi_agent_store_protocol::Result<rsi_agent_store_protocol::StoreMailboxClaim> {
+        if waking.is_none() {
+            self.mailbox
+                .claim_selections
+                .fetch_add(1, Ordering::Relaxed);
+        }
+        self.inner.read_mailbox_claim(session_id, waking).await
+    }
+
     async fn read_agent_mailbox(
         &self,
         session_id: &SessionId,
         query: MailboxRead,
     ) -> rsi_agent_store_protocol::Result<rsi_agent_store_protocol::StoreAgentMailbox> {
-        if query == MailboxRead::NextStep {
-            self.mailbox.step_reads.fetch_add(1, Ordering::Relaxed);
-        }
         *self
             .mailbox
             .reads
@@ -1244,13 +1257,10 @@ impl SessionStore for FactReadRaceStore {
         mailbox
             .pending
             .truncate(self.mailbox.prefix_limit.load(Ordering::Relaxed));
-        if let Some(buffers) = self.mailbox.claim_body_buffers.lock().unwrap().as_mut() {
-            *buffers = mailbox
-                .pending
-                .iter()
-                .map(|entry| entry.message.content.as_ptr() as usize)
-                .collect();
-        }
+        assert!(
+            !self.mailbox.claim_references.load(Ordering::Relaxed),
+            "claim must not read a mailbox payload page"
+        );
         Ok(mailbox)
     }
 

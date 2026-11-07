@@ -181,7 +181,7 @@ impl AgentKernel {
                 {
                     self.discard_continuation_admitted(
                         &notice.session_id,
-                        &scan,
+                        (scan.durable_fact_seq, scan.durable_control_seq),
                         entry,
                         MessageDiscardReason::ProgramInterrupted,
                     )

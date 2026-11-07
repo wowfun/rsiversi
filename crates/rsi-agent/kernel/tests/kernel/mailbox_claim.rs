@@ -217,7 +217,24 @@ async fn mailbox_initial_claim_does_not_let_unrelated_turns_hide_held_input() {
 }
 
 #[tokio::test]
-async fn mailbox_initial_claim_cannot_omit_its_waking_input_at_a_page_boundary() {
+async fn mailbox_initial_claim_is_independent_of_payload_page_boundaries() {
+    for limit in [1, 2] {
+        let store = Arc::new(FactReadRaceStore::new(Arc::new(MemoryStore::new())));
+        let ordered = seed(store.clone(), 2, true).await;
+        let kernel =
+            AgentKernel::recover_with_clock(store.clone(), composition(), Arc::new(FixedClock))
+                .await
+                .unwrap();
+        let worker = kernel.start_workers();
+        store.mailbox.prefix_limit.store(limit, Ordering::Relaxed);
+        claim_batch(&kernel).await.unwrap();
+        check_claims(&kernel, store.as_ref(), &ordered, true).await;
+        kernel.shutdown(worker).await.unwrap();
+    }
+}
+
+#[tokio::test]
+async fn mailbox_step_claim_drains_all_selected_inputs_without_payload_pages() {
     let store = Arc::new(FactReadRaceStore::new(Arc::new(MemoryStore::new())));
     seed(store.clone(), 2, true).await;
     let kernel =
@@ -225,24 +242,157 @@ async fn mailbox_initial_claim_cannot_omit_its_waking_input_at_a_page_boundary()
             .await
             .unwrap();
     let worker = kernel.start_workers();
-    let session = SessionId::new("claim-order").unwrap();
-    let before = store.read_watermarks(&session).await.unwrap();
-    // Model a valid byte-bounded prefix without allocating tens of megabytes.
-    for limit in [1, 2] {
-        store.mailbox.prefix_limit.store(limit, Ordering::Relaxed);
-        assert!(matches!(
-            claim_batch(&kernel).await,
-            Err(TurnError::Capacity)
-        ));
-        assert_eq!(store.read_watermarks(&session).await.unwrap(), before);
-        assert_eq!(
-            kernel
-                .message_status(&session, &MessageId::new("wake").unwrap())
-                .await
-                .unwrap()
-                .state,
-            MessageState::Pending
-        );
+    claim_batch(&kernel).await.unwrap();
+    let _executor = kernel.register("step-claim-executor".into()).unwrap();
+    let claim = kernel
+        .claim("step-claim-executor", CancellationToken::new())
+        .await
+        .unwrap()
+        .unwrap();
+    for id in ["steer-a", "steer-b"] {
+        enqueue(&kernel, claim.session_id(), input(id, false), true).await;
     }
+    let before = store.read_watermarks(claim.session_id()).await.unwrap();
+    store.mailbox.prefix_limit.store(1, Ordering::Relaxed);
+    store
+        .mailbox
+        .claim_references
+        .store(true, Ordering::Relaxed);
+    assert_eq!(kernel.claim_pending_step_messages(&claim).await.unwrap(), 2);
+    assert!(
+        store
+            .mailbox
+            .claim_references
+            .swap(false, Ordering::Relaxed)
+    );
+    let page = store
+        .read_facts(claim.session_id(), before.durable_fact_seq, 4, 64 * 1024)
+        .await
+        .unwrap();
+    assert_eq!(page.facts.len(), 4);
+    let mut steps = Vec::new();
+    for (fact, id) in page.facts[2..].iter().zip(["steer-a", "steer-b"]) {
+        let SessionFactBody::InputMessageClaimed {
+            source: rsi_agent_session_protocol::InputMessageSource::Human { message_id, .. },
+            step_id,
+            ..
+        } = fact.body()
+        else {
+            panic!("missing queued input")
+        };
+        assert_eq!(message_id.as_str(), id);
+        steps.push(step_id);
+    }
+    assert_eq!(steps[0], steps[1]);
+    assert_eq!(
+        store
+            .read_agent_mailbox(claim.session_id(), MailboxRead::All)
+            .await
+            .unwrap()
+            .pending_count,
+        1
+    );
     kernel.shutdown(worker).await.unwrap();
+}
+
+#[tokio::test]
+#[ignore = "opt-in 68 MiB logical claim and durable verification"]
+async fn mailbox_initial_claim_streams_beyond_the_atomic_payload_budget() {
+    let directory = tempfile::tempdir().unwrap();
+    let store = Arc::new(rsi_agent_store_sqlite::SqliteStore::open(directory.path()).unwrap());
+    let kernel =
+        AgentKernel::recover_with_clock(store.clone(), composition(), Arc::new(FixedClock))
+            .await
+            .unwrap();
+    let worker = kernel.start_workers();
+    let session = SessionId::new("claim-order").unwrap();
+    for index in 0..34 {
+        let mut message = input(&format!("large-{index}"), false);
+        message.content = vec![AgentMessageContent::Text {
+            text: "\n".repeat(1024 * 1024),
+        }];
+        let submission = if index == 0 {
+            fresh(header(session.as_str()))
+        } else {
+            resume(&kernel, session.clone()).await
+        };
+        kernel
+            .submit_message(SubmitMessage {
+                session: submission,
+                message,
+                delivery: MessageDelivery::NextStep,
+            })
+            .await
+            .unwrap();
+    }
+    enqueue(&kernel, &session, input("wake", false), false).await;
+    let metadata = store
+        .read_mailbox_claim(&session, Some(MessageId::new("wake").unwrap()))
+        .await
+        .unwrap();
+    assert_eq!(metadata.pending.len(), 35);
+    claim_batch(&kernel).await.unwrap();
+    let marks = store.read_watermarks(&session).await.unwrap();
+    assert_eq!(marks.durable_fact_seq, 37);
+    let mut encoded = 0;
+    for seq in 3..=37 {
+        let page = store
+            .read_facts(&session, seq - 1, 1, 3 * 1024 * 1024)
+            .await
+            .unwrap();
+        assert_eq!(page.facts.len(), 1);
+        let fact = &page.facts[0];
+        encoded += fact.encoded_len();
+        let SessionFactBody::InputMessageClaimed {
+            content,
+            step_id,
+            source,
+            ..
+        } = fact.body()
+        else {
+            panic!("missing input Fact")
+        };
+        assert_eq!(step_id.as_str(), "step-order");
+        let rsi_agent_session_protocol::InputMessageSource::Human { message_id, .. } = source
+        else {
+            panic!("wrong input source")
+        };
+        assert_eq!(
+            message_id.as_str(),
+            if seq < 37 {
+                format!("large-{}", seq - 3)
+            } else {
+                "wake".into()
+            }
+        );
+        let [AgentMessageContent::Text { text }] = content.as_slice() else {
+            panic!("wrong input content")
+        };
+        if seq < 37 {
+            assert_eq!(text.len(), 1024 * 1024);
+            assert!(text.bytes().all(|byte| byte == b'\n'));
+        } else {
+            assert_eq!(text, "wake");
+        }
+    }
+    assert!(encoded > rsi_agent_store_protocol::MAXIMUM_STORE_BATCH_BYTES);
+    let remaining = store.read_mailbox_claim(&session, None).await.unwrap();
+    assert!(remaining.pending.is_empty());
+    kernel.shutdown(worker).await.unwrap();
+    drop(kernel);
+    drop(store);
+    rsi_agent_store_sqlite::SqliteStore::verify(directory.path()).unwrap();
+    let reopened = rsi_agent_store_sqlite::SqliteStore::open(directory.path()).unwrap();
+    assert!(matches!(
+        reopened
+            .read_agent_message(&session, &MessageId::new("wake").unwrap())
+            .await
+            .unwrap()
+            .unwrap()
+            .state,
+        rsi_agent_store_protocol::StoreAgentMessageState::Claimed {
+            claimed_fact_seq: 37,
+            ..
+        }
+    ));
 }

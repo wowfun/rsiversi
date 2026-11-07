@@ -108,10 +108,16 @@ Turn, Step, and model-visible input. Recovery does not materialize every mailbox
 or historical Agent tree into resident scheduler state. The open-turn index and
 repair preconditions share a Store snapshot. Asking for a control record just
 to learn its sequence would add a read and decode payload unrelated to repair.
-Mailbox reads return the
-complete pending count but only an ordered 32 MiB payload prefix and one selected
-status from a single Store snapshot; Kernel holds its process-wide Store-read
-reservation through decode and validation. Capacity and completion decisions use
+Mailbox inspection returns the complete pending count but only an ordered
+32 MiB payload prefix and one selected status. Claims instead capture all selected
+identities and only the waking message body in one snapshot. The Kernel supplies
+the exact claim coordinates through its controls; Store reconstructs each input
+Fact from canonical acceptance inside the atomic commit. This follows DSH's full
+next-Step drain before a waking input without loading the complete queue into
+Kernel memory or duplicating its durable bodies. SQLite processes those bodies
+one at a time; the in-memory test Store retains expanded logical Facts.
+Kernel holds its process-wide Store-read reservation through decode and
+validation. Capacity and completion decisions use
 a separate metadata-only Store snapshot containing the exact pending count and
 Fact/control tails, so those paths do not decode the payload prefix. Scheduler,
 cancellation, and settlement paths that need only descendant identities reuse
@@ -153,6 +159,13 @@ mutation semantics belong to the [Turn contract](../../../../crates/rsi-agent/tu
 and [Store contract](../../../../crates/rsi-agent/store-protocol/README.md).
 
 ## Alternatives considered
+
+Increasing mailbox and atomic payload buffers would make claim-time memory grow
+with every queued body. Splitting a claim across commits would expose an
+incomplete Turn or require another recovery state. Canonical input references
+keep the full selection atomic while SQLite processes one body at a time.
+The existing claim control already carries the required coordinates, so a
+second claim-request list would duplicate identities and sequencing authority.
 
 Returning a live-only admission from submit was rejected for the product
 Session service because reconnectable idempotency requires an unambiguous

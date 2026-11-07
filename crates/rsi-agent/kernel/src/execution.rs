@@ -1,5 +1,4 @@
 use super::*;
-use rsi_agent_store_protocol::MailboxRead;
 
 #[async_trait]
 impl TurnExecution for AgentKernel {
@@ -396,9 +395,8 @@ impl TurnExecution for AgentKernel {
             .submission_admission
             .acquire(claim.session_id())
             .await?;
-        let scan =
-            scan_durable_messages(&self.inner, claim.session_id(), MailboxRead::NextStep).await?;
-        let mut pending = scan.pending;
+        let scan = read_mailbox_claim(&self.inner, claim.session_id(), None).await?;
+        let pending = scan.pending;
         if pending.is_empty() {
             return Ok(0);
         }
@@ -466,16 +464,6 @@ impl TurnExecution for AgentKernel {
             },
         ]);
         let input_fact_offset = bodies.len();
-        bodies.extend(
-            pending
-                .iter_mut()
-                .map(|entry| SessionFactBody::InputMessageClaimed {
-                    turn_id: claim.turn_id().clone(),
-                    step_id: next_step.clone(),
-                    source: entry.message.claimed_source(),
-                    content: std::mem::take(&mut entry.message.content),
-                }),
-        );
         let timestamp_ms = self.inner.clock.now_ms().max(1);
         let facts = bodies
             .into_iter()
@@ -504,13 +492,19 @@ impl TurnExecution for AgentKernel {
         for fact in &facts {
             apply_executor_body(&mut staged, fact.body(), fact.seq())?;
         }
+        let first_input_seq = expected_fact_seq
+            .checked_add(input_fact_offset as u64 + 1)
+            .ok_or_else(|| TurnError::Invariant("Fact sequence exhausted".into()))?;
+        let final_fact_seq = first_input_seq
+            .checked_add(pending.len() as u64 - 1)
+            .ok_or_else(|| TurnError::Invariant("Fact sequence exhausted".into()))?;
+        for seq in first_input_seq..=final_fact_seq {
+            super::turn_state::apply_claimed_input(&mut staged, &next_step, seq)?;
+        }
         let controls = pending
             .iter()
             .enumerate()
             .map(|(offset, entry)| {
-                let fact_index = offset
-                    .checked_add(input_fact_offset)
-                    .ok_or_else(|| TurnError::Invariant("Fact offset exhausted".into()))?;
                 let control_offset = u64::try_from(offset)
                     .map_err(|_| TurnError::Invariant("control offset exceeds u64".into()))?;
                 let control_offset = control_offset
@@ -522,18 +516,11 @@ impl TurnExecution for AgentKernel {
                         .ok_or_else(|| TurnError::Invariant("control sequence exhausted".into()))?,
                     timestamp_ms,
                     AgentControlRecordBody::MessageClaimed {
-                        message_id: entry.message.message_id.clone(),
+                        message_id: entry.message_id.clone(),
                         activation_id: activation_id.clone(),
                         turn_id: claim.turn_id().clone(),
                         step_id: next_step.clone(),
-                        claimed_fact_seq: facts
-                            .get(fact_index)
-                            .ok_or_else(|| {
-                                TurnError::Invariant(
-                                    "Step message Fact/control cardinality diverged".into(),
-                                )
-                            })?
-                            .seq(),
+                        claimed_fact_seq: first_input_seq + offset as u64,
                     },
                 )
                 .map_err(|error| TurnError::Invalid(error.to_string()))
@@ -572,10 +559,7 @@ impl TurnExecution for AgentKernel {
                 .get_mut(claim.turn_id())
                 .expect("validated claim turn exists");
             *turn = staged;
-            session.durable_seq = facts
-                .last()
-                .expect("Step message commit contains Facts")
-                .seq();
+            session.durable_seq = final_fact_seq;
             session.flush_status.send_replace(FlushStatus {
                 durable_seq: session.durable_seq,
                 permanent_error: session.permanent_flush_error.clone(),

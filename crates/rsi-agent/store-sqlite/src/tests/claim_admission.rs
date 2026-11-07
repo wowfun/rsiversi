@@ -93,6 +93,104 @@ async fn mailbox_claim_checks_the_append_without_rereading_its_fact() {
     );
 }
 
+#[tokio::test]
+async fn mailbox_claim_resolves_one_canonical_body_and_rolls_back_atomically() {
+    static BODY_READS: AtomicU64 = AtomicU64::new(0);
+    let root = private_tempdir();
+    let store = SqliteStore::open(root.path()).unwrap();
+    let header = test_header("claim-reference");
+    let session = header.session_id().clone();
+    let message = AgentMessage {
+        message_id: MessageId::new("input").unwrap(),
+        source: AgentMessageSource::Human { attribution: None },
+        content: vec![AgentMessageContent::Text {
+            text: "canonical".repeat(20_000),
+        }],
+        options: MessageOptions::default(),
+    };
+    let commit = |append| AtomicAgentCommit {
+        sessions: vec![append],
+        required_active_activations: vec![],
+        quiescent_descendants_of: None,
+    };
+    store
+        .commit_agent(commit(accepted_append(header, &message)))
+        .await
+        .unwrap();
+    let mut append = claim_append(&session, &message, 3, true);
+    append.facts.pop();
+    let mut wrong = append.clone();
+    wrong.controls[1] = AgentControlRecord::new(
+        3,
+        2,
+        AgentControlRecordBody::MessageClaimed {
+            message_id: message.message_id.clone(),
+            activation_id: ActivationId::new("wrong").unwrap(),
+            turn_id: TurnId::new("turn").unwrap(),
+            step_id: StepId::new("step").unwrap(),
+            claimed_fact_seq: 3,
+        },
+    )
+    .unwrap();
+    assert!(store.commit_agent(commit(wrong)).await.is_err());
+    let marks = store.read_watermarks(&session).await.unwrap();
+    assert_eq!((marks.durable_fact_seq, marks.durable_control_seq), (0, 1));
+    assert_eq!(
+        store
+            .read_agent_message(&session, &message.message_id)
+            .await
+            .unwrap()
+            .unwrap()
+            .state,
+        StoreAgentMessageState::Pending
+    );
+    store
+        .with_writer(|connection| {
+            connection.trace_v2(
+                TraceEventCodes::SQLITE_TRACE_STMT,
+                Some(|event| {
+                    if let TraceEvent::Stmt(_, sql) = event
+                        && sql.trim_start().starts_with("SELECT")
+                        && sql.contains("control_json")
+                    {
+                        BODY_READS.fetch_add(1, Ordering::Relaxed);
+                    }
+                }),
+            );
+            Ok(())
+        })
+        .await
+        .unwrap();
+    store.commit_agent(commit(append)).await.unwrap();
+    assert_eq!(
+        BODY_READS.load(Ordering::Relaxed),
+        1,
+        "one canonical body read per claim"
+    );
+    store
+        .with_writer(|connection| {
+            connection.trace_v2(TraceEventCodes::empty(), None);
+            Ok(())
+        })
+        .await
+        .unwrap();
+    let facts = store.read_facts(&session, 0, 3, 1024 * 1024).await.unwrap();
+    assert!(
+        matches!(facts.facts[2].body(), SessionFactBody::InputMessageClaimed { content, .. } if content == &message.content)
+    );
+    drop(store);
+    SqliteStore::verify(root.path()).unwrap();
+    let reopened = SqliteStore::open(root.path()).unwrap();
+    assert_eq!(
+        reopened
+            .read_facts(&session, 0, 3, 1024 * 1024)
+            .await
+            .unwrap()
+            .facts,
+        facts.facts
+    );
+}
+
 pub(super) fn claim_append(
     session_id: &SessionId,
     message: &AgentMessage,

@@ -6,16 +6,23 @@ coordinates, never a second message body. Body reads join the indexed acceptance
 to its canonical control in the same query and bound that control before allocating
 its JSON. Typed decoding transfers the accepted message without cloning its body;
 the exact compact message byte count uses a counting writer rather than a JSON copy.
-Metadata-only queue queries do not join or decode control bodies. Canonical replay
+Metadata-only queue inspection and summary queries do not decode control bodies.
+Claim selection reads the optional waking body and uses canonical command
+provenance to group that command's inputs; other selected inputs carry only
+identities and ordering coordinates. Canonical replay
 checks the routing index against the original acceptance and later transitions.
 The mailbox summary selects the first pending next-Step source in acceptance
 order from that same index and snapshot, without reading the accepted content.
 Queued input claims retain their Fact coordinates and a same-Session acceptance
-reference, rather than another copy of content and attribution. Claim admission
-compares the canonical accepted message with the original typed Fact in the
-atomic append before encoding that reference. It does not validate a rehydrated
-substitute or reread a just-inserted Fact. Same-append acceptance is supported;
-claims without a mailbox acceptance remain inline.
+reference, rather than another copy of content and attribution. The
+[atomic Store contract](../store-protocol/README.md) lets claim controls supply
+input Facts from already-durable acceptance. SQLite reconstructs and hashes
+these bodies individually, then carries only acceptance coordinates into control
+indexing. When the caller supplies an explicit input Fact, admission compares
+that original typed Fact with acceptance before encoding its reference; it does
+not validate a rehydrated substitute or reread a just-inserted Fact. Explicit
+Facts also support same-append acceptance. Claims without a mailbox acceptance
+remain inline.
 
 The Store returns the same self-contained logical Facts through all read paths.
 One bounded joined query supplies the physical Fact and its accepted control;

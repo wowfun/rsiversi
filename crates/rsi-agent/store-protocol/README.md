@@ -283,7 +283,24 @@ their validation requirements. A backend may cache successful proofs within
 its exclusive writer lifetime; metadata reads neither fill nor touch that cache.
 
 Agent control commits compare both Fact and control watermarks and atomically
-touch at most three sessions. Within each Session append, capacity and reservation
+touch at most three sessions. A `MessageClaimed` control supplies its input Fact
+from the canonical accepted message when the caller does not supply that Fact.
+The Kernel chooses the message, Turn, Step, timestamp and exact Fact sequence;
+Store only reconstructs the body and validates its pending state. Explicit Facts
+and these references must form one contiguous suffix, with a unique claim per
+message and Fact. The batch byte budget counts supplied payloads and references,
+not already-durable bodies. SQLite resolves and hashes one accepted body at a
+time inside the same transaction; it never collects the expanded claim batch.
+Logical Fact readers retain their existing byte bounds and representation.
+
+`read_mailbox_claim` captures the complete selected identity list, mailbox flags,
+Fact/control tails and optional exact waking message in one snapshot. Without a
+waking identity it selects next-Step messages; with one it also selects that
+message and same-command siblings. This metadata selection has the mailbox's
+cardinality bound, independently of the payload page bound. Kernel orders all
+selected next-Step inputs before waking inputs and claims them atomically.
+
+Within each Session append, capacity and reservation
 checks observe controls in sequence order, including slots released or consumed
 earlier in that append. Program graph counterparts are checked after all paired
 appends are installed. The Store maintains mechanical indexes with
@@ -293,23 +310,18 @@ a byte-bounded prefix plus the exact pending-mailbox count and direct message
 status, and the one currently active activation per session. A lightweight
 mailbox summary returns the pending count, the bounded ordered identities of
 pending promotable next-Step messages, and Fact/control tails for capacity and
-terminal-promotion decisions. Mailbox reads may select all pending messages,
-all pending messages plus one exact message status, or only next-Step messages.
-Turn-claim reads return the exact waking message status and select only pending
-next-Step inputs, that waking message and its same-command invocation siblings.
-The selection also reports whether any ordinary next-Turn input is pending,
-independent of the returned payload page, so continuation priority needs no
-unrelated message bodies.
-Selection applies to the count and ordered rows before the byte limit and
-payload decoding. Every read uses one Store snapshot:
+terminal-promotion decisions. Payload inspection reads all pending messages,
+optionally with one exact message status. Claim metadata selection separately
+reports whether any ordinary next-Turn input is pending, so continuation
+priority needs no unrelated message bodies. Every read uses one Store snapshot:
 it never materializes the valid 64-message worst case at once, returns the Fact
 and control tails observed by that snapshot, and lets callers reserve its fixed
 page bound before I/O. Message admission
 and status reads use that index rather than replaying an unbounded control
 history. Each returned entry carries the exact encoded message length computed
 by the Store while it reads or indexes the payload. The mailbox page takes at
-most half the atomic batch byte budget, leaving room for the claim envelope
-and controls. Kernel consumes the ordered page directly. A descendant
+most half the atomic batch byte budget. This payload inspection page does not
+limit the metadata selection used for claiming. A descendant
 status snapshot reads one subtree's immutable membership, parent/path/task,
 control watermarks, the last settlement control sequence, and open-Turn,
 active-activation and waking-message flags

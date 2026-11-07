@@ -969,7 +969,6 @@ impl AgentKernel {
         } else {
             DurableMessageScan {
                 inbox_paused: false,
-                has_ordinary_pending_turn: false,
                 selected: None,
                 pending_count: 0,
                 pending: Vec::new(),
@@ -1230,19 +1229,19 @@ impl AgentKernel {
             .await
             .map_err(turn_kernel_error)?;
 
-        let mut scan = scan_durable_messages(
-            &self.inner,
-            &session_id,
-            MailboxRead::TurnClaim(request.message_id.clone()),
-        )
-        .await?;
-        let entry = scan.selected.take().ok_or_else(|| {
-            TurnError::Invalid(format!(
-                "message `{}` does not exist in session `{}`",
-                request.message_id.as_str(),
-                session_id.as_str()
-            ))
-        })?;
+        let mut scan =
+            read_mailbox_claim(&self.inner, &session_id, Some(request.message_id.clone())).await?;
+        let entry = scan
+            .selected
+            .take()
+            .map(super::observation::durable_message_entry)
+            .ok_or_else(|| {
+                TurnError::Invalid(format!(
+                    "message `{}` does not exist in session `{}`",
+                    request.message_id.as_str(),
+                    session_id.as_str()
+                ))
+            })?;
         match &entry.state {
             MessageState::Claimed {
                 activation_id,
@@ -1305,7 +1304,7 @@ impl AgentKernel {
         {
             self.discard_continuation_admitted(
                 &session_id,
-                &scan,
+                (scan.durable_fact_seq, scan.durable_control_seq),
                 &entry,
                 MessageDiscardReason::ProgramInterrupted,
             )
@@ -1321,7 +1320,7 @@ impl AgentKernel {
             {
                 self.discard_continuation_admitted(
                     &session_id,
-                    &scan,
+                    (scan.durable_fact_seq, scan.durable_control_seq),
                     &entry,
                     if ordinary_pending {
                         MessageDiscardReason::Superseded
@@ -1347,11 +1346,8 @@ impl AgentKernel {
             .unwrap_or(header.settings().sandbox());
         let require_approval = header.settings().require_approval()
             || sandbox == rsi_sandbox::SandboxMode::DangerFullAccess;
-        let mut selected = {
+        let selected = {
             let mut selected = scan.pending;
-            if selected.len() != scan.pending_count {
-                return Err(TurnError::Capacity);
-            }
             // Store owns the cardinality bound and FIFO cursors. Step input comes
             // first even when accepted after the waking message.
             selected.sort_unstable_by_key(|pending| {
@@ -1363,13 +1359,13 @@ impl AgentKernel {
             selected
         };
         let timestamp_ms = self.inner.clock.now_ms().max(1);
-        let mut fact_bodies = vec![
+        let fact_bodies = vec![
             SessionFactBody::MessageTurnAccepted {
                 turn_id: request.turn_id.clone(),
                 activation_id: request.activation_id.clone(),
                 message_ids: selected
                     .iter()
-                    .map(|pending| pending.message.message_id.clone())
+                    .map(|pending| pending.message_id.clone())
                     .collect(),
                 reasoning_effort: entry.message.options.reasoning_effort.clone(),
                 model,
@@ -1381,14 +1377,6 @@ impl AgentKernel {
                 step_id: request.step_id.clone(),
             },
         ];
-        for pending in &mut selected {
-            fact_bodies.push(SessionFactBody::InputMessageClaimed {
-                turn_id: request.turn_id.clone(),
-                step_id: request.step_id.clone(),
-                source: pending.message.claimed_source(),
-                content: std::mem::take(&mut pending.message.content),
-            });
-        }
         let facts = fact_bodies
             .into_iter()
             .enumerate()
@@ -1405,10 +1393,9 @@ impl AgentKernel {
         let claimed_fact_seq = expected_fact_seq
             .checked_add(3)
             .ok_or_else(|| TurnError::Invariant("message Fact sequence exhausted".into()))?;
-        let final_fact_seq = facts
-            .last()
-            .expect("message claim always creates Facts")
-            .seq();
+        let final_fact_seq = expected_fact_seq
+            .checked_add(2 + selected.len() as u64)
+            .ok_or_else(|| TurnError::Invariant("message Fact sequence exhausted".into()))?;
         let program_append = self
             .program_child_claim_append(&header, &request.message_id, &request.activation_id)
             .await?;
@@ -1473,7 +1460,7 @@ impl AgentKernel {
                     .ok_or(TurnError::Capacity)?,
                 timestamp_ms,
                 AgentControlRecordBody::MessageClaimed {
-                    message_id: pending.message.message_id.clone(),
+                    message_id: pending.message_id.clone(),
                     activation_id: request.activation_id.clone(),
                     turn_id: request.turn_id.clone(),
                     step_id: request.step_id.clone(),
@@ -1587,6 +1574,9 @@ impl AgentKernel {
                     .turns
                     .get_mut(&request.turn_id)
                     .expect("committed Turn is installed");
+                for seq in claimed_fact_seq..=final_fact_seq {
+                    super::turn_state::apply_claimed_input(turn, &request.step_id, seq)?;
+                }
                 turn.prepared_lane = lane;
                 turn.execution = execution;
                 session.durable_seq = final_fact_seq;

@@ -90,12 +90,13 @@ attached observation with the same flush error instead of leaving an
 application waiter blocked behind an unreachable terminal Fact.
 
 One next-Turn mailbox claim starts an activation and one Step. Within the bounded
-mailbox batch, it claims pending next-Step input first, in acceptance order,
+mailbox, it claims all pending next-Step input first, in acceptance order,
 then the selected waking input and its same-command siblings, also in acceptance
 order. This applies to every message source. Other next-Turn inputs stay queued;
-their bodies do not consume the claim page budget. The Store selects this batch
-before loading payloads. A truncated selected batch cannot start a Turn or
-silently leave out held input.
+the Store captures complete selected identities independently of payload paging.
+The [Store contract](../../store-protocol/README.md) owns atomic reference
+resolution, so a body page boundary cannot omit selected input or prevent
+starting a Turn.
 The selected waking input supplies the Turn policy. Claim Facts, their ordered
 Turn membership and all mailbox receipts commit together. Further safe-boundary
 messages close the current Step, start the next, and become Facts atomically

@@ -2321,11 +2321,8 @@ async fn step_mailbox_reaches_steers_beyond_a_full_page_of_next_turn_messages() 
             .iter()
             .all(|entry| entry.target == MessageTarget::NextTurn)
     );
-    let step = store
-        .read_agent_mailbox(&session, MailboxRead::NextStep)
-        .await
-        .unwrap();
-    assert_eq!(step.pending_count, 2);
+    let step = store.read_mailbox_claim(&session, None).await.unwrap();
+    assert_eq!(step.pending.len(), 2);
     assert_eq!(step.durable_control_seq, all.durable_control_seq);
     assert_eq!(
         step.pending
@@ -2340,13 +2337,10 @@ async fn step_mailbox_reaches_steers_beyond_a_full_page_of_next_turn_messages() 
             .all(|entry| entry.target == MessageTarget::NextStep)
     );
     let claim = store
-        .read_agent_mailbox(
-            &session,
-            MailboxRead::TurnClaim(MessageId::new("input-33").unwrap()),
-        )
+        .read_mailbox_claim(&session, Some(MessageId::new("input-33").unwrap()))
         .await
         .unwrap();
-    assert_eq!(claim.pending_count, 3);
+    assert_eq!(claim.pending.len(), 3);
     assert!(claim.has_ordinary_pending_turn);
     assert_eq!(claim.durable_control_seq, all.durable_control_seq);
     assert_eq!(claim.selected.unwrap().accepted_control_seq, 33);
@@ -2402,22 +2396,23 @@ async fn exact_message_read_does_not_decode_unrelated_pending_payloads() {
         Some(expected)
     );
     let claim = store
-        .read_agent_mailbox(&session, MailboxRead::TurnClaim(selected.clone()))
+        .read_mailbox_claim(&session, Some(selected.clone()))
         .await
         .unwrap();
-    assert_eq!(claim.pending_count, 1);
+    assert_eq!(claim.pending.len(), 1);
     assert!(claim.has_ordinary_pending_turn);
-    assert_eq!(claim.pending[0].message.message_id, selected);
+    assert_eq!(claim.pending[0].message_id, selected);
     assert!(matches!(
         store.read_agent_message(&session, &unrelated).await,
         Err(StoreError::Corrupt(_))
     ));
     assert_eq!(
         store
-            .read_agent_mailbox(&session, MailboxRead::NextStep)
+            .read_mailbox_claim(&session, None)
             .await
             .unwrap()
-            .pending_count,
+            .pending
+            .len(),
         0
     );
     assert!(matches!(
