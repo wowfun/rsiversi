@@ -868,9 +868,21 @@ fn current_process_start_token() -> String {
 
 #[cfg(target_os = "linux")]
 fn live_process_start_token(pid: u32) -> Result<Option<String>, ServiceHostError> {
-    let stat = match fs::read_to_string(format!("/proc/{pid}/stat")) {
+    process_start_token_from_stat(fs::read_to_string(format!("/proc/{pid}/stat")))
+}
+
+#[cfg(target_os = "linux")]
+fn process_start_token_from_stat(
+    stat: io::Result<String>,
+) -> Result<Option<String>, ServiceHostError> {
+    let stat = match stat {
         Ok(stat) => stat,
-        Err(error) if error.kind() == io::ErrorKind::NotFound => return Ok(None),
+        Err(error)
+            if error.kind() == io::ErrorKind::NotFound
+                || error.raw_os_error() == Some(rustix::io::Errno::SRCH.raw_os_error()) =>
+        {
+            return Ok(None);
+        }
         Err(error) => return Err(io_error(error)),
     };
     let end = stat.rfind(')').ok_or_else(|| {
@@ -1113,6 +1125,33 @@ pub(crate) fn io_error(error: io::Error) -> ServiceHostError {
 #[cfg(all(test, any(windows, target_os = "linux")))]
 mod origin_tests {
     use super::*;
+
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn owner_exiting_during_stat_read_is_no_longer_current() {
+        use std::io::Read;
+
+        let mut child = std::process::Command::new("/bin/sleep")
+            .arg("60")
+            .spawn()
+            .unwrap();
+        let stat = fs::File::open(format!("/proc/{}/stat", child.id()));
+        child.kill().unwrap();
+        child.wait().unwrap();
+        let mut stat = stat.unwrap();
+        let mut contents = String::new();
+        let result = stat.read_to_string(&mut contents).map(|_| contents);
+        assert_eq!(
+            result.as_ref().unwrap_err().raw_os_error(),
+            Some(rustix::io::Errno::SRCH.raw_os_error())
+        );
+        assert_eq!(process_start_token_from_stat(result).unwrap(), None);
+        assert!(
+            process_start_token_from_stat(Err(io::Error::from(io::ErrorKind::PermissionDenied)))
+                .is_err()
+        );
+    }
+
     #[test]
     fn installation_provenance_requires_exactly_schema_three() {
         let root = tempfile::tempdir().unwrap();
