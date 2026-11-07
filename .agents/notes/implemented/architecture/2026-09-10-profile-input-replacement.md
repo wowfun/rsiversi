@@ -53,7 +53,9 @@ actual cleanup; timing out a whole-Runtime waiter never abandons this work.
 
 Meta disposes children before running their parent's deferred effects. A stopped
 Profile therefore releases its executable inputs and targets while retaining
-redacted status and tree snapshots. Otherwise an outer owner's observation handle
+bounded status and redacted tree snapshots. Local failure text follows the
+[local diagnostic decision](../bug-fix/2026-11-07-local-profile-failure-causes.md).
+Otherwise an outer owner's observation handle
 can keep a native factory alive while an earlier child is waiting for Loader
 quiescence. Public handle-retention and real native bootstrap tests cover this
 ordering, including application and embedded service shutdown.

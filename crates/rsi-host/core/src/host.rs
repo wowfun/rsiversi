@@ -448,13 +448,15 @@ impl Host {
             )
             .await;
         match applied {
-            Ok(handle) if matches!(handle.snapshot().state, FiberState::Active) => {}
             Ok(handle) => {
                 let state = handle.snapshot().state;
-                let _ = runtime.shutdown().await;
-                return Err(HostError::Bootstrap(format!(
-                    "Profile Fiber settled as {state:?}"
-                )));
+                if !matches!(state, FiberState::Active) {
+                    let _ = runtime.shutdown().await;
+                    return Err(HostError::Bootstrap(match state {
+                        FiberState::Failed(reason) => reason,
+                        state => format!("Profile Fiber settled as {state:?}"),
+                    }));
+                }
             }
             Err(error) => {
                 let _ = runtime.shutdown().await;

@@ -5,10 +5,10 @@ use rsi_meta::{
 };
 use rsi_meta_profile::{
     Profile, ProfileCompiler, ProfileEntry, ProfileEnvironment, ProfileGenerationPlan,
-    ProfileLimits, ProfileProgram, ProfileResolver,
+    ProfileInput, ProfileLimits, ProfileProgram, ProfileResolver,
 };
 use serde_json::Value;
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, BTreeSet};
 use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::{Arc, Condvar, Mutex};
 use std::time::Duration;
@@ -228,7 +228,7 @@ impl PluginFactory for ActivationFailureFactory {
             }),
         )?;
         Err(rsi_meta::MetaError::Activation(
-            "secret activation detail".to_owned(),
+            "activation detail".to_owned(),
         ))
     }
 }
@@ -238,7 +238,7 @@ impl PluginFactory for PrepareFailureFactory {
     fn prepare(&self, _desired: &ConfigValue) -> rsi_meta::Result<PreparedActivation> {
         self.calls.fetch_add(1, Ordering::SeqCst);
         Err(rsi_meta::MetaError::InvalidConfig(
-            "secret preparation detail".to_owned(),
+            "preparation detail".to_owned(),
         ))
     }
 
@@ -381,7 +381,7 @@ async fn returned_wrapper_cannot_reconfigure_into_an_empty_generation() {
 }
 
 #[tokio::test]
-async fn preparation_failure_is_redacted_before_wrapper_mutation() {
+async fn preparation_failure_retains_cause_before_wrapper_mutation() {
     let temp = tempfile::tempdir().unwrap();
     let candidate = compiler(temp.path())
         .compile(&ProfileProgram::from_profile(Profile::new([
@@ -411,10 +411,10 @@ async fn preparation_failure_is_redacted_before_wrapper_mutation() {
 
     assert!(matches!(
         &error,
-        rsi_meta_profile::ProfileError::Preparation { instance }
+        rsi_meta_profile::ProfileError::Preparation { instance, .. }
             if instance.as_str() == "rejected"
     ));
-    assert!(!error.to_string().contains("secret"));
+    assert!(error.to_string().contains("preparation detail"));
     assert_eq!(calls.load(Ordering::SeqCst), 1);
     let after = runtime.resource_snapshot();
     assert_eq!(after.fibers.current, baseline.fibers.current);
@@ -426,6 +426,58 @@ async fn preparation_failure_is_redacted_before_wrapper_mutation() {
     );
     assert_eq!(after.effects.current, baseline.effects.current);
     assert!(runtime.shutdown().await.is_clean());
+}
+
+#[test]
+fn linked_preflight_retains_bounded_unicode_errors_without_configuration_or_panic_payloads() {
+    #[derive(Debug)]
+    struct PreflightFailure;
+
+    #[async_trait]
+    impl PluginFactory for PreflightFailure {
+        fn prepare(&self, desired: &ConfigValue) -> rsi_meta::Result<PreparedActivation> {
+            assert_ne!(desired["panic"], true, "private panic payload");
+            Err(rsi_meta::MetaError::InvalidConfig("目录不可用".repeat(100)))
+        }
+
+        async fn activate(&self, _: ActivationPlan) -> rsi_meta::Result<()> {
+            unreachable!("preflight never activates")
+        }
+    }
+
+    for (panic, maximum) in [(false, 4096), (false, 40), (true, 4096)] {
+        let input = ProfileInput::new(
+            Arc::new(SingleResolver {
+                plugin: "test.preflight",
+                factory: Arc::new(PreflightFailure),
+            }),
+            ProfileProgram::from_profile(Profile::new([ProfileEntry::new(
+                "rejected",
+                "test.preflight",
+                serde_json::json!({"panic": panic, "private": "configuration-secret"}),
+            )])),
+            ProfileEnvironment::without_paths("test", BTreeMap::new()).unwrap(),
+            ProfileLimits {
+                maximum_diagnostic_bytes: maximum,
+                ..ProfileLimits::default()
+            },
+        );
+        let error = input.preflight_linked(&BTreeSet::new()).unwrap_err();
+        assert!(!error.to_string().contains("configuration-secret"));
+        let rsi_meta_profile::ProfileError::Preparation { instance, reason } = error else {
+            panic!("expected a preparation error");
+        };
+        assert_eq!(instance.as_str(), "rejected");
+        assert!(reason.len() <= maximum);
+        if panic {
+            assert_eq!(reason, "plugin preparation panicked");
+        } else {
+            assert!(reason.contains("目录"));
+            if maximum == 40 {
+                assert_eq!(reason, "plugin configuration is invalid: 目录");
+            }
+        }
+    }
 }
 
 #[tokio::test]
@@ -455,10 +507,10 @@ async fn activation_failure_names_the_exact_leaf_and_rolls_back_earlier_effects(
 
     assert!(matches!(
         &error,
-        rsi_meta_profile::ProfileError::Application { instance }
+        rsi_meta_profile::ProfileError::Application { instance, .. }
             if instance.as_str() == "failing"
     ));
-    assert!(!error.to_string().contains("secret"));
+    assert!(error.to_string().contains("activation detail"));
     assert_eq!(live.load(Ordering::SeqCst), 0);
     let after = runtime.resource_snapshot();
     assert_eq!(after.fibers.current, baseline.fibers.current);

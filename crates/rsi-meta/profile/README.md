@@ -82,8 +82,8 @@ enabled value. Evaluation is bounded and pure: scripts can read the frozen
 environment, filesystem, network, or process access. Operation, expression,
 and function-call depths plus string, array, and map sizes are pinned to
 Profile limits. The operation ceiling is shared by every expression in one
-rebuild rather than resetting for each program step. Scripts and configuration
-values never appear in diagnostics.
+rebuild rather than resetting for each program step. Compiler diagnostics never
+include scripts or configuration values.
 
 The final tree admits `maximum_config_bytes` of encoded configuration. During
 ordered compilation, retained leaf and staged patch configurations together
@@ -189,7 +189,7 @@ owns its final joins. The command worker releases executable inputs after its
 admitted command settles, without waiting for child cleanup to reach the parent's
 deferred effect. The product's `ScopedProfile` uses the first path and
 `RunningHost` uses the second.
-Stopped control handles retain redacted status and tree snapshots, releasing
+Stopped control handles retain bounded local status and redacted tree snapshots, releasing
 their resolver and executable targets. A long-lived observation handle therefore
 does not postpone native factory finalization after its owning tree retires.
 
@@ -228,8 +228,10 @@ compensation failure kinds. Meta capacity/payload/busy errors retain the Capacit
 failures as well as convergence outcomes. Admission-only Busy/Stopped errors,
 polling and an in-progress command do not replace the last completed attempt.
 An input replacement that rolls back restores the previous input's watch plan.
-Local diagnostics remain bounded and redacted; remote presentation maps only
-closed categories and never forwards these strings or dependency identities.
+Local diagnostics retain bounded plugin preparation and activation errors with
+their instance identity. Plugin authors own redaction of secrets in their error
+messages. Remote presentation maps only closed categories and never forwards
+these strings or dependency identities.
 
 The Profile Fiber watches the root and every transitive include. Change signals
 use a serialized single-flight worker with a dirty bit, so a signal arriving
@@ -251,7 +253,8 @@ source changes or manual reload is requested.
 
 The Fiber supplies typed Local `ProfileControl` with `reload`, `status`,
 redacted tree `snapshot`, and last-value `subscribe`. Status bounds diagnostics
-and source paths; it never contains configuration, Rhai source, or secrets.
+and source paths; Profile never serializes configuration or Rhai source into
+diagnostics. Plugin-supplied error text is intended for the local operator.
 Observed child state is a Profile-owned lifecycle category: `Failed` deliberately
 does not carry the Runtime/plugin failure string, while `Pending` retains only
 Meta's already-bounded dependency report.

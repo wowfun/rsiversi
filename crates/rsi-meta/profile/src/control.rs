@@ -185,7 +185,7 @@ impl ProfileInstanceStatus {
     }
 }
 
-/// Bounded redacted status published after Profile state changes.
+/// Bounded local status published after Profile state changes.
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct ProfileStatus {
     revision: u64,
@@ -233,7 +233,7 @@ impl ProfileStatus {
         &self.observed
     }
 
-    /// Latest bounded redacted operational diagnostic.
+    /// Latest bounded local operational diagnostic, including plugin errors.
     pub fn diagnostic(&self) -> Option<&str> {
         self.diagnostic.as_deref()
     }
@@ -316,7 +316,7 @@ pub enum ReloadOutcome {
     RolledBack {
         /// Restored converged status.
         status: ProfileStatus,
-        /// Bounded redacted candidate failure.
+        /// Bounded local candidate failure.
         error: String,
         /// Product-neutral candidate failure category.
         error_kind: ProfileFailureKind,
@@ -325,9 +325,9 @@ pub enum ReloadOutcome {
     Degraded {
         /// Actually observed partial graph.
         status: ProfileStatus,
-        /// Bounded redacted candidate failure.
+        /// Bounded local candidate failure.
         error: String,
-        /// Bounded redacted compensation failure.
+        /// Bounded local compensation failure.
         rollback_error: String,
         /// Product-neutral candidate failure category.
         error_kind: ProfileFailureKind,
@@ -538,11 +538,15 @@ impl ProfileGenerationPlan {
                 ConfigValue::Null,
             )
             .await?;
-        if !matches!(handle.snapshot().state, FiberState::Active) {
+        let state = handle.snapshot().state;
+        if !matches!(state, FiberState::Active) {
             let _cleanup = handle.dispose().await;
             return Err(first_instance.map_or_else(
                 || ProfileError::InvalidProgram("static Profile generation failed".to_owned()),
-                |instance| ProfileError::Application { instance },
+                |instance| ProfileError::Application {
+                    instance,
+                    reason: format!("generation wrapper settled as {state:?}"),
+                },
             ));
         }
         let wrapper_context = wrapper_context
@@ -596,10 +600,14 @@ async fn prepare_generation(
             joined = &mut task => joined,
         };
         let proof = joined
-            .map_err(|_| ProfileError::Preparation {
+            .map_err(|error| ProfileError::Preparation {
                 instance: instance.clone(),
+                reason: error.to_string(),
             })?
-            .map_err(|_| ProfileError::Preparation { instance })?;
+            .map_err(|error| ProfileError::Preparation {
+                instance,
+                reason: error.to_string(),
+            })?;
         prepared.push(Some(proof));
     }
     if cancellation.is_cancelled() {
@@ -648,11 +656,12 @@ async fn mount_generation(
                 return rollback_generation(handle, ProfileError::Meta(MetaError::Cancelled)).await;
             }
             Some(Ok(leaf)) => leaf,
-            Some(Err(_)) => {
+            Some(Err(error)) => {
                 return rollback_generation(
                     handle,
                     ProfileError::Application {
                         instance: leaf_target.candidate.id().clone(),
+                        reason: error.to_string(),
                     },
                 )
                 .await;
@@ -663,12 +672,16 @@ async fn mount_generation(
             FiberState::Pending(_) => Some(ProfileError::GenerationPending {
                 instance: leaf_target.candidate.id().clone(),
             }),
-            FiberState::Loading
-            | FiberState::Failed(_)
-            | FiberState::Unloading
-            | FiberState::Disposed => Some(ProfileError::Application {
+            FiberState::Failed(reason) => Some(ProfileError::Application {
                 instance: leaf_target.candidate.id().clone(),
+                reason,
             }),
+            state @ (FiberState::Loading | FiberState::Unloading | FiberState::Disposed) => {
+                Some(ProfileError::Application {
+                    instance: leaf_target.candidate.id().clone(),
+                    reason: format!("child settled as {state:?}"),
+                })
+            }
         };
         if let Some(error) = error {
             return rollback_generation(handle, error).await;
@@ -1152,16 +1165,18 @@ impl Controller {
                         resolved.factory.clone(),
                         resolved.candidate.config().clone(),
                     )
-                    .map_err(|_| ProfileError::Preparation {
+                    .map_err(|error| ProfileError::Preparation {
                         instance: resolved.candidate.id().clone(),
+                        reason: error.to_string(),
                     })?,
             };
             let handle = candidate.leaves[index]
                 .context
                 .apply_prepared(prepared)
                 .await
-                .map_err(|_| ProfileError::Application {
+                .map_err(|error| ProfileError::Application {
                     instance: resolved.candidate.id().clone(),
+                    reason: error.to_string(),
                 })?;
             let state = handle.snapshot().state;
             active.insert(
@@ -1820,9 +1835,10 @@ async fn apply_initial(
             .context
             .apply_prepared(prepared)
             .await
-            .map_err(|_| {
+            .map_err(|error| {
                 ProfileError::Application {
                     instance: resolved.candidate.id().clone(),
+                    reason: error.to_string(),
                 }
                 .to_string()
             })?;
@@ -1856,8 +1872,9 @@ fn prepare_new_target(
         .map(|leaf| {
             let proof = runtime
                 .prepare(leaf.factory.clone(), leaf.candidate.config().clone())
-                .map_err(|_| ProfileError::Preparation {
+                .map_err(|error| ProfileError::Preparation {
                     instance: leaf.candidate.id().clone(),
+                    reason: error.to_string(),
                 })?;
             Ok(Some(proof))
         })
@@ -2055,9 +2072,10 @@ fn target_status(target: &ResolvedTarget) -> Vec<ProfileTargetStatus> {
 
 fn settled_failure(instance: &rsi_meta::InstanceId, state: &FiberState) -> Option<String> {
     match state {
-        FiberState::Failed(_) => Some(
+        FiberState::Failed(reason) => Some(
             ProfileError::Application {
                 instance: instance.clone(),
+                reason: reason.clone(),
             }
             .to_string(),
         ),
@@ -2198,16 +2216,18 @@ mod tests {
     }
 
     #[test]
-    fn failed_runtime_state_is_projected_without_its_diagnostic() {
+    fn local_failure_retains_cause_while_child_category_remains_redacted() {
         let instance = InstanceId::new("child");
-        let runtime_state = FiberState::Failed("secret plugin diagnostic".to_owned());
+        let runtime_state = FiberState::Failed("plugin diagnostic".to_owned());
 
         let state = redacted_instance_state(runtime_state.clone());
         let diagnostic = settled_failure(&instance, &runtime_state).unwrap();
 
         assert_eq!(state, ProfileInstanceState::Failed);
-        assert!(!format!("{state:?}").contains("secret"));
-        assert!(!diagnostic.contains("secret"));
-        assert_eq!(diagnostic, "applying Profile instance `child` failed");
+        assert!(!format!("{state:?}").contains("plugin diagnostic"));
+        assert_eq!(
+            diagnostic,
+            "applying Profile instance `child` failed: plugin diagnostic"
+        );
     }
 }

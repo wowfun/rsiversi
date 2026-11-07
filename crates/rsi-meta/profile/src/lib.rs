@@ -71,7 +71,7 @@ pub struct ProfileLimits {
     /// Maximum retained JSON bytes in the resolved tree; compilation admits
     /// twice this weight across live leaf and staged patch configurations.
     pub maximum_config_bytes: usize,
-    /// Maximum bytes retained for one redacted operational diagnostic.
+    /// Maximum bytes retained for one local operational diagnostic.
     pub maximum_diagnostic_bytes: usize,
 }
 
@@ -890,17 +890,21 @@ pub enum ProfileError {
         /// Missing stable key.
         key: String,
     },
-    /// Factory preparation failed; executable diagnostics are redacted.
-    #[error("preparing Profile instance `{instance}` failed")]
+    /// Factory preparation failed with a local operator diagnostic.
+    #[error("preparing Profile instance `{instance}` failed: {reason}")]
     Preparation {
         /// Stable instance ID.
         instance: InstanceId,
+        /// Plugin-owned diagnostic; the plugin must redact its secrets.
+        reason: String,
     },
-    /// Runtime convergence failed; plugin diagnostics are redacted.
-    #[error("applying Profile instance `{instance}` failed")]
+    /// Runtime convergence failed with a local operator diagnostic.
+    #[error("applying Profile instance `{instance}` failed: {reason}")]
     Application {
         /// Stable instance ID.
         instance: InstanceId,
+        /// Plugin-owned diagnostic; the plugin must redact its secrets.
+        reason: String,
     },
     /// A static generation could not activate because one leaf remained Pending.
     #[error("Profile generation instance `{instance}` remained Pending")]
