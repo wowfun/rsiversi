@@ -235,7 +235,8 @@ impl Operation {
     const fn version(self) -> u16 {
         match self {
             Self::Create => 12,
-            Self::Inspect | Self::Recent | Self::DraftSnapshot | Self::SelectPreset => 10,
+            Self::Recent => 11,
+            Self::Inspect | Self::DraftSnapshot | Self::SelectPreset => 10,
             Self::Submit => 7,
             Self::MessageStatus
             | Self::Terminal

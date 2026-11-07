@@ -1388,13 +1388,17 @@ impl SessionStore for MemoryStore {
                 )
             })
             .take(limit + 1)
-            .map(|(_, session_id)| StoreRecentSession {
-                header: state
+            .map(|(_, session_id)| {
+                let session = state
                     .sessions
                     .get(session_id)
-                    .expect("recent index references its Session")
-                    .header
-                    .clone(),
+                    .expect("recent index references its Session");
+                StoreRecentSession {
+                    header: session.header.clone(),
+                    last_activity_ms: session.last_activity_ms,
+                    durable_fact_seq: session.facts.last().map_or(0, |fact| fact.seq()),
+                    durable_control_seq: session.controls.last().map_or(0, AgentControlRecord::seq),
+                }
             })
             .collect::<Vec<_>>();
         let has_more = sessions.len() > limit;

@@ -3680,4 +3680,10 @@ async fn recent_page_uses_one_bounded_header_query() {
         page.sessions[0].header.session_id().as_str(),
         "recent-query-11"
     );
+    assert_eq!(page.sessions[0].durable_fact_seq, 1);
+    assert_eq!(page.sessions[0].durable_control_seq, 0);
+    assert_eq!(
+        page.sessions[0].last_activity_ms,
+        test_fact(1).timestamp_ms()
+    );
 }

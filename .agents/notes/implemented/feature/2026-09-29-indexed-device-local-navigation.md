@@ -4,7 +4,7 @@ name: Indexed activity navigation and device-local ordering
 
 ## Problem
 
-Creation-ordered Header scans neither expose current activity nor provide one
+Creation order does not identify the most recently active Session or provide one
 workspace identity owner. Full manual ordering cannot be computed from a replaced page of
 64 rows. Activity-driven cursor invalidation would starve historical pagination.
 
@@ -18,6 +18,12 @@ The GUI uses this projection for Session navigation and native history-picker
 sources. It retains no second recent-Session catalog or pagination command:
 fetching an unused list adds Service work and can fail an otherwise valid refresh.
 The independent Session recent-list API remains available to its other consumers.
+Its summary reuses the Store's Header/activity row, including both durable
+watermarks from that row's read snapshot. The standard Session service applies
+visibility to the typed rows and moves them to callers. A catalog does not need
+to read the same metadata again after listing; that second read added worker and
+SQLite work and could fail merely because a listed Session was deleted meanwhile.
+This is a row-level observation, not a retained global catalog snapshot.
 
 SSH visibility must enter that snapshot before limits and cursor selection.
 Filtering the finished page leaks a hidden row through `newest`/continuation and
@@ -64,6 +70,9 @@ cannot finish while another Session is active. An unbounded full-history scan
 does not provide a bounded navigation interface.
 Accumulating every Workspace page would still mix registry snapshots and would
 turn a presentation page into a second membership owner.
+A separate metadata cache would add invalidation and retention to values already
+available in the listing. Duplicating Session identity and coordinates in a second
+summary envelope would add allocation without adding information.
 
 ## Consequences
 

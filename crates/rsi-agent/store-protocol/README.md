@@ -380,9 +380,11 @@ produce an empty page. The recent-session cursor is the exact descending
 contract and is not reused for presentation. Startup recovery uses the
 open-session index, so closed historical sessions do not impose Store calls or
 decoding work. No Store method materializes an unbounded durable catalog.
-Each recent-session row carries its validated bounded Header from the same Store
-snapshot, so presentation does not fan one index page into hundreds of later
-Header reads.
+Each recent-session row carries its validated bounded Header, last qualifying
+activity time and both durable watermarks from the same Store read snapshot.
+Providers validate these rows at the Store boundary. Consumers can render a
+catalog or compare log revisions without later Header or activity-summary reads.
+The row contains no duplicate identity or execution coordinates beside its Header.
 
 Context checkpoints are an optional cache, not canonical session state. The
 Store preserves at most 64 MiB of opaque Context-owned bytes with a header

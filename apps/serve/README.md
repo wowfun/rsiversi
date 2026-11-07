@@ -223,13 +223,14 @@ the shared owner's authority. For an unpublished Session it reads the existing
 draft handle. A local filesystem plugin can only receive a native local
 workspace path through this operation.
 `application.sessions` reads one page of visible durable Sessions with the
-same live request authority. Each indexed activity summary supplies the last
-activity time and durable Fact watermark used for the blank flag. The running
+same live request authority. Each listed row supplies its Header, activity time and
+durable Fact/control watermarks from one Store read snapshot. Both watermarks
+determine the blank flag; no follow-up activity-summary query is needed. The running
 flag reports current Kernel ownership of a nonterminal Turn for that visible
 identity. A cold open Turn stays in the list with a clear running flag.
 Listing reads neither transcript bodies nor pending human interactions.
 With `history: true`, the same cursor returns immutable history metadata and
-the durable Fact/control cursor from one indexed summary per Session. The
+the durable Fact/control cursor from that same listed row. The
 parent names the history source for both independent and Agent forks. The
 working directory is present for local execution only.
 `application.create` resolves a named Workspace or registers an explicit

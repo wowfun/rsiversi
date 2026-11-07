@@ -371,7 +371,8 @@ async fn metadata_snapshot(
             if row.session_id == *header.session_id()
                 && row.created_at_ms == header.created_at_ms() =>
         {
-            let mut metadata = stored_snapshot(&header, row);
+            let mut metadata =
+                stored_snapshot(&header, row.durable_fact_seq, row.durable_control_seq);
             metadata["through"] = json!(row.durable_fact_seq);
             metadata["model_baseline"] = json!(model_baseline(&header));
             Ok(metadata)
@@ -383,12 +384,13 @@ async fn metadata_snapshot(
 
 pub(super) fn stored_snapshot(
     header: &rsi_agent_session_protocol::SessionHeader,
-    row: &rsi_agent_store_protocol::StoreActivityRow,
+    fact_seq: u64,
+    control_seq: u64,
 ) -> Value {
     let mut item = stored_header(header);
     item["selection_cursor"] = json!(rsi_agent_session_protocol::ProjectionCursor::Durable {
-        fact_seq: row.durable_fact_seq,
-        control_seq: row.durable_control_seq,
+        fact_seq,
+        control_seq,
     });
     item
 }

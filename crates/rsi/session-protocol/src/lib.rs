@@ -484,32 +484,10 @@ impl RecentSessionCursor {
     }
 }
 /// Public ordering position of an already visible Header.
-#[derive(Clone, Debug, Eq, PartialEq, serde::Serialize, serde::Deserialize)]
-#[serde(deny_unknown_fields)]
-pub struct RecentSessionPosition {
-    /// Durable creation timestamp in Unix milliseconds.
-    pub created_at_ms: u64,
-    /// Descending identity tie-breaker.
-    pub session_id: SessionId,
-}
+pub use rsi_agent_store_protocol::StoreRecentSessionCursor as RecentSessionPosition;
 
-/// One recent durable session summary.
-#[derive(Clone, Debug, Eq, PartialEq, serde::Serialize, serde::Deserialize)]
-#[serde(deny_unknown_fields)]
-pub struct SessionSummary {
-    /// Complete immutable durable Header.
-    pub header: SessionHeader,
-}
-
-impl SessionSummary {
-    /// Returns this visible Header's ordering position.
-    pub fn position(&self) -> RecentSessionPosition {
-        RecentSessionPosition {
-            created_at_ms: self.header.created_at_ms(),
-            session_id: self.header.session_id().clone(),
-        }
-    }
-}
+/// One visible durable Session's Header, activity and watermarks from one Store snapshot.
+pub use rsi_agent_store_protocol::StoreRecentSession as SessionSummary;
 
 /// One bounded recent-session page.
 #[derive(Clone, Debug, Eq, PartialEq, serde::Serialize, serde::Deserialize)]
@@ -537,6 +515,11 @@ impl RecentSessionPage {
             .and_then(|c| c.after.as_ref())
             .map(|p| (p.created_at_ms, &p.session_id));
         for row in &self.sessions {
+            if row.last_activity_ms < row.header.created_at_ms() {
+                return Err(SessionError::Invalid(
+                    "recent activity precedes Session creation".into(),
+                ));
+            }
             let current = (row.header.created_at_ms(), row.header.session_id());
             if previous.is_some_and(|previous| current >= previous) {
                 return Err(SessionError::Invalid(

@@ -181,6 +181,8 @@ async fn remote_session_reads_are_offline_caller_bound_and_live_streams_recheck_
     ));
     let visible = scoped.list_recent(None, 1).await.unwrap();
     assert_eq!(visible.sessions[0].header, headers[0]);
+    assert_eq!(visible.sessions[0].durable_fact_seq, 1);
+    assert_eq!(visible.sessions[0].durable_control_seq, 0);
     assert!(!visible.has_more);
     access.granted.store(true, Ordering::SeqCst);
     let read = rsi_session_protocol::SessionReads::acquire(&service, origin.clone(), &target)

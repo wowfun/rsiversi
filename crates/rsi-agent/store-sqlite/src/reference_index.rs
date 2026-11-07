@@ -242,14 +242,14 @@ pub(super) fn validate_all(connection: &Connection, codecs: &ReferenceCodecs) ->
     while let Some(row) = rows.next().map_err(sql_error)? {
         let id = SessionId::new(bounded_text(row, 0, 256).map_err(sql_error)?)
             .map_err(|e| StoreError::Corrupt(e.to_string()))?;
-        let (header, _, encoded) = validation::read_session_header_source(connection, &id)?;
+        let (row, encoded) = validation::read_session_header_source(connection, &id)?;
         verify(
             connection,
             &id,
             "header",
             0,
             &digest(&encoded),
-            &header_references(&header)?,
+            &header_references(&row.header)?,
         )?;
         observer.records += 1;
         validation::validate_session_observed(connection, &id, &mut observer)?;
@@ -483,14 +483,14 @@ pub(super) fn rebuild(connection: &Connection, codecs: &ReferenceCodecs) -> Resu
             break;
         }
         for id in &ids {
-            let (header, _, encoded) = validation::read_session_header_source(connection, id)?;
+            let (row, encoded) = validation::read_session_header_source(connection, id)?;
             write(
                 connection,
                 id,
                 "header",
                 0,
                 &digest(&encoded),
-                header_references(&header),
+                header_references(&row.header),
                 true,
             )?;
             rebuilder.records += 1;

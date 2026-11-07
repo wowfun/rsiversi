@@ -1787,7 +1787,8 @@ impl StoreSessionPage {
 }
 
 /// Exact cursor for creation-time-descending session enumeration.
-#[derive(Clone, Debug, Eq, PartialEq)]
+#[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
 pub struct StoreRecentSessionCursor {
     /// Durable creation timestamp in Unix milliseconds.
     pub created_at_ms: u64,
@@ -1796,10 +1797,17 @@ pub struct StoreRecentSessionCursor {
 }
 
 /// One durable session summary ordered by creation time and identity descending.
-#[derive(Clone, Debug, Eq, PartialEq)]
+#[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
 pub struct StoreRecentSession {
     /// Complete validated immutable Header selected in the listing snapshot.
     pub header: SessionHeader,
+    /// Latest qualifying activity in that snapshot; never earlier than creation.
+    pub last_activity_ms: u64,
+    /// Durable Fact watermark in that snapshot.
+    pub durable_fact_seq: u64,
+    /// Durable control watermark in that snapshot.
+    pub durable_control_seq: u64,
 }
 
 impl StoreRecentSession {
@@ -1833,13 +1841,13 @@ impl StoreRecentSessionPage {
                 "recent-session page has invalid bounds".into(),
             ));
         }
-        let mut previous = self.after.clone();
+        let mut previous = self
+            .after
+            .as_ref()
+            .map(|cursor| (cursor.created_at_ms, &cursor.session_id));
         for session in &self.sessions {
-            let current = session.cursor();
-            if previous.as_ref().is_some_and(|previous| {
-                (current.created_at_ms, &current.session_id)
-                    >= (previous.created_at_ms, &previous.session_id)
-            }) {
+            let current = (session.header.created_at_ms(), session.header.session_id());
+            if previous.is_some_and(|previous| current >= previous) {
                 return Err(StoreError::Corrupt(
                     "recent-session page is not strictly descending".into(),
                 ));
@@ -2240,6 +2248,7 @@ pub trait SessionStore: fmt::Debug + Send + Sync + 'static {
         limit: usize,
     ) -> Result<StoreSessionPage>;
     /// Lists at most `limit` sessions after an exclusive creation-time-descending cursor.
+    /// Each row's Header, activity and watermarks share one validated read snapshot.
     async fn list_recent_sessions(
         &self,
         locations: &ExecutionLocations,

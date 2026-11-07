@@ -1,6 +1,10 @@
 # rsi-session-api
 
-Interface version 21 admits `submit` v7 with non-waking `NextStep` input under
+Interface version 22 carries `recent` v11 summaries with the Header, activity time
+and Fact/control watermarks from each Store listing snapshot. The fields are
+required; clients validate activity against Header creation under the
+[Session listing contract](../session-protocol/README.md).
+It admits `submit` v7 with non-waking `NextStep` input under
 the [Session input contract](../session-protocol/README.md). It publishes accepted
 context without starting a Turn; ordinary message bounds and receipts apply.
 
@@ -60,7 +64,7 @@ the unscoped Local Session service. Handles recheck location Use for new operati
 stream frames recheck before publication without retaining draft or composition pins.
 
 The current Session format is 30. Operations negotiate their own versions:
-create v12; recent, inspect, draft-snapshot and select-preset v10;
+create v12; recent v11; inspect, draft-snapshot and select-preset v10;
 attach and observe v9. Draft responses include the exact held command-input
 batch, bounded by 256 KiB in addition to the Header and envelope. Clients validate
 the batch's Command provenance, first-Step delivery, identity and ordering.

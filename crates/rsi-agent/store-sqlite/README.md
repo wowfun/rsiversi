@@ -136,7 +136,9 @@ of an unreferenced object; file type, namespace and unlink failures remain error
 
 Recent-session pages select bounded Header projections in the same ordered query.
 They share the ordinary Header decoder and integrity checks, without one extra
-query per result or decoding an unbounded JSON value.
+query per result or decoding an unbounded JSON value. The decoder retains the
+already selected activity time and Fact/control watermarks in each returned row;
+the Header and these scalars describe that same SQLite snapshot.
 
 The `model_effect_coordinates` unique expression index derives Session/Turn/effect/role
 directly from canonical Fact JSON for ModelIntent, ModelStarted and

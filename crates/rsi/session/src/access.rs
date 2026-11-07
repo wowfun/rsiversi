@@ -179,7 +179,6 @@ impl LocalSessionService {
                 .list_recent_sessions(visibility.locations(), cursor.as_ref(), limit)
                 .await
                 .map_err(super::map_store_error)?;
-            page.validate().map_err(super::map_store_error)?;
             more = page.has_more;
             if page.sessions.is_empty() {
                 break;
@@ -190,7 +189,7 @@ impl LocalSessionService {
                 match self.protect_header(&row.header) {
                     Ok(lease) => {
                         leases.push(lease);
-                        sessions.push(super::SessionSummary { header: row.header });
+                        sessions.push(row);
                     }
                     Err(SessionError::Api(rsi_api_protocol::ApiError::Unauthorized)) => {}
                     Err(_) => {
@@ -221,7 +220,7 @@ impl LocalSessionService {
             if more {
                 let visible = sessions
                     .last()
-                    .map(super::SessionSummary::position)
+                    .map(super::SessionSummary::cursor)
                     .or_else(|| after.and_then(|c| c.after.clone()));
                 Some(book.issue(
                     &self.origin,

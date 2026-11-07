@@ -89,8 +89,13 @@ Its native message identity owns retry and withdrawal, independently of any
 reusable presentation ID. Command-generated draft inputs retain their separate
 atomic command publication contract.
 
-Recent listing returns descending visible Headers and an optional opaque `next`
-cursor. `has_more` means more scanning work exists, including hidden rows; clients
+Recent listing returns descending visible Session summaries and an optional opaque
+`next` cursor. Each summary carries its Header, `last_activity_ms`,
+`durable_fact_seq` and `durable_control_seq` from the same Store read snapshot.
+The shared Store row is exposed as `SessionSummary`; its `cursor()` returns the
+visible ordering position, not an authorized continuation. Visibility scanning
+may combine several Store pages, so a response does not promise one global cut.
+`has_more` means more scanning work exists, including hidden rows; clients
 continue with `next` even when a page is empty. Cursors never expose skipped
 identities. They belong to the actual principal and service generation, expire
 after five minutes, and retain at most 128 cuts globally and eight per principal.
@@ -100,7 +105,8 @@ refresh. Protection infrastructure errors propagate as unavailable; only known
 authorization refusals hide rows.
 `RecentSessionPage::validate` checks a decoded page against its requested cursor
 and limit: strict descending visible order, exact continuation presence and
-visible position, and a fresh successor token. Empty scan pages may continue.
+visible position, a fresh successor token, and activity no earlier than Header
+creation. Empty scan pages may continue.
 
 `SessionHandle::export` returns a finite read-only export stream. Its options,
 bounded UTF-8 chunks and completion validation are shared by every application;

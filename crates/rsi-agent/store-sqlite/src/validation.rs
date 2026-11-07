@@ -372,13 +372,14 @@ pub(super) fn read_session_header_row(
     connection: &Connection,
     session_id: &SessionId,
 ) -> Result<(SessionHeader, u64)> {
-    read_session_header_source(connection, session_id).map(|(header, seq, _)| (header, seq))
+    read_session_header_source(connection, session_id)
+        .map(|(row, _)| (row.header, row.durable_fact_seq))
 }
 
 pub(super) fn read_session_header_source(
     connection: &Connection,
     session_id: &SessionId,
-) -> Result<(SessionHeader, u64, String)> {
+) -> Result<(StoreRecentSession, String)> {
     #[cfg(test)]
     HEADER_READS.set(HEADER_READS.get() + 1);
     let row = connection
@@ -399,14 +400,14 @@ pub(super) fn read_session_header_source(
 pub(super) fn decode_header_projection(
     session_id: &SessionId,
     row: HeaderRow,
-) -> Result<(SessionHeader, u64)> {
-    decode_header_source(session_id, row).map(|(header, seq, _)| (header, seq))
+) -> Result<StoreRecentSession> {
+    decode_header_source(session_id, row).map(|(row, _)| row)
 }
 
 fn decode_header_source(
     session_id: &SessionId,
     row: HeaderRow,
-) -> Result<(SessionHeader, u64, String)> {
+) -> Result<(StoreRecentSession, String)> {
     let HeaderRow {
         created_at_ms,
         durable_seq,
@@ -419,7 +420,8 @@ fn decode_header_source(
         last_activity_ms,
     } = row;
     let durable_seq = decode_u64("durable sequence", durable_seq)?;
-    decode_u64("durable control sequence", control_seq)?;
+    let control_seq = decode_u64("durable control sequence", control_seq)?;
+    let last_activity_ms = decode_u64("activity timestamp", last_activity_ms)?;
     for (label, digest) in [
         ("Fact-prefix digest", fact_prefix_sha256),
         ("Control-prefix digest", control_prefix_sha256),
@@ -444,13 +446,21 @@ fn decode_header_source(
         ));
     }
     if super::activity::coordinates_key(header.coordinates())? != coordinates_key
-        || decode_u64("activity timestamp", last_activity_ms)? < header.created_at_ms()
+        || last_activity_ms < header.created_at_ms()
     {
         return Err(StoreError::Corrupt(
             "Session coordinate or activity projection differs from its Header".into(),
         ));
     }
-    Ok((header, durable_seq, encoded))
+    Ok((
+        StoreRecentSession {
+            header,
+            last_activity_ms,
+            durable_fact_seq: durable_seq,
+            durable_control_seq: control_seq,
+        },
+        encoded,
+    ))
 }
 
 pub(super) fn validate_turn_index(connection: &Connection, session_id: &SessionId) -> Result<()> {

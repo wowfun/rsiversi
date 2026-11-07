@@ -370,6 +370,9 @@ Recent listing scans at most 128
 source pages per request and returns an opaque continuation for the last scanned
 row, including an empty visible page. Cursor ownership and bounds belong to the
 [Session protocol](../session-protocol/README.md).
+The service moves Store-validated Header/activity rows through visibility filtering
+without reconstructing summaries, revalidating Store ordering or querying their
+metadata again. Caller and protection leases remain live through publication.
 The optional protection policy
 checks actual callers and cancels reading leases on revocation; absent policy
 rejects protected reads without affecting ordinary Sessions. A Local frozen

@@ -367,12 +367,16 @@ mod tests {
             _: usize,
         ) -> rsi_session_protocol::Result<rsi_session_protocol::RecentSessionPage> {
             assert!(self.allow_history, "startup must not read recent history");
+            let header = crate::tests::UnknownThenAcceptedHandle::default()
+                .header()
+                .await
+                .unwrap();
             Ok(rsi_session_protocol::RecentSessionPage {
                 sessions: vec![rsi_session_protocol::SessionSummary {
-                    header: crate::tests::UnknownThenAcceptedHandle::default()
-                        .header()
-                        .await
-                        .unwrap(),
+                    last_activity_ms: header.created_at_ms(),
+                    header,
+                    durable_fact_seq: 0,
+                    durable_control_seq: 0,
                 }],
                 has_more: false,
                 next: None,

@@ -1358,9 +1358,8 @@ impl SessionStore for SqliteStore {
                         if sessions.len() == limit { has_more = true; break; }
                         let session_id = SessionId::new(bounded_text(row, 0, 256).map_err(sql_error)?)
                             .map_err(|error| StoreError::Corrupt(error.to_string()))?;
-                        let header = crate::validation::decode_header_projection(&session_id,
-                            crate::validation::read_header_projection(row, 1).map_err(sql_error)?)?.0;
-                        sessions.push(StoreRecentSession { header });
+                        sessions.push(crate::validation::decode_header_projection(&session_id,
+                            crate::validation::read_header_projection(row, 1).map_err(sql_error)?)?);
                     }
                 }
                 let page = StoreRecentSessionPage {

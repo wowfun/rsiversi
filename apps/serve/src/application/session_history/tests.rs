@@ -166,15 +166,7 @@ async fn metadata_reads_do_not_attach_and_preserve_visibility_and_failures() {
         json!({"model":header.settings().default_model(), "reasoning_effort":null})
     );
     assert!(snapshot.get("model_selection").is_none());
-    let catalog = stored_snapshot(
-        &header,
-        store
-            .session_activity_summaries(std::slice::from_ref(id))
-            .await
-            .unwrap()[0]
-            .as_ref()
-            .unwrap(),
-    );
+    let catalog = stored_snapshot(&header, 1, 0);
     assert!(catalog.get("model_baseline").is_none());
     assert!(catalog.get("through").is_none());
     assert_eq!(
