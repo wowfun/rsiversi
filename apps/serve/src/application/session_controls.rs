@@ -1,10 +1,56 @@
 use rsi_agent_session_protocol::{
-    AgentControlRecord, AgentControlRecordBody as Body, DomainMutationSource, DomainStateCommit,
-    SessionCommandReceipt, SessionHeader,
+    AgentControlRecord, AgentControlRecordBody as Body, AgentMessage, DomainMutationSource,
+    DomainStateCommit, MessageId, MessageTarget, ModelSelection, QueueSlot,
+    SessionCommandInvocation, SessionCommandReceipt, SessionHeader, TurnId,
 };
 use rsi_agent_store_protocol::{SessionStore, StoreError};
 use rsi_extension::{Error, Result};
-use serde_json::{Value, json};
+use serde::Serialize;
+
+#[derive(Serialize)]
+struct ControlEvent<'a> {
+    seq: u64,
+    after_fact_seq: u64,
+    time: u64,
+    #[serde(flatten)]
+    body: ControlBody<'a>,
+}
+
+#[derive(Serialize)]
+#[serde(tag = "kind", rename_all = "snake_case")]
+enum ControlBody<'a> {
+    Accepted {
+        message_id: &'a MessageId,
+        message: &'a AgentMessage,
+        target: &'a MessageTarget,
+    },
+    Successor {
+        predecessor_id: &'a MessageId,
+        successor_id: &'a MessageId,
+        slot: &'a QueueSlot,
+    },
+    Claimed {
+        message_id: &'a MessageId,
+        turn_id: &'a TurnId,
+    },
+    Promoted {
+        message_id: &'a MessageId,
+    },
+    Discarded {
+        message_id: &'a MessageId,
+    },
+    Model {
+        selection: ModelSelection,
+        #[serde(flatten)]
+        origin: Option<CommandOrigin<'a>>,
+    },
+}
+
+#[derive(Serialize)]
+struct CommandOrigin<'a> {
+    invocation: &'a SessionCommandInvocation,
+    receipt: SessionCommandReceipt,
+}
 
 pub(super) async fn read_controls(
     store: &dyn SessionStore,
@@ -52,12 +98,12 @@ pub(super) async fn read_controls(
     Ok((cursor, encoded))
 }
 
-fn project_control(
+fn project_control<'a>(
     header: &SessionHeader,
-    record: &AgentControlRecord,
+    record: &'a AgentControlRecord,
     anchor: u64,
-) -> Result<Option<Value>> {
-    let mut value =
+) -> Result<Option<ControlEvent<'a>>> {
+    let body =
         if let Some(value) = mailbox_event(record.body()) {
             value
         } else if let Body::DomainStateCommitted { commit } = record.body() {
@@ -66,156 +112,67 @@ fn project_control(
             }) else {
                 return Ok(None);
             };
-            let domain = rsi_agent_session_protocol::DomainStateView {
-                revision: update.revision(),
-                snapshot: update.snapshot().clone(),
-            };
             let selection =
-                rsi_agent_model_selection::resolve_selection(header, Some(&domain.snapshot), None)
+                rsi_agent_model_selection::resolve_selection(header, Some(update.snapshot()), None)
                     .map_err(|error| Error::Remote(error.to_string()))?;
-            let mut value = json!({"kind":"model","selection":selection});
-            command_origin(&mut value, record.seq(), commit)?;
-            value
+            ControlBody::Model {
+                selection,
+                origin: command_origin(record.seq(), commit)?,
+            }
         } else {
             return Ok(None);
         };
-    value["seq"] = json!(record.seq());
-    value["after_fact_seq"] = json!(anchor);
-    value["time"] = json!(record.timestamp_ms());
-    Ok(Some(value))
+    Ok(Some(ControlEvent {
+        seq: record.seq(),
+        after_fact_seq: anchor,
+        time: record.timestamp_ms(),
+        body,
+    }))
 }
 
-fn command_origin(value: &mut Value, seq: u64, commit: &DomainStateCommit) -> Result<()> {
+fn command_origin(seq: u64, commit: &DomainStateCommit) -> Result<Option<CommandOrigin<'_>>> {
     if let DomainMutationSource::Command { invocation } = commit.source() {
         let receipt = SessionCommandReceipt::committed(seq, commit)
             .map_err(|error| Error::Remote(error.to_string()))?;
-        value["invocation"] = json!(invocation);
-        value["receipt"] = json!(receipt);
+        return Ok(Some(CommandOrigin {
+            invocation,
+            receipt,
+        }));
     }
-    Ok(())
+    Ok(None)
 }
 
-fn mailbox_event(body: &Body) -> Option<Value> {
+fn mailbox_event(body: &Body) -> Option<ControlBody<'_>> {
     Some(match body {
         Body::MessageAccepted {
             message, target, ..
-        } => {
-            json!({"kind":"accepted", "message_id":message.message_id,"message":message,"target":target})
-        }
+        } => ControlBody::Accepted {
+            message_id: &message.message_id,
+            message,
+            target,
+        },
         Body::MessageSuccessor {
             predecessor_id,
             successor_id,
             slot,
-        } => {
-            json!({"kind":"successor","predecessor_id":predecessor_id,"successor_id":successor_id,"slot":slot})
-        }
+        } => ControlBody::Successor {
+            predecessor_id,
+            successor_id,
+            slot,
+        },
         Body::MessageClaimed {
             message_id,
             turn_id,
             ..
-        } => json!({"kind":"claimed","message_id":message_id,"turn_id":turn_id}),
-        Body::MessagePromoted { message_id } => json!({"kind":"promoted","message_id":message_id}),
-        Body::MessageDiscarded { message_id, .. } => {
-            json!({"kind":"discarded","message_id":message_id})
-        }
+        } => ControlBody::Claimed {
+            message_id,
+            turn_id,
+        },
+        Body::MessagePromoted { message_id } => ControlBody::Promoted { message_id },
+        Body::MessageDiscarded { message_id, .. } => ControlBody::Discarded { message_id },
         _ => return None,
     })
 }
 
 #[cfg(test)]
-mod tests {
-    use super::*;
-
-    #[test]
-    fn model_command_origin_distinguishes_identical_values_and_aggregate_baselines() {
-        use rsi_agent_session_protocol::{
-            CommandArguments, CommandRevision, ContributionId, DomainIdentity, DomainRequestId,
-            DomainRevision, DomainSnapshot, DomainStateUpdate, DomainStateValue,
-            SessionCommandInvocation,
-        };
-        let update = DomainStateUpdate::new(
-            DomainRevision::new(1),
-            DomainSnapshot::new(
-                DomainIdentity::new(rsi_agent_model_selection::DOMAIN, 1).unwrap(),
-                DomainStateValue::new(json!({"model":{"deployment":"native","model":"chosen"}}))
-                    .unwrap(),
-            ),
-        )
-        .unwrap();
-        let mut results = Vec::new();
-        for id in ["first", "second"] {
-            let invocation = SessionCommandInvocation {
-                command: ContributionId::new(rsi_agent_model_selection::COMMAND).unwrap(),
-                request_id: DomainRequestId::new(id).unwrap(),
-                expected_revision: CommandRevision::Durable { control_seq: 3 },
-                arguments: CommandArguments::new(update.snapshot().state().value().clone())
-                    .unwrap(),
-            };
-            let commit = DomainStateCommit::new(
-                Some(invocation.request_id.clone()),
-                DomainMutationSource::Command {
-                    invocation: invocation.clone(),
-                },
-                vec![update.clone()],
-            )
-            .unwrap();
-            let mut value = json!({});
-            command_origin(&mut value, 4, &commit).unwrap();
-            assert_eq!(value["invocation"], json!(invocation));
-            assert_eq!(
-                value["receipt"],
-                json!(SessionCommandReceipt::committed(4, &commit).unwrap())
-            );
-            assert!(command_origin(&mut json!({}), 5, &commit).is_err());
-            results.push(value);
-        }
-        assert_ne!(results[0]["receipt"], results[1]["receipt"]);
-        let initial =
-            DomainStateUpdate::new(DomainRevision::new(0), update.snapshot().clone()).unwrap();
-        let baseline =
-            DomainStateCommit::new(None, DomainMutationSource::Baseline, vec![initial]).unwrap();
-        let mut value = json!({});
-        command_origin(&mut value, 1, &baseline).unwrap();
-        assert_eq!(value, json!({}));
-    }
-
-    #[test]
-    fn acceptance_control_fragments_preserve_exact_multibyte_input() {
-        use rsi_agent_session_protocol::{
-            AgentMessage, AgentMessageContent, AgentMessageSource, MessageDelivery, MessageId,
-            MessageOptions, MessageTarget, SessionId,
-        };
-        let message = AgentMessage {
-            message_id: MessageId::new("large-context").unwrap(),
-            source: AgentMessageSource::Human { attribution: None },
-            content: vec![AgentMessageContent::Text {
-                text: "界".repeat(100_000),
-            }],
-            options: MessageOptions::default(),
-        };
-        let body = Body::MessageAccepted {
-            message: message.clone(),
-            delivery: MessageDelivery::NextTurn,
-            bound_turn_id: None,
-            root_session_id: SessionId::new("root").unwrap(),
-            target: MessageTarget::NextTurn,
-            wake_required: true,
-        };
-        let metadata = mailbox_event(&body).unwrap();
-        assert_eq!(metadata["message_id"], "large-context");
-        assert_eq!(metadata["message"], json!(message));
-        let encoded = serde_json::to_string(&vec![metadata]).unwrap();
-        let mut offset = 0;
-        let mut restored = String::new();
-        while offset < encoded.len() {
-            let fragment = super::super::session_history::fragment(&encoded, offset, 42).unwrap();
-            assert_eq!(fragment["through_seq"], 42);
-            restored.push_str(fragment["json"].as_str().unwrap());
-            offset = usize::try_from(fragment["next_offset"].as_u64().unwrap()).unwrap();
-        }
-        assert_eq!(
-            serde_json::from_str::<Value>(&restored).unwrap()[0]["message"],
-            json!(message)
-        );
-    }
-}
+mod tests;

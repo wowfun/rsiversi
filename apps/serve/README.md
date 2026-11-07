@@ -349,6 +349,8 @@ JSON string escaping before choosing its boundary. Eight KiB of the existing
 Store pages use half the frame's byte capacity; larger individual records retain
 their existing exact-size read and fragmentation path.
 Control history uses a captured control horizon.
+Its wire projection borrows the Store's validated control payloads through
+serialization, without materializing a second JSON tree of message bodies.
 Its exclusive `after_seq`, inclusive `through_seq` and UTF-8 byte `offset` select
 fragments of one JSON event array. Pages contain at most 64 control records,
 normally within that ordinary page budget; one larger record uses its exact

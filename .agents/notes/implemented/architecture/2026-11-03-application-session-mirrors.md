@@ -37,6 +37,9 @@ Ordinary Store pages follow the transport capacity, so a moderate control body
 does not force separate reads for its preceding records, body and trailing records.
 The bounded reader count and oversized-record path remain the memory boundary;
 neither a second durable event log nor a larger process frame is needed.
+Like DSH's reads of an already materialized event slice, the native control
+projection borrows validated payloads until serialization. An intermediate JSON
+value tree adds a full body copy without contributing validation or ownership.
 Persisted opens obtain their immutable model baseline and Fact/control cut from
 authorized stored metadata. Like DSH's JSONL read handles, they do not need a
 live Agent projection to reconstruct history. Requesting a full model projection
