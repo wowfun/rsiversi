@@ -28,6 +28,12 @@ inspection snapshots expose this state at the same durable cut as their
 contents. Promotion and queue editing preserve it. The Store does not decide
 which user or Agent action requests a pause or resume; Kernel owns that policy.
 
+`read_agent_mailbox_summary` also returns the source kind of the first pending
+next-Step message in acceptance order, or none when that selection is empty.
+It shares the summary's Fact/control cut and uses indexed metadata after ordinary
+Session validation. Observing whether an Agent wait can resume does not load
+message bodies or consume the queue; Kernel maps the source kind to the wake cause.
+
 Each control record retains the immutable Fact watermark at the end of its
 own atomic append. `StoreControlPage.fact_cursors` pairs those watermarks with
 the returned records, and `durable_fact_seq` comes from the same read snapshot.

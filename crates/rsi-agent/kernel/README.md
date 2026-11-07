@@ -18,9 +18,10 @@ then follows pending waking input until one idle cut is observed. It does not
 poll, load a composition, read message bodies or capture an Agent subtree.
 Dropping a waiter releases its subscription; shutdown terminates pending waits.
 
-At a model Step boundary, and when checking for a message that resumes a
-waiting Tool, Kernel requests the next-Step mailbox directly. Earlier next-Turn
-payloads cannot consume its page or hide a pending steer.
+At a model Step boundary, Kernel requests the next-Step mailbox directly.
+Earlier next-Turn payloads cannot consume its page or hide a pending steer.
+Waiting Tools observe the first pending next-Step source kind through the
+metadata-only mailbox summary; wake classification does not read message bodies.
 
 Inbox suspension is durable and independent of pending message horizons. Ready
 selection and direct mailbox claims honor the captured pause state. A genuinely

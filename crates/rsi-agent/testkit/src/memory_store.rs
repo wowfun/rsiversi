@@ -1716,37 +1716,32 @@ impl SessionStore for MemoryStore {
             .sessions
             .get(session_id)
             .ok_or_else(|| StoreError::NotFound(session_id.to_string()))?;
+        let mut pending_count = 0;
+        let mut first_step: Option<&StoreAgentMessage> = None;
+        let mut promotable = Vec::new();
+        for ((candidate, _), entry) in &state.agent_messages {
+            if candidate != session_id || !matches!(entry.state, StoreAgentMessageState::Pending) {
+                continue;
+            }
+            pending_count += 1;
+            if entry.target != MessageTarget::NextStep {
+                continue;
+            }
+            if first_step
+                .is_none_or(|first| entry.accepted_control_seq < first.accepted_control_seq)
+            {
+                first_step = Some(entry);
+            }
+            if !entry.wake_required && entry.permits_promotion() {
+                promotable.push((entry.accepted_control_seq, entry.message.message_id.clone()));
+            }
+        }
+        promotable.sort_by_key(|(control_seq, _)| *control_seq);
         let summary = StoreAgentMailboxSummary {
             inbox_paused: session.inbox_paused,
-            pending_count: state
-                .agent_messages
-                .iter()
-                .filter(|((candidate, _), entry)| {
-                    candidate == session_id
-                        && matches!(entry.state, StoreAgentMessageState::Pending)
-                })
-                .count(),
-            pending_promotable_message_ids: {
-                let mut messages = state
-                    .agent_messages
-                    .iter()
-                    .filter(|((candidate, _), entry)| {
-                        candidate == session_id
-                            && matches!(entry.state, StoreAgentMessageState::Pending)
-                            && entry.target == MessageTarget::NextStep
-                            && !entry.wake_required
-                            && entry.permits_promotion()
-                    })
-                    .map(|(_, entry)| {
-                        (entry.accepted_control_seq, entry.message.message_id.clone())
-                    })
-                    .collect::<Vec<_>>();
-                messages.sort_by_key(|(control_seq, _)| *control_seq);
-                messages
-                    .into_iter()
-                    .map(|(_, message_id)| message_id)
-                    .collect()
-            },
+            first_pending_step_source: first_step.map(|entry| entry.message.source.kind()),
+            pending_count,
+            pending_promotable_message_ids: promotable.into_iter().map(|(_, id)| id).collect(),
             durable_control_seq: session.controls.last().map_or(0, AgentControlRecord::seq),
             durable_fact_seq: session.facts.last().map_or(0, |fact| fact.seq()),
         };

@@ -33,6 +33,9 @@ mod claim_storage;
 #[path = "tests/claim_storage_bench.rs"]
 mod claim_storage_bench;
 #[cfg(any(unix, windows))]
+#[path = "tests/mailbox_summary.rs"]
+mod mailbox_summary;
+#[cfg(any(unix, windows))]
 #[path = "tests/maintenance.rs"]
 mod maintenance;
 

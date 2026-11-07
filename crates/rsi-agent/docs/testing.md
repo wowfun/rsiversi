@@ -38,6 +38,9 @@ Human steering scenarios run through the Kernel against both Memory and SQLite:
 idle routing, active Step consumption, terminal/recovery promotion, immutable
 same-ID retries, acceptance FIFO around fixed follow-ups, and explicit message
 cancellation. SQLite scenarios also run its offline canonical/index verifier.
+Agent wait regression checks assert that resuming from its own mailbox does not
+read a payload page. SQLite mailbox summaries trace metadata-only queries with a
+1 MiB held input and check acceptance order, discard transitions and reopening.
 SQLite integration tests separately cover session and per-turn pagination,
 open-turn indexing and cursor pagination, optimistic conflicts, rejection of
 representative old schemas, index integrity,

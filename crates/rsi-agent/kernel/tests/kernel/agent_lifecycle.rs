@@ -1726,8 +1726,11 @@ async fn idle_child_admits_human_input_but_rejects_expired_agent_callers() {
 
 #[tokio::test]
 async fn agent_wait_resumes_for_a_message_to_its_own_mailbox() {
-    let store = Arc::new(MemoryStore::new());
-    let kernel = kernel(store.clone()).await;
+    let store = Arc::new(FactReadRaceStore::new(Arc::new(MemoryStore::new())));
+    let kernel =
+        AgentKernel::recover_with_clock(store.clone(), composition(), Arc::new(FixedClock))
+            .await
+            .unwrap();
     let worker = kernel.start_workers();
     let (parent, child, _lease) = active_parent_and_child(&kernel).await;
     let waiter = tokio::spawn({
@@ -1757,6 +1760,7 @@ async fn agent_wait_resumes_for_a_message_to_its_own_mailbox() {
     })
     .await
     .expect("parent must durably park");
+    store.mailbox.step_reads.store(0, Ordering::Relaxed);
     kernel
         .send_agent_message(SendAgentMessage {
             cancellation: CancellationToken::new(),
@@ -1769,6 +1773,11 @@ async fn agent_wait_resumes_for_a_message_to_its_own_mailbox() {
         .await
         .unwrap();
     assert_eq!(waiter.await.unwrap().unwrap(), AgentWaitResult::Changed);
+    assert_eq!(
+        store.mailbox.step_reads.load(Ordering::Relaxed),
+        0,
+        "wait observation must not load pending message bodies"
+    );
     assert!(
         store
             .read_controls(

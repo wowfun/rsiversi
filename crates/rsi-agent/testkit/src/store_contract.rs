@@ -1936,6 +1936,9 @@ pub async fn assert_mechanical_store_contract(
         store.read_agent_mailbox_summary(&session_id).await.unwrap(),
         StoreAgentMailboxSummary {
             inbox_paused: false,
+            first_pending_step_source: Some(
+                rsi_agent_session_protocol::AgentMessageSourceKind::Completion
+            ),
             pending_count: rsi_agent_session_protocol::MAXIMUM_PENDING_AGENT_MESSAGES,
             pending_promotable_message_ids: vec![MessageId::new("bounded-message-0").unwrap(),],
             durable_control_seq: full_control_seq,
@@ -2032,6 +2035,15 @@ pub async fn assert_mechanical_store_contract(
             .all(|entry| entry.target == MessageTarget::NextStep)
     );
     assert_eq!(step.durable_control_seq, full_control_seq + 1);
+    assert_eq!(
+        store
+            .read_agent_mailbox_summary(&session_id)
+            .await
+            .unwrap()
+            .first_pending_step_source,
+        Some(rsi_agent_session_protocol::AgentMessageSourceKind::Human),
+        "promoted next-Turn input must not hide the first pending next-Step source"
+    );
     let inspection = store.inspect_session(&session_id).await.unwrap();
     inspection.validate().unwrap();
     assert!(

@@ -1760,11 +1760,14 @@ impl SessionStore for SqliteStore {
             let transaction = connection
                 .transaction_with_behavior(TransactionBehavior::Deferred)
                 .map_err(sql_error)?;
-            let (durable_fact_seq, durable_control_seq, pending_count, inbox_paused) = transaction
+            let (durable_fact_seq, durable_control_seq, pending_count, inbox_paused, first_step_source) = transaction
                 .query_row(
                     "SELECT durable_seq, control_seq,
                             (SELECT COUNT(*) FROM agent_messages
-                             WHERE session_id = ?1 AND state = 'pending'), inbox_paused
+                             WHERE session_id = ?1 AND state = 'pending'), inbox_paused,
+                            (SELECT message_source FROM agent_messages
+                             WHERE session_id = ?1 AND state = 'pending' AND target = 'next_step'
+                             ORDER BY accepted_control_seq LIMIT 1)
                      FROM sessions WHERE session_id NOT IN (SELECT session_id FROM session_tombstones) AND session_id = ?1",
                     [session_id.as_str()],
                     |row| {
@@ -1773,6 +1776,7 @@ impl SessionStore for SqliteStore {
                             row.get::<_, i64>(1)?,
                             row.get::<_, i64>(2)?,
                             row.get::<_, bool>(3)?,
+                            optional_text(row, 4, 16)?,
                         ))
                     },
                 )
@@ -1807,6 +1811,9 @@ impl SessionStore for SqliteStore {
                 .collect::<Result<Vec<_>>>()?;
             let summary = StoreAgentMailboxSummary {
                 inbox_paused,
+                first_pending_step_source: first_step_source.as_deref()
+                    .map(|source| crate::append::decode_message_source(source.as_bytes()))
+                    .transpose()?,
                 pending_count: usize::try_from(pending_count).map_err(|_| {
                     StoreError::Corrupt("mailbox pending count is outside usize".into())
                 })?,

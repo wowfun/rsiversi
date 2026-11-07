@@ -8,6 +8,8 @@ its JSON. Typed decoding transfers the accepted message without cloning its body
 the exact compact message byte count uses a counting writer rather than a JSON copy.
 Metadata-only queue queries do not join or decode control bodies. Canonical replay
 checks the routing index against the original acceptance and later transitions.
+The mailbox summary selects the first pending next-Step source in acceptance
+order from that same index and snapshot, without reading the accepted content.
 Queued input claims retain their Fact coordinates and a same-Session acceptance
 reference, rather than another copy of content and attribution. Claim admission
 compares the canonical accepted message with the original typed Fact in the

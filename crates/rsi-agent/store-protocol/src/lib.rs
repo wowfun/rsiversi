@@ -1118,6 +1118,8 @@ pub struct StoreAgentMailboxSummary {
     pub inbox_paused: bool,
     /// Complete pending-message count at the Store snapshot.
     pub pending_count: usize,
+    /// Source of the first pending next-Step input in acceptance order, if any.
+    pub first_pending_step_source: Option<rsi_agent_session_protocol::AgentMessageSourceKind>,
     /// Pending promotable next-Step identities in acceptance order at the same snapshot.
     pub pending_promotable_message_ids: Vec<MessageId>,
     /// Exact durable control tail at the same Store snapshot.
@@ -1134,6 +1136,7 @@ impl StoreAgentMailboxSummary {
             .iter()
             .collect::<BTreeSet<_>>();
         if self.pending_count > MAXIMUM_PENDING_AGENT_MESSAGES
+            || (self.pending_count == 0 && self.first_pending_step_source.is_some())
             || self.pending_promotable_message_ids.len() > self.pending_count
             || identities.len() != self.pending_promotable_message_ids.len()
         {
@@ -2317,7 +2320,7 @@ pub trait SessionStore: fmt::Debug + Send + Sync + 'static {
             "this Agent Store does not support indexed mailbox reads".into(),
         ))
     }
-    /// Reads only the complete pending count and exact durable tails atomically.
+    /// Reads indexed pending metadata and exact durable tails atomically, without bodies.
     async fn read_agent_mailbox_summary(
         &self,
         session_id: &SessionId,

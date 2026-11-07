@@ -300,17 +300,10 @@ pub(super) async fn observe_agent_wait_change(
         .await
         .map_err(turn_store_error)?;
     summary.validate().map_err(turn_store_error)?;
-    if summary.pending_count == 0 {
-        drop(execution);
-        let _execution = kernel.admit_agent_read(caller)?;
-        return Ok(None);
-    }
-    let mailbox =
-        scan_durable_messages(&kernel.inner, caller.session_id(), MailboxRead::NextStep).await?;
     drop(execution);
     let _execution = kernel.admit_agent_read(caller)?;
-    Ok(mailbox.pending.first().map(|entry| {
-        if matches!(entry.message.source, AgentMessageSource::Completion { .. }) {
+    Ok(summary.first_pending_step_source.map(|source| {
+        if source == rsi_agent_session_protocol::AgentMessageSourceKind::Completion {
             WaitResumeCause::Completion
         } else {
             WaitResumeCause::Message

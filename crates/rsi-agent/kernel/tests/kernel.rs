@@ -86,6 +86,7 @@ type ProgramReadBarrier = (
 #[derive(Debug)]
 struct MailboxProbe {
     reads: Mutex<std::collections::BTreeMap<SessionId, usize>>,
+    step_reads: AtomicUsize,
     claim_body_buffers: Mutex<Option<std::collections::BTreeSet<usize>>>,
     prefix_limit: AtomicUsize,
 }
@@ -94,6 +95,7 @@ impl Default for MailboxProbe {
     fn default() -> Self {
         Self {
             reads: Mutex::default(),
+            step_reads: AtomicUsize::new(0),
             claim_body_buffers: Mutex::default(),
             prefix_limit: AtomicUsize::new(usize::MAX),
         }
@@ -1228,6 +1230,9 @@ impl SessionStore for FactReadRaceStore {
         session_id: &SessionId,
         query: MailboxRead,
     ) -> rsi_agent_store_protocol::Result<rsi_agent_store_protocol::StoreAgentMailbox> {
+        if query == MailboxRead::NextStep {
+            self.mailbox.step_reads.fetch_add(1, Ordering::Relaxed);
+        }
         *self
             .mailbox
             .reads
