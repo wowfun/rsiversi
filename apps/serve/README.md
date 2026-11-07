@@ -55,7 +55,7 @@ A Service Profile can select an application process with
 asset selection as the browser), a private `profile` name, and a `process`
 using the installed package process descriptor. One supervised process owns
 the application's routes across local browser attachments. At activation the
-host sends `application.open` with protocol 10, a private profile directory
+host sends `application.open` with protocol 11, a private profile directory
 and a random upstream key over the generation's private process connection.
 The opening payload also supplies an opaque `owner` callback handle. Native
 composition gives it the product's shared browser identity and the application
@@ -163,7 +163,13 @@ write ownership, create an Agent, or make an unpublished draft durable.
 Kernel subagent preparing a model request. Interactive commands and queue
 mutations on a subagent still go through its parent. A request-owned inbox
 snapshot retains the exact active Turn, Fact and
-control cursors and pending-message metadata. Opening returns the complete
+control cursors and pending-message metadata. A durable opening also returns
+`history`: the Header metadata, model baseline, `through` and `selection_cursor`
+from that same inspection. Readers replay model controls through this captured
+cut; opening does not subscribe to current projections or read the Header again.
+Draft model selection remains revision-matched through the history opening,
+because a draft's selected model belongs to its command baseline, not its Header.
+Opening returns the complete
 metadata object, bounded by the native 64-message count and typed identities.
 An empty snapshot retains nothing and needs no close operation. Message bodies
 are read as bounded UTF-8 fragments; a message read must name an acceptance in that

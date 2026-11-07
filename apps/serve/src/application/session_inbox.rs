@@ -1,12 +1,12 @@
 use super::{
     Sessions,
-    session_history::{fragment_text, resource_key},
+    session_history::{fragment_text, resource_key, stored_history},
 };
 use futures_util::StreamExt as _;
 use rsi_agent_session_protocol::{
     AgentMessage, CommandMessage, MessageId, QueueMutationRequest, QueueOperationId, SessionId,
 };
-use rsi_agent_store_protocol::StorePendingMessage;
+use rsi_agent_store_protocol::{StorePendingMessage, StoreSessionInspection};
 use rsi_extension::{Error, Result};
 use serde::Deserialize;
 use serde_json::{Value, json};
@@ -192,23 +192,32 @@ impl Snapshot {
             }
             Err(rsi_session_protocol::SessionError::NotFound(_)) => {
                 let state = handle.inspect().await.map_err(remote)?;
-                let session = state.header.session_id().clone();
-                let metadata = json!({"kind":"durable","session_id":session,
+                Ok(Self::durable(state))
+            }
+            Err(error) => Err(remote(error)),
+        }
+    }
+
+    fn durable(state: StoreSessionInspection) -> (Self, Value) {
+        let session = state.header.session_id().clone();
+        let history = stored_history(
+            &state.header,
+            state.durable_fact_seq,
+            state.durable_control_seq,
+        );
+        let metadata = json!({"kind":"durable","session_id":session,"history":history,
                     "active_turn_id":state.active_turn_id,"activation_phase":state.activation_phase,
                     "driver_active":state.tree.session.has_open_turn || state.tree.session.has_active_activation || state.tree.session.has_waking_message,
                     "cursor":{"fact_seq":state.durable_fact_seq,"control_seq":state.durable_control_seq},
                     "pending":state.pending});
-                Ok((
-                    Self {
-                        session,
-                        inputs: Inputs::Durable(state.pending),
-                        message: tokio::sync::Mutex::new(None),
-                    },
-                    metadata,
-                ))
-            }
-            Err(error) => Err(remote(error)),
-        }
+        (
+            Self {
+                session,
+                inputs: Inputs::Durable(state.pending),
+                message: tokio::sync::Mutex::new(None),
+            },
+            metadata,
+        )
     }
 }
 fn fragment(encoded: &str, offset: usize) -> Result<Value> {
@@ -399,6 +408,81 @@ mod tests {
         }
     }
 
+    fn header() -> rsi_agent_session_protocol::SessionHeader {
+        use rsi_agent_session_protocol::{AgentPresetId, FrozenAgentSettings, SessionHeader};
+        SessionHeader::new_local(
+            SessionId::new("one").unwrap(),
+            1,
+            "/workspace",
+            AgentPresetId::new("test").unwrap(),
+            FrozenAgentSettings::new(
+                "default",
+                "system",
+                rsi_ai_protocol::ModelRef::new("test", "baseline").unwrap(),
+                rsi_sandbox::SandboxMode::WorkspaceWrite,
+                false,
+            )
+            .unwrap(),
+        )
+        .unwrap()
+    }
+
+    #[tokio::test]
+    async fn durable_inbox_supplies_replay_metadata_from_its_inspection() {
+        use rsi_agent_session_protocol::{SessionFact, SessionFactBody, TurnId};
+        use rsi_agent_store_protocol::{AppendBatch, SessionStore};
+        let store = rsi_agent_testkit::MemoryStore::new();
+        let header = header();
+        let session = header.session_id();
+        store
+            .append(AppendBatch {
+                session_id: session.clone(),
+                expected_seq: 0,
+                header: Some(header.clone()),
+                facts: vec![Arc::new(
+                    SessionFact::new(
+                        1,
+                        2,
+                        SessionFactBody::TurnAccepted {
+                            turn_id: TurnId::new("turn").unwrap(),
+                            text: "input".into(),
+                            model: None,
+                            reasoning_effort: None,
+                            sandbox: rsi_sandbox::SandboxMode::WorkspaceWrite,
+                            require_approval: false,
+                        },
+                    )
+                    .unwrap(),
+                )],
+            })
+            .await
+            .unwrap();
+        let inspection = store.inspect_session(session).await.unwrap();
+        let (_, inbox) = Snapshot::durable(inspection);
+        let history = &inbox["history"];
+        assert_eq!(inbox["active_turn_id"], "turn");
+        assert_eq!(history["id"], inbox["session_id"]);
+        assert_eq!(history["through"], 1);
+        assert_eq!(history["through"], inbox["cursor"]["fact_seq"]);
+        assert_eq!(
+            history["selection_cursor"],
+            json!({"kind":"durable", "fact_seq":1, "control_seq":0})
+        );
+        assert_eq!(
+            history["selection_cursor"]["control_seq"],
+            inbox["cursor"]["control_seq"]
+        );
+        assert_eq!(history["preset"], "test");
+        assert_eq!(
+            history["model_baseline"]["model"],
+            json!(header.settings().default_model())
+        );
+        assert!(
+            history.get("model_selection").is_none(),
+            "current model comes from replay at the captured cut"
+        );
+    }
+
     #[test]
     fn maximum_pending_metadata_fits_one_process_reply() {
         use rsi_agent_session_protocol::{
@@ -423,7 +507,8 @@ mod tests {
             .collect();
         let bytes = serde_json::to_vec(&json!({"kind":"durable","session_id":"s".repeat(MAXIMUM_AGENT_IDENTIFIER_BYTES),
             "active_turn_id":"t".repeat(MAXIMUM_AGENT_IDENTIFIER_BYTES),"activation_phase":rsi_agent_store_protocol::StoreActivationPhase::WaitingForDescendants,
-            "driver_active":true,"cursor":{"fact_seq":u64::MAX,"control_seq":u64::MAX},"pending":rows})).unwrap();
+            "driver_active":true,"cursor":{"fact_seq":u64::MAX,"control_seq":u64::MAX},"pending":rows,
+            "history":stored_history(&header(), u64::MAX, u64::MAX)})).unwrap();
         assert!(
             bytes.len() < 128 * 1024,
             "bounded metadata leaves room for the process envelope"

@@ -371,15 +371,22 @@ async fn metadata_snapshot(
             if row.session_id == *header.session_id()
                 && row.created_at_ms == header.created_at_ms() =>
         {
-            let mut metadata =
-                stored_snapshot(&header, row.durable_fact_seq, row.durable_control_seq);
-            metadata["through"] = json!(row.durable_fact_seq);
-            metadata["model_baseline"] = json!(model_baseline(&header));
-            Ok(metadata)
+            Ok(stored_history(
+                &header,
+                row.durable_fact_seq,
+                row.durable_control_seq,
+            ))
         }
         [None] => Ok(Value::Null),
         _ => Err(Error::Remote("Session catalog changed during read".into())),
     }
+}
+
+pub(super) fn stored_history(header: &SessionHeader, fact_seq: u64, control_seq: u64) -> Value {
+    let mut metadata = stored_snapshot(header, fact_seq, control_seq);
+    metadata["through"] = json!(fact_seq);
+    metadata["model_baseline"] = json!(model_baseline(header));
+    metadata
 }
 
 pub(super) fn stored_snapshot(
