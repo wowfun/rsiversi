@@ -331,7 +331,12 @@ record, moving its body directly into serialization.
 Fact, control, exact-message and inherited Fact pages carry a unique `reader`
 identity for one page. Offset zero reads and serializes that page once; subsequent
 offsets borrow the same encoded bytes under the original physical request,
-Session and read coordinates. Each fragment still checks caller authority.
+Session and read coordinates. Fact, control and exact-message pages also bind
+the addressed parent. Their first fragment authorizes the Session and parent
+and captures the page. Continuations check the retained
+request's live authority and exact page identity without reading Session
+metadata again. They finish that immutable cut even if storage later changes;
+a new page authorizes and captures its own cut.
 The final fragment releases the page. `page_close` releases an abandoned reader;
 request or upstream retirement releases every remaining page. Failed or cancelled
 preparation retains no page. A single-fragment response retains no resource.

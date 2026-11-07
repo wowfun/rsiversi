@@ -25,6 +25,11 @@ DSH Session values. Request-local synchronous lookups and read-only persistence
 handles use the same projection. Each new read checks the original native request;
 cached content is not an authorization grant. Explicitly opened workbench
 transcripts can retain a native-backed Agent in the original Cordis registry.
+Transport fragments within one read borrow the already authorized immutable
+page, as DSH's history controller borrows one `SessionObservation` for its
+consumer. Repeating Header I/O cannot make that captured body fresher. The
+retained page includes the addressed parent, while the owning request remains
+subject to retirement on every fragment. New reads still authorize independently.
 Persisted opens obtain their immutable model baseline and Fact/control cut from
 authorized stored metadata. Like DSH's JSONL read handles, they do not need a
 live Agent projection to reconstruct history. Requesting a full model projection

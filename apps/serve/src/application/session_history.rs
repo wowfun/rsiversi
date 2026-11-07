@@ -130,7 +130,6 @@ impl Sessions {
                 through_seq,
                 offset,
             } => {
-                let header = header().await?;
                 self.history_pages
                     .read(
                         &self.routes,
@@ -139,15 +138,20 @@ impl Sessions {
                         offset,
                         Identity::Controls {
                             session: input.session_id.clone(),
+                            parent: input.parent_session_id.clone(),
                             after: after_seq,
                             through: through_seq,
                         },
-                        super::session_controls::read_controls(
-                            store,
-                            &header,
-                            after_seq,
-                            through_seq,
-                        ),
+                        async {
+                            let header = header().await?;
+                            super::session_controls::read_controls(
+                                store,
+                                &header,
+                                after_seq,
+                                through_seq,
+                            )
+                            .await
+                        },
                     )
                     .await?
             }
@@ -157,7 +161,6 @@ impl Sessions {
                 accepted_control_seq,
                 offset,
             } => {
-                let header = header().await?;
                 self.history_pages
                     .read(
                         &self.routes,
@@ -166,15 +169,20 @@ impl Sessions {
                         offset,
                         Identity::Message {
                             session: input.session_id.clone(),
+                            parent: input.parent_session_id.clone(),
                             message: message_id.clone(),
                             accepted: accepted_control_seq,
                         },
-                        read_message(
-                            store,
-                            header.session_id(),
-                            &message_id,
-                            accepted_control_seq,
-                        ),
+                        async {
+                            let header = header().await?;
+                            read_message(
+                                store,
+                                header.session_id(),
+                                &message_id,
+                                accepted_control_seq,
+                            )
+                            .await
+                        },
                     )
                     .await?
             }
@@ -184,7 +192,6 @@ impl Sessions {
                 through_seq,
                 offset,
             } => {
-                let header = header().await?;
                 self.history_pages
                     .read(
                         &self.routes,
@@ -193,10 +200,14 @@ impl Sessions {
                         offset,
                         Identity::Facts {
                             session: input.session_id.clone(),
+                            parent: input.parent_session_id.clone(),
                             after: after_seq,
                             through: through_seq,
                         },
-                        read_facts(store, header.session_id(), after_seq, through_seq),
+                        async {
+                            let header = header().await?;
+                            read_facts(store, header.session_id(), after_seq, through_seq).await
+                        },
                     )
                     .await?
             }

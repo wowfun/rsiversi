@@ -10,16 +10,19 @@ use tokio::sync::{OwnedSemaphorePermit, Semaphore};
 pub(super) enum Identity {
     Facts {
         session: SessionId,
+        parent: Option<SessionId>,
         after: u64,
         through: u64,
     },
     Controls {
         session: SessionId,
+        parent: Option<SessionId>,
         after: u64,
         through: u64,
     },
     Message {
         session: SessionId,
+        parent: Option<SessionId>,
         message: MessageId,
         accepted: u64,
     },

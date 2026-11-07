@@ -6,6 +6,7 @@ pub(crate) struct FragmentReader {
     routes: rsi_api_http::ApplicationUpstream,
     callback: rsi_api_http::ApplicationCallback,
     pages: Pages,
+    revoked: tokio_util::sync::CancellationToken,
 }
 impl FragmentReader {
     pub(crate) fn new() -> Self {
@@ -15,16 +16,18 @@ impl FragmentReader {
             tokio_util::sync::CancellationToken::new(),
         )
         .unwrap();
+        let revoked = tokio_util::sync::CancellationToken::new();
         let callback = routes
             .open_callback(&rsi_api_protocol::AuthenticatedDevice {
                 id: rsi_api_protocol::DeviceId::generate().unwrap(),
-                revoked: tokio_util::sync::CancellationToken::new(),
+                revoked: revoked.clone(),
             })
             .unwrap();
         Self {
             routes,
             callback,
             pages: Pages::default(),
+            revoked,
         }
     }
     async fn read(
@@ -61,6 +64,7 @@ impl FragmentReader {
                 offset,
                 Identity::Facts {
                     session: session.clone(),
+                    parent: None,
                     after,
                     through,
                 },
@@ -84,6 +88,7 @@ impl FragmentReader {
                 offset,
                 Identity::Controls {
                     session: header.session_id().clone(),
+                    parent: None,
                     after,
                     through,
                 },
@@ -107,6 +112,7 @@ impl FragmentReader {
                 offset,
                 Identity::Message {
                     session: session.clone(),
+                    parent: None,
                     message: message.clone(),
                     accepted,
                 },
@@ -117,10 +123,70 @@ impl FragmentReader {
 }
 
 #[tokio::test]
+async fn continuation_preserves_parent_authority_and_rejects_revoked_callers() {
+    let identities = |parent: Option<&str>| {
+        let session = SessionId::new("child").unwrap();
+        let parent = parent.map(|value| SessionId::new(value).unwrap());
+        [
+            Identity::Facts {
+                session: session.clone(),
+                parent: parent.clone(),
+                after: 0,
+                through: 1,
+            },
+            Identity::Controls {
+                session: session.clone(),
+                parent: parent.clone(),
+                after: 0,
+                through: 1,
+            },
+            Identity::Message {
+                session,
+                parent,
+                message: MessageId::new("message").unwrap(),
+                accepted: 1,
+            },
+        ]
+    };
+    for ((original, altered), same) in identities(Some("parent"))
+        .into_iter()
+        .zip(identities(None))
+        .zip(identities(Some("parent")))
+    {
+        let reader = FragmentReader::new();
+        let first = reader
+            .read("page", 0, original, async {
+                Ok((1, format!("[\"{}\"]", "x".repeat(150_000))))
+            })
+            .await
+            .unwrap();
+        let offset = usize::try_from(first["next_offset"].as_u64().unwrap()).unwrap();
+        assert!(matches!(
+            reader
+                .read("page", offset, altered, async {
+                    panic!("continuation must not query metadata or bodies")
+                })
+                .await,
+            Err(Error::Protocol)
+        ));
+        reader.revoked.cancel();
+        assert!(matches!(
+            reader
+                .read("page", offset, same, async {
+                    panic!("revoked continuation must not load")
+                })
+                .await,
+            Err(Error::Cancelled)
+        ));
+    }
+}
+
+#[tokio::test]
 async fn retained_pages_bind_the_request_and_coordinates_and_release_capacity() {
     let reader = FragmentReader::new();
     let identity = |session: &str| Identity::Facts {
         session: SessionId::new(session).unwrap(),
+        parent: None,
         after: 0,
         through: 1,
     };
@@ -219,6 +285,7 @@ async fn failed_cancelled_and_single_fragment_reads_leave_no_retained_page() {
     let reader = FragmentReader::new();
     let identity = || Identity::Facts {
         session: SessionId::new("one").unwrap(),
+        parent: None,
         after: 0,
         through: 1,
     };
