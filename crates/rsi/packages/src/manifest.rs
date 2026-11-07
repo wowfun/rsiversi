@@ -17,9 +17,9 @@ pub struct Dependency {
 pub struct FileRecord {
     /// Portable relative path.
     pub path: String,
-    /// Exact file length.
+    /// Exact source file length.
     pub bytes: u64,
-    /// Exact SHA-256.
+    /// SHA-256 of the complete source file.
     pub digest: String,
     /// Whether the published file may be executed.
     pub executable: bool,
@@ -53,6 +53,9 @@ pub struct Export {
     pub kind: ExportKind,
     /// File or assets directory relative to the package.
     pub path: String,
+    /// Payload-only SHA-256 of its exact container prefix and encoded index.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub index_digest: Option<String>,
 }
 /// Provenance remains distinct from integrity.
 #[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
@@ -151,9 +154,7 @@ impl Manifest {
                 .checked_add(file.bytes)
                 .ok_or_else(|| invalid("package size overflow"))?;
         }
-        if total > crate::MAX_STORE_BYTES
-            || crate::payload::reserved_bytes(self) > crate::MAX_STORE_BYTES
-        {
+        if total > crate::MAX_STORE_BYTES {
             return Err(invalid("package exceeds store capacity"));
         }
         for file in &self.files {
@@ -164,10 +165,40 @@ impl Manifest {
                 }
             }
         }
+        self.validate_exports()?;
+        let mut names = BTreeSet::new();
+        for dependency in &self.dependencies {
+            crate::identifier(&dependency.name)?;
+            crate::hash(&dependency.digest)?;
+            if dependency.name == self.name || !names.insert(&dependency.name) {
+                return Err(invalid("self or duplicate dependency"));
+            }
+        }
+        let mut interfaces = BTreeSet::new();
+        for required in &self.requires {
+            required.validate().map_err(|e| invalid(e.to_string()))?;
+            if required.version == 0 || !interfaces.insert(&required.name) {
+                return Err(invalid("invalid or duplicate interface"));
+            }
+        }
+        Ok(())
+    }
+
+    fn validate_exports(&self) -> Result<()> {
         let mut payload_paths = BTreeSet::new();
         for (name, export) in &self.exports {
-            if export.kind == ExportKind::PayloadTree && !payload_paths.insert(&export.path) {
-                return Err(invalid("duplicate payload tree export"));
+            match (export.kind, &export.index_digest) {
+                (ExportKind::PayloadTree, Some(digest)) => {
+                    crate::hash(digest)?;
+                    if !payload_paths.insert(&export.path) {
+                        return Err(invalid("duplicate payload tree export"));
+                    }
+                }
+                (ExportKind::PayloadTree, None) => {
+                    return Err(invalid("payload export requires an index digest"));
+                }
+                (_, Some(_)) => return Err(invalid("index digest is only valid for a payload")),
+                (_, None) => {}
             }
             crate::identifier(name)?;
             relative(&export.path)?;
@@ -185,19 +216,19 @@ impl Manifest {
                 return Err(invalid("export has no declared content"));
             }
         }
-        let mut names = BTreeSet::new();
-        for dependency in &self.dependencies {
-            crate::identifier(&dependency.name)?;
-            crate::hash(&dependency.digest)?;
-            if dependency.name == self.name || !names.insert(&dependency.name) {
-                return Err(invalid("self or duplicate dependency"));
-            }
-        }
-        let mut interfaces = BTreeSet::new();
-        for required in &self.requires {
-            required.validate().map_err(|e| invalid(e.to_string()))?;
-            if required.version == 0 || !interfaces.insert(&required.name) {
-                return Err(invalid("invalid or duplicate interface"));
+        for export in self
+            .exports
+            .values()
+            .filter(|export| export.kind != ExportKind::PayloadTree)
+        {
+            if payload_paths.iter().any(|path| {
+                *path == &export.path
+                    || export.kind == ExportKind::WebAssets
+                        && path.starts_with(&format!("{}/", export.path))
+            }) {
+                return Err(invalid(
+                    "payload transport cannot also be an installed file export",
+                ));
             }
         }
         Ok(())

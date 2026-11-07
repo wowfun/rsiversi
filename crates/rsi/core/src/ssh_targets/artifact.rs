@@ -104,6 +104,7 @@ mod tests {
                     Export {
                         kind: ExportKind::Executable,
                         path: "helper".into(),
+                        index_digest: None,
                     },
                 )]
                 .into(),

@@ -22,8 +22,8 @@ Meta has no knowledge of extension event types or DSH services.
 
 Installed process closures use PackageStore's bounded metadata admission and
 lifetime leases. Launch authenticates the descriptor and resolves the paths it
-uses. Full archive and expanded-file verification belongs to installation and
-ordinary acquisition, as specified by the
+uses. Full content verification belongs to installation and ordinary acquisition,
+as specified by the
 [package contract](../../../../crates/rsi/packages/README.md).
 
 The published Better Sidebar resolves explicit filesystem paths with the

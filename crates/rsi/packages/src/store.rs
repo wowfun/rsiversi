@@ -173,19 +173,17 @@ impl PackageLease {
             .get(name)
             .filter(|export| export.kind == kind)
             .ok_or_else(|| invalid("missing export or wrong role"))?;
-        Ok(self.root.join(&export.path))
+        Ok(if kind == ExportKind::PayloadTree {
+            self.root.with_file_name("payloads").join(name)
+        } else {
+            self.root.join(&export.path)
+        })
     }
     /// Pins a payload expanded and verified at installation, without a second cache.
     pub fn payload(self: &Arc<Self>, name: &str) -> Result<MaterializedPayload> {
-        self.export(name, ExportKind::PayloadTree)?;
         Ok(MaterializedPayload {
             package: self.clone(),
-            path: self
-                .root
-                .parent()
-                .ok_or_else(|| invalid("object content has no parent"))?
-                .join("payloads")
-                .join(name),
+            path: self.export(name, ExportKind::PayloadTree)?,
         })
     }
 }
@@ -476,12 +474,23 @@ impl PackageStore {
             .exports
             .iter()
             .filter(|(_, export)| export.kind == ExportKind::PayloadTree)
-            .map(|(name, export)| (export.path.as_str(), name.as_str()))
+            .map(|(name, export)| {
+                (
+                    export.path.as_str(),
+                    (
+                        name.as_str(),
+                        export
+                            .index_digest
+                            .as_deref()
+                            .expect("validated payload index"),
+                    ),
+                )
+            })
             .collect();
         let mut trees = Vec::with_capacity(payloads.len());
         for file in &manifest.files {
-            if let Some(&name) = payloads.get(file.path.as_str()) {
-                trees.push((name, file));
+            if let Some(&(name, index_digest)) = payloads.get(file.path.as_str()) {
+                trees.push((name, file, index_digest));
             } else {
                 let input = rsi_files_native_fs::open_relative_file_no_follow(
                     &directory.directory,
@@ -492,8 +501,8 @@ impl PackageStore {
         }
         timing.mark(digest, "content");
         let mut remaining = crate::payload::MAX_PAYLOAD_ENTRIES;
-        for (name, file) in trees {
-            crate::payload::verify(&directory, name, file, &mut remaining)?;
+        for (name, file, index_digest) in trees {
+            crate::payload::verify(&directory, name, file, index_digest, &mut remaining)?;
         }
         timing.mark(digest, "expanded");
         Ok((directory, manifest))
@@ -568,6 +577,7 @@ impl PackageStore {
         // Intent precedes file creation, so an interrupted stage remains bounded and reclaimable.
         staging.write("manifest.json", &source.manifest, false)?;
         let input = rsi_files_native_fs::open_absolute_directory_no_follow(&source.directory)?;
+        let mut remaining = crate::payload::MAX_PAYLOAD_ENTRIES;
         for file in &manifest.files {
             let path = Path::new(&file.path);
             let mut parent = PathBuf::from("content");
@@ -583,10 +593,26 @@ impl PackageStore {
                 Path::new(path.file_name().expect("admitted file")),
             )?;
             let source = rsi_files_native_fs::open_relative_file_no_follow(&input, path)?;
-            verify_file(source, file, Some(output))?;
+            if let Some((name, export)) = manifest.exports.iter().find(|(_, export)| {
+                export.kind == ExportKind::PayloadTree && export.path == file.path
+            }) {
+                crate::payload::expand(
+                    &staging,
+                    name,
+                    file,
+                    export
+                        .index_digest
+                        .as_deref()
+                        .expect("validated payload index"),
+                    source,
+                    output,
+                    &mut remaining,
+                )?;
+            } else {
+                verify_file(source, file, Some(output))?;
+            }
             directory.directory.sync_all()?;
         }
-        crate::payload::expand(&staging, manifest)?;
         let mut budget = traversal_budget();
         sync_tree(&staging.directory, 0, &mut budget)?;
         drop(staging);

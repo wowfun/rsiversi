@@ -3,8 +3,6 @@ use crate::{Error, FileRecord, Result, filesystem::Dir, invalid};
 use rsi_files_native_fs::EntryKind;
 use sha2::{Digest as _, Sha256};
 use std::{
-    fs::File,
-    io::{BufReader, Read},
     path::Path,
     sync::{
         Arc, Mutex,
@@ -13,44 +11,27 @@ use std::{
     },
 };
 
-struct Archive {
-    input: BufReader<File>,
-    digest: Sha256,
-}
-impl Read for Archive {
-    fn read(&mut self, bytes: &mut [u8]) -> std::io::Result<usize> {
-        let count = self.input.read(bytes)?;
-        self.digest.update(&bytes[..count]);
-        Ok(count)
-    }
-}
-
 pub(crate) fn verify(
     object: &Dir,
     name: &str,
     record: &FileRecord,
+    index_digest: &str,
     remaining: &mut usize,
 ) -> Result<()> {
-    let file = rsi_files_native_fs::open_relative_file_no_follow(
+    let mut file = rsi_files_native_fs::open_relative_file_no_follow(
         &object.directory,
         &Path::new("content").join(&record.path),
     )?;
-    if file.metadata()?.len() != record.bytes {
+    let size = file.metadata()?.len();
+    if size > (super::MAX_HEADER + 12) as u64 {
+        return Err(invalid("retained payload index capacity"));
+    }
+    let (header, index) = read_header(&mut file, record.bytes)?;
+    if size != index.len() as u64 || hex::encode(Sha256::digest(&index)) != index_digest {
         return Err(Error::Digest);
     }
-    let mut archive = Archive {
-        input: BufReader::with_capacity(256 * 1024, file),
-        digest: Sha256::new(),
-    };
-    let header = read_header(&mut archive, record.bytes)?;
     let mut expected = header.entries(remaining)?;
     let mut buffer = vec![0; 64 * 1024];
-    for file in &header.files {
-        read_record(&mut archive, file, &mut buffer, std::io::sink())?;
-    }
-    if archive.read(&mut [0])? != 0 || hex::encode(archive.digest.finalize()) != record.digest {
-        return Err(Error::Digest);
-    }
     let root = Arc::new(object.child(&Path::new("payloads").join(name), false)?);
     let readers = Readers::reserve(header.files.len());
     if readers.0 == 0 {

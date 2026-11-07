@@ -24,6 +24,7 @@ fn install(store: &PackageStore, directory: &Path, version: u8) -> String {
     let mut archive = b"RSITREE1".to_vec();
     archive.extend(u32::try_from(header.len()).unwrap().to_le_bytes());
     archive.extend(header);
+    let index_digest = hex::encode(Sha256::digest(&archive));
     archive.extend(data);
     std::fs::write(directory.join("payload"), &archive).unwrap();
     let manifest = Manifest {
@@ -44,6 +45,7 @@ fn install(store: &PackageStore, directory: &Path, version: u8) -> String {
             Export {
                 kind: ExportKind::PayloadTree,
                 path: "payload".into(),
+                index_digest: Some(index_digest),
             },
         )]),
     };

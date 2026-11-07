@@ -31,6 +31,7 @@ fn source(root: &std::path::Path, name: &str, bytes: &[u8]) -> InstallSource {
             Export {
                 kind: ExportKind::ApplicationProfile,
                 path: "application.toml".into(),
+                index_digest: None,
             },
         )]),
     };

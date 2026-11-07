@@ -1,11 +1,11 @@
 mod verify;
-use crate::{Error, ExportKind, FileRecord, Manifest, Result, filesystem::Dir, invalid};
+use crate::{Error, FileRecord, Manifest, Result, filesystem::Dir, invalid};
 use serde::{Deserialize, Serialize};
 use sha2::{Digest as _, Sha256};
 use std::{
     collections::{HashMap, HashSet},
     fs::File,
-    io::{Read, Write},
+    io::{BufReader, Read, Write},
     path::Path,
 };
 pub(crate) use verify::verify;
@@ -78,7 +78,7 @@ impl PayloadHeader {
         Ok(entries)
     }
 }
-fn read_header(input: &mut impl Read, archive_bytes: u64) -> Result<PayloadHeader> {
+fn read_header(input: &mut impl Read, archive_bytes: u64) -> Result<(PayloadHeader, Vec<u8>)> {
     let mut prefix = [0; 12];
     input.read_exact(&mut prefix)?;
     if &prefix[..8] != b"RSITREE1" {
@@ -88,10 +88,11 @@ fn read_header(input: &mut impl Read, archive_bytes: u64) -> Result<PayloadHeade
     if length > MAX_HEADER {
         return Err(invalid("payload header capacity"));
     }
-    let mut bytes = vec![0; length];
-    input.read_exact(&mut bytes)?;
+    let mut bytes = vec![0; 12 + length];
+    bytes[..12].copy_from_slice(&prefix);
+    input.read_exact(&mut bytes[12..])?;
     let header: PayloadHeader =
-        serde_json::from_slice(&bytes).map_err(|e| invalid(e.to_string()))?;
+        serde_json::from_slice(&bytes[12..]).map_err(|e| invalid(e.to_string()))?;
     let expected = header
         .files
         .iter()
@@ -100,40 +101,57 @@ fn read_header(input: &mut impl Read, archive_bytes: u64) -> Result<PayloadHeade
     if expected != archive_bytes {
         return Err(Error::Digest);
     }
-    Ok(header)
+    Ok((header, bytes))
 }
 pub(crate) fn reserved_bytes(manifest: &Manifest) -> u64 {
-    manifest
-        .files
-        .iter()
-        .map(|file| {
-            file.bytes
-                * if manifest.exports.values().any(|export| {
-                    export.kind == ExportKind::PayloadTree && export.path == file.path
-                }) {
-                    2
-                } else {
-                    1
-                }
-        })
-        .sum()
+    manifest.files.iter().map(|file| file.bytes).sum()
 }
-pub(crate) fn expand(object: &Dir, manifest: &Manifest) -> Result<()> {
-    let mut remaining = MAX_PAYLOAD_ENTRIES;
-    for (name, export) in &manifest.exports {
-        if export.kind != ExportKind::PayloadTree {
-            continue;
-        }
-        let mut input = rsi_files_native_fs::open_relative_file_no_follow(
-            &object.directory,
-            &Path::new("content").join(&export.path),
-        )?;
-        let size = input.metadata()?.len();
-        let header = read_header(&mut input, size)?;
-        header.entries(&mut remaining)?;
-        let tree = object.child(&Path::new("payloads").join(name), true)?;
-        expand_files(&tree, &header.files, &mut input)?;
+
+struct Archive {
+    input: BufReader<File>,
+    digest: Sha256,
+}
+impl Read for Archive {
+    fn read(&mut self, bytes: &mut [u8]) -> std::io::Result<usize> {
+        let count = self.input.read(bytes)?;
+        self.digest.update(&bytes[..count]);
+        Ok(count)
     }
+}
+
+pub(crate) fn expand(
+    object: &Dir,
+    name: &str,
+    record: &FileRecord,
+    index_digest: &str,
+    input: File,
+    mut output: File,
+    remaining: &mut usize,
+) -> Result<()> {
+    if input.metadata()?.len() != record.bytes {
+        return Err(Error::Digest);
+    }
+    let mut input = Archive {
+        input: BufReader::with_capacity(256 * 1024, input),
+        digest: Sha256::new(),
+    };
+    let (header, index) = read_header(&mut input, record.bytes)?;
+    if hex::encode(Sha256::digest(&index)) != index_digest {
+        return Err(Error::Digest);
+    }
+    header.entries(remaining)?;
+    output.write_all(&index)?;
+    let tree = object.child(&Path::new("payloads").join(name), true)?;
+    expand_files(&tree, &header.files, &mut input)?;
+    if input.read(&mut [0])? != 0 || hex::encode(input.digest.finalize()) != record.digest {
+        return Err(Error::Digest);
+    }
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt as _;
+        output.set_permissions(std::fs::Permissions::from_mode(0o400))?;
+    }
+    output.sync_all()?;
     Ok(())
 }
 
@@ -160,7 +178,7 @@ fn read_record(
     Ok(())
 }
 
-fn expand_files(tree: &Dir, files: &[FileRecord], input: &mut File) -> Result<()> {
+fn expand_files(tree: &Dir, files: &[FileRecord], input: &mut impl Read) -> Result<()> {
     let mut buffer = vec![0; 64 * 1024];
     let mut ancestors: Vec<(&str, Dir)> = Vec::new();
     for file in files {

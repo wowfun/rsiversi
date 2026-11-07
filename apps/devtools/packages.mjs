@@ -102,14 +102,18 @@ export function validateManifest(manifest) {
   }
   const trees = new Set();
   for (const [name, item] of Object.entries(manifest.exports)) {
-    if (!identifier(name) || !fields(item,['kind','path']) || !portable(item.path)
+    if (!identifier(name) || !fields(item,item?.index_digest === undefined ? ['kind','path'] : ['kind','path','index_digest']) || !portable(item.path)
         || !['web_assets','executable','application_profile','service_profile','native_addon','payload_tree','process_extension','package_importer'].includes(item.kind)) fail();
     if (item.kind === 'payload_tree') {
-      if (trees.has(item.path)) fail();
+      if (!digest(item.index_digest) || trees.has(item.path)) fail();
       trees.add(item.path);
-    }
+    } else if (item.index_digest != null) fail();
     if (!manifest.files.some(file => item.kind === 'web_assets' ? file.path.startsWith(item.path+'/')
       : file.path === item.path && (item.kind !== 'executable' || file.executable))) fail();
+  }
+  for (const item of Object.values(manifest.exports)) {
+    if (item.kind !== 'payload_tree' && [...trees].some(path => path === item.path
+        || item.kind === 'web_assets' && path.startsWith(item.path+'/'))) fail();
   }
   const dependencies = new Set(), interfaces = new Set();
   for (const dependency of manifest.dependencies) {

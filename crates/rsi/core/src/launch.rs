@@ -520,6 +520,7 @@ mod tests {
                 Export {
                     kind: ExportKind::ApplicationProfile,
                     path: "main.toml".into(),
+                    index_digest: None,
                 },
             )]),
         };
