@@ -70,6 +70,14 @@ cannot represent current Plan instructions: they would keep an exited policy in
 later requests. This refines the execution-contribution representation without
 sampling unrecorded guidance inside the Context builder.
 
+The native Plan Policy uses that same instruction slot. DSH's `plan:policy`
+section supplies the selected policy to each current prompt; repeated unchanged
+preparations do not create additional policy messages. Appending native policy
+text as PluginContext would also change the aggregate system evidence every
+request, multiplying old copies in durable request inspection. Reusing the slot
+requires neither another state cache nor another durable policy owner. The typed
+plan domain and Tool policy retain their existing authority.
+
 Operation-scoped history reads borrow the captured claim-visible reader. Their
 consumed cursor is extension checkpoint data and advances with the journal's
 atomic publication. UTF-8 fragment transfer preserves the existing maximum Fact

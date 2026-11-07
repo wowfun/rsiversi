@@ -5,8 +5,8 @@
 
 use async_trait::async_trait;
 use rsi_agent_composition_protocol::{
-    ContextContributor, ContributionContext, ContributionError, ContributionInput,
-    ContributionKind, ContributionOutput, ContributionRegistrarContract, ContributionRegistration,
+    BeforeStepContext, BeforeStepContributor, BeforeStepOutput, ContributionContext,
+    ContributionError, ContributionKind, ContributionRegistrarContract, ContributionRegistration,
     ContributionResult, DomainDefinition, DomainHandle, DomainRegistrarContract, SessionCommand,
     SessionCommandContext, SessionCommandRegistration, SessionProjection, SessionProjectionContext,
     ToolPolicy, ToolPolicyDecision, ToolPolicyRequest,
@@ -147,16 +147,16 @@ impl SessionCommand for PlanPolicy {
     }
 }
 #[async_trait]
-impl ContextContributor for PlanPolicy {
-    async fn contribute(
+impl BeforeStepContributor for PlanPolicy {
+    async fn prepare(
         &self,
-        context: &ContributionContext,
+        context: &BeforeStepContext<'_>,
         cancellation: CancellationToken,
-    ) -> ContributionResult<ContributionOutput> {
+    ) -> ContributionResult<BeforeStepOutput> {
         if cancellation.is_cancelled() {
             return Err(ContributionError::Closed);
         }
-        let (_, enabled) = self.current(&context.domains)?;
+        let (_, enabled) = self.current(&context.captured.domains)?;
         let text = if enabled {
             format!(
                 "Plan mode is enabled. {} Only these Tools are allowed: {}. Existing sandbox and approval requirements still apply. The user can disable plan mode with /plan off.",
@@ -170,9 +170,9 @@ impl ContextContributor for PlanPolicy {
         } else {
             "Plan mode is disabled. Follow the user's request under the existing sandbox and approval requirements.".into()
         };
-        Ok(ContributionOutput {
-            inputs: vec![ContributionInput::context(text)],
-            domains: Vec::new(),
+        Ok(BeforeStepOutput {
+            instructions: text,
+            ..BeforeStepOutput::default()
         })
     }
 }
@@ -299,7 +299,7 @@ impl PluginFactory for PlanPolicyFactory {
             ),
             (
                 ContributionId::new("rsi.plan-policy.context").expect("static contribution"),
-                ContributionKind::Context(callback.clone()),
+                ContributionKind::BeforeStep(callback.clone()),
             ),
             (
                 ContributionId::new("rsi.plan-policy.tools").expect("static contribution"),
