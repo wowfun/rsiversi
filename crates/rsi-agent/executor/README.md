@@ -220,11 +220,10 @@ most 4096 bytes and includes omitted-event counts; it never contains fact bodies
 prompts or arbitrary error messages. Writes occur outside scheduler/diagnostic
 locks and failures cannot change execution outcomes. A synchronous stderr sink
 can still block; these diagnostics do not promise nonblocking I/O.
-For one parallel-safe run, the executor publishes the complete source-ordered
-intent batch and crosses one durability barrier, then publishes the matching
-source-ordered start batch and crosses one durability barrier before invoking
-any member. This preserves each call's intent-before-start proof without
-multiplying startup barriers by the batch cardinality. Result publication stays
+For external effects, the executor follows the
+[complete-prefix ordering contract](../docs/subsystems/turns-and-agent-trees.md),
+including one ordered intent/start publication and durability wait for a
+parallel-safe run. Result publication stays
 per call because budget rejection and retained-result commit are independently
 owned by each identity.
 Every exact-prefix durability wait has a validated executor-local deadline, so

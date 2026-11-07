@@ -80,9 +80,10 @@ decoding and validating the selected bounded Facts, while cold outcome lookup
 uses a Store-validated acceptance/terminal boundary pair whose decoded sequence,
 turn, and kind exactly match the selecting relational rows.
 
-The Kernel accepts an external-effect start marker only after its matching
-intent is durable; the executor then durably flushes that start before
-invocation. Recovery preserves a durable cancellation as `Cancelled`, treats
+The Kernel validates ordered, matching external-effect intent/start markers;
+the executor durably flushes the complete prefix before invocation, as defined
+by the [effect ordering contract](subsystems/turns-and-agent-trees.md).
+Recovery preserves a durable cancellation as `Cancelled`, treats
 other unfinished work as interrupted, and never guesses that replay is safe.
 Cancellation is cooperative, so every provider and Tool call also remains
 bounded by its own timeout and shutdown deadline.

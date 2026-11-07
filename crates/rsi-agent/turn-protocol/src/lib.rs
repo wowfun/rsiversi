@@ -1602,6 +1602,8 @@ pub trait TurnExecution: fmt::Debug + Send + Sync + 'static {
         ))
     }
     /// Publishes validated bodies as the next live Facts without claiming durability.
+    /// An intent and its matching start may share an ordered publication.
+    /// Executors must flush through the start before invoking an external effect.
     /// Activation terminals must use `finish_turn`; only direct Turns
     /// may publish a raw `TurnTerminal` body.
     async fn publish(

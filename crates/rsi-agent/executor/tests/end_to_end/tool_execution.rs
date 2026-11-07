@@ -1041,6 +1041,7 @@ async fn adjacent_parallel_safe_tools_overlap_but_publish_results_in_source_orde
             .with_scheduling(ToolScheduling::ParallelSafe),
             timeout: rsi_tools_protocol::ToolTimeoutPolicy::Execution { timeout_ms: 1_000 },
             executor: Arc::new(ParallelTool {
+                store: stack.store.clone(),
                 rendezvous,
                 release_first,
                 observed_lane_parking_authority: Arc::clone(&observed_lane_parking_authority),

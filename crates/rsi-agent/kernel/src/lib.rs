@@ -959,7 +959,6 @@ use observation::{
 };
 use recovery::{
     is_terminal_fact, load_control_state, read_stored_outcome, repair_unfinished_session,
-    validate_durable_intent_fence,
 };
 use turn_state::{
     apply_executor_body, apply_recovered_fact, bounded_diagnostic, canonicalize_terminal,

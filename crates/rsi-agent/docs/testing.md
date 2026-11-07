@@ -116,7 +116,9 @@ also enter an already-attached observation, and shutdown snapshots its flush
 waiters so concurrent terminal-session eviction cannot fabricate a missing
 session. The same latch rejects later submissions to the failed session.
 Recovery preserves durable cancellation classification, and direct execution
-tests prove a start cannot share its undurable intent publication. Shutdown
+tests prove an ordered intent/start publication preserves exact identities and
+rejects invalid batches without partial admission. Executor tests require the
+complete prefix to be durable before provider or Tool invocation. Shutdown
 waits on every captured session even when one fails, and a
 claim-horizon test submits a later private prompt before the first claim and
 proves that prompt is absent from the earlier model request.

@@ -673,12 +673,19 @@ impl TurnExecution for FullBeforePublish {
             .facts
             .last()
             .map_or(1, |fact| fact.seq().saturating_add(1));
-        Ok(PublishAttempt::Published(test_claim_issuer().published(
-            _claim,
-            vec![Arc::new(
-                SessionFact::new(next_seq, next_seq, bodies.into_iter().next().unwrap()).unwrap(),
-            )],
-        )?))
+        Ok(PublishAttempt::Published(
+            test_claim_issuer().published(
+                _claim,
+                bodies
+                    .into_iter()
+                    .enumerate()
+                    .map(|(index, body)| {
+                        let seq = next_seq + u64::try_from(index).unwrap();
+                        Arc::new(SessionFact::new(seq, seq, body).unwrap())
+                    })
+                    .collect(),
+            )?,
+        ))
     }
 
     async fn flush(
@@ -1026,10 +1033,20 @@ async fn evidence_fallback_is_only_for_explicit_prepublication_budget_rejection(
                 request_sha256: "a".repeat(64),
             },
         };
+        let start = SessionFactBody::ModelStarted {
+            turn_id: claim.turn_id().clone(),
+            effect_id: effect.clone(),
+        };
         let result =
-            publish_nonterminal_with_capacity_retry(&turns, &config, &claim, vec![intent]).await;
+            publish_nonterminal_with_capacity_retry(&turns, &config, &claim, vec![intent, start])
+                .await;
         if budget || after_flush {
             let result = result.unwrap();
+            assert_eq!(result.facts().len(), 2);
+            assert!(
+                matches!(result.facts()[1].body(), SessionFactBody::ModelStarted { turn_id, effect_id }
+                if turn_id == claim.turn_id() && effect_id == &effect)
+            );
             assert!(
                 matches!(result.facts()[0].body(),SessionFactBody::ModelIntent {effect_id,snapshot,evidence:RequestEvidence::Unavailable {reason:EvidenceUnavailable::Budget},..} if effect_id==&effect && snapshot.call_id=="one-prepare")
             );

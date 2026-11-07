@@ -654,21 +654,17 @@ impl Driver {
         self.publish_durable(
             claim,
             fold,
-            vec![SessionFactBody::ImageIntent {
-                turn_id: claim.turn_id().clone(),
-                effect_id: effect_id.clone(),
-                snapshot,
-            }],
-        )
-        .await?;
-
-        self.publish_durable(
-            claim,
-            fold,
-            vec![SessionFactBody::ImageStarted {
-                turn_id: claim.turn_id().clone(),
-                effect_id: effect_id.clone(),
-            }],
+            vec![
+                SessionFactBody::ImageIntent {
+                    turn_id: claim.turn_id().clone(),
+                    effect_id: effect_id.clone(),
+                    snapshot,
+                },
+                SessionFactBody::ImageStarted {
+                    turn_id: claim.turn_id().clone(),
+                    effect_id: effect_id.clone(),
+                },
+            ],
         )
         .await?;
 
@@ -877,38 +873,35 @@ impl Driver {
             .publish_durable(
                 claim,
                 fold,
-                vec![SessionFactBody::ModelIntent {
-                    evidence,
-                    price_quote: claim
-                        .header()
-                        .settings()
-                        .pricing()
-                        .resolve(&snapshot)
-                        .cloned(),
-                    purpose: purpose.clone(),
-                    turn_id: claim.turn_id().clone(),
-                    effect_id: effect_id.clone(),
-                    snapshot: snapshot.clone(),
-                }],
+                vec![
+                    SessionFactBody::ModelIntent {
+                        evidence,
+                        price_quote: claim
+                            .header()
+                            .settings()
+                            .pricing()
+                            .resolve(&snapshot)
+                            .cloned(),
+                        purpose: purpose.clone(),
+                        turn_id: claim.turn_id().clone(),
+                        effect_id: effect_id.clone(),
+                        snapshot: snapshot.clone(),
+                    },
+                    SessionFactBody::ModelStarted {
+                        turn_id: claim.turn_id().clone(),
+                        effect_id: effect_id.clone(),
+                    },
+                ],
             )
             .await?;
 
-        for fact in intent.facts() {
-            self.evidence
-                .lock()
-                .map_err(|_| fatal("evidence cache lock poisoned"))?
-                .observe(claim.session_id(), fact);
-        }
-        self.publish_durable(
-            claim,
-            fold,
-            vec![SessionFactBody::ModelStarted {
-                turn_id: claim.turn_id().clone(),
-                effect_id: effect_id.clone(),
-            }],
-        )
-        .await?;
-
+        self.evidence
+            .lock()
+            .map_err(|_| fatal("evidence cache lock poisoned"))?
+            .observe(
+                claim.session_id(),
+                intent.facts().first().expect("model intent precedes start"),
+            );
         live.started().map_err(fatal)?;
 
         let combined = combine_cancellation(cancellation, stop);
@@ -1593,30 +1586,26 @@ impl Driver {
             .publish_durable(
                 claim,
                 fold,
-                vec![SessionFactBody::ToolIntent {
-                    origin,
-                    program_role,
-                    turn_id: claim.turn_id().clone(),
-                    effect_id: effect_id.clone(),
-                    identity: identity.clone(),
-                    name,
-                    arguments,
-                    approval,
-                    parallel_safe,
-                }],
+                vec![
+                    SessionFactBody::ToolIntent {
+                        origin,
+                        program_role,
+                        turn_id: claim.turn_id().clone(),
+                        effect_id: effect_id.clone(),
+                        identity: identity.clone(),
+                        name,
+                        arguments,
+                        approval,
+                        parallel_safe,
+                    },
+                    SessionFactBody::ToolStarted {
+                        turn_id: claim.turn_id().clone(),
+                        effect_id: effect_id.clone(),
+                        identity: identity.clone(),
+                    },
+                ],
             )
             .await?;
-
-        self.publish_durable(
-            claim,
-            fold,
-            vec![SessionFactBody::ToolStarted {
-                turn_id: claim.turn_id().clone(),
-                effect_id: effect_id.clone(),
-                identity: identity.clone(),
-            }],
-        )
-        .await?;
 
         self.track_tool(claim, composition.clone(), identity.clone());
         Ok(PreparedToolEffect {
@@ -1638,7 +1627,7 @@ impl Driver {
         fold: &mut ModelContextState,
         pending: Vec<PendingToolEffect>,
     ) -> std::result::Result<Vec<PreparedToolEffect>, DriveFailure> {
-        let mut intents = Vec::with_capacity(pending.len());
+        let mut markers = Vec::with_capacity(pending.len() * 2);
         let mut prepared = Vec::with_capacity(pending.len());
         for effect in pending {
             let PendingToolEffect {
@@ -1652,7 +1641,7 @@ impl Driver {
                 parallel_safe,
                 prepared: prepared_call,
             } = effect;
-            intents.push(SessionFactBody::ToolIntent {
+            markers.push(SessionFactBody::ToolIntent {
                 origin,
                 program_role,
                 turn_id: claim.turn_id().clone(),
@@ -1666,11 +1655,18 @@ impl Driver {
             prepared.push((effect_id, identity, prepared_call));
         }
 
-        let intents = self.publish_durable(claim, fold, intents).await?;
+        markers.extend(prepared.iter().map(|(effect_id, identity, _)| {
+            SessionFactBody::ToolStarted {
+                turn_id: claim.turn_id().clone(),
+                effect_id: effect_id.clone(),
+                identity: identity.clone(),
+            }
+        }));
+        let markers = self.publish_durable(claim, fold, markers).await?;
 
         let prepared: Vec<_> = prepared
             .into_iter()
-            .zip(intents.into_facts())
+            .zip(markers.into_facts())
             .map(
                 |((effect_id, identity, prepared), intent)| PreparedToolEffect {
                     intent,
@@ -1680,16 +1676,6 @@ impl Driver {
                 },
             )
             .collect();
-        let starts = prepared
-            .iter()
-            .map(|effect| SessionFactBody::ToolStarted {
-                turn_id: claim.turn_id().clone(),
-                effect_id: effect.effect_id.clone(),
-                identity: effect.identity.clone(),
-            })
-            .collect();
-        self.publish_durable(claim, fold, starts).await?;
-
         for effect in &prepared {
             self.track_tool(claim, composition.clone(), effect.identity.clone());
         }

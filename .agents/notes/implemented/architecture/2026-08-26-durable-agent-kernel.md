@@ -86,9 +86,14 @@ target is idle. `followup_task` always queues a waking next Turn, including
 behind an already-running Turn. Completion delivery is Kernel-owned and selects
 next Step versus next Turn while holding the relevant atomic Store guards.
 
-Every external effect follows prepare, durable intent, durable start, invoke,
-and durable outcome order. The Kernel accepts a start marker only after its
-matching intent is durable. Cancellation first appends and durably commits its
+Every external effect follows the
+[complete-prefix ordering contract](../../../../crates/rsi-agent/docs/subsystems/turns-and-agent-trees.md).
+DSH's checkpoint policy waits for the full event prefix before invoking a model
+or Tool. The same boundary suffices here: the staged state machine validates
+intent/start identity and order, and a single wait through start makes both
+durable. An intermediate intent-only acknowledgement adds a Store round trip
+without changing recovery's prohibition on replaying uncertain effects.
+Cancellation first appends and durably commits its
 `CancelRequested` Fact, then fires the live cancellation token independently
 of whether the requesting future remains attached. A following
 terminal outcome is classified by the already-recorded cancellation and

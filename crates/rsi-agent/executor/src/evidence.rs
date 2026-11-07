@@ -184,20 +184,25 @@ pub(super) fn budget_fallback(bodies: &[SessionFactBody]) -> Option<Vec<SessionF
             price_quote,
             evidence: RequestEvidence::Available { .. },
         },
+        tail @ ..,
     ] = bodies
     else {
         return None;
     };
-    Some(vec![SessionFactBody::ModelIntent {
-        turn_id: turn_id.clone(),
-        effect_id: effect_id.clone(),
-        snapshot: snapshot.clone(),
-        purpose: purpose.clone(),
-        price_quote: price_quote.clone(),
-        evidence: RequestEvidence::Unavailable {
-            reason: EvidenceUnavailable::Budget,
-        },
-    }])
+    Some(
+        std::iter::once(SessionFactBody::ModelIntent {
+            turn_id: turn_id.clone(),
+            effect_id: effect_id.clone(),
+            snapshot: snapshot.clone(),
+            purpose: purpose.clone(),
+            price_quote: price_quote.clone(),
+            evidence: RequestEvidence::Unavailable {
+                reason: EvidenceUnavailable::Budget,
+            },
+        })
+        .chain(tail.iter().cloned())
+        .collect(),
+    )
 }
 
 #[cfg(test)]

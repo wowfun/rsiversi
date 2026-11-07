@@ -32,13 +32,19 @@ Session. Recovery first resumes a durably parked wait as cancelled before it
 transitions the interrupted activation to descendant settlement.
 
 The executor follows one ordering rule for every external effect. The Kernel
-rejects a start marker unless its matching intent is already durable, so an
-executor cannot collapse the first durability fence into one publication:
+validates intent/start order and exact identity within the staged publication.
+They may share one publication; the executor waits for the complete prefix
+through the start marker to become durable before invoking the effect:
 
 ```text
-prepare immutable input -> publish intent -> flush durable intent
--> publish start -> flush durable start -> invoke -> publish outcome
+prepare immutable input -> publish ordered intent and start
+-> flush through start -> invoke -> publish outcome
 ```
+
+A parallel-safe Tool run publishes all source-ordered intents followed by all
+matching starts, then waits through the last start before invoking any member.
+Store batches may partition that prefix; only the complete-prefix acknowledgement
+permits invocation. A flush failure never authorizes dispatch or implicit replay.
 
 Language calls and Image calls are pinned process-local objects obtained from
 exact active Local generations. Tool definitions and dispatch come from the

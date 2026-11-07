@@ -1226,7 +1226,6 @@ pub(super) fn try_publish_once(
         }
         for body in &bodies {
             validate_intent_price(&session.header, body)?;
-            validate_durable_intent_fence(session, body)?;
         }
         (
             clone_turn_control(original),

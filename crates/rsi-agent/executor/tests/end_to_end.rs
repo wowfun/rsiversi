@@ -855,6 +855,7 @@ struct FailingTool {
 
 #[derive(Debug)]
 struct ParallelTool {
+    store: Arc<MemoryStore>,
     rendezvous: Arc<Barrier>,
     release_first: Arc<Notify>,
     observed_lane_parking_authority: Arc<AtomicBool>,
@@ -941,6 +942,46 @@ impl ToolExecutor for ParallelTool {
         arguments: Value,
         execution: ToolExecution,
     ) -> ToolResultType<ToolResult> {
+        let page = self
+            .store
+            .read_facts(
+                &SessionId::new("session-e2e").unwrap(),
+                0,
+                64,
+                rsi_agent_store_protocol::MAXIMUM_STORE_FACT_PAGE_BYTES,
+            )
+            .await
+            .unwrap();
+        let intents: Vec<_> = page
+            .facts
+            .iter()
+            .filter_map(|fact| match fact.body() {
+                SessionFactBody::ToolIntent {
+                    effect_id,
+                    identity,
+                    ..
+                } => Some((effect_id, identity)),
+                _ => None,
+            })
+            .collect();
+        let starts: Vec<_> = page
+            .facts
+            .iter()
+            .filter_map(|fact| match fact.body() {
+                SessionFactBody::ToolStarted {
+                    effect_id,
+                    identity,
+                    ..
+                } => Some((effect_id, identity)),
+                _ => None,
+            })
+            .collect();
+        assert_eq!(
+            intents.len(),
+            2,
+            "the whole parallel run must be durable before either body"
+        );
+        assert_eq!(starts, intents);
         self.observed_lane_parking_authority.fetch_or(
             execution.extension::<ToolLaneParkingAuthority>().is_some(),
             Ordering::AcqRel,

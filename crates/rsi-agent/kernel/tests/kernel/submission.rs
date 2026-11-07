@@ -899,16 +899,22 @@ async fn explicit_effect_flush_waits_through_transient_failure_without_reorderin
     let facts = kernel
         .publish(
             &claim,
-            vec![SessionFactBody::ModelIntent {
-                evidence: rsi_agent_session_protocol::RequestEvidence::Unavailable {
-                    reason: rsi_agent_session_protocol::EvidenceUnavailable::NotCaptured,
+            vec![
+                SessionFactBody::ModelIntent {
+                    evidence: rsi_agent_session_protocol::RequestEvidence::Unavailable {
+                        reason: rsi_agent_session_protocol::EvidenceUnavailable::NotCaptured,
+                    },
+                    price_quote: None,
+                    purpose: rsi_agent_session_protocol::ModelPurpose::Conversation,
+                    turn_id: submitted.turn_id.clone(),
+                    effect_id: effect.clone(),
+                    snapshot: snapshot(),
                 },
-                price_quote: None,
-                purpose: rsi_agent_session_protocol::ModelPurpose::Conversation,
-                turn_id: submitted.turn_id.clone(),
-                effect_id: effect,
-                snapshot: snapshot(),
-            }],
+                SessionFactBody::ModelStarted {
+                    turn_id: submitted.turn_id.clone(),
+                    effect_id: effect,
+                },
+            ],
         )
         .await
         .unwrap()
@@ -933,7 +939,7 @@ async fn explicit_effect_flush_waits_through_transient_failure_without_reorderin
             .await
             .unwrap()
             .durable_seq,
-        through - 1
+        through - 2
     );
     tokio::time::advance(std::time::Duration::from_millis(199)).await;
     tokio::task::yield_now().await;
@@ -950,89 +956,114 @@ async fn explicit_effect_flush_waits_through_transient_failure_without_reorderin
         )
         .await
         .unwrap();
-    assert_eq!(stored.facts.len(), 5);
+    assert_eq!(stored.facts.len(), 6);
     assert!(matches!(
         stored.facts[0].body(),
         SessionFactBody::TurnAccepted { .. }
     ));
     assert!(matches!(
         stored.facts.last().unwrap().body(),
-        SessionFactBody::ModelIntent { .. }
+        SessionFactBody::ModelStarted { .. }
     ));
     kernel.shutdown(worker).await.unwrap();
 }
 
 #[tokio::test]
-async fn effect_start_requires_its_intent_to_be_durable() {
-    let store = Arc::new(MemoryStore::new());
-    let kernel = kernel(store).await;
-    let worker = kernel.start_workers();
-    let submitted = submit(&kernel, "session-effect-fence", "hello").await;
-    let _lease = kernel.register("executor".into()).unwrap();
-    let claim = kernel
-        .claim("executor", CancellationToken::new())
-        .await
-        .unwrap()
-        .unwrap();
-    tool_origin::prepare_claimed_inputs(&kernel, &claim).await;
-    let effect = EffectId::new("model-effect-fence").unwrap();
-
-    let error = kernel
-        .publish(
-            &claim,
+async fn effect_start_validates_order_and_identity_without_an_intermediate_flush() {
+    for combined in [true, false] {
+        let store = Arc::new(MemoryStore::new());
+        let kernel = kernel(store.clone()).await;
+        let worker = kernel.start_workers();
+        let submitted = submit(&kernel, "session-effect-prefix", "hello").await;
+        let _lease = kernel.register("executor".into()).unwrap();
+        let claim = kernel
+            .claim("executor", CancellationToken::new())
+            .await
+            .unwrap()
+            .unwrap();
+        tool_origin::prepare_claimed_inputs(&kernel, &claim).await;
+        let effect = EffectId::new("model-effect-prefix").unwrap();
+        let intent = SessionFactBody::ModelIntent {
+            evidence: rsi_agent_session_protocol::RequestEvidence::Unavailable {
+                reason: rsi_agent_session_protocol::EvidenceUnavailable::NotCaptured,
+            },
+            price_quote: None,
+            purpose: rsi_agent_session_protocol::ModelPurpose::Conversation,
+            turn_id: submitted.turn_id.clone(),
+            effect_id: effect.clone(),
+            snapshot: snapshot(),
+        };
+        let start = SessionFactBody::ModelStarted {
+            turn_id: submitted.turn_id.clone(),
+            effect_id: effect.clone(),
+        };
+        for invalid in [
+            vec![start.clone()],
+            vec![start.clone(), intent.clone()],
             vec![
-                SessionFactBody::ModelIntent {
-                    evidence: rsi_agent_session_protocol::RequestEvidence::Unavailable {
-                        reason: rsi_agent_session_protocol::EvidenceUnavailable::NotCaptured,
-                    },
-                    price_quote: None,
-                    purpose: rsi_agent_session_protocol::ModelPurpose::Conversation,
-                    turn_id: submitted.turn_id.clone(),
-                    effect_id: effect.clone(),
-                    snapshot: snapshot(),
-                },
+                intent.clone(),
                 SessionFactBody::ModelStarted {
+                    turn_id: submitted.turn_id.clone(),
+                    effect_id: EffectId::new("different-effect").unwrap(),
+                },
+            ],
+            vec![
+                intent.clone(),
+                SessionFactBody::ImageStarted {
                     turn_id: submitted.turn_id.clone(),
                     effect_id: effect.clone(),
                 },
             ],
-        )
-        .await
-        .expect_err("an effect start cannot share the undurable intent publication");
-    assert!(matches!(error, TurnError::Invalid(_)));
-
-    let intent = kernel
-        .publish(
-            &claim,
-            vec![SessionFactBody::ModelIntent {
-                evidence: rsi_agent_session_protocol::RequestEvidence::Unavailable {
-                    reason: rsi_agent_session_protocol::EvidenceUnavailable::NotCaptured,
-                },
-                price_quote: None,
-                purpose: rsi_agent_session_protocol::ModelPurpose::Conversation,
-                turn_id: submitted.turn_id.clone(),
-                effect_id: effect.clone(),
-                snapshot: snapshot(),
-            }],
-        )
-        .await
-        .unwrap()
-        .published();
-    let through = intent.last().unwrap().seq();
-    kernel.flush(&claim, through).await.unwrap();
-    kernel
-        .publish(
-            &claim,
-            vec![SessionFactBody::ModelStarted {
-                turn_id: submitted.turn_id,
-                effect_id: effect,
-            }],
-        )
-        .await
-        .unwrap()
-        .published();
-
-    kernel.shutdown(worker).await.unwrap();
+            vec![intent.clone(), start.clone(), start.clone()],
+        ] {
+            assert!(matches!(
+                kernel.publish(&claim, invalid).await,
+                Err(TurnError::Invalid(_))
+            ));
+        }
+        // Reusing this exact effect proves rejected batches admitted no partial intent.
+        let bodies = if combined {
+            vec![intent, start]
+        } else {
+            kernel
+                .publish(&claim, vec![intent])
+                .await
+                .unwrap()
+                .published();
+            vec![start]
+        };
+        let published = kernel.publish(&claim, bodies).await.unwrap().published();
+        let through = published.last().unwrap().seq();
+        kernel.flush(&claim, through).await.unwrap();
+        let stored = store
+            .read_facts(
+                &submitted.session_id,
+                0,
+                512,
+                rsi_agent_store_protocol::MAXIMUM_STORE_FACT_PAGE_BYTES,
+            )
+            .await
+            .unwrap();
+        let markers: Vec<_> = stored
+            .facts
+            .iter()
+            .filter(|fact| {
+                matches!(
+                    fact.body(),
+                    SessionFactBody::ModelIntent { .. } | SessionFactBody::ModelStarted { .. }
+                )
+            })
+            .collect();
+        assert_eq!(markers.len(), 2);
+        assert!(
+            matches!(markers[0].body(), SessionFactBody::ModelIntent { effect_id, .. } if effect_id == &effect)
+        );
+        assert!(
+            matches!(markers[1].body(), SessionFactBody::ModelStarted { effect_id, .. } if effect_id == &effect)
+        );
+        assert_eq!(markers[1].seq(), through);
+        kernel.shutdown(worker).await.unwrap();
+    }
 }
 
 #[tokio::test]
