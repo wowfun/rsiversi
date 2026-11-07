@@ -115,8 +115,8 @@ async fn large_history_page_read_cost() {
         started.elapsed().as_millis()
     );
     assert_eq!(
-        reads, 2,
-        "one capacity probe and one complete body read per page"
+        reads, 1,
+        "a sub-frame logical record needs no capacity probe"
     );
 }
 
@@ -272,7 +272,9 @@ async fn metadata_parent_address_requires_visible_direct_parent() {
     );
 }
 
-async fn withdrawn_message_fixture() -> (
+async fn withdrawn_message_fixture(
+    text: String,
+) -> (
     rsi_agent_testkit::MemoryStore,
     SessionHeader,
     rsi_agent_session_protocol::AgentMessage,
@@ -289,9 +291,7 @@ async fn withdrawn_message_fixture() -> (
     let message = AgentMessage {
         message_id: MessageId::new("message").unwrap(),
         source: AgentMessageSource::Human { attribution: None },
-        content: vec![AgentMessageContent::Text {
-            text: "界".repeat(100_000),
-        }],
+        content: vec![AgentMessageContent::Text { text }],
         options: MessageOptions::default(),
     };
     store
@@ -338,7 +338,7 @@ async fn withdrawn_message_fixture() -> (
 #[tokio::test]
 async fn control_pages_keep_moderate_acceptances_and_transitions_in_one_read() {
     let reader = FragmentReader::new();
-    let (store, header, message) = withdrawn_message_fixture().await;
+    let (store, header, message) = withdrawn_message_fixture("界".repeat(100_000)).await;
     let page = reader.controls(&store, &header, 0, 2, 0).await.unwrap();
     assert_eq!(page["through_seq"], 2);
     assert_eq!(page["next_offset"], page["total_bytes"]);
@@ -364,10 +364,36 @@ async fn control_pages_keep_moderate_acceptances_and_transitions_in_one_read() {
 }
 
 #[tokio::test]
+async fn control_pages_pack_escaped_acceptance_and_transition_before_fragmenting() {
+    let reader = FragmentReader::new();
+    let (store, header, message) = withdrawn_message_fixture("\"".repeat(400_000)).await;
+    let mut encoded = String::new();
+    let mut fragments = 0;
+    loop {
+        let page = reader
+            .controls(&store, &header, 0, 2, encoded.len())
+            .await
+            .unwrap();
+        assert_eq!(page["through_seq"], 2);
+        assert!(serde_json::to_vec(&page).unwrap().len() < rsi_extension::MAXIMUM_FRAME_BYTES);
+        encoded.push_str(page["json"].as_str().unwrap());
+        fragments += 1;
+        if page["next_offset"] == page["total_bytes"] {
+            break;
+        }
+    }
+    assert_eq!(fragments, 2);
+    let events: Value = serde_json::from_str(&encoded).unwrap();
+    assert_eq!(events.as_array().unwrap().len(), 2);
+    assert_eq!(events[0]["message"], json!(message));
+    assert_eq!(events[1]["kind"], "discarded");
+}
+
+#[tokio::test]
 async fn exact_message_reads_preserve_withdrawn_bodies_and_fragment_identity() {
     use rsi_agent_session_protocol::MessageId;
     let reader = FragmentReader::new();
-    let (store, header, message) = withdrawn_message_fixture().await;
+    let (store, header, message) = withdrawn_message_fixture("界".repeat(100_000)).await;
     let id = header.session_id();
     let expected = serde_json::to_string(&message).unwrap();
     let mut restored = String::new();
@@ -543,7 +569,7 @@ async fn fact_pages_bound_the_captured_horizon_and_read_large_records_alone() {
                     if seq == 1 {
                         SessionFactBody::TurnAccepted {
                             turn_id: turn.clone(),
-                            text: "\n".repeat(400_000),
+                            text: "\n".repeat(600_000),
                             model: None,
                             reasoning_effort: None,
                             sandbox: SandboxMode::WorkspaceWrite,

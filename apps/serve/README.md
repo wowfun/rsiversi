@@ -346,8 +346,11 @@ request slots available for continuation and close. No durable cache is created.
 Each UTF-8 fragment uses the available process-frame payload budget, counting
 JSON string escaping before choosing its boundary. Eight KiB of the existing
 1 MiB frame remains reserved for bounded reply coordinates and framing. Ordinary
-Store pages use half the frame's byte capacity; larger individual records retain
-their existing exact-size read and fragmentation path.
+Store pages admit 1 MiB of logical records independently of the encoded fragment
+boundary. JSON escaping can spread that page across several frames without
+another Store read. Larger individual records retain their existing exact-size
+read and fragmentation path; the two retained-page permits and serialized-page
+ceiling also apply to these ordinary pages.
 Control history uses a captured control horizon.
 Its wire projection borrows the Store's validated control payloads through
 serialization, without materializing a second JSON tree of message bodies.

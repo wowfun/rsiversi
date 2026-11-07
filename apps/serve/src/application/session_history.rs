@@ -535,7 +535,7 @@ pub(super) fn fragment(encoded: &str, offset: usize, through: u64) -> Result<Val
     )
 }
 
-pub(super) const HISTORY_PAGE_BYTES: usize = rsi_extension::MAXIMUM_FRAME_BYTES / 2;
+pub(super) const HISTORY_PAGE_BYTES: usize = rsi_extension::MAXIMUM_FRAME_BYTES;
 const FRAGMENT_JSON_BYTES: usize = rsi_extension::MAXIMUM_FRAME_BYTES - 8 * 1024;
 
 pub(super) fn fragment_text(encoded: &str, offset: usize) -> Result<(usize, &str)> {
