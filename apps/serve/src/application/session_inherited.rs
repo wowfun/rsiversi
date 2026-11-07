@@ -1,5 +1,6 @@
 use super::{
     Sessions,
+    session_fragments::Identity,
     session_history::{read_facts, resource_key},
 };
 use rsi_agent_session_protocol::{ForkTurnSelection, SessionHeader, SessionId};
@@ -18,6 +19,7 @@ struct Selection {
 #[serde(deny_unknown_fields)]
 pub(super) struct ReadInterval {
     key: String,
+    reader: String,
     interval: usize,
     after_seq: u64,
     through_seq: u64,
@@ -77,6 +79,8 @@ impl Sessions {
             return Err(Error::Protocol);
         }
         tokio::select! {biased;()=retired.cancelled()=>Err(Error::Cancelled),
-        result=read_facts(self.store.as_ref(),&origin.parent_session_id,read.after_seq,read.through_seq,read.offset)=>result}
+        result=self.history_pages.read(&self.routes, request, &read.reader, read.offset,
+            Identity::Inherited { target: target.clone(), source: origin.parent_session_id.clone(), after: read.after_seq, through: read.through_seq },
+            read_facts(self.store.as_ref(),&origin.parent_session_id,read.after_seq,read.through_seq))=>result}
     }
 }

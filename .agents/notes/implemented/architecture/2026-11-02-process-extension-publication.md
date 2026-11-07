@@ -76,6 +76,11 @@ atomic publication. UTF-8 fragment transfer preserves the existing maximum Fact
 size while keeping process frames small. It does not grant another Store reader
 or permit access beyond the captured horizon.
 
+Workbench history borrows a prepared page for the complete fragment transfer.
+The [Serve contract](../../../../apps/serve/README.md) owns reader lifetimes and
+bounds. Queueing before the first RPC leaves native request slots available to
+finish or close existing transfers.
+
 A draft's validated snapshot may reference unpublished CAS data. A proposal can
 therefore retain a process-local owner for the complete snapshot. Baseline clones
 and first-publication admission preserve it until canonical publication; replacing
@@ -110,6 +115,13 @@ threads shift the same work onto scarce CPU and storage; timestamp caches add
 state and invalidation rules. Metadata admission removes that work without an
 additional cache or durable copy.
 
+Stateless byte offsets for workbench history re-read and reserialize a complete
+page for every fragment. This makes large-record work proportional to the number
+of transport fragments. DSH's history controller borrows one Session observation
+for each page computation; RSI's operation history and model streams likewise
+already retain prepared data until consumed. A bounded active reader follows
+that lifetime without retaining a second history cache or widening process frames.
+
 ## Consequences
 
 The process can overlap requests and reverse callbacks, but it is not a sandbox:
@@ -123,6 +135,8 @@ and ordinary acquisition remains the complete integrity check. This is an
 intentional local execution trade-off: installed plugins already have the
 operator's native authority, while bounded metadata, descriptor authentication,
 no-follow path admission and GC leases remain enforced.
+Workbench page transfer trades short-lived bounded memory for eliminating repeated
+body reads, decode and serialization. Retention lasts only for the active transfer.
 The standard package factory resolves a versioned descriptor from an exact
 PackageStore digest. Descriptor paths can name the declaring package or its
 exact direct dependencies; installation validates them before selection. The

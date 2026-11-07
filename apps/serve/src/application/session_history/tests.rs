@@ -1,3 +1,4 @@
+use super::super::session_fragments::tests::FragmentReader;
 use super::*;
 use rsi_session_protocol::{CreateSession, RecentSessionCursor, RecentSessionPage, SessionError};
 use std::sync::Arc;
@@ -54,6 +55,69 @@ fn metadata_header(id: &str) -> SessionHeader {
         .unwrap(),
     )
     .unwrap()
+}
+
+#[tokio::test]
+async fn large_history_page_read_cost() {
+    use rsi_agent_session_protocol::{SessionFact, SessionFactBody, TurnId};
+    use rsi_agent_store_protocol::AppendBatch;
+    let reader = FragmentReader::new();
+    let store = rsi_agent_testkit::MemoryStore::new();
+    let header = metadata_header("fragment-cost");
+    let id = header.session_id().clone();
+    let fact = Arc::new(
+        SessionFact::new(
+            1,
+            1,
+            SessionFactBody::TurnAccepted {
+                turn_id: TurnId::new("turn").unwrap(),
+                text: "界".repeat(300_000),
+                model: None,
+                reasoning_effort: None,
+                sandbox: rsi_sandbox::SandboxMode::WorkspaceWrite,
+                require_approval: false,
+            },
+        )
+        .unwrap(),
+    );
+    store
+        .append(AppendBatch {
+            session_id: id.clone(),
+            expected_seq: 0,
+            header: Some(header),
+            facts: vec![fact.clone()],
+        })
+        .await
+        .unwrap();
+    store.take_fact_read_cursors();
+    let started = std::time::Instant::now();
+    let mut encoded = String::new();
+    let mut fragments = 0;
+    loop {
+        let page = reader
+            .facts(&store, &id, 0, 1, encoded.len())
+            .await
+            .unwrap();
+        fragments += 1;
+        encoded.push_str(page["json"].as_str().unwrap());
+        if page["next_offset"] == page["total_bytes"] {
+            break;
+        }
+    }
+    let reads = store.take_fact_read_cursors().len();
+    assert_eq!(
+        serde_json::from_str::<Vec<SessionFact>>(&encoded).unwrap(),
+        vec![fact.as_ref().clone()]
+    );
+    eprintln!(
+        "history_probe fragments={fragments} store_reads={reads} serialized_bytes={} elapsed_ms={}",
+        encoded.len(),
+        started.elapsed().as_millis()
+    );
+    assert_eq!(
+        reads, 2,
+        "one capacity probe and one complete body read per page"
+    );
 }
 
 #[tokio::test]
@@ -273,13 +337,14 @@ async fn withdrawn_message_fixture() -> (
 
 #[tokio::test]
 async fn control_pages_deliver_acceptances_once_and_bound_large_records() {
+    let reader = FragmentReader::new();
     let (store, header, message) = withdrawn_message_fixture().await;
     let mut controls = String::new();
     loop {
-        let page =
-            super::super::session_controls::read_controls(&store, &header, 0, 2, controls.len())
-                .await
-                .unwrap();
+        let page = reader
+            .controls(&store, &header, 0, 2, controls.len())
+            .await
+            .unwrap();
         assert_eq!(
             page["through_seq"], 1,
             "one oversized acceptance stays on its own page"
@@ -294,9 +359,7 @@ async fn control_pages_deliver_acceptances_once_and_bound_large_records() {
     assert_eq!(events.as_array().unwrap().len(), 1);
     assert_eq!(events[0]["message"], json!(message));
     assert_eq!(events[0]["after_fact_seq"], 0);
-    let discarded = super::super::session_controls::read_controls(&store, &header, 1, 2, 0)
-        .await
-        .unwrap();
+    let discarded = reader.controls(&store, &header, 1, 2, 0).await.unwrap();
     assert_eq!(discarded["through_seq"], 2);
     assert_eq!(
         serde_json::from_str::<Value>(discarded["json"].as_str().unwrap()).unwrap()[0]["kind"],
@@ -304,7 +367,8 @@ async fn control_pages_deliver_acceptances_once_and_bound_large_records() {
     );
     for (after, through) in [(0, 0), (2, 1), (0, 3)] {
         assert!(
-            super::super::session_controls::read_controls(&store, &header, after, through, 0)
+            reader
+                .controls(&store, &header, after, through, 0)
                 .await
                 .is_err()
         );
@@ -314,12 +378,14 @@ async fn control_pages_deliver_acceptances_once_and_bound_large_records() {
 #[tokio::test]
 async fn exact_message_reads_preserve_withdrawn_bodies_and_fragment_identity() {
     use rsi_agent_session_protocol::MessageId;
+    let reader = FragmentReader::new();
     let (store, header, message) = withdrawn_message_fixture().await;
     let id = header.session_id();
     let expected = serde_json::to_string(&message).unwrap();
     let mut restored = String::new();
     while restored.len() < expected.len() {
-        let page = read_message(&store, id, &message.message_id, 1, restored.len())
+        let page = reader
+            .message(&store, id, &message.message_id, 1, restored.len())
             .await
             .unwrap();
         assert_eq!(page["through_seq"], 1);
@@ -331,19 +397,22 @@ async fn exact_message_reads_preserve_withdrawn_bodies_and_fragment_identity() {
     assert_eq!(restored, expected);
     for seq in [0, 2, 3] {
         assert!(
-            read_message(&store, id, &message.message_id, seq, 0)
+            reader
+                .message(&store, id, &message.message_id, seq, 0)
                 .await
                 .is_err()
         );
     }
     assert!(
-        read_message(&store, id, &MessageId::new("missing").unwrap(), 1, 0)
+        reader
+            .message(&store, id, &MessageId::new("missing").unwrap(), 1, 0)
             .await
             .is_err()
     );
     for offset in [expected.find('界').unwrap() + 1, expected.len(), usize::MAX] {
         assert!(
-            read_message(&store, id, &message.message_id, 1, offset)
+            reader
+                .message(&store, id, &message.message_id, 1, offset)
                 .await
                 .is_err()
         );
@@ -355,6 +424,7 @@ async fn stored_pages_inline_normalized_attempts_and_preserve_unicode() {
     use rsi_agent_session_protocol::{
         EffectId, ModelAttemptLog, ModelEventPurpose, SessionFact, SessionFactBody, TurnId,
     };
+    let reader = FragmentReader::new();
     let store = rsi_agent_testkit::MemoryStore::default();
     let header = metadata_header("stored-attempt");
     let id = header.session_id().clone();
@@ -434,21 +504,16 @@ async fn stored_pages_inline_normalized_attempts_and_preserve_unicode() {
 
     let mut restored = String::new();
     while restored.len() < expected.len() {
-        let page = read_facts(&store, &id, 1, 2, restored.len()).await.unwrap();
+        let page = reader
+            .facts(&store, &id, 1, 2, restored.len())
+            .await
+            .unwrap();
         assert_eq!(page["through_seq"], 2);
         assert_eq!(page["total_bytes"], expected.len());
         restored.push_str(page["json"].as_str().unwrap());
         assert_eq!(page["next_offset"], restored.len());
     }
     assert_eq!(restored, expected);
-    for after in [2, 3, u64::MAX] {
-        assert!(read_facts(&store, &id, after, 2, 0).await.is_err());
-    }
-    assert!(
-        read_facts(&store, &id, 1, 2, expected.find('中').unwrap() + 1)
-            .await
-            .is_err()
-    );
 }
 
 #[tokio::test]
@@ -461,6 +526,7 @@ async fn fact_pages_bound_the_captured_horizon_and_read_large_records_alone() {
     use rsi_ai_protocol::ModelRef;
     use rsi_sandbox::SandboxMode;
     use std::sync::Arc;
+    let reader = FragmentReader::new();
 
     let store = MemoryStore::default();
     let id = SessionId::new("page-test").unwrap();
@@ -517,10 +583,10 @@ async fn fact_pages_bound_the_captured_horizon_and_read_large_records_alone() {
             .await
             .unwrap();
     }
-    let large = read_facts(&store, &id, 0, 600, 0).await.unwrap();
+    let large = reader.facts(&store, &id, 0, 600, 0).await.unwrap();
     assert_eq!(large["through_seq"], 1);
     assert_eq!(large["next_offset"], 128 * 1024);
-    let tail = read_facts(&store, &id, 0, 600, 128 * 1024).await.unwrap();
+    let tail = reader.facts(&store, &id, 0, 600, 128 * 1024).await.unwrap();
     assert_eq!(tail["through_seq"], 1);
     assert_eq!(large["total_bytes"], tail["total_bytes"]);
     let encoded = format!(
@@ -532,16 +598,16 @@ async fn fact_pages_bound_the_captured_horizon_and_read_large_records_alone() {
         serde_json::from_str::<Vec<SessionFact>>(&encoded).unwrap(),
         vec![facts[0].as_ref().clone()]
     );
-    let cut = read_facts(&store, &id, 1, 10, 0).await.unwrap();
+    let cut = reader.facts(&store, &id, 1, 10, 0).await.unwrap();
     let page: Vec<SessionFact> = serde_json::from_str(cut["json"].as_str().unwrap()).unwrap();
     assert_eq!(page.len(), 9);
     assert_eq!(page.first().unwrap().seq(), 2);
     assert_eq!(cut["through_seq"], 10);
-    let capped = read_facts(&store, &id, 1, 600, 0).await.unwrap();
+    let capped = reader.facts(&store, &id, 1, 600, 0).await.unwrap();
     assert_eq!(capped["through_seq"], 513);
-    assert!(read_facts(&store, &id, 10, 10, 0).await.is_err());
-    assert!(read_facts(&store, &id, 11, 10, 0).await.is_err());
-    assert!(read_facts(&store, &id, 1, 601, 0).await.is_err());
+    assert!(reader.facts(&store, &id, 10, 10, 0).await.is_err());
+    assert!(reader.facts(&store, &id, 11, 10, 0).await.is_err());
+    assert!(reader.facts(&store, &id, 1, 601, 0).await.is_err());
 }
 
 #[test]

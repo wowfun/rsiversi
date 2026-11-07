@@ -11,8 +11,7 @@ pub(super) async fn read_controls(
     header: &SessionHeader,
     after: u64,
     through: u64,
-    offset: usize,
-) -> Result<Value> {
+) -> Result<(u64, String)> {
     let limit = through
         .checked_sub(after)
         .filter(|count| *count > 0)
@@ -45,7 +44,7 @@ pub(super) async fn read_controls(
         }
     }
     let encoded = serde_json::to_string(&events).map_err(|_| Error::Protocol)?;
-    super::session_history::fragment(&encoded, offset, cursor)
+    Ok((cursor, encoded))
 }
 
 fn project_control(

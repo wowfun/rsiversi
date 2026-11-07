@@ -55,7 +55,7 @@ A Service Profile can select an application process with
 asset selection as the browser), a private `profile` name, and a `process`
 using the installed package process descriptor. One supervised process owns
 the application's routes across local browser attachments. At activation the
-host sends `application.open` with protocol 9, a private profile directory
+host sends `application.open` with protocol 10, a private profile directory
 and a random upstream key over the generation's private process connection.
 The opening payload also supplies an opaque `owner` callback handle. Native
 composition gives it the product's shared browser identity and the application
@@ -328,6 +328,16 @@ or opening runtime activity. Every read checks caller retirement before returnin
 addressed parent access and lineage still apply. Exact message reads bind both
 the message ID and its acceptance control sequence through the canonical control
 record, moving its body directly into serialization.
+Fact, control, exact-message and inherited Fact pages carry a unique `reader`
+identity for one page. Offset zero reads and serializes that page once; subsequent
+offsets borrow the same encoded bytes under the original physical request,
+Session and read coordinates. Each fragment still checks caller authority.
+The final fragment releases the page. `page_close` releases an abandoned reader;
+request or upstream retirement releases every remaining page. Failed or cancelled
+preparation retains no page. A single-fragment response retains no resource.
+At most two page preparations/transfers share native storage at once. The
+application queues page readers before sending their first RPC, leaving native
+request slots available for continuation and close. No durable cache is created.
 Control history uses a captured control horizon.
 Its exclusive `after_seq`, inclusive `through_seq` and UTF-8 byte `offset` select
 fragments of one JSON event array. Pages contain at most 64 control records,

@@ -17,6 +17,7 @@ mod session_command;
 mod session_commands;
 mod session_controls;
 mod session_create;
+mod session_fragments;
 mod session_history;
 mod session_inbox;
 mod session_inherited;
@@ -205,6 +206,7 @@ fn package_error(error: &rsi_packages::Error) -> rsi_extension::Error {
 }
 #[derive(Clone, Debug)]
 struct Sessions {
+    history_pages: session_fragments::Pages,
     owner: Arc<dyn rsi_api_http::BrowserOwner>,
     models: Option<Arc<dyn rsi_ai_protocol::LanguageModels>>,
     defaults: Option<Arc<dyn rsi_session_protocol::AgentSettingsSource>>,
@@ -438,7 +440,7 @@ async fn open_application(
     tools: Option<&tools::Publisher>,
     owner: &rsi_api_http::ApplicationCallback,
 ) -> rsi_meta::Result<Ready> {
-    const PROTOCOL: u32 = 9;
+    const PROTOCOL: u32 = 10;
     let mut payload = serde_json::json!({"protocol":PROTOCOL,"profile":profile,"key":key.expose_secret(),"importer":importer,"owner":owner.id()});
     if let Some(source) = tools {
         payload["tools"] = serde_json::json!({"outcomeDirectory":source.receipt_directory});
@@ -535,6 +537,7 @@ impl PluginFactory for Factory {
             None
         };
         let mut sessions = Sessions {
+            history_pages: session_fragments::Pages::default(),
             owner: plan.local::<rsi_api_http::BrowserOwnerContract>()?,
             models: plan
                 .context()

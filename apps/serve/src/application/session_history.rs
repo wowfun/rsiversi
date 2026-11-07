@@ -1,4 +1,4 @@
-use super::Sessions;
+use super::{Sessions, session_fragments::Identity};
 use futures_util::StreamExt;
 use rsi_agent_session_protocol::{SessionHeader, SessionId};
 use rsi_agent_store_protocol::{SessionStore, StoreError};
@@ -32,19 +32,25 @@ enum Operation {
         metadata_only: bool,
     },
     Controls {
+        reader: String,
         after_seq: u64,
         through_seq: u64,
         offset: usize,
     },
     Message {
+        reader: String,
         message_id: rsi_agent_session_protocol::MessageId,
         accepted_control_seq: u64,
         offset: usize,
     },
     Fact {
+        reader: String,
         after_seq: u64,
         through_seq: u64,
         offset: usize,
+    },
+    PageClose {
+        reader: String,
     },
     Wait {
         cursor: ObservationCursor,
@@ -119,46 +125,85 @@ impl Sessions {
                 None => Value::Null,
             },
             Operation::Controls {
+                reader,
                 after_seq,
                 through_seq,
                 offset,
             } => {
-                super::session_controls::read_controls(
-                    store,
-                    &header().await?,
-                    after_seq,
-                    through_seq,
-                    offset,
-                )
-                .await?
+                let header = header().await?;
+                self.history_pages
+                    .read(
+                        &self.routes,
+                        &input.request,
+                        &reader,
+                        offset,
+                        Identity::Controls {
+                            session: input.session_id.clone(),
+                            after: after_seq,
+                            through: through_seq,
+                        },
+                        super::session_controls::read_controls(
+                            store,
+                            &header,
+                            after_seq,
+                            through_seq,
+                        ),
+                    )
+                    .await?
             }
             Operation::Message {
+                reader,
                 message_id,
                 accepted_control_seq,
                 offset,
             } => {
-                read_message(
-                    store,
-                    header().await?.session_id(),
-                    &message_id,
-                    accepted_control_seq,
-                    offset,
-                )
-                .await?
+                let header = header().await?;
+                self.history_pages
+                    .read(
+                        &self.routes,
+                        &input.request,
+                        &reader,
+                        offset,
+                        Identity::Message {
+                            session: input.session_id.clone(),
+                            message: message_id.clone(),
+                            accepted: accepted_control_seq,
+                        },
+                        read_message(
+                            store,
+                            header.session_id(),
+                            &message_id,
+                            accepted_control_seq,
+                        ),
+                    )
+                    .await?
             }
             Operation::Fact {
+                reader,
                 after_seq,
                 through_seq,
                 offset,
             } => {
-                read_facts(
-                    store,
-                    header().await?.session_id(),
-                    after_seq,
-                    through_seq,
-                    offset,
-                )
-                .await?
+                let header = header().await?;
+                self.history_pages
+                    .read(
+                        &self.routes,
+                        &input.request,
+                        &reader,
+                        offset,
+                        Identity::Facts {
+                            session: input.session_id.clone(),
+                            after: after_seq,
+                            through: through_seq,
+                        },
+                        read_facts(store, header.session_id(), after_seq, through_seq),
+                    )
+                    .await?
+            }
+            Operation::PageClose { reader } => {
+                self.routes
+                    .release_resource(&input.request, &resource_key("history", &reader)?);
+                Value::Null
             }
             Operation::SeedOpen { key } => {
                 let handle = attach().await?;
@@ -412,13 +457,12 @@ fn remote(error: &rsi_session_protocol::SessionError) -> Error {
     Error::Remote(error.to_string().chars().take(1000).collect())
 }
 
-async fn read_message(
+pub(super) async fn read_message(
     store: &dyn SessionStore,
     session: &SessionId,
     message: &rsi_agent_session_protocol::MessageId,
     accepted_control_seq: u64,
-    offset: usize,
-) -> Result<Value> {
+) -> Result<(u64, String)> {
     let after = accepted_control_seq.checked_sub(1).ok_or(Error::Protocol)?;
     let page = store
         .read_controls(
@@ -438,7 +482,7 @@ async fn read_message(
         && accepted.message_id == *message
     {
         let encoded = serde_json::to_string(&accepted).map_err(|_| Error::Protocol)?;
-        return fragment(&encoded, offset, accepted_control_seq);
+        return Ok((accepted_control_seq, encoded));
     }
     Err(Error::Remote("exact message acceptance unavailable".into()))
 }
@@ -450,8 +494,7 @@ pub(super) async fn read_facts(
     session: &SessionId,
     after: u64,
     through: u64,
-    offset: usize,
-) -> Result<Value> {
+) -> Result<(u64, String)> {
     let count = through
         .checked_sub(after)
         .filter(|count| *count > 0)
@@ -468,8 +511,7 @@ pub(super) async fn read_facts(
         return Err(Error::Protocol);
     }
     let last = page.facts.last().ok_or(Error::Protocol)?.seq();
-    let (through, encoded) = rsi_extension_agent::project_history_page(&page.facts, last)?;
-    fragment(&encoded, offset, through)
+    rsi_extension_agent::project_history_page(&page.facts, last)
 }
 
 pub(super) fn fragment(encoded: &str, offset: usize, through: u64) -> Result<Value> {
