@@ -41,20 +41,30 @@ mod maintenance;
 
 #[tokio::test]
 async fn control_fact_cuts_survive_reopen_and_reject_corrupt_anchors() {
-    for anchor in [None, Some(0), Some(3)] {
+    for mutation in [
+        None,
+        Some("UPDATE agent_controls SET fact_seq = 0 WHERE seq = 2"),
+        Some("UPDATE agent_controls SET fact_seq = 3 WHERE seq = 2"),
+        Some("DELETE FROM agent_controls WHERE seq = 1"),
+        Some("DELETE FROM agent_controls WHERE seq = 2"),
+        Some("DELETE FROM agent_controls WHERE seq = 3"),
+        Some("UPDATE sessions SET control_seq = 2"),
+        Some("UPDATE sessions SET control_seq = 4"),
+        Some(
+            "UPDATE agent_controls SET control_json = json_set(control_json, '$.seq', 4) WHERE seq = 3",
+        ),
+    ] {
         let root = private_tempdir();
         let header = test_header("control-cuts");
         let store = SqliteStore::open(root.path()).unwrap();
         rsi_agent_testkit::assert_control_fact_order(&store, header.clone()).await;
         drop(store);
-        if let Some(anchor) = anchor {
+        if let Some(sql) = mutation {
             let connection = Connection::open(root.path().join("sessions.sqlite3")).unwrap();
             connection
-                .execute(
-                    "UPDATE agent_controls SET fact_seq=?1 WHERE seq=2",
-                    [anchor],
-                )
+                .pragma_update(None, "foreign_keys", false)
                 .unwrap();
+            connection.execute_batch(sql).unwrap();
         }
         let store = SqliteStore::open(root.path()).unwrap();
         let page = store
@@ -65,16 +75,51 @@ async fn control_fact_cuts_survive_reopen_and_reject_corrupt_anchors() {
                 rsi_agent_store_protocol::MAXIMUM_STORE_CONTROL_PAGE_BYTES,
             )
             .await;
-        if anchor.is_some() {
+        if let Some(sql) = mutation {
             assert!(
-                matches!(page, Err(StoreError::Corrupt(message)) if message.contains("anchors"))
+                matches!(page, Err(StoreError::Corrupt(_))),
+                "accepted {sql}"
             );
         } else {
             assert_eq!(page.unwrap().fact_cursors, [1, 1, 2]);
         }
         drop(store);
-        assert_eq!(SqliteStore::verify(root.path()).is_ok(), anchor.is_none());
+        assert_eq!(SqliteStore::verify(root.path()).is_ok(), mutation.is_none());
     }
+}
+
+#[tokio::test]
+async fn cold_control_replay_scans_canonical_rows_once() {
+    use rusqlite::trace::{TraceEvent, TraceEventCodes};
+    static SCANS: AtomicU64 = AtomicU64::new(0);
+    fn trace(event: TraceEvent<'_>) {
+        if let TraceEvent::Profile(statement, _) = event
+            && statement.sql().contains("FROM agent_controls")
+        {
+            SCANS.fetch_add(1, Ordering::Relaxed);
+        }
+    }
+    let root = private_tempdir();
+    let header = test_header("single-control-scan");
+    let store = SqliteStore::open(root.path()).unwrap();
+    rsi_agent_testkit::assert_control_fact_order(&store, header.clone()).await;
+    drop(store);
+    let store = SqliteStore::open(root.path()).unwrap();
+    store
+        .inner
+        .connections
+        .validation_reader
+        .lock()
+        .unwrap()
+        .as_mut()
+        .unwrap()
+        .trace_v2(TraceEventCodes::SQLITE_TRACE_PROFILE, Some(trace));
+    store.validate_session(header.session_id()).await.unwrap();
+    assert_eq!(
+        SCANS.load(Ordering::Relaxed),
+        1,
+        "cold proof must check control continuity and anchors in its canonical replay"
+    );
 }
 
 #[cfg(windows)]
@@ -681,7 +726,10 @@ async fn control_projection_replay_enforces_the_individual_control_bound() {
     .unwrap();
     writer.execute("INSERT INTO agent_controls (session_id,seq,control_json,fact_seq) VALUES (?1,1,?2 || printf('%*s',?3,''),0)",
         params![header.session_id().as_str(), serde_json::to_string(&record).unwrap(), i64::try_from(MAXIMUM_SESSION_FACT_BYTES).unwrap()]).unwrap();
-    let result = crate::validation::validate_agent_indexes(writer, &header);
+    writer
+        .execute("UPDATE sessions SET control_seq = 1", [])
+        .unwrap();
+    let result = crate::validation::validate_session(writer, header.session_id());
     assert!(
         matches!(result, Err(StoreError::Corrupt(message)) if message.contains("encoded bytes")),
         "activation projection admitted an individually oversized control"

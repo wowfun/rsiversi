@@ -161,10 +161,12 @@ pub(super) fn validate_session_observed(
     session_id: &SessionId,
     observer: &mut impl CanonicalObserver,
 ) -> Result<ControlReplaySummary> {
-    let (header, durable_seq) = read_session_header_row(connection, session_id)?;
+    let (session, _) = read_session_header_source(connection, session_id)?;
+    let header = &session.header;
+    let durable_seq = session.durable_fact_seq;
     rsi_agent_store_protocol::validate_program_header(
         &super::program_graph::Graph(connection),
-        &header,
+        header,
     )
     .map_err(|error| StoreError::Corrupt(error.to_string()))?;
 
@@ -184,52 +186,9 @@ pub(super) fn validate_session_observed(
         ));
     }
 
-    let control_seq = connection
-        .query_row(
-            "SELECT control_seq FROM sessions WHERE session_id = ?1",
-            [session_id.as_str()],
-            |row| row.get::<_, i64>(0),
-        )
-        .map_err(sql_error)
-        .and_then(|value| decode_u64("control sequence", value))?;
-    let (control_count, maximum_control_sequence) = connection
-        .query_row(
-            "SELECT COUNT(*), COALESCE(MAX(seq), 0)
-             FROM agent_controls WHERE session_id = ?1",
-            [session_id.as_str()],
-            |row| Ok((row.get::<_, i64>(0)?, row.get::<_, i64>(1)?)),
-        )
-        .map_err(sql_error)?;
-    if decode_u64("session control count", control_count)? != control_seq
-        || decode_u64("session maximum control sequence", maximum_control_sequence)? != control_seq
-    {
-        return Err(StoreError::Corrupt(
-            "session control watermark differs from its contiguous control stream".into(),
-        ));
-    }
-
-    let invalid_anchor = connection
-        .query_row(
-            "SELECT EXISTS(SELECT 1 FROM (
-           SELECT fact_seq, LAG(fact_seq, 1, 0) OVER (ORDER BY seq) AS previous
-           FROM agent_controls WHERE session_id = ?1
-         ) WHERE fact_seq < previous OR fact_seq > ?2)",
-            params![
-                session_id.as_str(),
-                sqlite_u64("Fact watermark", durable_seq)?
-            ],
-            |row| row.get::<_, bool>(0),
-        )
-        .map_err(sql_error)?;
-    if invalid_anchor {
-        return Err(StoreError::Corrupt(
-            "control Fact anchors are inconsistent".into(),
-        ));
-    }
-
     validate_turn_index(connection, session_id)?;
-    validate_session_lineage(connection, &header)?;
-    validate_agent_indexes_observed(connection, &header, observer)
+    validate_session_lineage(connection, header)?;
+    validate_agent_indexes_observed(connection, &session, observer)
 }
 
 fn validate_session_lineage(connection: &Connection, header: &SessionHeader) -> Result<()> {
@@ -1438,22 +1397,13 @@ pub(super) struct ControlReplaySummary {
     pub(super) activity_ms: u64,
 }
 
-/// Decode each bounded canonical control once and feed all index projections.
-#[allow(clippy::too_many_lines)] // Validate the canonical control horizon and every dependent bounded index together.
-#[cfg(all(test, unix))]
-pub(super) fn validate_agent_indexes(
-    connection: &Connection,
-    header: &SessionHeader,
-) -> Result<ControlReplaySummary> {
-    validate_agent_indexes_observed(connection, header, &mut Unobserved)
-}
-
 #[allow(clippy::too_many_lines)] // One canonical pass validates all related projections.
 fn validate_agent_indexes_observed(
     connection: &Connection,
-    header: &SessionHeader,
+    session: &StoreRecentSession,
     observer: &mut impl CanonicalObserver,
 ) -> Result<ControlReplaySummary> {
+    let header = &session.header;
     let selected = header.session_id();
     let mut mailbox = MailboxProjection::default();
     let mut ready = ReadyProjection::default();
@@ -1461,6 +1411,7 @@ fn validate_agent_indexes_observed(
     let mut domains = super::domain::Projection::default();
     let mut programs = super::program::Projection::default();
     let mut decoded = 0_u64;
+    let mut previous_anchor = 0;
     let mut activity = rsi_agent_store_protocol::ActivityProjection::default();
     let mut digest = EMPTY_CONTROL_PREFIX_DIGEST;
     let mut terminals = 0_u64;
@@ -1471,7 +1422,7 @@ fn validate_agent_indexes_observed(
     let mut statement = connection
         .prepare(
             "SELECT length(CAST(control_json AS BLOB)),
-                CASE WHEN length(CAST(control_json AS BLOB)) <= ?1 THEN control_json END, seq
+                CASE WHEN length(CAST(control_json AS BLOB)) <= ?1 THEN control_json END, seq, fact_seq
          FROM agent_controls WHERE session_id = ?2 ORDER BY seq",
         )
         .map_err(sql_error)?;
@@ -1508,13 +1459,21 @@ fn validate_agent_indexes_observed(
                 counter.fetch_add(1, Ordering::Relaxed);
             }
         });
-        if record.seq() != decoded
+        if decoded > session.durable_control_seq
+            || record.seq() != decoded
             || decode_u64("control row sequence", row.get(2).map_err(sql_error)?)? != decoded
         {
             return Err(StoreError::Corrupt(
-                "control JSON sequence differs from its canonical row".into(),
+                "control sequence differs from its canonical row or durable watermark".into(),
             ));
         }
+        let anchor = decode_u64("control Fact anchor", row.get(3).map_err(sql_error)?)?;
+        if anchor < previous_anchor || anchor > session.durable_fact_seq {
+            return Err(StoreError::Corrupt(
+                "control Fact anchors are inconsistent".into(),
+            ));
+        }
+        previous_anchor = anchor;
         digest = advance_control_prefix_digest(digest, &record)
             .map_err(|error| StoreError::Corrupt(error.to_string()))?;
         if validate_terminal_control(connection, selected, &record, digest)? {
@@ -1566,6 +1525,11 @@ fn validate_agent_indexes_observed(
             AgentControlRecordBody::MessageSuccessor { .. }
         )
         .then_some(record);
+    }
+    if decoded != session.durable_control_seq {
+        return Err(StoreError::Corrupt(
+            "session control watermark differs from its contiguous control stream".into(),
+        ));
     }
     let (indexed_terminals, indexed_settlement, indexed_digest, indexed_pause) = connection
         .query_row(

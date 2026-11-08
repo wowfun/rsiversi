@@ -295,8 +295,11 @@ online indexed reads and offline verification; it never describes an open Turn.
 The lazy
 check does not decode every Fact JSON body, but its watermark count and
 turn-membership queries cost O(that session's history) on an uncached access.
-It streams, decodes and hashes each canonical Agent control once, checking the
-stored final control-prefix digest and terminal control prefixes and feeding separate
+It streams, decodes and hashes each canonical Agent control once. That same
+ordered pass checks row/record sequence agreement, the exact control watermark,
+and nondecreasing Fact anchors within the durable Fact watermark; it does not
+prescan the control stream for counts or anchors. It checks the
+stored final control-prefix digest and terminal control prefixes and feeds separate
 mailbox, ready, active-activation and bounded domain-head projections. Domain
 version/request membership and exact canonical update positions are verified in
 that same pass. Domain indexes retain positions and derived capacity metadata;
