@@ -810,7 +810,7 @@ impl LanguageCall for LanguageFixture {
 
 #[derive(Clone, Debug)]
 struct LanguageFixtureFactory {
-    fixture: Arc<LanguageFixture>,
+    fixture: Arc<dyn LanguageCall>,
 }
 
 #[async_trait]

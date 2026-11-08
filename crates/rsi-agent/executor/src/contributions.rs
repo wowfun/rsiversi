@@ -675,7 +675,7 @@ impl Driver {
             }
             self.sync_fold(claim, fold).await?;
         } else if !facts.is_empty() {
-            self.publish_durable(claim, fold, facts).await?;
+            self.publish(claim, fold, facts).await?;
         } else {
             self.sync_fold(claim, fold).await?;
         }

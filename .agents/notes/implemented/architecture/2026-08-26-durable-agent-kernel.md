@@ -93,6 +93,14 @@ or Tool. The same boundary suffices here: the staged state machine validates
 intent/start identity and order, and a single wait through start makes both
 durable. An intermediate intent-only acknowledgement adds a Store round trip
 without changing recovery's prohibition on replaying uncertain effects.
+Pure contribution output also joins that live suffix. Flushing preparation-only
+Facts before the side-effect-free Language preparation would add an earlier
+Store round trip without protecting another external effect. Model start,
+terminal settlement, and the existing bounded write-behind drain persist those
+Facts through their complete prefix. Domain commits and their publication
+receipts retain their atomic boundary; Tool-result retirement retains its own
+durability acknowledgement. A crash may lose unflushed preparation that has not
+authorized an external effect, just as it can lose other live-only observations.
 Cancellation first appends and durably commits its
 `CancelRequested` Fact, then fires the live cancellation token independently
 of whether the requesting future remains attached. A following

@@ -152,7 +152,12 @@ The returned view follows the [shared Jobs contract](../../rsi/session-protocol/
 Execution contributions use the claim's frozen composition. Before a new
 provider retry series, one stage captures durable Fact/control watermarks and
 domain states, invokes callbacks in catalog order, validates the complete
-output, and commits it before provider preparation. An admitted provider retry reuses those entered inputs and the original request. A post-tool stage receives one
+output, and publishes it before provider preparation. Pure Fact output joins the
+Kernel's live suffix; the next effect-start or terminal barrier makes that complete
+prefix durable. Provider preparation performs no provider I/O and needs no separate
+preparation-only flush. Domain mutations still commit atomically before their
+publication observers run. An admitted provider retry reuses those entered inputs
+and the original request. A post-tool stage receives one
 source-ordered settled batch after every successful result publication is
 durable. If a successful result waives the model follow-up, Executor first
 settles all sibling calls and the post-tool stage. Pending Tool context or
@@ -181,9 +186,9 @@ Agent-composition pin, immutable Tool catalog and unique ModelContextBuilder. De
 retained-result recovery, and commit all use that one catalog. Any admitted
 Tool retained past the main driver future carries a clone of the generation
 pin, so teardown cannot destroy the catalog or its hidden Scope while delayed
-work is settling. Every provider or Tool attempt is
-prepared, recorded, flushed, marked started, flushed again, and only then
-invoked. Immediately before Tool start, the executor must obtain the Kernel's
+work is settling. Every provider or Tool attempt is prepared, then its ordered
+intent and start are published together and the complete prefix is flushed before
+invocation. Immediately before Tool start, the executor must obtain the Kernel's
 authority for that exact started effect; rejection prevents external execution.
 Image outputs enter Media and each ref is durably flushed before the
 stream advances; later failure preserves those refs in `partial_failed`.

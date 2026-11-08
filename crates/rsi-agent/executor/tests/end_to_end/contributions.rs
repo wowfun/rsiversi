@@ -1602,3 +1602,182 @@ async fn actual_contribution_is_durable_before_the_first_provider_request() {
     assert!(callbacks.dispose().await.is_clean());
     stack.dispose(language_fiber, executor).await;
 }
+
+#[derive(Clone, Copy, Debug)]
+enum PreparationExit {
+    Start,
+    Fail,
+    Cancel,
+}
+
+#[derive(Debug)]
+struct PreparationCheckpoint {
+    language: Arc<LanguageFixture>,
+    exit: PreparationExit,
+    entered: Notify,
+    prepared_was_durable: Mutex<Vec<bool>>,
+}
+
+#[async_trait]
+impl LanguageCall for PreparationCheckpoint {
+    fn describe(
+        &self,
+        model: &ModelRef,
+    ) -> Result<rsi_ai_protocol::LanguageModelDescription, AiError> {
+        self.language.describe(model)
+    }
+
+    async fn prepare(
+        &self,
+        model: ModelRef,
+        request: LanguageRequest,
+    ) -> Result<Box<dyn PreparedLanguageCall>, AiError> {
+        // The request already includes the contribution even when its Fact is live-only.
+        assert!(
+            serde_json::to_string(&request)
+                .unwrap()
+                .contains("sample 0")
+        );
+        let session = self
+            .language
+            .store
+            .list_sessions(None, 1)
+            .await
+            .unwrap()
+            .sessions
+            .remove(0);
+        let facts = self
+            .language
+            .store
+            .read_facts(
+                &session,
+                0,
+                64,
+                rsi_agent_store_protocol::MAXIMUM_STORE_FACT_PAGE_BYTES,
+            )
+            .await
+            .unwrap()
+            .facts;
+        self.prepared_was_durable.lock().unwrap().push(
+            facts
+                .iter()
+                .any(|fact| matches!(fact.body(), SessionFactBody::StepInputsPrepared { .. })),
+        );
+        match self.exit {
+            PreparationExit::Start => self.language.prepare(model, request).await,
+            PreparationExit::Fail => Err(AiError::new(
+                ErrorKind::InvalidRequest,
+                ErrorPhase::Prepare,
+                DispatchStatus::NotDispatched,
+                "fixture preparation rejected",
+            )
+            .unwrap()),
+            PreparationExit::Cancel => {
+                self.entered.notify_one();
+                std::future::pending().await
+            }
+        }
+    }
+}
+
+#[tokio::test(start_paused = true)]
+async fn preparation_uses_the_next_effect_or_terminal_durability_barrier() {
+    for exit in [
+        PreparationExit::Start,
+        PreparationExit::Fail,
+        PreparationExit::Cancel,
+    ] {
+        let stack = BaseStack::activate().await;
+        let callbacks = install(
+            &stack,
+            vec![ContributionRegistration::new(
+                ContributionId::new("fixture.time").unwrap(),
+                0,
+                ContributionKind::Context(Arc::new(SampleTime::default())),
+            )],
+        )
+        .await;
+        let language = Arc::new(LanguageFixture {
+            outcomes: Mutex::new(VecDeque::from([StartOutcome::Stream(answer_script())])),
+            requests: Mutex::new(vec![]),
+            starts: Arc::new(AtomicUsize::new(0)),
+            store: stack.store.clone(),
+            retry_policy: RetryPolicy::default(),
+        });
+        let checkpoint = Arc::new(PreparationCheckpoint {
+            language: language.clone(),
+            exit,
+            entered: Notify::new(),
+            prepared_was_durable: Mutex::new(vec![]),
+        });
+        let language_fiber = activate_fixture(
+            &stack.runtime,
+            "test.preparation",
+            "1",
+            Arc::new(LanguageFixtureFactory {
+                fixture: checkpoint.clone(),
+            }),
+        )
+        .await;
+        let executor = stack.activate_executor("executor-preparation").await;
+        let turns = stack
+            .runtime
+            .root()
+            .lookup_local::<TurnServiceContract>()
+            .unwrap();
+        let submitted = stack
+            .submit_fresh(&turns, "preparation-prefix", "work")
+            .await;
+        if matches!(exit, PreparationExit::Cancel) {
+            checkpoint.entered.notified().await;
+            turns
+                .cancel(&submitted.session_id, &submitted.turn_id, None)
+                .await
+                .unwrap();
+        }
+        let outcome = wait_for_outcome(&turns, &submitted).await;
+        match exit {
+            PreparationExit::Start => assert_eq!(outcome, TurnOutcome::Completed),
+            PreparationExit::Fail => {
+                assert!(matches!(outcome, TurnOutcome::Failed { ref code, .. }
+                if code == "provider.invalid_request"))
+            }
+            PreparationExit::Cancel => assert_eq!(outcome, TurnOutcome::Cancelled),
+        }
+        let facts = stack
+            .store
+            .read_facts(
+                &submitted.session_id,
+                0,
+                64,
+                rsi_agent_store_protocol::MAXIMUM_STORE_FACT_PAGE_BYTES,
+            )
+            .await
+            .unwrap()
+            .facts;
+        assert!(
+            facts
+                .iter()
+                .any(|fact| matches!(fact.body(), SessionFactBody::StepInputsPrepared { .. }))
+        );
+        assert!(facts.iter().any(|fact| matches!(
+            fact.body(),
+            SessionFactBody::InputMessageClaimed {
+                source: InputMessageSource::PluginContext { .. },
+                ..
+            }
+        )));
+        // PreparedScript::start independently checks the durable intent/start prefix.
+        assert_eq!(
+            language.starts.load(Ordering::Acquire),
+            usize::from(matches!(exit, PreparationExit::Start))
+        );
+        assert!(callbacks.dispose().await.is_clean());
+        stack.dispose(language_fiber, executor).await;
+        assert_eq!(
+            *checkpoint.prepared_was_durable.lock().unwrap(),
+            [false],
+            "{exit:?}"
+        );
+    }
+}

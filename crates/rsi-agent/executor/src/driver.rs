@@ -2229,7 +2229,7 @@ impl Driver {
         ));
     }
 
-    pub(super) async fn publish_durable(
+    pub(super) async fn publish(
         &self,
         claim: &TurnClaim,
         fold: &mut ModelContextState,
@@ -2256,6 +2256,16 @@ impl Driver {
             fold.ingest(ContextPage::Canonical(&facts[unapplied..]))
                 .map_err(|error| context_failure("context.incremental", &error))?;
         }
+        Ok(receipt)
+    }
+
+    pub(super) async fn publish_durable(
+        &self,
+        claim: &TurnClaim,
+        fold: &mut ModelContextState,
+        bodies: Vec<SessionFactBody>,
+    ) -> std::result::Result<rsi_agent_turn_protocol::PublishedFacts, DriveFailure> {
+        let receipt = self.publish(claim, fold, bodies).await?;
         let seq = receipt
             .facts()
             .last()

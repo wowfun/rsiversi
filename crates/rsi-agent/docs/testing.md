@@ -132,7 +132,10 @@ session. The same latch rejects later submissions to the failed session.
 Recovery preserves durable cancellation classification, and direct execution
 tests prove an ordered intent/start publication preserves exact identities and
 rejects invalid batches without partial admission. Executor tests require the
-complete prefix to be durable before provider or Tool invocation. Shutdown
+complete prefix to be durable before provider or Tool invocation. A paused-clock
+executor test allows pure contribution output to remain live during provider
+preparation, then checks durable evidence on successful dispatch, preparation
+failure and cancellation. Shutdown
 waits on every captured session even when one fails, and a
 claim-horizon test submits a later private prompt before the first claim and
 proves that prompt is absent from the earlier model request.
