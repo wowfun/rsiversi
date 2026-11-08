@@ -63,7 +63,8 @@ subscriptions to the authenticated `ApiContext.origin`. It never falls through t
 the unscoped Local Session service. Handles recheck location Use for new operations;
 stream frames recheck before publication without retaining draft or composition pins.
 
-The current Session format is 30. Operations negotiate their own versions:
+The durable format follows the [Agent Session protocol](../../rsi-agent/session-protocol/README.md).
+API operations negotiate their own versions:
 create v12; recent v11; inspect, draft-snapshot and select-preset v10;
 attach and observe v9. Draft responses include the exact held command-input
 batch, bounded by 256 KiB in addition to the Header and envelope. Clients validate
