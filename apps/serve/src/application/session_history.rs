@@ -31,6 +31,11 @@ enum Operation {
         #[serde(default)]
         metadata_only: bool,
     },
+    Capture {
+        reader: String,
+        after: ObservationCursor,
+        offset: usize,
+    },
     Controls {
         reader: String,
         after_seq: u64,
@@ -108,6 +113,33 @@ impl Sessions {
             .ok_or_else(unavailable)
         };
         let result = match input.operation {
+            Operation::Capture {
+                reader,
+                after,
+                offset,
+            } => {
+                self.history_pages
+                    .read(
+                        &self.routes,
+                        &input.request,
+                        &reader,
+                        offset,
+                        Identity::Capture {
+                            session: input.session_id.clone(),
+                            parent: input.parent_session_id.clone(),
+                            fact: after.fact_seq,
+                            control: after.control_seq,
+                        },
+                        super::session_capture::capture(
+                            store,
+                            service.as_ref(),
+                            &input.session_id,
+                            input.parent_session_id.as_ref(),
+                            after,
+                        ),
+                    )
+                    .await?
+            }
             Operation::Open {
                 metadata_only: true,
             } => {
@@ -313,7 +345,7 @@ async fn find_handle(
     Ok(Some(handle))
 }
 
-async fn find_summary(
+pub(super) async fn find_summary(
     service: &dyn SessionService,
     session: &SessionId,
     parent: Option<&SessionId>,
@@ -520,7 +552,11 @@ pub(super) async fn read_facts(
         return Err(Error::Protocol);
     }
     let last = page.facts.last().ok_or(Error::Protocol)?.seq();
-    rsi_extension_agent::project_history_page(&page.facts, last)
+    rsi_extension_agent::project_history_page(
+        &page.facts,
+        last,
+        rsi_agent_session_protocol::MAXIMUM_SESSION_FACT_BYTES + 2,
+    )
 }
 
 pub(super) fn fragment(encoded: &str, offset: usize, through: u64) -> Result<Value> {

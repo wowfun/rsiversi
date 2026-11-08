@@ -151,6 +151,7 @@ impl HistoryRouter {
             let (through, json) = project_history_page(
                 page.facts.iter().map(Arc::as_ref),
                 page.through_seq.min(end),
+                rsi_agent_session_protocol::MAXIMUM_SESSION_FACT_BYTES + 2,
             )?;
             *slot = Some(Page {
                 after: request.after_seq,

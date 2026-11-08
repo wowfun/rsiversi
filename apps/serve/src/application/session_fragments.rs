@@ -8,6 +8,12 @@ use tokio::sync::{OwnedSemaphorePermit, Semaphore};
 
 #[derive(Debug, Eq, PartialEq)]
 pub(super) enum Identity {
+    Capture {
+        session: SessionId,
+        parent: Option<SessionId>,
+        fact: u64,
+        control: u64,
+    },
     Facts {
         session: SessionId,
         parent: Option<SessionId>,

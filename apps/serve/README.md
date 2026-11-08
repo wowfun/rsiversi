@@ -329,6 +329,22 @@ returns null for an unpublished draft. Other read failures remain errors. The ca
 selects the history cut, while the control watermark identifies its independent
 selection revision. An absent producer uses the immutable Header baseline.
 A failed producer is reported rather than replaced with a default.
+The durable `capture` operation accepts the caller's already projected Fact and
+control positions. It authorizes one fresh summary and returns that metadata
+with the first missing Fact and control slices at its cut. It does not attach
+a Session or read a live projection. Absent or inaccessible Sessions return a
+null capture; positions ahead of the captured cut are invalid. Unchanged streams
+carry no page. Each slice reports its own covered position; control Fact anchors
+remain unchanged even when its paired Fact slice ends earlier.
+The entire encoded capture fits the ordinary history page budget, including
+metadata and both slices. The remaining budget is shared between advancing
+streams. An individual record that cannot fit is left to the ordinary paged
+reader; capture does not retry with a larger Store allocation or retain a second
+page. Captures use
+the same two prepared-page reservations and fragmentation lifetime as other
+history pages. Their identity binds the Session, parent and both starting
+positions; continuations do not recapture a newer cut. Every new capture
+authorizes afresh. Listing metadata does not read event bodies.
 Fact, control and exact acceptance history reads authorize the
 durable Header directly and use the Store, without allocating a Session handle
 or opening runtime activity. Every read checks caller retirement before returning;

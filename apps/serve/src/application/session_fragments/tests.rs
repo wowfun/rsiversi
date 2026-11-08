@@ -128,6 +128,12 @@ async fn continuation_preserves_parent_authority_and_rejects_revoked_callers() {
         let session = SessionId::new("child").unwrap();
         let parent = parent.map(|value| SessionId::new(value).unwrap());
         [
+            Identity::Capture {
+                session: session.clone(),
+                parent: parent.clone(),
+                fact: 0,
+                control: 0,
+            },
             Identity::Facts {
                 session: session.clone(),
                 parent: parent.clone(),
@@ -182,6 +188,59 @@ async fn continuation_preserves_parent_authority_and_rejects_revoked_callers() {
             Err(Error::Cancelled)
         ));
     }
+}
+
+#[tokio::test]
+async fn control_only_capture_fragments_bind_both_positions_without_recapturing() {
+    let reader = FragmentReader::new();
+    let identity = |fact, control| Identity::Capture {
+        session: SessionId::new("one").unwrap(),
+        parent: None,
+        fact,
+        control,
+    };
+    let body = serde_json::to_string(&"\\\n".repeat(200_000)).unwrap();
+    let first = reader
+        .read("capture", 0, identity(0, 1), async {
+            Ok((0, body.clone()))
+        })
+        .await
+        .unwrap();
+    assert_eq!(first["through_seq"], 0);
+    let mut offset = first["next_offset"].as_u64().unwrap() as usize;
+    assert!(
+        offset < body.len(),
+        "escaped capture must span multiple frames"
+    );
+    for altered in [identity(1, 1), identity(0, 2)] {
+        assert!(matches!(
+            reader
+                .read("capture", offset, altered, async {
+                    panic!("changed coordinates must not recapture")
+                })
+                .await,
+            Err(Error::Protocol)
+        ));
+    }
+    let mut joined = first["json"].as_str().unwrap().to_owned();
+    while offset < body.len() {
+        let page = reader
+            .read("capture", offset, identity(0, 1), async {
+                panic!("continuation must reuse the first authorized capture")
+            })
+            .await
+            .unwrap();
+        assert_eq!(page["through_seq"], 0);
+        joined.push_str(page["json"].as_str().unwrap());
+        offset = page["next_offset"].as_u64().unwrap() as usize;
+    }
+    assert_eq!(joined, body);
+    reader
+        .read("capture", 0, identity(0, 1), async {
+            Ok((0, "null".into()))
+        })
+        .await
+        .unwrap();
 }
 
 #[tokio::test]

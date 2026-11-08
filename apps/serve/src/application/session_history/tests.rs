@@ -4,7 +4,18 @@ use rsi_session_protocol::{CreateSession, RecentSessionCursor, RecentSessionPage
 use std::sync::Arc;
 
 #[derive(Debug)]
-struct MetadataService(Vec<rsi_session_protocol::SessionSummary>);
+struct MetadataService {
+    rows: Vec<rsi_session_protocol::SessionSummary>,
+    reads: std::sync::atomic::AtomicUsize,
+}
+impl MetadataService {
+    fn new(rows: Vec<rsi_session_protocol::SessionSummary>) -> Self {
+        Self {
+            rows,
+            reads: std::sync::atomic::AtomicUsize::new(0),
+        }
+    }
+}
 
 #[async_trait::async_trait]
 impl SessionService for MetadataService {
@@ -12,11 +23,13 @@ impl SessionService for MetadataService {
         &self,
         id: &SessionId,
     ) -> rsi_session_protocol::Result<rsi_session_protocol::SessionSummary> {
+        self.reads
+            .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
         match id.as_str() {
             "denied" => Err(SessionError::Api(rsi_api_protocol::ApiError::Unauthorized)),
             "failed" => Err(SessionError::Backend("read failed".into())),
             _ => self
-                .0
+                .rows
                 .iter()
                 .find(|row| row.header.session_id() == id)
                 .cloned()
@@ -130,7 +143,7 @@ async fn metadata_reads_do_not_attach_and_preserve_visibility_and_failures() {
     use rsi_agent_testkit::MemoryStore;
     let header = metadata_header("metadata");
     let id = header.session_id();
-    let service = MetadataService(vec![]);
+    let service = MetadataService::new(vec![]);
     let store = MemoryStore::default();
     // No durable row, including an unpublished draft, is not an error.
     assert_eq!(
@@ -160,7 +173,7 @@ async fn metadata_reads_do_not_attach_and_preserve_visibility_and_failures() {
         })
         .await
         .unwrap();
-    let service = MetadataService(vec![store.session_summary(id).await.unwrap()]);
+    let service = MetadataService::new(vec![store.session_summary(id).await.unwrap()]);
     let snapshot = metadata_snapshot(&service, id, None).await.unwrap();
     assert_eq!(snapshot["id"], id.as_str());
     assert_eq!(snapshot["created_at"], 1);
@@ -225,7 +238,7 @@ async fn metadata_parent_address_requires_visible_direct_parent() {
         durable_fact_seq: 7,
         durable_control_seq: 9,
     };
-    let service = MetadataService(vec![
+    let service = MetadataService::new(vec![
         summary(parent.clone()),
         summary(child.clone()),
         summary(other.clone()),
@@ -237,7 +250,7 @@ async fn metadata_parent_address_requires_visible_direct_parent() {
             .unwrap()["selection_cursor"],
         json!({"kind":"durable","fact_seq":7,"control_seq":9})
     );
-    let hidden_parent = MetadataService(vec![summary(child.clone())]);
+    let hidden_parent = MetadataService::new(vec![summary(child.clone())]);
     assert!(
         metadata_snapshot(
             &hidden_parent,
@@ -354,6 +367,162 @@ async fn control_pages_keep_moderate_acceptances_and_transitions_in_one_read() {
                 .is_err()
         );
     }
+}
+
+#[tokio::test]
+async fn capture_authorizes_once_and_keeps_both_streams_at_its_cut() {
+    use super::super::session_capture::capture;
+    use rsi_agent_session_protocol::{SessionFact, SessionFactBody, TurnId};
+    use rsi_agent_store_protocol::AppendBatch;
+    let (store, header, message) = withdrawn_message_fixture("captured input".into()).await;
+    let id = header.session_id();
+    let control_only = MetadataService::new(vec![store.session_summary(id).await.unwrap()]);
+    let fact = |seq| {
+        Arc::new(
+            SessionFact::new(
+                seq,
+                seq + 2,
+                SessionFactBody::TurnAccepted {
+                    turn_id: TurnId::new(format!("turn-{seq}")).unwrap(),
+                    text: "native input".into(),
+                    model: None,
+                    reasoning_effort: None,
+                    sandbox: rsi_sandbox::SandboxMode::WorkspaceWrite,
+                    require_approval: false,
+                },
+            )
+            .unwrap(),
+        )
+    };
+    store
+        .append(AppendBatch {
+            session_id: id.clone(),
+            expected_seq: 0,
+            header: None,
+            facts: vec![fact(1)],
+        })
+        .await
+        .unwrap();
+    let service = MetadataService::new(vec![store.session_summary(id).await.unwrap()]);
+    // A later append is outside this captured summary even when the page read sees it.
+    store
+        .append(AppendBatch {
+            session_id: id.clone(),
+            expected_seq: 1,
+            header: None,
+            facts: vec![fact(2)],
+        })
+        .await
+        .unwrap();
+    let zero = ObservationCursor {
+        fact_seq: 0,
+        control_seq: 0,
+    };
+    let (through, encoded) = capture(&store, &service, id, None, zero).await.unwrap();
+    assert_eq!(service.reads.load(std::sync::atomic::Ordering::Relaxed), 1);
+    assert_eq!(through, 1);
+    assert!(encoded.len() <= HISTORY_PAGE_BYTES);
+    let page: Value = serde_json::from_str(&encoded).unwrap();
+    assert_eq!(
+        page["meta"]["selection_cursor"],
+        json!({"kind":"durable","fact_seq":1,"control_seq":2})
+    );
+    assert_eq!(page["facts"]["through"], 1);
+    assert_eq!(page["facts"]["value"].as_array().unwrap().len(), 1);
+    assert_eq!(page["controls"]["through"], 2);
+    assert_eq!(page["controls"]["value"][0]["message"], json!(message));
+    assert_eq!(page["controls"]["value"][0]["after_fact_seq"], 0);
+    let (_, unchanged) = capture(
+        &store,
+        &service,
+        id,
+        None,
+        ObservationCursor {
+            fact_seq: 1,
+            control_seq: 2,
+        },
+    )
+    .await
+    .unwrap();
+    let unchanged: Value = serde_json::from_str(&unchanged).unwrap();
+    assert!(unchanged["facts"].is_null() && unchanged["controls"].is_null());
+    let (through, encoded) = capture(&store, &control_only, id, None, zero)
+        .await
+        .unwrap();
+    let page: Value = serde_json::from_str(&encoded).unwrap();
+    assert_eq!(through, 0);
+    assert!(page["facts"].is_null());
+    assert_eq!(page["controls"]["through"], 2);
+    assert!(matches!(
+        capture(
+            &store,
+            &service,
+            id,
+            None,
+            ObservationCursor {
+                fact_seq: 2,
+                control_seq: 2
+            }
+        )
+        .await,
+        Err(Error::Protocol)
+    ));
+    assert_eq!(
+        capture(
+            &store,
+            &service,
+            &SessionId::new("denied").unwrap(),
+            None,
+            zero
+        )
+        .await
+        .unwrap(),
+        (0, "null".into())
+    );
+    assert!(
+        capture(
+            &store,
+            &service,
+            id,
+            Some(&SessionId::new("missing-parent").unwrap()),
+            zero
+        )
+        .await
+        .is_err()
+    );
+}
+
+#[tokio::test]
+async fn capture_defers_an_oversized_record_to_ordinary_history_without_losing_the_cut() {
+    use super::super::session_capture::capture;
+    let (store, header, message) = withdrawn_message_fixture("x".repeat(HISTORY_PAGE_BYTES)).await;
+    let id = header.session_id();
+    let service = MetadataService::new(vec![store.session_summary(id).await.unwrap()]);
+    let (through, encoded) = capture(
+        &store,
+        &service,
+        id,
+        None,
+        ObservationCursor {
+            fact_seq: 0,
+            control_seq: 0,
+        },
+    )
+    .await
+    .unwrap();
+    assert_eq!(through, 0);
+    assert!(encoded.len() < 4096);
+    let page: Value = serde_json::from_str(&encoded).unwrap();
+    assert_eq!(page["meta"]["selection_cursor"]["control_seq"], 2);
+    assert!(page["controls"].is_null());
+    let (through, events) = super::super::session_controls::read_controls(&store, &header, 0, 2)
+        .await
+        .unwrap();
+    assert_eq!(through, 1);
+    assert_eq!(
+        serde_json::from_str::<Value>(&events).unwrap()[0]["message"],
+        json!(message)
+    );
 }
 
 #[tokio::test]
@@ -503,7 +672,12 @@ async fn stored_pages_inline_normalized_attempts_and_preserve_unicode() {
         })
         .await
         .unwrap();
-    let (_, expected) = rsi_extension_agent::project_history_page([fact.as_ref()], 2).unwrap();
+    let (_, expected) = rsi_extension_agent::project_history_page(
+        [fact.as_ref()],
+        2,
+        rsi_agent_session_protocol::MAXIMUM_SESSION_FACT_BYTES + 2,
+    )
+    .unwrap();
     let projected: Value = serde_json::from_str(&expected).unwrap();
     assert!(projected[0]["attempt"].get("chunks").is_none());
     assert!(projected[0]["attempt"]["events"].is_array());

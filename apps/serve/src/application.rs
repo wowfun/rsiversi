@@ -13,6 +13,7 @@ use std::{path::PathBuf, sync::Arc};
 #[cfg(test)]
 mod lease_tests;
 mod model_catalog;
+mod session_capture;
 mod session_command;
 mod session_commands;
 mod session_controls;

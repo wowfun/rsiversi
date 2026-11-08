@@ -74,6 +74,13 @@ impl Write for Bounded {
         if self.bytes.len().saturating_add(bytes.len()) > self.maximum {
             return Err(std::io::Error::other("history page capacity"));
         }
+        let needed = self.bytes.len() + bytes.len();
+        if needed > self.bytes.capacity() {
+            let capacity = needed
+                .max(self.bytes.capacity().saturating_mul(2))
+                .min(self.maximum);
+            self.bytes.reserve_exact(capacity - self.bytes.len());
+        }
         self.bytes.extend_from_slice(bytes);
         Ok(bytes.len())
     }
@@ -88,23 +95,16 @@ impl Write for Bounded {
 ///
 /// # Errors
 /// Returns capacity for an individually oversized projection, or protocol for an
-/// invalid canonical event. No partial Fact is returned.
+/// invalid canonical event or a budget outside the serialized Fact ceiling.
+/// No partial Fact is returned.
 pub fn project_history_page<'a>(
-    facts: impl IntoIterator<Item = &'a SessionFact>,
-    through: u64,
-) -> Result<(u64, String)> {
-    encode_page(
-        facts,
-        through,
-        rsi_agent_session_protocol::MAXIMUM_SESSION_FACT_BYTES + 2,
-    )
-}
-
-fn encode_page<'a>(
     facts: impl IntoIterator<Item = &'a SessionFact>,
     mut through: u64,
     maximum: usize,
 ) -> Result<(u64, String)> {
+    if !(2..=rsi_agent_session_protocol::MAXIMUM_SESSION_FACT_BYTES + 2).contains(&maximum) {
+        return Err(Error::Protocol);
+    }
     let mut output = Bounded {
         bytes: vec![b'['],
         maximum: maximum - 1,
@@ -114,8 +114,9 @@ fn encode_page<'a>(
             break;
         }
         let start = output.bytes.len();
-        if start > 1 {
-            output.bytes.push(b',');
+        if start > 1 && output.write_all(b",").is_err() {
+            through = fact.seq() - 1;
+            break;
         }
         if let Err(error) = serde_json::to_writer(&mut output, &Fact(fact)) {
             if !error.is_io() {
@@ -129,6 +130,7 @@ fn encode_page<'a>(
             break;
         }
     }
+    output.bytes.reserve_exact(1);
     output.bytes.push(b']');
     Ok((
         through,
@@ -139,6 +141,20 @@ fn encode_page<'a>(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn encoding_growth_stays_within_the_supplied_budget() {
+        let mut output = Bounded {
+            bytes: vec![b'['],
+            maximum: 101,
+        };
+        for _ in 0..10 {
+            output.write_all(b"0123456789").unwrap();
+            assert!(output.bytes.capacity() <= output.maximum);
+        }
+        assert!(output.write_all(b"x").is_err());
+        assert_eq!(output.bytes.len(), 101);
+    }
 
     #[test]
     fn page_capacity_keeps_whole_facts_and_claim_invisible_cursors() {
@@ -155,15 +171,30 @@ mod tests {
         };
         let facts = [fact(2), fact(5)];
         let expected = serde_json::to_string(&facts[..1]).unwrap();
-        let (through, json) = encode_page(&facts, 7, expected.len()).unwrap();
+        let (through, json) = project_history_page(&facts, 7, expected.len()).unwrap();
         assert_eq!(through, 4);
         assert_eq!(json, expected);
         assert!(matches!(
-            encode_page(&facts, 7, expected.len() - 1),
+            project_history_page(&facts, 7, expected.len() - 1),
             Err(Error::Capacity)
         ));
-        assert_eq!(encode_page([], 7, 2).unwrap(), (7, "[]".into()));
-        let (through, json) = project_history_page(&facts, 7).unwrap();
+        assert_eq!(project_history_page([], 7, 2).unwrap(), (7, "[]".into()));
+        for maximum in [
+            0,
+            1,
+            rsi_agent_session_protocol::MAXIMUM_SESSION_FACT_BYTES + 3,
+        ] {
+            assert!(matches!(
+                project_history_page([], 7, maximum),
+                Err(Error::Protocol)
+            ));
+        }
+        let (through, json) = project_history_page(
+            &facts,
+            7,
+            rsi_agent_session_protocol::MAXIMUM_SESSION_FACT_BYTES + 2,
+        )
+        .unwrap();
         assert_eq!(through, 7);
         assert_eq!(json, serde_json::to_string(&facts).unwrap());
     }

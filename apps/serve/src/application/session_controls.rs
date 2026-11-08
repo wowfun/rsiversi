@@ -80,6 +80,15 @@ pub(super) async fn read_controls(
         result => result,
     }
     .map_err(|error| Error::Remote(error.to_string()))?;
+    encode_controls(header, page, after, through)
+}
+
+pub(super) fn encode_controls(
+    header: &SessionHeader,
+    page: rsi_agent_store_protocol::StoreControlPage,
+    after: u64,
+    through: u64,
+) -> Result<(u64, String)> {
     if through > page.durable_seq {
         return Err(Error::Protocol);
     }

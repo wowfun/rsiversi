@@ -94,7 +94,11 @@ fragmented history reader also carries large batches across process replacement.
 Before loading the plugin, the adapter checks that the journal head still has the captured revision. Journal publication uses that revision for compare-and-swap.
 The request carries the native selection and any preceding preset decision. Its staged reply supplies an ordered input decision over captured claims. Downstream preparation may edit the entered list. The receipt must contain the final decision for the same Turn and Step alongside the journal commit. A staged rejection prevents later input preparation. Small decisions travel inline. Larger edits remain operation-scoped and cross the existing process frame boundary in UTF-8 fragments of up to 128 KiB. The host validates the reconstructed decision against the native preparation budget.
 History pages are transient read views, not another durable Fact format. A
-`model_attempt_settled` row retains its sequence, timestamp, Turn, effect and
+caller supplies the encoded page budget, from two bytes through the existing
+serialized Fact ceiling. Encoding stops before the first Fact that would exceed
+the budget; an individually oversized first Fact returns capacity. It never
+returns part of a Fact or allocates beyond the supplied encoding budget.
+Each `model_attempt_settled` row retains its sequence, timestamp, Turn, effect and
 purpose, but its `attempt` contains `retain_context` and ordered
 `(elapsed_ms, LanguageEvent)` values from the canonical decoder. Other rows
 retain their canonical representation. The encoded attempt chunks are not sent
