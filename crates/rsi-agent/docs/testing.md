@@ -20,6 +20,11 @@ rollback and zero interval. Context tests distinguish claimed, omitted, emptied
 and entered input, including checkpoint recovery, selected fork history and Turn
 eviction. The executor checks that the next preparation after a Tool result sees
 the entered input's original Fact timestamp without adding another copy.
+Agent catalog tests exercise current Step guidance through file edits, removals,
+typed source failures and recovery. Human mention names are rechecked against
+each current catalog without adding historical instruction inputs. Live checks
+verify one catalog copy per request, stable repeated system evidence and cold
+continuation; the Context projection target owns Step replacement and expiry.
 Workflow settlement tests drive the production observation loop and terminal
 cleanup, including runtime retirement with a still-pending Program result.
 Paused-clock tests bound both queued and admitted observation commands, preserve

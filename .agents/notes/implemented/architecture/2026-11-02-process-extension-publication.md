@@ -91,6 +91,16 @@ The fold cache format changes independently of the builder's message semantics.
 Keeping the semantic identity avoids rejecting existing, still-valid summaries
 just to rebuild timing metadata from their source Facts.
 
+The available-agent catalog also uses current Step instructions. DSH assembles
+registered system-prompt sections for the current request; a native catalog
+formerly appended the same replacement-marked instruction on every retry series,
+but replacement affected compaction protection rather than immediate projection.
+The existing BeforeStep instruction slot preserves current discovery, Human
+mentions and source diagnostics without retaining every earlier catalog in model
+history. Another registry or a last-good catalog cache would duplicate ownership
+and could hide changed or removed definitions. The existing Step preparation
+remains the durable retry/recovery receipt; this does not change spawn authority.
+
 Operation-scoped history reads borrow the captured claim-visible reader. Their
 consumed cursor is extension checkpoint data and advances with the journal's
 atomic publication. UTF-8 fragment transfer preserves the existing maximum Fact
