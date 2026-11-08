@@ -1,6 +1,12 @@
 use super::*;
 use rsi_agent_store_protocol::MAXIMUM_STORE_FACT_PAGE_BYTES as FACT_PAGE_BYTES;
 
+fn approval_header() -> SessionHeader {
+    let mut wire = serde_json::to_value(header()).unwrap();
+    wire["settings"]["require_approval"] = true.into();
+    serde_json::from_value(wire).unwrap()
+}
+
 #[derive(Debug)]
 struct AuthenticatedEcho(EchoTool);
 
@@ -863,6 +869,105 @@ async fn frozen_role_hides_tools_before_any_intent_and_does_not_mutate_other_cla
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn standing_sandbox_does_not_override_explicit_approval_policy() {
+    #[derive(Debug, Default)]
+    struct CountApproval(AtomicUsize);
+    #[async_trait]
+    impl Approval for CountApproval {
+        async fn ask(
+            &self,
+            _request: ApprovalRequest,
+            _stop: CancellationToken,
+        ) -> rsi_approval_protocol::Result<ApprovalOutcome> {
+            self.0.fetch_add(1, Ordering::SeqCst);
+            Ok(ApprovalOutcome {
+                decision: ApprovalDecision::Deny,
+                answerer: "test".into(),
+                reason: None,
+            })
+        }
+    }
+    for mode in [SandboxMode::WorkspaceWrite, SandboxMode::DangerFullAccess] {
+        for require_approval in [false, true] {
+            let approval = Arc::new(CountApproval::default());
+            let stack = BaseStack::activate_with_answerer(approval.clone()).await;
+            let calls = Arc::new(AtomicUsize::new(0));
+            let lease = stack
+                .tool_registrar
+                .register(ToolRegistration {
+                    output: None,
+                    definition: ToolDefinition::new("echo", "echo JSON", json!({"type":"object"}))
+                        .unwrap(),
+                    timeout: rsi_tools_protocol::ToolTimeoutPolicy::Execution { timeout_ms: 2_000 },
+                    executor: Arc::new(EchoTool {
+                        store: stack.store.clone(),
+                        calls: calls.clone(),
+                    }),
+                })
+                .unwrap();
+            let language = stack
+                .activate_language(
+                    "test.language",
+                    Arc::new(LanguageFixture {
+                        outcomes: Mutex::new(VecDeque::from([
+                            StartOutcome::Stream(tool_calls_script(&[
+                                ("first", "echo", r#"{"value":1}"#),
+                                ("second", "echo", r#"{"value":2}"#),
+                            ])),
+                            StartOutcome::Stream(answer_script()),
+                        ])),
+                        requests: Mutex::default(),
+                        starts: Arc::new(AtomicUsize::new(0)),
+                        store: stack.store.clone(),
+                        retry_policy: RetryPolicy::default(),
+                    }),
+                )
+                .await;
+            let executor = stack.activate_executor("standing-permission").await;
+            let mut wire = serde_json::to_value(header()).unwrap();
+            wire["settings"]["sandbox"] = serde_json::to_value(mode).unwrap();
+            wire["settings"]["require_approval"] = require_approval.into();
+            let override_mode =
+                (mode == SandboxMode::WorkspaceWrite).then_some(SandboxMode::DangerFullAccess);
+            let (submitted, outcome) = stack
+                .submit_and_wait_with_header(
+                    "call echo twice",
+                    override_mode,
+                    serde_json::from_value(wire).unwrap(),
+                )
+                .await;
+            assert_eq!(outcome, TurnOutcome::Completed);
+            assert_eq!(
+                approval.0.load(Ordering::SeqCst),
+                if require_approval { 2 } else { 0 }
+            );
+            assert_eq!(
+                calls.load(Ordering::SeqCst),
+                if require_approval { 0 } else { 2 }
+            );
+            let facts = stack
+                .store
+                .read_facts(&submitted.session_id, 0, 64, FACT_PAGE_BYTES)
+                .await
+                .unwrap()
+                .facts;
+            assert!(matches!(facts[0].body(), SessionFactBody::TurnAccepted {
+                sandbox: SandboxMode::DangerFullAccess, require_approval: actual, ..
+            } if *actual == require_approval));
+            assert_eq!(
+                facts
+                    .iter()
+                    .filter(|fact| matches!(fact.body(), SessionFactBody::ToolRejected { .. }))
+                    .count(),
+                if require_approval { 2 } else { 0 }
+            );
+            drop(lease);
+            stack.dispose(language, executor).await;
+        }
+    }
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn denied_approval_persists_the_prepared_call_without_starting_the_tool() {
     let stack = BaseStack::activate_with_approval(ApprovalDecision::Deny).await;
     let calls = Arc::new(AtomicUsize::new(0));
@@ -893,7 +998,11 @@ async fn denied_approval_persists_the_prepared_call_without_starting_the_tool() 
         .await;
     let executor = stack.activate_executor("executor-deny").await;
     let (submitted, outcome) = stack
-        .submit_and_wait_with_sandbox("call echo", Some(SandboxMode::DangerFullAccess))
+        .submit_and_wait_with_header(
+            "call echo",
+            Some(SandboxMode::DangerFullAccess),
+            approval_header(),
+        )
         .await;
     assert_eq!(outcome, TurnOutcome::Completed);
     assert_eq!(calls.load(Ordering::Acquire), 0);
@@ -967,7 +1076,11 @@ async fn executor_persists_intent_and_start_before_model_and_tool_io() {
         .await;
     let executor_fiber = stack.activate_executor("executor-1").await;
     let (submitted, outcome) = stack
-        .submit_and_wait_with_sandbox("call echo", Some(SandboxMode::DangerFullAccess))
+        .submit_and_wait_with_header(
+            "call echo",
+            Some(SandboxMode::DangerFullAccess),
+            approval_header(),
+        )
         .await;
     assert_eq!(outcome, TurnOutcome::Completed);
     assert_eq!(fixture.starts.load(Ordering::Acquire), 2);

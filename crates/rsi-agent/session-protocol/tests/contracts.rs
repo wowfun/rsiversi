@@ -609,38 +609,51 @@ fn settings_fingerprint_is_canonical_and_secrets_have_no_field() {
 }
 
 #[test]
-fn unconfined_settings_require_live_approval() {
+fn sandbox_and_approval_are_independent_durable_settings() {
     let model = ModelRef::new("openai", "gpt-test").unwrap();
-    assert!(
-        FrozenAgentSettings::new(
-            "unsafe",
-            "Be precise.",
-            model.clone(),
-            SandboxMode::DangerFullAccess,
-            false,
-        )
-        .is_err()
-    );
-    assert!(
-        serde_json::from_value::<FrozenAgentSettings>(json!({
-            "settings_id": "unsafe",
-            "system_prompt": "Be precise.",
-            "default_model": { "deployment": "openai", "model": "gpt-test" },
-            "sandbox": "danger-full-access",
-            "require_approval": false
-        }))
-        .is_err()
-    );
-    assert!(
-        FrozenAgentSettings::new(
-            "reviewed",
-            "Be precise.",
-            model,
-            SandboxMode::DangerFullAccess,
-            true,
-        )
-        .is_ok()
-    );
+    for sandbox in [
+        SandboxMode::ReadOnly,
+        SandboxMode::WorkspaceWrite,
+        SandboxMode::DangerFullAccess,
+    ] {
+        for require_approval in [false, true] {
+            let settings = FrozenAgentSettings::new(
+                "standing",
+                "Be precise.",
+                model.clone(),
+                sandbox,
+                require_approval,
+            )
+            .unwrap();
+            let decoded: FrozenAgentSettings =
+                serde_json::from_value(serde_json::to_value(&settings).unwrap()).unwrap();
+            assert_eq!(decoded, settings);
+            for body in [
+                SessionFactBody::TurnAccepted {
+                    turn_id: TurnId::new("turn-standing").unwrap(),
+                    text: "hello".into(),
+                    model: None,
+                    reasoning_effort: None,
+                    sandbox,
+                    require_approval,
+                },
+                SessionFactBody::MessageTurnAccepted {
+                    turn_id: TurnId::new("turn-standing").unwrap(),
+                    activation_id: ActivationId::new("activation-standing").unwrap(),
+                    message_ids: vec![MessageId::new("message-standing").unwrap()],
+                    model: None,
+                    reasoning_effort: None,
+                    sandbox,
+                    require_approval,
+                },
+            ] {
+                let fact = SessionFact::new(1, 1, body).unwrap();
+                let decoded: SessionFact =
+                    serde_json::from_slice(&serde_json::to_vec(&fact).unwrap()).unwrap();
+                assert_eq!(decoded, fact);
+            }
+        }
+    }
 }
 
 #[test]

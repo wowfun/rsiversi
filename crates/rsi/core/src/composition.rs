@@ -2228,7 +2228,7 @@ fn base_fragment(
             json!({
                 "read-only": { "sandbox": "read-only", "require_approval": false },
                 "workspace-write": { "sandbox": "workspace-write", "require_approval": false },
-                "danger-full-access": { "sandbox": "danger-full-access", "require_approval": true }
+                "danger-full-access": { "sandbox": "danger-full-access", "require_approval": false }
             }),
         ),
         ProfileEntry::new(
@@ -2691,7 +2691,7 @@ mod tests {
     }
 
     #[test]
-    fn standard_unconfined_preset_requires_approval() {
+    fn standard_unconfined_preset_grants_standing_access() {
         let temporary = tempfile::tempdir().unwrap();
         let paths = HostPaths::new(
             temporary.path().join("config"),
@@ -2707,7 +2707,7 @@ mod tests {
             .expect("standard permission preset registration");
         assert_eq!(
             permissions.config()["danger-full-access"]["require_approval"],
-            true
+            false
         );
     }
 

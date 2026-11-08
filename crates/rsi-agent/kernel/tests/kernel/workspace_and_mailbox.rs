@@ -1,6 +1,58 @@
 use super::*;
 
 #[tokio::test]
+async fn mailbox_preserves_standing_permissions_across_restart() {
+    for require_approval in [false, true] {
+        let store = Arc::new(MemoryStore::new());
+        let initial = kernel(store.clone()).await;
+        let workers = initial.start_workers();
+        let session_id = SessionId::new("standing-permission").unwrap();
+        let mut wire = serde_json::to_value(header(session_id.as_str())).unwrap();
+        wire["settings"]["require_approval"] = require_approval.into();
+        let mut message = mailbox_message("standing-input");
+        message.options.sandbox = Some(SandboxMode::DangerFullAccess);
+        initial
+            .submit_message(SubmitMessage {
+                session: fresh(serde_json::from_value(wire).unwrap()),
+                message,
+                delivery: rsi_agent_session_protocol::MessageDelivery::NextTurn,
+            })
+            .await
+            .unwrap();
+        initial.shutdown(workers).await.unwrap();
+
+        let restarted = kernel(store.clone()).await;
+        let workers = restarted.start_workers();
+        restarted
+            .claim_message(ClaimMessage {
+                session: restarted.prepare_resume(&session_id).await.unwrap(),
+                message_id: MessageId::new("standing-input").unwrap(),
+                activation_id: ActivationId::new("standing-activation").unwrap(),
+                path: AgentPath::root(),
+                turn_id: TurnId::new("standing-turn").unwrap(),
+                step_id: StepId::new("standing-step").unwrap(),
+            })
+            .await
+            .unwrap();
+        let facts = store
+            .read_facts(
+                &session_id,
+                0,
+                8,
+                rsi_agent_store_protocol::MAXIMUM_STORE_FACT_PAGE_BYTES,
+            )
+            .await
+            .unwrap();
+        assert!(
+            matches!(facts.facts[0].body(), SessionFactBody::MessageTurnAccepted {
+            sandbox: SandboxMode::DangerFullAccess, require_approval: actual, ..
+        } if *actual == require_approval)
+        );
+        restarted.shutdown(workers).await.unwrap();
+    }
+}
+
+#[tokio::test]
 async fn mailbox_admission_creates_a_zero_fact_session_and_survives_restart() {
     let store = Arc::new(MemoryStore::new());
     let first = kernel(store.clone()).await;

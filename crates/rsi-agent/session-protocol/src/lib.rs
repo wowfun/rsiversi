@@ -1458,27 +1458,17 @@ impl FrozenAgentSettings {
 
     /// Revalidates decoded Agent settings.
     pub fn validate(&self) -> Result<()> {
-        Self::validate_policy(
-            &self.settings_id,
-            &self.system_prompt,
-            self.sandbox,
-            self.require_approval,
-        )?;
+        Self::validate_metadata(&self.settings_id, &self.system_prompt)?;
         self.pricing.validate()?;
         self.default_model
             .validate()
             .map_err(|error| SessionError::Invalid(error.to_string()))
     }
 
-    /// Validates the complete non-routing policy without inventing a model route.
+    /// Validates settings identity and prompt without inventing a model route.
     /// Configuration owners may use this before selection; durable settings still
     /// require an explicit model through the constructor or deserializer.
-    pub fn validate_policy(
-        settings_id: &str,
-        system_prompt: &str,
-        sandbox: SandboxMode,
-        require_approval: bool,
-    ) -> Result<()> {
+    pub fn validate_metadata(settings_id: &str, system_prompt: &str) -> Result<()> {
         validate_identifier("Agent settings", settings_id)?;
         validate_safe_text(
             "system prompt",
@@ -1486,11 +1476,6 @@ impl FrozenAgentSettings {
             MAXIMUM_SYSTEM_PROMPT_BYTES,
             true,
         )?;
-        if sandbox == SandboxMode::DangerFullAccess && !require_approval {
-            return Err(SessionError::Invalid(
-                "danger-full-access requires live approval".into(),
-            ));
-        }
         Ok(())
     }
 
@@ -2462,29 +2447,20 @@ impl SessionFactBody {
             Self::TurnAccepted {
                 text,
                 model,
-                turn_id: _,
-                sandbox,
-                require_approval,
-                reasoning_effort,
-            } => {
-                validate_effort_override(model.as_ref(), reasoning_effort.as_ref())?;
-                validate_turn_acceptance(text, model.as_ref(), *sandbox, *require_approval)
-            }
-            Self::MessageTurnAccepted {
-                message_ids,
-                model,
-                sandbox,
-                require_approval,
                 reasoning_effort,
                 ..
             } => {
                 validate_effort_override(model.as_ref(), reasoning_effort.as_ref())?;
-                validate_message_turn_acceptance(
-                    message_ids,
-                    model.as_ref(),
-                    *sandbox,
-                    *require_approval,
-                )
+                validate_turn_acceptance(text, model.as_ref())
+            }
+            Self::MessageTurnAccepted {
+                message_ids,
+                model,
+                reasoning_effort,
+                ..
+            } => {
+                validate_effort_override(model.as_ref(), reasoning_effort.as_ref())?;
+                validate_message_turn_acceptance(message_ids, model.as_ref())
             }
             Self::InputMessageClaimed {
                 source, content, ..
@@ -2706,21 +2682,14 @@ impl SessionFactBody {
     }
 }
 
-fn validate_turn_acceptance(
-    text: &str,
-    model: Option<&ModelRef>,
-    sandbox: SandboxMode,
-    require_approval: bool,
-) -> Result<()> {
+fn validate_turn_acceptance(text: &str, model: Option<&ModelRef>) -> Result<()> {
     validate_turn_text(text)?;
-    validate_resolved_turn_policy(model, sandbox, require_approval)
+    validate_turn_model(model)
 }
 
 fn validate_message_turn_acceptance(
     message_ids: &[MessageId],
     model: Option<&ModelRef>,
-    sandbox: SandboxMode,
-    require_approval: bool,
 ) -> Result<()> {
     if message_ids.is_empty()
         || message_ids.len() > MAXIMUM_PENDING_AGENT_MESSAGES
@@ -2734,23 +2703,14 @@ fn validate_message_turn_acceptance(
             "message Turn must claim 1..={MAXIMUM_PENDING_AGENT_MESSAGES} unique messages"
         )));
     }
-    validate_resolved_turn_policy(model, sandbox, require_approval)
+    validate_turn_model(model)
 }
 
-fn validate_resolved_turn_policy(
-    model: Option<&ModelRef>,
-    sandbox: SandboxMode,
-    require_approval: bool,
-) -> Result<()> {
+fn validate_turn_model(model: Option<&ModelRef>) -> Result<()> {
     if let Some(model) = model {
         model
             .validate()
             .map_err(|error| SessionError::Invalid(error.to_string()))?;
-    }
-    if sandbox == SandboxMode::DangerFullAccess && !require_approval {
-        return Err(SessionError::Invalid(
-            "danger-full-access turn requires live approval".into(),
-        ));
     }
     Ok(())
 }

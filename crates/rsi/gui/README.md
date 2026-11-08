@@ -14,8 +14,9 @@ flushes its editor before switching, and first input remains the publication poi
 Composer preparation accepts an optional typed sandbox mode for a next-Turn
 message and freezes it with the request. Steering rejects sandbox overrides;
 queue edits and uncertain retries retain their original options. Dispatch admits
-that same bounded mode without rewriting it. The Agent resolves mandatory
-approval (including Full access) and enforces the execution policy. Pane metadata
+that same bounded mode without rewriting it. The Agent enforces the execution
+policy and its independent approval requirement as defined by the
+[security contract](../../rsi-agent/docs/security.md). Pane metadata
 exposes the immutable Header sandbox default; document preferences never mutate
 that Header or imply platform isolation support.
 

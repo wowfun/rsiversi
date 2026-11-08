@@ -77,9 +77,10 @@ state; it does not invent a Turn identity before scheduling. Claim atomically
 creates the Turn and Step, and reconnectable Session observation exposes that
 identity and all later Facts through independent control and Fact cursors.
 Submission resolves the session default and invocation override into one exact
-durable execution policy. Unconfined execution always requires a live approval
-decision. The executor pins the Approval and Sandbox generations, records the
-approval evidence before Tool start, and passes the exact policy plus Sandbox
+durable execution policy. The [security contract](../security.md) separates
+standing access from explicit approval requirements. The executor pins the
+Approval and Sandbox generations, records any required approval evidence before
+Tool start, and passes the exact policy plus Sandbox
 authority into the Tool execution boundary. A Tool result retains the truthful
 enforcement stamps produced by process plans; a requested mode is never itself
 treated as enforcement.

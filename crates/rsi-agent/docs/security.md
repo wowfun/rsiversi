@@ -90,10 +90,15 @@ other unfinished work as interrupted, and never guesses that replay is safe.
 Cancellation is cooperative, so every provider and Tool call also remains
 bounded by its own timeout and shutdown deadline.
 
-Turn acceptance stores an already-resolved execution policy rather than a
-security-looking override. Danger-full-access is invalid without live approval;
-restricted Tool process plans cross the pinned Sandbox service and durable
-Tool results retain its actual enforcement stamps.
+Turn acceptance stores the caller's resolved Sandbox mode and the Session's
+independent approval requirement. An explicitly configured unconfined mode does
+not add per-Tool approval; an explicit approval requirement still applies in any
+mode. Tool policy contributors may require approval or deny execution, and a
+Tool's requested privilege escalation retains its own approval boundary. Model
+arguments do not grant a new Turn policy. Restricted Tool process plans cross
+the pinned Sandbox service and durable Tool results retain its actual enforcement
+stamps. The same resolved pair survives mailbox activation, child/workflow
+inheritance and durable replay.
 
 SQLite readers project each row's byte length and suppress an oversized header
 or Fact body before allocating its Rust String. Typed Fact readers then enforce

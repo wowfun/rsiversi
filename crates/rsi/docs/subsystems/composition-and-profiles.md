@@ -221,6 +221,12 @@ cleanup after host `SIGKILL` or containment of a descendant that calls
 profile bundles, Media export, and native package management are outside this
 Host contract.
 
+The standard `danger-full-access` permission preset selects unconfined execution
+without requiring an approval for every Tool. It is an explicit caller choice,
+not the default permission mode. Custom presets can require approval with any
+Sandbox mode; the [Agent security contract](../../../rsi-agent/docs/security.md)
+owns policy inheritance and the distinction from Tool-requested escalation.
+
 On Unix, `rsi addon list [--root ABSOLUTE] [--output text|json]` reads installed
 and separately enabled artifact identities. `rsi addon install MANIFEST`,
 `enable ID`, `disable ID` and `uninstall ID` accept the same options. The default

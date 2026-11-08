@@ -544,8 +544,7 @@ impl TurnService for AgentKernel {
         let header = session.header();
         let profile = header.settings();
         let sandbox = sandbox.unwrap_or(profile.sandbox());
-        let require_approval =
-            profile.require_approval() || sandbox == rsi_sandbox::SandboxMode::DangerFullAccess;
+        let require_approval = profile.require_approval();
         let body = SessionFactBody::TurnAccepted {
             turn_id: turn_id.clone(),
             text,
@@ -1344,8 +1343,7 @@ impl AgentKernel {
             .options
             .sandbox
             .unwrap_or(header.settings().sandbox());
-        let require_approval = header.settings().require_approval()
-            || sandbox == rsi_sandbox::SandboxMode::DangerFullAccess;
+        let require_approval = header.settings().require_approval();
         let selected = {
             let mut selected = scan.pending;
             // Store owns the cardinality bound and FIFO cursors. Step input comes

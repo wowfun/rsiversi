@@ -218,7 +218,7 @@ billionths per token. Optional cache rates replace that input subset and require
 its measured count. ModelIntent freezes the matching quote; Kernel validates it
 against the immutable Header. Empty pricing means cost is not configured.
 
-`FrozenAgentSettings::validate_policy` validates the non-routing fields for
+`FrozenAgentSettings::validate_metadata` validates identity and prompt for
 configuration owners that have not selected a model yet. It does not construct
 durable settings. Constructors and deserialization still require a validated
 model reference and the complete policy before creating `FrozenAgentSettings`.
