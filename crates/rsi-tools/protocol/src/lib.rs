@@ -105,18 +105,10 @@ impl<'de> Deserialize<'de> for ToolDefinition {
         }
 
         let wire = WireDefinition::deserialize(deserializer)?;
-        let definition = Self {
-            name: wire.name,
-            description: wire.description,
-            input_schema: wire.input_schema,
-            freeform: wire.freeform,
-            scheduling: ToolScheduling::Exclusive,
-            program_role: ToolProgramRole::Unavailable,
-        };
-        definition
-            .validate()
-            .map(|()| definition)
-            .map_err(serde::de::Error::custom)
+        let mut definition = Self::new(wire.name, wire.description, wire.input_schema)
+            .map_err(serde::de::Error::custom)?;
+        definition.freeform = wire.freeform;
+        Ok(definition)
     }
 }
 
@@ -127,16 +119,29 @@ impl ToolDefinition {
         description: impl Into<String>,
         input_schema: Value,
     ) -> Result<Self> {
-        let definition = Self {
-            name: name.into(),
-            description: description.into(),
+        let name = name.into();
+        let description = description.into();
+        validate_model_tool_name(&name)?;
+        validate_safe_text(
+            "tool description",
+            &description,
+            MAXIMUM_TOOL_DESCRIPTION_BYTES,
+            true,
+        )?;
+        if !matches!(input_schema, Value::Object(_) | Value::Bool(_)) {
+            return Err(ToolError::InvalidInput(
+                "tool input schema must be an object or boolean JSON Schema".into(),
+            ));
+        }
+        validate_json("tool input schema", &input_schema)?;
+        Ok(Self {
+            name,
+            description,
             input_schema,
             freeform: None,
             scheduling: ToolScheduling::Exclusive,
             program_role: ToolProgramRole::Unavailable,
-        };
-        definition.validate()?;
-        Ok(definition)
+        })
     }
 
     /// Returns the exact model-visible name.
@@ -154,11 +159,11 @@ impl ToolDefinition {
         &self.input_schema
     }
 
-    /// Adds a provider-neutral freeform grammar projection.
-    pub fn with_freeform(mut self, freeform: FreeformToolDefinition) -> Result<Self> {
+    /// Adds an already validated provider-neutral freeform grammar projection.
+    #[must_use]
+    pub fn with_freeform(mut self, freeform: FreeformToolDefinition) -> Self {
         self.freeform = Some(freeform);
-        self.validate()?;
-        Ok(self)
+        self
     }
 
     /// Returns the optional freeform projection.
@@ -188,27 +193,6 @@ impl ToolDefinition {
     /// Returns the trusted owner declaration, never taken from model arguments.
     pub const fn program_role(&self) -> ToolProgramRole {
         self.program_role
-    }
-
-    /// Revalidates a definition decoded from a durable or external boundary.
-    pub fn validate(&self) -> Result<()> {
-        validate_model_tool_name(&self.name)?;
-        validate_safe_text(
-            "tool description",
-            &self.description,
-            MAXIMUM_TOOL_DESCRIPTION_BYTES,
-            true,
-        )?;
-        if !matches!(self.input_schema, Value::Object(_) | Value::Bool(_)) {
-            return Err(ToolError::InvalidInput(
-                "tool input schema must be an object or boolean JSON Schema".into(),
-            ));
-        }
-        validate_json("tool input schema", &self.input_schema)?;
-        if let Some(freeform) = &self.freeform {
-            freeform.validate()?;
-        }
-        Ok(())
     }
 }
 
@@ -276,12 +260,14 @@ pub enum FreeformFormat {
 impl FreeformToolDefinition {
     /// Creates a bounded freeform grammar.
     pub fn new(format: FreeformFormat, grammar: impl Into<String>) -> Result<Self> {
-        let definition = Self {
-            format,
-            grammar: grammar.into(),
-        };
-        definition.validate()?;
-        Ok(definition)
+        let grammar = grammar.into();
+        validate_safe_text(
+            "tool freeform grammar",
+            &grammar,
+            MAXIMUM_FREEFORM_GRAMMAR_BYTES,
+            false,
+        )?;
+        Ok(Self { format, grammar })
     }
 
     /// Returns the grammar family.
@@ -292,16 +278,6 @@ impl FreeformToolDefinition {
     /// Returns the exact grammar text.
     pub fn grammar(&self) -> &str {
         &self.grammar
-    }
-
-    /// Revalidates a decoded freeform definition.
-    pub fn validate(&self) -> Result<()> {
-        validate_safe_text(
-            "tool freeform grammar",
-            &self.grammar,
-            MAXIMUM_FREEFORM_GRAMMAR_BYTES,
-            false,
-        )
     }
 }
 

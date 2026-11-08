@@ -14,6 +14,13 @@ value survives the canonical `serde_json::Value` representation. Serializable
 calls and execution policies revalidate those invariants during
 deserialization rather than relying on a later runtime consumer.
 
+`ToolDefinition` and `FreeformToolDefinition` establish their bounds during
+construction and deserialization. Their fields are immutable outside this
+package. Attaching an already validated freeform grammar is infallible; typed
+consumers trust these invariants without repeating schema traversal or JSON
+serialization. Catalog registration still owns its scheduling, timeout,
+uniqueness and aggregate limits. Narrower capabilities retain their own limits.
+
 `validate_model_tool_name` exposes the same name admission used by definitions
 and calls so narrower durable authorities do not maintain a second grammar.
 

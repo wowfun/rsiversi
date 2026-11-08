@@ -1,6 +1,8 @@
 use rsi_tools_protocol::{
-    MAXIMUM_TOOL_IDENTIFIER_BYTES, MAXIMUM_TOOL_JSON_DEPTH, MAXIMUM_TOOL_JSON_NODES, ToolCall,
-    ToolDefinition, ToolExecutionPolicy, ToolResult, ToolScheduling, parse_tool_arguments,
+    FreeformFormat, FreeformToolDefinition, MAXIMUM_FREEFORM_GRAMMAR_BYTES,
+    MAXIMUM_TOOL_DESCRIPTION_BYTES, MAXIMUM_TOOL_IDENTIFIER_BYTES, MAXIMUM_TOOL_JSON_BYTES,
+    MAXIMUM_TOOL_JSON_DEPTH, MAXIMUM_TOOL_JSON_NODES, ToolCall, ToolDefinition,
+    ToolExecutionPolicy, ToolResult, ToolScheduling, parse_tool_arguments,
 };
 use serde_json::json;
 
@@ -124,12 +126,93 @@ fn typed_tool_definitions_enforce_json_structure_bounds() {
     for _ in 0..=MAXIMUM_TOOL_JSON_DEPTH {
         too_deep = json!({"nested": too_deep});
     }
-    assert!(ToolDefinition::new("deep", "", too_deep).is_err());
-
     let too_many_nodes = json!({
         "nodes": vec![serde_json::Value::Null; MAXIMUM_TOOL_JSON_NODES]
     });
-    assert!(ToolDefinition::new("wide", "", too_many_nodes).is_err());
+    for schema in [too_deep, too_many_nodes] {
+        assert!(ToolDefinition::new("tool", "", schema.clone()).is_err());
+        assert!(
+            serde_json::from_value::<ToolDefinition>(json!({
+                "name":"tool", "description":"", "input_schema":schema,
+            }))
+            .is_err()
+        );
+    }
+}
+
+#[test]
+fn tool_definition_bounds_are_enforced_at_construction_and_decode() {
+    for (name, description, schema) in [
+        (String::new(), String::new(), json!(true)),
+        ("bad name".into(), String::new(), json!(true)),
+        (
+            "x".repeat(MAXIMUM_TOOL_IDENTIFIER_BYTES + 1),
+            String::new(),
+            json!(true),
+        ),
+        ("tool".into(), "bad\u{1b}".into(), json!(true)),
+        (
+            "tool".into(),
+            "x".repeat(MAXIMUM_TOOL_DESCRIPTION_BYTES + 1),
+            json!(true),
+        ),
+        ("tool".into(), String::new(), json!([])),
+        (
+            "tool".into(),
+            String::new(),
+            json!({"padding":"x".repeat(MAXIMUM_TOOL_JSON_BYTES)}),
+        ),
+        (
+            "tool".into(),
+            String::new(),
+            serde_json::from_str(r#"{"number":1.0000000000000001}"#).unwrap(),
+        ),
+    ] {
+        assert!(ToolDefinition::new(&name, &description, schema.clone()).is_err());
+        assert!(
+            serde_json::from_value::<ToolDefinition>(json!({
+                "name":name, "description":description, "input_schema":schema,
+            }))
+            .is_err()
+        );
+    }
+}
+
+#[test]
+fn freeform_grammar_is_admitted_before_it_can_enter_a_definition() {
+    for grammar in [
+        String::new(),
+        "bad\u{1b}".into(),
+        "x".repeat(MAXIMUM_FREEFORM_GRAMMAR_BYTES + 1),
+    ] {
+        assert!(FreeformToolDefinition::new(FreeformFormat::Lark, &grammar).is_err());
+        let wire = json!({"format":"lark", "grammar":grammar});
+        assert!(serde_json::from_value::<FreeformToolDefinition>(wire.clone()).is_err());
+        assert!(
+            serde_json::from_value::<ToolDefinition>(json!({
+                "name":"tool", "description":"", "input_schema":true, "freeform":wire,
+            }))
+            .is_err()
+        );
+    }
+}
+
+#[test]
+fn definition_decode_is_closed_and_preserves_function_and_freeform_fields() {
+    let wire = json!({
+        "name":"tool", "description":"", "input_schema":false,
+        "freeform":{"format":"lark", "grammar":"x".repeat(MAXIMUM_FREEFORM_GRAMMAR_BYTES)},
+    });
+    let definition: ToolDefinition = serde_json::from_value(wire.clone()).unwrap();
+    assert_eq!(serde_json::to_value(&definition).unwrap(), wire);
+    for field in ["scheduling", "program_role", "unknown"] {
+        let mut invalid = wire.clone();
+        invalid[field] = json!("untrusted");
+        assert!(serde_json::from_value::<ToolDefinition>(invalid).is_err());
+    }
+    let mut invalid = wire;
+    invalid["freeform"]["unknown"] = json!(true);
+    assert!(serde_json::from_value::<ToolDefinition>(invalid).is_err());
 }
 
 #[test]

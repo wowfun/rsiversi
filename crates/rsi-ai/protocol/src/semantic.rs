@@ -1651,9 +1651,6 @@ fn validate_tools(tools: &[ToolDefinition], tool_choice: &ToolChoice) -> Result<
     let mut names = BTreeSet::new();
     let mut schema_bytes = 0usize;
     for tool in tools {
-        tool.validate().map_err(|error| {
-            SemanticError::new("tool.invalid_definition", "tools", error.to_string())
-        })?;
         validation::tool_name("tools.name", tool.name())
             .map_err(|reason| SemanticError::new("tool.invalid_name", "tools", reason))?;
         validate_json("tools.input_schema", tool.input_schema())?;

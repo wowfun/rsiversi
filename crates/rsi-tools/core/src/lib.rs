@@ -982,7 +982,6 @@ async fn shutdown(state: Arc<ProviderState>) -> std::result::Result<(), String> 
 }
 
 fn validate_definition(definition: &ToolRegistration) -> Result<()> {
-    definition.definition.validate()?;
     match definition.definition.program_role() {
         rsi_tools_protocol::ToolProgramRole::Callable
             if definition.definition.scheduling()

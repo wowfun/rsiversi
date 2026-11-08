@@ -81,6 +81,9 @@ may additionally carry one bounded provider-neutral Lark freeform projection.
 Because Tools is a reusable capability with a wider identifier and JSON node
 budget, the Language request boundary revalidates imported Tool definitions
 against the AI name and JSON structure limits before provider I/O.
+It trusts the immutable Tools definition's construction invariant rather than
+repeating Tools validation. Encoded schema and grammar totals remain bounded
+by the Language request's aggregate allowance.
 Adapters that cannot preserve freeform semantics reject the request during
 Prepare; they must not silently downgrade it to a function call. Every
 normalized tool call records whether the provider emitted function or freeform
