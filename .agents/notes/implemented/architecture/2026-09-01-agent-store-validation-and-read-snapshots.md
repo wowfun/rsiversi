@@ -16,7 +16,9 @@ scaled with unrelated dormant history.
 The metadata-first-access portion of this decision is superseded by
 [explicit validation and bounded metadata snapshots](2026-09-05-agent-metadata-and-admitted-work.md).
 The mechanical proof, cache, WAL snapshot, and offline-audit rationale below
-continues to apply to execution and history access.
+continues to apply to execution and indexed history access. The
+[canonical page decision](2026-11-08-canonical-pages-and-execution-proofs.md)
+supersedes implicit Session validation for contiguous canonical history reads.
 
 Open retains the exclusive writer lease, owned-root checks, and exact schema
 validation but does not scan session contents. An existing nonempty database is

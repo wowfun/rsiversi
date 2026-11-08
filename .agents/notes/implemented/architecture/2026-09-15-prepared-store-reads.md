@@ -20,7 +20,7 @@ an owner cycle. Pin waiters retain their local successful proof without holding
 the validation lane. Drop releases capacity before waking waiters and never
 reenters the registry mutex.
 
-Pin insertion owns bounded dead-entry cleanup so ordinary reads do not scan
+Pin insertion owns bounded dead-entry cleanup so proof reuse does not scan
 unrelated leases. The path encoding owns its byte bound beside `AgentPath`;
 representation changes must satisfy that protocol's serialization tests rather
 than silently disagreeing with arithmetic in a Store adapter.
@@ -31,6 +31,10 @@ the task result until delivery. Ordinary caller cancellation cannot release a
 reservation while the Store worker still owns its materialized page. Metadata
 watermarks require neither replay nor a payload reservation. Atomic writes keep
 their existing validation and compare-and-set checks.
+
+The [canonical page decision](2026-11-08-canonical-pages-and-execution-proofs.md)
+separates raw history reads from proof preparation. Those pages do not consult
+the pin registry; execution callers retain the explicit preparation above.
 
 Writeback maintains independently polled suffixes, at most one for each resident
 Session. Completion immediately makes that Session's next suffix eligible.

@@ -96,7 +96,9 @@ normalization is not a semantic schema proof because it changes string literals.
 ## Consequences
 
 Historical corruption can coexist with readable immutable metadata. Explicit
-validation, execution/history reads and offline verification still reject it.
+validation, indexed execution/history reads and offline verification still reject
+it. The later [canonical page decision](2026-11-08-canonical-pages-and-execution-proofs.md)
+separates raw history intervals from these whole-Session proofs.
 A caller may stop waiting before learning that an admitted mutation committed.
 Shutdown can report its bounded timeout while background drain continues to own
 its resources. Runtime ancestor settlement is eventually observable independently

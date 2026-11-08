@@ -63,7 +63,7 @@ read a payload page. SQLite mailbox summaries trace metadata-only queries with a
 SQLite integration tests separately cover session and per-turn pagination,
 open-turn indexing and cursor pagination, optimistic conflicts, rejection of
 representative old schemas, index integrity,
-CAS integrity, fast reopen with dormant corruption, first-access rejection,
+CAS integrity, fast reopen with dormant corruption, indexed-access rejection,
 explicit full verification, reader/writer WAL snapshots, exclusive writer leases, and direct database
 tampering with header or Fact rows above their framing bounds. Checkpoint-row
 tampering also proves reads reject a mismatched immutable-header fingerprint
@@ -76,7 +76,10 @@ offline verification: a bounded wait may retry only `WriterLocked`, while any
 other verification result is asserted immediately. Kernel worker completion or a
 proof result alone does not prove that every SQLite job owner has closed.
 Metadata scans above the validation-cache capacity
-must not validate history. Large Fact page boundaries and count lookahead
+must not validate history. Canonical pages remain readable with unrelated damaged
+indexes, reject selected malformed rows and missing coordinates, and leave proof
+counters unchanged. Explicit preparation, indexed decisions and mutation still
+reject that damage. Large Fact page boundaries and count lookahead
 assert that the next JSON body is not materialized. Subtree snapshots reject
 cycles and oversized lineage; transaction guards detect children inserted after
 a caller's snapshot, including children created by that same commit. Cold subtree

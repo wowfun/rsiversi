@@ -353,14 +353,21 @@ async fn normalized_claim_rejects_broken_references_and_false_byte_projections()
             "{sql}"
         );
         let store = SqliteStore::open(root.path()).unwrap();
-        assert!(
-            matches!(
-                store
-                    .read_facts(header.session_id(), 0, 64, MAXIMUM_STORE_FACT_PAGE_BYTES)
-                    .await,
-                Err(StoreError::Corrupt(_))
-            ),
-            "{sql}"
-        );
+        let page = store
+            .read_facts(header.session_id(), 0, 64, MAXIMUM_STORE_FACT_PAGE_BYTES)
+            .await;
+        if sql.contains("wake_required") {
+            // Routing is execution state; changing it does not change the claimed payload.
+            assert_eq!(page.unwrap().facts.len(), 4);
+            assert!(
+                matches!(
+                    store.prepare_session(header.session_id()).await,
+                    Err(StoreError::Corrupt(_))
+                ),
+                "prepared {sql}"
+            );
+        } else {
+            assert!(matches!(page, Err(StoreError::Corrupt(_))), "{sql}");
+        }
     }
 }

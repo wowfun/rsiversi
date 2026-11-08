@@ -13,7 +13,6 @@ impl SqliteStore {
         maximum_bytes: usize,
     ) -> Result<StoreFactWindow> {
         validate_window_limits(limit, maximum_bytes)?;
-        self.ensure_session_validated(session_id).await?;
         let session_id = session_id.clone();
         #[cfg(any(test, feature = "test-support"))]
         let materializations = self.inner.fact_materializations.clone();
@@ -24,9 +23,15 @@ impl SqliteStore {
             let mut window=StoreFactWindow{after_seq,through_seq:after_seq,durable_seq,facts:vec![],omitted:vec![],encoded_bytes:0};
             let mut admitted=Vec::new();
             {
-                let mut statement=transaction.prepare("SELECT seq,coalesce(logical_bytes,length(CAST(fact_json AS BLOB))) FROM facts WHERE session_id=?1 AND seq>?2 ORDER BY seq LIMIT ?3").map_err(sql_error)?;
-                let mut rows=statement.query(params![session_id.as_str(),sqlite_u64("Fact cursor",after_seq)?,i64::try_from(limit).expect("bounded limit")]).map_err(sql_error)?;
-                while let Some(row)=rows.next().map_err(sql_error)? {
+                let mut statement=transaction.prepare("SELECT seq,coalesce(logical_bytes,length(CAST(fact_json AS BLOB))) FROM facts WHERE session_id=?1 AND seq>?2 AND seq<=?4 ORDER BY seq LIMIT ?3").map_err(sql_error)?;
+                let mut rows=statement.query(params![session_id.as_str(),sqlite_u64("Fact cursor",after_seq)?,i64::try_from(limit).expect("bounded limit"),sqlite_u64("Fact watermark",durable_seq)?]).map_err(sql_error)?;
+                loop {
+                    let Some(row) = rows.next().map_err(sql_error)? else {
+                        if admitted.len() + window.omitted.len() < limit && window.through_seq < durable_seq {
+                            return Err(StoreError::Corrupt("missing canonical window Fact".into()));
+                        }
+                        break;
+                    };
                     let seq=decode_u64("Fact coordinate",row.get(0).map_err(sql_error)?)?;
                     let length=usize::try_from(row.get::<_,i64>(1).map_err(sql_error)?).map_err(|_|StoreError::Corrupt("negative Fact length".into()))?;
                     if length>MAXIMUM_SESSION_FACT_BYTES {return Err(StoreError::Corrupt("Fact exceeds durable byte bound".into()));}

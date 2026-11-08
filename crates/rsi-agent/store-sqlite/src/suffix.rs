@@ -12,7 +12,6 @@ impl SqliteStore {
         maximum_bytes: usize,
     ) -> Result<StoreFactSuffix> {
         validate_suffix_limits(limit, maximum_bytes)?;
-        self.ensure_session_validated(session_id).await?;
         let session_id = session_id.clone();
         #[cfg(any(test, feature = "test-support"))]
         let materializations = self.inner.fact_materializations.clone();
@@ -30,8 +29,17 @@ impl SqliteStore {
                 // column or Rust allocation until the remaining budget admits it.
                 let mut lengths = transaction.prepare("SELECT seq, coalesce(logical_bytes, length(CAST(fact_json AS BLOB))) FROM facts WHERE session_id = ?1 AND seq <= ?2 ORDER BY seq DESC LIMIT ?3").map_err(sql_error)?;
                 let mut rows = lengths.query(params![session_id.as_str(), through, i64::try_from(limit).expect("bounded limit")]).map_err(sql_error)?;
-                while let Some(row) = rows.next().map_err(sql_error)? {
+                loop {
+                    let Some(row) = rows.next().map_err(sql_error)? else {
+                        if admitted.len() < limit && (admitted.len() as u64) < through_seq {
+                            return Err(StoreError::Corrupt("missing canonical suffix Fact".into()));
+                        }
+                        break;
+                    };
                     let seq = row.get::<_,i64>(0).map_err(sql_error)?;
+                    if Some(decode_u64("suffix Fact", seq)?) != through_seq.checked_sub(admitted.len() as u64) {
+                        return Err(StoreError::Corrupt("noncontiguous suffix Fact".into()));
+                    }
                     let length = usize::try_from(row.get::<_,i64>(1).map_err(sql_error)?).map_err(|_| StoreError::Corrupt("invalid Fact length".into()))?;
                     if length > MAXIMUM_SESSION_FACT_BYTES { return Err(StoreError::Corrupt("Fact exceeds durable byte bound".into())); }
                     if length > maximum_bytes - suffix.encoded_bytes { suffix.byte_limited = true; break; }

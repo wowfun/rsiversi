@@ -272,8 +272,17 @@ request a reset. Standalone reset callers receive the receipt with the result,
 including when opening the replacement fails. Product-home maintenance belongs
 to the [launcher](../../../apps/cli/README.md), before plugin activation.
 
-Explicit `validate_session`, Fact, control, turn, checkpoint, and append access
-validate the selected session's mechanical durable invariants in one snapshot.
+Canonical Fact and control pages follow the bounded interval contract in the
+[Store protocol](../store-protocol/README.md). They read only selected canonical
+rows and their snapshot watermarks, without consulting the Session-proof cache.
+Control pages compare physical and encoded sequence numbers and read the cursor's
+preceding anchor in the same snapshot. An exhausted interval before its expected
+tail is corruption; byte or count limits may end a page earlier. Claims resolve
+their payload from canonical acceptance controls, not a derived mailbox body.
+
+Explicit `validate_session` and `prepare_session`, indexed turn, mailbox, domain,
+lineage, checkpoint, and append access validate the selected session's mechanical
+durable invariants in one snapshot.
 A bounded cache retains 256 Session proofs across a recent FIFO and a reused
 LRU. Successful first validations enter recent; successful revalidation of a
 recently evicted identity enters reused. At capacity, recent entries above a
@@ -287,7 +296,8 @@ cache reuse and post-commit marking are optional: poisoning disables both,
 while in-use pins remain independent. Cache failure cannot turn a successful
 durable commit into an error. Cold proof publication still requires a usable cache,
 as described by the validation failure contract below. Cold validation
-still runs before any indexed execution/history read.
+still runs before any indexed execution/history read. Kernel prepares a proof
+before admitting payload memory; a plain canonical page is not that proof.
 Every canonical terminal Fact must have the matching non-NULL terminal index
 Fact and control sequences and prefix digests. The final control of each
 terminal commit is its exact `TurnBoundaryRecorded` marker. Missing terminal metadata is corruption in both

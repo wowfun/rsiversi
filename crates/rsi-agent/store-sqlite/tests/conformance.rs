@@ -281,10 +281,12 @@ async fn cold_terminal_index_validation_rejects_missing_and_mismatched_metadata(
                 matches!(open, Err(StoreError::Corrupt(_))),
                 "{name}: {open:?}"
             );
-            assert!(
-                matches!(facts, Err(StoreError::Corrupt(_))),
-                "{name}: {facts:?}"
-            );
+            // Canonical Facts are unchanged by these derived-index/control mutations.
+            assert_eq!(facts.unwrap().facts.len(), if closed { 2 } else { 1 });
+            assert!(matches!(
+                store.prepare_session(&session).await,
+                Err(StoreError::Corrupt(_))
+            ));
         } else {
             validation.unwrap();
             assert_eq!(boundary.unwrap().terminal().is_some(), closed, "{name}");

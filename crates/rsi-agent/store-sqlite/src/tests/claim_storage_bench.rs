@@ -64,6 +64,7 @@ async fn compare_referenced_and_inline_claim_storage() {
         for index in [round % 2, 1 - round % 2] {
             let store = SqliteStore::open(roots[index].path()).unwrap();
             let start = Instant::now();
+            let _proof = store.prepare_session(&id).await.unwrap();
             let page = store.read_facts(&id, 0, 64, 1024 * 1024).await.unwrap();
             cold[index].push(start.elapsed().as_secs_f64() * 1000.0);
             assert_eq!(page.facts, expected);

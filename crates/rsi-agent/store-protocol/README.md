@@ -278,9 +278,20 @@ See [the Agent architecture](../docs/architecture.md).
 they do not scan history or establish a historical validation proof.
 `validate_session` explicitly checks the mechanical durable session invariants.
 Execution, recovery, lineage, and control decisions require that proof before
-using a cold Header. Fact, control, turn, outcome, and mutation boundaries retain
-their validation requirements. A backend may cache successful proofs within
-its exclusive writer lifetime; metadata reads neither fill nor touch that cache.
+using a cold Header. Callers retain `prepare_session` across canonical reads
+used for these decisions. Turn, outcome, mailbox, domain, lineage, checkpoint,
+and mutation boundaries establish the proof themselves.
+
+Canonical Fact pages (forward, backward, window and suffix) and control pages
+validate only their selected interval in one read snapshot: framing and byte
+bounds, typed records, physical/logical coordinate agreement, contiguous progress,
+and read-time watermarks. Control anchors remain nondecreasing across the
+preceding cursor and within the page. These reads neither inspect unrelated history or derived indexes nor
+establish a Session proof. A malformed selected record fails; unrelated dormant
+corruption is left to explicit validation, indexed decisions and offline audit.
+The suffix digest is read-time metadata, not a recomputed prefix proof.
+A backend may cache successful proofs within its exclusive writer lifetime;
+metadata and canonical page reads neither fill nor touch that cache.
 
 Agent control commits compare both Fact and control watermarks and atomically
 touch at most three sessions. A `MessageClaimed` control supplies its input Fact

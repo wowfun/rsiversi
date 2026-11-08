@@ -2016,7 +2016,8 @@ pub trait SessionStore: fmt::Debug + Send + Sync + 'static {
     /// Reads both durable cursors from one metadata snapshot without replaying history.
     async fn read_watermarks(&self, session_id: &SessionId) -> Result<StoreSessionWatermarks>;
 
-    /// Captures a current suffix and full prefix digest in one read transaction.
+    /// Captures a canonical suffix and stored prefix digest in one read transaction.
+    /// Like `read_facts`, this does not establish a Session validation proof.
     /// The first body and every later body must fit remaining bytes before copying.
     async fn read_fact_suffix(
         &self,
@@ -2121,6 +2122,8 @@ pub trait SessionStore: fmt::Debug + Send + Sync + 'static {
     ///
     /// Checks lengths against `maximum_bytes` before body allocation. An oversized
     /// first record returns `ReadRequiresCapacity`; later records end a short page.
+    /// Canonical pages validate the selected interval, not unrelated history or
+    /// derived indexes. Execution callers retain `prepare_session` across reads.
     async fn read_facts(
         &self,
         session_id: &SessionId,
@@ -2130,6 +2133,7 @@ pub trait SessionStore: fmt::Debug + Send + Sync + 'static {
     ) -> Result<StoreFactPage>;
     /// Reads a bounded forward interval, omitting originals larger than the entire
     /// caller budget before body allocation. Omitted coordinates still advance.
+    /// Shares `read_facts`' canonical interval validation boundary.
     async fn read_fact_window(
         &self,
         session_id: &SessionId,
@@ -2144,6 +2148,8 @@ pub trait SessionStore: fmt::Debug + Send + Sync + 'static {
         ))
     }
     /// Reads at most `limit` contiguous Agent-control records after one cursor.
+    /// Shares `read_facts`' canonical interval boundary; control decisions require
+    /// `prepare_session` before interpreting the result.
     async fn read_controls(
         &self,
         session_id: &SessionId,
@@ -2161,6 +2167,7 @@ pub trait SessionStore: fmt::Debug + Send + Sync + 'static {
     ///
     /// Cursor zero selects one past the read-time durable tail. Results are
     /// always returned in ascending sequence order.
+    /// Shares `read_facts`' canonical interval validation boundary.
     async fn read_facts_before(
         &self,
         session_id: &SessionId,

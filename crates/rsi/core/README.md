@@ -366,6 +366,8 @@ service and generation before draft creation. Environment values resolve through
 ephemeral credential references; only the frozen MCP manifest enters Agent
 durability. Cold restore requires the caller's configuration and secrets again,
 compares the discovered manifest, and rejects missing or changed declarations.
+ACP restore prepares the durable Session before reading its baseline controls;
+plain canonical history reads do not establish an execution proof.
 The source resolves descendants through their validated root lineage, retaining
 the same private provider. Private input failure cannot fall back to Host MCP.
 Preparation reserves the root ID before starting effects. The 256-root budget

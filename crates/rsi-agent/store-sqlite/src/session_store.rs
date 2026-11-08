@@ -526,7 +526,6 @@ impl SessionStore for SqliteStore {
         maximum_bytes: usize,
     ) -> Result<StoreFactPage> {
         rsi_agent_store_protocol::validate_page_limits(limit, maximum_bytes)?;
-        self.ensure_session_validated(session_id).await?;
         let session_id = session_id.clone();
         #[cfg(any(test, feature = "test-support"))]
         let materializations = Arc::clone(&self.inner.fact_materializations);
@@ -555,7 +554,7 @@ impl SessionStore for SqliteStore {
                 let page = {
                     let mut statement = transaction
                         .prepare(
-                            fact_rows!("?4", "WHERE f.session_id = ?1 AND f.seq > ?2 ORDER BY f.seq LIMIT ?3"),
+                            fact_rows!("?4", "WHERE f.session_id = ?1 AND f.seq > ?2 AND f.seq <= ?5 ORDER BY f.seq LIMIT ?3"),
                         )
                         .map_err(sql_error)?;
                     let mut rows = statement
@@ -567,11 +566,20 @@ impl SessionStore for SqliteStore {
                             })?,
                             i64::try_from(MAXIMUM_SESSION_FACT_BYTES)
                                 .expect("session Fact bound fits SQLite INTEGER"),
+                            sqlite_u64("Fact watermark", durable_seq)?,
                         ])
                         .map_err(sql_error)?;
                     let mut facts = Vec::new();
                     let mut encoded_bytes = 0_usize;
-                    while let Some(row) = rows.next().map_err(sql_error)? {
+                    loop {
+                        let Some(row) = rows.next().map_err(sql_error)? else {
+                            if facts.len() < limit
+                                && facts.last().map_or(after_seq, SessionFact::seq) < durable_seq
+                            {
+                                return Err(StoreError::Corrupt("missing canonical Fact".into()));
+                            }
+                            break;
+                        };
                         let encoded_len = super::fact_storage::logical_len(row)?;
                         let projected = encoded_bytes
                             .checked_add(encoded_len)
@@ -622,7 +630,6 @@ impl SessionStore for SqliteStore {
         maximum_bytes: usize,
     ) -> Result<StoreControlPage> {
         rsi_agent_store_protocol::validate_page_limits(limit, maximum_bytes)?;
-        self.ensure_session_validated(session_id).await?;
         let session_id = session_id.clone();
         self.with_reader(move |connection| {
             let transaction = connection
@@ -630,25 +637,35 @@ impl SessionStore for SqliteStore {
                 .map_err(sql_error)?;
             let durable_seq = transaction
                 .query_row(
-                    "SELECT control_seq, durable_seq FROM sessions WHERE session_id NOT IN (SELECT session_id FROM session_tombstones) AND session_id = ?1",
-                    [session_id.as_str()],
-                    |row| Ok((row.get::<_, i64>(0)?, row.get::<_, i64>(1)?)),
+                    "SELECT control_seq, durable_seq,
+                            (SELECT fact_seq FROM agent_controls WHERE session_id = ?1 AND seq = ?2)
+                     FROM sessions WHERE session_id NOT IN (SELECT session_id FROM session_tombstones) AND session_id = ?1",
+                    params![session_id.as_str(), sqlite_u64("control cursor", after_seq)?],
+                    |row| Ok((row.get::<_, i64>(0)?, row.get::<_, i64>(1)?, row.get::<_, Option<i64>>(2)?)),
                 )
                 .optional()
                 .map_err(sql_error)?
                 .ok_or_else(|| StoreError::NotFound(session_id.to_string()))
-                .and_then(|(control, fact)| Ok((decode_u64("control sequence", control)?, decode_u64("Fact sequence", fact)?)))?;
-            let (durable_seq, durable_fact_seq) = durable_seq;
+                .and_then(|(control, fact, anchor)| Ok((decode_u64("control sequence", control)?, decode_u64("Fact sequence", fact)?, anchor)))?;
+            let (durable_seq, durable_fact_seq, anchor) = durable_seq;
             if after_seq > durable_seq {
                 return Err(StoreError::Invalid(
                     "control cursor exceeds the durable tail".into(),
                 ));
             }
+            let previous_anchor = if after_seq == 0 {
+                0
+            } else {
+                decode_u64("control cursor anchor", anchor.ok_or_else(|| StoreError::Corrupt("missing control cursor".into()))?)?
+            };
+            if previous_anchor > durable_fact_seq {
+                return Err(StoreError::Corrupt("control cursor anchor exceeds Fact tail".into()));
+            }
             let mut statement = transaction
                 .prepare(
                     "SELECT length(CAST(control_json AS BLOB)),
                             CASE WHEN length(CAST(control_json AS BLOB)) <= ?4
-                                 THEN control_json END, fact_seq
+                                 THEN control_json END, fact_seq, seq
                      FROM agent_controls
                      WHERE session_id = ?1 AND seq > ?2 AND seq <= ?5
                      ORDER BY seq LIMIT ?3",
@@ -668,7 +685,15 @@ impl SessionStore for SqliteStore {
             let mut records = Vec::new();
             let mut fact_cursors = Vec::new();
             let mut encoded_bytes = 0_usize;
-            while let Some(row) = rows.next().map_err(sql_error)? {
+            loop {
+                let Some(row) = rows.next().map_err(sql_error)? else {
+                    if records.len() < limit
+                        && records.last().map_or(after_seq, AgentControlRecord::seq) < durable_seq
+                    {
+                        return Err(StoreError::Corrupt("missing canonical control".into()));
+                    }
+                    break;
+                };
                 let encoded_len = usize::try_from(row.get::<_, i64>(0).map_err(sql_error)?)
                     .map_err(|_| StoreError::Corrupt("negative Agent control length".into()))?;
                 if encoded_len > MAXIMUM_SESSION_FACT_BYTES {
@@ -691,8 +716,15 @@ impl SessionStore for SqliteStore {
                     ),
                     MAXIMUM_SESSION_FACT_BYTES,
                 )?;
+                if record.seq() != decode_u64("control row sequence", row.get(3).map_err(sql_error)?)? {
+                    return Err(StoreError::Corrupt("control row and record sequence disagree".into()));
+                }
+                let anchor = decode_u64("control Fact watermark", row.get(2).map_err(sql_error)?)?;
+                if records.is_empty() && anchor < previous_anchor {
+                    return Err(StoreError::Corrupt("control Fact anchors descend".into()));
+                }
                 encoded_bytes = projected;
-                fact_cursors.push(decode_u64("control Fact watermark", row.get(2).map_err(sql_error)?)?);
+                fact_cursors.push(anchor);
                 records.push(record);
             }
             drop(rows);
@@ -719,7 +751,6 @@ impl SessionStore for SqliteStore {
         maximum_bytes: usize,
     ) -> Result<StoreBackwardFactPage> {
         rsi_agent_store_protocol::validate_page_limits(limit, maximum_bytes)?;
-        self.ensure_session_validated(session_id).await?;
         let session_id = session_id.clone();
         #[cfg(any(test, feature = "test-support"))]
         let materializations = Arc::clone(&self.inner.fact_materializations);
@@ -770,7 +801,15 @@ impl SessionStore for SqliteStore {
                     .map_err(sql_error)?;
                 let mut facts = Vec::new();
                 let mut encoded_bytes = 0_usize;
-                while let Some(row) = rows.next().map_err(sql_error)? {
+                loop {
+                    let Some(row) = rows.next().map_err(sql_error)? else {
+                        if facts.len() < limit
+                            && facts.last().map_or(before_seq, SessionFact::seq) > 1
+                        {
+                            return Err(StoreError::Corrupt("missing canonical Fact".into()));
+                        }
+                        break;
+                    };
                     let encoded_len = super::fact_storage::logical_len(row)?;
                     let projected = encoded_bytes
                         .checked_add(encoded_len)
