@@ -562,7 +562,7 @@ impl Driver {
                 step_id: snapshot.step_id().clone(),
                 names: names.clone(),
                 application,
-                instructions,
+                instructions: (fold.step_instructions() != instructions).then_some(instructions),
             });
         }
         if let Some(decision) = decision {

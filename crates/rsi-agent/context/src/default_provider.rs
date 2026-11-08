@@ -54,6 +54,9 @@ struct DefaultCursor {
     limits: ContextLimits,
 }
 impl ModelContextCursor for DefaultCursor {
+    fn step_instructions(&self) -> &[rsi_agent_session_protocol::StepInstruction] {
+        self.fold.step_instructions()
+    }
     fn previous_context_input_at_ms(
         &self,
         producer: &rsi_agent_session_protocol::ContributionId,

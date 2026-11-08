@@ -71,8 +71,11 @@ withdraws admission and cancels pending questions.
 
 BeforeStep uses the same retained journal and receipt protocol as Tool settlement.
 Its framework-assigned operation identity exists before the external call begins.
-The committed receipt identifies the producer's instruction sections, selected
-Step and a Tool subset within the proposed set. Recovery reconciles an unknown
+The committed receipt identifies the selected Step and a Tool subset within the
+proposed set. Explicit instruction updates contain the producer's staged text;
+an omitted update relies on the executor's equality check against that Step's
+canonical Context assembly. The adapter trusts this typed in-process publication
+contract instead of adding a second history lookup. Recovery reconciles an unknown
 receipt against canonical history.
 
 During preparation, `agent.history.read` borrows only that operation's captured

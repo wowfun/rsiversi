@@ -176,6 +176,9 @@ impl RawContextPressure {
 
 /// Exclusive incremental context state for one immutable Session Header.
 pub trait ModelContextCursor: fmt::Debug + Send + 'static {
+    /// Current ordered guidance from canonical Step instruction updates.
+    /// Step start/end clears it; an omitted update retains it across request series.
+    fn step_instructions(&self) -> &[rsi_agent_session_protocol::StepInstruction];
     /// Last entered non-Tool context input from this producer in retained Turns,
     /// reconstructed from canonical Facts and the selected fork history.
     fn previous_context_input_at_ms(
@@ -254,6 +257,10 @@ struct Metadata {
 }
 
 impl ModelContextState {
+    /// Borrows the canonical assembly for unchanged-instruction suppression.
+    pub fn step_instructions(&self) -> &[rsi_agent_session_protocol::StepInstruction] {
+        self.cursor.step_instructions()
+    }
     /// Borrows derived input timing without another history read or payload copy.
     pub fn previous_context_input_at_ms(
         &self,

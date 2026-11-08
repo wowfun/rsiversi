@@ -15,7 +15,7 @@ fn application_crash_facts(turn: &TurnId, started: bool) -> Vec<Arc<SessionFact>
             turn_id: turn.clone(),
             step_id: step,
             names: vec!["read".into()],
-            instructions: vec![],
+            instructions: Some(vec![]),
             application: Some(ApplicationToolView::Ready {
                 generation: "old-worker".into(),
                 receipt_source: Some("market".into()),

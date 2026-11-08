@@ -46,7 +46,7 @@ async fn ready_fixture(store: &SqliteStore) -> SessionId {
 
 #[tokio::test]
 async fn previous_body_encodings_are_refused_without_touching_the_database() {
-    for version in [44, 45] {
+    for version in [44, 45, 46] {
         let root = private_tempdir();
         let store = SqliteStore::open(root.path()).unwrap();
         ready_fixture(&store).await;

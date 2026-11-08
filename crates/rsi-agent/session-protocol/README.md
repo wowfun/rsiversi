@@ -1,5 +1,12 @@
 # rsi-agent-session-protocol
 
+`StepPrepared.instructions` is an optional complete ordered instruction update.
+Absent means retain the current Step's instructions; an empty list clears them.
+Step start/end resets them. Tool selection and application capture remain explicit
+on every preparation, independently of instruction equality. Format 36 owns
+these update semantics; older formats are rejected rather than interpreted as
+the current contract.
+
 `TurnOutcome::Blocked` records an input-preparation rejection. It is distinct from
 cancellation, provider failure and successful completion; no provider request is
 authorized by the rejected preparation. Initial `enter([])` completes normally.
@@ -18,7 +25,7 @@ these are not execution authority. Empty blocks and empty message content are
 valid preparation results even though fresh ingress requires meaningful input.
 The serialized entered list has a 32 MiB prepared-input envelope. Typed
 construction and deserialization validate it; safe-Rust consumers borrow it
-without repeating serialization. Session format 35 retains verbatim files as
+without repeating serialization. Session format 36 retains verbatim files as
 typed `FileRef` content, independently of image and conversation references.
 Image blocks may include optional display metadata independent of the raster identity. File bytes and provider-local paths do not enter Facts. It separates `InputMessageClaimed`
 and `ToolContextsClaimed` from `StepInputsPrepared`. Direct `TurnAccepted` text is
@@ -86,7 +93,7 @@ bounded like other non-human Agent messages and cannot carry execution overrides
 Command inputs retain one or more typed text, image or file blocks in their original
 order. Their external admission owner verifies referenced objects; the protocol
 validates descriptors, provenance and aggregate bounds without filesystem I/O.
-Session format 35 admits this content under both pending and claimed command
+Session format 36 admits this content under both pending and claimed command
 provenance. Command input grants no execution overrides or frozen-reference authority.
 
 `ExtensionJournal` is the built-in version-1 envelope for a trusted process
@@ -250,7 +257,7 @@ request identity, and a draft revision cannot appear in a durable command.
 Command controls contain no execution Facts and cannot claim a Turn's free
 mutation lane. Their consumers obtain Session authority through the owning
 Kernel service; serialized identities alone confer no authority. Only Header
-format 35 is accepted; all other formats are unsupported. Header protection is
+format 36 is accepted; all other formats are unsupported. Header protection is
 part of this format's immutable shape. The
 [SQLite contract](../store-sqlite/README.md) owns the exact database version;
 earlier authoritative formats are rejected without rewriting their files.

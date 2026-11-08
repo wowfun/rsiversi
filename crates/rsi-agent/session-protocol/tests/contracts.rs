@@ -14,7 +14,7 @@ fn application_bindings_retain_only_selected_unambiguous_identities() {
             turn_id: TurnId::new("turn").unwrap(),
             step_id: StepId::new("step").unwrap(),
             names: vec!["read".into(), "write".into()],
-            instructions: vec![],
+            instructions: Some(vec![]),
             application: Some(ApplicationToolView::Ready {
                 generation: "worker".into(),
                 receipt_source: Some("market".into()),
@@ -518,7 +518,7 @@ fn header_reports_old_format_before_removed_fields_and_rejects_them_in_current_f
     )
     .unwrap();
     let current = serde_json::to_value(&header).unwrap();
-    assert_eq!(current["format_version"], 35);
+    assert_eq!(current["format_version"], 36);
     assert!(current.get("workspace_trust").is_none());
     for version in 1..SESSION_FORMAT_VERSION {
         // Put the obsolete field before the version to prove decoding is not key-order dependent.

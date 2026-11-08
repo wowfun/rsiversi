@@ -228,6 +228,7 @@ impl rsi_agent_composition_protocol::BeforeStepContributor for EnteredTime {
     ) -> ContributionResult<rsi_agent_composition_protocol::BeforeStepOutput> {
         self.0.lock().unwrap().push(context.previous_input_at_ms);
         Ok(rsi_agent_composition_protocol::BeforeStepOutput {
+            instructions: "One current instruction".into(),
             contribution: ContributionOutput {
                 inputs: if context.previous_input_at_ms.is_none() {
                     vec![ContributionInput::context("one committed time sample")]
@@ -242,6 +243,7 @@ impl rsi_agent_composition_protocol::BeforeStepContributor for EnteredTime {
 }
 
 #[tokio::test]
+#[allow(clippy::too_many_lines)] // One Tool round trip checks retained input time, instruction storage and both model requests.
 async fn before_step_receives_its_entered_input_time_after_tool_round_trip() {
     let stack = BaseStack::activate().await;
     let sample = Arc::new(EnteredTime::default());
@@ -308,18 +310,38 @@ async fn before_step_receives_its_entered_input_time_after_tool_round_trip() {
         })
         .collect();
     assert_eq!(samples.len(), 1);
+    let instructions = facts
+        .iter()
+        .filter_map(|fact| match fact.body() {
+            SessionFactBody::StepPrepared {
+                instructions,
+                names,
+                ..
+            } => {
+                assert_eq!(names, &["echo"]);
+                Some(instructions)
+            }
+            _ => None,
+        })
+        .collect::<Vec<_>>();
+    assert_eq!(instructions.len(), 2);
+    assert_eq!(
+        instructions[0].as_ref().unwrap()[0].text,
+        "One current instruction"
+    );
+    assert!(
+        instructions[1].is_none(),
+        "unchanged preparation must not store the same instruction again"
+    );
     assert_eq!(
         *sample.0.lock().unwrap(),
         vec![None, Some(samples[0].timestamp_ms())]
     );
     for request in language.requests.lock().unwrap().iter() {
-        assert_eq!(
-            serde_json::to_string(request)
-                .unwrap()
-                .matches("one committed time sample")
-                .count(),
-            1
-        );
+        let encoded = serde_json::to_string(request).unwrap();
+        for marker in ["One current instruction", "one committed time sample"] {
+            assert_eq!(encoded.matches(marker).count(), 1);
+        }
     }
     drop(lease);
     assert!(callbacks.dispose().await.is_clean());

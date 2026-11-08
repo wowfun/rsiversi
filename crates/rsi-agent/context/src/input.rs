@@ -8,6 +8,11 @@ use rsi_agent_session_protocol::{
 use rsi_ai_protocol::{Message, MessageContent};
 
 impl ContextFold {
+    /// Current canonical Step guidance, cleared at Step boundaries.
+    pub fn step_instructions(&self) -> &[rsi_agent_session_protocol::StepInstruction] {
+        &self.step_instructions
+    }
+
     /// Last entered non-Tool context input from this producer in retained Turns.
     /// Claims or omitted inputs do not advance it. Replay and checkpoints retain
     /// the original Fact timestamp; removing its Turn forgets this derived value.

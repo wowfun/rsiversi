@@ -472,10 +472,20 @@ async fn model_retry_reuses_application_registration_and_next_round_drops_it() {
     let binding = &views[0][0];
     assert_eq!(binding.name, "echo");
     assert_eq!(binding.registration, "first-registration");
+    assert_request_tool_evidence(&page.facts, &provider.requests.lock().unwrap());
+    assert!(page.facts.iter().any(|f|matches!(f.body(),
+        SessionFactBody::ToolIntent{identity,approval:None,..} if identity.owner_id()==binding.owner)));
+    assert!(page.facts.iter().any(|f|matches!(f.body(),
+        SessionFactBody::ToolResult{identity,result,..} if identity.owner_id()==binding.owner && result.value==json!({"value":42}))));
+    assert_entered_tool_contexts(&page.facts, &submitted.session_id);
+    assert!(worker.dispose().await.is_clean());
+    stack.dispose(language, executor).await;
+}
+
+fn assert_request_tool_evidence(facts: &[SessionFact], requests: &[LanguageRequest]) {
     // The model request owns schema inspection; preparation retains only routing identities.
-    let requests = provider.requests.lock().unwrap();
     let mut intents = 0;
-    for fact in &page.facts {
+    for fact in facts {
         let SessionFactBody::ModelIntent { evidence, .. } = fact.body() else {
             continue;
         };
@@ -485,7 +495,7 @@ async fn model_retry_reuses_application_registration_and_next_round_drops_it() {
         let original = match tools {
             rsi_agent_session_protocol::EvidencePart::Inline { .. } => tools,
             rsi_agent_session_protocol::EvidencePart::Reference { seq, .. } => {
-                let original = page.facts.iter().find(|f| f.seq() == *seq).unwrap();
+                let original = facts.iter().find(|f| f.seq() == *seq).unwrap();
                 let SessionFactBody::ModelIntent {
                     evidence: rsi_agent_session_protocol::RequestEvidence::Available { tools, .. },
                     ..
@@ -507,14 +517,6 @@ async fn model_retry_reuses_application_registration_and_next_round_drops_it() {
         intents += 1;
     }
     assert_eq!(intents, requests.len());
-    drop(requests);
-    assert!(page.facts.iter().any(|f|matches!(f.body(),
-        SessionFactBody::ToolIntent{identity,approval:None,..} if identity.owner_id()==binding.owner)));
-    assert!(page.facts.iter().any(|f|matches!(f.body(),
-        SessionFactBody::ToolResult{identity,result,..} if identity.owner_id()==binding.owner && result.value==json!({"value":42}))));
-    assert_entered_tool_contexts(&page.facts, &submitted.session_id);
-    assert!(worker.dispose().await.is_clean());
-    stack.dispose(language, executor).await;
 }
 
 fn assert_retry_tools_and_inputs(requests: &[LanguageRequest]) {

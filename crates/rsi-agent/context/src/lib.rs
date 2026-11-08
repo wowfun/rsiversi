@@ -1245,7 +1245,10 @@ impl ContextFold {
         let body = fact.body();
         let seq = fact.seq();
         match body {
-            SessionFactBody::StepPrepared { instructions, .. } => {
+            SessionFactBody::StepPrepared {
+                instructions: Some(instructions),
+                ..
+            } => {
                 self.set_step_instructions(instructions)?;
             }
             SessionFactBody::StepStarted { .. } | SessionFactBody::StepEnded { .. } => {
@@ -1330,7 +1333,10 @@ impl ContextFold {
                 self.assemblers
                     .retain(|_, active| &active.turn_id != turn_id);
             }
-            SessionFactBody::CancelRequested { .. }
+            SessionFactBody::StepPrepared {
+                instructions: None, ..
+            }
+            | SessionFactBody::CancelRequested { .. }
             | SessionFactBody::WorkspaceTouched { .. }
             | SessionFactBody::ModelStarted { .. }
             | SessionFactBody::ImageIntent { .. }

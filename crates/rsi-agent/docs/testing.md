@@ -25,6 +25,10 @@ typed source failures and recovery. Human mention names are rechecked against
 each current catalog without adding historical instruction inputs. Live checks
 verify one catalog copy per request, stable repeated system evidence and cold
 continuation; the Context projection target owns Step replacement and expiry.
+Instruction-update tests preserve unchanged guidance across a checkpoint,
+replace and explicitly clear it, and prevent inheritance across Step boundaries.
+The executor proves repeated model/Tool rounds publish the text once while
+retaining each round's explicit Tool capture; retries use the admitted assembly.
 Workflow settlement tests drive the production observation loop and terminal
 cleanup, including runtime retirement with a still-pending Program result.
 Paused-clock tests bound both queued and admitted observation commands, preserve

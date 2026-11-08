@@ -101,6 +101,23 @@ history. Another registry or a last-good catalog cache would duplicate ownership
 and could hide changed or removed definitions. The existing Step preparation
 remains the durable retry/recovery receipt; this does not change spawn authority.
 
+Unchanged Step instruction assemblies are omitted from subsequent preparations,
+following DSH's `SystemPromptProjection.project` no-update decision. The current
+Context cursor already retains the assembly for projection and checkpointing;
+comparing that canonical value avoids a separate cache, digest table or storage
+reference reader. Empty replacement is distinct from omission, and Step closure
+clears the assembly. Each preparation still publishes its fresh application Tool
+capture: those registration identities are not interchangeable merely because
+the visible tool names and instruction text agree. The process adapter trusts
+the executor's unchanged decision at this typed in-process boundary. Adding
+another history walk to re-prove it would duplicate the owner's work.
+
+Format 36 and Store schema 47 reject older durable encodings. The Context cache
+payload remains v19 because its complete retained assembly and interpretation
+are unchanged; its immutable Header binding separates the new Session format.
+This pre-release choice avoids migration and fallback paths, not a claim that
+migration is technically impossible.
+
 Operation-scoped history reads borrow the captured claim-visible reader. Their
 consumed cursor is extension checkpoint data and advances with the journal's
 atomic publication. UTF-8 fragment transfer preserves the existing maximum Fact

@@ -142,6 +142,10 @@ fn full_builder_preserves_v19_payload_and_v6_envelope_without_a_third_full_copy(
         additional,
         hex::encode(Sha256::digest(&bytes))
     );
+    println!(
+        "checkpoint_header={}",
+        serde_json::to_string(state.header()).unwrap()
+    );
     assert_checkpoint_contract(&bytes);
     assert!(
         additional < 3 * bytes.len(),
@@ -156,7 +160,7 @@ fn assert_checkpoint_contract(bytes: &[u8]) {
     // v19 binds each projected Turn to its source Session and keeps pending
     // claims separate from prepared messages and current Step instructions,
     // plus entered context timestamps per producer and retained Turn;
-    // the v6 outer envelope, Session 35 and builder 2.15.0 bind the cache.
+    // the v6 outer envelope, Session 36 and builder 2.15.0 bind the cache.
     let prefix = b"rsi-agent-model-context-v6\0".len() + 32;
     let metadata_len = u32::from_le_bytes(bytes[prefix..prefix + 4].try_into().unwrap()) as usize;
     let metadata: serde_json::Value =
@@ -193,7 +197,7 @@ fn assert_checkpoint_contract(bytes: &[u8]) {
     }
     assert_eq!(
         hex::encode(Sha256::digest(bytes)),
-        "c2d8b7722ba378d8961fe45b9b670b707b87f98ae9360cd37471557dcf83be4a"
+        "c6c60811d00fc370ff5546dc880a4f6ceb33de48fe9d31d6dfeb2230e8456e81"
     );
 }
 

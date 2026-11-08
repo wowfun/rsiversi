@@ -7,6 +7,34 @@ use rsi_tools_protocol::ToolResultIdentity;
 use serde_json::json;
 
 #[test]
+fn step_instruction_omission_and_explicit_clear_have_distinct_wire_meanings() {
+    let body = |instructions| SessionFactBody::StepPrepared {
+        turn_id: TurnId::new("turn").unwrap(),
+        step_id: StepId::new("step").unwrap(),
+        names: vec![],
+        application: None,
+        instructions,
+    };
+    let unchanged = SessionFact::new(3, 42, body(None)).unwrap();
+    let wire = serde_json::to_value(&unchanged).unwrap();
+    assert!(wire.get("instructions").is_none());
+    assert_eq!(
+        serde_json::from_value::<SessionFact>(wire).unwrap(),
+        unchanged
+    );
+    let clear = SessionFact::new(3, 42, body(Some(vec![]))).unwrap();
+    let wire = serde_json::to_value(&clear).unwrap();
+    assert_eq!(wire["instructions"], json!([]));
+    assert_eq!(
+        serde_json::from_value::<SessionFact>(wire.clone()).unwrap(),
+        clear
+    );
+    let mut invalid = wire;
+    invalid["instructions"] = json!([{"producer":"fixture", "text":""}]);
+    assert!(serde_json::from_value::<SessionFact>(invalid).is_err());
+}
+
+#[test]
 fn plugin_input_has_validated_provenance_and_preserves_actual_text() {
     let body = SessionFactBody::InputMessageClaimed {
         turn_id: TurnId::new("turn").unwrap(),

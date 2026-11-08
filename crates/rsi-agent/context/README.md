@@ -52,8 +52,12 @@ checkpoint restore and compaction selection must preserve both coordinates.
 Durable compaction selections use policy v2 and carry the source Session explicitly.
 
 Step preparation instructions are current system guidance, not historical chat
-messages. `StepPrepared` replaces that guidance; the next Step or terminal Turn
-clears it. Ordinary contributed inputs retain their existing history semantics.
+messages. `StepPrepared.instructions` replaces that guidance when present; an
+omitted value retains the current Step's assembly. An explicit empty list clears
+it. The executor compares against the claim's synchronized Context cursor before
+omitting unchanged instructions. A new Step or terminal Turn clears guidance,
+so omission cannot revive a previous Step's assembly. Ordinary contributed inputs
+retain their existing history semantics.
 The bounded guidance participates in context accounting, compaction requests and
 checkpoint v19, so recovery cannot retain an exited Plan's old instructions.
 
@@ -78,7 +82,7 @@ interrupted-output projection.
 Target-specific Tool image fallback consumes the assembled messages before request
 construction, moving unaffected messages and request options without cloning. Only Tool results containing
 images are rebuilt; complete-request validation still bounds the projection.
-The allocation golden binds builder 2.15.0, Session format 35, the v19 fold
+The allocation golden binds builder 2.15.0, Session format 36, the v19 fold
 and the v6 envelope.
 
 The single deep module for prompt projection, incremental model context, and

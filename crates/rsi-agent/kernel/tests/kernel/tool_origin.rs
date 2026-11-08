@@ -303,7 +303,7 @@ async fn application_registration_binds_owner_without_forcing_approval() {
                 turn_id: turn.clone(),
                 step_id: step,
                 names: vec!["file_read".into(), "other".into()],
-                instructions: vec![],
+                instructions: Some(vec![]),
                 application: Some(ApplicationToolView::Ready {
                     generation: "worker".into(),
                     receipt_source: Some("market".into()),

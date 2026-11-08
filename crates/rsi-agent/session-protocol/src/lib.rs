@@ -112,7 +112,7 @@ pub use resource::{
 };
 
 /// Exact durable format accepted by this pre-release implementation.
-pub const SESSION_FORMAT_VERSION: u32 = 35;
+pub const SESSION_FORMAT_VERSION: u32 = 36;
 /// Maximum bytes in one session, turn, effect, profile, or error-code identity.
 pub const MAXIMUM_AGENT_IDENTIFIER_BYTES: usize = 256;
 /// Maximum bytes in one Agent preset directory-segment identity.
@@ -2264,8 +2264,9 @@ pub enum SessionFactBody {
         names: Vec<String>,
         /// Application names and registration identities for this request series.
         application: Option<ApplicationToolView>,
-        /// Current system instructions in contribution order, replaced at each preparation.
-        instructions: Vec<StepInstruction>,
+        /// Complete ordered replacement; omission retains the current Step's instructions.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        instructions: Option<Vec<StepInstruction>>,
     },
     /// One model Step ended before another Step or the Turn terminal.
     StepEnded {
@@ -2511,7 +2512,9 @@ impl SessionFactBody {
                 instructions,
                 ..
             } => {
-                validate_step_instructions(instructions)?;
+                if let Some(instructions) = instructions {
+                    validate_step_instructions(instructions)?;
+                }
                 if names.len() > rsi_tools_protocol::MAXIMUM_REGISTERED_TOOLS
                     || names.windows(2).any(|pair| pair[0] >= pair[1])
                 {

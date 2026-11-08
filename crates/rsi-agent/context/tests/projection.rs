@@ -100,6 +100,7 @@ fn command_content_keeps_user_role_and_file_identity_through_checkpoint() {
 }
 
 #[test]
+#[allow(clippy::too_many_lines)] // One replay checks update, omission, clearing, checkpointing and Step expiry.
 fn step_instructions_survive_checkpoint_but_do_not_leak_into_a_later_step() {
     let turn = TurnId::new("turn-step-instructions").unwrap();
     let step = StepId::new("step-one").unwrap();
@@ -121,10 +122,10 @@ fn step_instructions_survive_checkpoint_but_do_not_leak_into_a_later_step() {
             step_id: step.clone(),
             names: vec![],
             application: None,
-            instructions: vec![rsi_agent_session_protocol::StepInstruction {
+            instructions: Some(vec![rsi_agent_session_protocol::StepInstruction {
                 producer: rsi_agent_session_protocol::ContributionId::new("fixture.plan").unwrap(),
                 text: "Only plan during this Step".into(),
-            }],
+            }]),
         },
     ]);
     let mut fold = ContextFold::with_limits(
@@ -160,6 +161,64 @@ fn step_instructions_survive_checkpoint_but_do_not_leak_into_a_later_step() {
         .unwrap(),
         serde_json::to_value(request).unwrap()
     );
+    for (update, expected) in [
+        (None, "Only plan during this Step"),
+        (Some("New instruction"), "New instruction"),
+        (None, "New instruction"),
+        (Some(""), ""),
+        (None, ""),
+        (
+            Some("Only plan during this Step"),
+            "Only plan during this Step",
+        ),
+    ] {
+        let instructions = update.map(|text| {
+            if text.is_empty() {
+                vec![]
+            } else {
+                vec![rsi_agent_session_protocol::StepInstruction {
+                    producer: rsi_agent_session_protocol::ContributionId::new("fixture.plan")
+                        .unwrap(),
+                    text: text.into(),
+                }]
+            }
+        });
+        restored
+            .apply(&entered_facts_after(
+                restored.through_seq(),
+                vec![SessionFactBody::StepPrepared {
+                    turn_id: turn.clone(),
+                    step_id: step.clone(),
+                    names: vec![],
+                    application: None,
+                    instructions,
+                }],
+            ))
+            .unwrap();
+        let wire = serde_json::to_string(
+            &restored
+                .request(ContextLimits::default(), options.clone())
+                .unwrap(),
+        )
+        .unwrap();
+        for marker in ["Only plan during this Step", "New instruction"] {
+            assert_eq!(wire.contains(marker), marker == expected);
+        }
+        restored = ContextFold::from_checkpoint(
+            header("system"),
+            ContextLimits::default(),
+            &restored.checkpoint_bytes().unwrap(),
+            rsi_agent_context::ContextBudget::default(),
+        )
+        .unwrap();
+        assert_eq!(
+            restored
+                .step_instructions()
+                .first()
+                .map_or("", |row| row.text.as_str()),
+            expected
+        );
+    }
     let next = StepId::new("step-two").unwrap();
     restored
         .apply(&entered_facts_after(
@@ -179,7 +238,7 @@ fn step_instructions_survive_checkpoint_but_do_not_leak_into_a_later_step() {
                     step_id: next,
                     names: vec![],
                     application: None,
-                    instructions: vec![],
+                    instructions: None,
                 },
             ],
         ))

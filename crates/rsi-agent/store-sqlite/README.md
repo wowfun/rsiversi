@@ -1,6 +1,6 @@
 # rsi-agent-store-sqlite
 
-Schema 46 stores Header format 35 with separate history provenance and Agent
+Schema 47 stores Header format 36 with separate history provenance and Agent
 execution ownership. A mailbox row retains routing, lifecycle and acceptance
 coordinates, never a second message body. Body reads join the indexed acceptance
 to its canonical control in the same query and bound that control before allocating
@@ -35,7 +35,7 @@ window and suffix admission, and cold validation checks their indexed lengths
 against reconstructed Facts. Physical JSON lengths are bounded before allocation.
 Prefix fingerprints remain logical; reference coverage hashes the exact physical
 record and verifies the logical reference edges. Purge removes Facts before their
-accepted controls. Unsupported schemas, including 44 and 45, are rejected during
+accepted controls. Unsupported schemas are rejected during
 read-only preflight; no automatic migration or reset is performed.
 The Session row projects inbox suspension from canonical controls. Ready queries
 filter suspended Sessions without rewriting their message candidates; canonical
