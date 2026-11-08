@@ -128,10 +128,10 @@ struct Backend {
 struct Service(Arc<Backend>);
 #[async_trait]
 impl SessionService for Service {
-    async fn read_header(
+    async fn read_summary(
         &self,
         _: &rsi_agent_session_protocol::SessionId,
-    ) -> rsi_session_protocol::Result<rsi_agent_session_protocol::SessionHeader> {
+    ) -> rsi_session_protocol::Result<rsi_session_protocol::SessionSummary> {
         panic!("unexpected durable Header read")
     }
     async fn create(

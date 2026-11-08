@@ -310,11 +310,11 @@ impl rsi_extension::Handler for Sessions {
             .map_err(|_| rsi_extension::Error::Remote("request has retired".into()))?;
         let service = self.ingress.scoped(origin);
         let read = async {
-            match service.read_header(&input.session_id).await {
+            match service.read_summary(&input.session_id).await {
                 Err(rsi_session_protocol::SessionError::NotFound(_)) => {
                     service.attach(&input.session_id).await?.header().await
                 }
-                result => result,
+                result => result.map(|summary| summary.header),
             }
         };
         let header = tokio::select! {biased;()=stop.cancelled()=>return Err(rsi_extension::Error::Cancelled),

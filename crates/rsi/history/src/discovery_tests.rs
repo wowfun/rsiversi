@@ -18,12 +18,15 @@ struct Fixture {
 }
 mod sessions {
     use super::Fixture;
-    use rsi_agent_session_protocol::{SessionHeader, SessionId};
+    use rsi_agent_session_protocol::SessionId;
     use rsi_session_protocol::*;
     use std::sync::Arc;
     #[async_trait::async_trait]
     impl SessionService for Fixture {
-        async fn read_header(&self, session_id: &SessionId) -> Result<SessionHeader> {
+        async fn read_summary(
+            &self,
+            session_id: &SessionId,
+        ) -> Result<rsi_session_protocol::SessionSummary> {
             panic!("unused history fixture facet")
         }
         async fn create(&self, request: CreateSession) -> Result<Arc<dyn SessionHandle>> {

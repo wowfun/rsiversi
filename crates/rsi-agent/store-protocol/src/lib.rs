@@ -2040,6 +2040,9 @@ pub trait SessionStore: fmt::Debug + Send + Sync + 'static {
     async fn validate_session(&self, session_id: &SessionId) -> Result<()>;
     /// Reads bounded immutable metadata without scanning session history.
     async fn header(&self, session_id: &SessionId) -> Result<SessionHeader>;
+    /// Reads the Header, activity and Fact/control watermarks from one metadata snapshot.
+    /// Missing or retired Sessions are not found; this read never loads transcript.
+    async fn session_summary(&self, session_id: &SessionId) -> Result<StoreRecentSession>;
     /// Reads ordered per-item access projections from one metadata snapshot.
     /// Returns exactly one result per input identity, in input order, including
     /// failures and repeated identities; implementations never omit a slot.

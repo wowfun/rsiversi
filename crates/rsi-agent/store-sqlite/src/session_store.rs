@@ -61,6 +61,18 @@ pub(super) const LIST_READY_ROOTS_FIRST_SQL: &str =
      WHERE COALESCE((SELECT inbox_paused FROM sessions WHERE session_id = r.session_id), 0) = 0
      ORDER BY r.root_session_id LIMIT ?2";
 
+impl SqliteStore {
+    async fn read_summary_row(&self, session_id: &SessionId) -> Result<StoreRecentSession> {
+        let session_id = session_id.clone();
+        self.with_reader_named(StoreOperation::Header, move |connection| {
+            let transaction = connection.transaction().map_err(sql_error)?;
+            reference_index::available(&transaction, &session_id)?;
+            validation::read_session_header_source(&transaction, &session_id).map(|(row, _)| row)
+        })
+        .await
+    }
+}
+
 #[async_trait]
 #[allow(clippy::too_many_lines)] // The trait implementation keeps each Store seam explicit.
 impl SessionStore for SqliteStore {
@@ -408,13 +420,13 @@ impl SessionStore for SqliteStore {
     }
 
     async fn header(&self, session_id: &SessionId) -> Result<SessionHeader> {
-        let session_id = session_id.clone();
-        self.with_reader_named(StoreOperation::Header, move |connection| {
-            let transaction = connection.transaction().map_err(sql_error)?;
-            reference_index::available(&transaction, &session_id)?;
-            read_session_header_row(&transaction, &session_id).map(|(header, _)| header)
-        })
-        .await
+        self.read_summary_row(session_id)
+            .await
+            .map(|row| row.header)
+    }
+
+    async fn session_summary(&self, session_id: &SessionId) -> Result<StoreRecentSession> {
+        self.read_summary_row(session_id).await
     }
 
     async fn read_domain_states(

@@ -65,10 +65,10 @@ impl Sessions {
                 return Err(Error::Protocol);
             }
             let source = sessions
-                .read_header(&fork.source_session_id)
+                .read_summary(&fork.source_session_id)
                 .await
                 .map_err(remote)?;
-            WorkspaceId::from_coordinates(source.coordinates())
+            WorkspaceId::from_coordinates(source.header.coordinates())
         } else {
             input
                 .workspace(self.workspaces.scoped(origin).as_ref())

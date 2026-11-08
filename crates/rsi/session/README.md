@@ -313,11 +313,8 @@ are always sampled separately. A closed durable cut is Idle even when the earlie
 resident sample reports running work; Idle does not establish effect settlement.
 Running requires both an open durable Turn and a sampled current owner.
 
-`SessionService::read_header` reads one durable Store Header by SessionId without
-attaching, creating a handle, touching activity or loading transcript. Unpublished
-drafts are absent. The authenticated `session/read-header` v1 operation exposes
-the same read and validates the echoed identity; narrowed Session contribution
-clients do not gain this deployment-wide operation.
+The [summary read](../session-protocol/README.md) authorizes the Header returned
+by the Store's single metadata snapshot before returning its activity and cuts.
 
 A new queue replacement transfers its owned content through normal input admission
 and back into the unchanged request before Kernel submission. Validation does not

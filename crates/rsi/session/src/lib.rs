@@ -527,7 +527,7 @@ impl LocalSessionService {
             ));
         }
         let source_lifetime = self.lifecycles.attach(&fork.source_session_id)?.hard()?;
-        let source = self.read_header(&fork.source_session_id).await?;
+        let source = self.read_summary(&fork.source_session_id).await?.header;
         let protection = self.protect_header(&source)?;
         if source.protection().is_some() {
             return Err(SessionError::Api(rsi_api_protocol::ApiError::Unauthorized));
@@ -652,16 +652,19 @@ impl SessionService for LocalSessionService {
         self.maintenance_status(operation_id).await
     }
 
-    async fn read_header(&self, session_id: &SessionId) -> Result<SessionHeader> {
+    async fn read_summary(
+        &self,
+        session_id: &SessionId,
+    ) -> Result<rsi_session_protocol::SessionSummary> {
         self.check_origin()?;
-        let header = self
+        let summary = self
             .store
-            .header(session_id)
+            .session_summary(session_id)
             .await
             .map_err(map_store_error)?;
-        let _protection = self.protect_header(&header)?;
-        let _admission = self.admit(header.coordinates().location())?;
-        Ok(header)
+        let _protection = self.protect_header(&summary.header)?;
+        let _admission = self.admit(summary.header.coordinates().location())?;
+        Ok(summary)
     }
     async fn activity(&self) -> Result<rsi_session_protocol::SessionActivityPage> {
         self.collect_activity().await

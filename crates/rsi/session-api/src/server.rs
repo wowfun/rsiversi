@@ -262,16 +262,16 @@ fn root_operations(
             }
         }),
     )?;
-    let header_service = service.clone();
-    let header_scratch = scratch.clone();
-    let read_header = registrar.register(
-        Operation::ReadHeader.spec(),
+    let summary_service = service.clone();
+    let summary_scratch = scratch.clone();
+    let read_summary = registrar.register(
+        Operation::ReadSummary.spec(),
         json_handler(move |context, request: wire::Attach| {
-            let service = header_service.scoped(context.origin);
-            let scratch = header_scratch.clone();
+            let service = summary_service.scoped(context.origin);
+            let scratch = summary_scratch.clone();
             async move {
-                let reservation = scratch.reserve(Operation::ReadHeader).await?;
-                admitted(service.read_header(&request.session_id).await, reservation)
+                let reservation = scratch.reserve(Operation::ReadSummary).await?;
+                admitted(service.read_summary(&request.session_id).await, reservation)
             }
         }),
     )?;
@@ -299,7 +299,7 @@ fn root_operations(
             }
         }),
     )?;
-    maintenance.extend([create, attach, read_header, recent]);
+    maintenance.extend([create, attach, read_summary, recent]);
     Ok(maintenance)
 }
 #[allow(clippy::too_many_lines)] // Keep the closed operation-to-handler mapping reviewable in one place.

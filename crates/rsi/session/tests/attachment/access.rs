@@ -153,7 +153,7 @@ async fn remote_session_reads_are_offline_caller_bound_and_live_streams_recheck_
         Err(SessionError::Api(ApiError::Unauthorized))
     ));
     assert!(matches!(
-        scoped.read_header(remote).await,
+        scoped.read_summary(remote).await,
         Err(SessionError::Api(ApiError::Unauthorized))
     ));
     for selected in [
@@ -253,10 +253,10 @@ async fn remote_session_reads_are_offline_caller_bound_and_live_streams_recheck_
         64,
         "a paused stream must release its publication permit"
     );
-    assert!(scoped.read_header(headers[0].session_id()).await.is_ok());
+    assert!(scoped.read_summary(headers[0].session_id()).await.is_ok());
     access.granted.store(false, Ordering::SeqCst);
     assert!(matches!(
-        scoped.read_header(remote).await,
+        scoped.read_summary(remote).await,
         Err(SessionError::Api(ApiError::Unauthorized))
     ));
     assert!(matches!(
@@ -307,7 +307,7 @@ async fn remote_session_reads_are_offline_caller_bound_and_live_streams_recheck_
         Err(SessionError::Api(ApiError::Unauthorized))
     ));
     assert!(
-        service.read_header(remote).await.is_ok(),
+        service.read_summary(remote).await.is_ok(),
         "Local trust is independent of Device Use"
     );
     revoked.cancel();

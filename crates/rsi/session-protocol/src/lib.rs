@@ -911,8 +911,9 @@ pub trait SessionService: fmt::Debug + Send + Sync + 'static {
     async fn activity(&self) -> Result<SessionActivityPage> {
         Err(SessionError::NotFound("Session activity owner".into()))
     }
-    /// Reads only the durable Header, without a handle, transcript or activity effect.
-    async fn read_header(&self, session_id: &SessionId) -> Result<SessionHeader>;
+    /// Reads a fresh durable Header and activity/cut summary from one metadata snapshot.
+    /// Does not create a handle, load transcript, or touch activity.
+    async fn read_summary(&self, session_id: &SessionId) -> Result<SessionSummary>;
     /// Creates one unpublished draft handle after rejecting a durable identity collision.
     async fn create(&self, request: CreateSession) -> Result<Arc<dyn SessionHandle>>;
     /// Resolves a live draft or attaches to one exact durable session from Store alone.

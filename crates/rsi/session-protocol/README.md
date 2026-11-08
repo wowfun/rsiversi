@@ -445,11 +445,14 @@ content at their normal owning boundary before dispatch. ACP retains request
 cancellation and does not expose queue editing. The `:steer` command continues to
 submit new input with its existing idle fallback.
 
-`SessionService::read_header` reads one durable Store Header by SessionId without
-attaching, creating a handle, touching activity or loading transcript. Unpublished
-drafts are absent. The authenticated `session/read-header` v1 operation exposes
-the same read and validates the echoed identity; narrowed Session contribution
-clients do not gain this deployment-wide operation.
+`SessionService::read_summary` reads one durable Session's Header, activity time
+and Fact/control watermarks from one Store metadata snapshot, without attaching,
+creating a handle, touching activity or loading transcript. It returns the same
+`SessionSummary` used by recent listings. Unpublished drafts and retired Sessions
+are absent. The authenticated `session/read-summary` v1 operation validates the
+echoed identity and activity timestamp; narrowed Session contribution clients
+do not gain this deployment-wide operation. Each call reads a fresh snapshot
+under the caller's current protection and execution-location authority.
 
 Every Session transport implements queue mutation and receipt lookup explicitly;
 these are required SessionHandle methods, without a runtime unsupported fallback.

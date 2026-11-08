@@ -21,7 +21,7 @@ pub(crate) async fn preflight(
         crate::SessionSelection::Resume { cwd, .. } => {
             let mut keys = vec![Session::Attach.spec().key()];
             if cwd.is_some() {
-                keys.push(Session::ReadHeader.spec().key());
+                keys.push(Session::ReadSummary.spec().key());
             }
             keys
         }

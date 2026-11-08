@@ -98,12 +98,13 @@ impl Sessions {
         };
         let attach = || async { find().await?.ok_or_else(unavailable) };
         let header = || async {
-            find_header(
+            find_summary(
                 service.as_ref(),
                 &input.session_id,
                 input.parent_session_id.as_ref(),
             )
             .await?
+            .map(|summary| summary.header)
             .ok_or_else(unavailable)
         };
         let result = match input.operation {
@@ -112,7 +113,6 @@ impl Sessions {
             } => {
                 metadata_snapshot(
                     service.as_ref(),
-                    store,
                     &input.session_id,
                     input.parent_session_id.as_ref(),
                 )
@@ -313,13 +313,13 @@ async fn find_handle(
     Ok(Some(handle))
 }
 
-async fn find_header(
+async fn find_summary(
     service: &dyn SessionService,
     session: &SessionId,
     parent: Option<&SessionId>,
-) -> Result<Option<SessionHeader>> {
-    let header = match service.read_header(session).await {
-        Ok(header) => header,
+) -> Result<Option<rsi_session_protocol::SessionSummary>> {
+    let summary = match service.read_summary(session).await {
+        Ok(summary) => summary,
         Err(
             rsi_session_protocol::SessionError::NotFound(_)
             | rsi_session_protocol::SessionError::Api(rsi_api_protocol::ApiError::Unauthorized),
@@ -327,9 +327,9 @@ async fn find_header(
         Err(_) => return Err(unavailable()),
     };
     if let Some(parent) = parent {
-        check_parent(service, &header, parent).await?;
+        check_parent(service, &summary.header, parent).await?;
     }
-    Ok(Some(header))
+    Ok(Some(summary))
 }
 
 async fn check_parent(
@@ -338,7 +338,7 @@ async fn check_parent(
     parent: &SessionId,
 ) -> Result<()> {
     service
-        .read_header(parent)
+        .read_summary(parent)
         .await
         .map_err(|_| Error::Remote("Parent unavailable to caller".into()))?;
     if header
@@ -355,31 +355,17 @@ async fn check_parent(
 
 async fn metadata_snapshot(
     service: &dyn SessionService,
-    store: &dyn SessionStore,
     session: &SessionId,
     parent: Option<&SessionId>,
 ) -> Result<Value> {
-    let Some(header) = find_header(service, session, parent).await? else {
+    let Some(summary) = find_summary(service, session, parent).await? else {
         return Ok(Value::Null);
     };
-    let rows = store
-        .session_activity_summaries(std::slice::from_ref(header.session_id()))
-        .await
-        .map_err(|_| Error::Remote("Session metadata unavailable".into()))?;
-    match rows.as_slice() {
-        [Some(row)]
-            if row.session_id == *header.session_id()
-                && row.created_at_ms == header.created_at_ms() =>
-        {
-            Ok(stored_history(
-                &header,
-                row.durable_fact_seq,
-                row.durable_control_seq,
-            ))
-        }
-        [None] => Ok(Value::Null),
-        _ => Err(Error::Remote("Session catalog changed during read".into())),
-    }
+    Ok(stored_history(
+        &summary.header,
+        summary.durable_fact_seq,
+        summary.durable_control_seq,
+    ))
 }
 
 pub(super) fn stored_history(header: &SessionHeader, fact_seq: u64, control_seq: u64) -> Value {

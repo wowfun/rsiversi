@@ -1,5 +1,10 @@
 # rsi-agent-store-protocol
 
+`session_summary` reads one durable Session's Header, activity timestamp and
+Fact/control watermarks from one metadata snapshot. It returns the same
+`StoreRecentSession` value used by recent listings, without loading transcript
+or creating runtime activity. A missing or retired Session is not found.
+
 A domain-state read can select one domain ID. It returns the same watermarks
 and canonical state as filtering the complete page at that cut. A missing
 domain yields an empty page. Readers can request the stored codec version by

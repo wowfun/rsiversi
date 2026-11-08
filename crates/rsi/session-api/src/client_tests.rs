@@ -170,6 +170,39 @@ async fn fixture() -> (Arc<Remote>, SessionClient, Arc<dyn SessionHandle>) {
     let handle = client.attach(header().session_id()).await.unwrap();
     (remote, client, handle)
 }
+
+#[tokio::test]
+async fn summary_reads_keep_one_cut_and_reject_foreign_or_inconsistent_metadata() {
+    let remote = Remote::new();
+    let client = SessionClient::new(remote.clone());
+    let expected = SessionSummary {
+        header: header(),
+        last_activity_ms: 2,
+        durable_fact_seq: 7,
+        durable_control_seq: 9,
+    };
+    let id = expected.header.session_id();
+    remote.reply(&expected);
+    assert_eq!(client.read_summary(id).await.unwrap(), expected);
+    assert_eq!(remote.calls.load(Ordering::SeqCst), 1);
+    assert_eq!(
+        remote.requests.lock().unwrap()[0].0,
+        Operation::ReadSummary.spec()
+    );
+    let mut stale = expected.clone();
+    stale.last_activity_ms = 0;
+    remote.reply(&stale);
+    assert!(client.read_summary(id).await.is_err());
+    remote.reply(&expected);
+    assert!(
+        client
+            .read_summary(&SessionId::new("foreign").unwrap())
+            .await
+            .is_err()
+    );
+    assert_eq!(remote.calls.load(Ordering::SeqCst), 3);
+    assert_eq!(remote.output.used(), 0);
+}
 fn envelope(body: Value) -> Value {
     let mut reply =
         json!({"target":{"session_id":"session","header_key":header().fingerprint().unwrap()}});
@@ -598,7 +631,7 @@ fn session_proxy_keeps_local_call_versions_without_constructor_admission() {
     let versions = [
         (Operation::Create, 12),
         (Operation::Attach, 9),
-        (Operation::Recent, 10),
+        (Operation::Recent, 11),
         (Operation::DraftSnapshot, 10),
         (Operation::SelectPreset, 10),
         (Operation::Inspect, 10),
@@ -606,7 +639,7 @@ fn session_proxy_keeps_local_call_versions_without_constructor_admission() {
         (Operation::Observe, 9),
         (Operation::History, 7),
         (Operation::ReadMessage, 7),
-        (Operation::ReadHeader, 3),
+        (Operation::ReadSummary, 1),
         (Operation::DiscardDraftInputs, 2),
         (Operation::MutateQueue, 3),
         (Operation::ModelObserve, 2),
@@ -617,12 +650,12 @@ fn session_proxy_keeps_local_call_versions_without_constructor_admission() {
         assert_eq!(current.id.version(), version);
         let mut remote = Remote::new();
         let operations = &mut Arc::get_mut(&mut remote).unwrap().operations;
-        let old = operations
+        let advertised = operations
             .iter_mut()
             .find(|spec| spec.id == current.id)
             .unwrap();
-        old.id =
-            rsi_api_protocol::OperationId::new("session", current.id.name(), version - 1).unwrap();
+        advertised.id =
+            rsi_api_protocol::OperationId::new("session", current.id.name(), version + 1).unwrap();
         let proxy = SessionClient::new(remote.clone());
         assert!(Arc::ptr_eq(
             &proxy.state.api,

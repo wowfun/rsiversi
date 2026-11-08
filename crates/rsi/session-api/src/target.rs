@@ -19,7 +19,7 @@ pub(crate) fn operations() -> Vec<OperationSpec> {
             | Operation::PurgeStatus
             | Operation::Create
             | Operation::Recent
-            | Operation::ReadHeader
+            | Operation::ReadSummary
             | Operation::WorkflowReadiness
             | Operation::ListWorkflows
             | Operation::ReadWorkflow

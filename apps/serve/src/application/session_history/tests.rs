@@ -4,18 +4,21 @@ use rsi_session_protocol::{CreateSession, RecentSessionCursor, RecentSessionPage
 use std::sync::Arc;
 
 #[derive(Debug)]
-struct MetadataService(Vec<SessionHeader>);
+struct MetadataService(Vec<rsi_session_protocol::SessionSummary>);
 
 #[async_trait::async_trait]
 impl SessionService for MetadataService {
-    async fn read_header(&self, id: &SessionId) -> rsi_session_protocol::Result<SessionHeader> {
+    async fn read_summary(
+        &self,
+        id: &SessionId,
+    ) -> rsi_session_protocol::Result<rsi_session_protocol::SessionSummary> {
         match id.as_str() {
             "denied" => Err(SessionError::Api(rsi_api_protocol::ApiError::Unauthorized)),
             "failed" => Err(SessionError::Backend("read failed".into())),
             _ => self
                 .0
                 .iter()
-                .find(|header| header.session_id() == id)
+                .find(|row| row.header.session_id() == id)
                 .cloned()
                 .ok_or_else(|| SessionError::NotFound(id.to_string())),
         }
@@ -127,11 +130,11 @@ async fn metadata_reads_do_not_attach_and_preserve_visibility_and_failures() {
     use rsi_agent_testkit::MemoryStore;
     let header = metadata_header("metadata");
     let id = header.session_id();
-    let service = MetadataService(vec![header.clone()]);
+    let service = MetadataService(vec![]);
     let store = MemoryStore::default();
     // No durable row, including an unpublished draft, is not an error.
     assert_eq!(
-        metadata_snapshot(&service, &store, id, None).await.unwrap(),
+        metadata_snapshot(&service, id, None).await.unwrap(),
         Value::Null
     );
     store
@@ -157,7 +160,8 @@ async fn metadata_reads_do_not_attach_and_preserve_visibility_and_failures() {
         })
         .await
         .unwrap();
-    let snapshot = metadata_snapshot(&service, &store, id, None).await.unwrap();
+    let service = MetadataService(vec![store.session_summary(id).await.unwrap()]);
+    let snapshot = metadata_snapshot(&service, id, None).await.unwrap();
     assert_eq!(snapshot["id"], id.as_str());
     assert_eq!(snapshot["created_at"], 1);
     assert_eq!(snapshot["through"], 1);
@@ -176,14 +180,14 @@ async fn metadata_reads_do_not_attach_and_preserve_visibility_and_failures() {
     assert!(store.take_fact_read_cursors().is_empty());
     for absent in ["missing", "denied"] {
         assert_eq!(
-            metadata_snapshot(&service, &store, &SessionId::new(absent).unwrap(), None)
+            metadata_snapshot(&service, &SessionId::new(absent).unwrap(), None)
                 .await
                 .unwrap(),
             Value::Null
         );
     }
     assert!(matches!(
-        metadata_snapshot(&service, &store, &SessionId::new("failed").unwrap(), None).await,
+        metadata_snapshot(&service, &SessionId::new("failed").unwrap(), None).await,
         Err(Error::Remote(_))
     ));
 }
@@ -215,25 +219,28 @@ async fn metadata_parent_address_requires_visible_direct_parent() {
         })
         .unwrap();
     let other = metadata_header("other");
-    let service = MetadataService(vec![parent.clone(), child.clone(), other.clone()]);
-    let store = rsi_agent_testkit::MemoryStore::default();
-    // The metadata path checks parent access and lineage before querying the Store.
+    let summary = |header: SessionHeader| rsi_session_protocol::SessionSummary {
+        last_activity_ms: header.created_at_ms(),
+        header,
+        durable_fact_seq: 7,
+        durable_control_seq: 9,
+    };
+    let service = MetadataService(vec![
+        summary(parent.clone()),
+        summary(child.clone()),
+        summary(other.clone()),
+    ]);
+    // The authorized summary already carries the single Store cut.
     assert_eq!(
-        metadata_snapshot(
-            &service,
-            &store,
-            child.session_id(),
-            Some(parent.session_id())
-        )
-        .await
-        .unwrap(),
-        Value::Null
+        metadata_snapshot(&service, child.session_id(), Some(parent.session_id()))
+            .await
+            .unwrap()["selection_cursor"],
+        json!({"kind":"durable","fact_seq":7,"control_seq":9})
     );
-    let hidden_parent = MetadataService(vec![child.clone()]);
+    let hidden_parent = MetadataService(vec![summary(child.clone())]);
     assert!(
         metadata_snapshot(
             &hidden_parent,
-            &store,
             child.session_id(),
             Some(parent.session_id()),
         )
@@ -244,7 +251,6 @@ async fn metadata_parent_address_requires_visible_direct_parent() {
         assert!(matches!(
             metadata_snapshot(
                 &service,
-                &store,
                 child.session_id(),
                 Some(&SessionId::new(invalid).unwrap())
             )
@@ -253,14 +259,9 @@ async fn metadata_parent_address_requires_visible_direct_parent() {
         ));
     }
     assert!(
-        metadata_snapshot(
-            &service,
-            &store,
-            other.session_id(),
-            Some(parent.session_id())
-        )
-        .await
-        .is_err()
+        metadata_snapshot(&service, other.session_id(), Some(parent.session_id()))
+            .await
+            .is_err()
     );
 }
 

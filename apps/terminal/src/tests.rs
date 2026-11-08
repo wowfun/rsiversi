@@ -1512,10 +1512,10 @@ struct HeadlessDomain(Arc<UnknownThenAcceptedHandle>);
 #[cfg(unix)]
 #[async_trait::async_trait]
 impl SessionService for HeadlessDomain {
-    async fn read_header(
+    async fn read_summary(
         &self,
         _: &rsi_agent_session_protocol::SessionId,
-    ) -> rsi_session_protocol::Result<rsi_agent_session_protocol::SessionHeader> {
+    ) -> rsi_session_protocol::Result<rsi_session_protocol::SessionSummary> {
         panic!("unexpected durable Header read")
     }
     async fn create(
@@ -1632,10 +1632,10 @@ async fn line_sigint_interrupts_initial_service_queries_and_drains_presentation(
     struct Stalled(CancellationToken);
     #[async_trait::async_trait]
     impl SessionService for Stalled {
-        async fn read_header(
+        async fn read_summary(
             &self,
             _: &rsi_agent_session_protocol::SessionId,
-        ) -> rsi_session_protocol::Result<rsi_agent_session_protocol::SessionHeader> {
+        ) -> rsi_session_protocol::Result<rsi_session_protocol::SessionSummary> {
             panic!("unexpected durable Header read")
         }
         async fn create(

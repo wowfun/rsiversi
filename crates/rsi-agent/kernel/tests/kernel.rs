@@ -504,6 +504,12 @@ impl FactReadRaceStore {
 
 #[async_trait]
 impl SessionStore for FactReadRaceStore {
+    async fn session_summary(
+        &self,
+        session_id: &SessionId,
+    ) -> rsi_agent_store_protocol::Result<rsi_agent_store_protocol::StoreRecentSession> {
+        self.inner.session_summary(session_id).await
+    }
     async fn session_access(
         &self,
         sessions: &[SessionId],

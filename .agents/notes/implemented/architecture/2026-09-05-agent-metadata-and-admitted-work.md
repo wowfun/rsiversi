@@ -25,9 +25,14 @@ same snapshot. Quiescence checks every strict descendant after applying all
 appends, before committing; newly obtained proofs are cached only after commit.
 
 The [Serve application history contract](../../../../apps/serve/README.md)
-uses the existing authorized Header read for metadata-only requests. Attaching a
-Session merely to return its stored cursor would register runtime activity and
-allocate handle services and watch state. DSH's JSONL persistence separates
+uses the caller-authorized [Session summary](../../../../crates/rsi/session-protocol/README.md)
+for metadata-only requests. Its Header, activity time and Fact/control watermarks
+come from one Store metadata snapshot. SQLite already decodes those fields
+together; discarding the mutable fields and querying them again adds a reader
+job and combines independent cuts. Header-only Agent Store callers retain their
+focused interface through the same concrete row reader, without another boxed
+Store call. Attaching a Session merely to return its stored cursor would register
+runtime activity and allocate handle services and watch state. DSH's JSONL persistence separates
 `stat()` from `open()` for the same reason: observation does not need a live log
 handle. RSI keeps its location authorization, direct-parent check and request
 retirement boundary, without adding another metadata cache or durable index.
@@ -83,6 +88,10 @@ Revalidating history for every metadata row repeats work without increasing the
 proof required for presentation. A validation no-op would instead remove a
 required execution boundary. Keeping both old and new query APIs would obscure
 which path establishes that proof.
+Caching an earlier summary would not provide fresh watermarks under current
+caller authority. Parallel independent metadata reads still perform both jobs
+and cannot establish one snapshot. The summary operation replaces the Header-only
+Session operation without a pre-release compatibility alias.
 Cache hints are optional: a poisoned hint cache disables reuse instead of
 overriding a durable commit result. Its failure cannot authorize skipping the
 uncached proof.
@@ -94,6 +103,10 @@ SQLite or filesystem operation already running on another thread. SQL text
 normalization is not a semantic schema proof because it changes string literals.
 
 ## Consequences
+
+Point-read replies carry three numeric metadata fields and reuse the recent-listing
+summary type. They add no durable field, mirror, background task or cache. Removing
+one reader job does not by itself establish end-to-end search performance parity.
 
 Historical corruption can coexist with readable immutable metadata. Explicit
 validation, indexed execution/history reads and offline verification still reject

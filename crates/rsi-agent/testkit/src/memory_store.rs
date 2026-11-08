@@ -716,6 +716,22 @@ impl SessionStore for MemoryStore {
             .ok_or_else(|| StoreError::NotFound(session_id.as_str().into()))
     }
 
+    async fn session_summary(&self, session_id: &SessionId) -> Result<StoreRecentSession> {
+        self.header_reads.fetch_add(1, Ordering::Relaxed);
+        self.inner
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .sessions
+            .get(session_id)
+            .map(|session| StoreRecentSession {
+                header: session.header.clone(),
+                last_activity_ms: session.last_activity_ms,
+                durable_fact_seq: session.facts.last().map_or(0, |fact| fact.seq()),
+                durable_control_seq: session.controls.last().map_or(0, AgentControlRecord::seq),
+            })
+            .ok_or_else(|| StoreError::NotFound(session_id.as_str().into()))
+    }
+
     async fn read_domain_states(
         &self,
         session_id: &SessionId,

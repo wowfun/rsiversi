@@ -90,7 +90,7 @@ async fn navigation_metadata_is_durable_without_rewriting_history_or_requiring_c
     run_message_to_terminal(&handle, "navigation-first-message").await;
     let service = running.session_service().unwrap();
     let activity = service.activity().await.unwrap();
-    let header = service.read_header(&session).await.unwrap();
+    let header = service.read_summary(&session).await.unwrap().header;
     assert_eq!(header, handle.header().await.unwrap());
     assert_eq!(
         service.activity().await.unwrap(),
