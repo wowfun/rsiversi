@@ -901,8 +901,16 @@ impl<'a> ToolBody<'a> {
     pub fn execution(&self) -> &ToolExecution {
         &self.execution
     }
+    /// Borrows the immutable arguments already admitted for this body.
+    #[must_use]
+    pub fn arguments(&self) -> &Value {
+        &self.arguments
+    }
     /// Executes the prepared body once.
     pub async fn run(self) -> Result<ToolResult> {
+        if self.execution.cancellation.is_cancelled() {
+            return Err(ToolError::Cancelled);
+        }
         self.executor.execute(self.arguments, self.execution).await
     }
 }

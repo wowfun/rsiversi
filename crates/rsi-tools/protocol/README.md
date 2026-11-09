@@ -1,5 +1,11 @@
 # rsi-tools-protocol
 
+`ToolBody` is a consuming continuation over immutable admitted arguments and
+execution authority. It checks the current cancellation token immediately before
+entering the body, including after an around callback has awaited. A cancellation
+during a wrapper must not invoke a body that has not started. Already-started
+bodies and wrappers retain the owner's cooperative drain semantics.
+
 Execution-policy paths use the bounded
 [host-path grammar](../../rsi-workspace/path/README.md) when validated as data.
 Native process and sandbox providers retain actual filesystem validation.

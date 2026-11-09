@@ -20,6 +20,9 @@ use std::sync::{
 use tokio::sync::{Notify, Semaphore};
 use tokio_util::sync::CancellationToken;
 
+#[path = "tools/middleware.rs"]
+mod middleware;
+
 #[derive(Debug)]
 struct TestSandbox;
 
