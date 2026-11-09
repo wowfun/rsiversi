@@ -159,7 +159,7 @@ pub enum Failure {
     Closed,
     /// Native creation rejected before a process was published.
     Spawn,
-    /// Native bounded read failed.
+    /// Native preparation or I/O failed.
     Io,
     /// Admitted effects lack a verified outcome.
     OutcomeUnknown,
@@ -174,9 +174,9 @@ impl From<rsi_process::ProcessError> for Failure {
                 rsi_sandbox::SandboxError::InvalidInput(_) => Self::Invalid,
                 rsi_sandbox::SandboxError::Capacity => Self::Capacity,
                 rsi_sandbox::SandboxError::Unsupported(_) => Self::Unsupported,
-                rsi_sandbox::SandboxError::Preparation | rsi_sandbox::SandboxError::Probe(_) => {
-                    Self::Io
-                }
+                rsi_sandbox::SandboxError::Preparation
+                | rsi_sandbox::SandboxError::Probe(_)
+                | rsi_sandbox::SandboxError::Native(_) => Self::Io,
             },
             E::InvalidInput(_) => Self::Invalid,
             E::Capacity => Self::Capacity,

@@ -256,6 +256,7 @@ mod tests {
             ),
             (SandboxError::Preparation, "\"io\""),
             (SandboxError::Probe("native API and path".into()), "\"io\""),
+            (SandboxError::Native("native API and path".into()), "\"io\""),
         ] {
             let wire = Failure::from(rsi_process::ProcessError::Sandbox(cause));
             assert_eq!(serde_json::to_string(&wire).unwrap(), expected);

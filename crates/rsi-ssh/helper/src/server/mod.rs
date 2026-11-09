@@ -550,7 +550,7 @@ fn sandbox_failure(error: &SandboxError) -> Failure {
         SandboxError::Capacity => Failure::Capacity,
         SandboxError::Unsupported(_) => Failure::Unsupported,
         SandboxError::InvalidInput(_) => Failure::Invalid,
-        SandboxError::Probe(_) | SandboxError::Preparation => Failure::Io,
+        SandboxError::Probe(_) | SandboxError::Preparation | SandboxError::Native(_) => Failure::Io,
     }
 }
 fn transport_failure(error: rsi_ssh_transport::Error) -> Failure {
@@ -598,6 +598,10 @@ mod status_tests {
     fn sandbox_preparation_failures_preserve_wire_categories() {
         assert_eq!(sandbox_failure(&SandboxError::Capacity), Failure::Capacity);
         assert_eq!(sandbox_failure(&SandboxError::Preparation), Failure::Io);
+        assert_eq!(
+            sandbox_failure(&SandboxError::Native("private path".into())),
+            Failure::Io
+        );
         assert_eq!(
             sandbox_failure(&SandboxError::Probe("probe".into())),
             Failure::Io

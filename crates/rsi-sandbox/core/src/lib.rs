@@ -370,7 +370,7 @@ impl ConfinedProcess {
 
     /// Other backends express scratch selection in their exact wrapper arguments.
     #[cfg(not(windows))]
-    #[expect(
+    #[allow(
         clippy::unused_self,
         reason = "The common preparation API has no environment edits on this platform."
     )]
