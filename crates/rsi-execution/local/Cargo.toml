@@ -20,6 +20,7 @@ rsi-files = { path = "../../rsi-files/core" }
 rsi-meta = { path = "../../rsi-meta/core" }
 rsi-process-local = { path = "../../rsi-process/local" }
 rsi-sandbox-local = { path = "../../rsi-sandbox/local" }
+rsi-tools-protocol = { path = "../../rsi-tools/protocol" }
 serde_json.workspace = true
 tempfile.workspace = true
 tokio = { workspace = true, features = ["time"] }

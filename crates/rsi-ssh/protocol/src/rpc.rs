@@ -170,6 +170,14 @@ impl From<rsi_process::ProcessError> for Failure {
     fn from(value: rsi_process::ProcessError) -> Self {
         use rsi_process::ProcessError as E;
         match value {
+            E::Sandbox(cause) => match cause {
+                rsi_sandbox::SandboxError::InvalidInput(_) => Self::Invalid,
+                rsi_sandbox::SandboxError::Capacity => Self::Capacity,
+                rsi_sandbox::SandboxError::Unsupported(_) => Self::Unsupported,
+                rsi_sandbox::SandboxError::Preparation | rsi_sandbox::SandboxError::Probe(_) => {
+                    Self::Io
+                }
+            },
             E::InvalidInput(_) => Self::Invalid,
             E::Capacity => Self::Capacity,
             E::ShuttingDown => Self::Closed,

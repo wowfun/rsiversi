@@ -793,6 +793,7 @@ mod native {
             ProcessError::SettlementTimeout => "process_settlement_timeout",
             ProcessError::ShutdownTimeout => "process_shutdown_timeout",
             ProcessError::InvalidInput(_)
+            | ProcessError::Sandbox(_)
             | ProcessError::Spawn(_)
             | ProcessError::Io(_)
             | ProcessError::Api(_) => "process_error",

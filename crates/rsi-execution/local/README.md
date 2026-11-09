@@ -8,8 +8,9 @@ selectors fail closed. Distinct selectors may resolve to the same executable wit
 different environments; the opaque resolved program keeps that selection intact. No ambient PATH, HOME or environment lookup occurs.
 Preparation freezes that program's environment into the opaque plan. Spawn
 rejects environment substitution before backend I/O. Sandbox preparation capacity
-is preserved as `ProcessError::Capacity`; a failed blocking worker becomes an
-I/O error without opening a process.
+is preserved as `ProcessError::Capacity`; other preparation failures retain
+their typed Sandbox cause under the [Process error contract](../../rsi-process/core/README.md).
+No preparation failure opens a process.
 
 Path canonicalization uses this machine only. Canonical Windows drive paths use
 the shared native path representation from `rsi-workspace-path`, so Execution

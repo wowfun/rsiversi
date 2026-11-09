@@ -71,6 +71,8 @@ backend; root authority is outside a workspace-scoped sandbox contract, and a
 Bubblewrap root rebind would additionally hide its private scratch and device
 mounts. A canonical descendant
 such as `/tmp/work` is rebound after tmpfs creation in either restricted mode.
+Root admission follows the canonical workspace's native filesystem root,
+including Windows drive roots; it does not resolve a POSIX root on Windows.
 An executable below `/tmp` outside that workspace is rebound as one read-only
 file after the private scratch mount. Its neighboring files remain hidden; this
 keeps immutable helpers usable when the Host's state home is temporary.

@@ -67,6 +67,9 @@ Preparation carries an explicit source-reader choice, valid only for ReadOnly
 pipes. This selects the pinned Sandbox view; a program name or marker does not
 implicitly change confinement. The reply's enforcement evidence must confirm
 read-only Host scratch and isolated networking.
+Preparation failures use the existing closed `Failure` categories. A typed
+native Sandbox cause maps to Invalid, Capacity, Unsupported or Io; its local
+diagnostic does not enter the helper wire.
 
 `CACHE_CONTENTION_EXIT_CODE` is the shared process-exit contract for refused
 cache-writer admission. Clients classify it only after the child is reaped;

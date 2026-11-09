@@ -748,8 +748,7 @@ fn validate_request(request: &ProcessRequest) -> Result<(PathBuf, PathBuf, PathB
     let cwd = canonical_directory(&request.cwd, "cwd")?;
     let workspace = canonical_directory(&request.workspace, "workspace")?;
     if request.mode != SandboxMode::DangerFullAccess {
-        let canonical_root = canonical_directory(Path::new("/"), "filesystem root")?;
-        if workspace == canonical_root {
+        if workspace.parent().is_none() {
             return Err(SandboxError::InvalidInput(
                 "restricted workspace cannot be the filesystem root".into(),
             ));
@@ -1024,11 +1023,31 @@ mod tests {
                 assert_eq!(plan.stamp.backend, SandboxBackend::Unconfined);
             } else {
                 assert!(
-                    result.is_err(),
+                    matches!(result, Err(SandboxError::Unsupported(actual)) if actual == mode),
                     "a restricted Windows request must never become an unconfined PTY"
                 );
             }
         }
+    }
+
+    #[test]
+    fn restricted_workspace_rejects_its_native_root_but_accepts_a_directory() {
+        let directory = tempfile::tempdir().unwrap();
+        let workspace = directory.path().canonicalize().unwrap();
+        let mut request = ProcessRequest {
+            stdio: rsi_sandbox::ProcessStdio::Pipes,
+            mode: SandboxMode::WorkspaceWrite,
+            program: std::env::current_exe().unwrap(),
+            arguments: vec![],
+            cwd: workspace.clone(),
+            workspace: workspace.ancestors().last().unwrap().to_path_buf(),
+        };
+        assert!(matches!(
+            validate_request(&request),
+            Err(SandboxError::InvalidInput(message)) if message == "restricted workspace cannot be the filesystem root"
+        ));
+        request.workspace = workspace;
+        assert!(validate_request(&request).is_ok());
     }
 
     #[derive(Debug)]

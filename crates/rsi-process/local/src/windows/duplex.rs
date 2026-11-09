@@ -120,10 +120,6 @@ impl DuplexControl for Control {
     }
 }
 impl Service {
-    #[expect(
-        clippy::too_many_lines,
-        reason = "Duplex tasks and Job settlement retain the same child and capture permits."
-    )]
     pub(crate) async fn spawn_duplex(
         self: &Arc<Self>,
         spec: DuplexProcessSpec,

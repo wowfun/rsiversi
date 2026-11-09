@@ -27,6 +27,12 @@ Sandbox-produced plan. Process validates spawn framing, not the authenticity of
 the issuer or the truth of a caller-supplied enforcement stamp. Untrusted callers
 must enter through the policy-owning product boundary, not receive Process.
 
+Preparation through a local Execution adapter preserves Sandbox failures as
+`ProcessError::Sandbox`, including the requested unsupported mode and the
+planner's diagnostic. Sandbox capacity remains `ProcessError::Capacity` so
+admission can retain its existing scheduling semantics. These preparation
+failures precede spawn and do not imply a child or an unknown effect.
+
 Readers use monotonically increasing whole-stream offsets. Each stream retains
 only its requested tail: a read older than the retained window is marked
 lossy and begins at the oldest retained byte. Reads preserve arbitrary bytes;

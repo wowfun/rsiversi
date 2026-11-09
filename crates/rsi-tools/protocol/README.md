@@ -49,6 +49,11 @@ typed extension map. A Tool start admits that exact lease and retains the operat
 through body settlement. Workspace reads and the matching Files reader come from
 that tuple; a native provider is used only by native-only embeddings without a
 lease. Remote process calls cannot use the legacy native confinement method.
+Non-capacity native Sandbox preparation failures retain the same `ToolError::Sandbox`
+whether the Tool uses an Execution lease or a direct native embedding. The
+lease adapter preserves the requested mode and planner diagnostic instead of
+reclassifying them as unavailable admission. Capacity, retirement, and unknown
+outcome retain their distinct scheduling and no-replay categories.
 `ToolExecution::workspace_read()` asks that same pinned Sandbox generation for
 an immutable workspace read scope using the resolved policy. It accepts no model
 paths or mode overrides, rejects already-cancelled execution, and adds no process

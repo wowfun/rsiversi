@@ -120,10 +120,7 @@ async fn resolve_local_program(mut program: ResolvedProgram) -> Result<ResolvedP
 fn sandbox_error(error: SandboxError) -> ProcessError {
     match error {
         SandboxError::Capacity => ProcessError::Capacity,
-        SandboxError::Preparation => ProcessError::Io("sandbox preparation worker failed".into()),
-        SandboxError::Unsupported(_) => ProcessError::Unsupported,
-        SandboxError::InvalidInput(message) => ProcessError::InvalidInput(message),
-        SandboxError::Probe(message) => ProcessError::Io(message),
+        other => ProcessError::Sandbox(other),
     }
 }
 
@@ -233,14 +230,16 @@ impl ExecutionBackend for NativeBackend {
 mod preparation_errors {
     use super::*;
     #[test]
-    fn sandbox_preparation_preserves_capacity_and_worker_failure() {
+    fn sandbox_preparation_preserves_capacity_and_typed_causes() {
         assert!(matches!(
             sandbox_error(SandboxError::Capacity),
             ProcessError::Capacity
         ));
         assert!(matches!(
             sandbox_error(SandboxError::Preparation),
-            ProcessError::Io(_)
+            ProcessError::Sandbox(SandboxError::Preparation)
         ));
+        let cause = SandboxError::Probe("SetNamedSecurityInfoW: access denied (5)".into());
+        assert_eq!(sandbox_error(cause.clone()), ProcessError::Sandbox(cause));
     }
 }

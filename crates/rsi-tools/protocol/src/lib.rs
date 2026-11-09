@@ -1748,12 +1748,12 @@ impl<'de> Visitor<'de> for StrictValueVisitor<'_> {
     }
 }
 
-#[allow(clippy::needless_pass_by_value)] // Adapter consumes the provider error at map_err without exposing backend diagnostics.
 fn execution_error(error: rsi_process::ProcessError) -> ToolError {
     match error {
         rsi_process::ProcessError::OutcomeUnknown => ToolError::OutcomeUnknown,
         rsi_process::ProcessError::Capacity => ToolError::Capacity,
         rsi_process::ProcessError::ShuttingDown => ToolError::ShuttingDown,
+        rsi_process::ProcessError::Sandbox(cause) => ToolError::Sandbox(cause),
         _ => ToolError::Execution("execution provider or admission is unavailable".into()),
     }
 }

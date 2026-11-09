@@ -421,6 +421,9 @@ pub enum ProcessError {
     /// Active or retained-capture capacity is exhausted.
     #[error("process capacity is exhausted")]
     Capacity,
+    /// The pinned Sandbox rejected preparation before process creation.
+    #[error(transparent)]
+    Sandbox(rsi_sandbox::SandboxError),
     /// Provider admission closed before the spawn could be published.
     #[error("managed process provider is shutting down")]
     ShuttingDown,

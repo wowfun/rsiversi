@@ -6523,6 +6523,7 @@ dependencies = [
  "rsi-process-local",
  "rsi-sandbox",
  "rsi-sandbox-local",
+ "rsi-tools-protocol",
  "rsi-workspace-path",
  "serde_json",
  "tempfile",
