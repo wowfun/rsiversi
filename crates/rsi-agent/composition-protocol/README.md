@@ -1,5 +1,25 @@
 # rsi-agent-composition-protocol
 
+Native Agent plugins register `ToolAround` contributions in the same owned,
+immutable catalog as their other callbacks. They await a consuming
+`ToolContinuation`: borrowed call arguments and execution authority are readable,
+but the admitted body cannot be invoked twice or replaced with different arguments.
+Callbacks enter in frozen contribution order and unwind in reverse order. A
+callback may return without invoking the body. The entire chain runs inside the
+Tool owner's cancellation, timeout, panic and retained-result scope, after policy,
+human approval and durable start. It adds no process calls or callback tasks.
+The captured chain retains the generation owner until it settles, even if the
+requesting waiter drops its composition pin.
+An empty chain does not allocate a wrapper.
+
+The native chain wraps the request application's existing execution continuation,
+if present; application-provided Tool bodies retain their own JS pipeline. This
+is an explicit native/application boundary, not a merged Cordis listener order.
+Porting a JS listener with mixed ordering dependencies requires preserving that
+position separately. Withdrawal cannot alter an admitted composition pin; a new
+generation observes removal or replacement. Recovery observes the final retained
+result and never reruns either native hooks or the application continuation.
+
 A request Tool capture can supply around middleware for native preset Tools.
 The capture's own added Tools already execute in the application. A native
 call keeps its existing preparation, registration, approval and retained-result

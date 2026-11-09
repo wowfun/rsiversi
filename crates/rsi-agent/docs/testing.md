@@ -1,5 +1,12 @@
 # rsi-agent testing
 
+Native Tool around-contribution tests drive the real Kernel and executor without
+an application source. They verify nested await order, single body invocation,
+short-circuit results, scoped execution authority and final durable output.
+Composition tests retain the old callback catalog across replacement and removal;
+admitted invocations keep that pin. Mixed native/application tests exercise the
+explicit nesting boundary rather than assuming global Cordis event order.
+
 Program validation spans the closest protocol, Kernel, Store, Context and executor
 targets because origin and ownership change durable replay. Kernel workflow tests
 exercise exclusive receipts beyond ordinary mailbox capacity, creator retirement,

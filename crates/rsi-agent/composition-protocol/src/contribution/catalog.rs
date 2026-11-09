@@ -20,6 +20,8 @@ pub enum ContributionStage {
     ToolSettlement,
     /// Before Tool approval or execution.
     ToolPolicy,
+    /// Around the admitted body, inside retained execution.
+    ToolAround,
     /// Explicit Session command dispatch, outside the execution loop.
     Command,
     /// Disposable extension view over a captured Session state.
@@ -43,6 +45,8 @@ pub enum ContributionKind {
     ToolSettlement(Arc<dyn ToolSettlementContributor>),
     /// Monotone prepared-Tool policy.
     ToolPolicy(Arc<dyn ToolPolicy>),
+    /// Awaited native execution wrapper with a consuming continuation.
+    ToolAround(Arc<dyn crate::ToolAroundContributor>),
     /// Effect-free Session command with bounded discovery metadata.
     Command(crate::SessionCommandRegistration),
     /// Read-only complete Session view, isolated from other projection failures.
@@ -87,6 +91,7 @@ impl ContributionRegistration {
             ContributionKind::PostTool(_) => ContributionStage::AfterTools,
             ContributionKind::ToolSettlement(_) => ContributionStage::ToolSettlement,
             ContributionKind::ToolPolicy(_) => ContributionStage::ToolPolicy,
+            ContributionKind::ToolAround(_) => ContributionStage::ToolAround,
             ContributionKind::Command(_) => ContributionStage::Command,
             ContributionKind::Projection(_) => ContributionStage::Projection,
             ContributionKind::ResourceRead(_) => ContributionStage::ResourceRead,

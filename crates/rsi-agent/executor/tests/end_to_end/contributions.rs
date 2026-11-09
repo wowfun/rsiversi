@@ -1740,7 +1740,7 @@ async fn preparation_uses_the_next_effect_or_terminal_durability_barrier() {
             PreparationExit::Start => assert_eq!(outcome, TurnOutcome::Completed),
             PreparationExit::Fail => {
                 assert!(matches!(outcome, TurnOutcome::Failed { ref code, .. }
-                if code == "provider.invalid_request"))
+                if code == "provider.invalid_request"));
             }
             PreparationExit::Cancel => assert_eq!(outcome, TurnOutcome::Cancelled),
         }

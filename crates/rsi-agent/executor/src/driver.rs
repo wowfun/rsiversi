@@ -1526,8 +1526,11 @@ impl Driver {
                 additional_contexts,
             ),
             (approval, decision) => {
-                if let (Some(plan), Some(ToolDecision::Ready(continuation))) = (plan, decision) {
-                    *plan.continuation = Some(continuation);
+                if let Some(mut plan) = plan {
+                    if let Some(ToolDecision::Ready(continuation)) = decision {
+                        *plan.continuation = Some(continuation);
+                    }
+                    composition.wrap_tool_execution(&mut plan);
                 }
                 return Ok(ToolPreparation::Ready(PendingToolEffect {
                     origin: origin.clone(),

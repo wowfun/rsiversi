@@ -15,10 +15,12 @@ use thiserror::Error;
 mod manifest;
 mod report;
 mod request_tools;
+mod tool_around;
 pub use request_tools::{
     RequestInputContext, RequestInputPreparer, RequestToolCatalog, RequestToolRoute,
     RequestToolSource, RequestToolSourceContract,
 };
+pub use tool_around::{ToolAroundContributor, ToolContinuation};
 mod scoped_tools;
 mod seed;
 mod tool_outputs;

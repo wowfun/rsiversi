@@ -486,6 +486,7 @@ impl Driver {
                                     .await
                             }
                             ContributionKind::ToolPolicy(_)
+                            | ContributionKind::ToolAround(_)
                             | ContributionKind::ForkTransform(_)
                             | ContributionKind::ToolSettlement(_)
                             | ContributionKind::Command(_)
