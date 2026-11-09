@@ -35,6 +35,11 @@ unavailable model in that Service rather than depend on a different launcher def
 
 The native RSI launcher owns command parsing, process control and Tokio setup. It
 uses the explicit application catalog for native clients and daemon startup.
+Its async runtime uses at most two worker threads by default, or one when only
+one CPU is available or CPU availability cannot be determined. Set
+`TOKIO_WORKER_THREADS` before launching the process to override this default;
+Tokio owns parsing and validation of that value. The blocking pool remains
+independent. Restart an existing resident Host to apply a different worker count.
 An immutable managed publication starts its resident Host from the original
 executable and holds its generation lease through readiness; the child then
 retains its own lease through shutdown. Ordinary build outputs are first copied

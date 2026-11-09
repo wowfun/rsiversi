@@ -110,10 +110,7 @@ fn main() -> ExitCode {
     if let Some(exit) = maybe_run_apply_patch_helper(std::env::args_os().skip(1)) {
         return ExitCode::from(exit);
     }
-    let runtime = match tokio::runtime::Builder::new_multi_thread()
-        .enable_all()
-        .build()
-    {
+    let runtime = match build_runtime() {
         Ok(runtime) => runtime,
         Err(error) => {
             eprintln!("failed to construct Tokio runtime: {error}");
@@ -121,6 +118,15 @@ fn main() -> ExitCode {
         }
     };
     ExitCode::from(runtime.block_on(run_main()))
+}
+
+fn build_runtime() -> std::io::Result<tokio::runtime::Runtime> {
+    let mut builder = tokio::runtime::Builder::new_multi_thread();
+    if std::env::var_os("TOKIO_WORKER_THREADS").is_none() {
+        let workers = std::thread::available_parallelism().map_or(1, |count| count.get().min(2));
+        builder.worker_threads(workers);
+    }
+    builder.enable_all().build()
 }
 
 async fn run_main() -> u8 {
