@@ -12,8 +12,8 @@ request output cap.
 
 Finished(MaxTokens) assembles as LanguageAssemblyError::Incomplete, carrying
 bounded partial output and usage rather than a successful LanguageOutput. The
-event grammar remains strict; empty content and unfinished Tool arguments are
-valid incomplete evidence only after the stream's blocks have closed. No caller
+event grammar remains strict; the terminal event closes any remaining blocks,
+so empty content and unfinished Tool arguments remain valid incomplete evidence. No caller
 may use incomplete content as Tool execution authority. A request's explicit
 output cap is validated against the actual prepared model profile before
 credential or Media access; capability reserves never supply request defaults.
@@ -60,8 +60,15 @@ produces an explicit unavailable handle. The execution fact grants no authority.
 No provider reads or uploads the complete file, and a file reference does not
 imply image/audio capability or filesystem authority.
 Each normalized language event exposes the same context-free field validation
-for durable envelopes; `LanguageAssembler` adds ordering, aggregate, and
-terminal grammar across the complete event stream.
+for durable envelopes. `LanguageStreamValidator` owns ordering, aggregate bounds,
+and terminal grammar across the stream. It retains block states and counters,
+not content, sources, warnings, replay payloads, or provider errors. A valid
+Failed, MaxTokens, or Cancelled stream is admissible evidence; validation alone
+never authorizes Tool execution. Discard a validator after an error.
+`LanguageAssembler` uses that same validator before retaining content in index
+order. It adds output collection and encoded retention accounting only for
+consumers that need assembled output. Its serialized state is diagnostic, not
+a durable or resumable format.
 
 `ProviderExtension` is a construction- and decode-validated closed value. Its
 namespace, version, JSON value, and exact encoded length are immutable and

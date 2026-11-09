@@ -2,7 +2,7 @@
 
 use crate::{Result, SessionError};
 use base64::{Engine as _, engine::general_purpose::STANDARD};
-use rsi_ai_protocol::{ContentDelta, LanguageAssembler, LanguageAssemblyError, LanguageEvent};
+use rsi_ai_protocol::{ContentDelta, LanguageEvent, LanguageStreamValidator};
 use serde::{Deserialize, Serialize};
 use std::sync::Arc;
 
@@ -82,11 +82,11 @@ impl ModelAttemptLog {
                 return Err(invalid("encoded evidence exceeds 32 MiB"));
             }
         }
-        let mut assembler = LanguageAssembler::new();
+        let mut validator = LanguageStreamValidator::new();
         let mut terminal = None;
         for event in Events::new(&data.chunks) {
             let (_, event) = event?;
-            assembler
+            validator
                 .push(&event)
                 .map_err(|error| invalid(error.to_string()))?;
             if is_terminal(&event) {
@@ -94,13 +94,9 @@ impl ModelAttemptLog {
             }
         }
         let terminal = terminal.ok_or_else(|| invalid("missing terminal event"))?;
-        match assembler.finish() {
-            Err(LanguageAssemblyError::Protocol(error)) => return Err(invalid(error.to_string())),
-            Ok(_)
-            | Err(
-                LanguageAssemblyError::Provider { .. } | LanguageAssemblyError::Incomplete { .. },
-            ) => {}
-        }
+        validator
+            .finish()
+            .map_err(|error| invalid(error.to_string()))?;
         Ok(Self {
             data: Arc::new(data),
             terminal: Arc::new(terminal),
@@ -277,7 +273,7 @@ impl ModelAttemptPrefix {
 pub struct ModelPrefixDecoder {
     builder: ModelAttemptBuilder,
     cursor: ModelEventCursor,
-    assembler: LanguageAssembler,
+    validator: LanguageStreamValidator,
 }
 impl ModelPrefixDecoder {
     /// Number of accepted raw bytes, for exact transport continuity checks.
@@ -326,7 +322,7 @@ impl ModelPrefixDecoder {
     pub fn prefix(&mut self, expected_events: u64) -> Result<ModelAttemptPrefix> {
         let mut prefix = self.builder.prefix();
         for item in prefix.events_after(&mut self.cursor) {
-            self.assembler
+            self.validator
                 .push(&item?.1)
                 .map_err(|error| invalid(error.to_string()))?;
         }
@@ -619,6 +615,64 @@ impl Iterator for Events<'_> {
 mod tests {
     use super::*;
     use rsi_ai_protocol::{ContentStart, FinishReason};
+
+    #[test]
+    fn prefix_and_durable_admission_reject_the_same_block_type_violation() {
+        let mut builder = ModelAttemptBuilder::new();
+        builder
+            .push(
+                0,
+                &LanguageEvent::ContentStarted {
+                    index: 0,
+                    content: ContentStart::Text,
+                },
+            )
+            .unwrap();
+        let mut decoder = ModelPrefixDecoder::default();
+        let first = builder.prefix();
+        for page in first.pages() {
+            decoder.append(page).unwrap();
+        }
+        assert_eq!(decoder.prefix(1).unwrap().events().count(), 1);
+        builder
+            .push(
+                1,
+                &LanguageEvent::ContentDelta {
+                    index: 0,
+                    delta: ContentDelta::Reasoning("wrong kind".into()),
+                },
+            )
+            .unwrap();
+        for page in builder.prefix().pages_after(first.raw_len()) {
+            decoder.append(&page).unwrap();
+        }
+        assert!(
+            decoder
+                .prefix(2)
+                .unwrap_err()
+                .to_string()
+                .contains("block type")
+        );
+        builder
+            .push(2, &LanguageEvent::ContentFinished { index: 0 })
+            .unwrap();
+        builder
+            .push(
+                3,
+                &LanguageEvent::Finished {
+                    reason: FinishReason::Stop,
+                    replay: None,
+                },
+            )
+            .unwrap();
+        assert!(
+            builder
+                .finish(true)
+                .unwrap_err()
+                .to_string()
+                .contains("block type")
+        );
+    }
 
     #[test]
     fn suffix_page_boundaries_are_checked_before_indexing() {

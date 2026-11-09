@@ -114,6 +114,10 @@ Live prefix transport appends canonical base64 pages at an exact raw byte offset
 `ModelPrefixDecoder` retains immutable compact blocks and a grammar cursor, validating
 only newly appended events. Each revision ends at an event boundary and declares
 the complete event count; gaps, rewrites, malformed events and overflow fail closed.
+The prefix decoder and complete attempt admission share the AI protocol's
+`LanguageStreamValidator`. Neither assembles a second copy of model content or
+computes the encoded weight of an output it will not retain. Complete admission
+still checks terminal grammar, including failed and incomplete evidence.
 
 The version-1 compact attempt stream contains unsigned minimal LEB128 time gaps,
 a byte tag, an index for delta tags, a minimal LEB128 payload length and payload.
