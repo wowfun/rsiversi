@@ -1,5 +1,5 @@
 use async_trait::async_trait;
-use futures_util::future::BoxFuture;
+use futures_util::future::{BoxFuture, ready};
 use futures_util::stream::{self, StreamExt as _};
 use std::any::Any;
 use std::fmt;
@@ -20,7 +20,7 @@ pub trait LocalEvent: 'static + Sized {
     const KEY: &'static str;
 
     /// Direct safe-Rust value carried by this event.
-    type Value: Clone + Send + Sync + 'static;
+    type Value: Send + Sync + 'static;
 
     /// Direct safe-Rust handler failure.
     type Error: Send + 'static;
@@ -70,8 +70,8 @@ pub trait EmitEventHandler<E: LocalEvent<Mode = Emit>>: fmt::Debug + Send + Sync
 pub trait ParallelEventHandler<E: LocalEvent<Mode = Parallel>>:
     fmt::Debug + Send + Sync + 'static
 {
-    /// Handles one independently cloned dispatch value.
-    async fn handle(&self, value: E::Value) -> std::result::Result<(), E::Error>;
+    /// Borrows the dispatch-owned value, including across suspension points.
+    async fn handle(&self, value: &E::Value) -> std::result::Result<(), E::Error>;
 }
 
 /// Asynchronous listener for a [`Serial`] event.
@@ -80,7 +80,7 @@ pub trait SerialEventHandler<E: LocalEvent<Mode = Serial>>:
     fmt::Debug + Send + Sync + 'static
 {
     /// Returns `Some` to complete the ordered dispatch or `None` to continue.
-    async fn handle(&self, value: E::Value) -> std::result::Result<Option<E::Value>, E::Error>;
+    async fn handle(&self, value: &E::Value) -> std::result::Result<Option<E::Value>, E::Error>;
 }
 
 /// Synchronous listener for a [`Bail`] event.
@@ -129,7 +129,7 @@ pub trait LocalEventMode<E: LocalEvent>: sealed::Sealed + Send + Sync + 'static 
 #[doc(hidden)]
 pub struct LocalEventBinding {
     id: EventListenerId,
-    handler: Arc<dyn Any + Send + Sync>,
+    handler: Box<dyn Any + Send + Sync>,
     once: bool,
     claim_once: Arc<dyn Fn() -> bool + Send + Sync>,
 }
@@ -143,18 +143,17 @@ impl LocalEventBinding {
     ) -> Self {
         Self {
             id,
-            handler: Arc::new(handler),
+            handler: Box::new(handler),
             once,
             claim_once,
         }
     }
 
-    fn handler<H: ?Sized + Send + Sync + 'static>(&self) -> Arc<H> {
-        Arc::clone(
-            self.handler
-                .downcast_ref::<Arc<H>>()
-                .expect("a typed Local event slot retains one exact handler trait"),
-        )
+    fn handler<H: ?Sized + Send + Sync + 'static>(&self) -> &H {
+        self.handler
+            .downcast_ref::<Arc<H>>()
+            .expect("a typed Local event slot retains one exact handler trait")
+            .as_ref()
     }
 
     fn claim(&self) -> bool {
@@ -214,28 +213,19 @@ impl Drop for LocalEventBindings {
     }
 }
 
-fn parallel_callbacks<E: LocalEvent<Mode = Parallel>>(
-    bindings: Arc<LocalEventBindings>,
-    value: E::Value,
+fn parallel_callbacks<'a, E: LocalEvent<Mode = Parallel>>(
+    bindings: &'a [Arc<LocalEventBinding>],
+    value: &'a E::Value,
 ) -> impl futures_util::Stream<
-    Item = impl Future<Output = (usize, std::result::Result<(), E::Error>)> + Send,
-> + Send {
-    stream::unfold(
-        (bindings, 0, value),
-        |(bindings, mut index, value)| async move {
-            loop {
-                let binding = bindings.bindings.get(index)?;
-                index += 1;
-                if !binding.claim() {
-                    continue;
-                }
-                let handler = binding.handler::<dyn ParallelEventHandler<E>>();
-                let input = value.clone();
-                let callback = async move { (index, handler.handle(input).await) };
-                return Some((callback, (bindings, index, value)));
-            }
-        },
-    )
+    Item = impl Future<Output = (usize, std::result::Result<(), E::Error>)> + Send + 'a,
+> + Send
++ 'a {
+    stream::iter(bindings.iter().enumerate()).filter_map(move |(index, binding)| {
+        ready(binding.claim().then_some(async move {
+            let handler = binding.handler::<dyn ParallelEventHandler<E>>();
+            (index, handler.handle(value).await)
+        }))
+    })
 }
 
 impl<E: LocalEvent<Mode = Emit>> LocalEventMode<E> for Emit {
@@ -257,8 +247,7 @@ impl<E: LocalEvent<Mode = Parallel>> LocalEventMode<E> for Parallel {
 
     fn dispatch(snapshot: LocalEventSnapshot, value: E::Value) -> Self::Dispatch {
         Box::pin(async move {
-            let bindings = Arc::clone(&snapshot.bindings);
-            let callbacks = parallel_callbacks::<E>(bindings, value)
+            let callbacks = parallel_callbacks::<E>(snapshot.bindings(), &value)
                 .buffer_unordered(MAXIMUM_PARALLEL_EVENT_CALLBACKS);
             futures_util::pin_mut!(callbacks);
             let mut errors = Vec::new();
@@ -267,7 +256,6 @@ impl<E: LocalEvent<Mode = Parallel>> LocalEventMode<E> for Parallel {
                     errors.push((index, error));
                 }
             }
-            drop(snapshot);
             if errors.is_empty() {
                 Ok(())
             } else {
@@ -288,11 +276,7 @@ impl<E: LocalEvent<Mode = Serial>> LocalEventMode<E> for Serial {
                 if !binding.claim() {
                     continue;
                 }
-                if let Some(output) = binding
-                    .handler::<Self::Handler>()
-                    .handle(value.clone())
-                    .await?
-                {
+                if let Some(output) = binding.handler::<Self::Handler>().handle(&value).await? {
                     return Ok(Some(output));
                 }
             }

@@ -16,6 +16,9 @@ use tokio::sync::Notify;
 mod resolver;
 use resolver::resolved;
 
+#[path = "local_events/borrowed.rs"]
+mod borrowed;
+
 struct Emitted;
 
 impl LocalEvent for Emitted {
@@ -50,7 +53,7 @@ struct ParallelWorker(std::result::Result<(), &'static str>);
 impl ParallelEventHandler<ParallelWork> for ParallelWorker {
     async fn handle(
         &self,
-        barrier: Arc<tokio::sync::Barrier>,
+        barrier: &Arc<tokio::sync::Barrier>,
     ) -> std::result::Result<(), &'static str> {
         barrier.wait().await;
         self.0
@@ -64,7 +67,7 @@ struct CountParallel(Arc<AtomicUsize>);
 impl ParallelEventHandler<ParallelWork> for CountParallel {
     async fn handle(
         &self,
-        _barrier: Arc<tokio::sync::Barrier>,
+        _barrier: &Arc<tokio::sync::Barrier>,
     ) -> std::result::Result<(), &'static str> {
         self.0.fetch_add(1, Ordering::AcqRel);
         Ok(())
@@ -94,7 +97,7 @@ struct GatedParallelWorker;
 
 #[async_trait]
 impl ParallelEventHandler<BoundedParallelWork> for GatedParallelWorker {
-    async fn handle(&self, gate: Arc<ParallelGate>) -> std::result::Result<(), Infallible> {
+    async fn handle(&self, gate: &Arc<ParallelGate>) -> std::result::Result<(), Infallible> {
         gate.started.fetch_add(1, Ordering::AcqRel);
         let active = gate.active.fetch_add(1, Ordering::AcqRel) + 1;
         gate.peak.fetch_max(active, Ordering::AcqRel);
@@ -124,8 +127,8 @@ struct SerialAnswer(Option<u32>, Arc<Mutex<Vec<u32>>>);
 
 #[async_trait]
 impl SerialEventHandler<SerialQuery> for SerialAnswer {
-    async fn handle(&self, value: u32) -> std::result::Result<Option<u32>, &'static str> {
-        self.1.lock().expect("serial log poisoned").push(value);
+    async fn handle(&self, value: &u32) -> std::result::Result<Option<u32>, &'static str> {
+        self.1.lock().expect("serial log poisoned").push(*value);
         Ok(self.0)
     }
 }
@@ -835,7 +838,7 @@ struct PanickingParallel;
 impl ParallelEventHandler<ParallelWork> for PanickingParallel {
     async fn handle(
         &self,
-        _value: Arc<tokio::sync::Barrier>,
+        _value: &Arc<tokio::sync::Barrier>,
     ) -> std::result::Result<(), &'static str> {
         panic!("asynchronous listener callback panic evidence");
     }
@@ -1051,7 +1054,7 @@ struct RefillWorker(usize);
 
 #[async_trait]
 impl ParallelEventHandler<RefillParallelWork> for RefillWorker {
-    async fn handle(&self, release: Arc<tokio::sync::Notify>) -> std::result::Result<(), usize> {
+    async fn handle(&self, release: &Arc<tokio::sync::Notify>) -> std::result::Result<(), usize> {
         match self.0 {
             0 => {
                 release.notified().await;
