@@ -237,7 +237,7 @@ impl Operation {
             Self::Create => 12,
             Self::Recent => 11,
             Self::Inspect | Self::DraftSnapshot | Self::SelectPreset => 10,
-            Self::Submit => 7,
+            Self::Submit | Self::History | Self::ReadMessage => 7,
             Self::MessageStatus
             | Self::Terminal
             | Self::TerminalOutput
@@ -252,7 +252,6 @@ impl Operation {
             | Self::DiscardDraftInputs
             | Self::ExecuteCommand => 2,
             Self::Attach | Self::Observe => 9,
-            Self::History | Self::ReadMessage => 7,
             _ => 1,
         }
     }
