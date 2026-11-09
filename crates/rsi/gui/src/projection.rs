@@ -575,6 +575,19 @@ impl Transcript {
                 purpose,
                 attempt,
             } => {
+                if self
+                    .live_model
+                    .view()
+                    .is_some_and(|(turn, effect, _, _)| turn == turn_id && effect == effect_id)
+                {
+                    // Promote the whole response before per-source sorting; otherwise
+                    // its first settled block moves behind its still-transient siblings.
+                    for block in &mut self.blocks {
+                        if self.live_keys.contains(&block.key) {
+                            block.first_seq = fact.seq();
+                        }
+                    }
+                }
                 self.live_model.settle(fact.seq(), effect_id);
                 let preview =
                     rsi_conversation::model_previews(attempt, MAX_BLOCK_BYTES, MAX_BLOCK_BYTES * 2);
@@ -707,6 +720,112 @@ impl Transcript {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    #[allow(clippy::too_many_lines)] // One fixture compares a complete live and durable lifecycle.
+    fn settlement_keeps_streamed_reasoning_before_its_answer() {
+        use rsi_agent_session_protocol::{
+            EffectId, ModelAttemptBuilder, ModelEventPurpose, SessionId,
+        };
+        use rsi_ai_protocol::{ContentDelta, ContentStart, FinishReason, LanguageEvent};
+        let mut builder = ModelAttemptBuilder::new();
+        for event in [
+            LanguageEvent::ContentStarted {
+                index: 0,
+                content: ContentStart::Reasoning,
+            },
+            LanguageEvent::ContentDelta {
+                index: 0,
+                delta: ContentDelta::Reasoning("think first".into()),
+            },
+            LanguageEvent::ContentFinished { index: 0 },
+            LanguageEvent::ContentStarted {
+                index: 1,
+                content: ContentStart::Text,
+            },
+            LanguageEvent::ContentDelta {
+                index: 1,
+                delta: ContentDelta::Text("answer second".into()),
+            },
+            LanguageEvent::ContentFinished { index: 1 },
+        ] {
+            builder.push(0, &event).unwrap();
+        }
+        let snapshot = rsi_agent_turn_protocol::ModelLiveSnapshot {
+            session_id: SessionId::new("session").unwrap(),
+            turn_id: TurnId::new("turn").unwrap(),
+            effect_id: EffectId::new("effect").unwrap(),
+            purpose: ModelEventPurpose::Conversation,
+            revision: 1,
+            prefix: builder.prefix(),
+            status: rsi_agent_turn_protocol::ModelLiveStatus::Streaming,
+        };
+        let started = SessionFact::new(
+            1,
+            1,
+            SessionFactBody::ModelStarted {
+                turn_id: snapshot.turn_id.clone(),
+                effect_id: snapshot.effect_id.clone(),
+            },
+        )
+        .unwrap();
+        builder
+            .push(
+                1,
+                &LanguageEvent::Finished {
+                    reason: FinishReason::Stop,
+                    replay: None,
+                },
+            )
+            .unwrap();
+        let settled = SessionFact::new(
+            2,
+            2,
+            SessionFactBody::ModelAttemptSettled {
+                turn_id: snapshot.turn_id.clone(),
+                effect_id: snapshot.effect_id.clone(),
+                purpose: snapshot.purpose,
+                attempt: builder.finish(true).unwrap(),
+            },
+        )
+        .unwrap();
+        let mut live = Transcript::default();
+        live.fact(&started);
+        live.model(&snapshot);
+        live.fact(&settled);
+        let mut cold = Transcript::default();
+        cold.fact(&started);
+        cold.fact(&settled);
+        let content = |transcript: &Transcript| {
+            transcript
+                .blocks
+                .iter()
+                .filter(|block| matches!(block.role, "reasoning" | "assistant"))
+                .map(|block| (block.key.clone(), block.text.clone()))
+                .collect::<Vec<_>>()
+        };
+        assert_eq!(content(&live), content(&cold));
+        assert_eq!(
+            content(&live)
+                .iter()
+                .map(|(_, text)| text.as_str())
+                .collect::<Vec<_>>(),
+            ["think first", "answer second"]
+        );
+        let revisions: Vec<_> = live
+            .blocks
+            .iter()
+            .map(|block| block.revision.clone())
+            .collect();
+        live.fact(&settled);
+        assert_eq!(content(&live), content(&cold));
+        assert!(
+            live.blocks
+                .iter()
+                .zip(revisions)
+                .all(|(block, revision)| std::sync::Arc::ptr_eq(&block.revision, &revision))
+        );
+    }
 
     #[test]
     fn started_fact_reveals_a_preview_that_arrived_first() {

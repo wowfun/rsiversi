@@ -99,6 +99,9 @@ whose evidence or ordered window membership changed; text-only deltas reuse the
 existing index without rebuilding classification vectors. The frame baseline
 retains unchanged live blocks across snapshot updates. Settlement replaces their
 transient text with durable source coordinates and invalidates only those blocks.
+All surviving preview blocks of the settling model acquire its durable sequence
+together before source insertion sorts the transcript. Their original content
+order is the same during streaming, after settlement, and after a cold read.
 It also shares its serialized Turn value and byte count until that index changes;
 cache identity includes the index lifetime, not only its numeric wire revision. An incomplete window is explicitly partial
 and never hides unknown content. Rust supplies explicit `running` and `foldable`
