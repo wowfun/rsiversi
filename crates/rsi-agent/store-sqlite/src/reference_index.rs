@@ -359,7 +359,7 @@ pub(super) fn validate_retiring_operation(
             let id = SessionId::new(bounded_text(row, 9, 256).map_err(sql_error)?)
                 .map_err(|error| StoreError::Corrupt(error.to_string()))?;
             let (fact, encoded) = super::fact_storage::decode(row)?;
-            verify_fact(connection, &id, &fact, &encoded)?;
+            verify_fact(connection, &id, &fact, encoded)?;
             records += 1;
         }
     }

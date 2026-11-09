@@ -39,7 +39,7 @@ pub(super) fn read(
         .next()
         .map_err(sql_error)?
         .ok_or_else(|| StoreError::Corrupt("absent canonical Fact".into()))?;
-    decode(row)
+    decode(row).map(|(fact, encoded)| (fact, encoded.to_owned()))
 }
 
 #[derive(Serialize, Deserialize)]
@@ -104,12 +104,13 @@ pub(super) fn logical_len(row: &rusqlite::Row<'_>) -> Result<usize> {
 }
 
 /// Called only after the caller admits this row's logical bytes into its budget.
-/// Returns the logical value and the exact physical bytes for coverage hashing.
-pub(super) fn decode(row: &rusqlite::Row<'_>) -> Result<(SessionFact, String)> {
+/// Returns the owned logical value and borrowed physical bytes for coverage hashing.
+pub(super) fn decode<'a>(row: &'a rusqlite::Row<'_>) -> Result<(SessionFact, &'a str)> {
     let length = logical_len(row)?;
     let physical = (
         row.get::<_, i64>(1).map_err(sql_error)?,
-        row.get::<_, Option<String>>(2).map_err(sql_error)?,
+        super::text::optional_borrowed_text(row, 2, MAXIMUM_SESSION_FACT_BYTES)
+            .map_err(sql_error)?,
     );
     let acceptance = row.get::<_, Option<i64>>(3).map_err(sql_error)?;
     let (fact, encoded) = if let Some(acceptance) = acceptance {
@@ -133,14 +134,16 @@ pub(super) fn decode(row: &rusqlite::Row<'_>) -> Result<(SessionFact, String)> {
         let ClaimAcceptance::MessageAccepted {
             seq: control_seq,
             message,
-        } = decode_projected_json(
+        } = super::cas::decode_projected_json_with_source(
             "claim acceptance",
             (
                 row.get::<_, i64>(4).map_err(sql_error)?,
-                row.get::<_, Option<String>>(5).map_err(sql_error)?,
+                super::text::optional_borrowed_text(row, 5, MAXIMUM_SESSION_FACT_BYTES)
+                    .map_err(sql_error)?,
             ),
             MAXIMUM_SESSION_FACT_BYTES,
-        )?;
+        )?
+        .0;
         if control_seq != accepted_control_seq {
             return Err(StoreError::Corrupt(
                 "claim acceptance sequence differs".into(),
@@ -176,4 +179,43 @@ pub(super) fn decode(row: &rusqlite::Row<'_>) -> Result<(SessionFact, String)> {
         ));
     }
     Ok((fact, encoded))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn physical_fact_text_borrows_the_current_sqlite_row() {
+        let expected = SessionFact::new(
+            1,
+            10,
+            SessionFactBody::ModelStarted {
+                turn_id: TurnId::new("turn").unwrap(),
+                effect_id: rsi_agent_session_protocol::EffectId::new("effect").unwrap(),
+            },
+        )
+        .unwrap();
+        let json = serde_json::to_string(&expected).unwrap();
+        let db = Connection::open_in_memory().unwrap();
+        let decoded = db
+            .query_row(
+                "SELECT length(CAST(?1 AS BLOB)), length(CAST(?1 AS BLOB)), ?1,
+                        NULL, 0, NULL, 1, 'turn', 'event', 'session'",
+                [&json],
+                |row| {
+                    let raw = row.get_ref(2)?.as_str().unwrap();
+                    let (fact, encoded) = decode(row).unwrap();
+                    assert_eq!(encoded.as_ptr(), raw.as_ptr(), "do not copy physical JSON");
+                    assert_eq!(encoded, json);
+                    Ok(fact)
+                },
+            )
+            .unwrap();
+        drop(db);
+        assert_eq!(
+            decoded, expected,
+            "the logical Fact outlives the SQLite row"
+        );
+    }
 }

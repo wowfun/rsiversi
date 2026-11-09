@@ -33,6 +33,10 @@ control routing and options are validated by canonical control replay; reading a
 Fact does not construct and count a second complete control value. Logical byte lengths govern page,
 window and suffix admission, and cold validation checks their indexed lengths
 against reconstructed Facts. Physical JSON lengths are bounded before allocation.
+Fact-page decoding borrows the bounded SQLite row text through validation and
+coverage hashing; it does not allocate a second physical JSON string. Logical
+Facts own their decoded contents. A selected-record lookup copies the physical
+text only when returning it beyond the SQLite statement's lifetime.
 Prefix fingerprints remain logical; reference coverage hashes the exact physical
 record and verifies the logical reference edges. Purge removes Facts before their
 accepted controls. Unsupported schemas are rejected during

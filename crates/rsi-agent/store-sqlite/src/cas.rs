@@ -462,11 +462,11 @@ pub(super) fn decode_projected_json<T: serde::de::DeserializeOwned>(
     decode_projected_json_with_source(label, projection, maximum_bytes).map(|(value, _)| value)
 }
 
-pub(super) fn decode_projected_json_with_source<T: serde::de::DeserializeOwned>(
+pub(super) fn decode_projected_json_with_source<T: serde::de::DeserializeOwned, S: AsRef<str>>(
     label: &str,
-    (encoded_len, json): (i64, Option<String>),
+    (encoded_len, json): (i64, Option<S>),
     maximum_bytes: usize,
-) -> Result<(T, String)> {
+) -> Result<(T, S)> {
     super::cold_validation::check()?;
     #[cfg(feature = "test-support")]
     let _decode = super::test_support::DecodeProbe::start();
@@ -482,12 +482,12 @@ pub(super) fn decode_projected_json_with_source<T: serde::de::DeserializeOwned>(
             "{label} is absent from its bounded SQLite projection"
         ))
     })?;
-    if json.len() != encoded_len {
+    if json.as_ref().len() != encoded_len {
         return Err(StoreError::Corrupt(format!(
             "{label} byte length disagrees with its SQLite projection"
         )));
     }
-    let value = decode_json(label, &json)?;
+    let value = decode_json(label, json.as_ref())?;
     Ok((value, json))
 }
 

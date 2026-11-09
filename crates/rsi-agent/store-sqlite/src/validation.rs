@@ -1182,7 +1182,7 @@ pub(super) fn validate_canonical_fact_prefix(
                 "session Fact sequence differs from its contiguous durable row".into(),
             ));
         }
-        observer.fact(session_id, &fact, &encoded)?;
+        observer.fact(session_id, &fact, encoded)?;
         activity.observe_fact(&fact);
         digest = advance_fact_prefix_digest(digest, &fact).map_err(|error| {
             StoreError::Corrupt(format!("stored session Fact is invalid: {error}"))
@@ -1434,7 +1434,7 @@ fn validate_agent_indexes_observed(
         .map_err(sql_error)?;
     while let Some(row) = rows.next().map_err(sql_error)? {
         observer.checkpoint()?;
-        let (record, encoded): (AgentControlRecord, _) =
+        let (record, encoded): (AgentControlRecord, String) =
             super::cas::decode_projected_json_with_source(
                 "Agent control record",
                 (
