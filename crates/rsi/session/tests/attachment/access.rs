@@ -472,6 +472,19 @@ async fn input_canonicalization_and_submission_share_one_exact_target_lease() {
 struct RemoteWorkspace(rsi_execution::ExecutionCoordinates);
 #[async_trait]
 impl WorkspaceRegistry for RemoteWorkspace {
+    async fn display_order(
+        &self,
+    ) -> rsi_workspace_protocol::Result<rsi_workspace_protocol::WorkspaceDisplayOrder> {
+        unreachable!("display ordering is not used by this fixture")
+    }
+    async fn insert_before(
+        &self,
+        _: &rsi_workspace_protocol::WorkspaceId,
+        _: Option<&rsi_workspace_protocol::WorkspaceId>,
+    ) -> rsi_workspace_protocol::Result<rsi_workspace_protocol::WorkspaceDisplayOrder> {
+        unreachable!("display ordering is not used by this fixture")
+    }
+
     async fn rename(
         &self,
         _id: &rsi_workspace_protocol::WorkspaceId,

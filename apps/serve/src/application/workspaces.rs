@@ -23,6 +23,10 @@ enum Operation {
     List {
         after: Option<WorkspaceCursor>,
     },
+    InsertBefore {
+        id: WorkspaceId,
+        before: Option<WorkspaceId>,
+    },
     Membership,
     SetPin {
         session: rsi_agent_session_protocol::SessionId,
@@ -66,13 +70,28 @@ impl Sessions {
             .map_err(|_| Error::Cancelled)?;
         let value = match input.operation {
             Operation::List { after } => {
-                let page = self
+                let registry = self.workspaces.scoped(origin);
+                let order = if after.is_none() {
+                    Some(registry.display_order().await.map_err(remote)?.ids)
+                } else {
+                    None
+                };
+                let page = registry.list(after, 16).await.map_err(remote)?;
+                json!({"items":page.records.iter().map(record).collect::<Vec<_>>(),"next":page.next,"order":order})
+            }
+            Operation::InsertBefore { id, before } => {
+                match self
                     .workspaces
                     .scoped(origin)
-                    .list(after, 16)
+                    .insert_before(&id, before.as_ref())
                     .await
-                    .map_err(remote)?;
-                json!({"items":page.records.iter().map(record).collect::<Vec<_>>(),"next":page.next})
+                {
+                    Ok(order) => json!({"status":"applied","ids":order.ids}),
+                    Err(rsi_workspace_protocol::WorkspaceError::Unknown(id)) => {
+                        json!({"status":"unknown","id":id})
+                    }
+                    Err(error) => return Err(remote(error)),
+                }
             }
             Operation::Membership => {
                 let seed = self

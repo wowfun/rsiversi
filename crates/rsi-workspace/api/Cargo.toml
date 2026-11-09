@@ -16,6 +16,7 @@ serde.workspace = true
 serde_json.workspace = true
 
 [dev-dependencies]
+rsi-files-native-fs = { path = "../../rsi-files/native-fs" }
 rsi-execution = { path = "../../rsi-execution/core" }
 rsi-api = { path = "../../rsi-api/core" }
 rsi-api-http = { path = "../../rsi-api/http" }
@@ -23,7 +24,7 @@ rsi-api-http-client = { path = "../../rsi-api/http-client" }
 rsi-credentials-protocol = { path = "../../rsi-credentials/protocol" }
 rsi-storage = { path = "../../rsi-storage/core" }
 rsi-storage-domain = { path = "../../rsi-storage/domain" }
-rsi-storage-json = { path = "../../rsi-storage/json" }
+rsi-storage-sqlite = { path = "../../rsi-storage/sqlite" }
 rsi-workspace = { path = "../core" }
 tempfile.workspace = true
 tokio = { workspace = true, features = ["net", "rt-multi-thread", "time"] }

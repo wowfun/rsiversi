@@ -15,6 +15,16 @@ registry registration. Accepted commits run on the owning Execution runtime.
 Complete order membership streams visible records into its count and byte bound;
 it does not materialize the entire registry before detecting overflow.
 
+The allocation record also retains the Host display order as creation positions,
+not copied Workspace records. On opening, the registry drops positions whose
+registration was deleted and prepends newer registrations. Deletion removes the
+live position immediately; the next allocation or changed move prunes retired
+positions from the durable list. This list stays within the registration bound
+and cannot resurrect a deleted position when its path is registered again.
+One allocation-record commit publishes a changed order. A failed commit keeps the
+previous live order; unknown outcomes use the Storage generation's existing fence.
+Insertion-order pages and their durable cursors remain independent of this order.
+
 Domain version 4 stores mandatory execution coordinates and the independent
 allocation high-water mark. Workspace protocol owns identity derivation from
 those coordinates. Local get-or-create canonicalizes only the Service filesystem;

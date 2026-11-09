@@ -22,6 +22,26 @@ struct Provider {
 }
 #[async_trait]
 impl WorkspaceRegistry for Provider {
+    async fn display_order(
+        &self,
+    ) -> rsi_workspace_protocol::Result<rsi_workspace_protocol::WorkspaceDisplayOrder> {
+        Ok(WorkspaceDisplayOrder { ids: vec![] })
+    }
+    async fn insert_before(
+        &self,
+        _: &rsi_workspace_protocol::WorkspaceId,
+        _: Option<&rsi_workspace_protocol::WorkspaceId>,
+    ) -> rsi_workspace_protocol::Result<rsi_workspace_protocol::WorkspaceDisplayOrder> {
+        self.writes.fetch_add(1, Ordering::SeqCst);
+        if self.bad_record {
+            Ok(WorkspaceDisplayOrder { ids: vec![] })
+        } else {
+            Err(WorkspaceError::Storage(
+                "order reply was lost after write".into(),
+            ))
+        }
+    }
+
     async fn rename(&self, id: &WorkspaceId, name: WorkspaceName) -> Result<WorkspaceRecord> {
         self.writes.fetch_add(1, Ordering::SeqCst);
         if self.bad_record {
@@ -167,13 +187,22 @@ async fn commit_result_loss_and_invalid_registration_reply_stay_unknown_without_
             Err(WorkspaceError::Api(ApiError::OutcomeUnknown))
         ));
         assert_eq!(provider.writes.load(Ordering::SeqCst), 3);
+        assert!(matches!(
+            client.insert_before(&id, None).await,
+            Err(WorkspaceError::Api(ApiError::OutcomeUnknown))
+        ));
+        assert_eq!(provider.writes.load(Ordering::SeqCst), 4);
         endpoint.close().await;
         registry.close().await;
     }
 }
 
+#[async_trait]
 impl WorkspaceIngress for Provider {
     fn scoped(&self, _: CallOrigin) -> Arc<dyn WorkspaceRegistry> {
         Arc::new(self.clone())
+    }
+    async fn register_local(&self, _: CallOrigin, path: &Path) -> Result<(WorkspaceRecord, bool)> {
+        self.get_or_create(path).await.map(|record| (record, true))
     }
 }

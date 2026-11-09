@@ -142,6 +142,8 @@ async fn server_setup(
     HttpClientConfig,
     rsi_api::ConnectionApi,
 ) {
+    let state = directory.join("state");
+    rsi_files_native_fs::create_absolute_directory_no_follow(&state).unwrap();
     for (name, factory, config) in [
         (
             "execution",
@@ -155,9 +157,9 @@ async fn server_setup(
             Value::Null,
         ),
         (
-            "json",
-            Arc::new(rsi_storage_json::JsonStorageFactory),
-            json!({"name":"json","path":directory.join("domains.json")}),
+            "sqlite",
+            Arc::new(rsi_storage_sqlite::SqliteStorageFactory),
+            json!({"name":"sqlite","path":state.join("domains.sqlite3")}),
         ),
         (
             "domains",
@@ -167,7 +169,7 @@ async fn server_setup(
         (
             "workspace",
             Arc::new(rsi_workspace::WorkspaceFactory),
-            json!({"backend":"json"}),
+            json!({"backend":"sqlite"}),
         ),
         ("api", Arc::new(rsi_api::ApiFactory), Value::Null),
     ] {
@@ -253,6 +255,31 @@ async fn exercise_workspace(
         one
     );
     let two = workspace.get_or_create(second).await.unwrap();
+    assert_eq!(
+        workspace.display_order().await.unwrap().ids,
+        vec![two.id.clone(), one.id.clone()]
+    );
+    assert_eq!(
+        workspace
+            .insert_before(&one.id, Some(&two.id))
+            .await
+            .unwrap()
+            .ids,
+        vec![one.id.clone(), two.id.clone()]
+    );
+    assert_eq!(
+        workspace.insert_before(&one.id, None).await.unwrap().ids,
+        vec![two.id.clone(), one.id.clone()]
+    );
+    assert_eq!(
+        workspace
+            .insert_before(&one.id, Some(&one.id))
+            .await
+            .unwrap()
+            .ids,
+        vec![two.id.clone(), one.id.clone()]
+    );
+
     let rsi_workspace_protocol::WorkspaceOrderSeed::Available { records } =
         workspace.order_seed().await.unwrap()
     else {

@@ -1,11 +1,13 @@
-use crate::wire::{Failure, IdRequest, ListRequest, Operation, RegisterRequest, RenameRequest};
+use crate::wire::{
+    Failure, IdRequest, InsertBeforeRequest, ListRequest, Operation, RegisterRequest, RenameRequest,
+};
 use async_trait::async_trait;
 use rsi_api_protocol::{ApiClient, ApiClientContract, ApiError, call_json};
 use rsi_meta::{ActivationPlan, ConfigValue, PluginFactory, PreparedActivation};
 use rsi_workspace_protocol::{
-    MAXIMUM_WORKSPACES_PER_PAGE, Result, WorkspaceCursor, WorkspaceError, WorkspaceId,
-    WorkspacePage, WorkspaceRecord, WorkspaceRegistry, WorkspaceRegistryContract, WorkspaceStatus,
-    validate_registration_path,
+    MAXIMUM_WORKSPACES_PER_PAGE, Result, WorkspaceCursor, WorkspaceDisplayOrder, WorkspaceError,
+    WorkspaceId, WorkspacePage, WorkspaceRecord, WorkspaceRegistry, WorkspaceRegistryContract,
+    WorkspaceStatus, validate_registration_path,
 };
 use serde::{Serialize, de::DeserializeOwned};
 use std::{path::Path, sync::Arc};
@@ -33,6 +35,43 @@ impl WorkspaceClient {
 }
 #[async_trait]
 impl WorkspaceRegistry for WorkspaceClient {
+    async fn display_order(&self) -> Result<WorkspaceDisplayOrder> {
+        let order: WorkspaceDisplayOrder = self
+            .call(Operation::DisplayOrder, &serde_json::json!({}))
+            .await?;
+        order.validate()?;
+        Ok(order)
+    }
+    async fn insert_before(
+        &self,
+        id: &WorkspaceId,
+        before: Option<&WorkspaceId>,
+    ) -> Result<WorkspaceDisplayOrder> {
+        let order: WorkspaceDisplayOrder = self
+            .call(
+                Operation::InsertBefore,
+                &InsertBeforeRequest {
+                    id: id.clone(),
+                    before: before.cloned(),
+                },
+            )
+            .await?;
+        order.validate().map_err(crate::wire::invalid_record)?;
+        let moved = order.ids.iter().position(|value| value == id);
+        let expected = match before {
+            Some(anchor) if anchor == id => moved,
+            Some(anchor) => order
+                .ids
+                .iter()
+                .position(|value| value == anchor)
+                .and_then(|index| index.checked_sub(1)),
+            None => order.ids.len().checked_sub(1),
+        };
+        if moved.is_none() || moved != expected {
+            return Err(WorkspaceError::Api(ApiError::OutcomeUnknown));
+        }
+        Ok(order)
+    }
     async fn order_seed(&self) -> Result<rsi_workspace_protocol::WorkspaceOrderSeed> {
         let seed: rsi_workspace_protocol::WorkspaceOrderSeed = self
             .call(Operation::OrderSeed, &serde_json::json!({}))

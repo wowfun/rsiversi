@@ -47,8 +47,20 @@ mutation outcomes. A failed reply is not proof that registration or deletion did
 not happen. The caller reconciles through exact registry identity and reads; the
 proxy does not replay mutations or reinterpret API failures as storage failures.
 
+The registry also owns a shared display order, independent of insertion-order
+pagination and browser-local view preferences. New registrations lead this order.
+`insert_before` moves one visible registration before a visible anchor, or to the
+end when the anchor is absent, and returns the committed visible order. Both
+identities must exist and admit the caller. Self-anchored and already-positioned
+moves perform no durable write and publish no revision. Concurrent moves apply to
+the latest committed order. Accepted moves survive loss of their waiter and
+retirement drains them. Rename, filesystem activity and Session activity never
+change display order. Deleting and recreating the same path creates a new position.
+The display-order response contains only unique identities, bounded by the
+registry's 16,384-registration capacity; it copies no Workspace records or history.
+
 `WorkspaceId::from_canonical_path` is an explicitly Local convenience for callers
 that already own a native canonical directory. Cross-location consumers derive
 identity from complete coordinates through `WorkspaceId::from_coordinates`.
 
-The native ingress can expose a process-local directory revision. Publishing, renaming or deleting a registration changes the revision. Reusing an existing record leaves it unchanged.
+The native ingress can expose a process-local directory revision. Publishing, renaming, deleting or moving a registration changes the revision. Reusing an existing record or an unchanged display position leaves it unchanged.

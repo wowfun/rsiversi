@@ -15,6 +15,8 @@ use thiserror::Error;
 
 mod order;
 pub use order::WorkspaceOrderSeed;
+mod display_order;
+pub use display_order::{MAXIMUM_REGISTERED_WORKSPACES, WorkspaceDisplayOrder};
 
 /// Stable host-local workspace identity.
 #[derive(Clone, Debug, Eq, Hash, Ord, PartialEq, PartialOrd, Serialize)]
@@ -283,6 +285,15 @@ pub trait WorkspaceRegistry: fmt::Debug + Send + Sync + 'static {
     async fn list(&self, after: Option<WorkspaceCursor>, limit: usize) -> Result<WorkspacePage>;
     /// Reads complete bounded membership under one registry snapshot.
     async fn order_seed(&self) -> Result<WorkspaceOrderSeed>;
+    /// Reads the shared display order without changing insertion-order cursors.
+    async fn display_order(&self) -> Result<WorkspaceDisplayOrder>;
+    /// Moves one visible registration before an anchor, or to the end without one.
+    /// No-op moves do not write; both supplied identities must exist and admit the caller.
+    async fn insert_before(
+        &self,
+        id: &WorkspaceId,
+        before: Option<&WorkspaceId>,
+    ) -> Result<WorkspaceDisplayOrder>;
     /// Finds or durably creates the canonical directory registration.
     async fn get_or_create(&self, path: &Path) -> Result<WorkspaceRecord> {
         self.register_at(&ExecutionLocation::Local, path).await

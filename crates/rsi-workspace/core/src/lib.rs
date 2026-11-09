@@ -13,9 +13,10 @@ use rsi_meta::{
 use rsi_storage::StorageError;
 use rsi_storage_domain::{Domain, DomainFacilityContract, DomainSpec};
 use rsi_workspace_protocol::{
-    ExecutionCoordinates, ExecutionLocation, MAXIMUM_WORKSPACES_PER_PAGE, Result, WorkspaceCursor,
-    WorkspaceError, WorkspaceId, WorkspacePage, WorkspaceRecord, WorkspaceRegistry,
-    WorkspaceRegistryContract, WorkspaceStatus,
+    ExecutionCoordinates, ExecutionLocation, MAXIMUM_REGISTERED_WORKSPACES,
+    MAXIMUM_WORKSPACES_PER_PAGE, Result, WorkspaceCursor, WorkspaceDisplayOrder, WorkspaceError,
+    WorkspaceId, WorkspacePage, WorkspaceRecord, WorkspaceRegistry, WorkspaceRegistryContract,
+    WorkspaceStatus,
 };
 use rsi_workspace_protocol::{WorkspaceIngress, WorkspaceIngressContract};
 use serde::{Deserialize, Serialize};
@@ -30,7 +31,7 @@ use tokio::sync::{Mutex, RwLock};
 const DOMAIN_ID: &str = "rsi.workspace";
 const DOMAIN_VERSION: u32 = 4;
 const ALLOCATION_KEY: &str = "allocation";
-const MAXIMUM_WORKSPACES: usize = 16_384;
+const MAXIMUM_WORKSPACES: usize = MAXIMUM_REGISTERED_WORKSPACES;
 const MAXIMUM_WORKSPACE_DOMAIN_BYTES: usize = 128 * 1024 * 1024;
 
 /// Configuration accepted by [`WorkspaceFactory`].
@@ -52,6 +53,8 @@ struct DurableWorkspaceRecord {
 #[serde(deny_unknown_fields)]
 struct Allocation {
     high_water: u64,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    display_order: Vec<u64>,
 }
 
 #[derive(Debug, Default)]
@@ -59,6 +62,7 @@ struct RegistryData {
     next_order: u64,
     order: BTreeMap<u64, WorkspaceId>,
     records: BTreeMap<WorkspaceId, (u64, WorkspaceRecord)>,
+    display_order: Vec<u64>,
 }
 
 #[derive(Clone, Debug)]
@@ -75,6 +79,74 @@ struct Service {
 
 #[async_trait]
 impl WorkspaceRegistry for Service {
+    async fn display_order(&self) -> Result<WorkspaceDisplayOrder> {
+        let state = self.state.read().await;
+        self.ensure_available()?;
+        visible_order(&state, &state.display_order, &mut Permissions::new(self))
+    }
+
+    async fn insert_before(
+        &self,
+        id: &WorkspaceId,
+        before: Option<&WorkspaceId>,
+    ) -> Result<WorkspaceDisplayOrder> {
+        let commit = Arc::clone(&self.commit).lock_owned().await;
+        let current = self.state.read().await;
+        self.ensure_available()?;
+        let mut permissions = Permissions::new(self);
+        let mut position = |id: &WorkspaceId| -> Result<u64> {
+            let (position, record) = current
+                .records
+                .get(id)
+                .ok_or_else(|| WorkspaceError::Unknown(id.clone()))?;
+            if !permissions.permits(record.coordinates.location())? {
+                return Err(WorkspaceError::Api(ApiError::Unauthorized));
+            }
+            Ok(*position)
+        };
+        let moved = position(id)?;
+        let anchor = before.map(&mut position).transpose()?;
+        let mut next = current.display_order.clone();
+        if anchor != Some(moved) {
+            next.retain(|position| *position != moved);
+            let index = anchor.map_or(next.len(), |anchor| {
+                next.iter()
+                    .position(|position| *position == anchor)
+                    .expect("registered anchor has a display position")
+            });
+            next.insert(index, moved);
+        }
+        let result = visible_order(&current, &next, &mut permissions)?;
+        if next == current.display_order {
+            return Ok(result);
+        }
+        let value = serde_json::to_value(Allocation {
+            high_water: current.next_order,
+            display_order: next.clone(),
+        })
+        .map_err(|error| WorkspaceError::Storage(error.to_string()))?;
+        let permits = permissions.locations;
+        drop(current);
+        let domain = self.domain.clone();
+        let state = self.state.clone();
+        let revision = self.revision.clone();
+        self.execution
+            .spawn(async move {
+                let (_commit, _permits) = (commit, permits);
+                domain
+                    .put(ALLOCATION_KEY, value)
+                    .await
+                    .map_err(storage_error)?;
+                state.write().await.display_order = next;
+                revision.fetch_add(1, Ordering::Release);
+                Ok(result)
+            })
+            .await
+            .map_err(|error| {
+                WorkspaceError::Storage(format!("workspace commit task failed: {error}"))
+            })?
+    }
+
     async fn order_seed(&self) -> Result<rsi_workspace_protocol::WorkspaceOrderSeed> {
         let state = self.state.read().await;
         self.ensure_available()?;
@@ -254,6 +326,7 @@ impl WorkspaceRegistry for Service {
                 let mut state = state.write().await;
                 state.records.remove(&id);
                 state.order.remove(&order);
+                state.display_order.retain(|position| *position != order);
                 revision.fetch_add(1, Ordering::Release);
                 Ok(true)
             })
@@ -360,19 +433,37 @@ async fn canonical_directory(path: &Path) -> Result<PathBuf> {
 
 fn load_registry(mut snapshot: BTreeMap<String, ConfigValue>) -> Result<RegistryData> {
     let allocation = snapshot.remove(ALLOCATION_KEY);
-    let high_water = match allocation {
-        Some(value) => {
-            serde_json::from_value::<Allocation>(value)
-                .map_err(|error| WorkspaceError::Corrupt(error.to_string()))?
-                .high_water
-        }
-        None if snapshot.is_empty() => 0,
+    let Allocation {
+        high_water,
+        display_order,
+    } = match allocation {
+        Some(value) => serde_json::from_value::<Allocation>(value)
+            .map_err(|error| WorkspaceError::Corrupt(error.to_string()))?,
+        None if snapshot.is_empty() => Allocation {
+            high_water: 0,
+            display_order: Vec::new(),
+        },
         None => {
             return Err(WorkspaceError::Corrupt(
                 "workspace allocation is missing".into(),
             ));
         }
     };
+    if display_order.len() > MAXIMUM_WORKSPACES
+        || display_order
+            .iter()
+            .any(|position| *position == 0 || *position > high_water)
+    {
+        return Err(WorkspaceError::Corrupt(
+            "invalid Workspace display positions".into(),
+        ));
+    }
+    let known = display_order.iter().copied().collect::<HashSet<_>>();
+    if known.len() != display_order.len() {
+        return Err(WorkspaceError::Corrupt(
+            "duplicated Workspace display positions".into(),
+        ));
+    }
     if snapshot.len() > MAXIMUM_WORKSPACES {
         return Err(WorkspaceError::Corrupt(
             "workspace record bound is exceeded".into(),
@@ -408,6 +499,18 @@ fn load_registry(mut snapshot: BTreeMap<String, ConfigValue>) -> Result<Registry
             ));
         }
     }
+    state.display_order = state
+        .order
+        .keys()
+        .rev()
+        .copied()
+        .filter(|position| !known.contains(position))
+        .chain(
+            display_order
+                .into_iter()
+                .filter(|position| state.order.contains_key(position)),
+        )
+        .collect();
     Ok(state)
 }
 
@@ -476,6 +579,11 @@ impl Service {
             .next_order
             .checked_add(1)
             .ok_or_else(|| WorkspaceError::InvalidInput("workspace order exhausted".into()))?;
+        let allocation = serde_json::to_value(Allocation {
+            high_water: order,
+            display_order: state.display_order.clone(),
+        })
+        .map_err(|error| WorkspaceError::Storage(error.to_string()))?;
         drop(state);
         let durable = DurableWorkspaceRecord {
             order,
@@ -496,7 +604,7 @@ impl Service {
                 // until its reservation has been acknowledged.
                 state.write().await.next_order = order;
                 domain
-                    .put(ALLOCATION_KEY, serde_json::json!({"high_water": order}))
+                    .put(ALLOCATION_KEY, allocation)
                     .await
                     .map_err(storage_error)?;
                 domain
@@ -506,6 +614,7 @@ impl Service {
                 let mut state = state.write().await;
                 state.order.insert(order, id.clone());
                 state.records.insert(id, (order, record.clone()));
+                state.display_order.insert(0, order);
                 revision.fetch_add(1, Ordering::Release);
                 Ok((record, true))
             })
@@ -561,6 +670,21 @@ impl WorkspaceIngress for Service {
 struct Permissions<'a> {
     service: &'a Service,
     locations: BTreeMap<ExecutionLocation, Option<ExecutionOperation>>,
+}
+fn visible_order(
+    state: &RegistryData,
+    positions: &[u64],
+    permissions: &mut Permissions<'_>,
+) -> Result<WorkspaceDisplayOrder> {
+    let mut ids = Vec::with_capacity(positions.len());
+    for position in positions {
+        let id = &state.order[position];
+        let record = &state.records[id].1;
+        if permissions.permits(record.coordinates.location())? {
+            ids.push(id.clone());
+        }
+    }
+    Ok(WorkspaceDisplayOrder { ids })
 }
 impl<'a> Permissions<'a> {
     fn new(service: &'a Service) -> Self {
