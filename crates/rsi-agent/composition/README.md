@@ -124,8 +124,9 @@ same fresh Local isolation as the registrars, before any Profile leaf activates.
 Unchanged definitions may share a pin only when these inputs also match.
 An owner-detected seed codec mismatch survives failed activation as a closed,
 generation-local diagnostic. It reports typed saved/expected identities and the
-new-conversation action after rollback. Other Profile activation failures retain
-their generic redaction. A recorded mismatch also prevents sealing if a plugin
+new-conversation action after rollback. Other Profile preparation, activation and
+Pending failures identify the validated Profile instance and failure stage;
+plugin-owned diagnostic text is not copied into that error. A recorded mismatch also prevents sealing if a plugin
 ignores its failed state lookup.
 
 After Tools seal, composition freezes their exact-name output declarations in

@@ -171,12 +171,15 @@ async fn saved_seed_reconstructs_exact_tools_before_sealing_and_partitions_cache
     assert_eq!(restored.source_digest(), again.source_digest());
     assert_eq!(*factory.activated.lock().unwrap(), [false, false, true]);
     let invalid = service
-        .pin(&id, Some(&seed(serde_json::json!(false))))
+        .pin(
+            &id,
+            Some(&seed(serde_json::json!("private-saved-manifest"))),
+        )
         .await
         .unwrap_err();
     assert_eq!(
         invalid.to_string(),
-        "Agent preset default is unavailable: activating an Agent contribution failed"
+        "Agent preset default is unavailable: activating an Agent contribution failed (instance `manifest`)"
     );
     let wrong_codec = AgentGenerationSeed::new(vec![DomainSnapshot::new(
         DomainIdentity::new("fixture.manifest", 2).unwrap(),

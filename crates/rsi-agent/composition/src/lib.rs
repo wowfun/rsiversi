@@ -1130,9 +1130,17 @@ fn profile_unavailable(preset_id: &AgentPresetId, error: &ProfileError) -> Agent
         ProfileError::GenerationPending { .. } => "an Agent contribution remained Pending",
         _ => "Agent Profile compilation or activation failed",
     };
+    let reason = match error {
+        ProfileError::Preparation { instance, .. }
+        | ProfileError::Application { instance, .. }
+        | ProfileError::GenerationPending { instance } => {
+            format!("{reason} (instance `{instance}`)")
+        }
+        _ => reason.to_owned(),
+    };
     AgentCompositionError::Unavailable {
         preset_id: preset_id.clone(),
-        reason: reason.to_owned(),
+        reason,
     }
 }
 
