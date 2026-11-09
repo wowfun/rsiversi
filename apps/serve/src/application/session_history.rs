@@ -140,22 +140,15 @@ impl Sessions {
                     )
                     .await?
             }
-            Operation::Open {
-                metadata_only: true,
-            } => {
-                metadata_snapshot(
+            Operation::Open { metadata_only } => {
+                open_history(
                     service.as_ref(),
                     &input.session_id,
                     input.parent_session_id.as_ref(),
+                    metadata_only,
                 )
                 .await?
             }
-            Operation::Open {
-                metadata_only: false,
-            } => match find().await? {
-                Some(handle) => self.opening_snapshot(handle.as_ref()).await?,
-                None => Value::Null,
-            },
             Operation::Controls {
                 reader,
                 after_seq,
@@ -300,21 +293,33 @@ impl Sessions {
             .map_err(|_| Error::Cancelled)?;
         Ok(result)
     }
+}
 
-    async fn opening_snapshot(&self, handle: &dyn SessionHandle) -> Result<Value> {
-        let header = handle.header().await.map_err(|error| remote(&error))?;
-        let (selection, cursor) = current_selection(handle, &header).await?;
-        let through = match cursor {
-            rsi_agent_session_protocol::ProjectionCursor::Durable { fact_seq, .. } => fact_seq,
-            rsi_agent_session_protocol::ProjectionCursor::Draft { .. } => 0,
-        };
-        let mut metadata = stored_header(&header);
-        metadata["through"] = json!(through);
-        metadata["model_selection"] = json!(selection);
-        metadata["selection_cursor"] = json!(cursor);
-        metadata["model_baseline"] = json!(model_baseline(&header));
-        Ok(metadata)
+async fn open_history(
+    service: &dyn SessionService,
+    session: &SessionId,
+    parent: Option<&SessionId>,
+    metadata_only: bool,
+) -> Result<Value> {
+    let metadata = metadata_snapshot(service, session, parent).await?;
+    if metadata_only || !metadata.is_null() {
+        return Ok(metadata);
     }
+    let Some(handle) = find_handle(service, session, parent).await? else {
+        return Ok(Value::Null);
+    };
+    let header = handle.header().await.map_err(|error| remote(&error))?;
+    let (selection, cursor) = current_selection(handle.as_ref(), &header).await?;
+    let through = match cursor {
+        rsi_agent_session_protocol::ProjectionCursor::Durable { fact_seq, .. } => fact_seq,
+        rsi_agent_session_protocol::ProjectionCursor::Draft { .. } => 0,
+    };
+    let mut metadata = stored_header(&header);
+    metadata["through"] = json!(through);
+    metadata["model_selection"] = json!(selection);
+    metadata["selection_cursor"] = json!(cursor);
+    metadata["model_baseline"] = json!(model_baseline(&header));
+    Ok(metadata)
 }
 
 fn unavailable() -> Error {

@@ -175,6 +175,16 @@ async fn metadata_reads_do_not_attach_and_preserve_visibility_and_failures() {
         .unwrap();
     let service = MetadataService::new(vec![store.session_summary(id).await.unwrap()]);
     let snapshot = metadata_snapshot(&service, id, None).await.unwrap();
+    for metadata_only in [false, true] {
+        assert_eq!(
+            open_history(&service, id, None, metadata_only)
+                .await
+                .unwrap(),
+            snapshot,
+            "ordinary durable opens must not attach or activate a projection either"
+        );
+    }
+    assert_eq!(service.reads.load(std::sync::atomic::Ordering::Relaxed), 3);
     assert_eq!(snapshot["id"], id.as_str());
     assert_eq!(snapshot["created_at"], 1);
     assert_eq!(snapshot["through"], 1);
@@ -199,10 +209,18 @@ async fn metadata_reads_do_not_attach_and_preserve_visibility_and_failures() {
             Value::Null
         );
     }
-    assert!(matches!(
-        metadata_snapshot(&service, &SessionId::new("failed").unwrap(), None).await,
-        Err(Error::Remote(_))
-    ));
+    for metadata_only in [false, true] {
+        assert!(matches!(
+            open_history(
+                &service,
+                &SessionId::new("failed").unwrap(),
+                None,
+                metadata_only
+            )
+            .await,
+            Err(Error::Remote(_))
+        ));
+    }
 }
 
 #[tokio::test]

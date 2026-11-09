@@ -319,9 +319,8 @@ inspect an active Turn or enumerate message-removal requests. The standard
 Session adapter handles unpublished drafts without publication. Interactive
 root commands reject an Agent-owned child.
 For an explicitly opened Session, `application.history` reads immutable Facts
-under the active browser owner's authority. Opening returns the durable cursor
-and the current native model-selection projection. An open with `metadata_only:
-true` reads the authorized durable Header, immutable model baseline and indexed
+under the active browser owner's authority. Opening a persisted Session reads
+the authorized durable Header, immutable model baseline and indexed
 Fact/control cut without attaching
 a Session handle, opening activity, or creating projection subscriptions. The
 caller's location access and any addressed direct-parent relationship still apply.
@@ -332,7 +331,9 @@ Opening an absent or inaccessible Session returns null. A metadata-only read als
 returns null for an unpublished draft. Other read failures remain errors. The captured Fact watermark
 selects the history cut, while the control watermark identifies its independent
 selection revision. An absent producer uses the immutable Header baseline.
-A failed producer is reported rather than replaced with a default.
+A draft open still reads its revision-matched model projection; a failed draft
+producer is reported rather than replaced with a default. Durable history does
+not require executable Agent or MCP contributions to activate.
 The durable `capture` operation accepts the caller's already projected Fact and
 control positions. It authorizes one fresh summary and returns that metadata
 with the first missing Fact and control slices at its cut. It does not attach
