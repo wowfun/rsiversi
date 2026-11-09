@@ -10,6 +10,10 @@ Completed native Turns expose a manual fork action bound to the current pane
 generation. Full, Last(n), and None create a fresh independent draft in the source
 workspace and preset through the ordinary Session creation service. The document
 flushes its editor before switching, and first input remains the publication point.
+Forking resolves the source coordinates to the current registration at invocation;
+opening history does not require a registration. Pane `workspace_key` and catalog
+`key` identify coordinate-scoped history. Creation receipts retain registration
+IDs for draft reuse. Catalog keys are derived only during presentation serialization.
 
 Composer preparation accepts an optional typed sandbox mode for a next-Turn
 message and freezes it with the request. Steering rejects sandbox overrides;

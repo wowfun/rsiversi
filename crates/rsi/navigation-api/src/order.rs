@@ -46,6 +46,15 @@ pub struct OrderMember {
     /// Shared archive partition.
     pub archived: bool,
 }
+/// Complete coordinate group and its current optional registration.
+#[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct OrderGroup {
+    /// Machine and canonical directory, independent of registration lifetime.
+    pub coordinates: ExecutionCoordinates,
+    /// Current registered identity; absent for an unregistered directory.
+    pub workspace: Option<rsi_workspace_protocol::WorkspaceId>,
+}
 /// Complete membership, or explicit capacity refusal.
 #[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
 #[serde(tag = "kind", rename_all = "snake_case", deny_unknown_fields)]
@@ -53,7 +62,7 @@ pub enum OrderMembership {
     /// Every identity in the scope, strictly ascending.
     Available {
         /// Unique execution coordinate groups in first-member order.
-        groups: Vec<ExecutionCoordinates>,
+        groups: Vec<OrderGroup>,
         /// Reconcile all members before reading summary pages.
         members: Vec<OrderMember>,
     },
@@ -237,13 +246,19 @@ impl NavigationClient {
 }
 
 fn valid_groups(
-    groups: &[ExecutionCoordinates],
+    groups: &[OrderGroup],
     members: &[OrderMember],
     scope: Option<&ExecutionCoordinates>,
 ) -> bool {
-    if groups.len() > members.len()
+    let mut registrations = std::collections::BTreeSet::new();
+    if groups
+        .iter()
+        .filter_map(|group| group.workspace.as_ref())
+        .any(|id| !registrations.insert(id))
+        || groups.len() > members.len()
         || groups
             .iter()
+            .map(|group| &group.coordinates)
             .collect::<std::collections::BTreeSet<_>>()
             .len()
             != groups.len()
@@ -256,7 +271,7 @@ fn valid_groups(
         let Some(coordinates) = groups.get(index) else {
             return false;
         };
-        if scope.is_some_and(|scope| coordinates != scope)
+        if scope.is_some_and(|scope| &coordinates.coordinates != scope)
             || !used.contains(&index) && index != used.len()
         {
             return false;
@@ -275,13 +290,14 @@ mod tests {
             host_epoch: HostEpoch::from_bytes([1; 16]),
             metadata_revision: "1".into(),
             membership: OrderMembership::Available {
-                groups: vec![
-                    ExecutionCoordinates::new(
+                groups: vec![OrderGroup {
+                    coordinates: ExecutionCoordinates::new(
                         rsi_agent_session_protocol::ExecutionLocation::Local,
                         "/workspace",
                     )
                     .unwrap(),
-                ],
+                    workspace: None,
+                }],
                 members: vec![OrderMember {
                     account_position: 0,
                     last_activity_ms: "1".into(),
@@ -301,6 +317,27 @@ mod tests {
             members[0].group = 1;
         }
         assert!(matches!(seed.bounded(), Err(ApiError::Invalid(_))));
+    }
+    #[test]
+    fn distinct_groups_cannot_claim_the_same_registration() {
+        let mut value = seed();
+        if let OrderMembership::Available { members, groups } = &mut value.membership {
+            let id = rsi_workspace_protocol::WorkspaceId::parse("a".repeat(64)).unwrap();
+            groups[0].workspace = Some(id.clone());
+            groups.push(OrderGroup {
+                coordinates: ExecutionCoordinates::new(
+                    rsi_agent_session_protocol::ExecutionLocation::Local,
+                    "/other",
+                )
+                .unwrap(),
+                workspace: Some(id),
+            });
+            let mut second = members[0].clone();
+            second.session = SessionId::new("two").unwrap();
+            second.group = 1;
+            members.push(second);
+        }
+        assert!(value.validate().is_err());
     }
     #[test]
     fn remote_account_positions_must_be_complete_and_unique_per_group() {

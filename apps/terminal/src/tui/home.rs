@@ -387,6 +387,14 @@ mod tests {
     struct Workspace;
     #[async_trait::async_trait]
     impl rsi_workspace_protocol::WorkspaceRegistry for Workspace {
+        async fn find(
+            &self,
+            _: &rsi_workspace_protocol::WorkspaceKey,
+        ) -> rsi_workspace_protocol::Result<Option<rsi_workspace_protocol::WorkspaceRecord>>
+        {
+            panic!("coordinate lookup is not used by this fixture")
+        }
+
         async fn display_order(
             &self,
         ) -> rsi_workspace_protocol::Result<rsi_workspace_protocol::WorkspaceDisplayOrder> {

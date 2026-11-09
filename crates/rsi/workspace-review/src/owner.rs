@@ -211,7 +211,7 @@ impl WorkspaceReview {
         }
         let workspace = PathBuf::from(start.header.canonical_cwd());
         let scope = Scope {
-            workspace: rsi_workspace_protocol::WorkspaceId::from_coordinates(
+            workspace: rsi_workspace_protocol::WorkspaceKey::from_coordinates(
                 start.header.coordinates(),
             ),
             conversation: ConversationIdentity::Native(start.header.session_id().clone()),

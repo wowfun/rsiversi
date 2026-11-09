@@ -8,7 +8,7 @@ use rsi_api_protocol::{
     OperationSpec, RequestEncoding, Result, call_json,
 };
 pub use rsi_conversation::ConversationIdentity;
-use rsi_workspace_protocol::WorkspaceId;
+use rsi_workspace_protocol::WorkspaceKey;
 use serde::{Deserialize, Serialize};
 use std::sync::Arc;
 
@@ -16,8 +16,8 @@ use std::sync::Arc;
 #[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct Scope {
-    /// Registered workspace.
-    pub workspace: WorkspaceId,
+    /// Coordinate key resolved through the current registry.
+    pub workspace: WorkspaceKey,
     /// Exact conversation.
     pub conversation: ConversationIdentity,
 }
@@ -458,7 +458,7 @@ mod tests {
     use super::*;
     fn scope() -> Scope {
         Scope {
-            workspace: WorkspaceId::parse("a".repeat(64)).unwrap(),
+            workspace: WorkspaceKey::parse("a".repeat(64)).unwrap(),
             conversation: ConversationIdentity::Native(
                 rsi_agent_session_protocol::SessionId::new("source").unwrap(),
             ),

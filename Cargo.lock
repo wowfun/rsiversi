@@ -8467,6 +8467,7 @@ name = "rsi-workspace"
 version = "0.0.1"
 dependencies = [
  "async-trait",
+ "getrandom 0.3.4",
  "hex",
  "rsi-api-protocol",
  "rsi-execution",

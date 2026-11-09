@@ -101,7 +101,7 @@ impl ToolExecutor for Executor {
         }
         let request = request(
             arguments,
-            &rsi_workspace_protocol::WorkspaceId::from_coordinates(caller.header().coordinates()),
+            &rsi_workspace_protocol::WorkspaceKey::from_coordinates(caller.header().coordinates()),
             caller.session_id(),
         )?;
         match self
@@ -143,7 +143,7 @@ impl ToolExecutor for Executor {
 
 fn request(
     mut input: Value,
-    workspace: &rsi_workspace_protocol::WorkspaceId,
+    workspace: &rsi_workspace_protocol::WorkspaceKey,
     target: &rsi_agent_session_protocol::SessionId,
 ) -> rsi_tools_protocol::Result<Request> {
     let object = input
@@ -201,7 +201,7 @@ mod tests {
     use super::*;
     #[test]
     fn model_indexing_uses_discovery_continuations_and_originals_require_an_exact_source() {
-        let workspace = rsi_workspace_protocol::WorkspaceId::parse("a".repeat(64)).unwrap();
+        let workspace = rsi_workspace_protocol::WorkspaceKey::parse("a".repeat(64)).unwrap();
         let target = rsi_agent_session_protocol::SessionId::new("target").unwrap();
         let resolve = |value| request(serde_json::from_value(value).unwrap(), &workspace, &target);
         let continuation = "b".repeat(32);

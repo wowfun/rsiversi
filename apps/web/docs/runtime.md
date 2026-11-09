@@ -338,3 +338,9 @@ A document contribution may wrap its Session occurrence in one provider. The
 provider shares that occurrence's action fence and is disposed with its generation;
 it cannot retain a replacement pane's authority. Finite document resource reads
 also recheck the connection and attachment after completion.
+
+## Workspace identities
+
+History pickers use pane `workspace_key` and catalog Workspace `key`, both
+coordinate-scoped. Creation and draft reuse use the registration ID in the
+creation receipt. The document does not derive or interchange these identities.

@@ -172,7 +172,7 @@ impl Sessions {
             return Err(Error::Capacity);
         };
         Ok(
-            json!({"groups":groups.iter().map(WorkspaceId::from_coordinates).collect::<Vec<_>>(),"members":members}),
+            json!({"groups":groups.iter().map(|group| &group.workspace).collect::<Vec<_>>(),"members":members}),
         )
     }
 
@@ -237,18 +237,22 @@ impl Sessions {
         let mut slice = rows
             .iter()
             .filter(|row| after.is_none_or(|id| id < &row.session_id));
-        let items: Vec<_> = slice
-            .by_ref()
-            .take(8)
-            .map(|row| {
-                json!({
-                    "id": row.session_id, "cwd": row.coordinates.path(),
-                    "workspace": WorkspaceId::from_coordinates(&row.coordinates),
-                    "createdAt": row.created_at_ms, "updatedAt": row.created_at_ms,
-                    "blank": row.inherited_turns == 0, "running": false,
-                })
-            })
-            .collect();
+        let mut items = Vec::new();
+        let registry = self.workspaces.scoped(origin.clone());
+        for row in slice.by_ref().take(8) {
+            let workspace = registry
+                .find(&rsi_workspace_protocol::WorkspaceKey::from_coordinates(
+                    &row.coordinates,
+                ))
+                .await
+                .map_err(remote)?;
+            items.push(json!({
+                "id": row.session_id, "cwd": row.coordinates.path(),
+                "workspace": workspace.map(|record| record.id),
+                "createdAt": row.created_at_ms, "updatedAt": row.created_at_ms,
+                "blank": row.inherited_turns == 0, "running": false,
+            }));
+        }
         let next = slice
             .next()
             .and_then(|_| items.last())

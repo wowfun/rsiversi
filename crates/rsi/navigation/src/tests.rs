@@ -173,6 +173,7 @@ struct ReadConcurrency {
 }
 #[derive(Debug, Default)]
 struct Workspaces {
+    fail: bool,
     reads: ReadConcurrency,
     calls: std::sync::atomic::AtomicUsize,
     records: BTreeMap<WorkspaceId, WorkspaceRecord>,
@@ -203,6 +204,27 @@ impl WorkspaceRegistry for Workspaces {
         &self,
     ) -> rsi_workspace_protocol::Result<rsi_workspace_protocol::WorkspaceOrderSeed> {
         unreachable!("workspace order membership is not used by this fixture")
+    }
+    async fn find(
+        &self,
+        key: &rsi_workspace_protocol::WorkspaceKey,
+    ) -> rsi_workspace_protocol::Result<Option<WorkspaceRecord>> {
+        use std::sync::atomic::Ordering::SeqCst;
+        self.calls.fetch_add(1, SeqCst);
+        let active = self.reads.active.fetch_add(1, SeqCst) + 1;
+        self.reads.peak.fetch_max(active, SeqCst);
+        tokio::task::yield_now().await;
+        self.reads.active.fetch_sub(1, SeqCst);
+        if self.fail {
+            return Err(WorkspaceError::Storage("injected lookup failure".into()));
+        }
+        Ok(self
+            .records
+            .values()
+            .find(|record| {
+                &rsi_workspace_protocol::WorkspaceKey::from_coordinates(&record.coordinates) == key
+            })
+            .cloned())
     }
     async fn get(&self, id: &WorkspaceId) -> rsi_workspace_protocol::Result<WorkspaceRecord> {
         use std::sync::atomic::Ordering::SeqCst;
@@ -411,7 +433,7 @@ async fn workspace_lookup_prefetch_is_bounded_ordered_shared_and_lazy() {
             .enumerate()
             .filter(|(i, _)| i % 2 == 0)
             .map(|(_, coordinates)| {
-                let record = WorkspaceRecord::new(coordinates.clone());
+                let record = workspace_record(coordinates.clone());
                 (record.id.clone(), record)
             })
             .collect(),
@@ -429,7 +451,7 @@ async fn workspace_lookup_prefetch_is_bounded_ordered_shared_and_lazy() {
         rows,
         selected
             .map(|coordinates| coordinates.and_then(|coordinates| {
-                let id = WorkspaceId::from_coordinates(coordinates);
+                let id = fixture_workspace_id(coordinates);
                 workspaces.records.contains_key(&id).then_some(id)
             }))
             .collect::<Vec<_>>()
@@ -599,7 +621,7 @@ async fn activity_moving_ahead_of_a_live_cursor_is_exposed_on_refresh() {
             &CallOrigin::Local,
             NavigationFilter {
                 workspace: WorkspaceFilter::Registered {
-                    id: WorkspaceId::from_canonical_path(std::path::Path::new("/gone")).unwrap(),
+                    id: WorkspaceId::parse("f".repeat(64)).unwrap(),
                 },
                 ..Default::default()
             },
@@ -1304,7 +1326,7 @@ async fn visibility_filters_before_order_capacity_cursors_pins_and_exact_summari
     assert!(
         groups
             .iter()
-            .all(|coordinates| *coordinates.location() == ExecutionLocation::Local)
+            .all(|group| *group.coordinates.location() == ExecutionLocation::Local)
     );
     let summaries = owner
         .summaries(
@@ -1880,7 +1902,7 @@ async fn purge_cleanup_requires_completion_preserves_other_records_and_retries_c
     let selected = SessionId::new("row-001").unwrap();
     let other = SessionId::new("row-002").unwrap();
     let header = navigation.store.header(&selected).await.unwrap();
-    let workspace = WorkspaceId::from_coordinates(header.coordinates());
+    let workspace = fixture_workspace_id(header.coordinates());
     let request = seed_purge_cleanup(&store, header).await;
     let domain = Arc::new(CleanupDomain {
         spec: navigation.domain.spec().clone(),
@@ -2022,4 +2044,19 @@ impl From<SessionMetadata> for StoredMetadata {
             partition_revision: None,
         }
     }
+}
+
+fn workspace_record(
+    coordinates: rsi_workspace_protocol::ExecutionCoordinates,
+) -> rsi_workspace_protocol::WorkspaceRecord {
+    let key = rsi_workspace_protocol::WorkspaceKey::from_coordinates(&coordinates);
+    rsi_workspace_protocol::WorkspaceRecord::new(
+        rsi_workspace_protocol::WorkspaceId::parse(key.as_str()).unwrap(),
+        coordinates,
+    )
+}
+
+fn fixture_workspace_id(coordinates: &ExecutionCoordinates) -> WorkspaceId {
+    WorkspaceId::parse(rsi_workspace_protocol::WorkspaceKey::from_coordinates(coordinates).as_str())
+        .unwrap()
 }

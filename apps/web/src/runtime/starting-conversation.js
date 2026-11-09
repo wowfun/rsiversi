@@ -38,7 +38,7 @@ async function openComposer(pane, context) {
       const timer = setTimeout(() => { unsubscribe?.(); reject(new Error('Conversation is still opening. Your starting draft is saved.')); }, 15000);
       const check = () => {
         if (context.connection !== connection || connection.closing) { clearTimeout(timer); unsubscribe?.(); reject(new Error('Connection changed; your starting draft is saved')); }
-        else if (pane.generation && pane.editor && pane.staged?.data?.workspace === workspace.id) { clearTimeout(timer); unsubscribe?.(); resolve(); }
+        else if (pane.generation && pane.editor && pane.staged?.data?.creation?.workspace_id === workspace.id) { clearTimeout(timer); unsubscribe?.(); resolve(); }
       };
       unsubscribe = pane.subscribe(check); check();
     });

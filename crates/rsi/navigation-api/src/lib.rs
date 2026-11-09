@@ -15,7 +15,9 @@ use std::sync::Arc;
 pub mod attention;
 mod order;
 mod validation;
-pub use order::{OrderMember, OrderMembership, OrderScope, OrderSeed, SummaryPage, SummaryRequest};
+pub use order::{
+    OrderGroup, OrderMember, OrderMembership, OrderScope, OrderSeed, SummaryPage, SummaryRequest,
+};
 
 /// Exact title and archive state; neither field mutates Session execution.
 #[derive(Clone, Debug, Default, Eq, PartialEq, Serialize, Deserialize)]

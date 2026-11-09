@@ -15,8 +15,8 @@ use rsi_storage_domain::{Domain, DomainFacilityContract, DomainSpec};
 use rsi_workspace_protocol::{
     ExecutionCoordinates, ExecutionLocation, MAXIMUM_REGISTERED_WORKSPACES,
     MAXIMUM_WORKSPACES_PER_PAGE, Result, WorkspaceCursor, WorkspaceDisplayOrder, WorkspaceError,
-    WorkspaceId, WorkspacePage, WorkspaceRecord, WorkspaceRegistry, WorkspaceRegistryContract,
-    WorkspaceStatus,
+    WorkspaceId, WorkspaceKey, WorkspacePage, WorkspaceRecord, WorkspaceRegistry,
+    WorkspaceRegistryContract, WorkspaceStatus,
 };
 use rsi_workspace_protocol::{WorkspaceIngress, WorkspaceIngressContract};
 use serde::{Deserialize, Serialize};
@@ -62,6 +62,7 @@ struct RegistryData {
     next_order: u64,
     order: BTreeMap<u64, WorkspaceId>,
     records: BTreeMap<WorkspaceId, (u64, WorkspaceRecord)>,
+    coordinates: BTreeMap<WorkspaceKey, WorkspaceId>,
     display_order: Vec<u64>,
 }
 
@@ -179,6 +180,17 @@ impl WorkspaceRegistry for Service {
             .ok_or_else(|| WorkspaceError::Unknown(id.clone()))?;
         let _permit = self.admit(record.coordinates.location())?;
         Ok(record.clone())
+    }
+
+    async fn find(&self, key: &WorkspaceKey) -> Result<Option<WorkspaceRecord>> {
+        let state = self.state.read().await;
+        self.ensure_available()?;
+        let Some(id) = state.coordinates.get(key) else {
+            return Ok(None);
+        };
+        let record = &state.records[id].1;
+        let _permit = self.admit(record.coordinates.location())?;
+        Ok(Some(record.clone()))
     }
 
     async fn list(&self, after: Option<WorkspaceCursor>, limit: usize) -> Result<WorkspacePage> {
@@ -309,6 +321,7 @@ impl WorkspaceRegistry for Service {
         };
         let _permit = self.admit(record.coordinates.location())?;
         let order = *order;
+        let coordinates = WorkspaceKey::from_coordinates(&record.coordinates);
         drop(state);
         let domain = Arc::clone(&self.domain);
         let state = Arc::clone(&self.state);
@@ -325,6 +338,7 @@ impl WorkspaceRegistry for Service {
                 }
                 let mut state = state.write().await;
                 state.records.remove(&id);
+                state.coordinates.remove(&coordinates);
                 state.order.remove(&order);
                 state.display_order.retain(|position| *position != order);
                 revision.fetch_add(1, Ordering::Release);
@@ -473,7 +487,6 @@ fn load_registry(mut snapshot: BTreeMap<String, ConfigValue>) -> Result<Registry
         next_order: high_water,
         ..RegistryData::default()
     };
-    let mut paths = HashSet::new();
     for (key, value) in snapshot {
         let durable: DurableWorkspaceRecord = serde_json::from_value(value)
             .map_err(|error| WorkspaceError::Corrupt(error.to_string()))?;
@@ -484,7 +497,13 @@ fn load_registry(mut snapshot: BTreeMap<String, ConfigValue>) -> Result<Registry
         if durable.order == 0
             || durable.order > high_water
             || key != record.id.as_str()
-            || !paths.insert(record.coordinates.clone())
+            || state
+                .coordinates
+                .insert(
+                    WorkspaceKey::from_coordinates(&record.coordinates),
+                    record.id.clone(),
+                )
+                .is_some()
         {
             return Err(WorkspaceError::Corrupt(
                 "workspace record identity or path is inconsistent".into(),
@@ -547,25 +566,28 @@ impl Service {
                 .await
                 .map_err(execution_error)?,
         };
-        let id = WorkspaceId::from_coordinates(&coordinates);
+        let key = WorkspaceKey::from_coordinates(&coordinates);
         let current = self.state.read().await;
         self.ensure_available()?;
-        if let Some((_, existing)) = current.records.get(&id) {
-            return Ok((existing.clone(), false));
+        if let Some(id) = current.coordinates.get(&key) {
+            return Ok((current.records[id].1.clone(), false));
         }
         drop(current);
         let commit = Arc::clone(&self.commit).lock_owned().await;
         let state = self.state.read().await;
         self.ensure_available()?;
-        if let Some((_, existing)) = state.records.get(&id) {
-            return Ok((existing.clone(), false));
+        if let Some(id) = state.coordinates.get(&key) {
+            return Ok((state.records[id].1.clone(), false));
         }
         if state.records.len() == MAXIMUM_WORKSPACES {
             return Err(WorkspaceError::InvalidInput(
                 "workspace registry reached its capacity".into(),
             ));
         }
-        let mut record = WorkspaceRecord::new(coordinates);
+        let mut bytes = [0_u8; 32];
+        getrandom::fill(&mut bytes).map_err(|error| WorkspaceError::Storage(error.to_string()))?;
+        let id = WorkspaceId::from_bytes(bytes);
+        let mut record = WorkspaceRecord::new(id.clone(), coordinates);
         record.created_at_ms = Some(
             std::time::SystemTime::now()
                 .duration_since(std::time::UNIX_EPOCH)
@@ -613,6 +635,7 @@ impl Service {
                     .map_err(storage_error)?;
                 let mut state = state.write().await;
                 state.order.insert(order, id.clone());
+                state.coordinates.insert(key, id.clone());
                 state.records.insert(id, (order, record.clone()));
                 state.display_order.insert(0, order);
                 revision.fetch_add(1, Ordering::Release);

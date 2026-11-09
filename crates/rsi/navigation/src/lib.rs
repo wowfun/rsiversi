@@ -454,12 +454,13 @@ impl Navigation {
         &self,
         coordinates: &ExecutionCoordinates,
     ) -> Result<Option<WorkspaceId>> {
-        let derived = WorkspaceId::from_coordinates(coordinates);
-        match self.workspace.get(&derived).await {
-            Ok(record) => Ok(Some(record.id)),
-            Err(WorkspaceError::Unknown(_)) => Ok(None),
-            Err(_) => Err(ApiError::Unavailable),
-        }
+        self.workspace
+            .find(&rsi_workspace_protocol::WorkspaceKey::from_coordinates(
+                coordinates,
+            ))
+            .await
+            .map(|record| record.map(|record| record.id))
+            .map_err(|_| ApiError::Unavailable)
     }
     // Shared futures retain one result per coordinate without starting unpolled lookups.
     fn workspace_lookups<'a>(

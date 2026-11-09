@@ -1,6 +1,10 @@
 # rsi-navigation-api
 
-Wire version 8 exposes each complete member's `account_position`: its zero-based
+Complete groups carry their execution coordinates and optional current registration
+ID together. An unregistered coordinate has no registration ID. Clients consume
+this mapping instead of deriving registration identities from paths.
+
+Wire version 9 exposes each complete member's `account_position`: its zero-based
 position in the caller-visible shared Workspace account. Positions are contiguous
 within each group and independent of pin/archive state and later activity. Device
 manual views may retain their own order; Workspace clients use this Host position.
@@ -26,8 +30,8 @@ page carries only the previous visible key. A protected newest key is omitted. E
 cursor appear after refresh; a query is not a Store-wide snapshot. Each page
 returns the newest activity key from the same read snapshot.
 
-Grouping uses a WorkspaceId derived from the complete execution coordinates and
-an exact registry lookup; equal paths on different machines remain distinct. Missing registrations remain unregistered; reads never create
+Grouping resolves the current WorkspaceId through an exact coordinate-key registry
+lookup; equal paths on different machines remain distinct. Missing registrations remain unregistered; reads never create
 workspaces. Metadata replacement uses an exact global revision and one complete
 title/archive record. Clients do not replay writes after unknown outcomes.
 

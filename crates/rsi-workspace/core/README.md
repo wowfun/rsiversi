@@ -26,12 +26,13 @@ previous live order; unknown outcomes use the Storage generation's existing fenc
 Insertion-order pages and their durable cursors remain independent of this order.
 
 Domain version 4 stores mandatory execution coordinates and the independent
-allocation high-water mark. Workspace protocol owns identity derivation from
-those coordinates. Local get-or-create canonicalizes only the Service filesystem;
+allocation high-water mark. A new registration receives an opaque random identity
+in its existing record; coordinate keys form a separate in-memory lookup index. Local get-or-create canonicalizes only the Service filesystem;
 it never interprets a remote registration's path as Local. Non-UTF-8 paths are
 rejected rather than silently collapsed. Older domain records are rejected.
-Validated coordinate-derived IDs are the in-memory uniqueness authority;
-registration checks that ID before and after acquiring the commit slot.
+Registration checks the coordinate index before and after acquiring the commit
+slot. Both identity and coordinate indexes are reconstructed from the same durable
+records; neither creates a second stored mapping.
 
 Cache availability follows [Storage generation health and recovery](../../rsi-storage/core/README.md).
 

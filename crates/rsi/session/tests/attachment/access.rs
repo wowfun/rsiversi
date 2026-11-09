@@ -472,6 +472,13 @@ async fn input_canonicalization_and_submission_share_one_exact_target_lease() {
 struct RemoteWorkspace(rsi_execution::ExecutionCoordinates);
 #[async_trait]
 impl WorkspaceRegistry for RemoteWorkspace {
+    async fn find(
+        &self,
+        _: &rsi_workspace_protocol::WorkspaceKey,
+    ) -> rsi_workspace_protocol::Result<Option<rsi_workspace_protocol::WorkspaceRecord>> {
+        panic!("coordinate lookup is not used by this fixture")
+    }
+
     async fn display_order(
         &self,
     ) -> rsi_workspace_protocol::Result<rsi_workspace_protocol::WorkspaceDisplayOrder> {

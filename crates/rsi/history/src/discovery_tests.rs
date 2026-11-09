@@ -129,6 +129,18 @@ mod workspaces {
     use std::sync::atomic::Ordering;
     #[async_trait::async_trait]
     impl WorkspaceRegistry for Fixture {
+        async fn find(
+            &self,
+            key: &rsi_workspace_protocol::WorkspaceKey,
+        ) -> rsi_workspace_protocol::Result<Option<rsi_workspace_protocol::WorkspaceRecord>>
+        {
+            assert_eq!(
+                *key,
+                rsi_workspace_protocol::WorkspaceKey::from_coordinates(&self.workspace.coordinates)
+            );
+            self.get(&self.workspace.id).await.map(Some)
+        }
+
         async fn display_order(
             &self,
         ) -> rsi_workspace_protocol::Result<rsi_workspace_protocol::WorkspaceDisplayOrder> {
@@ -246,7 +258,10 @@ async fn catalog_case(case: CatalogCase) {
     )
     .unwrap();
     let fixture = Arc::new(Fixture {
-        workspace: rsi_workspace_protocol::WorkspaceRecord::new(coordinates.clone()),
+        workspace: rsi_workspace_protocol::WorkspaceRecord::new(
+            rsi_workspace_protocol::WorkspaceId::parse("a".repeat(64)).unwrap(),
+            coordinates.clone(),
+        ),
         gets: AtomicUsize::new(0),
         revoke_at: AtomicUsize::new(0),
         revoked: CancellationToken::new(),
@@ -318,7 +333,9 @@ async fn catalog_case(case: CatalogCase) {
             .cache
             .remember(
                 Scope {
-                    workspace: fixture.workspace.id.clone(),
+                    workspace: rsi_workspace_protocol::WorkspaceKey::from_coordinates(
+                        &fixture.workspace.coordinates,
+                    ),
                     conversation: ConversationIdentity::Native(header.session_id().clone()),
                 },
                 stop.clone(),
@@ -330,7 +347,9 @@ async fn catalog_case(case: CatalogCase) {
         QueryScope::AccessibleHost
     } else {
         QueryScope::Workspace {
-            workspace: fixture.workspace.id.clone(),
+            workspace: rsi_workspace_protocol::WorkspaceKey::from_coordinates(
+                &fixture.workspace.coordinates,
+            ),
         }
     };
     let authority = HistoryAuthority::Caller(CallOrigin::Local);

@@ -18,27 +18,65 @@ pub use order::WorkspaceOrderSeed;
 mod display_order;
 pub use display_order::{MAXIMUM_REGISTERED_WORKSPACES, WorkspaceDisplayOrder};
 
-/// Stable host-local workspace identity.
+fn parse_identity(value: String) -> Result<String> {
+    if value.len() != 64
+        || !value
+            .bytes()
+            .all(|byte| byte.is_ascii_digit() || (b'a'..=b'f').contains(&byte))
+    {
+        return Err(WorkspaceError::InvalidInput(
+            "workspace identity must be 64 lowercase hex digits".into(),
+        ));
+    }
+    Ok(value)
+}
+
+/// Opaque identity of one host-local Workspace registration.
 #[derive(Clone, Debug, Eq, Hash, Ord, PartialEq, PartialOrd, Serialize)]
 #[serde(transparent)]
 pub struct WorkspaceId(String);
 
 impl WorkspaceId {
-    /// Validates the canonical lowercase SHA-256 identity at an external boundary.
+    /// Validates the opaque lowercase hexadecimal identity at an external boundary.
     pub fn parse(value: impl Into<String>) -> Result<Self> {
-        let value = value.into();
-        if value.len() != 64
-            || !value
-                .bytes()
-                .all(|byte| byte.is_ascii_digit() || (b'a'..=b'f').contains(&byte))
-        {
-            return Err(WorkspaceError::InvalidInput(
-                "workspace identity must be 64 lowercase hex digits".into(),
-            ));
-        }
-        Ok(Self(value))
+        parse_identity(value.into()).map(Self)
     }
 
+    /// Constructs an identity from its allocated bytes without text validation.
+    pub fn from_bytes(bytes: [u8; 32]) -> Self {
+        Self(hex::encode(bytes))
+    }
+
+    /// Borrows the exact identity.
+    pub fn as_str(&self) -> &str {
+        &self.0
+    }
+}
+
+impl fmt::Display for WorkspaceId {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        formatter.write_str(&self.0)
+    }
+}
+
+impl<'de> Deserialize<'de> for WorkspaceId {
+    fn deserialize<D: serde::Deserializer<'de>>(
+        deserializer: D,
+    ) -> std::result::Result<Self, D::Error> {
+        Self::parse(String::deserialize(deserializer)?).map_err(serde::de::Error::custom)
+    }
+}
+
+/// Stable key for complete execution coordinates, independent of registration.
+#[derive(Clone, Debug, Eq, Hash, Ord, PartialEq, PartialOrd, Serialize)]
+#[serde(transparent)]
+pub struct WorkspaceKey(String);
+
+impl WorkspaceKey {
+    /// Parses a coordinate key supplied at an external boundary.
+    pub fn parse(value: impl Into<String>) -> Result<Self> {
+        parse_identity(value.into()).map(Self)
+    }
     /// Derives identity from a path already canonicalized by its owning filesystem.
     /// This checks the host path spelling without opening the caller's filesystem.
     pub fn from_canonical_path(path: &Path) -> Result<Self> {
@@ -61,19 +99,17 @@ impl WorkspaceId {
         Self(hex::encode(digest.finalize()))
     }
 
-    /// Borrows the exact identity.
+    /// Borrows the canonical coordinate key.
     pub fn as_str(&self) -> &str {
         &self.0
     }
 }
-
-impl fmt::Display for WorkspaceId {
+impl fmt::Display for WorkspaceKey {
     fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
         formatter.write_str(&self.0)
     }
 }
-
-impl<'de> Deserialize<'de> for WorkspaceId {
+impl<'de> Deserialize<'de> for WorkspaceKey {
     fn deserialize<D: serde::Deserializer<'de>>(
         deserializer: D,
     ) -> std::result::Result<Self, D::Error> {
@@ -164,7 +200,7 @@ pub struct WorkspacePage {
 #[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct WorkspaceRecord {
-    /// Stable identity derived from complete coordinates.
+    /// Opaque identity of this registration lifetime.
     pub id: WorkspaceId,
     /// Machine and canonical physical absolute directory.
     pub coordinates: ExecutionCoordinates,
@@ -177,10 +213,10 @@ pub struct WorkspaceRecord {
 }
 
 impl WorkspaceRecord {
-    /// Creates a registration identity from target-canonicalized coordinates.
-    pub fn new(coordinates: ExecutionCoordinates) -> Self {
+    /// Associates an allocated registration identity with canonical coordinates.
+    pub fn new(id: WorkspaceId, coordinates: ExecutionCoordinates) -> Self {
         Self {
-            id: WorkspaceId::from_coordinates(&coordinates),
+            id,
             coordinates,
             name: None,
             created_at_ms: None,
@@ -197,12 +233,6 @@ impl WorkspaceRecord {
                 "workspace creation time is out of range".into(),
             ));
         }
-        let expected = WorkspaceId::from_coordinates(&self.coordinates);
-        if expected != self.id {
-            return Err(WorkspaceError::Corrupt(
-                "workspace identity does not match its coordinates".into(),
-            ));
-        }
         Ok(())
     }
 }
@@ -216,11 +246,12 @@ impl WorkspacePage {
             ));
         }
         let mut ids = std::collections::BTreeSet::new();
+        let mut coordinates = std::collections::BTreeSet::new();
         for record in &self.records {
             record.validate()?;
-            if !ids.insert(&record.id) {
+            if !ids.insert(&record.id) || !coordinates.insert(&record.coordinates) {
                 return Err(WorkspaceError::Corrupt(
-                    "workspace page repeats an identity".into(),
+                    "workspace page repeats an identity or coordinates".into(),
                 ));
             }
         }
@@ -280,6 +311,8 @@ pub type Result<T> = std::result::Result<T, WorkspaceError>;
 pub trait WorkspaceRegistry: fmt::Debug + Send + Sync + 'static {
     /// Reads an exact registration without probing or mutating the filesystem.
     async fn get(&self, id: &WorkspaceId) -> Result<WorkspaceRecord>;
+    /// Finds the current registration for a coordinate key without filesystem access.
+    async fn find(&self, key: &WorkspaceKey) -> Result<Option<WorkspaceRecord>>;
     /// Returns at most `limit` records in stable insertion order.
     /// The limit must be in `1..=MAXIMUM_WORKSPACES_PER_PAGE`.
     async fn list(&self, after: Option<WorkspaceCursor>, limit: usize) -> Result<WorkspacePage>;

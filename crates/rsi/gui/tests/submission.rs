@@ -82,6 +82,7 @@ fn missing<T>() -> rsi_session_protocol::Result<T> {
 #[derive(Debug, Default)]
 struct Backend {
     creations: Mutex<Vec<CreateSession>>,
+    current_registration: Mutex<Option<rsi_workspace_protocol::WorkspaceId>>,
     metrics: Mutex<Option<rsi_session_protocol::MetricsRead>>,
     metrics_gate: Mutex<Option<Arc<admission::HeaderGate>>>,
     workspace_lists: std::sync::atomic::AtomicUsize,
@@ -678,6 +679,24 @@ impl Backend {
 }
 #[async_trait]
 impl rsi_workspace_protocol::WorkspaceRegistry for Service {
+    async fn find(
+        &self,
+        key: &rsi_workspace_protocol::WorkspaceKey,
+    ) -> rsi_workspace_protocol::Result<Option<rsi_workspace_protocol::WorkspaceRecord>> {
+        let coordinates = self.0.header().await.unwrap().coordinates().clone();
+        assert_eq!(
+            *key,
+            rsi_workspace_protocol::WorkspaceKey::from_coordinates(&coordinates)
+        );
+        Ok(self
+            .0
+            .current_registration
+            .lock()
+            .unwrap()
+            .clone()
+            .map(|id| rsi_workspace_protocol::WorkspaceRecord::new(id, coordinates)))
+    }
+
     async fn display_order(
         &self,
     ) -> rsi_workspace_protocol::Result<rsi_workspace_protocol::WorkspaceDisplayOrder> {

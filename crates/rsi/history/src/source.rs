@@ -180,9 +180,10 @@ impl ProductHistorySearch {
     ) -> Result<Source> {
         let workspace = self
             .workspaces
-            .get(&scope.workspace)
+            .find(&scope.workspace)
             .await
-            .map_err(invalid)?;
+            .map_err(invalid)?
+            .ok_or_else(|| invalid("Workspace is not registered"))?;
         check(stop)?;
         // A fresh check never substitutes for the pin retained through accepted work.
         let current = authority.admit(self.resolver.as_ref(), &workspace.coordinates)?;

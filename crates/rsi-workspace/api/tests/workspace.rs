@@ -255,30 +255,7 @@ async fn exercise_workspace(
         one
     );
     let two = workspace.get_or_create(second).await.unwrap();
-    assert_eq!(
-        workspace.display_order().await.unwrap().ids,
-        vec![two.id.clone(), one.id.clone()]
-    );
-    assert_eq!(
-        workspace
-            .insert_before(&one.id, Some(&two.id))
-            .await
-            .unwrap()
-            .ids,
-        vec![one.id.clone(), two.id.clone()]
-    );
-    assert_eq!(
-        workspace.insert_before(&one.id, None).await.unwrap().ids,
-        vec![two.id.clone(), one.id.clone()]
-    );
-    assert_eq!(
-        workspace
-            .insert_before(&one.id, Some(&one.id))
-            .await
-            .unwrap()
-            .ids,
-        vec![two.id.clone(), one.id.clone()]
-    );
+    assert_display_moves(workspace, &one.id, &two.id).await;
 
     let rsi_workspace_protocol::WorkspaceOrderSeed::Available { records } =
         workspace.order_seed().await.unwrap()
@@ -293,6 +270,8 @@ async fn exercise_workspace(
         [&one.id, &two.id].into_iter().collect()
     );
     assert_eq!(workspace.get(&one.id).await.unwrap(), one);
+    let key = rsi_workspace_protocol::WorkspaceKey::from_coordinates(&one.coordinates);
+    assert_eq!(workspace.find(&key).await.unwrap(), Some(one.clone()));
     assert_eq!(
         workspace.status(&one.id).await.unwrap(),
         WorkspaceStatus::Ok
@@ -301,6 +280,7 @@ async fn exercise_workspace(
     assert_eq!(page.records, vec![one.clone()]);
     assert!(workspace.list(None, 257).await.is_err());
     assert!(workspace.delete_registration(&one.id).await.unwrap());
+    assert_eq!(workspace.find(&key).await.unwrap(), None);
     assert_eq!(
         workspace.list(page.next, 1).await.unwrap().records,
         vec![two.clone()]
@@ -308,6 +288,7 @@ async fn exercise_workspace(
     assert!(
         matches!(workspace.get(&one.id).await, Err(WorkspaceError::Unknown(id)) if id == one.id)
     );
+    assert_recreated_identity(workspace, first, &one).await;
     assert_eq!(std::fs::read(first.join("keep.txt")).unwrap(), b"keep");
     std::fs::remove_dir(second).unwrap();
     assert_eq!(
@@ -340,4 +321,41 @@ async fn exercise_workspace(
             .await,
         Err(WorkspaceError::InvalidInput(_))
     ));
+}
+
+async fn assert_recreated_identity(
+    workspace: &dyn rsi_workspace_protocol::WorkspaceRegistry,
+    path: &std::path::Path,
+    previous: &rsi_workspace_protocol::WorkspaceRecord,
+) {
+    let key = rsi_workspace_protocol::WorkspaceKey::from_coordinates(&previous.coordinates);
+    let recreated = workspace.get_or_create(path).await.unwrap();
+    assert_ne!(recreated.id, previous.id);
+    assert_eq!(workspace.find(&key).await.unwrap(), Some(recreated.clone()));
+    assert!(!workspace.delete_registration(&previous.id).await.unwrap());
+    assert_eq!(workspace.get(&recreated.id).await.unwrap(), recreated);
+    assert!(workspace.delete_registration(&recreated.id).await.unwrap());
+}
+
+async fn assert_display_moves(
+    workspace: &dyn rsi_workspace_protocol::WorkspaceRegistry,
+    one: &rsi_workspace_protocol::WorkspaceId,
+    two: &rsi_workspace_protocol::WorkspaceId,
+) {
+    assert_eq!(
+        workspace.display_order().await.unwrap().ids,
+        vec![two.clone(), one.clone()]
+    );
+    assert_eq!(
+        workspace.insert_before(one, Some(two)).await.unwrap().ids,
+        vec![one.clone(), two.clone()]
+    );
+    assert_eq!(
+        workspace.insert_before(one, None).await.unwrap().ids,
+        vec![two.clone(), one.clone()]
+    );
+    assert_eq!(
+        workspace.insert_before(one, Some(one)).await.unwrap().ids,
+        vec![two.clone(), one.clone()]
+    );
 }

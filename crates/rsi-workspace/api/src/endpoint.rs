@@ -1,5 +1,6 @@
 use crate::wire::{
-    IdRequest, InsertBeforeRequest, ListRequest, Operation, RegisterRequest, RenameRequest, result,
+    FindRequest, IdRequest, InsertBeforeRequest, ListRequest, Operation, RegisterRequest,
+    RenameRequest, result,
 };
 use async_trait::async_trait;
 use rsi_api_protocol::{ApiRegistrar, ApiRegistrarContract, ApiRegistration, Result, json_handler};
@@ -23,6 +24,14 @@ impl WorkspaceApi {
         workspace: Arc<dyn WorkspaceIngress>,
     ) -> Result<Self> {
         let mut registrations = Vec::new();
+        let service = workspace.clone();
+        registrations.push(registrar.register(
+            Operation::Find.spec(),
+            json_handler(move |context, input: FindRequest| {
+                let service = service.scoped(context.origin);
+                async move { result(service.find(&input.key).await) }
+            }),
+        )?);
         let service = workspace.clone();
         registrations.push(registrar.register(
             Operation::DisplayOrder.spec(),

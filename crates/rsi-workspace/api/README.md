@@ -2,7 +2,7 @@
 
 The [Workspace contract](../protocol/README.md) owns the shared domain types and semantics.
 
-The ordinary endpoint plugin registers version 4 Workspace get, list, registration,
+The ordinary endpoint plugin registers version 5 Workspace get, find, list, registration,
 rename, status, order-seed, display-order, insert-before and deletion operations through the generic API registrar. Closed DTOs,
 bounds and read/mutation policy belong here. The endpoint requires a Workspace
 registry and grants no additional filesystem authority; registration requires an

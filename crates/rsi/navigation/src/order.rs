@@ -1,5 +1,5 @@
 use super::{ApiError, Arc, BoxFuture, Document, Navigation, NavigationEntry, Result};
-use futures_util::{StreamExt, stream};
+use futures_util::{StreamExt, TryStreamExt, stream};
 use rsi_agent_store_protocol::StoreOrderSeed;
 use rsi_navigation_api::{
     OrderMember, OrderMembership, OrderScope, OrderSeed, SummaryPage, SummaryRequest,
@@ -76,32 +76,17 @@ impl Navigation {
                                 archived: metadata.is_some_and(|row| row.archived),
                             });
                         }
+                        let groups = owner
+                            .order_accounts(
+                                &document,
+                                visible_groups,
+                                &account_members,
+                                &mut selected,
+                            )
+                            .await?;
                         super::finish_scope(&origin, &leases)?;
-                        let mut positions = std::collections::HashMap::new();
-                        for (group, coordinates) in visible_groups.iter().enumerate() {
-                            let id =
-                                rsi_workspace_protocol::WorkspaceId::from_coordinates(coordinates);
-                            let ids = super::workspace_account::account_order(
-                                document
-                                    .workspace_orders
-                                    .get(&id)
-                                    .map_or(&[], Vec::as_slice),
-                                account_members[group]
-                                    .iter()
-                                    .map(|(index, created)| (&selected[*index].session, *created)),
-                            );
-                            positions.extend(ids.into_iter().enumerate().map(|(position, id)| {
-                                (
-                                    id,
-                                    u16::try_from(position).expect("bounded order membership"),
-                                )
-                            }));
-                        }
-                        for member in &mut selected {
-                            member.account_position = positions[&member.session];
-                        }
                         OrderMembership::Available {
-                            groups: visible_groups,
+                            groups,
                             members: selected,
                         }
                     }
@@ -115,6 +100,44 @@ impl Navigation {
                 seed.bounded().map_err(|_| ApiError::Unavailable)
             })
         })
+    }
+    async fn order_accounts(
+        &self,
+        document: &Document,
+        coordinates: Vec<rsi_agent_session_protocol::ExecutionCoordinates>,
+        account_members: &[Vec<(usize, u64)>],
+        selected: &mut [OrderMember],
+    ) -> Result<Vec<rsi_navigation_api::OrderGroup>> {
+        let registrations = self
+            .workspace_lookups(coordinates.iter().map(Some))
+            .try_collect::<Vec<_>>()
+            .await?;
+        let mut positions = std::collections::HashMap::with_capacity(selected.len());
+        let mut groups = Vec::with_capacity(coordinates.len());
+        for (group, (coordinates, id)) in coordinates.into_iter().zip(registrations).enumerate() {
+            let ids = super::workspace_account::account_order(
+                id.as_ref()
+                    .and_then(|id| document.workspace_orders.get(id))
+                    .map_or(&[], Vec::as_slice),
+                account_members[group]
+                    .iter()
+                    .map(|(index, created)| (&selected[*index].session, *created)),
+            );
+            groups.push(rsi_navigation_api::OrderGroup {
+                coordinates,
+                workspace: id,
+            });
+            positions.extend(ids.into_iter().enumerate().map(|(position, id)| {
+                (
+                    id,
+                    u16::try_from(position).expect("bounded order membership"),
+                )
+            }));
+        }
+        for member in selected {
+            member.account_position = positions[&member.session];
+        }
+        Ok(groups)
     }
     /// Reads up to 64 exact summaries in requested order under one metadata revision.
     pub fn summaries(

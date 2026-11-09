@@ -11,16 +11,20 @@ registration and retain admitted commits through durable publication.
 Authenticated registration can return the record and whether this call
 created it. The registry decides that result under its existing commit lock.
 
-Registrations carry mandatory validated execution coordinates. Their identity
-includes the owning machine and canonical path; decoding and validation never
-probe the receiving client's filesystem. A path alone cannot identify an SSH
-workspace. Consumers compare complete coordinates before using a registration.
+Registrations carry mandatory validated execution coordinates. `WorkspaceId`
+identifies one registration lifetime; it is opaque and independent of the path.
+Deleting and re-registering the same directory creates a new identity, so an old
+identity cannot address the replacement. Exact `get` reads by registration ID;
+`find` reads by `WorkspaceKey` and returns an optional current registration.
+Both operations authorize the record's location without filesystem access.
 
-Workspace identity is derived only by this owner from validated execution
+`WorkspaceKey` is derived only by this owner from validated execution
 coordinates. Local identity uses its normalized absolute path bytes; SSH identity
 uses a distinct `ssh` domain prefix, stable target identity and target path. Since
 a Local path is absolute, it cannot occupy the SSH-prefixed input namespace.
 No consumer hashes paths or interprets an SSH path on the Service filesystem.
+History and review scopes use this coordinate key; they do not manufacture a
+registration identity. Neither kind of identity grants filesystem access.
 
 This library owns validated Workspace identities, exact registration reads and
 bounded insertion-order pages. It contains no native filesystem or storage
@@ -59,8 +63,8 @@ change display order. Deleting and recreating the same path creates a new positi
 The display-order response contains only unique identities, bounded by the
 registry's 16,384-registration capacity; it copies no Workspace records or history.
 
-`WorkspaceId::from_canonical_path` is an explicitly Local convenience for callers
+`WorkspaceKey::from_canonical_path` is an explicitly Local convenience for callers
 that already own a native canonical directory. Cross-location consumers derive
-identity from complete coordinates through `WorkspaceId::from_coordinates`.
+the coordinate key through `WorkspaceKey::from_coordinates`.
 
 The native ingress can expose a process-local directory revision. Publishing, renaming, deleting or moving a registration changes the revision. Reusing an existing record or an unchanged display position leaves it unchanged.

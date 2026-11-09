@@ -3,11 +3,17 @@
 Workspace Session accounts have a shared Host order, independent of activity,
 pin/archive partitions and device-local view ordering. New durable members precede
 previously ordered members in descending creation-time/identity order; activity
-never moves them. An explicit move changes only the selected Workspace's ordered
-identity references in the existing metadata document. Unknown or foreign members
-and anchors are rejected; self and already-positioned moves do not write or advance
+never moves them. An explicit move writes the selected Workspace's ordered
+identity references in the existing metadata document. Accounts are resolved
+against the current registration. A recreated directory has a new
+registration identity and cannot inherit its predecessor's explicit account.
+When an explicit move records the new account, the same commit removes its
+members' obsolete account references. A Session is retained in at most one saved
+account, without a cleanup task or a second durable identity map.
+Unknown or foreign members and anchors are rejected; self and already-positioned moves do not write or advance
 the metadata revision. Durable membership remains owned by Session Store, so reads
-filter removed identities and mutations prune only their selected account.
+filter removed identities; writes prune obsolete references for their selected
+members without changing unrelated accounts.
 The document retains at most 8,192 order references within its existing 8 MiB bound.
 An absent order map means there are no explicit moves; empty maps are not stored.
 The ordinary Navigation writer owns commit, publication and draining after waiter

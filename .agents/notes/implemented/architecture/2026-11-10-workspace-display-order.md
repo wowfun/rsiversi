@@ -15,7 +15,8 @@ whose result must survive restart and reach other observers.
 Workspace owns a shared display order alongside its registration allocation.
 Moves name one identity and an optional anchor and apply under the existing
 commit owner. The allocation record stores creation positions, so deleting and
-re-registering the same coordinate-derived identity cannot revive an old slot.
+re-registering the same coordinates cannot revive an old slot. Registration
+identity is defined by the [Workspace protocol](../../../../crates/rsi-workspace/protocol/README.md).
 Registration bodies remain single-copy. New registrations lead the order; no-op
 moves do not write. Reads and replies filter by the caller's location access.
 

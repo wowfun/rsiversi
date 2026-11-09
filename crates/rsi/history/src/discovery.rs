@@ -5,7 +5,7 @@ use super::{
 use rsi_agent_session_protocol::ReferenceSource;
 use rsi_conversation::ConversationIdentity;
 use rsi_history_api::{DiscoveryCursor, QueryProgress, QueryScope, SourceCoverage};
-use rsi_workspace_protocol::WorkspaceId;
+use rsi_workspace_protocol::WorkspaceKey;
 use sha2::{Digest as _, Sha256};
 use std::time::{Duration, Instant};
 
@@ -35,7 +35,7 @@ fn source_scope(
         ReferenceSource::Observed { .. } => return Err(invalid("unsupported saved source")),
     };
     Ok(Scope {
-        workspace: WorkspaceId::from_coordinates(coordinates),
+        workspace: WorkspaceKey::from_coordinates(coordinates),
         conversation,
     })
 }

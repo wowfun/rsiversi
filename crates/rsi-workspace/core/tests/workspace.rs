@@ -253,17 +253,28 @@ async fn display_order_survives_restart_without_changing_creation_cursors() {
     // Re-registering the same coordinates allocates a new position and must
     // not revive the deleted registration's manual position.
     assert!(registry.delete_registration(second).await.unwrap());
+    let replacement = registry
+        .get_or_create(&temporary.path().join("second"))
+        .await
+        .unwrap();
+    assert_ne!(replacement.id, *second);
+    assert!(matches!(
+        registry.get(second).await,
+        Err(rsi_workspace_protocol::WorkspaceError::Unknown(_))
+    ));
+    assert!(!registry.delete_registration(second).await.unwrap());
     assert_eq!(
         registry
-            .get_or_create(&temporary.path().join("second"))
+            .find(&rsi_workspace_protocol::WorkspaceKey::from_coordinates(
+                &replacement.coordinates
+            ))
             .await
-            .unwrap()
-            .id,
-        *second
+            .unwrap(),
+        Some(replacement.clone())
     );
     assert_eq!(
         registry.display_order().await.unwrap().ids,
-        vec![second.clone(), first.clone(), third.clone()]
+        vec![replacement.id.clone(), first.clone(), third.clone()]
     );
     assert_eq!(
         registry
@@ -274,7 +285,7 @@ async fn display_order_survives_restart_without_changing_creation_cursors() {
             .iter()
             .map(|r| &r.id)
             .collect::<Vec<_>>(),
-        vec![third, second]
+        vec![third, &replacement.id]
     );
     drop(registry);
     assert!(fiber.dispose().await.is_clean());
@@ -292,7 +303,7 @@ async fn display_order_survives_restart_without_changing_creation_cursors() {
             .await
             .unwrap()
             .ids,
-        vec![second.clone(), first.clone(), third.clone()]
+        vec![replacement.id.clone(), first.clone(), third.clone()]
     );
     assert!(runtime.shutdown().await.is_clean());
 }
@@ -435,7 +446,7 @@ async fn assert_bounded_pages(
     );
     first.validate().unwrap();
     let mut misbound = first.clone();
-    misbound.coordinates.clone_from(&second.coordinates);
+    misbound.created_at_ms = Some(u64::MAX);
     assert!(matches!(
         misbound.validate(),
         Err(rsi_workspace_protocol::WorkspaceError::Corrupt(_))
@@ -866,9 +877,7 @@ async fn version_three_rejection_preserves_the_entire_backend_byte_for_byte() {
 
 #[tokio::test]
 async fn cold_registry_preserves_distinct_machines_without_local_remote_probes() {
-    use rsi_workspace_protocol::{
-        ExecutionCoordinates, ExecutionLocation, WorkspaceId, WorkspaceOrderSeed, WorkspaceRecord,
-    };
+    use rsi_workspace_protocol::{ExecutionCoordinates, ExecutionLocation, WorkspaceOrderSeed};
     let temporary = tempfile::tempdir().unwrap();
     let canonical = temporary.path().canonicalize().unwrap();
     let path = canonical.to_str().unwrap();
@@ -887,7 +896,7 @@ async fn cold_registry_preserves_distinct_machines_without_local_remote_probes()
         } else {
             path
         };
-        WorkspaceRecord::new(ExecutionCoordinates::new(location, host_path).unwrap())
+        workspace_record(ExecutionCoordinates::new(location, host_path).unwrap())
     });
     let state = temporary.path().join("state");
     rsi_files_native_fs::create_absolute_directory_no_follow(&state).unwrap();
@@ -937,7 +946,12 @@ async fn cold_registry_preserves_distinct_machines_without_local_remote_probes()
     };
     assert_eq!(seed.len(), 3);
     assert_eq!(
-        WorkspaceId::from_canonical_path(&canonical).unwrap(),
+        registry
+            .find(&rsi_workspace_protocol::WorkspaceKey::from_canonical_path(&canonical).unwrap())
+            .await
+            .unwrap()
+            .unwrap()
+            .id,
         records[0].id
     );
     assert_eq!(
@@ -966,12 +980,12 @@ async fn scoped_registry_filters_before_paging_and_seed_budget_and_rechecks_revo
     use rsi_api_protocol::{ApiError, AuthenticatedDevice, CallOrigin, DeviceId};
     use rsi_workspace_protocol::{
         ExecutionCoordinates, ExecutionLocation, WorkspaceError, WorkspaceIngressContract,
-        WorkspaceOrderSeed, WorkspaceRecord,
+        WorkspaceOrderSeed,
     };
     use std::sync::atomic::Ordering;
     let temporary = tempfile::tempdir().unwrap();
     let local_path = temporary.path().canonicalize().unwrap();
-    let local = WorkspaceRecord::new(
+    let local = workspace_record(
         ExecutionCoordinates::new(ExecutionLocation::Local, local_path.to_str().unwrap()).unwrap(),
     );
     let remote_location = ExecutionLocation::Ssh {
@@ -982,14 +996,13 @@ async fn scoped_registry_filters_before_paging_and_seed_budget_and_rechecks_revo
     } else {
         local_path.to_str().unwrap()
     };
-    let remote = WorkspaceRecord::new(
-        ExecutionCoordinates::new(remote_location.clone(), remote_path).unwrap(),
-    );
+    let remote =
+        workspace_record(ExecutionCoordinates::new(remote_location.clone(), remote_path).unwrap());
     // Hidden entries exceed the full manual-order seed budget, before the visible row.
     let mut values = std::collections::BTreeMap::new();
     values.insert("allocation".into(), json!({"high_water":1027}));
     for index in 0..1025 {
-        let record = WorkspaceRecord::new(
+        let record = workspace_record(
             ExecutionCoordinates::new(remote_location.clone(), format!("/private/remote/{index}"))
                 .unwrap(),
         );
@@ -1061,6 +1074,12 @@ async fn scoped_registry_filters_before_paging_and_seed_budget_and_rechecks_revo
     );
     for result in [
         scoped.get(&remote.id).await.map(|_| ()),
+        scoped
+            .find(&rsi_workspace_protocol::WorkspaceKey::from_coordinates(
+                &remote.coordinates,
+            ))
+            .await
+            .map(|_| ()),
         scoped.status(&remote.id).await.map(|_| ()),
         scoped.delete_registration(&remote.id).await.map(|_| ()),
         scoped
@@ -1271,4 +1290,14 @@ async fn retirement_drains_abandoned_workspace_mutations_before_withdrawal() {
         drop(durable);
         assert!(runtime.shutdown().await.is_clean());
     }
+}
+
+fn workspace_record(
+    coordinates: rsi_workspace_protocol::ExecutionCoordinates,
+) -> rsi_workspace_protocol::WorkspaceRecord {
+    let key = rsi_workspace_protocol::WorkspaceKey::from_coordinates(&coordinates);
+    rsi_workspace_protocol::WorkspaceRecord::new(
+        rsi_workspace_protocol::WorkspaceId::parse(key.as_str()).unwrap(),
+        coordinates,
+    )
 }

@@ -702,7 +702,7 @@ export function createPaneClass(context) {
         });
       }
       this.historyContext = data
-        ? { session: data.session, workspace: data.workspace }
+        ? { session: data.session, workspace: data.workspace_key }
         : undefined;
       const changed = this.generation !== data?.generation;
       if (this.selection !== data?.selection) {

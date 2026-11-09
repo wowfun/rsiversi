@@ -332,6 +332,13 @@ struct UnavailableWorkspace;
 
 #[async_trait]
 impl WorkspaceRegistry for UnavailableWorkspace {
+    async fn find(
+        &self,
+        _: &rsi_workspace_protocol::WorkspaceKey,
+    ) -> rsi_workspace_protocol::Result<Option<rsi_workspace_protocol::WorkspaceRecord>> {
+        panic!("coordinate lookup is not used by this fixture")
+    }
+
     async fn display_order(
         &self,
     ) -> rsi_workspace_protocol::Result<rsi_workspace_protocol::WorkspaceDisplayOrder> {
@@ -393,6 +400,13 @@ struct RejectingWorkspace {
 
 #[async_trait]
 impl WorkspaceRegistry for RejectingWorkspace {
+    async fn find(
+        &self,
+        _: &rsi_workspace_protocol::WorkspaceKey,
+    ) -> rsi_workspace_protocol::Result<Option<rsi_workspace_protocol::WorkspaceRecord>> {
+        panic!("coordinate lookup is not used by this fixture")
+    }
+
     async fn display_order(
         &self,
     ) -> rsi_workspace_protocol::Result<rsi_workspace_protocol::WorkspaceDisplayOrder> {
@@ -827,6 +841,13 @@ fn workspace_id() -> WorkspaceId {
 
 #[async_trait]
 impl WorkspaceRegistry for AvailableWorkspace {
+    async fn find(
+        &self,
+        _: &rsi_workspace_protocol::WorkspaceKey,
+    ) -> rsi_workspace_protocol::Result<Option<rsi_workspace_protocol::WorkspaceRecord>> {
+        panic!("coordinate lookup is not used by this fixture")
+    }
+
     async fn display_order(
         &self,
     ) -> rsi_workspace_protocol::Result<rsi_workspace_protocol::WorkspaceDisplayOrder> {

@@ -72,33 +72,55 @@ impl Document {
             self.validate()?;
         }
         let mut accounting = self.accounting.expect("validated metadata accounting");
-        let previous = self.workspace_orders.get(id);
-        let prior_bytes = previous
-            .map(|members| order_bytes(id, members))
-            .transpose()?;
-        accounting.order_members =
-            accounting.order_members - previous.map_or(0, Vec::len) + members.len();
-        accounting.orders = if members.is_empty() {
-            prior_bytes
-                .map_or(Ok(accounting.orders), |bytes| {
-                    accounting.orders.without_entry(bytes)
-                })
-                .map_err(storage_error)?
-        } else {
-            accounting
-                .orders
-                .with_entry(prior_bytes, order_bytes(id, &members)?)
-                .map_err(storage_error)?
-        };
+        // Store membership is immutable by coordinates. Members of this current
+        // registration cannot also belong to a deleted registration's saved account.
+        let selected = members.iter().collect::<HashSet<_>>();
+        let mut changes = self
+            .workspace_orders
+            .iter()
+            .filter(|(other, ids)| *other != id && ids.iter().any(|id| selected.contains(id)))
+            .map(|(other, ids)| {
+                (
+                    other.clone(),
+                    ids.iter()
+                        .filter(|id| !selected.contains(id))
+                        .cloned()
+                        .collect::<Vec<_>>(),
+                )
+            })
+            .collect::<Vec<_>>();
+        changes.push((id.clone(), members));
+        for (id, members) in &changes {
+            let previous = self.workspace_orders.get(id);
+            let prior_bytes = previous
+                .map(|members| order_bytes(id, members))
+                .transpose()?;
+            accounting.order_members =
+                accounting.order_members - previous.map_or(0, Vec::len) + members.len();
+            accounting.orders = if members.is_empty() {
+                prior_bytes
+                    .map_or(Ok(accounting.orders), |bytes| {
+                        accounting.orders.without_entry(bytes)
+                    })
+                    .map_err(storage_error)?
+            } else {
+                accounting
+                    .orders
+                    .with_entry(prior_bytes, order_bytes(id, members)?)
+                    .map_err(storage_error)?
+            };
+        }
         let revision = self
             .revision
             .checked_add(1)
             .ok_or_else(|| ApiError::Invalid("navigation revision exhausted".into()))?;
         accounting.check(revision)?;
-        if members.is_empty() {
-            self.workspace_orders.remove(id);
-        } else {
-            self.workspace_orders.insert(id.clone(), members);
+        for (id, members) in changes {
+            if members.is_empty() {
+                self.workspace_orders.remove(&id);
+            } else {
+                self.workspace_orders.insert(id, members);
+            }
         }
         self.accounting = Some(accounting);
         self.revision = revision;

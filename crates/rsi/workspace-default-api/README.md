@@ -8,7 +8,8 @@ Session creation and provider configuration. An existing workspace or persisted
 Session prevents first-use creation. A recorded initialization survives removal
 of its registration; it never recreates a deliberately removed workspace.
 
-The response contains the current registration when available. The ordinary
+The version-2 response contains the current registration when available, with
+its opaque registration ID. The ordinary
 client validates its coordinates and identity before exposing it to GUI code.
 The Service owner keeps one bounded initialization receipt in its own domain,
 retains admitted work through settlement, and never deletes directory contents.

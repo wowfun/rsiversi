@@ -18,7 +18,7 @@ impl Client {
     pub(super) fn search_all_history(&mut self, query: String, workspace_only: bool) {
         let scope = if workspace_only {
             QueryScope::Workspace {
-                workspace: rsi_workspace_protocol::WorkspaceId::from_coordinates(
+                workspace: rsi_workspace_protocol::WorkspaceKey::from_coordinates(
                     self.state.header.coordinates(),
                 ),
             }
@@ -53,7 +53,7 @@ impl Client {
     }
     pub(super) fn search_history(&mut self, conversation: ConversationIdentity, query: String) {
         let workspace =
-            rsi_workspace_protocol::WorkspaceId::from_coordinates(self.state.header.coordinates());
+            rsi_workspace_protocol::WorkspaceKey::from_coordinates(self.state.header.coordinates());
         let request = Request::Search {
             scope: Scope {
                 workspace,

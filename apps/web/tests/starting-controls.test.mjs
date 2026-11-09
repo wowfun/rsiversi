@@ -33,7 +33,7 @@ test('opening concurrent composer controls creates once, preserves text, and nev
   const gate=new Promise(resolve=>{release=resolve;});
   const editor={text:'',images:[],references:[],record:{},edit(text){this.text=text;},async flush(){}};
   const pane={index:'main',starting:{text:'saved input',serial:3,async flush(){await gate;},async clearCaptured(serial){assert.equal(serial,3);cleared=true;}},renderComposer(){},subscribe(){return()=>{};},submit(){throw Error('must not submit');}};
-  const connection={};const context={connection,view:{setup:{agent:{default_model:{model:'test'}}},catalog:{workspaces:[{id:'workspace'}]}},boundCall:()=>async()=>{creates++;pane.generation='1';pane.editor=editor;pane.staged={data:{workspace:'workspace'}};}};
+  const connection={};const context={connection,view:{setup:{agent:{default_model:{model:'test'}}},catalog:{workspaces:[{id:'workspace'}]}},boundCall:()=>async()=>{creates++;pane.generation='1';pane.editor=editor;pane.staged={data:{creation:{workspace_id:'workspace'},workspace_key:'coordinate-key'}};}};
   const one=prepareComposer(pane,context),two=prepareComposer(pane,context);release();
   assert.deepEqual(await Promise.all([one,two]),[true,true]);assert.equal(creates,1);assert.equal(editor.text,'saved input');assert(cleared);
 });

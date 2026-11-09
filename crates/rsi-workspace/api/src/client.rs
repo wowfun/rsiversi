@@ -1,5 +1,6 @@
 use crate::wire::{
-    Failure, IdRequest, InsertBeforeRequest, ListRequest, Operation, RegisterRequest, RenameRequest,
+    Failure, FindRequest, IdRequest, InsertBeforeRequest, ListRequest, Operation, RegisterRequest,
+    RenameRequest,
 };
 use async_trait::async_trait;
 use rsi_api_protocol::{ApiClient, ApiClientContract, ApiError, call_json};
@@ -88,6 +89,23 @@ impl WorkspaceRegistry for WorkspaceClient {
             return Err(WorkspaceError::Corrupt(
                 "Workspace response changed the requested identity".into(),
             ));
+        }
+        Ok(record)
+    }
+    async fn find(
+        &self,
+        key: &rsi_workspace_protocol::WorkspaceKey,
+    ) -> Result<Option<WorkspaceRecord>> {
+        let record: Option<WorkspaceRecord> = self
+            .call(Operation::Find, &FindRequest { key: key.clone() })
+            .await?;
+        if let Some(record) = &record {
+            record.validate()?;
+            if rsi_workspace_protocol::WorkspaceKey::from_coordinates(&record.coordinates) != *key {
+                return Err(WorkspaceError::Corrupt(
+                    "Workspace response changed the requested coordinates".into(),
+                ));
+            }
         }
         Ok(record)
     }

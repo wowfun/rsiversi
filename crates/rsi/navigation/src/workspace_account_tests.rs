@@ -30,7 +30,7 @@ async fn workspace_account_moves_survive_activity_partitions_and_restore() {
         owner.domain.spec().clone(),
         Mutex::new(None),
     ));
-    let row = WorkspaceRecord::new(
+    let row = workspace_record(
         ExecutionCoordinates::new(
             rsi_agent_session_protocol::ExecutionLocation::Local,
             "/unregistered",
@@ -208,7 +208,7 @@ async fn workspace_account_commit_failure_and_concurrent_moves_preserve_publishe
         recorded: RecordingDomain(owner.domain.spec().clone(), Mutex::new(None)),
         fail_next: true.into(),
     });
-    let row = WorkspaceRecord::new(
+    let row = workspace_record(
         ExecutionCoordinates::new(
             rsi_agent_session_protocol::ExecutionLocation::Local,
             "/unregistered",
@@ -252,11 +252,11 @@ async fn workspace_account_commit_failure_and_concurrent_moves_preserve_publishe
 
 #[test]
 fn workspace_account_document_bounds_and_accounting_match_serialized_bytes() {
-    let a = WorkspaceId::from_coordinates(
+    let a = fixture_workspace_id(
         &ExecutionCoordinates::new(rsi_agent_session_protocol::ExecutionLocation::Local, "/a")
             .unwrap(),
     );
-    let b = WorkspaceId::from_coordinates(
+    let b = fixture_workspace_id(
         &ExecutionCoordinates::new(rsi_agent_session_protocol::ExecutionLocation::Local, "/b")
             .unwrap(),
     );
@@ -305,4 +305,107 @@ fn workspace_account_document_bounds_and_accounting_match_serialized_bytes() {
         document.workspace_orders = orders;
         assert!(document.validate().is_err());
     }
+}
+
+#[tokio::test]
+async fn recreated_workspace_cannot_inherit_or_duplicate_deleted_account() {
+    let mut old = owner().await;
+    let old_domain = Arc::new(RecordingDomain(old.domain.spec().clone(), Mutex::new(None)));
+    Arc::get_mut(&mut old).unwrap().domain = old_domain;
+    let mut record = workspace_record(
+        ExecutionCoordinates::new(
+            rsi_agent_session_protocol::ExecutionLocation::Local,
+            "/unregistered",
+        )
+        .unwrap(),
+    );
+    let old_id = record.id.clone();
+    Arc::get_mut(&mut old).unwrap().workspace = Arc::new(Workspaces {
+        records: [(old_id.clone(), record.clone())].into(),
+        ..Default::default()
+    });
+    let first = SessionId::new("row-001").unwrap();
+    let last = SessionId::new("row-300").unwrap();
+    old.insert_workspace_session_before(
+        CallOrigin::Local,
+        old_id.clone(),
+        first.clone(),
+        Some(last.clone()),
+    )
+    .unwrap()
+    .await
+    .unwrap();
+    let saved = serde_json::to_value(old.document().as_ref()).unwrap();
+    old.close().await;
+
+    let mut current = owner().await;
+    record.id = WorkspaceId::parse("f".repeat(64)).unwrap();
+    let current_id = record.id.clone();
+    let current_domain = Arc::new(RecordingDomain(
+        current.domain.spec().clone(),
+        Mutex::new(None),
+    ));
+    let editable = Arc::get_mut(&mut current).unwrap();
+    editable.domain = current_domain;
+    editable.workspace = Arc::new(Workspaces {
+        records: [(current_id.clone(), record)].into(),
+        ..Default::default()
+    });
+    let mut restored: Document = serde_json::from_value(saved).unwrap();
+    restored.validate().unwrap();
+    editable.state.lock().unwrap().document = Arc::new(restored);
+    assert_eq!(account(&current).await[0], last);
+    assert_eq!(
+        current
+            .insert_workspace_session_before(CallOrigin::Local, old_id.clone(), first.clone(), None)
+            .unwrap()
+            .await
+            .unwrap(),
+        WorkspaceMoveOutcome::UnknownWorkspace
+    );
+    current
+        .insert_workspace_session_before(
+            CallOrigin::Local,
+            current_id.clone(),
+            first.clone(),
+            Some(last),
+        )
+        .unwrap()
+        .await
+        .unwrap();
+    assert_eq!(account(&current).await[0], first);
+    assert_eq!(current.metadata_revision(), 2);
+    assert!(!current.document().workspace_orders.contains_key(&old_id));
+    assert_eq!(current.document().workspace_orders.len(), 1);
+    let mut durable: Document =
+        serde_json::from_value(serde_json::to_value(current.document().as_ref()).unwrap()).unwrap();
+    durable.validate().unwrap();
+    assert_eq!(durable.workspace_orders[&current_id].len(), 300);
+    current.close().await;
+}
+
+#[tokio::test]
+async fn registration_lookup_failure_stops_unpolled_account_groups() {
+    let mut current = owner().await;
+    for number in 400..420 {
+        append_member(&current, number, &format!("/group-{number}")).await;
+    }
+    let workspaces = Arc::new(Workspaces {
+        fail: true,
+        ..Default::default()
+    });
+    Arc::get_mut(&mut current).unwrap().workspace = workspaces.clone();
+    assert!(matches!(
+        current
+            .order_seed(&CallOrigin::Local, OrderScope::All)
+            .unwrap()
+            .await,
+        Err(ApiError::Unavailable)
+    ));
+    let calls = workspaces.calls.load(std::sync::atomic::Ordering::SeqCst);
+    assert!(
+        (1..=4).contains(&calls),
+        "failed lookup must not drain the other coordinate groups: {calls}"
+    );
+    current.close().await;
 }

@@ -14,15 +14,18 @@ fn workspace_identity_includes_the_machine_and_accepts_foreign_local_paths() {
         .unwrap()
     };
     let ids = [local, remote("a"), remote("b")]
-        .map(|coordinates| WorkspaceId::from_coordinates(&coordinates));
+        .map(|coordinates| rsi_workspace_protocol::WorkspaceKey::from_coordinates(&coordinates));
     assert_eq!(
         ids.iter().collect::<std::collections::BTreeSet<_>>().len(),
         3
     );
     let windows = ExecutionCoordinates::new(ExecutionLocation::Local, r"C:\project").unwrap();
     assert_eq!(
-        WorkspaceId::from_coordinates(&windows),
-        WorkspaceId::from_canonical_path(std::path::Path::new(windows.path())).unwrap()
+        rsi_workspace_protocol::WorkspaceKey::from_coordinates(&windows),
+        rsi_workspace_protocol::WorkspaceKey::from_canonical_path(std::path::Path::new(
+            windows.path()
+        ))
+        .unwrap()
     );
 }
 
@@ -37,6 +40,7 @@ fn deserialization_rejects_noncanonical_workspace_identities() {
     ] {
         assert!(serde_json::from_value::<WorkspaceId>(serde_json::json!(value)).is_err());
     }
+    assert_eq!(WorkspaceId::from_bytes([1; 32]).as_str(), "01".repeat(32));
     let value = "0123456789abcdef".repeat(4);
     let identity: WorkspaceId = serde_json::from_value(serde_json::json!(value)).unwrap();
     assert_eq!(identity.as_str(), value);
@@ -70,7 +74,9 @@ fn custom_names_are_bounded_and_absent_metadata_stays_unknown() {
         },
     )
     .unwrap();
-    let record: WorkspaceRecord = serde_json::from_value(serde_json::json!({"id":WorkspaceId::from_coordinates(&coordinates),"coordinates":coordinates})).unwrap();
+    let record: WorkspaceRecord =
+        serde_json::from_value(serde_json::json!({"id":"a".repeat(64),"coordinates":coordinates}))
+            .unwrap();
     record.validate().unwrap();
     assert!(record.name.is_none());
     assert!(record.created_at_ms.is_none());
@@ -85,7 +91,7 @@ fn external_records_bound_paths_and_keep_host_paths_opaque() {
     let mut record = WorkspaceRecord {
         name: None,
         created_at_ms: None,
-        id: WorkspaceId::from_canonical_path(&path).unwrap(),
+        id: WorkspaceId::parse("b".repeat(64)).unwrap(),
         coordinates: rsi_workspace_protocol::ExecutionCoordinates::new(
             rsi_workspace_protocol::ExecutionLocation::Local,
             path.to_str().unwrap(),
@@ -94,7 +100,7 @@ fn external_records_bound_paths_and_keep_host_paths_opaque() {
     };
     record.validate().unwrap();
     record.id = WorkspaceId::parse("a".repeat(64)).unwrap();
-    assert!(record.validate().is_err());
+    assert!(record.validate().is_ok());
     for path in [
         String::new(),
         "a\0b".into(),
@@ -103,18 +109,19 @@ fn external_records_bound_paths_and_keep_host_paths_opaque() {
         assert!(validate_workspace_path(std::path::Path::new(&path)).is_err());
     }
     for path in ["relative", "/a/../b", "/a//b"] {
-        assert!(WorkspaceId::from_canonical_path(std::path::Path::new(path)).is_err());
+        assert!(
+            rsi_workspace_protocol::WorkspaceKey::from_canonical_path(std::path::Path::new(path))
+                .is_err()
+        );
     }
 }
 
 #[test]
 fn order_seed_bounds_complete_membership_and_rejects_partial_or_misbound_wire_values() {
-    use rsi_workspace_protocol::{
-        ExecutionCoordinates, ExecutionLocation, WorkspaceOrderSeed, WorkspaceRecord,
-    };
+    use rsi_workspace_protocol::{ExecutionCoordinates, ExecutionLocation, WorkspaceOrderSeed};
     let mut records = (0..1025)
         .map(|index| {
-            WorkspaceRecord::new(
+            workspace_record(
                 ExecutionCoordinates::new(ExecutionLocation::Local, format!("/w{index}")).unwrap(),
             )
         })
@@ -130,7 +137,7 @@ fn order_seed_bounds_complete_membership_and_rejects_partial_or_misbound_wire_va
         WorkspaceOrderSeed::from_records(&records),
         WorkspaceOrderSeed::TooLarge {}
     ));
-    let long = WorkspaceRecord::new(
+    let long = workspace_record(
         ExecutionCoordinates::new(ExecutionLocation::Local, format!("/{}", "x".repeat(16000)))
             .unwrap(),
     );
@@ -146,7 +153,7 @@ fn order_seed_bounds_complete_membership_and_rejects_partial_or_misbound_wire_va
             .is_err()
     );
     let mut misbound = complete;
-    misbound[0].coordinates = long.coordinates;
+    misbound[0].coordinates = misbound[1].coordinates.clone();
     assert!(
         WorkspaceOrderSeed::Available { records: misbound }
             .validate()
@@ -162,13 +169,11 @@ fn order_seed_bounds_complete_membership_and_rejects_partial_or_misbound_wire_va
 
 #[test]
 fn order_seed_builder_and_validator_agree_with_encoded_envelope_at_the_byte_limit() {
-    use rsi_workspace_protocol::{
-        ExecutionCoordinates, ExecutionLocation, WorkspaceOrderSeed, WorkspaceRecord,
-    };
+    use rsi_workspace_protocol::{ExecutionCoordinates, ExecutionLocation, WorkspaceOrderSeed};
     // Escaped path bytes exercise actual JSON size, not character or path length.
     let mut records = (0..24)
         .map(|index| {
-            WorkspaceRecord::new(
+            workspace_record(
                 ExecutionCoordinates::new(
                     ExecutionLocation::Local,
                     format!("/w{index}{}", "\"界".repeat(1500)),
@@ -195,4 +200,14 @@ fn order_seed_builder_and_validator_agree_with_encoded_envelope_at_the_byte_limi
         saw_oversized |= !fits;
     }
     assert!(saw_oversized);
+}
+
+fn workspace_record(
+    coordinates: rsi_workspace_protocol::ExecutionCoordinates,
+) -> rsi_workspace_protocol::WorkspaceRecord {
+    let key = rsi_workspace_protocol::WorkspaceKey::from_coordinates(&coordinates);
+    rsi_workspace_protocol::WorkspaceRecord::new(
+        rsi_workspace_protocol::WorkspaceId::parse(key.as_str()).unwrap(),
+        coordinates,
+    )
 }

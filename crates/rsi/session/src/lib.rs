@@ -155,8 +155,15 @@ impl LocalSessionService {
         header
             .validate()
             .map_err(|e| SessionError::Invalid(e.to_string()))?;
-        let workspace_id =
-            rsi_workspace_protocol::WorkspaceId::from_coordinates(header.coordinates());
+        let workspace_id = self
+            .workspace
+            .find(&rsi_workspace_protocol::WorkspaceKey::from_coordinates(
+                header.coordinates(),
+            ))
+            .await
+            .map_err(|error| map_workspace_error(&error))?
+            .ok_or_else(|| SessionError::Invalid("Workspace is not registered".into()))?
+            .id;
         let service = Self {
             frozen: Some((header.clone(), pin)),
             ..self.clone()

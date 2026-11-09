@@ -22,6 +22,15 @@ struct Provider {
 }
 #[async_trait]
 impl WorkspaceRegistry for Provider {
+    async fn find(&self, _: &WorkspaceKey) -> Result<Option<WorkspaceRecord>> {
+        Ok(self.bad_record.then(|| {
+            WorkspaceRecord::new(
+                WorkspaceId::parse("a".repeat(64)).unwrap(),
+                ExecutionCoordinates::new(ExecutionLocation::Local, "/different").unwrap(),
+            )
+        }))
+    }
+
     async fn display_order(
         &self,
     ) -> rsi_workspace_protocol::Result<rsi_workspace_protocol::WorkspaceDisplayOrder> {
@@ -58,7 +67,7 @@ impl WorkspaceRegistry for Provider {
                 id: id.clone(),
                 coordinates,
                 name: Some(name),
-                created_at_ms: None,
+                created_at_ms: Some(u64::MAX),
             })
         } else {
             Err(WorkspaceError::Storage(
@@ -92,7 +101,7 @@ impl WorkspaceRegistry for Provider {
         if self.bad_record {
             Ok(WorkspaceRecord {
                 name: None,
-                created_at_ms: None,
+                created_at_ms: Some(u64::MAX),
                 id: WorkspaceId::parse("0".repeat(64)).unwrap(),
                 coordinates: rsi_workspace_protocol::ExecutionCoordinates::new(
                     rsi_workspace_protocol::ExecutionLocation::Local,
@@ -163,6 +172,16 @@ async fn commit_result_loss_and_invalid_registration_reply_stay_unknown_without_
             },
         });
         let client = WorkspaceClient::new(connection);
+        let found = client
+            .find(&WorkspaceKey::from_coordinates(
+                &ExecutionCoordinates::new(ExecutionLocation::Local, "/expected").unwrap(),
+            ))
+            .await;
+        if bad_record {
+            assert!(matches!(found, Err(WorkspaceError::Corrupt(_))));
+        } else {
+            assert_eq!(found.unwrap(), None);
+        }
         assert!(matches!(
             client.get_or_create(Path::new("relative")).await,
             Err(WorkspaceError::InvalidInput(_))

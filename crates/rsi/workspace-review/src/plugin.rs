@@ -149,9 +149,10 @@ impl PluginFactory for WorkspaceReviewApiFactory {
                                 }
                                 let scope = request.scope();
                                 let workspace = workspaces
-                                    .get(&scope.workspace)
+                                    .find(&scope.workspace)
                                     .await
-                                    .map_err(|_| ApiError::Unavailable)?;
+                                    .map_err(|_| ApiError::Unavailable)?
+                                    .ok_or(ApiError::Unavailable)?;
                                 let admission = execution
                                     .admit(&context.origin, workspace.coordinates.location())?;
                                 let coordinates = match &scope.conversation {

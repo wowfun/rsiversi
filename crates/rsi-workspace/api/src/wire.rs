@@ -10,6 +10,8 @@ use std::path::PathBuf;
 pub enum Operation {
     /// Get operation.
     Get,
+    /// Find the current registration by complete coordinate key.
+    Find,
     /// List operation.
     List,
     /// Workspace ordering seed.
@@ -29,8 +31,9 @@ pub enum Operation {
 }
 impl Operation {
     /// All operation identities owned by this protocol.
-    pub const ALL: [Self; 9] = [
+    pub const ALL: [Self; 10] = [
         Self::Get,
+        Self::Find,
         Self::List,
         Self::OrderSeed,
         Self::DisplayOrder,
@@ -47,6 +50,7 @@ impl Operation {
     pub fn spec(self) -> OperationSpec {
         let (name, effect) = match self {
             Self::Get => ("get", OperationEffect::Read),
+            Self::Find => ("find", OperationEffect::Read),
             Self::List => ("list", OperationEffect::Read),
             Self::OrderSeed => ("order_seed", OperationEffect::Read),
             Self::DisplayOrder => ("display_order", OperationEffect::Read),
@@ -58,7 +62,7 @@ impl Operation {
         };
         OperationSpec {
             protocol: rsi_api_protocol::wire_contract!(),
-            id: OperationId::new("workspace", name, 4).expect("constant operation"),
+            id: OperationId::new("workspace", name, 5).expect("constant operation"),
             class: OperationClass::Data,
             effect,
             access: rsi_api_protocol::OperationAccess::Authenticated,
@@ -81,6 +85,11 @@ impl Operation {
             },
         }
     }
+}
+#[derive(Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub(crate) struct FindRequest {
+    pub key: rsi_workspace_protocol::WorkspaceKey,
 }
 #[derive(Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
