@@ -214,31 +214,25 @@ impl Drop for LocalEventBindings {
     }
 }
 
-fn claim_parallel_callback<E: LocalEvent<Mode = Parallel>>(
-    binding: &Arc<LocalEventBinding>,
-    value: E::Value,
-) -> Option<BoxFuture<'static, std::result::Result<(), E::Error>>> {
-    if !binding.claim() {
-        return None;
-    }
-    let handler = binding.handler::<dyn ParallelEventHandler<E>>();
-    Some(Box::pin(async move { handler.handle(value).await }))
-}
-
 fn parallel_callbacks<E: LocalEvent<Mode = Parallel>>(
     bindings: Arc<LocalEventBindings>,
     value: E::Value,
-) -> impl futures_util::Stream<Item = BoxFuture<'static, std::result::Result<(), E::Error>>> + Send
-{
+) -> impl futures_util::Stream<
+    Item = impl Future<Output = (usize, std::result::Result<(), E::Error>)> + Send,
+> + Send {
     stream::unfold(
         (bindings, 0, value),
         |(bindings, mut index, value)| async move {
             loop {
                 let binding = bindings.bindings.get(index)?;
                 index += 1;
-                if let Some(callback) = claim_parallel_callback::<E>(binding, value.clone()) {
-                    return Some((callback, (bindings, index, value)));
+                if !binding.claim() {
+                    continue;
                 }
+                let handler = binding.handler::<dyn ParallelEventHandler<E>>();
+                let input = value.clone();
+                let callback = async move { (index, handler.handle(input).await) };
+                return Some((callback, (bindings, index, value)));
             }
         },
     )
@@ -264,18 +258,21 @@ impl<E: LocalEvent<Mode = Parallel>> LocalEventMode<E> for Parallel {
     fn dispatch(snapshot: LocalEventSnapshot, value: E::Value) -> Self::Dispatch {
         Box::pin(async move {
             let bindings = Arc::clone(&snapshot.bindings);
-            let errors = parallel_callbacks::<E>(bindings, value)
-                .buffered(MAXIMUM_PARALLEL_EVENT_CALLBACKS)
-                .collect::<Vec<_>>()
-                .await
-                .into_iter()
-                .filter_map(std::result::Result::err)
-                .collect::<Vec<_>>();
+            let callbacks = parallel_callbacks::<E>(bindings, value)
+                .buffer_unordered(MAXIMUM_PARALLEL_EVENT_CALLBACKS);
+            futures_util::pin_mut!(callbacks);
+            let mut errors = Vec::new();
+            while let Some((index, result)) = callbacks.next().await {
+                if let Err(error) = result {
+                    errors.push((index, error));
+                }
+            }
             drop(snapshot);
             if errors.is_empty() {
                 Ok(())
             } else {
-                Err(errors)
+                errors.sort_unstable_by_key(|(index, _)| *index);
+                Err(errors.into_iter().map(|(_, error)| error).collect())
             }
         })
     }

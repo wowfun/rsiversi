@@ -157,7 +157,8 @@ membership and capacity are released, bounded cleanup evidence is retained,
 and the Runtime terminalizes.
 
 Marker-level behavior proves Emit ordering, Parallel all-settled aggregate
-errors with a 64-callback polling ceiling, Serial asynchronous first-break,
+errors with a 64-callback polling ceiling, slot reuse while an earlier callback
+is still pending, and error ordering independent of completion order; Serial asynchronous first-break,
 Bail synchronous first-break, and Waterfall typed continuation
 replacement/veto. Synchronous and asynchronous listener panics prove the same
 documented ordinary safe-Rust propagation rather than an implicit Runtime

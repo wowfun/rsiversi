@@ -1035,3 +1035,72 @@ async fn cancelled_parallel_dispatch_claims_only_callbacks_admitted_for_polling(
     assert!(owner.dispose().await.is_clean());
     assert!(runtime.shutdown().await.is_complete());
 }
+
+#[derive(Debug)]
+struct RefillParallelWork;
+
+impl LocalEvent for RefillParallelWork {
+    const KEY: &'static str = "test.parallel-refill";
+    type Value = Arc<tokio::sync::Notify>;
+    type Error = usize;
+    type Mode = Parallel;
+}
+
+#[derive(Debug)]
+struct RefillWorker(usize);
+
+#[async_trait]
+impl ParallelEventHandler<RefillParallelWork> for RefillWorker {
+    async fn handle(&self, release: Arc<tokio::sync::Notify>) -> std::result::Result<(), usize> {
+        match self.0 {
+            0 => {
+                release.notified().await;
+                Err(0)
+            }
+            MAXIMUM_PARALLEL_EVENT_CALLBACKS => {
+                release.notify_one();
+                Err(self.0)
+            }
+            _ => Ok(()),
+        }
+    }
+}
+
+#[tokio::test]
+async fn parallel_reuses_completed_slots_before_the_first_callback_finishes() {
+    let runtime = Runtime::default();
+    let captured = Arc::new(Mutex::new(None));
+    let owner = runtime
+        .root()
+        .apply(
+            crate::resolved(Arc::new(CaptureContext(captured.clone()))),
+            Value::Null,
+        )
+        .await
+        .unwrap();
+    let context = captured.lock().unwrap().take().unwrap();
+    for index in 0..=MAXIMUM_PARALLEL_EVENT_CALLBACKS {
+        context
+            .on_parallel::<RefillParallelWork, _>(
+                Arc::new(RefillWorker(index)),
+                LocalEventOptions::default(),
+            )
+            .unwrap();
+    }
+    // The last callback can release the first only after a completed middle
+    // callback gives up its slot. All errors must still follow snapshot order.
+    let result = tokio::time::timeout(
+        Duration::from_secs(1),
+        context
+            .dispatch_local::<RefillParallelWork>(Arc::new(tokio::sync::Notify::new()))
+            .unwrap(),
+    )
+    .await;
+    drop(context);
+    assert!(owner.dispose().await.is_clean());
+    assert!(runtime.shutdown().await.is_complete());
+    assert_eq!(
+        result.expect("completed callbacks must free polling slots"),
+        Err(vec![0, MAXIMUM_PARALLEL_EVENT_CALLBACKS])
+    );
+}
