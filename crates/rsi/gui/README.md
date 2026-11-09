@@ -406,6 +406,10 @@ classification and bounded JSON previews; it does not serialize complete large
 arguments or result values before truncating them. The view keeps a Tool's name and argument preview when its result arrives, with distinct
 intent and result Fact sequences. Arguments and results each occupy at most half the block; this also reserves
 room for an intent loaded after its result. Clipping never removes its exact source.
+Rejected Tools display their durable explanation in the same block, including
+the default approval-denied message when no reason was supplied. Live observation
+and history replay use the same explanation and retain the exact rejection source;
+display does not consult a policy service or depend on a later model response.
 History beginning after intent displays an explicitly missing intent rather than
 inventing a Tool name or arguments. It also marks a page whose durable prefix
 was not loaded, including the initial

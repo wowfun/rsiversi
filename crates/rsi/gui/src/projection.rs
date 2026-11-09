@@ -468,7 +468,10 @@ impl Transcript {
                 block.clipped |= window.more;
             }
         }
-        if tool.result != old_result
+        if let SessionFactBody::ToolRejected { rejection, .. } = fact.body() {
+            block.text.truncate(block.tool_argument_bytes);
+            block.text.push_str(&rejection.message());
+        } else if tool.result != old_result
             && let SessionFactBody::ToolResult { result, .. } = fact.body()
         {
             block.text.truncate(block.tool_argument_bytes);
@@ -983,6 +986,81 @@ mod tests {
             assert_eq!(recovered.blocks[0].title, block.title);
             assert_eq!(recovered.blocks[0].text, block.text);
             assert_eq!(recovered.blocks[0].first_seq, 10);
+        }
+    }
+
+    #[test]
+    fn rejected_tool_displays_durable_reason_once_with_bounded_arguments() {
+        use rsi_agent_session_protocol::{ContributionId, EffectId, ToolOrigin, ToolRejection};
+        use rsi_approval_protocol::{ApprovalDecision, ApprovalOutcome};
+        use rsi_tools_protocol::{ToolProgramRole, ToolResultIdentity};
+
+        for (rejection, expected) in [
+            (
+                ToolRejection::PolicyDenied {
+                    contribution_id: ContributionId::new("fixture.policy").unwrap(),
+                    reason: "Mods refused this command: 拒绝执行".into(),
+                },
+                "Mods refused this command: 拒绝执行",
+            ),
+            (
+                ToolRejection::ApprovalDenied {
+                    outcome: ApprovalOutcome {
+                        decision: ApprovalDecision::Deny,
+                        answerer: "fixture.user".into(),
+                        reason: None,
+                    },
+                },
+                "Live approval denied the Tool call; it was not executed.",
+            ),
+            (
+                ToolRejection::ApprovalDenied {
+                    outcome: ApprovalOutcome {
+                        decision: ApprovalDecision::Deny,
+                        answerer: "fixture.user".into(),
+                        reason: Some("Keep this file unchanged".into()),
+                    },
+                },
+                "Live approval denied the Tool call: Keep this file unchanged",
+            ),
+        ] {
+            let fact = SessionFact::new(
+                12,
+                1,
+                SessionFactBody::ToolRejected {
+                    additional_contexts: Vec::new(),
+                    origin: ToolOrigin::Model {
+                        effect_id: EffectId::new("source-model").unwrap(),
+                    },
+                    program_role: ToolProgramRole::Unavailable,
+                    turn_id: TurnId::new("turn").unwrap(),
+                    effect_id: EffectId::new("effect").unwrap(),
+                    identity: ToolResultIdentity::new("owner", "invoke", "call", "a".repeat(64))
+                        .unwrap(),
+                    name: "pwsh".into(),
+                    arguments: serde_json::json!({"command": "界".repeat(MAX_BLOCK_BYTES / 3)}),
+                    rejection,
+                },
+            )
+            .unwrap();
+            let mut transcript = Transcript::default();
+            transcript.fact(&fact);
+            let block = &transcript.blocks[0];
+            assert!(block.text.ends_with(expected));
+            assert_eq!(block.text.matches(expected).count(), 1);
+            assert!(block.clipped);
+            assert!(block.text.len() <= MAX_BLOCK_BYTES);
+            let view = serde_json::to_value(block).unwrap();
+            assert_eq!(view["tool"]["phase"], "rejected");
+            assert_eq!(view["tool"]["rejection"]["seq"], "12");
+            assert!(view["tool"]["result"].is_null());
+            let revision = block.revision.clone();
+            transcript.fact(&fact);
+            assert!(std::sync::Arc::ptr_eq(
+                &revision,
+                &transcript.blocks[0].revision
+            ));
+            assert_eq!(serde_json::to_value(&transcript.blocks[0]).unwrap(), view);
         }
     }
 
