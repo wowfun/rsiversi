@@ -1,12 +1,10 @@
 use super::{
     Sessions,
-    session_history::{fragment_text, resource_key, stored_history},
+    session_history::{resource_key, stored_history},
 };
 use futures_util::StreamExt as _;
-use rsi_agent_session_protocol::{
-    AgentMessage, CommandMessage, MessageId, QueueMutationRequest, QueueOperationId, SessionId,
-};
-use rsi_agent_store_protocol::{StorePendingMessage, StoreSessionInspection};
+use rsi_agent_session_protocol::{MessageId, QueueMutationRequest, QueueOperationId, SessionId};
+use rsi_agent_store_protocol::StoreSessionInspection;
 use rsi_extension::{Error, Result};
 use serde::Deserialize;
 use serde_json::{Value, json};
@@ -25,39 +23,15 @@ struct Input {
 #[derive(Deserialize)]
 #[serde(tag = "type", rename_all = "snake_case", deny_unknown_fields)]
 enum Operation {
-    Open {
-        key: String,
-    },
-    Message {
-        key: String,
-        message_id: MessageId,
-        offset: usize,
-    },
-    Close {
-        key: String,
-    },
-    Mutate {
-        mutation: QueueMutationRequest,
-    },
-    DiscardDraft {
-        message_ids: Vec<MessageId>,
-    },
-    Status {
-        operation_id: QueueOperationId,
-    },
-    MessageStatus {
-        message_id: MessageId,
-    },
-    WaitDraft {
-        revision: u64,
-    },
+    Open,
+    Mutate { mutation: QueueMutationRequest },
+    DiscardDraft { message_ids: Vec<MessageId> },
+    Status { operation_id: QueueOperationId },
+    MessageStatus { message_id: MessageId },
+    WaitDraft { revision: u64 },
     WaitIdle,
-    RetainDraft {
-        key: String,
-    },
-    ReleaseDraft {
-        key: String,
-    },
+    RetainDraft { key: String },
+    ReleaseDraft { key: String },
 }
 
 #[derive(Debug, Default)]
@@ -91,148 +65,50 @@ impl DraftOwners {
         }
     }
 }
-#[derive(Debug)]
-struct Snapshot {
-    session: SessionId,
-    inputs: Inputs,
-    message: tokio::sync::Mutex<Option<(MessageId, String)>>,
-}
-#[derive(Debug)]
-enum Inputs {
-    Draft(Vec<CommandMessage>),
-    Durable(Vec<StorePendingMessage>),
-}
-enum Acceptance<'a> {
-    Draft(&'a AgentMessage),
-    Durable(u64),
-}
-impl Snapshot {
-    fn publish(
-        self,
-        routes: &rsi_api_http::ApplicationUpstream,
-        request: &str,
-        key: String,
-    ) -> Result<()> {
-        let pending = match &self.inputs {
-            Inputs::Draft(inputs) => !inputs.is_empty(),
-            Inputs::Durable(inputs) => !inputs.is_empty(),
-        };
-        if pending {
-            routes
-                .retain_resource(request, key, Arc::new(self))
-                .map_err(|_| Error::Cancelled)?;
-        } else {
-            routes.caller(request).map_err(|_| Error::Cancelled)?;
+async fn capture(handle: &dyn rsi_session_protocol::SessionHandle) -> Result<Value> {
+    match handle.draft_snapshot().await {
+        Ok(snapshot) => Ok(draft(&snapshot)),
+        Err(rsi_session_protocol::SessionError::NotFound(_)) => {
+            let state = handle.inspect().await.map_err(remote)?;
+            Ok(durable(&state))
         }
-        Ok(())
+        Err(error) => Err(remote(error)),
     }
+}
 
-    async fn message_fragment<F>(
-        &self,
-        id: &MessageId,
-        offset: usize,
-        load: impl FnOnce(u64) -> F,
-    ) -> Result<Value>
-    where
-        F: std::future::Future<Output = Result<AgentMessage>>,
-    {
-        let mut cached = self.message.lock().await;
-        if cached.as_ref().is_none_or(|(key, _)| key != id) {
-            *cached = None;
-            let encoded = match self.acceptance(id)? {
-                Acceptance::Draft(message) => serde_json::to_string(message),
-                Acceptance::Durable(accepted) => serde_json::to_string(&load(accepted).await?),
-            }
-            .map_err(|_| Error::Protocol)?;
-            *cached = Some((id.clone(), encoded));
-        }
-        let page = fragment(&cached.as_ref().expect("captured message body").1, offset)?;
-        if page["next_offset"] == page["total_bytes"] {
-            *cached = None;
-        }
-        Ok(page)
-    }
-
-    fn acceptance(&self, id: &MessageId) -> Result<Acceptance<'_>> {
-        match &self.inputs {
-            Inputs::Draft(inputs) => inputs
-                .iter()
-                .find(|row| &row.message.message_id == id)
-                .map(|row| Acceptance::Draft(&row.message)),
-            Inputs::Durable(inputs) => inputs
-                .iter()
-                .find(|row| &row.message_id == id)
-                .map(|row| Acceptance::Durable(row.accepted_control_seq)),
-        }
-        .ok_or(Error::Protocol)
-    }
-    async fn capture(handle: &dyn rsi_session_protocol::SessionHandle) -> Result<(Self, Value)> {
-        match handle.draft_snapshot().await {
-            Ok(draft) => {
-                let session = draft.header.session_id().clone();
-                let pending: Vec<_> = draft
-                    .command_inputs
-                    .iter()
-                    .map(|input| {
-                        json!({
+fn draft(draft: &rsi_session_protocol::SessionDraftView) -> Value {
+    let session = draft.header.session_id();
+    let pending: Vec<_> = draft
+        .command_inputs
+        .iter()
+        .map(|input| {
+            json!({
                     "message_id":input.message.message_id,"source_kind":input.message.source.kind(),
-                    "delivery":input.delivery,"target":input.delivery})
-                    })
-                    .collect();
-                let metadata = json!({"kind":"draft","session_id":session,
-                    "revision":draft.revision,"pending":pending});
-                Ok((
-                    Self {
-                        session,
-                        inputs: Inputs::Draft(draft.command_inputs),
-                        message: tokio::sync::Mutex::new(None),
-                    },
-                    metadata,
-                ))
-            }
-            Err(rsi_session_protocol::SessionError::NotFound(_)) => {
-                let state = handle.inspect().await.map_err(remote)?;
-                Ok(Self::durable(state))
-            }
-            Err(error) => Err(remote(error)),
-        }
-    }
+                    "delivery":input.delivery,"target":input.delivery,"message":input.message})
+        })
+        .collect();
+    json!({"kind":"draft","session_id":session,
+                    "revision":draft.revision,"pending":pending})
+}
 
-    fn durable(state: StoreSessionInspection) -> (Self, Value) {
-        let session = state.header.session_id().clone();
-        let history = stored_history(
-            &state.header,
-            state.durable_fact_seq,
-            state.durable_control_seq,
-        );
-        let metadata = json!({"kind":"durable","session_id":session,"history":history,
+fn durable(state: &StoreSessionInspection) -> Value {
+    let session = state.header.session_id();
+    let history = stored_history(
+        &state.header,
+        state.durable_fact_seq,
+        state.durable_control_seq,
+    );
+    json!({"kind":"durable","session_id":session,"history":history,
                     "active_turn_id":state.active_turn_id,"activation_phase":state.activation_phase,
                     "driver_active":state.tree.session.has_open_turn || state.tree.session.has_active_activation || state.tree.session.has_waking_message,
                     "cursor":{"fact_seq":state.durable_fact_seq,"control_seq":state.durable_control_seq},
-                    "pending":state.pending});
-        (
-            Self {
-                session,
-                inputs: Inputs::Durable(state.pending),
-                message: tokio::sync::Mutex::new(None),
-            },
-            metadata,
-        )
-    }
-}
-fn fragment(encoded: &str, offset: usize) -> Result<Value> {
-    let (end, part) = fragment_text(encoded, offset)?;
-    Ok(json!({"json":part,"offset":offset,"next_offset":end,"total_bytes":encoded.len()}))
+                    "pending":state.pending})
 }
 fn remote(error: impl std::fmt::Display) -> Error {
     Error::Remote(error.to_string().chars().take(1000).collect())
 }
 
 impl Sessions {
-    #[expect(
-        clippy::too_many_lines,
-        reason = "One typed wire dispatcher shares caller and Session admission across inbox operations"
-    )]
     pub(super) async fn inbox(&self, payload: Value) -> Result<Value> {
         let Input {
             request,
@@ -276,35 +152,11 @@ impl Sessions {
                 }
                 Err(Error::Protocol)
             }
-            Operation::Close { key } => {
-                self.routes
-                    .release_resource(&request, &resource_key("inbox", &key)?);
-                Ok(Value::Null)
-            }
-            Operation::Message {
-                key,
-                message_id,
-                offset,
-            } => {
-                let snapshot = self.inbox_snapshot(&request, &session_id, &key)?;
+            Operation::Open => {
                 let handle = self.read_handle(&request, &session_id, None).await?;
-                let page = snapshot
-                    .message_fragment(&message_id, offset, async |accepted| {
-                        handle
-                            .read_message(&message_id, accepted)
-                            .await
-                            .map_err(remote)
-                    })
-                    .await?;
+                let captured = capture(handle.as_ref()).await?;
                 self.routes.caller(&request).map_err(|_| Error::Cancelled)?;
-                Ok(page)
-            }
-            Operation::Open { key } => {
-                let key = resource_key("inbox", &key)?;
-                let handle = self.read_handle(&request, &session_id, None).await?;
-                let (snapshot, metadata) = Snapshot::capture(handle.as_ref()).await?;
-                snapshot.publish(&self.routes, &request, key)?;
-                Ok(metadata)
+                Ok(captured)
             }
             Operation::Mutate { mutation } => {
                 let handle = self.interactive_handle(&request, &session_id).await?;
@@ -339,22 +191,6 @@ impl Sessions {
             }
         }
     }
-    fn inbox_snapshot(
-        &self,
-        request: &str,
-        session: &SessionId,
-        key: &str,
-    ) -> Result<Arc<Snapshot>> {
-        let (snapshot, _) = self
-            .routes
-            .shared_resource::<Snapshot>(request, &resource_key("inbox", key)?)
-            .map_err(|_| Error::Cancelled)?;
-        if &snapshot.session != session {
-            return Err(Error::Protocol);
-        }
-        Ok(snapshot)
-    }
-
     fn draft_owners(&self, request: &str) -> Result<Arc<DraftOwners>> {
         if let Ok((owners, _)) = self
             .routes
@@ -381,15 +217,8 @@ impl Sessions {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use rsi_agent_store_protocol::StorePendingMessage;
     use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
-
-    fn snapshot(inputs: Inputs) -> Snapshot {
-        Snapshot {
-            session: SessionId::new("one").unwrap(),
-            inputs,
-            message: tokio::sync::Mutex::new(None),
-        }
-    }
 
     fn pending(id: &MessageId) -> StorePendingMessage {
         use rsi_agent_session_protocol::{
@@ -458,7 +287,7 @@ mod tests {
             .await
             .unwrap();
         let inspection = store.inspect_session(session).await.unwrap();
-        let (_, inbox) = Snapshot::durable(inspection);
+        let inbox = durable(&inspection);
         let history = &inbox["history"];
         assert_eq!(inbox["active_turn_id"], "turn");
         assert_eq!(history["id"], inbox["session_id"]);
@@ -516,104 +345,73 @@ mod tests {
     }
 
     #[test]
-    fn empty_inbox_captures_do_not_consume_callback_resources() {
-        let upstream = rsi_api_http::ApplicationUpstream::preparing(
-            rsi_credentials_protocol::SecretValue::new("a".repeat(64)).unwrap(),
-            vec![],
-            tokio_util::sync::CancellationToken::new(),
-        )
-        .unwrap();
-        let device = rsi_api_protocol::AuthenticatedDevice {
-            id: rsi_api_protocol::DeviceId::generate().unwrap(),
-            revoked: tokio_util::sync::CancellationToken::new(),
+    fn maximum_draft_inputs_round_trip_in_one_process_reply() {
+        use rsi_agent_session_protocol::{
+            AgentMessage, AgentMessageContent, AgentMessageSource, CommandMessage,
+            CommandMessageSource, ContributionId, DomainRequestId, MAXIMUM_COMMAND_INPUT_BYTES,
+            MAXIMUM_COMMAND_INPUTS, MessageDelivery, MessageOptions,
         };
-        let callback = upstream.open_callback(&device).unwrap();
-        for index in 0..128 {
-            let inputs = if index % 2 == 0 {
-                Inputs::Draft(vec![])
-            } else {
-                Inputs::Durable(vec![])
+        let mut inputs: Vec<_> = (0..MAXIMUM_COMMAND_INPUTS)
+            .map(|index| {
+                let source = CommandMessageSource {
+                    command: ContributionId::new("fixture.inject").unwrap(),
+                    request_id: DomainRequestId::new("held").unwrap(),
+                    invocation_sha256: "a".repeat(64),
+                    ordinal: index.try_into().unwrap(),
+                    attribution: None,
+                };
+                CommandMessage {
+                    message: AgentMessage {
+                        message_id: source.message_id().unwrap(),
+                        source: AgentMessageSource::Command { source },
+                        content: vec![AgentMessageContent::Text { text: "x".into() }],
+                        options: MessageOptions::default(),
+                    },
+                    delivery: MessageDelivery::NextStep,
+                }
+            })
+            .collect();
+        // Escaped text fills the admitted byte budget, not just character count.
+        let mut remaining =
+            MAXIMUM_COMMAND_INPUT_BYTES - serde_json::to_vec(&inputs).unwrap().len();
+        for input in &mut inputs {
+            let added = (remaining / 2).min(60 * 1024);
+            let AgentMessageContent::Text { text } = &mut input.message.content[0] else {
+                unreachable!()
             };
-            let key = format!("inbox-{index}");
-            snapshot(inputs)
-                .publish(&upstream, callback.id(), key.clone())
-                .unwrap();
-            assert!(
-                upstream
-                    .shared_resource::<Snapshot>(callback.id(), &key)
-                    .is_err()
+            text.push_str(&"\\".repeat(added));
+            remaining -= added * 2;
+        }
+        CommandMessage::validate_batch(&inputs, None, true).unwrap();
+        assert!(MAXIMUM_COMMAND_INPUT_BYTES - serde_json::to_vec(&inputs).unwrap().len() < 2);
+        let view = rsi_session_protocol::SessionDraftView {
+            header: header(),
+            revision: 7,
+            command_inputs: inputs,
+        };
+        let captured = draft(&view);
+        assert_eq!(captured["kind"], "draft");
+        assert_eq!(captured["revision"], 7);
+        assert_eq!(
+            captured["pending"].as_array().unwrap().len(),
+            MAXIMUM_COMMAND_INPUTS
+        );
+        for (row, input) in captured["pending"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .zip(&view.command_inputs)
+        {
+            assert_eq!(row["message_id"], input.message.message_id.as_str());
+            assert_eq!(row["target"], "next_step");
+            assert_eq!(
+                serde_json::from_value::<AgentMessage>(row["message"].clone()).unwrap(),
+                input.message
             );
         }
-        let id = MessageId::new("queued").unwrap();
-        snapshot(Inputs::Durable(vec![pending(&id)]))
-            .publish(&upstream, callback.id(), "pending".into())
-            .unwrap();
         assert!(
-            upstream
-                .shared_resource::<Snapshot>(callback.id(), "pending")
-                .is_ok()
-        );
-        device.revoked.cancel();
-        assert!(
-            snapshot(Inputs::Draft(vec![]))
-                .publish(&upstream, callback.id(), "late".into())
-                .is_err()
-        );
-        assert!(
-            upstream
-                .shared_resource::<Snapshot>(callback.id(), "pending")
-                .is_err()
-        );
-    }
-
-    #[tokio::test]
-    async fn fragmented_acceptance_reads_once_and_releases_the_encoded_body() {
-        use rsi_agent_session_protocol::{AgentMessageContent, AgentMessageSource, MessageOptions};
-        let id = MessageId::new("queued").unwrap();
-        let captured = snapshot(Inputs::Durable(vec![pending(&id)]));
-        let reads = AtomicUsize::new(0);
-        let mut offset = 0;
-        let mut restored = String::new();
-        loop {
-            let page = captured
-                .message_fragment(&id, offset, async |accepted| {
-                    assert_eq!(accepted, 4);
-                    reads.fetch_add(1, Ordering::SeqCst);
-                    Ok(AgentMessage {
-                        message_id: id.clone(),
-                        source: AgentMessageSource::Human { attribution: None },
-                        content: vec![AgentMessageContent::Text {
-                            text: "排队\n".repeat(120_000),
-                        }],
-                        options: MessageOptions::default(),
-                    })
-                })
-                .await
-                .unwrap();
-            restored.push_str(page["json"].as_str().unwrap());
-            offset = page["next_offset"].as_u64().unwrap().try_into().unwrap();
-            if page["next_offset"] == page["total_bytes"] {
-                break;
-            }
-            assert!(captured.message.lock().await.is_some());
-        }
-        assert_eq!(reads.load(Ordering::SeqCst), 1);
-        assert!(captured.message.lock().await.is_none());
-        let message: AgentMessage = serde_json::from_str(&restored).unwrap();
-        assert_eq!(message.message_id, id);
-        assert_eq!(
-            message.content,
-            vec![AgentMessageContent::Text {
-                text: "排队\n".repeat(120_000)
-            }]
-        );
-        assert!(
-            captured
-                .message_fragment(&MessageId::new("other").unwrap(), 0, |_| async {
-                    panic!("an acceptance outside the snapshot must not reach Store");
-                })
-                .await
-                .is_err()
+            serde_json::to_vec(&captured).unwrap().len() < 512 * 1024,
+            "bounded draft bodies and routing metadata leave room for the 1 MiB process envelope"
         );
     }
 
@@ -705,32 +503,12 @@ mod tests {
         upstream
             .retain_resource(callback.id(), "draft-owners".into(), owners)
             .unwrap();
-        // Draft owners must leave snapshot capacity available on this callback.
+        // Draft owners must leave history reader capacity available on this callback.
         upstream
-            .retain_resource(callback.id(), "inbox".into(), Arc::new(0u64))
+            .retain_resource(callback.id(), "history".into(), Arc::new(0u64))
             .unwrap();
         assert_eq!(dropped.load(Ordering::SeqCst), 0);
         drop(callback);
         assert_eq!(dropped.load(Ordering::SeqCst), 64);
-    }
-
-    #[test]
-    fn inbox_fragments_preserve_multibyte_acceptance_content() {
-        let encoded = serde_json::to_string(&json!({"text":"界".repeat(100_000)})).unwrap();
-        let mut offset = 0;
-        let mut restored = String::new();
-        while offset < encoded.len() {
-            let value = fragment(&encoded, offset).unwrap();
-            let part = value["json"].as_str().unwrap();
-            assert!(part.len() <= rsi_extension::MAXIMUM_FRAME_BYTES);
-            assert_eq!(value["offset"], offset);
-            assert_eq!(value["total_bytes"], encoded.len());
-            offset = usize::try_from(value["next_offset"].as_u64().unwrap()).unwrap();
-            restored.push_str(part);
-        }
-        assert_eq!(restored, encoded);
-        assert!(fragment(&encoded, encoded.len()).is_err());
-        let character = encoded.find('界').unwrap();
-        assert!(fragment(&encoded, character + 1).is_err());
     }
 }

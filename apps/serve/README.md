@@ -24,6 +24,12 @@ Application inbox `wait_idle` delegates to the attached Session's read-only nati
 idle wait. It retains the request lifetime while waiting and creates no inbox
 snapshot, message resource, polling timer or per-Turn cancellation request.
 
+Application inbox `open` returns pending identities, routing and execution state
+at one native cut. Accepted durable message bodies come from history controls at
+that cut. Unpublished draft inputs are included directly; their native aggregate
+bound fits the process reply. Neither capture retains an inbox reader or needs
+message-fragment and close calls. Durable message reads use the history interface.
+
 Application inbox `wait_draft` waits until the supplied draft revision changes or
 the Session is published, using the standard Session draft subscription. It
 retains no inbox snapshot and does not extend the draft lifetime. Request
@@ -59,7 +65,7 @@ A Service Profile can select an application process with
 asset selection as the browser), a private `profile` name, and a `process`
 using the installed package process descriptor. One supervised process owns
 the application's routes across local browser attachments. At activation the
-host sends `application.open` with protocol 11, a private profile directory
+host sends `application.open` with protocol 12, a private profile directory
 and a random upstream key over the generation's private process connection.
 The opening payload also supplies an opaque `owner` callback handle. Native
 composition gives it the product's shared browser identity and the application
