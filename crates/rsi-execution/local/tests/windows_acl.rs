@@ -79,7 +79,6 @@ impl Fixture {
             capabilities,
             BTreeMap::new(),
         )
-        .await
         .unwrap();
         let lease = provider.lease(Arc::new(Admission)).unwrap();
         Self {

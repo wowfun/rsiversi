@@ -69,7 +69,6 @@ impl PluginFactory for Factory {
             },
             self.programs.clone(),
         )
-        .await
         .map_err(|_| MetaError::Activation("Local execution provider unavailable".into()))?;
         let stop = CancellationToken::new();
         let owner = Arc::new(Resolver {

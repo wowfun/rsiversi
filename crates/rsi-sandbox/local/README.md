@@ -33,8 +33,11 @@ have no claimed hard deadline; cancellation does not free a still-running slot.
 External-wrapper selection probes only explicit absolute candidate paths. A process request must also carry native absolute cwd and workspace paths before
 filesystem canonicalization. Portable host-path DTOs may describe another
 platform; those spellings do not grant this native effect boundary a relative path.
-Program validation checks the resolved target is a regular file, but preserves
-the caller's absolute invocation spelling in the execution plan. Multicall
+Program admission uses file metadata without canonicalizing the invocation.
+Unix targets must be regular executable files. Windows also accepts native
+application execution aliases by inspecting the directory entry itself;
+ordinary symlinks still resolve to a file. The native launcher resolves the
+accepted invocation, and launch failures remain ordinary Process errors. Multicall
 executables such as rustup and BusyBox dispatch on argv[0]; replacing that path
 with its canonical target would change the requested command.
 A bubblewrap candidate must create the same namespace and read-only-root shape

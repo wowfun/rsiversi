@@ -6,6 +6,12 @@ providers. Composition supplies an exact finite program catalog; each program
 has an absolute executable path and a complete child environment. Missing
 selectors fail closed. Distinct selectors may resolve to the same executable with
 different environments; the opaque resolved program keeps that selection intact. No ambient PATH, HOME or environment lookup occurs.
+Program capture validates bounded absolute invocation paths and environments
+without filesystem I/O or rewriting the executable spelling. Construction is
+synchronous and moves the validated catalog into its provider. Sandbox owns
+file admission when preparing the actual process; missing, directory or
+nonexecutable Unix targets fail there. This preserves multicall argv[0] and
+native Windows application execution aliases.
 Preparation applies Sandbox-owned temporary-directory selection to that
 program's environment, then freezes it into the opaque plan. Spawn
 rejects environment substitution before backend I/O. Sandbox preparation capacity
@@ -13,7 +19,7 @@ is preserved as `ProcessError::Capacity`; other preparation failures retain
 their typed Sandbox cause under the [Process error contract](../../rsi-process/core/README.md).
 No preparation failure opens a process.
 
-Path canonicalization uses this machine only. Canonical Windows drive paths use
+Workspace coordinate canonicalization uses this machine only. Canonical Windows drive paths use
 the shared native path representation from `rsi-workspace-path`, so Execution
 coordinates and durable workspace coordinates name the same canonical directory.
 Only an already canonical filesystem path is normalized; this does not admit

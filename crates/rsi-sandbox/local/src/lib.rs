@@ -740,17 +740,33 @@ fn validate_request(request: &ProcessRequest) -> Result<(PathBuf, PathBuf, PathB
             "process program must be absolute".into(),
         ));
     }
-    let resolved = request
-        .program
-        .canonicalize()
+    #[cfg(windows)]
+    let metadata = std::fs::symlink_metadata(&request.program).and_then(|entry| {
+        if entry.is_symlink() {
+            std::fs::metadata(&request.program)
+        } else {
+            Ok(entry)
+        }
+    });
+    #[cfg(not(windows))]
+    let metadata = std::fs::metadata(&request.program);
+    let metadata = metadata
         .map_err(|error| SandboxError::InvalidInput(format!("program is unavailable: {error}")))?;
-    if !resolved.is_file() {
+    if !metadata.is_file() {
         return Err(SandboxError::InvalidInput(
             "process program is not a file".into(),
         ));
     }
-    // Preserve argv[0] for multicall executables; canonicalization validates
-    // availability but must not turn `cargo` into an invocation of `rustup`.
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        if metadata.permissions().mode() & 0o111 == 0 {
+            return Err(SandboxError::InvalidInput(
+                "process program is not executable".into(),
+            ));
+        }
+    }
+    // The caller's spelling determines argv[0] and Windows alias dispatch.
     let program = request.program.clone();
     let cwd = canonical_directory(&request.cwd, "cwd")?;
     let workspace = canonical_directory(&request.workspace, "workspace")?;

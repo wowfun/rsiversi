@@ -70,7 +70,6 @@ async fn native_preparation_reports_the_same_sandbox_cause_with_or_without_a_lea
         },
         BTreeMap::new(),
     )
-    .await
     .unwrap();
     let lease = provider.lease(Arc::new(Admission)).unwrap();
     let workspace = tempfile::tempdir().unwrap();
