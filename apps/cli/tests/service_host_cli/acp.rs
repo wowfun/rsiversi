@@ -170,7 +170,7 @@ async fn native_tools_chat(
     if index >= 2 {
         return chat().await;
     }
-    let name = if index == 0 { "bash" } else { "file_read" };
+    let name = if index == 0 { "pwsh" } else { "file_read" };
     assert!(
         body["tools"]
             .as_array()
@@ -186,7 +186,7 @@ async fn native_tools_chat(
             .any(|tool| tool["function"]["name"] == "output_read")
     );
     let arguments = if index == 0 {
-        json!({"command":"cat > native.txt <<'RSI_EOF'\nnative-acp-tool-evidence\n中文 \\ escaped \"quotes\"\nRSI_EOF\n", "run_in_background":false})
+        json!({"command": r#"[System.IO.File]::WriteAllText((Join-Path (Get-Location) 'native.txt'), "native-acp-tool-evidence`n中文 \ escaped `"quotes`"`n", [System.Text.UTF8Encoding]::new($false))"#, "run_in_background":false})
     } else {
         json!({"path":"native.txt"})
     };
@@ -204,7 +204,7 @@ async fn native_tools_chat(
 
 #[cfg(windows)]
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
-async fn native_bash_and_files_execute_through_owned_windows_acp() {
+async fn native_pwsh_and_files_execute_through_owned_windows_acp() {
     let requests = Arc::new(std::sync::Mutex::new(Vec::new()));
     let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
     let endpoint = format!("http://{}", listener.local_addr().unwrap());
@@ -227,7 +227,7 @@ async fn native_bash_and_files_execute_through_owned_windows_acp() {
     let pending = request(
         &port,
         "session/prompt",
-        json!({"sessionId":session["sessionId"],"prompt":[{"type":"text","text":"exercise native Bash and Files"}]}),
+        json!({"sessionId":session["sessionId"],"prompt":[{"type":"text","text":"exercise native PowerShell and Files"}]}),
     );
     tokio::pin!(pending);
     let mut permissions = 0;

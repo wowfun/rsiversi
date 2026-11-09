@@ -161,7 +161,7 @@ pub(crate) fn tool_title(tool: &ToolState, interrupted: bool) -> String {
     use rsi_conversation::{ToolOutcome, ToolPhase};
     let name = tool.name.as_deref().unwrap_or("Tool");
     let (prepared, running, settled, subject) = match (name, tool.argument_summary.as_deref()) {
-        ("bash", Some(command)) => ("Run", "Running", "Ran", command.to_owned()),
+        ("bash" | "pwsh", Some(command)) => ("Run", "Running", "Ran", command.to_owned()),
         ("directory_list", Some(path)) => ("List", "Listing", "Listed", path.to_owned()),
         ("file_read", Some(path)) => ("Read", "Reading", "Read", path.to_owned()),
         (_, summary) => (
@@ -1949,6 +1949,12 @@ mod tests {
                 "pwd && ls -la",
                 "Running pwd && ls -la",
                 "Ran pwd && ls -la",
+            ),
+            (
+                "pwsh",
+                "Get-Location",
+                "Running Get-Location",
+                "Ran Get-Location",
             ),
             ("directory_list", ".", "Listing .", "Listed ."),
             (

@@ -1,5 +1,5 @@
 [package]
-name = "rsi-shell-bash"
+name = "rsi-shell-native"
 version.workspace = true
 edition.workspace = true
 rust-version.workspace = true

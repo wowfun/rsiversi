@@ -68,8 +68,8 @@ enabled_rhai = "defines.standard_output_cache"
 
 [[steps]]
 kind = "plugin"
-id = "bash"
-plugin = "rsi.shell.bash.tool"
+id = "shell"
+plugin = "rsi.shell.tool"
 enabled_rhai = "defines.standard_coding_tools"
 
 [[steps]]

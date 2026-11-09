@@ -69,12 +69,14 @@ Debug and release share launch identity, ownership and recovery rules. Explicit
 home options and leased `--watch` select the operator's intended environment;
 there is no separate development launch purpose.
 
-The standard Windows Web, TUI and ACP composition exposes native Files and explicit native
-Bash tools. Full Process output caching and its `output_read` contribution are
+The standard Windows Web, TUI and ACP composition exposes native Files and the
+native `pwsh` tool. Full Process output caching and its `output_read` contribution are
 enabled only where the Process owner publishes the cache capability. CLI and
-Desktop use `capture_standard_bash`, which selects Bash from the absolute Git for Windows installation recorded
-by its installer. It fails clearly if that installation is absent; it never
-substitutes the Windows WSL launcher. On Unix it resolves `/bin/bash`.
+Desktop use `capture_standard_shell`. Windows selects PowerShell 7 from its
+standard installation or absolute PATH entries, including native Store aliases,
+then falls back to system Windows PowerShell. Linux selects `/bin/bash`.
+Shell selection is independent of Git for Windows discovery; choosing PowerShell
+does not change the separately captured Git executable used by workspace review.
 Windows manual terminals use native PowerShell through ConPTY with explicit
 current-user permissions, independently of Agent tools and sandbox settings.
 Windows does not advertise the Linux apply-patch helper. This optional capability

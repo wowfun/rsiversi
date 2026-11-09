@@ -313,7 +313,7 @@ fn private_environment(root: &Path) -> crate::Result<BTreeMap<String, String>> {
 fn importer_environment(
     variables: impl IntoIterator<Item = (std::ffi::OsString, std::ffi::OsString)>,
 ) -> BTreeMap<String, String> {
-    rsi_shell_bash::scrub_child_environment(variables)
+    rsi_shell_native::scrub_child_environment(variables)
         .into_iter()
         .filter_map(|(name, value)| {
             let key = name.into_string().ok()?;

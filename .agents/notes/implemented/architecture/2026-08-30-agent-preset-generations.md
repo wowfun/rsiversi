@@ -46,12 +46,13 @@ retained Tool invocation keeps a clone until settlement. A superseded hidden
 Scope is disposed asynchronously only after its final current-generation,
 session, draft, or Tool pin is released.
 
-Bash process production is global because a complete `ProcessSpec` crosses the
+Shell process production is global because a complete `ProcessSpec` crosses the
 producer seam and Jobs may outlive the Agent generation that submitted them.
-The Bash definition, generic Jobs controls, and apply-patch definition are
-independent Agent contribution factories. There is no generic shell core until
-a second concrete shell demonstrates shared public semantics, and there is no
-generic filesystem provider around the single structured patch capability.
+The shell definition, generic Jobs controls, and apply-patch definition are
+independent Agent contribution factories. The single-shell composition decision
+is superseded by the [native PowerShell decision](../feature/2026-11-09-native-powershell-tools.md),
+which supplies the second concrete dialect and retains these ownership boundaries.
+There is no generic filesystem provider around the single structured patch capability.
 
 ## Alternatives considered
 

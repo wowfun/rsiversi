@@ -144,7 +144,7 @@ rsi-service-host = { path = "../service-host" }
 rsi-settings = { path = "../../rsi-settings/core" }
 rsi-settings-local = { path = "../../rsi-settings/local" }
 rsi-settings-protocol = { path = "../../rsi-settings/protocol" }
-rsi-shell-bash = { path = "../../rsi-shell/bash" }
+rsi-shell-native = { path = "../../rsi-shell/native" }
 rsi-storage = { path = "../../rsi-storage/core" }
 rsi-storage-domain = { path = "../../rsi-storage/domain" }
 rsi-storage-sqlite = { path = "../../rsi-storage/sqlite" }

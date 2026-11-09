@@ -1,4 +1,6 @@
 #[cfg(any(target_os = "linux", windows))]
+use rsi::StandardCodingTools;
+#[cfg(any(target_os = "linux", windows))]
 use rsi::StandardServiceDaemon;
 #[cfg(any(target_os = "linux", windows))]
 use rsi::probe_service_host;
@@ -7,8 +9,6 @@ use rsi::{
     ProfileCatalog, ProfileSource, RsiError, StandardComposition, capture_standard_environment,
     maybe_run_apply_patch_helper, standard_agent_preset_root,
 };
-#[cfg(any(target_os = "linux", windows))]
-use rsi::{StandardCodingTools, scrub_child_environment};
 use rsi_agent_presets::{AgentPresetHealth, AgentPresetId, AgentPresetRow, PresetError};
 use rsi_agent_store_sqlite::SqliteStore;
 #[cfg(any(target_os = "linux", windows))]
@@ -49,9 +49,10 @@ fn daemon_readiness_timeout_error() -> RsiError {
 #[cfg(any(target_os = "linux", windows))]
 fn standard_coding_tools() -> rsi::Result<Option<StandardCodingTools>> {
     StandardCodingTools::new(
-        rsi::capture_standard_bash()?,
+        rsi::capture_standard_shell()?,
         std::env::current_exe().map_err(|e| RsiError::Boot(e.to_string()))?,
-        scrub_child_environment(std::env::vars_os()),
+        std::env::vars_os().collect(),
+        rsi::capture_standard_git(),
     )
     .map(Some)
 }

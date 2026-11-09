@@ -4717,7 +4717,7 @@ dependencies = [
  "rsi-settings-local",
  "rsi-settings-protocol",
  "rsi-settings-testkit",
- "rsi-shell-bash",
+ "rsi-shell-native",
  "rsi-ssh-client",
  "rsi-ssh-protocol",
  "rsi-storage",
@@ -7925,7 +7925,7 @@ dependencies = [
 ]
 
 [[package]]
-name = "rsi-shell-bash"
+name = "rsi-shell-native"
 version = "0.0.1"
 dependencies = [
  "async-trait",

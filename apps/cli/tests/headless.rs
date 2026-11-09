@@ -190,6 +190,7 @@ fn test_coding_tools() -> Option<StandardCodingTools> {
             std::fs::canonicalize("/bin/bash").unwrap(),
             std::env::current_exe().unwrap().canonicalize().unwrap(),
             vec![("PATH".into(), "/usr/bin:/bin".into())],
+            None,
         )
         .unwrap(),
     )
@@ -197,14 +198,15 @@ fn test_coding_tools() -> Option<StandardCodingTools> {
 
 #[cfg(target_os = "linux")]
 #[test]
-fn standard_coding_tools_rejects_a_missing_bash_during_construction() {
+fn standard_coding_tools_defers_shell_file_admission_to_preparation() {
     assert!(
         StandardCodingTools::new(
             std::path::PathBuf::from("/definitely/missing/rsi-bash"),
             std::env::current_exe().unwrap().canonicalize().unwrap(),
             Vec::new(),
+            None,
         )
-        .is_err()
+        .is_ok()
     );
 }
 
@@ -366,7 +368,7 @@ fn background_job_id(request: &serde_json::Value) -> &str {
     tool_message(request, "call-background-bash")["content"]
         .as_str()
         .unwrap()
-        .strip_prefix("Started background Bash job ")
+        .strip_prefix("Started background shell job ")
         .unwrap()
         .strip_suffix('.')
         .unwrap()

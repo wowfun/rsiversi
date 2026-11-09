@@ -356,7 +356,7 @@ fn command_text(body: &SessionFactBody) -> Option<&str> {
         }
         | SessionFactBody::ToolRejected {
             name, arguments, ..
-        } if name == "bash" => arguments.get("command")?.as_str(),
+        } if matches!(name.as_str(), "bash" | "pwsh") => arguments.get("command")?.as_str(),
         _ => None,
     }
 }

@@ -214,7 +214,11 @@ impl HostLaunchKey {
         }
         if let Some(coding) = coding_tools {
             hash_component(&mut digest, b"coding-tools", b"enabled");
-            hash_path(&mut digest, b"coding-bash", coding.bash);
+            hash_path(&mut digest, b"coding-shell", coding.shell);
+            hash_component(&mut digest, b"coding-shell-kind", coding.kind.as_bytes());
+            if let Some(git) = coding.git {
+                hash_path(&mut digest, b"coding-git", git);
+            }
             if let Some(helper) = coding.apply_patch {
                 hash_path(&mut digest, b"coding-apply-patch", helper);
             } else {
@@ -262,7 +266,9 @@ impl fmt::Display for HostLaunchKey {
 }
 
 pub(crate) struct CodingToolsLaunchIdentity<'a> {
-    pub(crate) bash: &'a Path,
+    pub(crate) shell: &'a Path,
+    pub(crate) kind: &'a str,
+    pub(crate) git: Option<&'a Path>,
     pub(crate) apply_patch: Option<&'a Path>,
 }
 

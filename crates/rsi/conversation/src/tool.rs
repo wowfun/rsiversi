@@ -249,7 +249,7 @@ impl ToolState {
 fn argument_summary(name: &str, arguments: &serde_json::Value) -> Option<String> {
     let string = |key| arguments.get(key).and_then(serde_json::Value::as_str);
     let text = match name {
-        "bash" => string("command")?,
+        "bash" | "pwsh" => string("command")?,
         "file_read" | "directory_list" => {
             string("path").or_else(|| string("path_hex")).unwrap_or(".")
         }

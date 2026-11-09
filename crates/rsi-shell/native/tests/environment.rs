@@ -1,4 +1,4 @@
-use rsi_shell_bash::scrub_child_environment;
+use rsi_shell_native::scrub_child_environment;
 use std::ffi::{OsStr, OsString};
 #[cfg(unix)]
 use std::os::unix::ffi::OsStringExt as _;

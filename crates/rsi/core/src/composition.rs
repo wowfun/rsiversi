@@ -44,7 +44,7 @@ use rsi_projection::ProjectionRegistryContract;
 use rsi_sandbox::SandboxContract;
 use rsi_session_protocol::AgentSettingsContract;
 use rsi_settings_protocol::{SettingsContract, SettingsProviderContract};
-use rsi_shell_bash::{BashJobProducerFactory, BashToolFactory};
+use rsi_shell_native::{ShellJobProducerFactory, ShellKind, ShellToolFactory};
 use rsi_storage::StorageHubContract;
 use rsi_storage_domain::DomainFacilityContract;
 use rsi_tools_protocol::{ToolCatalogProviderContract, ToolRegistrarContract};
@@ -95,8 +95,8 @@ const WORKSPACE_FACTORY: &str = "rsi.workspace";
 const FILES_FACTORY: &str = "rsi.files.local";
 const FILES_TOOLS_FACTORY: &str = "rsi.files.tools";
 const TOOLS_FACTORY: &str = "rsi.tools";
-const BASH_PRODUCER_FACTORY: &str = "rsi.shell.bash.producer";
-const BASH_TOOL_FACTORY: &str = "rsi.shell.bash.tool";
+const SHELL_PRODUCER_FACTORY: &str = "rsi.shell.producer";
+const SHELL_TOOL_FACTORY: &str = "rsi.shell.tool";
 const JOBS_TOOLS_FACTORY: &str = "rsi.jobs.tools";
 const AGENT_TOOLS_FACTORY: &str = "rsi.agent.tools";
 const CONTEXT_BUILDER_FACTORY: &str = "rsi.agent.context.default";
@@ -187,9 +187,10 @@ pub struct StandardComposition {
 /// Frozen process inputs required by the standard native coding-tool generation.
 #[derive(Clone, Debug)]
 pub struct StandardCodingTools {
-    bash_producer: BashJobProducerFactory,
-    bash_tool: BashToolFactory,
+    shell_producer: ShellJobProducerFactory,
+    shell_tool: ShellToolFactory,
     apply_patch: Option<ApplyPatchToolFactory>,
+    review_git: Option<PathBuf>,
     execution_programs: std::collections::BTreeMap<String, rsi_execution::ResolvedProgram>,
 }
 
@@ -205,7 +206,8 @@ pub struct StandardHostPreview {
 }
 
 impl StandardCodingTools {
-    /// Validates explicit executable paths and freezes the supplied child environment.
+    /// Freezes the platform shell, optional Git path and supplied child environment.
+    /// `shell` names PowerShell on Windows and Bash on Linux; `helper` is Linux-only.
     #[cfg_attr(
         windows,
         expect(
@@ -214,20 +216,26 @@ impl StandardCodingTools {
         )
     )]
     pub fn new(
-        bash: PathBuf,
+        shell: PathBuf,
         helper: PathBuf,
         child_environment: Vec<(OsString, OsString)>,
+        review_git: Option<PathBuf>,
     ) -> crate::Result<Self> {
         #[cfg(not(any(target_os = "linux", windows)))]
         {
-            let _ = (bash, helper, child_environment);
+            let _ = (shell, helper, child_environment, review_git);
             Err(crate::RsiError::Boot(
                 "the standard coding contributions require native Linux or Windows".into(),
             ))
         }
         #[cfg(any(target_os = "linux", windows))]
         {
-            let bash_tool = BashToolFactory::new(bash, child_environment)
+            let kind = if cfg!(windows) {
+                ShellKind::PowerShell
+            } else {
+                ShellKind::Bash
+            };
+            let shell_tool = ShellToolFactory::new(kind, shell, child_environment)
                 .map_err(|error| crate::RsiError::Boot(error.to_string()))?;
             #[cfg_attr(
                 windows,
@@ -237,10 +245,10 @@ impl StandardCodingTools {
                 )
             )]
             let mut execution_programs = std::collections::BTreeMap::from([(
-                "bash".into(),
+                kind.name().into(),
                 rsi_execution::ResolvedProgram {
-                    program: bash_tool.executable().to_owned(),
-                    environment: bash_tool.environment_with_bash_defaults(),
+                    program: shell_tool.executable().to_owned(),
+                    environment: shell_tool.environment().to_vec(),
                 },
             )]);
             #[cfg(target_os = "linux")]
@@ -263,8 +271,9 @@ impl StandardCodingTools {
             };
             Ok(Self {
                 execution_programs,
-                bash_producer: BashJobProducerFactory,
-                bash_tool,
+                shell_producer: ShellJobProducerFactory::new(kind),
+                shell_tool,
+                review_git,
                 apply_patch,
             })
         }
@@ -414,7 +423,7 @@ fn register_coding_tools(
         OUTPUT_READ_FACTORY,
         Arc::new(crate::output_read::OutputReadToolFactory),
     )?;
-    register(BASH_TOOL_FACTORY, Arc::new(coding.bash_tool.clone()))?;
+    register(SHELL_TOOL_FACTORY, Arc::new(coding.shell_tool.clone()))?;
     if let Some(tool) = &coding.apply_patch {
         register(APPLY_PATCH_FACTORY, Arc::new(tool.clone()))?;
     }
@@ -1237,7 +1246,9 @@ impl StandardComposition {
             self.coding_tools
                 .as_ref()
                 .map(|tools| CodingToolsLaunchIdentity {
-                    bash: tools.bash_tool.executable(),
+                    shell: tools.shell_tool.executable(),
+                    kind: tools.shell_tool.kind().name(),
+                    git: tools.review_git.as_deref(),
                     apply_patch: tools
                         .apply_patch
                         .as_ref()
@@ -1471,13 +1482,12 @@ impl StandardComposition {
         let review_git = self
             .coding_tools
             .as_ref()
-            .and_then(|tools| tools.bash_tool.executable().parent())
-            .map(|parent| parent.join("git.exe"));
+            .and_then(|tools| tools.review_git.as_deref());
         builder.register_fragment(base_fragment(
             &paths,
             coding_tools_enabled,
             self.user_home.as_deref(),
-            review_git.as_deref(),
+            review_git,
         ))?;
         builder.register_local_contract::<rsi_session_protocol::WorkflowReadinessContract>()?;
         builder.register_local_contract::<rsi_session_protocol::SessionProtectionContract>()?;
@@ -1974,9 +1984,9 @@ fn register_runtime_factories(
     if let Some(coding) = coding_tools {
         register(
             builder,
-            BASH_PRODUCER_FACTORY,
+            SHELL_PRODUCER_FACTORY,
             UpdateMode::Replayable,
-            coding.bash_producer,
+            coding.shell_producer,
         )?;
     }
     register(
@@ -2259,7 +2269,7 @@ fn base_fragment(
         ProfileEntry::new(
             "rsi-workspace-review",
             "rsi.workspace-review",
-            json!({"directory":paths.cache().join("workspace-review/v1"),"program":if cfg!(windows){review_git.unwrap_or_else(|| Path::new(r"C:\Program Files\Git\bin\git.exe"))}else{Path::new("/usr/bin/git")}}),
+            json!({"directory":paths.cache().join("workspace-review/v1"),"program":review_git.unwrap_or_else(|| if cfg!(windows){Path::new(r"C:\Program Files\Git\bin\git.exe")}else{Path::new("/usr/bin/git")})}),
         ),
         ProfileEntry::new(
             "rsi-history",
@@ -2333,8 +2343,8 @@ fn base_fragment(
     ));
     if coding_tools {
         entries.push(ProfileEntry::new(
-            "rsi-shell-bash-producer",
-            BASH_PRODUCER_FACTORY,
+            "rsi-shell-producer",
+            SHELL_PRODUCER_FACTORY,
             Value::Null,
         ));
     }
@@ -2547,24 +2557,29 @@ mod tests {
         assert_eq!(std::fs::read_dir(temporary.path()).unwrap().count(), 1);
     }
 
-    #[cfg(target_os = "linux")]
+    #[cfg(any(target_os = "linux", windows))]
     #[test]
-    fn local_execution_catalog_uses_the_bash_owners_scrubbed_environment() {
+    fn local_execution_catalog_uses_the_shell_owners_scrubbed_environment() {
         let coding = super::StandardCodingTools::new(
-            "/bin/bash".into(),
+            std::env::current_exe().unwrap(),
             std::env::current_exe().unwrap(),
             vec![
                 ("DEEPSEEK_API_KEY".into(), "test-secret".into()),
                 ("LD_PRELOAD".into(), "test-loader".into()),
                 ("VISIBLE".into(), "yes".into()),
             ],
+            None,
         )
         .unwrap();
-        let environment = &coding.execution_programs["bash"].environment;
-        assert_eq!(
-            *environment,
-            coding.bash_tool.environment_with_bash_defaults()
-        );
+        let selector = if cfg!(windows) { "pwsh" } else { "bash" };
+        assert_eq!(coding.shell_tool.kind().name(), selector);
+        assert!(!coding.execution_programs.contains_key(if cfg!(windows) {
+            "bash"
+        } else {
+            "pwsh"
+        }));
+        let environment = &coding.execution_programs[selector].environment;
+        assert_eq!(*environment, coding.shell_tool.environment().to_vec());
         assert!(
             !environment
                 .iter()
@@ -2585,6 +2600,7 @@ mod tests {
             root.path().join("bash"),
             root.path().join("helper"),
             Vec::new(),
+            None,
         )
         .unwrap_err();
         assert!(
@@ -2863,7 +2879,7 @@ mod tests {
                 "rsi.agent.schedule",
                 REPEAT_REMINDER_FACTORY,
                 OUTPUT_READ_FACTORY,
-                BASH_TOOL_FACTORY,
+                SHELL_TOOL_FACTORY,
                 JOBS_TOOLS_FACTORY,
                 AGENT_TOOLS_FACTORY,
                 APPLY_PATCH_FACTORY,
@@ -2928,7 +2944,7 @@ mod tests {
                 .resolve(&rsi_meta::PluginId::from("rsi.tools.portable"))
                 .is_ok()
         );
-        for linux_only in [BASH_TOOL_FACTORY, APPLY_PATCH_FACTORY] {
+        for linux_only in [SHELL_TOOL_FACTORY, APPLY_PATCH_FACTORY] {
             assert!(
                 portable
                     .resolve(&rsi_meta::PluginId::from(linux_only))

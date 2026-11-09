@@ -3,6 +3,7 @@ use rsi_execution::{
     ExecutionLocation, ExecutionProvider, ExecutionTargetId, HostEpoch, ResolvedProgram,
 };
 use rsi_tools_protocol::ToolError;
+use std::sync::atomic::Ordering;
 #[path = "../../../../../fixtures/rsi/execution/process.rs"]
 mod target_fixture;
 

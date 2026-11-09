@@ -238,6 +238,7 @@ async fn run() -> Result<serde_json::Value> {
         std::fs::canonicalize("/bin/bash")?,
         std::env::current_exe()?.canonicalize()?,
         rsi::scrub_child_environment(std::env::vars_os()),
+        None,
     )?;
     let composition = StandardComposition::new(
         paths.clone(),
