@@ -119,8 +119,11 @@ The version-1 compact attempt stream contains unsigned minimal LEB128 time gaps,
 a byte tag, an index for delta tags, a minimal LEB128 payload length and payload.
 Tag 0 carries canonical normalized event JSON; tags 1/2/3 carry UTF-8 text,
 reasoning or Tool-argument deltas. Canonical padded base64 blocks split the raw
-stream at 147,453 bytes; only the final block may be shorter. Readers enforce
-the same upper bound on the final block. Raw suffix offsets must fall within the
+stream at 147,453 bytes; only the final block may be shorter. The event reader
+checks block lengths while decoding, using strict canonical padding and zero
+trailing bits. Durable admission performs this decoding once during grammar
+validation, without a separate decode/re-encode pass. Readers enforce the same
+upper bound on the final block. Raw suffix offsets must fall within the
 validated prefix; out-of-range programmer input is rejected before indexing.
 Readers preserve the original event index and elapsed time within its single settlement Fact.
 Payload extraction copies contiguous decoded slices across block boundaries;
