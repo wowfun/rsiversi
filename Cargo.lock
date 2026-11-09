@@ -7332,6 +7332,10 @@ dependencies = [
 name = "rsi-process-native"
 version = "0.0.1"
 dependencies = [
+ "getrandom 0.3.4",
+ "hex",
+ "serde_json",
+ "tempfile",
  "tokio",
  "windows-sys 0.61.2",
 ]

@@ -1,17 +1,20 @@
 //! `ConPTY` shares admission and Job settlement with native pipe processes.
 use super::{Service, Slot, io_error, native, settle_job, spawn_error};
+use native::{
+    PipeDirection::{Read, Write},
+    async_pipe,
+};
 use rsi_process::{
     MAXIMUM_PTY_IO_BYTES, ManagedPtyProcess, ProcessError, ProcessOutcome, PtyControl,
     PtyProcessSpec, PtyRead, PtySize, Result,
 };
 use std::{
-    fs::OpenOptions,
     sync::{Arc, Mutex, Weak, atomic::Ordering},
     time::Duration,
 };
 use tokio::{
     io::{AsyncReadExt, AsyncWriteExt},
-    net::windows::named_pipe::{NamedPipeServer, ServerOptions},
+    net::windows::named_pipe::NamedPipeServer,
     sync::{Notify, OwnedSemaphorePermit, mpsc},
 };
 use tokio_util::sync::CancellationToken;
@@ -157,8 +160,8 @@ impl Service {
             )
             .map_err(|_| ProcessError::Capacity)?;
         let job = Arc::new(native::Job::new().map_err(spawn_error)?);
-        let (input, client_input) = pipe(false).await.map_err(spawn_error)?;
-        let (output, client_output) = pipe(true).await.map_err(spawn_error)?;
+        let (input, client_input) = async_pipe(Write).await.map_err(spawn_error)?;
+        let (output, client_output) = async_pipe(Read).await.map_err(spawn_error)?;
         let (send, receive) = mpsc::channel(QUEUE);
         let drain = CancellationToken::new();
         let reader = tokio::spawn(drain_output(output, send, drain.clone()));
@@ -240,27 +243,6 @@ impl Service {
 #[cfg(test)]
 mod tests;
 
-async fn pipe(read: bool) -> std::io::Result<(NamedPipeServer, std::fs::File)> {
-    let mut random = [0; 16];
-    getrandom::fill(&mut random).map_err(|error| std::io::Error::other(error.to_string()))?;
-    let name = format!(
-        r"\\.\pipe\rsi-conpty-{}-{}",
-        std::process::id(),
-        hex::encode(random)
-    );
-    let server = ServerOptions::new()
-        .first_pipe_instance(true)
-        .reject_remote_clients(true)
-        .access_inbound(read)
-        .access_outbound(!read)
-        .in_buffer_size(u32::try_from(CHUNK).expect("fixed pipe buffer size"))
-        .out_buffer_size(u32::try_from(CHUNK).expect("fixed pipe buffer size"))
-        .create(&name)?;
-    let client = OpenOptions::new().read(!read).write(read).open(&name)?;
-    server.connect().await?;
-    Ok((server, client))
-}
-
 async fn drain_output(
     mut output: NamedPipeServer,
     send: mpsc::Sender<Vec<u8>>,
@@ -286,13 +268,11 @@ async fn drain_output(
 }
 async fn supervise(
     state: Arc<Control>,
-    child: native::ConsoleChild,
+    mut child: native::ConsoleChild,
     reader: tokio::task::JoinHandle<Result<bool>>,
 ) {
-    let status = tokio::task::spawn_blocking(move || child.wait())
-        .await
-        .map_err(|_| ProcessError::OutcomeUnknown)
-        .and_then(|v| v.map_err(io_error));
+    let status = child.wait().await.map_err(io_error);
+    drop(child);
     let terminated = state.drain.is_cancelled();
     state.stop.cancel();
     let settlement = settle_job(&state.job).await;

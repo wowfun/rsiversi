@@ -56,7 +56,7 @@ impl Service {
         self: &Arc<Self>,
         spec: ProcessSpec,
         capture_stdout: bool,
-    ) -> Result<(tokio::process::Child, Arc<Child>, Vec<u8>, Duration)> {
+    ) -> Result<(native::PipeChild, Arc<Child>, Vec<u8>, Duration)> {
         spec.validate()?;
         if spec
             .process
@@ -102,22 +102,17 @@ impl Service {
                 .map_err(|_| ProcessError::Capacity)?,
         );
         let job = Arc::new(native::Job::new().map_err(spawn_error)?);
-        let mut command = tokio::process::Command::new(&spec.process.program);
-        command
-            .args(&spec.process.arguments)
-            .current_dir(&spec.process.cwd)
-            .env_clear()
-            .envs(spec.environment)
-            .stdin(std::process::Stdio::piped())
-            .stdout(std::process::Stdio::piped())
-            .stderr(std::process::Stdio::piped())
-            .creation_flags(0x0800_0004)
-            .kill_on_drop(true);
-        let mut process = command.spawn().map_err(spawn_error)?;
-        let pid = process
-            .id()
-            .ok_or_else(|| ProcessError::Spawn("native child has no PID".into()))?;
-        let setup = job.admit_tokio_child(&process);
+        let mut process = native::PipeChild::spawn(native::PipeSpawn {
+            program: &spec.process.program,
+            arguments: &spec.process.arguments,
+            environment: &spec.environment,
+            cwd: &spec.process.cwd,
+            token: None,
+        })
+        .await
+        .map_err(spawn_error)?;
+        let pid = process.id();
+        let setup = process.resume(&job);
         if let Err(error) = setup {
             // Cleanup owns the still-suspended/assigned child independently of a
             // cancelled spawn waiter, and keeps its admission until actual reap.

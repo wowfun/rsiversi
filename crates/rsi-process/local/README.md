@@ -44,7 +44,9 @@ Windows pipe execution requires an explicit native executable. Batch-file paths
 are refused; callers must explicitly select `cmd.exe` to execute a batch script.
 It starts the executable suspended, assigns an
 unnamed non-inheritable Job Object before any user code can run, then resumes its
-validated primary thread. The Job forbids breakaway and uses kill-on-close.
+returned primary thread directly, without a system-thread snapshot. Pipe I/O
+uses the Tokio I/O driver and direct-child waiting uses Windows wait registration;
+neither occupies a Tokio blocking worker. The Job forbids breakaway and uses kill-on-close.
 Termination forcibly closes the whole Job; Windows advertises no Unix TERM or
 console-control delivery. Direct-child reaping, zero active Job members and pipe
 joins precede settlement. A naturally exited leader with surviving descendants

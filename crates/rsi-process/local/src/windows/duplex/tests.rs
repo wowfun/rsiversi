@@ -56,7 +56,7 @@ async fn duplex_acknowledgement_allows_the_woken_next_writer() {
                 let observed = match next.as_mut().poll(&mut Context::from_waker(Waker::noop())) {
                     Poll::Pending => 1,
                     Poll::Ready(Err(ProcessError::Capacity)) => 2,
-                    _ => 3,
+                    Poll::Ready(_) => 3,
                 };
                 self.observed.store(observed, Ordering::SeqCst);
             }
