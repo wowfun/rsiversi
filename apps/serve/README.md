@@ -1,5 +1,9 @@
 # rsi-serve
 
+Application Workspace Session moves use Navigation's shared native account order.
+The caller's actual location and Session protection authority cover the commit;
+the bridge owns only the DSH error and projection mapping.
+
 The selected application's Tool listener can prepare and wrap a native Tool on a
 dedicated authenticated loopback WebSocket. One invocation owns the connection.
 Before the durable intent the application may request one approval with its

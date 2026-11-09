@@ -182,15 +182,18 @@ pub async fn assert_activity_store_contract(store: &dyn SessionStore, template: 
             .session_order_seed(&ExecutionLocations::all(), Some(&local))
             .await
             .unwrap(),
-        StoreOrderSeed::from_members(vec![(a.clone(), local.clone(), 50), (b, local.clone(), 21)])
-            .unwrap()
+        StoreOrderSeed::from_members(vec![
+            (a.clone(), local.clone(), 10, 50),
+            (b, local.clone(), 20, 21)
+        ])
+        .unwrap()
     );
     assert_eq!(
         store
             .session_order_seed(&ExecutionLocations::all(), Some(&remote))
             .await
             .unwrap(),
-        StoreOrderSeed::from_members(vec![(remote_id, remote.clone(), 31)]).unwrap()
+        StoreOrderSeed::from_members(vec![(remote_id, remote.clone(), 30, 31)]).unwrap()
     );
     new_human(store, &a).await;
     let final_page = store

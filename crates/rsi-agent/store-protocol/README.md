@@ -1,5 +1,10 @@
 # rsi-agent-store-protocol
 
+Complete order membership includes immutable creation time and current activity
+from the same Store snapshot. Shared Workspace account order uses creation time;
+activity-based views retain the separate activity value. Neither requires loading
+transcript bodies or a second timestamp record.
+
 `session_summary` reads one durable Session's Header, activity timestamp and
 Fact/control watermarks from one metadata snapshot. It returns the same
 `StoreRecentSession` value used by recent listings, without loading transcript

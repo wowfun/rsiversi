@@ -7,6 +7,10 @@ use rsi_navigation_api::{
 
 impl Navigation {
     /// Reads complete manual-order membership from one Store snapshot.
+    ///
+    /// # Panics
+    /// Panics if the Store violates its bounded membership contract or an internal
+    /// account projection fails to assign an admitted member a position.
     pub fn order_seed(
         self: &Arc<Self>,
         origin: &rsi_api_protocol::CallOrigin,
@@ -30,6 +34,7 @@ impl Navigation {
                 {
                     StoreOrderSeed::TooLarge => OrderMembership::TooLarge,
                     StoreOrderSeed::Available { members, groups } => {
+                        let mut account_members: Vec<Vec<(usize, u64)>> = Vec::new();
                         let mut selected = Vec::new();
                         let mut leases = Vec::new();
                         let mut remap = std::collections::BTreeMap::new();
@@ -53,10 +58,14 @@ impl Navigation {
                                         .clone(),
                                 );
                                 remap.insert(member.group, group);
+                                account_members.push(Vec::new());
                                 group
                             };
+                            account_members[usize::from(group)]
+                                .push((selected.len(), member.created_at_ms));
                             let metadata = document.records.get(&member.session);
                             selected.push(OrderMember {
+                                account_position: 0,
                                 last_activity_ms: member.last_activity_ms.to_string(),
                                 group,
                                 session: member.session,
@@ -68,6 +77,29 @@ impl Navigation {
                             });
                         }
                         super::finish_scope(&origin, &leases)?;
+                        let mut positions = std::collections::HashMap::new();
+                        for (group, coordinates) in visible_groups.iter().enumerate() {
+                            let id =
+                                rsi_workspace_protocol::WorkspaceId::from_coordinates(coordinates);
+                            let ids = super::workspace_account::account_order(
+                                document
+                                    .workspace_orders
+                                    .get(&id)
+                                    .map_or(&[], Vec::as_slice),
+                                account_members[group]
+                                    .iter()
+                                    .map(|(index, created)| (&selected[*index].session, *created)),
+                            );
+                            positions.extend(ids.into_iter().enumerate().map(|(position, id)| {
+                                (
+                                    id,
+                                    u16::try_from(position).expect("bounded order membership"),
+                                )
+                            }));
+                        }
+                        for member in &mut selected {
+                            member.account_position = positions[&member.session];
+                        }
                         OrderMembership::Available {
                             groups: visible_groups,
                             members: selected,

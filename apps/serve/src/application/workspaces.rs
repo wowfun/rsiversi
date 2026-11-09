@@ -28,6 +28,11 @@ enum Operation {
         before: Option<WorkspaceId>,
     },
     Membership,
+    InsertSessionBefore {
+        id: WorkspaceId,
+        session: String,
+        before: Option<String>,
+    },
     SetPin {
         session: rsi_agent_session_protocol::SessionId,
         pinned: bool,
@@ -93,17 +98,14 @@ impl Sessions {
                     Err(error) => return Err(remote(error)),
                 }
             }
-            Operation::Membership => {
-                let seed = self
-                    .navigation
-                    .order_seed(&origin, OrderScope::All)
-                    .map_err(remote)?
-                    .await
-                    .map_err(remote)?;
-                let OrderMembership::Available { groups, members } = seed.membership else {
-                    return Err(Error::Capacity);
-                };
-                json!({"groups":groups.iter().map(WorkspaceId::from_coordinates).collect::<Vec<_>>(),"members":members})
+            Operation::Membership => self.workspace_membership(&origin).await?,
+            Operation::InsertSessionBefore {
+                id,
+                session,
+                before,
+            } => {
+                self.move_workspace_session(origin, id, session, before)
+                    .await?
             }
             Operation::SetPin { session, pinned } => {
                 self.set_workspace_pin(origin, session, pinned).await?
@@ -126,23 +128,7 @@ impl Sessions {
                     .await?
             }
             Operation::Drafts { after } => self.workspace_drafts(&origin, after.as_ref()).await?,
-            Operation::Default => {
-                let spec = rsi_workspace_default_api::operation();
-                let invocation = self.dispatch.admit(&spec.call(), origin).map_err(remote)?;
-                let bytes = self
-                    .dispatch
-                    .input_budget(spec.class)
-                    .copy(b"{}")
-                    .map_err(remote)?;
-                let rsi_api_protocol::ApiOutput::Reply(message) =
-                    invocation.invoke(bytes).await.map_err(remote)?
-                else {
-                    return Err(Error::Protocol);
-                };
-                let selected: Option<WorkspaceRecord> =
-                    serde_json::from_slice(message.json.as_bytes()).map_err(|_| Error::Protocol)?;
-                selected.as_ref().map_or(Value::Null, record)
-            }
+            Operation::Default => self.default_workspace(origin).await?,
             Operation::Rename { id, title } => record(
                 &self
                     .workspaces
@@ -173,6 +159,70 @@ impl Sessions {
             .caller(&input.request)
             .map_err(|_| Error::Cancelled)?;
         Ok(value)
+    }
+
+    async fn workspace_membership(&self, origin: &rsi_api_protocol::CallOrigin) -> Result<Value> {
+        let seed = self
+            .navigation
+            .order_seed(origin, OrderScope::All)
+            .map_err(remote)?
+            .await
+            .map_err(remote)?;
+        let OrderMembership::Available { groups, members } = seed.membership else {
+            return Err(Error::Capacity);
+        };
+        Ok(
+            json!({"groups":groups.iter().map(WorkspaceId::from_coordinates).collect::<Vec<_>>(),"members":members}),
+        )
+    }
+
+    async fn move_workspace_session(
+        &self,
+        origin: rsi_api_protocol::CallOrigin,
+        id: WorkspaceId,
+        session: String,
+        before: Option<String>,
+    ) -> Result<Value> {
+        let parsed = SessionId::new(session).and_then(|session| {
+            before
+                .map(SessionId::new)
+                .transpose()
+                .map(|before| (session, before))
+        });
+        if let Ok((session, before)) = parsed {
+            use rsi_navigation::WorkspaceMoveOutcome;
+            let outcome = self
+                .navigation
+                .insert_workspace_session_before(origin, id, session, before)
+                .map_err(remote)?
+                .await
+                .map_err(remote)?;
+            Ok(json!({"status":match outcome {
+                WorkspaceMoveOutcome::Applied => "applied",
+                WorkspaceMoveOutcome::UnknownWorkspace => "unknown",
+                WorkspaceMoveOutcome::InvalidMember => "invalid_member",
+            }}))
+        } else {
+            Ok(json!({"status":"invalid_member"}))
+        }
+    }
+
+    async fn default_workspace(&self, origin: rsi_api_protocol::CallOrigin) -> Result<Value> {
+        let spec = rsi_workspace_default_api::operation();
+        let invocation = self.dispatch.admit(&spec.call(), origin).map_err(remote)?;
+        let bytes = self
+            .dispatch
+            .input_budget(spec.class)
+            .copy(b"{}")
+            .map_err(remote)?;
+        let rsi_api_protocol::ApiOutput::Reply(message) =
+            invocation.invoke(bytes).await.map_err(remote)?
+        else {
+            return Err(Error::Protocol);
+        };
+        let selected: Option<WorkspaceRecord> =
+            serde_json::from_slice(message.json.as_bytes()).map_err(|_| Error::Protocol)?;
+        Ok(selected.as_ref().map_or(Value::Null, record))
     }
 
     async fn workspace_drafts(

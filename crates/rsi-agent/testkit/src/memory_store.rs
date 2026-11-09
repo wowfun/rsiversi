@@ -176,6 +176,7 @@ impl SessionStore for MemoryStore {
                     (
                         id.clone(),
                         coordinates,
+                        state.sessions[&id].header.created_at_ms(),
                         state.sessions[&id].last_activity_ms,
                     )
                 })

@@ -1,6 +1,20 @@
 # rsi-navigation
 
-Purge cleanup removes only the completed operation's selected Session metadata.
+Workspace Session accounts have a shared Host order, independent of activity,
+pin/archive partitions and device-local view ordering. New durable members precede
+previously ordered members in descending creation-time/identity order; activity
+never moves them. An explicit move changes only the selected Workspace's ordered
+identity references in the existing metadata document. Unknown or foreign members
+and anchors are rejected; self and already-positioned moves do not write or advance
+the metadata revision. Durable membership remains owned by Session Store, so reads
+filter removed identities and mutations prune only their selected account.
+The document retains at most 8,192 order references within its existing 8 MiB bound.
+An absent order map means there are no explicit moves; empty maps are not stored.
+The ordinary Navigation writer owns commit, publication and draining after waiter
+loss. No JS registry, duplicated Session payload or separate order journal is used.
+
+Purge cleanup removes only the completed operation's selected Session metadata
+and account-order references.
 Status is read-only; cleanup is idempotent and preserves unrelated records. Writer
 capacity refusal leaves the document unchanged and permits explicit retry. A
 pending durable purge cannot authorize navigation removal.
@@ -129,7 +143,8 @@ protection scope is omitted. Storage failure cannot be presented as a hidden row
 
 Completed Session purge operations have an independent, idempotent navigation
 cleanup receipt. Cleanup resolves the original completed Store selection and
-removes only those metadata records, preserving all unselected records. Failure
+removes only those metadata records and account-order references, preserving all
+unselected records. Failure
 leaves canonical purge complete and is retried through the same operation status;
 absence of this owner is reported as unavailable rather than successful cleanup.
 

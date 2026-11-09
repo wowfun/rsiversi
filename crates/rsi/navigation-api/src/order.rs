@@ -30,6 +30,8 @@ impl OrderScope {
 #[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct OrderMember {
+    /// Zero-based shared Workspace account position within the visible group.
+    pub account_position: u16,
     /// Lossless initial activity rank, independent of later live changes.
     pub last_activity_ms: String,
     /// Index of the exact execution coordinate group.
@@ -92,7 +94,18 @@ impl OrderSeed {
     fn validate_membership(&self) -> Result<()> {
         let revision_bound = revision(&self.metadata_revision)?;
         if let OrderMembership::Available { members, .. } = &self.membership {
+            let mut positions =
+                std::collections::BTreeMap::<_, std::collections::BTreeSet<_>>::new();
             for member in members {
+                if !positions
+                    .entry(member.group)
+                    .or_default()
+                    .insert(member.account_position)
+                {
+                    return Err(ApiError::Invalid(
+                        "duplicate Workspace account position".into(),
+                    ));
+                }
                 if let Some(rank) = &member.partition_revision
                     && (!(member.pinned || member.archived)
                         || !(1..=revision_bound).contains(&revision(rank)?))
@@ -104,6 +117,16 @@ impl OrderSeed {
                 if revision(&member.last_activity_ms)? == 0 {
                     return Err(ApiError::Invalid("invalid order member activity".into()));
                 }
+            }
+            if positions.values().any(|group| {
+                group
+                    .iter()
+                    .copied()
+                    .ne(0..u16::try_from(group.len()).unwrap_or(u16::MAX))
+            }) {
+                return Err(ApiError::Invalid(
+                    "non-contiguous Workspace account positions".into(),
+                ));
             }
         }
         if let OrderMembership::Available { members, groups } = &self.membership
@@ -260,6 +283,7 @@ mod tests {
                     .unwrap(),
                 ],
                 members: vec![OrderMember {
+                    account_position: 0,
                     last_activity_ms: "1".into(),
                     group: 0,
                     session: SessionId::new("one").unwrap(),
@@ -279,11 +303,27 @@ mod tests {
         assert!(matches!(seed.bounded(), Err(ApiError::Invalid(_))));
     }
     #[test]
+    fn remote_account_positions_must_be_complete_and_unique_per_group() {
+        let mut value = seed();
+        if let OrderMembership::Available { members, .. } = &mut value.membership {
+            members[0].account_position = 1;
+        }
+        assert!(value.validate().is_err());
+        let mut value = seed();
+        if let OrderMembership::Available { members, .. } = &mut value.membership {
+            let mut other = members[0].clone();
+            other.session = SessionId::new("two").unwrap();
+            members.push(other);
+        }
+        assert!(value.validate().is_err());
+    }
+    #[test]
     fn valid_membership_with_an_oversized_wire_envelope_is_explicitly_too_large() {
         let mut seed = seed();
         if let OrderMembership::Available { members, .. } = &mut seed.membership {
             *members = (0..1024)
                 .map(|i| OrderMember {
+                    account_position: i,
                     last_activity_ms: "1".into(),
                     group: 0,
                     session: SessionId::new(format!("{i:04}{}", "x".repeat(200))).unwrap(),
