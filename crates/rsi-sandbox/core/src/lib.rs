@@ -26,9 +26,9 @@ pub const MAXIMUM_SANDBOX_WRAPPER_BYTES: usize = 16 * 1024 * 1024;
 #[derive(Clone, Copy, Debug, Eq, PartialEq, Serialize, Deserialize)]
 #[serde(rename_all = "kebab-case")]
 pub enum SandboxMode {
-    /// Read-only host filesystem view.
+    /// Requests read-only file effects; the stamp identifies the native boundary.
     ReadOnly,
-    /// Read-only host view with one writable canonical workspace.
+    /// Requests write access to one workspace; the stamp identifies the boundary.
     WorkspaceWrite,
     /// Explicit bypass without confinement.
     DangerFullAccess,
@@ -89,6 +89,8 @@ pub enum SandboxBackend {
         /// SHA-256 of the exact staged runner bytes.
         sha256: String,
     },
+    /// Native Low-integrity write-restricted token and Windows ACL grants.
+    WindowsAcl,
     /// Explicit danger-full-access bypass.
     Unconfined,
 }
@@ -103,6 +105,10 @@ pub enum SandboxFileSystem {
     ReadOnly,
     /// Host paths are read-only except for the canonical workspace.
     WorkspaceWrite,
+    /// Windows ACL write restriction with existing ambient Low-object grants.
+    WindowsAclReadOnly,
+    /// Windows ACL restriction plus workspace and private-directory grants.
+    WindowsAclWorkspaceWrite,
 }
 
 /// Durable scratch-directory evidence.
@@ -113,6 +119,8 @@ pub enum SandboxScratch {
     Host,
     /// The child sees a private tmpfs mounted at `/tmp`.
     PrivateTmp,
+    /// An owned directory selected through TEMP/TMP, without a private namespace.
+    PrivateDirectory,
 }
 
 /// Durable network enforcement evidence.
@@ -206,10 +214,16 @@ impl EnforcementStamp {
                 "sandbox backend digest must be lowercase SHA-256 hex".into(),
             ));
         }
-        let expected = match self.requested {
-            SandboxMode::ReadOnly => SandboxFileSystem::ReadOnly,
-            SandboxMode::WorkspaceWrite => SandboxFileSystem::WorkspaceWrite,
-            SandboxMode::DangerFullAccess => SandboxFileSystem::Unconfined,
+        let expected = match (&self.backend, self.requested) {
+            (SandboxBackend::WindowsAcl, SandboxMode::ReadOnly) => {
+                SandboxFileSystem::WindowsAclReadOnly
+            }
+            (SandboxBackend::WindowsAcl, SandboxMode::WorkspaceWrite) => {
+                SandboxFileSystem::WindowsAclWorkspaceWrite
+            }
+            (_, SandboxMode::ReadOnly) => SandboxFileSystem::ReadOnly,
+            (_, SandboxMode::WorkspaceWrite) => SandboxFileSystem::WorkspaceWrite,
+            (_, SandboxMode::DangerFullAccess) => SandboxFileSystem::Unconfined,
         };
         if self.filesystem != expected {
             return Err(SandboxError::InvalidInput(
@@ -238,6 +252,11 @@ impl EnforcementStamp {
                     && self.scratch == SandboxScratch::Host
                     && self.network == SandboxNetwork::Host
             }
+            SandboxBackend::WindowsAcl => {
+                self.network == SandboxNetwork::Host
+                    && self.scratch == SandboxScratch::PrivateDirectory
+                    && self.requested != SandboxMode::DangerFullAccess
+            }
         };
         if !semantics_are_valid {
             return Err(SandboxError::InvalidInput(
@@ -255,16 +274,57 @@ fn is_lexically_normal_absolute(path: &Path) -> bool {
 
 /// Opaque native resources that must outlive execution of a confined plan.
 #[derive(Clone, Debug)]
-pub struct ProcessPlanOwner(std::sync::Arc<dyn fmt::Debug + Send + Sync>);
+pub struct ProcessPlanOwner {
+    retained: std::sync::Arc<dyn fmt::Debug + Send + Sync>,
+    #[cfg(windows)]
+    launch: Option<std::sync::Arc<WindowsLaunch>>,
+}
+#[cfg(windows)]
+#[derive(Debug)]
+struct WindowsLaunch {
+    token: std::os::windows::io::OwnedHandle,
+    temporary: PathBuf,
+}
 impl ProcessPlanOwner {
     /// Retains provider-owned resources without exposing native operations in the contract.
     pub fn new(owner: impl fmt::Debug + Send + Sync + 'static) -> Self {
-        Self(std::sync::Arc::new(owner))
+        Self {
+            retained: std::sync::Arc::new(owner),
+            #[cfg(windows)]
+            launch: None,
+        }
+    }
+    /// Adds a lifetime pin without hiding native launch resources.
+    #[must_use]
+    pub fn retain(self, owner: impl fmt::Debug + Send + Sync + 'static) -> Self {
+        Self {
+            retained: std::sync::Arc::new((self.retained, owner)),
+            #[cfg(windows)]
+            launch: self.launch,
+        }
+    }
+    /// Retains an issuer-prepared primary token, grants and private scratch path.
+    #[cfg(windows)]
+    pub fn windows(
+        owner: impl fmt::Debug + Send + Sync + 'static,
+        token: std::os::windows::io::OwnedHandle,
+        temporary: PathBuf,
+    ) -> Self {
+        Self {
+            retained: std::sync::Arc::new(owner),
+            launch: Some(std::sync::Arc::new(WindowsLaunch { token, temporary })),
+        }
+    }
+    /// Borrows the exact primary token while this plan remains retained.
+    #[cfg(windows)]
+    pub fn windows_token(&self) -> Option<std::os::windows::io::BorrowedHandle<'_>> {
+        use std::os::windows::io::AsHandle;
+        self.launch.as_ref().map(|launch| launch.token.as_handle())
     }
 }
 impl PartialEq for ProcessPlanOwner {
     fn eq(&self, other: &Self) -> bool {
-        std::sync::Arc::ptr_eq(&self.0, &other.0)
+        std::sync::Arc::ptr_eq(&self.retained, &other.retained)
     }
 }
 impl Eq for ProcessPlanOwner {}
@@ -286,6 +346,39 @@ pub struct ConfinedProcess {
     pub stamp: EnforcementStamp,
 }
 
+impl ConfinedProcess {
+    /// Applies native Sandbox scratch selection; returns whether it was selected.
+    #[cfg(windows)]
+    pub fn prepare_environment(&self, environment: &mut Vec<(OsString, OsString)>) -> bool {
+        let Some(temporary) = self
+            .owner
+            .as_ref()
+            .and_then(|owner| owner.launch.as_ref())
+            .map(|launch| &launch.temporary)
+        else {
+            return false;
+        };
+        environment.retain(|(name, _)| {
+            !name.eq_ignore_ascii_case("TEMP") && !name.eq_ignore_ascii_case("TMP")
+        });
+        environment.extend([
+            ("TEMP".into(), temporary.as_os_str().to_owned()),
+            ("TMP".into(), temporary.as_os_str().to_owned()),
+        ]);
+        true
+    }
+
+    /// Other backends express scratch selection in their exact wrapper arguments.
+    #[cfg(not(windows))]
+    #[expect(
+        clippy::unused_self,
+        reason = "The common preparation API has no environment edits on this platform."
+    )]
+    pub fn prepare_environment(&self, _: &mut Vec<(OsString, OsString)>) -> bool {
+        false
+    }
+}
+
 /// Closed sandbox failure taxonomy.
 #[derive(Clone, Debug, Error, Eq, PartialEq)]
 pub enum SandboxError {
@@ -304,6 +397,9 @@ pub enum SandboxError {
     /// Feature probe failed unexpectedly.
     #[error("sandbox probe failed: {0}")]
     Probe(String),
+    /// Native token or ACL preparation failed with an operating-system diagnostic.
+    #[error("native sandbox preparation failed: {0}")]
+    Native(String),
 }
 
 /// Sandbox result.
@@ -498,6 +594,114 @@ mod tests {
             .validate()
             .is_ok()
         );
+    }
+
+    #[test]
+    fn windows_acl_evidence_does_not_claim_mount_or_network_isolation() {
+        for (mode, filesystem) in [
+            (SandboxMode::ReadOnly, SandboxFileSystem::WindowsAclReadOnly),
+            (
+                SandboxMode::WorkspaceWrite,
+                SandboxFileSystem::WindowsAclWorkspaceWrite,
+            ),
+        ] {
+            let valid = stamp(
+                mode,
+                SandboxBackend::WindowsAcl,
+                filesystem,
+                SandboxScratch::PrivateDirectory,
+                SandboxNetwork::Host,
+            );
+            let encoded = serde_json::to_value(&valid).unwrap();
+            assert_eq!(
+                serde_json::from_value::<EnforcementStamp>(encoded.clone()).unwrap(),
+                valid
+            );
+            for (field, value) in [
+                ("filesystem", "read_only"),
+                ("filesystem", "workspace_write"),
+                ("scratch", "host"),
+                ("scratch", "private_tmp"),
+                ("network", "isolated"),
+                ("requested", "danger-full-access"),
+            ] {
+                let mut invalid = encoded.clone();
+                invalid[field] = value.into();
+                assert!(
+                    serde_json::from_value::<EnforcementStamp>(invalid).is_err(),
+                    "{mode:?}: {field}={value}"
+                );
+            }
+        }
+    }
+
+    #[test]
+    #[cfg(windows)]
+    fn lifetime_pins_preserve_the_native_handle_and_exact_private_environment() {
+        use std::{
+            os::windows::io::AsRawHandle,
+            sync::{
+                Arc,
+                atomic::{AtomicUsize, Ordering},
+            },
+        };
+        #[derive(Debug)]
+        struct Released(Arc<AtomicUsize>);
+        impl Drop for Released {
+            fn drop(&mut self) {
+                self.0.fetch_add(1, Ordering::SeqCst);
+            }
+        }
+        // Handle ownership only: no native token creation or host policy edits.
+        let handle: std::os::windows::io::OwnedHandle =
+            std::fs::File::open(std::env::current_exe().unwrap())
+                .unwrap()
+                .into();
+        let raw = handle.as_raw_handle();
+        let released = Arc::new(AtomicUsize::new(0));
+        let owner = ProcessPlanOwner::windows(
+            Released(released.clone()),
+            handle,
+            r"C:\private-scratch".into(),
+        );
+        let original = owner.clone();
+        let pinned = owner.retain(Released(released.clone()));
+        assert_eq!(pinned.windows_token().unwrap().as_raw_handle(), raw);
+        let mut plan = ConfinedProcess {
+            owner: Some(pinned),
+            stdio: ProcessStdio::Pipes,
+            program: r"C:\program.exe".into(),
+            cwd: r"C:\workspace".into(),
+            arguments: vec![],
+            stamp: stamp(
+                SandboxMode::ReadOnly,
+                SandboxBackend::WindowsAcl,
+                SandboxFileSystem::WindowsAclReadOnly,
+                SandboxScratch::PrivateDirectory,
+                SandboxNetwork::Host,
+            ),
+        };
+        let mut environment = vec![
+            ("Temp".into(), "old".into()),
+            ("tMp".into(), "old".into()),
+            ("KEEP".into(), "value".into()),
+        ];
+        assert!(plan.prepare_environment(&mut environment));
+        assert_eq!(
+            environment,
+            vec![
+                ("KEEP".into(), "value".into()),
+                ("TEMP".into(), r"C:\private-scratch".into()),
+                ("TMP".into(), r"C:\private-scratch".into())
+            ]
+        );
+        drop(original);
+        assert_eq!(released.load(Ordering::SeqCst), 0);
+        drop(plan.owner.take());
+        assert_eq!(released.load(Ordering::SeqCst), 2);
+        let frozen = environment.clone();
+        assert!(!plan.prepare_environment(&mut environment));
+        assert_eq!(environment, frozen);
     }
 
     #[test]

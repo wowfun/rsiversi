@@ -162,7 +162,7 @@ impl ExecutionBackend for NativeBackend {
     async fn prepare(
         &self,
         request: ProcessRequest,
-        environment: Vec<(std::ffi::OsString, std::ffi::OsString)>,
+        mut environment: Vec<(std::ffi::OsString, std::ffi::OsString)>,
     ) -> Result<BackendPlan> {
         let process = self
             .capabilities
@@ -171,12 +171,15 @@ impl ExecutionBackend for NativeBackend {
             .await
             .map_err(sandbox_error)?;
         let stamp = process.stamp.clone();
+        if process.prepare_environment(&mut environment) {
+            rsi_process::validate_environment(&environment)?;
+        }
         Ok(BackendPlan::new(process, stamp, environment))
     }
     async fn prepare_source_reader(
         &self,
         request: ProcessRequest,
-        environment: Vec<(std::ffi::OsString, std::ffi::OsString)>,
+        mut environment: Vec<(std::ffi::OsString, std::ffi::OsString)>,
     ) -> Result<BackendPlan> {
         let process = self
             .capabilities
@@ -185,6 +188,9 @@ impl ExecutionBackend for NativeBackend {
             .await
             .map_err(sandbox_error)?;
         let stamp = process.stamp.clone();
+        if process.prepare_environment(&mut environment) {
+            rsi_process::validate_environment(&environment)?;
+        }
         Ok(BackendPlan::new(process, stamp, environment))
     }
     async fn spawn(

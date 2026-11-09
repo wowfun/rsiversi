@@ -9,6 +9,17 @@ confined process plans, enforcement stamps, and the Local service contract. It
 contains no feature probing, process spawning, filesystem mutation, or plugin
 lifecycle.
 
+`ProcessPlanOwner` retains native resources through child settlement. A Windows
+issuer may attach an owned primary token and its private temporary
+directory; cloning a plan shares those resources. Adding an execution lifetime
+pin preserves the launch resources. Token preparation and directory grants
+remain with the issuer, not this contract.
+`ConfinedProcess::prepare_environment` applies a selected private directory to
+both Windows `TEMP` and `TMP` before the caller freezes its complete environment.
+It reads no ambient environment and leaves unrelated entries untouched.
+Its return value identifies whether a selection was applied, so callers only
+recheck environment bounds when Sandbox changed the already validated input.
+
 `WorkspaceReadRequest` carries the exact orchestrator-selected paths and mode.
 Its scope is process-local, has no deserializer, and exposes immutable values
 plus an opaque provider generation. Providers allocate one generation per service
@@ -23,6 +34,18 @@ source-reader view requires ReadOnly filesystem, Host scratch and Isolated
 network; no write-mode or PTY source-reader plan is supported. Landlock evidence is restricted, uses host scratch, and currently
 retains host network. Unsupported or contradictory combinations are rejected
 when durable data is decoded or revalidated.
+
+Windows ACL evidence uses `WindowsAclReadOnly` or `WindowsAclWorkspaceWrite`,
+not the read-only mount evidence. Both use a Low-integrity write-restricted
+token containing the logon SID and Everyone, required by Windows initialization
+and PowerShell's crypto runtime. Existing writable Low-integrity objects whose
+ACL admits those ambient SIDs remain writable. Workspace-write additionally
+carries its workspace capability. Both restricted modes carry a distinct
+private-directory capability and use PrivateDirectory scratch; read-only never
+carries a workspace write capability. Writable private scratch lets PowerShell
+evaluate its real AppLocker policy instead of treating failed temporary policy
+probes as language restrictions. Network remains Host. PrivateDirectory means an owned
+directory selected through TEMP/TMP, not a separate filesystem namespace.
 The stamped workspace is also revalidated as an absolute, lexically normalized
 path: relative paths and paths containing `.` or `..` components are rejected
 without requiring the durable path to exist or re-canonicalizing the live

@@ -12,8 +12,10 @@ activation may publish an unconfined service for holders that use only
 restricted backend passes its behavior probe. The standard product selects the
 required policy on Linux whenever it links effect-bearing coding Tools, so those Tools
 cannot become ready with enforcement deferred until their first call.
-Windows standard composition supplies no Linux backend candidates and supports
-explicit unconfined pipe plans. Restricted process policies remain unavailable.
+Windows uses its native ACL backend when no external wrapper is selected.
+Restricted pipe plans carry a primary token; explicit full-access plans remain
+unconfined. Windows ACL evidence describes its native partial write boundary
+separately from Linux mount evidence, as defined in the [core contract](core/README.md).
 
 Restricted process calls fail closed without a selected backend. The
 `danger-full-access` mode is an explicit holder bypass and is stamped as
@@ -76,8 +78,8 @@ PTY terminal sessions are live resources, not durable enforcement stamps.
 
 Windows also permits explicit `DangerFullAccess` PTY requests. The returned
 plan preserves PTY intent and reports unconfined filesystem and host network
-access. ReadOnly and WorkspaceWrite continue to fail closed when no enforcing
-backend exists; no restricted request is converted into full access.
+access. Restricted Windows PTY requests remain unsupported; the ACL backend
+accepts pipes. No restricted request is converted into full access.
 
 Linux PTY plans pin the workspace directory when confined and carry that handle
 into the child before Bubblewrap resolves its bind-fd source. Replacing the

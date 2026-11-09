@@ -1,4 +1,4 @@
-//! Local Linux sandbox backend selection and process planning.
+//! Local sandbox backend selection and process planning.
 
 #![deny(unsafe_code)]
 #![warn(missing_docs)]
@@ -21,6 +21,9 @@ use std::sync::Arc;
 use std::time::Duration;
 
 mod isolated;
+#[cfg(windows)]
+#[allow(unsafe_code)]
+mod windows;
 
 const PROBE_TIMEOUT: Duration = Duration::from_secs(2);
 const PROBE_SUCCESS_CODE: i32 = 23;
@@ -355,6 +358,10 @@ impl Service {
                 stamp: stamp(request.mode, None, workspace, SandboxNetwork::Host),
             });
         }
+        #[cfg(windows)]
+        if self.backend.is_none() && !source_reader {
+            return windows::confine(request, program, cwd, workspace);
+        }
         let backend = self
             .backend
             .clone()
@@ -598,7 +605,7 @@ impl PluginFactory for SandboxLocalFactory {
                 }
             }
         }
-        if self.require_restricted_backend && selected.is_none() {
+        if self.require_restricted_backend && selected.is_none() && !cfg!(windows) {
             let reason = if probe_budget.exhausted() {
                 let skipped = configured_candidates.saturating_sub(considered_candidates);
                 match skipped {

@@ -6,7 +6,8 @@ providers. Composition supplies an exact finite program catalog; each program
 has an absolute executable path and a complete child environment. Missing
 selectors fail closed. Distinct selectors may resolve to the same executable with
 different environments; the opaque resolved program keeps that selection intact. No ambient PATH, HOME or environment lookup occurs.
-Preparation freezes that program's environment into the opaque plan. Spawn
+Preparation applies Sandbox-owned temporary-directory selection to that
+program's environment, then freezes it into the opaque plan. Spawn
 rejects environment substitution before backend I/O. Sandbox preparation capacity
 is preserved as `ProcessError::Capacity`; other preparation failures retain
 their typed Sandbox cause under the [Process error contract](../../rsi-process/core/README.md).

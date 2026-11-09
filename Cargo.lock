@@ -7450,6 +7450,7 @@ dependencies = [
  "rsi-meta-contract",
  "rsi-workspace-path",
  "serde",
+ "serde_json",
  "thiserror 2.0.20",
 ]
 
@@ -7462,12 +7463,14 @@ dependencies = [
  "libc",
  "rsi-meta",
  "rsi-sandbox",
+ "rsi-workspace-path",
  "rustix 1.1.4",
  "serde",
  "serde_json",
  "sha2",
  "tempfile",
  "tokio",
+ "windows-sys 0.61.2",
 ]
 
 [[package]]

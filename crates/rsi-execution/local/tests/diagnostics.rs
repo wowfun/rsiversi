@@ -2,7 +2,7 @@ use rsi_execution::{ExecutionAdmission, ExecutionOperation};
 use rsi_execution_local::NativeCapabilities;
 use rsi_meta::{ResolvedFactory, Runtime, UpdateMode};
 use rsi_process::{DuplexProcessContract, ProcessContract, PtyProcessContract};
-use rsi_sandbox::{SandboxContract, SandboxError, SandboxMode};
+use rsi_sandbox::{Sandbox, SandboxError, SandboxMode};
 use rsi_tools_protocol::{
     ToolError, ToolExecution, ToolExecutionExtensions, ToolExecutionPolicy, ToolStart,
 };
@@ -20,22 +20,28 @@ impl ExecutionAdmission for Admission {
     }
 }
 
+#[derive(Debug)]
+struct UnavailableSandbox;
+#[async_trait::async_trait]
+impl Sandbox for UnavailableSandbox {
+    async fn workspace_read(
+        &self,
+        request: rsi_sandbox::WorkspaceReadRequest,
+    ) -> rsi_sandbox::Result<rsi_sandbox::WorkspaceReadScope> {
+        Err(SandboxError::Unsupported(request.mode))
+    }
+
+    async fn confine(
+        &self,
+        request: rsi_sandbox::ProcessRequest,
+    ) -> rsi_sandbox::Result<rsi_sandbox::ConfinedProcess> {
+        Err(SandboxError::Unsupported(request.mode))
+    }
+}
+
 #[tokio::test]
 async fn native_preparation_reports_the_same_sandbox_cause_with_or_without_a_lease() {
     let runtime = Runtime::default();
-    let sandbox_fiber = runtime
-        .root()
-        .apply(
-            ResolvedFactory::linked(
-                "sandbox",
-                "test",
-                UpdateMode::Replayable,
-                Arc::new(rsi_sandbox_local::SandboxLocalFactory::default()),
-            ),
-            serde_json::json!({"bubblewrap":[],"landlock":[]}),
-        )
-        .await
-        .unwrap();
     let process_fiber = runtime
         .root()
         .apply(
@@ -49,7 +55,7 @@ async fn native_preparation_reports_the_same_sandbox_cause_with_or_without_a_lea
         )
         .await
         .unwrap();
-    let sandbox = runtime.root().lookup_local::<SandboxContract>().unwrap();
+    let sandbox: Arc<dyn Sandbox> = Arc::new(UnavailableSandbox);
     let provider = rsi_execution_local::provider(
         rsi_execution::HostEpoch::from_bytes([17; 16]),
         NativeCapabilities {
@@ -109,5 +115,4 @@ async fn native_preparation_reports_the_same_sandbox_cause_with_or_without_a_lea
     drop(provider);
     drop(sandbox);
     assert!(process_fiber.dispose().await.is_clean());
-    assert!(sandbox_fiber.dispose().await.is_clean());
 }

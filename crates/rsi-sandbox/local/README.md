@@ -1,5 +1,28 @@
 # rsi-sandbox-local
 
+On Windows, absent a selected external wrapper, restricted pipes use native
+Low-integrity tokens and ACL grants. Activation creates no workspace grants or
+probe processes. Native API failures occur at preparation and keep their API,
+Win32 error and path; a failed preparation never yields an unconfined child.
+Workspace grants use the DSH per-workspace SID derivation and remain standing.
+An exact grant, ambient-delete deny and Low label skip tree propagation.
+Workspace read/merge/write is serialized by a per-path OS file lock, interoperating
+with the DSH ACL lock location and range. Exclusively owned private directories
+need no persistent lock file. Only a caller-owned directory may receive
+the owner's missing label-setting right; other ownership is not changed.
+
+Both restricted modes own a distinct temporary directory outside the workspace,
+with its own SID. Its TEMP/TMP selection is applied before freezing the execution
+environment. The plan retains token and grants through child settlement;
+releasing the final plan schedules blocking temp revocation and removal, owned
+through completion even when its waiter is gone. Workspace grants are retained
+for reuse; temporary grants are revoked. Read-only plans carry no workspace
+write SID. Preparation can install a standing workspace grant before a child
+is approved or started; only a token containing that capability can use it.
+Native opt-in tests establish Windows behavior; ordinary tests
+do not edit real workspace ACLs. See the [evidence contract](../core/README.md)
+for the existing ambient grants that Windows tokens still admit.
+
 Process-plan filesystem admission and effective cgroup reads run on blocking
 workers, with at most four outstanding operations per service generation.
 Admission is immediate and returns `SandboxError::Capacity` when full. A worker
@@ -7,7 +30,7 @@ owns its permit, generation and staged backend until actual completion, even if
 its async waiter cancels or the published service is withdrawn. Filesystem calls
 have no claimed hard deadline; cancellation does not free a still-running slot.
 
-This ordinary plugin probes only explicit absolute candidate paths. A process request must also carry native absolute cwd and workspace paths before
+External-wrapper selection probes only explicit absolute candidate paths. A process request must also carry native absolute cwd and workspace paths before
 filesystem canonicalization. Portable host-path DTOs may describe another
 platform; those spellings do not grant this native effect boundary a relative path.
 Program validation checks the resolved target is a regular file, but preserves
@@ -32,7 +55,8 @@ that same absolute two-second deadline. Concurrent native process creation can
 briefly inherit a staging writer until exec closes it. Only this transient spawn
 error is retried; an unsuccessful probe exit never establishes enforcement.
 
-Optional factory activation publishes a service even when no backend passes;
+On hosts without the native Windows backend, optional factory activation
+publishes a service even when no external backend passes;
 restricted process calls then fail closed while `danger-full-access` remains an explicit
 unconfined holder bypass. A factory constructed with required restricted
 support instead fails activation before publishing the service. This
@@ -47,12 +71,11 @@ workspace-only read capability even when an optional service has no process
 backend. Actual file opens and symlink confinement belong to the file provider;
 the read scope never claims a process backend or its enforcement stamp.
 
-The selected wrapper is frozen for the generation. Restricted requests produce
+When an external wrapper is selected, it is frozen for the generation. Restricted requests produce
 wrapper argv and a matching stamp; absence fails closed. The durable stamp
 identifies the staged wrapper bytes by SHA-256 rather than its temporary path.
-The Landlock backend
-is an external safe runner because applying Landlock between fork and exec
-inside this `unsafe_code = deny` library would require an unsafe pre-exec hook.
+The Landlock backend is an external safe runner; the library uses no Unix
+pre-exec hooks. Its narrowly scoped Windows module owns documented native FFI.
 
 Each candidate is first copied into a generation-private temporary directory;
 the feature probe and every later plan execute that same owned copy. Replacement

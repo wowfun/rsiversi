@@ -52,8 +52,10 @@ console-control delivery. Direct-child reaping, zero active Job members and pipe
 joins precede settlement. A naturally exited leader with surviving descendants
 also closes the Job before publishing its outcome. Startup and retirement retain
 the same active/capture admission budgets; failures are not cleanup receipts.
-Windows provides native unconfined pipe and ConPTY plans. Restricted plans and
-the optional completed-output cache remain unavailable. ConPTY shares the active
+Windows pipes accept either an explicit unconfined plan or a Windows ACL plan
+with its retained primary token. The exact token is borrowed for native creation;
+Process retains the Sandbox owner through Job settlement. ConPTY remains
+unconfined, and the optional completed-output cache remains unavailable. ConPTY shares the active
 process and capture budgets, bounds output buffering and input admission, and
 limits each input write to 500 ms. Cleanup drains console output while closing
 ConPTY, joins I/O and reaps the client and its Job before releasing admission.

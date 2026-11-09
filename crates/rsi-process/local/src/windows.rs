@@ -69,12 +69,19 @@ impl Service {
         {
             return Err(ProcessError::InvalidInput("Windows Process requires an explicit native executable; select cmd.exe to run batch files".into()));
         }
-        if !spec.process.program.is_absolute()
-            || !spec.process.cwd.is_absolute()
-            || spec.process.stamp.backend != rsi_sandbox::SandboxBackend::Unconfined
-        {
+        let token = spec
+            .process
+            .owner
+            .as_ref()
+            .and_then(rsi_sandbox::ProcessPlanOwner::windows_token);
+        let native_plan = matches!(
+            (&spec.process.stamp.backend, token),
+            (rsi_sandbox::SandboxBackend::Unconfined, None)
+                | (rsi_sandbox::SandboxBackend::WindowsAcl, Some(_))
+        );
+        if !spec.process.program.is_absolute() || !spec.process.cwd.is_absolute() || !native_plan {
             return Err(ProcessError::InvalidInput(
-                "Windows requires an exact native unconfined pipe plan".into(),
+                "Windows requires an exact native plan and its matching token".into(),
             ));
         }
         if !self.accepting.load(Ordering::Acquire) {
@@ -107,7 +114,7 @@ impl Service {
             arguments: &spec.process.arguments,
             environment: &spec.environment,
             cwd: &spec.process.cwd,
-            token: None,
+            token,
         })
         .await
         .map_err(spawn_error)?;

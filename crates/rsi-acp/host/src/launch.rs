@@ -62,11 +62,12 @@ pub(super) async fn open(
         })
         .await
         .map_err(|_| Error::Launch)?;
-    let environment = environment(state, &endpoint.launch)
+    let mut environment = environment(state, &endpoint.launch)
         .await?
         .into_iter()
         .map(|(key, value)| (key.into(), value.into()))
         .collect();
+    confined.prepare_environment(&mut environment);
     let process = state
         .processes
         .spawn(DuplexProcessSpec {

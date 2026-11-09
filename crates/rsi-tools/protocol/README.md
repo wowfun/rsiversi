@@ -182,6 +182,8 @@ non-authorizing execution review metadata separately from the request digest.
 The prepared call retains that plan. Start rejects a changed policy, lease or
 native Sandbox; body code consumes the plan once. A standalone Runtime caller
 that omits explicit preparation gets the same preparation before body execution.
+Sandbox-owned temporary-directory selection is applied before the complete
+environment is frozen, including standalone native preparation.
 No process is spawned during preparation. Jobs may retain the move-only plan
 and consume it exactly once through its original tuple.
 
