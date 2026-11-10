@@ -102,7 +102,7 @@ async fn finite_reads_resolve_on_host_without_tokens_and_observe_fresh_contents(
 #[cfg(unix)]
 #[tokio::test]
 async fn finite_read_follows_physical_parent_and_symlink_semantics_and_rejects_special_files() {
-    use std::os::unix::{ffi::OsStrExt, fs::symlink};
+    use std::os::unix::fs::symlink;
     let temporary = tempfile::tempdir().unwrap();
     let root = temporary.path().canonicalize().unwrap();
     std::fs::create_dir_all(root.join("real/child")).unwrap();
@@ -121,19 +121,24 @@ async fn finite_read_follows_physical_parent_and_symlink_semantics_and_rejects_s
         panic!("file")
     };
     assert_eq!(hex::decode(page.bytes_hex).unwrap(), b"physical");
-    let name = std::ffi::OsStr::from_bytes(b"\xff");
-    std::fs::write(root.join(name), b"exact").unwrap();
-    let result = files
-        .read_path(
-            request(&root, b"\xff", FileKind::File),
-            CancellationToken::new(),
-        )
-        .await
-        .unwrap();
-    assert_eq!(
-        result.path.as_bytes(),
-        root.join(name).as_os_str().as_bytes()
-    );
+    // Apple filesystems reject non-UTF-8 names during fixture creation.
+    #[cfg(not(target_vendor = "apple"))]
+    {
+        use std::os::unix::ffi::OsStrExt as _;
+        let name = std::ffi::OsStr::from_bytes(b"\xff");
+        std::fs::write(root.join(name), b"exact").unwrap();
+        let result = files
+            .read_path(
+                request(&root, b"\xff", FileKind::File),
+                CancellationToken::new(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(
+            result.path.as_bytes(),
+            root.join(name).as_os_str().as_bytes()
+        );
+    }
     assert!(
         std::process::Command::new("mkfifo")
             .arg(root.join("fifo"))

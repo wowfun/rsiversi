@@ -65,7 +65,9 @@ async fn cursor_survives_deletion_of_highest_orders_and_registry_restart() {
     for name in ["first", "second", "third", "after_restart", "after_empty"] {
         fs::create_dir(temporary.path().join(name)).unwrap();
     }
-    let state = temporary.path().join("state");
+    let state =
+        rsi_workspace_protocol::canonical_native_path(temporary.path().canonicalize().unwrap())
+            .join("state");
     rsi_files_native_fs::create_absolute_directory_no_follow(&state).unwrap();
     let runtime = storage_runtime(&state.join("registry.sqlite3")).await;
     let config = json!({"backend":"sqlite"});
@@ -166,7 +168,9 @@ async fn cursor_survives_deletion_of_highest_orders_and_registry_restart() {
 )]
 async fn display_order_survives_restart_without_changing_creation_cursors() {
     let temporary = tempfile::tempdir().unwrap();
-    let state = temporary.path().join("state");
+    let state =
+        rsi_workspace_protocol::canonical_native_path(temporary.path().canonicalize().unwrap())
+            .join("state");
     rsi_files_native_fs::create_absolute_directory_no_follow(&state).unwrap();
     let runtime = storage_runtime(&state.join("registry.sqlite3")).await;
     let config = json!({"backend":"sqlite"});
@@ -318,7 +322,9 @@ async fn registration_is_canonical_durable_and_delete_never_touches_files() {
     fs::create_dir(&second_workspace_path).unwrap();
     let user_file = workspace_path.join("keep.txt");
     fs::write(&user_file, b"keep").unwrap();
-    let state = temporary.path().join("state");
+    let state =
+        rsi_workspace_protocol::canonical_native_path(temporary.path().canonicalize().unwrap())
+            .join("state");
     rsi_files_native_fs::create_absolute_directory_no_follow(&state).unwrap();
     let runtime = Runtime::default();
     provide_access(&runtime).await;
@@ -898,7 +904,9 @@ async fn cold_registry_preserves_distinct_machines_without_local_remote_probes()
         };
         workspace_record(ExecutionCoordinates::new(location, host_path).unwrap())
     });
-    let state = temporary.path().join("state");
+    let state =
+        rsi_workspace_protocol::canonical_native_path(temporary.path().canonicalize().unwrap())
+            .join("state");
     rsi_files_native_fs::create_absolute_directory_no_follow(&state).unwrap();
     let runtime = storage_runtime(&state.join("registry.sqlite3")).await;
     let facility = runtime

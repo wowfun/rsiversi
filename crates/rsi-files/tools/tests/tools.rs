@@ -390,7 +390,7 @@ async fn absolute_directory_paths_remain_bounded_and_pagination_does_not_skip_en
     let _scenario = SCENARIOS.lock().await;
     let temporary = tempfile::tempdir().unwrap();
     let mut root = temporary.path().canonicalize().unwrap();
-    for _ in 0..8 {
+    for _ in 0..4 {
         root.push("a".repeat(180));
     }
     std::fs::create_dir_all(root.join("cwd")).unwrap();

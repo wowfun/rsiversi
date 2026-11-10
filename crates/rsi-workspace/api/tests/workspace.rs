@@ -142,7 +142,8 @@ async fn server_setup(
     HttpClientConfig,
     rsi_api::ConnectionApi,
 ) {
-    let state = directory.join("state");
+    let state = rsi_workspace_protocol::canonical_native_path(directory.canonicalize().unwrap())
+        .join("state");
     rsi_files_native_fs::create_absolute_directory_no_follow(&state).unwrap();
     for (name, factory, config) in [
         (
