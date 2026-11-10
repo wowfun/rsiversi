@@ -3,7 +3,17 @@ use rsi_agent_session_protocol::{
     CommandArguments, DomainRequestId, SessionCommandInvocation, ToolRejection, TurnOutcome,
 };
 
-async fn denied_call() -> Response {
+async fn denied_call(Json(request): Json<serde_json::Value>) -> Response {
+    if let Some(reply) = request["messages"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|message| message["role"] == "tool")
+    {
+        assert_eq!(reply["tool_call_id"], "plan-bash");
+        assert!(reply["content"].to_string().contains("Plan mode"));
+        return review_response(None);
+    }
     let call = serde_json::json!({"choices":[{"delta":{"role":"assistant","tool_calls":[{"index":0,"id":"plan-bash","type":"function","function":{"name":"bash","arguments":"{\"command\":\"printf forbidden > should-not-exist\"}"}}]},"finish_reason":null}]});
     let finish = serde_json::json!({"choices":[{"delta":{},"finish_reason":"tool_calls"}],"usage":{"prompt_tokens":2,"completion_tokens":1}});
     Response::builder()
@@ -83,7 +93,15 @@ async fn standard_plan_policy_denies_bash_before_intent_start_or_filesystem_effe
             | SessionFactBody::ToolResult { .. }
     )));
     assert!(
-        matches!(history.facts.last().unwrap().body(), SessionFactBody::TurnTerminal { outcome: TurnOutcome::Failed { code, .. }, .. } if code == "policy.denied")
+        matches!(
+            history.facts.last().unwrap().body(),
+            SessionFactBody::TurnTerminal {
+                outcome: TurnOutcome::Completed,
+                ..
+            }
+        ),
+        "unexpected terminal: {:?}",
+        history.facts.last().unwrap().body()
     );
     assert!(!fixture.workspace.join("should-not-exist").exists());
     assert!(running.shutdown().await.is_clean());

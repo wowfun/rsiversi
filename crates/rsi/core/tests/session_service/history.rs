@@ -54,7 +54,7 @@ async fn discovery_limits_each_metadata_step_and_fences_continuations_by_caller_
         run_message_to_terminal(&session, &format!("discovery-input-{number}")).await;
     }
     let range = QueryScope::Workspace {
-        workspace: workspace.id.clone(),
+        workspace: rsi_workspace_protocol::WorkspaceKey::from_coordinates(&workspace.coordinates),
     };
     let Reply::Progress { progress, .. } = call(
         &running,
@@ -154,7 +154,7 @@ async fn history_search_rereads_original_freezes_into_an_unpublished_draft_and_r
         .unwrap();
     run_message_to_terminal(&source, "history-first").await;
     let scope = Scope {
-        workspace: workspace.id.clone(),
+        workspace: rsi_workspace_protocol::WorkspaceKey::from_coordinates(&workspace.coordinates),
         conversation: ConversationIdentity::Native(
             source.header().await.unwrap().session_id().clone(),
         ),
@@ -318,7 +318,9 @@ async fn history_search_rereads_original_freezes_into_an_unpublished_draft_and_r
         &running,
         Request::Reset {
             scope: QueryScope::Workspace {
-                workspace: workspace.id.clone(),
+                workspace: rsi_workspace_protocol::WorkspaceKey::from_coordinates(
+                    &workspace.coordinates,
+                ),
             },
             after: None,
         },
@@ -333,7 +335,9 @@ async fn history_search_rereads_original_freezes_into_an_unpublished_draft_and_r
         &running,
         Request::Query {
             scope: QueryScope::Workspace {
-                workspace: workspace.id.clone(),
+                workspace: rsi_workspace_protocol::WorkspaceKey::from_coordinates(
+                    &workspace.coordinates,
+                ),
             },
             query: "inspect".into(),
             after: None,
@@ -368,7 +372,9 @@ async fn history_search_rereads_original_freezes_into_an_unpublished_draft_and_r
             &running,
             Request::Search {
                 scope: Scope {
-                    workspace: foreign.id,
+                    workspace: rsi_workspace_protocol::WorkspaceKey::from_coordinates(
+                        &foreign.coordinates
+                    ),
                     conversation: scope.conversation.clone()
                 },
                 query: "inspect".into(),
@@ -394,7 +400,7 @@ async fn history_search_rereads_original_freezes_into_an_unpublished_draft_and_r
     };
     assert!(coverage.has_more);
     // Exercise an actual FTS candidate beyond the old latest-1024-Facts boundary.
-    for turn in 0..100 {
+    for turn in 0..110 {
         run_message_to_terminal(&source, &format!("history-old-hit-{turn}")).await;
     }
     let mut indexed = false;
@@ -536,7 +542,7 @@ async fn history_observed_epoch_replacement_rejects_old_candidates_but_keeps_fro
         .await
         .unwrap();
     let scope = Scope {
-        workspace: workspace.id,
+        workspace: rsi_workspace_protocol::WorkspaceKey::from_coordinates(&workspace.coordinates),
         conversation: ConversationIdentity::External(id.clone()),
     };
     client
