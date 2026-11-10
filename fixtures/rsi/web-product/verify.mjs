@@ -1,7 +1,7 @@
 import {disconnect} from './controls.mjs';
 import {workspaceForm,navigationOptions,openSettings,saveSettings,openConversation} from './controls.mjs';
 import {closeDetails,details,openResource,resources,sourceInspectionGeometry} from "./controls.mjs";
-import {detailMode,navigationFilter,selectSurface,sessionTools} from './controls.mjs';
+import {detailMode,navigationFilter,navigationMode,selectSurface,sessionTools} from './controls.mjs';
 import {recordNavigationEvidence} from './navigation-evidence.mjs';
 import {paired} from './paired-env.mjs';
 import { verifyPairing } from "./pairing.mjs";
@@ -235,6 +235,7 @@ try {
       await page.screenshot({ path: join(report, `${name}-plan-durable.png`) });
       await left.getByRole("textbox", { name: "Main message" }).fill("Keep this draft while switching");
       const leftIdentity = await left.locator(".pane-session").textContent();
+      await navigationMode(page,"flat");
       await navigationFilter(page,"all");await navigationOptions(page);await page.locator("#refresh").click();
       await openConversation(page,left,await right.getAttribute('data-session-id'));
       await left.locator(".pane-session").filter({ hasText: (await right.getAttribute('data-session-id')) }).waitFor({state:"attached"});
