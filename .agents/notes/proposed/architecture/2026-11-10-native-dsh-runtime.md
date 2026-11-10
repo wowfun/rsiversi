@@ -53,13 +53,20 @@ guard. Notification failure semantics belong to the event contract: DSH's
 Agent notifications contain listener failures, while Meta's existing Local
 callbacks deliberately use ordinary Rust panic propagation.
 
-The companion's native adapter advertises actual JS contributions and their
-generation. An Agent request pins the selected native and JS contributions once.
-An empty JS contribution set must not open a JS Session mirror or prepare a JS
-tool view. A purely native run can operate without Node. Preserve the real JS
-hook position in mixed ordered or around pipelines; batching must not move
-native callbacks across JS callbacks, duplicate side effects, or replay an
-uncertain mutation.
+The first execution slice is native prompt assembly and request-time context
+preparation. It ports the DSH system-prompt service into an ordinary Agent plugin;
+Workspace Host ordering remains separately scoped. The selected application input
+source explicitly owns mixed preparation. There is no proved global empty-JS
+registry detector: capture can install listeners and its preparer adds runtime
+context. Do not infer participation from Tool counts or process generation IDs.
+A headless native composition can omit Node; a native Agent with the workbench
+still retains its browser process. Count those paths separately.
+
+The first mixed acceptance keeps original DSH assembly and the JS pipeline together,
+with native Tool bodies behind their existing continuation. Preserve actual JS hook
+positions; do not invent coarse order bands, cross native callbacks over JS callbacks,
+duplicate side effects, or replay an uncertain mutation. Replacing Cordis inside
+the unchanged JS host remains a separate companion project.
 
 Native Session facts, metadata, workspace membership and command outcomes have
 one durable owner. The JS host may retain a demand-driven projection required
@@ -85,18 +92,19 @@ compatibility implementation and acceptance.
 ## Acceptance criteria
 
 1. Complete a source-backed native slice from a Standard user action through
-   its plugin and durable outcome. Workspace Host ordering is the current
-   slice; Session account ordering and Agent hook execution require separate
-   behavioral evidence. Use original DSH behavior rather than inventing a
-   second product policy.
+   its plugin and durable outcome. Native prompt assembly is the first execution
+   slice, including scoped names, complete prompts, interpolation, required runtime
+   context, presentation order and refresh. Workspace Host and Session account
+   ordering remain separate. Use original DSH behavior and preserve native policy.
 2. For native Agent hooks, prove scope and caller ownership, registration order,
    cancellation, removal/replacement and awaited continuation behavior across
    real public Meta Context/Fiber tests. Then remove superseded native glue and
    the JS implementation of the built-in from the Standard path together.
-3. Run the same native workload with no JS contributions and with one installed
-   third-party JS hook. Instrument process requests and bytes at the carrier:
-   the first has zero JS calls; the second pays for its actual contribution.
-   Also verify asynchronous JS work started before removal drains correctly.
+3. Run the declared native composition and the mixed application composition with
+   one unchanged installed third-party hook, identifying its package/export and
+   actual activation. Instrument execution and workbench calls separately. Record
+   the pre-existing tools-disabled baseline independently of new assembly behavior.
+   Verify actual callback positions and asynchronous work draining after removal.
 4. Compare startup, per-turn latency, allocation/retained state, process count
    and peak memory with the current Standard build and the original DSH path
    on the same workload. A code-size reduction or an empty registry is not a
