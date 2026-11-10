@@ -282,8 +282,9 @@ settings and does not claim native Windows or macOS behavior.
 
 `--queue` uses a held deterministic response to exercise replacement and pending-only
 withdrawal through the shared Worker. Inputs freeze their explicit access policy,
-so the fixture requires the steering conversion to be unavailable. It checks one
-current user block, stable slot identity, retained composer text and a surviving
+so the fixture requires the steering conversion to be unavailable. It checks a
+prepared user block only after the surviving input enters a Turn, replacement
+content read back through the queue editor, stable slot identity, retained composer text and a surviving
 queued Turn after Stop. This mode is separate from live-provider scenarios.
 
 `--ui-alignment` exercises the native clipboard, real directory creation, and the

@@ -157,6 +157,8 @@ Native filesystem handles admit all durable path transitions; descendants are
 opened relative to their retained parent, never by re-resolving absolute paths.
 Windows requires
 TokenUser-owned private fixed-NTFS roots; Unix roots must be owned and private.
+Selected Store and install-source paths must have physical parents; the Store
+does not follow system temporary-directory aliases or caller-selected symlinks.
 
 Source producers may use `install_checked` to revalidate their captured inputs
 and cancellation immediately before the atomic resolution write. This callback

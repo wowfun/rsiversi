@@ -520,6 +520,7 @@ async fn masked_key_and_manual_limits_complete_setup_with_injected_store() {
         terminal.until("Maximum output tokens").await;
         terminal.send(b"1000\r");
         terminal.select_menu("Provider default").await;
+        terminal.until("Ctrl+J adds a line").await;
         terminal.until("unknown-capacity").await;
         terminal.until("retained before setup").await;
         terminal.send(b"\r");

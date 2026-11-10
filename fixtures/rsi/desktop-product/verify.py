@@ -25,7 +25,7 @@ from provider_input import current_input
 from workflow import configure as configure_workflow, provider_reply as workflow_reply, verify as verify_workflow
 from plan_review import provider_reply as plan_reply, verify as verify_plan_review
 from pressure import verify_writes
-from controls import BUTTON_TARGET, COMPOSER_FOCUS, fill as fill_input, asset_pressure, file_has_bytes, configure_live_limits
+from controls import BUTTON_TARGET, COMPOSER_FOCUS, fill as fill_input, click as click_ready, asset_pressure, file_has_bytes, configure_live_limits
 from external import configure as configure_external, verify as verify_external, provider_reply as external_reply, delegation as verify_delegation
 from profiles import verify as verify_profiles
 from history import verify as verify_history
@@ -243,7 +243,9 @@ try:
     def script(source, arguments=None): return call('POST', root + '/execute/sync', {'script': source, 'args': arguments or []})
     def element(css): return call('POST', root + '/element', {'using': 'css selector', 'value': css})
     def eid(value): return next(iter(value.values()))
-    def click(css): call('POST', root + f'/element/{eid(element(css))}/click', {})
+    def dispatch_click(item): call('POST', root + f'/element/{eid(item)}/click', {})
+    def click(css):
+        click_ready(lambda: script('const e=document.querySelector(arguments[0]);return e&&!e.disabled&&e.getClientRects().length?e:null', [css]), dispatch_click, until)
     def fill(css, value):
         def keys(item, text):
             call('POST', root + f'/element/{eid(item)}/value', {'text': text, 'value': list(text)})
@@ -278,18 +280,7 @@ try:
         if text in ('File','Conversation','Images','Search history','Export'):
             button('Add files or run commands')
         if text == 'Terminal': script('document.querySelector(".conversation-menu").open=true;return true')
-        def attempt():
-            item = script(BUTTON_TARGET, [text])
-            if item is None: return False
-            try:
-                call('POST', root + f'/element/{eid(item)}/click', {})
-            except RuntimeError as error:
-                reply = error.args[0] if error.args else None
-                if isinstance(reply, dict) and reply.get('value', {}).get('error') == 'stale element reference':
-                    return False
-                raise
-            return True
-        until(attempt)
+        click_ready(lambda: script(BUTTON_TARGET, [text]), dispatch_click, until)
         if text == 'Terminal':
             until(lambda: script('return [...document.querySelectorAll("[data-dockkit-tab][aria-selected=true]")].some(e=>e.textContent.includes("Resources"))'))
             script('document.querySelector(".conversation-menu").open=false;return true')
@@ -453,7 +444,7 @@ try:
             const required=async command=>{const reply=await request(command);if(reply.error)throw Error(reply.error);return JSON.parse(reply.result)};
             const read=async (attachment,probe=false)=>{let ack=null;while(!pressure.stopped){pressure.pending++;try{const reply=await request({type:'read',attachment,ack});const capacity=reply.error?.includes('API capacity is exhausted');if(capacity)pressure.apiCapacity++;const busy=reply.notAdmitted===true&&reply.retryable===true;if(busy)pressure.busy++;if(pressure.responses.length<256)pressure.responses.push(reply);if(!reply.error)ack=JSON.parse(reply.result).ack;else if(!busy&&!capacity&&!(probe&&reply.error.includes('Terminal attachment does not belong')))throw Error(reply.error);}finally{pressure.pending--}await new Promise(resolve=>setTimeout(resolve,10))}};
             window.fixturePressureCleanup=async()=>{pressure.stopped=true;await window.fixturePressureReaders;for(const terminal of terminals)await required({type:'close',terminal});pressure.cleaned=true};
-            (async()=>{for(let i=0;i<4;i++){const created=await required({type:'create',size:{rows:24,columns:80}});terminals.push(created.value.terminal.id);followers.push(created.value.id);for(let j=1;j<(i===3?7:8);j++)followers.push((await required({type:'attach',terminal:created.value.terminal.id})).value.id)}pressure.ready=true;window.fixturePressureReaders=Promise.all([...followers.map(id=>read(id)),...Array.from({length:8},()=>read("absent-pressure-probe",true))]).catch(error=>{pressure.error=String(error);pressure.stopped=true})})().catch(error=>pressure.error=String(error));return true''')
+            (async()=>{for(let i=0;i<4;i++){const created=await required({type:'create',key:crypto.randomUUID(),size:{rows:24,columns:80}});terminals.push(created.value.terminal.id);followers.push(created.value.id);for(let j=1;j<(i===3?7:8);j++)followers.push((await required({type:'attach',terminal:created.value.terminal.id})).value.id)}pressure.ready=true;window.fixturePressureReaders=Promise.all([...followers.map(id=>read(id)),...Array.from({length:8},()=>read("absent-pressure-probe",true))]).catch(error=>{pressure.error=String(error);pressure.stopped=true})})().catch(error=>pressure.error=String(error));return true''')
         pressure = until(lambda: script('if(window.fixturePressure.error)throw Error(window.fixturePressure.error);return window.fixturePressure.busy>0?window.fixturePressure:null'))
         assert pressure['pending'] > 0, pressure
         # Re-evaluate one current frozen renderer URL, bypassing the module cache.

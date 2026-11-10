@@ -6,8 +6,10 @@ that exact deployment over the public Unix client. It derives the deployment
 gate through the Service Host owner's `local_compatibility_key`; same-UID transport authentication
 remains enforced by the owner. It never opens the grant database or source editor.
 Its stdin accepts one bounded catalog or grant operation and stdout returns the
-typed result. Browser tests use it to issue explicit Device leaf grants; remote
-configuration authority alone does not grant source changes.
+typed result. Browser tests read the domain Device from the public Profile caller
+projection and use the probe to grant that exact shared browser owner. Bearer
+credentials keep their independent Device identity; configuration authority alone
+does not grant source changes.
 The probe's Unix transport is unavailable on other platforms; its executable
 rejects before reading stdin or consulting Service metadata there.
 

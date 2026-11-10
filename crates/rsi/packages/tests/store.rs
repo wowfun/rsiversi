@@ -2,12 +2,8 @@ use rsi_packages::*;
 use sha2::{Digest as _, Sha256};
 use std::collections::BTreeMap;
 
-fn temporary_root() -> tempfile::TempDir {
-    let root = std::env::temp_dir();
-    #[cfg(not(windows))]
-    let root = root.canonicalize().unwrap();
-    tempfile::tempdir_in(root).unwrap()
-}
+mod support;
+use support::temporary_root;
 
 fn source(root: &std::path::Path, name: &str, bytes: &[u8]) -> InstallSource {
     let directory = root.join(format!("input-{name}-{}", bytes.len()));

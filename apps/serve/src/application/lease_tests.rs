@@ -9,8 +9,6 @@ use std::{collections::BTreeMap, path::Path, sync::Arc};
 use tokio_util::sync::CancellationToken;
 
 fn install(store: &PackageStore, directory: &Path, version: u8) -> String {
-    let directory =
-        rsi_workspace_protocol::canonical_native_path(directory.canonicalize().unwrap());
     let data = [version];
     let entry = FileRecord {
         path: "entry".into(),
@@ -52,7 +50,7 @@ fn install(store: &PackageStore, directory: &Path, version: u8) -> String {
         )]),
     };
     let source = InstallSource {
-        directory,
+        directory: directory.to_owned(),
         manifest: serde_json::to_vec(&manifest).unwrap(),
         provenance: Provenance::Local,
     };
@@ -66,7 +64,10 @@ fn install(store: &PackageStore, directory: &Path, version: u8) -> String {
 
 #[tokio::test]
 async fn releasing_a_digest_returns_capacity_and_permits_collection() {
-    let root = tempfile::tempdir().unwrap();
+    let root = tempfile::tempdir_in(rsi_workspace_protocol::canonical_native_path(
+        std::env::temp_dir().canonicalize().unwrap(),
+    ))
+    .unwrap();
     let store = Arc::new(PackageStore::open(&root.path().join("store")).unwrap());
     let service = Imports {
         profile: "fixture".into(),

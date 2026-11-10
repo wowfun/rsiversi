@@ -20,9 +20,12 @@ export async function verifyQueue(page,pane,service,report,name) {
   await dialog.waitFor({state:'hidden'});
   await waitUntil(async()=>await rows.count()===2,'replacement retains slot count');
   assert.equal(await rows.first().getAttribute('data-slot'),initialSlot);
-  await pane.locator('.message.user').filter({hasText:'Queue replacement content'}).waitFor();
+  await rows.first().getByRole('button',{name:'Edit',exact:true}).click();
+  await waitUntil(async()=>await dialog.getByRole('textbox',{name:'Queued text 1'}).inputValue()==='Queue replacement content','replacement immutable content readback');
+  await dialog.getByRole('button',{name:'Close',exact:true}).click();
+  await dialog.waitFor({state:'hidden'});
   assert.equal(await pane.locator('.message.user').filter({hasText:'Queue original editable input'}).count(),0);
-  assert.equal(await pane.locator('.message.user').filter({hasText:'Queue replacement content'}).count(),1);
+  assert.equal(await pane.locator('.message.user').filter({hasText:'Queue replacement content'}).count(),0);
   assert.equal(await composer.inputValue(),'Ordinary composer draft survives every queue operation');
   // The composer freezes the selected access policy on every next-Turn input.
   // Converting it to steering would silently discard that policy.
@@ -34,10 +37,11 @@ export async function verifyQueue(page,pane,service,report,name) {
   await pane.getByRole('button',{name:'Stop',exact:true}).click();
   await waitUntil(()=>service.provider.requests.some(request=>request.prompt==='UI Goal hold queue survivor after Stop'),'Stop preserves queued next Turn');
   await pane.locator('.transcript').getByText('Waiting for fixture release.',{exact:true}).waitFor();
+  assert.equal(await pane.locator('.message.user').filter({hasText:'UI Goal hold queue survivor after Stop'}).count(),1);
   assert.equal(service.provider.requests.filter(request=>request.prompt==='Queue original editable input' || request.prompt==='Queue replacement content').length,0);
   assert.equal(await composer.inputValue(),'Ordinary composer draft survives every queue operation');
   await page.screenshot({path:join(report,`${name}-queue-after-stop.png`)});
   await pane.getByRole('button',{name:'Stop',exact:true}).click();
   await pane.locator('.pane-status').filter({hasText:'Cancelled'}).waitFor({state:'attached'});
-  await writeFile(join(report,`${name}-queue.json`),JSON.stringify({replacementKeepsSlot:true,oneUserBlock:true,explicitAccessPreventsSteering:true,withdrawPendingOnly:true,stopPreservesSuccessorTurn:true,composerPreserved:true,requests:service.provider.requests.filter(request=>request.prompt.includes('queue survivor') || request.prompt.includes('Queue replacement'))},null,2));
+  await writeFile(join(report,`${name}-queue.json`),JSON.stringify({replacementKeepsSlot:true,pendingOnlyInQueue:true,replacementReadback:true,explicitAccessPreventsSteering:true,withdrawPendingOnly:true,stopPreservesSuccessorTurn:true,composerPreserved:true,requests:service.provider.requests.filter(request=>request.prompt.includes('queue survivor') || request.prompt.includes('Queue replacement'))},null,2));
 }

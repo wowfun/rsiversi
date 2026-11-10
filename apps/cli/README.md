@@ -89,6 +89,12 @@ captured output on failure and reap the child. The
 Workspace-review PTY acceptance observes Pending while the provider is held,
 then waits for the interval's completed-state field before opening files.
 Explanatory prose can mention completion while capture remains pending.
+A menu choice establishes action admission. PTY fixtures wait for the requested
+readback before issuing its next control; closing a menu does not establish that
+an asynchronous reference or workspace read has finished.
+Native presentation fixtures build beneath the selected `CARGO_TARGET_DIR` (or
+the workspace target directory), reuse dependency artifacts across feature
+revisions, and retain a private copy of each built library before rebuilding.
 
 Debug and release use the same launch parser, final home selection and resident
 Host path. `--watch` adds connection-owned configuration/source leases; Vite and

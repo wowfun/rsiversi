@@ -1,6 +1,8 @@
+mod support;
 use rsi_packages::*;
 use sha2::{Digest as _, Sha256};
 use std::{collections::BTreeMap, sync::Arc};
+use support::temporary_root;
 fn hash(bytes: &[u8]) -> String {
     hex::encode(Sha256::digest(bytes))
 }
@@ -33,8 +35,6 @@ fn tree(files: &[(&str, &[u8])]) -> Vec<u8> {
 fn source(root: &std::path::Path, tag: &str, bytes: &[u8]) -> InstallSource {
     let directory = root.join(tag);
     std::fs::create_dir(&directory).unwrap();
-    #[cfg(unix)]
-    let directory = directory.canonicalize().unwrap();
     std::fs::write(directory.join("payload.rsi"), bytes).unwrap();
     let manifest = Manifest {
         format: 2,
@@ -66,7 +66,7 @@ fn source(root: &std::path::Path, tag: &str, bytes: &[u8]) -> InstallSource {
 }
 #[test]
 fn payload_is_immutable_and_its_lease_survives_selection_and_gc() {
-    let root = tempfile::tempdir().unwrap();
+    let root = temporary_root();
     let store = PackageStore::open(&root.path().join("store")).unwrap();
     store
         .install(
@@ -111,7 +111,7 @@ fn payload_is_immutable_and_its_lease_survives_selection_and_gc() {
 }
 #[test]
 fn installed_payload_retains_only_its_index_and_one_body() {
-    let root = tempfile::tempdir().unwrap();
+    let root = temporary_root();
     let store_root = root.path().join("store");
     let store = PackageStore::open(&store_root).unwrap();
     let body = vec![0x5a; 256 * 1024];
@@ -156,7 +156,7 @@ fn installed_payload_retains_only_its_index_and_one_body() {
 
 #[test]
 fn payload_commitments_and_single_copy_capacity_are_manifest_contracts() {
-    let root = tempfile::tempdir().unwrap();
+    let root = temporary_root();
     let input = source(root.path(), "source", &tree(&[("body", b"body")]));
     let original = Manifest::parse(&input.manifest).unwrap();
     let mut absent = original.clone();
@@ -209,7 +209,7 @@ fn payload_commitments_and_single_copy_capacity_are_manifest_contracts() {
 
 #[test]
 fn bad_payload_does_not_publish_or_break_previous_selection() {
-    let root = tempfile::tempdir().unwrap();
+    let root = temporary_root();
     let store = PackageStore::open(&root.path().join("store")).unwrap();
     store
         .install(
@@ -274,7 +274,7 @@ fn bad_payload_does_not_publish_or_break_previous_selection() {
 }
 #[test]
 fn ordinary_acquisition_detects_unknown_entries_without_rescanning_on_process_start() {
-    let root = tempfile::tempdir().unwrap();
+    let root = temporary_root();
     let store = PackageStore::open(&root.path().join("store")).unwrap();
     store
         .install(
@@ -319,7 +319,7 @@ fn ordinary_acquisition_detects_unknown_entries_without_rescanning_on_process_st
 
 #[test]
 fn a_rewritten_index_and_matching_expansion_do_not_replace_the_admitted_record() {
-    let root = tempfile::tempdir().unwrap();
+    let root = temporary_root();
     let store_root = root.path().join("store");
     let store = PackageStore::open(&store_root).unwrap();
     store
@@ -347,7 +347,7 @@ fn a_rewritten_index_and_matching_expansion_do_not_replace_the_admitted_record()
 
 #[test]
 fn acquisition_authenticates_the_exact_header_bytes_even_when_every_file_hash_matches() {
-    let root = tempfile::tempdir().unwrap();
+    let root = temporary_root();
     let store_root = root.path().join("store");
     let store = PackageStore::open(&store_root).unwrap();
     let mut archive = tree(&[("one", b"same")]);
@@ -378,7 +378,7 @@ fn acquisition_authenticates_the_exact_header_bytes_even_when_every_file_hash_ma
 }
 #[test]
 fn arbitrary_file_order_preserves_directory_authority_and_checks_every_file() {
-    let root = tempfile::tempdir().unwrap();
+    let root = temporary_root();
     let store = PackageStore::open(&root.path().join("store")).unwrap();
     let files: &[(&str, &[u8])] = &[
         ("a/b/c/same.mjs", b"deep"),
@@ -412,7 +412,7 @@ fn arbitrary_file_order_preserves_directory_authority_and_checks_every_file() {
 }
 #[test]
 fn payload_file_count_does_not_reuse_the_small_manifest_limit() {
-    let root = tempfile::tempdir().unwrap();
+    let root = temporary_root();
     let store = PackageStore::open(&root.path().join("store")).unwrap();
     let names: Vec<_> = (0..4097).map(|i| format!("modules/p{i}.js")).collect();
     let files: Vec<_> = names
@@ -488,7 +488,7 @@ fn process_source(
 
 #[test]
 fn fresh_process_launch_skips_archives_and_unused_files_but_requires_its_entry() {
-    let root = tempfile::tempdir().unwrap();
+    let root = temporary_root();
     let path = root.path().join("store");
     let store = PackageStore::open(&path).unwrap();
     let runtime = source(
@@ -536,7 +536,7 @@ fn fresh_process_launch_skips_archives_and_unused_files_but_requires_its_entry()
 
 #[test]
 fn process_admission_authenticates_every_manifest_and_requires_payload_roots() {
-    let root = tempfile::tempdir().unwrap();
+    let root = temporary_root();
     let path = root.path().join("store");
     let store = PackageStore::open(&path).unwrap();
     let runtime = source(root.path(), "runtime", &tree(&[("host.mjs", b"entry")]));
@@ -591,7 +591,7 @@ fn process_admission_authenticates_every_manifest_and_requires_payload_roots() {
 
 #[test]
 fn each_launch_authenticates_its_descriptor_even_with_a_live_lease() {
-    let root = tempfile::tempdir().unwrap();
+    let root = temporary_root();
     let path = root.path().join("store");
     let store = PackageStore::open(&path).unwrap();
     let runtime = source(root.path(), "runtime", &tree(&[("host.mjs", b"entry")]));
@@ -634,7 +634,7 @@ fn each_launch_authenticates_its_descriptor_even_with_a_live_lease() {
 
 #[test]
 fn process_paths_retain_exact_dependencies_and_reject_invalid_updates_before_selection() {
-    let root = tempfile::tempdir().unwrap();
+    let root = temporary_root();
     let store = PackageStore::open(&root.path().join("store")).unwrap();
     let first = source(root.path(), "runtime-one", &tree(&[("host.mjs", b"first")]));
     let bridge = process_source(root.path(), "bridge-one", &first, "host.mjs");
@@ -743,7 +743,7 @@ fn process_descriptor_rejects_escape_unknown_fields_and_unsupported_format() {
 
 #[test]
 fn importer_role_and_protocol_are_admitted_before_selection() {
-    let root = tempfile::tempdir().unwrap();
+    let root = temporary_root();
     let store = PackageStore::open(&root.path().join("store")).unwrap();
     let runtime = source(
         root.path(),

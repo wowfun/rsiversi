@@ -54,6 +54,7 @@ async fn history_tui_discovers_saved_text_without_a_conversation_id() {
     terminal.send(b"\x10");
     terminal.select_menu("Draft references").await;
     terminal.select_menu("global-history-source").await;
+    terminal.until("Reference global-history-source").await;
     terminal.send(b"\r");
     terminal.select_menu("Remove from draft").await;
     terminal.until("Reference removed from draft").await;

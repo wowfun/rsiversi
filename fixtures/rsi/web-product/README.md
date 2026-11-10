@@ -655,7 +655,9 @@ cleanup. Run it with explicit
 It owns temporary HOME/XDG paths and uses no live model provider.
 
 The default queue scenario holds an actual Rust Turn at its deterministic provider,
-replaces one queued input, verifies that its explicit access policy prevents
+replaces one queued input, reads its replacement back from the queue editor, and
+requires waiting inputs to remain outside the transcript until durable preparation.
+It verifies that its explicit access policy prevents
 conversion into steering, withdraws it and
 then stops the original Turn. It checks that a second queued input actually
 executes and that the ordinary draft survives. IndexedDB probes independently

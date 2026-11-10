@@ -21,11 +21,15 @@ export async function browserOwner(page) {
   await page.getByRole('button',{name:'Plugins',exact:true}).click();
   await page.getByRole('button',{name:'Browse Host Profiles',exact:true}).click();
   await page.getByRole('button',{name:'Open Profile fixture',exact:true}).click();
-  const caller=page.locator('.profile-leaves > p').filter({hasText:/^Caller: device /});
+  const id=await readBrowserOwner(page);
+  await page.getByRole('button',{name:'Close settings',exact:true}).click();
+  return id;
+}
+export async function readBrowserOwner(scope) {
+  const caller=scope.locator('.profile-leaves > p').filter({hasText:/^Caller: device /});
   await caller.waitFor();
   const id=(await caller.innerText()).match(/^Caller: device ([0-9a-f]{32})(?:\s|$)/)?.[1];
   if(!id)throw new Error('Browser domain owner is unavailable');
-  await page.getByRole('button',{name:'Close settings',exact:true}).click();
   return id;
 }
 export async function saveSettings(page) {

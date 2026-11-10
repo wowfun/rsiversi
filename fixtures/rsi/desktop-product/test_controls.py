@@ -3,10 +3,37 @@ import unittest
 from pathlib import Path
 import tempfile
 from unittest.mock import Mock
-from controls import FOCUS_INPUT, fill, file_has_bytes, configure_live_limits
+from controls import FOCUS_INPUT, fill, click, file_has_bytes, configure_live_limits
 
 
 class InputControlTest(unittest.TestCase):
+    def test_click_reacquires_only_missing_or_stale_pre_dispatch_targets(self):
+        first, current = {'id': 'stale'}, {'id': 'current'}
+        resolve = Mock(side_effect=[None, first, current])
+        dispatch = Mock(side_effect=[RuntimeError({'value': {'error': 'stale element reference'}}), None])
+        def until(read):
+            self.assertFalse(read())
+            dispatch.assert_not_called()
+            self.assertFalse(read())
+            self.assertTrue(read())
+        click(resolve, dispatch, until)
+        self.assertEqual([call.args for call in dispatch.call_args_list], [(first,), (current,)])
+
+    def test_ambiguous_click_is_never_replayed(self):
+        dispatch = Mock(side_effect=RuntimeError('click outcome unknown'))
+        with self.assertRaisesRegex(RuntimeError, 'outcome unknown'):
+            click(lambda: {'id': 'current'}, dispatch, lambda read: read())
+        dispatch.assert_called_once()
+
+    def test_missing_click_target_times_out_without_dispatch(self):
+        dispatch = Mock()
+        def until(read):
+            self.assertFalse(read())
+            raise TimeoutError('missing control')
+        with self.assertRaises(TimeoutError):
+            click(lambda: None, dispatch, until)
+        dispatch.assert_not_called()
+
     def test_live_limits_are_expanded_and_filled_before_apply(self):
         events = []
         limits = dict(context_window_tokens=1048576, default_output_reserve_tokens=4096, max_output_reserve_tokens=393216)

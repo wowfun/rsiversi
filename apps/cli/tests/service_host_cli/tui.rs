@@ -825,8 +825,12 @@ plugin = "rsi.application.tui"
                 self.until_screen(&format!("menu selected {label}"), |screen| {
                     !screen
                         .lines()
-                        .filter_map(|line| line.split_once("› "))
-                        .any(|(_, selected)| matches(selected.trim().trim_end_matches('│').trim()))
+                        .filter_map(|line| {
+                            let (_, body) = line.split_once('│')?;
+                            let (body, _) = body.rsplit_once('│')?;
+                            body.trim().strip_prefix("› ")
+                        })
+                        .any(|selected| matches(selected.trim()))
                 })
                 .await;
                 return;
@@ -1304,9 +1308,12 @@ async fn native_presentation_reloads_in_the_running_tui_without_losing_draft_or_
         .join("../..")
         .canonicalize()
         .unwrap();
+    let target = std::env::var_os("CARGO_TARGET_DIR")
+        .map_or_else(|| root.join("target"), std::path::PathBuf::from)
+        .join("terminal-native-test");
+    let retained = tempfile::tempdir().unwrap();
     let mut artifacts = Vec::new();
     for revision in ["a", "b"] {
-        let target = root.join("target/terminal-native-test").join(revision);
         let mut build = Command::new(env!("CARGO"));
         build
             .args(["build", "--locked", "--manifest-path"])
@@ -1322,11 +1329,14 @@ async fn native_presentation_reloads_in_the_running_tui_without_losing_draft_or_
             "{}",
             String::from_utf8_lossy(&result.stderr)
         );
-        artifacts.push(target.join("debug").join(format!(
+        let library = target.join("debug").join(format!(
             "{}rsi_terminal_native{}",
             std::env::consts::DLL_PREFIX,
             std::env::consts::DLL_SUFFIX
-        )));
+        ));
+        let artifact = retained.path().join(revision);
+        std::fs::copy(library, &artifact).unwrap();
+        artifacts.push(artifact);
     }
     let (endpoint, state, provider) = gated_provider("bash").await;
     let fixture = CliFixture::new(&endpoint);

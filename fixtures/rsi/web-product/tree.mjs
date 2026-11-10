@@ -17,7 +17,7 @@ export async function verifyTree(page, pane, service, report, browser) {
   await detail.getByRole("button", { name: "Agent: inspect-child", exact: true }).waitFor();
   await detail.getByRole("button", { name: "Read conversation", exact: true }).click();
   await detail.getByText("Read-only history.", { exact: false }).waitFor();
-  await detail.getByText(/Fact \d+ · Input: Child inspector evidence/).waitFor();
+  await detail.getByText(/Fact \d+ · Input claimed: Child inspector evidence/).waitFor();
   assert.match(await detail.innerText(), /Through Fact \d+/);
   assert.equal(await page.locator(".transcript").count(), 2);
   assert.deepEqual(await page.locator(".pane-session").allTextContents(), identities);

@@ -13,6 +13,21 @@ def stale_target(error):
     return isinstance(failure, dict) and failure.get('error') == 'stale element reference'
 
 
+def click(resolve, dispatch, until):
+    def attempt():
+        item = resolve()
+        if not item:
+            return False
+        try:
+            dispatch(item)
+        except RuntimeError as error:
+            if not stale_target(error):
+                raise
+            return False
+        return True
+    until(attempt)
+
+
 def fill(script, keys, until, css, value):
     def ready():
         try:

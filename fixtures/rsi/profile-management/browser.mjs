@@ -1,5 +1,5 @@
 import {paired} from '../web-product/paired-env.mjs';
-import {openSettings,disconnect} from '../web-product/controls.mjs';
+import {openSettings,disconnect,readBrowserOwner} from '../web-product/controls.mjs';
 import assert from 'node:assert/strict';
 import {createRequire} from 'node:module';
 import {mkdir,readFile,appendFile,writeFile} from 'node:fs/promises';
@@ -22,8 +22,6 @@ for(const [name,engine] of [['chromium',chromium],['firefox',firefox]]) {
   const target=local({operation:'catalog',query:{profile:'editable',after:null}}).leaves.find(leaf=>leaf.target.leaf==='rsi-inspector-api')?.target;
   assert(target,'fixture leaf must be on the first source page');
   const registration=service.register(`${name} Profile review`);
-  const scope={principal:{kind:'device',id:registration.id},scope:{kind:'profile',target,operation:'disable'}};
-  const grant=granted=>local({operation:'set_grant',request:{expected:local({operation:'grants'}).revision,scope,granted}});
   const browser=await engine.launch({headless:true});let page;const errors=[];
   try {
     const context=await browser.newContext({ignoreHTTPSErrors:true,viewport:{width:1440,height:980}});
@@ -33,6 +31,8 @@ for(const [name,engine] of [['chromium',chromium],['firefox',firefox]]) {
     const open=async()=>{await openSettings(page);await page.getByRole('button',{name:'Plugins',exact:true}).click();await page.getByRole('button',{name:'Browse Host Profiles',exact:true}).click();};
     await open();const panel=page.getByRole('region',{name:'Host Profile management',exact:true});
     await panel.getByRole('button',{name:'Open Profile editable',exact:true}).click();await panel.getByLabel('Plugin leaf',{exact:true}).selectOption(target.leaf);
+    const scope={principal:{kind:'device',id:await readBrowserOwner(panel)},scope:{kind:'profile',target,operation:'disable'}};
+    const grant=granted=>local({operation:'set_grant',request:{expected:local({operation:'grants'}).revision,scope,granted}});
     assert(await panel.getByRole('button',{name:'Preview disable',exact:true}).isDisabled());
     assert.equal(await panel.getByText('Grant an exact change',{exact:true}).count(),0,'Device must not show Local grant editor');
     grant(true);await panel.getByRole('button',{name:'Refresh source choices',exact:true}).click();
