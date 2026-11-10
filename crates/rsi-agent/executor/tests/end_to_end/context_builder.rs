@@ -62,8 +62,11 @@ struct SelectedCursor {
     drop_effort: bool,
 }
 impl ModelContextCursor for SelectedCursor {
-    fn step_instructions(&self) -> &[rsi_agent_session_protocol::StepInstruction] {
-        self.inner.step_instructions()
+    fn step_prompt(&self) -> &rsi_agent_session_protocol::StepPrompt {
+        self.inner.step_prompt()
+    }
+    fn runtime_context(&self) -> Option<&str> {
+        self.inner.runtime_context()
     }
     fn previous_context_input_at_ms(
         &self,

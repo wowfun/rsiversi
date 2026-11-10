@@ -4,6 +4,9 @@ The journal adapter stages bounded immutable event segments in the Agent Store
 and returns a typed domain proposal. It retains each prepared CAS object until
 the caller supplies the exact Kernel receipt or proves rejection. It does not
 publish Session state or decide retries.
+BeforeStep receipts verify guidance only in `StepPrompt::AppendToHeader`; a native
+complete assembly is a different preparation owner and cannot acknowledge the
+extension's staged guidance. Omitted same-Step updates retain their existing meaning.
 The owner commits its proposal together with the matching ToolResult or complete
 contribution stage. A receipt must contain the exact proposed snapshot and CAS
 predecessor; a matching public operation name alone is insufficient.

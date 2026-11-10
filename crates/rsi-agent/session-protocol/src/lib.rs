@@ -67,7 +67,8 @@ pub use compaction::{
     ContextCompactionPlan, MAXIMUM_COMPACTION_PLAN_BYTES, ModelEventPurpose, ModelPurpose,
 };
 pub use contribution::{
-    MAXIMUM_STEP_INSTRUCTION_BYTES, StepInstruction, ToolRejection, validate_step_instructions,
+    MAXIMUM_STEP_INSTRUCTION_BYTES, StepInstruction, StepPrompt, ToolRejection,
+    validate_step_instructions,
 };
 mod command;
 pub use command::{
@@ -112,7 +113,7 @@ pub use resource::{
 };
 
 /// Exact durable format accepted by this pre-release implementation.
-pub const SESSION_FORMAT_VERSION: u32 = 36;
+pub const SESSION_FORMAT_VERSION: u32 = 37;
 /// Maximum bytes in one session, turn, effect, profile, or error-code identity.
 pub const MAXIMUM_AGENT_IDENTIFIER_BYTES: usize = 256;
 /// Maximum bytes in one Agent preset directory-segment identity.
@@ -800,6 +801,8 @@ pub enum InputMessageSource {
     SkillCatalog { sha256: String },
     /// Direct user invocation of one selected skill.
     UserSkillInvocation { name: String, source: String },
+    /// Native request-time User snapshot, entered through ordinary input preparation.
+    RuntimeContext,
     /// Actual text entered by a pinned context contribution before external execution.
     PluginContext {
         /// Stable contribution provenance, not an authorization credential.
@@ -940,7 +943,8 @@ impl InputMessageSource {
             }
             | Self::Agent { .. }
             | Self::Completion { .. }
-            | Self::PluginContext { .. } => Ok(()),
+            | Self::PluginContext { .. }
+            | Self::RuntimeContext => Ok(()),
         }
     }
 }
@@ -2249,9 +2253,9 @@ pub enum SessionFactBody {
         names: Vec<String>,
         /// Application names and registration identities for this request series.
         application: Option<ApplicationToolView>,
-        /// Complete ordered replacement; omission retains the current Step's instructions.
+        /// Resolved ownership and sections; omission retains the current Step's prompt.
         #[serde(default, skip_serializing_if = "Option::is_none")]
-        instructions: Option<Vec<StepInstruction>>,
+        prompt: Option<StepPrompt>,
     },
     /// One model Step ended before another Step or the Turn terminal.
     StepEnded {
@@ -2485,11 +2489,11 @@ impl SessionFactBody {
             Self::StepPrepared {
                 names,
                 application,
-                instructions,
+                prompt,
                 ..
             } => {
-                if let Some(instructions) = instructions {
-                    validate_step_instructions(instructions)?;
+                if let Some(prompt) = prompt {
+                    prompt.validate()?;
                 }
                 if names.len() > rsi_tools_protocol::MAXIMUM_REGISTERED_TOOLS
                     || names.windows(2).any(|pair| pair[0] >= pair[1])
@@ -2778,13 +2782,15 @@ fn validate_claimed_message(
         };
         source.validate_text(text)?;
     }
-    if matches!(source, InputMessageSource::PluginContext { .. })
-        && content
-            .iter()
-            .any(|item| !matches!(item, AgentMessageContent::Text { .. }))
+    if matches!(
+        source,
+        InputMessageSource::PluginContext { .. } | InputMessageSource::RuntimeContext
+    ) && content
+        .iter()
+        .any(|item| !matches!(item, AgentMessageContent::Text { .. }))
     {
         return Err(SessionError::Invalid(
-            "PluginContext must contain only text".into(),
+            "runtime and plugin context must contain only text".into(),
         ));
     }
     let text_limit = if matches!(

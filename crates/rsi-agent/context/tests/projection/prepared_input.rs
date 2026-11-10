@@ -66,6 +66,60 @@ fn cursor() -> ContextFold {
 }
 
 #[test]
+fn runtime_snapshot_advances_only_when_entered_and_survives_checkpoint() {
+    for enter in [false, true] {
+        let mut fold = cursor();
+        let mut history = initial();
+        let mut body = history.pop().unwrap().body().clone();
+        let SessionFactBody::InputMessageClaimed {
+            source, content, ..
+        } = &mut body
+        else {
+            panic!()
+        };
+        *source = InputMessageSource::RuntimeContext;
+        *content = vec![AgentMessageContent::Text {
+            text: "Directory: /project".into(),
+        }];
+        history.push(SessionFact::new(3, 3, body).unwrap());
+        fold.apply(&history).unwrap();
+        assert_eq!(
+            fold.runtime_context(),
+            None,
+            "an unprepared claim is not entered"
+        );
+        fold.apply(&[decision(if enter {
+            StepInputDecision::enter(vec![PreparedInput::Claimed {
+                claim: InputClaimRef::new(3, 0).unwrap(),
+            }])
+            .unwrap()
+        } else {
+            StepInputDecision::reject()
+        })])
+        .unwrap();
+        let restored = ContextFold::from_checkpoint(
+            header(""),
+            ContextLimits::default(),
+            &fold.checkpoint_bytes().unwrap(),
+            rsi_agent_context::ContextBudget::default(),
+        )
+        .unwrap();
+        for fold in [&fold, &restored] {
+            assert_eq!(
+                fold.runtime_context(),
+                enter.then_some("Directory: /project")
+            );
+            let context = fold.project(ContextLimits::default()).unwrap();
+            if enter {
+                assert_eq!(context.messages()[0].role(), MessageRole::User);
+            } else {
+                assert!(context.messages().is_empty());
+            }
+        }
+    }
+}
+
+#[test]
 fn file_identity_and_execution_location_survive_preparation_and_checkpoint() {
     let file = rsi_media_protocol::FileRef::new(
         rsi_media_protocol::MediaId::new("c".repeat(64)).unwrap(),

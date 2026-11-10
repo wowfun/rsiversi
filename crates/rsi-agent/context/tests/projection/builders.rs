@@ -60,8 +60,11 @@ fn selected(id: &str, version: &str, digest: &str) -> Arc<SelectedBuilder> {
 #[derive(Debug)]
 struct WrongPosition(Box<dyn ModelContextCursor>);
 impl ModelContextCursor for WrongPosition {
-    fn step_instructions(&self) -> &[rsi_agent_session_protocol::StepInstruction] {
-        self.0.step_instructions()
+    fn step_prompt(&self) -> &rsi_agent_session_protocol::StepPrompt {
+        self.0.step_prompt()
+    }
+    fn runtime_context(&self) -> Option<&str> {
+        self.0.runtime_context()
     }
     fn previous_context_input_at_ms(
         &self,

@@ -20,38 +20,95 @@ pub struct StepInstruction {
     pub text: String,
 }
 
+/// Resolved system prompt with explicit ownership of immutable Header defaults.
+#[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
+#[serde(tag = "mode", rename_all = "snake_case", deny_unknown_fields)]
+pub enum StepPrompt {
+    /// Complete prompt, including any defaults chosen by the assembler.
+    Assembled {
+        /// Ordered resolved sections; empty clears the system prompt.
+        sections: Vec<StepInstruction>,
+    },
+    /// Guidance appended to the immutable Header and delegation persona.
+    AppendToHeader {
+        /// Ordered guidance; empty retains only Header defaults.
+        sections: Vec<StepInstruction>,
+    },
+}
+
+impl Default for StepPrompt {
+    fn default() -> Self {
+        Self::AppendToHeader {
+            sections: Vec::new(),
+        }
+    }
+}
+
+impl StepPrompt {
+    /// Borrows the resolved sections without discarding their ownership tag.
+    pub fn sections(&self) -> &[StepInstruction] {
+        match self {
+            Self::Assembled { sections } | Self::AppendToHeader { sections } => sections,
+        }
+    }
+
+    /// Checks the durable representation at its owning boundary.
+    pub fn validate(&self) -> Result<()> {
+        match self {
+            Self::AppendToHeader { sections } => validate_step_instructions(sections),
+            Self::Assembled { sections } => validate_sections(
+                sections,
+                66,
+                super::MAXIMUM_SYSTEM_PROMPT_BYTES
+                    + super::MAXIMUM_DELEGATION_PERSONA_BYTES
+                    + MAXIMUM_STEP_INSTRUCTION_BYTES,
+                false,
+                "System prompt",
+            ),
+        }
+    }
+}
+
 /// Validates a complete ordered Step instruction assembly.
 ///
 /// # Errors
 /// Rejects duplicate producers, empty sections or the aggregate byte bound.
 pub fn validate_step_instructions(sections: &[StepInstruction]) -> Result<()> {
+    validate_sections(
+        sections,
+        64,
+        MAXIMUM_STEP_INSTRUCTION_BYTES,
+        true,
+        "Step instructions",
+    )
+}
+
+fn validate_sections(
+    sections: &[StepInstruction],
+    maximum_sections: usize,
+    maximum_bytes: usize,
+    reject_blank: bool,
+    label: &str,
+) -> Result<()> {
     let mut producers = std::collections::BTreeSet::new();
     let mut bytes = 0_usize;
-    if sections.len() > 64 {
-        return Err(SessionError::Invalid(
-            "too many Step instruction sections".into(),
-        ));
+    if sections.len() > maximum_sections {
+        return Err(SessionError::Invalid(format!("too many {label} sections")));
     }
     for section in sections {
-        validate_safe_text(
-            "Step instructions",
-            &section.text,
-            MAXIMUM_STEP_INSTRUCTION_BYTES,
-            false,
-        )?;
-        if section.text.trim().is_empty() || !producers.insert(&section.producer) {
-            return Err(SessionError::Invalid(
-                "empty or duplicate Step instruction section".into(),
-            ));
+        validate_safe_text(label, &section.text, maximum_bytes, false)?;
+        if (reject_blank && section.text.trim().is_empty()) || !producers.insert(&section.producer)
+        {
+            return Err(SessionError::Invalid(format!(
+                "empty or duplicate {label} section"
+            )));
         }
         bytes = bytes
             .checked_add(section.text.len())
-            .ok_or_else(|| SessionError::Invalid("Step instruction size overflow".into()))?;
+            .ok_or_else(|| SessionError::Invalid(format!("{label} size overflow")))?;
     }
-    if bytes > MAXIMUM_STEP_INSTRUCTION_BYTES {
-        return Err(SessionError::Invalid(
-            "Step instruction budget exceeded".into(),
-        ));
+    if bytes > maximum_bytes {
+        return Err(SessionError::Invalid(format!("{label} budget exceeded")));
     }
     Ok(())
 }

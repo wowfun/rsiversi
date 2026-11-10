@@ -178,7 +178,9 @@ impl RawContextPressure {
 pub trait ModelContextCursor: fmt::Debug + Send + 'static {
     /// Current ordered guidance from canonical Step instruction updates.
     /// Step start/end clears it; an omitted update retains it across request series.
-    fn step_instructions(&self) -> &[rsi_agent_session_protocol::StepInstruction];
+    fn step_prompt(&self) -> &rsi_agent_session_protocol::StepPrompt;
+    /// Last retained, entered native runtime snapshot.
+    fn runtime_context(&self) -> Option<&str>;
     /// Last entered non-Tool context input from this producer in retained Turns,
     /// reconstructed from canonical Facts and the selected fork history.
     fn previous_context_input_at_ms(
@@ -258,8 +260,12 @@ struct Metadata {
 
 impl ModelContextState {
     /// Borrows the canonical assembly for unchanged-instruction suppression.
-    pub fn step_instructions(&self) -> &[rsi_agent_session_protocol::StepInstruction] {
-        self.cursor.step_instructions()
+    pub fn step_prompt(&self) -> &rsi_agent_session_protocol::StepPrompt {
+        self.cursor.step_prompt()
+    }
+    /// Borrows the last entered native runtime snapshot from the selected cursor.
+    pub fn runtime_context(&self) -> Option<&str> {
+        self.cursor.runtime_context()
     }
     /// Borrows derived input timing without another history read or payload copy.
     pub fn previous_context_input_at_ms(

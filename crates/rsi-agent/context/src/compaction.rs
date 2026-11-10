@@ -1163,6 +1163,9 @@ impl ContextFold {
         for turn in &mut self.turns {
             if let Some((replacement, bytes)) = replacements.remove(&turn.id) {
                 turn.messages = replacement.messages;
+                turn.runtime_context = turn
+                    .runtime_context
+                    .and_then(|index| replacement.remap.get(index));
                 turn.batches = replacement.batches;
                 turn.message_bytes = bytes;
             }
@@ -1298,6 +1301,7 @@ mod view_tests {
                 fold.turns.len(),
             );
             fold.turns.push_back(ProjectedTurn {
+                runtime_context: None,
                 id: TurnKey::new(fold.header.session_id(), &TurnId::new(id).unwrap()),
                 context_input_times: BTreeMap::from([(
                     rsi_agent_session_protocol::ContributionId::new(id).unwrap(),

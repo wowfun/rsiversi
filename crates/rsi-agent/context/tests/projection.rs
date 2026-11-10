@@ -24,6 +24,108 @@ mod images;
 mod prepared_input;
 
 #[test]
+fn complete_prompt_replaces_header_and_survives_checkpoint() {
+    use rsi_agent_session_protocol::StepPrompt;
+    let turn = TurnId::new("complete-prompt").unwrap();
+    let step = StepId::new("complete-step").unwrap();
+    let history = entered_facts(vec![
+        SessionFactBody::TurnAccepted {
+            turn_id: turn.clone(),
+            text: "work".into(),
+            model: None,
+            reasoning_effort: None,
+            sandbox: SandboxMode::WorkspaceWrite,
+            require_approval: false,
+        },
+        SessionFactBody::StepStarted {
+            turn_id: turn.clone(),
+            step_id: step.clone(),
+        },
+        SessionFactBody::StepPrepared {
+            turn_id: turn.clone(),
+            step_id: step.clone(),
+            names: vec![],
+            application: None,
+            prompt: Some(rsi_agent_session_protocol::StepPrompt::Assembled {
+                sections: vec![rsi_agent_session_protocol::StepInstruction {
+                    producer: rsi_agent_session_protocol::ContributionId::new("complete").unwrap(),
+                    text: "Only the resolved complete prompt".into(),
+                }],
+            }),
+        },
+    ]);
+    let mut fold = ContextFold::with_limits(
+        header("discard-header-default"),
+        ContextLimits::default(),
+        rsi_agent_context::ContextBudget::default(),
+    )
+    .unwrap();
+    fold.apply(&history).unwrap();
+    let bytes = fold.checkpoint_bytes().unwrap();
+    let mut restored = ContextFold::from_checkpoint(
+        header("discard-header-default"),
+        ContextLimits::default(),
+        &bytes,
+        rsi_agent_context::ContextBudget::default(),
+    )
+    .unwrap();
+    for context in [&mut fold, &mut restored] {
+        let request = context
+            .request(
+                ContextLimits::default(),
+                rsi_ai_protocol::LanguageRequestOptions::default(),
+            )
+            .unwrap();
+        let encoded = serde_json::to_string(&request).unwrap();
+        assert!(encoded.contains("Only the resolved complete prompt"));
+        assert!(
+            !encoded.contains("discard-header-default"),
+            "complete prompt must supersede Header defaults"
+        );
+    }
+    for (prompt, expected) in [
+        (None, Some("Only the resolved complete prompt")),
+        (Some(StepPrompt::Assembled { sections: vec![] }), None),
+        (None, None),
+        (
+            Some(StepPrompt::AppendToHeader { sections: vec![] }),
+            Some("discard-header-default"),
+        ),
+    ] {
+        fold.apply(&entered_facts_after(
+            fold.through_seq(),
+            vec![SessionFactBody::StepPrepared {
+                turn_id: turn.clone(),
+                step_id: step.clone(),
+                names: vec![],
+                application: None,
+                prompt,
+            }],
+        ))
+        .unwrap();
+        let checkpoint = fold.checkpoint_bytes().unwrap();
+        let restored = ContextFold::from_checkpoint(
+            header("discard-header-default"),
+            ContextLimits::default(),
+            &checkpoint,
+            rsi_agent_context::ContextBudget::default(),
+        )
+        .unwrap();
+        let context = restored.project(ContextLimits::default()).unwrap();
+        let system = context
+            .messages()
+            .iter()
+            .find(|message| message.role() == MessageRole::System);
+        assert_eq!(
+            system.map(rsi_ai_protocol::Message::content),
+            expected
+                .map(|text| vec![MessageContent::Text { text: text.into() }])
+                .as_deref()
+        );
+    }
+}
+
+#[test]
 fn command_content_keeps_user_role_and_file_identity_through_checkpoint() {
     use rsi_agent_session_protocol::{CommandMessageSource, ContributionId, DomainRequestId};
     let source = CommandMessageSource {
@@ -122,10 +224,13 @@ fn step_instructions_survive_checkpoint_but_do_not_leak_into_a_later_step() {
             step_id: step.clone(),
             names: vec![],
             application: None,
-            instructions: Some(vec![rsi_agent_session_protocol::StepInstruction {
-                producer: rsi_agent_session_protocol::ContributionId::new("fixture.plan").unwrap(),
-                text: "Only plan during this Step".into(),
-            }]),
+            prompt: Some(rsi_agent_session_protocol::StepPrompt::AppendToHeader {
+                sections: vec![rsi_agent_session_protocol::StepInstruction {
+                    producer: rsi_agent_session_protocol::ContributionId::new("fixture.plan")
+                        .unwrap(),
+                    text: "Only plan during this Step".into(),
+                }],
+            }),
         },
     ]);
     let mut fold = ContextFold::with_limits(
@@ -191,7 +296,9 @@ fn step_instructions_survive_checkpoint_but_do_not_leak_into_a_later_step() {
                     step_id: step.clone(),
                     names: vec![],
                     application: None,
-                    instructions,
+                    prompt: instructions.map(|sections| {
+                        rsi_agent_session_protocol::StepPrompt::AppendToHeader { sections }
+                    }),
                 }],
             ))
             .unwrap();
@@ -213,7 +320,8 @@ fn step_instructions_survive_checkpoint_but_do_not_leak_into_a_later_step() {
         .unwrap();
         assert_eq!(
             restored
-                .step_instructions()
+                .step_prompt()
+                .sections()
                 .first()
                 .map_or("", |row| row.text.as_str()),
             expected
@@ -238,7 +346,7 @@ fn step_instructions_survive_checkpoint_but_do_not_leak_into_a_later_step() {
                     step_id: next,
                     names: vec![],
                     application: None,
-                    instructions: None,
+                    prompt: None,
                 },
             ],
         ))

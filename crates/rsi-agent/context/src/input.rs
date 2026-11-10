@@ -8,9 +8,19 @@ use rsi_agent_session_protocol::{
 use rsi_ai_protocol::{Message, MessageContent};
 
 impl ContextFold {
+    /// Last retained, entered native runtime snapshot, borrowed without copying text.
+    pub fn runtime_context(&self) -> Option<&str> {
+        self.turns.iter().rev().find_map(|turn| {
+            let index = turn.runtime_context?;
+            match turn.messages[index].content() {
+                [MessageContent::Text { text }] => Some(text.as_str()),
+                _ => Some(""),
+            }
+        })
+    }
     /// Current canonical Step guidance, cleared at Step boundaries.
-    pub fn step_instructions(&self) -> &[rsi_agent_session_protocol::StepInstruction] {
-        &self.step_instructions
+    pub fn step_prompt(&self) -> &rsi_agent_session_protocol::StepPrompt {
+        &self.step_prompt
     }
 
     /// Last entered non-Tool context input from this producer in retained Turns.
@@ -80,6 +90,16 @@ impl ContextFold {
             if let Some(message) = message {
                 self.push_turn_message(turn, message)?;
                 if let Some(fact) = origin {
+                    if matches!(
+                        fact.body(),
+                        SessionFactBody::InputMessageClaimed {
+                            source: InputMessageSource::RuntimeContext,
+                            ..
+                        }
+                    ) {
+                        let turn = self.turn_mut(turn)?;
+                        turn.runtime_context = Some(turn.messages.len() - 1);
+                    }
                     if let SessionFactBody::InputMessageClaimed {
                         source:
                             InputMessageSource::PluginContext {

@@ -21,7 +21,7 @@ impl Default for DefaultContextBuilder {
         Self {
             identity: ContextBuilderIdentity::new(
                 "rsi.agent.context.default",
-                "2.15.0",
+                "2.16.0",
                 hex::encode(Sha256::digest(b"null")),
             )
             .expect("static builder identity is valid"),
@@ -54,8 +54,11 @@ struct DefaultCursor {
     limits: ContextLimits,
 }
 impl ModelContextCursor for DefaultCursor {
-    fn step_instructions(&self) -> &[rsi_agent_session_protocol::StepInstruction] {
-        self.fold.step_instructions()
+    fn step_prompt(&self) -> &rsi_agent_session_protocol::StepPrompt {
+        self.fold.step_prompt()
+    }
+    fn runtime_context(&self) -> Option<&str> {
+        self.fold.runtime_context()
     }
     fn previous_context_input_at_ms(
         &self,

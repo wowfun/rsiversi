@@ -15,7 +15,9 @@ fn application_crash_facts(turn: &TurnId, started: bool) -> Vec<Arc<SessionFact>
             turn_id: turn.clone(),
             step_id: step,
             names: vec!["read".into()],
-            instructions: Some(vec![]),
+            prompt: Some(rsi_agent_session_protocol::StepPrompt::AppendToHeader {
+                sections: vec![],
+            }),
             application: Some(ApplicationToolView::Ready {
                 generation: "old-worker".into(),
                 receipt_source: Some("market".into()),

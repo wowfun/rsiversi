@@ -281,6 +281,7 @@ pub fn fact_references(record: &SessionFact) -> Result<ReferenceCollector> {
                     | InputMessageSource::AgentInstructions { .. }
                     | InputMessageSource::SkillCatalog { .. }
                     | InputMessageSource::UserSkillInvocation { .. }
+                    | InputMessageSource::RuntimeContext
                     | InputMessageSource::PluginContext { .. }
                     | InputMessageSource::Command { .. } => {}
                 }

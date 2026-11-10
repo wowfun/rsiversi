@@ -318,7 +318,7 @@ async fn before_step_receives_its_entered_input_time_after_tool_round_trip() {
         .iter()
         .filter_map(|fact| match fact.body() {
             SessionFactBody::StepPrepared {
-                instructions,
+                prompt: instructions,
                 names,
                 ..
             } => {
@@ -330,7 +330,7 @@ async fn before_step_receives_its_entered_input_time_after_tool_round_trip() {
         .collect::<Vec<_>>();
     assert_eq!(instructions.len(), 2);
     assert_eq!(
-        instructions[0].as_ref().unwrap()[0].text,
+        instructions[0].as_ref().unwrap().sections()[0].text,
         "One current instruction"
     );
     assert!(
