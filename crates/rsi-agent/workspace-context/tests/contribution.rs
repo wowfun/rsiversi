@@ -309,7 +309,7 @@ async fn enter(kernel: &AgentKernel, claim: &TurnClaim, request: &str) -> usize 
     let pin = kernel.composition(claim).unwrap();
     let token = CancellationToken::new();
     let context = kernel
-        .contribution_context(claim, token.clone())
+        .contribution_context(claim, Vec::new(), token.clone())
         .await
         .unwrap();
     let mut batch = ContributionBatch::default();
@@ -645,7 +645,10 @@ async fn initial_empty_workspace_does_not_emit_replacement_or_tombstone() {
 #[tokio::test]
 #[allow(clippy::too_many_lines)] // One parent/child lifecycle proves inherited state and independent input admission.
 async fn fork_rebinds_the_inherited_cursor_and_only_new_human_input_invokes_skills() {
-    use rsi_agent_session_protocol::{ContributionId, ForkTurnSelection, MessageDelivery};
+    use rsi_agent_session_protocol::{
+        ContributionId, ForkTurnSelection, InputClaimRef, MessageDelivery, PreparedInput,
+        StepInputDecision,
+    };
     use rsi_agent_turn_protocol::{SpawnAgentRequest, SubmitMessage};
     let fixture = Fixture::new(snapshot(true)).await;
     let store = Arc::new(SqliteStore::open(fixture.temp.path().join("store")).unwrap());
@@ -691,7 +694,7 @@ async fn fork_rebinds_the_inherited_cursor_and_only_new_human_input_invokes_skil
     enter(&kernel, &parent, "parent-initial").await;
     let token = CancellationToken::new();
     let context = kernel
-        .contribution_context(&parent, token.clone())
+        .contribution_context(&parent, Vec::new(), token.clone())
         .await
         .unwrap();
     let bodies = (0..20)
@@ -742,6 +745,25 @@ async fn fork_rebinds_the_inherited_cursor_and_only_new_human_input_invokes_skil
     .unwrap()
     .unwrap();
     // The child must be created by an actual model-produced, started Tool.
+    let (step_id, _) = kernel
+        .request_step(&parent, None, Vec::new(), CancellationToken::new())
+        .await
+        .unwrap();
+    let initial = kernel
+        .read_facts(&parent, parent.accepted_seq(), 16)
+        .await
+        .unwrap();
+    let input = initial
+        .facts
+        .iter()
+        .find(|fact| {
+            matches!(fact.body(),
+                SessionFactBody::InputMessageClaimed {
+                    source: InputMessageSource::Human { message_id, .. }, ..
+                } if message_id.as_str() == "parent-invoking"
+            )
+        })
+        .unwrap();
     let model_effect = rsi_agent_session_protocol::EffectId::new("spawn-model").unwrap();
     let tool_effect = rsi_agent_session_protocol::EffectId::new("spawn-tool").unwrap();
     let identity = rsi_tools_protocol::ToolResultIdentity::new(
@@ -780,6 +802,14 @@ async fn fork_rebinds_the_inherited_cursor_and_only_new_human_input_invokes_skil
         ),
     };
     let mut batches = vec![
+        vec![SessionFactBody::StepInputsPrepared {
+            turn_id: parent.turn_id().clone(),
+            step_id,
+            decision: StepInputDecision::enter(vec![PreparedInput::Claimed {
+                claim: InputClaimRef::new(input.seq(), 0).unwrap(),
+            }])
+            .unwrap(),
+        }],
         vec![SessionFactBody::ModelIntent {
             evidence: rsi_agent_session_protocol::RequestEvidence::Unavailable {
                 reason: rsi_agent_session_protocol::EvidenceUnavailable::NotCaptured,
