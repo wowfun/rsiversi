@@ -1,5 +1,13 @@
 # rsi-tools-protocol
 
+Local registrations separate `ToolInteraction` from an optional cooperative
+execution deadline in `ToolRunPolicy`. An automatic Tool may have no
+deadline; it still observes caller cancellation, catalog retirement and provider
+shutdown. Human interaction retains exclusive-final scheduling and is unavailable
+to Program calls. An execution deadline is a positive `Duration` representable by
+the runtime clock; the Local contract has no 600-second cap. The separately
+bounded Portable wire contract retains its own declared millisecond limit.
+
 `ToolBody` is a consuming continuation over immutable admitted arguments and
 execution authority. It checks the current cancellation token immediately before
 entering the body, including after an around callback has awaited. A cancellation
@@ -99,11 +107,8 @@ immediately; an active body keeps its provider-wide invocation admission until
 true settlement, and an outcome produced after catalog withdrawal is
 discarded. Starting above the provider-wide admission bound returns
 `ToolError::Capacity`; starts after shutdown begins return
-`ToolError::ShuttingDown`. Each
-execution registration timeout is within
-1..=600,000 milliseconds. The owner-declared `HumanInteraction` policy instead
-requires `exclusive_final` scheduling and ends on answer or cancellation; it
-has no implicit answer or timer. The current
+`ToolError::ShuttingDown`. Human interaction requires `exclusive_final`
+scheduling; interaction and deadline are independent as specified above. The current
 pre-release result shape is exactly `{ value, content, is_error, enforcement }`; image
 content contains a durable `MediaRef`, not an inline blob or status envelope.
 Model-facing text rejects C0 terminal controls other than tab and line breaks.
@@ -119,7 +124,8 @@ has no migration reader.
 `portable` owns the version-2 `rsi.tools.portable` duplex byte protocol. The linked
 bridge requires one explicitly named Portable supply and the exact Local
 ToolRegistrar. Describe returns a nonempty atomic batch of at most 64 bounded
-definitions with owner-declared finite timeout and scheduling. Describe contains
+definitions with owner-declared finite timeout of 1..=600,000 milliseconds
+and scheduling. Describe contains
 no registration callback or authority; the bridge registers the entire validated
 batch through the ordinary unpublished stage. Sealing and generation ownership
 retain their existing meaning.

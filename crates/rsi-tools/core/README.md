@@ -11,11 +11,13 @@ opens a bounded unpublished stage, contributes exact-name definitions through
 its registrar, and consumes the stage to seal one immutable runtime. Duplicate
 names fail atomically, schema listing is deterministic, and runtime execution
 never shares the staging lock or holds provider locks across Tool code. One
-stage admits at most 64 definitions, and an execution registration's cooperative timeout
-must be within 1..=600,000 milliseconds. An owner may instead declare
-`HumanInteraction` for an exclusive-final tool: it waits until human settlement
-or cancellation without a runtime timer, while retaining bounded invocation
-ownership and cooperative shutdown semantics.
+stage admits at most 64 definitions. Registrations declare an interaction category
+independently from their optional execution deadline. A deadline must be positive
+and representable by the runtime clock; absence creates no execution timer.
+Human-interaction Tools require exclusive-final scheduling. Native producers keep
+their chosen deadlines; automatic unbounded Tools still retain bounded invocation
+ownership and cooperative shutdown semantics. Preparation remains bounded by
+30 seconds or the shorter declared deadline, independently of execution.
 
 Registration leases support activation rollback by withdrawing their exact
 batch while the stage is open. Once the stage is sealed, dropping or retiring
@@ -90,7 +92,7 @@ admission. Standard product generation pins must therefore retain the native
 provider and bridge together with their catalog; replacement must not retire a
 scope still pinned by an old Session.
 
-Registration rejects Callable definitions with human-interaction timeouts or
+Registration rejects Callable definitions with human interaction or
 exclusive-final scheduling, and requires Coordinators to be exclusive. Local
 program roles never propagate through the Portable definition adapter.
 

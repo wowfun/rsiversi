@@ -13,7 +13,7 @@ use rsi_jobs::{JobScopeId, Jobs, JobsContract};
 use rsi_meta::{ActivationPlan, MetaError};
 use rsi_tools_protocol::{
     ToolDefinition, ToolError, ToolExecution, ToolExecutor, ToolLease, ToolRegistrarContract,
-    ToolRegistration, ToolResult, ToolTimeoutPolicy,
+    ToolRegistration, ToolResult, ToolRunPolicy,
 };
 use serde::Deserialize;
 use serde_json::{Value, json};
@@ -43,9 +43,7 @@ pub(super) fn register(plan: &ActivationPlan) -> rsi_meta::Result<ToolLease> {
         .register(ToolRegistration {
             definition,
             output: None,
-            timeout: ToolTimeoutPolicy::Execution {
-                timeout_ms: 600_000,
-            },
+            run_policy: ToolRunPolicy::execution(std::time::Duration::from_mins(10)),
             executor: Arc::new(Workflow {
                 runtime: plan.local::<ProgramRuntimeContract>()?,
                 jobs: plan.local::<JobsContract>()?,

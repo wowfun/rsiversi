@@ -44,9 +44,9 @@ pub(super) fn registration(
             }),
         )?
         .with_program_role(rsi_tools_protocol::ToolProgramRole::Callable),
-        timeout: rsi_tools_protocol::ToolTimeoutPolicy::Execution {
-            timeout_ms: SHELL_TOOL_TIMEOUT_MS,
-        },
+        run_policy: rsi_tools_protocol::ToolRunPolicy::execution(std::time::Duration::from_millis(
+            SHELL_TOOL_TIMEOUT_MS,
+        )),
         executor: Arc::new(ShellTool { services }),
     })
 }

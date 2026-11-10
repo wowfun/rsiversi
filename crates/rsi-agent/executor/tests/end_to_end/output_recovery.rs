@@ -112,7 +112,9 @@ async fn truncated_tool_batch_is_diagnostic_only_and_stops_without_replanning() 
         .register(ToolRegistration {
             output: None,
             definition: ToolDefinition::new("echo", "echo", json!({"type":"object"})).unwrap(),
-            timeout: rsi_tools_protocol::ToolTimeoutPolicy::Execution { timeout_ms: 2000 },
+            run_policy: rsi_tools_protocol::ToolRunPolicy::execution(
+                std::time::Duration::from_secs(2),
+            ),
             executor: Arc::new(EchoTool {
                 store: stack.store.clone(),
                 calls: calls.clone(),

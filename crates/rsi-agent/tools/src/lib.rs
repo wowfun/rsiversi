@@ -283,7 +283,9 @@ fn registrations(
                 output: None,
                 definition: ToolDefinition::new(name, description, parameters)?
                     .with_scheduling(scheduling),
-                timeout: rsi_tools_protocol::ToolTimeoutPolicy::Execution { timeout_ms },
+                run_policy: rsi_tools_protocol::ToolRunPolicy::execution(
+                    std::time::Duration::from_millis(timeout_ms),
+                ),
                 executor: Arc::new(NativeExecutor {
                     definitions: definitions.cloned(),
                     roles: roles.clone(),

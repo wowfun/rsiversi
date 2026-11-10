@@ -75,7 +75,9 @@ async fn installed_original_todo_commits_through_kernel_and_restores_without_rep
             definition,
             output: None,
             executor: adapter.tool("todo_write".into()),
-            timeout: rsi_tools_protocol::ToolTimeoutPolicy::Execution { timeout_ms: 30_000 },
+            run_policy: rsi_tools_protocol::ToolRunPolicy::execution(
+                std::time::Duration::from_secs(30),
+            ),
         })
         .unwrap();
     let args =
@@ -495,7 +497,7 @@ async fn original_plan_review_parks_the_kernel_and_rejects_answers_invalidated_b
                     .with_scheduling(ToolScheduling::ExclusiveFinal),
                 output: None,
                 executor: adapter.tool("exit_plan_mode".into()),
-                timeout: rsi_tools_protocol::ToolTimeoutPolicy::HumanInteraction,
+                run_policy: rsi_tools_protocol::ToolRunPolicy::human_interaction(),
             })
             .unwrap();
         let arguments = json!({"plan":"# Original Plan\nReview the exact content."}).to_string();
@@ -729,7 +731,9 @@ async fn lost_reply(lose_stage: bool) {
             definition: original_todo(&connection).await,
             output: None,
             executor: adapter.tool("todo_write".into()),
-            timeout: rsi_tools_protocol::ToolTimeoutPolicy::Execution { timeout_ms: 30_000 },
+            run_policy: rsi_tools_protocol::ToolRunPolicy::execution(
+                std::time::Duration::from_secs(30),
+            ),
         })
         .unwrap();
     let args = json!({"todos":[{"content":"Exactly once","status":"pending"}]}).to_string();

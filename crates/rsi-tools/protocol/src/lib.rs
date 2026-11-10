@@ -47,8 +47,8 @@ pub const MAXIMUM_TOOL_DESCRIPTION_BYTES: usize = 4 * 1024;
 pub const MAXIMUM_FREEFORM_GRAMMAR_BYTES: usize = 64 * 1024;
 /// Maximum active definitions in one Tool Runtime generation.
 pub const MAXIMUM_REGISTERED_TOOLS: usize = 64;
-/// Maximum cooperative timeout for one Tool call in milliseconds.
-pub const MAXIMUM_TOOL_TIMEOUT_MS: u64 = 600_000;
+/// Maximum timeout accepted by the Portable Tool wire contract, in milliseconds.
+pub const MAXIMUM_PORTABLE_TOOL_TIMEOUT_MS: u64 = 600_000;
 /// Maximum active-or-retained invocations across one Tool catalog provider.
 pub const MAXIMUM_ADMITTED_TOOL_INVOCATIONS: usize = 1_024;
 /// Maximum unpublished and sealed catalogs retained by one provider.
@@ -987,16 +987,38 @@ pub trait PendingToolApproval: fmt::Debug + Send + 'static {
     -> Result<ToolDecision>;
 }
 
-/// Owner-declared cooperative timeout policy.
+/// Whether executing a Tool requires synchronous human interaction.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
-pub enum ToolTimeoutPolicy {
-    /// Finite cooperative execution timeout, validated at registration.
-    Execution {
-        /// Maximum execution duration in milliseconds.
-        timeout_ms: u64,
-    },
-    /// Synchronous human interaction, bounded by cancellation and provider ownership.
-    HumanInteraction,
+pub enum ToolInteraction {
+    /// No synchronous human interaction.
+    Automatic,
+    /// Synchronous human interaction requiring exclusive-final scheduling.
+    Human,
+}
+
+/// Independent owner-declared interaction and cooperative execution deadline.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub struct ToolRunPolicy {
+    /// Interaction requirements, independent of the optional deadline.
+    pub interaction: ToolInteraction,
+    /// Maximum execution duration. `None` installs no execution timer.
+    pub deadline: Option<std::time::Duration>,
+}
+impl ToolRunPolicy {
+    /// Automatic execution with a finite deadline, checked at registration.
+    pub const fn execution(deadline: std::time::Duration) -> Self {
+        Self {
+            interaction: ToolInteraction::Automatic,
+            deadline: Some(deadline),
+        }
+    }
+    /// Human interaction bounded by cancellation and provider ownership.
+    pub const fn human_interaction() -> Self {
+        Self {
+            interaction: ToolInteraction::Human,
+            deadline: None,
+        }
+    }
 }
 
 /// One process-local implementation registered for a model-visible definition.
@@ -1006,8 +1028,8 @@ pub struct ToolRegistration {
     pub definition: ToolDefinition,
     /// Optional canonical successful-output contract, outside model-visible schema.
     pub output: Option<ToolOutputDeclaration>,
-    /// Owner-declared timeout policy; model arguments cannot select it.
-    pub timeout: ToolTimeoutPolicy,
+    /// Owner-declared execution policy; model arguments cannot select it.
+    pub run_policy: ToolRunPolicy,
     /// Trusted body.
     pub executor: Arc<dyn ToolExecutor>,
 }
@@ -1018,7 +1040,7 @@ impl fmt::Debug for ToolRegistration {
             .debug_struct("ToolRegistration")
             .field("definition", &self.definition)
             .field("output", &self.output)
-            .field("timeout", &self.timeout)
+            .field("run_policy", &self.run_policy)
             .field("executor", &"<tool executor>")
             .finish()
     }

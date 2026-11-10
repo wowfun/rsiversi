@@ -45,7 +45,7 @@ The same plugin owns a second version-1 `rsi.plan-review` domain, reset on fork.
 It is root-only and Exclusive. Saved plans are data; saving grants no execution
 authority. The complete projection includes the current plan and last decision.
 
-`request_plan_execution` is root-only, ExclusiveFinal and HumanInteraction.
+`request_plan_execution` is root-only, ExclusiveFinal and uses the Human interaction category.
 It requires enabled plan mode, no initial structured-output contract, and the
 exact current plan reference. Before parking, it freezes both domain revisions
 through the started-Tool settlement seam. The human sees that plan with closed

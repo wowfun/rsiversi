@@ -220,7 +220,9 @@ async fn original_plugins_fork_at_the_captured_terminal_without_replaying_parent
             definition: original_todo(&connection).await,
             output: None,
             executor: adapter.tool("todo_write".into()),
-            timeout: rsi_tools_protocol::ToolTimeoutPolicy::Execution { timeout_ms: 30_000 },
+            run_policy: rsi_tools_protocol::ToolRunPolicy::execution(
+                std::time::Duration::from_secs(30),
+            ),
         })
         .unwrap();
     let fork = stack
@@ -240,7 +242,9 @@ async fn original_plugins_fork_at_the_captured_terminal_without_replaying_parent
                 handle: handle.clone(),
                 transform: transform.clone(),
             }),
-            timeout: rsi_tools_protocol::ToolTimeoutPolicy::Execution { timeout_ms: 30_000 },
+            run_policy: rsi_tools_protocol::ToolRunPolicy::execution(
+                std::time::Duration::from_secs(30),
+            ),
         })
         .unwrap();
     let provider = Arc::new(LanguageFixture {

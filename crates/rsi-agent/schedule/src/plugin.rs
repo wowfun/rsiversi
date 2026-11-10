@@ -20,7 +20,7 @@ use rsi_agent_turn_protocol::{
 use rsi_meta::{ActivationPlan, ConfigValue, MetaError, PluginFactory, PreparedActivation};
 use rsi_tools_protocol::{
     ToolContent, ToolDefinition, ToolError, ToolExecution, ToolExecutor, ToolRegistrarContract,
-    ToolRegistration, ToolResult, ToolScheduling, ToolTimeoutPolicy,
+    ToolRegistration, ToolResult, ToolRunPolicy, ToolScheduling,
 };
 use serde::{Deserialize, Serialize};
 use serde_json::json;
@@ -408,7 +408,7 @@ impl PluginFactory for ScheduleFactory {
                     host: host.clone(),
                     operation,
                 }),
-                timeout: ToolTimeoutPolicy::Execution { timeout_ms: 30_000 },
+                run_policy: ToolRunPolicy::execution(std::time::Duration::from_secs(30)),
             });
         }
         let tool_lease = plan

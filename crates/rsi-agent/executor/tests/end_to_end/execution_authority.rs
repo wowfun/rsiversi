@@ -26,7 +26,9 @@ async fn revocation_during_tool_settles_result_and_stops_next_provider_attempt()
                 json!({"type":"object"}),
             )
             .unwrap(),
-            timeout: rsi_tools_protocol::ToolTimeoutPolicy::Execution { timeout_ms: 2_000 },
+            run_policy: rsi_tools_protocol::ToolRunPolicy::execution(
+                std::time::Duration::from_secs(2),
+            ),
             executor: Arc::new(RevokeTool(gate.clone())),
         })
         .unwrap();

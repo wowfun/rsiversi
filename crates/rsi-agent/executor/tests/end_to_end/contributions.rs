@@ -61,7 +61,9 @@ async fn before_step_subset_is_durable_and_excludes_provider_hallucinated_tools(
                     store: stack.store.clone(),
                     calls: calls.clone(),
                 }),
-                timeout: rsi_tools_protocol::ToolTimeoutPolicy::Execution { timeout_ms: 1000 },
+                run_policy: rsi_tools_protocol::ToolRunPolicy::execution(
+                    std::time::Duration::from_secs(1),
+                ),
             })
             .unwrap();
         let language = Arc::new(LanguageFixture {
@@ -266,7 +268,9 @@ async fn before_step_receives_its_entered_input_time_after_tool_round_trip() {
                 store: stack.store.clone(),
                 calls: calls.clone(),
             }),
-            timeout: rsi_tools_protocol::ToolTimeoutPolicy::Execution { timeout_ms: 1000 },
+            run_policy: rsi_tools_protocol::ToolRunPolicy::execution(
+                std::time::Duration::from_secs(1),
+            ),
         })
         .unwrap();
     let language = Arc::new(LanguageFixture {
@@ -480,7 +484,9 @@ async fn policy_constraints_accumulate_and_denial_never_starts_the_tool() {
                 output: None,
                 definition: ToolDefinition::new("echo", "echo JSON", json!({"type":"object"}))
                     .unwrap(),
-                timeout: rsi_tools_protocol::ToolTimeoutPolicy::Execution { timeout_ms: 2_000 },
+                run_policy: rsi_tools_protocol::ToolRunPolicy::execution(
+                    std::time::Duration::from_secs(2),
+                ),
                 executor: Arc::new(EchoTool {
                     store: stack.store.clone(),
                     calls: calls.clone(),
@@ -615,7 +621,9 @@ async fn user_stop_after_tool_refusal_does_not_issue_another_model_request() {
         .register(ToolRegistration {
             output: None,
             definition: ToolDefinition::new("echo", "echo", json!({"type":"object"})).unwrap(),
-            timeout: rsi_tools_protocol::ToolTimeoutPolicy::Execution { timeout_ms: 2_000 },
+            run_policy: rsi_tools_protocol::ToolRunPolicy::execution(
+                std::time::Duration::from_secs(2),
+            ),
             executor: Arc::new(EchoTool {
                 store: stack.store.clone(),
                 calls: calls.clone(),
@@ -755,7 +763,9 @@ async fn tool_refusals_settle_mixed_and_all_denied_batches_in_source_order() {
                     definition: ToolDefinition::new("echo", "echo", json!({"type":"object"}))
                         .unwrap()
                         .with_scheduling(scheduling),
-                    timeout: rsi_tools_protocol::ToolTimeoutPolicy::Execution { timeout_ms: 2_000 },
+                    run_policy: rsi_tools_protocol::ToolRunPolicy::execution(
+                        std::time::Duration::from_secs(2),
+                    ),
                     executor: Arc::new(EchoTool {
                         store: stack.store.clone(),
                         calls: calls.clone(),
@@ -959,7 +969,9 @@ async fn concurrent_command_drops_stale_post_tool_batch_without_failing_or_repla
         .register(ToolRegistration {
             output: None,
             definition: ToolDefinition::new("echo", "echo JSON", json!({"type":"object"})).unwrap(),
-            timeout: rsi_tools_protocol::ToolTimeoutPolicy::Execution { timeout_ms: 2000 },
+            run_policy: rsi_tools_protocol::ToolRunPolicy::execution(
+                std::time::Duration::from_secs(2),
+            ),
             executor: Arc::new(EchoTool {
                 store: stack.store.clone(),
                 calls: Arc::new(AtomicUsize::new(0)),
@@ -1106,7 +1118,9 @@ async fn post_tool_contribution_observes_one_source_ordered_durable_batch() {
         .register(ToolRegistration {
             output: None,
             definition: ToolDefinition::new("echo", "echo JSON", json!({"type":"object"})).unwrap(),
-            timeout: rsi_tools_protocol::ToolTimeoutPolicy::Execution { timeout_ms: 2_000 },
+            run_policy: rsi_tools_protocol::ToolRunPolicy::execution(
+                std::time::Duration::from_secs(2),
+            ),
             executor: Arc::new(EchoTool {
                 store: stack.store.clone(),
                 calls: Arc::new(AtomicUsize::new(0)),

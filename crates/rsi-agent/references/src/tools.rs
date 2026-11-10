@@ -4,7 +4,7 @@ use rsi_agent_turn_protocol::AgentCallerAuthority;
 use rsi_meta::{ActivationPlan, ConfigValue, MetaError, PluginFactory, PreparedActivation};
 use rsi_tools_protocol::{
     ToolContent, ToolDefinition, ToolError, ToolExecution, ToolExecutor, ToolRegistrarContract,
-    ToolRegistration, ToolResult, ToolScheduling, ToolTimeoutPolicy,
+    ToolRegistration, ToolResult, ToolRunPolicy, ToolScheduling,
 };
 use serde_json::{Value, json};
 
@@ -38,7 +38,7 @@ impl PluginFactory for ReferenceToolsFactory {
             .register_batch(vec![ToolRegistration {
                 output: None,
                 definition,
-                timeout: ToolTimeoutPolicy::Execution { timeout_ms: 30_000 },
+                run_policy: ToolRunPolicy::execution(std::time::Duration::from_secs(30)),
                 executor: Arc::new(Read(plan.local::<ReferencesContract>()?)),
             }])
             .map_err(|error| MetaError::Activation(error.to_string()))?;

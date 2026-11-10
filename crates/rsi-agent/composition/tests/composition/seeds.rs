@@ -65,7 +65,9 @@ impl PluginFactory for SeedFactory {
                 output: None,
                 definition: ToolDefinition::new(&names[0], "frozen manifest tool", true.into())
                     .unwrap(),
-                timeout: rsi_tools_protocol::ToolTimeoutPolicy::Execution { timeout_ms: 1000 },
+                run_policy: rsi_tools_protocol::ToolRunPolicy::execution(
+                    std::time::Duration::from_secs(1),
+                ),
                 executor: Arc::new(ProbeTool),
             })
             .map_err(|error| MetaError::Activation(error.to_string()))?;

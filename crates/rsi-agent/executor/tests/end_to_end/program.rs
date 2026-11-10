@@ -154,7 +154,9 @@ async fn check_program_policy(policy: Option<bool>, abandon: bool) {
             definition: ToolDefinition::new("echo", "echo JSON", json!({"type":"object"}))
                 .unwrap()
                 .with_program_role(ToolProgramRole::Callable),
-            timeout: rsi_tools_protocol::ToolTimeoutPolicy::Execution { timeout_ms: 2_000 },
+            run_policy: rsi_tools_protocol::ToolRunPolicy::execution(
+                std::time::Duration::from_secs(2),
+            ),
             executor: abandoned.as_ref().map_or_else(
                 || {
                     Arc::new(EchoTool {
@@ -177,7 +179,9 @@ async fn check_program_policy(policy: Option<bool>, abandon: bool) {
             )
             .unwrap()
             .with_program_role(ToolProgramRole::Coordinator),
-            timeout: rsi_tools_protocol::ToolTimeoutPolicy::Execution { timeout_ms: 2_000 },
+            run_policy: rsi_tools_protocol::ToolRunPolicy::execution(
+                std::time::Duration::from_secs(2),
+            ),
             executor: Arc::new(Coordinator {
                 denied: policy == Some(true),
                 abandoned: abandoned.clone(),
@@ -386,7 +390,9 @@ async fn nested_uncertainty_reaches_coordinator_as_typed_failure_before_turn_int
             definition: ToolDefinition::new("echo", "uncertain", json!({"type":"object"}))
                 .unwrap()
                 .with_program_role(ToolProgramRole::Callable),
-            timeout: rsi_tools_protocol::ToolTimeoutPolicy::Execution { timeout_ms: 2_000 },
+            run_policy: rsi_tools_protocol::ToolRunPolicy::execution(
+                std::time::Duration::from_secs(2),
+            ),
             executor: Arc::new(super::tool_execution::UncertainTool(calls.clone())),
         })
         .unwrap();
@@ -397,7 +403,9 @@ async fn nested_uncertainty_reaches_coordinator_as_typed_failure_before_turn_int
             definition: ToolDefinition::new("run_code", "program", json!({"type":"object"}))
                 .unwrap()
                 .with_program_role(ToolProgramRole::Coordinator),
-            timeout: rsi_tools_protocol::ToolTimeoutPolicy::Execution { timeout_ms: 2_000 },
+            run_policy: rsi_tools_protocol::ToolRunPolicy::execution(
+                std::time::Duration::from_secs(2),
+            ),
             executor: Arc::new(UncertainCoordinator(observed.clone())),
         })
         .unwrap();

@@ -8,7 +8,7 @@ use rsi_agent_session_protocol::ContributionId;
 use rsi_meta::{ActivationPlan, ConfigValue, MetaError, PluginFactory, PreparedActivation};
 use rsi_tools_protocol::{
     ToolContent, ToolDefinition, ToolError, ToolExecution, ToolExecutor, ToolRegistrarContract,
-    ToolRegistration, ToolResult, ToolTimeoutPolicy,
+    ToolRegistration, ToolResult, ToolRunPolicy,
 };
 use serde_json::{Value, json};
 use std::sync::Arc;
@@ -49,7 +49,7 @@ impl PluginFactory for SessionBrowserToolsFactory {
             .register_batch(vec![ToolRegistration {
                 definition,
                 output: None,
-                timeout: ToolTimeoutPolicy::Execution { timeout_ms: 65_000 },
+                run_policy: ToolRunPolicy::execution(std::time::Duration::from_secs(65)),
                 executor: Arc::new(Executor { owner }),
             }])
             .map_err(meta)?;

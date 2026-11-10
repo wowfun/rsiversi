@@ -49,7 +49,9 @@ async fn cancelled_serial_and_parallel_calls_publish_their_settled_receipts() {
                 )
                 .unwrap()
                 .with_scheduling(scheduling),
-                timeout: rsi_tools_protocol::ToolTimeoutPolicy::Execution { timeout_ms: 60_000 },
+                run_policy: rsi_tools_protocol::ToolRunPolicy::execution(
+                    std::time::Duration::from_mins(1),
+                ),
                 executor: body.clone(),
             })
             .unwrap();

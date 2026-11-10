@@ -354,10 +354,10 @@ fn register_review_tools(
         .map(|(definition, write)| rsi_tools_protocol::ToolRegistration {
             definition,
             output: None,
-            timeout: if write {
-                rsi_tools_protocol::ToolTimeoutPolicy::Execution { timeout_ms: 1000 }
+            run_policy: if write {
+                rsi_tools_protocol::ToolRunPolicy::execution(std::time::Duration::from_secs(1))
             } else {
-                rsi_tools_protocol::ToolTimeoutPolicy::HumanInteraction
+                rsi_tools_protocol::ToolRunPolicy::human_interaction()
             },
             executor: Arc::new(review::PlanTool {
                 policy: callback.clone(),

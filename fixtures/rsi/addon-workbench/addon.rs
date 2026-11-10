@@ -7,7 +7,7 @@ use rsi_meta::{
 use rsi_settings_protocol::{SettingsContract, SettingsSpec, ValidateWith};
 use rsi_tools_protocol::{
     ToolDefinition, ToolExecution, ToolExecutor, ToolRegistrarContract, ToolRegistration,
-    ToolResult, ToolTimeoutPolicy,
+    ToolResult, ToolRunPolicy,
 };
 use serde_json::{Value, json};
 use std::sync::{
@@ -158,7 +158,7 @@ impl PluginFactory for ToolFactory {
                     json!({"type":"object"}),
                 )
                 .map_err(meta)?,
-                timeout: ToolTimeoutPolicy::Execution { timeout_ms: 10_000 },
+                run_policy: ToolRunPolicy::execution(std::time::Duration::from_secs(10)),
                 executor: Arc::new(Echo {
                     label,
                     evidence: self.0.clone(),

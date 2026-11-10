@@ -78,7 +78,7 @@ fn registrations(jobs: Arc<dyn Jobs>) -> rsi_tools_protocol::Result<Vec<ToolRegi
                     "additionalProperties":false
                 }),
             )?,
-            timeout: rsi_tools_protocol::ToolTimeoutPolicy::Execution { timeout_ms: JOB_OUTPUT_TOOL_TIMEOUT_MS },
+            run_policy: rsi_tools_protocol::ToolRunPolicy::execution(std::time::Duration::from_millis(JOB_OUTPUT_TOOL_TIMEOUT_MS)),
             executor: Arc::new(JobOutputTool {
                 jobs: Arc::clone(&jobs),
             }),
@@ -91,7 +91,7 @@ fn registrations(jobs: Arc<dyn Jobs>) -> rsi_tools_protocol::Result<Vec<ToolRegi
                 json!({"type":"object","properties":{},"additionalProperties":false}),
             )?
             .with_scheduling(ToolScheduling::ParallelSafe),
-            timeout: rsi_tools_protocol::ToolTimeoutPolicy::Execution { timeout_ms: 30_000 },
+            run_policy: rsi_tools_protocol::ToolRunPolicy::execution(std::time::Duration::from_secs(30)),
             executor: Arc::new(JobListTool {
                 jobs: Arc::clone(&jobs),
             }),
@@ -108,7 +108,7 @@ fn registrations(jobs: Arc<dyn Jobs>) -> rsi_tools_protocol::Result<Vec<ToolRegi
                     "additionalProperties":false
                 }),
             )?,
-            timeout: rsi_tools_protocol::ToolTimeoutPolicy::Execution { timeout_ms: 30_000 },
+            run_policy: rsi_tools_protocol::ToolRunPolicy::execution(std::time::Duration::from_secs(30)),
             executor: Arc::new(JobKillTool { jobs }),
         },
     ])

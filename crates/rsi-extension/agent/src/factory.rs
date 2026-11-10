@@ -8,9 +8,7 @@ use rsi_agent_session_protocol::ContributionId;
 use rsi_agent_store_protocol::SessionStoreContract;
 use rsi_extension::ExtensionContract;
 use rsi_meta::{ActivationPlan, ConfigValue, MetaError, PluginFactory, PreparedActivation};
-use rsi_tools_protocol::{
-    ToolDefinition, ToolRegistrarContract, ToolRegistration, ToolTimeoutPolicy,
-};
+use rsi_tools_protocol::{ToolDefinition, ToolRegistrarContract, ToolRegistration, ToolRunPolicy};
 use serde::Deserialize;
 use tokio_util::sync::CancellationToken;
 
@@ -37,14 +35,15 @@ struct CatalogTool {
 }
 impl CatalogTool {
     fn registration(self, adapter: &std::sync::Arc<AgentAdapter>) -> ToolRegistration {
-        let (definition, timeout) = match self.interaction {
-            Interaction::Execution { timeout_ms } => {
-                (self.definition, ToolTimeoutPolicy::Execution { timeout_ms })
-            }
+        let (definition, run_policy) = match self.interaction {
+            Interaction::Execution { timeout_ms } => (
+                self.definition,
+                ToolRunPolicy::execution(std::time::Duration::from_millis(timeout_ms)),
+            ),
             Interaction::Human => (
                 self.definition
                     .with_scheduling(rsi_tools_protocol::ToolScheduling::ExclusiveFinal),
-                ToolTimeoutPolicy::HumanInteraction,
+                ToolRunPolicy::human_interaction(),
             ),
         };
         let executor = adapter.tool(definition.name().into());
@@ -52,7 +51,7 @@ impl CatalogTool {
             definition,
             output: None,
             executor,
-            timeout,
+            run_policy,
         }
     }
 }

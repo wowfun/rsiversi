@@ -316,9 +316,9 @@ mod linux {
                     "additionalProperties":false
                 }),
             )?,
-            timeout: rsi_tools_protocol::ToolTimeoutPolicy::Execution {
-                timeout_ms: APPLY_PATCH_TOOL_TIMEOUT_MS,
-            },
+            run_policy: rsi_tools_protocol::ToolRunPolicy::execution(
+                std::time::Duration::from_millis(APPLY_PATCH_TOOL_TIMEOUT_MS),
+            ),
             executor: Arc::new(ApplyPatchTool { helper, process }),
         })
     }

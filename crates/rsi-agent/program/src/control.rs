@@ -7,7 +7,7 @@ use rsi_agent_turn_protocol::{
 use rsi_meta::ActivationPlan;
 use rsi_tools_protocol::{
     ToolDefinition, ToolError, ToolExecution, ToolExecutor, ToolLease, ToolRegistrarContract,
-    ToolRegistration, ToolResult, ToolTimeoutPolicy,
+    ToolRegistration, ToolResult, ToolRunPolicy,
 };
 use serde::Deserialize;
 use serde_json::{Value, json};
@@ -34,7 +34,7 @@ pub(super) fn register(plan: &ActivationPlan) -> rsi_meta::Result<Vec<ToolLease>
                 .register(ToolRegistration {
                     definition: ToolDefinition::new(name, description, schema).map_err(meta)?,
                     output: None,
-                    timeout: ToolTimeoutPolicy::Execution { timeout_ms: 60_000 },
+                    run_policy: ToolRunPolicy::execution(std::time::Duration::from_mins(1)),
                     executor: Arc::new(Control {
                         turns: plan.local::<TurnServiceContract>()?,
                         cancel,

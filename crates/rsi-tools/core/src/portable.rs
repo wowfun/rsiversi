@@ -5,9 +5,9 @@ use rsi_meta::{
 };
 use rsi_tools_protocol::portable::{self, OsValue, ProcessPlan, Request, Response, Scheduling};
 use rsi_tools_protocol::{
-    MAXIMUM_REGISTERED_TOOLS, MAXIMUM_TOOL_IDENTIFIER_BYTES, MAXIMUM_TOOL_TIMEOUT_MS, ToolCall,
-    ToolError, ToolExecution, ToolExecutor, ToolRegistrarContract, ToolRegistration, ToolResult,
-    ToolScheduling, ToolTimeoutPolicy,
+    MAXIMUM_PORTABLE_TOOL_TIMEOUT_MS, MAXIMUM_REGISTERED_TOOLS, MAXIMUM_TOOL_IDENTIFIER_BYTES,
+    ToolCall, ToolError, ToolExecution, ToolExecutor, ToolRegistrarContract, ToolRegistration,
+    ToolResult, ToolRunPolicy, ToolScheduling,
 };
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
@@ -73,7 +73,7 @@ impl PluginFactory for PortableToolsFactory {
         }
         let mut registrations = Vec::with_capacity(tools.len());
         for tool in tools {
-            if tool.timeout_ms == 0 || tool.timeout_ms > MAXIMUM_TOOL_TIMEOUT_MS {
+            if tool.timeout_ms == 0 || tool.timeout_ms > MAXIMUM_PORTABLE_TOOL_TIMEOUT_MS {
                 return Err(activation_error(protocol_error()));
             }
             let scheduling = match tool.scheduling {
@@ -85,9 +85,9 @@ impl PluginFactory for PortableToolsFactory {
             registrations.push(ToolRegistration {
                 output: tool.output.clone(),
                 definition: tool.definition.with_scheduling(scheduling),
-                timeout: ToolTimeoutPolicy::Execution {
-                    timeout_ms: tool.timeout_ms,
-                },
+                run_policy: ToolRunPolicy::execution(std::time::Duration::from_millis(
+                    tool.timeout_ms,
+                )),
                 executor: Arc::new(Executor {
                     output: tool.output,
                     name,

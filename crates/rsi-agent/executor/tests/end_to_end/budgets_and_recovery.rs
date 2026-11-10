@@ -153,7 +153,9 @@ async fn cancellation_retires_an_admitted_tool_after_it_settles() {
         .register(ToolRegistration {
             output: None,
             definition: ToolDefinition::new("echo", "delayed", json!({"type":"object"})).unwrap(),
-            timeout: rsi_tools_protocol::ToolTimeoutPolicy::Execution { timeout_ms: 2_000 },
+            run_policy: rsi_tools_protocol::ToolRunPolicy::execution(
+                std::time::Duration::from_secs(2),
+            ),
             executor: Arc::new(NonCooperativeTool {
                 entered: Arc::clone(&entered),
                 release: release.clone(),
@@ -313,7 +315,9 @@ async fn unconfirmed_executor_cleanup_blocks_replacement_after_tool_settlement()
                 output: None,
                 definition: ToolDefinition::new("echo", "delayed", json!({"type":"object"}))
                     .unwrap(),
-                timeout: rsi_tools_protocol::ToolTimeoutPolicy::Execution { timeout_ms: 2_000 },
+                run_policy: rsi_tools_protocol::ToolRunPolicy::execution(
+                    std::time::Duration::from_secs(2),
+                ),
                 executor: Arc::new(NonCooperativeTool {
                     entered: Arc::clone(&entered),
                     release: release.clone(),
@@ -431,7 +435,9 @@ async fn delayed_tool_retirement_does_not_block_the_next_claim() {
         .register(ToolRegistration {
             output: None,
             definition: ToolDefinition::new("echo", "delayed", json!({"type":"object"})).unwrap(),
-            timeout: rsi_tools_protocol::ToolTimeoutPolicy::Execution { timeout_ms: 60_000 },
+            run_policy: rsi_tools_protocol::ToolRunPolicy::execution(
+                std::time::Duration::from_mins(1),
+            ),
             executor: Arc::new(NonCooperativeTool {
                 entered: Arc::clone(&entered),
                 release: release.clone(),
