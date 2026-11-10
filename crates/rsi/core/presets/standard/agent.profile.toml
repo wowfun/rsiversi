@@ -7,6 +7,11 @@ plugin = "rsi.agent.context.default"
 
 [[steps]]
 kind = "plugin"
+id = "prompt-assembly"
+plugin = "rsi.agent.prompt-assembly"
+
+[[steps]]
+kind = "plugin"
 id = "workspace-context"
 plugin = "rsi.agent.workspace-context.contributor"
 

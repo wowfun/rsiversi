@@ -1070,11 +1070,16 @@ async fn assert_latest_is(store: &MemoryStore, predicate: impl Fn(&SessionFactBo
         .into_iter()
         .next()
         .unwrap();
+    let latest = store
+        .session_summary(&session)
+        .await
+        .unwrap()
+        .durable_fact_seq;
     let page = store
         .read_facts(
             &session,
-            0,
-            64,
+            latest.checked_sub(1).expect("a published Fact"),
+            1,
             rsi_agent_store_protocol::MAXIMUM_STORE_FACT_PAGE_BYTES,
         )
         .await
@@ -1275,6 +1280,12 @@ impl Drop for GenerationOwner {
 
 #[derive(Debug)]
 struct CompositionFixture {
+    prompt: Mutex<
+        Option<(
+            Arc<dyn rsi_agent_composition_protocol::PromptAssembler>,
+            rsi_meta_scope::ScopeKey,
+        )>,
+    >,
     stage: Mutex<Option<Box<dyn ToolCatalogStage>>>,
     registrar: Arc<dyn ToolRegistrar>,
     pin: Mutex<Option<AgentCompositionPin>>,
@@ -1325,7 +1336,7 @@ impl AgentComposition for CompositionFixture {
             }),
             None => tools,
         };
-        let pin = AgentCompositionPin::new(
+        let mut pin = AgentCompositionPin::new(
             preset_id.clone(),
             "b".repeat(64),
             tools,
@@ -1334,6 +1345,9 @@ impl AgentComposition for CompositionFixture {
             self.contributions.lock().unwrap().clone(),
             Arc::new(GenerationOwner(Arc::clone(&self.owner_drops))),
         )?;
+        if let Some((assembler, scope)) = self.prompt.lock().unwrap().clone() {
+            pin = pin.with_prompt_assembler(Some(assembler), scope);
+        }
         *current = Some(pin.clone());
         Ok(pin)
     }
@@ -1358,6 +1372,7 @@ impl PluginFactory for CompositionFixtureFactory {
             .map_err(|error| rsi_meta::MetaError::Activation(error.to_string()))?;
         let registrar = stage.registrar();
         let fixture = Arc::new(CompositionFixture {
+            prompt: Mutex::default(),
             stage: Mutex::new(Some(stage)),
             registrar,
             pin: Mutex::new(None),
@@ -1808,6 +1823,8 @@ mod image_and_shutdown;
 mod output_recovery;
 #[path = "end_to_end/pool.rs"]
 mod pool;
+#[path = "end_to_end/prompt.rs"]
+mod prompt;
 #[path = "end_to_end/request_input.rs"]
 mod request_input;
 #[path = "end_to_end/tool_execution.rs"]

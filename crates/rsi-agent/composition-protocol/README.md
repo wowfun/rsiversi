@@ -1,5 +1,31 @@
 # rsi-agent-composition-protocol
 
+## Native prompt preparation
+
+An optional `PromptAssembler` is captured with the immutable composition generation
+and its exact scope. Its borrowed input contains the Header, actual model selection,
+ordered native guidance, admitted Tool names and the pre-restriction Tool-name
+universe. Schema payloads stay with the Tool/model-options owner; assembly needs no
+schema copy. Providers run outside framework locks with request cancellation. The result
+contains resolved sections, ordinary runtime-context inputs and a presentation order
+over admitted names. It has no domain writer, Tool executor or new Tool authority.
+Unknown or duplicate presentation names fail before publication; execution selection
+continues to use the independently intersected Tool subset. Provider retries retain
+the same preparation and definitions, including their model-facing order.
+
+The native assembler and an explicitly configured application input source are
+distinct request owners. Capturing an application catalog selects that application's
+preparation and append-to-Header prompt; native assembly is not invoked around it.
+An extension-Agent preset selects its existing BeforeStep owner and omits the native
+assembler. Owner selection never depends on listener counts, package hashes, empty
+text or connection failure. An earlier native rejection skips new assembly work and
+preserves the stage's collected outputs and canonical rejection receipt.
+
+`StepPrompt` records resolved ownership: `Assembled` supplies the entire system
+prompt; `AppendToHeader` supplies ordered sections after Header/persona. The owning
+[Session protocol](../session-protocol/README.md) defines durable update semantics.
+No registry, variable map or second transcript is persisted.
+
 Native Agent plugins register `ToolAround` contributions in the same owned,
 immutable catalog as their other callbacks. They await a consuming
 `ToolContinuation`: borrowed call arguments and execution authority are readable,

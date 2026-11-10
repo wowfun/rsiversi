@@ -48,6 +48,7 @@ impl ContributionInput {
             Some(
                 source @ (InputMessageSource::AgentInstructions { .. }
                 | InputMessageSource::SkillCatalog { .. }
+                | InputMessageSource::RuntimeContext
                 | InputMessageSource::UserSkillInvocation { .. }),
             ) => source,
             Some(_) => {

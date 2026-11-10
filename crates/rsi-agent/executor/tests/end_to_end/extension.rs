@@ -6,6 +6,8 @@ use rsi_agent_session_protocol::{ContributionId, ExtensionJournal};
 mod commands;
 #[path = "extension/fork.rs"]
 mod fork;
+#[path = "extension/rejection.rs"]
+mod rejection;
 
 #[tokio::test]
 #[ignore = "requires RSI_EXTENSION_NODE and RSI_DSH_PACKAGE built from the original upstream"]

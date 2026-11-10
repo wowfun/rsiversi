@@ -70,6 +70,7 @@ struct Marker {
     key: &'static str,
     register: RegisterMarker,
     register_agent: RegisterAgentMarker,
+    generation_isolated: bool,
 }
 
 #[derive(Clone, Debug)]
@@ -276,6 +277,21 @@ impl StandardAddonBuilder {
         &mut self,
         scope: AddonScope,
     ) -> rsi_host::Result<&mut Self> {
+        self.local_marker::<C>(scope, false)
+    }
+
+    /// Declares an Agent Local provider whose binding belongs to each generation.
+    /// Only isolated markers use a distinct digest lane; shared markers retain
+    /// their identity when this capability is unused.
+    pub fn isolate_agent_local<C: LocalContract>(&mut self) -> rsi_host::Result<&mut Self> {
+        self.local_marker::<C>(AddonScope::Agent, true)
+    }
+
+    fn local_marker<C: LocalContract>(
+        &mut self,
+        scope: AddonScope,
+        generation_isolated: bool,
+    ) -> rsi_host::Result<&mut Self> {
         self.marker(
             scope,
             "local",
@@ -286,7 +302,12 @@ impl StandardAddonBuilder {
                 }
                 Ok(())
             },
-            AgentContributionCatalog::register_local_contract::<C>,
+            if generation_isolated {
+                AgentContributionCatalog::isolate_local_contract::<C>
+            } else {
+                AgentContributionCatalog::register_local_contract::<C>
+            },
+            generation_isolated,
         )
     }
 
@@ -306,6 +327,7 @@ impl StandardAddonBuilder {
                 Ok(())
             },
             AgentContributionCatalog::register_local_event::<E>,
+            false,
         )
     }
 
@@ -316,6 +338,7 @@ impl StandardAddonBuilder {
         key: &'static str,
         register: RegisterMarker,
         register_agent: RegisterAgentMarker,
+        generation_isolated: bool,
     ) -> rsi_host::Result<&mut Self> {
         if self.addon.markers.len() >= HostLimits::default().maximum_local_contracts {
             return Err(capacity(
@@ -329,6 +352,7 @@ impl StandardAddonBuilder {
             key,
             register,
             register_agent,
+            generation_isolated,
         });
         Ok(self)
     }
@@ -609,7 +633,14 @@ impl StandardAddonSet {
             for marker in &addon.markers {
                 component(&mut digest, b"marker");
                 component(&mut digest, &bounded_json(&marker.scope)?);
-                component(&mut digest, marker.lane.as_bytes());
+                component(
+                    &mut digest,
+                    if marker.generation_isolated {
+                        b"local-generation-isolated"
+                    } else {
+                        marker.lane.as_bytes()
+                    },
+                );
                 component(&mut digest, marker.key.as_bytes());
             }
             for (scope, fragment) in &addon.fragments {
@@ -732,4 +763,40 @@ fn bounded_json(value: &impl Serialize) -> rsi_host::Result<Vec<u8>> {
 
 fn profile_error(error: &rsi_meta_profile::ProfileError) -> HostError {
     HostError::Bootstrap(error.to_string())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    struct FixtureLocal;
+    impl LocalContract for FixtureLocal {
+        const KEY: &'static str = "fixture.local";
+        type Service = ();
+    }
+
+    #[test]
+    fn isolation_changes_only_the_opted_in_marker_digest() {
+        let mut shared = StandardAddonBuilder::new("test.isolation");
+        shared
+            .register_local_contract_at::<FixtureLocal>(AddonScope::Agent)
+            .unwrap();
+        let shared = StandardAddonSet::new([shared.build().unwrap()])
+            .unwrap()
+            .digest()
+            .unwrap();
+        // v2 shared-marker encoding: marker / scope / lane / key, with no
+        // isolation field. Review changes to this persisted identity explicitly.
+        assert_eq!(
+            shared,
+            "45ab5578854feed924b08cd33b2992b2371ee4e2499e25971bc858d92248fb95"
+        );
+        let mut isolated = StandardAddonBuilder::new("test.isolation");
+        isolated.isolate_agent_local::<FixtureLocal>().unwrap();
+        let isolated = StandardAddonSet::new([isolated.build().unwrap()])
+            .unwrap()
+            .digest()
+            .unwrap();
+        assert_ne!(isolated, shared);
+    }
 }

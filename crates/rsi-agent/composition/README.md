@@ -1,5 +1,11 @@
 # rsi-agent-composition
 
+The generation also captures its optional native prompt assembler and exact ScopeKey.
+Its Local marker is isolated with the Context builder: an ancestor cannot substitute
+for the selected generation. A pin retains the assembler through awaited preparation
+and replacement, and the last pin releases the same generation ownership. Passive
+prompt registrations belong to their registering plugin's effects, not extra Fibers.
+
 Session-specific composition remains an explicit application-owned input. Before
 ordinary preset resolution, `AgentCompositionSource::session_pin` may return an
 already prepared exact pin for a validated Header and optional saved baseline.
@@ -100,6 +106,11 @@ bounded to 4,096 entries per lane, and frozen when the catalog enters the
 immutable snapshot. Repeating the same nominal marker is idempotent; assigning
 the same key to another marker is rejected. Profile owns fresh/named allocation
 and generation namespaces; the catalog performs only nominal resolution.
+An explicit `isolate_local_contract` declaration also registers its nominal marker
+and gives that service a fresh mapping in each hidden generation Scope. This is
+for generation-owned providers such as the prompt authoring registry; shared Host
+dependencies retain their inherited mapping. The declaration participates in cache
+identity, and private snapshot derivation preserves it.
 Standard Agent addon marker declarations populate this same catalog. Catalogs
 contain at most 4,096 factories. Explicit Portable generation-isolation keys use
 the same per-lane entry bound and contain 1–256 UTF-8 bytes. Each hidden Scope

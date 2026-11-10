@@ -4614,6 +4614,7 @@ dependencies = [
  "rsi-agent-plan-policy",
  "rsi-agent-presets",
  "rsi-agent-program",
+ "rsi-agent-prompt-assembly",
  "rsi-agent-references",
  "rsi-agent-repeat-tool-reminder",
  "rsi-agent-schedule",
@@ -4921,6 +4922,7 @@ dependencies = [
  "rsi-agent-composition-protocol",
  "rsi-agent-context",
  "rsi-agent-presets",
+ "rsi-agent-prompt-assembly",
  "rsi-agent-session-protocol",
  "rsi-ai-protocol",
  "rsi-meta",
@@ -4951,6 +4953,7 @@ dependencies = [
  "rsi-files-protocol",
  "rsi-meta",
  "rsi-meta-contract",
+ "rsi-meta-scope",
  "rsi-process",
  "rsi-sandbox",
  "rsi-tools-protocol",
@@ -5007,6 +5010,7 @@ dependencies = [
  "rsi-agent-context",
  "rsi-agent-kernel",
  "rsi-agent-model-selection",
+ "rsi-agent-prompt-assembly",
  "rsi-agent-session-protocol",
  "rsi-agent-store-protocol",
  "rsi-agent-testkit",
@@ -5025,6 +5029,7 @@ dependencies = [
  "rsi-jobs-local",
  "rsi-media-protocol",
  "rsi-meta",
+ "rsi-meta-scope",
  "rsi-packages",
  "rsi-process",
  "rsi-process-local",
@@ -5191,6 +5196,23 @@ dependencies = [
  "serde",
  "serde_json",
  "tempfile",
+ "tokio",
+ "tokio-util",
+]
+
+[[package]]
+name = "rsi-agent-prompt-assembly"
+version = "0.0.1"
+dependencies = [
+ "async-trait",
+ "rsi-agent-composition-protocol",
+ "rsi-agent-session-protocol",
+ "rsi-ai-protocol",
+ "rsi-meta",
+ "rsi-meta-scope",
+ "rsi-sandbox",
+ "serde",
+ "serde_json",
  "tokio",
  "tokio-util",
 ]

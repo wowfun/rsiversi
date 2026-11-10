@@ -166,7 +166,10 @@ impl PreparedCommandInput {
         self.delivery
     }
     /// Scheduling intent as recorded in the owning publication.
-    pub const fn publication_delivery(&self, draft: bool) -> rsi_agent_session_protocol::MessageDelivery {
+    pub const fn publication_delivery(
+        &self,
+        draft: bool,
+    ) -> rsi_agent_session_protocol::MessageDelivery {
         if !draft && matches!(self.delivery, CommandInputDelivery::Steer) {
             rsi_agent_session_protocol::MessageDelivery::Steer
         } else {

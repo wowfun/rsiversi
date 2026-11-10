@@ -17,6 +17,7 @@ rsi-agent-context = { path = "../context" }
 rsi-agent-session-protocol = { path = "../session-protocol" }
 rsi-meta-contract = { path = "../../rsi-meta/contract" }
 rsi-meta = { path = "../../rsi-meta/core" }
+rsi-meta-scope = { path = "../../rsi-meta/scope" }
 rsi-tools-protocol = { path = "../../rsi-tools/protocol" }
 rsi-sandbox = { path = "../../rsi-sandbox/core" }
 serde.workspace = true

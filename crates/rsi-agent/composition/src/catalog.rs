@@ -12,6 +12,7 @@ use std::hash::{DefaultHasher, Hash, Hasher};
 pub struct AgentContributionCatalog {
     factories: BTreeMap<PluginId, ResolvedFactory>,
     local_contracts: BTreeMap<String, TypeId>,
+    local_isolations: BTreeSet<String>,
     local_events: BTreeMap<String, TypeId>,
     portable_isolations: BTreeSet<String>,
 }
@@ -80,6 +81,7 @@ impl AgentContributionCatalog {
         Ok(Self {
             factories: by_plugin,
             local_contracts: BTreeMap::new(),
+            local_isolations: BTreeSet::new(),
             local_events: BTreeMap::new(),
             portable_isolations: BTreeSet::new(),
         })
@@ -93,6 +95,18 @@ impl AgentContributionCatalog {
         &mut self,
     ) -> rsi_meta_profile::Result<()> {
         register_marker(&mut self.local_contracts, C::KEY, TypeId::of::<C>())
+    }
+
+    /// Registers a generation-owned Local provider with a fresh mapping per build.
+    ///
+    /// # Errors
+    /// Uses the nominal marker's conflict and capacity checks.
+    pub fn isolate_local_contract<C: rsi_meta::LocalContract>(
+        &mut self,
+    ) -> rsi_meta_profile::Result<()> {
+        self.register_local_contract::<C>()?;
+        self.local_isolations.insert(C::KEY.to_owned());
+        Ok(())
     }
 
     /// Selects an event marker before transferring this catalog into a factory.
@@ -133,6 +147,9 @@ impl AgentContributionCatalog {
         &self,
         mut context: rsi_meta::Context,
     ) -> rsi_meta::Result<rsi_meta::Context> {
+        for key in &self.local_isolations {
+            (context, _) = context.isolate_local_type_fresh(self.local_contracts[key], key)?;
+        }
         for key in &self.portable_isolations {
             (context, _) = context.isolate_fresh(key)?;
         }
@@ -151,6 +168,7 @@ impl AgentContributionCatalog {
                         && a.update_mode() == b.update_mode()
                 })
             && self.local_contracts == other.local_contracts
+            && self.local_isolations == other.local_isolations
             && self.local_events == other.local_events
             && self.portable_isolations == other.portable_isolations
     }
@@ -177,9 +195,11 @@ impl AgentContributionCatalog {
                 digest.update(hasher.finish().to_le_bytes());
             }
         }
-        digest.update((self.portable_isolations.len() as u64).to_le_bytes());
-        for key in &self.portable_isolations {
-            hash_field(&mut digest, key.as_bytes());
+        for keys in [&self.local_isolations, &self.portable_isolations] {
+            digest.update((keys.len() as u64).to_le_bytes());
+            for key in keys {
+                hash_field(&mut digest, key.as_bytes());
+            }
         }
         format!("{:x}", digest.finalize())
     }
@@ -215,6 +235,7 @@ impl fmt::Debug for AgentContributionCatalog {
             .debug_struct("AgentContributionCatalog")
             .field("factories", &self.factories.keys())
             .field("local_contracts", &self.local_contracts.keys())
+            .field("local_isolations", &self.local_isolations)
             .field("local_events", &self.local_events.keys())
             .field("portable_isolations", &self.portable_isolations)
             .finish()

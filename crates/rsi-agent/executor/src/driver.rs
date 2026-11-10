@@ -360,6 +360,7 @@ impl Driver {
             rsi_agent_session_protocol::ModelSelection::baseline(claim.header().settings());
         let mut selected_tools = None;
         let mut request_composition = composition.clone();
+        let mut prepared_options = None;
         loop {
             if stop.is_cancelled() {
                 return Err(DriveFailure::Stopped);
@@ -369,6 +370,7 @@ impl Driver {
                 return Err(DriveFailure::Turn(TurnOutcome::Cancelled));
             }
             if retry_attempt == 0 {
+                drop(prepared_options.take());
                 self.claim_step_messages(claim, fold).await?;
                 if request == ModelRequest::Stopping
                     && !fold.has_pending_tool_inputs()
@@ -417,16 +419,23 @@ impl Driver {
                         }
                         other => other,
                     })?;
+                prepared_options = Some(self.prepare_request_options(
+                    claim,
+                    &request_composition,
+                    &selection,
+                    selected_tools.as_deref(),
+                )?);
             }
             let composition = &request_composition;
             request = ModelRequest::ToolFollowup;
             let (source_model_effect_id, output) = match self
                 .run_model_attempt(
                     claim,
-                    composition,
+                    prepared_options
+                        .as_ref()
+                        .expect("a fresh request prepares options before its retry series"),
                     fold,
                     &selection,
-                    selected_tools.as_deref(),
                     retry_attempt,
                     &cancellation,
                     stop,

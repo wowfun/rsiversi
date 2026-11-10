@@ -371,6 +371,7 @@ fn assert_entered_model_requests(
 
 async fn exercise(decision: Decision, expected: TurnOutcome, starts: usize) {
     let stack = BaseStack::activate().await;
+    let native_prompt = prompt::install_unreachable(&stack).await;
     let preset = if matches!(
         decision,
         Decision::PresetReject | Decision::Mixed | Decision::MixedFailure
@@ -464,6 +465,7 @@ async fn exercise(decision: Decision, expected: TurnOutcome, starts: usize) {
     if let Some(preset) = preset {
         assert!(preset.dispose().await.is_clean());
     }
+    assert!(native_prompt.dispose().await.is_clean());
     stack.dispose(language, executor).await;
 }
 

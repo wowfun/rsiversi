@@ -57,19 +57,35 @@ fn admitted_options(
             .with_max_output_tokens(cap)
             .map_err(|error| options_failure(&error))?;
     }
-    let options = rsi_ai_protocol::LanguageRequestOptions::new(
-        composition
-            .tools()
-            .definitions()
-            .into_iter()
-            .filter(|definition| {
-                selected_tools.is_none_or(|names| {
-                    names
-                        .binary_search_by(|name| name.as_str().cmp(definition.name()))
-                        .is_ok()
-                })
+    let mut definitions: Vec<_> = composition
+        .tools()
+        .definitions()
+        .into_iter()
+        .filter(|definition| {
+            selected_tools.is_none_or(|names| {
+                names
+                    .binary_search_by(|name| name.as_str().cmp(definition.name()))
+                    .is_ok()
             })
-            .collect(),
+        })
+        .collect();
+    if let Some(order) = composition.tool_order() {
+        let positions: std::collections::HashMap<_, _> = order
+            .iter()
+            .enumerate()
+            .map(|(index, name)| (name.as_str(), index))
+            .collect();
+        // Presentation order cannot remove admitted definitions. Unranked names
+        // retain their original relative order after explicitly ranked names.
+        definitions.sort_by_key(|definition| {
+            positions
+                .get(definition.name())
+                .copied()
+                .unwrap_or(usize::MAX)
+        });
+    }
+    let options = rsi_ai_protocol::LanguageRequestOptions::new(
+        definitions,
         rsi_ai_protocol::ToolChoice::Auto,
         Vec::new(),
         rsi_ai_protocol::ResponseFormat::Text,
@@ -86,25 +102,27 @@ fn admitted_options(
     Ok((options, credit))
 }
 
+pub(super) struct PreparedRequestOptions {
+    profile: rsi_ai_protocol::LanguageProfile,
+    options: rsi_ai_protocol::LanguageRequestOptions,
+    _credit: rsi_agent_context::ContextCredit,
+}
+
 impl Driver {
-    #[allow(clippy::too_many_arguments)]
-    pub(super) async fn run_model_attempt(
+    #[allow(clippy::result_large_err)] // Reuse the drive's owned failure value without adding allocation to request preparation.
+    pub(super) fn prepare_request_options(
         &self,
         claim: &TurnClaim,
         composition: &AgentCompositionPin,
-        fold: &mut ModelContextState,
         model: &rsi_agent_session_protocol::ModelSelection,
         selected_tools: Option<&[String]>,
-        retry_attempt: u8,
-        cancellation: &CancellationToken,
-        stop: &CancellationToken,
-    ) -> std::result::Result<ModelAttempt, DriveFailure> {
+    ) -> std::result::Result<PreparedRequestOptions, DriveFailure> {
         let profile = self
             .language
             .describe(&model.model)
             .map_err(|error| ai_failure(&error))?
             .into_profile();
-        let (options, _options_credit) = admitted_options(
+        let (options, credit) = admitted_options(
             &self.context_budget,
             composition,
             model,
@@ -117,17 +135,38 @@ impl Driver {
             selected_tools,
         )
         .map_err(DriveFailure::Turn)?;
-        self.sync_fold(claim, fold).await?;
         profile
             .validate_output_cap(options.settings())
             .map_err(|error| failed("model.settings", error.to_string()))?;
+        Ok(PreparedRequestOptions {
+            profile,
+            options,
+            _credit: credit,
+        })
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    pub(super) async fn run_model_attempt(
+        &self,
+        claim: &TurnClaim,
+        prepared: &PreparedRequestOptions,
+        fold: &mut ModelContextState,
+        model: &rsi_agent_session_protocol::ModelSelection,
+        retry_attempt: u8,
+        cancellation: &CancellationToken,
+        stop: &CancellationToken,
+    ) -> std::result::Result<ModelAttempt, DriveFailure> {
+        let PreparedRequestOptions {
+            profile, options, ..
+        } = prepared;
+        self.sync_fold(claim, fold).await?;
         if retry_attempt == 0 {
             self.compact(
                 claim,
                 fold,
-                &options,
+                options,
                 model,
-                &profile,
+                profile,
                 None,
                 cancellation,
                 stop,
@@ -135,7 +174,7 @@ impl Driver {
             .await?;
         }
         let request = fold
-            .build(options.clone(), &profile)
+            .build(options.clone(), profile)
             .map_err(|error| context_failure("context.limit", &error))?;
         let result = self
             .run_model_effect(
@@ -144,7 +183,7 @@ impl Driver {
                 ModelPurpose::Conversation,
                 fold,
                 model,
-                &profile,
+                profile,
                 retry_attempt,
                 cancellation,
                 stop,
@@ -156,16 +195,16 @@ impl Driver {
         self.compact(
             claim,
             fold,
-            &options,
+            options,
             model,
-            &profile,
+            profile,
             Some(CompactionTrigger::ProviderContextLimit),
             cancellation,
             stop,
         )
         .await?;
         let request = fold
-            .build(options.clone(), &profile)
+            .build(options.clone(), profile)
             .map_err(|error| context_failure("context.limit", &error))?;
         // This is the single ordinary resubmission. It cannot reopen the ordinary
         // retry series after capacity recovery, including on undispatched errors.
@@ -175,7 +214,7 @@ impl Driver {
             ModelPurpose::Conversation,
             fold,
             model,
-            &profile,
+            profile,
             u8::MAX,
             cancellation,
             stop,
@@ -299,6 +338,46 @@ mod tests {
     use rsi_ai_protocol::{
         HostedTool, LanguageRequestOptions, LanguageSettings, ResponseFormat, ToolChoice,
     };
+
+    #[test]
+    fn request_owned_tool_missing_from_presentation_order_remains_admitted() {
+        let pin = crate::tests::context_pin()
+            .with_tool_order(vec![])
+            .with_output_contract(
+                "fixture",
+                rsi_agent_session_protocol::OutputContract::new(
+                    serde_json::json!({"type":"object"}),
+                )
+                .unwrap(),
+            )
+            .unwrap();
+        let budget = rsi_agent_context::ContextBudget::default();
+        let model = rsi_agent_session_protocol::ModelSelection {
+            model: rsi_ai_protocol::ModelRef::new("fixture", "model").unwrap(),
+            reasoning_effort: None,
+        };
+        let (options, _) = admitted_options(&budget, &pin, &model, None, None).unwrap();
+        let options = rsi_ai_protocol::LanguageRequest::new_with_options(
+            vec![rsi_ai_protocol::Message::user_text("work").unwrap()],
+            options,
+        )
+        .unwrap();
+        assert_eq!(options.tools().len(), 1);
+        assert_eq!(
+            options.tools()[0].name(),
+            rsi_agent_session_protocol::REPORT_RESULT_TOOL
+        );
+        let (restricted, _) = admitted_options(&budget, &pin, &model, None, Some(&[])).unwrap();
+        let restricted = rsi_ai_protocol::LanguageRequest::new_with_options(
+            vec![rsi_ai_protocol::Message::user_text("work").unwrap()],
+            restricted,
+        )
+        .unwrap();
+        assert!(
+            restricted.tools().is_empty(),
+            "fallback must not expand the selected subset"
+        );
+    }
 
     #[test]
     fn options_release_construction_headroom_but_retain_the_recovery_copy() {

@@ -567,7 +567,7 @@ impl rsi_meta::LocalContract for MarkerB {
 }
 
 fn changed_catalog(probe: &Arc<Probe>, step: usize) -> AgentContributionCatalog {
-    let mode = if step == 4 {
+    let mode = if step >= 4 {
         UpdateMode::RestartRequired
     } else {
         UpdateMode::Replayable
@@ -593,6 +593,9 @@ fn changed_catalog(probe: &Arc<Probe>, step: usize) -> AgentContributionCatalog 
     if step >= 3 {
         catalog.isolate_portable("test.unused-portable").unwrap();
     }
+    if step >= 5 {
+        catalog.isolate_local_contract::<MarkerB>().unwrap();
+    }
     catalog
 }
 
@@ -611,7 +614,7 @@ async fn cache_identity_includes_nominal_bindings_portable_keys_and_update_mode(
     .await;
     let id = AgentPresetId::new("default").unwrap();
     let mut pins = Vec::new();
-    for step in 0..5 {
+    for step in 0..6 {
         *source.current.lock().unwrap() = Some(Arc::new(AgentCompositionSnapshot::new(
             presets.clone(),
             changed_catalog(&probe, step),

@@ -35,6 +35,8 @@ use tokio_util::sync::CancellationToken;
 mod contributions;
 #[path = "composition/domains.rs"]
 mod domains;
+#[path = "composition/prompt.rs"]
+mod prompt;
 #[path = "composition/seeds.rs"]
 mod seeds;
 #[path = "composition/snapshots.rs"]
@@ -437,6 +439,7 @@ fn test_compiler(temp: &TempDir) -> AgentPresetProfileCompiler {
             "test.context",
             "test.domain",
             "test.callbacks",
+            "test.prompt",
         ],
     )
 }

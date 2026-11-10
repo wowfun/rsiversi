@@ -17,9 +17,10 @@ pub use root::{AgentGenerationRootContract, AgentGenerationRootFactory};
 use async_trait::async_trait;
 use rsi_agent_composition_protocol::{
     AgentComposition, AgentCompositionContract, AgentCompositionError, AgentCompositionPin,
-    AgentGenerationInputs, AgentGenerationInputsContract, ContributionCatalog,
-    ContributionRegistrar, ContributionRegistrarContract, DomainCatalog, DomainRegistrar,
-    DomainRegistrarContract,
+    AgentGenerationInputs, AgentGenerationInputsContract, AgentPromptScope,
+    AgentPromptScopeContract, ContributionCatalog, ContributionRegistrar,
+    ContributionRegistrarContract, DomainCatalog, DomainRegistrar, DomainRegistrarContract,
+    PromptAssembler, PromptAssemblerContract,
 };
 use rsi_agent_context::{ModelContextBuilder, ModelContextBuilderContract};
 use rsi_agent_presets::{AgentPresetCatalog, AgentPresetId, PresetError};
@@ -257,6 +258,7 @@ struct Generation {
     identity: snapshot::GenerationIdentity,
     tools: Arc<dyn ToolRuntime>,
     context_builder: Arc<dyn ModelContextBuilder>,
+    prompt: Option<Arc<dyn PromptAssembler>>,
     domains: DomainCatalog,
     contributions: ContributionCatalog,
     owner: Arc<GenerationOwner>,
@@ -285,7 +287,19 @@ impl Generation {
                     self.contributions.clone(),
                     self.owner.clone(),
                 )
-                .map(|pin| pin.with_manifest(self.identity.manifest.clone()))
+                .map(|pin| {
+                    pin.with_manifest(self.identity.manifest.clone())
+                        .with_prompt_assembler(
+                            self.prompt.clone(),
+                            self.owner
+                                .record
+                                .as_ref()
+                                .expect("published generation scope")
+                                .scope
+                                .key()
+                                .clone(),
+                        )
+                })
             })
             .clone()
     }
@@ -318,6 +332,7 @@ struct UnpublishedGeneration {
     scope: Option<ScopeHandle>,
     tools: Option<Arc<dyn ToolRuntime>>,
     context_builder: Option<Arc<dyn ModelContextBuilder>>,
+    prompt: Option<Arc<dyn PromptAssembler>>,
     domain_stage: domain::DomainStage,
     domains: Option<DomainCatalog>,
     contribution_stage: contribution::ContributionStage,
@@ -358,6 +373,7 @@ impl UnpublishedGeneration {
             scope: Some(scope),
             tools: None,
             context_builder: None,
+            prompt: None,
             domain_stage,
             domains: None,
             contribution_stage,
@@ -460,14 +476,17 @@ impl UnpublishedGeneration {
                 .map_err(|_| unavailable(preset_id, "Agent execution catalog sealing failed"))?,
         );
         self.context_builder = Some(builder);
+        self.prompt = context.lookup_local::<PromptAssemblerContract>();
         Ok(())
     }
 
+    #[allow(clippy::type_complexity)] // One ownership transfer of the sealed generation; only its publisher consumes these parts.
     fn into_published_parts(
         mut self,
     ) -> (
         Arc<dyn ToolRuntime>,
         Arc<dyn ModelContextBuilder>,
+        Option<Arc<dyn PromptAssembler>>,
         DomainCatalog,
         ContributionCatalog,
         ScopeHandle,
@@ -494,7 +513,14 @@ impl UnpublishedGeneration {
             .contributions
             .take()
             .expect("published Agent generation has contributions");
-        (tools, context_builder, domains, contributions, scope)
+        (
+            tools,
+            context_builder,
+            self.prompt.take(),
+            domains,
+            contributions,
+            scope,
+        )
     }
 
     async fn rollback(mut self) -> bool {
@@ -786,6 +812,8 @@ impl CompositionState {
             .clone()
             .isolate_local_fresh::<ToolRegistrarContract>()
             .and_then(|(context, _)| context.isolate_local_fresh::<ModelContextBuilderContract>())
+            .and_then(|(context, _)| context.isolate_local_fresh::<PromptAssemblerContract>())
+            .and_then(|(context, _)| context.isolate_local_fresh::<AgentPromptScopeContract>())
             .and_then(|(context, _)| context.isolate_local_fresh::<DomainRegistrarContract>())
             .and_then(|(context, _)| context.isolate_local_fresh::<ContributionRegistrarContract>())
             .and_then(|(context, _)| context.isolate_local_fresh::<AgentGenerationInputsContract>())
@@ -809,6 +837,10 @@ impl CompositionState {
                     UpdateMode::RestartRequired,
                     Arc::new(AgentRegistrarFactory {
                         inputs: inputs.clone(),
+                        prompt_scope: Arc::new(AgentPromptScope {
+                            root: self.scopes.clone(),
+                            key: unpublished.scope().key().clone(),
+                        }),
                         registrar: unpublished.registrar(),
                         domains: unpublished.domain_stage.registrar(),
                         contributions: unpublished.contribution_stage.registrar(),
@@ -916,7 +948,7 @@ impl CompositionState {
             if let Some(error) = rejection {
                 Err((error, unpublished))
             } else {
-                let (tools, context_builder, domains, contributions, scope) =
+                let (tools, context_builder, prompt, domains, contributions, scope) =
                     unpublished.into_published_parts();
                 inner.next_scope += 1;
                 let record = Arc::new(ScopeRecord {
@@ -936,6 +968,7 @@ impl CompositionState {
                     identity,
                     tools,
                     context_builder,
+                    prompt,
                     domains,
                     contributions,
                     owner,
@@ -1053,6 +1086,7 @@ where
 #[derive(Debug)]
 struct AgentRegistrarFactory {
     inputs: Arc<AgentGenerationInputs>,
+    prompt_scope: Arc<AgentPromptScope>,
     registrar: Arc<dyn ToolRegistrar>,
     domains: Arc<dyn DomainRegistrar>,
     contributions: Arc<dyn ContributionRegistrar>,
@@ -1076,6 +1110,9 @@ impl PluginFactory for AgentRegistrarFactory {
         let input_supply = plan
             .context()
             .provide_local::<AgentGenerationInputsContract>(self.inputs.clone())?;
+        let prompt_scope_supply = plan
+            .context()
+            .provide_local::<AgentPromptScopeContract>(self.prompt_scope.clone())?;
         let domain_supply = plan
             .context()
             .provide_local::<DomainRegistrarContract>(Arc::clone(&self.domains))?;
@@ -1090,6 +1127,7 @@ impl PluginFactory for AgentRegistrarFactory {
                     drop(domain_supply);
                     drop(contribution_supply);
                     drop(input_supply);
+                    drop(prompt_scope_supply);
                     Ok(())
                 })
             }),

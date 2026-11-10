@@ -1,5 +1,14 @@
 # rsi-agent-executor
 
+Native prompt assembly follows ordinary BeforeStep callbacks and their Tool
+intersection, but precedes final input preparation. It includes Header/persona once,
+records `StepPrompt::Assembled`, and contributes runtime context to the same complete
+batch used to compute positional input references. The atomic publication retains
+the existing domain/rejection receipt contract. An earlier rejection skips assembly.
+The configured application's capture/preparer instead retains `AppendToHeader` and
+its original callback ordering. Presentation order is separately validated against
+admitted Tools and passed to Context request options; it grants no execution authority.
+
 BeforeStep contributors edit captured input in registration order. The retained
 application prepares their result together with newly contributed context.
 Without an application preparer, Executor preserves the preset order and
@@ -279,6 +288,9 @@ pre-marker finalizer snapshot a second time.
 The executor delegates all prompt reconstruction and compaction to
 `rsi-agent-context`; it never reads a Workspace implicitly. Effect-owned
 pre-terminal finalizers run before the sole terminal Fact.
+Each fresh provider retry series freezes its model profile and validated Tool
+options once. Retries borrow the same schema allocation and Context credit;
+the next fresh series releases it before admitting replacement options.
 Tool options reserve conservative construction workspace before copying schemas,
 then shrink to their measured canonical weight. Those options stay charged while
 available for compaction recovery; a built request independently charges its own

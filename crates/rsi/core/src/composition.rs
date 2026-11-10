@@ -328,6 +328,10 @@ fn standard_agent_addon(
         Arc::new(rsi_agent_context::DefaultContextBuilderFactory),
     )?;
     register(
+        "rsi.agent.prompt-assembly",
+        Arc::new(rsi_agent_prompt_assembly::PromptAssemblyFactory),
+    )?;
+    register(
         WORKSPACE_CONTRIBUTOR_FACTORY,
         Arc::new(rsi_agent_workspace_context::WorkspaceContributorFactory),
     )?;
@@ -431,6 +435,14 @@ fn register_coding_tools(
 }
 
 fn describe_agent_addon(builder: &mut StandardAddonBuilder) -> rsi_host::Result<()> {
+    builder.register_local_contract_at::<rsi_agent_composition_protocol::PromptAssemblerContract>(
+        AddonScope::Agent,
+    )?;
+    builder
+        .register_local_contract_at::<rsi_agent_composition_protocol::AgentPromptScopeContract>(
+            AddonScope::Agent,
+        )?;
+    builder.isolate_agent_local::<rsi_agent_prompt_assembly::PromptRegistryContract>()?;
     builder.register_local_contract_at::<rsi_extension::ExtensionContract>(AddonScope::Agent)?;
     builder.describe_factory(
         "rsi.tools.portable",

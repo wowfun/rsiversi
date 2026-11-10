@@ -13,6 +13,11 @@ use std::sync::{Arc, OnceLock};
 use thiserror::Error;
 
 mod manifest;
+mod prompt;
+pub use prompt::{
+    AgentPromptScope, AgentPromptScopeContract, PreparedPrompt, PromptAssembler,
+    PromptAssemblerContract, PromptInput,
+};
 mod report;
 mod request_tools;
 mod tool_around;
@@ -72,6 +77,9 @@ pub struct AgentCompositionPin {
     application: Option<Arc<request_tools::RequestPreparation>>,
     tool_weight: Arc<OnceLock<Result<usize>>>,
     context_builder: Arc<dyn ModelContextBuilder>,
+    prompt: Option<(Arc<dyn PromptAssembler>, rsi_meta_scope::ScopeKey)>,
+    tool_order: Option<Arc<[String]>>,
+    unrestricted_tools: Option<Arc<dyn ToolRuntime>>,
     domains: DomainCatalog,
     contributions: ContributionCatalog,
     owner: Arc<dyn AgentGenerationOwner>,
@@ -112,6 +120,9 @@ impl AgentCompositionPin {
             application: None,
             tool_weight: Arc::default(),
             context_builder,
+            prompt: None,
+            tool_order: None,
+            unrestricted_tools: None,
             domains,
             contributions,
             owner,
@@ -217,6 +228,7 @@ impl AgentCompositionPin {
     ) -> Self {
         if let Some(policy) = policy {
             self.tool_weight = Arc::default();
+            self.unrestricted_tools = Some(Arc::clone(&self.tools));
             self.tools = Arc::new(scoped_tools::ScopedTools {
                 inner: self.tools,
                 allowed: scoped_tools::ToolScope::Only(policy.tools().clone()),
@@ -268,6 +280,53 @@ impl AgentCompositionPin {
     /// Returns the unique immutable context builder from this exact generation.
     pub fn context_builder(&self) -> Arc<dyn ModelContextBuilder> {
         Arc::clone(&self.context_builder)
+    }
+
+    /// Freezes native preparation with this generation's existing exact scope.
+    #[must_use]
+    pub fn with_prompt_assembler(
+        mut self,
+        assembler: Option<Arc<dyn PromptAssembler>>,
+        scope: rsi_meta_scope::ScopeKey,
+    ) -> Self {
+        self.prompt = assembler.map(|assembler| (assembler, scope));
+        self
+    }
+
+    /// The captured application owns mixed preparation, including unavailable captures.
+    pub fn prompt_assembler(&self) -> Option<(&dyn PromptAssembler, &rsi_meta_scope::ScopeKey)> {
+        if self.application.is_some() {
+            return None;
+        }
+        self.prompt
+            .as_ref()
+            .map(|(assembler, scope)| (assembler.as_ref(), scope))
+    }
+
+    /// Retains presentation order for the admitted request series and its retries.
+    #[must_use]
+    pub fn with_tool_order(mut self, order: Vec<String>) -> Self {
+        self.tool_order = Some(order.into());
+        self
+    }
+
+    /// Ordered admitted names, separate from durable execution-subset authority.
+    pub fn tool_order(&self) -> Option<&[String]> {
+        self.tool_order.as_deref()
+    }
+
+    /// Names known before delegation restriction, plus any request-owned reporting Tool.
+    pub fn known_tool_names(&self) -> Vec<String> {
+        let mut names = std::collections::BTreeSet::new();
+        if let Some(tools) = &self.unrestricted_tools {
+            tools.visit_definitions(&mut |tool| {
+                names.insert(tool.name().to_owned());
+            });
+        }
+        self.tools.visit_definitions(&mut |tool| {
+            names.insert(tool.name().to_owned());
+        });
+        names.into_iter().collect()
     }
 
     /// Returns the exact immutable domain definitions frozen with this generation.
