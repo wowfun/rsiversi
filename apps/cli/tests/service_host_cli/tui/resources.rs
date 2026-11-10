@@ -207,8 +207,8 @@ async fn project_and_personal_skills_and_markdown_work_through_both_tui_entries(
         terminal.until("setup-model").await;
         terminal.send(b"\r");
         terminal.select_menu("Provider default").await;
-        let settings = std::fs::read(&settings_path).unwrap();
         terminal.until("Ctrl+J adds a line").await;
+        let settings = std::fs::read(&settings_path).unwrap();
         terminal.send(b"use $gu");
         terminal.until("PERSONAL_DOLLAR_GUIDE").await;
         terminal.send(b"\x1bOQ");

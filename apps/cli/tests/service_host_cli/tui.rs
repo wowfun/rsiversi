@@ -791,6 +791,13 @@ plugin = "rsi.application.tui"
     }
 
     async fn select_menu(&mut self, label: &str) {
+        fn menu_text(line: &str) -> &str {
+            line.split_once('│')
+                .and_then(|(_, body)| body.rsplit_once('│'))
+                .map_or(line, |(body, _)| body)
+                .trim()
+        }
+
         self.until("Enter select").await;
         let deadline = Instant::now() + Duration::from_secs(10);
         let mut previous = None;
@@ -814,9 +821,7 @@ plugin = "rsi.application.tui"
                         .map(|label| (row, label.trim().to_owned()))
                 });
                 let target = screen.rows(0, cols).enumerate().find_map(|(row, line)| {
-                    let (_, body) = line.split_once('│')?;
-                    let (body, _) = body.rsplit_once('│')?;
-                    matches(body.trim().trim_start_matches('›').trim()).then_some(row)
+                    matches(menu_text(&line).trim_start_matches('›').trim()).then_some(row)
                 });
                 (screen.contents(), selected, target)
             };
@@ -825,11 +830,7 @@ plugin = "rsi.application.tui"
                 self.until_screen(&format!("menu selected {label}"), |screen| {
                     !screen
                         .lines()
-                        .filter_map(|line| {
-                            let (_, body) = line.split_once('│')?;
-                            let (body, _) = body.rsplit_once('│')?;
-                            body.trim().strip_prefix("› ")
-                        })
+                        .filter_map(|line| menu_text(line).strip_prefix("› "))
                         .any(|selected| matches(selected.trim()))
                 })
                 .await;
