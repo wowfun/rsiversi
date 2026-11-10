@@ -1015,16 +1015,13 @@ async fn stalled_native_stdin_retains_its_write_and_keeps_connection_and_sibling
         let writer = input.clone();
         let bytes = bytes.clone();
         let mut writing = tokio::spawn(async move { writer.write(&bytes).await });
-        match tokio::time::timeout(Duration::from_millis(100), &mut writing).await {
-            Ok(result) => {
-                let count = result.unwrap().unwrap();
-                assert!(count > 0 && count <= 64 * 1024);
-                accepted += count;
-            }
-            Err(_) => {
-                pending = Some(writing);
-                break;
-            }
+        if let Ok(result) = tokio::time::timeout(Duration::from_millis(100), &mut writing).await {
+            let count = result.unwrap().unwrap();
+            assert!(count > 0 && count <= 64 * 1024);
+            accepted += count;
+        } else {
+            pending = Some(writing);
+            break;
         }
     }
     let pending = pending.expect("the real native pipe must fill");

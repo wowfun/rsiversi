@@ -10,8 +10,8 @@ publish = false
 crate-type = ["cdylib"]
 
 [dependencies]
-rsi-meta-native = { git = "https://github.com/wowfun/rsiversi.git", rev = "386858d6f266fdf8d5c58e19793e5d2d09d3da34" }
-rsi-tools-protocol = { git = "https://github.com/wowfun/rsiversi.git", rev = "386858d6f266fdf8d5c58e19793e5d2d09d3da34" }
+rsi-meta-native = { git = "https://github.com/wowfun/rsiversi.git", rev = "3545705d4b3f0763d636f873fc2f0c7629f1212c" }
+rsi-tools-protocol = { git = "https://github.com/wowfun/rsiversi.git", rev = "3545705d4b3f0763d636f873fc2f0c7629f1212c" }
 serde = { version = "1", features = ["derive"] }
 serde_json = { version = "1", features = ["arbitrary_precision", "preserve_order"] }
 

@@ -47,7 +47,7 @@ async fn generated_external_locked_workspace_loads_describes_and_executes() {
         assert!(manifest["dependencies"][dependency].get("path").is_none());
         assert_eq!(
             manifest["dependencies"][dependency]["rev"].as_str(),
-            Some("386858d6f266fdf8d5c58e19793e5d2d09d3da34")
+            Some("3545705d4b3f0763d636f873fc2f0c7629f1212c")
         );
     }
     // Default deterministic evidence exercises the current SDK through explicit

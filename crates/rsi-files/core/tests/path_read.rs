@@ -134,14 +134,13 @@ async fn finite_read_follows_physical_parent_and_symlink_semantics_and_rejects_s
         result.path.as_bytes(),
         root.join(name).as_os_str().as_bytes()
     );
-    rustix::fs::mknodat(
-        rustix::fs::CWD,
-        root.join("fifo"),
-        rustix::fs::FileType::Fifo,
-        rustix::fs::Mode::RUSR | rustix::fs::Mode::WUSR,
-        0,
-    )
-    .unwrap();
+    assert!(
+        std::process::Command::new("mkfifo")
+            .arg(root.join("fifo"))
+            .status()
+            .unwrap()
+            .success()
+    );
     let result = tokio::time::timeout(
         std::time::Duration::from_secs(2),
         files.read_path(

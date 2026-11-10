@@ -188,14 +188,11 @@ async fn verify_killed_request(client: &ProcessConnection, root: &std::path::Pat
         let writer = input.clone();
         let bytes = bytes.clone();
         let mut writing = tokio::spawn(async move { writer.write(&bytes).await });
-        match tokio::time::timeout(Duration::from_millis(100), &mut writing).await {
-            Ok(result) => {
-                result.unwrap().unwrap();
-            }
-            Err(_) => {
-                pending = Some(writing);
-                break;
-            }
+        if let Ok(result) = tokio::time::timeout(Duration::from_millis(100), &mut writing).await {
+            result.unwrap().unwrap();
+        } else {
+            pending = Some(writing);
+            break;
         }
     }
     let waiting = pending.expect("native ACK must still be pending at SIGKILL");

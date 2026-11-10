@@ -1382,7 +1382,7 @@ mod tests {
 
     static BUSY_PROBE: StdMutex<Option<Arc<BusyProbe>>> = StdMutex::new(None);
 
-    fn deny_rollback(connection: &Connection) {
+    fn deny_rollback(connection: &mut Connection) {
         use rusqlite::hooks::{AuthAction, AuthContext, Authorization, TransactionOperation};
         connection
             .authorizer(Some(|context: AuthContext<'_>| {
@@ -1491,7 +1491,7 @@ mod tests {
     #[tokio::test]
     async fn wal_error_after_commit_fences_even_when_its_code_resembles_rejection() {
         use rusqlite::{ffi, hooks::Wal};
-        type Hook = fn(&Wal, i32) -> rusqlite::Result<()>;
+        type Hook = fn(&mut Wal, i32) -> rusqlite::Result<()>;
         let hooks: [Hook; 3] = [
             |_, _| {
                 Err(rusqlite::Error::SqliteFailure(
@@ -1517,7 +1517,12 @@ mod tests {
             let path = directory.path().join("state.sqlite3");
             let backend = SqliteBackend::open(&path).unwrap();
             backend.put("kept", 1, "a", &Value::Null).await.unwrap();
-            backend.connection.lock().unwrap().wal_hook(Some(hook));
+            backend
+                .connection
+                .lock()
+                .unwrap()
+                .wal_hook(Some(hook))
+                .unwrap();
             assert!(matches!(
                 backend
                     .put("changed", 1, "visible", &Value::Bool(true))
@@ -1590,7 +1595,7 @@ mod tests {
         let path = directory.path().join("state.sqlite3");
         let backend = SqliteBackend::open(&path).unwrap();
         backend.put("kept", 1, "a", &Value::Null).await.unwrap();
-        deny_rollback(&backend.connection.lock().unwrap());
+        deny_rollback(&mut backend.connection.lock().unwrap());
         let result = backend
             .transaction(|transaction| {
                 insert_domain(transaction, "uncommitted", 1)?;
@@ -1621,7 +1626,7 @@ mod tests {
         let path = directory.path().join("state.sqlite3");
         let backend = SqliteBackend::open(&path).unwrap();
         backend.put("kept", 1, "a", &Value::Null).await.unwrap();
-        deny_rollback(&backend.connection.lock().unwrap());
+        deny_rollback(&mut backend.connection.lock().unwrap());
         let result = backend.transaction(|transaction| {
             insert_domain(transaction, "uncommitted", 1)?;
             transaction.execute_batch(
@@ -1745,7 +1750,7 @@ mod tests {
             .connection
             .lock()
             .unwrap_or_else(std::sync::PoisonError::into_inner)
-            .busy_handler(None)
+            .busy_handler(None::<fn(i32) -> bool>)
             .unwrap();
         BUSY_PROBE
             .lock()
