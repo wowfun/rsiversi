@@ -66,51 +66,6 @@ fn catalog_item(summary: &SessionSummary, running: bool) -> Value {
     item
 }
 
-#[cfg(test)]
-mod tests {
-    use super::*;
-    use rsi_agent_session_protocol::{
-        AgentPresetId, FrozenAgentSettings, SessionHeader, SessionId,
-    };
-
-    #[test]
-    fn catalog_keeps_accepted_context_visible_before_the_first_turn() {
-        let header = SessionHeader::new_local(
-            SessionId::new("held-context").unwrap(),
-            1,
-            "/workspace",
-            AgentPresetId::new("test").unwrap(),
-            FrozenAgentSettings::new(
-                "default",
-                "system",
-                rsi_ai_protocol::ModelRef::new("test", "test").unwrap(),
-                rsi_sandbox::SandboxMode::WorkspaceWrite,
-                false,
-            )
-            .unwrap(),
-        )
-        .unwrap();
-        let mut summary = SessionSummary {
-            header,
-            last_activity_ms: 2,
-            durable_fact_seq: 0,
-            durable_control_seq: 2,
-        };
-        assert_eq!(
-            catalog_item(&summary, false),
-            json!({
-                "id":"held-context","cwd":"/workspace","createdAt":1,"updatedAt":2,"blank":false,"running":false,
-            })
-        );
-        summary.durable_control_seq = 0;
-        assert_eq!(catalog_item(&summary, false)["blank"], true);
-        summary.durable_fact_seq = 1;
-        let started = catalog_item(&summary, true);
-        assert_eq!(started["blank"], false);
-        assert_eq!(started["running"], true);
-    }
-}
-
 /// One application generation owns the cursor across its baseline and subsequent reads.
 pub(super) fn watch_directory(
     sessions: &Sessions,
@@ -228,5 +183,50 @@ impl rsi_extension::Handler for Directory {
             changes.take();
         }
         result
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use rsi_agent_session_protocol::{
+        AgentPresetId, FrozenAgentSettings, SessionHeader, SessionId,
+    };
+
+    #[test]
+    fn catalog_keeps_accepted_context_visible_before_the_first_turn() {
+        let header = SessionHeader::new_local(
+            SessionId::new("held-context").unwrap(),
+            1,
+            "/workspace",
+            AgentPresetId::new("test").unwrap(),
+            FrozenAgentSettings::new(
+                "default",
+                "system",
+                rsi_ai_protocol::ModelRef::new("test", "test").unwrap(),
+                rsi_sandbox::SandboxMode::WorkspaceWrite,
+                false,
+            )
+            .unwrap(),
+        )
+        .unwrap();
+        let mut summary = SessionSummary {
+            header,
+            last_activity_ms: 2,
+            durable_fact_seq: 0,
+            durable_control_seq: 2,
+        };
+        assert_eq!(
+            catalog_item(&summary, false),
+            json!({
+                "id":"held-context","cwd":"/workspace","createdAt":1,"updatedAt":2,"blank":false,"running":false,
+            })
+        );
+        summary.durable_control_seq = 0;
+        assert_eq!(catalog_item(&summary, false)["blank"], true);
+        summary.durable_fact_seq = 1;
+        let started = catalog_item(&summary, true);
+        assert_eq!(started["blank"], false);
+        assert_eq!(started["running"], true);
     }
 }

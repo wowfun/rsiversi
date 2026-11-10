@@ -93,205 +93,261 @@ impl Sessions {
             .caller(&input.request)
             .map_err(|_| Error::Cancelled)?;
         let service = self.ingress.scoped(origin);
-        let store = self.store.as_ref();
-        let find = || {
-            find_handle(
-                service.as_ref(),
-                &input.session_id,
-                input.parent_session_id.as_ref(),
-            )
+        let reader = HistoryReader {
+            sessions: self,
+            service: service.as_ref(),
+            request: &input.request,
+            session: &input.session_id,
+            parent: input.parent_session_id.as_ref(),
         };
-        let attach = || async { find().await?.ok_or_else(unavailable) };
-        let header = || async {
-            find_summary(
-                service.as_ref(),
-                &input.session_id,
-                input.parent_session_id.as_ref(),
-            )
-            .await?
-            .map(|summary| summary.header)
-            .ok_or_else(unavailable)
-        };
-        let result = match input.operation {
+        let result = reader.execute(input.operation).await?;
+        self.routes
+            .caller(&input.request)
+            .map_err(|_| Error::Cancelled)?;
+        Ok(result)
+    }
+}
+
+struct HistoryReader<'a> {
+    sessions: &'a Sessions,
+    service: &'a dyn SessionService,
+    request: &'a str,
+    session: &'a SessionId,
+    parent: Option<&'a SessionId>,
+}
+
+impl HistoryReader<'_> {
+    async fn execute(&self, operation: Operation) -> Result<Value> {
+        match operation {
             Operation::Capture {
                 reader,
                 after,
                 offset,
-            } => {
-                self.history_pages
-                    .read(
-                        &self.routes,
-                        &input.request,
-                        &reader,
-                        offset,
-                        Identity::Capture {
-                            session: input.session_id.clone(),
-                            parent: input.parent_session_id.clone(),
-                            fact: after.fact_seq,
-                            control: after.control_seq,
-                        },
-                        super::session_capture::capture(
-                            store,
-                            service.as_ref(),
-                            &input.session_id,
-                            input.parent_session_id.as_ref(),
-                            after,
-                        ),
-                    )
-                    .await?
-            }
+            } => self.capture(&reader, after, offset).await,
             Operation::Open { metadata_only } => {
-                open_history(
-                    service.as_ref(),
-                    &input.session_id,
-                    input.parent_session_id.as_ref(),
-                    metadata_only,
-                )
-                .await?
+                open_history(self.service, self.session, self.parent, metadata_only).await
             }
             Operation::Controls {
                 reader,
                 after_seq,
                 through_seq,
                 offset,
-            } => {
-                self.history_pages
-                    .read(
-                        &self.routes,
-                        &input.request,
-                        &reader,
-                        offset,
-                        Identity::Controls {
-                            session: input.session_id.clone(),
-                            parent: input.parent_session_id.clone(),
-                            after: after_seq,
-                            through: through_seq,
-                        },
-                        async {
-                            let header = header().await?;
-                            super::session_controls::read_controls(
-                                store,
-                                &header,
-                                after_seq,
-                                through_seq,
-                            )
-                            .await
-                        },
-                    )
-                    .await?
-            }
+            } => self.controls(&reader, after_seq, through_seq, offset).await,
             Operation::Message {
                 reader,
                 message_id,
                 accepted_control_seq,
                 offset,
             } => {
-                self.history_pages
-                    .read(
-                        &self.routes,
-                        &input.request,
-                        &reader,
-                        offset,
-                        Identity::Message {
-                            session: input.session_id.clone(),
-                            parent: input.parent_session_id.clone(),
-                            message: message_id.clone(),
-                            accepted: accepted_control_seq,
-                        },
-                        async {
-                            let header = header().await?;
-                            read_message(
-                                store,
-                                header.session_id(),
-                                &message_id,
-                                accepted_control_seq,
-                            )
-                            .await
-                        },
-                    )
-                    .await?
+                self.message(&reader, &message_id, accepted_control_seq, offset)
+                    .await
             }
             Operation::Fact {
                 reader,
                 after_seq,
                 through_seq,
                 offset,
-            } => {
-                self.history_pages
-                    .read(
-                        &self.routes,
-                        &input.request,
-                        &reader,
-                        offset,
-                        Identity::Facts {
-                            session: input.session_id.clone(),
-                            parent: input.parent_session_id.clone(),
-                            after: after_seq,
-                            through: through_seq,
-                        },
-                        async {
-                            let header = header().await?;
-                            read_facts(store, header.session_id(), after_seq, through_seq).await
-                        },
-                    )
-                    .await?
-            }
-            Operation::PageClose { reader } => {
-                self.routes
-                    .release_resource(&input.request, &resource_key("history", &reader)?);
-                Value::Null
-            }
+            } => self.facts(&reader, after_seq, through_seq, offset).await,
+            Operation::PageClose { reader } => self.close("history", &reader),
             Operation::SeedOpen { key } => {
-                let handle = attach().await?;
-                self.open_inherited(
-                    &input.request,
-                    &key,
-                    &handle.header().await.map_err(|error| remote(&error))?,
-                )
-                .await?
+                let handle = self.attach().await?;
+                self.sessions
+                    .open_inherited(
+                        self.request,
+                        &key,
+                        &handle.header().await.map_err(|error| remote(&error))?,
+                    )
+                    .await
             }
             Operation::SeedRead(read) => {
-                let _handle = attach().await?;
-                self.read_inherited(&input.request, &input.session_id, read)
-                    .await?
+                let _handle = self.attach().await?;
+                self.sessions
+                    .read_inherited(self.request, self.session, read)
+                    .await
             }
             Operation::SeedClose { key } => {
-                let _handle = attach().await?;
-                self.routes
-                    .release_resource(&input.request, &resource_key("seed", &key)?);
-                Value::Null
+                let _handle = self.attach().await?;
+                self.close("seed", &key)
             }
             Operation::Wait { cursor } => {
-                let handle = attach().await?;
-                wait(handle.as_ref(), store, &input.session_id, cursor).await?
+                let handle = self.attach().await?;
+                wait(
+                    handle.as_ref(),
+                    self.sessions.store.as_ref(),
+                    self.session,
+                    cursor,
+                )
+                .await
             }
             Operation::ModelOpen { key, effect } => {
-                let handle = attach().await?;
-                self.open_model(
-                    &input.request,
-                    &key,
-                    input.session_id.clone(),
-                    effect,
-                    handle.as_ref(),
-                )
-                .await?
+                let handle = self.attach().await?;
+                self.sessions
+                    .open_model(
+                        self.request,
+                        &key,
+                        self.session.clone(),
+                        effect,
+                        handle.as_ref(),
+                    )
+                    .await
             }
             Operation::ModelNext { key } => {
-                let _handle = attach().await?;
-                self.next_model(&input.request, &key, &input.session_id)
-                    .await?
+                let _handle = self.attach().await?;
+                self.sessions
+                    .next_model(self.request, &key, self.session)
+                    .await
             }
             Operation::ModelClose { key } => {
-                let _handle = attach().await?;
-                self.routes
-                    .release_resource(&input.request, &resource_key("model", &key)?);
-                Value::Null
+                let _handle = self.attach().await?;
+                self.close("model", &key)
             }
-        };
-        self.routes
-            .caller(&input.request)
-            .map_err(|_| Error::Cancelled)?;
-        Ok(result)
+        }
+    }
+
+    async fn attach(&self) -> Result<std::sync::Arc<dyn SessionHandle>> {
+        find_handle(self.service, self.session, self.parent)
+            .await?
+            .ok_or_else(unavailable)
+    }
+
+    async fn header(&self) -> Result<SessionHeader> {
+        find_summary(self.service, self.session, self.parent)
+            .await?
+            .map(|summary| summary.header)
+            .ok_or_else(unavailable)
+    }
+
+    fn close(&self, kind: &str, key: &str) -> Result<Value> {
+        self.sessions
+            .routes
+            .release_resource(self.request, &resource_key(kind, key)?);
+        Ok(Value::Null)
+    }
+
+    async fn capture(
+        &self,
+        reader: &str,
+        after: ObservationCursor,
+        offset: usize,
+    ) -> Result<Value> {
+        self.sessions
+            .history_pages
+            .read(
+                &self.sessions.routes,
+                self.request,
+                reader,
+                offset,
+                Identity::Capture {
+                    session: self.session.clone(),
+                    parent: self.parent.cloned(),
+                    fact: after.fact_seq,
+                    control: after.control_seq,
+                },
+                super::session_capture::capture(
+                    self.sessions.store.as_ref(),
+                    self.service,
+                    self.session,
+                    self.parent,
+                    after,
+                ),
+            )
+            .await
+    }
+
+    async fn controls(
+        &self,
+        reader: &str,
+        after: u64,
+        through: u64,
+        offset: usize,
+    ) -> Result<Value> {
+        self.sessions
+            .history_pages
+            .read(
+                &self.sessions.routes,
+                self.request,
+                reader,
+                offset,
+                Identity::Controls {
+                    session: self.session.clone(),
+                    parent: self.parent.cloned(),
+                    after,
+                    through,
+                },
+                async {
+                    let header = self.header().await?;
+                    super::session_controls::read_controls(
+                        self.sessions.store.as_ref(),
+                        &header,
+                        after,
+                        through,
+                    )
+                    .await
+                },
+            )
+            .await
+    }
+
+    async fn message(
+        &self,
+        reader: &str,
+        message: &rsi_agent_session_protocol::MessageId,
+        accepted: u64,
+        offset: usize,
+    ) -> Result<Value> {
+        self.sessions
+            .history_pages
+            .read(
+                &self.sessions.routes,
+                self.request,
+                reader,
+                offset,
+                Identity::Message {
+                    session: self.session.clone(),
+                    parent: self.parent.cloned(),
+                    message: message.clone(),
+                    accepted,
+                },
+                async {
+                    let header = self.header().await?;
+                    read_message(
+                        self.sessions.store.as_ref(),
+                        header.session_id(),
+                        message,
+                        accepted,
+                    )
+                    .await
+                },
+            )
+            .await
+    }
+
+    async fn facts(&self, reader: &str, after: u64, through: u64, offset: usize) -> Result<Value> {
+        self.sessions
+            .history_pages
+            .read(
+                &self.sessions.routes,
+                self.request,
+                reader,
+                offset,
+                Identity::Facts {
+                    session: self.session.clone(),
+                    parent: self.parent.cloned(),
+                    after,
+                    through,
+                },
+                async {
+                    let header = self.header().await?;
+                    read_facts(
+                        self.sessions.store.as_ref(),
+                        header.session_id(),
+                        after,
+                        through,
+                    )
+                    .await
+                },
+            )
+            .await
     }
 }
 

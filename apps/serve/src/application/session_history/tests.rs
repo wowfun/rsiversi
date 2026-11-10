@@ -387,37 +387,38 @@ async fn control_pages_keep_moderate_acceptances_and_transitions_in_one_read() {
     }
 }
 
+fn captured_turn_fact(seq: u64) -> Arc<rsi_agent_session_protocol::SessionFact> {
+    use rsi_agent_session_protocol::{SessionFact, SessionFactBody, TurnId};
+    Arc::new(
+        SessionFact::new(
+            seq,
+            seq + 2,
+            SessionFactBody::TurnAccepted {
+                turn_id: TurnId::new(format!("turn-{seq}")).unwrap(),
+                text: "native input".into(),
+                model: None,
+                reasoning_effort: None,
+                sandbox: rsi_sandbox::SandboxMode::WorkspaceWrite,
+                require_approval: false,
+            },
+        )
+        .unwrap(),
+    )
+}
+
 #[tokio::test]
 async fn capture_authorizes_once_and_keeps_both_streams_at_its_cut() {
     use super::super::session_capture::capture;
-    use rsi_agent_session_protocol::{SessionFact, SessionFactBody, TurnId};
     use rsi_agent_store_protocol::AppendBatch;
     let (store, header, message) = withdrawn_message_fixture("captured input".into()).await;
     let id = header.session_id();
     let control_only = MetadataService::new(vec![store.session_summary(id).await.unwrap()]);
-    let fact = |seq| {
-        Arc::new(
-            SessionFact::new(
-                seq,
-                seq + 2,
-                SessionFactBody::TurnAccepted {
-                    turn_id: TurnId::new(format!("turn-{seq}")).unwrap(),
-                    text: "native input".into(),
-                    model: None,
-                    reasoning_effort: None,
-                    sandbox: rsi_sandbox::SandboxMode::WorkspaceWrite,
-                    require_approval: false,
-                },
-            )
-            .unwrap(),
-        )
-    };
     store
         .append(AppendBatch {
             session_id: id.clone(),
             expected_seq: 0,
             header: None,
-            facts: vec![fact(1)],
+            facts: vec![captured_turn_fact(1)],
         })
         .await
         .unwrap();
@@ -428,7 +429,7 @@ async fn capture_authorizes_once_and_keeps_both_streams_at_its_cut() {
             session_id: id.clone(),
             expected_seq: 1,
             header: None,
-            facts: vec![fact(2)],
+            facts: vec![captured_turn_fact(2)],
         })
         .await
         .unwrap();

@@ -49,13 +49,11 @@ pub(super) async fn capture(
 }
 
 fn write_slice(output: &mut String, value: Slice) -> Result<()> {
-    match value {
-        Some((through, json)) => write!(output, "{{\"through\":{through},\"value\":{json}}}")
-            .map_err(|_| Error::Protocol),
-        None => {
-            output.push_str("null");
-            Ok(())
-        }
+    if let Some((through, json)) = value {
+        write!(output, "{{\"through\":{through},\"value\":{json}}}").map_err(|_| Error::Protocol)
+    } else {
+        output.push_str("null");
+        Ok(())
     }
 }
 

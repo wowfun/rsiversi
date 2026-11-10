@@ -207,7 +207,7 @@ async fn control_only_capture_fragments_bind_both_positions_without_recapturing(
         .await
         .unwrap();
     assert_eq!(first["through_seq"], 0);
-    let mut offset = first["next_offset"].as_u64().unwrap() as usize;
+    let mut offset = usize::try_from(first["next_offset"].as_u64().unwrap()).unwrap();
     assert!(
         offset < body.len(),
         "escaped capture must span multiple frames"
@@ -232,7 +232,7 @@ async fn control_only_capture_fragments_bind_both_positions_without_recapturing(
             .unwrap();
         assert_eq!(page["through_seq"], 0);
         joined.push_str(page["json"].as_str().unwrap());
-        offset = page["next_offset"].as_u64().unwrap() as usize;
+        offset = usize::try_from(page["next_offset"].as_u64().unwrap()).unwrap();
     }
     assert_eq!(joined, body);
     reader
