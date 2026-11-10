@@ -287,6 +287,7 @@ try {
 
       assert.match(await left.locator(".transcript").innerText(), /\bsegment 0\b/);
       assert.match(await left.locator(".transcript").innerText(), /Stream complete\./);
+      await navigationMode(page,"workspace");
       await openSettings(page);
       await page.getByRole("button", { name: "Advanced", exact: true }).click();
       await page.getByRole("button", { name: "rsi.agent", exact: true }).click();
