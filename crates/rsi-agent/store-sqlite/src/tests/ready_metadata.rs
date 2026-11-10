@@ -70,15 +70,16 @@ async fn indexed_message_reads_join_once_and_reject_a_missing_canonical_acceptan
     let root = private_tempdir();
     let store = SqliteStore::open(root.path()).unwrap();
     let id = ready_fixture(&store).await;
-    let db = Connection::open(root.path().join("sessions.sqlite3")).unwrap();
+    let mut db = Connection::open(root.path().join("sessions.sqlite3")).unwrap();
     db.trace_v2(
         TraceEventCodes::SQLITE_TRACE_STMT,
-        Some(|event| {
+        Some(|event: rusqlite::trace::TraceEvent<'_>| {
             if matches!(event, TraceEvent::Stmt(..)) {
                 READS.fetch_add(1, Ordering::Relaxed);
             }
         }),
-    );
+    )
+    .unwrap();
     let message = MessageId::new("message-1").unwrap();
     READS.store(0, Ordering::Relaxed);
     assert!(
@@ -87,7 +88,11 @@ async fn indexed_message_reads_join_once_and_reject_a_missing_canonical_acceptan
             .is_some()
     );
     assert_eq!(READS.load(Ordering::Relaxed), 1);
-    db.trace_v2(TraceEventCodes::empty(), None);
+    db.trace_v2(
+        TraceEventCodes::empty(),
+        None::<fn(rusqlite::trace::TraceEvent<'_>)>,
+    )
+    .unwrap();
     db.execute_batch("PRAGMA foreign_keys=OFF; DELETE FROM agent_controls WHERE seq=1")
         .unwrap();
     assert!(matches!(

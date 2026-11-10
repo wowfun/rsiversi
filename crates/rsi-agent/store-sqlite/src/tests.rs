@@ -127,7 +127,8 @@ async fn cold_control_replay_scans_canonical_rows_once() {
         .unwrap()
         .as_mut()
         .unwrap()
-        .trace_v2(TraceEventCodes::SQLITE_TRACE_PROFILE, Some(trace));
+        .trace_v2(TraceEventCodes::SQLITE_TRACE_PROFILE, Some(trace))
+        .unwrap();
     store.validate_session(header.session_id()).await.unwrap();
     assert_eq!(
         SCANS.load(Ordering::Relaxed),
@@ -516,7 +517,8 @@ async fn online_validation_sql_work() {
                 .unwrap()
                 .as_mut()
                 .expect("idle validation reader")
-                .trace_v2(TraceEventCodes::SQLITE_TRACE_PROFILE, Some(count));
+                .trace_v2(TraceEventCodes::SQLITE_TRACE_PROFILE, Some(count))
+                .unwrap();
             for cycle in 0..3 {
                 VM.store(0, Ordering::Relaxed);
                 SCANS.store(0, Ordering::Relaxed);
@@ -3613,8 +3615,10 @@ async fn domain_reads_query_only_the_selected_keys_and_reuse_their_common_contro
     )
     .unwrap();
     rsi_agent_testkit::assert_domain_store_contract(&store, header, accepted, event).await;
-    let connection = Connection::open(root.path().join("sessions.sqlite3")).unwrap();
-    connection.trace_v2(TraceEventCodes::SQLITE_TRACE_STMT, Some(trace));
+    let mut connection = Connection::open(root.path().join("sessions.sqlite3")).unwrap();
+    connection
+        .trace_v2(TraceEventCodes::SQLITE_TRACE_STMT, Some(trace))
+        .unwrap();
     for (domain_id, horizon, expected) in [
         (Some("missing"), None, [0, 1, 0]),
         (Some("b"), Some(1), [0, 1, 1]),
@@ -3658,10 +3662,12 @@ async fn recent_page_uses_one_bounded_header_query() {
     }
     store
         .with_reader(|connection| {
-            connection.trace_v2(
-                rusqlite::trace::TraceEventCodes::SQLITE_TRACE_STMT,
-                Some(trace),
-            );
+            connection
+                .trace_v2(
+                    rusqlite::trace::TraceEventCodes::SQLITE_TRACE_STMT,
+                    Some(trace),
+                )
+                .unwrap();
             Ok(())
         })
         .await
@@ -3676,7 +3682,12 @@ async fn recent_page_uses_one_bounded_header_query() {
         .unwrap();
     store
         .with_reader(|connection| {
-            connection.trace_v2(rusqlite::trace::TraceEventCodes::empty(), None);
+            connection
+                .trace_v2(
+                    rusqlite::trace::TraceEventCodes::empty(),
+                    None::<fn(rusqlite::trace::TraceEvent<'_>)>,
+                )
+                .unwrap();
             Ok(())
         })
         .await

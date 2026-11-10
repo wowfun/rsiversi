@@ -144,7 +144,7 @@ fn abandoned() -> StoreError {
     StoreError::ValidationBusy
 }
 
-struct ProgressGuard<'a>(&'a Connection);
+struct ProgressGuard<'a>(&'a mut Connection);
 impl Drop for ProgressGuard<'_> {
     fn drop(&mut self) {
         self.0
@@ -185,8 +185,9 @@ where
         );
         let _job = job;
         let _permit = permit;
-        let _scope = ReadScope::enter(stop.clone());
-        check()?;
+        if stop.is_cancelled() {
+            return Err(abandoned());
+        }
         owner.validation_queue_ns.fetch_add(
             u64::try_from(queued.elapsed().as_nanos()).unwrap_or(u64::MAX),
             Ordering::Relaxed,
@@ -196,33 +197,37 @@ where
             StoreError::Io("SQLite validation connection mutex was poisoned".into())
         })?;
         super::run_connection(&mut connection, &owner.validation_admission, |connection| {
-            let transaction = connection
-                .transaction_with_behavior(TransactionBehavior::Deferred)
-                .map_err(sql_error)?;
             #[cfg(any(test, feature = "test-support"))]
             let steps = owner.validation_vm_steps.clone();
-            transaction
+            connection
                 .progress_handler(
                     1_000,
                     Some(move || {
                         #[cfg(any(test, feature = "test-support"))]
                         steps.fetch_add(1_000, Ordering::Relaxed);
                         // rusqlite returns INTERRUPT for true, unlike the SQLx reference.
-                        stop.is_cancelled()
+                        check().is_err()
                     }),
                 )
                 .map_err(sql_error)?;
-            // Declared after the transaction: unwinding removes the hook before rollback.
-            let progress = ProgressGuard(&transaction);
+            let progress = ProgressGuard(connection);
+            let transaction = progress
+                .0
+                .transaction_with_behavior(TransactionBehavior::Deferred)
+                .map_err(sql_error)?;
+            // Scope ends before rollback/commit, making the callback inert while
+            // the transaction still borrows the connection. The guard then removes it.
+            let scope = ReadScope::enter(stop);
             let started = std::time::Instant::now();
             let result = operation(&transaction);
             owner.validation_work_ns.fetch_add(
                 u64::try_from(started.elapsed().as_nanos()).unwrap_or(u64::MAX),
                 Ordering::Relaxed,
             );
-            drop(progress);
+            drop(scope);
             let result = result?;
             transaction.commit().map_err(sql_error)?;
+            drop(progress);
             // A completed, committed read is valid even if its final waiter just left.
             publish(result)
         })

@@ -69,20 +69,27 @@ async fn cold_mailbox_validation_does_not_reload_acceptance_bodies() {
     let (_root, store, id) = validation_mailbox().await;
     let mut writer = store.inner.connections.writer.lock().unwrap();
     let writer = writer.as_mut().unwrap();
-    writer.trace_v2(
-        TraceEventCodes::SQLITE_TRACE_STMT,
-        Some(|event| {
-            if let TraceEvent::Stmt(_, sql) = event
-                && sql.contains("FROM agent_messages")
-                && sql.contains("control_json")
-            {
-                BODY_RESELECTS.fetch_add(1, Ordering::Relaxed);
-            }
-        }),
-    );
+    writer
+        .trace_v2(
+            TraceEventCodes::SQLITE_TRACE_STMT,
+            Some(|event: rusqlite::trace::TraceEvent<'_>| {
+                if let TraceEvent::Stmt(_, sql) = event
+                    && sql.contains("FROM agent_messages")
+                    && sql.contains("control_json")
+                {
+                    BODY_RESELECTS.fetch_add(1, Ordering::Relaxed);
+                }
+            }),
+        )
+        .unwrap();
     BODY_RESELECTS.store(0, Ordering::Relaxed);
     validation::validate_session(writer, &id).unwrap();
-    writer.trace_v2(TraceEventCodes::empty(), None);
+    writer
+        .trace_v2(
+            TraceEventCodes::empty(),
+            None::<fn(rusqlite::trace::TraceEvent<'_>)>,
+        )
+        .unwrap();
     assert_eq!(
         BODY_RESELECTS.load(Ordering::Relaxed),
         0,
@@ -222,22 +229,24 @@ async fn summary_observes_pending_step_order_without_materializing_bodies() {
     let (root, store, id) = summary_mailbox().await;
     store.validate_session(&id).await.unwrap();
     for connection in store.inner.connections.readers.lock().unwrap().iter_mut() {
-        connection.trace_v2(
-            TraceEventCodes::SQLITE_TRACE_STMT,
-            Some(|event| {
-                if let TraceEvent::Stmt(_, sql) = event
-                    && sql.trim_start().starts_with("SELECT")
-                {
-                    SELECTS.fetch_add(1, Ordering::Relaxed);
-                    if ["control_json", "fact_json", "header_json"]
-                        .iter()
-                        .any(|column| sql.contains(column))
+        connection
+            .trace_v2(
+                TraceEventCodes::SQLITE_TRACE_STMT,
+                Some(|event: rusqlite::trace::TraceEvent<'_>| {
+                    if let TraceEvent::Stmt(_, sql) = event
+                        && sql.trim_start().starts_with("SELECT")
                     {
-                        BODY_SELECTS.fetch_add(1, Ordering::Relaxed);
+                        SELECTS.fetch_add(1, Ordering::Relaxed);
+                        if ["control_json", "fact_json", "header_json"]
+                            .iter()
+                            .any(|column| sql.contains(column))
+                        {
+                            BODY_SELECTS.fetch_add(1, Ordering::Relaxed);
+                        }
                     }
-                }
-            }),
-        );
+                }),
+            )
+            .unwrap();
     }
     for _ in 0..3 {
         let summary = store.read_agent_mailbox_summary(&id).await.unwrap();
@@ -258,7 +267,12 @@ async fn summary_observes_pending_step_order_without_materializing_bodies() {
     );
     assert_eq!(BODY_SELECTS.load(Ordering::Relaxed), 0);
     for connection in store.inner.connections.readers.lock().unwrap().iter_mut() {
-        connection.trace_v2(TraceEventCodes::empty(), None);
+        connection
+            .trace_v2(
+                TraceEventCodes::empty(),
+                None::<fn(rusqlite::trace::TraceEvent<'_>)>,
+            )
+            .unwrap();
     }
     for (seq, message_id, expected) in [
         (4, "z-first", Some(AgentMessageSourceKind::Application)),
