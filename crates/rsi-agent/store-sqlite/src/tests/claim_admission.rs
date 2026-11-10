@@ -32,7 +32,7 @@ async fn mailbox_claim_checks_the_append_without_rereading_its_fact() {
             connection
                 .trace_v2(
                     TraceEventCodes::SQLITE_TRACE_STMT,
-                    Some(|event: rusqlite::trace::TraceEvent<'_>| {
+                    Some(|event: TraceEvent<'_>| {
                         if let TraceEvent::Stmt(_, sql) = event
                             && sql.trim_start().starts_with("SELECT")
                             && sql.contains("fact_json")
@@ -71,10 +71,7 @@ async fn mailbox_claim_checks_the_append_without_rereading_its_fact() {
     store
         .with_writer(|connection| {
             connection
-                .trace_v2(
-                    TraceEventCodes::empty(),
-                    None::<fn(rusqlite::trace::TraceEvent<'_>)>,
-                )
+                .trace_v2(TraceEventCodes::empty(), None::<fn(TraceEvent<'_>)>)
                 .unwrap();
             Ok(())
         })
@@ -156,7 +153,7 @@ async fn mailbox_claim_resolves_one_canonical_body_and_rolls_back_atomically() {
             connection
                 .trace_v2(
                     TraceEventCodes::SQLITE_TRACE_STMT,
-                    Some(|event: rusqlite::trace::TraceEvent<'_>| {
+                    Some(|event: TraceEvent<'_>| {
                         if let TraceEvent::Stmt(_, sql) = event
                             && sql.trim_start().starts_with("SELECT")
                             && sql.contains("control_json")
@@ -179,10 +176,7 @@ async fn mailbox_claim_resolves_one_canonical_body_and_rolls_back_atomically() {
     store
         .with_writer(|connection| {
             connection
-                .trace_v2(
-                    TraceEventCodes::empty(),
-                    None::<fn(rusqlite::trace::TraceEvent<'_>)>,
-                )
+                .trace_v2(TraceEventCodes::empty(), None::<fn(TraceEvent<'_>)>)
                 .unwrap();
             Ok(())
         })

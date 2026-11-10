@@ -1165,6 +1165,7 @@ dependencies = [
  "rsi-execution",
  "rsi-meta",
  "rsi-meta-contract",
+ "rsi-meta-scope",
  "rsi-process",
  "rsi-sandbox",
  "rsi-tools-protocol",

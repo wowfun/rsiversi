@@ -34,10 +34,7 @@ impl rsi_media_protocol::MediaObjectReader for CountWrites {
 struct TestBackend(Arc<CountWrites>);
 #[async_trait]
 impl rsi_meta::PluginFactory for TestBackend {
-    fn prepare(
-        &self,
-        _: &rsi_meta::ConfigValue,
-    ) -> rsi_meta::Result<rsi_meta::PreparedActivation> {
+    fn prepare(&self, _: &rsi_meta::ConfigValue) -> rsi_meta::Result<rsi_meta::PreparedActivation> {
         Ok(rsi_meta::PreparedActivation::new(Value::Null))
     }
     async fn activate(&self, plan: rsi_meta::ActivationPlan) -> rsi_meta::Result<()> {

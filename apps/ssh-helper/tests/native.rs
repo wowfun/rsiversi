@@ -183,23 +183,25 @@ async fn verify_killed_request(client: &ProcessConnection, root: &std::path::Pat
         .unwrap();
     let input = process.stdin();
     let bytes = vec![b'x'; 65536];
-    let mut pressured = false;
+    let mut pending = None;
     for _ in 0..64 {
-        match bounded(input.write(&bytes)).await {
-            Ok(_) => {}
-            Err(ProcessError::Capacity) => {
-                pressured = true;
+        let writer = input.clone();
+        let bytes = bytes.clone();
+        let mut writing = tokio::spawn(async move { writer.write(&bytes).await });
+        match tokio::time::timeout(Duration::from_millis(100), &mut writing).await {
+            Ok(result) => {
+                result.unwrap().unwrap();
+            }
+            Err(_) => {
+                pending = Some(writing);
                 break;
             }
-            other => panic!("unexpected native pressure result: {other:?}"),
         }
     }
-    assert!(pressured);
-    let waiting = tokio::spawn(async move { input.write(&bytes).await });
-    tokio::time::sleep(Duration::from_millis(100)).await;
-    assert!(
-        !waiting.is_finished(),
-        "native ACK must still be pending at SIGKILL"
+    let waiting = pending.expect("native ACK must still be pending at SIGKILL");
+    assert_eq!(
+        bounded(input.write(b"must not enter")).await,
+        Err(ProcessError::Capacity)
     );
     assert!(
         tokio::process::Command::new("/usr/bin/systemctl")

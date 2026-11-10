@@ -1815,15 +1815,19 @@ async fn cold_resume_preset_failure_precedes_workspace_registration() {
     assert_eq!(workspace.registrations.load(Ordering::Acquire), 0);
 }
 
-#[tokio::test]
-async fn attach_and_history_need_only_the_durable_store() {
+async fn seed_attachment_history(
+    store: &MemoryStore,
+    session_id: &SessionId,
+) -> (
+    SessionHeader,
+    SessionFact,
+    rsi_agent_session_protocol::AgentMessage,
+) {
     use rsi_agent_session_protocol::{
         AgentControlRecord, AgentControlRecordBody as Body, AgentMessage, AgentMessageContent,
-        AgentMessageSource, MessageDelivery, MessageDiscardReason, MessageOptions, MessageTarget,
+        AgentMessageSource, MessageDelivery, MessageOptions, MessageTarget,
     };
     use rsi_agent_store_protocol::{AtomicAgentCommit, AtomicSessionAppend};
-    let store = Arc::new(MemoryStore::new());
-    let session_id = SessionId::new("session-store-only-attach").unwrap();
     let turn_id = TurnId::new("turn-existing").unwrap();
     let cwd = rsi_workspace_protocol::canonical_native_path(
         std::env::current_dir().unwrap().canonicalize().unwrap(),
@@ -1905,6 +1909,18 @@ async fn attach_and_history_need_only_the_durable_store() {
         })
         .await
         .unwrap();
+    (header, accepted, message)
+}
+
+#[tokio::test]
+async fn attach_and_history_need_only_the_durable_store() {
+    use rsi_agent_session_protocol::{
+        AgentControlRecord, AgentControlRecordBody as Body, MessageDiscardReason,
+    };
+    use rsi_agent_store_protocol::{AtomicAgentCommit, AtomicSessionAppend};
+    let store = Arc::new(MemoryStore::new());
+    let session_id = SessionId::new("session-store-only-attach").unwrap();
+    let (header, accepted, message) = seed_attachment_history(&store, &session_id).await;
     let store_service: Arc<dyn SessionStore> = store.clone();
     let application = LocalSessionService::new(
         rsi_meta::Execution::native(tokio::runtime::Handle::current()),

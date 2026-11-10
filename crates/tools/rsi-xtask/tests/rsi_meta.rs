@@ -324,10 +324,12 @@ fn ci_exercises_every_agent_package_and_formats_the_repository_once() {
     let workflow = fs::read_to_string(repository().join(".github/workflows/ci.yml"))
         .unwrap()
         .replace("\r\n", "\n");
+    assert!(workflow.contains(
+        "cargo clippy --locked -p 'rsi-agent*' -p 'rsi-extension*' --all-targets -- -D warnings"
+    ));
     assert!(
-        workflow.contains("cargo clippy --locked -p 'rsi-agent*' --all-targets -- -D warnings")
+        workflow.contains("cargo test --locked -p 'rsi-agent*' -p 'rsi-extension*' --all-targets")
     );
-    assert!(workflow.contains("cargo test --locked -p 'rsi-agent*' --all-targets"));
     assert!(!workflow.contains(
         "cargo test --locked -p rsi-agent-session-protocol --all-targets --features serde_json/arbitrary_precision"
     ));

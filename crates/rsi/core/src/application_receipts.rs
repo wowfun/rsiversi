@@ -105,6 +105,7 @@ mod tests {
     #[test]
     fn cold_lookup_accepts_only_a_complete_exact_receipt_and_does_not_create_missing_files() {
         let dir = tempfile::tempdir().unwrap();
+        let directory = dir.path().canonicalize().unwrap();
         let receipt = ApplicationReceipt {
             source: "market".into(),
             session: rsi_agent_session_protocol::SessionId::new("one").unwrap(),
@@ -118,11 +119,11 @@ mod tests {
             )
             .unwrap(),
         };
-        let file = dir.path().join(format!(
+        let file = directory.join(format!(
             "{}.json",
             hex::encode(Sha256::digest(br#"["one","effect"]"#))
         ));
-        assert!(read_file(dir.path(), &receipt).unwrap().is_none());
+        assert!(read_file(&directory, &receipt).unwrap().is_none());
         assert!(!file.exists());
         let mut record = json!({"session":"one","effect":"effect","registration":"registration","identity":receipt.identity,
             "signature":"signature","state":"settled","result":{"value":"once","content":[],"is_error":false}});
@@ -131,13 +132,13 @@ mod tests {
         };
         save(&record);
         assert_eq!(
-            read_file(dir.path(), &receipt).unwrap().unwrap().value,
+            read_file(&directory, &receipt).unwrap().unwrap().value,
             "once"
         );
         record["result"]["concludes_turn"] = json!(true);
         save(&record);
         assert!(
-            read_file(dir.path(), &receipt)
+            read_file(&directory, &receipt)
                 .unwrap()
                 .unwrap()
                 .concludes_turn
@@ -145,7 +146,7 @@ mod tests {
         let mut invalid = record.clone();
         invalid["result"]["is_error"] = json!(true);
         save(&invalid);
-        assert!(read_file(dir.path(), &receipt).is_err());
+        assert!(read_file(&directory, &receipt).is_err());
         for (key, value) in [
             ("session", "other"),
             ("effect", "other"),
@@ -155,21 +156,21 @@ mod tests {
             let mut wrong = record.clone();
             wrong[key] = json!(value);
             save(&wrong);
-            assert!(read_file(dir.path(), &receipt).unwrap().is_none());
+            assert!(read_file(&directory, &receipt).unwrap().is_none());
         }
         record["identity"]["request_sha256"] = json!("b".repeat(64));
         save(&record);
-        assert!(read_file(dir.path(), &receipt).unwrap().is_none());
+        assert!(read_file(&directory, &receipt).unwrap().is_none());
         record["identity"] = json!(receipt.identity);
         record["result"]["enforcement"] = json!([]);
         save(&record);
-        assert!(read_file(dir.path(), &receipt).is_err());
+        assert!(read_file(&directory, &receipt).is_err());
         std::fs::OpenOptions::new()
             .write(true)
             .open(&file)
             .unwrap()
             .set_len(33 * 1024 * 1024)
             .unwrap();
-        assert!(read_file(dir.path(), &receipt).is_err());
+        assert!(read_file(&directory, &receipt).is_err());
     }
 }

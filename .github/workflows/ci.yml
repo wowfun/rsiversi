@@ -576,11 +576,11 @@ jobs:
           workspaces: . -> target
       - name: Lint Base services
         if: ${{ !cancelled() && steps.base_setup.outcome == 'success' }}
-        run: cargo clippy --locked -p rsi-host -p 'rsi-api*' -p 'rsi-storage*' -p 'rsi-settings*' -p 'rsi-credentials*' -p 'rsi-media*' -p 'rsi-approval*' -p 'rsi-user-questions*' -p 'rsi-permission*' -p 'rsi-sandbox*' -p 'rsi-process*' -p 'rsi-pty*' -p 'rsi-commands*' -p 'rsi-jobs*' -p rsi-projection -p 'rsi-tools*' -p rsi-shell-bash -p rsi-apply-patch -p 'rsi-workspace*' -p 'rsi-files*' -p 'rsi-mcp*' -p 'rsi-retrieval*' -p rsi-acp -p rsi-acp-protocol -p rsi-acp-journal -p rsi-acp-client -p rsi-acp-host -p rsi-acp-api -p rsi-acp-tools --all-targets -- -D warnings
+        run: cargo clippy --locked -p rsi-host -p 'rsi-api*' -p 'rsi-storage*' -p 'rsi-settings*' -p 'rsi-credentials*' -p 'rsi-media*' -p 'rsi-approval*' -p 'rsi-user-questions*' -p 'rsi-permission*' -p 'rsi-sandbox*' -p 'rsi-process*' -p 'rsi-pty*' -p 'rsi-commands*' -p 'rsi-jobs*' -p rsi-projection -p 'rsi-tools*' -p rsi-shell-native -p rsi-apply-patch -p 'rsi-workspace*' -p 'rsi-files*' -p 'rsi-mcp*' -p 'rsi-retrieval*' -p rsi-acp -p rsi-acp-protocol -p rsi-acp-journal -p rsi-acp-client -p rsi-acp-host -p rsi-acp-api -p rsi-acp-tools --all-targets -- -D warnings
         timeout-minutes: 30
       - name: Exercise Base services
         if: ${{ !cancelled() && steps.base_setup.outcome == 'success' }}
-        run: cargo test --locked -p rsi-host -p 'rsi-api*' -p 'rsi-storage*' -p 'rsi-settings*' -p 'rsi-credentials*' -p 'rsi-media*' -p 'rsi-approval*' -p 'rsi-user-questions*' -p 'rsi-permission*' -p 'rsi-sandbox*' -p 'rsi-process*' -p 'rsi-pty*' -p 'rsi-commands*' -p 'rsi-jobs*' -p rsi-projection -p 'rsi-tools*' -p rsi-shell-bash -p rsi-apply-patch -p 'rsi-workspace*' -p 'rsi-files*' -p 'rsi-mcp*' -p 'rsi-retrieval*' -p rsi-acp -p rsi-acp-protocol -p rsi-acp-journal -p rsi-acp-client -p rsi-acp-host -p rsi-acp-api -p rsi-acp-tools --all-targets --no-fail-fast
+        run: cargo test --locked -p rsi-host -p 'rsi-api*' -p 'rsi-storage*' -p 'rsi-settings*' -p 'rsi-credentials*' -p 'rsi-media*' -p 'rsi-approval*' -p 'rsi-user-questions*' -p 'rsi-permission*' -p 'rsi-sandbox*' -p 'rsi-process*' -p 'rsi-pty*' -p 'rsi-commands*' -p 'rsi-jobs*' -p rsi-projection -p 'rsi-tools*' -p rsi-shell-native -p rsi-apply-patch -p 'rsi-workspace*' -p 'rsi-files*' -p 'rsi-mcp*' -p 'rsi-retrieval*' -p rsi-acp -p rsi-acp-protocol -p rsi-acp-journal -p rsi-acp-client -p rsi-acp-host -p rsi-acp-api -p rsi-acp-tools --all-targets --no-fail-fast
         timeout-minutes: 30
       - name: Exercise ACP client phase budgets
         if: ${{ !cancelled() && steps.base_setup.outcome == 'success' && runner.os == 'Linux' }}
@@ -688,10 +688,10 @@ jobs:
         with:
           node-version: 22.23.2
       - name: Lint rsi-agent
-        run: cargo clippy --locked -p 'rsi-agent*' --all-targets -- -D warnings
+        run: cargo clippy --locked -p 'rsi-agent*' -p 'rsi-extension*' --all-targets -- -D warnings
         timeout-minutes: 20
       - name: Exercise rsi-agent
-        run: cargo test --locked -p 'rsi-agent*' --all-targets --no-fail-fast
+        run: cargo test --locked -p 'rsi-agent*' -p 'rsi-extension*' --all-targets --no-fail-fast
         timeout-minutes: 20
 
       - name: Check SQLite test-support contracts

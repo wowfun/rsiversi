@@ -99,10 +99,9 @@ async fn assert_inputs(handle: &Arc<dyn SessionHandle>, receipts: &[MessageRecei
     }
 }
 
-#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
-async fn direct_input_attribution_survives_uds_draft_publication_retry_and_restart() {
-    let requests = Arc::new(Mutex::new(Vec::new()));
-    let seen = requests.clone();
+async fn recording_fixture(
+    requests: Arc<Mutex<Vec<serde_json::Value>>>,
+) -> (Fixture, tokio::task::JoinHandle<()>) {
     let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
     let fixture = fixture(&format!("http://{}", listener.local_addr().unwrap()));
     let server = tokio::spawn(async move {
@@ -111,7 +110,7 @@ async fn direct_input_attribution_survives_uds_draft_publication_retry_and_resta
             Router::new().route(
                 "/v1/chat/completions",
                 post(move |Json(body): Json<serde_json::Value>| {
-                    seen.lock().unwrap().push(body);
+                    requests.lock().unwrap().push(body);
                     chat()
                 }),
             ),
@@ -119,6 +118,33 @@ async fn direct_input_attribution_survives_uds_draft_publication_retry_and_resta
         .await
         .unwrap();
     });
+    (fixture, server)
+}
+
+async fn assert_non_waking_input(
+    handle: &Arc<dyn SessionHandle>,
+    input: SubmitInput,
+    receipt: &MessageReceipt,
+) {
+    assert_eq!(
+        handle.submit(input).await.unwrap().accepted_control_seq,
+        receipt.accepted_control_seq
+    );
+    handle.wait_idle().await.unwrap();
+    assert!(
+        handle
+            .history_before(None, 128)
+            .await
+            .unwrap()
+            .facts
+            .is_empty()
+    );
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn direct_input_attribution_survives_uds_draft_publication_retry_and_restart() {
+    let requests = Arc::new(Mutex::new(Vec::new()));
+    let (fixture, server) = recording_fixture(requests.clone()).await;
     let daemon = DaemonFixture::new(&fixture).await;
     let workspace = daemon
         .connection
@@ -201,23 +227,7 @@ async fn direct_input_attribution_survives_uds_draft_publication_retry_and_resta
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 async fn non_waking_input_publishes_once_and_survives_restart_before_a_question() {
     let requests = Arc::new(Mutex::new(Vec::new()));
-    let seen = requests.clone();
-    let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
-    let fixture = fixture(&format!("http://{}", listener.local_addr().unwrap()));
-    let server = tokio::spawn(async move {
-        axum::serve(
-            listener,
-            Router::new().route(
-                "/v1/chat/completions",
-                post(move |Json(body): Json<serde_json::Value>| {
-                    seen.lock().unwrap().push(body);
-                    chat()
-                }),
-            ),
-        )
-        .await
-        .unwrap();
-    });
+    let (fixture, server) = recording_fixture(requests.clone()).await;
     let daemon = DaemonFixture::new(&fixture).await;
     let workspace = daemon
         .connection
@@ -250,23 +260,7 @@ async fn non_waking_input_publishes_once_and_survives_restart_before_a_question(
         Err(SessionError::Invalid(_))
     ));
     let receipt = handle.submit(held.clone()).await.unwrap();
-    assert_eq!(
-        handle
-            .submit(held.clone())
-            .await
-            .unwrap()
-            .accepted_control_seq,
-        receipt.accepted_control_seq
-    );
-    handle.wait_idle().await.unwrap();
-    assert!(
-        handle
-            .history_before(None, 128)
-            .await
-            .unwrap()
-            .facts
-            .is_empty()
-    );
+    assert_non_waking_input(&handle, held.clone(), &receipt).await;
     assert!(requests.lock().unwrap().is_empty());
     let mut conflict = held.clone();
     conflict.delivery = MessageDelivery::NextTurn;
@@ -286,20 +280,8 @@ async fn non_waking_input_publishes_once_and_survives_restart_before_a_question(
         .attach(&id)
         .await
         .unwrap();
-    handle.wait_idle().await.unwrap();
+    assert_non_waking_input(&handle, held, &receipt).await;
     assert!(requests.lock().unwrap().is_empty());
-    assert!(
-        handle
-            .history_before(None, 128)
-            .await
-            .unwrap()
-            .facts
-            .is_empty()
-    );
-    assert_eq!(
-        handle.submit(held).await.unwrap().accepted_control_seq,
-        receipt.accepted_control_seq
-    );
     let accepted = handle
         .read_message(&receipt.message_id, receipt.accepted_control_seq)
         .await

@@ -1714,6 +1714,7 @@ dependencies = [
  "rsi-execution",
  "rsi-meta",
  "rsi-meta-contract",
+ "rsi-meta-scope",
  "rsi-process",
  "rsi-sandbox",
  "rsi-tools-protocol",
@@ -1992,6 +1993,19 @@ name = "rsi-meta-native"
 version = "0.0.1"
 dependencies = [
  "serde_json",
+]
+
+[[package]]
+name = "rsi-meta-scope"
+version = "0.0.1"
+dependencies = [
+ "async-trait",
+ "futures-util",
+ "rsi-meta",
+ "serde_json",
+ "thiserror 2.0.20",
+ "tokio",
+ "tokio-util",
 ]
 
 [[package]]

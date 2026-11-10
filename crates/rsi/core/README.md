@@ -891,6 +891,8 @@ presentation factories. No implicit official application catalog is available.
 `application_services` owns the local ServingService and LocalBrowserAdministration
 contracts consumed by application plugins. The latter retains its API result type;
 these product contracts do not add transport dependencies to rsi-application.
+The HTTP browser-owner contract is isolated with these contracts in each Service
+and application catalog, so independent owners can share a Runtime.
 
 Local browser launch grants configuration access before rotating an existing
 managed principal. A rejected grant leaves its old credential and live leases

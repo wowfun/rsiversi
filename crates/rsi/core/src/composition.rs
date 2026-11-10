@@ -44,7 +44,9 @@ use rsi_projection::ProjectionRegistryContract;
 use rsi_sandbox::SandboxContract;
 use rsi_session_protocol::AgentSettingsContract;
 use rsi_settings_protocol::{SettingsContract, SettingsProviderContract};
-use rsi_shell_native::{ShellJobProducerFactory, ShellKind, ShellToolFactory};
+#[cfg(any(target_os = "linux", windows))]
+use rsi_shell_native::ShellKind;
+use rsi_shell_native::{ShellJobProducerFactory, ShellToolFactory};
 use rsi_storage::StorageHubContract;
 use rsi_storage_domain::DomainFacilityContract;
 use rsi_tools_protocol::{ToolCatalogProviderContract, ToolRegistrarContract};
@@ -2879,6 +2881,7 @@ mod tests {
                 .collect::<Vec<_>>(),
             [
                 CONTEXT_BUILDER_FACTORY,
+                "rsi.agent.prompt-assembly",
                 WORKSPACE_CONTRIBUTOR_FACTORY,
                 "rsi.agent.workspace-context.tools",
                 "rsi.agent.references.tools",
@@ -2915,6 +2918,7 @@ mod tests {
                 .collect::<Vec<_>>(),
             [
                 CONTEXT_BUILDER_FACTORY,
+                "rsi.agent.prompt-assembly",
                 WORKSPACE_CONTRIBUTOR_FACTORY,
                 "rsi.agent.workspace-context.tools",
                 "rsi.agent.references.tools",
