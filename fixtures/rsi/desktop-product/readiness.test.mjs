@@ -32,6 +32,17 @@ for (const [name, engine] of Object.entries({chromium, firefox})) {
       assert.equal(await check(),null);
     } finally {await browser.close();}
   });
+  test(`${name}: repeated queue labels remain scoped to their original slot`, async () => {
+    const browser=await engine.launch({headless:true});
+    try {
+      const page=await browser.newPage();
+      await page.setContent('<div class="queue-row" data-slot="other"><button id="other">Edit</button></div><div class="queue-row" data-slot="original"><button id="original">Edit</button></div>');
+      const check=()=>page.evaluate(source=>new Function(source)('Edit','.queue-row[data-slot="original"]')?.id??null,buttonTarget);
+      assert.equal(await check(),'original');
+      await page.locator('[data-slot="original"]').evaluate(row=>row.remove());
+      assert.equal(await check(),null,'another slot never substitutes for a missing original');
+    } finally {await browser.close();}
+  });
   test(`${name}: composer evidence rejects an earlier same-length trusted input`, async () => {
     const browser=await engine.launch({headless:true});
     try {

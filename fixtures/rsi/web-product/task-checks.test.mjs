@@ -2,13 +2,23 @@ import assert from "node:assert/strict";
 import { test } from "node:test";
 import { chromium, firefox } from "playwright";
 import { browserNames, assertControls, assertNoNotices, recordTaskFailure } from "./task-checks.mjs";
-import { clickUiControl, closeDetails, openConversation, resourceSelector, sourceInspectionGeometry } from './controls.mjs';
+import { clickUiControl, closeDetails, openConversation, readBrowserOwner, resourceSelector, sourceInspectionGeometry } from './controls.mjs';
 import { recordNavigationEvidence } from './navigation-evidence.mjs';
 import { mkdtemp, readFile, rm } from "node:fs/promises";
 import { join } from "node:path";
 import { tmpdir } from "node:os";
 
 for (const [name, engine] of [["chromium", chromium], ["firefox", firefox]]) {
+  test(`${name}: browser owner readback works from the page and its Profile panel`, async()=>{
+    const browser=await engine.launch({headless:true});
+    try {
+      const page=await browser.newPage();page.setDefaultTimeout(500);
+      const id='0123456789abcdef0123456789abcdef';
+      await page.setContent(`<section class="profile-leaves" aria-label="Host Profile management"><p>Caller: device ${id} · Source root example</p></section>`);
+      assert.equal(await readBrowserOwner(page),id);
+      assert.equal(await readBrowserOwner(page.getByRole('region',{name:'Host Profile management',exact:true})),id);
+    } finally {await browser.close();}
+  });
   test(`${name}: reopening the same conversation requires a newly published generation`, async()=>{
     const browser=await engine.launch({headless:true});
     try {

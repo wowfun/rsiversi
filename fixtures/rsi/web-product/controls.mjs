@@ -26,7 +26,7 @@ export async function browserOwner(page) {
   return id;
 }
 export async function readBrowserOwner(scope) {
-  const caller=scope.locator('.profile-leaves > p').filter({hasText:/^Caller: device /});
+  const caller=scope.getByText(/^Caller: device /);
   await caller.waitFor();
   const id=(await caller.innerText()).match(/^Caller: device ([0-9a-f]{32})(?:\s|$)/)?.[1];
   if(!id)throw new Error('Browser domain owner is unavailable');

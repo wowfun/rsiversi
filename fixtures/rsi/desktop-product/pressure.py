@@ -30,7 +30,7 @@ Path('writer-bytes-'+index).write_bytes(data)
         window.fixtureCloseWriters=async()=>{await window.fixtureWriters;for(const terminal of extra)await request({type:'close',terminal});pressure.cleaned=true};
         (async()=>{
             for(let i=0;i<4;i++){
-                const created=await request({type:'create',size:{rows:24,columns:80}});
+                const created=await request({type:'create',key:crypto.randomUUID(),size:{rows:24,columns:80}});
                 extra.push(created.value.terminal.id);followers.push(created.value.id);
                 await request({type:'write',attachment:created.value.id,bytes:Array.from(new TextEncoder().encode('stty raw -echo; python3 pressure-reader.py '+i+'; stty sane\r'))});
             }

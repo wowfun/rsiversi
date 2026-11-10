@@ -11,6 +11,7 @@ export async function verifyQueue(page,pane,service,report,name) {
   await send('UI Goal hold queue survivor after Stop');
   const rows=pane.locator('.queue-row');await waitUntil(async()=>await rows.count()===2,'two pending slots');
   const initialSlot=await rows.first().getAttribute('data-slot');
+  const initialMessage=await rows.first().locator('.queue-summary').innerText();
   await composer.fill('Ordinary composer draft survives every queue operation');
   await rows.first().getByRole('button',{name:'Edit',exact:true}).click();
   const dialog=pane.getByRole('dialog',{name:'Edit queued input'});
@@ -20,6 +21,7 @@ export async function verifyQueue(page,pane,service,report,name) {
   await dialog.waitFor({state:'hidden'});
   await waitUntil(async()=>await rows.count()===2,'replacement retains slot count');
   assert.equal(await rows.first().getAttribute('data-slot'),initialSlot);
+  await waitUntil(async()=>await rows.first().locator('.queue-summary').innerText()!==initialMessage,'replacement message identity');
   await rows.first().getByRole('button',{name:'Edit',exact:true}).click();
   await waitUntil(async()=>await dialog.getByRole('textbox',{name:'Queued text 1'}).inputValue()==='Queue replacement content','replacement immutable content readback');
   await dialog.getByRole('button',{name:'Close',exact:true}).click();

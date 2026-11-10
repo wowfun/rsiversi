@@ -250,7 +250,7 @@ try:
         def keys(item, text):
             call('POST', root + f'/element/{eid(item)}/value', {'text': text, 'value': list(text)})
         fill_input(script, keys, until, css, value)
-    def button(text):
+    def button(text, scope=None):
         if text in ('Settings', 'Close application') and not script('return document.querySelector(".application-options")?.open'):
             button('More')
         if text == 'External agents':
@@ -280,7 +280,7 @@ try:
         if text in ('File','Conversation','Images','Search history','Export'):
             button('Add files or run commands')
         if text == 'Terminal': script('document.querySelector(".conversation-menu").open=true;return true')
-        click_ready(lambda: script(BUTTON_TARGET, [text]), dispatch_click, until)
+        click_ready(lambda: script(BUTTON_TARGET, [text, scope]), dispatch_click, until)
         if text == 'Terminal':
             until(lambda: script('return [...document.querySelectorAll("[data-dockkit-tab][aria-selected=true]")].some(e=>e.textContent.includes("Resources"))'))
             script('document.querySelector(".conversation-menu").open=false;return true')

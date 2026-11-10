@@ -27,6 +27,8 @@ that derived socket path and uploads those roots after failures.
 Registered settings stay inside the Settings dialog and close with that dialog.
 Button selection requires an enabled, visible control with an unobstructed center
 hit, including when a closed menu retains a same-label descendant's layout box.
+Queue actions scope repeated labels to the original slot and wait for its
+replacement message identity before reading the edited content again.
 Clicks relocate only after WebDriver explicitly reports a stale element
 before dispatch; ambiguous click failures are never replayed.
 Workflow resource controls must be visible and enabled before dispatch. A
