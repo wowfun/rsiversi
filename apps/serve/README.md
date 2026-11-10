@@ -1,5 +1,21 @@
 # rsi-serve
 
+Application capture carries each exact registration's required `timeout_ms`
+field: `null` means no execution deadline; a number is the DSH `timeoutMs`
+declaration. Serve checks finite positive numbers and converts milliseconds to
+`Duration` with checked nanosecond precision; values below that precision or
+outside the runtime clock's range are rejected, never clamped or replaced by a
+600-second timeout. Fractional and longer representable durations are retained.
+The application's captured Tool remains automatic unless its actual native
+contract independently declares human interaction.
+
+Deadline expiry cancels and joins the original application operation. Native
+Tools preserve a non-cancellation outcome that settles after cancellation,
+including evidence of a completed effect. This intentionally differs from DSH's
+optional `timeout-policy` wrapper, which replaces its own expired result. A
+selected original JS wrapper keeps its classification at its original pipeline
+position; Serve adds no duplicate wrapper and never erases a settled receipt.
+
 Application Workspace Session moves use Navigation's shared native account order.
 The caller's actual location and Session protection authority cover the commit;
 the bridge owns only the DSH error and projection mapping.
@@ -90,7 +106,7 @@ All other preset names retain precedence and delegated Sessions still obey
 their tool allowlist.
 
 An application configured with `tools = true` can advertise a separate private
-loopback listener in its opening reply. Tool protocol 14 owns capture, input
+loopback listener in its opening reply. Tool protocol 15 owns capture, input
 preparation, stopping, start, outcome, cancellation and view release. Before an
 idle language Turn settles, `POST /v1/stopping` names its producing view.
 The application returns JSON null once its stopping listeners and their native

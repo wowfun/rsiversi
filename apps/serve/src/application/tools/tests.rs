@@ -5,12 +5,42 @@ use tokio::{
     net::{TcpListener, TcpStream},
 };
 
+#[test]
+fn capture_deadlines_preserve_absence_fractional_and_long_values() {
+    let row = |value: Value| {
+        serde_json::from_value::<Row>(json!({
+            "definition": {"name":"probe", "description":"probe", "input_schema":{}},
+            "registration":"registration", "timeout_ms":value
+        }))
+    };
+    assert_eq!(row(Value::Null).unwrap().deadline, None);
+    assert_eq!(
+        row(json!(0.25)).unwrap().deadline,
+        Some(Duration::from_micros(250))
+    );
+    assert_eq!(
+        row(json!(600_001.5)).unwrap().deadline,
+        Some(Duration::from_micros(600_001_500))
+    );
+    for value in [
+        json!(0),
+        json!(-1),
+        json!(1e-15),
+        json!(1e300),
+        json!("1000"),
+        json!({}),
+    ] {
+        assert!(row(value).is_err());
+    }
+    assert!(serde_json::from_value::<Row>(json!({"definition":{"name":"probe", "description":"probe", "input_schema":{}}, "registration":"registration"})).is_err());
+}
+
 pub(super) async fn endpoint() -> (TcpListener, Arc<Endpoint>) {
     let socket = TcpListener::bind("127.0.0.1:0").await.unwrap();
     let port = socket.local_addr().unwrap().port();
     let endpoint = Arc::new(Endpoint {
         listener: Listener {
-            protocol: 14,
+            protocol: 15,
             generation: "worker".into(),
             port,
         },

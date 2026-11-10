@@ -14,7 +14,7 @@ struct Channel {
     key: String,
 }
 
-fn report(value: Value) {
+fn report(value: impl std::fmt::Display) {
     println!("RSI_TOOL_TRANSPORT {value}");
     std::io::stdout().flush().unwrap();
 }
@@ -52,7 +52,7 @@ async fn native_tool_transport() {
                 let channel: Channel = serde_json::from_slice(&bytes).unwrap();
                 let endpoint = Arc::new(Endpoint {
                     listener: Listener {
-                        protocol: 14,
+                        protocol: 15,
                         generation: "transport-probe".into(),
                         port: channel.port,
                     },
@@ -74,7 +74,7 @@ async fn native_tool_transport() {
                 let stop = CancellationToken::new();
                 let started = std::time::Instant::now();
                 let result = tokio::time::timeout(
-                    Duration::from_secs(120),
+                    Duration::from_mins(2),
                     view.start_and_observe(&request, &identity, &stop),
                 )
                 .await
