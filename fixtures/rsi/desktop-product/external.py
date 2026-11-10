@@ -1,5 +1,6 @@
 """External ACP controls through actual WebKitGTK elements and the native bridge."""
 import json
+from provider_input import current_input
 import os
 from pathlib import Path
 import shutil
@@ -83,7 +84,7 @@ def verify(script, button, fill, until, screenshot, workspace, report):
 
 def provider_reply(body):
     messages = body.get('messages', [])
-    index = next((i for i in range(len(messages)-1, -1, -1) if messages[i]['role']=='user'), -1)
+    index = current_input(messages)
     if index < 0 or 'start an external delegation' not in str(messages[index].get('content', '')):
         return None
     if any(m['role']=='tool' for m in messages[index+1:]):

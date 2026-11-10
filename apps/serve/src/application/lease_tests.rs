@@ -9,6 +9,8 @@ use std::{collections::BTreeMap, path::Path, sync::Arc};
 use tokio_util::sync::CancellationToken;
 
 fn install(store: &PackageStore, directory: &Path, version: u8) -> String {
+    let directory =
+        rsi_workspace_protocol::canonical_native_path(directory.canonicalize().unwrap());
     let data = [version];
     let entry = FileRecord {
         path: "entry".into(),
@@ -50,7 +52,7 @@ fn install(store: &PackageStore, directory: &Path, version: u8) -> String {
         )]),
     };
     let source = InstallSource {
-        directory: directory.to_owned(),
+        directory,
         manifest: serde_json::to_vec(&manifest).unwrap(),
         provenance: Provenance::Local,
     };

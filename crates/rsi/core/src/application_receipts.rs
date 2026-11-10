@@ -105,7 +105,8 @@ mod tests {
     #[test]
     fn cold_lookup_accepts_only_a_complete_exact_receipt_and_does_not_create_missing_files() {
         let dir = tempfile::tempdir().unwrap();
-        let directory = dir.path().canonicalize().unwrap();
+        let directory =
+            rsi_workspace_protocol::canonical_native_path(dir.path().canonicalize().unwrap());
         let receipt = ApplicationReceipt {
             source: "market".into(),
             session: rsi_agent_session_protocol::SessionId::new("one").unwrap(),

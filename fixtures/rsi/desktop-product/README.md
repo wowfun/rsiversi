@@ -17,6 +17,9 @@ from the checkout root before starting the native application.
 Linux Tauri window under `dbus-run-session -- xvfb-run -a`. It creates isolated
 explicit config/state/cache homes and a launch document selecting its fixture Service, then uses actual WebDriver input to configure
 the deterministic provider, select a model, create a conversation and submit it.
+Deterministic providers route on the first User message after the last completed
+Assistant reply. Appended runtime contexts remain visible; Tool continuations
+belong to the same round until an ordinary Assistant reply completes it.
 Use a short report path on a native Unix filesystem: the Service Host socket is
 under its isolated state home and must fit the platform's Unix socket path limit.
 CI keeps every evidence root, including each mode in a loop, short enough for

@@ -1,10 +1,11 @@
 """Native question and approval navigation through actual desktop controls."""
 import json
+from provider_input import current_input
 
 
 def provider_reply(body):
     messages = body.get('messages', [])
-    index = next((i for i in range(len(messages)-1, -1, -1) if messages[i]['role']=='user'), -1)
+    index = current_input(messages)
     if index < 0 or any(m['role']=='tool' for m in messages[index+1:]):
         return None
     prompt = str(messages[index].get('content', ''))

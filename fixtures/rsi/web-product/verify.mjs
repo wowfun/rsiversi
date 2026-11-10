@@ -146,7 +146,7 @@ try {
       await verifyFiles(page, left, service, report, name);
       await verifyFilePicker(page, left, service, report, name);
       await verifyCompletionPointer(page, left, service, report, name);
-      await verifyPlugins(page, left, service, receipt, report, name);
+      await verifyPlugins(page, left, service, report, name);
       await verifyMcp(page, left, report, name);
       await verifyRetrieval(page, left, service, report, name);
       await left.getByRole('button',{name:'Add files or run commands',exact:true}).click();

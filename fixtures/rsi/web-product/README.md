@@ -1,5 +1,11 @@
 # Web product verification
 
+The deterministic provider selects the first User message after the last completed
+Assistant reply. Later User-role workspace and runtime-context messages remain
+in the actual request; Tool-call Assistant messages retain the current round.
+This provider protocol is separate from native input provenance and live-model
+interpretation.
+
 Settings saves wait for a refreshed editor ticket and enabled controls. React
 retains the editor nodes across saves, so node removal is not a completion signal.
 `provider-binding.mjs` mounts the production document with controlled transport.
@@ -706,6 +712,11 @@ schema upgrade, transaction serialization, 64/65 order movement, abort rollback,
 notification and principal/draft isolation without a Service or model. It is a
 storage check, not a substitute for paired product or visual validation.
 
+Browser operations use the deployment's shared browser owner. Fixture grants
+read that principal from the public Profile caller projection. Bearer API probes
+retain their registered Device and receive independent exact grants. Automation
+grants use the fixture's Local API helper; fixtures do not edit live policy files.
+
 The opt-in `ssh-targets.mjs` probe requires explicit isolated sshd/session/auth
 executables, account, fixture directory and optional shared-library path through
 `RSI_TEST_SSH*`, plus `RSI_TEST_HELPER_BIN` for an independently built static
@@ -788,7 +799,8 @@ navigation. Those inline assertions remain a separate opt-in integration check;
 passing the Dock gate does not establish inline navigation evidence.
 
 `automation-verify.mjs` is an explicit Automation presentation check. Supply
-`RSI_WEB_BINARY`, `RSI_WEB_ASSETS`, `RSI_AUTOMATION_WEB_SEED` and a new
+`RSI_WEB_BINARY`, `RSI_WEB_ASSETS`, `RSI_AUTOMATION_WEB_SEED`, the absolute
+`RSI_AUTOMATION_GRANT_PROBE` built as the `desktop-automation-grant` example, and a new
 `RSI_AUTOMATION_WEB_REPORT`. The seed is created by the ignored core
 `automation::prepare_visual_fixture` test through PolicyOwner and Ledger, using
 an actual normalized native checker PNG. It exercises the real Worker/API,

@@ -1,4 +1,4 @@
-import {openSettings} from './controls.mjs';
+import {browserOwner,openSettings} from './controls.mjs';
 // Real SSH, generated keys and Local public API trust; no source-owned user identities.
 import {paired} from './paired-env.mjs';
 import {liveFixture} from './live-fixture.mjs';
@@ -48,6 +48,7 @@ try {
   const registration=service.register('SSH target product verification');
   deviceApi=await requests.newContext({ignoreHTTPSErrors:true,extraHTTPHeaders:{authorization:`Bearer ${registration.token}`,'x-rsi-wire-version':'2'}});
   await page.goto(service.origin);await page.locator('#receipt').fill(JSON.stringify(registration));await page.getByRole('button',{name:'Connect',exact:true}).click();await page.locator('#workbench').waitFor({state:'visible'});
+  const domainOwner=await browserOwner(page);
   await openSettings(page);await page.getByRole('button',{name:'Plugins',exact:true}).click();
   const panel=page.getByRole('region',{name:'SSH targets',exact:true});await panel.getByRole('button',{name:'Refresh SSH targets',exact:true}).click();
   await panel.locator('summary').filter({hasText:'Add an SSH target'}).click();
@@ -65,8 +66,7 @@ try {
   assert([401,403].includes(beforeUse.status()));checks.push('actual authenticated HTTP directory request denied without Use');
   const publicKey=(await readFile(`${hostKey}.pub`,'utf8')).trim().split(/\s+/);const fingerprint='SHA256:'+createHash('sha256').update(Buffer.from(publicKey[1],'base64')).digest('base64').replace(/=+$/,'');
   target=local({operation:'ssh_trust',request:{selection:{host_epoch:catalog.host_epoch,target:target.candidate.target,revision:target.revision},host_key:{algorithm:publicKey[0],base64:publicKey[1]},fingerprint,identity_path:identity}});
-  const scope={principal:{kind:'device',id:registration.id},scope:{kind:'ssh_use',target:target.candidate.target}};
-  const grant=granted=>local({operation:'set_grant',request:{expected:local({operation:'grants'}).revision,scope,granted}});
+  const grant=granted=>{for(const id of [registration.id,domainOwner])local({operation:'set_grant',request:{expected:local({operation:'grants'}).revision,scope:{principal:{kind:'device',id},scope:{kind:'ssh_use',target:target.candidate.target}},granted}})};
   grant(true);await panel.getByRole('button',{name:'Refresh SSH targets',exact:true}).click();await card.getByRole('button',{name:'Connect target',exact:true}).click();
   await waitUntil(()=>card.getByRole('button',{name:'Reconnect target',exact:true}).count(),'actual helper connection',60000);
   catalog=local({operation:'ssh_catalog'});target=catalog.targets[0];assert(target.connected);const oldEpoch=target.connection_epoch;checks.push('real generated SSH config and receipt-verified musl helper connected');
@@ -75,7 +75,7 @@ try {
   const targetHome=boundedRun('/usr/bin/getent',['passwd',user],{encoding:'utf8'}).stdout.trim().split(':')[5];
   const defaultDirectory=await picker('list',{path:null});assert.equal(defaultDirectory.status(),200);assert.equal((await defaultDirectory.json()).home,targetHome);
   checks.push('picker defaults to target account HOME, independently of isolated Service HOME');
-  await verifySshMcp({page,service,report,local,registration,target,checks});
+  await verifySshMcp({page,service,report,local,domainOwner,target,checks});
   await page.getByRole('button',{name:'Close settings',exact:true}).click();
   await page.getByTestId('new-conversation').click();
   await page.getByRole('button',{name:'Choose workspace',exact:true}).click();

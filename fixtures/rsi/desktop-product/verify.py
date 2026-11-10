@@ -21,6 +21,7 @@ from presentation import verify as verify_presentation
 from alignment import verify as verify_alignment
 from queue_scenario import verify as verify_queue
 from tasks import ProviderControl, verify as verify_tasks
+from provider_input import current_input
 from workflow import configure as configure_workflow, provider_reply as workflow_reply, verify as verify_workflow
 from plan_review import provider_reply as plan_reply, verify as verify_plan_review
 from pressure import verify_writes
@@ -106,7 +107,9 @@ class Provider(BaseHTTPRequestHandler):
         body = json.loads(self.rfile.read(size))
         requests.append({'model': body.get('model'), 'messages': len(body.get('messages', []))})
         if args.queue:
-            prompt = next((message.get('content','') for message in reversed(body.get('messages', [])) if message.get('role') == 'user'), '')
+            messages = body.get('messages', [])
+            index = current_input(messages)
+            prompt = messages[index].get('content', '') if index >= 0 else ''
             if isinstance(prompt, list): prompt = ''.join(part.get('text','') for part in prompt)
             requests[-1]['prompt'] = prompt
             if prompt == 'Desktop queue hold active':
@@ -402,7 +405,10 @@ try:
             call('POST', root + f'/element/{eid(pending)}/click', {}); button('Allow once'); approvals += 1
         return script(r'return [...document.querySelectorAll(".message.assistant")].some(b=>b.textContent.includes(arguments[0]))&&document.querySelector(".pane-status")?.textContent==="Completed"', [expected])
     until(completed, 180 if secret else 45)
-    until(lambda: script(r'return document.querySelectorAll("#sessions .session-row").length===1'))
+    if script(BUTTON_TARGET, ['Refresh conversations']): button('Refresh conversations')
+    until(lambda: script('return document.querySelector("#workspaces .workspace-toggle")'))
+    if script('return document.querySelector("#workspaces .workspace-toggle").getAttribute("aria-expanded")!=="true"'): click('#workspaces .workspace-toggle')
+    until(lambda: script("return document.querySelectorAll('#workspaces [data-testid=\"conversation-row\"]').length===1"))
     screenshot('conversation.png')
     if secret:
         assert not requests, requests
@@ -520,8 +526,8 @@ try:
     def select_retained_session():
         until(lambda: script(r'return Boolean(document.querySelector("#workspaces .workspace-toggle"))'))
         if script(r'return document.querySelector("#workspaces .workspace-toggle").getAttribute("aria-expanded")!=="true"'): click('#workspaces .workspace-toggle')
-        until(lambda: script(r'return document.querySelectorAll("#sessions .session-row").length===1'))
-        click('#sessions .session-row button')
+        until(lambda: script("return document.querySelectorAll('#workspaces [data-testid=\"conversation-row\"]').length===1"))
+        click('#workspaces [data-testid="conversation-open"]')
     if args.reload:
         fill('textarea[aria-label="Main message"]', 'saved across document reload')
         until(lambda: script('return !document.querySelector(".draft-status")?.textContent.includes("Saving")'))

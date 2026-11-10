@@ -4,14 +4,14 @@ import {readFile,writeFile} from 'node:fs/promises';
 import {join} from 'node:path';
 import {waitUntil} from './service.mjs';
 
-export async function verifySshMcp({page,service,report,local,registration,target,checks}) {
+export async function verifySshMcp({page,service,report,local,domainOwner,target,checks}) {
   const panel=page.getByRole('region',{name:'SSH MCP servers',exact:true});
   await panel.getByLabel('MCP execution target',{exact:true}).selectOption(target.candidate.target);
   await panel.getByLabel('SSH MCP server name',{exact:true}).fill('target-peer');
   const read=panel.getByRole('button',{name:'Read server configuration',exact:true});
   await read.click();await panel.getByRole('status').filter({hasText:'exact target/server grant'}).waitFor();
   assert.equal(await panel.getByLabel('MCP target executable',{exact:true}).count(),0);
-  const scope={principal:{kind:'device',id:registration.id},scope:{kind:'ssh_stdio',target:target.candidate.target,server:'target-peer',credentials:[]}};
+  const scope={principal:{kind:'device',id:domainOwner},scope:{kind:'ssh_stdio',target:target.candidate.target,server:'target-peer',credentials:[]}};
   const grant=granted=>local({operation:'set_grant',request:{expected:local({operation:'grants'}).revision,scope,granted}});
   grant(true);await read.click();await panel.getByRole('status').filter({hasText:'Configuration read'}).waitFor();
   const marker=join(service.workspace,'mcp-discovery.txt');

@@ -33,6 +33,8 @@ fn tree(files: &[(&str, &[u8])]) -> Vec<u8> {
 fn source(root: &std::path::Path, tag: &str, bytes: &[u8]) -> InstallSource {
     let directory = root.join(tag);
     std::fs::create_dir(&directory).unwrap();
+    #[cfg(unix)]
+    let directory = directory.canonicalize().unwrap();
     std::fs::write(directory.join("payload.rsi"), bytes).unwrap();
     let manifest = Manifest {
         format: 2,

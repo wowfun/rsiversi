@@ -1,10 +1,11 @@
 """Recorded result declaration read from the durable Tool contribution baseline."""
 import json
+from provider_input import current_input
 
 
 def provider_reply(body):
     messages = body.get('messages', [])
-    index = next((i for i in range(len(messages)-1, -1, -1) if messages[i]['role']=='user'), -1)
+    index = current_input(messages)
     if index < 0 or 'desktop typed profile catalog' not in str(messages[index].get('content', '')) or any(m['role']=='tool' for m in messages[index+1:]):
         return None
     return {'tool_calls':[{'index':0,'id':'desktop-typed','type':'function','function':{'name':'host_profile','arguments':json.dumps({'operation':'catalog'})}}]}

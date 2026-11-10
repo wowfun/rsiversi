@@ -818,11 +818,14 @@ async fn approval_reviews_the_prepared_request_and_denial_never_starts_it() {
                     .iter()
                     .any(|v| v["type"] == "fact" && v["fact"]["type"] == "tool_started")
             );
-            assert_eq!(provider.requests.lock().unwrap().len(), 1);
+            assert_eq!(provider.requests.lock().unwrap().len(), 2);
+            assert!(observations.iter().any(|v| v["type"] == "fact"
+                && v["fact"]["type"] == "tool_rejected"
+                && v["fact"]["rejection"]["type"] == "approval_denied"));
             assert!(
                 observations
                     .iter()
-                    .any(|v| v["type"] == "outcome" && v["outcome"]["status"] == "failed")
+                    .any(|v| v["type"] == "outcome" && v["outcome"]["status"] == "completed")
             );
         }
         task.abort();

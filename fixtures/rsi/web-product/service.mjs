@@ -51,10 +51,11 @@ async function startProvider(onRequest) {
       const body = JSON.parse(Buffer.concat(chunks).toString());
       if (requests.length === 512) { response.writeHead(429).end(); return; }
       const messages = body.messages ?? [];
-      const lastUser = messages.findLastIndex(message => message.role === "user");
-      const prompt = text(messages[lastUser]?.content).slice(0, 2048);
-      const completedTool = messages.slice(lastUser + 1).some(message => message.role === "tool");
-      const images = (Array.isArray(messages[lastUser]?.content) ? messages[lastUser].content : []).filter(part => part.type === "image_url").map(part => {
+      const previousReply = messages.findLastIndex(message => message.role === "assistant" && !message.tool_calls?.length);
+      const input = messages.findIndex((message, index) => index > previousReply && message.role === "user");
+      const prompt = text(messages[input]?.content).slice(0, 2048);
+      const completedTool = messages.slice(input + 1).some(message => message.role === "tool");
+      const images = (Array.isArray(messages[input]?.content) ? messages[input].content : []).filter(part => part.type === "image_url").map(part => {
         assert.match(part.image_url.url, /^data:image\/png;base64,/);
         const bytes = Buffer.from(part.image_url.url.split(",")[1], "base64");
         assert.equal(bytes.subarray(1, 4).toString(), "PNG");
@@ -264,7 +265,7 @@ export async function startService({ binary, assets, report, configure, onReques
           return facts;
         } finally {database.close();}
       },
-      probe(program, input) { return boundedRun(program, [], {cwd: workspace, env, encoding: 'utf8', input: JSON.stringify(input)}); },
+      probe(program, input, args = []) { return boundedRun(program, args, {cwd: workspace, env, encoding: 'utf8', input: JSON.stringify(input)}); },
       async restart(change) { await stopProcess(); await change?.(); await startProcess(); },
       register(label) {
         const receipt = JSON.parse(run(["run", "devices", "register", label]).stdout);

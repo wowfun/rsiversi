@@ -117,7 +117,8 @@ async fn delegated_tool_card_opens_the_existing_host_conversation() {
         .unwrap();
     state.release.notify_one();
     terminal.until("hello from daemon").await;
-    terminal.send(b"\t\x10");
+    terminal.focus_source("Called external_agent").await;
+    terminal.send(b"\x10");
     terminal.select_menu("Raw sources / full output").await;
     terminal.select_menu("Open external conversation").await;
     terminal.until("Connected · Ready").await;
