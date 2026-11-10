@@ -108,6 +108,105 @@ async fn active_unscoped_context(runtime: &Runtime) -> (FiberHandle, Context) {
 }
 
 #[tokio::test]
+async fn passive_registration_joins_loading_rollback_and_reclaims_active_layers() {
+    #[derive(Debug)]
+    struct Register {
+        layers: Arc<ScopedLayers<TestLayer>>,
+        leases: Arc<Mutex<Vec<rsi_meta::RegistrationLease>>>,
+        fail: bool,
+    }
+    #[async_trait]
+    impl PluginFactory for Register {
+        fn prepare(&self, value: &ConfigValue) -> Result<PreparedActivation> {
+            Ok(PreparedActivation::new(value.clone()))
+        }
+        async fn activate(&self, plan: ActivationPlan) -> Result<()> {
+            let lease = self
+                .layers
+                .register(plan.context(), "passive", |layer| {
+                    layer.named.insert("name", 1).map_err(|_| "duplicate")
+                })
+                .await
+                .map_err(|error| MetaError::Activation(error.to_string()))?;
+            self.leases.lock().unwrap().push(lease);
+            assert_eq!(self.layers.global().named.get("name"), Some(1));
+            if self.fail {
+                Err(MetaError::Activation("rollback fixture".into()))
+            } else {
+                Ok(())
+            }
+        }
+    }
+    let runtime = Runtime::default();
+    let root = new_scope_root();
+    let layers = Arc::new(ScopedLayers::new(
+        root.clone(),
+        1,
+        |_| TestLayer::new(),
+        || async { panic!("passive registrations do not dispatch change callbacks") },
+    ));
+    let leases = Arc::new(Mutex::new(Vec::new()));
+    for fail in [true, false] {
+        let fiber = runtime
+            .root()
+            .apply(
+                ResolvedFactory::linked(
+                    "passive",
+                    "1",
+                    UpdateMode::Replayable,
+                    Arc::new(Register {
+                        layers: layers.clone(),
+                        leases: leases.clone(),
+                        fail,
+                    }),
+                ),
+                Value::Null,
+            )
+            .await
+            .unwrap();
+        assert_eq!(
+            matches!(fiber.snapshot().state, rsi_meta::FiberState::Failed(_)),
+            fail
+        );
+        assert_eq!(
+            layers.global().named.get("name"),
+            if fail { None } else { Some(1) }
+        );
+        assert!(fiber.dispose().await.is_clean());
+        assert!(layers.global().is_empty());
+    }
+    for _ in 0..3 {
+        let scope = root.create(&runtime.root()).await.unwrap();
+        let first = layers
+            .register(scope.context(), "scoped", |layer| {
+                layer.named.insert("entry", 2).map_err(|_| "duplicate")
+            })
+            .await
+            .unwrap();
+        assert!(
+            layers
+                .register(scope.context(), "duplicate", |layer| layer
+                    .named
+                    .insert("entry", 3)
+                    .map_err(|_| "duplicate"))
+                .await
+                .is_err()
+        );
+        assert_eq!(
+            layers
+                .effective_named(Some(scope.key()), |layer| &layer.named)
+                .unwrap(),
+            [("entry".into(), 2)]
+        );
+        assert!(first.dispose().await.is_clean());
+        assert!(layers.peek(scope.key()).unwrap().is_none());
+        assert!(scope.dispose().await.is_clean());
+    }
+    drop(leases);
+    assert!(runtime.shutdown().await.is_clean());
+}
+
+#[tokio::test]
 async fn global_is_eager_scope_layers_are_lazy_and_empty_aggregates_are_reclaimed() {
     let runtime = Runtime::default();
     let scope_root = new_scope_root();
