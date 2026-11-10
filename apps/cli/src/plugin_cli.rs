@@ -1,6 +1,6 @@
 use super::{OsString, RsiError};
 use rsi::local_package_source as local_source;
-use rsi_packages::{Manifest, PackageStore};
+use rsi_packages::PackageStore;
 use std::path::Path;
 mod download;
 mod importer;
@@ -99,7 +99,11 @@ pub(super) async fn install_core(local: Option<&Path>) -> rsi::Result<rsi_packag
     let target = format!("{}-{}", std::env::consts::OS, std::env::consts::ARCH);
     if let Some(local) = local {
         let source = local_source(local, &std::env::current_dir().map_err(error)?)?;
-        if Manifest::parse(&source.manifest).map_err(error)?.name != "core" {
+        if rsi_packages::Manifest::parse(&source.manifest)
+            .map_err(error)?
+            .name
+            != "core"
+        {
             return Err(error("core upgrade requires a core package"));
         }
         store

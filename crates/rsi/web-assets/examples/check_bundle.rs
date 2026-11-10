@@ -4,6 +4,13 @@ use rsi_meta::UpdateMode;
 use rsi_web_assets::{WebAssetControlContract, WebAssetsFactory};
 use std::{path::PathBuf, sync::Arc};
 
+#[derive(serde::Deserialize)]
+#[serde(deny_unknown_fields)]
+struct Document {
+    files: Vec<String>,
+    trusted_inline_styles: bool,
+}
+
 #[tokio::main]
 async fn main() -> Result<(), Box<dyn std::error::Error>> {
     let mut arguments = std::env::args_os().skip(1);
@@ -36,12 +43,6 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     } else {
         None
     };
-    #[derive(serde::Deserialize)]
-    #[serde(deny_unknown_fields)]
-    struct Document {
-        files: Vec<String>,
-        trusted_inline_styles: bool,
-    }
     let document = match arguments.next() {
         Some(flag) if flag == "--document" => {
             use std::io::Read as _;

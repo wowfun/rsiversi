@@ -73,7 +73,7 @@ try {
           assert.equal(cookies.length, 1);
           assert.equal(cookies[0].httpOnly, true);
           assert.equal(cookies[0].sameSite, "Strict");
-          assert.equal(cookies[0].path, "/api");
+          assert.equal(cookies[0].path, "/");
           assert.equal(cookies[0].secure, secure);
           for (const forgedOrigin of [undefined, "https://foreign.invalid"]) {
             const headers = { "x-rsi-wire-version": "2", "x-rsi-csrf": "1", "content-type": "application/json" };
