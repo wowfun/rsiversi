@@ -5,13 +5,17 @@ use rsi::{
 };
 use rsi_agent_goal::{GoalAction, GoalPhase, GoalState};
 use rsi_agent_session_protocol::{DomainRequestId, SessionId};
+use rsi_agent_turn_protocol::{ObservationCursor, SessionObservation};
 use rsi_credentials_local::SecretStore;
 use rsi_credentials_protocol::{CredentialsError, SecretValue};
 use rsi_goal::{GoalControl, GoalDriverStage};
 use rsi_service_host::{HostOwnerLease, ServiceHostPaths};
 use rsi_session_protocol::{CreateSession, SessionHandle};
 use serde::Deserialize;
-use std::{io::Read as _, sync::Arc};
+use std::{
+    io::{Read as _, Write as _},
+    sync::Arc,
+};
 use tokio_util::sync::CancellationToken;
 
 type Result<T> = std::result::Result<T, Box<dyn std::error::Error + Send + Sync>>;
@@ -273,7 +277,12 @@ async fn run() -> Result<serde_json::Value> {
         if connection.mode() != ServiceHostConnectionMode::Remote {
             return Err("evaluation did not connect through the local API".into());
         }
-        let result = exercise(&connection, request).await;
+        let result = exercise(
+            &connection,
+            request,
+            &paths.state().join("session-api-eval-trace.jsonl"),
+        )
+        .await;
         let closed = infrastructure("API shutdown", connection.shutdown())
             .await
             .and_then(|closed| closed.map_err(Into::into));
@@ -330,6 +339,7 @@ async fn state(handle: &Arc<dyn SessionHandle>) -> Result<GoalState> {
 async fn exercise(
     connection: &rsi::ServiceHostConnection,
     request: Evaluation,
+    trace_path: &std::path::Path,
 ) -> Result<serde_json::Value> {
     let service = connection.session_service();
     let handle = if request.create_session {
@@ -406,7 +416,51 @@ async fn exercise(
     if current.phase == GoalPhase::Completed && current.report.is_none() {
         return Err("completion lacks an authenticated report".into());
     }
+    infrastructure(
+        "canonical trace capture",
+        capture_trace(&handle, trace_path),
+    )
+    .await??;
     Ok(
         serde_json::json!({"transport":"local_session_api", "before_live":before_live, "after_reads_live":after_reads_live, "before":before, "receipt":receipt, "live":live, "goal":goal}),
     )
+}
+
+async fn capture_trace(handle: &Arc<dyn SessionHandle>, path: &std::path::Path) -> Result<()> {
+    #[derive(serde::Serialize)]
+    #[serde(rename_all = "snake_case")]
+    enum Record<'a> {
+        Fact(&'a rsi_agent_session_protocol::SessionFact),
+        Control(&'a rsi_agent_session_protocol::AgentControlRecord),
+    }
+
+    let cut = handle.inspect().await?;
+    let mut cursor = ObservationCursor::default();
+    let mut stream = handle.observe(cursor).await?;
+    let mut writer = std::io::BufWriter::new(std::fs::File::create(path)?);
+    while cursor.fact_seq < cut.durable_fact_seq || cursor.control_seq < cut.durable_control_seq {
+        let next = stream
+            .next()
+            .await
+            .ok_or("canonical trace stream ended before its cut")??;
+        match next {
+            SessionObservation::Fact { fact, .. } => {
+                if fact.seq() > cut.durable_fact_seq {
+                    continue;
+                }
+                cursor.fact_seq = fact.seq();
+                serde_json::to_writer(&mut writer, &Record::Fact(fact.as_ref()))?;
+            }
+            SessionObservation::Control { record, .. } => {
+                if record.seq() > cut.durable_control_seq {
+                    continue;
+                }
+                cursor.control_seq = record.seq();
+                serde_json::to_writer(&mut writer, &Record::Control(record.as_ref()))?;
+            }
+        }
+        writeln!(writer)?;
+    }
+    writer.flush()?;
+    Ok(())
 }

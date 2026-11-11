@@ -234,6 +234,20 @@ def fact_chain(facts):
     return digest.hex()
 
 
+def canonical_trace(root):
+    trace = {"facts": [], "controls": []}
+    with (root / "state/rsi/session-api-eval-trace.jsonl").open(encoding="utf-8") as captured:
+        for line in captured:
+            row = json.loads(line)
+            if set(row) == {"fact"}:
+                trace["facts"].append(row["fact"])
+            elif set(row) == {"control"}:
+                trace["controls"].append(row["control"])
+            else:
+                raise ValueError("invalid canonical trace record")
+    return trace
+
+
 def selected_pressure_answer(trace, plan, intent_seq):
     """Verify this single-Session fixture's actual selected ordinary answer."""
     for source in plan.get("sources", []):
@@ -261,11 +275,14 @@ def selected_pressure_answer(trace, plan, intent_seq):
             kind = fact["type"]
             if kind in (
                 "turn_accepted",
-                "input_message_claimed",
                 "tool_result",
                 "tool_rejected",
             ):
                 message_index += 1
+            if kind == "step_inputs_prepared":
+                decision = object_at(fact, "decision")
+                if decision.get("kind") == "enter":
+                    message_index += len(decision["messages"])
             if kind != "model_attempt_settled" or fact.get("purpose") != "conversation":
                 continue
             text = ""
@@ -529,7 +546,7 @@ def execute_task(task, binary, destination, model, key, provider, report, starte
             )
             if outcome != "passed":
                 report["classification"] = outcome
-        trace = coding.durable_trace(root)
+        trace = canonical_trace(root)
         coding.record_trace_summary(report, trace)
         try:
             report["verified_turn_counters"] = verify_counters(trace, report["limits"])
