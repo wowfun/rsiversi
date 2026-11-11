@@ -25,7 +25,7 @@ from provider_input import current_input
 from workflow import configure as configure_workflow, provider_reply as workflow_reply, verify as verify_workflow
 from plan_review import provider_reply as plan_reply, verify as verify_plan_review
 from pressure import verify_writes
-from controls import BUTTON_TARGET, COMPOSER_FOCUS, fill as fill_input, click as click_ready, asset_pressure, file_has_bytes, configure_live_limits
+from controls import BUTTON_TARGET, COMPOSER_FOCUS, SAVED_INPUT, fill as fill_input, click as click_ready, asset_pressure, file_has_bytes, configure_live_limits
 from external import configure as configure_external, verify as verify_external, provider_reply as external_reply, delegation as verify_delegation
 from profiles import verify as verify_profiles
 from history import verify as verify_history
@@ -520,15 +520,17 @@ try:
         until(lambda: script("return document.querySelectorAll('#workspaces [data-testid=\"conversation-row\"]').length===1"))
         click('#workspaces [data-testid="conversation-open"]')
     if args.reload:
+        reload_session = script('return document.querySelector(".pane.selected").dataset.sessionId')
         fill('textarea[aria-label="Main message"]', 'saved across document reload')
-        until(lambda: script('return !document.querySelector(".draft-status")?.textContent.includes("Saving")'))
+        until(lambda: script(SAVED_INPUT, [daemon_metadata['endpoint_id'], reload_session, 'saved across document reload']) is True)
         call('POST',root+'/refresh',{})
         until(lambda: script('return document.querySelector("#workbench")?.hidden===false'),45)
         observe_document()
         select_retained_session()
+        assert script('return document.querySelector(".pane.selected").dataset.sessionId') == reload_session
         until(lambda: script(r'''return document.querySelector('textarea[aria-label="Main message"]')?.value==='saved across document reload';'''))
         screenshot('reloaded.png')
-        (args.report/'reload.json').write_text(json.dumps({'reload':True,'draftRetained':True}))
+        (args.report/'reload.json').write_text(json.dumps({'reload':True,'draftRetained':True,'session':reload_session,'savedBeforeReload':True}))
     if args.restart:
         initial_origin = script('return location.origin')
         if args.host_loss:

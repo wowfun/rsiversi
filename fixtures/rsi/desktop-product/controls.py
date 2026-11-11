@@ -5,6 +5,7 @@ FOCUS_INPUT = (Path(__file__).with_name('focus-input.js')).read_text()
 COMPOSER_FOCUS = (Path(__file__).with_name('composer-focus.js')).read_text()
 ASSET_PRESSURE = (Path(__file__).with_name('asset-pressure.js')).read_text()
 BUTTON_TARGET = (Path(__file__).with_name('button-target.js')).read_text()
+SAVED_INPUT = (Path(__file__).with_name('saved-input.js')).read_text()
 
 
 def stale_target(error):

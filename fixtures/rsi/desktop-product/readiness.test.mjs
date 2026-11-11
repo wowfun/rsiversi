@@ -1,12 +1,44 @@
 import assert from 'node:assert/strict';
 import {readFile} from 'node:fs/promises';
+import {createServer} from 'node:http';
 import test from 'node:test';
 import {chromium, firefox} from '../web-product/node_modules/playwright/index.mjs';
 const focus = await readFile(new URL('./focus-input.js', import.meta.url), 'utf8');
 const composerFocus = await readFile(new URL('./composer-focus.js', import.meta.url), 'utf8');
 const assets = await readFile(new URL('./asset-pressure.js', import.meta.url), 'utf8');
 const buttonTarget = await readFile(new URL('./button-target.js', import.meta.url), 'utf8');
+const savedInput = await readFile(new URL('./saved-input.js', import.meta.url), 'utf8');
+const drafts = await readFile(new URL('../../../apps/web/drafts.js', import.meta.url), 'utf8');
 for (const [name, engine] of Object.entries({chromium, firefox})) {
+  test(`${name}: reload waits for the exact committed Session draft`, async () => {
+    const server = createServer((request, response) => {
+      response.setHeader('Content-Type', request.url === '/drafts.js' ? 'text/javascript' : 'text/html');
+      response.end(request.url === '/drafts.js' ? drafts : '<textarea aria-label="Main message">saved across document reload</textarea>');
+    });
+    await new Promise(resolve => server.listen(0, '127.0.0.1', resolve));
+    let browser;
+    try {
+      browser = await engine.launch({headless: true});
+      const page = await browser.newPage();
+      await page.goto(`http://127.0.0.1:${server.address().port}`);
+      await page.evaluate(async () => {
+        const {DraftStore} = await import('/drafts.js');
+        const store = await DraftStore.open('a'.repeat(32), {kind: 'local'});
+        let record = await store.ensure('main', 'captured-session', 'c'.repeat(64), null);
+        record = await store.edit(record, 'sa', [], []);
+        window.fixtureDraft = {store, record};
+      });
+      const check = (session = 'captured-session') => page.evaluate(({source, session}) => new Function(source)('a'.repeat(32), session, 'saved across document reload'), {source: savedInput, session});
+      assert.equal(await page.locator('textarea').inputValue(), 'saved across document reload');
+      assert.equal(await check(), false, 'visible text and partial durable text do not establish a saved draft');
+      await page.evaluate(async () => {const {store, record} = fixtureDraft;fixtureDraft.record = await store.edit(record, 'saved across document reload', [], []);});
+      assert.equal(await check(), true);
+      assert.equal(await check('another-session'), false, 'another Session cannot satisfy the captured draft');
+    } finally {
+      await browser?.close();
+      await new Promise(resolve => server.close(resolve));
+    }
+  });
   test(`${name}: composer clear readiness excludes the hidden device receipt`, async () => {
     const browser = await engine.launch({headless: true});
     try {

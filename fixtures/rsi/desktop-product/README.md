@@ -293,7 +293,8 @@ queued Turn after Stop. This mode is separate from live-provider scenarios.
 seven Web viewport widths with all three theme choices through Settings. Its Xvfb
 screen must be at least 1920 pixels wide; CI provides 2560×1440. Captures are
 manual comparison evidence, not screenshot baselines. `--reload` performs an
-actual WebDriver document refresh, reselects the retained Session, and verifies
+actual WebDriver document refresh after the owning DraftStore confirms the exact
+text for the captured endpoint and Session. It reselects that Session and verifies
 its saved draft survives observer replacement. Like restart, it does not assume
 the new Pane retains its previous in-memory selection. Document-local transport
 and trusted-input probes are reattached before later native gestures. This is distinct from
