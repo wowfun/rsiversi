@@ -45,8 +45,8 @@ and read-only controls after rebuilding the form. Device-storage tests
 verify that failure to reserve cleanup aborts the layout transaction. UI alignment
 uses the unified Settings window and verifies disclosure Escape/outside dismissal,
 focus return, Verbose inline source actions, modal Escape, transcript keyboard
-regions and responsive geometry. Its pin/refresh scenario opens the workspace's
-captured conversation group before selecting a row. These are
+regions and responsive geometry. Navigation probes open the workspace's
+captured conversation group and bind its Session before selecting a row. These are
 document/runtime checks; `plan-live.mjs` separately exercises an explicitly selected
 real provider through the paired Worker and native service.
 `controller-keyboard.mjs` mounts the actual Session event owner and external draft
