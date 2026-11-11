@@ -43,7 +43,7 @@ screenshots, DOM and state reports. It also checks
 Settings editor mode switches, exact JSON retention, UTF-8 byte limits
 and read-only controls after rebuilding the form. Its actual Settings runtime
 checks retain the editor through loading frames, both read reply orders and
-transport/provider failures, while section changes still replace it. Device-storage tests
+transport/provider failures, while section changes and external reads still replace it. Device-storage tests
 verify that failure to reserve cleanup aborts the layout transaction. UI alignment
 uses the unified Settings window and verifies disclosure Escape/outside dismissal,
 focus return, Verbose inline source actions, modal Escape, transcript keyboard

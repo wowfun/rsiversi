@@ -88,10 +88,14 @@ window.settingsRuntimeChecks=async()=>{
  try{
   settingsPanel.set('appearance');settingsMounted.set(true);runtime=createSettingsRuntime(context);
   await React.act(async()=>{present();root.render(<RegisteredSettings/>)});
-  const draft=registeredSettings.getSnapshot().draft,form=host.querySelector('form');
+  const draft=registeredSettings.getSnapshot().draft;let form=host.querySelector('form');
   const prepare=async()=>{await React.act(async()=>{if(!draft.fields.jsonMode)draft.fields.toggle();draft.fields.editJson(exact);present()});[...form.querySelectorAll('button')].find(button=>button.textContent==='Discard edits and reload').focus()};
   const retained=()=>{if(registeredSettings.getSnapshot()?.draft!==draft||!form.isConnected)throw Error('An editor-owned reload unmounted its form');if(!draft.disabled||!form.querySelector('fieldset').disabled)throw Error('An old ticket stayed editable during reload')};
   const focused=()=>{if(!form.contains(document.activeElement)||!document.activeElement.matches('button:not(:disabled),input:not(:disabled),textarea:not(:disabled),select:not(:disabled)'))throw Error('Runtime reload lost ready focus: '+document.activeElement.outerHTML.slice(0,160))};
+  await prepare();let ownRead,externalRead;await React.act(async()=>{ownRead=draft.reload()});retained();
+  await React.act(async()=>{externalRead=runtime.command({action:'settings_read',namespace:'rsi.client'})});
+  if(form.isConnected||registeredSettings.getSnapshot()!==undefined)throw Error('An external read inherited the pending editor read ownership');
+  await React.act(async()=>{pending.shift().resolve();pending.shift().resolve();await Promise.all([ownRead,externalRead]);present()});form=host.querySelector('form');
   for(const order of ['frame-before-ack','ack-before-frame']){
    await prepare();let reading;
    await React.act(async()=>{reading=draft.reload()});retained();
@@ -112,7 +116,7 @@ window.settingsRuntimeChecks=async()=>{
   if(!draft.error.includes('provider refused the read')||draft.canSave)throw Error('A projected read failure lost its error or unlocked the old ticket');focused();
   await React.act(async()=>settingsPanel.set('advanced'));
   if(form.isConnected||registeredSettings.getSnapshot()!==undefined)throw Error('A section change retained the previous editor');
-  return {retainedForm:true,freshTicketFence:true,replyOrders:true,readFailure:true,projectedReadFailure:true,focusRetained:true,sectionFence:true};
+  return {retainedForm:true,freshTicketFence:true,replyOrders:true,readFailure:true,projectedReadFailure:true,focusRetained:true,sectionFence:true,externalReadFence:true};
  }finally{
   await React.act(async()=>{root.unmount();runtime?.dispose();settingsMounted.set(false);for(const reply of pending)reply.resolve()});host.remove();window.IS_REACT_ACT_ENVIRONMENT=environment;
  }

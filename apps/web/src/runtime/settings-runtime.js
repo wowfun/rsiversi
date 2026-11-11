@@ -40,15 +40,11 @@ export function createSettingsRuntime(context) {
         context.notify(String(error.message ?? error));
     },
   });
-  function command(value) {
+  function command(value, draft) {
     const reading =
         value.action === "settings_read" || value.action === "settings_list",
       owner = context.connection,
-      draft = registeredSettings.getSnapshot()?.draft,
-      retained =
-        reading && draft?.saving && draft.current.namespace === value.namespace
-          ? draft
-          : undefined,
+      retained = value.action === "settings_read" ? draft : undefined,
       request = reading ? {draft: retained} : undefined;
     if (reading) {
       read = request;
@@ -103,7 +99,7 @@ export function createSettingsRuntime(context) {
       let draft = drafts.get(section);
       if (!draft || draft.current.namespace !== editor.namespace) {
         draft?.retire();
-        draft = createSettingsDraft(editor, command);
+        draft = createSettingsDraft(editor, (value) => command(value, draft));
         drafts.set(section, draft);
       } else if (draft.current !== editor) draft.update(editor);
       if (read?.draft === draft) read.draft = undefined;
