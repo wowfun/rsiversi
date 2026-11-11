@@ -16,7 +16,8 @@ import {installDisclosures} from './disclosure.js';
 import {flushSync} from 'react-dom';
 import {createSettingsFields} from './src/runtime/settings-fields.js';
 import {createSettingsDraft} from './src/runtime/settings-draft.js';
-import {RegisteredDraft} from './src/settings/registered.tsx';
+import {RegisteredDraft,RegisteredSettings} from './src/settings/registered.tsx';
+import {createSettingsRuntime} from './src/runtime/settings-runtime.js';
 import {MAXIMUM_SETTINGS_BYTES} from './settings-json.js';
 import {Button} from './src/button.tsx';
 import {Notices} from './src/notices.tsx';
@@ -27,7 +28,7 @@ import {emptyDock,dockIntent} from './src/dock-state.ts';
 import {presentationIdentity,LayoutContext,usePresentation,useViewport,useNarrow,useResourceVisibility,ResizeHandle} from './src/presentation.tsx';
 import {defaultLayout} from './presentation-layout.js';
 import {ConversationWidthControls} from './src/conversation-width.tsx';
-import {source,installActions} from './src/bridge.ts';
+import {source,installActions,settingsPanel,settingsMounted,registeredSettings} from './src/bridge.ts';
 import {resources,resourceHosts,publishResources,clearResources} from './src/resource-hosts.ts';
 window.modules={defaultLayout,DeviceStore,emptyDock,dockIntent,resources,resourceHosts,publishResources,clearResources};
 window.mountConversationWidth=()=>{
@@ -74,6 +75,51 @@ window.settingsDraftChecks=async()=>{
   show({...a,ticket:'a8',version:['scope','5']});if(JSON.parse(current.fields.json()).name!=='saved'||!current.canSave)throw Error('Same-version discard retained edits');
   return {exactDraft:true,versionConflict:true,explicitDiscard:true,saveFrameOrders:true,focusRetained:true,conflictCleared:true,calls:calls.map(call=>call.action)};
  }finally{root.unmount();host.remove();for(const draft of drafts.values())draft.retire()}
+};
+window.settingsRuntimeChecks=async()=>{
+ const host=document.createElement('section');document.body.append(host);const root=createRoot(host),pending=[],owner={};
+ const environment=window.IS_REACT_ACT_ENVIRONMENT;window.IS_REACT_ACT_ENVIRONMENT=true;
+ const metadata={schema:{type:'object',properties:{name:{type:'string'}}},sensitive_fields:[],applies:'live',description:'Runtime reload'};
+ const context={connection:owner,view:undefined,boundCall:()=>async(method,payload)=>new Promise((resolve,reject)=>pending.push({command:JSON.parse(payload),resolve,reject})),notify:message=>{throw Error(message)}};
+ let revision=0,ticket=0,runtime;
+ const present=(advance=true)=>{if(advance)revision++;context.view={settings_revision:String(revision),settings:{namespace:'rsi.client',ticket:String(++ticket),version:['scope',String(ticket)],text:'{"name":"saved"}',description:{writable:true,defaults:{},metadata}}};runtime.present(context.view)};
+ const catalog=error=>{context.view={settings_revision:String(++revision),settings_catalog:{namespace:'rsi.client',ticket:String(revision),page:null,error:error??null}};runtime.present(context.view)};
+  const exact='{"large":9007199254740993,"negative":-0}';
+ try{
+  settingsPanel.set('appearance');settingsMounted.set(true);runtime=createSettingsRuntime(context);
+  await React.act(async()=>{present();root.render(<RegisteredSettings/>)});
+  const draft=registeredSettings.getSnapshot().draft;let form=host.querySelector('form');
+  const prepare=async()=>{await React.act(async()=>{if(!draft.fields.jsonMode)draft.fields.toggle();draft.fields.editJson(exact);present()});[...form.querySelectorAll('button')].find(button=>button.textContent==='Discard edits and reload').focus()};
+  const retained=()=>{if(registeredSettings.getSnapshot()?.draft!==draft||!form.isConnected)throw Error('An editor-owned reload unmounted its form');if(!draft.disabled||!form.querySelector('fieldset').disabled)throw Error('An old ticket stayed editable during reload')};
+  const focused=()=>{if(!form.contains(document.activeElement)||!document.activeElement.matches('button:not(:disabled),input:not(:disabled),textarea:not(:disabled),select:not(:disabled)'))throw Error('Runtime reload lost ready focus: '+document.activeElement.outerHTML.slice(0,160))};
+  await prepare();let ownRead,externalRead;await React.act(async()=>{ownRead=draft.reload()});retained();
+  await React.act(async()=>{externalRead=runtime.command({action:'settings_read',namespace:'rsi.client'})});
+  if(form.isConnected||registeredSettings.getSnapshot()!==undefined)throw Error('An external read inherited the pending editor read ownership');
+  await React.act(async()=>{pending.shift().resolve();pending.shift().resolve();await Promise.all([ownRead,externalRead]);present()});form=host.querySelector('form');
+  for(const order of ['frame-before-ack','ack-before-frame']){
+   await prepare();let reading;
+   await React.act(async()=>{reading=draft.reload()});retained();
+   const reply=pending.shift();if(reply.command.action!=='settings_read')throw Error('Reload did not request a read');
+   await React.act(async()=>catalog());retained();
+   if(order==='frame-before-ack'){await React.act(async()=>present(false));retained()}
+   await React.act(async()=>{reply.resolve();await reading});
+   if(order==='ack-before-frame'){retained();await React.act(async()=>present(false))}
+   if(!draft.canSave||JSON.parse(draft.fields.json()).name!=='saved')throw Error('Reload did not accept its fresh ticket');focused();
+  }
+  await prepare();let reading;await React.act(async()=>{reading=draft.reload()});retained();
+  await React.act(async()=>{pending.shift().reject(Error('read unavailable'));await reading});
+  if(registeredSettings.getSnapshot()?.draft!==draft||!form.isConnected||draft.fields.json()!==exact||!draft.error.includes('read unavailable'))throw Error('Failed read replaced the retained draft or its error');focused();
+  await prepare();await React.act(async()=>{reading=draft.reload()});retained();
+  await React.act(async()=>catalog('provider refused the read'));retained();
+  const failedRevision=draft.getSnapshot();await React.act(async()=>runtime.present(context.view));if(draft.getSnapshot()!==failedRevision)throw Error('An unchanged provider failure republished its draft');
+  await React.act(async()=>{pending.shift().resolve();await reading});retained();
+  if(!draft.error.includes('provider refused the read')||draft.canSave)throw Error('A projected read failure lost its error or unlocked the old ticket');focused();
+  await React.act(async()=>settingsPanel.set('advanced'));
+  if(form.isConnected||registeredSettings.getSnapshot()!==undefined)throw Error('A section change retained the previous editor');
+  return {retainedForm:true,freshTicketFence:true,replyOrders:true,readFailure:true,projectedReadFailure:true,focusRetained:true,sectionFence:true,externalReadFence:true};
+ }finally{
+  await React.act(async()=>{root.unmount();runtime?.dispose();settingsMounted.set(false);for(const reply of pending)reply.resolve()});host.remove();window.IS_REACT_ACT_ENVIRONMENT=environment;
+ }
 };
 window.mountCleanup=async()=>{
  const owner=new ResourceOwner(async()=>{throw Error('Input is busy')});
@@ -226,7 +272,7 @@ if(process.env.RSI_REVIEW_PREVIEW){
 try{
  await mkdir(report,{recursive:true});await server.listen();browser=await chromium.launch();
  page=await browser.newPage();page.on('pageerror',e=>errors.push(e.message));page.on('console',event=>{if(event.type()==='error')errors.push(event.text())});await page.goto(`http://127.0.0.1:${server.httpServer.address().port}/review.html`);await page.waitForFunction(()=>window.lifecycle);
- checks.push({settingsEditor:await page.evaluate(()=>window.settingsChecks()),settingsDrafts:await page.evaluate(()=>window.settingsDraftChecks())});
+ checks.push({settingsEditor:await page.evaluate(()=>window.settingsChecks()),settingsDrafts:await page.evaluate(()=>window.settingsDraftChecks()),settingsRuntime:await page.evaluate(()=>window.settingsRuntimeChecks())});
  for(const mode of ['write','read','write-error','reload']){
   const presentation=await page.evaluate(mode=>window.stalePresentationReply(mode),mode);
   assert.equal(presentation.width,310);assert.equal(presentation.notice,'');

@@ -97,8 +97,10 @@ caching it avoids hashing the running image on every unavailable connection.
 The cache uses a persistent writer inode and independently opened artifact leases.
 Lock guards explicitly unlock when their owner finishes; CLOEXEC alone does not
 prevent an unrelated concurrent fork from temporarily retaining the open file
-description. This follows the same ownership issue already handled by the product's
-`writer_lock.rs`. Publication order uses bounded atomic metadata rather than mtime,
+description. The PackageStore's coordinator and generation guards follow the same
+ownership rule as the product's `writer_lock.rs`: an unrelated child's descriptor
+is not authority to extend a completed owner. Publication order uses bounded
+atomic metadata rather than mtime,
 so wall-clock changes cannot choose the two retained versions. Unknown filesystem
 types, including overlay whose backing store locality is not established, fail closed.
 Publication retains the shared artifact lease while hashing outside the writer

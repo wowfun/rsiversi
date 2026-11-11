@@ -13,6 +13,40 @@ pub(crate) struct Dir {
     #[cfg(windows)]
     pin: rsi_files_native_fs::NamespaceLease,
 }
+
+#[derive(Debug)]
+pub(crate) struct Lock(File);
+
+impl Drop for Lock {
+    fn drop(&mut self) {
+        let _ = self.0.unlock();
+    }
+}
+
+#[cfg(all(test, unix))]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn finished_lease_does_not_remain_locked_through_an_inherited_descriptor() {
+        let temporary = tempfile::tempdir_in(std::env::temp_dir().canonicalize().unwrap()).unwrap();
+        let directory = Dir::open(&temporary.path().join("store"), true).unwrap();
+        for shared in [false, true] {
+            let lease = directory.lock("lease", shared).unwrap();
+            // dup retains the same open file description as a concurrent fork.
+            let inherited = lease.0.try_clone().unwrap();
+            assert!(matches!(directory.lock("lease", false), Err(Error::Busy)));
+            drop(lease);
+            let next = directory
+                .lock("lease", false)
+                .expect("the finished owner releases its lock before descriptor close");
+            drop(inherited);
+            assert!(matches!(directory.lock("lease", false), Err(Error::Busy)));
+            drop(next);
+            assert!(directory.lock("lease", false).is_ok());
+        }
+    }
+}
 impl Dir {
     pub fn open(path: &Path, create: bool) -> Result<Self> {
         let directory = if create {
@@ -116,7 +150,7 @@ impl Dir {
         self.directory.sync_all()?;
         Ok(())
     }
-    pub fn lock(&self, name: &str, shared: bool) -> Result<File> {
+    pub fn lock(&self, name: &str, shared: bool) -> Result<Lock> {
         let file = match rsi_files_native_fs::create_relative_private_file_no_follow(
             &self.directory,
             Path::new(name),
@@ -161,7 +195,7 @@ impl Dir {
             std::fs::TryLockError::WouldBlock => Error::Busy,
             std::fs::TryLockError::Error(error) => Error::Io(error),
         })?;
-        Ok(file)
+        Ok(Lock(file))
     }
     pub fn names(&self, maximum: usize) -> Result<Vec<(String, EntryKind)>> {
         let mut names = Vec::new();

@@ -130,8 +130,11 @@ Trust high-water receipts survive uninstall and GC. Unknown objects are retained
 and reported with their name; move them outside `objects/` before retrying GC.
 The collector never deletes an unrecognized operator-owned directory.
 Read-only resolution and acquisition share the coordinator; mutation and GC
-require exclusive ownership. Acquisition pins objects before releasing that
-coordinator. Installation removes abandoned `stage-<id>` trees, including a
+require exclusive ownership. Each coordinator or generation lease explicitly
+unlocks when its owning guard ends, before closing the descriptor. A concurrent
+fork retaining that descriptor cannot extend the completed owner's lock.
+Acquisition pins objects before releasing that coordinator. Installation removes
+abandoned `stage-<id>` trees, including a
 stage interrupted before its manifest was written. It accounts for existing
 and incoming digests together under the writer lease. Complete retired
 generations remain available for reuse within the Store's count and byte
