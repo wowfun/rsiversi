@@ -52,7 +52,7 @@ $directory = Join-Path $temporary $taskName
 $null = New-Item -ItemType Directory -Path $directory
 $configurationPath = Join-Path $directory 'configuration.json'
 $environment = @{}
-foreach ($name in @('PATH', 'CARGO_HOME', 'RUSTUP_HOME', 'CARGO_TARGET_DIR', 'CARGO_BUILD_JOBS', 'RSI_TEST_NODE')) {
+foreach ($name in @('PATH', 'CARGO_HOME', 'RUSTUP_HOME', 'RUSTUP_TOOLCHAIN', 'CARGO_TARGET_DIR', 'CARGO_BUILD_JOBS', 'RSI_TEST_NODE')) {
     $value = [Environment]::GetEnvironmentVariable($name)
     if ($null -ne $value) { $environment[$name] = $value }
 }

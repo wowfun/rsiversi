@@ -25,7 +25,8 @@ Jobs that use `rg` for test discovery install ripgrep explicitly on Linux.
 Windows resident-Host tests run compiled artifacts through an ephemeral scheduled
 task under the current user. Both Cargo and the Actions runner can impose Jobs
 that forbid the Host's required breakaway. The task receives only the toolchain
-environment, writes its output and exit status to a unique temporary directory,
+environment, including the selected `RUSTUP_TOOLCHAIN` for registry crates,
+writes its output and exit status to a unique temporary directory,
 has a bounded lifetime and is unregistered in `finally`. The same runner executes
 the opt-in frontend watch test after checking its exact compiled test name.
 
