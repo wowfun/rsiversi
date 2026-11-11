@@ -9,11 +9,10 @@ use futures_util::FutureExt;
 use rsi_meta::{ActivationPlan, ConfigValue, MetaError, PluginFactory, PreparedActivation};
 use rsi_tools_protocol::{
     MAXIMUM_ADMITTED_TOOL_INVOCATIONS, MAXIMUM_REGISTERED_TOOLS, MAXIMUM_TOOL_CATALOGS,
-    MAXIMUM_TOOL_TIMEOUT_MS, PreparedToolCall, Result, RetainedToolFailure,
-    RetainedToolFailureKind, RetainedToolResult, ToolBatchLease, ToolCall, ToolCatalogProvider,
-    ToolCatalogProviderContract, ToolCatalogStage, ToolEnforcement, ToolError, ToolExecution,
-    ToolLease, ToolRegistrar, ToolRegistration, ToolResult, ToolResultIdentity, ToolRuntime,
-    ToolStart,
+    PreparedToolCall, Result, RetainedToolFailure, RetainedToolFailureKind, RetainedToolResult,
+    ToolBatchLease, ToolCall, ToolCatalogProvider, ToolCatalogProviderContract, ToolCatalogStage,
+    ToolEnforcement, ToolError, ToolExecution, ToolLease, ToolRegistrar, ToolRegistration,
+    ToolResult, ToolResultIdentity, ToolRuntime, ToolStart,
 };
 use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
@@ -801,19 +800,20 @@ async fn prepare_execution(
         )
         .catch_unwind();
         tokio::pin!(future);
-        let timeout_ms = match entry.definition.timeout {
-            rsi_tools_protocol::ToolTimeoutPolicy::Execution { timeout_ms } => {
-                timeout_ms.min(30_000)
-            }
-            rsi_tools_protocol::ToolTimeoutPolicy::HumanInteraction => 30_000,
-        };
+        let timeout = entry
+            .definition
+            .run_policy
+            .deadline
+            .map_or(Duration::from_secs(30), |deadline| {
+                deadline.min(Duration::from_secs(30))
+            });
         let stopped = tokio::select! {
             biased;
             result = &mut future => return rsi_tools_protocol::ToolPreparation::new(execution.clone(), unwind_tool(result)?),
             () = cancellation.cancelled() => ToolError::Cancelled,
             () = entry.retirement.cancelled() => ToolError::Cancelled,
             () = shutdown.cancelled() => ToolError::Cancelled,
-            () = tokio::time::sleep(Duration::from_millis(timeout_ms)) => ToolError::Timeout,
+            () = tokio::time::sleep(timeout) => ToolError::Timeout,
         };
         owned_cancellation.cancel();
         let _settled = unwind_tool(future.await);
@@ -867,11 +867,11 @@ async fn settle(
     .catch_unwind();
     tokio::pin!(future);
     let timeout = async {
-        match entry.definition.timeout {
-            rsi_tools_protocol::ToolTimeoutPolicy::Execution { timeout_ms } => {
-                tokio::time::sleep(Duration::from_millis(timeout_ms)).await;
+        match entry.definition.run_policy.deadline {
+            Some(deadline) => {
+                tokio::time::sleep(deadline).await;
             }
-            rsi_tools_protocol::ToolTimeoutPolicy::HumanInteraction => {
+            None => {
                 std::future::pending::<()>().await;
             }
         }
@@ -982,14 +982,13 @@ async fn shutdown(state: Arc<ProviderState>) -> std::result::Result<(), String> 
 }
 
 fn validate_definition(definition: &ToolRegistration) -> Result<()> {
-    definition.definition.validate()?;
     match definition.definition.program_role() {
         rsi_tools_protocol::ToolProgramRole::Callable
             if definition.definition.scheduling()
                 == rsi_tools_protocol::ToolScheduling::ExclusiveFinal
                 || matches!(
-                    definition.timeout,
-                    rsi_tools_protocol::ToolTimeoutPolicy::HumanInteraction
+                    definition.run_policy.interaction,
+                    rsi_tools_protocol::ToolInteraction::Human
                 ) =>
         {
             return Err(ToolError::InvalidInput(
@@ -1008,18 +1007,19 @@ fn validate_definition(definition: &ToolRegistration) -> Result<()> {
         _ => {}
     }
 
-    if definition.timeout == rsi_tools_protocol::ToolTimeoutPolicy::HumanInteraction
+    if definition.run_policy.interaction == rsi_tools_protocol::ToolInteraction::Human
         && definition.definition.scheduling() != rsi_tools_protocol::ToolScheduling::ExclusiveFinal
     {
         return Err(ToolError::InvalidInput(
             "human interaction tools require exclusive-final scheduling".into(),
         ));
     }
-    if matches!(definition.timeout, rsi_tools_protocol::ToolTimeoutPolicy::Execution { timeout_ms } if timeout_ms == 0 || timeout_ms > MAXIMUM_TOOL_TIMEOUT_MS)
-    {
-        return Err(ToolError::InvalidInput(format!(
-            "tool timeout must be within 1..={MAXIMUM_TOOL_TIMEOUT_MS} milliseconds"
-        )));
+    if definition.run_policy.deadline.is_some_and(|deadline| {
+        deadline.is_zero() || std::time::Instant::now().checked_add(deadline).is_none()
+    }) {
+        return Err(ToolError::InvalidInput(
+            "tool deadline must be positive and representable by the monotonic clock".into(),
+        ));
     }
     Ok(())
 }

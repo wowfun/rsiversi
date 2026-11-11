@@ -89,7 +89,10 @@ readable and parsed as a Profile. Profile loading is not a filesystem sandbox
 or an allowlist. It rejects symlinks and special files at its owned reader
 boundary before reading, verifies the opened regular-file identity, caps source
 and group depth, count, bytes, and total expression work across one rebuild, and retains
-only bounded redacted diagnostics. The digest includes native path bytes and is
+only bounded diagnostics. Parser and expression errors redact source contents;
+local plugin errors preserve the plugin's own diagnostic, whose secret redaction
+is the plugin author's responsibility. Remote Profile presentation exposes only
+closed failure categories. The digest includes native path bytes and is
 therefore a host-platform-scoped identity, not a portable cache key. Products
 that need a path policy place it before Profile source selection.
 

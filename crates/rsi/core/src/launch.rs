@@ -22,7 +22,7 @@ pub fn product_protocols() -> Vec<rsi_api_protocol::ProtocolDescriptor> {
         },
         rsi_api_protocol::ProtocolDescriptor {
             name: "rsi.extension.agent".into(),
-            version: 7,
+            version: 8,
         },
         rsi_api_protocol::connection_protocol(),
         rsi_api_device_api::protocol_descriptor(),
@@ -520,6 +520,7 @@ mod tests {
                 Export {
                     kind: ExportKind::ApplicationProfile,
                     path: "main.toml".into(),
+                    index_digest: None,
                 },
             )]),
         };

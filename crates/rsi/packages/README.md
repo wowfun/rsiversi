@@ -21,22 +21,30 @@ below the selected state home. Applications supply downloads and source recipes;
 installing a package never runs a compiler, lifecycle script or executable.
 An optional `payload_tree` export carries an uncompressed RSI tree container:
 the eight bytes `RSITREE1`, a little-endian u32 JSON-header length, a format-1
-header with ordered FileRecords, then their exact bytes. Admission expands it
-inside the same unpublished object before publication. Files are regular,
+header with ordered FileRecords, then their exact bytes. Its export declares
+`index_digest`, the SHA-256 of the exact magic, length and encoded header.
+The source FileRecord still authenticates the complete transport container.
+Admission streams that container into the unpublished expanded tree and retains
+only its index under `content`; it does not store a second copy of the file bodies.
+Payload containers cannot also be ordinary file or Web-asset exports. Files are regular,
 hash-checked and immutable; links and case-colliding paths are refused. Hidden
 ordinary components are allowed inside payloads for dependency-manager metadata.
 Each tree has at most 16,384 files, 32 path components and a 16 MiB header; one
-package has at most 65,536 expanded files plus directories. Archive and expanded
-bytes are both reserved against the store budget. The materialized payload retains
+package has at most 65,536 expanded files plus directories. The index and expanded
+files together reserve the container's logical byte length once. The materialized payload retains
 its complete PackageLease, so selection changes and GC cannot remove a live tree.
 There is no second expansion cache or installation registry.
-Acquisition streams each archive once to authenticate the manifest digest and
-the ordered file records. It then walks the expanded tree once, matching each
+Ordinary acquisition authenticates each bounded retained index against the export's
+commitment. That index owns the expanded files' names, lengths and digests.
+It walks the expanded tree once, matching each
 exact name and type to that header and hashing each file through its retained
 parent directory. A missing, extra, changed or substituted entry fails the
-acquisition. Windows excludes the filesystem-owned `.rsi-namespace-pin` guard
-of each pinned directory. The last live process lease still ends reuse.
+acquisition. A missing index commitment is inadmissible; no legacy archive fallback
+or in-place object conversion is provided. Windows excludes the filesystem-owned `.rsi-namespace-pin` guard
+of each pinned directory.
 Installation writes in archive order and holds only the current ancestor chain.
+Resolving a `payload_tree` export returns its expanded directory; its transport
+container is not an installed file export.
 For large acquisitions the directory walk sends bounded batches from retained
 parents to at most seven additional readers across the process. All readers
 settle before the lease is published.
@@ -60,7 +68,7 @@ importers cannot publish resolution selections or grant signed provenance.
 Profiles select activation. The resolution lock records installed names, exact
 manifest digests and dependency closures; it contains no enabled flag.
 
-A format-2 manifest declares its target, every file's relative path, length and SHA-256,
+A format-2 manifest declares its target, every source file's relative path, length and SHA-256,
 exact dependencies, named exports and required interface descriptors. Paths are
 portable relative components; links, device names, case-fold collisions and
 undeclared exports are refused. Publication stages all bytes, verifies the
@@ -149,6 +157,8 @@ Native filesystem handles admit all durable path transitions; descendants are
 opened relative to their retained parent, never by re-resolving absolute paths.
 Windows requires
 TokenUser-owned private fixed-NTFS roots; Unix roots must be owned and private.
+Selected Store and install-source paths must have physical parents; the Store
+does not follow system temporary-directory aliases or caller-selected symlinks.
 
 Source producers may use `install_checked` to revalidate their captured inputs
 and cancellation immediately before the atomic resolution write. This callback
@@ -164,17 +174,21 @@ immutable object passes verification, including an unselected generation.
 An unselected, unleased candidate that fails verification can be reclaimed
 and staged again from the supplied source.
 One lease can materialize payload exports of its exact direct dependencies.
-Callers retain the selection lease while using those paths. Reopening the
-same dependency to acquire another lease would repeat verification of bytes
-already owned by that process generation.
+Callers retain the selection lease while using those paths.
+Process acquisition authenticates bounded manifests and exact dependency
+identities, opens each declared payload root without following links, and pins
+the complete closure. It relies on installation's content verification rather
+than rescanning archives and expanded files at startup. Process launch additionally
+authenticates its bounded descriptor and admits the referenced working directory
+and argument paths. This applies to both process extensions and importers.
+Manual changes or corruption of other installed content are detected by ordinary
+acquisition or installation reuse verification, not proactively at process startup.
+Installed code executes with the operator's native authority.
 Process and importer exports resolved by the same store may share an already
 live lease of the exact named generation. Each launch resolves its own export
 role, descriptor bytes and arguments. Releasing the last consumer ends this
-reuse. Opening a different store or acquiring an ordinary lease verifies the
-durable closure afresh.
-When the running process adds another selection, its store can transfer
-already held immutable dependency objects to that selection. Each new lease
-holds its own locks. New object bytes still undergo full verification.
+reuse. A new process lease rereads the durable metadata and holds its own locks;
+an ordinary lease verifies the complete durable content afresh.
 For an opt-in cold-start measurement, `RSI_PACKAGE_TIMINGS=1` writes Store
 writer-lock wait, manifest and regular content verification, payload verification
 (archive plus expanded tree) and process-closure acquisition times to stderr. Records use

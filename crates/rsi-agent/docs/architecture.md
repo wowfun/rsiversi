@@ -26,6 +26,13 @@ claims, mailbox inputs and parent/child lifetimes.
 Model prompt projection and compaction belong to
 `rsi-agent-context`, not to the executor or Store; [context inputs](subsystems/context-inputs.md)
 explains capture, selection and projection ownership.
+The ordinary `rsi-agent-prompt-assembly` plugin owns native named prompt providers,
+scope overlays, presentation transforms and rendering. Composition captures its
+typed interface from `composition-protocol` with the same generation as Tools
+and Context. Executor invokes it after native BeforeStep contributions and before
+final input preparation; Context projects the resolved tagged Step prompt without
+evaluating providers. An explicitly selected application input owner retains its
+own assembly pipeline. Prompt presentation grants no Tool or Store authority.
 The [Goal domain](../goal/README.md) composes pure allocation, reporting and
 settlement callbacks over these contracts. Its scheduling owner belongs to the
 standard Host; Kernel authenticates the separate continuation lease, reservation

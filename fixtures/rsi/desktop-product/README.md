@@ -17,6 +17,9 @@ from the checkout root before starting the native application.
 Linux Tauri window under `dbus-run-session -- xvfb-run -a`. It creates isolated
 explicit config/state/cache homes and a launch document selecting its fixture Service, then uses actual WebDriver input to configure
 the deterministic provider, select a model, create a conversation and submit it.
+Deterministic providers route on the first User message after the last completed
+Assistant reply. Appended runtime contexts remain visible; Tool continuations
+belong to the same round until an ordinary Assistant reply completes it.
 Use a short report path on a native Unix filesystem: the Service Host socket is
 under its isolated state home and must fit the platform's Unix socket path limit.
 CI keeps every evidence root, including each mode in a loop, short enough for
@@ -24,6 +27,8 @@ that derived socket path and uploads those roots after failures.
 Registered settings stay inside the Settings dialog and close with that dialog.
 Button selection requires an enabled, visible control with an unobstructed center
 hit, including when a closed menu retains a same-label descendant's layout box.
+Queue actions scope repeated labels to the original slot and wait for its
+replacement message identity before reading the edited content again.
 Clicks relocate only after WebDriver explicitly reports a stale element
 before dispatch; ambiguous click failures are never replayed.
 Workflow resource controls must be visible and enabled before dispatch. A
@@ -279,15 +284,19 @@ settings and does not claim native Windows or macOS behavior.
 
 `--queue` uses a held deterministic response to exercise replacement and pending-only
 withdrawal through the shared Worker. Inputs freeze their explicit access policy,
-so the fixture requires the steering conversion to be unavailable. It checks one
-current user block, stable slot identity, retained composer text and a surviving
+so the fixture requires the steering conversion to be unavailable. It checks a
+prepared user block only after the surviving input enters a Turn, replacement
+content read back through the queue editor, stable slot identity, retained composer text and a surviving
 queued Turn after Stop. This mode is separate from live-provider scenarios.
 
 `--ui-alignment` exercises the native clipboard, real directory creation, and the
 seven Web viewport widths with all three theme choices through Settings. Its Xvfb
 screen must be at least 1920 pixels wide; CI provides 2560×1440. Captures are
 manual comparison evidence, not screenshot baselines. `--reload` performs an
-actual WebDriver document refresh, reselects the retained Session, and verifies
+actual WebDriver document refresh after the owning DraftStore confirms the exact
+text for the captured Session. A passive edit observer retains the actual writer,
+including its authenticated Device namespace; Host metadata does not select it.
+It waits for the reselected Session's identity after native click delivery, then verifies
 its saved draft survives observer replacement. Like restart, it does not assume
 the new Pane retains its previous in-memory selection. Document-local transport
 and trusted-input probes are reattached before later native gestures. This is distinct from

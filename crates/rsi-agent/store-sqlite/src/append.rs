@@ -143,8 +143,57 @@ pub(super) fn apply_atomic_sqlite_append(
         )
         .map_err(sql_error)
         .and_then(|digest| decode_sha256("Fact-prefix digest", &digest))?;
-    for fact in &append.facts {
-        insert_fact(transaction, &append.session_id, fact, &references)?;
+    let suffix = append.fact_suffix()?;
+    let durable_fact_seq = suffix
+        .last()
+        .map_or(actual_fact, rsi_agent_store_protocol::StoreFactAppend::seq);
+    let mut resolved_claims = std::collections::BTreeMap::new();
+    let mut domain_facts = if append.has_referenced_claims() {
+        rsi_agent_store_protocol::StoreDomainFactCheck::new(&append.controls)
+    } else {
+        None
+    };
+    for item in suffix {
+        let materialized;
+        let (fact, acceptance) = match item {
+            rsi_agent_store_protocol::StoreFactAppend::Inline(fact) => (fact.as_ref(), None),
+            rsi_agent_store_protocol::StoreFactAppend::Claimed(claim) => {
+                let entry = super::validation::read_indexed_agent_message(
+                    transaction,
+                    &append.session_id,
+                    claim.message_id,
+                )?;
+                if entry.state != StoreAgentMessageState::Pending {
+                    return Err(StoreError::Corrupt(
+                        "claim acceptance is not pending".into(),
+                    ));
+                }
+                entry.validate_claim_turn(claim.turn_id)?;
+                let acceptance = entry.accepted_control_seq;
+                materialized = claim.materialize(entry.message)?;
+                resolved_claims.insert(claim.seq, acceptance);
+                (&materialized, Some(acceptance))
+            }
+        };
+        if let Some(acceptance) = acceptance {
+            insert_fact_row(
+                transaction,
+                &append.session_id,
+                fact,
+                &references,
+                Some(acceptance),
+            )?;
+            update_turn_index(transaction, &append.session_id, fact)?;
+        } else if matches!(fact.body(), SessionFactBody::InputMessageClaimed { .. }) {
+            // Claims are encoded only after their original typed bodies pass
+            // control admission. Other Fact-dependent controls can use the index.
+            update_turn_index(transaction, &append.session_id, fact)?;
+        } else {
+            insert_fact(transaction, &append.session_id, fact, &references)?;
+        }
+        if let Some(domain_facts) = &mut domain_facts {
+            domain_facts.push(fact)?;
+        }
         fact_digest = advance_fact_prefix_digest(fact_digest, fact)
             .map_err(|error| StoreError::Invalid(error.to_string()))?;
         if matches!(fact.body(), SessionFactBody::TurnTerminal { .. }) {
@@ -167,7 +216,9 @@ pub(super) fn apply_atomic_sqlite_append(
             }
         }
     }
-    let durable_fact_seq = append.facts.last().map_or(actual_fact, |fact| fact.seq());
+    if let Some(domain_facts) = domain_facts {
+        domain_facts.finish()?;
+    }
     let minimum_claimed_fact_seq = append
         .expected_fact_seq
         .checked_add(1)
@@ -181,6 +232,7 @@ pub(super) fn apply_atomic_sqlite_append(
         )
         .map_err(sql_error)
         .and_then(|digest| decode_sha256("control-prefix digest", &digest))?;
+    let mut claimed_acceptances = Vec::new();
     for (index, record) in append.controls.iter().enumerate() {
         if let AgentControlRecordBody::MessageDiscarded { message_id, .. } = record.body()
             && let Some(AgentControlRecordBody::QueueMutationRecorded { receipt }) =
@@ -207,14 +259,19 @@ pub(super) fn apply_atomic_sqlite_append(
                 &append.controls[index + 2],
             )?;
         }
-        insert_control(
+        if let Some(claim) = (ControlIndexer {
             transaction,
-            &append.session_id,
+            session_id: &append.session_id,
+            facts: &append.facts,
+            resolved_claims: &resolved_claims,
             minimum_claimed_fact_seq,
-            durable_fact_seq,
+            after_fact_seq: durable_fact_seq,
             record,
-            &references,
-        )?;
+        })
+        .insert(&references)?
+        {
+            claimed_acceptances.push(claim);
+        }
         control_digest = advance_control_prefix_digest(control_digest, record)
             .map_err(|error| StoreError::Invalid(error.to_string()))?;
         if let AgentControlRecordBody::TurnBoundaryRecorded {
@@ -234,6 +291,22 @@ pub(super) fn apply_atomic_sqlite_append(
                     "SQLite lost the terminal Fact/control correlation".into(),
                 ));
             }
+        }
+    }
+    claimed_acceptances.sort_unstable_by_key(|&(seq, _)| seq);
+    for fact in &append.facts {
+        if matches!(fact.body(), SessionFactBody::InputMessageClaimed { .. }) {
+            let acceptance = claimed_acceptances
+                .binary_search_by_key(&fact.seq(), |&(seq, _)| seq)
+                .ok()
+                .map(|index| claimed_acceptances[index].1);
+            insert_fact_row(
+                transaction,
+                &append.session_id,
+                fact,
+                &references,
+                acceptance,
+            )?;
         }
     }
     let durable_control_seq = append
@@ -289,27 +362,11 @@ pub(super) fn apply_atomic_sqlite_append(
     })
 }
 
-pub(super) fn insert_control(
-    transaction: &Transaction<'_>,
-    session_id: &SessionId,
-    minimum_claimed_fact_seq: u64,
-    after_fact_seq: u64,
-    record: &AgentControlRecord,
-    references: &super::reference_index::Writer<'_>,
-) -> Result<()> {
-    ControlIndexer {
-        transaction,
-        session_id,
-        minimum_claimed_fact_seq,
-        after_fact_seq,
-        record,
-    }
-    .insert(references)
-}
-
-pub(super) struct ControlIndexer<'a, 'connection> {
+struct ControlIndexer<'a, 'connection> {
     transaction: &'a Transaction<'connection>,
     session_id: &'a SessionId,
+    facts: &'a [std::sync::Arc<SessionFact>],
+    resolved_claims: &'a std::collections::BTreeMap<u64, u64>,
     minimum_claimed_fact_seq: u64,
     after_fact_seq: u64,
     record: &'a AgentControlRecord,
@@ -317,7 +374,10 @@ pub(super) struct ControlIndexer<'a, 'connection> {
 
 impl ControlIndexer<'_, '_> {
     #[allow(clippy::too_many_lines)] // One transaction projects the closed set of control records into mechanical indexes.
-    fn insert(&self, references: &super::reference_index::Writer<'_>) -> Result<()> {
+    fn insert(
+        &self,
+        references: &super::reference_index::Writer<'_>,
+    ) -> Result<Option<(u64, u64)>> {
         self.transaction
             .execute(
                 "INSERT INTO agent_controls (session_id, seq, control_json, fact_seq) VALUES (?1, ?2, ?3, ?4)",
@@ -396,13 +456,13 @@ impl ControlIndexer<'_, '_> {
                 turn_id,
                 step_id,
                 claimed_fact_seq,
-            } => self.insert_message_claimed(
+            } => return self.insert_message_claimed(
                 message_id,
                 activation_id,
                 turn_id,
                 step_id,
                 *claimed_fact_seq,
-            ),
+            ).map(Some),
             AgentControlRecordBody::MessageDiscarded { message_id, reason } => {
                 self.insert_message_discarded(message_id, *reason)
             }
@@ -442,7 +502,7 @@ impl ControlIndexer<'_, '_> {
                 turn_id,
                 ..
             } => self.insert_wait_resumed(activation_id, turn_id),
-        }
+        }.map(|()| None)
     }
 
     #[allow(clippy::too_many_lines)] // Canonical acceptance and its route indexes share one transaction.
@@ -617,51 +677,39 @@ impl ControlIndexer<'_, '_> {
         turn_id: &TurnId,
         step_id: &StepId,
         claimed_fact_seq: u64,
-    ) -> Result<()> {
-        let entry = super::validation::read_indexed_agent_message(
-            self.transaction,
-            self.session_id,
-            message_id,
-        )?;
-        if !matches!(entry.state, StoreAgentMessageState::Pending) {
-            return Err(StoreError::Corrupt(
-                "mailbox claim has no pending indexed message".into(),
-            ));
-        }
-        entry.validate_claim_turn(turn_id)?;
-        let message = entry.message;
-        let fact_projection = self
-            .transaction
-            .query_row(
-                "SELECT length(CAST(fact_json AS BLOB)),
-                        CASE WHEN length(CAST(fact_json AS BLOB)) <= ?3 THEN fact_json END
-                 FROM facts WHERE session_id = ?1 AND seq = ?2",
-                params![
-                    self.session_id.as_str(),
-                    sqlite_u64("entered Fact sequence", claimed_fact_seq)?,
-                    i64::try_from(MAXIMUM_SESSION_FACT_BYTES)
-                        .expect("session Fact bound fits SQLite INTEGER"),
-                ],
-                |row| Ok((row.get::<_, i64>(0)?, row.get::<_, Option<String>>(1)?)),
-            )
-            .optional()
-            .map_err(sql_error)?;
-        let fact = fact_projection
-            .map(|projection| {
-                decode_projected_json::<SessionFact>(
-                    "session Fact",
-                    projection,
-                    MAXIMUM_SESSION_FACT_BYTES,
-                )
-            })
-            .transpose()?;
-        validate_message_claim_fact(
-            &message,
-            turn_id,
-            step_id,
-            self.minimum_claimed_fact_seq,
-            fact.as_ref(),
-        )?;
+    ) -> Result<(u64, u64)> {
+        let accepted_control_seq =
+            if let Some(acceptance) = self.resolved_claims.get(&claimed_fact_seq) {
+                // Resolved from this exact control before indexing. The pending-state
+                // UPDATE below still rejects an intervening discard or duplicate.
+                *acceptance
+            } else {
+                let entry = super::validation::read_indexed_agent_message(
+                    self.transaction,
+                    self.session_id,
+                    message_id,
+                )?;
+                if !matches!(entry.state, StoreAgentMessageState::Pending) {
+                    return Err(StoreError::Corrupt(
+                        "mailbox claim has no pending indexed message".into(),
+                    ));
+                }
+                entry.validate_claim_turn(turn_id)?;
+                let message = entry.message;
+                let fact = self
+                    .facts
+                    .binary_search_by_key(&claimed_fact_seq, |fact| fact.seq())
+                    .ok()
+                    .map(|index| self.facts[index].as_ref());
+                validate_message_claim_fact(
+                    &message,
+                    turn_id,
+                    step_id,
+                    self.minimum_claimed_fact_seq,
+                    fact,
+                )?;
+                entry.accepted_control_seq
+            };
         self.transaction
             .execute(
                 "DELETE FROM ready_messages WHERE session_id = ?1 AND message_id = ?2",
@@ -703,7 +751,8 @@ impl ControlIndexer<'_, '_> {
         ensure_changed(
             changed,
             "message claim disagrees with its active activation",
-        )
+        )?;
+        Ok((claimed_fact_seq, accepted_control_seq))
     }
 
     fn insert_message_discarded(
@@ -901,6 +950,14 @@ pub(super) const fn message_target_name(target: MessageTarget) -> &'static str {
     }
 }
 
+pub(super) const fn message_state_name(state: &StoreAgentMessageState) -> &'static str {
+    match state {
+        StoreAgentMessageState::Pending => "pending",
+        StoreAgentMessageState::Claimed { .. } => "claimed",
+        StoreAgentMessageState::Discarded { .. } => "discarded",
+    }
+}
+
 pub(super) const fn message_delivery_name(
     delivery: rsi_agent_session_protocol::MessageDelivery,
 ) -> &'static str {
@@ -1022,12 +1079,7 @@ pub(super) fn decode_indexed_message(row: IndexedMessageRow) -> Result<StoreAgen
         (row.8, row.9),
         MAXIMUM_INDEXED_MESSAGE_STATE_BYTES,
     )?;
-    let expected_state = match &state {
-        StoreAgentMessageState::Pending => "pending",
-        StoreAgentMessageState::Claimed { .. } => "claimed",
-        StoreAgentMessageState::Discarded { .. } => "discarded",
-    };
-    if row.7 != expected_state {
+    if row.7 != message_state_name(&state) {
         return Err(StoreError::Corrupt(
             "mailbox state discriminator differs from its typed state".into(),
         ));
@@ -1302,6 +1354,17 @@ pub(super) fn insert_fact(
     fact: &SessionFact,
     references: &super::reference_index::Writer<'_>,
 ) -> Result<()> {
+    insert_fact_row(transaction, session_id, fact, references, None)?;
+    update_turn_index(transaction, session_id, fact)
+}
+
+fn insert_fact_row(
+    transaction: &Transaction<'_>,
+    session_id: &SessionId,
+    fact: &SessionFact,
+    references: &super::reference_index::Writer<'_>,
+    acceptance: Option<u64>,
+) -> Result<()> {
     if let Some((effect, role)) = rsi_agent_store_protocol::store_fact_model_coordinate(fact.body())
     {
         let exists = transaction
@@ -1326,18 +1389,20 @@ pub(super) fn insert_fact(
     }
     transaction
         .execute(
-            "INSERT INTO facts (session_id, seq, turn_id, fact_kind, fact_json)
-             VALUES (?1, ?2, ?3, ?4, ?5)",
+            "INSERT INTO facts (session_id, seq, turn_id, fact_kind, fact_json, acceptance_control_seq, logical_bytes)
+             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7)",
             params![
                 session_id.as_str(),
                 sqlite_u64("fact sequence", fact.seq())?,
                 fact.body().turn_id().as_str(),
                 fact_index_kind(fact.body()),
-                references.fact(fact)?,
+                super::fact_storage::encode(fact, acceptance, references)?,
+                acceptance.map(|seq| sqlite_u64("claim acceptance", seq)).transpose()?,
+                acceptance.map(|_| i64::try_from(fact.encoded_len()).expect("bounded Fact length")),
             ],
         )
         .map_err(sql_error)?;
-    update_turn_index(transaction, session_id, fact)
+    Ok(())
 }
 
 pub(super) fn update_turn_index(

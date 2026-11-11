@@ -367,8 +367,29 @@ async fn command_inputs_publish_atomically_keep_provenance_and_retry_once() {
         } else {
             Arc::new(MemoryStore::new())
         };
-        let fixture = Fixture::start(store, false).await;
-        inputs(&fixture);
+        let store = Arc::new(FactReadRaceStore::new(store));
+        let fixture = Fixture::start(store.clone(), false).await;
+        *fixture.callback.inputs.lock().unwrap() = vec![
+            text_input(CommandInputDelivery::Steer, "Prepare a plan"),
+            text_input(CommandInputDelivery::Inject, "Mode changed"),
+            text_input(CommandInputDelivery::Steer, "Continue that plan"),
+        ];
+        for (ordinal, input) in fixture
+            .callback
+            .inputs
+            .lock()
+            .unwrap()
+            .iter_mut()
+            .enumerate()
+        {
+            input.content.push(AgentMessageContent::Text {
+                text: "消息🦀".repeat(4096),
+            });
+            input.attribution = Some(rsi_agent_session_protocol::MessageAttribution {
+                id: format!("original:{ordinal}"),
+                source: serde_json::json!({"kind":"plugin:input", "ordinal":ordinal}),
+            });
+        }
         let invocation = fixture.invocation("command-with-inputs", true).await;
         let receipt = fixture
             .kernel
@@ -383,7 +404,7 @@ async fn command_inputs_publish_atomically_keep_provenance_and_retry_once() {
             .await
             .unwrap();
         let emitted = receipt.commit().command_inputs();
-        assert_eq!(emitted.len(), 2);
+        assert_eq!(emitted.len(), 3);
         for (ordinal, input) in emitted.iter().enumerate() {
             let entry = fixture
                 .store
@@ -401,7 +422,7 @@ async fn command_inputs_publish_atomically_keep_provenance_and_retry_once() {
                 panic!("command provenance")
             };
             assert_eq!(source.invocation_sha256, invocation.digest().unwrap());
-            assert_eq!(entry.wake_required, ordinal == 1);
+            assert_eq!(entry.wake_required, ordinal != 1);
         }
         assert_eq!(
             fixture
@@ -441,6 +462,10 @@ async fn command_inputs_publish_atomically_keep_provenance_and_retry_once() {
             .kernel
             .register("command-input-executor".into())
             .unwrap();
+        store
+            .mailbox
+            .claim_references
+            .store(true, Ordering::Relaxed);
         let claim = tokio::time::timeout(
             std::time::Duration::from_secs(2),
             fixture
@@ -451,6 +476,53 @@ async fn command_inputs_publish_atomically_keep_provenance_and_retry_once() {
         .unwrap()
         .unwrap()
         .unwrap();
+        assert!(
+            store
+                .mailbox
+                .claim_references
+                .swap(false, Ordering::Relaxed)
+        );
+        for input in emitted {
+            let stored = store
+                .read_agent_message(&fixture.session_id, &input.message.message_id)
+                .await
+                .unwrap()
+                .unwrap();
+            assert_eq!(
+                stored.message, input.message,
+                "claim must not empty canonical acceptance"
+            );
+            let rsi_agent_store_protocol::StoreAgentMessageState::Claimed {
+                activation_id,
+                turn_id,
+                step_id,
+                ..
+            } = stored.state
+            else {
+                panic!("message was not claimed");
+            };
+            let tail = store.read_watermarks(&fixture.session_id).await.unwrap();
+            fixture
+                .kernel
+                .claim_message(rsi_agent_turn_protocol::ClaimMessage {
+                    session: fixture
+                        .kernel
+                        .prepare_resume(&fixture.session_id)
+                        .await
+                        .unwrap(),
+                    message_id: input.message.message_id.clone(),
+                    activation_id,
+                    turn_id,
+                    step_id,
+                    path: AgentPath::root(),
+                })
+                .await
+                .unwrap();
+            assert_eq!(
+                store.read_watermarks(&fixture.session_id).await.unwrap(),
+                tail
+            );
+        }
         assert_eq!(
             fixture
                 .kernel
@@ -473,7 +545,7 @@ async fn command_inputs_publish_atomically_keep_provenance_and_retry_once() {
                 )
             })
             .count();
-        assert_eq!(entered, 2);
+        assert_eq!(entered, 3);
         let texts = page
             .facts
             .iter()
@@ -488,9 +560,9 @@ async fn command_inputs_publish_atomically_keep_provenance_and_retry_once() {
             .collect::<Vec<_>>();
         assert_eq!(
             texts,
-            emitted
-                .iter()
-                .map(|input| input.message.content.clone())
+            [1, 0, 2]
+                .into_iter()
+                .map(|index| emitted[index].message.content.clone())
                 .collect::<Vec<_>>()
         );
         let initial = rsi_agent_turn_protocol::initial_turn_input(&fixture.kernel, &claim)

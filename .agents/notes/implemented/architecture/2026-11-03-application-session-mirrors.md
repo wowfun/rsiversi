@@ -25,13 +25,41 @@ DSH Session values. Request-local synchronous lookups and read-only persistence
 handles use the same projection. Each new read checks the original native request;
 cached content is not an authorization grant. Explicitly opened workbench
 transcripts can retain a native-backed Agent in the original Cordis registry.
+Transport fragments within one read borrow the already authorized immutable
+page, as DSH's history controller borrows one `SessionObservation` for its
+consumer. Repeating Header I/O cannot make that captured body fresher. The
+retained page includes the addressed parent, while the owning request remains
+subject to retirement on every fragment. New reads still authorize independently.
+DSH's persistence reader obtains a contiguous log slice in one read. The process
+adapter preserves that intent within its existing frame limit: it packs fragments
+by their escaped wire size instead of imposing a smaller fixed text prefix.
+Ordinary Store pages follow the transport capacity, so a moderate control body
+does not force separate reads for its preceding records, body and trailing records.
+The bounded reader count and oversized-record path remain the memory boundary;
+neither a second durable event log nor a larger process frame is needed.
+Like DSH's reads of an already materialized event slice, the native control
+projection borrows validated payloads until serialization. An intermediate JSON
+value tree adds a full body copy without contributing validation or ownership.
+Persisted opens obtain their immutable model baseline and Fact/control cut from
+authorized stored metadata. Like DSH's JSONL read handles, they do not need a
+live Agent projection to reconstruct history. Requesting a full model projection
+first would admit runtime composition work whose current selection is unused:
+the history projector already derives it from canonical controls. Reusing the
+captured cut also avoids a second opening call on refresh. Unpublished drafts
+still need their live selection because they have no durable control history.
+Catalog listings omit the baseline payload; no second stored projection is added.
 Inbox metadata contains at most 64 typed routing entries and fits one process
-reply. Capture returns it directly and retains a reader only when acceptance
-reads need that immutable cut. This avoids
-three serialized process calls and a resource slot for the common empty inbox.
-An incomplete message retains only its current encoded body, avoiding repeated
-Store reads and serialization without retaining every queued body. Request
-retirement still invalidates access to all retained readers.
+reply. Capture returns it directly. Durable messages already enter the shared
+inbox projection through history controls, as DSH reads its Inbox from Session
+projection state. Reading their bodies again during inbox capture adds Store I/O,
+serialization, process round trips and allocations without supplying another
+consumer. Durable captures therefore retain no reader or second body path.
+Unpublished drafts include their messages directly: Agent bounds the complete
+input batch to 256 KiB, which fits the existing 1 MiB process reply with routing
+metadata. A fragmented snapshot and close handshake would add ownership state
+without increasing admissible input size. Both forms are one authorized call;
+no inbox reader survives the response. History readers retain their separate
+retirement and fragmentation contracts.
 That application-owned identity supports plugin lookups after a browser closes;
 native callbacks use the selected application's owner capability.
 Native history observation emits committed Session events through the original

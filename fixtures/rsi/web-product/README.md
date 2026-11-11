@@ -1,5 +1,11 @@
 # Web product verification
 
+The deterministic provider selects the first User message after the last completed
+Assistant reply. Later User-role workspace and runtime-context messages remain
+in the actual request; Tool-call Assistant messages retain the current round.
+This provider protocol is separate from native input provenance and live-model
+interpretation.
+
 Settings saves wait for a refreshed editor ticket and enabled controls. React
 retains the editor nodes across saves, so node removal is not a completion signal.
 `provider-binding.mjs` mounts the production document with controlled transport.
@@ -32,12 +38,15 @@ canonical URLs across tickets, explicit retry and URL disposal on retirement.
 The cache's capacity, byte accounting and LRU invariants have adjacent Node tests.
 
 The review lifecycle fixture exercises current React resource owners against real
-IndexedDB, including delayed opens and window replacement. It also covers
+IndexedDB, including delayed opens and window replacement. Failures retain
+screenshots, DOM and state reports. It also checks
 Settings editor mode switches, exact JSON retention, UTF-8 byte limits
 and read-only controls after rebuilding the form. Device-storage tests
 verify that failure to reserve cleanup aborts the layout transaction. UI alignment
 uses the unified Settings window and verifies disclosure Escape/outside dismissal,
-focus return, Verbose inline source actions, modal Escape, transcript keyboard regions and responsive geometry. These are
+focus return, Verbose inline source actions, modal Escape, transcript keyboard
+regions and responsive geometry. Navigation probes open the workspace's
+captured conversation group and bind its Session before selecting a row. These are
 document/runtime checks; `plan-live.mjs` separately exercises an explicitly selected
 real provider through the paired Worker and native service.
 `controller-keyboard.mjs` mounts the actual Session event owner and external draft
@@ -649,7 +658,9 @@ cleanup. Run it with explicit
 It owns temporary HOME/XDG paths and uses no live model provider.
 
 The default queue scenario holds an actual Rust Turn at its deterministic provider,
-replaces one queued input, verifies that its explicit access policy prevents
+replaces one queued input, reads its replacement back from the queue editor, and
+requires waiting inputs to remain outside the transcript until durable preparation.
+It verifies that its explicit access policy prevents
 conversion into steering, withdraws it and
 then stops the original Turn. It checks that a second queued input actually
 executes and that the ordinary draft survives. IndexedDB probes independently
@@ -705,6 +716,11 @@ presentation-store modules in two actual isolated Chromium pages. It verifies th
 schema upgrade, transaction serialization, 64/65 order movement, abort rollback,
 notification and principal/draft isolation without a Service or model. It is a
 storage check, not a substitute for paired product or visual validation.
+
+Browser operations use the deployment's shared browser owner. Fixture grants
+read that principal from the public Profile caller projection. Bearer API probes
+retain their registered Device and receive independent exact grants. Automation
+grants use the fixture's Local API helper; fixtures do not edit live policy files.
 
 The opt-in `ssh-targets.mjs` probe requires explicit isolated sshd/session/auth
 executables, account, fixture directory and optional shared-library path through
@@ -788,7 +804,8 @@ navigation. Those inline assertions remain a separate opt-in integration check;
 passing the Dock gate does not establish inline navigation evidence.
 
 `automation-verify.mjs` is an explicit Automation presentation check. Supply
-`RSI_WEB_BINARY`, `RSI_WEB_ASSETS`, `RSI_AUTOMATION_WEB_SEED` and a new
+`RSI_WEB_BINARY`, `RSI_WEB_ASSETS`, `RSI_AUTOMATION_WEB_SEED`, the absolute
+`RSI_AUTOMATION_GRANT_PROBE` built as the `desktop-automation-grant` example, and a new
 `RSI_AUTOMATION_WEB_REPORT`. The seed is created by the ignored core
 `automation::prepare_visual_fixture` test through PolicyOwner and Ledger, using
 an actual normalized native checker PNG. It exercises the real Worker/API,
@@ -875,12 +892,14 @@ both browser and Service cleanup and retains the original error if either fails.
 
 `review-lifecycle.mjs` renders 64 cleanup failures with the owning component and
 stylesheet at 1440 px and 390 px, checks the last Retry control by keyboard, and
-retains screenshots. Set `RSI_REVIEW_PREVIEW=1` with `RSI_REPORT_DIR` to keep that
+retains screenshots before, during and after a deferred retry. Repeated activation
+while pending cannot dispatch twice, and keyboard focus survives its failure.
+Set `RSI_REVIEW_PREVIEW=1` with `RSI_REPORT_DIR` to keep that
 isolated component scene available at the printed local URL for manual inspection.
 This scene verifies cleanup layout; it is not a full connected-workbench capture.
-Keyboard focus checks wait for an enabled Retry control and for it to enter the cleanup
-scroll viewport before reading geometry; native keyboard scrolling can settle
-asynchronously. Resource close helpers pin the selected Dock identity for both
+Keyboard focus checks wait for Home to reach the top before moving focus, then
+wait for the Retry control to enter the cleanup viewport. Native keyboard
+scrolling can settle asynchronously. Resource close helpers pin the selected Dock identity for both
 click and completion within the active resource dock; separate session docks may
 reuse tab IDs. A retained DOM node does not identify a resource.
 Workflow navigation settles its latest view before closing that resource.

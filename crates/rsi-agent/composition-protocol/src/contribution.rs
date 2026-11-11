@@ -128,6 +128,10 @@ pub struct BeforeStepContext<'a> {
     pub selection: &'a rsi_agent_session_protocol::ModelSelection,
     /// Exact registered producer assigned to its durable context inputs.
     pub producer: &'a ContributionId,
+    /// Last entered non-Tool context input from this producer in retained Turns.
+    /// Uses its Fact timestamp in Unix milliseconds; absent after those Turns
+    /// are removed. Reconstructed by Context replay, including fork history.
+    pub previous_input_at_ms: Option<u64>,
     /// Read-only claim-scoped snapshot.
     pub captured: &'a ContributionContext,
     /// Result of preceding preset input editors, over the same captured claim set.

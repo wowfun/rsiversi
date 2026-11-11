@@ -108,6 +108,8 @@ pub const MAXIMUM_ORDER_SEED_BYTES: usize = 128 * 1024;
 #[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct StoreOrderMember {
+    /// Immutable Header creation time from the same membership snapshot.
+    pub created_at_ms: u64,
     /// Latest qualifying activity from the membership read snapshot.
     pub last_activity_ms: u64,
     /// Stable durable identity.
@@ -134,7 +136,7 @@ impl StoreOrderSeed {
     ///
     /// # Panics
     /// Panics if the fixed membership bound can no longer fit a group index.
-    pub fn from_members(rows: Vec<(SessionId, ExecutionCoordinates, u64)>) -> Result<Self> {
+    pub fn from_members(rows: Vec<(SessionId, ExecutionCoordinates, u64, u64)>) -> Result<Self> {
         if rows.windows(2).any(|pair| pair[0].0 >= pair[1].0) {
             return Err(StoreError::Corrupt(
                 "order members are not strictly increasing".into(),
@@ -146,8 +148,8 @@ impl StoreOrderSeed {
         let mut lookup = std::collections::BTreeMap::new();
         let mut groups = Vec::new();
         let mut members = Vec::with_capacity(rows.len());
-        for (session, coordinates, last_activity_ms) in rows {
-            if last_activity_ms == 0 {
+        for (session, coordinates, created_at_ms, last_activity_ms) in rows {
+            if created_at_ms == 0 || last_activity_ms == 0 {
                 return Err(StoreError::Corrupt("invalid member activity".into()));
             }
             let group = *lookup.entry(coordinates.clone()).or_insert_with(|| {
@@ -156,6 +158,7 @@ impl StoreOrderSeed {
                 index
             });
             members.push(StoreOrderMember {
+                created_at_ms,
                 last_activity_ms,
                 session,
                 group,
@@ -344,6 +347,7 @@ mod tests {
                     SessionId::new(format!("id-{i:04}")).unwrap(),
                     coordinates.clone(),
                     1,
+                    1,
                 )
             })
             .collect::<Vec<_>>();
@@ -352,7 +356,12 @@ mod tests {
             StoreOrderSeed::Available { .. }
         ));
         let mut too_many = small;
-        too_many.push((SessionId::new("id-1024").unwrap(), coordinates.clone(), 1));
+        too_many.push((
+            SessionId::new("id-1024").unwrap(),
+            coordinates.clone(),
+            1,
+            1,
+        ));
         assert_eq!(
             StoreOrderSeed::from_members(too_many).unwrap(),
             StoreOrderSeed::TooLarge
@@ -362,6 +371,7 @@ mod tests {
                 (
                     SessionId::new(format!("{i:04}{}", "x".repeat(252))).unwrap(),
                     coordinates.clone(),
+                    1,
                     1,
                 )
             })

@@ -32,6 +32,7 @@ export async function verifyWorkerLifecycle(browser, root) {
     export async function ui_source() {}
     export async function restore_session() {}
     export async function prepare_submission() {}
+    export async function read_session_resource() {}
     export async function reference_input() {}
     export async function file_input() {}
     export async function export_input() {}

@@ -146,7 +146,7 @@ fn agent_history_uses_its_original_lease_and_rejects_other_workspaces() {
         )
         .unwrap();
     let authority = HistoryAuthority::Agent(Arc::new(issuer.agent_caller(&claim).unwrap()));
-    let workspace = rsi_workspace_protocol::WorkspaceId::from_coordinates(&coords);
+    let workspace = rsi_workspace_protocol::WorkspaceKey::from_coordinates(&coords);
     assert!(
         authority
             .narrow(&rsi_history_api::QueryScope::Workspace {
@@ -160,7 +160,7 @@ fn agent_history_uses_its_original_lease_and_rejects_other_workspaces() {
     ));
     assert!(matches!(
         authority.narrow(&rsi_history_api::QueryScope::Workspace {
-            workspace: rsi_workspace_protocol::WorkspaceId::from_coordinates(&coordinates(
+            workspace: rsi_workspace_protocol::WorkspaceKey::from_coordinates(&coordinates(
                 "/another-workspace"
             )),
         }),
@@ -169,7 +169,7 @@ fn agent_history_uses_its_original_lease_and_rejects_other_workspaces() {
     for (requested, allowed) in [
         (workspace, true),
         (
-            rsi_workspace_protocol::WorkspaceId::from_coordinates(&coordinates(
+            rsi_workspace_protocol::WorkspaceKey::from_coordinates(&coordinates(
                 "/another-workspace",
             )),
             false,
@@ -210,7 +210,7 @@ fn a_prepared_source_reply_is_not_published_after_use_withdrawal() {
     let admission = authority.admit(&access, &coords).unwrap();
     let protection = CancellationToken::new();
     let scope = rsi_history_api::Scope {
-        workspace: rsi_workspace_protocol::WorkspaceId::from_coordinates(&coords),
+        workspace: rsi_workspace_protocol::WorkspaceKey::from_coordinates(&coords),
         conversation: rsi_history_api::ConversationIdentity::External(
             rsi_acp_protocol::observation::ConversationId::new("saved-source").unwrap(),
         ),

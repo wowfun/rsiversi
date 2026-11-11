@@ -1,10 +1,10 @@
-use super::Sessions;
+use super::{Sessions, session_fragments::Identity};
 use futures_util::StreamExt;
-use rsi_agent_session_protocol::SessionId;
+use rsi_agent_session_protocol::{SessionHeader, SessionId};
 use rsi_agent_store_protocol::{SessionStore, StoreError};
 use rsi_agent_turn_protocol::{ObservationCursor, SessionObservation};
 use rsi_extension::{Error, Result};
-use rsi_session_protocol::SessionHandle;
+use rsi_session_protocol::{SessionHandle, SessionService};
 use serde::Deserialize;
 use serde_json::{Value, json};
 
@@ -31,23 +31,31 @@ enum Operation {
         #[serde(default)]
         metadata_only: bool,
     },
+    Capture {
+        reader: String,
+        after: ObservationCursor,
+        offset: usize,
+    },
     Controls {
+        reader: String,
         after_seq: u64,
         through_seq: u64,
+        offset: usize,
     },
     Message {
+        reader: String,
         message_id: rsi_agent_session_protocol::MessageId,
         accepted_control_seq: u64,
         offset: usize,
     },
     Fact {
+        reader: String,
         after_seq: u64,
         through_seq: u64,
         offset: usize,
     },
-    Attempt {
-        after_seq: u64,
-        offset: usize,
+    PageClose {
+        reader: String,
     },
     Wait {
         cursor: ObservationCursor,
@@ -71,190 +79,404 @@ impl Sessions {
         session: &SessionId,
         parent: Option<&SessionId>,
     ) -> Result<std::sync::Arc<dyn SessionHandle>> {
-        self.find_handle(request, session, parent)
-            .await?
-            .ok_or_else(|| Error::Remote("Session unavailable to caller".into()))
-    }
-
-    async fn find_handle(
-        &self,
-        request: &str,
-        session: &SessionId,
-        parent: Option<&SessionId>,
-    ) -> Result<Option<std::sync::Arc<dyn SessionHandle>>> {
         let origin = self.routes.caller(request).map_err(|_| Error::Cancelled)?;
         let service = self.ingress.scoped(origin);
-        let handle = match service.attach(session).await {
-            Ok(handle) => handle,
-            Err(
-                rsi_session_protocol::SessionError::NotFound(_)
-                | rsi_session_protocol::SessionError::Api(rsi_api_protocol::ApiError::Unauthorized),
-            ) => return Ok(None),
-            Err(_) => return Err(Error::Remote("Session unavailable to caller".into())),
-        };
-        if let Some(parent) = parent {
-            service
-                .read_header(parent)
-                .await
-                .map_err(|_| Error::Remote("Parent unavailable to caller".into()))?;
-            let header = handle.header().await.map_err(|error| remote(&error))?;
-            if header
-                .fork_origin()
-                .map(|fork| &fork.history.parent_session_id)
-                != Some(parent)
-            {
-                return Err(Error::Remote(
-                    "Session address does not identify a direct child".into(),
-                ));
-            }
-        }
-        Ok(Some(handle))
+        find_handle(service.as_ref(), session, parent)
+            .await?
+            .ok_or_else(unavailable)
     }
 
     pub(super) async fn history(&self, payload: Value) -> Result<Value> {
         let input: HistoryRead = serde_json::from_value(payload).map_err(|_| Error::Protocol)?;
-        let Some(handle) = self
-            .find_handle(
-                &input.request,
-                &input.session_id,
-                input.parent_session_id.as_ref(),
-            )
-            .await?
-        else {
-            return match input.operation {
-                Operation::Open { .. } => Ok(Value::Null),
-                _ => Err(Error::Remote("Session unavailable to caller".into())),
-            };
+        let origin = self
+            .routes
+            .caller(&input.request)
+            .map_err(|_| Error::Cancelled)?;
+        let service = self.ingress.scoped(origin);
+        let reader = HistoryReader {
+            sessions: self,
+            service: service.as_ref(),
+            request: &input.request,
+            session: &input.session_id,
+            parent: input.parent_session_id.as_ref(),
         };
-        let store = self.store.as_ref();
-        let result = match input.operation {
-            Operation::SeedOpen { key } => {
-                self.open_inherited(
-                    &input.request,
-                    &key,
-                    &handle.header().await.map_err(|error| remote(&error))?,
-                )
-                .await?
-            }
-            Operation::SeedRead(read) => {
-                self.read_inherited(&input.request, &input.session_id, read)
-                    .await?
-            }
-            Operation::SeedClose { key } => {
-                self.routes
-                    .release_resource(&input.request, &resource_key("seed", &key)?);
-                Value::Null
-            }
-            Operation::Open { metadata_only } => {
-                self.opening_snapshot(handle.as_ref(), metadata_only)
-                    .await?
-            }
-            Operation::Controls {
-                after_seq,
-                through_seq,
-            } => {
-                self.history_controls(
-                    &handle.header().await.map_err(|error| remote(&error))?,
-                    after_seq,
-                    through_seq,
-                )
-                .await?
-            }
-            Operation::Message {
-                message_id,
-                accepted_control_seq,
-                offset,
-            } => {
-                let message = handle
-                    .read_message(&message_id, accepted_control_seq)
-                    .await
-                    .map_err(|error| remote(&error))?;
-                let encoded = serde_json::to_string(&message).map_err(|_| Error::Protocol)?;
-                fragment(&encoded, offset, accepted_control_seq)?
-            }
-            Operation::Fact {
-                after_seq,
-                through_seq,
-                offset,
-            } => read_facts(store, &input.session_id, after_seq, through_seq, offset).await?,
-            Operation::Attempt { after_seq, offset } => {
-                read_attempt(handle.as_ref(), after_seq, offset).await?
-            }
-            Operation::Wait { cursor } => {
-                wait(handle.as_ref(), store, &input.session_id, cursor).await?
-            }
-            Operation::ModelOpen { key, effect } => {
-                self.open_model(
-                    &input.request,
-                    &key,
-                    input.session_id,
-                    effect,
-                    handle.as_ref(),
-                )
-                .await?
-            }
-            Operation::ModelNext { key } => {
-                self.next_model(&input.request, &key, &input.session_id)
-                    .await?
-            }
-            Operation::ModelClose { key } => {
-                self.routes
-                    .release_resource(&input.request, &resource_key("model", &key)?);
-                Value::Null
-            }
-        };
+        let result = reader.execute(input.operation).await?;
         self.routes
             .caller(&input.request)
             .map_err(|_| Error::Cancelled)?;
         Ok(result)
     }
+}
 
-    async fn opening_snapshot(
-        &self,
-        handle: &dyn SessionHandle,
-        metadata_only: bool,
-    ) -> Result<Value> {
-        let header = handle.header().await.map_err(|error| remote(&error))?;
-        if metadata_only {
-            let rows = self
-                .store
-                .session_activity_summaries(std::slice::from_ref(header.session_id()))
+struct HistoryReader<'a> {
+    sessions: &'a Sessions,
+    service: &'a dyn SessionService,
+    request: &'a str,
+    session: &'a SessionId,
+    parent: Option<&'a SessionId>,
+}
+
+impl HistoryReader<'_> {
+    async fn execute(&self, operation: Operation) -> Result<Value> {
+        match operation {
+            Operation::Capture {
+                reader,
+                after,
+                offset,
+            } => self.capture(&reader, after, offset).await,
+            Operation::Open { metadata_only } => {
+                open_history(self.service, self.session, self.parent, metadata_only).await
+            }
+            Operation::Controls {
+                reader,
+                after_seq,
+                through_seq,
+                offset,
+            } => self.controls(&reader, after_seq, through_seq, offset).await,
+            Operation::Message {
+                reader,
+                message_id,
+                accepted_control_seq,
+                offset,
+            } => {
+                self.message(&reader, &message_id, accepted_control_seq, offset)
+                    .await
+            }
+            Operation::Fact {
+                reader,
+                after_seq,
+                through_seq,
+                offset,
+            } => self.facts(&reader, after_seq, through_seq, offset).await,
+            Operation::PageClose { reader } => self.close("history", &reader),
+            Operation::SeedOpen { key } => {
+                let handle = self.attach().await?;
+                self.sessions
+                    .open_inherited(
+                        self.request,
+                        &key,
+                        &handle.header().await.map_err(|error| remote(&error))?,
+                    )
+                    .await
+            }
+            Operation::SeedRead(read) => {
+                let _handle = self.attach().await?;
+                self.sessions
+                    .read_inherited(self.request, self.session, read)
+                    .await
+            }
+            Operation::SeedClose { key } => {
+                let _handle = self.attach().await?;
+                self.close("seed", &key)
+            }
+            Operation::Wait { cursor } => {
+                let handle = self.attach().await?;
+                wait(
+                    handle.as_ref(),
+                    self.sessions.store.as_ref(),
+                    self.session,
+                    cursor,
+                )
                 .await
-                .map_err(|_| Error::Remote("Session metadata unavailable".into()))?;
-            return match rows.as_slice() {
-                [Some(row)]
-                    if row.session_id == *header.session_id()
-                        && row.created_at_ms == header.created_at_ms() =>
-                {
-                    Ok(stored_snapshot(&header, row))
-                }
-                [None] => Ok(Value::Null),
-                _ => Err(Error::Remote("Session catalog changed during read".into())),
-            };
+            }
+            Operation::ModelOpen { key, effect } => {
+                let handle = self.attach().await?;
+                self.sessions
+                    .open_model(
+                        self.request,
+                        &key,
+                        self.session.clone(),
+                        effect,
+                        handle.as_ref(),
+                    )
+                    .await
+            }
+            Operation::ModelNext { key } => {
+                let _handle = self.attach().await?;
+                self.sessions
+                    .next_model(self.request, &key, self.session)
+                    .await
+            }
+            Operation::ModelClose { key } => {
+                let _handle = self.attach().await?;
+                self.close("model", &key)
+            }
         }
-        let (selection, cursor) = current_selection(handle, &header).await?;
-        let through = match cursor {
-            rsi_agent_session_protocol::ProjectionCursor::Durable { fact_seq, .. } => fact_seq,
-            rsi_agent_session_protocol::ProjectionCursor::Draft { .. } => 0,
-        };
-        let mut metadata = stored_header(&header);
-        metadata["through"] = json!(through);
-        metadata["model_selection"] = json!(selection);
-        metadata["selection_cursor"] = json!(cursor);
-        metadata["model_baseline"] = json!({"model":header.settings().default_model(),
-        "reasoning_effort":header.settings().default_reasoning_effort()});
-        Ok(metadata)
     }
+
+    async fn attach(&self) -> Result<std::sync::Arc<dyn SessionHandle>> {
+        find_handle(self.service, self.session, self.parent)
+            .await?
+            .ok_or_else(unavailable)
+    }
+
+    async fn header(&self) -> Result<SessionHeader> {
+        find_summary(self.service, self.session, self.parent)
+            .await?
+            .map(|summary| summary.header)
+            .ok_or_else(unavailable)
+    }
+
+    fn close(&self, kind: &str, key: &str) -> Result<Value> {
+        self.sessions
+            .routes
+            .release_resource(self.request, &resource_key(kind, key)?);
+        Ok(Value::Null)
+    }
+
+    async fn capture(
+        &self,
+        reader: &str,
+        after: ObservationCursor,
+        offset: usize,
+    ) -> Result<Value> {
+        self.sessions
+            .history_pages
+            .read(
+                &self.sessions.routes,
+                self.request,
+                reader,
+                offset,
+                Identity::Capture {
+                    session: self.session.clone(),
+                    parent: self.parent.cloned(),
+                    fact: after.fact_seq,
+                    control: after.control_seq,
+                },
+                super::session_capture::capture(
+                    self.sessions.store.as_ref(),
+                    self.service,
+                    self.session,
+                    self.parent,
+                    after,
+                ),
+            )
+            .await
+    }
+
+    async fn controls(
+        &self,
+        reader: &str,
+        after: u64,
+        through: u64,
+        offset: usize,
+    ) -> Result<Value> {
+        self.sessions
+            .history_pages
+            .read(
+                &self.sessions.routes,
+                self.request,
+                reader,
+                offset,
+                Identity::Controls {
+                    session: self.session.clone(),
+                    parent: self.parent.cloned(),
+                    after,
+                    through,
+                },
+                async {
+                    let header = self.header().await?;
+                    super::session_controls::read_controls(
+                        self.sessions.store.as_ref(),
+                        &header,
+                        after,
+                        through,
+                    )
+                    .await
+                },
+            )
+            .await
+    }
+
+    async fn message(
+        &self,
+        reader: &str,
+        message: &rsi_agent_session_protocol::MessageId,
+        accepted: u64,
+        offset: usize,
+    ) -> Result<Value> {
+        self.sessions
+            .history_pages
+            .read(
+                &self.sessions.routes,
+                self.request,
+                reader,
+                offset,
+                Identity::Message {
+                    session: self.session.clone(),
+                    parent: self.parent.cloned(),
+                    message: message.clone(),
+                    accepted,
+                },
+                async {
+                    let header = self.header().await?;
+                    read_message(
+                        self.sessions.store.as_ref(),
+                        header.session_id(),
+                        message,
+                        accepted,
+                    )
+                    .await
+                },
+            )
+            .await
+    }
+
+    async fn facts(&self, reader: &str, after: u64, through: u64, offset: usize) -> Result<Value> {
+        self.sessions
+            .history_pages
+            .read(
+                &self.sessions.routes,
+                self.request,
+                reader,
+                offset,
+                Identity::Facts {
+                    session: self.session.clone(),
+                    parent: self.parent.cloned(),
+                    after,
+                    through,
+                },
+                async {
+                    let header = self.header().await?;
+                    read_facts(
+                        self.sessions.store.as_ref(),
+                        header.session_id(),
+                        after,
+                        through,
+                    )
+                    .await
+                },
+            )
+            .await
+    }
+}
+
+async fn open_history(
+    service: &dyn SessionService,
+    session: &SessionId,
+    parent: Option<&SessionId>,
+    metadata_only: bool,
+) -> Result<Value> {
+    let metadata = metadata_snapshot(service, session, parent).await?;
+    if metadata_only || !metadata.is_null() {
+        return Ok(metadata);
+    }
+    let Some(handle) = find_handle(service, session, parent).await? else {
+        return Ok(Value::Null);
+    };
+    let header = handle.header().await.map_err(|error| remote(&error))?;
+    let (selection, cursor) = current_selection(handle.as_ref(), &header).await?;
+    let through = match cursor {
+        rsi_agent_session_protocol::ProjectionCursor::Durable { fact_seq, .. } => fact_seq,
+        rsi_agent_session_protocol::ProjectionCursor::Draft { .. } => 0,
+    };
+    let mut metadata = stored_header(&header);
+    metadata["through"] = json!(through);
+    metadata["model_selection"] = json!(selection);
+    metadata["selection_cursor"] = json!(cursor);
+    metadata["model_baseline"] = json!(model_baseline(&header));
+    Ok(metadata)
+}
+
+fn unavailable() -> Error {
+    Error::Remote("Session unavailable to caller".into())
+}
+
+async fn find_handle(
+    service: &dyn SessionService,
+    session: &SessionId,
+    parent: Option<&SessionId>,
+) -> Result<Option<std::sync::Arc<dyn SessionHandle>>> {
+    let handle = match service.attach(session).await {
+        Ok(handle) => handle,
+        Err(
+            rsi_session_protocol::SessionError::NotFound(_)
+            | rsi_session_protocol::SessionError::Api(rsi_api_protocol::ApiError::Unauthorized),
+        ) => return Ok(None),
+        Err(_) => return Err(unavailable()),
+    };
+    if let Some(parent) = parent {
+        check_parent(
+            service,
+            &handle.header().await.map_err(|error| remote(&error))?,
+            parent,
+        )
+        .await?;
+    }
+    Ok(Some(handle))
+}
+
+pub(super) async fn find_summary(
+    service: &dyn SessionService,
+    session: &SessionId,
+    parent: Option<&SessionId>,
+) -> Result<Option<rsi_session_protocol::SessionSummary>> {
+    let summary = match service.read_summary(session).await {
+        Ok(summary) => summary,
+        Err(
+            rsi_session_protocol::SessionError::NotFound(_)
+            | rsi_session_protocol::SessionError::Api(rsi_api_protocol::ApiError::Unauthorized),
+        ) => return Ok(None),
+        Err(_) => return Err(unavailable()),
+    };
+    if let Some(parent) = parent {
+        check_parent(service, &summary.header, parent).await?;
+    }
+    Ok(Some(summary))
+}
+
+async fn check_parent(
+    service: &dyn SessionService,
+    header: &SessionHeader,
+    parent: &SessionId,
+) -> Result<()> {
+    service
+        .read_summary(parent)
+        .await
+        .map_err(|_| Error::Remote("Parent unavailable to caller".into()))?;
+    if header
+        .fork_origin()
+        .map(|fork| &fork.history.parent_session_id)
+        != Some(parent)
+    {
+        return Err(Error::Remote(
+            "Session address does not identify a direct child".into(),
+        ));
+    }
+    Ok(())
+}
+
+async fn metadata_snapshot(
+    service: &dyn SessionService,
+    session: &SessionId,
+    parent: Option<&SessionId>,
+) -> Result<Value> {
+    let Some(summary) = find_summary(service, session, parent).await? else {
+        return Ok(Value::Null);
+    };
+    Ok(stored_history(
+        &summary.header,
+        summary.durable_fact_seq,
+        summary.durable_control_seq,
+    ))
+}
+
+pub(super) fn stored_history(header: &SessionHeader, fact_seq: u64, control_seq: u64) -> Value {
+    let mut metadata = stored_snapshot(header, fact_seq, control_seq);
+    metadata["through"] = json!(fact_seq);
+    metadata["model_baseline"] = json!(model_baseline(header));
+    metadata
 }
 
 pub(super) fn stored_snapshot(
     header: &rsi_agent_session_protocol::SessionHeader,
-    row: &rsi_agent_store_protocol::StoreActivityRow,
+    fact_seq: u64,
+    control_seq: u64,
 ) -> Value {
     let mut item = stored_header(header);
     item["selection_cursor"] = json!(rsi_agent_session_protocol::ProjectionCursor::Durable {
-        fact_seq: row.durable_fact_seq,
-        control_seq: row.durable_control_seq,
+        fact_seq,
+        control_seq,
     });
     item
 }
@@ -285,13 +507,16 @@ async fn current_selection(
         .ok_or(Error::Disconnected)?
         .map_err(|error| remote(&error))?;
     let snapshot = retained.snapshot();
-    let selection = projected_selection(snapshot.entries())?.unwrap_or_else(|| {
-        rsi_agent_session_protocol::ModelSelection {
-            model: header.settings().default_model().clone(),
-            reasoning_effort: header.settings().default_reasoning_effort().cloned(),
-        }
-    });
+    let selection =
+        projected_selection(snapshot.entries())?.unwrap_or_else(|| model_baseline(header));
     Ok((selection, snapshot.cursor()))
+}
+
+fn model_baseline(header: &SessionHeader) -> rsi_agent_session_protocol::ModelSelection {
+    rsi_agent_session_protocol::ModelSelection {
+        model: header.settings().default_model().clone(),
+        reasoning_effort: header.settings().default_reasoning_effort().cloned(),
+    }
 }
 
 fn projected_selection(
@@ -331,27 +556,34 @@ fn remote(error: &rsi_session_protocol::SessionError) -> Error {
     Error::Remote(error.to_string().chars().take(1000).collect())
 }
 
-async fn read_attempt(handle: &dyn SessionHandle, after: u64, offset: usize) -> Result<Value> {
-    let before = after.checked_add(2).ok_or(Error::Protocol)?;
-    let page = handle
-        .history_before(Some(before), 1)
+pub(super) async fn read_message(
+    store: &dyn SessionStore,
+    session: &SessionId,
+    message: &rsi_agent_session_protocol::MessageId,
+    accepted_control_seq: u64,
+) -> Result<(u64, String)> {
+    let after = accepted_control_seq.checked_sub(1).ok_or(Error::Protocol)?;
+    let page = store
+        .read_controls(
+            session,
+            after,
+            1,
+            rsi_agent_store_protocol::MAXIMUM_STORE_CONTROL_PAGE_BYTES,
+        )
         .await
-        .map_err(|error| remote(&error))?;
-    let [fact] = page.facts.as_slice() else {
-        return Err(Error::Protocol);
-    };
-    attempt_fragment(fact, after, offset)
-}
-pub(super) fn attempt_fragment(
-    fact: &rsi_agent_session_protocol::SessionFact,
-    after: u64,
-    offset: usize,
-) -> Result<Value> {
-    if after.checked_add(1) != Some(fact.seq()) {
-        return Err(Error::Protocol);
+        .map_err(|error| Error::Remote(error.to_string()))?;
+    if let Some(record) = page.records.into_iter().next()
+        && record.seq() == accepted_control_seq
+        && let rsi_agent_session_protocol::AgentControlRecordBody::MessageAccepted {
+            message: accepted,
+            ..
+        } = record.into_body()
+        && accepted.message_id == *message
+    {
+        let encoded = serde_json::to_string(&accepted).map_err(|_| Error::Protocol)?;
+        return Ok((accepted_control_seq, encoded));
     }
-    let encoded = rsi_extension_agent::project_model_attempt(fact, after)?;
-    fragment(&encoded, offset, fact.seq())
+    Err(Error::Remote("exact message acceptance unavailable".into()))
 }
 
 /// The Store bounds body allocation before decoding. Oversized individual Facts
@@ -361,14 +593,16 @@ pub(super) async fn read_facts(
     session: &SessionId,
     after: u64,
     through: u64,
-    offset: usize,
-) -> Result<Value> {
+) -> Result<(u64, String)> {
     let count = through
         .checked_sub(after)
         .filter(|count| *count > 0)
         .ok_or(Error::Protocol)?;
     let limit = count.min(512) as usize;
-    let page = match store.read_facts(session, after, limit, 128 * 1024).await {
+    let page = match store
+        .read_facts(session, after, limit, HISTORY_PAGE_BYTES)
+        .await
+    {
         Err(StoreError::ReadRequiresCapacity { minimum_bytes }) => {
             store.read_facts(session, after, 1, minimum_bytes).await
         }
@@ -379,8 +613,11 @@ pub(super) async fn read_facts(
         return Err(Error::Protocol);
     }
     let last = page.facts.last().ok_or(Error::Protocol)?.seq();
-    let encoded = serde_json::to_string(&page.facts).map_err(|_| Error::Protocol)?;
-    fragment(&encoded, offset, last)
+    rsi_extension_agent::project_history_page(
+        &page.facts,
+        last,
+        rsi_agent_session_protocol::MAXIMUM_SESSION_FACT_BYTES + 2,
+    )
 }
 
 pub(super) fn fragment(encoded: &str, offset: usize, through: u64) -> Result<Value> {
@@ -390,11 +627,32 @@ pub(super) fn fragment(encoded: &str, offset: usize, through: u64) -> Result<Val
     )
 }
 
+pub(super) const HISTORY_PAGE_BYTES: usize = rsi_extension::MAXIMUM_FRAME_BYTES;
+const FRAGMENT_JSON_BYTES: usize = rsi_extension::MAXIMUM_FRAME_BYTES - 8 * 1024;
+
 pub(super) fn fragment_text(encoded: &str, offset: usize) -> Result<(usize, &str)> {
     if offset >= encoded.len() || !encoded.is_char_boundary(offset) {
         return Err(Error::Protocol);
     }
-    let mut end = offset.saturating_add(128 * 1024).min(encoded.len());
+    // Any byte takes at most six bytes in a JSON string. Small pages fit without
+    // scanning; larger pages count the same escapes as serde_json's formatter.
+    if encoded.len() - offset <= FRAGMENT_JSON_BYTES / 6 {
+        return Ok((encoded.len(), &encoded[offset..]));
+    }
+    let mut end = offset;
+    let mut wire_bytes = 0;
+    for byte in &encoded.as_bytes()[offset..] {
+        let width = match byte {
+            b'"' | b'\\' | b'\x08' | b'\t' | b'\n' | b'\x0c' | b'\r' => 2,
+            0..=0x1f => 6,
+            _ => 1,
+        };
+        if wire_bytes + width > FRAGMENT_JSON_BYTES {
+            break;
+        }
+        wire_bytes += width;
+        end += 1;
+    }
     while !encoded.is_char_boundary(end) {
         end -= 1;
     }
@@ -435,132 +693,4 @@ async fn wait(
 }
 
 #[cfg(test)]
-mod tests {
-    use super::*;
-
-    #[tokio::test]
-    async fn fact_pages_bound_the_captured_horizon_and_read_large_records_alone() {
-        use rsi_agent_session_protocol::{
-            AgentPresetId, FrozenAgentSettings, SessionFact, SessionFactBody, SessionHeader, TurnId,
-        };
-        use rsi_agent_store_protocol::AppendBatch;
-        use rsi_agent_testkit::MemoryStore;
-        use rsi_ai_protocol::ModelRef;
-        use rsi_sandbox::SandboxMode;
-        use std::sync::Arc;
-
-        let store = MemoryStore::default();
-        let id = SessionId::new("page-test").unwrap();
-        let turn = TurnId::new("turn").unwrap();
-        let header = SessionHeader::new_local(
-            id.clone(),
-            1,
-            "/workspace",
-            AgentPresetId::new("test").unwrap(),
-            FrozenAgentSettings::new(
-                "default",
-                "system",
-                ModelRef::new("test", "test").unwrap(),
-                SandboxMode::WorkspaceWrite,
-                false,
-            )
-            .unwrap(),
-        )
-        .unwrap();
-        let facts: Vec<_> = (1..=600)
-            .map(|seq| {
-                Arc::new(
-                    SessionFact::new(
-                        seq,
-                        seq,
-                        if seq == 1 {
-                            SessionFactBody::TurnAccepted {
-                                turn_id: turn.clone(),
-                                text: "history".repeat(24_000),
-                                model: None,
-                                reasoning_effort: None,
-                                sandbox: SandboxMode::WorkspaceWrite,
-                                require_approval: false,
-                            }
-                        } else {
-                            SessionFactBody::CancelRequested {
-                                turn_id: turn.clone(),
-                                reason: None,
-                            }
-                        },
-                    )
-                    .unwrap(),
-                )
-            })
-            .collect();
-        for (index, chunk) in facts.chunks(64).enumerate() {
-            store
-                .append(AppendBatch {
-                    session_id: id.clone(),
-                    expected_seq: (index * 64) as u64,
-                    header: (index == 0).then(|| header.clone()),
-                    facts: chunk.to_vec(),
-                })
-                .await
-                .unwrap();
-        }
-        let large = read_facts(&store, &id, 0, 600, 0).await.unwrap();
-        assert_eq!(large["through_seq"], 1);
-        assert_eq!(large["next_offset"], 128 * 1024);
-        let tail = read_facts(&store, &id, 0, 600, 128 * 1024).await.unwrap();
-        assert_eq!(tail["through_seq"], 1);
-        assert_eq!(large["total_bytes"], tail["total_bytes"]);
-        let encoded = format!(
-            "{}{}",
-            large["json"].as_str().unwrap(),
-            tail["json"].as_str().unwrap()
-        );
-        assert_eq!(
-            serde_json::from_str::<Vec<SessionFact>>(&encoded).unwrap(),
-            vec![facts[0].as_ref().clone()]
-        );
-        let cut = read_facts(&store, &id, 1, 10, 0).await.unwrap();
-        let page: Vec<SessionFact> = serde_json::from_str(cut["json"].as_str().unwrap()).unwrap();
-        assert_eq!(page.len(), 9);
-        assert_eq!(page.first().unwrap().seq(), 2);
-        assert_eq!(cut["through_seq"], 10);
-        let capped = read_facts(&store, &id, 1, 600, 0).await.unwrap();
-        assert_eq!(capped["through_seq"], 513);
-        assert!(read_facts(&store, &id, 10, 10, 0).await.is_err());
-        assert!(read_facts(&store, &id, 11, 10, 0).await.is_err());
-        assert!(read_facts(&store, &id, 1, 601, 0).await.is_err());
-    }
-
-    #[test]
-    fn model_projection_retains_effort_absence_and_does_not_default_a_failed_producer() {
-        use rsi_agent_session_protocol::{ContributionId, ProjectionEntry, ProjectionValue};
-        let producer = ContributionId::new(rsi_agent_model_selection::VIEW).unwrap();
-        assert!(projected_selection(&[]).unwrap().is_none());
-        let selection = json!({"model":{"deployment":"native","model":"selected"}});
-        let row = ProjectionEntry::value(
-            producer.clone(),
-            ProjectionValue::encode(&selection).unwrap(),
-        );
-        let parsed = projected_selection(&[row]).unwrap().unwrap();
-        assert_eq!(parsed.model.model(), "selected");
-        assert!(parsed.reasoning_effort.is_none());
-        let failed = ProjectionEntry::failed(producer, "state unavailable").unwrap();
-        assert!(
-            matches!(projected_selection(&[failed]), Err(Error::Remote(message)) if message == "state unavailable")
-        );
-    }
-
-    #[test]
-    fn history_fragments_preserve_multibyte_text_and_reject_invalid_offsets() {
-        let prefix = "x".repeat(128 * 1024 - 1);
-        let data = format!("{prefix}历史");
-        let first = fragment(&data, 0, 7).unwrap();
-        assert_eq!(first["json"], prefix);
-        let next = prefix.len();
-        let last = fragment(&data, next, 7).unwrap();
-        assert_eq!(last["json"], "历史");
-        assert_eq!(last["next_offset"], data.len());
-        assert!(fragment(&data, next + 1, 7).is_err());
-        assert!(fragment(&data, data.len(), 7).is_err());
-    }
-}
+mod tests;

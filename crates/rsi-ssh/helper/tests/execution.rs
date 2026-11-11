@@ -997,7 +997,7 @@ async fn twenty_long_polled_processes_leave_ordinary_capacity_and_drop_settles_a
 }
 
 #[tokio::test]
-async fn stalled_native_stdin_reports_capacity_and_keeps_connection_and_siblings_alive() {
+async fn stalled_native_stdin_retains_its_write_and_keeps_connection_and_siblings_alive() {
     let fixture = Fixture::new(false).await;
     let plan = fixture
         .plan(
@@ -1010,24 +1010,25 @@ async fn stalled_native_stdin_reports_capacity_and_keeps_connection_and_siblings
     let bytes = vec![b'q'; 64 * 1024];
     let input = process.stdin();
     let mut accepted = 0;
-    let mut pressured = false;
+    let mut pending = None;
     for _ in 0..64 {
-        match tokio::time::timeout(Duration::from_secs(2), input.write(&bytes))
-            .await
-            .expect("native flow control must settle before the RPC deadline")
-        {
-            Ok(count) => {
-                assert!(count > 0 && count <= bytes.len());
-                accepted += count;
-            }
-            Err(ProcessError::Capacity) => {
-                pressured = true;
-                break;
-            }
-            other => panic!("unexpected input result: {other:?}"),
+        let writer = input.clone();
+        let bytes = bytes.clone();
+        let mut writing = tokio::spawn(async move { writer.write(&bytes).await });
+        if let Ok(result) = tokio::time::timeout(Duration::from_millis(100), &mut writing).await {
+            let count = result.unwrap().unwrap();
+            assert!(count > 0 && count <= 64 * 1024);
+            accepted += count;
+        } else {
+            pending = Some(writing);
+            break;
         }
     }
-    assert!(pressured, "the real native pipe must fill");
+    let pending = pending.expect("the real native pipe must fill");
+    assert_eq!(
+        bounded(input.write(b"must not enter")).await,
+        Err(ProcessError::Capacity)
+    );
     let sibling_plan = fixture
         .plan("shell", Some("printf sibling; touch drain"), false)
         .await;
@@ -1038,8 +1039,7 @@ async fn stalled_native_stdin_reports_capacity_and_keeps_connection_and_siblings
         .unwrap();
     assert_eq!(bounded(sibling.wait()).await.unwrap().exit_code, Some(0));
     assert_eq!(sibling.stdout().read_from(0).unwrap().bytes, b"sibling");
-    // Resume the same pipe after pressure and prove a fresh frame follows exactly
-    // the previously acknowledged prefixes, with no hidden bytes from the timeout.
+    // Draining settles the same admitted write before a fresh frame is sent.
     let marker = b"after-capacity\0frame";
     let output = process.stdout();
     let reading = tokio::spawn(async move {
@@ -1053,6 +1053,7 @@ async fn stalled_native_stdin_reports_capacity_and_keeps_connection_and_siblings
         }
         received
     });
+    accepted += bounded(pending).await.unwrap().unwrap();
     let mut offset = 0;
     while offset < marker.len() {
         offset += bounded(input.write(&marker[offset..])).await.unwrap();

@@ -22,7 +22,7 @@ impl HistoryAuthority {
     }
     pub(super) fn narrow(&self, scope: &rsi_history_api::QueryScope) -> Result<()> {
         if let Self::Agent(caller) = self {
-            let workspace = rsi_workspace_protocol::WorkspaceId::from_coordinates(
+            let workspace = rsi_workspace_protocol::WorkspaceKey::from_coordinates(
                 caller.header().coordinates(),
             );
             let allowed = match scope {

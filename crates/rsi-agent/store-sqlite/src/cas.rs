@@ -1,4 +1,3 @@
-use super::bounded_text;
 use super::*;
 
 /// One filesystem operation in immutable CAS publication.
@@ -463,11 +462,11 @@ pub(super) fn decode_projected_json<T: serde::de::DeserializeOwned>(
     decode_projected_json_with_source(label, projection, maximum_bytes).map(|(value, _)| value)
 }
 
-pub(super) fn decode_projected_json_with_source<T: serde::de::DeserializeOwned>(
+pub(super) fn decode_projected_json_with_source<T: serde::de::DeserializeOwned, S: AsRef<str>>(
     label: &str,
-    (encoded_len, json): (i64, Option<String>),
+    (encoded_len, json): (i64, Option<S>),
     maximum_bytes: usize,
-) -> Result<(T, String)> {
+) -> Result<(T, S)> {
     super::cold_validation::check()?;
     #[cfg(feature = "test-support")]
     let _decode = super::test_support::DecodeProbe::start();
@@ -483,12 +482,12 @@ pub(super) fn decode_projected_json_with_source<T: serde::de::DeserializeOwned>(
             "{label} is absent from its bounded SQLite projection"
         ))
     })?;
-    if json.len() != encoded_len {
+    if json.as_ref().len() != encoded_len {
         return Err(StoreError::Corrupt(format!(
             "{label} byte length disagrees with its SQLite projection"
         )));
     }
-    let value = decode_json(label, &json)?;
+    let value = decode_json(label, json.as_ref())?;
     Ok((value, json))
 }
 
@@ -497,49 +496,7 @@ pub(super) fn read_indexed_fact(
     session_id: &SessionId,
     sequence: i64,
 ) -> Result<SessionFact> {
-    let projection = connection
-        .query_row(
-            "SELECT seq, turn_id, fact_kind,
-                    length(CAST(fact_json AS BLOB)),
-                    CASE WHEN length(CAST(fact_json AS BLOB)) <= ?3
-                         THEN fact_json END
-             FROM facts WHERE session_id = ?1 AND seq = ?2",
-            params![
-                session_id.as_str(),
-                sequence,
-                i64::try_from(MAXIMUM_SESSION_FACT_BYTES)
-                    .expect("session Fact bound fits SQLite INTEGER"),
-            ],
-            |row| {
-                Ok((
-                    row.get::<_, i64>(0)?,
-                    bounded_text(row, 1, 256)?,
-                    bounded_text(row, 2, 8)?,
-                    row.get::<_, i64>(3)?,
-                    row.get::<_, Option<String>>(4)?,
-                ))
-            },
-        )
-        .optional()
-        .map_err(sql_error)?
-        .ok_or_else(|| {
-            StoreError::Corrupt("turn index references an absent canonical Fact".into())
-        })?;
-    let fact: SessionFact = decode_projected_json(
-        "session Fact",
-        (projection.3, projection.4),
-        MAXIMUM_SESSION_FACT_BYTES,
-    )?;
-    let indexed_sequence = decode_u64("indexed Fact sequence", projection.0)?;
-    if fact.seq() != indexed_sequence
-        || fact.body().turn_id().as_str() != projection.1
-        || fact_index_kind(fact.body()) != projection.2
-    {
-        return Err(StoreError::Corrupt(
-            "indexed Fact JSON differs from its relational row".into(),
-        ));
-    }
-    Ok(fact)
+    Ok(super::fact_storage::read(connection, session_id, sequence)?.0)
 }
 
 pub(super) fn sqlite_u64(label: &str, value: u64) -> Result<i64> {

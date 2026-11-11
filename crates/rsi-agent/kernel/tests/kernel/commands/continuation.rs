@@ -915,7 +915,7 @@ async fn busy_ordinary_backlog_skips_mailbox_while_same_tree_disarmed_input_is_c
             (a.timestamp_ms, &a.session_id, a.control_seq)
                 < (b.timestamp_ms, &b.session_id, b.control_seq)
         }));
-        store.mailbox_reads.lock().unwrap().clear();
+        store.mailbox.reads.lock().unwrap().clear();
         let _idle = kernel.register("idle".into()).unwrap();
         let idle = tokio::time::timeout(
             std::time::Duration::from_secs(5),
@@ -928,7 +928,8 @@ async fn busy_ordinary_backlog_skips_mailbox_while_same_tree_disarmed_input_is_c
         assert_eq!(idle.session_id(), &idle_id);
         assert_eq!(
             store
-                .mailbox_reads
+                .mailbox
+                .reads
                 .lock()
                 .unwrap()
                 .get(&busy_id)
@@ -938,7 +939,8 @@ async fn busy_ordinary_backlog_skips_mailbox_while_same_tree_disarmed_input_is_c
         );
         assert!(
             store
-                .mailbox_reads
+                .mailbox
+                .reads
                 .lock()
                 .unwrap()
                 .get(&auto_id)

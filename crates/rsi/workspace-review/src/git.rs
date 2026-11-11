@@ -152,6 +152,7 @@ impl Git {
             ));
             environment.push(("HOME".into(), scratch.as_os_str().to_owned()));
         }
+        process.prepare_environment(&mut environment);
         let process = self
             .process
             .spawn(ProcessSpec {

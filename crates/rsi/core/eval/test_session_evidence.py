@@ -1,9 +1,44 @@
 import copy
+import json
+import tempfile
 import unittest
+from pathlib import Path
 
-from session_api import boundary_evidence, fact_chain, pressure_evidence
+from session_api import boundary_evidence, canonical_trace, fact_chain, pressure_evidence
 from session_fixture import BOUNDARY_MARKER, PRESSURE_TEXT, SUMMARY_FRAME, SUMMARY_TEXT
 from test_attempt import log
+
+
+class CanonicalTrace(unittest.TestCase):
+    def test_reads_logical_observations_in_canonical_field_order(self):
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            state = root / "state/rsi"
+            state.mkdir(parents=True)
+            fact = dict(seq=1, timestamp_ms=1, type="input_message_claimed", content="界🦀")
+            control = dict(seq=1, type="message_accepted")
+            path = state / "session-api-eval-trace.jsonl"
+            path.write_text(
+                json.dumps(dict(control=control)) + "\n" + json.dumps(dict(fact=fact), ensure_ascii=False) + "\n",
+                encoding="utf-8",
+            )
+            trace = canonical_trace(root)
+            self.assertEqual(trace, dict(facts=[fact], controls=[control]))
+            self.assertEqual(list(trace["facts"][0]), list(fact))
+
+    def test_missing_or_invalid_capture_never_falls_back_to_physical_storage(self):
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            state = root / "state/rsi"
+            (state / "agent").mkdir(parents=True)
+            (state / "agent/sessions.sqlite3").write_bytes(b"physical projection")
+            with self.assertRaises(FileNotFoundError):
+                canonical_trace(root)
+            path = state / "session-api-eval-trace.jsonl"
+            for line in ['{"fact":', '{"fact":{},"control":{}}']:
+                path.write_text(line, encoding="utf-8")
+                with self.assertRaises(ValueError):
+                    canonical_trace(root)
 
 
 class PressureEvidence(unittest.TestCase):
@@ -92,6 +127,21 @@ class PressureEvidence(unittest.TestCase):
             (10, 11, 13),
         )
         self.assertEqual(len(evidence["ordinary_wire_messages_sha256"]), 64)
+
+    def test_message_position_counts_final_preparation_instead_of_claims(self):
+        answer = self.trace["facts"].pop()
+        answer["seq"] = 4
+        source = [
+            dict(type="input_message_claimed", seq=1, turn_id="older"),
+            dict(type="input_message_claimed", seq=2, turn_id="older"),
+            dict(type="step_inputs_prepared", seq=3, turn_id="older", decision=dict(kind="enter", messages=[dict(kind="claimed", claim=dict(fact_seq=2, ordinal=0))])),
+            answer,
+        ]
+        self.trace["facts"] += source
+        plan = self.trace["facts"][0]["purpose"]["plan"]
+        plan["sources"][0].update(through_seq=4, facts_sha256=fact_chain(source))
+        plan["selections"] = [dict(turn="older", first=1, count=1)]
+        self.assertEqual(self.verify()[0]["verified_selected_answer"]["message_index"], 1)
 
     def test_unrelated_selection_and_forged_source_digest_cannot_prove_removal(self):
         plan = self.trace["facts"][0]["purpose"]["plan"]

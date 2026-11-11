@@ -77,8 +77,25 @@ its blocks without repeating content validation. Its wire representation remains
 the ordered input array. Media existence, captured-reference binding, execution
 authority and durable admission are independently validated by their owners.
 
-Recent listing returns descending visible Headers and an optional opaque `next`
-cursor. `has_more` means more scanning work exists, including hidden rows; clients
+Direct input uses `NextTurn`, `Steer` or non-waking `NextStep` delivery with the
+same content and attribution contract. `NextStep` accepts durable context without
+starting a Turn or resuming a paused inbox. It carries no new-Turn model, effort
+or sandbox overrides. The first accepted message publishes the Session, including
+non-waking input; an empty draft stays unpublished. Publication also fixes its
+Header and composition, so draft-only preset replacement ends at this boundary.
+A held message survives Host
+restart and is consumed at the next Step once separate waking work is admitted.
+Its native message identity owns retry and withdrawal, independently of any
+reusable presentation ID. Command-generated draft inputs retain their separate
+atomic command publication contract.
+
+Recent listing returns descending visible Session summaries and an optional opaque
+`next` cursor. Each summary carries its Header, `last_activity_ms`,
+`durable_fact_seq` and `durable_control_seq` from the same Store read snapshot.
+The shared Store row is exposed as `SessionSummary`; its `cursor()` returns the
+visible ordering position, not an authorized continuation. Visibility scanning
+may combine several Store pages, so a response does not promise one global cut.
+`has_more` means more scanning work exists, including hidden rows; clients
 continue with `next` even when a page is empty. Cursors never expose skipped
 identities. They belong to the actual principal and service generation, expire
 after five minutes, and retain at most 128 cuts globally and eight per principal.
@@ -88,7 +105,8 @@ refresh. Protection infrastructure errors propagate as unavailable; only known
 authorization refusals hide rows.
 `RecentSessionPage::validate` checks a decoded page against its requested cursor
 and limit: strict descending visible order, exact continuation presence and
-visible position, and a fresh successor token. Empty scan pages may continue.
+visible position, a fresh successor token, and activity no earlier than Header
+creation. Empty scan pages may continue.
 
 `SessionHandle::export` returns a finite read-only export stream. Its options,
 bounded UTF-8 chunks and completion validation are shared by every application;
@@ -221,7 +239,8 @@ Model enumeration belongs to AI's independent `LanguageModelsContract`.
 immutable acceptance body at a positive `accepted_control_seq` and requires
 that exact control record to be `MessageAccepted` for the requested message.
 It uses the existing Store control log, without a second body index or replay
-subscription. A stale or mismatched identity is not a neighboring record.
+subscription. A stale or mismatched identity is not a neighboring record;
+claiming or withdrawing the message does not change its acceptance body.
 
 Attachment is a durable-data operation: it reads the Store Header and builds a
 handle without resolving the current preset generation, Language/Image route,
@@ -426,11 +445,14 @@ content at their normal owning boundary before dispatch. ACP retains request
 cancellation and does not expose queue editing. The `:steer` command continues to
 submit new input with its existing idle fallback.
 
-`SessionService::read_header` reads one durable Store Header by SessionId without
-attaching, creating a handle, touching activity or loading transcript. Unpublished
-drafts are absent. The authenticated `session/read-header` v1 operation exposes
-the same read and validates the echoed identity; narrowed Session contribution
-clients do not gain this deployment-wide operation.
+`SessionService::read_summary` reads one durable Session's Header, activity time
+and Fact/control watermarks from one Store metadata snapshot, without attaching,
+creating a handle, touching activity or loading transcript. It returns the same
+`SessionSummary` used by recent listings. Unpublished drafts and retired Sessions
+are absent. The authenticated `session/read-summary` v1 operation validates the
+echoed identity and activity timestamp; narrowed Session contribution clients
+do not gain this deployment-wide operation. Each call reads a fresh snapshot
+under the caller's current protection and execution-location authority.
 
 Every Session transport implements queue mutation and receipt lookup explicitly;
 these are required SessionHandle methods, without a runtime unsupported fallback.

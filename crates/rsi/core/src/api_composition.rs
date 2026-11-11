@@ -27,6 +27,7 @@ pub(crate) fn register(
     builder.register_local_contract::<DeviceAdministrationContract>()?;
     builder.register_local_contract::<DeviceAuthenticationContract>()?;
     builder.register_local_contract::<LocalBrowserAdministrationContract>()?;
+    builder.register_local_contract::<rsi_api_http::BrowserOwnerContract>()?;
     builder.register_local_contract::<rsi_ui::UiContract>()?;
     builder.register_local_contract::<rsi_ui_api::UiTargetBinderContract>()?;
     builder.register_linked(

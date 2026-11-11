@@ -1,5 +1,9 @@
 # rsi-workspace-review-api
 
+Review scopes use `WorkspaceKey` for complete execution coordinates, independently
+of the current Workspace registration identity. The owner resolves and authorizes
+the current registration before reviewing its source.
+
 Authenticated clients list interval summaries for one exact native or observed
 conversation in a registered workspace, then read one file diff from that interval.
 The owner reauthorizes workspace and source for the actual API origin on every

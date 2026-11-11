@@ -1,5 +1,4 @@
 use super::*;
-use rsi_agent_store_protocol::MailboxRead;
 
 async fn ready_fixture(store: &SqliteStore) -> SessionId {
     let id = seed_session(store, "ready-metadata").await;
@@ -46,104 +45,21 @@ async fn ready_fixture(store: &SqliteStore) -> SessionId {
 }
 
 #[tokio::test]
-async fn schema_44_discards_only_the_message_copy_and_reads_canonical_bodies_after_reopen() {
-    let root = private_tempdir();
-    let store = SqliteStore::open(root.path()).unwrap();
-    let id = ready_fixture(&store).await;
-    let before = store
-        .read_agent_mailbox(&id, MailboxRead::All)
-        .await
-        .unwrap();
-    drop(store);
-    let mut db = Connection::open(root.path().join("sessions.sqlite3")).unwrap();
-    let controls = |db: &Connection| -> Vec<String> {
-        db.prepare("SELECT control_json FROM agent_controls ORDER BY session_id, seq")
-            .unwrap()
-            .query_map([], |row| row.get(0))
-            .unwrap()
-            .map(|row| row.unwrap())
-            .collect()
-    };
-    let canonical = controls(&db);
-    let columns: Vec<String> = db
-        .prepare("SELECT name FROM pragma_table_info('agent_messages')")
-        .unwrap()
-        .query_map([], |row| row.get(0))
-        .unwrap()
-        .map(|row| row.unwrap())
-        .collect();
-    let old_sql = EXPECTED_TABLES
-        .iter()
-        .find(|(name, _)| *name == "agent_messages")
-        .unwrap()
-        .1
-        .replace(
-            "message_source TEXT NOT NULL,",
-            "message_source TEXT NOT NULL,\n            message_json TEXT NOT NULL,",
-        );
-    let transaction = db.transaction().unwrap();
-    transaction
-        .execute_batch("ALTER TABLE agent_messages RENAME TO current_messages")
-        .unwrap();
-    transaction.execute_batch(&old_sql).unwrap();
-    transaction.execute_batch(&format!(
-        "INSERT INTO agent_messages ({},message_json) SELECT {},json_extract(c.control_json,'$.message') \
-         FROM current_messages AS m JOIN agent_controls AS c ON c.session_id=m.session_id AND c.seq=m.accepted_control_seq; \
-         DROP TABLE current_messages",
-        columns.join(","), columns.iter().map(|name| format!("m.{name}")).collect::<Vec<_>>().join(",")
-    )).unwrap();
-    for (_, sql) in EXPECTED_INDEXES {
-        if sql.contains("ON agent_messages") {
-            transaction.execute_batch(sql).unwrap();
-        }
+async fn previous_body_encodings_are_refused_without_touching_the_database() {
+    for version in [44, 45, 46] {
+        let root = private_tempdir();
+        let store = SqliteStore::open(root.path()).unwrap();
+        ready_fixture(&store).await;
+        drop(store);
+        let path = root.path().join("sessions.sqlite3");
+        let db = Connection::open(&path).unwrap();
+        db.pragma_update(None, "user_version", version).unwrap();
+        drop(db);
+        let before = std::fs::read(&path).unwrap();
+        assert!(matches!(SqliteStore::open(root.path()),
+            Err(StoreError::SchemaMismatch { expected: AGENT_STORE_SCHEMA_VERSION, actual }) if actual == version));
+        assert_eq!(std::fs::read(&path).unwrap(), before);
     }
-    transaction.pragma_update(None, "user_version", 44).unwrap();
-    transaction.commit().unwrap();
-    drop(db);
-    let store = SqliteStore::open(root.path()).unwrap();
-    assert_eq!(
-        store
-            .read_agent_mailbox(&id, MailboxRead::All)
-            .await
-            .unwrap(),
-        before
-    );
-    for row in &before.pending {
-        assert_eq!(
-            store
-                .read_agent_message(&id, &row.message.message_id)
-                .await
-                .unwrap(),
-            Some(row.clone())
-        );
-    }
-    let db = Connection::open(root.path().join("sessions.sqlite3")).unwrap();
-    assert_eq!(controls(&db), canonical);
-    assert_eq!(
-        pragma_user_version(&db).unwrap(),
-        AGENT_STORE_SCHEMA_VERSION
-    );
-    validate_schema_shape(&db).unwrap();
-    assert_eq!(
-        db.query_row(
-            "SELECT count(*) FROM pragma_table_info('agent_messages') WHERE name='message_json'",
-            [],
-            |row| row.get::<_, i64>(0)
-        )
-        .unwrap(),
-        0
-    );
-    drop(db);
-    drop(store);
-    SqliteStore::verify(root.path()).unwrap();
-    let reopened = SqliteStore::open(root.path()).unwrap();
-    assert_eq!(
-        reopened
-            .read_agent_mailbox(&id, MailboxRead::All)
-            .await
-            .unwrap(),
-        before
-    );
 }
 
 #[tokio::test]
@@ -154,15 +70,16 @@ async fn indexed_message_reads_join_once_and_reject_a_missing_canonical_acceptan
     let root = private_tempdir();
     let store = SqliteStore::open(root.path()).unwrap();
     let id = ready_fixture(&store).await;
-    let db = Connection::open(root.path().join("sessions.sqlite3")).unwrap();
+    let mut db = Connection::open(root.path().join("sessions.sqlite3")).unwrap();
     db.trace_v2(
         TraceEventCodes::SQLITE_TRACE_STMT,
-        Some(|event| {
+        Some(|event: rusqlite::trace::TraceEvent<'_>| {
             if matches!(event, TraceEvent::Stmt(..)) {
                 READS.fetch_add(1, Ordering::Relaxed);
             }
         }),
-    );
+    )
+    .unwrap();
     let message = MessageId::new("message-1").unwrap();
     READS.store(0, Ordering::Relaxed);
     assert!(
@@ -171,7 +88,11 @@ async fn indexed_message_reads_join_once_and_reject_a_missing_canonical_acceptan
             .is_some()
     );
     assert_eq!(READS.load(Ordering::Relaxed), 1);
-    db.trace_v2(TraceEventCodes::empty(), None);
+    db.trace_v2(
+        TraceEventCodes::empty(),
+        None::<fn(rusqlite::trace::TraceEvent<'_>)>,
+    )
+    .unwrap();
     db.execute_batch("PRAGMA foreign_keys=OFF; DELETE FROM agent_controls WHERE seq=1")
         .unwrap();
     assert!(matches!(

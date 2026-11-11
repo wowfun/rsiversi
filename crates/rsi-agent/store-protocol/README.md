@@ -1,5 +1,15 @@
 # rsi-agent-store-protocol
 
+Complete order membership includes immutable creation time and current activity
+from the same Store snapshot. Shared Workspace account order uses creation time;
+activity-based views retain the separate activity value. Neither requires loading
+transcript bodies or a second timestamp record.
+
+`session_summary` reads one durable Session's Header, activity timestamp and
+Fact/control watermarks from one metadata snapshot. It returns the same
+`StoreRecentSession` value used by recent listings, without loading transcript
+or creating runtime activity. A missing or retired Session is not found.
+
 A domain-state read can select one domain ID. It returns the same watermarks
 and canonical state as filtering the complete page at that cut. A missing
 domain yields an empty page. Readers can request the stored codec version by
@@ -27,6 +37,12 @@ exclude a paused Session without deleting its candidate messages. Mailbox and
 inspection snapshots expose this state at the same durable cut as their
 contents. Promotion and queue editing preserve it. The Store does not decide
 which user or Agent action requests a pause or resume; Kernel owns that policy.
+
+`read_agent_mailbox_summary` also returns the source kind of the first pending
+next-Step message in acceptance order, or none when that selection is empty.
+It shares the summary's Fact/control cut and uses indexed metadata after ordinary
+Session validation. Observing whether an Agent wait can resume does not load
+message bodies or consume the queue; Kernel maps the source kind to the wake cause.
 
 Each control record retains the immutable Fact watermark at the end of its
 own atomic append. `StoreControlPage.fact_cursors` pairs those watermarks with
@@ -272,12 +288,40 @@ See [the Agent architecture](../docs/architecture.md).
 they do not scan history or establish a historical validation proof.
 `validate_session` explicitly checks the mechanical durable session invariants.
 Execution, recovery, lineage, and control decisions require that proof before
-using a cold Header. Fact, control, turn, outcome, and mutation boundaries retain
-their validation requirements. A backend may cache successful proofs within
-its exclusive writer lifetime; metadata reads neither fill nor touch that cache.
+using a cold Header. Callers retain `prepare_session` across canonical reads
+used for these decisions. Turn, outcome, mailbox, domain, lineage, checkpoint,
+and mutation boundaries establish the proof themselves.
+
+Canonical Fact pages (forward, backward, window and suffix) and control pages
+validate only their selected interval in one read snapshot: framing and byte
+bounds, typed records, physical/logical coordinate agreement, contiguous progress,
+and read-time watermarks. Control anchors remain nondecreasing across the
+preceding cursor and within the page. These reads neither inspect unrelated history or derived indexes nor
+establish a Session proof. A malformed selected record fails; unrelated dormant
+corruption is left to explicit validation, indexed decisions and offline audit.
+The suffix digest is read-time metadata, not a recomputed prefix proof.
+A backend may cache successful proofs within its exclusive writer lifetime;
+metadata and canonical page reads neither fill nor touch that cache.
 
 Agent control commits compare both Fact and control watermarks and atomically
-touch at most three sessions. Within each Session append, capacity and reservation
+touch at most three sessions. A `MessageClaimed` control supplies its input Fact
+from the canonical accepted message when the caller does not supply that Fact.
+The Kernel chooses the message, Turn, Step, timestamp and exact Fact sequence;
+Store only reconstructs the body and validates its pending state. Explicit Facts
+and these references must form one contiguous suffix, with a unique claim per
+message and Fact. The batch byte budget counts supplied payloads and references,
+not already-durable bodies. SQLite resolves and hashes one accepted body at a
+time inside the same transaction; it never collects the expanded claim batch.
+Logical Fact readers retain their existing byte bounds and representation.
+
+`read_mailbox_claim` captures the complete selected identity list, mailbox flags,
+Fact/control tails and optional exact waking message in one snapshot. Without a
+waking identity it selects next-Step messages; with one it also selects that
+message and same-command siblings. This metadata selection has the mailbox's
+cardinality bound, independently of the payload page bound. Kernel orders all
+selected next-Step inputs before waking inputs and claims them atomically.
+
+Within each Session append, capacity and reservation
 checks observe controls in sequence order, including slots released or consumed
 earlier in that append. Program graph counterparts are checked after all paired
 appends are installed. The Store maintains mechanical indexes with
@@ -287,18 +331,18 @@ a byte-bounded prefix plus the exact pending-mailbox count and direct message
 status, and the one currently active activation per session. A lightweight
 mailbox summary returns the pending count, the bounded ordered identities of
 pending promotable next-Step messages, and Fact/control tails for capacity and
-terminal-promotion decisions. Mailbox reads may select all pending messages,
-all pending messages plus one exact message status, or only next-Step messages.
-Selection applies to the count and ordered rows before the byte limit and
-payload decoding. Every read uses one Store snapshot:
+terminal-promotion decisions. Payload inspection reads all pending messages,
+optionally with one exact message status. Claim metadata selection separately
+reports whether any ordinary next-Turn input is pending, so continuation
+priority needs no unrelated message bodies. Every read uses one Store snapshot:
 it never materializes the valid 64-message worst case at once, returns the Fact
 and control tails observed by that snapshot, and lets callers reserve its fixed
 page bound before I/O. Message admission
 and status reads use that index rather than replaying an unbounded control
 history. Each returned entry carries the exact encoded message length computed
 by the Store while it reads or indexes the payload. The mailbox page takes at
-most half the atomic batch byte budget, leaving room for the claim envelope
-and controls. Kernel consumes the ordered page directly. A descendant
+most half the atomic batch byte budget. This payload inspection page does not
+limit the metadata selection used for claiming. A descendant
 status snapshot reads one subtree's immutable membership, parent/path/task,
 control watermarks, the last settlement control sequence, and open-Turn,
 active-activation and waking-message flags
@@ -357,9 +401,11 @@ produce an empty page. The recent-session cursor is the exact descending
 contract and is not reused for presentation. Startup recovery uses the
 open-session index, so closed historical sessions do not impose Store calls or
 decoding work. No Store method materializes an unbounded durable catalog.
-Each recent-session row carries its validated bounded Header from the same Store
-snapshot, so presentation does not fan one index page into hundreds of later
-Header reads.
+Each recent-session row carries its validated bounded Header, last qualifying
+activity time and both durable watermarks from the same Store read snapshot.
+Providers validate these rows at the Store boundary. Consumers can render a
+catalog or compare log revisions without later Header or activity-summary reads.
+The row contains no duplicate identity or execution coordinates beside its Header.
 
 Context checkpoints are an optional cache, not canonical session state. The
 Store preserves at most 64 MiB of opaque Context-owned bytes with a header

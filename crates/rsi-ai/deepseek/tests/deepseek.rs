@@ -136,7 +136,6 @@ async fn responses_rejects_media_and_unknown_custom_tools_before_dispatch() {
             .with_freeform(
                 FreeformToolDefinition::new(FreeformFormat::Lark, "start: /.+/").unwrap(),
             )
-            .unwrap()
     };
     let base = LanguageRequest::new(vec![Message::user_text("hello").unwrap()]).unwrap();
     let requests = [

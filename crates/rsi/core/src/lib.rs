@@ -60,6 +60,8 @@ mod acp_configuration;
 mod acp_inputs;
 #[cfg(any(target_os = "linux", windows))]
 mod acp_owner;
+mod coding_inputs;
+pub use coding_inputs::{capture_standard_git, capture_standard_shell};
 mod composition;
 mod import;
 mod integration_source;
@@ -151,7 +153,7 @@ pub use profiles::{HostLeafEdit, ProfileEdit, ProfileEditError, ProfileEditRecei
 pub use rsi_agent_presets::{AgentPresetSource, AgentPresetTrust};
 pub use rsi_apply_patch::maybe_run_apply_patch_helper;
 pub use rsi_session_protocol;
-pub use rsi_shell_bash::scrub_child_environment;
+pub use rsi_shell_native::scrub_child_environment;
 
 use profile_owner::ProfileOwner;
 use rsi_host::HostPaths;
@@ -560,47 +562,6 @@ fn required_local<C: rsi_meta::LocalContract>(
         .ok_or_else(|| RsiError::Boot(format!("{name} is unavailable")))
 }
 
-/// Captures the canonical platform Bash selected by the standard product launcher.
-/// Windows uses the Git for Windows installer registry; Unix uses `/bin/bash`.
-pub fn capture_standard_bash() -> Result<PathBuf> {
-    #[cfg(windows)]
-    let path = {
-        use winreg::{
-            RegKey,
-            enums::{HKEY_CURRENT_USER, HKEY_LOCAL_MACHINE},
-        };
-        let install = [HKEY_CURRENT_USER, HKEY_LOCAL_MACHINE]
-            .into_iter()
-            .find_map(|hive| {
-                RegKey::predef(hive)
-                    .open_subkey("SOFTWARE\\GitForWindows")
-                    .ok()
-                    .and_then(|key| key.get_value::<String, _>("InstallPath").ok())
-            })
-            .ok_or_else(|| {
-                RsiError::Boot(
-                    "native Windows coding requires an installed Git for Windows Bash".into(),
-                )
-            })?;
-        PathBuf::from(install).join("bin/bash.exe")
-    };
-    #[cfg(not(windows))]
-    let path = PathBuf::from("/bin/bash");
-    canonical_standard_bash(&path)
-}
-
-fn canonical_standard_bash(path: &std::path::Path) -> Result<PathBuf> {
-    if !path.is_absolute() {
-        return Err(RsiError::Boot("standard Bash path must be absolute".into()));
-    }
-    std::fs::canonicalize(path).map_err(|error| {
-        RsiError::Boot(format!(
-            "standard Bash {} is unavailable: {error}",
-            path.display()
-        ))
-    })
-}
-
 /// Captures the Windows Profile Known Folder, independent of HOME.
 /// On Unix, missing, empty and relative HOME values skip this optional source.
 pub fn capture_standard_home() -> Result<Option<PathBuf>> {
@@ -666,10 +627,10 @@ mod tests {
     struct StartupSession;
     #[async_trait::async_trait]
     impl rsi_session_protocol::SessionService for StartupSession {
-        async fn read_header(
+        async fn read_summary(
             &self,
             _: &rsi_agent_session_protocol::SessionId,
-        ) -> rsi_session_protocol::Result<rsi_agent_session_protocol::SessionHeader> {
+        ) -> rsi_session_protocol::Result<rsi_session_protocol::SessionSummary> {
             panic!("startup does not read Session data")
         }
         async fn create(
@@ -835,38 +796,6 @@ mod tests {
         assert_eq!(
             personal_home(Some("/home/example".into())),
             Some(PathBuf::from("/home/example"))
-        );
-    }
-
-    #[cfg(windows)]
-    #[test]
-    #[ignore = "opt-in installed Git for Windows lookup and subprocess; no user state is written"]
-    fn windows_standard_bash_runs_the_installed_native_executable() {
-        let bash = capture_standard_bash().unwrap();
-        assert!(bash.is_absolute());
-        assert_eq!(bash.file_name().unwrap(), "bash.exe");
-        let output = std::process::Command::new(bash)
-            .arg("--version")
-            .output()
-            .unwrap();
-        assert!(output.status.success());
-        assert!(String::from_utf8_lossy(&output.stdout).contains("GNU bash"));
-    }
-
-    #[test]
-    fn standard_bash_resolution_rejects_cwd_relative_installations() {
-        assert!(
-            canonical_standard_bash(std::path::Path::new("."))
-                .unwrap_err()
-                .to_string()
-                .contains("must be absolute")
-        );
-        let temp = tempfile::tempdir().unwrap();
-        let executable = temp.path().join("bash-fixture");
-        std::fs::write(&executable, b"fixture").unwrap();
-        assert_eq!(
-            canonical_standard_bash(&executable).unwrap(),
-            executable.canonicalize().unwrap()
         );
     }
 

@@ -86,7 +86,9 @@ window.mountCleanup=async()=>{
 window.mountCleanupFlood=async()=>{
  await import('./styles.css');const shell=(await import('./src/shell.module.css')).default;
  window.cleanupCalls=0;
- const owner=new ResourceOwner(async()=>{window.cleanupCalls++;throw Error('Input is busy. '+ '原始资源仍等待清理。'.repeat(8))});
+ let pendingRetry;
+ window.holdCleanupRetry=()=>{pendingRetry=new Promise(resolve=>{window.settleCleanupRetry=()=>{pendingRetry=undefined;resolve()}})};
+ const owner=new ResourceOwner(async()=>{window.cleanupCalls++;if(pendingRetry)await pendingRetry;throw Error('Input is busy. '+ '原始资源仍等待清理。'.repeat(8))});
  for(let i=0;i<64;i++)owner.reservePanel('session-'+Math.floor(i/16),{view:String(i+1),open_revision:'2'},'Workspace files '+(i+1)).commit();
  await new Promise(resolve=>setTimeout(resolve,0));
  installActions({resources:()=>owner});source.set({surfaces:{},application_surfaces:[]});
@@ -216,14 +218,14 @@ window.mountExtension=async(action,seed)=>{
 if(new URLSearchParams(location.search).has('cleanup'))await window.mountCleanupFlood();
 `;
 const server=await createServer({configFile:false,root,cacheDir:join(root,'node_modules/.vite-review-fixture'),optimizeDeps:{entries:[],noDiscovery:true,include:['react','react-dom','react-dom/client','react/jsx-runtime','react/jsx-dev-runtime','use-sync-external-store/shim','use-sync-external-store/shim/with-selector','clsx','@xterm/xterm','@xterm/addon-fit']},esbuild:{jsx:'automatic'},server:{host:'127.0.0.1',port:0},plugins:[{name:'review-fixture',resolveId(id){if(id==='/review-test.tsx')return entry},load(id){if(id===entry)return code},configureServer(server){server.middlewares.use('/review.html',(_req,res)=>{res.setHeader('Content-Type','text/html');res.end('<!doctype html><title>Review lifecycle</title><script type="module" src="/review-test.tsx"></script>')})}}]});
-let browser;const errors=[],checks=[];
+let browser,page;const errors=[],checks=[];
 if(process.env.RSI_REVIEW_PREVIEW){
  await server.listen();console.log(`http://127.0.0.1:${server.httpServer.address().port}/review.html?cleanup=1`);
  await new Promise(resolve=>{process.once('SIGINT',resolve);process.once('SIGTERM',resolve)});await server.close();
 }else{
 try{
  await mkdir(report,{recursive:true});await server.listen();browser=await chromium.launch();
- const page=await browser.newPage();page.on('pageerror',e=>errors.push(e.message));page.on('console',event=>{if(event.type()==='error')errors.push(event.text())});await page.goto(`http://127.0.0.1:${server.httpServer.address().port}/review.html`);await page.waitForFunction(()=>window.lifecycle);
+ page=await browser.newPage();page.on('pageerror',e=>errors.push(e.message));page.on('console',event=>{if(event.type()==='error')errors.push(event.text())});await page.goto(`http://127.0.0.1:${server.httpServer.address().port}/review.html`);await page.waitForFunction(()=>window.lifecycle);
  checks.push({settingsEditor:await page.evaluate(()=>window.settingsChecks()),settingsDrafts:await page.evaluate(()=>window.settingsDraftChecks())});
  for(const mode of ['write','read','write-error','reload']){
   const presentation=await page.evaluate(mode=>window.stalePresentationReply(mode),mode);
@@ -440,11 +442,11 @@ try{
  for(const width of [1440,390]){
   await page.setViewportSize({width,height:844});
   await flood.focus();await page.keyboard.press('Home');
+  await page.waitForFunction(()=>document.querySelector('.resource-cleanup-notice').scrollTop===0);
   const geometry=await page.evaluate(()=>{const alert=document.querySelector('.resource-cleanup-notice'),main=document.querySelector('#workbench'),composer=document.querySelector('textarea');return {height:alert.clientHeight,scroll:alert.scrollHeight,main:main.clientHeight,bottom:composer.getBoundingClientRect().bottom,width:document.documentElement.scrollWidth}});
   assert(geometry.height<=844*.3+1&&geometry.scroll>geometry.height&&geometry.main>300&&geometry.bottom<=844&&geometry.width<=width,JSON.stringify(geometry));
   await page.screenshot({path:join(report,`cleanup-${width}.png`)});
-  const last=flood.getByRole('button',{name:/^Retry cleanup for /}).last();
-  await page.waitForFunction(()=>![...document.querySelectorAll('.resource-cleanup-notice button')].at(-1)?.disabled);
+  const last=flood.getByRole('button',{name:'Retry cleanup for Workspace files 64 (panel:64:2)',exact:true});
   await last.focus();
   await page.waitForFunction(()=>{
    const alert=document.querySelector('.resource-cleanup-notice'),last=[...alert.querySelectorAll('button')].at(-1);
@@ -452,14 +454,23 @@ try{
    const button=last.getBoundingClientRect(),viewport=alert.getBoundingClientRect();
    return button.top>=viewport.top&&button.bottom<=viewport.bottom;
   });
-  const focused=await last.evaluate(node=>{const button=node.getBoundingClientRect(),alert=node.closest('[role=alert]').getBoundingClientRect();return {top:button.top,bottom:button.bottom,alertTop:alert.top,alertBottom:alert.bottom}});
-  assert(focused.top>=focused.alertTop&&focused.bottom<=focused.alertBottom,JSON.stringify(focused));
   await page.screenshot({path:join(report,`cleanup-last-${width}.png`)});
-  await page.keyboard.press('Enter');await page.waitForFunction(()=>window.cleanupCalls>64);
+  await page.evaluate(()=>window.holdCleanupRetry());
+  const calls=await page.evaluate(()=>window.cleanupCalls);
+  await page.keyboard.press('Enter');
+  await page.waitForFunction(before=>window.cleanupCalls===before+1&&document.querySelector('.resource-cleanup-notice button[aria-disabled="true"]'),calls);
+  assert(await last.evaluate(node=>node===document.activeElement),'pending cleanup retains keyboard focus');
+  await page.keyboard.press('Enter');
+  assert.equal(await page.evaluate(()=>window.cleanupCalls),calls+1,'pending cleanup activation does not dispatch twice');
+  await page.screenshot({path:join(report,`cleanup-pending-${width}.png`)});
+  await page.evaluate(()=>window.settleCleanupRetry());
+  await page.waitForFunction(()=>[...document.querySelectorAll('.resource-cleanup-notice button')].every(button=>button.getAttribute('aria-disabled')!=='true'));
+  assert(await last.evaluate(node=>node===document.activeElement),'retry settlement retains the focused resource control');
+  await page.screenshot({path:join(report,`cleanup-settled-${width}.png`)});
   checks.push({boundedCleanup:{width,...geometry}});
  }
  await page.evaluate(()=>window.unmountCleanupFlood());
  assert.deepEqual(errors,[]);await writeFile(join(report,'result.json'),JSON.stringify({checks,errors},null,2));
-}catch(error){await writeFile(join(report,'failure.json'),JSON.stringify({error:String(error),errors,checks},null,2));throw error;}finally{await browser?.close();await server.close()}
+}catch(error){if(page)await Promise.allSettled([page.screenshot({path:join(report,'failure.png')}),page.content().then(html=>writeFile(join(report,'failure.html'),html))]);await writeFile(join(report,'failure.json'),JSON.stringify({error:String(error),errors,checks},null,2));throw error;}finally{await browser?.close();await server.close()}
 
 }

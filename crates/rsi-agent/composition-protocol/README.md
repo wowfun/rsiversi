@@ -1,5 +1,51 @@
 # rsi-agent-composition-protocol
 
+## Native prompt preparation
+
+An optional `PromptAssembler` is captured with the immutable composition generation
+and its exact scope. Its borrowed input contains the Header, actual model selection,
+ordered native guidance, admitted Tool names and the pre-restriction Tool-name
+universe. Schema payloads stay with the Tool/model-options owner; assembly needs no
+schema copy. Providers run outside framework locks with request cancellation. The result
+contains resolved sections, ordinary runtime-context inputs and a presentation order
+over admitted names. It has no domain writer, Tool executor or new Tool authority.
+Unknown or duplicate presentation names fail before publication; execution selection
+continues to use the independently intersected Tool subset. Provider retries retain
+the same preparation and definitions, including their model-facing order.
+
+The native assembler and an explicitly configured application input source are
+distinct request owners. Capturing an application catalog selects that application's
+preparation and append-to-Header prompt; native assembly is not invoked around it.
+An extension-Agent preset selects its existing BeforeStep owner and omits the native
+assembler. Owner selection never depends on listener counts, package hashes, empty
+text or connection failure. An earlier native rejection skips new assembly work and
+preserves the stage's collected outputs and canonical rejection receipt.
+
+`StepPrompt` records resolved ownership: `Assembled` supplies the entire system
+prompt; `AppendToHeader` supplies ordered sections after Header/persona. The owning
+[Session protocol](../session-protocol/README.md) defines durable update semantics.
+No registry, variable map or second transcript is persisted.
+
+Native Agent plugins register `ToolAround` contributions in the same owned,
+immutable catalog as their other callbacks. They await a consuming
+`ToolContinuation`: borrowed call arguments and execution authority are readable,
+but the admitted body cannot be invoked twice or replaced with different arguments.
+Callbacks enter in frozen contribution order and unwind in reverse order. A
+callback may return without invoking the body. The entire chain runs inside the
+Tool owner's cancellation, timeout, panic and retained-result scope, after policy,
+human approval and durable start. It adds no process calls or callback tasks.
+The captured chain retains the generation owner until it settles, even if the
+requesting waiter drops its composition pin.
+An empty chain does not allocate a wrapper.
+
+The native chain wraps the request application's existing execution continuation,
+if present; application-provided Tool bodies retain their own JS pipeline. This
+is an explicit native/application boundary, not a merged Cordis listener order.
+Porting a JS listener with mixed ordering dependencies requires preserving that
+position separately. Withdrawal cannot alter an admitted composition pin; a new
+generation observes removal or replacement. Recovery observes the final retained
+result and never reruns either native hooks or the application continuation.
+
 A request Tool capture can supply around middleware for native preset Tools.
 The capture's own added Tools already execute in the application. A native
 call keeps its existing preparation, registration, approval and retained-result
@@ -30,7 +76,9 @@ A `RequestToolSource` captures a supplemental sealed catalog for a single
 provider request series. The generation pin continues to own preset tools.
 Capture receives the resolved model and reasoning effort for that series, after
 the executing claim's selection is resolved and before preparation callbacks.
-The same selection and catalog survive provider retries; a later request series
+The runtime is the only retained owner of captured tool schemas. Its registration
+view contains names and identities, without cloning the definitions into another
+catalog. The same selection and catalog survive provider retries; a later request series
 resolves both again. A source must not infer that selection from the Header or a
 fresh Session read, which may describe a different choice.
 The captured catalog also carries the application's rendered current system

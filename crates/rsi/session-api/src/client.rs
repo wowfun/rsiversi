@@ -321,23 +321,25 @@ impl SessionService for SessionClient {
         Ok(result)
     }
 
-    async fn read_header(
+    async fn read_summary(
         &self,
         session_id: &SessionId,
-    ) -> rsi_session_protocol::Result<SessionHeader> {
-        let header: SessionHeader = self
+    ) -> rsi_session_protocol::Result<rsi_session_protocol::SessionSummary> {
+        let summary: rsi_session_protocol::SessionSummary = self
             .state
             .call(
-                Operation::ReadHeader,
+                Operation::ReadSummary,
                 &wire::Attach {
                     session_id: session_id.clone(),
                 },
             )
             .await?;
-        if header.session_id() != session_id {
-            return Err(malformed(Operation::ReadHeader));
+        if summary.header.session_id() != session_id
+            || summary.last_activity_ms < summary.header.created_at_ms()
+        {
+            return Err(malformed(Operation::ReadSummary));
         }
-        Ok(header)
+        Ok(summary)
     }
     async fn create(
         &self,

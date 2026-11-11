@@ -22,6 +22,44 @@ function certificateOrPrivateDirectory(program,args,options) {
   return {status:0,stdout:'',stderr:''};
 }
 
+test("deterministic provider keeps user routing and Tool continuation separate from appended contexts", async t => {
+  const report = await mkdtemp(join(tmpdir(), 'rsi-provider-round-'));
+  const finished = new Error('provider assertions complete');
+  try {
+    t.mock.method(cp, 'spawnSync', certificateOrPrivateDirectory);
+    syncBuiltinESMExports();
+    await assert.rejects(startService({binary:'unused', assets:report, report,
+      async configure({provider}) {
+        const user = content => ({role:'user', content});
+        const request = async messages => {
+          const response = await fetch(`${provider.origin}/v1/chat/completions`, {
+            method:'POST', body:JSON.stringify({model:'fixture-model', messages}),
+          });
+          assert.equal(response.status, 200);
+          const first = (await response.text()).split('\n').find(line => line.startsWith('data: '));
+          return JSON.parse(first.slice(6)).choices[0].delta;
+        };
+        const input = user('WORKFLOW_FIXTURE_COMPLETE');
+        const contexts = [user('Current time sampled before this model request: fixture'), user('Current runtime context: fixture')];
+        const initial = await request([input, ...contexts]);
+        assert.equal(initial.tool_calls[0].function.name, 'run_workflow');
+        assert.match(JSON.parse(initial.tool_calls[0].function.arguments).script, /Collect evidence/);
+        const next = await request([user('WORKFLOW_FIXTURE_CANCEL'), {role:'assistant', content:'Earlier turn complete'}, input, ...contexts]);
+        assert.match(JSON.parse(next.tool_calls[0].function.arguments).script, /Collect evidence/);
+        const continuation = await request([input, ...contexts, {role:'assistant', tool_calls:initial.tool_calls}, {role:'tool', content:'{}'}, user('Refreshed context')]);
+        assert.equal(continuation.content, 'The tool result has been reviewed. The conversation can continue.');
+        const child = await request([input, {role:'assistant', content:'Earlier turn complete'}, user('WORKFLOW_CHILD_LEFT'), ...contexts]);
+        assert.equal(child.tool_calls[0].function.name, 'report_result');
+        assert.deepEqual(JSON.parse(child.tool_calls[0].function.arguments), {n:19});
+        throw finished;
+      },
+    }), error => error === finished);
+  } finally {
+    t.mock.restoreAll(); syncBuiltinESMExports();
+    await rm(report, {recursive:true, force:true});
+  }
+});
+
 test("embedded browser owns its Service and invokes device Profiles directly", async t => {
   const report = await mkdtemp(join(tmpdir(), "rsi-embedded-adapter-"));
   let service;

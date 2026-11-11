@@ -40,8 +40,14 @@ impl WorkspaceOrderSeed {
                     "invalid workspace order membership".into(),
                 ));
             }
+            let mut coordinates = std::collections::BTreeSet::new();
             for record in records {
                 record.validate()?;
+                if !coordinates.insert(&record.coordinates) {
+                    return Err(WorkspaceError::Corrupt(
+                        "workspace membership repeats coordinates".into(),
+                    ));
+                }
             }
             if rsi_api_protocol::measure_json(self, 128 * 1024).is_err() {
                 return Err(WorkspaceError::Corrupt(

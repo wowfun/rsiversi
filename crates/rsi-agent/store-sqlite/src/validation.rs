@@ -40,35 +40,17 @@ pub(super) fn initialize_or_validate_schema(
         transaction.execute_batch(&schema).map_err(sql_error)?;
         transaction.commit().map_err(sql_error)?;
         version = AGENT_STORE_SCHEMA_VERSION;
-    } else if version != AGENT_STORE_SCHEMA_VERSION && version != 44 {
+    } else if version != AGENT_STORE_SCHEMA_VERSION {
         return Err(StoreError::SchemaMismatch {
             expected: AGENT_STORE_SCHEMA_VERSION,
             actual: version,
         });
     }
-    validate_version_shape(connection, version)?;
+    validate_schema_shape(connection)?;
     Ok(version)
 }
 
 pub(super) fn validate_schema_shape(connection: &Connection) -> Result<()> {
-    validate_version_shape(connection, AGENT_STORE_SCHEMA_VERSION)
-}
-
-/// The exclusive Store lease covers the exact schema-44 preflight and this transaction.
-pub(super) fn remove_mailbox_body_copy(connection: &mut Connection) -> Result<()> {
-    let transaction = connection
-        .transaction_with_behavior(TransactionBehavior::Immediate)
-        .map_err(sql_error)?;
-    transaction
-        .execute_batch("ALTER TABLE agent_messages DROP COLUMN message_json")
-        .map_err(sql_error)?;
-    transaction
-        .pragma_update(None, "user_version", AGENT_STORE_SCHEMA_VERSION)
-        .map_err(sql_error)?;
-    transaction.commit().map_err(sql_error)
-}
-
-fn validate_version_shape(connection: &Connection, version: u32) -> Result<()> {
     let expected = EXPECTED_TABLES
         .iter()
         .map(|(name, _)| (*name).to_owned())
@@ -80,16 +62,7 @@ fn validate_version_shape(connection: &Connection, version: u32) -> Result<()> {
         ));
     }
     for (table, current_sql) in EXPECTED_TABLES {
-        let previous;
-        let expected_sql = if version == 44 && table == "agent_messages" {
-            previous = current_sql.replace(
-                "message_source TEXT NOT NULL,",
-                "message_source TEXT NOT NULL,\n            message_json TEXT NOT NULL,",
-            );
-            previous.as_str()
-        } else {
-            current_sql
-        };
+        let expected_sql = current_sql;
         let observed_sql = connection
             .query_row(
                 "SELECT sql FROM sqlite_master WHERE type = 'table' AND name = ?1",
@@ -188,10 +161,12 @@ pub(super) fn validate_session_observed(
     session_id: &SessionId,
     observer: &mut impl CanonicalObserver,
 ) -> Result<ControlReplaySummary> {
-    let (header, durable_seq) = read_session_header_row(connection, session_id)?;
+    let (session, _) = read_session_header_source(connection, session_id)?;
+    let header = &session.header;
+    let durable_seq = session.durable_fact_seq;
     rsi_agent_store_protocol::validate_program_header(
         &super::program_graph::Graph(connection),
-        &header,
+        header,
     )
     .map_err(|error| StoreError::Corrupt(error.to_string()))?;
 
@@ -211,52 +186,9 @@ pub(super) fn validate_session_observed(
         ));
     }
 
-    let control_seq = connection
-        .query_row(
-            "SELECT control_seq FROM sessions WHERE session_id = ?1",
-            [session_id.as_str()],
-            |row| row.get::<_, i64>(0),
-        )
-        .map_err(sql_error)
-        .and_then(|value| decode_u64("control sequence", value))?;
-    let (control_count, maximum_control_sequence) = connection
-        .query_row(
-            "SELECT COUNT(*), COALESCE(MAX(seq), 0)
-             FROM agent_controls WHERE session_id = ?1",
-            [session_id.as_str()],
-            |row| Ok((row.get::<_, i64>(0)?, row.get::<_, i64>(1)?)),
-        )
-        .map_err(sql_error)?;
-    if decode_u64("session control count", control_count)? != control_seq
-        || decode_u64("session maximum control sequence", maximum_control_sequence)? != control_seq
-    {
-        return Err(StoreError::Corrupt(
-            "session control watermark differs from its contiguous control stream".into(),
-        ));
-    }
-
-    let invalid_anchor = connection
-        .query_row(
-            "SELECT EXISTS(SELECT 1 FROM (
-           SELECT fact_seq, LAG(fact_seq, 1, 0) OVER (ORDER BY seq) AS previous
-           FROM agent_controls WHERE session_id = ?1
-         ) WHERE fact_seq < previous OR fact_seq > ?2)",
-            params![
-                session_id.as_str(),
-                sqlite_u64("Fact watermark", durable_seq)?
-            ],
-            |row| row.get::<_, bool>(0),
-        )
-        .map_err(sql_error)?;
-    if invalid_anchor {
-        return Err(StoreError::Corrupt(
-            "control Fact anchors are inconsistent".into(),
-        ));
-    }
-
     validate_turn_index(connection, session_id)?;
-    validate_session_lineage(connection, &header)?;
-    validate_agent_indexes_observed(connection, &header, observer)
+    validate_session_lineage(connection, header)?;
+    validate_agent_indexes_observed(connection, &session, observer)
 }
 
 fn validate_session_lineage(connection: &Connection, header: &SessionHeader) -> Result<()> {
@@ -399,13 +331,14 @@ pub(super) fn read_session_header_row(
     connection: &Connection,
     session_id: &SessionId,
 ) -> Result<(SessionHeader, u64)> {
-    read_session_header_source(connection, session_id).map(|(header, seq, _)| (header, seq))
+    read_session_header_source(connection, session_id)
+        .map(|(row, _)| (row.header, row.durable_fact_seq))
 }
 
 pub(super) fn read_session_header_source(
     connection: &Connection,
     session_id: &SessionId,
-) -> Result<(SessionHeader, u64, String)> {
+) -> Result<(StoreRecentSession, String)> {
     #[cfg(test)]
     HEADER_READS.set(HEADER_READS.get() + 1);
     let row = connection
@@ -426,14 +359,14 @@ pub(super) fn read_session_header_source(
 pub(super) fn decode_header_projection(
     session_id: &SessionId,
     row: HeaderRow,
-) -> Result<(SessionHeader, u64)> {
-    decode_header_source(session_id, row).map(|(header, seq, _)| (header, seq))
+) -> Result<StoreRecentSession> {
+    decode_header_source(session_id, row).map(|(row, _)| row)
 }
 
 fn decode_header_source(
     session_id: &SessionId,
     row: HeaderRow,
-) -> Result<(SessionHeader, u64, String)> {
+) -> Result<(StoreRecentSession, String)> {
     let HeaderRow {
         created_at_ms,
         durable_seq,
@@ -446,7 +379,8 @@ fn decode_header_source(
         last_activity_ms,
     } = row;
     let durable_seq = decode_u64("durable sequence", durable_seq)?;
-    decode_u64("durable control sequence", control_seq)?;
+    let control_seq = decode_u64("durable control sequence", control_seq)?;
+    let last_activity_ms = decode_u64("activity timestamp", last_activity_ms)?;
     for (label, digest) in [
         ("Fact-prefix digest", fact_prefix_sha256),
         ("Control-prefix digest", control_prefix_sha256),
@@ -471,13 +405,21 @@ fn decode_header_source(
         ));
     }
     if super::activity::coordinates_key(header.coordinates())? != coordinates_key
-        || decode_u64("activity timestamp", last_activity_ms)? < header.created_at_ms()
+        || last_activity_ms < header.created_at_ms()
     {
         return Err(StoreError::Corrupt(
             "Session coordinate or activity projection differs from its Header".into(),
         ));
     }
-    Ok((header, durable_seq, encoded))
+    Ok((
+        StoreRecentSession {
+            header,
+            last_activity_ms,
+            durable_fact_seq: durable_seq,
+            durable_control_seq: control_seq,
+        },
+        encoded,
+    ))
 }
 
 pub(super) fn validate_turn_index(connection: &Connection, session_id: &SessionId) -> Result<()> {
@@ -698,13 +640,7 @@ impl MailboxProjection {
                     reason: MessageDiscardReason::Replaced,
                     control_seq: record.seq(),
                 };
-                if read_indexed_agent_message(connection, session_id, predecessor_id)?
-                    != predecessor
-                {
-                    return Err(StoreError::Corrupt(
-                        "queue predecessor projection differs".into(),
-                    ));
-                }
+                validate_indexed_message(connection, session_id, &predecessor)?;
             }
             AgentControlRecordBody::MessageAccepted {
                 message,
@@ -831,11 +767,7 @@ impl MailboxProjection {
             let expected = expected_messages
                 .remove(&(session_id.clone(), message_id.clone()))
                 .expect("validated closing message");
-            if read_indexed_agent_message(connection, session_id, message_id)? != expected {
-                return Err(StoreError::Corrupt(
-                    "mailbox index final projection differs from canonical controls".into(),
-                ));
-            }
+            validate_indexed_message(connection, session_id, &expected)?;
         }
         if expected_messages.len() > rsi_agent_session_protocol::MAXIMUM_PENDING_AGENT_MESSAGES {
             return Err(StoreError::Corrupt(
@@ -850,12 +782,8 @@ impl MailboxProjection {
             expected_messages,
         } = self;
 
-        for ((session_id, message_id), expected) in expected_messages {
-            if read_indexed_agent_message(connection, &session_id, &message_id)? != expected {
-                return Err(StoreError::Corrupt(
-                    "mailbox index final projection differs from canonical controls".into(),
-                ));
-            }
+        for ((session_id, _), expected) in expected_messages {
+            validate_indexed_message(connection, &session_id, &expected)?;
         }
         let indexed_messages = connection
             .query_row(
@@ -882,6 +810,73 @@ pub(super) fn read_indexed_agent_message(
     super::session_store::read_indexed_message(connection, session_id, message_id)?.ok_or_else(
         || StoreError::Corrupt("canonical mailbox control has no indexed message".into()),
     )
+}
+
+pub(super) fn validate_indexed_message(
+    connection: &Connection,
+    session_id: &SessionId,
+    expected: &StoreAgentMessage,
+) -> Result<()> {
+    if expected.encoded_message_bytes > MAXIMUM_STORE_MAILBOX_PAGE_BYTES {
+        return Err(StoreError::Corrupt(
+            "Agent message exceeds mailbox byte capacity".into(),
+        ));
+    }
+    let (matches, length, state) = connection
+        .query_row(
+            "SELECT message_source = ?3 AND root_session_id = ?4 AND target = ?5
+                AND wake_required = ?6 AND accepted_control_seq = ?7
+                AND state = ?8 AND delivery = ?9 AND bound_turn_id IS ?10
+                AND accepted_timestamp_ms = ?11 AND queue_slot_id = ?12
+                AND queue_timestamp_ms = ?13 AND queue_control_seq = ?14
+                AND has_turn_options = ?15,
+                length(CAST(state_json AS BLOB)),
+                CASE WHEN length(CAST(state_json AS BLOB)) <= ?16 THEN state_json END
+         FROM agent_messages WHERE session_id = ?1 AND message_id = ?2",
+            params![
+                session_id.as_str(),
+                expected.message.message_id.as_str(),
+                super::append::message_source_name(&expected.message.source),
+                expected.root_session_id.as_str(),
+                message_target_name(expected.target),
+                expected.wake_required,
+                sqlite_u64("acceptance control", expected.accepted_control_seq)?,
+                super::append::message_state_name(&expected.state),
+                super::append::message_delivery_name(expected.delivery),
+                expected.bound_turn_id.as_ref().map(TurnId::as_str),
+                sqlite_u64("acceptance timestamp", expected.accepted_timestamp_ms)?,
+                expected.queue_slot.id.as_str(),
+                sqlite_u64("queue timestamp", expected.queue_slot.timestamp_ms)?,
+                sqlite_u64("queue control", expected.queue_slot.control_seq)?,
+                expected.message.options != rsi_agent_session_protocol::MessageOptions::default(),
+                i64::try_from(MAXIMUM_INDEXED_MESSAGE_STATE_BYTES)
+                    .expect("state bound fits SQLite INTEGER"),
+            ],
+            |row| {
+                Ok((
+                    row.get::<_, bool>(0)?,
+                    row.get::<_, i64>(1)?,
+                    row.get::<_, Option<String>>(2)?,
+                ))
+            },
+        )
+        .optional()
+        .map_err(sql_error)?
+        .ok_or_else(|| {
+            StoreError::Corrupt("canonical mailbox control has no indexed message".into())
+        })?;
+    if !matches
+        || decode_projected_json::<StoreAgentMessageState>(
+            "Agent message state",
+            (length, state),
+            MAXIMUM_INDEXED_MESSAGE_STATE_BYTES,
+        )? != expected.state
+    {
+        return Err(StoreError::Corrupt(
+            "mailbox index final projection differs from canonical controls".into(),
+        ));
+    }
+    Ok(())
 }
 
 #[derive(Default)]
@@ -1170,12 +1165,7 @@ pub(super) fn validate_canonical_fact_prefix(
     let mut digest = EMPTY_FACT_PREFIX_DIGEST;
     let mut next_sequence = 1_u64;
     let mut statement = connection
-        .prepare(
-            "SELECT seq, turn_id, fact_kind, length(CAST(fact_json AS BLOB)),
-                    CASE WHEN length(CAST(fact_json AS BLOB)) <= ?2
-                         THEN fact_json END
-             FROM facts WHERE session_id = ?1 ORDER BY seq",
-        )
+        .prepare(fact_rows!("?2", "WHERE f.session_id = ?1 ORDER BY f.seq"))
         .map_err(sql_error)?;
     let mut rows = statement
         .query(params![
@@ -1186,28 +1176,13 @@ pub(super) fn validate_canonical_fact_prefix(
         .map_err(sql_error)?;
     while let Some(row) = rows.next().map_err(sql_error)? {
         observer.checkpoint()?;
-        let sequence = decode_u64("Fact sequence", row.get::<_, i64>(0).map_err(sql_error)?)?;
-        let turn_id = bounded_text(row, 1, 256).map_err(sql_error)?;
-        let fact_kind = bounded_text(row, 2, 8).map_err(sql_error)?;
-        let (fact, encoded): (SessionFact, _) = super::cas::decode_projected_json_with_source(
-            "session Fact",
-            (
-                row.get::<_, i64>(3).map_err(sql_error)?,
-                row.get::<_, Option<String>>(4).map_err(sql_error)?,
-            ),
-            MAXIMUM_SESSION_FACT_BYTES,
-        )?;
-        if sequence != next_sequence || fact.seq() != sequence {
+        let (fact, encoded) = super::fact_storage::decode(row)?;
+        if fact.seq() != next_sequence {
             return Err(StoreError::Corrupt(
-                "session Fact JSON sequence differs from its contiguous durable row".into(),
+                "session Fact sequence differs from its contiguous durable row".into(),
             ));
         }
-        if fact.body().turn_id().as_str() != turn_id || fact_index_kind(fact.body()) != fact_kind {
-            return Err(StoreError::Corrupt(
-                "session Fact JSON differs from its durable turn index columns".into(),
-            ));
-        }
-        observer.fact(session_id, &fact, &encoded)?;
+        observer.fact(session_id, &fact, encoded)?;
         activity.observe_fact(&fact);
         digest = advance_fact_prefix_digest(digest, &fact).map_err(|error| {
             StoreError::Corrupt(format!("stored session Fact is invalid: {error}"))
@@ -1422,22 +1397,13 @@ pub(super) struct ControlReplaySummary {
     pub(super) activity_ms: u64,
 }
 
-/// Decode each bounded canonical control once and feed all index projections.
-#[allow(clippy::too_many_lines)] // Validate the canonical control horizon and every dependent bounded index together.
-#[cfg(all(test, unix))]
-pub(super) fn validate_agent_indexes(
-    connection: &Connection,
-    header: &SessionHeader,
-) -> Result<ControlReplaySummary> {
-    validate_agent_indexes_observed(connection, header, &mut Unobserved)
-}
-
 #[allow(clippy::too_many_lines)] // One canonical pass validates all related projections.
 fn validate_agent_indexes_observed(
     connection: &Connection,
-    header: &SessionHeader,
+    session: &StoreRecentSession,
     observer: &mut impl CanonicalObserver,
 ) -> Result<ControlReplaySummary> {
+    let header = &session.header;
     let selected = header.session_id();
     let mut mailbox = MailboxProjection::default();
     let mut ready = ReadyProjection::default();
@@ -1445,6 +1411,7 @@ fn validate_agent_indexes_observed(
     let mut domains = super::domain::Projection::default();
     let mut programs = super::program::Projection::default();
     let mut decoded = 0_u64;
+    let mut previous_anchor = 0;
     let mut activity = rsi_agent_store_protocol::ActivityProjection::default();
     let mut digest = EMPTY_CONTROL_PREFIX_DIGEST;
     let mut terminals = 0_u64;
@@ -1455,7 +1422,7 @@ fn validate_agent_indexes_observed(
     let mut statement = connection
         .prepare(
             "SELECT length(CAST(control_json AS BLOB)),
-                CASE WHEN length(CAST(control_json AS BLOB)) <= ?1 THEN control_json END, seq
+                CASE WHEN length(CAST(control_json AS BLOB)) <= ?1 THEN control_json END, seq, fact_seq
          FROM agent_controls WHERE session_id = ?2 ORDER BY seq",
         )
         .map_err(sql_error)?;
@@ -1467,7 +1434,7 @@ fn validate_agent_indexes_observed(
         .map_err(sql_error)?;
     while let Some(row) = rows.next().map_err(sql_error)? {
         observer.checkpoint()?;
-        let (record, encoded): (AgentControlRecord, _) =
+        let (record, encoded): (AgentControlRecord, String) =
             super::cas::decode_projected_json_with_source(
                 "Agent control record",
                 (
@@ -1492,13 +1459,21 @@ fn validate_agent_indexes_observed(
                 counter.fetch_add(1, Ordering::Relaxed);
             }
         });
-        if record.seq() != decoded
+        if decoded > session.durable_control_seq
+            || record.seq() != decoded
             || decode_u64("control row sequence", row.get(2).map_err(sql_error)?)? != decoded
         {
             return Err(StoreError::Corrupt(
-                "control JSON sequence differs from its canonical row".into(),
+                "control sequence differs from its canonical row or durable watermark".into(),
             ));
         }
+        let anchor = decode_u64("control Fact anchor", row.get(3).map_err(sql_error)?)?;
+        if anchor < previous_anchor || anchor > session.durable_fact_seq {
+            return Err(StoreError::Corrupt(
+                "control Fact anchors are inconsistent".into(),
+            ));
+        }
+        previous_anchor = anchor;
         digest = advance_control_prefix_digest(digest, &record)
             .map_err(|error| StoreError::Corrupt(error.to_string()))?;
         if validate_terminal_control(connection, selected, &record, digest)? {
@@ -1550,6 +1525,11 @@ fn validate_agent_indexes_observed(
             AgentControlRecordBody::MessageSuccessor { .. }
         )
         .then_some(record);
+    }
+    if decoded != session.durable_control_seq {
+        return Err(StoreError::Corrupt(
+            "session control watermark differs from its contiguous control stream".into(),
+        ));
     }
     let (indexed_terminals, indexed_settlement, indexed_digest, indexed_pause) = connection
         .query_row(

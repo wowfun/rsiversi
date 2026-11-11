@@ -404,16 +404,18 @@ impl LanguageService {
                 })
                 .await
                 .map_err(|_| Error::Unavailable)?;
+            let mut environment = self
+                .config
+                .environment
+                .iter()
+                .map(|(key, value)| (key.into(), value.into()))
+                .collect();
+            process.prepare_environment(&mut environment);
             self.check_work(work)?;
             self.process
                 .spawn(DuplexProcessSpec {
                     process,
-                    environment: self
-                        .config
-                        .environment
-                        .iter()
-                        .map(|(k, v)| (k.into(), v.into()))
-                        .collect(),
+                    environment,
                     stdout_buffer_bytes: 1024 * 1024,
                     stderr_max_bytes: 32768,
                     termination_grace_ms: 200,

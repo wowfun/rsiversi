@@ -16,6 +16,7 @@ revision-b = []
 rsi-ai-protocol = { path = "../../../crates/rsi-ai/protocol" }
 rsi-api-protocol = { path = "../../../crates/rsi-api/protocol" }
 rsi-meta-native = { path = "../../../crates/rsi-meta/native" }
+rsi-session-api = { path = "../../../crates/rsi/session-api" }
 rsi-tools-protocol = { path = "../../../crates/rsi-tools/protocol" }
 rsi-ui-protocol = { path = "../../../crates/rsi/ui-protocol" }
 serde = { version = "1", features = ["derive"] }

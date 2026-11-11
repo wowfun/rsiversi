@@ -77,8 +77,16 @@ result reference. UI previews retain their independently owned bounds.
 
 The [workspace definition source](../workspace-context/README.md#agent-definition-files)
 owns file discovery, precedence and syntax. Inline/file name conflicts are errors. File edits affect the next fresh spawn, including in existing Sessions.
-Each new provider request receives a current bounded catalog; transport retries
-replay that request's entered catalog. `@name` in direct Human text asks the main
+Each new model request series receives a current bounded catalog through
+`BeforeStep.instructions`. Its successful observation, Human mention guidance or
+catalog-unavailable diagnostic replaces the preceding Step's guidance instead of
+appending a historical context input. The prepared instruction retains its
+producer identity, participates in existing Step bounds and checkpoint recovery,
+and expires when that Step closes. Transport retries reuse that preparation.
+Catalog descriptions and route fields are rendered as plain text, so JSON
+escaping cannot multiply their source byte bounds inside the shared instruction
+budget. No names or descriptions are silently truncated to fit that budget.
+`@name` in direct Human text asks the main
 Agent to delegate and summarize; it does not create a child by itself.
 Catalog availability means the definition is valid and readable; Tool-name
 existence remains a spawn-admission check. Source Capacity and Closed preserve

@@ -1,5 +1,19 @@
 # rsi-tools-protocol
 
+Local registrations separate `ToolInteraction` from an optional cooperative
+execution deadline in `ToolRunPolicy`. An automatic Tool may have no
+deadline; it still observes caller cancellation, catalog retirement and provider
+shutdown. Human interaction retains exclusive-final scheduling and is unavailable
+to Program calls. An execution deadline is a positive `Duration` representable by
+the runtime clock; the Local contract has no 600-second cap. The separately
+bounded Portable wire contract retains its own declared millisecond limit.
+
+`ToolBody` is a consuming continuation over immutable admitted arguments and
+execution authority. It checks the current cancellation token immediately before
+entering the body, including after an around callback has awaited. A cancellation
+during a wrapper must not invoke a body that has not started. Already-started
+bodies and wrappers retain the owner's cooperative drain semantics.
+
 Execution-policy paths use the bounded
 [host-path grammar](../../rsi-workspace/path/README.md) when validated as data.
 Native process and sandbox providers retain actual filesystem validation.
@@ -13,6 +27,13 @@ own limits. Model-produced numbers are accepted only when their exact decimal
 value survives the canonical `serde_json::Value` representation. Serializable
 calls and execution policies revalidate those invariants during
 deserialization rather than relying on a later runtime consumer.
+
+`ToolDefinition` and `FreeformToolDefinition` establish their bounds during
+construction and deserialization. Their fields are immutable outside this
+package. Attaching an already validated freeform grammar is infallible; typed
+consumers trust these invariants without repeating schema traversal or JSON
+serialization. Catalog registration still owns its scheduling, timeout,
+uniqueness and aggregate limits. Narrower capabilities retain their own limits.
 
 `validate_model_tool_name` exposes the same name admission used by definitions
 and calls so narrower durable authorities do not maintain a second grammar.
@@ -42,6 +63,11 @@ typed extension map. A Tool start admits that exact lease and retains the operat
 through body settlement. Workspace reads and the matching Files reader come from
 that tuple; a native provider is used only by native-only embeddings without a
 lease. Remote process calls cannot use the legacy native confinement method.
+Non-capacity native Sandbox preparation failures retain the same `ToolError::Sandbox`
+whether the Tool uses an Execution lease or a direct native embedding. The
+lease adapter preserves the requested mode and planner diagnostic instead of
+reclassifying them as unavailable admission. Capacity, retirement, and unknown
+outcome retain their distinct scheduling and no-replay categories.
 `ToolExecution::workspace_read()` asks that same pinned Sandbox generation for
 an immutable workspace read scope using the resolved policy. It accepts no model
 paths or mode overrides, rejects already-cancelled execution, and adds no process
@@ -81,11 +107,8 @@ immediately; an active body keeps its provider-wide invocation admission until
 true settlement, and an outcome produced after catalog withdrawal is
 discarded. Starting above the provider-wide admission bound returns
 `ToolError::Capacity`; starts after shutdown begins return
-`ToolError::ShuttingDown`. Each
-execution registration timeout is within
-1..=600,000 milliseconds. The owner-declared `HumanInteraction` policy instead
-requires `exclusive_final` scheduling and ends on answer or cancellation; it
-has no implicit answer or timer. The current
+`ToolError::ShuttingDown`. Human interaction requires `exclusive_final`
+scheduling; interaction and deadline are independent as specified above. The current
 pre-release result shape is exactly `{ value, content, is_error, enforcement }`; image
 content contains a durable `MediaRef`, not an inline blob or status envelope.
 Model-facing text rejects C0 terminal controls other than tab and line breaks.
@@ -101,7 +124,8 @@ has no migration reader.
 `portable` owns the version-2 `rsi.tools.portable` duplex byte protocol. The linked
 bridge requires one explicitly named Portable supply and the exact Local
 ToolRegistrar. Describe returns a nonempty atomic batch of at most 64 bounded
-definitions with owner-declared finite timeout and scheduling. Describe contains
+definitions with owner-declared finite timeout of 1..=600,000 milliseconds
+and scheduling. Describe contains
 no registration callback or authority; the bridge registers the entire validated
 batch through the ordinary unpublished stage. Sealing and generation ownership
 retain their existing meaning.
@@ -170,6 +194,8 @@ non-authorizing execution review metadata separately from the request digest.
 The prepared call retains that plan. Start rejects a changed policy, lease or
 native Sandbox; body code consumes the plan once. A standalone Runtime caller
 that omits explicit preparation gets the same preparation before body execution.
+Sandbox-owned temporary-directory selection is applied before the complete
+environment is frozen, including standalone native preparation.
 No process is spawned during preparation. Jobs may retain the move-only plan
 and consume it exactly once through its original tuple.
 

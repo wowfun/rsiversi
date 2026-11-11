@@ -165,8 +165,11 @@ hard stack-safety bound of 256 listeners.
 Dispatch snapshots the exact `(TypeId, LocalIsolationId)` slot and releases the
 registry lock before direct callbacks. There are no string event keys, JSON
 payloads, selectors, global bypass, Runtime callback tasks, common deadline, or
-call identity. Parallel returns a caller-owned all-settled Future; the other
-modes preserve their declared ordering and typed break behavior. Ordinary
+call identity. Parallel returns a caller-owned all-settled Future. It admits
+callbacks in snapshot order with at most 64 unfinished callbacks, reuses a slot
+as soon as any callback completes, and returns errors in snapshot order without
+retaining successful results. The other modes preserve their declared ordering
+and typed break behavior. Ordinary
 snapshot bindings remain valid across concurrent disposal, while once is an
 atomic global claim made as a callback enters Parallel's bounded polling
 window. Listener membership is bounded, and listener destruction occurs

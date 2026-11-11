@@ -107,6 +107,7 @@ mod tests {
         let mut payload = b"RSITREE1".to_vec();
         payload.extend(u32::try_from(header.len()).unwrap().to_le_bytes());
         payload.extend(header);
+        let index_digest = hash(&payload);
         payload.extend(script);
         std::fs::write(source.join("payload.rsi"), &payload).unwrap();
         let descriptor = serde_json::to_vec(&json!({"format":1,"cwd":{"payload":"runtime","path":""},
@@ -116,7 +117,7 @@ mod tests {
             "requires":[{"name":"rsi.extension.process","version":1},{"name":"rsi.packages.importer","version":1}],
             "files":[{"path":"payload.rsi","bytes":payload.len(),"digest":hash(&payload),"executable":false},
                 {"path":"import.json","bytes":descriptor.len(),"digest":hash(&descriptor),"executable":false}],
-            "exports":{"runtime":{"kind":"payload_tree","path":"payload.rsi"},"import":{"kind":"package_importer","path":"import.json"}}})).unwrap();
+            "exports":{"runtime":{"kind":"payload_tree","path":"payload.rsi","index_digest":index_digest},"import":{"kind":"package_importer","path":"import.json"}}})).unwrap();
         let store = Arc::new(PackageStore::open(&root.path().join("store")).unwrap());
         store
             .install(

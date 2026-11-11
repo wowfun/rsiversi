@@ -52,10 +52,16 @@ impl ProfileInput {
             std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
                 factory.prepare(leaf.config()).map(drop)
             }))
-            .ok()
-            .and_then(std::result::Result::ok)
-            .ok_or_else(|| ProfileError::Preparation {
+            .map_err(|_| ProfileError::Preparation {
                 instance: leaf.id().clone(),
+                reason: "plugin preparation panicked".to_owned(),
+            })?
+            .map_err(|error| ProfileError::Preparation {
+                instance: leaf.id().clone(),
+                reason: super::bound_message(
+                    error.to_string(),
+                    self.compiler.limits.maximum_diagnostic_bytes,
+                ),
             })?;
         }
         Ok(())

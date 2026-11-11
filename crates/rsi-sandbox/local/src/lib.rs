@@ -1,4 +1,4 @@
-//! Local Linux sandbox backend selection and process planning.
+//! Local sandbox backend selection and process planning.
 
 #![deny(unsafe_code)]
 #![warn(missing_docs)]
@@ -21,6 +21,9 @@ use std::sync::Arc;
 use std::time::Duration;
 
 mod isolated;
+#[cfg(windows)]
+#[allow(unsafe_code)]
+mod windows;
 
 const PROBE_TIMEOUT: Duration = Duration::from_secs(2);
 const PROBE_SUCCESS_CODE: i32 = 23;
@@ -355,6 +358,10 @@ impl Service {
                 stamp: stamp(request.mode, None, workspace, SandboxNetwork::Host),
             });
         }
+        #[cfg(windows)]
+        if self.backend.is_none() && !source_reader {
+            return windows::confine(request, program, cwd, workspace);
+        }
         let backend = self
             .backend
             .clone()
@@ -598,7 +605,7 @@ impl PluginFactory for SandboxLocalFactory {
                 }
             }
         }
-        if self.require_restricted_backend && selected.is_none() {
+        if self.require_restricted_backend && selected.is_none() && !cfg!(windows) {
             let reason = if probe_budget.exhausted() {
                 let skipped = configured_candidates.saturating_sub(considered_candidates);
                 match skipped {
@@ -733,23 +740,38 @@ fn validate_request(request: &ProcessRequest) -> Result<(PathBuf, PathBuf, PathB
             "process program must be absolute".into(),
         ));
     }
-    let resolved = request
-        .program
-        .canonicalize()
+    #[cfg(windows)]
+    let metadata = std::fs::symlink_metadata(&request.program).and_then(|entry| {
+        if entry.is_symlink() {
+            std::fs::metadata(&request.program)
+        } else {
+            Ok(entry)
+        }
+    });
+    #[cfg(not(windows))]
+    let metadata = std::fs::metadata(&request.program);
+    let metadata = metadata
         .map_err(|error| SandboxError::InvalidInput(format!("program is unavailable: {error}")))?;
-    if !resolved.is_file() {
+    if !metadata.is_file() {
         return Err(SandboxError::InvalidInput(
             "process program is not a file".into(),
         ));
     }
-    // Preserve argv[0] for multicall executables; canonicalization validates
-    // availability but must not turn `cargo` into an invocation of `rustup`.
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        if metadata.permissions().mode() & 0o111 == 0 {
+            return Err(SandboxError::InvalidInput(
+                "process program is not executable".into(),
+            ));
+        }
+    }
+    // The caller's spelling determines argv[0] and Windows alias dispatch.
     let program = request.program.clone();
     let cwd = canonical_directory(&request.cwd, "cwd")?;
     let workspace = canonical_directory(&request.workspace, "workspace")?;
     if request.mode != SandboxMode::DangerFullAccess {
-        let canonical_root = canonical_directory(Path::new("/"), "filesystem root")?;
-        if workspace == canonical_root {
+        if workspace.parent().is_none() {
             return Err(SandboxError::InvalidInput(
                 "restricted workspace cannot be the filesystem root".into(),
             ));
@@ -1024,11 +1046,31 @@ mod tests {
                 assert_eq!(plan.stamp.backend, SandboxBackend::Unconfined);
             } else {
                 assert!(
-                    result.is_err(),
+                    matches!(result, Err(SandboxError::Unsupported(actual)) if actual == mode),
                     "a restricted Windows request must never become an unconfined PTY"
                 );
             }
         }
+    }
+
+    #[test]
+    fn restricted_workspace_rejects_its_native_root_but_accepts_a_directory() {
+        let directory = tempfile::tempdir().unwrap();
+        let workspace = directory.path().canonicalize().unwrap();
+        let mut request = ProcessRequest {
+            stdio: rsi_sandbox::ProcessStdio::Pipes,
+            mode: SandboxMode::WorkspaceWrite,
+            program: std::env::current_exe().unwrap(),
+            arguments: vec![],
+            cwd: workspace.clone(),
+            workspace: workspace.ancestors().last().unwrap().to_path_buf(),
+        };
+        assert!(matches!(
+            validate_request(&request),
+            Err(SandboxError::InvalidInput(message)) if message == "restricted workspace cannot be the filesystem root"
+        ));
+        request.workspace = workspace;
+        assert!(validate_request(&request).is_ok());
     }
 
     #[derive(Debug)]

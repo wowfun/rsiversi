@@ -50,6 +50,13 @@ Fuzzing full tools would mix grammar coverage with filesystem/provider failures.
 Replacing HTTP integration waits with paused time would stop measuring real socket
 delivery. A single wall-clock number on an uncontrolled runner cannot justify a
 dependency upgrade or an algorithm rewrite.
+
+Application-tool comparisons distinguish the native Rust transport from a Node
+HTTP test client. Per-boundary timestamps can expose client-side queueing that
+would otherwise be misattributed to persistence. The Serve opt-in probe reuses
+the real typed start/observe implementation without publishing a diagnostic
+production API. Browser startup and benchmark control I/O remain outside its
+timed interval; provider turns and Kernel publication require their own evidence.
 An additional generic test inventory or orchestration framework would duplicate
 the owning test commands. A persistent fuzz corpus and a direct libfuzzer runner
 add machinery unnecessary for the existing bounded weekly campaigns.

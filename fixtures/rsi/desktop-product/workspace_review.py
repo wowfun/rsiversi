@@ -1,9 +1,10 @@
 """Actual patch and workspace interval inspection through the native bridge."""
 import json
+from provider_input import current_input
 
 def reply(body):
     messages = body.get('messages', [])
-    last = next((i for i in range(len(messages)-1,-1,-1) if messages[i].get('role')=='user'), -1)
+    last = current_input(messages)
     if last < 0 or 'REVIEW_PATCH' not in str(messages[last].get('content')) or any(m.get('role')=='tool' for m in messages[last+1:]): return None
     return {'tool_calls':[{'index':0,'id':'desktop-review-patch','type':'function','function':{'name':'apply_patch','arguments':json.dumps({'patch':'*** Begin Patch\n*** Update File: card.txt\n@@\n-before\n+after · 界\n*** End Patch\n'})}}]}
 

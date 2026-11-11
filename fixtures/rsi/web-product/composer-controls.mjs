@@ -6,12 +6,13 @@ import {sourceFixture} from './source-fixture.mjs';
 const report=resolve(process.env.RSI_REPORT_DIR??'.local/notes/1027/composer-controls');await mkdir(report,{recursive:true});
 const source=await readFile(new URL('./document-scene.tsx',import.meta.url),'utf8')+`
 fixture.base=structuredClone(fixture.view.surfaces.main);fixture.view.surfaces.main=null;
+fixture.view.catalog.workspaces[0].id='f'.repeat(64);
 fixture.creates=0;fixture.prepared=[];fixture.view.has_media=true;
 fixture.view.catalog.models.push({deployment:'fixture',model:'other'});
 fixture.setReply('command',async payload=>{
  const command=JSON.parse(payload);
  if(command.action==='create'){
-  fixture.creates++;fixture.view.surfaces.main={...structuredClone(fixture.base),generation:'2',selection:'2',sandbox:'workspace-write',transcript:{blocks:[],status:'Ready'},effort_profile:{supported:['off','low','high','max'],default:'high'},commands:{revision:{kind:'draft'},commands:[{name:'plan',description:'Plan mode',draft_safe:true}]}};
+  fixture.creates++;fixture.view.surfaces.main={...structuredClone(fixture.base),generation:'2',selection:'2',workspace:command.workspace,creation:{workspace_id:command.workspace,session_id:fixture.base.session,agent_preset_id:null},sandbox:'workspace-write',transcript:{blocks:[],status:'Ready'},effort_profile:{supported:['off','low','high','max'],default:'high'},commands:{revision:{kind:'draft'},commands:[{name:'plan',description:'Plan mode',draft_safe:true}]}};
  }
  const data=fixture.view.surfaces.main;
  if(command.action==='model'){data.model=command.model;data.reasoning_effort=command.reasoning_effort;}

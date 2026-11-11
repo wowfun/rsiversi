@@ -15,6 +15,7 @@ use super::{
     TurnId, WriteContextCheckpoint, advance_control_prefix_digest, advance_fact_prefix_digest,
     async_trait, validate_message_claim_fact, validate_read_limit, validate_session_read_limit,
 };
+use rsi_agent_session_protocol::AgentMessageSource;
 use rsi_agent_store_protocol::MailboxRead;
 use rsi_agent_store_protocol::admit_page_record;
 
@@ -175,6 +176,7 @@ impl SessionStore for MemoryStore {
                     (
                         id.clone(),
                         coordinates,
+                        state.sessions[&id].header.created_at_ms(),
                         state.sessions[&id].last_activity_ms,
                     )
                 })
@@ -712,6 +714,22 @@ impl SessionStore for MemoryStore {
             .sessions
             .get(session_id)
             .map(|session| session.header.clone())
+            .ok_or_else(|| StoreError::NotFound(session_id.as_str().into()))
+    }
+
+    async fn session_summary(&self, session_id: &SessionId) -> Result<StoreRecentSession> {
+        self.header_reads.fetch_add(1, Ordering::Relaxed);
+        self.inner
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .sessions
+            .get(session_id)
+            .map(|session| StoreRecentSession {
+                header: session.header.clone(),
+                last_activity_ms: session.last_activity_ms,
+                durable_fact_seq: session.facts.last().map_or(0, |fact| fact.seq()),
+                durable_control_seq: session.controls.last().map_or(0, AgentControlRecord::seq),
+            })
             .ok_or_else(|| StoreError::NotFound(session_id.as_str().into()))
     }
 
@@ -1387,13 +1405,17 @@ impl SessionStore for MemoryStore {
                 )
             })
             .take(limit + 1)
-            .map(|(_, session_id)| StoreRecentSession {
-                header: state
+            .map(|(_, session_id)| {
+                let session = state
                     .sessions
                     .get(session_id)
-                    .expect("recent index references its Session")
-                    .header
-                    .clone(),
+                    .expect("recent index references its Session");
+                StoreRecentSession {
+                    header: session.header.clone(),
+                    last_activity_ms: session.last_activity_ms,
+                    durable_fact_seq: session.facts.last().map_or(0, |fact| fact.seq()),
+                    durable_control_seq: session.controls.last().map_or(0, AgentControlRecord::seq),
+                }
             })
             .collect::<Vec<_>>();
         let has_more = sessions.len() > limit;
@@ -1626,6 +1648,60 @@ impl SessionStore for MemoryStore {
         Ok(entry)
     }
 
+    async fn read_mailbox_claim(
+        &self,
+        session_id: &SessionId,
+        waking: Option<MessageId>,
+    ) -> Result<rsi_agent_store_protocol::StoreMailboxClaim> {
+        use rsi_agent_store_protocol::{StoreClaimableMessage, StoreMailboxClaim};
+        let state = self
+            .inner
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        let session = state
+            .sessions
+            .get(session_id)
+            .ok_or_else(|| StoreError::NotFound(session_id.to_string()))?;
+        let selected = waking
+            .as_ref()
+            .and_then(|id| state.agent_messages.get(&(session_id.clone(), id.clone())))
+            .cloned();
+        let mut pending = Vec::new();
+        let mut has_ordinary_pending_turn = false;
+        for ((candidate, _), entry) in &state.agent_messages {
+            if candidate != session_id || entry.state != StoreAgentMessageState::Pending {
+                continue;
+            }
+            has_ordinary_pending_turn |= entry.target == MessageTarget::NextTurn
+                && !matches!(
+                    entry.message.source,
+                    AgentMessageSource::Continuation { .. }
+                );
+            if entry.target == MessageTarget::NextStep || selected.as_ref().is_some_and(|selected| {
+                entry.message.message_id == selected.message.message_id
+                    || matches!((&entry.message.source, &selected.message.source),
+                        (AgentMessageSource::Command { source: candidate }, AgentMessageSource::Command { source })
+                        if candidate.request_id == source.request_id && candidate.invocation_sha256 == source.invocation_sha256)
+            }) {
+                pending.push(StoreClaimableMessage {
+                    message_id: entry.message.message_id.clone(), target: entry.target,
+                    accepted_control_seq: entry.accepted_control_seq,
+                });
+            }
+        }
+        pending.sort_unstable_by_key(|entry| entry.accepted_control_seq);
+        let result = StoreMailboxClaim {
+            inbox_paused: session.inbox_paused,
+            has_ordinary_pending_turn,
+            selected,
+            pending,
+            durable_fact_seq: session.facts.last().map_or(0, |fact| fact.seq()),
+            durable_control_seq: session.controls.last().map_or(0, AgentControlRecord::seq),
+        };
+        result.validate()?;
+        Ok(result)
+    }
+
     async fn read_agent_mailbox(
         &self,
         session_id: &SessionId,
@@ -1641,20 +1717,17 @@ impl SessionStore for MemoryStore {
             .ok_or_else(|| StoreError::NotFound(session_id.to_string()))?;
         let durable_control_seq = session.controls.last().map_or(0, AgentControlRecord::seq);
         let durable_fact_seq = session.facts.last().map_or(0, |fact| fact.seq());
-        let step_only = query == MailboxRead::NextStep;
         let selected = match query {
             MailboxRead::WithMessage(id) => {
                 state.agent_messages.get(&(session_id.clone(), id)).cloned()
             }
-            MailboxRead::All | MailboxRead::NextStep => None,
+            MailboxRead::All => None,
         };
         let mut pending = state
             .agent_messages
             .iter()
             .filter_map(|((candidate, _), entry)| {
-                (candidate == session_id
-                    && matches!(entry.state, StoreAgentMessageState::Pending)
-                    && (!step_only || entry.target == MessageTarget::NextStep))
+                (candidate == session_id && matches!(entry.state, StoreAgentMessageState::Pending))
                     .then_some(entry)
             })
             .collect::<Vec<_>>();
@@ -1696,37 +1769,32 @@ impl SessionStore for MemoryStore {
             .sessions
             .get(session_id)
             .ok_or_else(|| StoreError::NotFound(session_id.to_string()))?;
+        let mut pending_count = 0;
+        let mut first_step: Option<&StoreAgentMessage> = None;
+        let mut promotable = Vec::new();
+        for ((candidate, _), entry) in &state.agent_messages {
+            if candidate != session_id || !matches!(entry.state, StoreAgentMessageState::Pending) {
+                continue;
+            }
+            pending_count += 1;
+            if entry.target != MessageTarget::NextStep {
+                continue;
+            }
+            if first_step
+                .is_none_or(|first| entry.accepted_control_seq < first.accepted_control_seq)
+            {
+                first_step = Some(entry);
+            }
+            if !entry.wake_required && entry.permits_promotion() {
+                promotable.push((entry.accepted_control_seq, entry.message.message_id.clone()));
+            }
+        }
+        promotable.sort_by_key(|(control_seq, _)| *control_seq);
         let summary = StoreAgentMailboxSummary {
             inbox_paused: session.inbox_paused,
-            pending_count: state
-                .agent_messages
-                .iter()
-                .filter(|((candidate, _), entry)| {
-                    candidate == session_id
-                        && matches!(entry.state, StoreAgentMessageState::Pending)
-                })
-                .count(),
-            pending_promotable_message_ids: {
-                let mut messages = state
-                    .agent_messages
-                    .iter()
-                    .filter(|((candidate, _), entry)| {
-                        candidate == session_id
-                            && matches!(entry.state, StoreAgentMessageState::Pending)
-                            && entry.target == MessageTarget::NextStep
-                            && !entry.wake_required
-                            && entry.permits_promotion()
-                    })
-                    .map(|(_, entry)| {
-                        (entry.accepted_control_seq, entry.message.message_id.clone())
-                    })
-                    .collect::<Vec<_>>();
-                messages.sort_by_key(|(control_seq, _)| *control_seq);
-                messages
-                    .into_iter()
-                    .map(|(_, message_id)| message_id)
-                    .collect()
-            },
+            first_pending_step_source: first_step.map(|entry| entry.message.source.kind()),
+            pending_count,
+            pending_promotable_message_ids: promotable.into_iter().map(|(_, id)| id).collect(),
             durable_control_seq: session.controls.last().map_or(0, AgentControlRecord::seq),
             durable_fact_seq: session.facts.last().map_or(0, |fact| fact.seq()),
         };
@@ -2106,8 +2174,37 @@ fn validate_cas_references(
 #[allow(clippy::too_many_lines)] // Keep the mechanical atomic-append mirror auditable as one transaction state transition.
 fn apply_atomic_memory_append(
     state: &mut MemoryState,
-    append: AtomicSessionAppend,
+    mut append: AtomicSessionAppend,
 ) -> Result<StoreSessionWatermarks> {
+    // The test Store retains logical Facts. Production SQLite resolves this
+    // same suffix one body at a time instead of collecting expanded payloads.
+    let mut domain_facts = if append.has_referenced_claims() {
+        rsi_agent_store_protocol::StoreDomainFactCheck::new(&append.controls)
+    } else {
+        None
+    };
+    let facts = append
+        .fact_suffix()?
+        .into_iter()
+        .map(|item| match item {
+            rsi_agent_store_protocol::StoreFactAppend::Inline(fact) => Ok(Arc::clone(fact)),
+            rsi_agent_store_protocol::StoreFactAppend::Claimed(claim) => {
+                let entry = state
+                    .agent_messages
+                    .get(&(append.session_id.clone(), claim.message_id.clone()))
+                    .ok_or_else(|| StoreError::Corrupt("claim acceptance is absent".into()))?;
+                entry.validate_claim_turn(claim.turn_id)?;
+                claim.materialize(entry.message.clone()).map(Arc::new)
+            }
+        })
+        .collect::<Result<Vec<_>>>()?;
+    if let Some(mut domain_facts) = domain_facts.take() {
+        for fact in &facts {
+            domain_facts.push(fact)?;
+        }
+        domain_facts.finish()?;
+    }
+    append.facts = facts;
     validate_cas_references(state, &append.facts, &append.controls)?;
     let activity = rsi_agent_store_protocol::appended_activity(
         append.header.as_ref(),

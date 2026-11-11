@@ -53,6 +53,19 @@ async fn native_windows_reader_pages_unicode_and_refuses_changed_identity() {
     assert_eq!(page.total, 2);
     assert_eq!(page.entries.len(), 1);
     fs::write(root.join("new.txt"), "new").unwrap();
+    // NTFS can coalesce automatic directory timestamps. Explicitly change the
+    // version this paging contract observes, independently of clock resolution.
+    {
+        use std::os::windows::fs::OpenOptionsExt as _;
+        fs::OpenOptions::new()
+            .read(true)
+            .access_mode(0x100) // FILE_WRITE_ATTRIBUTES
+            .custom_flags(0x0200_0000) // FILE_FLAG_BACKUP_SEMANTICS
+            .open(root)
+            .unwrap()
+            .set_modified(std::time::SystemTime::UNIX_EPOCH + std::time::Duration::from_secs(1))
+            .unwrap();
+    }
     assert_eq!(
         service.list(scope, directory.token, 0, 1, token).await,
         Err(FilesError::Changed)

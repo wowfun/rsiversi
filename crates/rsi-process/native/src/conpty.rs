@@ -1,28 +1,20 @@
 //! Exact `ConPTY` handles. Policy, buffering and asynchronous supervision belong to callers.
-use crate::Job;
+use crate::{Job, launch::Attributes};
 use std::{
-    ffi::{OsStr, OsString},
+    ffi::OsString,
     fs::File,
     io,
-    os::windows::{
-        ffi::{OsStrExt, OsStringExt},
-        io::{AsRawHandle, FromRawHandle, OwnedHandle},
-    },
+    os::windows::io::{AsHandle, AsRawHandle, FromRawHandle, OwnedHandle},
     path::Path,
     sync::Mutex,
 };
-use windows_sys::Win32::{
-    Foundation::WAIT_OBJECT_0,
-    System::{
-        Console::{COORD, ClosePseudoConsole, CreatePseudoConsole, ResizePseudoConsole},
-        Threading::{
-            CREATE_SUSPENDED, CREATE_UNICODE_ENVIRONMENT, CreateProcessW,
-            DeleteProcThreadAttributeList, EXTENDED_STARTUPINFO_PRESENT, GetExitCodeProcess,
-            INFINITE, InitializeProcThreadAttributeList, LPPROC_THREAD_ATTRIBUTE_LIST,
-            PROC_THREAD_ATTRIBUTE_PSEUDOCONSOLE, PROCESS_INFORMATION, ResumeThread,
-            STARTF_USESTDHANDLES, STARTUPINFOEXW, TerminateProcess, UpdateProcThreadAttribute,
-            WaitForSingleObject,
-        },
+use windows_sys::Win32::System::{
+    Console::{COORD, ClosePseudoConsole, CreatePseudoConsole, ResizePseudoConsole},
+    Threading::{
+        CREATE_SUSPENDED, CREATE_UNICODE_ENVIRONMENT, CreateProcessW, EXTENDED_STARTUPINFO_PRESENT,
+        INFINITE, PROC_THREAD_ATTRIBUTE_PSEUDOCONSOLE, PROCESS_INFORMATION, ResumeThread,
+        STARTF_USESTDHANDLES, STARTUPINFOEXW, TerminateProcess, UpdateProcThreadAttribute,
+        WaitForSingleObject,
     },
 };
 
@@ -67,39 +59,7 @@ impl Console {
                 "ConPTY requires an absolute native executable and directory",
             ));
         }
-        let program = win32_path(program)?;
-        let application = wide(&program)?;
-        let directory = wide(&win32_path(cwd)?)?;
-        let mut command = Vec::new();
-        for arg in std::iter::once(program.as_os_str()).chain(args.iter().map(OsString::as_os_str))
-        {
-            if !command.is_empty() {
-                command.push(32);
-            }
-            quote(arg, &mut command)?;
-        }
-        command.push(0);
-        if command.len() > 32767 {
-            return Err(io::Error::other(
-                "ConPTY command line exceeds Windows limit",
-            ));
-        }
-        let mut entries = environment.iter().collect::<Vec<_>>();
-        entries.sort_by_key(|(key, _)| key.to_string_lossy().to_uppercase());
-        let mut block = Vec::new();
-        for (key, value) in entries {
-            let key = wide(key)?;
-            if key.len() < 2 || key.contains(&61) {
-                return Err(io::Error::other("invalid environment key"));
-            }
-            block.extend_from_slice(&key[..key.len() - 1]);
-            block.push(61);
-            block.extend(wide(value)?);
-        }
-        if block.is_empty() {
-            block.push(0);
-        }
-        block.push(0);
+        let mut command = crate::launch::CommandLine::new(program, args, environment, cwd)?;
         let guard = self
             .0
             .lock()
@@ -138,14 +98,14 @@ impl Console {
         // CREATE_SUSPENDED prevents user code before Job assignment.
         if unsafe {
             CreateProcessW(
-                application.as_ptr(),
-                command.as_mut_ptr(),
+                command.application.as_ptr(),
+                command.arguments.as_mut_ptr(),
                 std::ptr::null(),
                 std::ptr::null(),
                 0,
                 CREATE_SUSPENDED | CREATE_UNICODE_ENVIRONMENT | EXTENDED_STARTUPINFO_PRESENT,
-                block.as_ptr().cast(),
-                directory.as_ptr(),
+                command.environment.as_ptr().cast(),
+                command.directory.as_ptr(),
                 &raw const startup.StartupInfo,
                 &raw mut info,
             )
@@ -160,6 +120,7 @@ impl Console {
         let child = ConsoleChild {
             process,
             pid: info.dwProcessId,
+            status: None,
         };
         job.assign(child.process.as_raw_handle())?;
         // SAFETY: The retained primary thread belongs to this just-created child,
@@ -204,120 +165,35 @@ impl Drop for Console {
 pub struct ConsoleChild {
     process: OwnedHandle,
     pid: u32,
+    status: Option<i32>,
 }
 impl ConsoleChild {
     /// Native child identity, retained by its handle.
     pub fn pid(&self) -> u32 {
         self.pid
     }
-    /// Blocks until the direct child exits and returns its Windows exit code.
-    pub fn wait(&self) -> io::Result<i32> {
-        // SAFETY: The owned process handle remains valid throughout the wait.
-        if unsafe { WaitForSingleObject(self.process.as_raw_handle(), INFINITE) } != WAIT_OBJECT_0 {
-            return Err(io::Error::last_os_error());
+    /// Waits asynchronously and returns the direct child's Windows exit code.
+    pub async fn wait(&mut self) -> io::Result<i32> {
+        if let Some(status) = self.status {
+            return Ok(status);
         }
-        let mut code = 0;
-        // SAFETY: The signalled process is retained and code is a writable DWORD.
-        if unsafe { GetExitCodeProcess(self.process.as_raw_handle(), &raw mut code) } == 0 {
-            return Err(io::Error::last_os_error());
-        }
-        Ok(code.cast_signed())
+        let status = crate::wait::wait(self.process.as_handle()).await?;
+        self.status = Some(status);
+        Ok(status)
     }
 }
 impl Drop for ConsoleChild {
     fn drop(&mut self) {
+        if self.status.is_some() {
+            return;
+        }
         // SAFETY: This exact owned process cannot be replaced by PID reuse. Killing
         // an exited process is harmless; always wait before releasing the handle.
         unsafe {
             TerminateProcess(self.process.as_raw_handle(), 1);
-        }
-        let _ = self.wait();
-    }
-}
-struct Attributes(Vec<usize>, bool);
-impl Attributes {
-    fn new() -> io::Result<Self> {
-        let mut bytes = 0;
-        // SAFETY: The documented sizing call writes only the required byte count.
-        unsafe {
-            InitializeProcThreadAttributeList(std::ptr::null_mut(), 1, 0, &raw mut bytes);
-        }
-        if bytes == 0 || bytes > 65536 {
-            return Err(io::Error::other("invalid process attribute size"));
-        }
-        let mut value = Self(vec![0; bytes.div_ceil(size_of::<usize>())], false);
-        // SAFETY: The aligned allocation has at least the requested byte length.
-        if unsafe { InitializeProcThreadAttributeList(value.pointer(), 1, 0, &raw mut bytes) } == 0
-        {
-            return Err(io::Error::last_os_error());
-        }
-        value.1 = true;
-        Ok(value)
-    }
-    fn pointer(&mut self) -> LPPROC_THREAD_ATTRIBUTE_LIST {
-        self.0.as_mut_ptr().cast()
-    }
-}
-impl Drop for Attributes {
-    fn drop(&mut self) {
-        // SAFETY: This owner retains its initialized list until deletion.
-        if self.1 {
-            unsafe {
-                DeleteProcThreadAttributeList(self.pointer());
-            }
+            WaitForSingleObject(self.process.as_raw_handle(), INFINITE);
         }
     }
-}
-fn wide(value: &OsStr) -> io::Result<Vec<u16>> {
-    let mut result = value.encode_wide().collect::<Vec<_>>();
-    if result.contains(&0) {
-        return Err(io::Error::other("NUL in native process input"));
-    }
-    result.push(0);
-    Ok(result)
-}
-fn win32_path(path: &Path) -> io::Result<OsString> {
-    let original = wide(path.as_os_str())?;
-    // CreateProcess's current directory and .NET executable configuration need
-    // Win32 spelling. Sandbox and Execution return verbatim paths. Strip only
-    // after proving the normal spelling resolves to the exact same target;
-    // reserved DOS names and trailing-dot/space paths must never be retargeted.
-    let prefix = [92, 92, 63, 92];
-    if !original.starts_with(&prefix) {
-        return Ok(path.as_os_str().to_owned());
-    }
-    let candidate = if original[4..].starts_with(&[85, 78, 67, 92]) {
-        [vec![92, 92], original[8..original.len() - 1].to_vec()].concat()
-    } else {
-        original[4..original.len() - 1].to_vec()
-    };
-    let candidate = std::path::PathBuf::from(OsString::from_wide(&candidate));
-    if !candidate.is_absolute() || candidate.canonicalize()? != path.canonicalize()? {
-        return Err(io::Error::other(
-            "console path has no equivalent Win32 spelling",
-        ));
-    }
-    Ok(candidate.into_os_string())
-}
-fn quote(value: &OsStr, output: &mut Vec<u16>) -> io::Result<()> {
-    let units = wide(value)?;
-    output.push(34);
-    let mut slashes = 0;
-    for &unit in &units[..units.len() - 1] {
-        if unit == 92 {
-            slashes += 1;
-            continue;
-        }
-        output.extend(std::iter::repeat_n(
-            92,
-            if unit == 34 { slashes * 2 + 1 } else { slashes },
-        ));
-        output.push(unit);
-        slashes = 0;
-    }
-    output.extend(std::iter::repeat_n(92, slashes * 2));
-    output.push(34);
-    Ok(())
 }
 fn dimensions(rows: u16, columns: u16) -> io::Result<COORD> {
     if !(1..=200).contains(&rows) || !(1..=500).contains(&columns) {

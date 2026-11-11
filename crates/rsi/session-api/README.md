@@ -1,6 +1,14 @@
 # rsi-session-api
 
-Interface version 19 adds `wait-idle` v1, a Session-bound read that waits for
+Interface version 23 carries `read-summary` v1 and `recent` v11 summaries with the
+Header, activity time and Fact/control watermarks from each Store metadata snapshot.
+The fields are required; clients validate activity against Header creation under the
+[Session listing contract](../session-protocol/README.md).
+It admits `submit` v7 with non-waking `NextStep` input under
+the [Session input contract](../session-protocol/README.md). It publishes accepted
+context without starting a Turn; ordinary message bounds and receipts apply.
+
+`wait-idle` v1 is a Session-bound read that waits for
 whole-driver quiescence without retaining inbox bodies or reserving future work.
 It retains `cancel` v3 with Session-wide stop and inbox-only
 clear targets as defined by the Turn protocol. Each captures a new cut, so
@@ -55,15 +63,16 @@ subscriptions to the authenticated `ApiContext.origin`. It never falls through t
 the unscoped Local Session service. Handles recheck location Use for new operations;
 stream frames recheck before publication without retaining draft or composition pins.
 
-The current Session format is 30. Operations negotiate their own versions:
-create v12; recent, inspect, draft-snapshot and select-preset v10;
+The durable format follows the [Agent Session protocol](../../rsi-agent/session-protocol/README.md).
+API operations negotiate their own versions:
+create v12; recent v11; inspect, draft-snapshot and select-preset v10;
 attach and observe v9. Draft responses include the exact held command-input
 batch, bounded by 256 KiB in addition to the Header and envelope. Clients validate
 the batch's Command provenance, first-Step delivery, identity and ordering.
-read-header v3. Create admits an optional fork selection before an accepted Turn
+read-summary v1. Create admits an optional fork selection before an accepted Turn
 or through a completed Turn, using the existing typed `ForkPoint`. Its
 clients verify the returned Header's exact immutable history binding.
-history and read-message v7; submit v6; discard-draft-inputs v2 and mutate-queue v3.
+history and read-message v7; submit v7; discard-draft-inputs v2 and mutate-queue v3.
 Direct submitted messages and their consumed Facts retain optional original
 application attribution under the Session protocol contract. Message-status is
 v3. Interactions, questions
@@ -239,16 +248,12 @@ receipt's operation, request fingerprint, slot and predecessor, and treats an
 untrustworthy mutation reply as an unknown outcome. It retains the frozen request
 for status lookup or an explicit identical retry; transport never invents a new
 operation or replays a mutation automatically.
-Inspection v7 includes pending queue-slot identity, source class and invocation
-option metadata. Observation v6 carries the new successor and queue-receipt
-control variants. These payload changes require their own operation versions,
-independently of the new Header read operation.
+Inspection includes pending queue-slot identity, source class and invocation
+option metadata. Observation carries successor and queue-receipt control variants.
 
-`SessionService::read_header` reads one durable Store Header by SessionId without
-attaching, creating a handle, touching activity or loading transcript. Unpublished
-drafts are absent. The authenticated `session/read-header` v1 operation exposes
-the same read and validates the echoed identity; narrowed Session contribution
-clients do not gain this deployment-wide operation.
+The [summary read](../session-protocol/README.md) returns one `SessionSummary`.
+Its response bound is the Header bound plus 256 bytes for the wrapper and three
+numeric metadata fields; it creates no attached handle or subscription.
 
 Workflow-readiness, read-workflow and cancel-workflow are v1. List-workflows is v2:
 an absent cursor requests the latest history, and the response returns its exact

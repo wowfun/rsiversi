@@ -1460,6 +1460,26 @@ impl rsi_ai_protocol::LanguageModels for UnknownThenAcceptedHandle {
 pub(crate) struct UnusedWorkspace;
 #[async_trait::async_trait]
 impl rsi_workspace_protocol::WorkspaceRegistry for UnusedWorkspace {
+    async fn find(
+        &self,
+        _: &rsi_workspace_protocol::WorkspaceKey,
+    ) -> rsi_workspace_protocol::Result<Option<rsi_workspace_protocol::WorkspaceRecord>> {
+        panic!("coordinate lookup is not used by this fixture")
+    }
+
+    async fn display_order(
+        &self,
+    ) -> rsi_workspace_protocol::Result<rsi_workspace_protocol::WorkspaceDisplayOrder> {
+        unreachable!("display ordering is not used by this fixture")
+    }
+    async fn insert_before(
+        &self,
+        _: &rsi_workspace_protocol::WorkspaceId,
+        _: Option<&rsi_workspace_protocol::WorkspaceId>,
+    ) -> rsi_workspace_protocol::Result<rsi_workspace_protocol::WorkspaceDisplayOrder> {
+        unreachable!("display ordering is not used by this fixture")
+    }
+
     async fn rename(
         &self,
         _id: &rsi_workspace_protocol::WorkspaceId,
@@ -1512,10 +1532,10 @@ struct HeadlessDomain(Arc<UnknownThenAcceptedHandle>);
 #[cfg(unix)]
 #[async_trait::async_trait]
 impl SessionService for HeadlessDomain {
-    async fn read_header(
+    async fn read_summary(
         &self,
         _: &rsi_agent_session_protocol::SessionId,
-    ) -> rsi_session_protocol::Result<rsi_agent_session_protocol::SessionHeader> {
+    ) -> rsi_session_protocol::Result<rsi_session_protocol::SessionSummary> {
         panic!("unexpected durable Header read")
     }
     async fn create(
@@ -1632,10 +1652,10 @@ async fn line_sigint_interrupts_initial_service_queries_and_drains_presentation(
     struct Stalled(CancellationToken);
     #[async_trait::async_trait]
     impl SessionService for Stalled {
-        async fn read_header(
+        async fn read_summary(
             &self,
             _: &rsi_agent_session_protocol::SessionId,
-        ) -> rsi_session_protocol::Result<rsi_agent_session_protocol::SessionHeader> {
+        ) -> rsi_session_protocol::Result<rsi_session_protocol::SessionSummary> {
             panic!("unexpected durable Header read")
         }
         async fn create(

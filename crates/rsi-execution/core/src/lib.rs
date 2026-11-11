@@ -337,10 +337,10 @@ impl ExecutionPin {
     }
     /// Retains the full tuple alongside the native Sandbox resources through child settlement.
     pub fn retain_native(self, mut process: ConfinedProcess) -> ConfinedProcess {
-        process.owner = Some(rsi_sandbox::ProcessPlanOwner::new((
-            process.owner.take(),
-            self,
-        )));
+        process.owner = Some(match process.owner.take() {
+            Some(owner) => owner.retain(self),
+            None => rsi_sandbox::ProcessPlanOwner::new(self),
+        });
         process
     }
 }

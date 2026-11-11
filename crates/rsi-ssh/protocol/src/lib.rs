@@ -240,6 +240,29 @@ fn curve(input: &mut &[u8], name: &[u8], bytes: usize) -> Result<()> {
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn sandbox_preparation_keeps_wire_categories_without_native_diagnostics() {
+        use crate::rpc::Failure;
+        use rsi_sandbox::{SandboxError, SandboxMode};
+        for (cause, expected) in [
+            (
+                SandboxError::InvalidInput("private path".into()),
+                "\"invalid\"",
+            ),
+            (SandboxError::Capacity, "\"capacity\""),
+            (
+                SandboxError::Unsupported(SandboxMode::WorkspaceWrite),
+                "\"unsupported\"",
+            ),
+            (SandboxError::Preparation, "\"io\""),
+            (SandboxError::Probe("native API and path".into()), "\"io\""),
+            (SandboxError::Native("native API and path".into()), "\"io\""),
+        ] {
+            let wire = Failure::from(rsi_process::ProcessError::Sandbox(cause));
+            assert_eq!(serde_json::to_string(&wire).unwrap(), expected);
+        }
+    }
+
     use super::*;
     fn field(bytes: &[u8]) -> Vec<u8> {
         [

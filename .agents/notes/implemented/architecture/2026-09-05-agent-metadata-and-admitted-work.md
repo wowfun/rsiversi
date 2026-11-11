@@ -24,6 +24,19 @@ lineage and activity, with mechanical proofs for uncached descendants in that
 same snapshot. Quiescence checks every strict descendant after applying all
 appends, before committing; newly obtained proofs are cached only after commit.
 
+The [Serve application history contract](../../../../apps/serve/README.md)
+uses the caller-authorized [Session summary](../../../../crates/rsi/session-protocol/README.md)
+for metadata-only requests. Its Header, activity time and Fact/control watermarks
+come from one Store metadata snapshot. SQLite already decodes those fields
+together; discarding the mutable fields and querying them again adds a reader
+job and combines independent cuts. Header-only Agent Store callers retain their
+focused interface through the same concrete row reader, without another boxed
+Store call. Attaching a Session merely to return its stored cursor would register
+runtime activity and allocate handle services and watch state. DSH's JSONL persistence separates
+`stat()` from `open()` for the same reason: observation does not need a live log
+handle. RSI keeps its location authorization, direct-parent check and request
+retirement boundary, without adding another metadata cache or durable index.
+
 The [Kernel contract](../../../../crates/rsi-agent/kernel/README.md) gives
 accepted Agent mutations an owned commit task and a move-only source lease.
 Source release closes new admission and defers claim retirement until accepted
@@ -75,6 +88,10 @@ Revalidating history for every metadata row repeats work without increasing the
 proof required for presentation. A validation no-op would instead remove a
 required execution boundary. Keeping both old and new query APIs would obscure
 which path establishes that proof.
+Caching an earlier summary would not provide fresh watermarks under current
+caller authority. Parallel independent metadata reads still perform both jobs
+and cannot establish one snapshot. The summary operation replaces the Header-only
+Session operation without a pre-release compatibility alias.
 Cache hints are optional: a poisoned hint cache disables reuse instead of
 overriding a durable commit result. Its failure cannot authorize skipping the
 uncached proof.
@@ -87,8 +104,14 @@ normalization is not a semantic schema proof because it changes string literals.
 
 ## Consequences
 
+Point-read replies carry three numeric metadata fields and reuse the recent-listing
+summary type. They add no durable field, mirror, background task or cache. Removing
+one reader job does not by itself establish end-to-end search performance parity.
+
 Historical corruption can coexist with readable immutable metadata. Explicit
-validation, execution/history reads and offline verification still reject it.
+validation, indexed execution/history reads and offline verification still reject
+it. The later [canonical page decision](2026-11-08-canonical-pages-and-execution-proofs.md)
+separates raw history intervals from these whole-Session proofs.
 A caller may stop waiting before learning that an admitted mutation committed.
 Shutdown can report its bounded timeout while background drain continues to own
 its resources. Runtime ancestor settlement is eventually observable independently

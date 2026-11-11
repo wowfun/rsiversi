@@ -342,10 +342,10 @@ mod tests {
     }
     #[async_trait::async_trait]
     impl SessionService for CreateFailure {
-        async fn read_header(
+        async fn read_summary(
             &self,
             _: &rsi_agent_session_protocol::SessionId,
-        ) -> rsi_session_protocol::Result<rsi_agent_session_protocol::SessionHeader> {
+        ) -> rsi_session_protocol::Result<rsi_session_protocol::SessionSummary> {
             panic!("unexpected durable Header read")
         }
         async fn create(
@@ -367,12 +367,16 @@ mod tests {
             _: usize,
         ) -> rsi_session_protocol::Result<rsi_session_protocol::RecentSessionPage> {
             assert!(self.allow_history, "startup must not read recent history");
+            let header = crate::tests::UnknownThenAcceptedHandle::default()
+                .header()
+                .await
+                .unwrap();
             Ok(rsi_session_protocol::RecentSessionPage {
                 sessions: vec![rsi_session_protocol::SessionSummary {
-                    header: crate::tests::UnknownThenAcceptedHandle::default()
-                        .header()
-                        .await
-                        .unwrap(),
+                    last_activity_ms: header.created_at_ms(),
+                    header,
+                    durable_fact_seq: 0,
+                    durable_control_seq: 0,
                 }],
                 has_more: false,
                 next: None,
@@ -383,6 +387,27 @@ mod tests {
     struct Workspace;
     #[async_trait::async_trait]
     impl rsi_workspace_protocol::WorkspaceRegistry for Workspace {
+        async fn find(
+            &self,
+            _: &rsi_workspace_protocol::WorkspaceKey,
+        ) -> rsi_workspace_protocol::Result<Option<rsi_workspace_protocol::WorkspaceRecord>>
+        {
+            panic!("coordinate lookup is not used by this fixture")
+        }
+
+        async fn display_order(
+            &self,
+        ) -> rsi_workspace_protocol::Result<rsi_workspace_protocol::WorkspaceDisplayOrder> {
+            unreachable!("display ordering is not used by this fixture")
+        }
+        async fn insert_before(
+            &self,
+            _: &rsi_workspace_protocol::WorkspaceId,
+            _: Option<&rsi_workspace_protocol::WorkspaceId>,
+        ) -> rsi_workspace_protocol::Result<rsi_workspace_protocol::WorkspaceDisplayOrder> {
+            unreachable!("display ordering is not used by this fixture")
+        }
+
         async fn rename(
             &self,
             _id: &rsi_workspace_protocol::WorkspaceId,

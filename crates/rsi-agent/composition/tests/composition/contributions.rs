@@ -1,21 +1,16 @@
 use super::*;
 use rsi_agent_composition_protocol::{
-    ContextContributor, ContributionContext, ContributionError, ContributionKind,
-    ContributionOutput, ContributionRegistrar, ContributionRegistrarContract,
-    ContributionRegistration, ContributionResult,
+    ContributionError, ContributionKind, ContributionRegistrar, ContributionRegistrarContract,
+    ContributionRegistration, ToolAroundContributor, ToolContinuation,
 };
 use rsi_agent_session_protocol::ContributionId;
 
 #[derive(Debug)]
-struct ContextProbe;
+struct AroundProbe;
 #[async_trait::async_trait]
-impl ContextContributor for ContextProbe {
-    async fn contribute(
-        &self,
-        _: &ContributionContext,
-        _: CancellationToken,
-    ) -> ContributionResult<ContributionOutput> {
-        Ok(ContributionOutput::default())
+impl ToolAroundContributor for AroundProbe {
+    async fn execute(&self, next: ToolContinuation<'_>) -> rsi_tools_protocol::Result<ToolResult> {
+        next.run().await
     }
 }
 
@@ -23,7 +18,7 @@ fn registration(id: &str, priority: i32) -> ContributionRegistration {
     ContributionRegistration::new(
         ContributionId::new(id).unwrap(),
         priority,
-        ContributionKind::Context(Arc::new(ContextProbe)),
+        ContributionKind::ToolAround(Arc::new(AroundProbe)),
     )
 }
 
@@ -103,7 +98,7 @@ fn source(config: &str) -> String {
 }
 
 #[tokio::test]
-async fn execution_catalog_freezes_business_order_and_rolls_back_failed_candidates() {
+async fn native_tool_catalog_freezes_business_order_and_rolls_back_failed_candidates() {
     let temp = tempfile::tempdir().unwrap();
     let root = temp.path().join("presets");
     let id = AgentPresetId::new("default").unwrap();

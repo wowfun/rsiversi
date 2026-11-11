@@ -1,8 +1,8 @@
 use super::{
     Arc, Deserialize, FileKind, Files, FilesBinding, FilesCaller, FilesError,
     MAXIMUM_FILE_PATH_BYTES, RelativePath, ToolContent, ToolDefinition, ToolError, ToolExecution,
-    ToolExecutor, ToolRegistration, ToolResult, ToolScheduling, ToolTimeoutPolicy, Value,
-    async_trait, error, json, safe_tool_text,
+    ToolExecutor, ToolRegistration, ToolResult, ToolRunPolicy, ToolScheduling, Value, async_trait,
+    error, json, safe_tool_text,
 };
 use serde::Serialize;
 
@@ -125,7 +125,7 @@ pub(super) fn registration(files: Arc<dyn Files>) -> rsi_tools_protocol::Result<
                 },"oneOf":[{"required":["path"]},{"required":["path_hex"]}],"additionalProperties":false
             }}},"required":["files"],"additionalProperties":false
         }))?.with_scheduling(ToolScheduling::ParallelSafe),
-        timeout: ToolTimeoutPolicy::Execution { timeout_ms: 30_000 },
+        run_policy: ToolRunPolicy::execution(std::time::Duration::from_secs(30)),
         executor: Arc::new(Present { files }),
     })
 }

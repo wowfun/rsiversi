@@ -1,5 +1,25 @@
 # rsi-serve
 
+Application capture carries each exact registration's required `timeout_ms`
+field: `null` means no execution deadline; a number is the DSH `timeoutMs`
+declaration. Serve checks finite positive numbers and converts milliseconds to
+`Duration` with checked nanosecond precision; values below that precision or
+outside the runtime clock's range are rejected, never clamped or replaced by a
+600-second timeout. Fractional and longer representable durations are retained.
+The application's captured Tool remains automatic unless its actual native
+contract independently declares human interaction.
+
+Deadline expiry cancels and joins the original application operation. Native
+Tools preserve a non-cancellation outcome that settles after cancellation,
+including evidence of a completed effect. This intentionally differs from DSH's
+optional `timeout-policy` wrapper, which replaces its own expired result. A
+selected original JS wrapper keeps its classification at its original pipeline
+position; Serve adds no duplicate wrapper and never erases a settled receipt.
+
+Application Workspace Session moves use Navigation's shared native account order.
+The caller's actual location and Session protection authority cover the commit;
+the bridge owns only the DSH error and projection mapping.
+
 The selected application's Tool listener can prepare and wrap a native Tool on a
 dedicated authenticated loopback WebSocket. One invocation owns the connection.
 Before the durable intent the application may request one approval with its
@@ -19,6 +39,12 @@ interactions are pending.
 Application inbox `wait_idle` delegates to the attached Session's read-only native
 idle wait. It retains the request lifetime while waiting and creates no inbox
 snapshot, message resource, polling timer or per-Turn cancellation request.
+
+Application inbox `open` returns pending identities, routing and execution state
+at one native cut. Accepted durable message bodies come from history controls at
+that cut. Unpublished draft inputs are included directly; their native aggregate
+bound fits the process reply. Neither capture retains an inbox reader or needs
+message-fragment and close calls. Durable message reads use the history interface.
 
 Application inbox `wait_draft` waits until the supplied draft revision changes or
 the Session is published, using the standard Session draft subscription. It
@@ -55,7 +81,7 @@ A Service Profile can select an application process with
 asset selection as the browser), a private `profile` name, and a `process`
 using the installed package process descriptor. One supervised process owns
 the application's routes across local browser attachments. At activation the
-host sends `application.open` with protocol 6, a private profile directory
+host sends `application.open` with protocol 12, a private profile directory
 and a random upstream key over the generation's private process connection.
 The opening payload also supplies an opaque `owner` callback handle. Native
 composition gives it the product's shared browser identity and the application
@@ -64,6 +90,9 @@ a browser credential or a completed HTTP request. It remains a device caller
 through Session ingress and cannot perform local-only administration. Browser
 closure or credential revocation retires that browser's requests; application
 replacement retires the owner handle and all resources it retained.
+The application Session catalog treats either durable Facts or controls as
+nonempty state. Held input remains discoverable before any Turn starts; empty
+unpublished drafts retain their separate draft presentation.
 The reply names its loopback port and owned route prefixes. Only the selected
 assets' listeners forward those paths. After a published process disconnects,
 the Host retires its sockets and request handles and prepares a fresh process
@@ -77,7 +106,7 @@ All other preset names retain precedence and delegated Sessions still obey
 their tool allowlist.
 
 An application configured with `tools = true` can advertise a separate private
-loopback listener in its opening reply. Tool protocol 14 owns capture, input
+loopback listener in its opening reply. Tool protocol 15 owns capture, input
 preparation, stopping, start, outcome, cancellation and view release. Before an
 idle language Turn settles, `POST /v1/stopping` names its producing view.
 The application returns JSON null once its stopping listeners and their native
@@ -106,6 +135,12 @@ the durable Tool intent. Start returns the settled outcome after the Worker has
 committed it. A lost start response triggers only read-only outcome queries.
 The source can read the same receipt from a replacement process. The effect
 body is admitted once. An absent or mismatched receipt cannot prove a result.
+Execution admission requires the original live captured view and registration.
+Duplicate start can return an existing matching receipt without that live view;
+it cannot enter a replacement registration. The native source sends only outcome
+queries after losing a start reply. The durable native Tool intent is the
+execution admission record; the application keeps live pending state in memory and persists only a settled
+result before returning it. Process loss without that result remains unknown.
 Capture includes `modelSelection` with the native request's provider, model and
 optional reasoning effort. This is the admitted request choice, independent of
 the immutable Session Header and any later model-selection command.
@@ -124,6 +159,20 @@ Cancellation allows five seconds for a receipt. A body that ignores its
 signal keeps its Worker admission until it actually exits. The native caller
 receives an unknown outcome when that grace expires.
 
+The opt-in `application::tools::tests::transport_probe::native_tool_transport`
+test drives the existing Rust `View::start_and_observe` path against an isolated
+application listener. Its line-delimited stdin accepts `{"type":"bind","path":...}`
+for a private listener descriptor containing `port` and `key`, then
+`{"type":"start","request":...}` for already captured fixture invocations.
+Output lines prefixed `RSI_TOOL_TRANSPORT ` carry readiness, binding confirmation,
+or elapsed milliseconds and the typed Tool result; credentials are never output.
+EOF closes the probe; a run without any invocation fails. Build the optimized test executable with
+`cargo test -p rsi-serve --lib --release --no-run`, and run the exact ignored test
+with `--ignored --exact --nocapture`. The measured interval includes native
+transport, application execution and receipt settlement, but excludes fixture
+stdin/stdout, capture, browser startup and subsequent Kernel Fact publication.
+This probe does not replace live Kernel execution or recovery acceptance.
+
 An application observing a root Session can follow its pending human
 interactions under the shared browser owner's authority. The observation
 starts with the native complete snapshot. Its bounded fragments retain the
@@ -140,7 +189,13 @@ write ownership, create an Agent, or make an unpublished draft durable.
 Kernel subagent preparing a model request. Interactive commands and queue
 mutations on a subagent still go through its parent. A request-owned inbox
 snapshot retains the exact active Turn, Fact and
-control cursors and pending-message metadata. Opening returns the complete
+control cursors and pending-message metadata. A durable opening also returns
+`history`: the Header metadata, model baseline, `through` and `selection_cursor`
+from that same inspection. Readers replay model controls through this captured
+cut; opening does not subscribe to current projections or read the Header again.
+Draft model selection remains revision-matched through the history opening,
+because a draft's selected model belongs to its command baseline, not its Header.
+Opening returns the complete
 metadata object, bounded by the native 64-message count and typed identities.
 An empty snapshot retains nothing and needs no close operation. Message bodies
 are read as bounded UTF-8 fragments; a message read must name an acceptance in that
@@ -163,9 +218,10 @@ in-flight submission cannot still commit.
 
 Application history control pages include committed model selections and mailbox
 acceptance, successor, claim, promotion and discard transitions, with their stored
-Fact anchors. Acceptance metadata names its immutable control sequence; the
-separate history message read fragments that exact acceptance through the Session
-read contract. Pending state is never reconstructed from the mutable mailbox tail.
+Fact anchors. Each acceptance carries its immutable message body in that same
+page, so replay does not read the acceptance again. The separate exact-message
+read remains available for receipt recovery. Pending state is never reconstructed
+from the mutable mailbox tail.
 Model controls originating from a command include its exact invocation and
 committed receipt. Baselines have neither: a draft baseline folds multiple
 changes together and cannot identify an individual command by matching its value.
@@ -199,13 +255,14 @@ the shared owner's authority. For an unpublished Session it reads the existing
 draft handle. A local filesystem plugin can only receive a native local
 workspace path through this operation.
 `application.sessions` reads one page of visible durable Sessions with the
-same live request authority. Each indexed activity summary supplies the last
-activity time and durable Fact watermark used for the blank flag. The running
+same live request authority. Each listed row supplies its Header, activity time and
+durable Fact/control watermarks from one Store read snapshot. Both watermarks
+determine the blank flag; no follow-up activity-summary query is needed. The running
 flag reports current Kernel ownership of a nonterminal Turn for that visible
 identity. A cold open Turn stays in the list with a clear running flag.
 Listing reads neither transcript bodies nor pending human interactions.
 With `history: true`, the same cursor returns immutable history metadata and
-the durable Fact/control cursor from one indexed summary per Session. The
+the durable Fact/control cursor from that same listed row. The
 parent names the history source for both independent and Agent forks. The
 working directory is present for local execution only.
 `application.create` resolves a named Workspace or registers an explicit
@@ -284,24 +341,86 @@ inspect an active Turn or enumerate message-removal requests. The standard
 Session adapter handles unpublished drafts without publication. Interactive
 root commands reject an Agent-owned child.
 For an explicitly opened Session, `application.history` reads immutable Facts
-under the active browser owner's Session handle. Opening returns the durable cursor
-and the current native model-selection projection. An open with `metadata_only:
-true` returns the stored header metadata and indexed cursor. Opening an absent
-or inaccessible Session returns null. A metadata-only read also returns null
-for an unpublished draft. Other read failures remain errors. The captured Fact watermark
+under the active browser owner's authority. Opening a persisted Session reads
+the authorized durable Header, immutable model baseline and indexed
+Fact/control cut without attaching
+a Session handle, opening activity, or creating projection subscriptions. The
+caller's location access and any addressed direct-parent relationship still apply.
+Its `through` equals the durable cursor's Fact watermark. Persisted history can
+reconstruct selection from that baseline and canonical controls without requesting
+a live model projection; catalog rows retain their smaller metadata shape.
+Opening an absent or inaccessible Session returns null. A metadata-only read also
+returns null for an unpublished draft. Other read failures remain errors. The captured Fact watermark
 selects the history cut, while the control watermark identifies its independent
 selection revision. An absent producer uses the immutable Header baseline.
-A failed producer is reported rather than replaced with a default.
-Control history uses the same authorized handle and a captured control horizon.
+A draft open still reads its revision-matched model projection; a failed draft
+producer is reported rather than replaced with a default. Durable history does
+not require executable Agent or MCP contributions to activate.
+The durable `capture` operation accepts the caller's already projected Fact and
+control positions. It authorizes one fresh summary and returns that metadata
+with the first missing Fact and control slices at its cut. It does not attach
+a Session or read a live projection. Absent or inaccessible Sessions return a
+null capture; positions ahead of the captured cut are invalid. Unchanged streams
+carry no page. Each slice reports its own covered position; control Fact anchors
+remain unchanged even when its paired Fact slice ends earlier.
+The entire encoded capture fits the ordinary history page budget, including
+metadata and both slices. The remaining budget is shared between advancing
+streams. An individual record that cannot fit is left to the ordinary paged
+reader; capture does not retry with a larger Store allocation or retain a second
+page. Captures use
+the same two prepared-page reservations and fragmentation lifetime as other
+history pages. Their identity binds the Session, parent and both starting
+positions; continuations do not recapture a newer cut. Every new capture
+authorizes afresh. Listing metadata does not read event bodies.
+Fact, control and exact acceptance history reads authorize the
+durable Header directly and use the Store, without allocating a Session handle
+or opening runtime activity. Every read checks caller retirement before returning;
+addressed parent access and lineage still apply. Exact message reads bind both
+the message ID and its acceptance control sequence through the canonical control
+record, moving its body directly into serialization.
+Fact, control, exact-message and inherited Fact pages carry a unique `reader`
+identity for one page. Offset zero reads and serializes that page once; subsequent
+offsets borrow the same encoded bytes under the original physical request,
+Session and read coordinates. Fact, control and exact-message pages also bind
+the addressed parent. Their first fragment authorizes the Session and parent
+and captures the page. Continuations check the retained
+request's live authority and exact page identity without reading Session
+metadata again. They finish that immutable cut even if storage later changes;
+a new page authorizes and captures its own cut.
+The final fragment releases the page. `page_close` releases an abandoned reader;
+request or upstream retirement releases every remaining page. Failed or cancelled
+preparation retains no page. A single-fragment response retains no resource.
+At most two page preparations/transfers share native storage at once. The
+application queues page readers before sending their first RPC, leaving native
+request slots available for continuation and close. No durable cache is created.
+Each UTF-8 fragment uses the available process-frame payload budget, counting
+JSON string escaping before choosing its boundary. Eight KiB of the existing
+1 MiB frame remains reserved for bounded reply coordinates and framing. Ordinary
+Store pages admit 1 MiB of logical records independently of the encoded fragment
+boundary. JSON escaping can spread that page across several frames without
+another Store read. Larger individual records retain their existing exact-size
+read and fragmentation path; the two retained-page permits and serialized-page
+ceiling also apply to these ordinary pages.
+Control history uses a captured control horizon.
+Its wire projection borrows the Store's validated control payloads through
+serialization, without materializing a second JSON tree of message bodies.
+Its exclusive `after_seq`, inclusive `through_seq` and UTF-8 byte `offset` select
+fragments of one JSON event array. Pages contain at most 64 control records,
+normally within that ordinary page budget; one larger record uses its exact
+Store-reported size. Non-projected records still advance the returned watermark.
 Pages expose model-selection commits with their Store-owned Fact anchors;
 the native model-selection codec resolves complete replacements. A wait returns
 a coherent pair of current watermarks after either stream advances.
 Fact reads supply an exclusive `after_seq` and inclusive captured `through_seq`.
-They return contiguous pages of at most 512 Facts, normally within 128 KiB of
-encoded Fact bodies. An individual larger Fact is read alone using its exact
+They return contiguous pages of at most 512 Facts, within the same ordinary
+encoded-body budget. An individual larger Fact is read alone using its exact
 Store-reported length. The response never advances beyond the captured horizon;
 inherited reads also stay inside their retained fork interval. Pages and decoded
-single model attempts use UTF-8 fragments. No second durable history is created.
+model attempts embedded in Fact pages use UTF-8 fragments. The
+[Agent extension history view](../../crates/rsi-extension/agent/README.md) owns
+the normalized attempt representation and serialized-page ceiling. Workbench and
+inherited reads use that same view, without a second attempt lookup or durable
+history copy.
 Waiting subscribes to
 native observations after the supplied control and Fact cursors. A retired
 upstream request loses access. Session listing uses its independent cold path.

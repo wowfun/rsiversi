@@ -360,6 +360,7 @@ impl Driver {
             rsi_agent_session_protocol::ModelSelection::baseline(claim.header().settings());
         let mut selected_tools = None;
         let mut request_composition = composition.clone();
+        let mut prepared_options = None;
         loop {
             if stop.is_cancelled() {
                 return Err(DriveFailure::Stopped);
@@ -369,6 +370,7 @@ impl Driver {
                 return Err(DriveFailure::Turn(TurnOutcome::Cancelled));
             }
             if retry_attempt == 0 {
+                drop(prepared_options.take());
                 self.claim_step_messages(claim, fold).await?;
                 if request == ModelRequest::Stopping
                     && !fold.has_pending_tool_inputs()
@@ -417,16 +419,23 @@ impl Driver {
                         }
                         other => other,
                     })?;
+                prepared_options = Some(self.prepare_request_options(
+                    claim,
+                    &request_composition,
+                    &selection,
+                    selected_tools.as_deref(),
+                )?);
             }
             let composition = &request_composition;
             request = ModelRequest::ToolFollowup;
             let (source_model_effect_id, output) = match self
                 .run_model_attempt(
                     claim,
-                    composition,
+                    prepared_options
+                        .as_ref()
+                        .expect("a fresh request prepares options before its retry series"),
                     fold,
                     &selection,
-                    selected_tools.as_deref(),
                     retry_attempt,
                     &cancellation,
                     stop,
@@ -654,21 +663,17 @@ impl Driver {
         self.publish_durable(
             claim,
             fold,
-            vec![SessionFactBody::ImageIntent {
-                turn_id: claim.turn_id().clone(),
-                effect_id: effect_id.clone(),
-                snapshot,
-            }],
-        )
-        .await?;
-
-        self.publish_durable(
-            claim,
-            fold,
-            vec![SessionFactBody::ImageStarted {
-                turn_id: claim.turn_id().clone(),
-                effect_id: effect_id.clone(),
-            }],
+            vec![
+                SessionFactBody::ImageIntent {
+                    turn_id: claim.turn_id().clone(),
+                    effect_id: effect_id.clone(),
+                    snapshot,
+                },
+                SessionFactBody::ImageStarted {
+                    turn_id: claim.turn_id().clone(),
+                    effect_id: effect_id.clone(),
+                },
+            ],
         )
         .await?;
 
@@ -877,38 +882,35 @@ impl Driver {
             .publish_durable(
                 claim,
                 fold,
-                vec![SessionFactBody::ModelIntent {
-                    evidence,
-                    price_quote: claim
-                        .header()
-                        .settings()
-                        .pricing()
-                        .resolve(&snapshot)
-                        .cloned(),
-                    purpose: purpose.clone(),
-                    turn_id: claim.turn_id().clone(),
-                    effect_id: effect_id.clone(),
-                    snapshot: snapshot.clone(),
-                }],
+                vec![
+                    SessionFactBody::ModelIntent {
+                        evidence,
+                        price_quote: claim
+                            .header()
+                            .settings()
+                            .pricing()
+                            .resolve(&snapshot)
+                            .cloned(),
+                        purpose: purpose.clone(),
+                        turn_id: claim.turn_id().clone(),
+                        effect_id: effect_id.clone(),
+                        snapshot: snapshot.clone(),
+                    },
+                    SessionFactBody::ModelStarted {
+                        turn_id: claim.turn_id().clone(),
+                        effect_id: effect_id.clone(),
+                    },
+                ],
             )
             .await?;
 
-        for fact in intent.facts() {
-            self.evidence
-                .lock()
-                .map_err(|_| fatal("evidence cache lock poisoned"))?
-                .observe(claim.session_id(), fact);
-        }
-        self.publish_durable(
-            claim,
-            fold,
-            vec![SessionFactBody::ModelStarted {
-                turn_id: claim.turn_id().clone(),
-                effect_id: effect_id.clone(),
-            }],
-        )
-        .await?;
-
+        self.evidence
+            .lock()
+            .map_err(|_| fatal("evidence cache lock poisoned"))?
+            .observe(
+                claim.session_id(),
+                intent.facts().first().expect("model intent precedes start"),
+            );
         live.started().map_err(fatal)?;
 
         let combined = combine_cancellation(cancellation, stop);
@@ -1533,8 +1535,11 @@ impl Driver {
                 additional_contexts,
             ),
             (approval, decision) => {
-                if let (Some(plan), Some(ToolDecision::Ready(continuation))) = (plan, decision) {
-                    *plan.continuation = Some(continuation);
+                if let Some(mut plan) = plan {
+                    if let Some(ToolDecision::Ready(continuation)) = decision {
+                        *plan.continuation = Some(continuation);
+                    }
+                    composition.wrap_tool_execution(&mut plan);
                 }
                 return Ok(ToolPreparation::Ready(PendingToolEffect {
                     origin: origin.clone(),
@@ -1593,30 +1598,26 @@ impl Driver {
             .publish_durable(
                 claim,
                 fold,
-                vec![SessionFactBody::ToolIntent {
-                    origin,
-                    program_role,
-                    turn_id: claim.turn_id().clone(),
-                    effect_id: effect_id.clone(),
-                    identity: identity.clone(),
-                    name,
-                    arguments,
-                    approval,
-                    parallel_safe,
-                }],
+                vec![
+                    SessionFactBody::ToolIntent {
+                        origin,
+                        program_role,
+                        turn_id: claim.turn_id().clone(),
+                        effect_id: effect_id.clone(),
+                        identity: identity.clone(),
+                        name,
+                        arguments,
+                        approval,
+                        parallel_safe,
+                    },
+                    SessionFactBody::ToolStarted {
+                        turn_id: claim.turn_id().clone(),
+                        effect_id: effect_id.clone(),
+                        identity: identity.clone(),
+                    },
+                ],
             )
             .await?;
-
-        self.publish_durable(
-            claim,
-            fold,
-            vec![SessionFactBody::ToolStarted {
-                turn_id: claim.turn_id().clone(),
-                effect_id: effect_id.clone(),
-                identity: identity.clone(),
-            }],
-        )
-        .await?;
 
         self.track_tool(claim, composition.clone(), identity.clone());
         Ok(PreparedToolEffect {
@@ -1638,7 +1639,7 @@ impl Driver {
         fold: &mut ModelContextState,
         pending: Vec<PendingToolEffect>,
     ) -> std::result::Result<Vec<PreparedToolEffect>, DriveFailure> {
-        let mut intents = Vec::with_capacity(pending.len());
+        let mut markers = Vec::with_capacity(pending.len() * 2);
         let mut prepared = Vec::with_capacity(pending.len());
         for effect in pending {
             let PendingToolEffect {
@@ -1652,7 +1653,7 @@ impl Driver {
                 parallel_safe,
                 prepared: prepared_call,
             } = effect;
-            intents.push(SessionFactBody::ToolIntent {
+            markers.push(SessionFactBody::ToolIntent {
                 origin,
                 program_role,
                 turn_id: claim.turn_id().clone(),
@@ -1666,11 +1667,18 @@ impl Driver {
             prepared.push((effect_id, identity, prepared_call));
         }
 
-        let intents = self.publish_durable(claim, fold, intents).await?;
+        markers.extend(prepared.iter().map(|(effect_id, identity, _)| {
+            SessionFactBody::ToolStarted {
+                turn_id: claim.turn_id().clone(),
+                effect_id: effect_id.clone(),
+                identity: identity.clone(),
+            }
+        }));
+        let markers = self.publish_durable(claim, fold, markers).await?;
 
         let prepared: Vec<_> = prepared
             .into_iter()
-            .zip(intents.into_facts())
+            .zip(markers.into_facts())
             .map(
                 |((effect_id, identity, prepared), intent)| PreparedToolEffect {
                     intent,
@@ -1680,16 +1688,6 @@ impl Driver {
                 },
             )
             .collect();
-        let starts = prepared
-            .iter()
-            .map(|effect| SessionFactBody::ToolStarted {
-                turn_id: claim.turn_id().clone(),
-                effect_id: effect.effect_id.clone(),
-                identity: effect.identity.clone(),
-            })
-            .collect();
-        self.publish_durable(claim, fold, starts).await?;
-
         for effect in &prepared {
             self.track_tool(claim, composition.clone(), effect.identity.clone());
         }
@@ -2243,7 +2241,7 @@ impl Driver {
         ));
     }
 
-    pub(super) async fn publish_durable(
+    pub(super) async fn publish(
         &self,
         claim: &TurnClaim,
         fold: &mut ModelContextState,
@@ -2270,6 +2268,16 @@ impl Driver {
             fold.ingest(ContextPage::Canonical(&facts[unapplied..]))
                 .map_err(|error| context_failure("context.incremental", &error))?;
         }
+        Ok(receipt)
+    }
+
+    pub(super) async fn publish_durable(
+        &self,
+        claim: &TurnClaim,
+        fold: &mut ModelContextState,
+        bodies: Vec<SessionFactBody>,
+    ) -> std::result::Result<rsi_agent_turn_protocol::PublishedFacts, DriveFailure> {
+        let receipt = self.publish(claim, fold, bodies).await?;
         let seq = receipt
             .facts()
             .last()

@@ -36,10 +36,18 @@ pub(super) fn optional_text(
     index: usize,
     limit: usize,
 ) -> rusqlite::Result<Option<String>> {
+    optional_borrowed_text(row, index, limit).map(|value| value.map(str::to_owned))
+}
+
+pub(super) fn optional_borrowed_text<'a>(
+    row: &'a Row<'_>,
+    index: usize,
+    limit: usize,
+) -> rusqlite::Result<Option<&'a str>> {
     if matches!(row.get_ref(index)?, ValueRef::Null) {
         Ok(None)
     } else {
-        bounded_text(row, index, limit).map(Some)
+        borrowed_text(row, index, limit).map(Some)
     }
 }
 

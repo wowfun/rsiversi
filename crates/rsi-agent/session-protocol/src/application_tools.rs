@@ -1,5 +1,5 @@
 use super::{Result, SessionError, validate_identifier, validate_safe_text};
-use rsi_tools_protocol::{MAXIMUM_REGISTERED_TOOLS, ToolDefinition};
+use rsi_tools_protocol::MAXIMUM_REGISTERED_TOOLS;
 use serde::{Deserialize, Serialize};
 use std::collections::BTreeSet;
 
@@ -7,8 +7,8 @@ use std::collections::BTreeSet;
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct ApplicationToolBinding {
-    /// Schema exposed to the model.
-    pub definition: ToolDefinition,
+    /// Model-visible name selected from the captured runtime.
+    pub name: String,
     /// Registration occurrence in the application process.
     pub registration: String,
     /// Registration owner authenticated by the native retained-result identity.
@@ -24,7 +24,7 @@ pub enum ApplicationToolView {
         /// Bounded operator diagnostic.
         reason: String,
     },
-    /// Definitions and identities of the exact selected registration occurrences.
+    /// Names and identities of the exact selected registration occurrences.
     Ready {
         /// Application process incarnation.
         generation: String,
@@ -61,7 +61,9 @@ impl ApplicationToolView {
                 let mut registrations = BTreeSet::new();
                 let mut previous = None;
                 for row in tools {
-                    let name = row.definition.name();
+                    let name = row.name.as_str();
+                    rsi_tools_protocol::validate_model_tool_name(name)
+                        .map_err(|e| SessionError::Invalid(e.to_string()))?;
                     if previous.is_some_and(|last| last >= name)
                         || selected
                             .binary_search_by(|candidate| candidate.as_str().cmp(name))

@@ -69,7 +69,7 @@ async fn workspace_review_api_waits_for_real_shell_work_and_preserves_summaries_
         .await
         .unwrap();
     let scope = Scope {
-        workspace: workspace.id.clone(),
+        workspace: rsi_workspace_protocol::WorkspaceKey::from_coordinates(&workspace.coordinates),
         conversation: ConversationIdentity::Native(SessionId::new("review-source").unwrap()),
     };
     let handle = daemon
@@ -220,7 +220,9 @@ async fn workspace_review_api_waits_for_real_shell_work_and_preserves_summaries_
         client
             .call(Request::List {
                 scope: Scope {
-                    workspace: other.id,
+                    workspace: rsi_workspace_protocol::WorkspaceKey::from_coordinates(
+                        &other.coordinates
+                    ),
                     conversation: scope.conversation.clone()
                 },
                 after: None

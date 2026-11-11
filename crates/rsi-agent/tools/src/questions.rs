@@ -1,6 +1,6 @@
 use super::*;
 use rsi_agent_turn_protocol::{TurnExecution, TurnExecutionContract};
-use rsi_tools_protocol::{ToolError, ToolTimeoutPolicy};
+use rsi_tools_protocol::{ToolError, ToolRunPolicy};
 use rsi_user_questions_protocol::{
     Question, QuestionError, QuestionRequest, UserQuestions, UserQuestionsContract,
     validate_questions,
@@ -42,7 +42,7 @@ impl PluginFactory for QuestionToolsFactory {
             .register_batch(vec![ToolRegistration {
                 output: None,
                 definition,
-                timeout: ToolTimeoutPolicy::HumanInteraction,
+                run_policy: ToolRunPolicy::human_interaction(),
                 executor,
             }])
             .map_err(|error| MetaError::Activation(error.to_string()))?;

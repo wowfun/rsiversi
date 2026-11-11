@@ -222,7 +222,7 @@ pub struct AgentAdapter {
     commands: command::Commands,
     read_budget: rsi_api_protocol::ByteBudget,
     history: Arc<crate::history::HistoryRouter>,
-    _history_registrations: [rsi_extension::HandlerRegistration; 3],
+    _history_registrations: [rsi_extension::HandlerRegistration; 2],
     questions: Mutex<
         Option<(
             Arc<crate::questions::QuestionRouter>,
@@ -252,7 +252,6 @@ impl AgentAdapter {
         let registrations = [
             register("agent.step-decision.read")?,
             register("agent.history.read")?,
-            register("agent.history.attempt.read")?,
         ];
         Ok(Arc::new(Self {
             history,

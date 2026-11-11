@@ -72,25 +72,33 @@ supplied by a session Fact.
 
 The Store's derived turn rows are committed in the same transaction as their
 canonical Facts. Open checks the exact schema. Header and recent-session reads
-validate bounded metadata; explicit validation and execution/history access check
-the selected session's relational and lifecycle consistency. The explicit offline verifier
+validate bounded metadata. Canonical history pages validate their selected bytes
+and coordinates; execution and indexed access require the selected session's
+relational and lifecycle proof, as defined by the
+[Store protocol](../store-protocol/README.md). The explicit offline verifier
 performs the whole-database physical, foreign-key, and logical audit while
 holding the writer lease. Kernel recovery never trusts an index row without
 decoding and validating the selected bounded Facts, while cold outcome lookup
 uses a Store-validated acceptance/terminal boundary pair whose decoded sequence,
 turn, and kind exactly match the selecting relational rows.
 
-The Kernel accepts an external-effect start marker only after its matching
-intent is durable; the executor then durably flushes that start before
-invocation. Recovery preserves a durable cancellation as `Cancelled`, treats
+The Kernel validates ordered, matching external-effect intent/start markers;
+the executor durably flushes the complete prefix before invocation, as defined
+by the [effect ordering contract](subsystems/turns-and-agent-trees.md).
+Recovery preserves a durable cancellation as `Cancelled`, treats
 other unfinished work as interrupted, and never guesses that replay is safe.
 Cancellation is cooperative, so every provider and Tool call also remains
 bounded by its own timeout and shutdown deadline.
 
-Turn acceptance stores an already-resolved execution policy rather than a
-security-looking override. Danger-full-access is invalid without live approval;
-restricted Tool process plans cross the pinned Sandbox service and durable
-Tool results retain its actual enforcement stamps.
+Turn acceptance stores the caller's resolved Sandbox mode and the Session's
+independent approval requirement. An explicitly configured unconfined mode does
+not add per-Tool approval; an explicit approval requirement still applies in any
+mode. Tool policy contributors may require approval or deny execution, and a
+Tool's requested privilege escalation retains its own approval boundary. Model
+arguments do not grant a new Turn policy. Restricted Tool process plans cross
+the pinned Sandbox service and durable Tool results retain its actual enforcement
+stamps. The same resolved pair survives mailbox activation, child/workflow
+inheritance and durable replay.
 
 SQLite readers project each row's byte length and suppress an oversized header
 or Fact body before allocating its Rust String. Typed Fact readers then enforce

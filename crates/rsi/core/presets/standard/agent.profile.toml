@@ -7,6 +7,11 @@ plugin = "rsi.agent.context.default"
 
 [[steps]]
 kind = "plugin"
+id = "prompt-assembly"
+plugin = "rsi.agent.prompt-assembly"
+
+[[steps]]
+kind = "plugin"
 id = "workspace-context"
 plugin = "rsi.agent.workspace-context.contributor"
 
@@ -68,8 +73,8 @@ enabled_rhai = "defines.standard_output_cache"
 
 [[steps]]
 kind = "plugin"
-id = "bash"
-plugin = "rsi.shell.bash.tool"
+id = "shell"
+plugin = "rsi.shell.tool"
 enabled_rhai = "defines.standard_coding_tools"
 
 [[steps]]

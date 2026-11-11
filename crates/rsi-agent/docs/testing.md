@@ -1,5 +1,12 @@
 # rsi-agent testing
 
+Native Tool around-contribution tests drive the real Kernel and executor without
+an application source. They verify nested await order, single body invocation,
+short-circuit results, scoped execution authority and final durable output.
+Composition tests retain the old callback catalog across replacement and removal;
+admitted invocations keep that pin. Mixed native/application tests exercise the
+explicit nesting boundary rather than assuming global Cordis event order.
+
 Program validation spans the closest protocol, Kernel, Store, Context and executor
 targets because origin and ownership change durable replay. Kernel workflow tests
 exercise exclusive receipts beyond ordinary mailbox capacity, creator retirement,
@@ -15,6 +22,20 @@ curated-result bounds without Node. Native Node tests require explicit `RSI_TEST
 and are opt-in locally; the Linux Agent CI job supplies pinned Node and runs them; they join cancelled RPC handlers and verify direct-process reaping.
 Live browser probes and provider usage belong to the standard product fixtures;
 deterministic suites do not resolve developer credentials or call live providers.
+Time-context tests cover the default refresh interval, exact expiry, clock
+rollback and zero interval. Context tests distinguish claimed, omitted, emptied
+and entered input, including checkpoint recovery, selected fork history and Turn
+eviction. The executor checks that the next preparation after a Tool result sees
+the entered input's original Fact timestamp without adding another copy.
+Agent catalog tests exercise current Step guidance through file edits, removals,
+typed source failures and recovery. Human mention names are rechecked against
+each current catalog without adding historical instruction inputs. Live checks
+verify one catalog copy per request, stable repeated system evidence and cold
+continuation; the Context projection target owns Step replacement and expiry.
+Instruction-update tests preserve unchanged guidance across a checkpoint,
+replace and explicitly clear it, and prevent inheritance across Step boundaries.
+The executor proves repeated model/Tool rounds publish the text once while
+retaining each round's explicit Tool capture; retries use the admitted assembly.
 Workflow settlement tests drive the production observation loop and terminal
 cleanup, including runtime retirement with a still-pending Program result.
 Paused-clock tests bound both queued and admitted observation commands, preserve
@@ -38,10 +59,18 @@ Human steering scenarios run through the Kernel against both Memory and SQLite:
 idle routing, active Step consumption, terminal/recovery promotion, immutable
 same-ID retries, acceptance FIFO around fixed follow-ups, and explicit message
 cancellation. SQLite scenarios also run its offline canonical/index verifier.
+Claim tests cover complete metadata selection independently of payload paging,
+reference-generated Fact order, atomic rollback, and a large opt-in queue whose
+expanded bodies exceed the ordinary append budget. SQLite claim admission checks
+that referenced input bodies are resolved individually and survive verification
+and reopening without introducing another durable payload owner.
+Agent wait regression checks assert that resuming from its own mailbox does not
+read a payload page. SQLite mailbox summaries trace metadata-only queries with a
+1 MiB held input and check acceptance order, discard transitions and reopening.
 SQLite integration tests separately cover session and per-turn pagination,
 open-turn indexing and cursor pagination, optimistic conflicts, rejection of
 representative old schemas, index integrity,
-CAS integrity, fast reopen with dormant corruption, first-access rejection,
+CAS integrity, fast reopen with dormant corruption, indexed-access rejection,
 explicit full verification, reader/writer WAL snapshots, exclusive writer leases, and direct database
 tampering with header or Fact rows above their framing bounds. Checkpoint-row
 tampering also proves reads reject a mismatched immutable-header fingerprint
@@ -54,7 +83,10 @@ offline verification: a bounded wait may retry only `WriterLocked`, while any
 other verification result is asserted immediately. Kernel worker completion or a
 proof result alone does not prove that every SQLite job owner has closed.
 Metadata scans above the validation-cache capacity
-must not validate history. Large Fact page boundaries and count lookahead
+must not validate history. Canonical pages remain readable with unrelated damaged
+indexes, reject selected malformed rows and missing coordinates, and leave proof
+counters unchanged. Explicit preparation, indexed decisions and mutation still
+reject that damage. Large Fact page boundaries and count lookahead
 assert that the next JSON body is not materialized. Subtree snapshots reject
 cycles and oversized lineage; transaction guards detect children inserted after
 a caller's snapshot, including children created by that same commit. Cold subtree
@@ -108,7 +140,12 @@ also enter an already-attached observation, and shutdown snapshots its flush
 waiters so concurrent terminal-session eviction cannot fabricate a missing
 session. The same latch rejects later submissions to the failed session.
 Recovery preserves durable cancellation classification, and direct execution
-tests prove a start cannot share its undurable intent publication. Shutdown
+tests prove an ordered intent/start publication preserves exact identities and
+rejects invalid batches without partial admission. Executor tests require the
+complete prefix to be durable before provider or Tool invocation. A paused-clock
+executor test allows pure contribution output to remain live during provider
+preparation, then checks durable evidence on successful dispatch, preparation
+failure and cancellation. Shutdown
 waits on every captured session even when one fails, and a
 claim-horizon test submits a later private prompt before the first claim and
 proves that prompt is absent from the earlier model request.

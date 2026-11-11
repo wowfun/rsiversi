@@ -119,12 +119,19 @@ impl PublicationObserver for PendingCommand {
             .domain_commit
             .ok_or_else(|| invalid("missing command control"))?;
         let proposal = self.prepared.proposal();
-        let expected = self.inputs.iter().map(|input| (input.message(), input.publication_delivery(false)));
+        let expected = self
+            .inputs
+            .iter()
+            .map(|input| (input.message(), input.publication_delivery(false)));
         if receipt.session_id != &self.session
             || !receipt.facts.is_empty()
             || !matches!(commit.source(), DomainMutationSource::Command { invocation } if invocation == &self.invocation)
             || commit.request_id() != Some(&self.invocation.request_id)
-            || commit.command_inputs().iter().map(|input| (&input.message, input.delivery)).ne(expected)
+            || commit
+                .command_inputs()
+                .iter()
+                .map(|input| (&input.message, input.delivery))
+                .ne(expected)
             || !commit.updates().iter().any(|update| {
                 update.snapshot() == proposal.snapshot()
                     && update.expected_revision() == proposal.expected_revision()

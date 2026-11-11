@@ -1,5 +1,32 @@
 use super::*;
 
+#[cfg(feature = "test-support")]
+#[tokio::test]
+async fn cold_session_summary_returns_header_and_cuts_in_one_metadata_read() {
+    let root = private_tempdir();
+    let store = SqliteStore::open(root.path()).unwrap();
+    let id = seed_session(&store, "single-summary").await;
+    let header = store.header(&id).await.unwrap();
+    drop(store);
+    let store = SqliteStore::open(root.path()).unwrap();
+    store.begin_store_measurements();
+    let row = store.session_summary(&id).await.unwrap();
+    assert_eq!(row.header, header);
+    assert_eq!(row.durable_fact_seq, 1);
+    assert_eq!(row.durable_control_seq, 0);
+    assert!(row.last_activity_ms >= header.created_at_ms());
+    let measured = store.take_store_measurements();
+    assert!(measured.validation.is_empty());
+    assert_eq!(measured.reader.len(), 1);
+    assert_eq!(measured.reader[0].operation, StoreOperation::Header);
+    assert!(matches!(
+        store
+            .session_summary(&SessionId::new("absent-summary").unwrap())
+            .await,
+        Err(StoreError::NotFound(_))
+    ));
+}
+
 #[tokio::test]
 async fn cuts_keep_per_item_corruption_separate_from_valid_sessions() {
     let root = private_tempdir();

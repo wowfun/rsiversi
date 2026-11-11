@@ -1,4 +1,7 @@
-use crate::wire::{IdRequest, ListRequest, Operation, RegisterRequest, RenameRequest, result};
+use crate::wire::{
+    FindRequest, IdRequest, InsertBeforeRequest, ListRequest, Operation, RegisterRequest,
+    RenameRequest, result,
+};
 use async_trait::async_trait;
 use rsi_api_protocol::{ApiRegistrar, ApiRegistrarContract, ApiRegistration, Result, json_handler};
 use rsi_meta::{ActivationPlan, ConfigValue, MetaError, PluginFactory, PreparedActivation};
@@ -21,6 +24,36 @@ impl WorkspaceApi {
         workspace: Arc<dyn WorkspaceIngress>,
     ) -> Result<Self> {
         let mut registrations = Vec::new();
+        let service = workspace.clone();
+        registrations.push(registrar.register(
+            Operation::Find.spec(),
+            json_handler(move |context, input: FindRequest| {
+                let service = service.scoped(context.origin);
+                async move { result(service.find(&input.key).await) }
+            }),
+        )?);
+        let service = workspace.clone();
+        registrations.push(registrar.register(
+            Operation::DisplayOrder.spec(),
+            json_handler(move |context, _: Empty| {
+                let service = service.scoped(context.origin);
+                async move { result(service.display_order().await) }
+            }),
+        )?);
+        let service = workspace.clone();
+        registrations.push(registrar.register(
+            Operation::InsertBefore.spec(),
+            json_handler(move |context, input: InsertBeforeRequest| {
+                let service = service.scoped(context.origin);
+                async move {
+                    result(
+                        service
+                            .insert_before(&input.id, input.before.as_ref())
+                            .await,
+                    )
+                }
+            }),
+        )?);
         let service = workspace.clone();
         registrations.push(registrar.register(
             Operation::OrderSeed.spec(),

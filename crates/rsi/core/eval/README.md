@@ -17,6 +17,12 @@ round maximum. The durable parent Turn count must fit that maximum. Model event
 diagnostics decode each bounded settlement without modifying canonical Facts or
 their source-chain digests; derived coordinates retain the Fact sequence, event
 index and elapsed time.
+The Session API driver captures an inspected dual-watermark cut through its
+durable observation stream before disconnecting. It writes typed logical Facts
+and controls as NDJSON to `state/rsi/session-api-eval-trace.jsonl` in the isolated
+home. Python reads that capture, preserving canonical field order; SQLite's
+physical projections and payload references are not canonical Fact evidence.
+Compaction message positions count final prepared messages, not input claims.
 
 Build its driver with `CARGO_BUILD_JOBS=2 cargo build -p rsi --example
 session-api-eval`. Run `python3 crates/rsi/core/eval/session_api.py --self-test

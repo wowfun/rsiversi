@@ -1,7 +1,7 @@
 # rsi-agent-plan-policy
 
 An ordinary Agent-only plugin combines a typed `rsi.plan-policy` version-1 bool
-domain, draft-safe `/plan` command, context contributor, monotone Tool policy and
+domain, draft-safe `/plan` command, step instructions, monotone Tool policy and
 complete projection. New drafts default to disabled; preset selection resets
 that default. Durable commands use the shared revision/request receipt contract.
 Forks inherit the canonical state at their declared boundary; recovery never
@@ -19,9 +19,13 @@ typed enabled state; changing it never relaxes an already prepared call's other
 approval or sandbox constraints.
 
 The command accepts a bounded string: `on`, `off`, `toggle`, or empty text for
-toggle. It proposes only a complete typed state replacement. The context
-contributor records the current mode before each model retry series, including
-explicit deactivation so older plan instructions cannot silently remain current.
+toggle. It proposes only a complete typed state replacement. Before each model
+retry series, the plugin supplies the current mode through the existing
+[`StepPrepared` instruction slot](../context/README.md). Each preparation replaces
+the preceding guidance, including explicit deactivation; it contributes no chat
+input or additional domain state. Retries reuse the prepared guidance, and
+terminal cleanup clears it. Repeated preparations therefore do not accumulate
+copies of plan instructions in model history or request evidence.
 When enabled, policy abstains only for an exact allowlisted name and denies all
 other Tools before intent/start. Existing approval and sandbox requirements still
 apply. The projection exposes `enabled` and the frozen ordered allowlist.
@@ -41,7 +45,7 @@ The same plugin owns a second version-1 `rsi.plan-review` domain, reset on fork.
 It is root-only and Exclusive. Saved plans are data; saving grants no execution
 authority. The complete projection includes the current plan and last decision.
 
-`request_plan_execution` is root-only, ExclusiveFinal and HumanInteraction.
+`request_plan_execution` is root-only, ExclusiveFinal and uses the Human interaction category.
 It requires enabled plan mode, no initial structured-output contract, and the
 exact current plan reference. Before parking, it freezes both domain revisions
 through the started-Tool settlement seam. The human sees that plan with closed

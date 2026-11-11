@@ -1,5 +1,6 @@
 """Native Goal/patch/Jobs mechanism checks, with explicit provider response gates."""
 import json
+from provider_input import current_input
 import re
 import threading
 
@@ -12,7 +13,7 @@ class ProviderControl:
 
     def handle(self, handler, body):
         messages = body.get('messages', [])
-        index = next((i for i in range(len(messages) - 1, -1, -1) if messages[i]['role'] == 'user'), -1)
+        index = current_input(messages)
         content = messages[index].get('content', '') if index >= 0 else ''
         prompt = content if isinstance(content, str) else '\n'.join(item.get('text', '') for item in content)
         if not any(marker in prompt for marker in ('Native inline patch', 'Native Goal hold', 'Native background job')):
@@ -163,7 +164,7 @@ def verify(script, button, fill, until, screenshot, workspace, report, provider)
     allocated, cap = map(int, re.search(r'Allocated rounds: (\d+) / (\d+)', goal_text).groups())
     assert (allocated, cap) == (2, 3)
     close()
-    send('Native background job', 'Started background Bash job')
+    send('Native background job', 'Started background shell job')
     button('Current-Turn Jobs')
     until(lambda: has('Running') and has('Reported: false'))
     screenshot('tasks-jobs-running.png')

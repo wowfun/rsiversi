@@ -6,9 +6,9 @@ rust-version = "1.97"
 publish = false
 
 [dependencies]
-rsi = { git = "https://github.com/wowfun/rsiversi.git", rev = "386858d6f266fdf8d5c58e19793e5d2d09d3da34" }
-rsi-host = { git = "https://github.com/wowfun/rsiversi.git", rev = "386858d6f266fdf8d5c58e19793e5d2d09d3da34" }
-rsi-meta = { git = "https://github.com/wowfun/rsiversi.git", rev = "386858d6f266fdf8d5c58e19793e5d2d09d3da34" }
+rsi = { git = "https://github.com/wowfun/rsiversi.git", rev = "3545705d4b3f0763d636f873fc2f0c7629f1212c" }
+rsi-host = { git = "https://github.com/wowfun/rsiversi.git", rev = "3545705d4b3f0763d636f873fc2f0c7629f1212c" }
+rsi-meta = { git = "https://github.com/wowfun/rsiversi.git", rev = "3545705d4b3f0763d636f873fc2f0c7629f1212c" }
 async-trait = "0.1"
 serde_json = { version = "1", features = ["arbitrary_precision", "preserve_order"] }
 tokio = { version = "1", features = ["rt-multi-thread", "macros"] }

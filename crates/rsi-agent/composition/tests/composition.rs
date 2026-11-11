@@ -35,6 +35,8 @@ use tokio_util::sync::CancellationToken;
 mod contributions;
 #[path = "composition/domains.rs"]
 mod domains;
+#[path = "composition/prompt.rs"]
+mod prompt;
 #[path = "composition/seeds.rs"]
 mod seeds;
 #[path = "composition/snapshots.rs"]
@@ -286,7 +288,9 @@ impl PluginFactory for ProbeFactory {
                     true.into(),
                 )
                 .map_err(|error| MetaError::Activation(error.to_string()))?,
-                timeout: rsi_tools_protocol::ToolTimeoutPolicy::Execution { timeout_ms: 1_000 },
+                run_policy: rsi_tools_protocol::ToolRunPolicy::execution(
+                    std::time::Duration::from_secs(1),
+                ),
                 executor: Arc::new(ProbeTool),
             })
             .map_err(|error| MetaError::Activation(error.to_string()))?;
@@ -435,6 +439,7 @@ fn test_compiler(temp: &TempDir) -> AgentPresetProfileCompiler {
             "test.context",
             "test.domain",
             "test.callbacks",
+            "test.prompt",
         ],
     )
 }

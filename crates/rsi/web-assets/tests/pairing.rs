@@ -31,7 +31,7 @@ async fn declared_document_closure_is_verified_and_policy_changes_require_restar
             )
             .unwrap(),
         )
-        .unwrap()
+        .unwrap();
     };
     write(true);
     let mut builder = HostBuilder::without_paths("document-closure");

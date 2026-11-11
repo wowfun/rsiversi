@@ -22,7 +22,7 @@ impl Sessions {
                 .map_err(|_| Error::Cancelled)?,
         );
         service
-            .read_header(&input.session_id)
+            .read_summary(&input.session_id)
             .await
             .map_err(|_| Error::Remote("Session unavailable to caller".into()))?;
         let mut tree = self
@@ -41,8 +41,8 @@ impl Sessions {
                 continue;
             };
             let id = child.status.session_id;
-            let header = match service.read_header(&id).await {
-                Ok(header) => header,
+            let header = match service.read_summary(&id).await {
+                Ok(summary) => summary.header,
                 Err(
                     SessionError::Api(rsi_api_protocol::ApiError::Unauthorized)
                     | SessionError::NotFound(_),

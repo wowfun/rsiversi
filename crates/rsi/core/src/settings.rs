@@ -117,8 +117,10 @@ fn validate_settings(value: &Value) -> rsi_settings_protocol::Result<()> {
         pricing: rsi_agent_session_protocol::PriceTable,
         #[serde(default, rename = "output_budgets")]
         _output_budgets: rsi_agent_session_protocol::OutputBudgetTable,
-        sandbox: rsi_sandbox::SandboxMode,
-        require_approval: bool,
+        #[serde(rename = "sandbox")]
+        _sandbox: rsi_sandbox::SandboxMode,
+        #[serde(rename = "require_approval")]
+        _require_approval: bool,
     }
     let config: Configuration = serde_json::from_value(value.clone())
         .map_err(|error| SettingsError::InvalidInput(error.to_string()))?;
@@ -136,13 +138,8 @@ fn validate_settings(value: &Value) -> rsi_settings_protocol::Result<()> {
             "default effort requires a default model".into(),
         ));
     }
-    FrozenAgentSettings::validate_policy(
-        &config.settings_id,
-        &config.system_prompt,
-        config.sandbox,
-        config.require_approval,
-    )
-    .map_err(|error| SettingsError::InvalidInput(error.to_string()))
+    FrozenAgentSettings::validate_metadata(&config.settings_id, &config.system_prompt)
+        .map_err(|error| SettingsError::InvalidInput(error.to_string()))
 }
 
 fn settings_meta(error: &SettingsError) -> rsi_meta::MetaError {
@@ -153,6 +150,26 @@ fn settings_meta(error: &SettingsError) -> rsi_meta::MetaError {
 mod tests {
     use super::validate_settings;
     use serde_json::json;
+
+    #[test]
+    fn standing_permissions_remain_typed_without_a_model_route() {
+        for sandbox in ["read-only", "workspace-write", "danger-full-access"] {
+            for require_approval in [false, true] {
+                let mut value = json!({
+                    "settings_id":"test", "system_prompt":"", "sandbox":sandbox,
+                    "require_approval":require_approval,
+                });
+                validate_settings(&value).unwrap();
+                value["require_approval"] = json!("false");
+                assert!(validate_settings(&value).is_err());
+                value["require_approval"] = json!(require_approval);
+                value["sandbox"] = json!("unknown");
+                assert!(validate_settings(&value).is_err());
+                value.as_object_mut().unwrap().remove("sandbox");
+                assert!(validate_settings(&value).is_err());
+            }
+        }
+    }
 
     #[test]
     fn decoded_output_policy_is_validated_before_settings_admission() {
@@ -297,7 +314,7 @@ mod tests {
         validate_settings(&unconfigured).unwrap();
         for change in [
             json!({"default_model":null}),
-            json!({"sandbox":"danger-full-access"}),
+            json!({"sandbox":"unknown"}),
             json!({"turn_budget":{"maximum_tool_calls":999_999_999}}),
         ] {
             assert!(scope.replace(0, change).await.is_err());

@@ -685,6 +685,7 @@ async fn missing_backend_fails_restricted_mode_but_explicit_bypass_is_truthful()
 }
 
 #[tokio::test]
+#[cfg(not(windows))]
 async fn required_backend_rejects_activation_before_publishing_sandbox() {
     let runtime = Runtime::default();
     let fiber = runtime
@@ -707,6 +708,27 @@ async fn required_backend_rejects_activation_before_publishing_sandbox() {
             if message.contains("restricted sandbox backend is required")
     ));
     assert!(runtime.root().lookup_local::<SandboxContract>().is_none());
+}
+
+#[cfg(windows)]
+#[tokio::test]
+async fn required_native_backend_publishes_without_external_wrappers() {
+    let runtime = Runtime::default();
+    let fiber = runtime
+        .root()
+        .apply(
+            ResolvedFactory::linked(
+                "rsi.sandbox.local",
+                "required-native-test",
+                UpdateMode::Replayable,
+                Arc::new(SandboxLocalFactory::default().require_restricted_backend()),
+            ),
+            json!({"bubblewrap":[],"landlock":[]}),
+        )
+        .await
+        .unwrap();
+    assert!(runtime.root().lookup_local::<SandboxContract>().is_some());
+    assert!(fiber.dispose().await.is_clean());
 }
 
 #[tokio::test]
@@ -775,7 +797,7 @@ async fn all_behavior_probes_share_one_activation_budget() {
 }
 
 #[tokio::test(start_paused = true)]
-async fn required_activation_reports_shared_probe_budget_exhaustion() {
+async fn required_activation_distinguishes_probe_exhaustion_from_native_readiness() {
     let temporary = tempfile::tempdir().unwrap();
     let bubblewrap = temporary.path().join("bubblewrap");
     let landlock = temporary.path().join("landlock");
@@ -806,14 +828,19 @@ async fn required_activation_reports_shared_probe_budget_exhaustion() {
         1,
         "the later tier must remain unprobed after the shared budget expires"
     );
-    assert!(matches!(
-        fiber.snapshot().state,
-        rsi_meta::FiberState::Failed(message)
-            if message.contains(
-                "shared behavior-probe budget was exhausted during candidate probing; 1 later configured candidate was skipped"
-            )
-    ));
-    assert!(runtime.root().lookup_local::<SandboxContract>().is_none());
+    if cfg!(windows) {
+        assert!(runtime.root().lookup_local::<SandboxContract>().is_some());
+        assert!(fiber.dispose().await.is_clean());
+    } else {
+        assert!(matches!(
+            fiber.snapshot().state,
+            rsi_meta::FiberState::Failed(message)
+                if message.contains(
+                    "shared behavior-probe budget was exhausted during candidate probing; 1 later configured candidate was skipped"
+                )
+        ));
+        assert!(runtime.root().lookup_local::<SandboxContract>().is_none());
+    }
 }
 
 #[cfg(unix)]

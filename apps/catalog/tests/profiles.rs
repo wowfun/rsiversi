@@ -317,6 +317,7 @@ fn host_launch_key_includes_owner_inputs_and_excludes_process_local_values() {
             fs::canonicalize("/bin/bash").unwrap(),
             std::env::current_exe().unwrap().canonicalize().unwrap(),
             vec![("PATH".into(), path.into())],
+            None,
         )
         .unwrap()
     };

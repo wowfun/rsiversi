@@ -273,7 +273,7 @@ async fn fullscreen_output_cards_read_both_raw_streams_and_pages() {
         assert_eq!(screen.cell(row, 0).unwrap().fgcolor(), vt100::Color::Idx(9));
         assert_eq!(screen.cell(row, 2).unwrap().fgcolor(), vt100::Color::Idx(7));
     }
-    terminal.send(b"\t");
+    terminal.focus_source("Failed to run").await;
     terminal.send(b"\x10");
     terminal.select_menu("Card details").await;
     terminal.until("bash · command failed").await;
@@ -768,6 +768,21 @@ plugin = "rsi.application.tui"
         self.writer.flush().unwrap();
     }
 
+    async fn focus_source(&mut self, text: &str) {
+        self.until_idle().await;
+        self.until(text).await;
+        let row = self
+            .screen
+            .lock()
+            .unwrap()
+            .screen()
+            .rows(0, 110)
+            .position(|row| row.contains(text))
+            .unwrap()
+            + 1;
+        self.send(format!("\x1b[<0;3;{row}M\x1b[<0;3;{row}m").as_bytes());
+    }
+
     fn action(&mut self, index: usize) {
         let mut keys = vec![0x10];
         keys.extend(b"\x1b[B".repeat(index));
@@ -776,10 +791,16 @@ plugin = "rsi.application.tui"
     }
 
     async fn select_menu(&mut self, label: &str) {
+        fn menu_text(line: &str) -> &str {
+            line.split_once('│')
+                .and_then(|(_, body)| body.rsplit_once('│'))
+                .map_or(line, |(body, _)| body)
+                .trim()
+        }
+
         self.until("Enter select").await;
         let deadline = Instant::now() + Duration::from_secs(10);
         let mut previous = None;
-        let mut clicked = false;
         let matches = |text: &str| {
             text == label
                 || text.starts_with(&format!("{label} ·"))
@@ -796,31 +817,21 @@ plugin = "rsi.application.tui"
                         .filter(|cell| cell.bgcolor() == vt100::Color::Idx(237))
                         .map(vt100::Cell::contents)
                         .collect::<String>();
-                    text.strip_prefix("› ").map(|label| label.trim().to_owned())
+                    text.strip_prefix("› ")
+                        .map(|label| (row, label.trim().to_owned()))
                 });
-                let target = (0..rows).find_map(|row| {
-                    let cells = (0..cols)
-                        .filter_map(|col| screen.cell(row, col).map(|cell| (col, cell)))
-                        .filter(|(_, cell)| matches!(cell.bgcolor(), vt100::Color::Idx(235 | 237)))
-                        .collect::<Vec<_>>();
-                    let text = cells
-                        .iter()
-                        .map(|(_, cell)| cell.contents())
-                        .collect::<String>();
-                    let text = text
-                        .strip_prefix("› ")
-                        .or_else(|| text.strip_prefix("  "))?;
-                    matches(text.trim()).then(|| (cells[0].0, row))
+                let target = screen.rows(0, cols).enumerate().find_map(|(row, line)| {
+                    matches(menu_text(&line).trim_start_matches('›').trim()).then_some(row)
                 });
                 (screen.contents(), selected, target)
             };
-            if selected.as_deref().is_some_and(&matches) {
+            if selected.as_ref().is_some_and(|(_, text)| matches(text)) {
                 self.send(b"\r");
                 self.until_screen(&format!("menu selected {label}"), |screen| {
                     !screen
                         .lines()
-                        .filter_map(|line| line.split_once("› "))
-                        .any(|(_, selected)| matches(selected.trim().trim_end_matches('│').trim()))
+                        .filter_map(|line| menu_text(line).strip_prefix("› "))
+                        .any(|selected| matches(selected.trim()))
                 })
                 .await;
                 return;
@@ -832,17 +843,13 @@ plugin = "rsi.application.tui"
                 Instant::now() < deadline,
                 "menu never selected {label}: {screen}"
             );
-            if let Some((x, y)) = target {
-                if !clicked {
-                    self.send(
-                        format!("\x1b[<0;{};{}M\x1b[<0;{};{}m", x + 1, y + 1, x + 1, y + 1)
-                            .as_bytes(),
-                    );
-                    clicked = true;
+            if let Some((row, _)) = &selected {
+                let up = target.is_some_and(|target| target < usize::from(*row));
+                let movement = (selected, up);
+                if previous.as_ref() != Some(&movement) {
+                    previous = Some(movement);
+                    self.send(if up { b"\x1b[A" } else { b"\x1b[B" });
                 }
-            } else if selected.is_some() && selected != previous {
-                previous = selected;
-                self.send(b"\x1b[B");
             }
             tokio::time::sleep(Duration::from_millis(20)).await;
         }
@@ -1216,14 +1223,14 @@ async fn fullscreen_reviews_and_denies_a_live_prepared_approval() {
     terminal.send(b"\r");
     terminal.until("Allow once").await;
     terminal.send(b"\r"); // Deny is the initial focused action.
-    terminal.until("failed").await;
+    terminal.until("hello from daemon").await;
     terminal.absent("1 approvals").await;
     terminal.send(b"\x1b");
     tokio::time::sleep(Duration::from_millis(80)).await;
     terminal.capture();
     terminal.send(b"\x04");
     terminal.finish().await;
-    assert_eq!(state.requests.lock().unwrap().len(), 1);
+    assert_eq!(state.requests.lock().unwrap().len(), 2);
     let history = fixture.assert_success(&[
         "run",
         "test-cli",
@@ -1233,7 +1240,13 @@ async fn fullscreen_reviews_and_denies_a_live_prepared_approval() {
         "jsonl",
     ]);
     let history = String::from_utf8(history.stdout).unwrap();
-    assert!(history.contains("approval.denied"));
+    let records: Vec<serde_json::Value> = history
+        .lines()
+        .map(|line| serde_json::from_str(line).unwrap())
+        .collect();
+    assert!(records.iter().any(|record| record["type"] == "fact"
+        && record["fact"]["type"] == "tool_rejected"
+        && record["fact"]["rejection"]["type"] == "approval_denied"));
     assert!(!history.contains("\"type\":\"tool_started\""));
     provider.abort();
 }
@@ -1296,9 +1309,12 @@ async fn native_presentation_reloads_in_the_running_tui_without_losing_draft_or_
         .join("../..")
         .canonicalize()
         .unwrap();
+    let target = std::env::var_os("CARGO_TARGET_DIR")
+        .map_or_else(|| root.join("target"), std::path::PathBuf::from)
+        .join("terminal-native-test");
+    let retained = tempfile::tempdir().unwrap();
     let mut artifacts = Vec::new();
     for revision in ["a", "b"] {
-        let target = root.join("target/terminal-native-test").join(revision);
         let mut build = Command::new(env!("CARGO"));
         build
             .args(["build", "--locked", "--manifest-path"])
@@ -1314,11 +1330,14 @@ async fn native_presentation_reloads_in_the_running_tui_without_losing_draft_or_
             "{}",
             String::from_utf8_lossy(&result.stderr)
         );
-        artifacts.push(target.join("debug").join(format!(
+        let library = target.join("debug").join(format!(
             "{}rsi_terminal_native{}",
             std::env::consts::DLL_PREFIX,
             std::env::consts::DLL_SUFFIX
-        )));
+        ));
+        let artifact = retained.path().join(revision);
+        std::fs::copy(library, &artifact).unwrap();
+        artifacts.push(artifact);
     }
     let (endpoint, state, provider) = gated_provider("bash").await;
     let fixture = CliFixture::new(&endpoint);

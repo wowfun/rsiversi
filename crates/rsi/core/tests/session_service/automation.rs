@@ -480,7 +480,7 @@ async fn exercise_frozen_protected_goal(fail_after_report: bool) {
         .await
         .unwrap();
     let scope = rsi_history_api::Scope {
-        workspace: workspace.id,
+        workspace: rsi_workspace_protocol::WorkspaceKey::from_coordinates(&workspace.coordinates),
         conversation: rsi_history_api::ConversationIdentity::Native(session.clone()),
     };
     let advance = || rsi_history_api::Request::Advance {

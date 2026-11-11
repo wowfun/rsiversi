@@ -15,8 +15,10 @@ fn shell_command_source_is_raw_bounded_and_variant_checked() {
     };
     for (name, arguments) in [
         ("bash", json!({"command":command})),
+        ("pwsh", json!({"command":command})),
         ("other", json!({"command":command})),
         ("bash", json!({"command":3})),
+        ("pwsh", json!({"command":3})),
         ("bash", json!({})),
     ] {
         let fact = SessionFact::new(
@@ -39,11 +41,16 @@ fn shell_command_source_is_raw_bounded_and_variant_checked() {
         )
         .unwrap();
         assert!(select_field(&fact, SourceRef { seq: 8, ..source }).is_none());
-        if name == "bash"
+        if matches!(name, "bash" | "pwsh")
             && arguments
                 .get("command")
                 .is_some_and(serde_json::Value::is_string)
         {
+            let tool = rsi_conversation::ToolState::from_fact(&fact).unwrap();
+            assert_eq!(
+                tool.argument_summary.as_deref(),
+                Some("printf '界\\n'  # \"quoted\"\\path")
+            );
             let field = select_field(&fact, source).unwrap();
             for start in 0..=command.len() {
                 assert_eq!(
@@ -473,7 +480,10 @@ fn input_sources_preserve_text_and_media_kinds() {
                 AgentMessageContent::Text {
                     text: "entered input".into(),
                 },
-                AgentMessageContent::Image { presentation: None, media: media() },
+                AgentMessageContent::Image {
+                    presentation: None,
+                    media: media(),
+                },
             ],
         },
         &[

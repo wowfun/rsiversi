@@ -281,10 +281,12 @@ async fn cold_terminal_index_validation_rejects_missing_and_mismatched_metadata(
                 matches!(open, Err(StoreError::Corrupt(_))),
                 "{name}: {open:?}"
             );
-            assert!(
-                matches!(facts, Err(StoreError::Corrupt(_))),
-                "{name}: {facts:?}"
-            );
+            // Canonical Facts are unchanged by these derived-index/control mutations.
+            assert_eq!(facts.unwrap().facts.len(), if closed { 2 } else { 1 });
+            assert!(matches!(
+                store.prepare_session(&session).await,
+                Err(StoreError::Corrupt(_))
+            ));
         } else {
             validation.unwrap();
             assert_eq!(boundary.unwrap().terminal().is_some(), closed, "{name}");
@@ -1762,7 +1764,16 @@ fn verify_refuses_a_snapshot_with_an_uncheckpointed_wal() {
 
 #[test]
 fn unsupported_or_incomplete_schema_is_rejected_before_any_write() {
-    for (version, partial) in [(44, false), (43, false), (42, false), (2, false), (0, true)] {
+    let current = rsi_agent_store_protocol::AGENT_STORE_SCHEMA_VERSION;
+    for (version, partial) in [
+        (current, false),
+        (45, false),
+        (44, false),
+        (43, false),
+        (42, false),
+        (2, false),
+        (0, true),
+    ] {
         let root = tempfile::tempdir().unwrap();
         let connection = Connection::open(root.path().join("sessions.sqlite3")).unwrap();
         if partial {
@@ -1784,7 +1795,7 @@ fn unsupported_or_incomplete_schema_is_rejected_before_any_write() {
         )
         .unwrap();
         let result = SqliteStore::open(root.path());
-        if version == 44 {
+        if version == current {
             assert!(matches!(result, Err(StoreError::Corrupt(_))));
         } else {
             assert!(
@@ -2238,11 +2249,7 @@ async fn current_schema_preflight_reads_the_committed_wal_before_writer_recovery
     drop(live);
 }
 
-#[tokio::test]
-async fn step_mailbox_reaches_steers_beyond_a_full_page_of_next_turn_messages() {
-    let root = tempfile::tempdir().unwrap();
-    let store = SqliteStore::open(root.path()).unwrap();
-    let session = SessionId::new("mixed-mailbox").unwrap();
+async fn fill_large_mixed_mailbox(store: &SqliteStore, session: &SessionId) {
     for first in (1..=35_u64).step_by(8) {
         let controls = (first..=(first + 7).min(35))
             .map(|seq| {
@@ -2298,6 +2305,14 @@ async fn step_mailbox_reaches_steers_beyond_a_full_page_of_next_turn_messages() 
             .await
             .unwrap();
     }
+}
+
+#[tokio::test]
+async fn step_mailbox_reaches_steers_beyond_a_full_page_of_next_turn_messages() {
+    let root = tempfile::tempdir().unwrap();
+    let store = SqliteStore::open(root.path()).unwrap();
+    let session = SessionId::new("mixed-mailbox").unwrap();
+    fill_large_mixed_mailbox(&store, &session).await;
     let all = store
         .read_agent_mailbox(&session, MailboxRead::All)
         .await
@@ -2308,11 +2323,8 @@ async fn step_mailbox_reaches_steers_beyond_a_full_page_of_next_turn_messages() 
             .iter()
             .all(|entry| entry.target == MessageTarget::NextTurn)
     );
-    let step = store
-        .read_agent_mailbox(&session, MailboxRead::NextStep)
-        .await
-        .unwrap();
-    assert_eq!(step.pending_count, 2);
+    let step = store.read_mailbox_claim(&session, None).await.unwrap();
+    assert_eq!(step.pending.len(), 2);
     assert_eq!(step.durable_control_seq, all.durable_control_seq);
     assert_eq!(
         step.pending
@@ -2325,6 +2337,22 @@ async fn step_mailbox_reaches_steers_beyond_a_full_page_of_next_turn_messages() 
         step.pending
             .iter()
             .all(|entry| entry.target == MessageTarget::NextStep)
+    );
+    let claim = store
+        .read_mailbox_claim(&session, Some(MessageId::new("input-33").unwrap()))
+        .await
+        .unwrap();
+    assert_eq!(claim.pending.len(), 3);
+    assert!(claim.has_ordinary_pending_turn);
+    assert_eq!(claim.durable_control_seq, all.durable_control_seq);
+    assert_eq!(claim.selected.unwrap().accepted_control_seq, 33);
+    assert_eq!(
+        claim
+            .pending
+            .iter()
+            .map(|entry| entry.accepted_control_seq)
+            .collect::<Vec<_>>(),
+        [33, 34, 35]
     );
 }
 
@@ -2369,16 +2397,24 @@ async fn exact_message_read_does_not_decode_unrelated_pending_payloads() {
         store.read_agent_message(&session, &selected).await.unwrap(),
         Some(expected)
     );
+    let claim = store
+        .read_mailbox_claim(&session, Some(selected.clone()))
+        .await
+        .unwrap();
+    assert_eq!(claim.pending.len(), 1);
+    assert!(claim.has_ordinary_pending_turn);
+    assert_eq!(claim.pending[0].message_id, selected);
     assert!(matches!(
         store.read_agent_message(&session, &unrelated).await,
         Err(StoreError::Corrupt(_))
     ));
     assert_eq!(
         store
-            .read_agent_mailbox(&session, MailboxRead::NextStep)
+            .read_mailbox_claim(&session, None)
             .await
             .unwrap()
-            .pending_count,
+            .pending
+            .len(),
         0
     );
     assert!(matches!(

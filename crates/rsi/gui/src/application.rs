@@ -338,6 +338,7 @@ impl Command {
 
 #[derive(Debug, Default, Serialize)]
 pub(crate) struct Catalog {
+    #[serde(serialize_with = "crate::catalog::serialize_workspaces")]
     pub workspaces: Vec<rsi_workspace_protocol::WorkspaceRecord>,
     pub workspaces_more: bool,
     pub workspace_order_seed: Option<rsi_workspace_protocol::WorkspaceOrderSeed>,

@@ -274,7 +274,7 @@ impl Driver {
         } else {
             composition.clone()
         };
-        let (tools, empty) = self
+        let (tools, empty, order) = self
             .run_captured_contributions(
                 claim,
                 &composition,
@@ -288,6 +288,10 @@ impl Driver {
         if needs_input && empty {
             return Err(DriveFailure::Turn(TurnOutcome::Completed));
         }
+        let composition = match order {
+            Some(order) => composition.with_tool_order(order),
+            None => composition,
+        };
         Ok((composition, selection, tools))
     }
 
@@ -336,14 +340,18 @@ impl Driver {
         snapshot: StepSnapshot,
         settled: &[Arc<SessionFact>],
         selection: Option<&rsi_agent_session_protocol::ModelSelection>,
-    ) -> std::result::Result<(Option<Vec<String>>, bool), DriveFailure> {
+    ) -> std::result::Result<(Option<Vec<String>>, bool, Option<Vec<String>>), DriveFailure> {
         let stage = run.stage;
         let entries = composition.contributions().entries();
         let prepares_tools = stage == ContributionStage::BeforeStep
             && entries
                 .iter()
                 .any(|entry| matches!(entry.kind(), ContributionKind::BeforeStep(_)));
-        let record_tools = prepares_tools
+        let native_prompt = (stage == ContributionStage::BeforeStep)
+            .then(|| composition.prompt_assembler())
+            .flatten();
+        let record_tools = native_prompt.is_some()
+            || prepares_tools
             || stage == ContributionStage::BeforeStep && composition.request_tool_view().is_some();
         let mut offered = Vec::new();
         if record_tools {
@@ -353,7 +361,8 @@ impl Driver {
             offered.sort();
         }
         let mut mutation = None;
-        let mut facts = Vec::new();
+        let mut batch = ContributionBatch::default();
+        let mut request_id = None;
         let mut selected: Option<std::collections::BTreeSet<String>> = None;
         let mut publications = Vec::new();
         let mut instructions = if stage == ContributionStage::BeforeStep {
@@ -377,7 +386,6 @@ impl Driver {
             &[]
         };
         if let StepSnapshot::Callbacks(context) = &snapshot {
-            let mut batch = ContributionBatch::default();
             let id =
                 DomainRequestId::new(next_effect_id().map_err(fatal)?.as_str()).map_err(fatal)?;
             for entry in entries.iter().filter(|entry| entry.stage() == stage) {
@@ -387,6 +395,12 @@ impl Driver {
                 {
                     break;
                 }
+                let previous_input_at_ms = match entry.kind() {
+                    ContributionKind::BeforeStep(_) => {
+                        fold.previous_context_input_at_ms(entry.id())
+                    }
+                    _ => None,
+                };
                 let output = run
                     .callback(entry.id(), async {
                         match entry.kind() {
@@ -396,6 +410,7 @@ impl Driver {
                                         &rsi_agent_composition_protocol::BeforeStepContext {
                                             selection: selection.expect("BeforeStep selection"),
                                             producer: entry.id(),
+                                            previous_input_at_ms,
                                             previous: previous.as_ref(),
                                             captured: context,
                                             request_id: &id,
@@ -479,6 +494,7 @@ impl Driver {
                                     .await
                             }
                             ContributionKind::ToolPolicy(_)
+                            | ContributionKind::ToolAround(_)
                             | ContributionKind::ForkTransform(_)
                             | ContributionKind::ToolSettlement(_)
                             | ContributionKind::Command(_)
@@ -507,15 +523,65 @@ impl Driver {
                     ));
                 }
             }
-            let (output, proposals) = batch.into_parts();
-            facts = output;
-            if !proposals.is_empty() {
-                mutation = Some((id, proposals));
-            }
+            request_id = Some(id);
         }
         let selected = selected
             .map(|names| names.into_iter().collect::<Vec<_>>())
-            .or_else(|| record_tools.then_some(offered));
+            .or_else(|| record_tools.then(|| offered.clone()));
+        let mut prompt = rsi_agent_session_protocol::StepPrompt::AppendToHeader {
+            sections: instructions,
+        };
+        let mut order = None;
+        if let Some((assembler, scope)) = native_prompt
+            && previous
+                .as_ref()
+                .is_none_or(|decision| decision.messages().is_some())
+        {
+            let producer = ContributionId::new("rsi.prompt-assembly").expect("static producer");
+            let previous_runtime = fold.runtime_context();
+            let known_tools = composition.known_tool_names();
+            let result = run.callback(&producer, async {
+                let prepared = assembler.assemble(rsi_agent_composition_protocol::PromptInput {
+                    header: claim.header(), model: selection.expect("BeforeStep selection"),
+                    scope: Some(scope), instructions: prompt.sections(),
+                    tools: selected.as_deref().unwrap_or(&offered), known_tools: &known_tools,
+                }, run.token.clone()).await?;
+                let prompt = rsi_agent_session_protocol::StepPrompt::Assembled { sections: prepared.sections };
+                prompt.validate().map_err(|error| rsi_agent_composition_protocol::ContributionError::Invalid(error.to_string()))?;
+                let mut ordered_names: Vec<_> = prepared.tool_order.iter().map(String::as_str).collect();
+                ordered_names.sort_unstable();
+                if !ordered_names.into_iter().eq(selected.as_ref().expect("native preparation records Tool authority").iter().map(String::as_str)) {
+                    return Err(rsi_agent_composition_protocol::ContributionError::Invalid("prompt Tool order differs from admitted names".into()));
+                }
+                let text = if prepared.runtime_context.is_empty() && previous_runtime.is_some() {
+                    "Current runtime context: none. Earlier runtime-context snapshots no longer apply.".to_owned()
+                } else { prepared.runtime_context };
+                if !text.is_empty() && previous_runtime != Some(text.as_str()) {
+                    batch.append(&producer, claim.turn_id(), snapshot.step_id(), rsi_agent_composition_protocol::ContributionOutput {
+                        inputs: vec![rsi_agent_composition_protocol::ContributionInput::sourced(rsi_agent_session_protocol::InputMessageSource::RuntimeContext, text)],
+                        ..Default::default()
+                    })?;
+                }
+                Ok((prompt, prepared.tool_order))
+            }).await;
+            match result {
+                Ok((assembled, tool_order)) => {
+                    prompt = assembled;
+                    order = Some(tool_order);
+                }
+                Err(error) => {
+                    super::tool_settlement::notify_publications(&mut publications, None).await?;
+                    return Err(error);
+                }
+            }
+        }
+        let (mut facts, proposals) = batch.into_parts();
+        if !proposals.is_empty() {
+            mutation = Some((
+                request_id.expect("contributor proposals have request identity"),
+                proposals,
+            ));
+        }
         let mut reject_input = false;
         let mut empty = false;
         let decision = if stage == ContributionStage::BeforeStep {
@@ -546,11 +612,7 @@ impl Driver {
                 if let rsi_agent_session_protocol::ApplicationToolView::Ready { tools, .. } =
                     &mut view
                 {
-                    tools.retain(|row| {
-                        names
-                            .binary_search_by(|name| name.as_str().cmp(row.definition.name()))
-                            .is_ok()
-                    });
+                    tools.retain(|row| names.binary_search(&row.name).is_ok());
                 }
                 view
             });
@@ -559,7 +621,7 @@ impl Driver {
                 step_id: snapshot.step_id().clone(),
                 names: names.clone(),
                 application,
-                instructions,
+                prompt: (fold.step_prompt() != &prompt).then_some(prompt),
             });
         }
         if let Some(decision) = decision {
@@ -672,14 +734,14 @@ impl Driver {
             }
             self.sync_fold(claim, fold).await?;
         } else if !facts.is_empty() {
-            self.publish_durable(claim, fold, facts).await?;
+            self.publish(claim, fold, facts).await?;
         } else {
             self.sync_fold(claim, fold).await?;
         }
         if reject_input {
             return Err(DriveFailure::Turn(TurnOutcome::Blocked));
         }
-        Ok((selected, empty))
+        Ok((selected, empty, order))
     }
 
     pub(super) async fn tool_policy_decision(

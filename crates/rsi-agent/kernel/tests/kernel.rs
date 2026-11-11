@@ -84,6 +84,25 @@ type ProgramReadBarrier = (
     tokio::sync::oneshot::Receiver<()>,
 );
 #[derive(Debug)]
+struct MailboxProbe {
+    reads: Mutex<std::collections::BTreeMap<SessionId, usize>>,
+    claim_selections: AtomicUsize,
+    claim_references: AtomicBool,
+    prefix_limit: AtomicUsize,
+}
+
+impl Default for MailboxProbe {
+    fn default() -> Self {
+        Self {
+            reads: Mutex::default(),
+            claim_selections: AtomicUsize::new(0),
+            claim_references: AtomicBool::new(false),
+            prefix_limit: AtomicUsize::new(usize::MAX),
+        }
+    }
+}
+
+#[derive(Debug)]
 struct FactReadRaceStore {
     inner: Arc<dyn SessionStore>,
     pause_reply_for: Mutex<Option<SessionId>>,
@@ -111,7 +130,7 @@ struct FactReadRaceStore {
     count_control_reads_for: Mutex<Option<SessionId>>,
     subtree_reads: Mutex<std::collections::BTreeMap<SessionId, usize>>,
     mailbox_summary_reads: Mutex<std::collections::BTreeMap<SessionId, usize>>,
-    mailbox_reads: Mutex<std::collections::BTreeMap<SessionId, usize>>,
+    mailbox: MailboxProbe,
     inbox_control_reads: AtomicUsize,
     read_captured: Notify,
     release_read: Notify,
@@ -220,7 +239,7 @@ impl FactReadRaceStore {
             count_control_reads_for: Mutex::new(None),
             subtree_reads: Mutex::default(),
             mailbox_summary_reads: Mutex::default(),
-            mailbox_reads: Mutex::new(std::collections::BTreeMap::new()),
+            mailbox: MailboxProbe::default(),
             inbox_control_reads: AtomicUsize::new(0),
             read_captured: Notify::new(),
             release_read: Notify::new(),
@@ -485,6 +504,12 @@ impl FactReadRaceStore {
 
 #[async_trait]
 impl SessionStore for FactReadRaceStore {
+    async fn session_summary(
+        &self,
+        session_id: &SessionId,
+    ) -> rsi_agent_store_protocol::Result<rsi_agent_store_protocol::StoreRecentSession> {
+        self.inner.session_summary(session_id).await
+    }
     async fn session_access(
         &self,
         sessions: &[SessionId],
@@ -745,6 +770,19 @@ impl SessionStore for FactReadRaceStore {
         &self,
         commit: rsi_agent_store_protocol::AtomicAgentCommit,
     ) -> rsi_agent_store_protocol::Result<rsi_agent_store_protocol::AtomicAgentCommitResult> {
+        if self.mailbox.claim_references.load(Ordering::Relaxed) {
+            assert!(
+                commit
+                    .sessions
+                    .iter()
+                    .flat_map(|append| &append.facts)
+                    .all(|fact| !matches!(
+                        fact.body(),
+                        SessionFactBody::InputMessageClaimed { .. }
+                    )),
+                "Kernel claim must reference acceptance without copying its body"
+            );
+        }
         if let Some(error) = self.commit_admission_refusal.lock().unwrap().clone() {
             self.domain_lookup_fails.store(true, Ordering::Release);
             return Err(error);
@@ -1196,18 +1234,40 @@ impl SessionStore for FactReadRaceStore {
         self.inner.read_agent_message(session_id, message_id).await
     }
 
+    async fn read_mailbox_claim(
+        &self,
+        session_id: &SessionId,
+        waking: Option<MessageId>,
+    ) -> rsi_agent_store_protocol::Result<rsi_agent_store_protocol::StoreMailboxClaim> {
+        if waking.is_none() {
+            self.mailbox
+                .claim_selections
+                .fetch_add(1, Ordering::Relaxed);
+        }
+        self.inner.read_mailbox_claim(session_id, waking).await
+    }
+
     async fn read_agent_mailbox(
         &self,
         session_id: &SessionId,
         query: MailboxRead,
     ) -> rsi_agent_store_protocol::Result<rsi_agent_store_protocol::StoreAgentMailbox> {
         *self
-            .mailbox_reads
+            .mailbox
+            .reads
             .lock()
             .unwrap()
             .entry(session_id.clone())
             .or_default() += 1;
-        self.inner.read_agent_mailbox(session_id, query).await
+        let mut mailbox = self.inner.read_agent_mailbox(session_id, query).await?;
+        mailbox
+            .pending
+            .truncate(self.mailbox.prefix_limit.load(Ordering::Relaxed));
+        assert!(
+            !self.mailbox.claim_references.load(Ordering::Relaxed),
+            "claim must not read a mailbox payload page"
+        );
+        Ok(mailbox)
     }
 
     async fn read_inbox_control_state(
@@ -1947,6 +2007,8 @@ mod domains;
 mod fork_and_scheduler;
 #[path = "kernel/jobs.rs"]
 mod jobs;
+#[path = "kernel/mailbox_claim.rs"]
+mod mailbox_claim;
 #[path = "kernel/model_attempts.rs"]
 mod model_attempts;
 #[path = "kernel/recovery_and_finalization.rs"]

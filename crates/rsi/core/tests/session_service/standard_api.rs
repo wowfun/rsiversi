@@ -10,6 +10,30 @@ use rsi_settings_protocol::SettingsAccess;
 use rsi_workspace_protocol::WorkspaceRegistry;
 use std::sync::Arc;
 
+fn assert_service_contracts_are_isolated(runtime: &rsi_meta::Runtime) {
+    let root = runtime.root();
+    assert!(
+        root.lookup_local::<rsi_session_protocol::SessionContract>()
+            .is_none()
+    );
+    assert!(
+        root.lookup_local::<ConnectionDescriptionContract>()
+            .is_none()
+    );
+    assert!(
+        root.lookup_local::<rsi_session_protocol::SessionReadContract>()
+            .is_none()
+    );
+    assert!(
+        root.lookup_local::<rsi_agent_context::ContextBudgetContract>()
+            .is_none()
+    );
+    assert!(
+        root.lookup_local::<rsi_api_http::BrowserOwnerContract>()
+            .is_none()
+    );
+}
+
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 async fn daemon_executor_reload_preserves_listener_diagnostics_owner_and_retained_clients() {
     let fixture = fixture("http://127.0.0.1:1");
@@ -128,31 +152,7 @@ async fn real_service_profiles_share_an_application_runtime_with_isolated_lifeti
         one.connection_description().unwrap().endpoint_id,
         two.connection_description().unwrap().endpoint_id
     );
-    assert!(
-        runtime
-            .root()
-            .lookup_local::<rsi_session_protocol::SessionContract>()
-            .is_none()
-    );
-    assert!(
-        runtime
-            .root()
-            .lookup_local::<ConnectionDescriptionContract>()
-            .is_none()
-    );
-    assert!(
-        runtime
-            .root()
-            .lookup_local::<rsi_session_protocol::SessionReadContract>()
-            .is_none()
-    );
-    assert!(
-        runtime
-            .root()
-            .lookup_local::<rsi_agent_context::ContextBudgetContract>()
-            .is_none(),
-        "Service budget must remain in its isolated Profile"
-    );
+    assert_service_contracts_are_isolated(&runtime);
     let service_instances = || {
         runtime.snapshot().fibers.into_iter().filter(|fiber| {
         fiber.state == rsi_meta::FiberState::Active &&
@@ -308,6 +308,7 @@ async fn standard_api_plugins_share_durable_identity_and_serve_independent_domai
     assert_eq!(
         domains,
         [
+            "agent-presets",
             "attention",
             "connection",
             "configuration",

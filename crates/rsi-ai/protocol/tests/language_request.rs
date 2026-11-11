@@ -152,12 +152,9 @@ fn image() -> MediaDescriptor {
 
 #[test]
 fn freeform_tool_grammar_round_trips_without_removing_function_schema() {
-    let tool = lookup()
-        .with_freeform(
-            FreeformToolDefinition::new(FreeformFormat::Lark, "start: /.+/")
-                .expect("freeform grammar"),
-        )
-        .expect("freeform tool");
+    let tool = lookup().with_freeform(
+        FreeformToolDefinition::new(FreeformFormat::Lark, "start: /.+/").expect("freeform grammar"),
+    );
     let request = LanguageRequest::new(vec![Message::user_text("edit").expect("message")])
         .expect("request")
         .with_tools(vec![tool], ToolChoice::Auto)
@@ -206,7 +203,6 @@ fn aggregate_freeform_grammar_bound_counts_encoded_json_bytes() {
                     )
                     .expect("individually bounded grammar"),
                 )
-                .expect("freeform tool")
         })
         .collect();
     let error = LanguageRequest::new(vec![Message::user_text("edit").expect("message")])

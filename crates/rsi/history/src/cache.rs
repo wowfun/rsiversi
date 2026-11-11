@@ -90,7 +90,7 @@ fn load(connection: &Connection, key: &str, source: ReferenceSource) -> Result<C
         initial(source)
     })
 }
-fn budget(connection: &Connection, stop: CancellationToken) -> Result<()> {
+fn budget(connection: &mut Connection, stop: CancellationToken) -> Result<()> {
     let mut steps = 0;
     connection
         .progress_handler(
@@ -103,7 +103,7 @@ fn budget(connection: &Connection, stop: CancellationToken) -> Result<()> {
         .map_err(invalid)
 }
 fn open(path: &Path) -> Result<Connection> {
-    let connection = Connection::open_with_flags(
+    let mut connection = Connection::open_with_flags(
         path,
         OpenFlags::SQLITE_OPEN_READ_WRITE
             | OpenFlags::SQLITE_OPEN_CREATE
@@ -111,7 +111,7 @@ fn open(path: &Path) -> Result<Connection> {
             | OpenFlags::SQLITE_OPEN_NOFOLLOW,
     )
     .map_err(sql)?;
-    budget(&connection, CancellationToken::new())?;
+    budget(&mut connection, CancellationToken::new())?;
     connection.execute_batch("PRAGMA journal_mode=DELETE;PRAGMA temp_store=MEMORY;PRAGMA cache_size=-8192;PRAGMA page_size=4096;").map_err(sql)?;
     connection
         .pragma_update(None, "max_page_count", MAXIMUM_PAGES)
@@ -198,7 +198,7 @@ fn clear_source(db: &mut Database, key: &str, stop: &CancellationToken) -> Resul
     db.generation = next;
     loop {
         check(stop)?;
-        budget(&db.connection, stop.clone())?;
+        budget(&mut db.connection, stop.clone())?;
         let tx = db.connection.transaction().map_err(sql)?;
         let deleted = tx.execute(
             "DELETE FROM documents WHERE rowid IN (SELECT rowid FROM documents WHERE documents MATCH ?1 LIMIT 128)",
@@ -334,7 +334,7 @@ impl Cache {
             check(&stop)?;
             let mut guard = inner.lock().expect("history cache");
             let database = guard.as_mut().ok_or(ApiError::ShuttingDown)?;
-            budget(&database.connection, stop.clone())?;
+            budget(&mut database.connection, stop.clone())?;
             let result = work(database);
             database
                 .connection
@@ -370,7 +370,7 @@ impl Cache {
     ) -> Result<Reply> {
         self.run(stop.clone(),move|db|{
         let actual=load(&db.connection,&key,previous.source.clone())?;if actual!=previous{return Err(invalid("history progress changed"));}
-        if previous.indexed_through=="0" && db.connection.query_row("SELECT rowid FROM documents WHERE documents MATCH ?1 LIMIT 1",[source_match(&key)],|row|row.get::<_,i64>(0)).optional().map_err(sql)?.is_some() {clear_source(db,&key,&stop)?;budget(&db.connection,stop.clone())?;}
+        if previous.indexed_through=="0" && db.connection.query_row("SELECT rowid FROM documents WHERE documents MATCH ?1 LIMIT 1",[source_match(&key)],|row|row.get::<_,i64>(0)).optional().map_err(sql)?.is_some() {clear_source(db,&key,&stop)?;budget(&mut db.connection,stop.clone())?;}
         let has_documents = !batch.documents.is_empty();
         let tx=db.connection.transaction().map_err(sql)?;
         for document in batch.documents {tx.execute("INSERT INTO documents(body,source,metadata) VALUES (?1,?2,?3)",params![document.text,key,serde_json::to_string(&document.hit).map_err(invalid)?]).map_err(sql)?;}
@@ -633,7 +633,7 @@ mod tests {
     }
     #[test]
     fn startup_validation_does_not_scan_indexed_documents() {
-        let connection = Connection::open_in_memory().unwrap();
+        let mut connection = Connection::open_in_memory().unwrap();
         let generation = schema(&connection).unwrap();
         connection.execute("WITH RECURSIVE n(x) AS (VALUES(1) UNION ALL SELECT x+1 FROM n WHERE x<10000) INSERT INTO documents(body,source,metadata) SELECT 'searchable text', 's', '{}' FROM n", []).unwrap();
         let steps = Arc::new(std::sync::atomic::AtomicUsize::new(0));

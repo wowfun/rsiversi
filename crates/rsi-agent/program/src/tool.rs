@@ -5,7 +5,7 @@ use rsi_jobs::{Jobs, JobsContract};
 use rsi_meta::{ActivationPlan, ConfigValue, MetaError, PluginFactory, PreparedActivation};
 use rsi_tools_protocol::{
     ToolDefinition, ToolError, ToolExecution, ToolExecutor, ToolProgramRole, ToolRegistrarContract,
-    ToolRegistration, ToolResult, ToolTimeoutPolicy,
+    ToolRegistration, ToolResult, ToolRunPolicy,
 };
 use serde::Deserialize;
 use serde_json::{Value, json};
@@ -36,9 +36,7 @@ impl PluginFactory for ProgramToolsFactory {
             .register(ToolRegistration {
                 definition,
                 output: None,
-                timeout: ToolTimeoutPolicy::Execution {
-                    timeout_ms: 600_000,
-                },
+                run_policy: ToolRunPolicy::execution(std::time::Duration::from_mins(10)),
                 executor: Arc::new(Tool {
                     runtime: plan.local::<ProgramRuntimeContract>()?,
                     jobs: plan.local::<JobsContract>()?,

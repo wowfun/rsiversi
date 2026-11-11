@@ -38,6 +38,7 @@ impl Drop for FlightCleanup {
     }
 }
 
+#[allow(clippy::large_enum_variant)] // This transient stack transfer avoids a heap allocation for each resident projection lookup.
 enum Selection {
     Resident(Arc<SessionHeader>, AgentCompositionPin),
     Loading(Arc<SessionLoad>),

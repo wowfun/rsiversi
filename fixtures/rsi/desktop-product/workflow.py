@@ -1,5 +1,6 @@
 """Opt-in Node Workflow through actual Linux Tauri/WebKit controls."""
 import json
+from provider_input import current_input
 import os
 import re
 from pathlib import Path
@@ -18,7 +19,7 @@ def configure(config, host):
 
 def provider_reply(body):
     messages=body.get('messages',[])
-    index=next((i for i in range(len(messages)-1,-1,-1) if messages[i]['role']=='user'),-1)
+    index = current_input(messages)
     if index<0 or 'WORKFLOW_DESKTOP' not in str(messages[index].get('content','')): return None
     if any(message['role']=='tool' for message in messages[index+1:]): return None
     script="await workflow.phase('Native Desktop',{pid:process.pid}); return {total:42};"

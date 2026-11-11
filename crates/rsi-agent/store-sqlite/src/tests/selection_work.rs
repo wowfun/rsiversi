@@ -10,7 +10,7 @@ pub(super) fn trace_readers(
     trace: Option<fn(TraceEvent<'_>)>,
 ) {
     for connection in store.inner.connections.readers.lock().unwrap().iter_mut() {
-        connection.trace_v2(mask, trace);
+        connection.trace_v2(mask, trace).unwrap();
     }
 }
 
@@ -161,7 +161,8 @@ async fn warm_fork_selection_work_does_not_grow_with_unselected_history() {
             .unwrap()
             .as_mut()
             .expect("idle validation reader")
-            .trace_v2(TraceEventCodes::SQLITE_TRACE_PROFILE, Some(count));
+            .trace_v2(TraceEventCodes::SQLITE_TRACE_PROFILE, Some(count))
+            .unwrap();
         trace_readers(&store, TraceEventCodes::SQLITE_TRACE_PROFILE, Some(count));
         let mut samples = Vec::new();
         for selection in [
@@ -195,7 +196,11 @@ async fn warm_fork_selection_work_does_not_grow_with_unselected_history() {
             .unwrap()
             .as_mut()
             .expect("idle validation reader")
-            .trace_v2(TraceEventCodes::empty(), None);
+            .trace_v2(
+                TraceEventCodes::empty(),
+                None::<fn(rusqlite::trace::TraceEvent<'_>)>,
+            )
+            .unwrap();
         trace_readers(&store, TraceEventCodes::empty(), None);
         assert_eq!(
             store.inner.validation_runs.load(Ordering::Relaxed),

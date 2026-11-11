@@ -6,6 +6,60 @@ use rsi_tools_protocol::{ToolContent, ToolResult, ToolResultIdentity};
 use serde_json::json;
 
 #[test]
+fn application_bindings_retain_only_selected_unambiguous_identities() {
+    let fact = SessionFact::new(
+        1,
+        1,
+        SessionFactBody::StepPrepared {
+            turn_id: TurnId::new("turn").unwrap(),
+            step_id: StepId::new("step").unwrap(),
+            names: vec!["read".into(), "write".into()],
+            prompt: Some(rsi_agent_session_protocol::StepPrompt::AppendToHeader {
+                sections: vec![],
+            }),
+            application: Some(ApplicationToolView::Ready {
+                generation: "worker".into(),
+                receipt_source: Some("market".into()),
+                tools: vec![ApplicationToolBinding {
+                    name: "read".into(),
+                    registration: "occurrence".into(),
+                    owner: "owner".into(),
+                }],
+            }),
+        },
+    )
+    .unwrap();
+    let wire = serde_json::to_value(&fact).unwrap();
+    assert_eq!(
+        wire["application"]["tools"][0],
+        json!({"name":"read", "registration":"occurrence", "owner":"owner"})
+    );
+    assert_eq!(
+        serde_json::from_value::<SessionFact>(wire.clone()).unwrap(),
+        fact
+    );
+    for invalid in ["unselected", "bad name", ""] {
+        let mut changed = wire.clone();
+        changed["application"]["tools"][0]["name"] = invalid.into();
+        assert!(serde_json::from_value::<SessionFact>(changed).is_err());
+    }
+    for field in ["name", "registration", "owner"] {
+        let mut changed = wire.clone();
+        let mut second = json!({"name":"write", "registration":"other", "owner":"other"});
+        second[field] = wire["application"]["tools"][0][field].clone();
+        changed["application"]["tools"]
+            .as_array_mut()
+            .unwrap()
+            .push(second);
+        assert!(serde_json::from_value::<SessionFact>(changed).is_err());
+    }
+    let mut obsolete = wire;
+    obsolete["application"]["tools"][0]["definition"] =
+        json!({"name":"read", "description":"read", "input_schema":{"type":"object"}});
+    assert!(serde_json::from_value::<SessionFact>(obsolete).is_err());
+}
+
+#[test]
 fn message_byte_count_and_owned_control_preserve_escaped_unicode_payload() {
     let message = AgentMessage {
         message_id: MessageId::new("bytes").unwrap(),
@@ -466,9 +520,9 @@ fn header_reports_old_format_before_removed_fields_and_rejects_them_in_current_f
     )
     .unwrap();
     let current = serde_json::to_value(&header).unwrap();
-    assert_eq!(current["format_version"], 34);
+    assert_eq!(current["format_version"], 37);
     assert!(current.get("workspace_trust").is_none());
-    for version in 1..34 {
+    for version in 1..SESSION_FORMAT_VERSION {
         // Put the obsolete field before the version to prove decoding is not key-order dependent.
         let wire = format!(
             r#"{{"workspace_trust":"trusted","settings":{{}},"format_version":{version}}}"#
@@ -557,38 +611,51 @@ fn settings_fingerprint_is_canonical_and_secrets_have_no_field() {
 }
 
 #[test]
-fn unconfined_settings_require_live_approval() {
+fn sandbox_and_approval_are_independent_durable_settings() {
     let model = ModelRef::new("openai", "gpt-test").unwrap();
-    assert!(
-        FrozenAgentSettings::new(
-            "unsafe",
-            "Be precise.",
-            model.clone(),
-            SandboxMode::DangerFullAccess,
-            false,
-        )
-        .is_err()
-    );
-    assert!(
-        serde_json::from_value::<FrozenAgentSettings>(json!({
-            "settings_id": "unsafe",
-            "system_prompt": "Be precise.",
-            "default_model": { "deployment": "openai", "model": "gpt-test" },
-            "sandbox": "danger-full-access",
-            "require_approval": false
-        }))
-        .is_err()
-    );
-    assert!(
-        FrozenAgentSettings::new(
-            "reviewed",
-            "Be precise.",
-            model,
-            SandboxMode::DangerFullAccess,
-            true,
-        )
-        .is_ok()
-    );
+    for sandbox in [
+        SandboxMode::ReadOnly,
+        SandboxMode::WorkspaceWrite,
+        SandboxMode::DangerFullAccess,
+    ] {
+        for require_approval in [false, true] {
+            let settings = FrozenAgentSettings::new(
+                "standing",
+                "Be precise.",
+                model.clone(),
+                sandbox,
+                require_approval,
+            )
+            .unwrap();
+            let decoded: FrozenAgentSettings =
+                serde_json::from_value(serde_json::to_value(&settings).unwrap()).unwrap();
+            assert_eq!(decoded, settings);
+            for body in [
+                SessionFactBody::TurnAccepted {
+                    turn_id: TurnId::new("turn-standing").unwrap(),
+                    text: "hello".into(),
+                    model: None,
+                    reasoning_effort: None,
+                    sandbox,
+                    require_approval,
+                },
+                SessionFactBody::MessageTurnAccepted {
+                    turn_id: TurnId::new("turn-standing").unwrap(),
+                    activation_id: ActivationId::new("activation-standing").unwrap(),
+                    message_ids: vec![MessageId::new("message-standing").unwrap()],
+                    model: None,
+                    reasoning_effort: None,
+                    sandbox,
+                    require_approval,
+                },
+            ] {
+                let fact = SessionFact::new(1, 1, body).unwrap();
+                let decoded: SessionFact =
+                    serde_json::from_slice(&serde_json::to_vec(&fact).unwrap()).unwrap();
+                assert_eq!(decoded, fact);
+            }
+        }
+    }
 }
 
 #[test]

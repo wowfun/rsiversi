@@ -126,6 +126,56 @@ async fn persistent_binary_echo_is_lossless_through_a_tiny_backpressured_queue()
     drop(managed);
     assert!(fiber.dispose().await.is_clean());
 }
+
+#[tokio::test]
+async fn slow_reader_resumes_without_losing_or_replaying_bytes() {
+    let (fiber, _, duplex) = owners(json!({})).await;
+    let managed = duplex
+        .spawn(duplex_spec("printf r; sleep 1.2; exec cat", 64 * 1024))
+        .await
+        .unwrap();
+    let input = managed.stdin();
+    let output = managed.stdout();
+    assert_eq!(output.read(1).await.unwrap().bytes, b"r");
+    let bytes: Vec<_> = (0..1024 * 1024)
+        .map(|index| u8::try_from(index % 251).unwrap())
+        .collect();
+    let result = tokio::time::timeout(Duration::from_secs(10), async {
+        tokio::try_join!(
+            async {
+                for chunk in bytes.chunks(rsi_process::MAXIMUM_DUPLEX_CHUNK_BYTES) {
+                    let mut rest = chunk;
+                    while !rest.is_empty() {
+                        let accepted = input.write(rest).await?;
+                        rest = &rest[accepted..];
+                    }
+                }
+                input.close().await
+            },
+            async {
+                let mut received = Vec::new();
+                loop {
+                    let read = output.read(rsi_process::MAXIMUM_DUPLEX_CHUNK_BYTES).await?;
+                    received.extend(read.bytes);
+                    if read.eof {
+                        return Ok::<_, ProcessError>(received);
+                    }
+                }
+            }
+        )
+    })
+    .await;
+    if !matches!(result, Ok(Ok(_))) {
+        managed.terminate();
+    }
+    managed.wait_settlement().await.unwrap();
+    assert!(fiber.dispose().await.is_clean());
+    let ((), received) = result
+        .unwrap()
+        .expect("healthy pipe backpressure must remain pending");
+    assert_eq!(received, bytes);
+    assert_eq!(managed.wait().await.unwrap().exit_code, Some(0));
+}
 #[tokio::test]
 async fn duplex_and_batch_share_slots_and_capture_retention_including_the_write_buffer() {
     let (fiber, batch, duplex) =

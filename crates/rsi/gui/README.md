@@ -10,12 +10,17 @@ Completed native Turns expose a manual fork action bound to the current pane
 generation. Full, Last(n), and None create a fresh independent draft in the source
 workspace and preset through the ordinary Session creation service. The document
 flushes its editor before switching, and first input remains the publication point.
+Forking resolves the source coordinates to the current registration at invocation;
+opening history does not require a registration. Pane `workspace_key` and catalog
+`key` identify coordinate-scoped history. Creation receipts retain registration
+IDs for draft reuse. Catalog keys are derived only during presentation serialization.
 
 Composer preparation accepts an optional typed sandbox mode for a next-Turn
 message and freezes it with the request. Steering rejects sandbox overrides;
 queue edits and uncertain retries retain their original options. Dispatch admits
-that same bounded mode without rewriting it. The Agent resolves mandatory
-approval (including Full access) and enforces the execution policy. Pane metadata
+that same bounded mode without rewriting it. The Agent enforces the execution
+policy and its independent approval requirement as defined by the
+[security contract](../../rsi-agent/docs/security.md). Pane metadata
 exposes the immutable Header sandbox default; document preferences never mutate
 that Header or imply platform isolation support.
 
@@ -98,6 +103,9 @@ whose evidence or ordered window membership changed; text-only deltas reuse the
 existing index without rebuilding classification vectors. The frame baseline
 retains unchanged live blocks across snapshot updates. Settlement replaces their
 transient text with durable source coordinates and invalidates only those blocks.
+All surviving preview blocks of the settling model acquire its durable sequence
+together before source insertion sorts the transcript. Their original content
+order is the same during streaming, after settlement, and after a cold read.
 It also shares its serialized Turn value and byte count until that index changes;
 cache identity includes the index lifetime, not only its numeric wire revision. An incomplete window is explicitly partial
 and never hides unknown content. Rust supplies explicit `running` and `foldable`
@@ -405,6 +413,10 @@ classification and bounded JSON previews; it does not serialize complete large
 arguments or result values before truncating them. The view keeps a Tool's name and argument preview when its result arrives, with distinct
 intent and result Fact sequences. Arguments and results each occupy at most half the block; this also reserves
 room for an intent loaded after its result. Clipping never removes its exact source.
+Rejected Tools display their durable explanation in the same block, including
+the default approval-denied message when no reason was supplied. Live observation
+and history replay use the same explanation and retain the exact rejection source;
+display does not consult a policy service or depend on a later model response.
 History beginning after intent displays an explicitly missing intent rather than
 inventing a Tool name or arguments. It also marks a page whose durable prefix
 was not loaded, including the initial

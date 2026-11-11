@@ -384,6 +384,9 @@ async fn check_actual_draft(review_tools: bool) {
         .contribution_context(&claim, Vec::new(), CancellationToken::new())
         .await
         .unwrap();
+    let instructions = prepared_instructions(&pin, &current).await;
+    assert!(instructions.starts_with("Plan mode is disabled."));
+    assert!(!instructions.contains("Plan mode is enabled."));
     let identity =
         rsi_tools_protocol::ToolResultIdentity::new("owner", "invocation", "call", "a".repeat(64))
             .unwrap();
@@ -473,34 +476,8 @@ async fn assert_enabled_plan(
             assert_eq!(result, ToolPolicyDecision::Abstain);
         }
     }
-    let context_unit = pin
-        .contributions()
-        .entries()
-        .iter()
-        .find_map(|entry| {
-            if let ContributionKind::Context(unit) = entry.kind() {
-                Some(unit)
-            } else {
-                None
-            }
-        })
-        .unwrap();
-    let output = context_unit
-        .contribute(context, CancellationToken::new())
-        .await
-        .unwrap();
-    assert_eq!(output.inputs.len(), 1);
-    assert!(output.domains.is_empty());
-    let mut batch = rsi_agent_composition_protocol::ContributionBatch::default();
-    batch
-        .append(
-            &rsi_agent_session_protocol::ContributionId::new("fixture.context").unwrap(),
-            &context.turn_id,
-            &context.step_id,
-            output,
-        )
-        .unwrap();
-    let text = serde_json::to_string(&batch.into_parts().0).unwrap();
+    let text = prepared_instructions(pin, context).await;
+    assert!(text.starts_with("Plan mode is enabled."));
     for name in ["plan_write", "request_plan_execution"] {
         assert_eq!(
             text.contains(name),
@@ -508,6 +485,58 @@ async fn assert_enabled_plan(
             "context must name only registered review Tools"
         );
     }
+}
+
+async fn prepared_instructions(
+    pin: &rsi_agent_composition_protocol::AgentCompositionPin,
+    context: &rsi_agent_composition_protocol::ContributionContext,
+) -> String {
+    let entry = pin
+        .contributions()
+        .entries()
+        .iter()
+        .find(|entry| entry.id().as_str() == "rsi.plan-policy.context")
+        .unwrap();
+    let ContributionKind::BeforeStep(unit) = entry.kind() else {
+        panic!("Plan guidance must replace the current instruction slot, not append chat inputs");
+    };
+    let selection = rsi_agent_session_protocol::ModelSelection {
+        model: context.header.settings().default_model().clone(),
+        reasoning_effort: None,
+    };
+    let request_id = DomainRequestId::new("prepare-plan").unwrap();
+    let captured = rsi_agent_composition_protocol::BeforeStepContext {
+        previous_input_at_ms: None,
+        selection: &selection,
+        producer: entry.id(),
+        previous: None,
+        captured: context,
+        request_id: &request_id,
+        tools: &[],
+    };
+    let output = unit
+        .prepare(&captured, CancellationToken::new())
+        .await
+        .unwrap();
+    assert!(output.contribution.inputs.is_empty());
+    assert!(output.contribution.domains.is_empty());
+    assert!(output.decision.is_none());
+    assert!(output.tools.is_none());
+    assert!(output.publications.is_empty());
+    assert_eq!(
+        output.instructions,
+        unit.prepare(&captured, CancellationToken::new())
+            .await
+            .unwrap()
+            .instructions
+    );
+    let cancellation = CancellationToken::new();
+    cancellation.cancel();
+    assert!(matches!(
+        unit.prepare(&captured, cancellation).await,
+        Err(rsi_agent_composition_protocol::ContributionError::Closed)
+    ));
+    output.instructions
 }
 
 #[test]

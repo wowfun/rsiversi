@@ -257,6 +257,12 @@ impl Drop for Released {
 }
 #[async_trait::async_trait]
 impl SessionStore for PausedStore {
+    async fn session_summary(
+        &self,
+        session_id: &SessionId,
+    ) -> StoreResult<rsi_agent_store_protocol::StoreRecentSession> {
+        self.inner.session_summary(session_id).await
+    }
     async fn session_access(
         &self,
         sessions: &[SessionId],

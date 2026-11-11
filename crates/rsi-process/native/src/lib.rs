@@ -21,3 +21,14 @@ pub use identity::{ProcessHandle, ProcessIdentity};
 mod inheritance;
 #[cfg(windows)]
 pub use inheritance::clear_standard_handle_inheritance;
+#[cfg(windows)]
+#[allow(unsafe_code)]
+mod launch;
+#[cfg(windows)]
+#[allow(unsafe_code)]
+mod pipes;
+#[cfg(windows)]
+pub use pipes::{PipeChild, PipeDirection, PipeSpawn, async_pipe};
+#[cfg(windows)]
+#[allow(unsafe_code)]
+mod wait;

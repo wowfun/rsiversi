@@ -223,7 +223,7 @@ async fn scenario(
             "system",
             ModelRef::new("deployment", "model").unwrap(),
             mode,
-            matches!(requirement, Requirement::Header) || mode == SandboxMode::DangerFullAccess,
+            matches!(requirement, Requirement::Header),
         )
         .unwrap(),
     )

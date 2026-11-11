@@ -157,12 +157,16 @@ membership and capacity are released, bounded cleanup evidence is retained,
 and the Runtime terminalizes.
 
 Marker-level behavior proves Emit ordering, Parallel all-settled aggregate
-errors with a 64-callback polling ceiling, Serial asynchronous first-break,
+errors with a 64-callback polling ceiling, slot reuse while an earlier callback
+is still pending, and error ordering independent of completion order; Serial asynchronous first-break,
 Bail synchronous first-break, and Waterfall typed continuation
 replacement/veto. Synchronous and asynchronous listener panics prove the same
 documented ordinary safe-Rust propagation rather than an implicit Runtime
 containment boundary. Cancelling a saturated Parallel dispatch proves once
 listeners outside its polling window remain eligible for a later dispatch.
+Clone counters prove that asynchronous broadcasts and queries do not copy their
+input. Non-Clone inputs and suspended callbacks prove borrowing across `await`,
+snapshot retention after listener disposal, and input release on cancellation.
 Compile-time use proves callers cannot select a different mode or pass an
 untyped JSON payload. The public API exposes no Runtime-owned callback deadline,
 cancellation token, call identity, or dispatch handle.

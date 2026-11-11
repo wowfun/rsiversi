@@ -47,8 +47,8 @@ pub const MAXIMUM_TOOL_DESCRIPTION_BYTES: usize = 4 * 1024;
 pub const MAXIMUM_FREEFORM_GRAMMAR_BYTES: usize = 64 * 1024;
 /// Maximum active definitions in one Tool Runtime generation.
 pub const MAXIMUM_REGISTERED_TOOLS: usize = 64;
-/// Maximum cooperative timeout for one Tool call in milliseconds.
-pub const MAXIMUM_TOOL_TIMEOUT_MS: u64 = 600_000;
+/// Maximum timeout accepted by the Portable Tool wire contract, in milliseconds.
+pub const MAXIMUM_PORTABLE_TOOL_TIMEOUT_MS: u64 = 600_000;
 /// Maximum active-or-retained invocations across one Tool catalog provider.
 pub const MAXIMUM_ADMITTED_TOOL_INVOCATIONS: usize = 1_024;
 /// Maximum unpublished and sealed catalogs retained by one provider.
@@ -105,18 +105,10 @@ impl<'de> Deserialize<'de> for ToolDefinition {
         }
 
         let wire = WireDefinition::deserialize(deserializer)?;
-        let definition = Self {
-            name: wire.name,
-            description: wire.description,
-            input_schema: wire.input_schema,
-            freeform: wire.freeform,
-            scheduling: ToolScheduling::Exclusive,
-            program_role: ToolProgramRole::Unavailable,
-        };
-        definition
-            .validate()
-            .map(|()| definition)
-            .map_err(serde::de::Error::custom)
+        let mut definition = Self::new(wire.name, wire.description, wire.input_schema)
+            .map_err(serde::de::Error::custom)?;
+        definition.freeform = wire.freeform;
+        Ok(definition)
     }
 }
 
@@ -127,16 +119,29 @@ impl ToolDefinition {
         description: impl Into<String>,
         input_schema: Value,
     ) -> Result<Self> {
-        let definition = Self {
-            name: name.into(),
-            description: description.into(),
+        let name = name.into();
+        let description = description.into();
+        validate_model_tool_name(&name)?;
+        validate_safe_text(
+            "tool description",
+            &description,
+            MAXIMUM_TOOL_DESCRIPTION_BYTES,
+            true,
+        )?;
+        if !matches!(input_schema, Value::Object(_) | Value::Bool(_)) {
+            return Err(ToolError::InvalidInput(
+                "tool input schema must be an object or boolean JSON Schema".into(),
+            ));
+        }
+        validate_json("tool input schema", &input_schema)?;
+        Ok(Self {
+            name,
+            description,
             input_schema,
             freeform: None,
             scheduling: ToolScheduling::Exclusive,
             program_role: ToolProgramRole::Unavailable,
-        };
-        definition.validate()?;
-        Ok(definition)
+        })
     }
 
     /// Returns the exact model-visible name.
@@ -154,11 +159,11 @@ impl ToolDefinition {
         &self.input_schema
     }
 
-    /// Adds a provider-neutral freeform grammar projection.
-    pub fn with_freeform(mut self, freeform: FreeformToolDefinition) -> Result<Self> {
+    /// Adds an already validated provider-neutral freeform grammar projection.
+    #[must_use]
+    pub fn with_freeform(mut self, freeform: FreeformToolDefinition) -> Self {
         self.freeform = Some(freeform);
-        self.validate()?;
-        Ok(self)
+        self
     }
 
     /// Returns the optional freeform projection.
@@ -188,27 +193,6 @@ impl ToolDefinition {
     /// Returns the trusted owner declaration, never taken from model arguments.
     pub const fn program_role(&self) -> ToolProgramRole {
         self.program_role
-    }
-
-    /// Revalidates a definition decoded from a durable or external boundary.
-    pub fn validate(&self) -> Result<()> {
-        validate_model_tool_name(&self.name)?;
-        validate_safe_text(
-            "tool description",
-            &self.description,
-            MAXIMUM_TOOL_DESCRIPTION_BYTES,
-            true,
-        )?;
-        if !matches!(self.input_schema, Value::Object(_) | Value::Bool(_)) {
-            return Err(ToolError::InvalidInput(
-                "tool input schema must be an object or boolean JSON Schema".into(),
-            ));
-        }
-        validate_json("tool input schema", &self.input_schema)?;
-        if let Some(freeform) = &self.freeform {
-            freeform.validate()?;
-        }
-        Ok(())
     }
 }
 
@@ -276,12 +260,14 @@ pub enum FreeformFormat {
 impl FreeformToolDefinition {
     /// Creates a bounded freeform grammar.
     pub fn new(format: FreeformFormat, grammar: impl Into<String>) -> Result<Self> {
-        let definition = Self {
-            format,
-            grammar: grammar.into(),
-        };
-        definition.validate()?;
-        Ok(definition)
+        let grammar = grammar.into();
+        validate_safe_text(
+            "tool freeform grammar",
+            &grammar,
+            MAXIMUM_FREEFORM_GRAMMAR_BYTES,
+            false,
+        )?;
+        Ok(Self { format, grammar })
     }
 
     /// Returns the grammar family.
@@ -292,16 +278,6 @@ impl FreeformToolDefinition {
     /// Returns the exact grammar text.
     pub fn grammar(&self) -> &str {
         &self.grammar
-    }
-
-    /// Revalidates a decoded freeform definition.
-    pub fn validate(&self) -> Result<()> {
-        validate_safe_text(
-            "tool freeform grammar",
-            &self.grammar,
-            MAXIMUM_FREEFORM_GRAMMAR_BYTES,
-            false,
-        )
     }
 }
 
@@ -925,8 +901,16 @@ impl<'a> ToolBody<'a> {
     pub fn execution(&self) -> &ToolExecution {
         &self.execution
     }
+    /// Borrows the immutable arguments already admitted for this body.
+    #[must_use]
+    pub fn arguments(&self) -> &Value {
+        &self.arguments
+    }
     /// Executes the prepared body once.
     pub async fn run(self) -> Result<ToolResult> {
+        if self.execution.cancellation.is_cancelled() {
+            return Err(ToolError::Cancelled);
+        }
         self.executor.execute(self.arguments, self.execution).await
     }
 }
@@ -1003,16 +987,38 @@ pub trait PendingToolApproval: fmt::Debug + Send + 'static {
     -> Result<ToolDecision>;
 }
 
-/// Owner-declared cooperative timeout policy.
+/// Whether executing a Tool requires synchronous human interaction.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
-pub enum ToolTimeoutPolicy {
-    /// Finite cooperative execution timeout, validated at registration.
-    Execution {
-        /// Maximum execution duration in milliseconds.
-        timeout_ms: u64,
-    },
-    /// Synchronous human interaction, bounded by cancellation and provider ownership.
-    HumanInteraction,
+pub enum ToolInteraction {
+    /// No synchronous human interaction.
+    Automatic,
+    /// Synchronous human interaction requiring exclusive-final scheduling.
+    Human,
+}
+
+/// Independent owner-declared interaction and cooperative execution deadline.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub struct ToolRunPolicy {
+    /// Interaction requirements, independent of the optional deadline.
+    pub interaction: ToolInteraction,
+    /// Maximum execution duration. `None` installs no execution timer.
+    pub deadline: Option<std::time::Duration>,
+}
+impl ToolRunPolicy {
+    /// Automatic execution with a finite deadline, checked at registration.
+    pub const fn execution(deadline: std::time::Duration) -> Self {
+        Self {
+            interaction: ToolInteraction::Automatic,
+            deadline: Some(deadline),
+        }
+    }
+    /// Human interaction bounded by cancellation and provider ownership.
+    pub const fn human_interaction() -> Self {
+        Self {
+            interaction: ToolInteraction::Human,
+            deadline: None,
+        }
+    }
 }
 
 /// One process-local implementation registered for a model-visible definition.
@@ -1022,8 +1028,8 @@ pub struct ToolRegistration {
     pub definition: ToolDefinition,
     /// Optional canonical successful-output contract, outside model-visible schema.
     pub output: Option<ToolOutputDeclaration>,
-    /// Owner-declared timeout policy; model arguments cannot select it.
-    pub timeout: ToolTimeoutPolicy,
+    /// Owner-declared execution policy; model arguments cannot select it.
+    pub run_policy: ToolRunPolicy,
     /// Trusted body.
     pub executor: Arc<dyn ToolExecutor>,
 }
@@ -1034,7 +1040,7 @@ impl fmt::Debug for ToolRegistration {
             .debug_struct("ToolRegistration")
             .field("definition", &self.definition)
             .field("output", &self.output)
-            .field("timeout", &self.timeout)
+            .field("run_policy", &self.run_policy)
             .field("executor", &"<tool executor>")
             .finish()
     }
@@ -1772,12 +1778,12 @@ impl<'de> Visitor<'de> for StrictValueVisitor<'_> {
     }
 }
 
-#[allow(clippy::needless_pass_by_value)] // Adapter consumes the provider error at map_err without exposing backend diagnostics.
 fn execution_error(error: rsi_process::ProcessError) -> ToolError {
     match error {
         rsi_process::ProcessError::OutcomeUnknown => ToolError::OutcomeUnknown,
         rsi_process::ProcessError::Capacity => ToolError::Capacity,
         rsi_process::ProcessError::ShuttingDown => ToolError::ShuttingDown,
+        rsi_process::ProcessError::Sandbox(cause) => ToolError::Sandbox(cause),
         _ => ToolError::Execution("execution provider or admission is unavailable".into()),
     }
 }

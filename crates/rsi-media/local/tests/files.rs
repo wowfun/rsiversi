@@ -72,7 +72,9 @@ async fn external_file_publisher_references_and_paths_are_shared_exactly() {
 #[tokio::test]
 async fn published_files_are_verified_without_copying_or_repairing_them() {
     let root = tempfile::tempdir().unwrap();
-    let reader = LocalAttachmentReader::open(root.path().to_owned()).await.unwrap();
+    let reader = LocalAttachmentReader::open(root.path().to_owned())
+        .await
+        .unwrap();
     for data in [vec![], vec![0x5a; 1024 * 1024 + 17]] {
         let reference = FileRef::new(
             MediaId::new(hex::encode(Sha256::digest(&data))).unwrap(),
@@ -111,7 +113,9 @@ async fn immutable_file_reads_reject_linked_objects_and_shards() {
     use std::os::unix::fs::symlink;
     let root = tempfile::tempdir().unwrap();
     let outside = tempfile::tempdir().unwrap();
-    let reader = LocalAttachmentReader::open(root.path().to_owned()).await.unwrap();
+    let reader = LocalAttachmentReader::open(root.path().to_owned())
+        .await
+        .unwrap();
     let reference = FileRef::new(
         MediaId::new(hex::encode(Sha256::digest(b"data"))).unwrap(),
         "file",

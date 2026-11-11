@@ -48,6 +48,12 @@ prefix fold as live observation; a generic JSON patch format would introduce a
 second interpreter for those semantics. Local acceptances, including their exact
 timestamp and original queue target, remain durable after acknowledgement.
 Before dispatch, the application records and flushes the exact native invocation.
+For inbox operations, the accepted event is also the invocation's body owner.
+Recovery metadata retains only the operation kind and, for context-input commands,
+the command, original native revision and digest. Request construction borrows
+the immutable event; neither a retained second body nor a second body cache is
+needed. This adopts DSH's event-backed inbox ownership across RSI's asynchronous
+native boundary. Cold loading checks the digest against the reconstructed request.
 Recovery reuses that invocation and request identity; it never silently restamps
 a revision or invokes under a fresh identity. A failed attempt does not erase an
 accepted event. The latest unresolved choice blocks dependent Agent submissions;
@@ -63,6 +69,21 @@ The single application process owns its writer; Host retires it before starting
 a replacement. Retained readers share a projector that processes only new native
 observations. Each caller supplies its own authorized read; sharing content grants
 no request authority. Native projection batches publish atomically.
+
+Distinct event coordinates do not require distinct message bodies. Following
+DSH's `shared-frozen` restore contract, the native projector supplies already
+admitted immutable values to the application owner. Remapping creates independent
+envelopes and reference fields while retaining unchanged bodies by identity.
+Inbox transitions retain the admitted message rather than their pre-admission
+copy. External mutable inputs and restored local records still cross a lossless
+JSON snapshot boundary; an internal ownership contract avoids repeating that
+copy for the same native body. No global interning table or durable projection
+cache is needed, and a failed batch cannot modify the shared frozen prefix.
+The same ownership contract avoids repeatedly freezing admitted payload graphs:
+only new envelopes and remapped reference containers need freezing on transfer.
+Canonical request headers add a shallow wrapper over the event's immutable
+configuration and schemas. This follows DSH's shared restore path without using
+an arbitrary caller's shallow-frozen object as proof of immutable descendants.
 
 Inbox reads follow DSH's retained projection cursor: immutable event prefixes do
 not need copying or refolding when more events arrive. Mutable operation metadata
@@ -83,10 +104,47 @@ observe plugin appends between native commits.
 History reconstruction uses bounded Fact pages within a captured horizon and
 borrows referenced evidence from the page already being folded. The normal page
 byte bound does not force a large individual Fact into an unrepresentable log:
-the existing fragmented transport handles that record alone. Warm durable mirrors
-compare indexed cursors before opening full model projections. These changes
+the existing fragmented transport handles that record alone. Persisted mirrors
+reconstruct from the indexed cut and immutable model baseline without opening
+live model projections. These changes
 reduce IPC and repeated work without another durable event corpus or an unbounded
 body cache. The exact application interface is owned by Serve's contract.
+
+Immutable history pages also use authorized durable Headers and direct Store
+reads. Creating a Session handle for each page adds runtime lifetime state to a
+read that does not need it. Draft and live observation operations retain handles;
+caller retirement and addressed parent visibility still gate durable reads.
+Exact acceptance reads already have the canonical control sequence: they move
+that record's owned body instead of cloning it. Going through the message index
+would additionally decode and validate unrelated queue-state fields. This follows
+DSH's separation of stored log reading from live Session execution without
+introducing another persistent or in-memory body cache.
+
+Control replay carries each accepted message in the control page that already
+read its canonical record. Returning an identity and fetching that record again
+added a Store decode and IPC round trip per input. DSH's stored event reader
+likewise delivers the body that its inbox fold consumes. Control pages reuse
+the existing bounded UTF-8 fragment mechanism; small ordinary pages and an
+isolated oversized record avoid materializing a whole queue on small devices.
+Exact acceptance lookup remains a separate operation for receipt recovery,
+which starts from an identity rather than a streamed control record.
+
+A model-attempt row transfers its normalized events in the Fact page. Sending
+encoded chunks and then re-reading the same Fact through a second callback
+would duplicate both transport and durable decoding. Like DSH's directly readable
+Session events, this read view supplies the body the consumer folds. The native
+compact codec and sole durable Fact remain unchanged. The Agent extension owns
+this shared wire projection; workbench, inherited history and captured Agent
+operations use it together.
+
+Merging native controls does not make each Fact anchor a new read horizon. DSH's
+stored-log reader resolves one current logical prefix before returning its
+requested slice. The bridge uses one bounded page cursor per captured update,
+consuming only through each control's anchor while retaining the rest of that
+page. Restarting pagination at every anchor added IPC and decoding without
+changing visibility. Page retention ends with the update; it is not another
+history cache or source of request authority. The existing staging transaction
+still prevents failed or cancelled observations from publishing a partial log.
 
 ## Alternatives considered
 

@@ -20,6 +20,8 @@ use std::sync::Arc;
 use thiserror::Error;
 
 mod activity;
+mod claim;
+pub use claim::{StoreClaimableMessage, StoreFactAppend, StoreInputClaim, StoreMailboxClaim};
 mod inherited;
 pub use inherited::{InheritedInterval, InheritedReadError, capture_inherited_intervals};
 mod maintenance;
@@ -46,8 +48,8 @@ mod evidence;
 mod suffix;
 mod window;
 pub use domain::{
-    StoreDomainHead, StoreDomainState, StoreDomainStatePage, StoreTurnDomainUsage,
-    domain_heads_after,
+    StoreDomainFactCheck, StoreDomainHead, StoreDomainState, StoreDomainStatePage,
+    StoreTurnDomainUsage, domain_heads_after,
 };
 pub use evidence::{EvidenceDigests, EvidenceOriginal, EvidenceResolveError};
 pub use suffix::{MAXIMUM_STORE_SUFFIX_FACTS, StoreFactSuffix, validate_suffix_limits};
@@ -56,7 +58,7 @@ pub use window::{
 };
 
 /// Exact `SQLite` and in-memory Store schema version.
-pub const AGENT_STORE_SCHEMA_VERSION: u32 = 45;
+pub const AGENT_STORE_SCHEMA_VERSION: u32 = 47;
 /// Maximum Facts in one atomic append.
 pub const MAXIMUM_STORE_BATCH_FACTS: usize = 512;
 /// Maximum encoded bytes in one atomic append.
@@ -318,7 +320,7 @@ pub struct AtomicSessionAppend {
     pub expected_control_seq: u64,
     /// Header supplied only for the single newly durable session.
     pub header: Option<SessionHeader>,
-    /// Optional exact contiguous Fact suffix.
+    /// Explicit Facts, completed by canonical inputs referenced by claim controls.
     pub facts: Vec<Arc<SessionFact>>,
     /// Optional exact contiguous Agent-control suffix.
     pub controls: Vec<AgentControlRecord>,
@@ -351,8 +353,11 @@ impl AtomicSessionAppend {
                 ));
             }
         }
-        validate_fact_sequence(self.expected_fact_seq, self.facts.iter().map(AsRef::as_ref))
-            .map_err(|error| StoreError::Invalid(error.to_string()))?;
+        for fact in &self.facts {
+            fact.validate()
+                .map_err(|error| StoreError::Invalid(error.to_string()))?;
+        }
+        self.fact_suffix()?;
         validate_control_sequence(self.expected_control_seq, &self.controls)
             .map_err(|error| StoreError::Invalid(error.to_string()))?;
         self.validate_terminal_boundary()?;
@@ -415,6 +420,14 @@ impl AtomicSessionAppend {
 
     fn validate_domain_commits(&self) -> Result<()> {
         use rsi_agent_session_protocol::{AgentControlRecordBody, DomainMutationSource};
+        if !self.has_referenced_claims()
+            && let Some(mut check) = StoreDomainFactCheck::new(&self.controls)
+        {
+            for fact in &self.facts {
+                check.push(fact)?;
+            }
+            check.finish()?;
+        }
         let mut requests = BTreeSet::new();
         let mut command_messages = BTreeSet::new();
         for (index, record) in self.controls.iter().enumerate() {
@@ -431,18 +444,6 @@ impl AtomicSessionAppend {
                     {
                         return Err(StoreError::Invalid(
                             "command input differs from its exact domain publication".into(),
-                        ));
-                    }
-                }
-                if matches!(commit.source(), DomainMutationSource::Turn { .. }) {
-                    let bound = commit
-                        .clone()
-                        .with_facts(self.facts.iter().map(AsRef::as_ref))
-                        .map_err(|error| StoreError::Invalid(error.to_string()))?;
-                    if &bound != commit {
-                        return Err(StoreError::Invalid(
-                            "domain request does not bind its complete same-append Fact span"
-                                .into(),
                         ));
                     }
                 }
@@ -1085,8 +1086,6 @@ pub enum MailboxRead {
     All,
     /// Both targets and the exact status of one message, including a terminal one.
     WithMessage(MessageId),
-    /// Only input for the next Step of the current Turn.
-    NextStep,
 }
 
 /// Atomic bounded view of one session mailbox selection at one control watermark.
@@ -1113,6 +1112,8 @@ pub struct StoreAgentMailboxSummary {
     pub inbox_paused: bool,
     /// Complete pending-message count at the Store snapshot.
     pub pending_count: usize,
+    /// Source of the first pending next-Step input in acceptance order, if any.
+    pub first_pending_step_source: Option<rsi_agent_session_protocol::AgentMessageSourceKind>,
     /// Pending promotable next-Step identities in acceptance order at the same snapshot.
     pub pending_promotable_message_ids: Vec<MessageId>,
     /// Exact durable control tail at the same Store snapshot.
@@ -1129,6 +1130,7 @@ impl StoreAgentMailboxSummary {
             .iter()
             .collect::<BTreeSet<_>>();
         if self.pending_count > MAXIMUM_PENDING_AGENT_MESSAGES
+            || (self.pending_count == 0 && self.first_pending_step_source.is_some())
             || self.pending_promotable_message_ids.len() > self.pending_count
             || identities.len() != self.pending_promotable_message_ids.len()
         {
@@ -1785,7 +1787,8 @@ impl StoreSessionPage {
 }
 
 /// Exact cursor for creation-time-descending session enumeration.
-#[derive(Clone, Debug, Eq, PartialEq)]
+#[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
 pub struct StoreRecentSessionCursor {
     /// Durable creation timestamp in Unix milliseconds.
     pub created_at_ms: u64,
@@ -1794,10 +1797,17 @@ pub struct StoreRecentSessionCursor {
 }
 
 /// One durable session summary ordered by creation time and identity descending.
-#[derive(Clone, Debug, Eq, PartialEq)]
+#[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
 pub struct StoreRecentSession {
     /// Complete validated immutable Header selected in the listing snapshot.
     pub header: SessionHeader,
+    /// Latest qualifying activity in that snapshot; never earlier than creation.
+    pub last_activity_ms: u64,
+    /// Durable Fact watermark in that snapshot.
+    pub durable_fact_seq: u64,
+    /// Durable control watermark in that snapshot.
+    pub durable_control_seq: u64,
 }
 
 impl StoreRecentSession {
@@ -1831,13 +1841,13 @@ impl StoreRecentSessionPage {
                 "recent-session page has invalid bounds".into(),
             ));
         }
-        let mut previous = self.after.clone();
+        let mut previous = self
+            .after
+            .as_ref()
+            .map(|cursor| (cursor.created_at_ms, &cursor.session_id));
         for session in &self.sessions {
-            let current = session.cursor();
-            if previous.as_ref().is_some_and(|previous| {
-                (current.created_at_ms, &current.session_id)
-                    >= (previous.created_at_ms, &previous.session_id)
-            }) {
+            let current = (session.header.created_at_ms(), session.header.session_id());
+            if previous.is_some_and(|previous| current >= previous) {
                 return Err(StoreError::Corrupt(
                     "recent-session page is not strictly descending".into(),
                 ));
@@ -2006,7 +2016,8 @@ pub trait SessionStore: fmt::Debug + Send + Sync + 'static {
     /// Reads both durable cursors from one metadata snapshot without replaying history.
     async fn read_watermarks(&self, session_id: &SessionId) -> Result<StoreSessionWatermarks>;
 
-    /// Captures a current suffix and full prefix digest in one read transaction.
+    /// Captures a canonical suffix and stored prefix digest in one read transaction.
+    /// Like `read_facts`, this does not establish a Session validation proof.
     /// The first body and every later body must fit remaining bytes before copying.
     async fn read_fact_suffix(
         &self,
@@ -2029,6 +2040,9 @@ pub trait SessionStore: fmt::Debug + Send + Sync + 'static {
     async fn validate_session(&self, session_id: &SessionId) -> Result<()>;
     /// Reads bounded immutable metadata without scanning session history.
     async fn header(&self, session_id: &SessionId) -> Result<SessionHeader>;
+    /// Reads the Header, activity and Fact/control watermarks from one metadata snapshot.
+    /// Missing or retired Sessions are not found; this read never loads transcript.
+    async fn session_summary(&self, session_id: &SessionId) -> Result<StoreRecentSession>;
     /// Reads ordered per-item access projections from one metadata snapshot.
     /// Returns exactly one result per input identity, in input order, including
     /// failures and repeated identities; implementations never omit a slot.
@@ -2111,6 +2125,8 @@ pub trait SessionStore: fmt::Debug + Send + Sync + 'static {
     ///
     /// Checks lengths against `maximum_bytes` before body allocation. An oversized
     /// first record returns `ReadRequiresCapacity`; later records end a short page.
+    /// Canonical pages validate the selected interval, not unrelated history or
+    /// derived indexes. Execution callers retain `prepare_session` across reads.
     async fn read_facts(
         &self,
         session_id: &SessionId,
@@ -2120,6 +2136,7 @@ pub trait SessionStore: fmt::Debug + Send + Sync + 'static {
     ) -> Result<StoreFactPage>;
     /// Reads a bounded forward interval, omitting originals larger than the entire
     /// caller budget before body allocation. Omitted coordinates still advance.
+    /// Shares `read_facts`' canonical interval validation boundary.
     async fn read_fact_window(
         &self,
         session_id: &SessionId,
@@ -2134,6 +2151,8 @@ pub trait SessionStore: fmt::Debug + Send + Sync + 'static {
         ))
     }
     /// Reads at most `limit` contiguous Agent-control records after one cursor.
+    /// Shares `read_facts`' canonical interval boundary; control decisions require
+    /// `prepare_session` before interpreting the result.
     async fn read_controls(
         &self,
         session_id: &SessionId,
@@ -2151,6 +2170,7 @@ pub trait SessionStore: fmt::Debug + Send + Sync + 'static {
     ///
     /// Cursor zero selects one past the read-time durable tail. Results are
     /// always returned in ascending sequence order.
+    /// Shares `read_facts`' canonical interval validation boundary.
     async fn read_facts_before(
         &self,
         session_id: &SessionId,
@@ -2238,6 +2258,7 @@ pub trait SessionStore: fmt::Debug + Send + Sync + 'static {
         limit: usize,
     ) -> Result<StoreSessionPage>;
     /// Lists at most `limit` sessions after an exclusive creation-time-descending cursor.
+    /// Each row's Header, activity and watermarks share one validated read snapshot.
     async fn list_recent_sessions(
         &self,
         locations: &ExecutionLocations,
@@ -2301,7 +2322,18 @@ pub trait SessionStore: fmt::Debug + Send + Sync + 'static {
             "this Agent Store does not support exact message reads".into(),
         ))
     }
-    /// Reads the selected pending queue and its count at one durable cut.
+    /// Captures all claimable identities and optional waking status at one durable cut.
+    async fn read_mailbox_claim(
+        &self,
+        session_id: &SessionId,
+        waking: Option<MessageId>,
+    ) -> Result<StoreMailboxClaim> {
+        let _ = (session_id, waking);
+        Err(StoreError::Invalid(
+            "this Store does not support mailbox claim selection".into(),
+        ))
+    }
+    /// Reads a byte-bounded pending payload page at one durable cut.
     async fn read_agent_mailbox(
         &self,
         session_id: &SessionId,
@@ -2312,7 +2344,7 @@ pub trait SessionStore: fmt::Debug + Send + Sync + 'static {
             "this Agent Store does not support indexed mailbox reads".into(),
         ))
     }
-    /// Reads only the complete pending count and exact durable tails atomically.
+    /// Reads indexed pending metadata and exact durable tails atomically, without bodies.
     async fn read_agent_mailbox_summary(
         &self,
         session_id: &SessionId,

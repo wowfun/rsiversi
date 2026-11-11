@@ -56,7 +56,7 @@ impl Service {
         self: &Arc<Self>,
         spec: ProcessSpec,
         capture_stdout: bool,
-    ) -> Result<(tokio::process::Child, Arc<Child>, Vec<u8>, Duration)> {
+    ) -> Result<(native::PipeChild, Arc<Child>, Vec<u8>, Duration)> {
         spec.validate()?;
         if spec
             .process
@@ -69,12 +69,19 @@ impl Service {
         {
             return Err(ProcessError::InvalidInput("Windows Process requires an explicit native executable; select cmd.exe to run batch files".into()));
         }
-        if !spec.process.program.is_absolute()
-            || !spec.process.cwd.is_absolute()
-            || spec.process.stamp.backend != rsi_sandbox::SandboxBackend::Unconfined
-        {
+        let token = spec
+            .process
+            .owner
+            .as_ref()
+            .and_then(rsi_sandbox::ProcessPlanOwner::windows_token);
+        let native_plan = matches!(
+            (&spec.process.stamp.backend, token),
+            (rsi_sandbox::SandboxBackend::Unconfined, None)
+                | (rsi_sandbox::SandboxBackend::WindowsAcl, Some(_))
+        );
+        if !spec.process.program.is_absolute() || !spec.process.cwd.is_absolute() || !native_plan {
             return Err(ProcessError::InvalidInput(
-                "Windows requires an exact native unconfined pipe plan".into(),
+                "Windows requires an exact native plan and its matching token".into(),
             ));
         }
         if !self.accepting.load(Ordering::Acquire) {
@@ -102,22 +109,17 @@ impl Service {
                 .map_err(|_| ProcessError::Capacity)?,
         );
         let job = Arc::new(native::Job::new().map_err(spawn_error)?);
-        let mut command = tokio::process::Command::new(&spec.process.program);
-        command
-            .args(&spec.process.arguments)
-            .current_dir(&spec.process.cwd)
-            .env_clear()
-            .envs(spec.environment)
-            .stdin(std::process::Stdio::piped())
-            .stdout(std::process::Stdio::piped())
-            .stderr(std::process::Stdio::piped())
-            .creation_flags(0x0800_0004)
-            .kill_on_drop(true);
-        let mut process = command.spawn().map_err(spawn_error)?;
-        let pid = process
-            .id()
-            .ok_or_else(|| ProcessError::Spawn("native child has no PID".into()))?;
-        let setup = job.admit_tokio_child(&process);
+        let mut process = native::PipeChild::spawn(native::PipeSpawn {
+            program: &spec.process.program,
+            arguments: &spec.process.arguments,
+            environment: &spec.environment,
+            cwd: &spec.process.cwd,
+            token,
+        })
+        .await
+        .map_err(spawn_error)?;
+        let pid = process.id();
+        let setup = process.resume(&job);
         if let Err(error) = setup {
             // Cleanup owns the still-suspended/assigned child independently of a
             // cancelled spawn waiter, and keeps its admission until actual reap.

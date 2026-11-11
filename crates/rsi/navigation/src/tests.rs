@@ -5,10 +5,14 @@ use rsi_agent_session_protocol::{
 use rsi_agent_store_protocol::AppendBatch;
 use rsi_workspace_protocol::{WorkspaceCursor, WorkspacePage, WorkspaceRecord, WorkspaceStatus};
 
+#[path = "workspace_account_tests.rs"]
+mod workspace_account;
+
 #[tokio::test]
 async fn archive_selection_includes_both_partitions_only_when_requested() {
     let owner = owner().await;
     owner.state.lock().unwrap().document = Arc::new(Document {
+        workspace_orders: BTreeMap::new(),
         accounting: None,
         revision: 1,
         records: [
@@ -169,12 +173,26 @@ struct ReadConcurrency {
 }
 #[derive(Debug, Default)]
 struct Workspaces {
+    fail: bool,
     reads: ReadConcurrency,
     calls: std::sync::atomic::AtomicUsize,
     records: BTreeMap<WorkspaceId, WorkspaceRecord>,
 }
 #[async_trait]
 impl WorkspaceRegistry for Workspaces {
+    async fn display_order(
+        &self,
+    ) -> rsi_workspace_protocol::Result<rsi_workspace_protocol::WorkspaceDisplayOrder> {
+        unreachable!("display ordering is not used by this fixture")
+    }
+    async fn insert_before(
+        &self,
+        _: &rsi_workspace_protocol::WorkspaceId,
+        _: Option<&rsi_workspace_protocol::WorkspaceId>,
+    ) -> rsi_workspace_protocol::Result<rsi_workspace_protocol::WorkspaceDisplayOrder> {
+        unreachable!("display ordering is not used by this fixture")
+    }
+
     async fn rename(
         &self,
         _id: &rsi_workspace_protocol::WorkspaceId,
@@ -186,6 +204,27 @@ impl WorkspaceRegistry for Workspaces {
         &self,
     ) -> rsi_workspace_protocol::Result<rsi_workspace_protocol::WorkspaceOrderSeed> {
         unreachable!("workspace order membership is not used by this fixture")
+    }
+    async fn find(
+        &self,
+        key: &rsi_workspace_protocol::WorkspaceKey,
+    ) -> rsi_workspace_protocol::Result<Option<WorkspaceRecord>> {
+        use std::sync::atomic::Ordering::SeqCst;
+        self.calls.fetch_add(1, SeqCst);
+        let active = self.reads.active.fetch_add(1, SeqCst) + 1;
+        self.reads.peak.fetch_max(active, SeqCst);
+        tokio::task::yield_now().await;
+        self.reads.active.fetch_sub(1, SeqCst);
+        if self.fail {
+            return Err(WorkspaceError::Storage("injected lookup failure".into()));
+        }
+        Ok(self
+            .records
+            .values()
+            .find(|record| {
+                &rsi_workspace_protocol::WorkspaceKey::from_coordinates(&record.coordinates) == key
+            })
+            .cloned())
     }
     async fn get(&self, id: &WorkspaceId) -> rsi_workspace_protocol::Result<WorkspaceRecord> {
         use std::sync::atomic::Ordering::SeqCst;
@@ -331,6 +370,7 @@ async fn grouping_queries_each_coordinate_once_per_page_pins_and_summary_batch()
         .map(|row| row.session.clone())
         .collect::<Vec<_>>();
     owner.state.lock().unwrap().document = Arc::new(Document {
+        workspace_orders: BTreeMap::new(),
         records: sessions
             .iter()
             .map(|id| {
@@ -393,7 +433,7 @@ async fn workspace_lookup_prefetch_is_bounded_ordered_shared_and_lazy() {
             .enumerate()
             .filter(|(i, _)| i % 2 == 0)
             .map(|(_, coordinates)| {
-                let record = WorkspaceRecord::new(coordinates.clone());
+                let record = workspace_record(coordinates.clone());
                 (record.id.clone(), record)
             })
             .collect(),
@@ -411,7 +451,7 @@ async fn workspace_lookup_prefetch_is_bounded_ordered_shared_and_lazy() {
         rows,
         selected
             .map(|coordinates| coordinates.and_then(|coordinates| {
-                let id = WorkspaceId::from_coordinates(coordinates);
+                let id = fixture_workspace_id(coordinates);
                 workspaces.records.contains_key(&id).then_some(id)
             }))
             .collect::<Vec<_>>()
@@ -581,7 +621,7 @@ async fn activity_moving_ahead_of_a_live_cursor_is_exposed_on_refresh() {
             &CallOrigin::Local,
             NavigationFilter {
                 workspace: WorkspaceFilter::Registered {
-                    id: WorkspaceId::from_canonical_path(std::path::Path::new("/gone")).unwrap(),
+                    id: WorkspaceId::parse("f".repeat(64)).unwrap(),
                 },
                 ..Default::default()
             },
@@ -600,6 +640,7 @@ async fn manual_seed_is_complete_before_ordered_64_65_summary_reads() {
     use rsi_navigation_api::{OrderMembership, OrderScope, SummaryRequest};
     let owner = owner().await;
     owner.state.lock().unwrap().document = Arc::new(Document {
+        workspace_orders: BTreeMap::new(),
         accounting: None,
         revision: 1,
         records: [(
@@ -710,6 +751,7 @@ fn metadata_bounds_reject_durable_and_external_oversize_or_control_titles() {
         .collect();
     assert!(
         Document {
+            workspace_orders: BTreeMap::new(),
             accounting: None,
             revision: 1,
             records
@@ -731,6 +773,7 @@ async fn pins_without_authorizable_headers_are_hidden_and_metadata_is_retained()
         .map(|id| (SessionId::new(id).unwrap(), metadata.clone().into()))
         .into();
     owner.state.lock().unwrap().document = Arc::new(Document {
+        workspace_orders: BTreeMap::new(),
         accounting: None,
         revision: 7,
         records,
@@ -803,7 +846,7 @@ async fn pins_without_authorizable_headers_are_hidden_and_metadata_is_retained()
 #[test]
 fn legacy_metadata_and_pin_capacity_have_explicit_durable_semantics() {
     let legacy: Document = serde_json::from_value(
-        serde_json::json!({"revision":1,"records":{"old":{"title":null,"archived":false}}}),
+        serde_json::json!({"workspace_orders":{},"revision":1,"records":{"old":{"title":null,"archived":false}}}),
     )
     .unwrap();
     assert!(!legacy.records.values().next().unwrap().pinned);
@@ -847,6 +890,7 @@ fn legacy_metadata_and_pin_capacity_have_explicit_durable_semantics() {
 async fn pinned_summaries_preserve_sorted_order_without_attaching_sessions() {
     let owner = owner().await;
     owner.state.lock().unwrap().document = Arc::new(Document {
+        workspace_orders: BTreeMap::new(),
         accounting: None,
         revision: 1,
         records: (1..=64)
@@ -981,7 +1025,7 @@ async fn pin_intents_keep_pin_order_and_skip_redundant_writes() {
 #[test]
 fn existing_pin_ranks_and_unranked_archives_survive_a_title_edit() {
     let mut stored: Document = serde_json::from_value(serde_json::json!({
-        "revision": 4, "records": {
+        "workspace_orders": {}, "revision": 4, "records": {
             "pin": {"pinned": true, "archived": false, "title": null, "pin_revision": 3},
             "archive": {"pinned": false, "archived": true, "title": null}
         }
@@ -1154,6 +1198,7 @@ async fn missing_unpinned_metadata_can_be_cleared_with_revision_cas() {
     Arc::get_mut(&mut owner).unwrap().domain = domain.clone();
     let missing = SessionId::new("gone").unwrap();
     owner.state.lock().unwrap().document = Arc::new(Document {
+        workspace_orders: BTreeMap::new(),
         accounting: None,
         revision: 7,
         records: [(
@@ -1281,7 +1326,7 @@ async fn visibility_filters_before_order_capacity_cursors_pins_and_exact_summari
     assert!(
         groups
             .iter()
-            .all(|coordinates| *coordinates.location() == ExecutionLocation::Local)
+            .all(|group| *group.coordinates.location() == ExecutionLocation::Local)
     );
     let summaries = owner
         .summaries(
@@ -1378,6 +1423,7 @@ async fn hidden_sessions(owner: &Navigation) -> Vec<SessionId> {
 #[test]
 fn metadata_incremental_sizes_match_the_durable_wrapper_through_edits() {
     let mut document = Document {
+        workspace_orders: BTreeMap::new(),
         revision: 8,
         ..Document::default()
     };
@@ -1409,12 +1455,7 @@ fn metadata_incremental_sizes_match_the_durable_wrapper_through_edits() {
         let expected = serde_json::to_vec(&serde_json::json!({"metadata": &document}))
             .unwrap()
             .len();
-        assert_eq!(
-            expected,
-            b"{\"metadata\":{\"revision\":,\"records\":}}".len()
-                + document.revision.to_string().len()
-                + accounting.records.bytes()
-        );
+        assert_eq!(expected, accounting.bytes(document.revision));
     }
     let pinned = SessionMetadata {
         pinned: true,
@@ -1564,6 +1605,7 @@ async fn protected_scope_is_hidden_in_pages_pins_order_membership_and_exact_summ
     let encoded = serde_json::to_string(&seed).unwrap();
     assert!(!encoded.contains("protected"));
     owner.state.lock().unwrap().document = Arc::new(Document {
+        workspace_orders: BTreeMap::new(),
         records: BTreeMap::from([(
             header.session_id().clone(),
             SessionMetadata {
@@ -1584,6 +1626,7 @@ async fn protected_scope_is_hidden_in_pages_pins_order_membership_and_exact_summ
             .is_empty()
     );
     owner.state.lock().unwrap().document = Arc::new(Document {
+        workspace_orders: BTreeMap::new(),
         records: BTreeMap::from([(
             header.session_id().clone(),
             SessionMetadata {
@@ -1859,6 +1902,7 @@ async fn purge_cleanup_requires_completion_preserves_other_records_and_retries_c
     let selected = SessionId::new("row-001").unwrap();
     let other = SessionId::new("row-002").unwrap();
     let header = navigation.store.header(&selected).await.unwrap();
+    let workspace = fixture_workspace_id(header.coordinates());
     let request = seed_purge_cleanup(&store, header).await;
     let domain = Arc::new(CleanupDomain {
         spec: navigation.domain.spec().clone(),
@@ -1873,6 +1917,7 @@ async fn purge_cleanup_requires_completion_preserves_other_records_and_retries_c
         pinned: true,
     };
     owner.state.lock().unwrap().document = Arc::new(Document {
+        workspace_orders: [(workspace.clone(), vec![selected.clone(), other.clone()])].into(),
         accounting: None,
         revision: 7,
         records: [
@@ -1912,6 +1957,10 @@ async fn purge_cleanup_requires_completion_preserves_other_records_and_retries_c
     assert_eq!(domain.written.lock().unwrap().len(), 1);
     let state = navigation.state.lock().unwrap();
     assert_eq!(state.document.records.len(), 1);
+    assert_eq!(
+        state.document.workspace_orders[&workspace],
+        vec![other.clone()]
+    );
     assert_eq!(
         state.document.records.get(&other).map(|row| &row.metadata),
         Some(&metadata)
@@ -1995,4 +2044,19 @@ impl From<SessionMetadata> for StoredMetadata {
             partition_revision: None,
         }
     }
+}
+
+fn workspace_record(
+    coordinates: rsi_workspace_protocol::ExecutionCoordinates,
+) -> rsi_workspace_protocol::WorkspaceRecord {
+    let key = rsi_workspace_protocol::WorkspaceKey::from_coordinates(&coordinates);
+    rsi_workspace_protocol::WorkspaceRecord::new(
+        rsi_workspace_protocol::WorkspaceId::parse(key.as_str()).unwrap(),
+        coordinates,
+    )
+}
+
+fn fixture_workspace_id(coordinates: &ExecutionCoordinates) -> WorkspaceId {
+    WorkspaceId::parse(rsi_workspace_protocol::WorkspaceKey::from_coordinates(coordinates).as_str())
+        .unwrap()
 }

@@ -52,6 +52,7 @@ async fn workspace_review_tui_opens_dirty_baseline_diff_without_model_work() {
     assert!(pending.contains("Complete"));
     assert!(!pending.contains(complete_field));
     state.release.notify_one();
+    terminal.until_idle().await;
     let end = Instant::now() + Duration::from_secs(15);
     while !terminal
         .screen
@@ -64,6 +65,7 @@ async fn workspace_review_tui_opens_dirty_baseline_diff_without_model_work() {
         assert!(Instant::now() < end, "review capture never settled");
         terminal.send(b"\r");
         terminal.select_menu("Review workspace changes").await;
+        terminal.until("Card details · Enter actions").await;
     }
     terminal.send(b"\r");
     terminal.select_menu("Open interval files").await;

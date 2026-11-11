@@ -1,21 +1,46 @@
 # rsi-agent-store-sqlite
 
-Schema 45 stores Header format 34 with separate history provenance and Agent
+Schema 47 stores Header format 36 with separate history provenance and Agent
 execution ownership. A mailbox row retains routing, lifecycle and acceptance
 coordinates, never a second message body. Body reads join the indexed acceptance
 to its canonical control in the same query and bound that control before allocating
 its JSON. Typed decoding transfers the accepted message without cloning its body;
 the exact compact message byte count uses a counting writer rather than a JSON copy.
-Metadata-only queue queries do not join or decode control bodies. Canonical replay
+Metadata-only queue inspection and summary queries do not decode control bodies.
+Claim selection reads the optional waking body and uses canonical command
+provenance to group that command's inputs; other selected inputs carry only
+identities and ordering coordinates. Canonical replay
 checks the routing index against the original acceptance and later transitions.
-Opening an exact schema 44 under the writer lease removes its redundant message
-column in one transaction. Canonical controls and Facts retain their bytes.
-Other incompatible versions are rejected during read-only preflight.
-The opt-in `preserves_live_history_while_removing_the_mailbox_body_copy` test
-accepts a cleanly closed schema-44 database through `RSI_STORE_SCHEMA44_FIXTURE`.
-It copies the database into an isolated private root, compares canonical bytes,
-reads its accepted messages, verifies the Store and reopens it. Run that test with
-`-- --ignored --nocapture`; the supplied database is never modified.
+The mailbox summary selects the first pending next-Step source in acceptance
+order from that same index and snapshot, without reading the accepted content.
+Queued input claims retain their Fact coordinates and a same-Session acceptance
+reference, rather than another copy of content and attribution. The
+[atomic Store contract](../store-protocol/README.md) lets claim controls supply
+input Facts from already-durable acceptance. SQLite reconstructs and hashes
+these bodies individually, then carries only acceptance coordinates into control
+indexing. When the caller supplies an explicit input Fact, admission compares
+that original typed Fact with acceptance before encoding its reference; it does
+not validate a rehydrated substitute or reread a just-inserted Fact. Explicit
+Facts also support same-append acceptance. Claims without a mailbox acceptance
+remain inline.
+
+The Store returns the same self-contained logical Facts through all read paths.
+One bounded joined query supplies the physical Fact and its accepted control;
+typed decoding moves the accepted content into the logical Fact without SQL JSON
+rehydration or per-message follow-up queries. The Fact reader decodes the acceptance
+identity and message projection, validating the resulting logical Fact once. Full
+control routing and options are validated by canonical control replay; reading a
+Fact does not construct and count a second complete control value. Logical byte lengths govern page,
+window and suffix admission, and cold validation checks their indexed lengths
+against reconstructed Facts. Physical JSON lengths are bounded before allocation.
+Fact-page decoding borrows the bounded SQLite row text through validation and
+coverage hashing; it does not allocate a second physical JSON string. Logical
+Facts own their decoded contents. A selected-record lookup copies the physical
+text only when returning it beyond the SQLite statement's lifetime.
+Prefix fingerprints remain logical; reference coverage hashes the exact physical
+record and verifies the logical reference edges. Purge removes Facts before their
+accepted controls. Unsupported schemas are rejected during
+read-only preflight; no automatic migration or reset is performed.
 The Session row projects inbox suspension from canonical controls. Ready queries
 filter suspended Sessions without rewriting their message candidates; canonical
 validation compares the stored flag with control replay.
@@ -33,6 +58,12 @@ at two pending evidence that a different policy improves the mixed workload.
 `RSI_STORE_BENCH_ACTIVITY_ONLY=1` compares sequential and batched activity reads
 on the same validated 128-Session fixture. `RSI_STORE_BENCH_EVIDENCE` retains the
 bounded raw lane samples; cold validation is reported separately from warm reads.
+
+The ignored `compare_referenced_and_inline_claim_storage` test accepts an explicit
+`RSI_STORE_CLAIM_BENCH_OUTPUT` JSON path. It compares identical logical Facts with
+referenced and inline claim encodings, alternating read order and reporting
+database bytes and latency without a nondeterministic timing gate. Its cold
+samples reopen the Store and validate the Session; they do not flush OS caches.
 
 An activity-cut batch obtains up to 64 canonical-history proofs sequentially
 before its single snapshot query. Warm proofs reuse the cache; a fully cold batch
@@ -109,7 +140,9 @@ of an unreferenced object; file type, namespace and unlink failures remain error
 
 Recent-session pages select bounded Header projections in the same ordered query.
 They share the ordinary Header decoder and integrity checks, without one extra
-query per result or decoding an unbounded JSON value.
+query per result or decoding an unbounded JSON value. The decoder retains the
+already selected activity time and Fact/control watermarks in each returned row;
+the Header and these scalars describe that same SQLite snapshot.
 
 The `model_effect_coordinates` unique expression index derives Session/Turn/effect/role
 directly from canonical Fact JSON for ModelIntent, ModelStarted and
@@ -211,7 +244,7 @@ and hash chunks, and cannot interrupt an active syscall or visitor callback.
 SQLite and filesystem-CAS ordinary plugin for
 `rsi-agent-store-protocol`. Opening the Store acquires one cross-process writer
 lease for the entire root before schema validation or recovery reads. Only the
-current schema or its documented upgrade source is accepted. For an existing nonempty database, the retained read-only
+current schema is accepted. For an existing nonempty database, the retained read-only
 foreground connection validates the exact schema before opening a writer or
 cleaning CAS staging. Rejected-version database bytes and staging contents stay
 unchanged. A current WAL is read in that preflight snapshot before ordinary
@@ -243,8 +276,17 @@ request a reset. Standalone reset callers receive the receipt with the result,
 including when opening the replacement fails. Product-home maintenance belongs
 to the [launcher](../../../apps/cli/README.md), before plugin activation.
 
-Explicit `validate_session`, Fact, control, turn, checkpoint, and append access
-validate the selected session's mechanical durable invariants in one snapshot.
+Canonical Fact and control pages follow the bounded interval contract in the
+[Store protocol](../store-protocol/README.md). They read only selected canonical
+rows and their snapshot watermarks, without consulting the Session-proof cache.
+Control pages compare physical and encoded sequence numbers and read the cursor's
+preceding anchor in the same snapshot. An exhausted interval before its expected
+tail is corruption; byte or count limits may end a page earlier. Claims resolve
+their payload from canonical acceptance controls, not a derived mailbox body.
+
+Explicit `validate_session` and `prepare_session`, indexed turn, mailbox, domain,
+lineage, checkpoint, and append access validate the selected session's mechanical
+durable invariants in one snapshot.
 A bounded cache retains 256 Session proofs across a recent FIFO and a reused
 LRU. Successful first validations enter recent; successful revalidation of a
 recently evicted identity enters reused. At capacity, recent entries above a
@@ -258,7 +300,8 @@ cache reuse and post-commit marking are optional: poisoning disables both,
 while in-use pins remain independent. Cache failure cannot turn a successful
 durable commit into an error. Cold proof publication still requires a usable cache,
 as described by the validation failure contract below. Cold validation
-still runs before any indexed execution/history read.
+still runs before any indexed execution/history read. Kernel prepares a proof
+before admitting payload memory; a plain canonical page is not that proof.
 Every canonical terminal Fact must have the matching non-NULL terminal index
 Fact and control sequences and prefix digests. The final control of each
 terminal commit is its exact `TurnBoundaryRecorded` marker. Missing terminal metadata is corruption in both
@@ -266,8 +309,11 @@ online indexed reads and offline verification; it never describes an open Turn.
 The lazy
 check does not decode every Fact JSON body, but its watermark count and
 turn-membership queries cost O(that session's history) on an uncached access.
-It streams, decodes and hashes each canonical Agent control once, checking the
-stored final control-prefix digest and terminal control prefixes and feeding separate
+It streams, decodes and hashes each canonical Agent control once. That same
+ordered pass checks row/record sequence agreement, the exact control watermark,
+and nondecreasing Fact anchors within the durable Fact watermark; it does not
+prescan the control stream for counts or anchors. It checks the
+stored final control-prefix digest and terminal control prefixes and feeds separate
 mailbox, ready, active-activation and bounded domain-head projections. Domain
 version/request membership and exact canonical update positions are verified in
 that same pass. Domain indexes retain positions and derived capacity metadata;
@@ -278,6 +324,10 @@ still grows with session history and may repeat after validation-cache eviction.
 Rejected receipts have no preceding mutation controls to read; successful edits
 also validate their one- or two-control mutation boundary. Receipt retention has
 no expiry, so these costs remain part of opening long-lived sessions.
+Mailbox index checks compare bounded metadata and state against the already
+replayed acceptance and transitions. They do not reload the canonical acceptance
+body to reconstruct a second message. The acceptance coordinates, source,
+options presence, route, queue slot, and final state must all agree.
 Completed pending payloads
 are released during that pass. All projections borrow the same immutable Header
 already decoded in that validation transaction; control history length does not

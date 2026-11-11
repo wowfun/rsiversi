@@ -82,6 +82,7 @@ fn missing<T>() -> rsi_session_protocol::Result<T> {
 #[derive(Debug, Default)]
 struct Backend {
     creations: Mutex<Vec<CreateSession>>,
+    current_registration: Mutex<Option<rsi_workspace_protocol::WorkspaceId>>,
     metrics: Mutex<Option<rsi_session_protocol::MetricsRead>>,
     metrics_gate: Mutex<Option<Arc<admission::HeaderGate>>>,
     workspace_lists: std::sync::atomic::AtomicUsize,
@@ -128,10 +129,10 @@ struct Backend {
 struct Service(Arc<Backend>);
 #[async_trait]
 impl SessionService for Service {
-    async fn read_header(
+    async fn read_summary(
         &self,
         _: &rsi_agent_session_protocol::SessionId,
-    ) -> rsi_session_protocol::Result<rsi_agent_session_protocol::SessionHeader> {
+    ) -> rsi_session_protocol::Result<rsi_session_protocol::SessionSummary> {
         panic!("unexpected durable Header read")
     }
     async fn create(
@@ -678,6 +679,36 @@ impl Backend {
 }
 #[async_trait]
 impl rsi_workspace_protocol::WorkspaceRegistry for Service {
+    async fn find(
+        &self,
+        key: &rsi_workspace_protocol::WorkspaceKey,
+    ) -> rsi_workspace_protocol::Result<Option<rsi_workspace_protocol::WorkspaceRecord>> {
+        let coordinates = self.0.header().await.unwrap().coordinates().clone();
+        assert_eq!(
+            *key,
+            rsi_workspace_protocol::WorkspaceKey::from_coordinates(&coordinates)
+        );
+        Ok(self
+            .0
+            .current_registration
+            .lock()
+            .unwrap()
+            .clone()
+            .map(|id| rsi_workspace_protocol::WorkspaceRecord::new(id, coordinates)))
+    }
+
+    async fn display_order(
+        &self,
+    ) -> rsi_workspace_protocol::Result<rsi_workspace_protocol::WorkspaceDisplayOrder> {
+        unreachable!("display ordering is not used by this fixture")
+    }
+    async fn insert_before(
+        &self,
+        _: &rsi_workspace_protocol::WorkspaceId,
+        _: Option<&rsi_workspace_protocol::WorkspaceId>,
+    ) -> rsi_workspace_protocol::Result<rsi_workspace_protocol::WorkspaceDisplayOrder> {
+        unreachable!("display ordering is not used by this fixture")
+    }
     async fn rename(
         &self,
         _id: &rsi_workspace_protocol::WorkspaceId,

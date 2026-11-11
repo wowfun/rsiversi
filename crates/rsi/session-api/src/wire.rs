@@ -36,7 +36,7 @@ pub enum Operation {
     TerminalInput,
     Create,
     Attach,
-    ReadHeader,
+    ReadSummary,
     Recent,
     Submit,
     Commands,
@@ -96,7 +96,7 @@ impl Operation {
         Self::TerminalInput,
         Self::Create,
         Self::Attach,
-        Self::ReadHeader,
+        Self::ReadSummary,
         Self::Recent,
         Self::Submit,
         Self::Commands,
@@ -160,7 +160,7 @@ impl Operation {
             Self::TerminalInput => ("terminal-input", Data, Mutation, 512 * 1024, 8192),
             Self::TerminalOutput => ("terminal-output", Subscription, Read, 8192, 128 * 1024),
             Self::Create => ("create", Data, Mutation, 8192, DRAFT_REPLY + 8192),
-            Self::ReadHeader => ("read-header", Data, Read, 4096, HEADER_REPLY),
+            Self::ReadSummary => ("read-summary", Data, Read, 4096, HEADER_REPLY + 256),
             Self::Attach => ("attach", Data, Read, 4096, HEADER_REPLY),
             Self::Recent => ("recent", Data, Read, 4096, LARGE_REPLY),
             Self::Submit => ("submit", Data, Mutation, 8 * 1024 * 1024, 16 * 1024),
@@ -235,12 +235,12 @@ impl Operation {
     const fn version(self) -> u16 {
         match self {
             Self::Create => 12,
-            Self::Inspect | Self::Recent | Self::DraftSnapshot | Self::SelectPreset => 10,
-            Self::Submit => 6,
+            Self::Recent => 11,
+            Self::Inspect | Self::DraftSnapshot | Self::SelectPreset => 10,
+            Self::Submit | Self::History | Self::ReadMessage => 7,
             Self::MessageStatus
             | Self::Terminal
             | Self::TerminalOutput
-            | Self::ReadHeader
             | Self::Jobs
             | Self::MutateQueue
             | Self::Cancel => 3,
@@ -252,7 +252,6 @@ impl Operation {
             | Self::DiscardDraftInputs
             | Self::ExecuteCommand => 2,
             Self::Attach | Self::Observe => 9,
-            Self::History | Self::ReadMessage => 7,
             _ => 1,
         }
     }

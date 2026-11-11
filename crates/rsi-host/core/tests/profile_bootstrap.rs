@@ -259,11 +259,23 @@ async fn startup_failure_rolls_back_already_applied_children() {
         .unwrap()
         .start(Profile::new([
             ProfileEntry::new("owned", "owned", Value::Null),
-            ProfileEntry::new("failing", "failing", Value::Null),
+            ProfileEntry::new(
+                "failing",
+                "failing",
+                json!({"private": "configuration-secret"}),
+            ),
         ]))
         .await
         .unwrap_err();
     assert!(matches!(error, HostError::Bootstrap(_)));
+    assert!(
+        error
+            .to_string()
+            .contains("applying Profile instance `failing` failed")
+    );
+    assert!(error.to_string().contains("expected"));
+    assert!(!error.to_string().contains("Failed("));
+    assert!(!error.to_string().contains("configuration-secret"));
     assert_eq!(live.load(Ordering::SeqCst), 0);
     let _ = FiberState::Disposed;
 }

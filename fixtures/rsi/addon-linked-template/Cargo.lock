@@ -63,12 +63,6 @@ dependencies = [
 ]
 
 [[package]]
-name = "allocator-api2"
-version = "0.2.21"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "683d7910e743518b0e34f1186f92494becacb047c7b6bf616c96772180fef923"
-
-[[package]]
 name = "ambient-authority"
 version = "0.0.2"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -88,15 +82,6 @@ name = "anyhow"
 version = "1.0.104"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "330a5ed07fa54e4702c9d6c4174f74427fc0ef6e214bbd677ae50a5099946470"
-
-[[package]]
-name = "approx"
-version = "0.5.1"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "cab112f0a86d568ea0e627cc1d6be74a1e9cd55214684db5561995f6dad897c6"
-dependencies = [
- "num-traits",
-]
 
 [[package]]
 name = "arrayvec"
@@ -138,15 +123,6 @@ dependencies = [
 ]
 
 [[package]]
-name = "atomic"
-version = "0.6.1"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "a89cbf775b137e9b968e67227ef7f775587cde3fd31b0d8599dbd0f598a48340"
-dependencies = [
- "bytemuck",
-]
-
-[[package]]
 name = "atomic-waker"
 version = "1.1.2"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -172,27 +148,12 @@ checksum = "ac07cdecf99051d9a5238b80f35af32cdeba5b336e55d957b318b50137e18da5"
 
 [[package]]
 name = "bit-set"
-version = "0.5.3"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "0700ddab506f33b20a03b13996eccd309a48e5ff77d0d95926aa0210fb4e95f1"
-dependencies = [
- "bit-vec 0.6.3",
-]
-
-[[package]]
-name = "bit-set"
 version = "0.8.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "08807e080ed7f9d5433fa9b275196cfc35414f66a0c79d864dc51a0d825231a3"
 dependencies = [
- "bit-vec 0.8.0",
+ "bit-vec",
 ]
-
-[[package]]
-name = "bit-vec"
-version = "0.6.3"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "349f9b6a179ed607305526ca489b34ad0a41aed5f7980fa90eb03160b69598fb"
 
 [[package]]
 name = "bit-vec"
@@ -211,9 +172,6 @@ name = "bitflags"
 version = "2.13.2"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "3ded4057c258ba199e2d26386d3af3780957ecaee6c4ef4041c6b4b8b97c0b06"
-dependencies = [
- "serde_core",
-]
 
 [[package]]
 name = "block-buffer"
@@ -222,6 +180,15 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "3078c7629b62d3f0439517fa394996acacc5cbc91c5a20d8c658e77abd503a71"
 dependencies = [
  "generic-array",
+]
+
+[[package]]
+name = "block-buffer"
+version = "0.12.1"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "d2f6c7dbe95a6ed67ad9f18e57daf93a2f034c524b99fd2b76d18fdfeb6660aa"
+dependencies = [
+ "hybrid-array",
 ]
 
 [[package]]
@@ -267,12 +234,6 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "72f5acc6cb2ba439de613abc23857ec3d78374d8ed5ac84e9d11336e87da8649"
 
 [[package]]
-name = "by_address"
-version = "1.2.1"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "64fa3c856b712db6612c019f14756e64e4bcea13337a6b33b696333a9eaa2d06"
-
-[[package]]
 name = "bytecount"
 version = "0.6.9"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -311,7 +272,7 @@ dependencies = [
  "io-lifetimes 3.0.1",
  "ipnet",
  "maybe-owned",
- "rustix 1.1.5",
+ "rustix",
  "rustix-linux-procfs",
  "windows-sys 0.61.2",
  "winx",
@@ -326,16 +287,7 @@ dependencies = [
  "cap-primitives",
  "io-extras",
  "io-lifetimes 3.0.1",
- "rustix 1.1.5",
-]
-
-[[package]]
-name = "castaway"
-version = "0.2.4"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "dec551ab6e7578819132c713a93c022a05d60159dc86e7a7050223577484c55a"
-dependencies = [
- "rustversion",
+ "rustix",
 ]
 
 [[package]]
@@ -374,7 +326,7 @@ checksum = "65c35e4b699c7e15ccbe7ee35c005e4fc0a278d22238a2857e6ce2dadeda1b06"
 dependencies = [
  "cfg-if",
  "cpufeatures 0.3.1",
- "rand_core 0.10.1",
+ "rand_core",
 ]
 
 [[package]]
@@ -406,19 +358,10 @@ dependencies = [
 ]
 
 [[package]]
-name = "compact_str"
-version = "0.9.1"
+name = "const-oid"
+version = "0.10.3"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "9dfdd1c2274d9aa354115b09dc9a901d6c5576818cdf70d14cae2bdb47df00ab"
-dependencies = [
- "castaway",
- "cfg-if",
- "itoa",
- "rustversion",
- "ryu",
- "serde",
- "static_assertions",
-]
+checksum = "be95d4a884358a21a199689323c29e9256b4a1b315e22f183d155422041d3a9a"
 
 [[package]]
 name = "const-random"
@@ -529,51 +472,6 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "a31eee39dddec8330830986fcd7625edb5a24ec90ea038215273bbc3adb08ac6"
 
 [[package]]
-name = "crossterm"
-version = "0.28.1"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "829d955a0bb380ef178a640b91779e3987da38c9aea133b20614cfed8cdea9c6"
-dependencies = [
- "bitflags 2.13.2",
- "crossterm_winapi",
- "mio",
- "parking_lot",
- "rustix 0.38.44",
- "serde",
- "signal-hook",
- "signal-hook-mio",
- "winapi",
-]
-
-[[package]]
-name = "crossterm"
-version = "0.29.0"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "d8b9f2e4c67f833b660cdb0a3523065869fb35570177239812ed4c905aeff87b"
-dependencies = [
- "bitflags 2.13.2",
- "crossterm_winapi",
- "derive_more",
- "document-features",
- "mio",
- "parking_lot",
- "rustix 1.1.5",
- "serde",
- "signal-hook",
- "signal-hook-mio",
- "winapi",
-]
-
-[[package]]
-name = "crossterm_winapi"
-version = "0.9.1"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "acdd7c62a3665c7f6830a51635d9ac9b23ed385797f70a83bb8bafe9c572ab2b"
-dependencies = [
- "winapi",
-]
-
-[[package]]
 name = "crunchy"
 version = "0.2.4"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -590,36 +488,12 @@ dependencies = [
 ]
 
 [[package]]
-name = "csscolorparser"
-version = "0.6.2"
+name = "crypto-common"
+version = "0.2.2"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "eb2a7d3066da2de787b7f032c736763eb7ae5d355f81a68bab2675a96008b0bf"
+checksum = "ce6e4c961d6cd6c9a86db418387425e8bdeaf05b3c8bc1411e6dca4c252f1453"
 dependencies = [
- "lab",
- "phf 0.11.3",
-]
-
-[[package]]
-name = "cssparser"
-version = "0.36.0"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "dae61cf9c0abb83bd659dab65b7e4e38d8236824c85f0f804f173567bda257d2"
-dependencies = [
- "cssparser-macros",
- "dtoa-short",
- "itoa",
- "phf 0.13.1",
- "smallvec",
-]
-
-[[package]]
-name = "cssparser-macros"
-version = "0.6.1"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "13b588ba4ac1a99f7f2964d24b3d896ddc6bf847ee3855dbd4366f058cfcd331"
-dependencies = [
- "quote",
- "syn 2.0.119",
+ "hybrid-array",
 ]
 
 [[package]]
@@ -694,12 +568,6 @@ dependencies = [
 ]
 
 [[package]]
-name = "deltae"
-version = "0.3.2"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "5729f5117e208430e437df2f4843f5e5952997175992d1414f94c57d61e270b4"
-
-[[package]]
 name = "deranged"
 version = "0.5.8"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -737,8 +605,40 @@ version = "0.10.7"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "9ed9a281f7bc9b7576e61468ba615a66a5c8cfdff42420a70aa82701a3b1e292"
 dependencies = [
- "block-buffer",
- "crypto-common",
+ "block-buffer 0.10.4",
+ "crypto-common 0.1.7",
+]
+
+[[package]]
+name = "digest"
+version = "0.11.3"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "f1dd6dbb5841937940781866fa1281a1ff7bd3bf827091440879f9994983d5c2"
+dependencies = [
+ "block-buffer 0.12.1",
+ "const-oid",
+ "crypto-common 0.2.2",
+]
+
+[[package]]
+name = "dirs"
+version = "6.0.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "c3e8aa94d75141228480295a7d0e7feb620b1a5ad9f12bc40be62411e38cce4e"
+dependencies = [
+ "dirs-sys",
+]
+
+[[package]]
+name = "dirs-sys"
+version = "0.5.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "e01a3366d27ee9890022452ee61b2b63a67e6f13f58900b651ff5665f0bb1fab"
+dependencies = [
+ "libc",
+ "option-ext",
+ "redox_users",
+ "windows-sys 0.59.0",
 ]
 
 [[package]]
@@ -753,34 +653,10 @@ dependencies = [
 ]
 
 [[package]]
-name = "document-features"
-version = "0.2.12"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "d4b8a88685455ed29a21542a33abd9cb6510b6b129abadabdcef0f4c55bc8f61"
-dependencies = [
- "litrs",
-]
-
-[[package]]
 name = "downcast-rs"
 version = "1.2.1"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "75b325c5dbd37f80359721ad39aca5a29fb04c89279657cffdda8736d0c0b9d2"
-
-[[package]]
-name = "dtoa"
-version = "1.0.11"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "4c3cf4824e2d5f025c7b531afcb2325364084a16806f6d47fbc1f5fbd9960590"
-
-[[package]]
-name = "dtoa-short"
-version = "0.3.5"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "cd1511a7b6a56299bd043a9c167a6d2bfb37bf84a6dfceaba651168adfb43c87"
-dependencies = [
- "dtoa",
-]
 
 [[package]]
 name = "dyn-clone"
@@ -835,15 +711,6 @@ dependencies = [
 ]
 
 [[package]]
-name = "euclid"
-version = "0.22.14"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "f1a05365e3b1c6d1650318537c7460c6923f1abdd272ad6842baa2b509957a06"
-dependencies = [
- "num-traits",
-]
-
-[[package]]
 name = "fallible-iterator"
 version = "0.3.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -857,21 +724,11 @@ checksum = "7360491ce676a36bf9bb3c56c1aa791658183a54d2744120f27285738d90465a"
 
 [[package]]
 name = "fancy-regex"
-version = "0.11.0"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "b95f7c0680e4142284cf8b22c14a476e87d61b004a3a0861872b32ef7ead40a2"
-dependencies = [
- "bit-set 0.5.3",
- "regex",
-]
-
-[[package]]
-name = "fancy-regex"
 version = "0.16.2"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "998b056554fbe42e03ae0e152895cd1a7e1002aec800fdc6635d20270260c46f"
 dependencies = [
- "bit-set 0.8.0",
+ "bit-set",
  "regex-automata",
  "regex-syntax",
 ]
@@ -907,18 +764,6 @@ name = "find-msvc-tools"
 version = "0.1.13"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "ef25905e51abafe4dcea6c15fec58c57b601cdbd0ee53d22ea1d3016c587d39b"
-
-[[package]]
-name = "finl_unicode"
-version = "1.5.0"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "80bb028c8b4148c9ee0cca68fcd9add6044e81d3619f48577ddf13a263d047a2"
-
-[[package]]
-name = "fixedbitset"
-version = "0.4.2"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "0ce7134b9999ecaf8bcd65542e436736ef32ddca1b3e06094cb6ec5755203b80"
 
 [[package]]
 name = "flate2"
@@ -980,7 +825,7 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "94e7099f6313ecacbe1256e8ff9d617b75d1bcb16a6fddef94866d225a01a14a"
 dependencies = [
  "io-lifetimes 2.0.4",
- "rustix 1.1.5",
+ "rustix",
  "windows-sys 0.59.0",
 ]
 
@@ -1100,7 +945,7 @@ dependencies = [
  "js-sys",
  "libc",
  "r-efi 6.0.0",
- "rand_core 0.10.1",
+ "rand_core",
  "wasm-bindgen",
 ]
 
@@ -1145,8 +990,6 @@ version = "0.16.1"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "841d1cc9bed7f9236f321df977030373f4a4163ae1a7dbfe1a51a2c1a51d9100"
 dependencies = [
- "allocator-api2",
- "equivalent",
  "foldhash",
 ]
 
@@ -1156,8 +999,6 @@ version = "0.17.1"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "ed5909b6e89a2db4456e54cd5f673791d7eca6732202bbf2a9cc504fe2f9b84a"
 dependencies = [
- "allocator-api2",
- "equivalent",
  "foldhash",
 ]
 
@@ -1198,7 +1039,7 @@ dependencies = [
  "idna",
  "ipnet",
  "jni",
- "rand 0.10.3",
+ "rand",
  "thiserror 2.0.21",
  "tinyvec",
  "tokio",
@@ -1218,7 +1059,7 @@ dependencies = [
  "jni",
  "once_cell",
  "prefix-trie",
- "rand 0.10.3",
+ "rand",
  "ring",
  "thiserror 2.0.21",
  "tinyvec",
@@ -1243,7 +1084,7 @@ dependencies = [
  "ndk-context",
  "once_cell",
  "parking_lot",
- "rand 0.10.3",
+ "rand",
  "resolv-conf",
  "smallvec",
  "system-configuration",
@@ -1306,6 +1147,15 @@ name = "httpdate"
 version = "1.0.3"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "df3b46402a9d5adb4c86a0cf463f42e19994e3ee891101b1841f30a545cb49a9"
+
+[[package]]
+name = "hybrid-array"
+version = "0.4.15"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "27f864f10dfb56725ce5ce5472bc52252c8f93a4ab86327122cebf62c5f59a17"
+dependencies = [
+ "typenum",
+]
 
 [[package]]
 name = "hyper"
@@ -1554,28 +1404,6 @@ dependencies = [
 ]
 
 [[package]]
-name = "indoc"
-version = "2.0.7"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "79cf5c93f93228cf8efb3ba362535fb11199ac548a09ce117c9b1adc3030d706"
-dependencies = [
- "rustversion",
-]
-
-[[package]]
-name = "instability"
-version = "0.3.14"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "4c3b5acc1e2fd9375041a388da33d1eb8aed5f7a8c0dd3543e3ea2805adfbe20"
-dependencies = [
- "darling",
- "indoc",
- "proc-macro2",
- "quote",
- "syn 3.0.6",
-]
-
-[[package]]
 name = "io-extras"
 version = "0.19.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -1620,12 +1448,13 @@ dependencies = [
 ]
 
 [[package]]
-name = "itertools"
-version = "0.14.0"
+name = "iri-string"
+version = "0.7.14"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "2b192c782037fadd9cfa75548310488aabdbf3d2da73885b31bd0abd03351285"
+checksum = "1663ee7d8cf2900cc1414b1e1eec9f348d6eaa3bcab07579f4726a4b8499f447"
 dependencies = [
- "either",
+ "memchr",
+ "serde",
 ]
 
 [[package]]
@@ -1758,7 +1587,7 @@ dependencies = [
  "base64 0.22.1",
  "bytecount",
  "email_address",
- "fancy-regex 0.16.2",
+ "fancy-regex",
  "fraction",
  "idna",
  "itoa",
@@ -1773,23 +1602,6 @@ dependencies = [
  "serde_json",
  "uuid-simd",
 ]
-
-[[package]]
-name = "kasuari"
-version = "0.4.12"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "bde5057d6143cc94e861d90f591b9303d6716c6b9602309150bd068853c10899"
-dependencies = [
- "hashbrown 0.16.1",
- "portable-atomic",
- "thiserror 2.0.21",
-]
-
-[[package]]
-name = "lab"
-version = "0.11.0"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "bf36173d4167ed999940f804952e6b08197cae5ad5d572eb4db150ce8ad5d58f"
 
 [[package]]
 name = "lazy_static"
@@ -1814,16 +1626,19 @@ dependencies = [
 ]
 
 [[package]]
-name = "libm"
-version = "0.2.16"
+name = "libredox"
+version = "0.1.25"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "b6d2cec3eae94f9f509c767b45932f1ada8350c4bdb85af2fcab4a3c14807981"
+checksum = "61ff90caf6077a803a240f62fdbe88645a890bbca49ef8174c3cb0404362171d"
+dependencies = [
+ "libc",
+]
 
 [[package]]
 name = "libsqlite3-sys"
-version = "0.38.2"
+version = "0.39.1"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "f1d20bef17f513b9b3004532233187769cd072d790971f4e4da0e346eb6401e8"
+checksum = "14a5f01b87b92705d07b433c06f96cbc764637d81a0bffb5734ce17cf0f9a2b3"
 dependencies = [
  "cc",
  "pkg-config",
@@ -1837,21 +1652,6 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "2e126dda6f34391ab7b444f9922055facc83c07a910da3eb16f1e4d9c45dc777"
 
 [[package]]
-name = "line-clipping"
-version = "0.3.8"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "e752191d037c44ad111a8caa762921926658402f01cc1253f7bef2020ece4f5e"
-dependencies = [
- "bitflags 2.13.2",
-]
-
-[[package]]
-name = "linux-raw-sys"
-version = "0.4.15"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "d26c52dbd32dccf2d10cac7725f8eae5296885fb5703b261f7d0a0739ec807ab"
-
-[[package]]
 name = "linux-raw-sys"
 version = "0.12.1"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -1862,12 +1662,6 @@ name = "litemap"
 version = "0.8.3"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "47d9d19d1d6efa0109d2f65ff4c85cddd50bd572e5a00127ab10987290bcefae"
-
-[[package]]
-name = "litrs"
-version = "1.0.0"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "11d3d7f243d5c5a8b9bb5d6dd2b1602c0cb0b9db1621bafc7ed66e35ff9fe092"
 
 [[package]]
 name = "lock_api"
@@ -1885,29 +1679,10 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "f9f8bd3e56ce4dfc153cf470fffbfa98c7620958b312ca5c3a4b8d5181fd13c6"
 
 [[package]]
-name = "lru"
-version = "0.18.5"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "ef9ac18847474e638e3702b76c65d4eb93428471a74778ef0f1be711717f89b5"
-dependencies = [
- "hashbrown 0.17.1",
-]
-
-[[package]]
 name = "lru-slab"
 version = "0.1.3"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "4050469837a6ff301cd14c1f8f24f88549e6d548f24f64e2148eb0f72cebc51f"
-
-[[package]]
-name = "mac_address"
-version = "1.1.8"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "c0aeb26bf5e836cc1c341c8106051b573f1766dfa05aa87f0b98be5e51b02303"
-dependencies = [
- "nix 0.29.0",
- "winapi",
-]
 
 [[package]]
 name = "markup5ever"
@@ -1931,27 +1706,6 @@ name = "memchr"
 version = "2.8.3"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "cf8baf1c55e62ffcace7a9f06f4bd9cd3f0c4beb022d3b367256b91b87513d98"
-
-[[package]]
-name = "memmem"
-version = "0.1.1"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "a64a92489e2744ce060c349162be1c5f33c6969234104dbd99ddb5feb08b8c15"
-
-[[package]]
-name = "memoffset"
-version = "0.9.1"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "488016bfae457b036d996092f6cb448677611ce4449e970ceaf42695203f218a"
-dependencies = [
- "autocfg",
-]
-
-[[package]]
-name = "minimal-lexical"
-version = "0.2.1"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "68354c5c6bd36d73ff3feceb05efa59b6acb7626617f4962be322a825e61f79a"
 
 [[package]]
 name = "miniz_oxide"
@@ -1980,7 +1734,6 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "4b18443e9c262bfe8fa82f51666e2642c53393f7e5c27b3e1aeab922cff5b9d8"
 dependencies = [
  "libc",
- "log",
  "wasi",
  "windows-sys 0.61.2",
 ]
@@ -2064,35 +1817,12 @@ dependencies = [
 ]
 
 [[package]]
-name = "nix"
-version = "0.29.0"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "71e2746dc3a24dd78b3cfcb7be93368c6de9963d30f43a6a73998a9cf4b17b46"
-dependencies = [
- "bitflags 2.13.2",
- "cfg-if",
- "cfg_aliases 0.2.2",
- "libc",
- "memoffset",
-]
-
-[[package]]
 name = "no-std-compat"
 version = "0.4.1"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "b93853da6d84c2e3c7d730d6473e8817692dd89be387eb01b94d7f108ecb5b8c"
 dependencies = [
  "spin",
-]
-
-[[package]]
-name = "nom"
-version = "7.1.3"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "d273983c5a657a70a3e8f2a01329822f3b8c8172b73826411a55751e404a0a4a"
-dependencies = [
- "memchr",
- "minimal-lexical",
 ]
 
 [[package]]
@@ -2141,17 +1871,6 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "521739c6d2bac4aa25192232afe6841231376b2b26d4d9fae5ecf8ca5772e441"
 
 [[package]]
-name = "num-derive"
-version = "0.4.2"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "ed3955f1a9c7c0c15e092f9c887db08b1fc683305fdf6eb6684f22555355e202"
-dependencies = [
- "proc-macro2",
- "quote",
- "syn 2.0.119",
-]
-
-[[package]]
 name = "num-integer"
 version = "0.1.47"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -2191,21 +1910,6 @@ dependencies = [
 ]
 
 [[package]]
-name = "num_threads"
-version = "0.1.7"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "5c7398b9c8b70908f6371f47ed36737907c87c52af34c268fed0bf0ceb92ead9"
-dependencies = [
- "libc",
-]
-
-[[package]]
-name = "numtoa"
-version = "0.2.4"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "6aa2c4e539b869820a2b82e1aef6ff40aa85e65decdd5185e83fb4b1249cd00f"
-
-[[package]]
 name = "once_cell"
 version = "1.21.4"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -2216,52 +1920,16 @@ dependencies = [
 ]
 
 [[package]]
-name = "ordered-float"
-version = "4.6.0"
+name = "option-ext"
+version = "0.2.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "7bb71e1b3fa6ca1c61f383464aaf2bb0e2f8e772a1f01d486832464de363b951"
-dependencies = [
- "num-traits",
-]
+checksum = "04744f49eae99ab78e0d5c0b603ab218f515ea8cfe5a456d7629ad883a3b6e7d"
 
 [[package]]
 name = "outref"
 version = "0.5.2"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "1a80800c0488c3a21695ea981a54918fbb37abf04f4d0720c453632255e2ff0e"
-
-[[package]]
-name = "palette"
-version = "0.7.7"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "ddeed8580d347d2abf3dcf06a5f0b3dc020258338526b277847cd4248a70fc64"
-dependencies = [
- "approx",
- "libm",
- "palette_derive",
- "palette_math",
-]
-
-[[package]]
-name = "palette_derive"
-version = "0.7.7"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "88537020289b719d81be994ccf1bbf4990f477e2f69ee52fe3e45f43a02e56be"
-dependencies = [
- "by_address",
- "proc-macro2",
- "quote",
- "syn 2.0.119",
-]
-
-[[package]]
-name = "palette_math"
-version = "0.7.7"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "6e6eb142958d64335fb0e345c5b9ead2ecd6fc438c307e9d7d3c4fd428dbaf12"
-dependencies = [
- "libm",
-]
 
 [[package]]
 name = "parking_lot"
@@ -2293,76 +1961,13 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "9b4f627cb1b25917193a259e49bdad08f671f8d9708acfd5fe0a8c1455d87220"
 
 [[package]]
-name = "pest"
-version = "2.9.2"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "45d3aca230fad2e6f6317ca0a72724338c4960cb97168a85cdee66df4a9a21a8"
-dependencies = [
- "memchr",
- "ucd-trie",
-]
-
-[[package]]
-name = "pest_derive"
-version = "2.9.2"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "284b60557f2c4a2e72ad3f2d34d42685a2fa4a6a61d0d2a10c0ae2a5e916c2cf"
-dependencies = [
- "pest",
- "pest_generator",
-]
-
-[[package]]
-name = "pest_generator"
-version = "2.9.2"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "1d9d1f08a115309ee99268cf85e5228e0e56aa9caf8841ec12866b6be07c3109"
-dependencies = [
- "pest",
- "pest_meta",
- "proc-macro2",
- "quote",
- "syn 2.0.119",
-]
-
-[[package]]
-name = "pest_meta"
-version = "2.9.2"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "ed93ba1a9ffcca32130a5188701c81c0c49cf00d4b7c5007d5148951d743adcb"
-dependencies = [
- "pest",
-]
-
-[[package]]
-name = "phf"
-version = "0.11.3"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "1fd6780a80ae0c52cc120a26a1a42c1ae51b247a253e4e06113d23d2c2edd078"
-dependencies = [
- "phf_macros 0.11.3",
- "phf_shared 0.11.3",
-]
-
-[[package]]
 name = "phf"
 version = "0.13.1"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "c1562dc717473dbaa4c1f85a36410e03c047b2e7df7f45ee938fbef64ae7fadf"
 dependencies = [
- "phf_macros 0.13.1",
- "phf_shared 0.13.1",
+ "phf_shared",
  "serde",
-]
-
-[[package]]
-name = "phf_codegen"
-version = "0.11.3"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "aef8048c789fa5e851558d709946d6d79a8ff88c0440c587967f8e94bfb1216a"
-dependencies = [
- "phf_generator 0.11.3",
- "phf_shared 0.11.3",
 ]
 
 [[package]]
@@ -2371,18 +1976,8 @@ version = "0.13.1"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "49aa7f9d80421bca176ca8dbfebe668cc7a2684708594ec9f3c0db0805d5d6e1"
 dependencies = [
- "phf_generator 0.13.1",
- "phf_shared 0.13.1",
-]
-
-[[package]]
-name = "phf_generator"
-version = "0.11.3"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "3c80231409c20246a13fddb31776fb942c38553c51e871f8cbd687a4cfb5843d"
-dependencies = [
- "phf_shared 0.11.3",
- "rand 0.8.8",
+ "phf_generator",
+ "phf_shared",
 ]
 
 [[package]]
@@ -2392,42 +1987,7 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "135ace3a761e564ec88c03a77317a7c6b80bb7f7135ef2544dbe054243b89737"
 dependencies = [
  "fastrand",
- "phf_shared 0.13.1",
-]
-
-[[package]]
-name = "phf_macros"
-version = "0.11.3"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "f84ac04429c13a7ff43785d75ad27569f2951ce0ffd30a3321230db2fc727216"
-dependencies = [
- "phf_generator 0.11.3",
- "phf_shared 0.11.3",
- "proc-macro2",
- "quote",
- "syn 2.0.119",
-]
-
-[[package]]
-name = "phf_macros"
-version = "0.13.1"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "812f032b54b1e759ccd5f8b6677695d5268c588701effba24601f6932f8269ef"
-dependencies = [
- "phf_generator 0.13.1",
- "phf_shared 0.13.1",
- "proc-macro2",
- "quote",
- "syn 2.0.119",
-]
-
-[[package]]
-name = "phf_shared"
-version = "0.11.3"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "67eabc2ef2a60eb7faa00097bd1ffdb5bd28e62bf39990626a582201b7a754e5"
-dependencies = [
- "siphasher",
+ "phf_shared",
 ]
 
 [[package]]
@@ -2492,12 +2052,12 @@ dependencies = [
  "lazy_static",
  "libc",
  "log",
- "nix 0.28.0",
+ "nix",
  "serial2",
  "shared_library",
  "shell-words",
  "winapi",
- "winreg",
+ "winreg 0.10.1",
 ]
 
 [[package]]
@@ -2601,7 +2161,7 @@ dependencies = [
  "bytes",
  "getrandom 0.4.3",
  "lru-slab",
- "rand 0.10.3",
+ "rand",
  "rand_pcg",
  "ring",
  "rustc-hash",
@@ -2651,29 +2211,14 @@ checksum = "f8dcc9c7d52a811697d2151c701e0d08956f92b0e24136cf4cf27b57a6a0d9bf"
 
 [[package]]
 name = "rand"
-version = "0.8.8"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "e058c7de0b26af77780c769414d6257830bb240f3c38477dbc2c16e5f54d6d4c"
-dependencies = [
- "rand_core 0.6.4",
-]
-
-[[package]]
-name = "rand"
 version = "0.10.3"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "65c9fb96cbc91e3478eaae79a69fcd3f1ae4ad052e471fe6732fff548984b4af"
 dependencies = [
  "chacha20",
  "getrandom 0.4.3",
- "rand_core 0.10.1",
+ "rand_core",
 ]
-
-[[package]]
-name = "rand_core"
-version = "0.6.4"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "ec0be4795e2f6a28069bec0b5ff3e2ac9bafc99e6a9a7dc3547996c5c816922c"
 
 [[package]]
 name = "rand_core"
@@ -2687,121 +2232,7 @@ version = "0.10.2"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "caa0f4137e1c0a72f4c651489402276c8e8e1cf081f3b0ba156d2cbeef09e86a"
 dependencies = [
- "rand_core 0.10.1",
-]
-
-[[package]]
-name = "ratatui"
-version = "0.30.2"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "3274ba0a2c5e1bcad2a2005d20f4dc59dad26b2eb0940fb094500dba4099d57d"
-dependencies = [
- "instability",
- "ratatui-core",
- "ratatui-crossterm",
- "ratatui-macros",
- "ratatui-termina",
- "ratatui-termion",
- "ratatui-termwiz",
- "ratatui-widgets",
- "serde",
-]
-
-[[package]]
-name = "ratatui-core"
-version = "0.1.2"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "cbb175c433c8e28a809d1f5773a2ae96e68c0ce40db865cbab1020bf33ae479c"
-dependencies = [
- "bitflags 2.13.2",
- "compact_str",
- "critical-section",
- "hashbrown 0.17.1",
- "itertools",
- "kasuari",
- "lru",
- "palette",
- "serde",
- "strum",
- "thiserror 2.0.21",
- "unicode-segmentation",
- "unicode-truncate",
- "unicode-width",
-]
-
-[[package]]
-name = "ratatui-crossterm"
-version = "0.1.2"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "567584a3b0e6a8203c23de40b4861497266725eb5363dbfd18a1edd603cca9f0"
-dependencies = [
- "cfg-if",
- "crossterm 0.28.1",
- "crossterm 0.29.0",
- "instability",
- "ratatui-core",
-]
-
-[[package]]
-name = "ratatui-macros"
-version = "0.7.2"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "ed7dc68daa7498a43e4d68e0eb078427e10c38fbcfbb1e42d955f1fa2140d814"
-dependencies = [
- "ratatui-core",
- "ratatui-widgets",
-]
-
-[[package]]
-name = "ratatui-termina"
-version = "0.1.0"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "c0bf912d9e66f057a759d92e386a280ea886b352ab757d6ac4d653c7ed2c43c2"
-dependencies = [
- "instability",
- "ratatui-core",
- "termina",
-]
-
-[[package]]
-name = "ratatui-termion"
-version = "0.1.2"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "87c732202fa5a71a9da0991013f0853e53f87048f45198e3a1ca3ee722accc2f"
-dependencies = [
- "instability",
- "ratatui-core",
- "termion",
-]
-
-[[package]]
-name = "ratatui-termwiz"
-version = "0.1.2"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "faf03e0380b7744054d6cb74224fe3adf062a029754933f575ca1e3b4c2ce977"
-dependencies = [
- "ratatui-core",
- "termwiz",
-]
-
-[[package]]
-name = "ratatui-widgets"
-version = "0.3.2"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "66e3d19bcc9130ca376277d93b60767ff121ace3be06f5f95f81dd68956407d1"
-dependencies = [
- "bitflags 2.13.2",
- "hashbrown 0.17.1",
- "indoc",
- "instability",
- "itertools",
- "line-clipping",
- "ratatui-core",
- "serde",
- "strum",
- "time",
- "unicode-segmentation",
- "unicode-width",
+ "rand_core",
 ]
 
 [[package]]
@@ -2811,6 +2242,16 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "ed2bf2547551a7053d6fdfafda3f938979645c44812fbfcda098faae3f1a362d"
 dependencies = [
  "bitflags 2.13.2",
+]
+
+[[package]]
+name = "redox_users"
+version = "0.5.3"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "60dc65c0ff1a7ae1294b0c67b9f14baf70b644404010370171787bfac1038fc0"
+dependencies = [
+ "libredox",
+ "thiserror 2.0.21",
 ]
 
 [[package]]
@@ -2971,11 +2412,11 @@ dependencies = [
 [[package]]
 name = "rsi"
 version = "0.0.1"
-source = "git+https://github.com/wowfun/rsiversi.git?rev=386858d6f266fdf8d5c58e19793e5d2d09d3da34#386858d6f266fdf8d5c58e19793e5d2d09d3da34"
+source = "git+https://github.com/wowfun/rsiversi.git?rev=3545705d4b3f0763d636f873fc2f0c7629f1212c#3545705d4b3f0763d636f873fc2f0c7629f1212c"
 dependencies = [
  "async-trait",
  "bytes",
- "cap-std",
+ "dirs",
  "futures-util",
  "getrandom 0.3.4",
  "hex",
@@ -2989,14 +2430,18 @@ dependencies = [
  "rsi-agent-composition",
  "rsi-agent-composition-protocol",
  "rsi-agent-context",
+ "rsi-agent-context-input",
  "rsi-agent-executor",
  "rsi-agent-goal",
  "rsi-agent-kernel",
  "rsi-agent-model-selection",
  "rsi-agent-plan-policy",
  "rsi-agent-presets",
+ "rsi-agent-program",
+ "rsi-agent-prompt-assembly",
  "rsi-agent-references",
  "rsi-agent-repeat-tool-reminder",
+ "rsi-agent-schedule",
  "rsi-agent-session-protocol",
  "rsi-agent-store-protocol",
  "rsi-agent-store-sqlite",
@@ -3025,6 +2470,9 @@ dependencies = [
  "rsi-apply-patch",
  "rsi-approval",
  "rsi-approval-protocol",
+ "rsi-automation",
+ "rsi-automation-api",
+ "rsi-browser",
  "rsi-client",
  "rsi-client-composition",
  "rsi-client-preferences",
@@ -3034,6 +2482,13 @@ dependencies = [
  "rsi-configuration-api",
  "rsi-credentials-local",
  "rsi-credentials-protocol",
+ "rsi-directory-picker",
+ "rsi-directory-picker-api",
+ "rsi-execution",
+ "rsi-execution-local",
+ "rsi-execution-protocol",
+ "rsi-extension",
+ "rsi-extension-agent",
  "rsi-files",
  "rsi-files-native-fs",
  "rsi-files-protocol",
@@ -3042,7 +2497,9 @@ dependencies = [
  "rsi-history",
  "rsi-history-api",
  "rsi-host",
+ "rsi-host-control",
  "rsi-inspector",
+ "rsi-installation",
  "rsi-jobs",
  "rsi-jobs-local",
  "rsi-jobs-tools",
@@ -3061,6 +2518,7 @@ dependencies = [
  "rsi-native-addons-api",
  "rsi-navigation",
  "rsi-navigation-api",
+ "rsi-packages",
  "rsi-permission-presets",
  "rsi-process",
  "rsi-process-local",
@@ -3071,40 +2529,36 @@ dependencies = [
  "rsi-retrieval",
  "rsi-sandbox",
  "rsi-sandbox-local",
- "rsi-serve",
+ "rsi-schedule",
  "rsi-service-host",
- "rsi-service-ui",
  "rsi-session",
  "rsi-session-api",
  "rsi-session-files",
- "rsi-session-files-ui",
  "rsi-session-protocol",
- "rsi-session-tree-ui",
  "rsi-session-ui",
  "rsi-settings",
  "rsi-settings-api",
  "rsi-settings-local",
  "rsi-settings-protocol",
- "rsi-shell-bash",
+ "rsi-shell-native",
+ "rsi-ssh-client",
+ "rsi-ssh-protocol",
  "rsi-storage",
  "rsi-storage-domain",
  "rsi-storage-sqlite",
- "rsi-terminal",
  "rsi-tools",
  "rsi-tools-protocol",
  "rsi-ui",
  "rsi-ui-api",
  "rsi-ui-portable",
  "rsi-user-questions-protocol",
- "rsi-web-assets",
- "rsi-workbench-ui",
  "rsi-workspace",
  "rsi-workspace-api",
+ "rsi-workspace-default-api",
  "rsi-workspace-protocol",
  "rsi-workspace-review",
  "rsi-workspace-review-api",
- "rsi-workspace-review-ui",
- "rustix 1.1.5",
+ "rustix",
  "serde",
  "serde_json",
  "sha2",
@@ -3114,12 +2568,13 @@ dependencies = [
  "tokio-util",
  "toml",
  "toml_edit",
+ "winreg 0.55.0",
 ]
 
 [[package]]
 name = "rsi-acp"
 version = "0.0.1"
-source = "git+https://github.com/wowfun/rsiversi.git?rev=386858d6f266fdf8d5c58e19793e5d2d09d3da34#386858d6f266fdf8d5c58e19793e5d2d09d3da34"
+source = "git+https://github.com/wowfun/rsiversi.git?rev=3545705d4b3f0763d636f873fc2f0c7629f1212c#3545705d4b3f0763d636f873fc2f0c7629f1212c"
 dependencies = [
  "async-trait",
  "rsi-acp-protocol",
@@ -3134,7 +2589,7 @@ dependencies = [
 [[package]]
 name = "rsi-acp-agent"
 version = "0.0.1"
-source = "git+https://github.com/wowfun/rsiversi.git?rev=386858d6f266fdf8d5c58e19793e5d2d09d3da34#386858d6f266fdf8d5c58e19793e5d2d09d3da34"
+source = "git+https://github.com/wowfun/rsiversi.git?rev=3545705d4b3f0763d636f873fc2f0c7629f1212c#3545705d4b3f0763d636f873fc2f0c7629f1212c"
 dependencies = [
  "async-trait",
  "futures-util",
@@ -3145,12 +2600,11 @@ dependencies = [
  "rsi-agent-session-protocol",
  "rsi-agent-turn-protocol",
  "rsi-ai-protocol",
- "rsi-application",
+ "rsi-api-contract-build",
+ "rsi-api-protocol",
  "rsi-approval-protocol",
  "rsi-meta",
- "rsi-serve",
  "rsi-session-protocol",
- "rustix 1.1.5",
  "serde",
  "serde_json",
  "tokio",
@@ -3160,11 +2614,12 @@ dependencies = [
 [[package]]
 name = "rsi-acp-api"
 version = "0.0.1"
-source = "git+https://github.com/wowfun/rsiversi.git?rev=386858d6f266fdf8d5c58e19793e5d2d09d3da34#386858d6f266fdf8d5c58e19793e5d2d09d3da34"
+source = "git+https://github.com/wowfun/rsiversi.git?rev=3545705d4b3f0763d636f873fc2f0c7629f1212c#3545705d4b3f0763d636f873fc2f0c7629f1212c"
 dependencies = [
  "async-trait",
  "hex",
  "rsi-acp-protocol",
+ "rsi-api-contract-build",
  "rsi-api-protocol",
  "rsi-meta",
  "serde",
@@ -3174,7 +2629,7 @@ dependencies = [
 [[package]]
 name = "rsi-acp-client"
 version = "0.0.1"
-source = "git+https://github.com/wowfun/rsiversi.git?rev=386858d6f266fdf8d5c58e19793e5d2d09d3da34#386858d6f266fdf8d5c58e19793e5d2d09d3da34"
+source = "git+https://github.com/wowfun/rsiversi.git?rev=3545705d4b3f0763d636f873fc2f0c7629f1212c#3545705d4b3f0763d636f873fc2f0c7629f1212c"
 dependencies = [
  "rsi-acp",
  "rsi-acp-journal",
@@ -3189,7 +2644,7 @@ dependencies = [
 [[package]]
 name = "rsi-acp-host"
 version = "0.0.1"
-source = "git+https://github.com/wowfun/rsiversi.git?rev=386858d6f266fdf8d5c58e19793e5d2d09d3da34#386858d6f266fdf8d5c58e19793e5d2d09d3da34"
+source = "git+https://github.com/wowfun/rsiversi.git?rev=3545705d4b3f0763d636f873fc2f0c7629f1212c#3545705d4b3f0763d636f873fc2f0c7629f1212c"
 dependencies = [
  "async-trait",
  "rsi-acp",
@@ -3209,11 +2664,11 @@ dependencies = [
 [[package]]
 name = "rsi-acp-journal"
 version = "0.0.1"
-source = "git+https://github.com/wowfun/rsiversi.git?rev=386858d6f266fdf8d5c58e19793e5d2d09d3da34#386858d6f266fdf8d5c58e19793e5d2d09d3da34"
+source = "git+https://github.com/wowfun/rsiversi.git?rev=3545705d4b3f0763d636f873fc2f0c7629f1212c#3545705d4b3f0763d636f873fc2f0c7629f1212c"
 dependencies = [
  "rsi-acp-protocol",
  "rusqlite",
- "rustix 1.1.5",
+ "rustix",
  "serde",
  "serde_json",
  "tokio",
@@ -3222,7 +2677,7 @@ dependencies = [
 [[package]]
 name = "rsi-acp-protocol"
 version = "0.0.1"
-source = "git+https://github.com/wowfun/rsiversi.git?rev=386858d6f266fdf8d5c58e19793e5d2d09d3da34#386858d6f266fdf8d5c58e19793e5d2d09d3da34"
+source = "git+https://github.com/wowfun/rsiversi.git?rev=3545705d4b3f0763d636f873fc2f0c7629f1212c#3545705d4b3f0763d636f873fc2f0c7629f1212c"
 dependencies = [
  "agent-client-protocol-schema",
  "async-trait",
@@ -3237,7 +2692,7 @@ dependencies = [
 [[package]]
 name = "rsi-acp-tools"
 version = "0.0.1"
-source = "git+https://github.com/wowfun/rsiversi.git?rev=386858d6f266fdf8d5c58e19793e5d2d09d3da34#386858d6f266fdf8d5c58e19793e5d2d09d3da34"
+source = "git+https://github.com/wowfun/rsiversi.git?rev=3545705d4b3f0763d636f873fc2f0c7629f1212c#3545705d4b3f0763d636f873fc2f0c7629f1212c"
 dependencies = [
  "async-trait",
  "hex",
@@ -3266,7 +2721,7 @@ dependencies = [
 [[package]]
 name = "rsi-agent-composition"
 version = "0.0.1"
-source = "git+https://github.com/wowfun/rsiversi.git?rev=386858d6f266fdf8d5c58e19793e5d2d09d3da34#386858d6f266fdf8d5c58e19793e5d2d09d3da34"
+source = "git+https://github.com/wowfun/rsiversi.git?rev=3545705d4b3f0763d636f873fc2f0c7629f1212c#3545705d4b3f0763d636f873fc2f0c7629f1212c"
 dependencies = [
  "async-trait",
  "rsi-agent-composition-protocol",
@@ -3286,14 +2741,19 @@ dependencies = [
 [[package]]
 name = "rsi-agent-composition-protocol"
 version = "0.0.1"
-source = "git+https://github.com/wowfun/rsiversi.git?rev=386858d6f266fdf8d5c58e19793e5d2d09d3da34#386858d6f266fdf8d5c58e19793e5d2d09d3da34"
+source = "git+https://github.com/wowfun/rsiversi.git?rev=3545705d4b3f0763d636f873fc2f0c7629f1212c#3545705d4b3f0763d636f873fc2f0c7629f1212c"
 dependencies = [
  "async-trait",
  "futures-util",
  "rsi-agent-context",
  "rsi-agent-session-protocol",
+ "rsi-ai-protocol",
+ "rsi-api-protocol",
+ "rsi-execution",
  "rsi-meta",
  "rsi-meta-contract",
+ "rsi-meta-scope",
+ "rsi-process",
  "rsi-sandbox",
  "rsi-tools-protocol",
  "serde",
@@ -3306,12 +2766,13 @@ dependencies = [
 [[package]]
 name = "rsi-agent-context"
 version = "0.0.1"
-source = "git+https://github.com/wowfun/rsiversi.git?rev=386858d6f266fdf8d5c58e19793e5d2d09d3da34#386858d6f266fdf8d5c58e19793e5d2d09d3da34"
+source = "git+https://github.com/wowfun/rsiversi.git?rev=3545705d4b3f0763d636f873fc2f0c7629f1212c#3545705d4b3f0763d636f873fc2f0c7629f1212c"
 dependencies = [
  "async-trait",
  "hex",
  "rsi-agent-session-protocol",
  "rsi-ai-protocol",
+ "rsi-api-protocol",
  "rsi-media-protocol",
  "rsi-meta",
  "rsi-tools-protocol",
@@ -3322,9 +2783,24 @@ dependencies = [
 ]
 
 [[package]]
+name = "rsi-agent-context-input"
+version = "0.0.1"
+source = "git+https://github.com/wowfun/rsiversi.git?rev=3545705d4b3f0763d636f873fc2f0c7629f1212c#3545705d4b3f0763d636f873fc2f0c7629f1212c"
+dependencies = [
+ "async-trait",
+ "rsi-agent-composition-protocol",
+ "rsi-agent-session-protocol",
+ "rsi-media-protocol",
+ "rsi-meta",
+ "serde",
+ "serde_json",
+ "tokio-util",
+]
+
+[[package]]
 name = "rsi-agent-executor"
 version = "0.0.1"
-source = "git+https://github.com/wowfun/rsiversi.git?rev=386858d6f266fdf8d5c58e19793e5d2d09d3da34#386858d6f266fdf8d5c58e19793e5d2d09d3da34"
+source = "git+https://github.com/wowfun/rsiversi.git?rev=3545705d4b3f0763d636f873fc2f0c7629f1212c#3545705d4b3f0763d636f873fc2f0c7629f1212c"
 dependencies = [
  "async-trait",
  "bytes",
@@ -3336,10 +2812,13 @@ dependencies = [
  "rsi-agent-session-protocol",
  "rsi-agent-turn-protocol",
  "rsi-ai-protocol",
+ "rsi-api-protocol",
  "rsi-approval-protocol",
+ "rsi-execution",
  "rsi-jobs",
  "rsi-media-protocol",
  "rsi-meta",
+ "rsi-process",
  "rsi-sandbox",
  "rsi-tools-protocol",
  "serde",
@@ -3352,7 +2831,7 @@ dependencies = [
 [[package]]
 name = "rsi-agent-goal"
 version = "0.0.1"
-source = "git+https://github.com/wowfun/rsiversi.git?rev=386858d6f266fdf8d5c58e19793e5d2d09d3da34#386858d6f266fdf8d5c58e19793e5d2d09d3da34"
+source = "git+https://github.com/wowfun/rsiversi.git?rev=3545705d4b3f0763d636f873fc2f0c7629f1212c#3545705d4b3f0763d636f873fc2f0c7629f1212c"
 dependencies = [
  "async-trait",
  "rsi-agent-composition-protocol",
@@ -3368,17 +2847,21 @@ dependencies = [
 [[package]]
 name = "rsi-agent-kernel"
 version = "0.0.1"
-source = "git+https://github.com/wowfun/rsiversi.git?rev=386858d6f266fdf8d5c58e19793e5d2d09d3da34#386858d6f266fdf8d5c58e19793e5d2d09d3da34"
+source = "git+https://github.com/wowfun/rsiversi.git?rev=3545705d4b3f0763d636f873fc2f0c7629f1212c#3545705d4b3f0763d636f873fc2f0c7629f1212c"
 dependencies = [
  "async-trait",
  "futures-util",
+ "getrandom 0.3.4",
  "rsi-agent-composition-protocol",
  "rsi-agent-session-protocol",
  "rsi-agent-store-protocol",
  "rsi-agent-turn-protocol",
  "rsi-ai-protocol",
+ "rsi-api-protocol",
+ "rsi-execution",
  "rsi-jobs",
  "rsi-meta",
+ "rsi-process",
  "rsi-sandbox",
  "rsi-tools-protocol",
  "serde",
@@ -3392,7 +2875,7 @@ dependencies = [
 [[package]]
 name = "rsi-agent-model-selection"
 version = "0.0.1"
-source = "git+https://github.com/wowfun/rsiversi.git?rev=386858d6f266fdf8d5c58e19793e5d2d09d3da34#386858d6f266fdf8d5c58e19793e5d2d09d3da34"
+source = "git+https://github.com/wowfun/rsiversi.git?rev=3545705d4b3f0763d636f873fc2f0c7629f1212c#3545705d4b3f0763d636f873fc2f0c7629f1212c"
 dependencies = [
  "async-trait",
  "rsi-agent-composition-protocol",
@@ -3407,29 +2890,33 @@ dependencies = [
 [[package]]
 name = "rsi-agent-plan-policy"
 version = "0.0.1"
-source = "git+https://github.com/wowfun/rsiversi.git?rev=386858d6f266fdf8d5c58e19793e5d2d09d3da34#386858d6f266fdf8d5c58e19793e5d2d09d3da34"
+source = "git+https://github.com/wowfun/rsiversi.git?rev=3545705d4b3f0763d636f873fc2f0c7629f1212c#3545705d4b3f0763d636f873fc2f0c7629f1212c"
 dependencies = [
  "async-trait",
+ "getrandom 0.3.4",
  "rsi-agent-composition-protocol",
  "rsi-agent-session-protocol",
+ "rsi-agent-turn-protocol",
  "rsi-meta",
  "rsi-tools-protocol",
+ "rsi-user-questions-protocol",
  "serde",
  "serde_json",
+ "sha2",
  "tokio-util",
 ]
 
 [[package]]
 name = "rsi-agent-presets"
 version = "0.0.1"
-source = "git+https://github.com/wowfun/rsiversi.git?rev=386858d6f266fdf8d5c58e19793e5d2d09d3da34#386858d6f266fdf8d5c58e19793e5d2d09d3da34"
+source = "git+https://github.com/wowfun/rsiversi.git?rev=3545705d4b3f0763d636f873fc2f0c7629f1212c#3545705d4b3f0763d636f873fc2f0c7629f1212c"
 dependencies = [
  "async-trait",
  "rsi-agent-session-protocol",
  "rsi-files-native-fs",
  "rsi-host",
  "rsi-meta-profile",
- "rustix 1.1.5",
+ "rustix",
  "serde",
  "serde_json",
  "tempfile",
@@ -3439,17 +2926,57 @@ dependencies = [
 ]
 
 [[package]]
-name = "rsi-agent-references"
+name = "rsi-agent-program"
 version = "0.0.1"
-source = "git+https://github.com/wowfun/rsiversi.git?rev=386858d6f266fdf8d5c58e19793e5d2d09d3da34#386858d6f266fdf8d5c58e19793e5d2d09d3da34"
+source = "git+https://github.com/wowfun/rsiversi.git?rev=3545705d4b3f0763d636f873fc2f0c7629f1212c#3545705d4b3f0763d636f873fc2f0c7629f1212c"
 dependencies = [
  "async-trait",
  "futures-util",
+ "rsi-agent-goal",
+ "rsi-agent-plan-policy",
+ "rsi-agent-schedule",
+ "rsi-agent-session-protocol",
+ "rsi-agent-turn-protocol",
+ "rsi-api-protocol",
+ "rsi-jobs",
+ "rsi-meta",
+ "rsi-process",
+ "rsi-tools-protocol",
+ "serde",
+ "serde_json",
+ "tokio",
+ "tokio-util",
+]
+
+[[package]]
+name = "rsi-agent-prompt-assembly"
+version = "0.0.1"
+source = "git+https://github.com/wowfun/rsiversi.git?rev=3545705d4b3f0763d636f873fc2f0c7629f1212c#3545705d4b3f0763d636f873fc2f0c7629f1212c"
+dependencies = [
+ "async-trait",
+ "rsi-agent-composition-protocol",
+ "rsi-agent-session-protocol",
+ "rsi-meta",
+ "rsi-meta-scope",
+ "serde",
+ "serde_json",
+ "tokio-util",
+]
+
+[[package]]
+name = "rsi-agent-references"
+version = "0.0.1"
+source = "git+https://github.com/wowfun/rsiversi.git?rev=3545705d4b3f0763d636f873fc2f0c7629f1212c#3545705d4b3f0763d636f873fc2f0c7629f1212c"
+dependencies = [
+ "async-trait",
+ "futures-util",
+ "getrandom 0.3.4",
  "hex",
  "rsi-agent-session-protocol",
  "rsi-agent-store-protocol",
  "rsi-agent-turn-protocol",
  "rsi-ai-protocol",
+ "rsi-api-protocol",
  "rsi-meta",
  "rsi-tools-protocol",
  "serde",
@@ -3463,7 +2990,7 @@ dependencies = [
 [[package]]
 name = "rsi-agent-repeat-tool-reminder"
 version = "0.0.1"
-source = "git+https://github.com/wowfun/rsiversi.git?rev=386858d6f266fdf8d5c58e19793e5d2d09d3da34#386858d6f266fdf8d5c58e19793e5d2d09d3da34"
+source = "git+https://github.com/wowfun/rsiversi.git?rev=3545705d4b3f0763d636f873fc2f0c7629f1212c#3545705d4b3f0763d636f873fc2f0c7629f1212c"
 dependencies = [
  "async-trait",
  "hex",
@@ -3479,15 +3006,35 @@ dependencies = [
 ]
 
 [[package]]
+name = "rsi-agent-schedule"
+version = "0.0.1"
+source = "git+https://github.com/wowfun/rsiversi.git?rev=3545705d4b3f0763d636f873fc2f0c7629f1212c#3545705d4b3f0763d636f873fc2f0c7629f1212c"
+dependencies = [
+ "async-trait",
+ "rsi-agent-composition-protocol",
+ "rsi-agent-session-protocol",
+ "rsi-agent-turn-protocol",
+ "rsi-meta",
+ "rsi-tools-protocol",
+ "serde",
+ "serde_json",
+ "sha2",
+ "tokio-util",
+]
+
+[[package]]
 name = "rsi-agent-session-protocol"
 version = "0.0.1"
-source = "git+https://github.com/wowfun/rsiversi.git?rev=386858d6f266fdf8d5c58e19793e5d2d09d3da34#386858d6f266fdf8d5c58e19793e5d2d09d3da34"
+source = "git+https://github.com/wowfun/rsiversi.git?rev=3545705d4b3f0763d636f873fc2f0c7629f1212c#3545705d4b3f0763d636f873fc2f0c7629f1212c"
 dependencies = [
+ "base64 0.22.1",
  "hex",
  "jsonschema",
  "rsi-ai-protocol",
  "rsi-approval-protocol",
+ "rsi-execution-protocol",
  "rsi-media-protocol",
+ "rsi-meta-contract",
  "rsi-sandbox",
  "rsi-tools-protocol",
  "rsi-workspace-path",
@@ -3500,24 +3047,30 @@ dependencies = [
 [[package]]
 name = "rsi-agent-store-protocol"
 version = "0.0.1"
-source = "git+https://github.com/wowfun/rsiversi.git?rev=386858d6f266fdf8d5c58e19793e5d2d09d3da34#386858d6f266fdf8d5c58e19793e5d2d09d3da34"
+source = "git+https://github.com/wowfun/rsiversi.git?rev=3545705d4b3f0763d636f873fc2f0c7629f1212c#3545705d4b3f0763d636f873fc2f0c7629f1212c"
 dependencies = [
  "async-trait",
  "rsi-agent-session-protocol",
+ "rsi-ai-protocol",
+ "rsi-api-protocol",
+ "rsi-execution-protocol",
  "rsi-meta-contract",
  "serde",
+ "serde_json",
  "thiserror 2.0.21",
 ]
 
 [[package]]
 name = "rsi-agent-store-sqlite"
 version = "0.0.1"
-source = "git+https://github.com/wowfun/rsiversi.git?rev=386858d6f266fdf8d5c58e19793e5d2d09d3da34#386858d6f266fdf8d5c58e19793e5d2d09d3da34"
+source = "git+https://github.com/wowfun/rsiversi.git?rev=3545705d4b3f0763d636f873fc2f0c7629f1212c#3545705d4b3f0763d636f873fc2f0c7629f1212c"
 dependencies = [
  "async-trait",
  "hex",
  "rsi-agent-session-protocol",
  "rsi-agent-store-protocol",
+ "rsi-api-protocol",
+ "rsi-files-native-fs",
  "rsi-meta",
  "rusqlite",
  "same-file",
@@ -3526,17 +3079,20 @@ dependencies = [
  "sha2",
  "tempfile",
  "tokio",
+ "tokio-util",
 ]
 
 [[package]]
 name = "rsi-agent-time-context"
 version = "0.0.1"
-source = "git+https://github.com/wowfun/rsiversi.git?rev=386858d6f266fdf8d5c58e19793e5d2d09d3da34#386858d6f266fdf8d5c58e19793e5d2d09d3da34"
+source = "git+https://github.com/wowfun/rsiversi.git?rev=3545705d4b3f0763d636f873fc2f0c7629f1212c#3545705d4b3f0763d636f873fc2f0c7629f1212c"
 dependencies = [
  "async-trait",
  "rsi-agent-composition-protocol",
  "rsi-agent-session-protocol",
  "rsi-meta",
+ "serde",
+ "serde_json",
  "time",
  "tokio-util",
 ]
@@ -3544,7 +3100,7 @@ dependencies = [
 [[package]]
 name = "rsi-agent-todo"
 version = "0.0.1"
-source = "git+https://github.com/wowfun/rsiversi.git?rev=386858d6f266fdf8d5c58e19793e5d2d09d3da34#386858d6f266fdf8d5c58e19793e5d2d09d3da34"
+source = "git+https://github.com/wowfun/rsiversi.git?rev=3545705d4b3f0763d636f873fc2f0c7629f1212c#3545705d4b3f0763d636f873fc2f0c7629f1212c"
 dependencies = [
  "async-trait",
  "rsi-agent-composition-protocol",
@@ -3559,7 +3115,7 @@ dependencies = [
 [[package]]
 name = "rsi-agent-tools"
 version = "0.0.1"
-source = "git+https://github.com/wowfun/rsiversi.git?rev=386858d6f266fdf8d5c58e19793e5d2d09d3da34#386858d6f266fdf8d5c58e19793e5d2d09d3da34"
+source = "git+https://github.com/wowfun/rsiversi.git?rev=3545705d4b3f0763d636f873fc2f0c7629f1212c#3545705d4b3f0763d636f873fc2f0c7629f1212c"
 dependencies = [
  "async-trait",
  "getrandom 0.3.4",
@@ -3568,6 +3124,7 @@ dependencies = [
  "rsi-agent-turn-protocol",
  "rsi-agent-workspace-context",
  "rsi-ai-protocol",
+ "rsi-execution",
  "rsi-meta",
  "rsi-tools-protocol",
  "rsi-user-questions-protocol",
@@ -3580,7 +3137,7 @@ dependencies = [
 [[package]]
 name = "rsi-agent-turn-protocol"
 version = "0.0.1"
-source = "git+https://github.com/wowfun/rsiversi.git?rev=386858d6f266fdf8d5c58e19793e5d2d09d3da34#386858d6f266fdf8d5c58e19793e5d2d09d3da34"
+source = "git+https://github.com/wowfun/rsiversi.git?rev=3545705d4b3f0763d636f873fc2f0c7629f1212c#3545705d4b3f0763d636f873fc2f0c7629f1212c"
 dependencies = [
  "async-trait",
  "base64 0.22.1",
@@ -3588,6 +3145,8 @@ dependencies = [
  "rsi-agent-composition-protocol",
  "rsi-agent-session-protocol",
  "rsi-ai-protocol",
+ "rsi-api-protocol",
+ "rsi-execution",
  "rsi-jobs",
  "rsi-meta",
  "rsi-meta-contract",
@@ -3602,7 +3161,7 @@ dependencies = [
 [[package]]
 name = "rsi-agent-workspace-context"
 version = "0.0.1"
-source = "git+https://github.com/wowfun/rsiversi.git?rev=386858d6f266fdf8d5c58e19793e5d2d09d3da34#386858d6f266fdf8d5c58e19793e5d2d09d3da34"
+source = "git+https://github.com/wowfun/rsiversi.git?rev=3545705d4b3f0763d636f873fc2f0c7629f1212c#3545705d4b3f0763d636f873fc2f0c7629f1212c"
 dependencies = [
  "async-trait",
  "cap-std",
@@ -3613,9 +3172,12 @@ dependencies = [
  "rsi-agent-session-protocol",
  "rsi-agent-turn-protocol",
  "rsi-ai-protocol",
+ "rsi-execution",
  "rsi-files-native-fs",
  "rsi-meta",
  "rsi-meta-contract",
+ "rsi-process",
+ "rsi-sandbox",
  "rsi-tools-protocol",
  "serde",
  "serde_json",
@@ -3629,7 +3191,7 @@ dependencies = [
 [[package]]
 name = "rsi-ai"
 version = "0.0.1"
-source = "git+https://github.com/wowfun/rsiversi.git?rev=386858d6f266fdf8d5c58e19793e5d2d09d3da34#386858d6f266fdf8d5c58e19793e5d2d09d3da34"
+source = "git+https://github.com/wowfun/rsiversi.git?rev=3545705d4b3f0763d636f873fc2f0c7629f1212c#3545705d4b3f0763d636f873fc2f0c7629f1212c"
 dependencies = [
  "async-trait",
  "futures-util",
@@ -3648,9 +3210,11 @@ dependencies = [
 [[package]]
 name = "rsi-ai-deepseek"
 version = "0.0.1"
-source = "git+https://github.com/wowfun/rsiversi.git?rev=386858d6f266fdf8d5c58e19793e5d2d09d3da34#386858d6f266fdf8d5c58e19793e5d2d09d3da34"
+source = "git+https://github.com/wowfun/rsiversi.git?rev=3545705d4b3f0763d636f873fc2f0c7629f1212c#3545705d4b3f0763d636f873fc2f0c7629f1212c"
 dependencies = [
+ "async-stream",
  "async-trait",
+ "futures-util",
  "hex",
  "rsi-ai-openai",
  "rsi-ai-openai-compatible",
@@ -3667,7 +3231,7 @@ dependencies = [
 [[package]]
 name = "rsi-ai-image"
 version = "0.0.1"
-source = "git+https://github.com/wowfun/rsiversi.git?rev=386858d6f266fdf8d5c58e19793e5d2d09d3da34#386858d6f266fdf8d5c58e19793e5d2d09d3da34"
+source = "git+https://github.com/wowfun/rsiversi.git?rev=3545705d4b3f0763d636f873fc2f0c7629f1212c#3545705d4b3f0763d636f873fc2f0c7629f1212c"
 dependencies = [
  "async-trait",
  "hex",
@@ -3684,10 +3248,11 @@ dependencies = [
 [[package]]
 name = "rsi-ai-models-api"
 version = "0.0.1"
-source = "git+https://github.com/wowfun/rsiversi.git?rev=386858d6f266fdf8d5c58e19793e5d2d09d3da34#386858d6f266fdf8d5c58e19793e5d2d09d3da34"
+source = "git+https://github.com/wowfun/rsiversi.git?rev=3545705d4b3f0763d636f873fc2f0c7629f1212c#3545705d4b3f0763d636f873fc2f0c7629f1212c"
 dependencies = [
  "async-trait",
  "rsi-ai-protocol",
+ "rsi-api-contract-build",
  "rsi-api-protocol",
  "rsi-meta",
  "serde",
@@ -3697,7 +3262,7 @@ dependencies = [
 [[package]]
 name = "rsi-ai-openai"
 version = "0.0.1"
-source = "git+https://github.com/wowfun/rsiversi.git?rev=386858d6f266fdf8d5c58e19793e5d2d09d3da34#386858d6f266fdf8d5c58e19793e5d2d09d3da34"
+source = "git+https://github.com/wowfun/rsiversi.git?rev=3545705d4b3f0763d636f873fc2f0c7629f1212c#3545705d4b3f0763d636f873fc2f0c7629f1212c"
 dependencies = [
  "async-stream",
  "async-trait",
@@ -3722,7 +3287,7 @@ dependencies = [
 [[package]]
 name = "rsi-ai-openai-compatible"
 version = "0.0.1"
-source = "git+https://github.com/wowfun/rsiversi.git?rev=386858d6f266fdf8d5c58e19793e5d2d09d3da34#386858d6f266fdf8d5c58e19793e5d2d09d3da34"
+source = "git+https://github.com/wowfun/rsiversi.git?rev=3545705d4b3f0763d636f873fc2f0c7629f1212c#3545705d4b3f0763d636f873fc2f0c7629f1212c"
 dependencies = [
  "async-stream",
  "async-trait",
@@ -3743,7 +3308,7 @@ dependencies = [
 [[package]]
 name = "rsi-ai-portable"
 version = "0.0.1"
-source = "git+https://github.com/wowfun/rsiversi.git?rev=386858d6f266fdf8d5c58e19793e5d2d09d3da34#386858d6f266fdf8d5c58e19793e5d2d09d3da34"
+source = "git+https://github.com/wowfun/rsiversi.git?rev=3545705d4b3f0763d636f873fc2f0c7629f1212c#3545705d4b3f0763d636f873fc2f0c7629f1212c"
 dependencies = [
  "async-stream",
  "async-trait",
@@ -3761,7 +3326,7 @@ dependencies = [
 [[package]]
 name = "rsi-ai-protocol"
 version = "0.0.1"
-source = "git+https://github.com/wowfun/rsiversi.git?rev=386858d6f266fdf8d5c58e19793e5d2d09d3da34#386858d6f266fdf8d5c58e19793e5d2d09d3da34"
+source = "git+https://github.com/wowfun/rsiversi.git?rev=3545705d4b3f0763d636f873fc2f0c7629f1212c#3545705d4b3f0763d636f873fc2f0c7629f1212c"
 dependencies = [
  "async-trait",
  "futures-util",
@@ -3781,7 +3346,7 @@ dependencies = [
 [[package]]
 name = "rsi-ai-provider"
 version = "0.0.1"
-source = "git+https://github.com/wowfun/rsiversi.git?rev=386858d6f266fdf8d5c58e19793e5d2d09d3da34#386858d6f266fdf8d5c58e19793e5d2d09d3da34"
+source = "git+https://github.com/wowfun/rsiversi.git?rev=3545705d4b3f0763d636f873fc2f0c7629f1212c#3545705d4b3f0763d636f873fc2f0c7629f1212c"
 dependencies = [
  "async-trait",
  "bytes",
@@ -3802,7 +3367,7 @@ dependencies = [
 [[package]]
 name = "rsi-ai-transport"
 version = "0.0.1"
-source = "git+https://github.com/wowfun/rsiversi.git?rev=386858d6f266fdf8d5c58e19793e5d2d09d3da34#386858d6f266fdf8d5c58e19793e5d2d09d3da34"
+source = "git+https://github.com/wowfun/rsiversi.git?rev=3545705d4b3f0763d636f873fc2f0c7629f1212c#3545705d4b3f0763d636f873fc2f0c7629f1212c"
 dependencies = [
  "async-stream",
  "async-trait",
@@ -3810,6 +3375,7 @@ dependencies = [
  "bytes",
  "futures-util",
  "http",
+ "httpdate",
  "memchr",
  "reqwest",
  "rsi-ai-protocol",
@@ -3825,7 +3391,7 @@ dependencies = [
 [[package]]
 name = "rsi-api"
 version = "0.0.1"
-source = "git+https://github.com/wowfun/rsiversi.git?rev=386858d6f266fdf8d5c58e19793e5d2d09d3da34#386858d6f266fdf8d5c58e19793e5d2d09d3da34"
+source = "git+https://github.com/wowfun/rsiversi.git?rev=3545705d4b3f0763d636f873fc2f0c7629f1212c#3545705d4b3f0763d636f873fc2f0c7629f1212c"
 dependencies = [
  "async-trait",
  "futures-util",
@@ -3840,7 +3406,7 @@ dependencies = [
 [[package]]
 name = "rsi-api-auth"
 version = "0.0.1"
-source = "git+https://github.com/wowfun/rsiversi.git?rev=386858d6f266fdf8d5c58e19793e5d2d09d3da34#386858d6f266fdf8d5c58e19793e5d2d09d3da34"
+source = "git+https://github.com/wowfun/rsiversi.git?rev=3545705d4b3f0763d636f873fc2f0c7629f1212c#3545705d4b3f0763d636f873fc2f0c7629f1212c"
 dependencies = [
  "async-trait",
  "getrandom 0.3.4",
@@ -3861,7 +3427,7 @@ dependencies = [
 [[package]]
 name = "rsi-api-client"
 version = "0.0.1"
-source = "git+https://github.com/wowfun/rsiversi.git?rev=386858d6f266fdf8d5c58e19793e5d2d09d3da34#386858d6f266fdf8d5c58e19793e5d2d09d3da34"
+source = "git+https://github.com/wowfun/rsiversi.git?rev=3545705d4b3f0763d636f873fc2f0c7629f1212c#3545705d4b3f0763d636f873fc2f0c7629f1212c"
 dependencies = [
  "async-stream",
  "async-trait",
@@ -3877,11 +3443,21 @@ dependencies = [
 ]
 
 [[package]]
+name = "rsi-api-contract-build"
+version = "0.0.1"
+source = "git+https://github.com/wowfun/rsiversi.git?rev=3545705d4b3f0763d636f873fc2f0c7629f1212c#3545705d4b3f0763d636f873fc2f0c7629f1212c"
+dependencies = [
+ "serde",
+ "serde_json",
+]
+
+[[package]]
 name = "rsi-api-device-api"
 version = "0.0.1"
-source = "git+https://github.com/wowfun/rsiversi.git?rev=386858d6f266fdf8d5c58e19793e5d2d09d3da34#386858d6f266fdf8d5c58e19793e5d2d09d3da34"
+source = "git+https://github.com/wowfun/rsiversi.git?rev=3545705d4b3f0763d636f873fc2f0c7629f1212c#3545705d4b3f0763d636f873fc2f0c7629f1212c"
 dependencies = [
  "async-trait",
+ "rsi-api-contract-build",
  "rsi-api-protocol",
  "rsi-credentials-protocol",
  "rsi-meta",
@@ -3892,25 +3468,30 @@ dependencies = [
 [[package]]
 name = "rsi-api-http"
 version = "0.0.1"
-source = "git+https://github.com/wowfun/rsiversi.git?rev=386858d6f266fdf8d5c58e19793e5d2d09d3da34#386858d6f266fdf8d5c58e19793e5d2d09d3da34"
+source = "git+https://github.com/wowfun/rsiversi.git?rev=3545705d4b3f0763d636f873fc2f0c7629f1212c#3545705d4b3f0763d636f873fc2f0c7629f1212c"
 dependencies = [
  "async-stream",
  "async-trait",
  "bytes",
  "futures-util",
+ "getrandom 0.3.4",
+ "hex",
  "http",
  "http-body-util",
  "hyper",
  "hyper-util",
  "libc",
+ "rsi-api-local-transport",
  "rsi-api-protocol",
  "rsi-credentials-protocol",
  "rsi-meta",
- "rustix 1.1.5",
+ "rustix",
  "serde",
  "serde_json",
+ "sha2",
  "tokio",
  "tokio-rustls",
+ "tokio-tungstenite",
  "tokio-util",
  "url",
  "zeroize",
@@ -3919,9 +3500,8 @@ dependencies = [
 [[package]]
 name = "rsi-api-http-client"
 version = "0.0.1"
-source = "git+https://github.com/wowfun/rsiversi.git?rev=386858d6f266fdf8d5c58e19793e5d2d09d3da34#386858d6f266fdf8d5c58e19793e5d2d09d3da34"
+source = "git+https://github.com/wowfun/rsiversi.git?rev=3545705d4b3f0763d636f873fc2f0c7629f1212c#3545705d4b3f0763d636f873fc2f0c7629f1212c"
 dependencies = [
- "async-stream",
  "async-trait",
  "futures-util",
  "http",
@@ -3939,9 +3519,19 @@ dependencies = [
 ]
 
 [[package]]
+name = "rsi-api-local-transport"
+version = "0.0.1"
+source = "git+https://github.com/wowfun/rsiversi.git?rev=3545705d4b3f0763d636f873fc2f0c7629f1212c#3545705d4b3f0763d636f873fc2f0c7629f1212c"
+dependencies = [
+ "rsi-process-native",
+ "tokio",
+ "windows-sys 0.61.2",
+]
+
+[[package]]
 name = "rsi-api-portable"
 version = "0.0.1"
-source = "git+https://github.com/wowfun/rsiversi.git?rev=386858d6f266fdf8d5c58e19793e5d2d09d3da34#386858d6f266fdf8d5c58e19793e5d2d09d3da34"
+source = "git+https://github.com/wowfun/rsiversi.git?rev=3545705d4b3f0763d636f873fc2f0c7629f1212c#3545705d4b3f0763d636f873fc2f0c7629f1212c"
 dependencies = [
  "async-stream",
  "async-trait",
@@ -3958,13 +3548,14 @@ dependencies = [
 [[package]]
 name = "rsi-api-protocol"
 version = "0.0.1"
-source = "git+https://github.com/wowfun/rsiversi.git?rev=386858d6f266fdf8d5c58e19793e5d2d09d3da34#386858d6f266fdf8d5c58e19793e5d2d09d3da34"
+source = "git+https://github.com/wowfun/rsiversi.git?rev=3545705d4b3f0763d636f873fc2f0c7629f1212c#3545705d4b3f0763d636f873fc2f0c7629f1212c"
 dependencies = [
  "async-trait",
  "bytes",
  "futures-util",
  "getrandom 0.3.4",
  "hex",
+ "rsi-api-contract-build",
  "rsi-credentials-protocol",
  "rsi-meta-contract",
  "serde",
@@ -3977,7 +3568,7 @@ dependencies = [
 [[package]]
 name = "rsi-api-uds-client"
 version = "0.0.1"
-source = "git+https://github.com/wowfun/rsiversi.git?rev=386858d6f266fdf8d5c58e19793e5d2d09d3da34#386858d6f266fdf8d5c58e19793e5d2d09d3da34"
+source = "git+https://github.com/wowfun/rsiversi.git?rev=3545705d4b3f0763d636f873fc2f0c7629f1212c#3545705d4b3f0763d636f873fc2f0c7629f1212c"
 dependencies = [
  "async-stream",
  "async-trait",
@@ -3988,9 +3579,11 @@ dependencies = [
  "hyper",
  "hyper-util",
  "rsi-api-client",
+ "rsi-api-local-transport",
  "rsi-api-protocol",
  "rsi-meta",
- "rustix 1.1.5",
+ "rsi-process-native",
+ "rustix",
  "serde",
  "serde_json",
  "tokio",
@@ -4000,7 +3593,7 @@ dependencies = [
 [[package]]
 name = "rsi-application"
 version = "0.0.1"
-source = "git+https://github.com/wowfun/rsiversi.git?rev=386858d6f266fdf8d5c58e19793e5d2d09d3da34#386858d6f266fdf8d5c58e19793e5d2d09d3da34"
+source = "git+https://github.com/wowfun/rsiversi.git?rev=3545705d4b3f0763d636f873fc2f0c7629f1212c#3545705d4b3f0763d636f873fc2f0c7629f1212c"
 dependencies = [
  "async-trait",
  "futures-util",
@@ -4017,13 +3610,13 @@ dependencies = [
 [[package]]
 name = "rsi-apply-patch"
 version = "0.0.1"
-source = "git+https://github.com/wowfun/rsiversi.git?rev=386858d6f266fdf8d5c58e19793e5d2d09d3da34#386858d6f266fdf8d5c58e19793e5d2d09d3da34"
+source = "git+https://github.com/wowfun/rsiversi.git?rev=3545705d4b3f0763d636f873fc2f0c7629f1212c#3545705d4b3f0763d636f873fc2f0c7629f1212c"
 dependencies = [
  "async-trait",
  "rsi-meta",
  "rsi-process",
  "rsi-tools-protocol",
- "rustix 1.1.5",
+ "rustix",
  "serde",
  "serde_json",
  "tokio",
@@ -4032,7 +3625,7 @@ dependencies = [
 [[package]]
 name = "rsi-approval"
 version = "0.0.1"
-source = "git+https://github.com/wowfun/rsiversi.git?rev=386858d6f266fdf8d5c58e19793e5d2d09d3da34#386858d6f266fdf8d5c58e19793e5d2d09d3da34"
+source = "git+https://github.com/wowfun/rsiversi.git?rev=3545705d4b3f0763d636f873fc2f0c7629f1212c#3545705d4b3f0763d636f873fc2f0c7629f1212c"
 dependencies = [
  "async-trait",
  "rsi-approval-protocol",
@@ -4044,9 +3637,10 @@ dependencies = [
 [[package]]
 name = "rsi-approval-protocol"
 version = "0.0.1"
-source = "git+https://github.com/wowfun/rsiversi.git?rev=386858d6f266fdf8d5c58e19793e5d2d09d3da34#386858d6f266fdf8d5c58e19793e5d2d09d3da34"
+source = "git+https://github.com/wowfun/rsiversi.git?rev=3545705d4b3f0763d636f873fc2f0c7629f1212c#3545705d4b3f0763d636f873fc2f0c7629f1212c"
 dependencies = [
  "async-trait",
+ "rsi-execution-protocol",
  "rsi-meta",
  "rsi-meta-contract",
  "rsi-workspace-path",
@@ -4057,14 +3651,106 @@ dependencies = [
 ]
 
 [[package]]
+name = "rsi-automation"
+version = "0.0.1"
+source = "git+https://github.com/wowfun/rsiversi.git?rev=3545705d4b3f0763d636f873fc2f0c7629f1212c#3545705d4b3f0763d636f873fc2f0c7629f1212c"
+dependencies = [
+ "async-trait",
+ "base64 0.22.1",
+ "bytes",
+ "futures-util",
+ "getrandom 0.3.4",
+ "hex",
+ "ring",
+ "rsi-agent-composition-protocol",
+ "rsi-agent-goal",
+ "rsi-agent-session-protocol",
+ "rsi-agent-turn-protocol",
+ "rsi-ai-protocol",
+ "rsi-api-protocol",
+ "rsi-automation-api",
+ "rsi-browser",
+ "rsi-credentials-protocol",
+ "rsi-files-native-fs",
+ "rsi-goal",
+ "rsi-media",
+ "rsi-meta",
+ "rsi-process",
+ "rsi-sandbox",
+ "rsi-session-protocol",
+ "rsi-tools-protocol",
+ "rsi-workspace-protocol",
+ "rusqlite",
+ "rustix",
+ "serde",
+ "serde_json",
+ "sha2",
+ "thiserror 2.0.21",
+ "time",
+ "tokio",
+ "tokio-util",
+ "url",
+]
+
+[[package]]
+name = "rsi-automation-api"
+version = "0.0.1"
+source = "git+https://github.com/wowfun/rsiversi.git?rev=3545705d4b3f0763d636f873fc2f0c7629f1212c#3545705d4b3f0763d636f873fc2f0c7629f1212c"
+dependencies = [
+ "base64 0.22.1",
+ "rsi-agent-session-protocol",
+ "rsi-ai-protocol",
+ "rsi-api-contract-build",
+ "rsi-api-protocol",
+ "serde",
+ "serde_json",
+]
+
+[[package]]
+name = "rsi-browser"
+version = "0.0.1"
+source = "git+https://github.com/wowfun/rsiversi.git?rev=3545705d4b3f0763d636f873fc2f0c7629f1212c#3545705d4b3f0763d636f873fc2f0c7629f1212c"
+dependencies = [
+ "async-trait",
+ "base64 0.22.1",
+ "bytes",
+ "futures-util",
+ "getrandom 0.3.4",
+ "hex",
+ "rsi-agent-composition-protocol",
+ "rsi-agent-session-protocol",
+ "rsi-agent-turn-protocol",
+ "rsi-api-protocol",
+ "rsi-client",
+ "rsi-execution",
+ "rsi-mcp",
+ "rsi-media",
+ "rsi-media-protocol",
+ "rsi-meta",
+ "rsi-process",
+ "rsi-retrieval",
+ "rsi-sandbox",
+ "rsi-session-protocol",
+ "rsi-tools-protocol",
+ "rsi-ui",
+ "serde",
+ "serde_json",
+ "sha2",
+ "tokio",
+ "tokio-util",
+ "url",
+]
+
+[[package]]
 name = "rsi-client"
 version = "0.0.1"
-source = "git+https://github.com/wowfun/rsiversi.git?rev=386858d6f266fdf8d5c58e19793e5d2d09d3da34#386858d6f266fdf8d5c58e19793e5d2d09d3da34"
+source = "git+https://github.com/wowfun/rsiversi.git?rev=3545705d4b3f0763d636f873fc2f0c7629f1212c#3545705d4b3f0763d636f873fc2f0c7629f1212c"
 dependencies = [
  "async-trait",
  "futures-util",
  "rsi-acp-protocol",
  "rsi-agent-session-protocol",
+ "rsi-agent-store-protocol",
  "rsi-agent-turn-protocol",
  "rsi-api-protocol",
  "rsi-conversation",
@@ -4082,13 +3768,14 @@ dependencies = [
 [[package]]
 name = "rsi-client-composition"
 version = "0.0.1"
-source = "git+https://github.com/wowfun/rsiversi.git?rev=386858d6f266fdf8d5c58e19793e5d2d09d3da34#386858d6f266fdf8d5c58e19793e5d2d09d3da34"
+source = "git+https://github.com/wowfun/rsiversi.git?rev=3545705d4b3f0763d636f873fc2f0c7629f1212c#3545705d4b3f0763d636f873fc2f0c7629f1212c"
 dependencies = [
  "rsi-acp-api",
  "rsi-acp-protocol",
  "rsi-ai-models-api",
  "rsi-ai-protocol",
  "rsi-api-protocol",
+ "rsi-directory-picker-api",
  "rsi-host",
  "rsi-media-api",
  "rsi-media-protocol",
@@ -4101,6 +3788,7 @@ dependencies = [
  "rsi-settings-api",
  "rsi-settings-protocol",
  "rsi-workspace-api",
+ "rsi-workspace-default-api",
  "rsi-workspace-protocol",
  "serde_json",
 ]
@@ -4108,7 +3796,7 @@ dependencies = [
 [[package]]
 name = "rsi-client-preferences"
 version = "0.0.1"
-source = "git+https://github.com/wowfun/rsiversi.git?rev=386858d6f266fdf8d5c58e19793e5d2d09d3da34#386858d6f266fdf8d5c58e19793e5d2d09d3da34"
+source = "git+https://github.com/wowfun/rsiversi.git?rev=3545705d4b3f0763d636f873fc2f0c7629f1212c#3545705d4b3f0763d636f873fc2f0c7629f1212c"
 dependencies = [
  "async-trait",
  "rsi-meta",
@@ -4120,7 +3808,7 @@ dependencies = [
 [[package]]
 name = "rsi-commands"
 version = "0.0.1"
-source = "git+https://github.com/wowfun/rsiversi.git?rev=386858d6f266fdf8d5c58e19793e5d2d09d3da34#386858d6f266fdf8d5c58e19793e5d2d09d3da34"
+source = "git+https://github.com/wowfun/rsiversi.git?rev=3545705d4b3f0763d636f873fc2f0c7629f1212c#3545705d4b3f0763d636f873fc2f0c7629f1212c"
 dependencies = [
  "async-trait",
  "rsi-commands-protocol",
@@ -4132,7 +3820,7 @@ dependencies = [
 [[package]]
 name = "rsi-commands-protocol"
 version = "0.0.1"
-source = "git+https://github.com/wowfun/rsiversi.git?rev=386858d6f266fdf8d5c58e19793e5d2d09d3da34#386858d6f266fdf8d5c58e19793e5d2d09d3da34"
+source = "git+https://github.com/wowfun/rsiversi.git?rev=3545705d4b3f0763d636f873fc2f0c7629f1212c#3545705d4b3f0763d636f873fc2f0c7629f1212c"
 dependencies = [
  "async-trait",
  "rsi-media-protocol",
@@ -4145,7 +3833,7 @@ dependencies = [
 [[package]]
 name = "rsi-configuration-access"
 version = "0.0.1"
-source = "git+https://github.com/wowfun/rsiversi.git?rev=386858d6f266fdf8d5c58e19793e5d2d09d3da34#386858d6f266fdf8d5c58e19793e5d2d09d3da34"
+source = "git+https://github.com/wowfun/rsiversi.git?rev=3545705d4b3f0763d636f873fc2f0c7629f1212c#3545705d4b3f0763d636f873fc2f0c7629f1212c"
 dependencies = [
  "async-trait",
  "futures-util",
@@ -4165,15 +3853,18 @@ dependencies = [
 [[package]]
 name = "rsi-configuration-api"
 version = "0.0.1"
-source = "git+https://github.com/wowfun/rsiversi.git?rev=386858d6f266fdf8d5c58e19793e5d2d09d3da34#386858d6f266fdf8d5c58e19793e5d2d09d3da34"
+source = "git+https://github.com/wowfun/rsiversi.git?rev=3545705d4b3f0763d636f873fc2f0c7629f1212c#3545705d4b3f0763d636f873fc2f0c7629f1212c"
 dependencies = [
  "async-trait",
  "rsi-agent-session-protocol",
  "rsi-ai-protocol",
+ "rsi-api-contract-build",
  "rsi-api-protocol",
  "rsi-credentials-protocol",
+ "rsi-execution-protocol",
  "rsi-mcp-protocol",
  "rsi-session-protocol",
+ "rsi-ssh-protocol",
  "serde",
  "serde_json",
  "url",
@@ -4182,10 +3873,11 @@ dependencies = [
 [[package]]
 name = "rsi-conversation"
 version = "0.0.1"
-source = "git+https://github.com/wowfun/rsiversi.git?rev=386858d6f266fdf8d5c58e19793e5d2d09d3da34#386858d6f266fdf8d5c58e19793e5d2d09d3da34"
+source = "git+https://github.com/wowfun/rsiversi.git?rev=3545705d4b3f0763d636f873fc2f0c7629f1212c#3545705d4b3f0763d636f873fc2f0c7629f1212c"
 dependencies = [
  "rsi-acp-protocol",
  "rsi-agent-session-protocol",
+ "rsi-agent-turn-protocol",
  "rsi-ai-protocol",
  "rsi-media-protocol",
  "rsi-process",
@@ -4198,14 +3890,13 @@ dependencies = [
 [[package]]
 name = "rsi-credentials-local"
 version = "0.0.1"
-source = "git+https://github.com/wowfun/rsiversi.git?rev=386858d6f266fdf8d5c58e19793e5d2d09d3da34#386858d6f266fdf8d5c58e19793e5d2d09d3da34"
+source = "git+https://github.com/wowfun/rsiversi.git?rev=3545705d4b3f0763d636f873fc2f0c7629f1212c#3545705d4b3f0763d636f873fc2f0c7629f1212c"
 dependencies = [
  "async-trait",
- "cap-std",
  "rsi-credentials-protocol",
  "rsi-files-native-fs",
  "rsi-meta",
- "rustix 1.1.5",
+ "rustix",
  "serde",
  "serde_json",
  "tokio",
@@ -4215,7 +3906,7 @@ dependencies = [
 [[package]]
 name = "rsi-credentials-protocol"
 version = "0.0.1"
-source = "git+https://github.com/wowfun/rsiversi.git?rev=386858d6f266fdf8d5c58e19793e5d2d09d3da34#386858d6f266fdf8d5c58e19793e5d2d09d3da34"
+source = "git+https://github.com/wowfun/rsiversi.git?rev=3545705d4b3f0763d636f873fc2f0c7629f1212c#3545705d4b3f0763d636f873fc2f0c7629f1212c"
 dependencies = [
  "async-trait",
  "rsi-meta-contract",
@@ -4225,16 +3916,132 @@ dependencies = [
 ]
 
 [[package]]
-name = "rsi-files"
+name = "rsi-directory-picker"
 version = "0.0.1"
-source = "git+https://github.com/wowfun/rsiversi.git?rev=386858d6f266fdf8d5c58e19793e5d2d09d3da34#386858d6f266fdf8d5c58e19793e5d2d09d3da34"
+source = "git+https://github.com/wowfun/rsiversi.git?rev=3545705d4b3f0763d636f873fc2f0c7629f1212c#3545705d4b3f0763d636f873fc2f0c7629f1212c"
 dependencies = [
  "async-trait",
- "cap-std",
+ "rsi-api-protocol",
+ "rsi-configuration-access",
+ "rsi-directory-picker-api",
+ "rsi-execution",
+ "rsi-files-native-fs",
+ "rsi-meta",
+ "rsi-process",
+ "rsi-sandbox",
+ "serde",
+ "serde_json",
+ "tokio",
+ "tokio-util",
+]
+
+[[package]]
+name = "rsi-directory-picker-api"
+version = "0.0.1"
+source = "git+https://github.com/wowfun/rsiversi.git?rev=3545705d4b3f0763d636f873fc2f0c7629f1212c#3545705d4b3f0763d636f873fc2f0c7629f1212c"
+dependencies = [
+ "async-trait",
+ "rsi-api-contract-build",
+ "rsi-api-protocol",
+ "rsi-execution-protocol",
+ "rsi-meta",
+ "serde",
+ "serde_json",
+]
+
+[[package]]
+name = "rsi-execution"
+version = "0.0.1"
+source = "git+https://github.com/wowfun/rsiversi.git?rev=3545705d4b3f0763d636f873fc2f0c7629f1212c#3545705d4b3f0763d636f873fc2f0c7629f1212c"
+dependencies = [
+ "async-trait",
+ "rsi-api-protocol",
+ "rsi-execution-protocol",
+ "rsi-files-protocol",
+ "rsi-meta-contract",
+ "rsi-process",
+ "rsi-sandbox",
+ "serde",
+ "tokio",
+ "tokio-util",
+]
+
+[[package]]
+name = "rsi-execution-local"
+version = "0.0.1"
+source = "git+https://github.com/wowfun/rsiversi.git?rev=3545705d4b3f0763d636f873fc2f0c7629f1212c#3545705d4b3f0763d636f873fc2f0c7629f1212c"
+dependencies = [
+ "async-trait",
+ "rsi-execution",
+ "rsi-files-protocol",
+ "rsi-process",
+ "rsi-sandbox",
+ "rsi-workspace-path",
+ "tokio",
+]
+
+[[package]]
+name = "rsi-execution-protocol"
+version = "0.0.1"
+source = "git+https://github.com/wowfun/rsiversi.git?rev=3545705d4b3f0763d636f873fc2f0c7629f1212c#3545705d4b3f0763d636f873fc2f0c7629f1212c"
+dependencies = [
+ "rsi-api-protocol",
+ "rsi-workspace-path",
+ "serde",
+ "thiserror 2.0.21",
+]
+
+[[package]]
+name = "rsi-extension"
+version = "0.0.1"
+source = "git+https://github.com/wowfun/rsiversi.git?rev=3545705d4b3f0763d636f873fc2f0c7629f1212c#3545705d4b3f0763d636f873fc2f0c7629f1212c"
+dependencies = [
+ "async-trait",
+ "rsi-meta",
+ "rsi-process",
+ "rsi-sandbox",
+ "serde",
+ "serde_json",
+ "thiserror 2.0.21",
+ "tokio",
+ "tokio-util",
+]
+
+[[package]]
+name = "rsi-extension-agent"
+version = "0.0.1"
+source = "git+https://github.com/wowfun/rsiversi.git?rev=3545705d4b3f0763d636f873fc2f0c7629f1212c#3545705d4b3f0763d636f873fc2f0c7629f1212c"
+dependencies = [
+ "async-trait",
+ "rsi-agent-composition-protocol",
+ "rsi-agent-session-protocol",
+ "rsi-agent-store-protocol",
+ "rsi-agent-turn-protocol",
+ "rsi-api-protocol",
+ "rsi-execution",
+ "rsi-extension",
+ "rsi-meta",
+ "rsi-tools-protocol",
+ "rsi-user-questions-protocol",
+ "serde",
+ "serde_json",
+ "sha2",
+ "thiserror 2.0.21",
+ "tokio",
+ "tokio-util",
+]
+
+[[package]]
+name = "rsi-files"
+version = "0.0.1"
+source = "git+https://github.com/wowfun/rsiversi.git?rev=3545705d4b3f0763d636f873fc2f0c7629f1212c#3545705d4b3f0763d636f873fc2f0c7629f1212c"
+dependencies = [
+ "async-trait",
  "hex",
  "rsi-files-native-fs",
  "rsi-files-protocol",
  "rsi-meta",
+ "rsi-workspace-path",
  "tokio",
  "tokio-util",
 ]
@@ -4242,20 +4049,21 @@ dependencies = [
 [[package]]
 name = "rsi-files-native-fs"
 version = "0.0.1"
-source = "git+https://github.com/wowfun/rsiversi.git?rev=386858d6f266fdf8d5c58e19793e5d2d09d3da34#386858d6f266fdf8d5c58e19793e5d2d09d3da34"
+source = "git+https://github.com/wowfun/rsiversi.git?rev=3545705d4b3f0763d636f873fc2f0c7629f1212c#3545705d4b3f0763d636f873fc2f0c7629f1212c"
 dependencies = [
  "cap-std",
  "libc",
- "rustix 1.1.5",
+ "rustix",
 ]
 
 [[package]]
 name = "rsi-files-protocol"
 version = "0.0.1"
-source = "git+https://github.com/wowfun/rsiversi.git?rev=386858d6f266fdf8d5c58e19793e5d2d09d3da34#386858d6f266fdf8d5c58e19793e5d2d09d3da34"
+source = "git+https://github.com/wowfun/rsiversi.git?rev=3545705d4b3f0763d636f873fc2f0c7629f1212c#3545705d4b3f0763d636f873fc2f0c7629f1212c"
 dependencies = [
  "async-trait",
  "hex",
+ "rsi-api-protocol",
  "rsi-meta-contract",
  "rsi-workspace-path",
  "serde",
@@ -4266,7 +4074,7 @@ dependencies = [
 [[package]]
 name = "rsi-files-tools"
 version = "0.0.1"
-source = "git+https://github.com/wowfun/rsiversi.git?rev=386858d6f266fdf8d5c58e19793e5d2d09d3da34#386858d6f266fdf8d5c58e19793e5d2d09d3da34"
+source = "git+https://github.com/wowfun/rsiversi.git?rev=3545705d4b3f0763d636f873fc2f0c7629f1212c#3545705d4b3f0763d636f873fc2f0c7629f1212c"
 dependencies = [
  "async-trait",
  "hex",
@@ -4280,7 +4088,7 @@ dependencies = [
 [[package]]
 name = "rsi-goal"
 version = "0.0.1"
-source = "git+https://github.com/wowfun/rsiversi.git?rev=386858d6f266fdf8d5c58e19793e5d2d09d3da34#386858d6f266fdf8d5c58e19793e5d2d09d3da34"
+source = "git+https://github.com/wowfun/rsiversi.git?rev=3545705d4b3f0763d636f873fc2f0c7629f1212c#3545705d4b3f0763d636f873fc2f0c7629f1212c"
 dependencies = [
  "async-stream",
  "async-trait",
@@ -4299,7 +4107,7 @@ dependencies = [
 [[package]]
 name = "rsi-history"
 version = "0.0.1"
-source = "git+https://github.com/wowfun/rsiversi.git?rev=386858d6f266fdf8d5c58e19793e5d2d09d3da34#386858d6f266fdf8d5c58e19793e5d2d09d3da34"
+source = "git+https://github.com/wowfun/rsiversi.git?rev=3545705d4b3f0763d636f873fc2f0c7629f1212c#3545705d4b3f0763d636f873fc2f0c7629f1212c"
 dependencies = [
  "async-trait",
  "futures-util",
@@ -4312,14 +4120,16 @@ dependencies = [
  "rsi-agent-turn-protocol",
  "rsi-api-protocol",
  "rsi-conversation",
+ "rsi-execution",
  "rsi-files-native-fs",
  "rsi-history-api",
  "rsi-meta",
+ "rsi-process",
  "rsi-session-protocol",
  "rsi-tools-protocol",
  "rsi-workspace-protocol",
  "rusqlite",
- "rustix 1.1.5",
+ "rustix",
  "serde",
  "serde_json",
  "sha2",
@@ -4330,9 +4140,11 @@ dependencies = [
 [[package]]
 name = "rsi-history-api"
 version = "0.0.1"
-source = "git+https://github.com/wowfun/rsiversi.git?rev=386858d6f266fdf8d5c58e19793e5d2d09d3da34#386858d6f266fdf8d5c58e19793e5d2d09d3da34"
+source = "git+https://github.com/wowfun/rsiversi.git?rev=3545705d4b3f0763d636f873fc2f0c7629f1212c#3545705d4b3f0763d636f873fc2f0c7629f1212c"
 dependencies = [
+ "rsi-acp-protocol",
  "rsi-agent-session-protocol",
+ "rsi-api-contract-build",
  "rsi-api-protocol",
  "rsi-conversation",
  "rsi-workspace-protocol",
@@ -4343,24 +4155,35 @@ dependencies = [
 [[package]]
 name = "rsi-host"
 version = "0.0.1"
-source = "git+https://github.com/wowfun/rsiversi.git?rev=386858d6f266fdf8d5c58e19793e5d2d09d3da34#386858d6f266fdf8d5c58e19793e5d2d09d3da34"
+source = "git+https://github.com/wowfun/rsiversi.git?rev=3545705d4b3f0763d636f873fc2f0c7629f1212c#3545705d4b3f0763d636f873fc2f0c7629f1212c"
 dependencies = [
  "async-trait",
  "hex",
  "rsi-meta",
  "rsi-meta-profile",
- "serde",
- "serde_json",
  "sha2",
  "thiserror 2.0.21",
  "tokio",
 ]
 
 [[package]]
+name = "rsi-host-control"
+version = "0.0.1"
+source = "git+https://github.com/wowfun/rsiversi.git?rev=3545705d4b3f0763d636f873fc2f0c7629f1212c#3545705d4b3f0763d636f873fc2f0c7629f1212c"
+dependencies = [
+ "rsi-api-contract-build",
+ "rsi-api-protocol",
+ "serde",
+ "serde_json",
+ "tokio",
+]
+
+[[package]]
 name = "rsi-inspector"
 version = "0.0.1"
-source = "git+https://github.com/wowfun/rsiversi.git?rev=386858d6f266fdf8d5c58e19793e5d2d09d3da34#386858d6f266fdf8d5c58e19793e5d2d09d3da34"
+source = "git+https://github.com/wowfun/rsiversi.git?rev=3545705d4b3f0763d636f873fc2f0c7629f1212c#3545705d4b3f0763d636f873fc2f0c7629f1212c"
 dependencies = [
+ "rsi-api-contract-build",
  "rsi-api-protocol",
  "rsi-meta",
  "rsi-meta-profile",
@@ -4369,9 +4192,30 @@ dependencies = [
 ]
 
 [[package]]
+name = "rsi-installation"
+version = "0.0.1"
+source = "git+https://github.com/wowfun/rsiversi.git?rev=3545705d4b3f0763d636f873fc2f0c7629f1212c#3545705d4b3f0763d636f873fc2f0c7629f1212c"
+dependencies = [
+ "dirs",
+ "getrandom 0.3.4",
+ "hex",
+ "rsi-files-native-fs",
+ "rsi-host",
+ "rsi-packages",
+ "rsi-service-host",
+ "rustix",
+ "serde",
+ "serde_json",
+ "sha2",
+ "tokio",
+ "windows-sys 0.61.2",
+ "winreg 0.55.0",
+]
+
+[[package]]
 name = "rsi-jobs"
 version = "0.0.1"
-source = "git+https://github.com/wowfun/rsiversi.git?rev=386858d6f266fdf8d5c58e19793e5d2d09d3da34#386858d6f266fdf8d5c58e19793e5d2d09d3da34"
+source = "git+https://github.com/wowfun/rsiversi.git?rev=3545705d4b3f0763d636f873fc2f0c7629f1212c#3545705d4b3f0763d636f873fc2f0c7629f1212c"
 dependencies = [
  "async-trait",
  "rsi-meta-contract",
@@ -4384,7 +4228,7 @@ dependencies = [
 [[package]]
 name = "rsi-jobs-local"
 version = "0.0.1"
-source = "git+https://github.com/wowfun/rsiversi.git?rev=386858d6f266fdf8d5c58e19793e5d2d09d3da34#386858d6f266fdf8d5c58e19793e5d2d09d3da34"
+source = "git+https://github.com/wowfun/rsiversi.git?rev=3545705d4b3f0763d636f873fc2f0c7629f1212c#3545705d4b3f0763d636f873fc2f0c7629f1212c"
 dependencies = [
  "async-trait",
  "futures-util",
@@ -4399,7 +4243,7 @@ dependencies = [
 [[package]]
 name = "rsi-jobs-tools"
 version = "0.0.1"
-source = "git+https://github.com/wowfun/rsiversi.git?rev=386858d6f266fdf8d5c58e19793e5d2d09d3da34#386858d6f266fdf8d5c58e19793e5d2d09d3da34"
+source = "git+https://github.com/wowfun/rsiversi.git?rev=3545705d4b3f0763d636f873fc2f0c7629f1212c#3545705d4b3f0763d636f873fc2f0c7629f1212c"
 dependencies = [
  "async-trait",
  "rsi-jobs",
@@ -4413,12 +4257,14 @@ dependencies = [
 [[package]]
 name = "rsi-lsp"
 version = "0.0.1"
-source = "git+https://github.com/wowfun/rsiversi.git?rev=386858d6f266fdf8d5c58e19793e5d2d09d3da34#386858d6f266fdf8d5c58e19793e5d2d09d3da34"
+source = "git+https://github.com/wowfun/rsiversi.git?rev=3545705d4b3f0763d636f873fc2f0c7629f1212c#3545705d4b3f0763d636f873fc2f0c7629f1212c"
 dependencies = [
  "async-trait",
  "futures-util",
  "hex",
  "rsi-agent-turn-protocol",
+ "rsi-api-protocol",
+ "rsi-execution",
  "rsi-files-protocol",
  "rsi-meta",
  "rsi-process",
@@ -4435,7 +4281,7 @@ dependencies = [
 [[package]]
 name = "rsi-lsp-ui"
 version = "0.0.1"
-source = "git+https://github.com/wowfun/rsiversi.git?rev=386858d6f266fdf8d5c58e19793e5d2d09d3da34#386858d6f266fdf8d5c58e19793e5d2d09d3da34"
+source = "git+https://github.com/wowfun/rsiversi.git?rev=3545705d4b3f0763d636f873fc2f0c7629f1212c#3545705d4b3f0763d636f873fc2f0c7629f1212c"
 dependencies = [
  "async-trait",
  "futures-util",
@@ -4453,7 +4299,7 @@ dependencies = [
 [[package]]
 name = "rsi-managed-providers"
 version = "0.0.1"
-source = "git+https://github.com/wowfun/rsiversi.git?rev=386858d6f266fdf8d5c58e19793e5d2d09d3da34#386858d6f266fdf8d5c58e19793e5d2d09d3da34"
+source = "git+https://github.com/wowfun/rsiversi.git?rev=3545705d4b3f0763d636f873fc2f0c7629f1212c#3545705d4b3f0763d636f873fc2f0c7629f1212c"
 dependencies = [
  "async-trait",
  "futures-util",
@@ -4480,16 +4326,20 @@ dependencies = [
 [[package]]
 name = "rsi-mcp"
 version = "0.0.1"
-source = "git+https://github.com/wowfun/rsiversi.git?rev=386858d6f266fdf8d5c58e19793e5d2d09d3da34#386858d6f266fdf8d5c58e19793e5d2d09d3da34"
+source = "git+https://github.com/wowfun/rsiversi.git?rev=3545705d4b3f0763d636f873fc2f0c7629f1212c#3545705d4b3f0763d636f873fc2f0c7629f1212c"
 dependencies = [
  "async-trait",
+ "base64 0.22.1",
+ "bytes",
  "futures-util",
  "reqwest",
  "rsi-agent-composition-protocol",
  "rsi-agent-session-protocol",
  "rsi-agent-turn-protocol",
  "rsi-credentials-protocol",
+ "rsi-execution",
  "rsi-mcp-protocol",
+ "rsi-media-protocol",
  "rsi-meta",
  "rsi-process",
  "rsi-sandbox",
@@ -4505,11 +4355,13 @@ dependencies = [
 [[package]]
 name = "rsi-mcp-protocol"
 version = "0.0.1"
-source = "git+https://github.com/wowfun/rsiversi.git?rev=386858d6f266fdf8d5c58e19793e5d2d09d3da34#386858d6f266fdf8d5c58e19793e5d2d09d3da34"
+source = "git+https://github.com/wowfun/rsiversi.git?rev=3545705d4b3f0763d636f873fc2f0c7629f1212c#3545705d4b3f0763d636f873fc2f0c7629f1212c"
 dependencies = [
  "base64 0.22.1",
+ "iri-string",
  "rsi-agent-session-protocol",
  "rsi-credentials-protocol",
+ "rsi-execution",
  "rsi-tools-protocol",
  "serde",
  "serde_json",
@@ -4520,7 +4372,7 @@ dependencies = [
 [[package]]
 name = "rsi-media"
 version = "0.0.1"
-source = "git+https://github.com/wowfun/rsiversi.git?rev=386858d6f266fdf8d5c58e19793e5d2d09d3da34#386858d6f266fdf8d5c58e19793e5d2d09d3da34"
+source = "git+https://github.com/wowfun/rsiversi.git?rev=3545705d4b3f0763d636f873fc2f0c7629f1212c#3545705d4b3f0763d636f873fc2f0c7629f1212c"
 dependencies = [
  "async-trait",
  "bytes",
@@ -4537,12 +4389,13 @@ dependencies = [
 [[package]]
 name = "rsi-media-api"
 version = "0.0.1"
-source = "git+https://github.com/wowfun/rsiversi.git?rev=386858d6f266fdf8d5c58e19793e5d2d09d3da34#386858d6f266fdf8d5c58e19793e5d2d09d3da34"
+source = "git+https://github.com/wowfun/rsiversi.git?rev=3545705d4b3f0763d636f873fc2f0c7629f1212c#3545705d4b3f0763d636f873fc2f0c7629f1212c"
 dependencies = [
  "async-trait",
  "bytes",
  "futures-util",
  "hex",
+ "rsi-api-contract-build",
  "rsi-api-protocol",
  "rsi-media-protocol",
  "rsi-meta",
@@ -4554,16 +4407,16 @@ dependencies = [
 [[package]]
 name = "rsi-media-local"
 version = "0.0.1"
-source = "git+https://github.com/wowfun/rsiversi.git?rev=386858d6f266fdf8d5c58e19793e5d2d09d3da34#386858d6f266fdf8d5c58e19793e5d2d09d3da34"
+source = "git+https://github.com/wowfun/rsiversi.git?rev=3545705d4b3f0763d636f873fc2f0c7629f1212c#3545705d4b3f0763d636f873fc2f0c7629f1212c"
 dependencies = [
  "async-trait",
  "bytes",
  "hex",
- "libc",
+ "image",
  "rsi-api-protocol",
+ "rsi-files-native-fs",
  "rsi-media-protocol",
  "rsi-meta",
- "same-file",
  "serde",
  "serde_json",
  "sha2",
@@ -4573,7 +4426,7 @@ dependencies = [
 [[package]]
 name = "rsi-media-protocol"
 version = "0.0.1"
-source = "git+https://github.com/wowfun/rsiversi.git?rev=386858d6f266fdf8d5c58e19793e5d2d09d3da34#386858d6f266fdf8d5c58e19793e5d2d09d3da34"
+source = "git+https://github.com/wowfun/rsiversi.git?rev=3545705d4b3f0763d636f873fc2f0c7629f1212c#3545705d4b3f0763d636f873fc2f0c7629f1212c"
 dependencies = [
  "async-trait",
  "bytes",
@@ -4586,7 +4439,7 @@ dependencies = [
 [[package]]
 name = "rsi-meta"
 version = "0.0.1"
-source = "git+https://github.com/wowfun/rsiversi.git?rev=386858d6f266fdf8d5c58e19793e5d2d09d3da34#386858d6f266fdf8d5c58e19793e5d2d09d3da34"
+source = "git+https://github.com/wowfun/rsiversi.git?rev=3545705d4b3f0763d636f873fc2f0c7629f1212c#3545705d4b3f0763d636f873fc2f0c7629f1212c"
 dependencies = [
  "async-trait",
  "futures-util",
@@ -4602,7 +4455,7 @@ dependencies = [
 [[package]]
 name = "rsi-meta-contract"
 version = "0.0.1"
-source = "git+https://github.com/wowfun/rsiversi.git?rev=386858d6f266fdf8d5c58e19793e5d2d09d3da34#386858d6f266fdf8d5c58e19793e5d2d09d3da34"
+source = "git+https://github.com/wowfun/rsiversi.git?rev=3545705d4b3f0763d636f873fc2f0c7629f1212c#3545705d4b3f0763d636f873fc2f0c7629f1212c"
 dependencies = [
  "serde",
  "serde_json",
@@ -4611,7 +4464,7 @@ dependencies = [
 [[package]]
 name = "rsi-meta-execution"
 version = "0.0.1"
-source = "git+https://github.com/wowfun/rsiversi.git?rev=386858d6f266fdf8d5c58e19793e5d2d09d3da34#386858d6f266fdf8d5c58e19793e5d2d09d3da34"
+source = "git+https://github.com/wowfun/rsiversi.git?rev=3545705d4b3f0763d636f873fc2f0c7629f1212c#3545705d4b3f0763d636f873fc2f0c7629f1212c"
 dependencies = [
  "futures-util",
  "js-sys",
@@ -4624,7 +4477,7 @@ dependencies = [
 [[package]]
 name = "rsi-meta-native"
 version = "0.0.1"
-source = "git+https://github.com/wowfun/rsiversi.git?rev=386858d6f266fdf8d5c58e19793e5d2d09d3da34#386858d6f266fdf8d5c58e19793e5d2d09d3da34"
+source = "git+https://github.com/wowfun/rsiversi.git?rev=3545705d4b3f0763d636f873fc2f0c7629f1212c#3545705d4b3f0763d636f873fc2f0c7629f1212c"
 dependencies = [
  "serde_json",
 ]
@@ -4632,7 +4485,7 @@ dependencies = [
 [[package]]
 name = "rsi-meta-native-loader"
 version = "0.0.1"
-source = "git+https://github.com/wowfun/rsiversi.git?rev=386858d6f266fdf8d5c58e19793e5d2d09d3da34#386858d6f266fdf8d5c58e19793e5d2d09d3da34"
+source = "git+https://github.com/wowfun/rsiversi.git?rev=3545705d4b3f0763d636f873fc2f0c7629f1212c#3545705d4b3f0763d636f873fc2f0c7629f1212c"
 dependencies = [
  "async-trait",
  "hex",
@@ -4640,7 +4493,7 @@ dependencies = [
  "libloading",
  "rsi-meta",
  "rsi-meta-native",
- "rustix 1.1.5",
+ "rustix",
  "serde_json",
  "sha2",
  "tempfile",
@@ -4651,7 +4504,7 @@ dependencies = [
 [[package]]
 name = "rsi-meta-profile"
 version = "0.0.1"
-source = "git+https://github.com/wowfun/rsiversi.git?rev=386858d6f266fdf8d5c58e19793e5d2d09d3da34#386858d6f266fdf8d5c58e19793e5d2d09d3da34"
+source = "git+https://github.com/wowfun/rsiversi.git?rev=3545705d4b3f0763d636f873fc2f0c7629f1212c#3545705d4b3f0763d636f873fc2f0c7629f1212c"
 dependencies = [
  "async-trait",
  "futures-util",
@@ -4671,7 +4524,7 @@ dependencies = [
 [[package]]
 name = "rsi-meta-scope"
 version = "0.0.1"
-source = "git+https://github.com/wowfun/rsiversi.git?rev=386858d6f266fdf8d5c58e19793e5d2d09d3da34#386858d6f266fdf8d5c58e19793e5d2d09d3da34"
+source = "git+https://github.com/wowfun/rsiversi.git?rev=3545705d4b3f0763d636f873fc2f0c7629f1212c#3545705d4b3f0763d636f873fc2f0c7629f1212c"
 dependencies = [
  "async-trait",
  "futures-util",
@@ -4685,9 +4538,10 @@ dependencies = [
 [[package]]
 name = "rsi-native-addons-api"
 version = "0.0.1"
-source = "git+https://github.com/wowfun/rsiversi.git?rev=386858d6f266fdf8d5c58e19793e5d2d09d3da34#386858d6f266fdf8d5c58e19793e5d2d09d3da34"
+source = "git+https://github.com/wowfun/rsiversi.git?rev=3545705d4b3f0763d636f873fc2f0c7629f1212c#3545705d4b3f0763d636f873fc2f0c7629f1212c"
 dependencies = [
  "async-trait",
+ "rsi-api-contract-build",
  "rsi-api-protocol",
  "serde",
  "thiserror 2.0.21",
@@ -4696,18 +4550,22 @@ dependencies = [
 [[package]]
 name = "rsi-navigation"
 version = "0.0.1"
-source = "git+https://github.com/wowfun/rsiversi.git?rev=386858d6f266fdf8d5c58e19793e5d2d09d3da34#386858d6f266fdf8d5c58e19793e5d2d09d3da34"
+source = "git+https://github.com/wowfun/rsiversi.git?rev=3545705d4b3f0763d636f873fc2f0c7629f1212c#3545705d4b3f0763d636f873fc2f0c7629f1212c"
 dependencies = [
  "async-trait",
  "futures-util",
+ "getrandom 0.3.4",
  "hex",
  "rsi-acp-protocol",
  "rsi-agent-session-protocol",
+ "rsi-agent-store-protocol",
  "rsi-api-protocol",
  "rsi-conversation",
+ "rsi-execution",
  "rsi-meta",
  "rsi-navigation-api",
  "rsi-session-protocol",
+ "rsi-storage",
  "rsi-storage-domain",
  "rsi-workspace-protocol",
  "serde",
@@ -4720,9 +4578,11 @@ dependencies = [
 [[package]]
 name = "rsi-navigation-api"
 version = "0.0.1"
-source = "git+https://github.com/wowfun/rsiversi.git?rev=386858d6f266fdf8d5c58e19793e5d2d09d3da34#386858d6f266fdf8d5c58e19793e5d2d09d3da34"
+source = "git+https://github.com/wowfun/rsiversi.git?rev=3545705d4b3f0763d636f873fc2f0c7629f1212c#3545705d4b3f0763d636f873fc2f0c7629f1212c"
 dependencies = [
  "rsi-agent-session-protocol",
+ "rsi-agent-store-protocol",
+ "rsi-api-contract-build",
  "rsi-api-protocol",
  "rsi-conversation",
  "rsi-session-protocol",
@@ -4732,9 +4592,26 @@ dependencies = [
 ]
 
 [[package]]
+name = "rsi-packages"
+version = "0.0.1"
+source = "git+https://github.com/wowfun/rsiversi.git?rev=3545705d4b3f0763d636f873fc2f0c7629f1212c#3545705d4b3f0763d636f873fc2f0c7629f1212c"
+dependencies = [
+ "getrandom 0.3.4",
+ "hex",
+ "ring",
+ "rsi-api-protocol",
+ "rsi-files-native-fs",
+ "rustix",
+ "serde",
+ "serde_json",
+ "sha2",
+ "thiserror 2.0.21",
+]
+
+[[package]]
 name = "rsi-permission-presets"
 version = "0.0.1"
-source = "git+https://github.com/wowfun/rsiversi.git?rev=386858d6f266fdf8d5c58e19793e5d2d09d3da34#386858d6f266fdf8d5c58e19793e5d2d09d3da34"
+source = "git+https://github.com/wowfun/rsiversi.git?rev=3545705d4b3f0763d636f873fc2f0c7629f1212c#3545705d4b3f0763d636f873fc2f0c7629f1212c"
 dependencies = [
  "async-trait",
  "rsi-meta",
@@ -4747,7 +4624,7 @@ dependencies = [
 [[package]]
 name = "rsi-process"
 version = "0.0.1"
-source = "git+https://github.com/wowfun/rsiversi.git?rev=386858d6f266fdf8d5c58e19793e5d2d09d3da34#386858d6f266fdf8d5c58e19793e5d2d09d3da34"
+source = "git+https://github.com/wowfun/rsiversi.git?rev=3545705d4b3f0763d636f873fc2f0c7629f1212c#3545705d4b3f0763d636f873fc2f0c7629f1212c"
 dependencies = [
  "async-trait",
  "bytes",
@@ -4761,7 +4638,7 @@ dependencies = [
 [[package]]
 name = "rsi-process-local"
 version = "0.0.1"
-source = "git+https://github.com/wowfun/rsiversi.git?rev=386858d6f266fdf8d5c58e19793e5d2d09d3da34#386858d6f266fdf8d5c58e19793e5d2d09d3da34"
+source = "git+https://github.com/wowfun/rsiversi.git?rev=3545705d4b3f0763d636f873fc2f0c7629f1212c#3545705d4b3f0763d636f873fc2f0c7629f1212c"
 dependencies = [
  "async-trait",
  "getrandom 0.3.4",
@@ -4769,8 +4646,9 @@ dependencies = [
  "portable-pty",
  "rsi-meta",
  "rsi-process",
+ "rsi-process-native",
  "rsi-sandbox",
- "rustix 1.1.5",
+ "rustix",
  "serde",
  "serde_json",
  "tokio",
@@ -4778,11 +4656,23 @@ dependencies = [
 ]
 
 [[package]]
+name = "rsi-process-native"
+version = "0.0.1"
+source = "git+https://github.com/wowfun/rsiversi.git?rev=3545705d4b3f0763d636f873fc2f0c7629f1212c#3545705d4b3f0763d636f873fc2f0c7629f1212c"
+dependencies = [
+ "getrandom 0.3.4",
+ "hex",
+ "tokio",
+ "windows-sys 0.61.2",
+]
+
+[[package]]
 name = "rsi-process-output-api"
 version = "0.0.1"
-source = "git+https://github.com/wowfun/rsiversi.git?rev=386858d6f266fdf8d5c58e19793e5d2d09d3da34#386858d6f266fdf8d5c58e19793e5d2d09d3da34"
+source = "git+https://github.com/wowfun/rsiversi.git?rev=3545705d4b3f0763d636f873fc2f0c7629f1212c#3545705d4b3f0763d636f873fc2f0c7629f1212c"
 dependencies = [
  "async-trait",
+ "rsi-api-contract-build",
  "rsi-api-protocol",
  "rsi-meta",
  "rsi-process",
@@ -4793,7 +4683,7 @@ dependencies = [
 [[package]]
 name = "rsi-projection"
 version = "0.0.1"
-source = "git+https://github.com/wowfun/rsiversi.git?rev=386858d6f266fdf8d5c58e19793e5d2d09d3da34#386858d6f266fdf8d5c58e19793e5d2d09d3da34"
+source = "git+https://github.com/wowfun/rsiversi.git?rev=3545705d4b3f0763d636f873fc2f0c7629f1212c#3545705d4b3f0763d636f873fc2f0c7629f1212c"
 dependencies = [
  "async-trait",
  "rsi-meta",
@@ -4804,15 +4694,17 @@ dependencies = [
 [[package]]
 name = "rsi-pty"
 version = "0.0.1"
-source = "git+https://github.com/wowfun/rsiversi.git?rev=386858d6f266fdf8d5c58e19793e5d2d09d3da34#386858d6f266fdf8d5c58e19793e5d2d09d3da34"
+source = "git+https://github.com/wowfun/rsiversi.git?rev=3545705d4b3f0763d636f873fc2f0c7629f1212c#3545705d4b3f0763d636f873fc2f0c7629f1212c"
 dependencies = [
  "async-trait",
  "futures-util",
  "getrandom 0.3.4",
  "hex",
+ "rsi-execution",
  "rsi-meta",
  "rsi-process",
  "rsi-pty-protocol",
+ "rsi-sandbox",
  "sha2",
  "tokio",
  "vt100",
@@ -4821,11 +4713,13 @@ dependencies = [
 [[package]]
 name = "rsi-pty-protocol"
 version = "0.0.1"
-source = "git+https://github.com/wowfun/rsiversi.git?rev=386858d6f266fdf8d5c58e19793e5d2d09d3da34#386858d6f266fdf8d5c58e19793e5d2d09d3da34"
+source = "git+https://github.com/wowfun/rsiversi.git?rev=3545705d4b3f0763d636f873fc2f0c7629f1212c#3545705d4b3f0763d636f873fc2f0c7629f1212c"
 dependencies = [
  "async-trait",
+ "rsi-execution",
  "rsi-meta-contract",
  "rsi-process",
+ "rsi-sandbox",
  "serde",
  "thiserror 2.0.21",
 ]
@@ -4833,7 +4727,7 @@ dependencies = [
 [[package]]
 name = "rsi-retrieval"
 version = "0.0.1"
-source = "git+https://github.com/wowfun/rsiversi.git?rev=386858d6f266fdf8d5c58e19793e5d2d09d3da34#386858d6f266fdf8d5c58e19793e5d2d09d3da34"
+source = "git+https://github.com/wowfun/rsiversi.git?rev=3545705d4b3f0763d636f873fc2f0c7629f1212c#3545705d4b3f0763d636f873fc2f0c7629f1212c"
 dependencies = [
  "async-trait",
  "brotli",
@@ -4860,7 +4754,7 @@ dependencies = [
 [[package]]
 name = "rsi-retrieval-protocol"
 version = "0.0.1"
-source = "git+https://github.com/wowfun/rsiversi.git?rev=386858d6f266fdf8d5c58e19793e5d2d09d3da34#386858d6f266fdf8d5c58e19793e5d2d09d3da34"
+source = "git+https://github.com/wowfun/rsiversi.git?rev=3545705d4b3f0763d636f873fc2f0c7629f1212c#3545705d4b3f0763d636f873fc2f0c7629f1212c"
 dependencies = [
  "rsi-agent-session-protocol",
  "rsi-credentials-protocol",
@@ -4873,7 +4767,7 @@ dependencies = [
 [[package]]
 name = "rsi-sandbox"
 version = "0.0.1"
-source = "git+https://github.com/wowfun/rsiversi.git?rev=386858d6f266fdf8d5c58e19793e5d2d09d3da34#386858d6f266fdf8d5c58e19793e5d2d09d3da34"
+source = "git+https://github.com/wowfun/rsiversi.git?rev=3545705d4b3f0763d636f873fc2f0c7629f1212c#3545705d4b3f0763d636f873fc2f0c7629f1212c"
 dependencies = [
  "async-trait",
  "rsi-meta-contract",
@@ -4885,35 +4779,34 @@ dependencies = [
 [[package]]
 name = "rsi-sandbox-local"
 version = "0.0.1"
-source = "git+https://github.com/wowfun/rsiversi.git?rev=386858d6f266fdf8d5c58e19793e5d2d09d3da34#386858d6f266fdf8d5c58e19793e5d2d09d3da34"
+source = "git+https://github.com/wowfun/rsiversi.git?rev=3545705d4b3f0763d636f873fc2f0c7629f1212c#3545705d4b3f0763d636f873fc2f0c7629f1212c"
 dependencies = [
  "async-trait",
  "hex",
  "libc",
  "rsi-meta",
  "rsi-sandbox",
- "rustix 1.1.5",
+ "rsi-workspace-path",
+ "rustix",
  "serde",
  "serde_json",
  "sha2",
  "tempfile",
  "tokio",
+ "windows-sys 0.61.2",
 ]
 
 [[package]]
-name = "rsi-serve"
+name = "rsi-schedule"
 version = "0.0.1"
-source = "git+https://github.com/wowfun/rsiversi.git?rev=386858d6f266fdf8d5c58e19793e5d2d09d3da34#386858d6f266fdf8d5c58e19793e5d2d09d3da34"
+source = "git+https://github.com/wowfun/rsiversi.git?rev=3545705d4b3f0763d636f873fc2f0c7629f1212c#3545705d4b3f0763d636f873fc2f0c7629f1212c"
 dependencies = [
  "async-trait",
  "futures-util",
- "rsi-api",
- "rsi-api-http",
- "rsi-api-protocol",
- "rsi-application",
+ "rsi-agent-schedule",
+ "rsi-agent-session-protocol",
+ "rsi-agent-turn-protocol",
  "rsi-meta",
- "rsi-web-assets",
- "rsi-web-assets-api",
  "serde_json",
  "tokio",
  "tokio-util",
@@ -4922,7 +4815,7 @@ dependencies = [
 [[package]]
 name = "rsi-service-host"
 version = "0.0.1"
-source = "git+https://github.com/wowfun/rsiversi.git?rev=386858d6f266fdf8d5c58e19793e5d2d09d3da34#386858d6f266fdf8d5c58e19793e5d2d09d3da34"
+source = "git+https://github.com/wowfun/rsiversi.git?rev=3545705d4b3f0763d636f873fc2f0c7629f1212c#3545705d4b3f0763d636f873fc2f0c7629f1212c"
 dependencies = [
  "async-trait",
  "futures-util",
@@ -4931,15 +4824,18 @@ dependencies = [
  "libc",
  "rsi-agent-session-protocol",
  "rsi-api-http",
+ "rsi-api-local-transport",
  "rsi-api-protocol",
  "rsi-approval-protocol",
+ "rsi-files-native-fs",
  "rsi-host",
  "rsi-meta",
+ "rsi-process-native",
  "rsi-session-protocol",
  "rsi-storage",
  "rsi-storage-domain",
  "rsi-user-questions-protocol",
- "rustix 1.1.5",
+ "rustix",
  "serde",
  "serde_json",
  "sha2",
@@ -4949,35 +4845,21 @@ dependencies = [
 ]
 
 [[package]]
-name = "rsi-service-ui"
-version = "0.0.1"
-source = "git+https://github.com/wowfun/rsiversi.git?rev=386858d6f266fdf8d5c58e19793e5d2d09d3da34#386858d6f266fdf8d5c58e19793e5d2d09d3da34"
-dependencies = [
- "async-trait",
- "futures-util",
- "rsi-api-protocol",
- "rsi-client",
- "rsi-meta",
- "rsi-ui",
- "rsi-ui-api",
- "serde",
- "serde_json",
- "tokio",
- "tokio-util",
-]
-
-[[package]]
 name = "rsi-session"
 version = "0.0.1"
-source = "git+https://github.com/wowfun/rsiversi.git?rev=386858d6f266fdf8d5c58e19793e5d2d09d3da34#386858d6f266fdf8d5c58e19793e5d2d09d3da34"
+source = "git+https://github.com/wowfun/rsiversi.git?rev=3545705d4b3f0763d636f873fc2f0c7629f1212c#3545705d4b3f0763d636f873fc2f0c7629f1212c"
 dependencies = [
  "async-stream",
  "async-trait",
  "bytes",
  "futures-util",
+ "getrandom 0.3.4",
+ "hex",
  "rsi-agent-composition-protocol",
+ "rsi-agent-context",
  "rsi-agent-goal",
  "rsi-agent-model-selection",
+ "rsi-agent-plan-policy",
  "rsi-agent-references",
  "rsi-agent-session-protocol",
  "rsi-agent-store-protocol",
@@ -4986,6 +4868,7 @@ dependencies = [
  "rsi-api-protocol",
  "rsi-approval-protocol",
  "rsi-conversation",
+ "rsi-execution",
  "rsi-goal",
  "rsi-media-protocol",
  "rsi-meta",
@@ -4994,6 +4877,7 @@ dependencies = [
  "rsi-sandbox",
  "rsi-session-export",
  "rsi-session-protocol",
+ "rsi-tools-protocol",
  "rsi-user-questions-protocol",
  "rsi-workspace-protocol",
  "serde",
@@ -5006,7 +4890,7 @@ dependencies = [
 [[package]]
 name = "rsi-session-api"
 version = "0.0.1"
-source = "git+https://github.com/wowfun/rsiversi.git?rev=386858d6f266fdf8d5c58e19793e5d2d09d3da34#386858d6f266fdf8d5c58e19793e5d2d09d3da34"
+source = "git+https://github.com/wowfun/rsiversi.git?rev=3545705d4b3f0763d636f873fc2f0c7629f1212c#3545705d4b3f0763d636f873fc2f0c7629f1212c"
 dependencies = [
  "async-stream",
  "async-trait",
@@ -5014,6 +4898,7 @@ dependencies = [
  "rsi-agent-session-protocol",
  "rsi-agent-store-protocol",
  "rsi-agent-turn-protocol",
+ "rsi-api-contract-build",
  "rsi-api-protocol",
  "rsi-approval-protocol",
  "rsi-goal",
@@ -5030,7 +4915,7 @@ dependencies = [
 [[package]]
 name = "rsi-session-export"
 version = "0.0.1"
-source = "git+https://github.com/wowfun/rsiversi.git?rev=386858d6f266fdf8d5c58e19793e5d2d09d3da34#386858d6f266fdf8d5c58e19793e5d2d09d3da34"
+source = "git+https://github.com/wowfun/rsiversi.git?rev=3545705d4b3f0763d636f873fc2f0c7629f1212c#3545705d4b3f0763d636f873fc2f0c7629f1212c"
 dependencies = [
  "async-stream",
  "futures-util",
@@ -5051,14 +4936,18 @@ dependencies = [
 [[package]]
 name = "rsi-session-files"
 version = "0.0.1"
-source = "git+https://github.com/wowfun/rsiversi.git?rev=386858d6f266fdf8d5c58e19793e5d2d09d3da34#386858d6f266fdf8d5c58e19793e5d2d09d3da34"
+source = "git+https://github.com/wowfun/rsiversi.git?rev=3545705d4b3f0763d636f873fc2f0c7629f1212c#3545705d4b3f0763d636f873fc2f0c7629f1212c"
 dependencies = [
  "async-trait",
  "futures-util",
+ "getrandom 0.3.4",
  "rsi-agent-session-protocol",
+ "rsi-api-contract-build",
  "rsi-api-protocol",
+ "rsi-execution",
  "rsi-files-protocol",
  "rsi-meta",
+ "rsi-process",
  "rsi-session-protocol",
  "serde",
  "serde_json",
@@ -5068,41 +4957,14 @@ dependencies = [
 ]
 
 [[package]]
-name = "rsi-session-files-ui"
-version = "0.0.1"
-source = "git+https://github.com/wowfun/rsiversi.git?rev=386858d6f266fdf8d5c58e19793e5d2d09d3da34#386858d6f266fdf8d5c58e19793e5d2d09d3da34"
-dependencies = [
- "async-trait",
- "base64 0.22.1",
- "cssparser",
- "futures-util",
- "html5ever",
- "percent-encoding",
- "pulldown-cmark",
- "rsi-agent-session-protocol",
- "rsi-client",
- "rsi-conversation",
- "rsi-files-protocol",
- "rsi-files-tools",
- "rsi-meta",
- "rsi-session-files",
- "rsi-session-protocol",
- "rsi-tools-protocol",
- "rsi-ui",
- "serde",
- "serde_json",
- "tokio",
- "tokio-util",
-]
-
-[[package]]
 name = "rsi-session-protocol"
 version = "0.0.1"
-source = "git+https://github.com/wowfun/rsiversi.git?rev=386858d6f266fdf8d5c58e19793e5d2d09d3da34#386858d6f266fdf8d5c58e19793e5d2d09d3da34"
+source = "git+https://github.com/wowfun/rsiversi.git?rev=3545705d4b3f0763d636f873fc2f0c7629f1212c#3545705d4b3f0763d636f873fc2f0c7629f1212c"
 dependencies = [
  "async-trait",
  "futures-util",
  "hex",
+ "rsi-agent-composition-protocol",
  "rsi-agent-session-protocol",
  "rsi-agent-store-protocol",
  "rsi-agent-turn-protocol",
@@ -5110,6 +4972,7 @@ dependencies = [
  "rsi-api-protocol",
  "rsi-approval-protocol",
  "rsi-conversation",
+ "rsi-execution",
  "rsi-goal",
  "rsi-media-protocol",
  "rsi-meta-contract",
@@ -5121,13 +4984,14 @@ dependencies = [
  "serde_json",
  "sha2",
  "thiserror 2.0.21",
+ "tokio",
  "tokio-util",
 ]
 
 [[package]]
 name = "rsi-session-tree-ui"
 version = "0.0.1"
-source = "git+https://github.com/wowfun/rsiversi.git?rev=386858d6f266fdf8d5c58e19793e5d2d09d3da34#386858d6f266fdf8d5c58e19793e5d2d09d3da34"
+source = "git+https://github.com/wowfun/rsiversi.git?rev=3545705d4b3f0763d636f873fc2f0c7629f1212c#3545705d4b3f0763d636f873fc2f0c7629f1212c"
 dependencies = [
  "async-trait",
  "futures-util",
@@ -5149,7 +5013,7 @@ dependencies = [
 [[package]]
 name = "rsi-session-ui"
 version = "0.0.1"
-source = "git+https://github.com/wowfun/rsiversi.git?rev=386858d6f266fdf8d5c58e19793e5d2d09d3da34#386858d6f266fdf8d5c58e19793e5d2d09d3da34"
+source = "git+https://github.com/wowfun/rsiversi.git?rev=3545705d4b3f0763d636f873fc2f0c7629f1212c#3545705d4b3f0763d636f873fc2f0c7629f1212c"
 dependencies = [
  "async-trait",
  "futures-util",
@@ -5161,6 +5025,7 @@ dependencies = [
  "rsi-application",
  "rsi-client",
  "rsi-conversation",
+ "rsi-execution",
  "rsi-goal",
  "rsi-host",
  "rsi-meta",
@@ -5168,6 +5033,7 @@ dependencies = [
  "rsi-retrieval-protocol",
  "rsi-session-api",
  "rsi-session-protocol",
+ "rsi-session-tree-ui",
  "rsi-tools-protocol",
  "rsi-ui",
  "rsi-ui-api",
@@ -5180,7 +5046,7 @@ dependencies = [
 [[package]]
 name = "rsi-settings"
 version = "0.0.1"
-source = "git+https://github.com/wowfun/rsiversi.git?rev=386858d6f266fdf8d5c58e19793e5d2d09d3da34#386858d6f266fdf8d5c58e19793e5d2d09d3da34"
+source = "git+https://github.com/wowfun/rsiversi.git?rev=3545705d4b3f0763d636f873fc2f0c7629f1212c#3545705d4b3f0763d636f873fc2f0c7629f1212c"
 dependencies = [
  "async-trait",
  "getrandom 0.3.4",
@@ -5194,10 +5060,11 @@ dependencies = [
 [[package]]
 name = "rsi-settings-api"
 version = "0.0.1"
-source = "git+https://github.com/wowfun/rsiversi.git?rev=386858d6f266fdf8d5c58e19793e5d2d09d3da34#386858d6f266fdf8d5c58e19793e5d2d09d3da34"
+source = "git+https://github.com/wowfun/rsiversi.git?rev=3545705d4b3f0763d636f873fc2f0c7629f1212c#3545705d4b3f0763d636f873fc2f0c7629f1212c"
 dependencies = [
  "async-trait",
  "futures-util",
+ "rsi-api-contract-build",
  "rsi-api-protocol",
  "rsi-meta",
  "rsi-settings-protocol",
@@ -5208,10 +5075,11 @@ dependencies = [
 [[package]]
 name = "rsi-settings-local"
 version = "0.0.1"
-source = "git+https://github.com/wowfun/rsiversi.git?rev=386858d6f266fdf8d5c58e19793e5d2d09d3da34#386858d6f266fdf8d5c58e19793e5d2d09d3da34"
+source = "git+https://github.com/wowfun/rsiversi.git?rev=3545705d4b3f0763d636f873fc2f0c7629f1212c#3545705d4b3f0763d636f873fc2f0c7629f1212c"
 dependencies = [
  "async-trait",
  "libc",
+ "rsi-files-native-fs",
  "rsi-meta",
  "rsi-settings-protocol",
  "serde",
@@ -5222,7 +5090,7 @@ dependencies = [
 [[package]]
 name = "rsi-settings-protocol"
 version = "0.0.1"
-source = "git+https://github.com/wowfun/rsiversi.git?rev=386858d6f266fdf8d5c58e19793e5d2d09d3da34#386858d6f266fdf8d5c58e19793e5d2d09d3da34"
+source = "git+https://github.com/wowfun/rsiversi.git?rev=3545705d4b3f0763d636f873fc2f0c7629f1212c#3545705d4b3f0763d636f873fc2f0c7629f1212c"
 dependencies = [
  "async-trait",
  "rsi-api-protocol",
@@ -5233,9 +5101,9 @@ dependencies = [
 ]
 
 [[package]]
-name = "rsi-shell-bash"
+name = "rsi-shell-native"
 version = "0.0.1"
-source = "git+https://github.com/wowfun/rsiversi.git?rev=386858d6f266fdf8d5c58e19793e5d2d09d3da34#386858d6f266fdf8d5c58e19793e5d2d09d3da34"
+source = "git+https://github.com/wowfun/rsiversi.git?rev=3545705d4b3f0763d636f873fc2f0c7629f1212c#3545705d4b3f0763d636f873fc2f0c7629f1212c"
 dependencies = [
  "async-trait",
  "rsi-jobs",
@@ -5248,23 +5116,78 @@ dependencies = [
 ]
 
 [[package]]
-name = "rsi-storage"
+name = "rsi-ssh-client"
 version = "0.0.1"
-source = "git+https://github.com/wowfun/rsiversi.git?rev=386858d6f266fdf8d5c58e19793e5d2d09d3da34#386858d6f266fdf8d5c58e19793e5d2d09d3da34"
+source = "git+https://github.com/wowfun/rsiversi.git?rev=3545705d4b3f0763d636f873fc2f0c7629f1212c#3545705d4b3f0763d636f873fc2f0c7629f1212c"
 dependencies = [
  "async-trait",
+ "hex",
+ "rsi-execution",
+ "rsi-files-protocol",
+ "rsi-process",
+ "rsi-sandbox",
+ "rsi-ssh-protocol",
+ "rsi-ssh-transport",
+ "serde_json",
+ "sha2",
+ "tempfile",
+ "thiserror 2.0.21",
+ "tokio",
+ "tokio-util",
+]
+
+[[package]]
+name = "rsi-ssh-protocol"
+version = "0.0.1"
+source = "git+https://github.com/wowfun/rsiversi.git?rev=3545705d4b3f0763d636f873fc2f0c7629f1212c#3545705d4b3f0763d636f873fc2f0c7629f1212c"
+dependencies = [
+ "base64 0.22.1",
+ "rsi-api-contract-build",
+ "rsi-api-protocol",
+ "rsi-execution",
+ "rsi-files-protocol",
+ "rsi-process",
+ "rsi-sandbox",
+ "rsi-workspace-path",
+ "serde",
+ "sha2",
+ "thiserror 2.0.21",
+]
+
+[[package]]
+name = "rsi-ssh-transport"
+version = "0.0.1"
+source = "git+https://github.com/wowfun/rsiversi.git?rev=3545705d4b3f0763d636f873fc2f0c7629f1212c#3545705d4b3f0763d636f873fc2f0c7629f1212c"
+dependencies = [
+ "rsi-ssh-protocol",
+ "serde",
+ "serde_json",
+ "thiserror 2.0.21",
+ "tokio",
+ "tokio-util",
+]
+
+[[package]]
+name = "rsi-storage"
+version = "0.0.1"
+source = "git+https://github.com/wowfun/rsiversi.git?rev=3545705d4b3f0763d636f873fc2f0c7629f1212c#3545705d4b3f0763d636f873fc2f0c7629f1212c"
+dependencies = [
+ "async-trait",
+ "rsi-files-native-fs",
  "rsi-meta",
  "serde",
  "serde_json",
  "thiserror 2.0.21",
+ "tokio",
 ]
 
 [[package]]
 name = "rsi-storage-domain"
 version = "0.0.1"
-source = "git+https://github.com/wowfun/rsiversi.git?rev=386858d6f266fdf8d5c58e19793e5d2d09d3da34#386858d6f266fdf8d5c58e19793e5d2d09d3da34"
+source = "git+https://github.com/wowfun/rsiversi.git?rev=3545705d4b3f0763d636f873fc2f0c7629f1212c#3545705d4b3f0763d636f873fc2f0c7629f1212c"
 dependencies = [
  "async-trait",
+ "rsi-api-protocol",
  "rsi-meta",
  "rsi-storage",
  "serde",
@@ -5275,10 +5198,11 @@ dependencies = [
 [[package]]
 name = "rsi-storage-sqlite"
 version = "0.0.1"
-source = "git+https://github.com/wowfun/rsiversi.git?rev=386858d6f266fdf8d5c58e19793e5d2d09d3da34#386858d6f266fdf8d5c58e19793e5d2d09d3da34"
+source = "git+https://github.com/wowfun/rsiversi.git?rev=3545705d4b3f0763d636f873fc2f0c7629f1212c#3545705d4b3f0763d636f873fc2f0c7629f1212c"
 dependencies = [
  "async-trait",
  "libc",
+ "rsi-files-native-fs",
  "rsi-meta",
  "rsi-storage",
  "rusqlite",
@@ -5288,101 +5212,14 @@ dependencies = [
 ]
 
 [[package]]
-name = "rsi-terminal"
-version = "0.0.1"
-source = "git+https://github.com/wowfun/rsiversi.git?rev=386858d6f266fdf8d5c58e19793e5d2d09d3da34#386858d6f266fdf8d5c58e19793e5d2d09d3da34"
-dependencies = [
- "async-trait",
- "base64 0.22.1",
- "bytes",
- "crossterm 0.29.0",
- "futures-util",
- "getrandom 0.3.4",
- "hex",
- "libc",
- "ratatui",
- "rsi-acp-protocol",
- "rsi-agent-session-protocol",
- "rsi-agent-store-protocol",
- "rsi-agent-todo",
- "rsi-agent-turn-protocol",
- "rsi-agent-workspace-context",
- "rsi-ai-protocol",
- "rsi-api-device-api",
- "rsi-api-protocol",
- "rsi-application",
- "rsi-approval-protocol",
- "rsi-client",
- "rsi-configuration-api",
- "rsi-conversation",
- "rsi-credentials-protocol",
- "rsi-files-protocol",
- "rsi-history-api",
- "rsi-host",
- "rsi-inspector",
- "rsi-media-protocol",
- "rsi-meta",
- "rsi-native-addons-api",
- "rsi-navigation-api",
- "rsi-process",
- "rsi-sandbox",
- "rsi-service-ui",
- "rsi-session-export",
- "rsi-session-files",
- "rsi-session-files-ui",
- "rsi-session-protocol",
- "rsi-session-tree-ui",
- "rsi-session-ui",
- "rsi-settings-protocol",
- "rsi-terminal-ui",
- "rsi-tools-protocol",
- "rsi-ui",
- "rsi-ui-api",
- "rsi-user-questions-protocol",
- "rsi-workbench-ui",
- "rsi-workspace-protocol",
- "rustix 1.1.5",
- "serde",
- "serde_json",
- "sha2",
- "termina",
- "tokio",
- "tokio-util",
- "unicode-segmentation",
- "unicode-width",
- "zeroize",
-]
-
-[[package]]
-name = "rsi-terminal-ui"
-version = "0.0.1"
-source = "git+https://github.com/wowfun/rsiversi.git?rev=386858d6f266fdf8d5c58e19793e5d2d09d3da34#386858d6f266fdf8d5c58e19793e5d2d09d3da34"
-dependencies = [
- "pulldown-cmark",
- "ratatui",
- "rsi-agent-session-protocol",
- "rsi-agent-todo",
- "rsi-ai-protocol",
- "rsi-conversation",
- "rsi-media-protocol",
- "rsi-tools-protocol",
- "rsi-ui-protocol",
- "rsi-user-questions-protocol",
- "serde",
- "serde_json",
- "termina",
- "unicode-segmentation",
- "unicode-width",
-]
-
-[[package]]
 name = "rsi-tools"
 version = "0.0.1"
-source = "git+https://github.com/wowfun/rsiversi.git?rev=386858d6f266fdf8d5c58e19793e5d2d09d3da34#386858d6f266fdf8d5c58e19793e5d2d09d3da34"
+source = "git+https://github.com/wowfun/rsiversi.git?rev=3545705d4b3f0763d636f873fc2f0c7629f1212c#3545705d4b3f0763d636f873fc2f0c7629f1212c"
 dependencies = [
  "async-trait",
  "futures-util",
  "hex",
+ "rsi-execution",
  "rsi-meta",
  "rsi-tools-protocol",
  "serde",
@@ -5395,13 +5232,16 @@ dependencies = [
 [[package]]
 name = "rsi-tools-protocol"
 version = "0.0.1"
-source = "git+https://github.com/wowfun/rsiversi.git?rev=386858d6f266fdf8d5c58e19793e5d2d09d3da34#386858d6f266fdf8d5c58e19793e5d2d09d3da34"
+source = "git+https://github.com/wowfun/rsiversi.git?rev=3545705d4b3f0763d636f873fc2f0c7629f1212c#3545705d4b3f0763d636f873fc2f0c7629f1212c"
 dependencies = [
  "async-trait",
  "jsonschema",
+ "rsi-execution",
+ "rsi-files-protocol",
  "rsi-jobs",
  "rsi-media-protocol",
  "rsi-meta-contract",
+ "rsi-process",
  "rsi-sandbox",
  "rsi-workspace-path",
  "serde",
@@ -5414,7 +5254,7 @@ dependencies = [
 [[package]]
 name = "rsi-ui"
 version = "0.0.1"
-source = "git+https://github.com/wowfun/rsiversi.git?rev=386858d6f266fdf8d5c58e19793e5d2d09d3da34#386858d6f266fdf8d5c58e19793e5d2d09d3da34"
+source = "git+https://github.com/wowfun/rsiversi.git?rev=3545705d4b3f0763d636f873fc2f0c7629f1212c#3545705d4b3f0763d636f873fc2f0c7629f1212c"
 dependencies = [
  "async-trait",
  "futures-util",
@@ -5437,10 +5277,11 @@ dependencies = [
 [[package]]
 name = "rsi-ui-api"
 version = "0.0.1"
-source = "git+https://github.com/wowfun/rsiversi.git?rev=386858d6f266fdf8d5c58e19793e5d2d09d3da34#386858d6f266fdf8d5c58e19793e5d2d09d3da34"
+source = "git+https://github.com/wowfun/rsiversi.git?rev=3545705d4b3f0763d636f873fc2f0c7629f1212c#3545705d4b3f0763d636f873fc2f0c7629f1212c"
 dependencies = [
  "async-trait",
  "futures-util",
+ "rsi-api-contract-build",
  "rsi-api-protocol",
  "rsi-meta",
  "rsi-ui",
@@ -5453,7 +5294,7 @@ dependencies = [
 [[package]]
 name = "rsi-ui-portable"
 version = "0.0.1"
-source = "git+https://github.com/wowfun/rsiversi.git?rev=386858d6f266fdf8d5c58e19793e5d2d09d3da34#386858d6f266fdf8d5c58e19793e5d2d09d3da34"
+source = "git+https://github.com/wowfun/rsiversi.git?rev=3545705d4b3f0763d636f873fc2f0c7629f1212c#3545705d4b3f0763d636f873fc2f0c7629f1212c"
 dependencies = [
  "async-trait",
  "futures-util",
@@ -5472,7 +5313,7 @@ dependencies = [
 [[package]]
 name = "rsi-ui-protocol"
 version = "0.0.1"
-source = "git+https://github.com/wowfun/rsiversi.git?rev=386858d6f266fdf8d5c58e19793e5d2d09d3da34#386858d6f266fdf8d5c58e19793e5d2d09d3da34"
+source = "git+https://github.com/wowfun/rsiversi.git?rev=3545705d4b3f0763d636f873fc2f0c7629f1212c#3545705d4b3f0763d636f873fc2f0c7629f1212c"
 dependencies = [
  "serde",
  "serde_json",
@@ -5482,7 +5323,7 @@ dependencies = [
 [[package]]
 name = "rsi-user-questions-protocol"
 version = "0.0.1"
-source = "git+https://github.com/wowfun/rsiversi.git?rev=386858d6f266fdf8d5c58e19793e5d2d09d3da34#386858d6f266fdf8d5c58e19793e5d2d09d3da34"
+source = "git+https://github.com/wowfun/rsiversi.git?rev=3545705d4b3f0763d636f873fc2f0c7629f1212c#3545705d4b3f0763d636f873fc2f0c7629f1212c"
 dependencies = [
  "async-trait",
  "futures-util",
@@ -5494,89 +5335,32 @@ dependencies = [
 ]
 
 [[package]]
-name = "rsi-web-assets"
-version = "0.0.1"
-source = "git+https://github.com/wowfun/rsiversi.git?rev=386858d6f266fdf8d5c58e19793e5d2d09d3da34#386858d6f266fdf8d5c58e19793e5d2d09d3da34"
-dependencies = [
- "async-trait",
- "hex",
- "rsi-api-http",
- "rsi-api-protocol",
- "rsi-meta",
- "rsi-ui-protocol",
- "rustix 1.1.5",
- "serde",
- "serde_json",
- "sha2",
- "thiserror 2.0.21",
- "tokio",
- "tokio-util",
-]
-
-[[package]]
-name = "rsi-web-assets-api"
-version = "0.0.1"
-source = "git+https://github.com/wowfun/rsiversi.git?rev=386858d6f266fdf8d5c58e19793e5d2d09d3da34#386858d6f266fdf8d5c58e19793e5d2d09d3da34"
-dependencies = [
- "async-trait",
- "futures-util",
- "rsi-api-protocol",
- "rsi-meta",
- "rsi-ui-protocol",
- "rsi-web-assets",
- "serde",
- "serde_json",
- "tokio",
- "tokio-util",
-]
-
-[[package]]
-name = "rsi-workbench-ui"
-version = "0.0.1"
-source = "git+https://github.com/wowfun/rsiversi.git?rev=386858d6f266fdf8d5c58e19793e5d2d09d3da34#386858d6f266fdf8d5c58e19793e5d2d09d3da34"
-dependencies = [
- "async-trait",
- "futures-util",
- "rsi-agent-session-protocol",
- "rsi-ai-protocol",
- "rsi-api-protocol",
- "rsi-configuration-api",
- "rsi-credentials-protocol",
- "rsi-host",
- "rsi-meta",
- "rsi-navigation-api",
- "rsi-settings-protocol",
- "rsi-ui",
- "serde",
- "serde_json",
- "tokio",
- "tokio-util",
-]
-
-[[package]]
 name = "rsi-workspace"
 version = "0.0.1"
-source = "git+https://github.com/wowfun/rsiversi.git?rev=386858d6f266fdf8d5c58e19793e5d2d09d3da34#386858d6f266fdf8d5c58e19793e5d2d09d3da34"
+source = "git+https://github.com/wowfun/rsiversi.git?rev=3545705d4b3f0763d636f873fc2f0c7629f1212c#3545705d4b3f0763d636f873fc2f0c7629f1212c"
 dependencies = [
  "async-trait",
- "hex",
+ "getrandom 0.3.4",
+ "rsi-api-protocol",
+ "rsi-execution",
  "rsi-meta",
+ "rsi-process",
  "rsi-storage",
  "rsi-storage-domain",
  "rsi-workspace-protocol",
  "serde",
  "serde_json",
- "sha2",
  "tokio",
 ]
 
 [[package]]
 name = "rsi-workspace-api"
 version = "0.0.1"
-source = "git+https://github.com/wowfun/rsiversi.git?rev=386858d6f266fdf8d5c58e19793e5d2d09d3da34#386858d6f266fdf8d5c58e19793e5d2d09d3da34"
+source = "git+https://github.com/wowfun/rsiversi.git?rev=3545705d4b3f0763d636f873fc2f0c7629f1212c#3545705d4b3f0763d636f873fc2f0c7629f1212c"
 dependencies = [
  "async-trait",
  "futures-util",
+ "rsi-api-contract-build",
  "rsi-api-protocol",
  "rsi-meta",
  "rsi-workspace-protocol",
@@ -5585,21 +5369,36 @@ dependencies = [
 ]
 
 [[package]]
+name = "rsi-workspace-default-api"
+version = "0.0.1"
+source = "git+https://github.com/wowfun/rsiversi.git?rev=3545705d4b3f0763d636f873fc2f0c7629f1212c#3545705d4b3f0763d636f873fc2f0c7629f1212c"
+dependencies = [
+ "async-trait",
+ "rsi-api-contract-build",
+ "rsi-api-protocol",
+ "rsi-meta",
+ "rsi-workspace-protocol",
+ "serde",
+]
+
+[[package]]
 name = "rsi-workspace-path"
 version = "0.0.1"
-source = "git+https://github.com/wowfun/rsiversi.git?rev=386858d6f266fdf8d5c58e19793e5d2d09d3da34#386858d6f266fdf8d5c58e19793e5d2d09d3da34"
+source = "git+https://github.com/wowfun/rsiversi.git?rev=3545705d4b3f0763d636f873fc2f0c7629f1212c#3545705d4b3f0763d636f873fc2f0c7629f1212c"
 
 [[package]]
 name = "rsi-workspace-protocol"
 version = "0.0.1"
-source = "git+https://github.com/wowfun/rsiversi.git?rev=386858d6f266fdf8d5c58e19793e5d2d09d3da34#386858d6f266fdf8d5c58e19793e5d2d09d3da34"
+source = "git+https://github.com/wowfun/rsiversi.git?rev=3545705d4b3f0763d636f873fc2f0c7629f1212c#3545705d4b3f0763d636f873fc2f0c7629f1212c"
 dependencies = [
  "async-trait",
  "hex",
  "rsi-api-protocol",
+ "rsi-execution-protocol",
  "rsi-meta",
  "rsi-workspace-path",
  "serde",
+ "serde_json",
  "sha2",
  "thiserror 2.0.21",
 ]
@@ -5607,10 +5406,9 @@ dependencies = [
 [[package]]
 name = "rsi-workspace-review"
 version = "0.0.1"
-source = "git+https://github.com/wowfun/rsiversi.git?rev=386858d6f266fdf8d5c58e19793e5d2d09d3da34#386858d6f266fdf8d5c58e19793e5d2d09d3da34"
+source = "git+https://github.com/wowfun/rsiversi.git?rev=3545705d4b3f0763d636f873fc2f0c7629f1212c#3545705d4b3f0763d636f873fc2f0c7629f1212c"
 dependencies = [
  "async-trait",
- "cap-std",
  "futures-util",
  "getrandom 0.3.4",
  "hex",
@@ -5619,6 +5417,7 @@ dependencies = [
  "rsi-agent-store-protocol",
  "rsi-agent-turn-protocol",
  "rsi-api-protocol",
+ "rsi-execution",
  "rsi-files-native-fs",
  "rsi-files-protocol",
  "rsi-meta",
@@ -5627,7 +5426,7 @@ dependencies = [
  "rsi-storage-domain",
  "rsi-workspace-protocol",
  "rsi-workspace-review-api",
- "rustix 1.1.5",
+ "rustix",
  "serde",
  "serde_json",
  "sha2",
@@ -5639,35 +5438,15 @@ dependencies = [
 [[package]]
 name = "rsi-workspace-review-api"
 version = "0.0.1"
-source = "git+https://github.com/wowfun/rsiversi.git?rev=386858d6f266fdf8d5c58e19793e5d2d09d3da34#386858d6f266fdf8d5c58e19793e5d2d09d3da34"
+source = "git+https://github.com/wowfun/rsiversi.git?rev=3545705d4b3f0763d636f873fc2f0c7629f1212c#3545705d4b3f0763d636f873fc2f0c7629f1212c"
 dependencies = [
  "rsi-agent-session-protocol",
+ "rsi-api-contract-build",
  "rsi-api-protocol",
  "rsi-conversation",
  "rsi-workspace-protocol",
  "serde",
  "serde_json",
-]
-
-[[package]]
-name = "rsi-workspace-review-ui"
-version = "0.0.1"
-source = "git+https://github.com/wowfun/rsiversi.git?rev=386858d6f266fdf8d5c58e19793e5d2d09d3da34#386858d6f266fdf8d5c58e19793e5d2d09d3da34"
-dependencies = [
- "async-trait",
- "futures-util",
- "hex",
- "rsi-api-protocol",
- "rsi-client",
- "rsi-meta",
- "rsi-session-protocol",
- "rsi-ui",
- "rsi-workspace-protocol",
- "rsi-workspace-review-api",
- "serde",
- "serde_json",
- "sha2",
- "tokio",
 ]
 
 [[package]]
@@ -5682,9 +5461,9 @@ dependencies = [
 
 [[package]]
 name = "rusqlite"
-version = "0.40.2"
+version = "0.41.1"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "23f2a97da3e3873c73cb2a2e71b35c40ff95e0b1eefa8d72d8499a6928c3b5b3"
+checksum = "da9bba6f3506135e120a6586df05be18b48d18896600646a4bec8f993d91a594"
 dependencies = [
  "bitflags 2.13.2",
  "fallible-iterator",
@@ -5712,19 +5491,6 @@ dependencies = [
 
 [[package]]
 name = "rustix"
-version = "0.38.44"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "fdb5bc1ae2baa591800df16c9ca78619bf65c0488b41b96ccec5d11220d8c154"
-dependencies = [
- "bitflags 2.13.2",
- "errno",
- "libc",
- "linux-raw-sys 0.4.15",
- "windows-sys 0.59.0",
-]
-
-[[package]]
-name = "rustix"
 version = "1.1.5"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "891efababe418670775f199f0d233d84843c227a0949a883ce15b37c78d6629d"
@@ -5732,7 +5498,7 @@ dependencies = [
  "bitflags 2.13.2",
  "errno",
  "libc",
- "linux-raw-sys 0.12.1",
+ "linux-raw-sys",
  "windows-sys 0.61.2",
 ]
 
@@ -5743,7 +5509,7 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "2fc84bf7e9aa16c4f2c758f27412dc9841341e16aa682d9c7ac308fe3ee12056"
 dependencies = [
  "once_cell",
- "rustix 1.1.5",
+ "rustix",
 ]
 
 [[package]]
@@ -5972,6 +5738,17 @@ dependencies = [
 ]
 
 [[package]]
+name = "sha1"
+version = "0.11.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "aacc4cc499359472b4abe1bf11d0b12e688af9a805fa5e3016f9a386dc2d0214"
+dependencies = [
+ "cfg-if",
+ "cpufeatures 0.3.1",
+ "digest 0.11.3",
+]
+
+[[package]]
 name = "sha2"
 version = "0.10.9"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -5979,7 +5756,7 @@ checksum = "a7507d819769d01a365ab707794a4084392c824f54a7a6a7862f8c3d0892b283"
 dependencies = [
  "cfg-if",
  "cpufeatures 0.2.17",
- "digest",
+ "digest 0.10.7",
 ]
 
 [[package]]
@@ -6003,27 +5780,6 @@ name = "shlex"
 version = "2.0.1"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "f8fadd59c855ef2080decdef8ff161eb6661b86933c9d82e5ba29dc602a55aba"
-
-[[package]]
-name = "signal-hook"
-version = "0.3.18"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "d881a16cf4426aa584979d30bd82cb33429027e42122b169753d6ef1085ed6e2"
-dependencies = [
- "libc",
- "signal-hook-registry",
-]
-
-[[package]]
-name = "signal-hook-mio"
-version = "0.2.5"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "b75a19a7a740b25bc7944bdee6172368f988763b744e3d4dfe753f6b4ece40cc"
-dependencies = [
- "libc",
- "mio",
- "signal-hook",
-]
 
 [[package]]
 name = "signal-hook-registry"
@@ -6137,7 +5893,7 @@ checksum = "a18596f8c785a729f2819c0f6a7eae6ebeebdfffbfe4214ae6b087f690e31901"
 dependencies = [
  "new_debug_unreachable",
  "parking_lot",
- "phf_shared 0.13.1",
+ "phf_shared",
  "precomputed-hash",
 ]
 
@@ -6147,8 +5903,8 @@ version = "0.6.1"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "585635e46db231059f76c5849798146164652513eb9e8ab2685939dd90f29b69"
 dependencies = [
- "phf_generator 0.13.1",
- "phf_shared 0.13.1",
+ "phf_generator",
+ "phf_shared",
  "proc-macro2",
  "quote",
 ]
@@ -6185,17 +5941,6 @@ name = "subtle"
 version = "2.6.1"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "13c2bddecc57b384dee18652358fb23172facb8a2c51ccc10d74c157bdea3292"
-
-[[package]]
-name = "syn"
-version = "1.0.109"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "72b64191b275b66ffe2469e8af2c1cfe3bafa67b529ead792a6d0160888b4237"
-dependencies = [
- "proc-macro2",
- "quote",
- "unicode-ident",
-]
 
 [[package]]
 name = "syn"
@@ -6275,7 +6020,7 @@ dependencies = [
  "fastrand",
  "getrandom 0.4.3",
  "once_cell",
- "rustix 1.1.5",
+ "rustix",
  "windows-sys 0.61.2",
 ]
 
@@ -6286,94 +6031,6 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "5fed54709c5b3a53d09bb1c113ea4f5ceafd1e772ddcb0030a82e1d56c087b08"
 dependencies = [
  "new_debug_unreachable",
-]
-
-[[package]]
-name = "termina"
-version = "0.3.3"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "9048a889effe34a5cddee0af7f53285198b16dca3be510858d38dfdb3e62a04e"
-dependencies = [
- "bitflags 2.13.2",
- "parking_lot",
- "rustix 1.1.5",
- "signal-hook",
- "windows-sys 0.61.2",
-]
-
-[[package]]
-name = "terminfo"
-version = "0.9.0"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "d4ea810f0692f9f51b382fff5893887bb4580f5fa246fde546e0b13e7fcee662"
-dependencies = [
- "fnv",
- "nom",
- "phf 0.11.3",
- "phf_codegen 0.11.3",
-]
-
-[[package]]
-name = "termion"
-version = "4.0.6"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "f44138a9ae08f0f502f24104d82517ef4da7330c35acd638f1f29d3cd5475ecb"
-dependencies = [
- "libc",
- "numtoa",
- "serde",
-]
-
-[[package]]
-name = "termios"
-version = "0.3.3"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "411c5bf740737c7918b8b1fe232dca4dc9f8e754b8ad5e20966814001ed0ac6b"
-dependencies = [
- "libc",
-]
-
-[[package]]
-name = "termwiz"
-version = "0.23.3"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "4676b37242ccbd1aabf56edb093a4827dc49086c0ffd764a5705899e0f35f8f7"
-dependencies = [
- "anyhow",
- "base64 0.22.1",
- "bitflags 2.13.2",
- "fancy-regex 0.11.0",
- "filedescriptor",
- "finl_unicode",
- "fixedbitset",
- "hex",
- "lazy_static",
- "libc",
- "log",
- "memmem",
- "nix 0.29.0",
- "num-derive",
- "num-traits",
- "ordered-float",
- "pest",
- "pest_derive",
- "phf 0.11.3",
- "serde",
- "sha2",
- "signal-hook",
- "siphasher",
- "terminfo",
- "termios",
- "thiserror 1.0.69",
- "ucd-trie",
- "unicode-segmentation",
- "vtparse",
- "wezterm-bidi",
- "wezterm-blob-leases",
- "wezterm-color-types",
- "wezterm-dynamic",
- "wezterm-input-types",
- "winapi",
 ]
 
 [[package]]
@@ -6429,9 +6086,7 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "cdb87b95ec50ddfa440816d227a17b2ccbdda963a316a727fda0fc4334f7d134"
 dependencies = [
  "deranged",
- "libc",
  "num-conv",
- "num_threads",
  "powerfmt",
  "serde_core",
  "time-core",
@@ -6514,6 +6169,18 @@ checksum = "b0c85f2c3ef0b1cd58b36682f4b17aaa995f0e5db534d85692b4903abce21f67"
 dependencies = [
  "rustls",
  "tokio",
+]
+
+[[package]]
+name = "tokio-tungstenite"
+version = "0.30.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "17a073bfed563fa236697a068031408a93cd9522e08abf9933ead3e73411bd71"
+dependencies = [
+ "futures-util",
+ "log",
+ "tokio",
+ "tungstenite",
 ]
 
 [[package]]
@@ -6663,16 +6330,26 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "e421abadd41a4225275504ea4d6566923418b7f05506fbc9c0fe86ba7396114b"
 
 [[package]]
+name = "tungstenite"
+version = "0.30.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "e48ac77174b19c110a50ab2128b24215ac9cb40e0e12e093fb602d175c569d22"
+dependencies = [
+ "bytes",
+ "data-encoding",
+ "http",
+ "httparse",
+ "log",
+ "rand",
+ "sha1",
+ "thiserror 2.0.21",
+]
+
+[[package]]
 name = "typenum"
 version = "1.20.1"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "b6f5e870be6c3b371b77fe0ee0bafb859fa4964b4404c27de1d380043c4dda20"
-
-[[package]]
-name = "ucd-trie"
-version = "0.1.7"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "2896d95c02a80c6d6a5d6e953d479f5ddf2dfdb6a244441010e373ac0fb88971"
 
 [[package]]
 name = "unicase"
@@ -6691,17 +6368,6 @@ name = "unicode-segmentation"
 version = "1.13.3"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "c6f5d3c3b1bf09027a88a6bc961fc00497d651009560b5463668dc81b0fa87a8"
-
-[[package]]
-name = "unicode-truncate"
-version = "2.0.1"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "16b380a1238663e5f8a691f9039c73e1cdae598a30e9855f541d29b08b53e9a5"
-dependencies = [
- "itertools",
- "unicode-segmentation",
- "unicode-width",
-]
 
 [[package]]
 name = "unicode-width"
@@ -6740,21 +6406,13 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "b6c140620e7ffbb22c2dee59cafe6084a59b5ffc27a8859a5f0d494b5d52b6be"
 
 [[package]]
-name = "utf8parse"
-version = "0.2.2"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "06abde3611657adf66d383f00b093d7faecc7fa57071cce2578660c9f1010821"
-
-[[package]]
 name = "uuid"
 version = "1.26.1"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "2ef6dac1e96601b4fb3acccccff2139741fcb757cb9a36089bf5be91cfb285ce"
 dependencies = [
- "atomic",
  "getrandom 0.4.3",
  "js-sys",
- "serde_core",
  "wasm-bindgen",
 ]
 
@@ -6806,15 +6464,6 @@ checksum = "a5924018406ce0063cd67f8e008104968b74b563ee1b85dde3ed1f7cb87d3dbd"
 dependencies = [
  "arrayvec",
  "memchr",
-]
-
-[[package]]
-name = "vtparse"
-version = "0.6.2"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "6d9b2acfb050df409c972a37d3b8e08cdea3bddb0c09db9d53137e504cfabed0"
-dependencies = [
- "utf8parse",
 ]
 
 [[package]]
@@ -6945,8 +6594,8 @@ version = "0.2.6"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "ba8b815c1b593dc0baf78dd0f4fc8fdb2de53198fb1163738093e9a311c33fb3"
 dependencies = [
- "phf 0.13.1",
- "phf_codegen 0.13.1",
+ "phf",
+ "phf_codegen",
  "string_cache",
  "string_cache_codegen",
 ]
@@ -6965,80 +6614,6 @@ name = "weezl"
 version = "0.1.12"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "a28ac98ddc8b9274cb41bb4d9d4d5c425b6020c50c46f25559911905610b4a88"
-
-[[package]]
-name = "wezterm-bidi"
-version = "0.2.3"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "0c0a6e355560527dd2d1cf7890652f4f09bb3433b6aadade4c9b5ed76de5f3ec"
-dependencies = [
- "log",
- "wezterm-dynamic",
-]
-
-[[package]]
-name = "wezterm-blob-leases"
-version = "0.1.1"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "692daff6d93d94e29e4114544ef6d5c942a7ed998b37abdc19b17136ea428eb7"
-dependencies = [
- "getrandom 0.3.4",
- "mac_address",
- "serde",
- "sha2",
- "thiserror 1.0.69",
- "uuid",
-]
-
-[[package]]
-name = "wezterm-color-types"
-version = "0.3.0"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "7de81ef35c9010270d63772bebef2f2d6d1f2d20a983d27505ac850b8c4b4296"
-dependencies = [
- "csscolorparser",
- "deltae",
- "lazy_static",
- "serde",
- "wezterm-dynamic",
-]
-
-[[package]]
-name = "wezterm-dynamic"
-version = "0.2.1"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "5f2ab60e120fd6eaa68d9567f3226e876684639d22a4219b313ff69ec0ccd5ac"
-dependencies = [
- "log",
- "ordered-float",
- "strsim",
- "thiserror 1.0.69",
- "wezterm-dynamic-derive",
-]
-
-[[package]]
-name = "wezterm-dynamic-derive"
-version = "0.1.1"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "46c0cf2d539c645b448eaffec9ec494b8b19bd5077d9e58cb1ae7efece8d575b"
-dependencies = [
- "proc-macro2",
- "quote",
- "syn 1.0.109",
-]
-
-[[package]]
-name = "wezterm-input-types"
-version = "0.1.0"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "7012add459f951456ec9d6c7e6fc340b1ce15d6fc9629f8c42853412c029e57e"
-dependencies = [
- "bitflags 1.3.2",
- "euclid",
- "lazy_static",
- "serde",
- "wezterm-dynamic",
-]
 
 [[package]]
 name = "widestring"
@@ -7334,6 +6909,16 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "80d0f4e272c85def139476380b12f9ac60926689dd2e01d4923222f40580869d"
 dependencies = [
  "winapi",
+]
+
+[[package]]
+name = "winreg"
+version = "0.55.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "cb5a765337c50e9ec252c2069be9bf91c7df47afb103b642ba3a53bf8101be97"
+dependencies = [
+ "cfg-if",
+ "windows-sys 0.59.0",
 ]
 
 [[package]]

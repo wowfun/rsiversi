@@ -39,12 +39,11 @@ order regardless of settlement order. A failed sibling does not erase evidence
 from successful siblings: their results are published in source order before the
 executor propagates the first failure.
 
-Each call still follows prepare, durable intent, durable start, invoke, durable
-result, and commit ordering. Within one parallel-safe run, all source-ordered
-intents form one publication and durability barrier, followed by all matching
-source-ordered starts and one durability barrier before invocation. The batch
-does not weaken an individual start proof: every intent is durable before any
-start is published, and every start is durable before any Tool runs. Results
+Each call follows the
+[complete-prefix ordering contract](../../../../crates/rsi-agent/docs/subsystems/turns-and-agent-trees.md).
+Within one parallel-safe run, one publication contains all source-ordered intents
+followed by all matching starts. One durability wait through the last start
+protects every member before any Tool runs. Results
 remain individually published and committed because one sibling's generated
 budget failure must not erase later settled siblings. Cancellation and retained
 Tool settlement keep their existing admission ownership. Typed Tool execution extensions may carry the

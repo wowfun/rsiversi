@@ -81,6 +81,15 @@ an independent application-owned publication. The original DSH fused dispatcher
 supplies the Agent subject and isolates failing notification listeners, with one
 scope carrier per Agent instead of one allocation per event.
 
+DSH observes inbox presence directly from its current queue projection. Native
+Agent wait observation likewise uses the Store's existing mailbox summary,
+including the first pending next-Step source kind at the same snapshot. Reading
+a full payload page merely to distinguish a child completion from other input
+adds body decoding and a second read cut without changing the decision. The
+source discriminator is already indexed and validated against canonical history;
+this adds no durable field, payload cache or schema version. Actual consumption
+still uses the claim boundary and its own admission rules.
+
 ## Alternatives considered
 
 Clearing pending messages cannot implement `keepInbox`. Reclassifying each

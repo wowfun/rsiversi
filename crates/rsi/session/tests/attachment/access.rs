@@ -153,7 +153,7 @@ async fn remote_session_reads_are_offline_caller_bound_and_live_streams_recheck_
         Err(SessionError::Api(ApiError::Unauthorized))
     ));
     assert!(matches!(
-        scoped.read_header(remote).await,
+        scoped.read_summary(remote).await,
         Err(SessionError::Api(ApiError::Unauthorized))
     ));
     for selected in [
@@ -181,6 +181,8 @@ async fn remote_session_reads_are_offline_caller_bound_and_live_streams_recheck_
     ));
     let visible = scoped.list_recent(None, 1).await.unwrap();
     assert_eq!(visible.sessions[0].header, headers[0]);
+    assert_eq!(visible.sessions[0].durable_fact_seq, 1);
+    assert_eq!(visible.sessions[0].durable_control_seq, 0);
     assert!(!visible.has_more);
     access.granted.store(true, Ordering::SeqCst);
     let read = rsi_session_protocol::SessionReads::acquire(&service, origin.clone(), &target)
@@ -251,8 +253,18 @@ async fn remote_session_reads_are_offline_caller_bound_and_live_streams_recheck_
         64,
         "a paused stream must release its publication permit"
     );
-    assert!(scoped.read_header(headers[0].session_id()).await.is_ok());
+    assert!(scoped.read_summary(headers[0].session_id()).await.is_ok());
     access.granted.store(false, Ordering::SeqCst);
+    assert!(matches!(
+        scoped.read_summary(remote).await,
+        Err(SessionError::Api(ApiError::Unauthorized))
+    ));
+    assert!(matches!(
+        handle
+            .read_message(&MessageId::new("absent").unwrap(), 1)
+            .await,
+        Err(SessionError::Api(ApiError::Unauthorized))
+    ));
     assert!(
         matches!(
             handle.evidence(evidence).await,
@@ -295,7 +307,7 @@ async fn remote_session_reads_are_offline_caller_bound_and_live_streams_recheck_
         Err(SessionError::Api(ApiError::Unauthorized))
     ));
     assert!(
-        service.read_header(remote).await.is_ok(),
+        service.read_summary(remote).await.is_ok(),
         "Local trust is independent of Device Use"
     );
     revoked.cancel();
@@ -460,6 +472,26 @@ async fn input_canonicalization_and_submission_share_one_exact_target_lease() {
 struct RemoteWorkspace(rsi_execution::ExecutionCoordinates);
 #[async_trait]
 impl WorkspaceRegistry for RemoteWorkspace {
+    async fn find(
+        &self,
+        _: &rsi_workspace_protocol::WorkspaceKey,
+    ) -> rsi_workspace_protocol::Result<Option<rsi_workspace_protocol::WorkspaceRecord>> {
+        panic!("coordinate lookup is not used by this fixture")
+    }
+
+    async fn display_order(
+        &self,
+    ) -> rsi_workspace_protocol::Result<rsi_workspace_protocol::WorkspaceDisplayOrder> {
+        unreachable!("display ordering is not used by this fixture")
+    }
+    async fn insert_before(
+        &self,
+        _: &rsi_workspace_protocol::WorkspaceId,
+        _: Option<&rsi_workspace_protocol::WorkspaceId>,
+    ) -> rsi_workspace_protocol::Result<rsi_workspace_protocol::WorkspaceDisplayOrder> {
+        unreachable!("display ordering is not used by this fixture")
+    }
+
     async fn rename(
         &self,
         _id: &rsi_workspace_protocol::WorkspaceId,

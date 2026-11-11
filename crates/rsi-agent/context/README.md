@@ -1,12 +1,26 @@
 # rsi-agent-context
 
+The cursor exposes the last retained, entered `RuntimeContext` snapshot for native
+request preparation. Each Turn retains its message position; text is borrowed
+from the existing message. Replay and checkpoints preserve this position, while
+Turn removal forgets it. Claims and omitted/rejected preparation never advance it.
+
 Accepted direct text and claimed input remain outside model messages until
 `StepInputsPrepared`. The fold retains their original Facts by Turn and source
 Session, resolves the final decision from that exact set, and drops consumed
 claims even when the decision enters nothing or rejects. A pending capture borrows
 that retained set; it does not reread history per message. Checkpoints retain
-unprepared claims separately from entered model history. Fold checkpoint v18 and
-builder 2.15.0 invalidate earlier projection caches.
+unprepared claims separately from entered model history. Fold checkpoint v20 and
+builder 2.16.0 bind explicit prompt ownership and retained runtime-context positions.
+Earlier projection caches are incompatible.
+
+Each retained Turn records the last entered PluginContext Fact timestamp per
+producer, excluding Tool-result context. BeforeStep borrows the latest such
+timestamp from retained Turns in reverse order. Claimed, omitted or emptied
+inputs do not advance it. This derived metadata contains no message text,
+requires no historical read or separate durable domain, and shares the Turn's
+accounting, checkpoint and selected fork lifetime. Partial compaction preserves
+it; removing the entire Turn releases it and permits a fresh contribution.
 
 Verbatim file blocks remain typed in the fold and checkpoints. The receiving
 Session's execution location determines whether a block permits local path
@@ -42,11 +56,16 @@ coordinate. Turn IDs are only Session-local; projection, pruning, accounting,
 checkpoint restore and compaction selection must preserve both coordinates.
 Durable compaction selections use policy v2 and carry the source Session explicitly.
 
-Step preparation instructions are current system guidance, not historical chat
-messages. `StepPrepared` replaces that guidance; the next Step or terminal Turn
-clears it. Ordinary contributed inputs retain their existing history semantics.
+Step preparation prompts are current system guidance, not historical chat messages.
+`StepPrepared.prompt` replaces the tagged assembly when present; omission retains it.
+Context consumes `Assembled` directly and prefixes Header/persona only for
+`AppendToHeader`. Empty values have the ownership-specific meaning defined by the
+[Session protocol](../session-protocol/README.md). The synchronized Context cursor
+exposes that same tagged value for Executor equality; new Steps and terminal Turns
+reset it. Context never calls native prompt providers or repeats interpolation.
+Ordinary contributed inputs retain their existing history semantics.
 The bounded guidance participates in context accounting, compaction requests and
-checkpoint v18, so recovery cannot retain an exited Plan's old instructions.
+checkpoint v20, so recovery cannot retain an exited Plan's old instructions.
 
 Language history is projected from atomic `ModelAttemptSettled` evidence.
 Final failed, cancelled and max-token attempts contribute their safe text and
@@ -69,7 +88,7 @@ interrupted-output projection.
 Target-specific Tool image fallback consumes the assembled messages before request
 construction, moving unaffected messages and request options without cloning. Only Tool results containing
 images are rebuilt; complete-request validation still bounds the projection.
-The allocation golden binds builder 2.15.0, Session format 34, the v18 fold
+The allocation golden binds builder 2.16.0, Session format 37, the v20 fold
 and the v6 envelope.
 
 The single deep module for prompt projection, incremental model context, and
@@ -138,7 +157,7 @@ reuses retained per-Turn totals and serializes only synthesized outcomes.
 Raw Facts remain unchanged.
 
 Retention and emission are distinct. Each attempt supplies its described target
-LanguageProfile along with frozen Language request options. Builder 2.15.0 emits
+LanguageProfile along with frozen Language request options. Builder 2.16.0 emits
 nested ToolResult images only when that profile positively declares image Tool
 results. No or Unknown uses deterministic descriptor text in the same block
 position, without reading Media or changing call IDs and error status. Ordinary

@@ -6,6 +6,12 @@ physical absolute paths and stable order, and provides a Local registry. Each
 workspace is one bounded domain record carrying its immutable insertion order;
 mutations never rewrite unrelated registrations.
 
+Each new registration receives an opaque random identity, retained across restart
+and never derived from its directory. Re-registering a deleted directory creates
+a new identity. The registry separately indexes the complete coordinate key for
+read-only `find` and idempotent registration. Neither index probes the filesystem.
+The coordinate index is reconstructed from records and is not persisted twice.
+
 Workspace state is not Agent context, a sandbox grant, or directory ownership.
 Deleting a registration removes only domain records; user directories, files,
 Sessions, and Agent facts are never removed. Missing directories are reported
@@ -46,7 +52,7 @@ never evidence that a directory is missing. Native canonicalization stays with
 Workspace's native filesystem boundary. Registrations contain no reusable grant.
 
 Workspace's API plugins own their versioned request DTOs, operation bounds and
-client proxy. The version-4 endpoint consumes trusted ingress and the API registrar; the client
+client proxy. The version-5 endpoint consumes trusted ingress and the API registrar; the client
 publishes the same Workspace contract over a negotiated connection. Generic
 transports do not classify Workspace operations. Transport failures preserve the
 API error taxonomy, including authentication and uncertain mutation outcomes.

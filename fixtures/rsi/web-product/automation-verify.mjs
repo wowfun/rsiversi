@@ -1,5 +1,6 @@
+import {browserOwner} from './controls.mjs';
 import assert from 'node:assert/strict';
-import {readFile,writeFile,mkdir,chmod} from 'node:fs/promises';
+import {readFile,writeFile,mkdir} from 'node:fs/promises';
 import {join,resolve} from 'node:path';
 import {chromium} from 'playwright';
 import {startService} from './service.mjs';
@@ -12,7 +13,6 @@ const service=await startService({binary:paired.binary,assets:paired.assets,repo
 }});
 try {
  receipt=service.register("Automation visual viewer");
- await service.restart(async()=>{const policyPath=join(seed,'policy/policy.json'),policy=JSON.parse(await readFile(policyPath));policy.grants=[{device:receipt.id,source:'visual',rule:'visual',view:true,cancel:true,resume:true}];await writeFile(policyPath,JSON.stringify(policy));await chmod(policyPath,0o600);});
 } catch(error) { await service.close(); throw error; }
 const browser=await chromium.launch({headless:true});
 try{
@@ -37,6 +37,9 @@ try{
   };
  });
  await page.goto(service.origin);await page.locator('#receipt').fill(JSON.stringify(receipt));await page.getByRole('button',{name:'Connect',exact:true}).click();
+ const owner=await browserOwner(page);
+ assert(process.env.RSI_AUTOMATION_GRANT_PROBE,'explicit Local Automation grant probe required');
+ const policy=JSON.parse(service.probe(process.env.RSI_AUTOMATION_GRANT_PROBE,undefined,[owner]).stdout);assert(Number(policy.revision)>0);
  await page.getByRole('button',{name:'Deployment checks',exact:true}).click();await page.locator('.automation-row').first().click();
  await page.locator('.automation-detail').getByText('Expected visible text is missing').waitFor();await page.getByRole('button',{name:'Read screenshot',exact:true}).click();
  await page.waitForFunction(()=>{const i=document.querySelector('.automation-screenshot');return i?.complete&&i.naturalWidth===1280});

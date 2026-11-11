@@ -1077,7 +1077,10 @@ async fn headless_inputs(
             .import_image(source)
             .await
             .map_err(|error| RsiError::Run(format!("image upload: {error}")))?;
-        content.push(MessageInput::Image { media, presentation: None });
+        content.push(MessageInput::Image {
+            media,
+            presentation: None,
+        });
     }
     Ok(content)
 }

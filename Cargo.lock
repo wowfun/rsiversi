@@ -2847,9 +2847,9 @@ dependencies = [
 
 [[package]]
 name = "libsqlite3-sys"
-version = "0.38.2"
+version = "0.39.1"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "f1d20bef17f513b9b3004532233187769cd072d790971f4e4da0e346eb6401e8"
+checksum = "14a5f01b87b92705d07b433c06f96cbc764637d81a0bffb5734ce17cf0f9a2b3"
 dependencies = [
  "cc",
  "pkg-config",
@@ -4614,6 +4614,7 @@ dependencies = [
  "rsi-agent-plan-policy",
  "rsi-agent-presets",
  "rsi-agent-program",
+ "rsi-agent-prompt-assembly",
  "rsi-agent-references",
  "rsi-agent-repeat-tool-reminder",
  "rsi-agent-schedule",
@@ -4717,7 +4718,7 @@ dependencies = [
  "rsi-settings-local",
  "rsi-settings-protocol",
  "rsi-settings-testkit",
- "rsi-shell-bash",
+ "rsi-shell-native",
  "rsi-ssh-client",
  "rsi-ssh-protocol",
  "rsi-storage",
@@ -4921,6 +4922,7 @@ dependencies = [
  "rsi-agent-composition-protocol",
  "rsi-agent-context",
  "rsi-agent-presets",
+ "rsi-agent-prompt-assembly",
  "rsi-agent-session-protocol",
  "rsi-ai-protocol",
  "rsi-meta",
@@ -4951,6 +4953,7 @@ dependencies = [
  "rsi-files-protocol",
  "rsi-meta",
  "rsi-meta-contract",
+ "rsi-meta-scope",
  "rsi-process",
  "rsi-sandbox",
  "rsi-tools-protocol",
@@ -5007,6 +5010,7 @@ dependencies = [
  "rsi-agent-context",
  "rsi-agent-kernel",
  "rsi-agent-model-selection",
+ "rsi-agent-prompt-assembly",
  "rsi-agent-session-protocol",
  "rsi-agent-store-protocol",
  "rsi-agent-testkit",
@@ -5025,6 +5029,7 @@ dependencies = [
  "rsi-jobs-local",
  "rsi-media-protocol",
  "rsi-meta",
+ "rsi-meta-scope",
  "rsi-packages",
  "rsi-process",
  "rsi-process-local",
@@ -5196,6 +5201,23 @@ dependencies = [
 ]
 
 [[package]]
+name = "rsi-agent-prompt-assembly"
+version = "0.0.1"
+dependencies = [
+ "async-trait",
+ "rsi-agent-composition-protocol",
+ "rsi-agent-session-protocol",
+ "rsi-ai-protocol",
+ "rsi-meta",
+ "rsi-meta-scope",
+ "rsi-sandbox",
+ "serde",
+ "serde_json",
+ "tokio",
+ "tokio-util",
+]
+
+[[package]]
 name = "rsi-agent-references"
 version = "0.0.1"
 dependencies = [
@@ -5344,6 +5366,8 @@ dependencies = [
  "rsi-agent-composition-protocol",
  "rsi-agent-session-protocol",
  "rsi-meta",
+ "serde",
+ "serde_json",
  "time",
  "tokio",
  "tokio-util",
@@ -6521,6 +6545,7 @@ dependencies = [
  "rsi-process-local",
  "rsi-sandbox",
  "rsi-sandbox-local",
+ "rsi-tools-protocol",
  "rsi-workspace-path",
  "serde_json",
  "tempfile",
@@ -6840,6 +6865,7 @@ dependencies = [
  "rsi-host",
  "rsi-packages",
  "rsi-service-host",
+ "rsi-workspace-path",
  "rustix 1.1.4",
  "serde",
  "serde_json",
@@ -7329,6 +7355,10 @@ dependencies = [
 name = "rsi-process-native"
 version = "0.0.1"
 dependencies = [
+ "getrandom 0.3.4",
+ "hex",
+ "serde_json",
+ "tempfile",
  "tokio",
  "windows-sys 0.61.2",
 ]
@@ -7443,6 +7473,7 @@ dependencies = [
  "rsi-meta-contract",
  "rsi-workspace-path",
  "serde",
+ "serde_json",
  "thiserror 2.0.20",
 ]
 
@@ -7455,12 +7486,14 @@ dependencies = [
  "libc",
  "rsi-meta",
  "rsi-sandbox",
+ "rsi-workspace-path",
  "rustix 1.1.4",
  "serde",
  "serde_json",
  "sha2",
  "tempfile",
  "tokio",
+ "windows-sys 0.61.2",
 ]
 
 [[package]]
@@ -7915,7 +7948,7 @@ dependencies = [
 ]
 
 [[package]]
-name = "rsi-shell-bash"
+name = "rsi-shell-native"
 version = "0.0.1"
 dependencies = [
  "async-trait",
@@ -8457,6 +8490,7 @@ name = "rsi-workspace"
 version = "0.0.1"
 dependencies = [
  "async-trait",
+ "getrandom 0.3.4",
  "hex",
  "rsi-api-protocol",
  "rsi-execution",
@@ -8489,10 +8523,11 @@ dependencies = [
  "rsi-api-protocol",
  "rsi-credentials-protocol",
  "rsi-execution",
+ "rsi-files-native-fs",
  "rsi-meta",
  "rsi-storage",
  "rsi-storage-domain",
- "rsi-storage-json",
+ "rsi-storage-sqlite",
  "rsi-workspace",
  "rsi-workspace-protocol",
  "serde",
@@ -8632,9 +8667,9 @@ dependencies = [
 
 [[package]]
 name = "rusqlite"
-version = "0.40.2"
+version = "0.41.1"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "23f2a97da3e3873c73cb2a2e71b35c40ff95e0b1eefa8d72d8499a6928c3b5b3"
+checksum = "da9bba6f3506135e120a6586df05be18b48d18896600646a4bec8f993d91a594"
 dependencies = [
  "bitflags 2.13.1",
  "fallible-iterator",

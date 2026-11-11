@@ -153,7 +153,7 @@ mod tests {
             json!({"type":"content_started","index":0,"content":{"type":"text"}}),
         )
         .unwrap();
-        let text = "界".repeat(50_000);
+        let text = "\n".repeat(400_000);
         let delta = serde_json::from_value(
             json!({"type":"content_delta","index":0,"delta":{"type":"text","value":text}}),
         )

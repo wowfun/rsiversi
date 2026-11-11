@@ -47,6 +47,13 @@ coordination locks and namespace guards remain after removal to avoid splitting
 concurrent leases. Actual removal can create those coordination anchors in existing
 homes even when their payloads are preserved. They are not an installed product.
 
+Installation renames on Windows retry a sharing violation at most eight times,
+waiting 20 ms initially and at most 200 ms per retry (1.1 seconds total). The
+same retained directory, source and destination remain selected under the
+maintenance lease. Other errors and post-rename synchronization failures return
+immediately. Persistent interference preserves the journal and previous bytes
+for explicit recovery.
+
 ## Removal and data
 
 Ordinary removal deletes only installation files and verified completed upgrade

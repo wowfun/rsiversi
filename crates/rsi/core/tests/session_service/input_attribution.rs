@@ -99,10 +99,9 @@ async fn assert_inputs(handle: &Arc<dyn SessionHandle>, receipts: &[MessageRecei
     }
 }
 
-#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
-async fn direct_input_attribution_survives_uds_draft_publication_retry_and_restart() {
-    let requests = Arc::new(Mutex::new(Vec::new()));
-    let seen = requests.clone();
+async fn recording_fixture(
+    requests: Arc<Mutex<Vec<serde_json::Value>>>,
+) -> (Fixture, tokio::task::JoinHandle<()>) {
     let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
     let fixture = fixture(&format!("http://{}", listener.local_addr().unwrap()));
     let server = tokio::spawn(async move {
@@ -111,7 +110,7 @@ async fn direct_input_attribution_survives_uds_draft_publication_retry_and_resta
             Router::new().route(
                 "/v1/chat/completions",
                 post(move |Json(body): Json<serde_json::Value>| {
-                    seen.lock().unwrap().push(body);
+                    requests.lock().unwrap().push(body);
                     chat()
                 }),
             ),
@@ -119,6 +118,33 @@ async fn direct_input_attribution_survives_uds_draft_publication_retry_and_resta
         .await
         .unwrap();
     });
+    (fixture, server)
+}
+
+async fn assert_non_waking_input(
+    handle: &Arc<dyn SessionHandle>,
+    input: SubmitInput,
+    receipt: &MessageReceipt,
+) {
+    assert_eq!(
+        handle.submit(input).await.unwrap().accepted_control_seq,
+        receipt.accepted_control_seq
+    );
+    handle.wait_idle().await.unwrap();
+    assert!(
+        handle
+            .history_before(None, 128)
+            .await
+            .unwrap()
+            .facts
+            .is_empty()
+    );
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn direct_input_attribution_survives_uds_draft_publication_retry_and_restart() {
+    let requests = Arc::new(Mutex::new(Vec::new()));
+    let (fixture, server) = recording_fixture(requests.clone()).await;
     let daemon = DaemonFixture::new(&fixture).await;
     let workspace = daemon
         .connection
@@ -194,6 +220,99 @@ async fn direct_input_attribution_survives_uds_draft_publication_retry_and_resta
         );
     }
     assert_eq!(requests.lock().unwrap().len(), 4);
+    assert!(running.shutdown().await.is_clean());
+    server.abort();
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn non_waking_input_publishes_once_and_survives_restart_before_a_question() {
+    let requests = Arc::new(Mutex::new(Vec::new()));
+    let (fixture, server) = recording_fixture(requests.clone()).await;
+    let daemon = DaemonFixture::new(&fixture).await;
+    let workspace = daemon
+        .connection
+        .workspace_registry()
+        .get_or_create(&fixture.workspace)
+        .await
+        .unwrap();
+    let id = SessionId::new("held-input").unwrap();
+    let handle = daemon
+        .connection
+        .session_service()
+        .create(CreateSession {
+            fork: None,
+            workspace_id: workspace.id,
+            session_id: id.clone(),
+            agent_preset_id: None,
+        })
+        .await
+        .unwrap();
+    let text = format!("native-held-context-{}", "字".repeat(100_000));
+    let mut held = input("held-message", MessageDelivery::NextStep);
+    held.origin = rsi_session_protocol::SubmissionOrigin::Application;
+    held.content = vec![SessionInput::Text { text: text.clone() }]
+        .try_into()
+        .unwrap();
+    let mut invalid = held.clone();
+    invalid.reasoning_effort = Some(rsi_ai_protocol::ReasoningEffortId::new("high").unwrap());
+    assert!(matches!(
+        handle.submit(invalid).await,
+        Err(SessionError::Invalid(_))
+    ));
+    let receipt = handle.submit(held.clone()).await.unwrap();
+    assert_non_waking_input(&handle, held.clone(), &receipt).await;
+    assert!(requests.lock().unwrap().is_empty());
+    let mut conflict = held.clone();
+    conflict.delivery = MessageDelivery::NextTurn;
+    assert!(matches!(
+        handle.submit(conflict).await,
+        Err(SessionError::MessageConflict { .. })
+    ));
+    drop(handle);
+    daemon.shutdown().await;
+
+    let running = RunningRsi::boot(composition(fixture.paths.clone()), &fixture.profile)
+        .await
+        .unwrap();
+    let handle = running
+        .session_service()
+        .unwrap()
+        .attach(&id)
+        .await
+        .unwrap();
+    assert_non_waking_input(&handle, held, &receipt).await;
+    assert!(requests.lock().unwrap().is_empty());
+    let accepted = handle
+        .read_message(&receipt.message_id, receipt.accepted_control_seq)
+        .await
+        .unwrap();
+    assert_eq!(
+        accepted.content,
+        vec![rsi_agent_session_protocol::AgentMessageContent::Text { text: text.clone() }]
+    );
+    complete(&handle, input("question", MessageDelivery::NextTurn)).await;
+    let history = handle.history_before(None, 128).await.unwrap();
+    let claimed: Vec<_> = history
+        .facts
+        .iter()
+        .filter_map(|fact| match fact.body() {
+            SessionFactBody::InputMessageClaimed {
+                source: InputMessageSource::Application { message_id, .. },
+                content,
+                ..
+            } if message_id == &receipt.message_id => Some(content),
+            _ => None,
+        })
+        .collect();
+    assert_eq!(claimed, vec![&accepted.content]);
+    assert_eq!(requests.lock().unwrap().len(), 1);
+    assert_eq!(
+        requests.lock().unwrap()[0]["messages"]
+            .to_string()
+            .matches(&text)
+            .count(),
+        1
+    );
     assert!(running.shutdown().await.is_clean());
     server.abort();
 }

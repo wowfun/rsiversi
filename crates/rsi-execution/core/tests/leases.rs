@@ -13,6 +13,12 @@ use std::{
 use tokio::sync::Notify;
 use tokio_util::sync::CancellationToken;
 
+const PROJECT: &str = if cfg!(windows) {
+    r"C:\project"
+} else {
+    "/project"
+};
+
 type PResult<T> = rsi_process::Result<T>;
 #[derive(Debug, Default)]
 struct Gate {
@@ -229,15 +235,15 @@ fn request() -> ProcessRequest {
         mode: SandboxMode::DangerFullAccess,
         program: "/configured/program".into(),
         arguments: vec![],
-        cwd: "/project".into(),
-        workspace: "/project".into(),
+        cwd: PROJECT.into(),
+        workspace: PROJECT.into(),
     }
 }
 fn stamp() -> EnforcementStamp {
     EnforcementStamp {
         requested: SandboxMode::DangerFullAccess,
         backend: SandboxBackend::Unconfined,
-        workspace: "/project".into(),
+        workspace: PROJECT.into(),
         filesystem: SandboxFileSystem::Unconfined,
         scratch: SandboxScratch::Host,
         network: SandboxNetwork::Host,
@@ -383,13 +389,8 @@ async fn failed_files_opens_do_not_exhaust_private_caller_capacity() {
         .unwrap();
     let files = lease.files().unwrap();
     for _ in 0..128 {
-        let binding = FilesBinding::new(
-            FilesCaller::default(),
-            "session",
-            "header",
-            "/project".into(),
-        )
-        .unwrap();
+        let binding =
+            FilesBinding::new(FilesCaller::default(), "session", "header", PROJECT.into()).unwrap();
         assert_eq!(
             files
                 .open(
@@ -403,13 +404,8 @@ async fn failed_files_opens_do_not_exhaust_private_caller_capacity() {
         );
     }
     events.fail_open.store(false, Ordering::SeqCst);
-    let binding = FilesBinding::new(
-        FilesCaller::default(),
-        "session",
-        "header",
-        "/project".into(),
-    )
-    .unwrap();
+    let binding =
+        FilesBinding::new(FilesCaller::default(), "session", "header", PROJECT.into()).unwrap();
     let opened = files
         .open(
             binding.clone(),
@@ -435,13 +431,8 @@ async fn a_failed_concurrent_open_preserves_the_same_callers_published_token() {
         .lease(Arc::new(Gate::default()))
         .unwrap();
     let files = lease.files().unwrap();
-    let binding = FilesBinding::new(
-        FilesCaller::default(),
-        "session",
-        "header",
-        "/project".into(),
-    )
-    .unwrap();
+    let binding =
+        FilesBinding::new(FilesCaller::default(), "session", "header", PROJECT.into()).unwrap();
     let mut failed = Box::pin(files.open(
         binding.clone(),
         RelativePath::default(),
@@ -700,13 +691,8 @@ async fn revoked_grant_denies_new_ports_and_files_but_allows_cleanup() {
         Err(ProcessError::ShuttingDown)
     );
     assert_eq!(pty.read().await, Err(ProcessError::ShuttingDown));
-    let binding = FilesBinding::new(
-        FilesCaller::default(),
-        "session",
-        "header",
-        "/project".into(),
-    )
-    .unwrap();
+    let binding =
+        FilesBinding::new(FilesCaller::default(), "session", "header", PROJECT.into()).unwrap();
     let token = FileToken::try_from("a".repeat(32)).unwrap();
     assert_eq!(
         files
@@ -875,13 +861,8 @@ async fn files_open_retains_admission_and_releases_both_inflight_and_queued_unpu
         let gate = Arc::new(Gate::default());
         let lease = provider(&events, None, 0, 0).lease(gate.clone()).unwrap();
         let files = lease.files().unwrap();
-        let binding = FilesBinding::new(
-            FilesCaller::default(),
-            "session",
-            "header",
-            "/project".into(),
-        )
-        .unwrap();
+        let binding =
+            FilesBinding::new(FilesCaller::default(), "session", "header", PROJECT.into()).unwrap();
         let mut waiting = Box::pin(files.open(
             binding,
             RelativePath::default(),
@@ -978,13 +959,8 @@ async fn retained_files_use_current_caller_and_reject_replacement_provider_befor
     let creator = Arc::new(Gate::default());
     let first = provider.lease(creator.clone()).unwrap();
     let resource = first.retain_files().unwrap();
-    let binding = FilesBinding::new(
-        FilesCaller::default(),
-        "session",
-        "header",
-        "/project".into(),
-    )
-    .unwrap();
+    let binding =
+        FilesBinding::new(FilesCaller::default(), "session", "header", PROJECT.into()).unwrap();
     let opened = resource
         .view(&first)
         .unwrap()
@@ -1311,13 +1287,8 @@ fn file_admission_preserves_nested_capacity_and_unknown_outcomes_without_io() {
     let gate = Arc::new(Gate::default());
     let lease = provider(&events, None, 0, 0).lease(gate.clone()).unwrap();
     let files = lease.files().unwrap();
-    let binding = FilesBinding::new(
-        FilesCaller::default(),
-        "session",
-        "header",
-        "/project".into(),
-    )
-    .unwrap();
+    let binding =
+        FilesBinding::new(FilesCaller::default(), "session", "header", PROJECT.into()).unwrap();
     let token = FileToken::try_from("a".repeat(32)).unwrap();
     for (error, expected) in [
         (rsi_api_protocol::ApiError::Capacity, FilesError::Capacity),
@@ -1341,13 +1312,8 @@ async fn only_last_retained_files_owner_releases_private_callers() {
     let resource = lease.retain_files().unwrap();
     let first = resource.view(&lease).unwrap();
     let last = resource.view(&lease).unwrap();
-    let binding = FilesBinding::new(
-        FilesCaller::default(),
-        "session",
-        "header",
-        "/project".into(),
-    )
-    .unwrap();
+    let binding =
+        FilesBinding::new(FilesCaller::default(), "session", "header", PROJECT.into()).unwrap();
     first
         .open(
             binding,

@@ -8,7 +8,7 @@ use rsi_api_protocol::{
     OperationSpec, RequestEncoding, Result, call_json,
 };
 pub use rsi_conversation::ConversationIdentity;
-use rsi_workspace_protocol::WorkspaceId;
+use rsi_workspace_protocol::WorkspaceKey;
 use serde::{Deserialize, Serialize};
 use std::sync::Arc;
 #[cfg(test)]
@@ -18,8 +18,8 @@ mod tests;
 #[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct Scope {
-    /// Independently registered workspace.
-    pub workspace: WorkspaceId,
+    /// Coordinate key resolved through the current registry.
+    pub workspace: WorkspaceKey,
     /// Explicit native or external conversation.
     pub conversation: ConversationIdentity,
 }
@@ -34,8 +34,8 @@ pub enum QueryScope {
     },
     /// All locally saved conversations at registered coordinates.
     Workspace {
-        /// Registered workspace identity.
-        workspace: WorkspaceId,
+        /// Complete coordinate key, independent of registration lifetime.
+        workspace: WorkspaceKey,
     },
     /// All currently authorized registered sources on this Host.
     AccessibleHost,

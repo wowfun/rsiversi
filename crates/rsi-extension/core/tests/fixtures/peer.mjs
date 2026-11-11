@@ -8,6 +8,12 @@ createInterface({ input: process.stdin }).on('line', line => {
     send({ kind: 'reply', id: message.id, result: { status: 'error', value: 'cancelled' } });
   } else if (message.kind === 'request') {
     if (message.method === 'hold') { held.add(message.id); return; }
+    if (message.method === 'pause-input') {
+      process.stdin.pause();
+      send({ kind: 'reply', id: message.id, result: { status: 'ok', value: null } });
+      setTimeout(() => process.stdin.resume(), 1200);
+      return;
+    }
     const value = message.method === 'extension.hello' ? { protocol: 1 } : message.payload;
     send({ kind: 'reply', id: message.id, result: { status: 'ok', value } });
   }

@@ -5,6 +5,47 @@ use super::host_cli::{DaemonControlEvent, next_daemon_control_event, stop_reload
 use super::*;
 
 #[test]
+fn runtime_worker_budget_preserves_explicit_override() {
+    for workers in [None, Some("1"), Some("4")] {
+        let mut child = std::process::Command::new(std::env::current_exe().unwrap());
+        child.args([
+            "--exact",
+            "tests::runtime_worker_budget_child",
+            "--nocapture",
+        ]);
+        child.env("RSI_TEST_RUNTIME_WORKERS", workers.unwrap_or("default"));
+        child.env_remove("TOKIO_WORKER_THREADS");
+        if let Some(workers) = workers {
+            child.env("TOKIO_WORKER_THREADS", workers);
+        }
+        let output = child.output().unwrap();
+        let stdout = String::from_utf8_lossy(&output.stdout);
+        assert!(
+            output.status.success() && stdout.contains("test result: ok. 1 passed;"),
+            "workers={workers:?}: {stdout}\n{}",
+            String::from_utf8_lossy(&output.stderr),
+        );
+    }
+}
+
+#[test]
+fn runtime_worker_budget_child() {
+    let Ok(expected) = std::env::var("RSI_TEST_RUNTIME_WORKERS") else {
+        return;
+    };
+    let runtime = build_runtime().unwrap();
+    let actual = runtime.metrics().num_workers();
+    if expected == "default" {
+        assert!((1..=2).contains(&actual), "default async workers: {actual}");
+        if std::thread::available_parallelism().is_ok_and(|cpus| cpus.get() == 1) {
+            assert_eq!(actual, 1);
+        }
+    } else {
+        assert_eq!(actual, expected.parse::<usize>().unwrap());
+    }
+}
+
+#[test]
 fn maintenance_help_is_resolved_before_home_initialization() {
     for command in ["config", "core", "import", "plugin"] {
         assert!(matches!(

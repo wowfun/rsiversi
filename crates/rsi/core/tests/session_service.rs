@@ -182,6 +182,7 @@ fn composition(paths: HostPaths) -> StandardComposition {
         std::fs::canonicalize("/bin/bash").unwrap(),
         std::env::current_exe().unwrap().canonicalize().unwrap(),
         vec![("PATH".into(), "/usr/bin:/bin".into())],
+        None,
     )
     .unwrap();
     StandardComposition::new(
@@ -713,6 +714,7 @@ async fn application_selection_uses_a_compatible_daemon_and_embeds_only_without_
                 std::fs::canonicalize("/bin/bash").unwrap(),
                 std::env::current_exe().unwrap().canonicalize().unwrap(),
                 vec![("PATH".into(), "/different".into())],
+                None,
             )
             .unwrap(),
         ),

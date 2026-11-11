@@ -23,6 +23,31 @@ fn input() -> AgentMessage {
 }
 
 #[test]
+fn claimed_parts_move_content_and_attribution_without_cloning() {
+    let message = input();
+    let expected_source = message.claimed_source();
+    let content_buffer = message.content.as_ptr();
+    let AgentMessageSource::Human {
+        attribution: Some(attribution),
+    } = &message.source
+    else {
+        panic!("fixture attribution");
+    };
+    let id_buffer = attribution.id.as_ptr();
+    let (source, content) = message.into_claimed_parts();
+    assert_eq!(source, expected_source);
+    assert_eq!(content.as_ptr(), content_buffer);
+    let InputMessageSource::Human {
+        attribution: Some(attribution),
+        ..
+    } = source
+    else {
+        panic!("claimed attribution");
+    };
+    assert_eq!(attribution.id.as_ptr(), id_buffer);
+}
+
+#[test]
 fn direct_ingress_keeps_native_identity_original_attribution_and_delivery() {
     let message = input();
     message.validate().unwrap();

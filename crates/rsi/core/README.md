@@ -69,12 +69,14 @@ Debug and release share launch identity, ownership and recovery rules. Explicit
 home options and leased `--watch` select the operator's intended environment;
 there is no separate development launch purpose.
 
-The standard Windows Web, TUI and ACP composition exposes native Files and explicit native
-Bash tools. Full Process output caching and its `output_read` contribution are
+The standard Windows Web, TUI and ACP composition exposes native Files and the
+native `pwsh` tool. Full Process output caching and its `output_read` contribution are
 enabled only where the Process owner publishes the cache capability. CLI and
-Desktop use `capture_standard_bash`, which selects Bash from the absolute Git for Windows installation recorded
-by its installer. It fails clearly if that installation is absent; it never
-substitutes the Windows WSL launcher. On Unix it resolves `/bin/bash`.
+Desktop use `capture_standard_shell`. Windows selects PowerShell 7 from its
+standard installation or absolute PATH entries, including native Store aliases,
+then falls back to system Windows PowerShell. Linux selects `/bin/bash`.
+Shell selection is independent of Git for Windows discovery; choosing PowerShell
+does not change the separately captured Git executable used by workspace review.
 Windows manual terminals use native PowerShell through ConPTY with explicit
 current-user permissions, independently of Agent tools and sandbox settings.
 Windows does not advertise the Linux apply-patch helper. This optional capability
@@ -366,6 +368,8 @@ service and generation before draft creation. Environment values resolve through
 ephemeral credential references; only the frozen MCP manifest enters Agent
 durability. Cold restore requires the caller's configuration and secrets again,
 compares the discovered manifest, and rejects missing or changed declarations.
+ACP restore prepares the durable Session before reading its baseline controls;
+plain canonical history reads do not establish an execution proof.
 The source resolves descendants through their validated root lineage, retaining
 the same private provider. Private input failure cannot fall back to Host MCP.
 Preparation reserves the root ID before starting effects. The 256-root budget
@@ -887,6 +891,8 @@ presentation factories. No implicit official application catalog is available.
 `application_services` owns the local ServingService and LocalBrowserAdministration
 contracts consumed by application plugins. The latter retains its API result type;
 these product contracts do not add transport dependencies to rsi-application.
+The HTTP browser-owner contract is isolated with these contracts in each Service
+and application catalog, so independent owners can share a Runtime.
 
 Local browser launch grants configuration access before rotating an existing
 managed principal. A rejected grant leaves its old credential and live leases

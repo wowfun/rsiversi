@@ -391,7 +391,7 @@ pub struct SubmitInput {
     /// Author of the submission, independently of its presentation attribution.
     #[serde(default)]
     pub origin: SubmissionOrigin,
-    /// Immutable direct ingress intent: `NextTurn` or `Steer`.
+    /// Immutable direct ingress intent, including non-waking `NextStep`.
     pub delivery: rsi_agent_session_protocol::MessageDelivery,
     /// Caller-preallocated durable message identity.
     pub message_id: MessageId,
@@ -484,32 +484,10 @@ impl RecentSessionCursor {
     }
 }
 /// Public ordering position of an already visible Header.
-#[derive(Clone, Debug, Eq, PartialEq, serde::Serialize, serde::Deserialize)]
-#[serde(deny_unknown_fields)]
-pub struct RecentSessionPosition {
-    /// Durable creation timestamp in Unix milliseconds.
-    pub created_at_ms: u64,
-    /// Descending identity tie-breaker.
-    pub session_id: SessionId,
-}
+pub use rsi_agent_store_protocol::StoreRecentSessionCursor as RecentSessionPosition;
 
-/// One recent durable session summary.
-#[derive(Clone, Debug, Eq, PartialEq, serde::Serialize, serde::Deserialize)]
-#[serde(deny_unknown_fields)]
-pub struct SessionSummary {
-    /// Complete immutable durable Header.
-    pub header: SessionHeader,
-}
-
-impl SessionSummary {
-    /// Returns this visible Header's ordering position.
-    pub fn position(&self) -> RecentSessionPosition {
-        RecentSessionPosition {
-            created_at_ms: self.header.created_at_ms(),
-            session_id: self.header.session_id().clone(),
-        }
-    }
-}
+/// One visible durable Session's Header, activity and watermarks from one Store snapshot.
+pub use rsi_agent_store_protocol::StoreRecentSession as SessionSummary;
 
 /// One bounded recent-session page.
 #[derive(Clone, Debug, Eq, PartialEq, serde::Serialize, serde::Deserialize)]
@@ -537,6 +515,11 @@ impl RecentSessionPage {
             .and_then(|c| c.after.as_ref())
             .map(|p| (p.created_at_ms, &p.session_id));
         for row in &self.sessions {
+            if row.last_activity_ms < row.header.created_at_ms() {
+                return Err(SessionError::Invalid(
+                    "recent activity precedes Session creation".into(),
+                ));
+            }
             let current = (row.header.created_at_ms(), row.header.session_id());
             if previous.is_some_and(|previous| current >= previous) {
                 return Err(SessionError::Invalid(
@@ -717,6 +700,7 @@ pub trait SessionHandle: fmt::Debug + Send + Sync + 'static {
     /// Reads the immutable candidate or durable Header.
     async fn header(&self) -> Result<SessionHeader>;
     /// Accepts one multimodal message and waits for durable mailbox acceptance.
+    /// `NextStep` publishes held context without waking execution.
     async fn submit(&self, request: SubmitInput) -> Result<MessageReceipt>;
     /// Reads the latest durable claim or discard state for one message.
     async fn message_status(&self, message_id: &MessageId) -> Result<MessageReceipt>;
@@ -927,8 +911,9 @@ pub trait SessionService: fmt::Debug + Send + Sync + 'static {
     async fn activity(&self) -> Result<SessionActivityPage> {
         Err(SessionError::NotFound("Session activity owner".into()))
     }
-    /// Reads only the durable Header, without a handle, transcript or activity effect.
-    async fn read_header(&self, session_id: &SessionId) -> Result<SessionHeader>;
+    /// Reads a fresh durable Header and activity/cut summary from one metadata snapshot.
+    /// Does not create a handle, load transcript, or touch activity.
+    async fn read_summary(&self, session_id: &SessionId) -> Result<SessionSummary>;
     /// Creates one unpublished draft handle after rejecting a durable identity collision.
     async fn create(&self, request: CreateSession) -> Result<Arc<dyn SessionHandle>>;
     /// Resolves a live draft or attaches to one exact durable session from Store alone.

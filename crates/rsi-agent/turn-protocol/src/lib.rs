@@ -1512,6 +1512,10 @@ pub trait TurnExecution: fmt::Debug + Send + Sync + 'static {
         outcome: &TurnOutcome,
     ) -> Result<Arc<SessionFact>>;
     /// Reads bounded live Facts after a cursor, including a speculative suffix.
+    /// The durable prefix and pending suffix share one captured read horizon.
+    /// The page may include that suffix even if it becomes durable during I/O.
+    /// A concurrent flush cannot turn an unexhausted horizon into an unchanged
+    /// cursor, even when all scanned Facts are hidden by claim isolation.
     async fn read_facts(
         &self,
         claim: &TurnClaim,
@@ -1602,6 +1606,8 @@ pub trait TurnExecution: fmt::Debug + Send + Sync + 'static {
         ))
     }
     /// Publishes validated bodies as the next live Facts without claiming durability.
+    /// An intent and its matching start may share an ordered publication.
+    /// Executors must flush through the start before invoking an external effect.
     /// Activation terminals must use `finish_turn`; only direct Turns
     /// may publish a raw `TurnTerminal` body.
     async fn publish(

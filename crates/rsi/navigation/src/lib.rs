@@ -34,13 +34,17 @@ mod attention;
 use admission::Admission;
 mod endpoint;
 mod order;
+mod workspace_account;
 pub use attention::AttentionFactory;
+pub use workspace_account::WorkspaceMoveOutcome;
 
 #[derive(Clone, Debug, Default, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 struct Document {
     revision: u64,
     records: BTreeMap<SessionId, StoredMetadata>,
+    #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
+    workspace_orders: BTreeMap<WorkspaceId, Vec<SessionId>>,
     #[serde(skip)]
     accounting: Option<MetadataSize>,
 }
@@ -67,9 +71,21 @@ impl std::ops::Deref for StoredMetadata {
 #[derive(Clone, Copy, Debug, Default)]
 struct MetadataSize {
     records: RecordObjectSize,
+    orders: RecordObjectSize,
+    order_members: usize,
     pins: usize,
 }
 impl MetadataSize {
+    fn bytes(self, revision: u64) -> usize {
+        b"{\"metadata\":{\"revision\":,\"records\":}}".len()
+            + revision.to_string().len()
+            + self.records.bytes()
+            + if self.orders.records() == 0 {
+                0
+            } else {
+                b",\"workspace_orders\":".len() + self.orders.bytes()
+            }
+    }
     fn check(self, revision: u64) -> Result<()> {
         if self.pins > 64 {
             return Err(ApiError::Invalid(
@@ -77,12 +93,12 @@ impl MetadataSize {
             ));
         }
         // The Domain record wrapper is intentional: it counts toward the 8 MiB bound.
-        let bytes = b"{\"metadata\":{\"revision\":,\"records\":}}".len()
-            + revision.to_string().len()
-            + self.records.bytes();
-        if self.records.records() > 8192 || bytes > 8 * 1024 * 1024 {
+        if self.records.records() > 8192
+            || self.order_members > 8192
+            || self.bytes(revision) > 8 * 1024 * 1024
+        {
             return Err(ApiError::Invalid(
-                "navigation metadata exceeds 8192 records or 8 MiB".into(),
+                "navigation metadata exceeds 8192 records/order references or 8 MiB".into(),
             ));
         }
         Ok(())
@@ -116,6 +132,7 @@ impl Document {
                 .map_err(storage_error)?;
             accounting.pins += usize::from(record.pinned);
         }
+        self.validate_orders(&mut accounting)?;
         accounting.check(self.revision)?;
         self.accounting = Some(accounting);
         Ok(())
@@ -437,12 +454,13 @@ impl Navigation {
         &self,
         coordinates: &ExecutionCoordinates,
     ) -> Result<Option<WorkspaceId>> {
-        let derived = WorkspaceId::from_coordinates(coordinates);
-        match self.workspace.get(&derived).await {
-            Ok(record) => Ok(Some(record.id)),
-            Err(WorkspaceError::Unknown(_)) => Ok(None),
-            Err(_) => Err(ApiError::Unavailable),
-        }
+        self.workspace
+            .find(&rsi_workspace_protocol::WorkspaceKey::from_coordinates(
+                coordinates,
+            ))
+            .await
+            .map(|record| record.map(|record| record.id))
+            .map_err(|_| ApiError::Unavailable)
     }
     // Shared futures retain one result per coordinate without starting unpolled lookups.
     fn workspace_lookups<'a>(
@@ -791,6 +809,9 @@ impl Navigation {
     ) -> Result<Arc<Document>> {
         let mut document = current.clone();
         document.edit(session, metadata)?;
+        self.publish_document(document).await
+    }
+    async fn publish_document(&self, document: Document) -> Result<Arc<Document>> {
         self.domain
             .put(
                 "metadata",
@@ -838,10 +859,14 @@ impl rsi_session_protocol::SessionPurgeCleanup for PurgeCleanup {
             .map_err(|e| SessionError::Backend(e.to_string()))?
             .ok_or_else(|| SessionError::NotFound(operation.into()))?;
         let state = owner.state.lock().expect("navigation state poisoned");
-        let absent = request
-            .targets
-            .iter()
-            .all(|target| !state.document.records.contains_key(&target.session_id));
+        let absent = request.targets.iter().all(|target| {
+            !state.document.records.contains_key(&target.session_id)
+                && !state
+                    .document
+                    .workspace_orders
+                    .values()
+                    .any(|ids| ids.contains(&target.session_id))
+        });
         Ok(if absent {
             rsi_session_protocol::NavigationCleanup::Complete
         } else {
@@ -885,6 +910,29 @@ impl rsi_session_protocol::SessionPurgeCleanup for PurgeCleanup {
                         .as_ref()
                         .clone();
                     let mut changed = false;
+                    let removed = request
+                        .targets
+                        .iter()
+                        .map(|target| &target.session_id)
+                        .collect::<std::collections::HashSet<_>>();
+                    let orders = document
+                        .workspace_orders
+                        .iter()
+                        .filter(|(_, ids)| ids.iter().any(|id| removed.contains(id)))
+                        .map(|(workspace, ids)| {
+                            (
+                                workspace.clone(),
+                                ids.iter()
+                                    .filter(|id| !removed.contains(id))
+                                    .cloned()
+                                    .collect::<Vec<_>>(),
+                            )
+                        })
+                        .collect::<Vec<_>>();
+                    for (workspace, ids) in orders {
+                        document.edit_order(&workspace, ids)?;
+                        changed = true;
+                    }
                     for target in request.targets {
                         if document.records.contains_key(&target.session_id) {
                             document.edit(&target.session_id, &SessionMetadata::default())?;

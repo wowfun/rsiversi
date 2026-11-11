@@ -7,6 +7,8 @@ the set once and retains whether preparation was rejected. Reordered or repeated
 presentation cannot consume an acceptance twice. Conversation model admission
 requires no outstanding input claim and no rejected decision. Claiming still
 retains exact original content and acceptance provenance for Store validation.
+Mailbox claims move their already owned message bodies into the atomic Fact batch;
+selecting and ordering that batch does not copy the pending message payloads.
 Rejection ends input preparation for that Turn; a later empty decision cannot
 reopen model admission.
 
@@ -16,9 +18,10 @@ then follows pending waking input until one idle cut is observed. It does not
 poll, load a composition, read message bodies or capture an Agent subtree.
 Dropping a waiter releases its subscription; shutdown terminates pending waits.
 
-At a model Step boundary, and when checking for a message that resumes a
-waiting Tool, Kernel requests the next-Step mailbox directly. Earlier next-Turn
-payloads cannot consume its page or hide a pending steer.
+At a model Step boundary, Kernel requests the next-Step mailbox directly.
+Earlier next-Turn payloads cannot consume its page or hide a pending steer.
+Waiting Tools observe the first pending next-Step source kind through the
+metadata-only mailbox summary; wake classification does not read message bodies.
 
 Inbox suspension is durable and independent of pending message horizons. Ready
 selection and direct mailbox claims honor the captured pause state. A genuinely

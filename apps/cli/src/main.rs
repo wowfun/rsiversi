@@ -1,4 +1,6 @@
 #[cfg(any(target_os = "linux", windows))]
+use rsi::StandardCodingTools;
+#[cfg(any(target_os = "linux", windows))]
 use rsi::StandardServiceDaemon;
 #[cfg(any(target_os = "linux", windows))]
 use rsi::probe_service_host;
@@ -7,8 +9,6 @@ use rsi::{
     ProfileCatalog, ProfileSource, RsiError, StandardComposition, capture_standard_environment,
     maybe_run_apply_patch_helper, standard_agent_preset_root,
 };
-#[cfg(any(target_os = "linux", windows))]
-use rsi::{StandardCodingTools, scrub_child_environment};
 use rsi_agent_presets::{AgentPresetHealth, AgentPresetId, AgentPresetRow, PresetError};
 use rsi_agent_store_sqlite::SqliteStore;
 #[cfg(any(target_os = "linux", windows))]
@@ -49,9 +49,10 @@ fn daemon_readiness_timeout_error() -> RsiError {
 #[cfg(any(target_os = "linux", windows))]
 fn standard_coding_tools() -> rsi::Result<Option<StandardCodingTools>> {
     StandardCodingTools::new(
-        rsi::capture_standard_bash()?,
+        rsi::capture_standard_shell()?,
         std::env::current_exe().map_err(|e| RsiError::Boot(e.to_string()))?,
-        scrub_child_environment(std::env::vars_os()),
+        std::env::vars_os().collect(),
+        rsi::capture_standard_git(),
     )
     .map(Some)
 }
@@ -109,10 +110,7 @@ fn main() -> ExitCode {
     if let Some(exit) = maybe_run_apply_patch_helper(std::env::args_os().skip(1)) {
         return ExitCode::from(exit);
     }
-    let runtime = match tokio::runtime::Builder::new_multi_thread()
-        .enable_all()
-        .build()
-    {
+    let runtime = match build_runtime() {
         Ok(runtime) => runtime,
         Err(error) => {
             eprintln!("failed to construct Tokio runtime: {error}");
@@ -120,6 +118,15 @@ fn main() -> ExitCode {
         }
     };
     ExitCode::from(runtime.block_on(run_main()))
+}
+
+fn build_runtime() -> std::io::Result<tokio::runtime::Runtime> {
+    let mut builder = tokio::runtime::Builder::new_multi_thread();
+    if std::env::var_os("TOKIO_WORKER_THREADS").is_none() {
+        let workers = std::thread::available_parallelism().map_or(1, |count| count.get().min(2));
+        builder.worker_threads(workers);
+    }
+    builder.enable_all().build()
 }
 
 async fn run_main() -> u8 {

@@ -1163,6 +1163,9 @@ impl ContextFold {
         for turn in &mut self.turns {
             if let Some((replacement, bytes)) = replacements.remove(&turn.id) {
                 turn.messages = replacement.messages;
+                turn.runtime_context = turn
+                    .runtime_context
+                    .and_then(|index| replacement.remap.get(index));
                 turn.batches = replacement.batches;
                 turn.message_bytes = bytes;
             }
@@ -1298,7 +1301,12 @@ mod view_tests {
                 fold.turns.len(),
             );
             fold.turns.push_back(ProjectedTurn {
+                runtime_context: None,
                 id: TurnKey::new(fold.header.session_id(), &TurnId::new(id).unwrap()),
+                context_input_times: BTreeMap::from([(
+                    rsi_agent_session_protocol::ContributionId::new(id).unwrap(),
+                    std::num::NonZeroU64::new(7).unwrap(),
+                )]),
                 claimed: Vec::new(),
                 claimed_bytes: 0,
                 messages,
@@ -1413,6 +1421,13 @@ mod view_tests {
         assert_eq!(fold.turns[1].messages.as_ptr(), pointer);
         assert_eq!(fold.turns[1].message_bytes, untouched_bytes);
         assert_eq!(fold.turns[0].messages.len(), 4);
+        assert_eq!(
+            fold.previous_context_input_at_ms(
+                &rsi_agent_session_protocol::ContributionId::new(affected.turn.as_str()).unwrap()
+            ),
+            Some(7),
+            "partial summary retains the entered input time"
+        );
         assert_eq!(
             fold.turns[0].batches.keys().copied().collect::<Vec<_>>(),
             [2]

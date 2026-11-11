@@ -8,7 +8,7 @@
 )]
 use rsi_agent_session_protocol::*;
 use rsi_agent_store_protocol::{
-    AppendBatch, AtomicAgentCommit, AtomicSessionAppend, SessionStore, StoreError,
+    AppendBatch, AtomicAgentCommit, AtomicSessionAppend, MailboxRead, SessionStore, StoreError,
 };
 use rsi_agent_store_sqlite::SqliteStore;
 use rsi_ai_protocol::ModelRef;
@@ -260,8 +260,9 @@ async fn excessive_ready_rows_do_not_grow_aggregate_peak() {
         );
         drop(database);
         let store = SqliteStore::open(root.path()).unwrap();
-        let before = begin_peak();
-        assert!(matches!(
+        // Canonical pages do not depend on the ready-message index. Its owning
+        // mailbox read must still reject corrupt rows before retaining them.
+        assert_eq!(
             store
                 .read_facts(
                     &id,
@@ -269,7 +270,15 @@ async fn excessive_ready_rows_do_not_grow_aggregate_peak() {
                     1,
                     rsi_agent_store_protocol::MAXIMUM_STORE_FACT_PAGE_BYTES
                 )
-                .await,
+                .await
+                .unwrap()
+                .facts
+                .len(),
+            1
+        );
+        let before = begin_peak();
+        assert!(matches!(
+            store.read_agent_mailbox(&id, MailboxRead::All).await,
             Err(StoreError::Corrupt(_))
         ));
         let measured = end_peak(before);

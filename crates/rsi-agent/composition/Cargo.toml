@@ -26,6 +26,7 @@ tokio = { workspace = true, features = ["fs", "io-util", "macros", "net", "proce
 tokio-util.workspace = true
 
 [dev-dependencies]
+rsi-agent-prompt-assembly = { path = "../prompt-assembly" }
 rsi-ai-protocol = { path = "../../rsi-ai/protocol" }
 rsi-sandbox = { path = "../../rsi-sandbox/core" }
 rsi-tools = { path = "../../rsi-tools/core" }

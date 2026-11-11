@@ -3,6 +3,7 @@ mod access;
 use rsi_meta::{ResolvedFactory, Runtime, UpdateMode};
 use rsi_storage::StorageFactory;
 use rsi_storage_domain::DomainFactory;
+#[cfg(unix)]
 use rsi_storage_json::JsonStorageFactory;
 use rsi_workspace::WorkspaceFactory;
 use rsi_workspace_protocol::{WorkspaceRegistryContract, WorkspaceStatus};
@@ -64,7 +65,9 @@ async fn cursor_survives_deletion_of_highest_orders_and_registry_restart() {
     for name in ["first", "second", "third", "after_restart", "after_empty"] {
         fs::create_dir(temporary.path().join(name)).unwrap();
     }
-    let state = temporary.path().join("state");
+    let state =
+        rsi_workspace_protocol::canonical_native_path(temporary.path().canonicalize().unwrap())
+            .join("state");
     rsi_files_native_fs::create_absolute_directory_no_follow(&state).unwrap();
     let runtime = storage_runtime(&state.join("registry.sqlite3")).await;
     let config = json!({"backend":"sqlite"});
@@ -159,6 +162,157 @@ async fn cursor_survives_deletion_of_highest_orders_and_registry_restart() {
 }
 
 #[tokio::test]
+#[expect(
+    clippy::too_many_lines,
+    reason = "one durable ordering lifecycle with two cold restarts"
+)]
+async fn display_order_survives_restart_without_changing_creation_cursors() {
+    let temporary = tempfile::tempdir().unwrap();
+    let state =
+        rsi_workspace_protocol::canonical_native_path(temporary.path().canonicalize().unwrap())
+            .join("state");
+    rsi_files_native_fs::create_absolute_directory_no_follow(&state).unwrap();
+    let runtime = storage_runtime(&state.join("registry.sqlite3")).await;
+    let config = json!({"backend":"sqlite"});
+    let fiber = runtime
+        .root()
+        .apply(
+            linked("workspace", Arc::new(WorkspaceFactory)),
+            config.clone(),
+        )
+        .await
+        .unwrap();
+    let registry = runtime
+        .root()
+        .lookup_local::<WorkspaceRegistryContract>()
+        .unwrap();
+    let mut ids = Vec::new();
+    for name in ["first", "second", "third"] {
+        let path = temporary.path().join(name);
+        fs::create_dir(&path).unwrap();
+        ids.push(registry.get_or_create(&path).await.unwrap().id);
+    }
+    let [first, second, third] = ids.as_slice() else {
+        unreachable!()
+    };
+    let cursor = registry.list(None, 1).await.unwrap().next.unwrap();
+    assert_eq!(
+        registry.display_order().await.unwrap().ids,
+        vec![third.clone(), second.clone(), first.clone()]
+    );
+    assert_eq!(
+        registry
+            .insert_before(first, Some(second))
+            .await
+            .unwrap()
+            .ids,
+        vec![third.clone(), first.clone(), second.clone()]
+    );
+    assert_eq!(registry.insert_before(third, None).await.unwrap().ids, ids);
+    assert_eq!(
+        registry
+            .list(Some(cursor), 2)
+            .await
+            .unwrap()
+            .records
+            .iter()
+            .map(|r| &r.id)
+            .collect::<Vec<_>>(),
+        vec![second, third]
+    );
+    let ingress = runtime
+        .root()
+        .lookup_local::<rsi_workspace_protocol::WorkspaceIngressContract>()
+        .unwrap();
+    let revision = ingress.directory_revision();
+    for (id, before) in [(first, Some(second)), (second, Some(second)), (third, None)] {
+        assert_eq!(registry.insert_before(id, before).await.unwrap().ids, ids);
+    }
+    let missing = rsi_workspace_protocol::WorkspaceId::parse("0".repeat(64)).unwrap();
+    for (id, before) in [(&missing, None), (first, Some(&missing))] {
+        assert_eq!(
+            registry.insert_before(id, before).await,
+            Err(rsi_workspace_protocol::WorkspaceError::Unknown(
+                missing.clone()
+            ))
+        );
+    }
+    assert_eq!(ingress.directory_revision(), revision);
+    drop(ingress);
+    drop(registry);
+    assert!(fiber.dispose().await.is_clean());
+    let fiber = runtime
+        .root()
+        .apply(
+            linked("workspace", Arc::new(WorkspaceFactory)),
+            config.clone(),
+        )
+        .await
+        .unwrap();
+    let registry = runtime
+        .root()
+        .lookup_local::<WorkspaceRegistryContract>()
+        .unwrap();
+    assert_eq!(registry.display_order().await.unwrap().ids, ids);
+    // Re-registering the same coordinates allocates a new position and must
+    // not revive the deleted registration's manual position.
+    assert!(registry.delete_registration(second).await.unwrap());
+    let replacement = registry
+        .get_or_create(&temporary.path().join("second"))
+        .await
+        .unwrap();
+    assert_ne!(replacement.id, *second);
+    assert!(matches!(
+        registry.get(second).await,
+        Err(rsi_workspace_protocol::WorkspaceError::Unknown(_))
+    ));
+    assert!(!registry.delete_registration(second).await.unwrap());
+    assert_eq!(
+        registry
+            .find(&rsi_workspace_protocol::WorkspaceKey::from_coordinates(
+                &replacement.coordinates
+            ))
+            .await
+            .unwrap(),
+        Some(replacement.clone())
+    );
+    assert_eq!(
+        registry.display_order().await.unwrap().ids,
+        vec![replacement.id.clone(), first.clone(), third.clone()]
+    );
+    assert_eq!(
+        registry
+            .list(Some(cursor), 2)
+            .await
+            .unwrap()
+            .records
+            .iter()
+            .map(|r| &r.id)
+            .collect::<Vec<_>>(),
+        vec![third, &replacement.id]
+    );
+    drop(registry);
+    assert!(fiber.dispose().await.is_clean());
+    runtime
+        .root()
+        .apply(linked("workspace", Arc::new(WorkspaceFactory)), config)
+        .await
+        .unwrap();
+    assert_eq!(
+        runtime
+            .root()
+            .lookup_local::<WorkspaceRegistryContract>()
+            .unwrap()
+            .display_order()
+            .await
+            .unwrap()
+            .ids,
+        vec![replacement.id.clone(), first.clone(), third.clone()]
+    );
+    assert!(runtime.shutdown().await.is_clean());
+}
+
+#[tokio::test]
 #[allow(clippy::too_many_lines)] // One cold registry lifecycle proves canonicalization and non-destructive deletion.
 async fn registration_is_canonical_durable_and_delete_never_touches_files() {
     let temporary = tempfile::tempdir().unwrap();
@@ -168,6 +322,10 @@ async fn registration_is_canonical_durable_and_delete_never_touches_files() {
     fs::create_dir(&second_workspace_path).unwrap();
     let user_file = workspace_path.join("keep.txt");
     fs::write(&user_file, b"keep").unwrap();
+    let state =
+        rsi_workspace_protocol::canonical_native_path(temporary.path().canonicalize().unwrap())
+            .join("state");
+    rsi_files_native_fs::create_absolute_directory_no_follow(&state).unwrap();
     let runtime = Runtime::default();
     provide_access(&runtime).await;
     let hub = runtime
@@ -178,8 +336,11 @@ async fn registration_is_canonical_durable_and_delete_never_touches_files() {
     let backend = runtime
         .root()
         .apply(
-            linked("storage-json", Arc::new(JsonStorageFactory)),
-            json!({"name":"json","path":temporary.path().join("domains.json")}),
+            linked(
+                "storage-sqlite",
+                Arc::new(rsi_storage_sqlite::SqliteStorageFactory),
+            ),
+            json!({"name":"sqlite","path":state.join("domains.sqlite3")}),
         )
         .await
         .unwrap();
@@ -188,7 +349,7 @@ async fn registration_is_canonical_durable_and_delete_never_touches_files() {
         .apply(linked("domains", Arc::new(DomainFactory)), Value::Null)
         .await
         .unwrap();
-    let workspace_config = json!({"backend":"json"});
+    let workspace_config = json!({"backend":"sqlite"});
     let workspace = runtime
         .root()
         .apply(
@@ -291,7 +452,7 @@ async fn assert_bounded_pages(
     );
     first.validate().unwrap();
     let mut misbound = first.clone();
-    misbound.coordinates.clone_from(&second.coordinates);
+    misbound.created_at_ms = Some(u64::MAX);
     assert!(matches!(
         misbound.validate(),
         Err(rsi_workspace_protocol::WorkspaceError::Corrupt(_))
@@ -520,6 +681,10 @@ async fn assert_invalid_allocation(runtime: &Runtime, domain: &FaultDomain) {
     for bad in [
         Some(json!({"high_water":0})),
         Some(json!({"high_water":"2"})),
+        Some(json!({"high_water":2,"display_order":[1,1]})),
+        Some(json!({"high_water":2,"display_order":[0]})),
+        Some(json!({"high_water":2,"display_order":[3]})),
+        Some(json!({"high_water":2,"display_order":vec![1;16_385]})),
         None,
     ] {
         let mut records = domain.values.lock().await;
@@ -658,6 +823,8 @@ impl rsi_meta::PluginFactory for FaultFacility {
     }
 }
 
+// This fixture verifies the JSON backend's original bytes; that backend is Unix-only.
+#[cfg(unix)]
 #[tokio::test]
 async fn version_three_rejection_preserves_the_entire_backend_byte_for_byte() {
     use sha2::{Digest, Sha256};
@@ -715,10 +882,8 @@ async fn version_three_rejection_preserves_the_entire_backend_byte_for_byte() {
 }
 
 #[tokio::test]
-async fn cold_registry_preserves_equal_paths_on_distinct_machines_without_local_remote_probes() {
-    use rsi_workspace_protocol::{
-        ExecutionCoordinates, ExecutionLocation, WorkspaceId, WorkspaceOrderSeed, WorkspaceRecord,
-    };
+async fn cold_registry_preserves_distinct_machines_without_local_remote_probes() {
+    use rsi_workspace_protocol::{ExecutionCoordinates, ExecutionLocation, WorkspaceOrderSeed};
     let temporary = tempfile::tempdir().unwrap();
     let canonical = temporary.path().canonicalize().unwrap();
     let path = canonical.to_str().unwrap();
@@ -731,50 +896,53 @@ async fn cold_registry_preserves_equal_paths_on_distinct_machines_without_local_
             target: serde_json::from_value(json!("b".repeat(32))).unwrap(),
         },
     ]
-    .map(|location| WorkspaceRecord::new(ExecutionCoordinates::new(location, path).unwrap()));
-    let mut durable = serde_json::Map::new();
-    durable.insert("allocation".into(), json!({"high_water":3}));
+    .map(|location| {
+        let host_path = if cfg!(windows) && location != ExecutionLocation::Local {
+            "/shared"
+        } else {
+            path
+        };
+        workspace_record(ExecutionCoordinates::new(location, host_path).unwrap())
+    });
+    let state =
+        rsi_workspace_protocol::canonical_native_path(temporary.path().canonicalize().unwrap())
+            .join("state");
+    rsi_files_native_fs::create_absolute_directory_no_follow(&state).unwrap();
+    let runtime = storage_runtime(&state.join("registry.sqlite3")).await;
+    let facility = runtime
+        .root()
+        .lookup_local::<rsi_storage_domain::DomainFacilityContract>()
+        .unwrap();
+    let domain = facility
+        .open(rsi_storage_domain::DomainSpec {
+            id: "rsi.workspace".into(),
+            backend: "sqlite".into(),
+            version: 4,
+            maximum_records: 16_385,
+            maximum_bytes: 128 * 1024 * 1024,
+        })
+        .await
+        .unwrap();
+    domain
+        .put("allocation", json!({"high_water":3}))
+        .await
+        .unwrap();
     for (index, record) in records.iter().enumerate() {
-        durable.insert(
-            record.id.to_string(),
-            json!({"order":index+1,"record":record}),
-        );
-    }
-    let file = temporary.path().join("registry.json");
-    fs::write(
-        &file,
-        serde_json::to_vec(
-            &json!({"format":1,"domains":{"rsi.workspace":{"version":4,"records":durable}}}),
-        )
-        .unwrap(),
-    )
-    .unwrap();
-    let runtime = Runtime::default();
-    provide_access(&runtime).await;
-    for (id, factory, config) in [
-        (
-            "storage",
-            Arc::new(StorageFactory) as Arc<dyn rsi_meta::PluginFactory>,
-            Value::Null,
-        ),
-        (
-            "json",
-            Arc::new(JsonStorageFactory),
-            json!({"name":"json","path":file}),
-        ),
-        ("domains", Arc::new(DomainFactory), Value::Null),
-        (
-            "workspace",
-            Arc::new(WorkspaceFactory),
-            json!({"backend":"json"}),
-        ),
-    ] {
-        runtime
-            .root()
-            .apply(linked(id, factory), config)
+        domain
+            .put(record.id.as_str(), json!({"order":index+1,"record":record}))
             .await
             .unwrap();
     }
+    drop(domain);
+    drop(facility);
+    runtime
+        .root()
+        .apply(
+            linked("workspace", Arc::new(WorkspaceFactory)),
+            json!({"backend":"sqlite"}),
+        )
+        .await
+        .unwrap();
     let registry = runtime
         .root()
         .lookup_local::<WorkspaceRegistryContract>()
@@ -786,7 +954,12 @@ async fn cold_registry_preserves_equal_paths_on_distinct_machines_without_local_
     };
     assert_eq!(seed.len(), 3);
     assert_eq!(
-        WorkspaceId::from_canonical_path(&canonical).unwrap(),
+        registry
+            .find(&rsi_workspace_protocol::WorkspaceKey::from_canonical_path(&canonical).unwrap())
+            .await
+            .unwrap()
+            .unwrap()
+            .id,
         records[0].id
     );
     assert_eq!(
@@ -815,12 +988,12 @@ async fn scoped_registry_filters_before_paging_and_seed_budget_and_rechecks_revo
     use rsi_api_protocol::{ApiError, AuthenticatedDevice, CallOrigin, DeviceId};
     use rsi_workspace_protocol::{
         ExecutionCoordinates, ExecutionLocation, WorkspaceError, WorkspaceIngressContract,
-        WorkspaceOrderSeed, WorkspaceRecord,
+        WorkspaceOrderSeed,
     };
     use std::sync::atomic::Ordering;
     let temporary = tempfile::tempdir().unwrap();
     let local_path = temporary.path().canonicalize().unwrap();
-    let local = WorkspaceRecord::new(
+    let local = workspace_record(
         ExecutionCoordinates::new(ExecutionLocation::Local, local_path.to_str().unwrap()).unwrap(),
     );
     let remote_location = ExecutionLocation::Ssh {
@@ -831,14 +1004,13 @@ async fn scoped_registry_filters_before_paging_and_seed_budget_and_rechecks_revo
     } else {
         local_path.to_str().unwrap()
     };
-    let remote = WorkspaceRecord::new(
-        ExecutionCoordinates::new(remote_location.clone(), remote_path).unwrap(),
-    );
+    let remote =
+        workspace_record(ExecutionCoordinates::new(remote_location.clone(), remote_path).unwrap());
     // Hidden entries exceed the full manual-order seed budget, before the visible row.
     let mut values = std::collections::BTreeMap::new();
     values.insert("allocation".into(), json!({"high_water":1027}));
     for index in 0..1025 {
-        let record = WorkspaceRecord::new(
+        let record = workspace_record(
             ExecutionCoordinates::new(remote_location.clone(), format!("/private/remote/{index}"))
                 .unwrap(),
         );
@@ -910,6 +1082,12 @@ async fn scoped_registry_filters_before_paging_and_seed_budget_and_rechecks_revo
     );
     for result in [
         scoped.get(&remote.id).await.map(|_| ()),
+        scoped
+            .find(&rsi_workspace_protocol::WorkspaceKey::from_coordinates(
+                &remote.coordinates,
+            ))
+            .await
+            .map(|_| ()),
         scoped.status(&remote.id).await.map(|_| ()),
         scoped.delete_registration(&remote.id).await.map(|_| ()),
         scoped
@@ -994,8 +1172,12 @@ impl FaultDomain {
 }
 
 #[tokio::test]
-async fn retirement_drains_abandoned_registration_and_deletion_before_withdrawal() {
-    for delete in [false, true] {
+#[expect(
+    clippy::too_many_lines,
+    reason = "the same held commit proves retirement ownership for all mutations"
+)]
+async fn retirement_drains_abandoned_workspace_mutations_before_withdrawal() {
+    for operation in ["register", "delete", "move"] {
         let directory = tempfile::tempdir().unwrap();
         let runtime = Runtime::default();
         provide_access(&runtime).await;
@@ -1034,11 +1216,25 @@ async fn retirement_drains_abandoned_registration_and_deletion_before_withdrawal
             .root()
             .lookup_local::<WorkspaceRegistryContract>()
             .unwrap();
-        let record = if delete {
-            Some(registry.get_or_create(directory.path()).await.unwrap())
-        } else {
+        let record = if operation == "register" {
             None
+        } else {
+            Some(registry.get_or_create(directory.path()).await.unwrap())
         };
+        if operation == "move" {
+            let second = directory.path().join("second");
+            fs::create_dir(&second).unwrap();
+            registry.get_or_create(&second).await.unwrap();
+            let id = &record.as_ref().unwrap().id;
+            let before = domain.values.lock().await.clone();
+            registry.insert_before(id, None).await.unwrap();
+            registry.insert_before(id, Some(id)).await.unwrap();
+            assert_eq!(
+                *domain.values.lock().await,
+                before,
+                "no-op moves must not write"
+            );
+        }
         domain
             .pause
             .store(true, std::sync::atomic::Ordering::SeqCst);
@@ -1047,7 +1243,15 @@ async fn retirement_drains_abandoned_registration_and_deletion_before_withdrawal
             let path = directory.path().to_owned();
             tokio::spawn(async move {
                 if let Some(record) = record {
-                    registry.delete_registration(&record.id).await.map(|_| ())
+                    if operation == "move" {
+                        let order = registry.display_order().await.unwrap();
+                        registry
+                            .insert_before(&record.id, Some(&order.ids[0]))
+                            .await
+                            .map(|_| ())
+                    } else {
+                        registry.delete_registration(&record.id).await.map(|_| ())
+                    }
                 } else {
                     registry.get_or_create(&path).await.map(|_| ())
                 }
@@ -1079,7 +1283,29 @@ async fn retirement_drains_abandoned_registration_and_deletion_before_withdrawal
                 .lookup_local::<WorkspaceRegistryContract>()
                 .is_none()
         );
-        assert_eq!(domain.values.lock().await.len(), if delete { 1 } else { 2 });
+        let durable = domain.values.lock().await;
+        assert_eq!(
+            durable.len(),
+            match operation {
+                "delete" => 1,
+                "move" => 3,
+                _ => 2,
+            }
+        );
+        if operation == "move" {
+            assert_eq!(durable["allocation"]["display_order"], json!([1, 2]));
+        }
+        drop(durable);
         assert!(runtime.shutdown().await.is_clean());
     }
+}
+
+fn workspace_record(
+    coordinates: rsi_workspace_protocol::ExecutionCoordinates,
+) -> rsi_workspace_protocol::WorkspaceRecord {
+    let key = rsi_workspace_protocol::WorkspaceKey::from_coordinates(&coordinates);
+    rsi_workspace_protocol::WorkspaceRecord::new(
+        rsi_workspace_protocol::WorkspaceId::parse(key.as_str()).unwrap(),
+        coordinates,
+    )
 }

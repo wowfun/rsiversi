@@ -32,13 +32,19 @@ Session. Recovery first resumes a durably parked wait as cancelled before it
 transitions the interrupted activation to descendant settlement.
 
 The executor follows one ordering rule for every external effect. The Kernel
-rejects a start marker unless its matching intent is already durable, so an
-executor cannot collapse the first durability fence into one publication:
+validates intent/start order and exact identity within the staged publication.
+They may share one publication; the executor waits for the complete prefix
+through the start marker to become durable before invoking the effect:
 
 ```text
-prepare immutable input -> publish intent -> flush durable intent
--> publish start -> flush durable start -> invoke -> publish outcome
+prepare immutable input -> publish ordered intent and start
+-> flush through start -> invoke -> publish outcome
 ```
+
+A parallel-safe Tool run publishes all source-ordered intents followed by all
+matching starts, then waits through the last start before invoking any member.
+Store batches may partition that prefix; only the complete-prefix acknowledgement
+permits invocation. A flush failure never authorizes dispatch or implicit replay.
 
 Language calls and Image calls are pinned process-local objects obtained from
 exact active Local generations. Tool definitions and dispatch come from the
@@ -71,9 +77,10 @@ state; it does not invent a Turn identity before scheduling. Claim atomically
 creates the Turn and Step, and reconnectable Session observation exposes that
 identity and all later Facts through independent control and Fact cursors.
 Submission resolves the session default and invocation override into one exact
-durable execution policy. Unconfined execution always requires a live approval
-decision. The executor pins the Approval and Sandbox generations, records the
-approval evidence before Tool start, and passes the exact policy plus Sandbox
+durable execution policy. The [security contract](../security.md) separates
+standing access from explicit approval requirements. The executor pins the
+Approval and Sandbox generations, records any required approval evidence before
+Tool start, and passes the exact policy plus Sandbox
 authority into the Tool execution boundary. A Tool result retains the truthful
 enforcement stamps produced by process plans; a requested mode is never itself
 treated as enforcement.
@@ -89,7 +96,16 @@ until its prefix is durable. A latched permanent Store failure terminates every
 attached observation with the same flush error instead of leaving an
 application waiter blocked behind an unreachable terminal Fact.
 
-One next-Turn mailbox claim starts an activation and one Step. Safe-boundary
+One next-Turn mailbox claim starts an activation and one Step. Within the bounded
+mailbox, it claims all pending next-Step input first, in acceptance order,
+then the selected waking input and its same-command siblings, also in acceptance
+order. This applies to every message source. Other next-Turn inputs stay queued;
+the Store captures complete selected identities independently of payload paging.
+The [Store contract](../../store-protocol/README.md) owns atomic reference
+resolution, so a body page boundary cannot omit selected input or prevent
+starting a Turn.
+The selected waking input supplies the Turn policy. Claim Facts, their ordered
+Turn membership and all mailbox receipts commit together. Further safe-boundary
 messages close the current Step, start the next, and become Facts atomically
 with their durable claims. Turn terminal and activation settlement are distinct:
 the terminal closes model execution, while an activation with non-quiescent

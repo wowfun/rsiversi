@@ -167,7 +167,7 @@ async fn read(context: &Context, operation: Operation) -> Result<UiView> {
         .map_err(error)?;
     let header = handle.header().await.map_err(error)?;
     let scope = Scope {
-        workspace: rsi_workspace_protocol::WorkspaceId::from_coordinates(header.coordinates()),
+        workspace: rsi_workspace_protocol::WorkspaceKey::from_coordinates(header.coordinates()),
         conversation: ConversationIdentity::Native(controller.session_id().clone()),
     };
     let request = match operation {

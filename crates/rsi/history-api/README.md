@@ -1,5 +1,9 @@
 # rsi-history-api
 
+Workspace scopes carry `WorkspaceKey`, the complete coordinate key, independently
+of a directory's registration lifetime. The owner resolves the current registry
+record before authorizing a source; registration IDs are not history scope keys.
+
 Progress reports `metadata_unavailable` when a metadata family or source Header
 cannot be enumerated in this pass. Other families and known sources still advance;
 the failed family is retried by a fresh discovery pass. A partial scan never claims

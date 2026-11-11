@@ -42,11 +42,18 @@ async fn manual_fork_binds_source_generation_and_passes_the_exact_cut_to_creatio
     let initial = view(&app)["surfaces"]["main"].clone();
     let before = backend.creations.lock().unwrap().len();
     let request = json!({"action":"fork_conversation","pane":"main","generation":generation,"turn":"terminal-turn","turns":{"last":2}});
+    // History opens while unregistered; creation must use a current registration.
+    assert!(app.command(&request.to_string()).await.is_err());
+    assert_eq!(backend.creations.lock().unwrap().len(), before);
+    let registration = rsi_workspace_protocol::WorkspaceId::from_bytes([0xbb; 32]);
+    *backend.current_registration.lock().unwrap() = Some(registration.clone());
+    assert_ne!(initial["workspace_key"], registration.as_str());
     app.command(&request.to_string()).await.unwrap();
     {
         let requests = backend.creations.lock().unwrap();
         assert_eq!(requests.len(), before + 1);
         let created = requests.last().unwrap();
+        assert_eq!(created.workspace_id, registration);
         assert_ne!(
             created.session_id.as_str(),
             initial["session"].as_str().unwrap()

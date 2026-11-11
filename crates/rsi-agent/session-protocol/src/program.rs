@@ -212,7 +212,7 @@ pub struct ProgramRunDescriptor {
     pub guard: Option<ProgramDomainGuard>,
 }
 impl ProgramRunDescriptor {
-    /// Rejects invalid frozen permissions, horizons and script bounds.
+    /// Rejects invalid parent bindings, horizons and script bounds.
     pub fn validate(&self) -> Result<()> {
         validate_sha256("program parent Header", &self.parent_header_sha256)?;
         self.fork.validate()?;
@@ -221,9 +221,6 @@ impl ProgramRunDescriptor {
             guard.validate()?;
         }
         self.script.validate(MAXIMUM_PROGRAM_SCRIPT_BYTES as u64)?;
-        if self.sandbox == SandboxMode::DangerFullAccess && !self.require_approval {
-            return Err(invalid("program danger-full-access requires approval"));
-        }
         Ok(())
     }
     /// Stable child identity, independent of the retired creator Tool's call ID.

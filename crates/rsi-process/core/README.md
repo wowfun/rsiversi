@@ -27,6 +27,12 @@ Sandbox-produced plan. Process validates spawn framing, not the authenticity of
 the issuer or the truth of a caller-supplied enforcement stamp. Untrusted callers
 must enter through the policy-owning product boundary, not receive Process.
 
+Preparation through a local Execution adapter preserves Sandbox failures as
+`ProcessError::Sandbox`, including the requested unsupported mode and the
+planner's diagnostic. Sandbox capacity remains `ProcessError::Capacity` so
+admission can retain its existing scheduling semantics. These preparation
+failures precede spawn and do not imply a child or an unknown effect.
+
 Readers use monotonically increasing whole-stream offsets. Each stream retains
 only its requested tail: a read older than the retained window is marked
 lossy and begins at the oldest retained byte. Reads preserve arbitrary bytes;
@@ -71,8 +77,13 @@ request has no batch stdin. It retains a bounded lossless stdout queue, a bounde
 stderr tail and explicit persistent stdin. Reads consume stdout once in order;
 queue saturation backpressures the child instead of dropping bytes. Each read or
 write is at most 64 KiB; overlapping reads/writes on the same stream reject as
-capacity rather than creating unbounded waiters. A write reports actual bytes
-accepted and must not be blindly replayed after cancellation. Closing stdin is
+capacity rather than creating unbounded waiters. An admitted write waits through
+pipe backpressure without a provider-imposed deadline; the protocol owner may
+terminate the process when its own operation expires. Acknowledgement releases
+write admission before waking the caller, so sequential writes do not compete.
+A write reports actual bytes accepted and must not be blindly replayed after
+cancellation. Dropping its waiter does not cancel the provider-owned write or
+release its admission early. Closing stdin is
 explicit. Dropping the final managed duplex handle starts termination; clones
 share one handle lifetime, while retained byte ports remain readable through
 settlement without keeping the child alive. JSON framing and RPC identity belong to the consumer.

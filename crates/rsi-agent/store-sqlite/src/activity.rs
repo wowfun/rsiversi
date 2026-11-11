@@ -197,6 +197,7 @@ impl SqliteStore {
                             "order coordinates",
                             &bounded_text(row, 1, 128 * 1024).map_err(sql_error)?,
                         )?,
+                        decode_u64("member creation", row.get(2).map_err(sql_error)?)?,
                         decode_u64("member activity", row.get(3).map_err(sql_error)?)?,
                     ));
                 }

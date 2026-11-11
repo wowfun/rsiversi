@@ -85,7 +85,7 @@ export function showHistoryPicker(pane, context) {
   const picker = createHistoryPicker({
     context: history,
     workspaces: (context.view?.catalog?.workspaces ?? []).map((item) => ({
-      id: item.id,
+      id: item.key,
       path: item.coordinates.path,
     })),
     sources: [

@@ -87,6 +87,9 @@ pub(super) fn apply_executor_body(
         ));
     }
     match body {
+        SessionFactBody::InputMessageClaimed { step_id, .. } => {
+            apply_claimed_input(turn, step_id, seq)?;
+        }
         SessionFactBody::ModelIntent { .. }
         | SessionFactBody::ModelStarted { .. }
         | SessionFactBody::ModelAttemptSettled { .. } => apply_model_body(turn, body)?,
@@ -99,7 +102,6 @@ pub(super) fn apply_executor_body(
         | SessionFactBody::ToolStarted { .. }
         | SessionFactBody::ToolResult { .. } => apply_tool_body(turn, body)?,
         SessionFactBody::StepStarted { .. }
-        | SessionFactBody::InputMessageClaimed { .. }
         | SessionFactBody::ToolContextsClaimed { .. }
         | SessionFactBody::StepInputsPrepared { .. }
         | SessionFactBody::StepPrepared { .. }
@@ -130,6 +132,24 @@ pub(super) fn apply_executor_body(
     Ok(())
 }
 
+pub(super) fn apply_claimed_input(
+    turn: &mut TurnControl,
+    step_id: &rsi_agent_session_protocol::StepId,
+    seq: u64,
+) -> TurnResult<()> {
+    if turn.terminal.is_some()
+        || turn.conclusion.is_some()
+        || turn.current_step.as_ref() != Some(step_id)
+    {
+        return Err(TurnError::Invalid(
+            "input claim requires its live open Step".into(),
+        ));
+    }
+    ensure_no_active_effect(turn)?;
+    turn.pending_inputs.insert(seq, 1);
+    Ok(())
+}
+
 fn apply_step_body(turn: &mut TurnControl, body: &SessionFactBody, seq: u64) -> TurnResult<()> {
     match body {
         SessionFactBody::StepStarted { step_id, .. } => {
@@ -142,8 +162,7 @@ fn apply_step_body(turn: &mut TurnControl, body: &SessionFactBody, seq: u64) -> 
                 ));
             }
         }
-        SessionFactBody::InputMessageClaimed { step_id, .. }
-        | SessionFactBody::ToolContextsClaimed { step_id, .. }
+        SessionFactBody::ToolContextsClaimed { step_id, .. }
         | SessionFactBody::StepInputsPrepared { step_id, .. }
         | SessionFactBody::StepPrepared { step_id, .. }
         | SessionFactBody::WorkspaceTouched { step_id, .. } => {
@@ -154,17 +173,13 @@ fn apply_step_body(turn: &mut TurnControl, body: &SessionFactBody, seq: u64) -> 
             }
             if matches!(
                 body,
-                SessionFactBody::InputMessageClaimed { .. }
-                    | SessionFactBody::ToolContextsClaimed { .. }
+                SessionFactBody::ToolContextsClaimed { .. }
                     | SessionFactBody::StepInputsPrepared { .. }
                     | SessionFactBody::StepPrepared { .. }
             ) {
                 ensure_no_active_effect(turn)?;
             }
             match body {
-                SessionFactBody::InputMessageClaimed { .. } => {
-                    turn.pending_inputs.insert(seq, 1);
-                }
                 SessionFactBody::ToolContextsClaimed { messages, .. } => {
                     turn.pending_inputs.insert(
                         seq,
@@ -202,7 +217,7 @@ fn apply_step_body(turn: &mut TurnControl, body: &SessionFactBody, seq: u64) -> 
                             .iter()
                             .map(|row| {
                                 (
-                                    row.definition.name().to_owned(),
+                                    row.name.clone(),
                                     CapturedRegistration {
                                         owner: row.owner.clone(),
                                         registration: row.registration.clone(),

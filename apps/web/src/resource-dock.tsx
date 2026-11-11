@@ -45,7 +45,7 @@ export function ResourceCleanupNotice() {
   useView(view=>!!view)
   const owner=input.resourceOwner()
   const errors=useSyncExternalStore(owner?.subscribe??(()=>()=>{}),owner?.getSnapshot??(()=>emptyErrors))
-  return owner&&errors.length>0&&<div className="resource-cleanup-notice" role="alert" aria-label="Resource cleanup" tabIndex={0}>Resource operations need attention.{errors.map((error:any)=><p key={error.key}><span title={error.key} data-session={error.session}>{error.label}</span>: {error.error} {error.retryable?<Button aria-label={`Retry cleanup for ${error.label} (${error.key})`} disabled={error.busy} onClick={()=>owner.retry(error.key)}>Retry cleanup</Button>:<span>Disconnect and reconnect to resolve this uncertain operation.</span>}</p>)}</div>
+  return owner&&errors.length>0&&<div className="resource-cleanup-notice" role="alert" aria-label="Resource cleanup" tabIndex={0}>Resource operations need attention.{errors.map((error:any)=><p key={error.key}><span title={error.key} data-session={error.session}>{error.label}</span>: {error.error} {error.retryable?<Button aria-label={`Retry cleanup for ${error.label} (${error.key})`} aria-disabled={error.busy} onClick={()=>owner.retry(error.key)}>Retry cleanup</Button>:<span>Disconnect and reconnect to resolve this uncertain operation.</span>}</p>)}</div>
 }
 const emptyErrors:never[]=[]
 function SessionDock({owner,pane,surface,active,launcher}:{owner:ResourceOwner;pane:string;surface:NativeSurface;active:boolean;launcher:ReactNode}) {

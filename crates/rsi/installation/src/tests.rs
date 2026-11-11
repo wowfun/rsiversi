@@ -16,7 +16,10 @@ struct Fixture {
 }
 impl Fixture {
     fn new() -> Self {
-        let temporary = tempfile::tempdir_in(std::env::temp_dir().canonicalize().unwrap()).unwrap();
+        let temporary = tempfile::tempdir_in(rsi_workspace_path::canonical_native_path(
+            std::env::temp_dir().canonicalize().unwrap(),
+        ))
+        .unwrap();
         let layout = Layout::new(&temporary.path().join("prefix")).unwrap();
         let homes = HostPaths::new(
             temporary.path().join("config"),
@@ -24,17 +27,20 @@ impl Fixture {
             temporary.path().join("cache"),
         )
         .unwrap();
-        for root in [
-            &layout.bin,
-            &layout.control,
-            homes.config(),
-            homes.state(),
-            homes.cache(),
-        ] {
+        let bin = native::create_absolute_directory_no_follow(&layout.bin).unwrap();
+        let control = native::create_absolute_directory_no_follow(&layout.control).unwrap();
+        for root in [homes.config(), homes.state(), homes.cache()] {
             native::create_absolute_directory_no_follow(root).unwrap();
         }
         for role in [Role::Core, Role::Uninstaller, Role::Launcher] {
-            std::fs::write(layout.target(role), format!("old {}", role.name())).unwrap();
+            let directory = if role == Role::Core { &bin } else { &control };
+            fs::write(
+                directory,
+                role.name(),
+                format!("old {}", role.name()).as_bytes(),
+                false,
+            )
+            .unwrap();
         }
         let hash = |role| fs::digest_file(fs::source(&layout.target(role)).unwrap()).unwrap();
         let record = Record {
@@ -47,12 +53,7 @@ impl Fixture {
             launcher: hash(Role::Launcher),
             path_edits: vec![],
         };
-        record
-            .save(
-                &native::open_absolute_directory_no_follow(&layout.control).unwrap(),
-                false,
-            )
-            .unwrap();
+        record.save(&control, false).unwrap();
         Self {
             temporary,
             layout,
@@ -361,8 +362,8 @@ async fn purge_recognizes_reset_receipts_using_the_producers_home_spelling() {
     let f = Fixture::new();
     let id = "e".repeat(32);
     let backup = f.homes.state().join(format!(".reset-{id}-agent"));
-    std::fs::create_dir(&backup).unwrap();
-    std::fs::write(backup.join("session"), b"secret").unwrap();
+    let backup_directory = native::create_absolute_directory_no_follow(&backup).unwrap();
+    fs::write(&backup_directory, "session", b"secret", false).unwrap();
     let receipt = crate::receipts::ResetJournal {
         format: 1,
         id: id.clone(),
@@ -379,12 +380,15 @@ async fn purge_recognizes_reset_receipts_using_the_producers_home_spelling() {
         }],
     };
     let directory = f.homes.state().join("session-host");
-    std::fs::create_dir(&directory).unwrap();
-    std::fs::write(
-        directory.join(format!("reset-{id}.json")),
-        serde_json::to_vec(&receipt).unwrap(),
+    let receipt_directory = native::create_absolute_directory_no_follow(&directory).unwrap();
+    fs::write(
+        &receipt_directory,
+        &format!("reset-{id}.json"),
+        &serde_json::to_vec(&receipt).unwrap(),
+        false,
     )
     .unwrap();
+    drop((backup_directory, receipt_directory));
     uninstall(f.options(true)).await.unwrap();
     assert!(!backup.exists());
     assert!(!directory.join(format!("reset-{id}.json")).exists());

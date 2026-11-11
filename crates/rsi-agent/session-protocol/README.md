@@ -1,5 +1,22 @@
 # rsi-agent-session-protocol
 
+Runtime context claims contain text only, like plugin context claims. Their
+distinct provenance selects the User role and the entered-snapshot projection.
+
+Native prompt runtime snapshots use `InputMessageSource::RuntimeContext` and the
+User role. They follow ordinary claim/preparation/publication, so rejected or
+omitted claims do not become entered context. Their text is a snapshot, including
+an explicit cleared marker; provenance is not Tool or policy authority.
+
+`StepPrepared.prompt` is an optional tagged `StepPrompt` replacement. `Assembled`
+contains the complete resolved system sections; `AppendToHeader` appends its sections
+after Header/persona. Omission retains the current Step's tagged value. Empty assembled
+sections clear the full system prompt; empty appended sections retain Header/persona.
+Step start/end resets the value to empty append mode. Tool selection and application
+capture remain explicit on every preparation independently of prompt equality.
+Format 37 owns this distinction; older durable formats are rejected explicitly rather
+than reinterpreted or reset. No saved-state migration is performed implicitly.
+
 `TurnOutcome::Blocked` records an input-preparation rejection. It is distinct from
 cancellation, provider failure and successful completion; no provider request is
 authorized by the rejected preparation. Initial `enter([])` completes normally.
@@ -18,7 +35,7 @@ these are not execution authority. Empty blocks and empty message content are
 valid preparation results even though fresh ingress requires meaningful input.
 The serialized entered list has a 32 MiB prepared-input envelope. Typed
 construction and deserialization validate it; safe-Rust consumers borrow it
-without repeating serialization. Session format 34 retains verbatim files as
+without repeating serialization. Session format 37 retains verbatim files as
 typed `FileRef` content, independently of image and conversation references.
 Image blocks may include optional display metadata independent of the raster identity. File bytes and provider-local paths do not enter Facts. It separates `InputMessageClaimed`
 and `ToolContextsClaimed` from `StepInputsPrepared`. Direct `TurnAccepted` text is
@@ -59,8 +76,13 @@ initial human authority. Origin and attribution are part of the exact accepted m
 reusing a native message ID conflicts instead of changing the prior acceptance.
 
 `StepPrepared` records the optional application source.
-A ready source records its process generation and the admitted schemas,
-application registrations and native result owners. An unavailable selected
+A ready source records its process generation and the admitted tool names,
+application registrations and native result owners. The captured runtime owns
+the schemas used for execution; `ModelIntent` request evidence owns their durable
+inspection representation and may reference an earlier identical section.
+`StepPrepared` does not persist a second schema catalog. When request evidence is
+unavailable, schema inspection is unavailable; registration routing and cold
+outcome recovery still use the complete captured identities. An unavailable selected
 source records its diagnostic. Absence denotes no selected application.
 `ToolIntent.identity.owner_id` binds an application call to the captured row.
 Sources with durable outcomes also record their stable receipt source on the
@@ -81,7 +103,7 @@ bounded like other non-human Agent messages and cannot carry execution overrides
 Command inputs retain one or more typed text, image or file blocks in their original
 order. Their external admission owner verifies referenced objects; the protocol
 validates descriptors, provenance and aggregate bounds without filesystem I/O.
-Session format 34 admits this content under both pending and claimed command
+Session format 37 admits this content under both pending and claimed command
 provenance. Command input grants no execution overrides or frozen-reference authority.
 
 `ExtensionJournal` is the built-in version-1 envelope for a trusted process
@@ -102,13 +124,20 @@ Live prefix transport appends canonical base64 pages at an exact raw byte offset
 `ModelPrefixDecoder` retains immutable compact blocks and a grammar cursor, validating
 only newly appended events. Each revision ends at an event boundary and declares
 the complete event count; gaps, rewrites, malformed events and overflow fail closed.
+The prefix decoder and complete attempt admission share the AI protocol's
+`LanguageStreamValidator`. Neither assembles a second copy of model content or
+computes the encoded weight of an output it will not retain. Complete admission
+still checks terminal grammar, including failed and incomplete evidence.
 
 The version-1 compact attempt stream contains unsigned minimal LEB128 time gaps,
 a byte tag, an index for delta tags, a minimal LEB128 payload length and payload.
 Tag 0 carries canonical normalized event JSON; tags 1/2/3 carry UTF-8 text,
 reasoning or Tool-argument deltas. Canonical padded base64 blocks split the raw
-stream at 147,453 bytes; only the final block may be shorter. Readers enforce
-the same upper bound on the final block. Raw suffix offsets must fall within the
+stream at 147,453 bytes; only the final block may be shorter. The event reader
+checks block lengths while decoding, using strict canonical padding and zero
+trailing bits. Durable admission performs this decoding once during grammar
+validation, without a separate decode/re-encode pass. Readers enforce the same
+upper bound on the final block. Raw suffix offsets must fall within the
 validated prefix; out-of-range programmer input is rejected before indexing.
 Readers preserve the original event index and elapsed time within its single settlement Fact.
 Payload extraction copies contiguous decoded slices across block boundaries;
@@ -206,7 +235,7 @@ billionths per token. Optional cache rates replace that input subset and require
 its measured count. ModelIntent freezes the matching quote; Kernel validates it
 against the immutable Header. Empty pricing means cost is not configured.
 
-`FrozenAgentSettings::validate_policy` validates the non-routing fields for
+`FrozenAgentSettings::validate_metadata` validates identity and prompt for
 configuration owners that have not selected a model yet. It does not construct
 durable settings. Constructors and deserialization still require a validated
 model reference and the complete policy before creating `FrozenAgentSettings`.
@@ -245,7 +274,7 @@ request identity, and a draft revision cannot appear in a durable command.
 Command controls contain no execution Facts and cannot claim a Turn's free
 mutation lane. Their consumers obtain Session authority through the owning
 Kernel service; serialized identities alone confer no authority. Only Header
-format 34 is accepted; all other formats are unsupported. Header protection is
+format 37 is accepted; all other formats are unsupported. Header protection is
 part of this format's immutable shape. The
 [SQLite contract](../store-sqlite/README.md) owns the exact database version;
 earlier authoritative formats are rejected without rewriting their files.

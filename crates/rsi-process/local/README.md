@@ -44,14 +44,18 @@ Windows pipe execution requires an explicit native executable. Batch-file paths
 are refused; callers must explicitly select `cmd.exe` to execute a batch script.
 It starts the executable suspended, assigns an
 unnamed non-inheritable Job Object before any user code can run, then resumes its
-validated primary thread. The Job forbids breakaway and uses kill-on-close.
+returned primary thread directly, without a system-thread snapshot. Pipe I/O
+uses the Tokio I/O driver and direct-child waiting uses Windows wait registration;
+neither occupies a Tokio blocking worker. The Job forbids breakaway and uses kill-on-close.
 Termination forcibly closes the whole Job; Windows advertises no Unix TERM or
 console-control delivery. Direct-child reaping, zero active Job members and pipe
 joins precede settlement. A naturally exited leader with surviving descendants
 also closes the Job before publishing its outcome. Startup and retirement retain
 the same active/capture admission budgets; failures are not cleanup receipts.
-Windows provides native unconfined pipe and ConPTY plans. Restricted plans and
-the optional completed-output cache remain unavailable. ConPTY shares the active
+Windows pipes accept either an explicit unconfined plan or a Windows ACL plan
+with its retained primary token. The exact token is borrowed for native creation;
+Process retains the Sandbox owner through Job settlement. ConPTY remains
+unconfined, and the optional completed-output cache remains unavailable. ConPTY shares the active
 process and capture budgets, bounds output buffering and input admission, and
 limits each input write to 500 ms. Cleanup drains console output while closing
 ConPTY, joins I/O and reaps the client and its Job before releasing admission.
@@ -102,10 +106,14 @@ The same provider also publishes the sibling duplex capability. Both spawn paths
 use the same validated confined-plan admission, process registry, capture budget,
 identity-fenced TERM/KILL and reaping mechanics. Duplex stdout waits for free queue
 space before reading another bounded pipe chunk. Its explicit stdin port serializes
-one write and closes on termination or direct-child exit. Each native pipe write
-waits at most 500 ms and either reports its exact accepted prefix or Capacity
-before accepting bytes. The writer remains usable after backpressure. Its task,
-not the RPC waiter, owns this deadline and any accepted input. The stdout task publishes
+one write and closes on termination or direct-child exit. Unix and Windows use
+the same input owner: one bounded command retains admission through its write,
+releases it before acknowledgement, and waits through pipe backpressure
+until completion or process cancellation. Its task, not the RPC waiter, owns any
+accepted input. Closing stdin flushes accepted bytes and drops the pipe before
+acknowledgement. Writes report the pipe adapter's accepted prefix; they do not
+establish that the subprocess consumed it.
+The stdout task publishes
 its own EOF or error promptly, independently of child and stderr settlement.
 Task cancellation or panic publishes a stream error after buffered bytes;
 whole-process failures remain observable through `wait`. The reaper retains

@@ -36,7 +36,9 @@ for(const [name,engine] of Object.entries({chromium,firefox})){
     assert(await editor.evaluate(node=>node===document.querySelector('[aria-label="Main message"]')),'empty and docked composer identity');
     await page.getByRole('button',{name:'Copy code',exact:true}).click();await page.getByRole('button',{name:'Copied',exact:true}).waitFor();
     checks.push({enterSend:true,composerIdentity:true,clipboard:true});
-    await page.locator('[data-testid="conversation-row"]').first().waitFor();await page.locator('[data-testid="conversation-row"] .session-options summary').first().click();await page.getByRole('button',{name:'Pin',exact:true}).click();await page.getByRole('region',{name:'Pinned conversations'}).getByTestId('conversation-open').waitFor();
+    const group=page.getByTestId('workspace-group').filter({has:page.getByRole('button',{name:'ui-folder',exact:true})});
+    await group.getByRole('button',{name:'ui-folder',exact:true}).click();
+    await group.getByTestId('conversation-row').first().waitFor();await group.locator('.session-options summary').first().click();await page.getByRole('button',{name:'Pin',exact:true}).click();await page.getByRole('region',{name:'Pinned conversations'}).getByTestId('conversation-open').waitFor();
     const refreshGroup = page.getByRole('button', {name:'Refresh conversations in ui-folder',exact:true});
     await refreshGroup.waitFor();await refreshGroup.click();await refreshGroup.waitFor({state:'detached'});
     assert.equal(await page.getByTestId('workspace-group').filter({hasText:'ui-folder'}).getByTestId('conversation-row').count(),0);
@@ -62,7 +64,7 @@ for(const [name,engine] of Object.entries({chromium,firefox})){
     }
     await page.setViewportSize({width:1440,height:900});
     await input.fill('hold this turn');await input.press('Enter');await page.getByTestId('composer-send').filter({hasText:'Queue'}).waitFor();
-    await input.fill('queued survivor');await input.press('Enter');await page.locator('.queue-row').waitFor();await input.fill('draft remains');await page.getByRole('button',{name:'Sending options'}).count();
+    await input.fill('queued survivor');await input.press('Enter');await page.locator('.queue-row').waitFor();await input.fill('draft remains');
     await page.getByRole('button',{name:'Stop',exact:true}).click();await page.waitForFunction(()=>document.querySelector('.pane-status').textContent==='Completed');assert.equal(await input.inputValue(),'draft remains');
     checks.push({queue:true,stopKeepsDraft:true});
     await page.screenshot({path:join(directory,'conversation.png')});assert.deepEqual(errors,[]);assert.equal(await page.locator('#notice:visible').count(),0);

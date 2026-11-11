@@ -489,7 +489,13 @@ async fn transcript_metadata_and_thinking_mouse_clicks_have_source_grounded_disp
         let until = Instant::now() + Duration::from_millis(2200);
         while Instant::now() < until {
             let contents = terminal.screen.lock().unwrap().screen().contents();
-            for absent in ["Working", "Loading", "Copied", "Copy failed"] {
+            for absent in [
+                "Working…",
+                "Loading…",
+                "Loading UI…",
+                "Copied",
+                "Copy failed",
+            ] {
                 assert!(
                     !contents.contains(absent),
                     "unexpected idle feedback: {absent}"

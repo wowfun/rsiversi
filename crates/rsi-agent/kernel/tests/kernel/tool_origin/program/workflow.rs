@@ -85,10 +85,12 @@ async fn fixture_with_store(
     if let Some(execution) = execution {
         session = session.with_execution(execution).unwrap();
     }
+    let mut message = mailbox_message("workflow-input");
+    message.options.sandbox = Some(SandboxMode::DangerFullAccess);
     kernel
         .submit_message(SubmitMessage {
             session,
-            message: mailbox_message("workflow-input"),
+            message,
             delivery: rsi_agent_session_protocol::MessageDelivery::NextTurn,
         })
         .await
@@ -123,6 +125,8 @@ async fn fixture_with_store(
         })
         .await
         .unwrap();
+    assert_eq!(run.descriptor().sandbox, SandboxMode::DangerFullAccess);
+    assert!(!run.descriptor().require_approval);
     assert!(
         store
             .read_program_records(root.session_id(), &run.descriptor().run_id)
@@ -389,6 +393,11 @@ async fn workflow_detaches_and_routes_128_initial_completions_without_parent_mai
         assert!(
             matches!(claim.header().execution_owner(),Some(ExecutionOwner::ProgramRun{ordinal:actual,..}) if *actual==ordinal)
         );
+        assert_eq!(
+            claim.header().settings().sandbox(),
+            SandboxMode::DangerFullAccess
+        );
+        assert!(!claim.header().settings().require_approval());
         assert_eq!(
             claim.header().history_origin().unwrap().point.turn_id(),
             f.root.turn_id()

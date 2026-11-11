@@ -16,7 +16,9 @@ scaled with unrelated dormant history.
 The metadata-first-access portion of this decision is superseded by
 [explicit validation and bounded metadata snapshots](2026-09-05-agent-metadata-and-admitted-work.md).
 The mechanical proof, cache, WAL snapshot, and offline-audit rationale below
-continues to apply to execution and history access.
+continues to apply to execution and indexed history access. The
+[canonical page decision](2026-11-08-canonical-pages-and-execution-proofs.md)
+supersedes implicit Session validation for contiguous canonical history reads.
 
 Open retains the exclusive writer lease, owned-root checks, and exact schema
 validation but does not scan session contents. An existing nonempty database is
@@ -61,9 +63,11 @@ Mailbox bodies come from their canonical acceptance controls through one indexed
 join. The mailbox table retains routing and lifecycle projections, not another
 encoded message. The decoder moves the validated message out of its control and
 counts compact JSON bytes without allocating another encoded copy. Metadata-only
-queue reads still avoid bodies. Exact schema-44 admission removes its redundant
-body column transactionally before exposing the current Store; canonical bytes
-remain unchanged.
+queue reads still avoid bodies. Queued claim bodies use the same acceptance
+owner, with their physical encoding kept inside the Store. The
+[Store contract](../../../../crates/rsi-agent/store-sqlite/README.md) owns schema
+admission and logical reconstruction; earlier encodings are rejected before a
+writer opens them.
 The Store interface also provides one exact indexed
 turn-boundary read while Kernel retains outcome interpretation.
 Atomic appends without a new Header require an existing Session and return

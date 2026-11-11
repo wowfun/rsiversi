@@ -81,6 +81,9 @@ async fn filtered_recent(
         .await
         .unwrap();
     assert_eq!(recent.sessions[0].header.session_id(), b);
+    assert_eq!(recent.sessions[0].last_activity_ms, 21);
+    assert_eq!(recent.sessions[0].durable_fact_seq, 1);
+    assert_eq!(recent.sessions[0].durable_control_seq, 0);
     assert!(recent.has_more);
     let next = store
         .list_recent_sessions(&local_scope, Some(&recent.sessions[0].cursor()), 1)
@@ -179,15 +182,18 @@ pub async fn assert_activity_store_contract(store: &dyn SessionStore, template: 
             .session_order_seed(&ExecutionLocations::all(), Some(&local))
             .await
             .unwrap(),
-        StoreOrderSeed::from_members(vec![(a.clone(), local.clone(), 50), (b, local.clone(), 21)])
-            .unwrap()
+        StoreOrderSeed::from_members(vec![
+            (a.clone(), local.clone(), 10, 50),
+            (b, local.clone(), 20, 21)
+        ])
+        .unwrap()
     );
     assert_eq!(
         store
             .session_order_seed(&ExecutionLocations::all(), Some(&remote))
             .await
             .unwrap(),
-        StoreOrderSeed::from_members(vec![(remote_id, remote.clone(), 31)]).unwrap()
+        StoreOrderSeed::from_members(vec![(remote_id, remote.clone(), 30, 31)]).unwrap()
     );
     new_human(store, &a).await;
     let final_page = store
@@ -231,6 +237,14 @@ async fn exact_summaries(
     assert!(store.session_activity_summaries(&too_many).await.is_err());
 }
 async fn new_human(store: &dyn SessionStore, session: &SessionId) {
+    let before = store
+        .list_recent_sessions(&ExecutionLocations::all(), None, 3)
+        .await
+        .unwrap()
+        .sessions
+        .into_iter()
+        .find(|row| row.header.session_id() == session)
+        .unwrap();
     let message = AgentMessage {
         message_id: MessageId::new("new-human").unwrap(),
         source: AgentMessageSource::Human { attribution: None },
@@ -267,6 +281,31 @@ async fn new_human(store: &dyn SessionStore, session: &SessionId) {
         })
         .await
         .unwrap();
+    let after = store
+        .list_recent_sessions(&ExecutionLocations::all(), None, 3)
+        .await
+        .unwrap()
+        .sessions
+        .into_iter()
+        .find(|row| row.header.session_id() == session)
+        .unwrap();
+    assert_eq!(before.header, after.header);
+    assert_eq!(
+        (
+            before.last_activity_ms,
+            before.durable_fact_seq,
+            before.durable_control_seq
+        ),
+        (50, 4, 0),
+    );
+    assert_eq!(
+        (
+            after.last_activity_ms,
+            after.durable_fact_seq,
+            after.durable_control_seq
+        ),
+        (60, 4, 1),
+    );
 }
 
 /// Proves complete order membership crosses page boundaries and fails closed at 1025.

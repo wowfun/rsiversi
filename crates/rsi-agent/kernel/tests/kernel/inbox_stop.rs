@@ -322,7 +322,7 @@ async fn session_stop_reconciles_lost_ack_in_pages_without_reading_pending_bodie
     for index in 0..8 {
         send(&kernel, &format!("held-{index}"), MessageDelivery::NextTurn).await;
     }
-    store.mailbox_reads.lock().unwrap().clear();
+    store.mailbox.reads.lock().unwrap().clear();
     *store.count_control_reads_for.lock().unwrap() = Some(claim.session_id().clone());
     store.control_read_attempts.store(0, Ordering::Release);
     store
@@ -340,7 +340,7 @@ async fn session_stop_reconciles_lost_ack_in_pages_without_reading_pending_bodie
             .accepted
     );
     assert!(kernel.cancellation(&claim).unwrap().is_cancelled());
-    assert!(store.mailbox_reads.lock().unwrap().is_empty());
+    assert!(store.mailbox.reads.lock().unwrap().is_empty());
     assert_eq!(
         store.control_read_attempts.load(Ordering::Acquire),
         1,
@@ -541,7 +541,7 @@ async fn session_stop_can_clear_an_idle_inbox_when_its_composition_is_unavailabl
     .await
     .unwrap();
     let id = SessionId::new("idle-stop").unwrap();
-    store.mailbox_reads.lock().unwrap().clear();
+    store.mailbox.reads.lock().unwrap().clear();
     store.reset_header_read_attempts();
     assert!(
         cold.cancel_target(&id, CancelTarget::Session { keep_inbox: true }, None)
@@ -561,7 +561,7 @@ async fn session_stop_can_clear_an_idle_inbox_when_its_composition_is_unavailabl
             .unwrap()
             .accepted
     );
-    assert!(store.mailbox_reads.lock().unwrap().is_empty());
+    assert!(store.mailbox.reads.lock().unwrap().is_empty());
     let inbox = store.read_inbox_control_state(&id, true).await.unwrap();
     assert!(inbox.inbox_paused && inbox.pending_message_ids.is_empty());
     let workers = cold.start_workers();

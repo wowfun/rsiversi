@@ -20,6 +20,9 @@ use std::sync::{
 use tokio::sync::{Notify, Semaphore};
 use tokio_util::sync::CancellationToken;
 
+#[path = "tools/middleware.rs"]
+mod middleware;
+
 #[derive(Debug)]
 struct TestSandbox;
 
@@ -295,7 +298,7 @@ fn echo_registration(name: &str) -> ToolRegistration {
     ToolRegistration {
         output: None,
         definition: ToolDefinition::new(name, "echo", true.into()).unwrap(),
-        timeout: rsi_tools_protocol::ToolTimeoutPolicy::Execution { timeout_ms: 1_000 },
+        run_policy: rsi_tools_protocol::ToolRunPolicy::execution(std::time::Duration::from_secs(1)),
         executor: Arc::new(EchoTool),
     }
 }
@@ -708,9 +711,9 @@ async fn catalog_withdrawal_cannot_recycle_admission_owned_by_active_bodies() {
             vec![ToolRegistration {
                 output: None,
                 definition: ToolDefinition::new("hold", "hold admission", true.into()).unwrap(),
-                timeout: rsi_tools_protocol::ToolTimeoutPolicy::Execution {
-                    timeout_ms: 600_000,
-                },
+                run_policy: rsi_tools_protocol::ToolRunPolicy::execution(
+                    std::time::Duration::from_mins(10),
+                ),
                 executor: Arc::new(AdmissionHoldingTool {
                     entered: Arc::clone(&entered),
                     entered_changed: Arc::clone(&entered_changed),
@@ -798,7 +801,9 @@ async fn retained_wait_observes_settlement_without_an_unrelated_notification() {
         vec![ToolRegistration {
             output: None,
             definition: ToolDefinition::new("stubborn", "stubborn", true.into()).unwrap(),
-            timeout: rsi_tools_protocol::ToolTimeoutPolicy::Execution { timeout_ms: 1_000 },
+            run_policy: rsi_tools_protocol::ToolRunPolicy::execution(
+                std::time::Duration::from_secs(1),
+            ),
             executor: Arc::new(StubbornTool {
                 entered: Arc::clone(&entered),
                 release: Arc::clone(&release),
@@ -853,7 +858,9 @@ async fn dropping_a_catalog_reclaims_settled_and_late_retained_results() {
             ToolRegistration {
                 output: None,
                 definition: ToolDefinition::new("blocking", "blocking", true.into()).unwrap(),
-                timeout: rsi_tools_protocol::ToolTimeoutPolicy::Execution { timeout_ms: 1_000 },
+                run_policy: rsi_tools_protocol::ToolRunPolicy::execution(
+                    std::time::Duration::from_secs(1),
+                ),
                 executor: Arc::new(BlockingTool {
                     entered: Arc::clone(&entered),
                 }),
@@ -926,7 +933,9 @@ async fn sandbox_rejection_remains_structured_across_tool_execution() {
         vec![ToolRegistration {
             output: None,
             definition: ToolDefinition::new("confine", "confine", true.into()).unwrap(),
-            timeout: rsi_tools_protocol::ToolTimeoutPolicy::Execution { timeout_ms: 1_000 },
+            run_policy: rsi_tools_protocol::ToolRunPolicy::execution(
+                std::time::Duration::from_secs(1),
+            ),
             executor: Arc::new(ConfineTool),
         }],
     );
@@ -981,7 +990,9 @@ async fn dropping_a_catalog_withdraws_prepared_calls_and_cancels_admitted_calls(
         vec![ToolRegistration {
             output: None,
             definition: ToolDefinition::new("wait", "wait", true.into()).unwrap(),
-            timeout: rsi_tools_protocol::ToolTimeoutPolicy::Execution { timeout_ms: 10_000 },
+            run_policy: rsi_tools_protocol::ToolRunPolicy::execution(
+                std::time::Duration::from_secs(10),
+            ),
             executor: Arc::new(BlockingTool {
                 entered: entered.clone(),
             }),
@@ -1012,18 +1023,18 @@ async fn catalog_bounds_tool_count_and_per_call_timeout_before_seal() {
     let (fiber, provider) = activated().await;
     let stage = provider.begin_stage().unwrap();
     let registrar = stage.registrar();
-    assert!(
-        registrar
-            .register(ToolRegistration {
-                output: None,
-                definition: ToolDefinition::new("too-slow", "", json!({})).unwrap(),
-                timeout: rsi_tools_protocol::ToolTimeoutPolicy::Execution {
-                    timeout_ms: 600_001
-                },
-                executor: Arc::new(EchoTool),
-            })
-            .is_err()
-    );
+    for deadline in [std::time::Duration::ZERO, std::time::Duration::MAX] {
+        assert!(
+            registrar
+                .register(ToolRegistration {
+                    output: None,
+                    definition: ToolDefinition::new("invalid-deadline", "", json!({})).unwrap(),
+                    run_policy: rsi_tools_protocol::ToolRunPolicy::execution(deadline),
+                    executor: Arc::new(EchoTool),
+                })
+                .is_err()
+        );
+    }
     let registrations = (0..64)
         .map(|index| echo_registration(&format!("tool-{index}")))
         .collect();
@@ -1056,7 +1067,9 @@ async fn timeout_is_retained_until_the_orchestrator_commits_it() {
                 json!({"type":"object"}),
             )
             .unwrap(),
-            timeout: rsi_tools_protocol::ToolTimeoutPolicy::Execution { timeout_ms: 100 },
+            run_policy: rsi_tools_protocol::ToolRunPolicy::execution(
+                std::time::Duration::from_millis(100),
+            ),
             executor: Arc::new(BlockingTool {
                 entered: entered.clone(),
             }),
@@ -1093,6 +1106,111 @@ async fn timeout_is_retained_until_the_orchestrator_commits_it() {
 }
 
 #[tokio::test(start_paused = true)]
+async fn automatic_tools_without_deadlines_and_long_deadlines_do_not_gain_a_600_second_timer() {
+    use rsi_tools_protocol::{ToolInteraction, ToolProgramRole, ToolRunPolicy};
+    use std::time::Duration;
+    let (fiber, provider) = activated().await;
+    for deadline in [None, Some(Duration::from_mins(15))] {
+        let entered = Arc::new(Notify::new());
+        let tools = seal(
+            &provider,
+            vec![ToolRegistration {
+                output: None,
+                definition: ToolDefinition::new("wait", "wait", json!({}))
+                    .unwrap()
+                    .with_program_role(ToolProgramRole::Callable),
+                run_policy: ToolRunPolicy {
+                    interaction: ToolInteraction::Automatic,
+                    deadline,
+                },
+                executor: Arc::new(BlockingTool {
+                    entered: entered.clone(),
+                }),
+            }],
+        );
+        let prepared = tools
+            .prepare(
+                "effect",
+                ToolCall {
+                    id: "call".into(),
+                    name: "wait".into(),
+                    arguments: json!({}),
+                },
+            )
+            .unwrap();
+        let identity = prepared.identity().clone();
+        let stop = CancellationToken::new();
+        let start = tool_start(stop.clone());
+        let invocation = tokio::spawn(async move { prepared.start(start).await });
+        entered.notified().await;
+        tokio::time::advance(Duration::from_millis(600_001)).await;
+        assert!(!invocation.is_finished());
+        assert_eq!(tools.query(&identity).unwrap(), RetainedToolResult::Pending);
+        if deadline.is_some() {
+            tokio::time::advance(Duration::from_mins(5)).await;
+            assert_eq!(invocation.await.unwrap(), Err(ToolError::Timeout));
+        } else {
+            stop.cancel();
+            assert_eq!(invocation.await.unwrap(), Err(ToolError::Cancelled));
+        }
+        tools.commit(&identity).unwrap();
+    }
+    drop(provider);
+    assert!(fiber.dispose().await.is_clean());
+}
+
+#[tokio::test(start_paused = true)]
+async fn deadline_cancels_then_joins_and_preserves_a_non_cancelled_settled_result() {
+    let (fiber, provider) = activated().await;
+    let entered = Arc::new(Notify::new());
+    let release = Arc::new(Notify::new());
+    let tools = seal(
+        &provider,
+        vec![ToolRegistration {
+            output: None,
+            definition: ToolDefinition::new("settle", "settle", json!({})).unwrap(),
+            run_policy: rsi_tools_protocol::ToolRunPolicy::execution(
+                std::time::Duration::from_micros(250),
+            ),
+            executor: Arc::new(StubbornTool {
+                entered: entered.clone(),
+                release: release.clone(),
+            }),
+        }],
+    );
+    let prepared = tools
+        .prepare(
+            "effect",
+            ToolCall {
+                id: "call".into(),
+                name: "settle".into(),
+                arguments: json!({"completed":true}),
+            },
+        )
+        .unwrap();
+    let identity = prepared.identity().clone();
+    let invocation =
+        tokio::spawn(async move { prepared.start(tool_start(CancellationToken::new())).await });
+    entered.notified().await;
+    tokio::time::advance(std::time::Duration::from_millis(5)).await;
+    assert!(!invocation.is_finished());
+    assert_eq!(tools.query(&identity).unwrap(), RetainedToolResult::Pending);
+    release.notify_one();
+    assert_eq!(
+        invocation.await.unwrap().unwrap().value,
+        json!({"completed":true})
+    );
+    assert!(matches!(
+        tools.query(&identity).unwrap(),
+        RetainedToolResult::Returned(_)
+    ));
+    tools.commit(&identity).unwrap();
+    drop(tools);
+    drop(provider);
+    assert!(fiber.dispose().await.is_clean());
+}
+
+#[tokio::test(start_paused = true)]
 async fn human_interaction_waits_beyond_execution_timeout_and_cancels_quiescently() {
     let (fiber, provider) = activated().await;
     let entered = Arc::new(Notify::new());
@@ -1103,7 +1221,7 @@ async fn human_interaction_waits_beyond_execution_timeout_and_cancels_quiescentl
             .register(ToolRegistration {
                 output: None,
                 definition: ToolDefinition::new("invalid-human", "", json!({})).unwrap(),
-                timeout: rsi_tools_protocol::ToolTimeoutPolicy::HumanInteraction,
+                run_policy: rsi_tools_protocol::ToolRunPolicy::human_interaction(),
                 executor: Arc::new(EchoTool),
             })
             .is_err()
@@ -1114,7 +1232,7 @@ async fn human_interaction_waits_beyond_execution_timeout_and_cancels_quiescentl
             definition: ToolDefinition::new("human", "wait", json!({"type":"object"}))
                 .unwrap()
                 .with_scheduling(rsi_tools_protocol::ToolScheduling::ExclusiveFinal),
-            timeout: rsi_tools_protocol::ToolTimeoutPolicy::HumanInteraction,
+            run_policy: rsi_tools_protocol::ToolRunPolicy::human_interaction(),
             executor: Arc::new(BlockingTool {
                 entered: entered.clone(),
             }),
@@ -1159,7 +1277,9 @@ async fn recursive_panic_payload_destruction_cannot_abandon_settlement() {
         vec![ToolRegistration {
             output: None,
             definition: ToolDefinition::new("panic", "panic", true.into()).unwrap(),
-            timeout: rsi_tools_protocol::ToolTimeoutPolicy::Execution { timeout_ms: 1_000 },
+            run_policy: rsi_tools_protocol::ToolRunPolicy::execution(
+                std::time::Duration::from_secs(1),
+            ),
             executor: Arc::new(RecursivePanicTool),
         }],
     );
@@ -1355,7 +1475,9 @@ async fn cancellation_and_dropped_waiters_do_not_abandon_tool_settlement() {
         vec![ToolRegistration {
             output: None,
             definition: ToolDefinition::new("stubborn", "stubborn", true.into()).unwrap(),
-            timeout: rsi_tools_protocol::ToolTimeoutPolicy::Execution { timeout_ms: 10_000 },
+            run_policy: rsi_tools_protocol::ToolRunPolicy::execution(
+                std::time::Duration::from_secs(10),
+            ),
             executor: Arc::new(StubbornTool {
                 entered: entered.clone(),
                 release: release.clone(),
@@ -1415,7 +1537,9 @@ async fn provider_cleanup_reports_unsettled_noncooperative_tools_within_its_boun
         vec![ToolRegistration {
             output: None,
             definition: ToolDefinition::new("stubborn", "stubborn", true.into()).unwrap(),
-            timeout: rsi_tools_protocol::ToolTimeoutPolicy::Execution { timeout_ms: 10_000 },
+            run_policy: rsi_tools_protocol::ToolRunPolicy::execution(
+                std::time::Duration::from_secs(10),
+            ),
             executor: Arc::new(StubbornTool {
                 entered: entered.clone(),
                 release: release.clone(),
@@ -1489,29 +1613,29 @@ async fn output_catalog_admits_the_exact_encoded_limit() {
 
 #[tokio::test]
 async fn program_roles_reject_human_wait_recursion_and_parallel_coordinators() {
-    use rsi_tools_protocol::{ToolProgramRole, ToolScheduling, ToolTimeoutPolicy};
+    use rsi_tools_protocol::{ToolProgramRole, ToolRunPolicy, ToolScheduling};
     let (fiber, provider) = activated().await;
     let stage = provider.begin_stage().unwrap();
     for (role, scheduling, timeout) in [
         (
             ToolProgramRole::Callable,
             ToolScheduling::ExclusiveFinal,
-            ToolTimeoutPolicy::HumanInteraction,
+            ToolRunPolicy::human_interaction(),
         ),
         (
             ToolProgramRole::Callable,
             ToolScheduling::ExclusiveFinal,
-            ToolTimeoutPolicy::Execution { timeout_ms: 1000 },
+            ToolRunPolicy::execution(std::time::Duration::from_secs(1)),
         ),
         (
             ToolProgramRole::Coordinator,
             ToolScheduling::ParallelSafe,
-            ToolTimeoutPolicy::Execution { timeout_ms: 1000 },
+            ToolRunPolicy::execution(std::time::Duration::from_secs(1)),
         ),
         (
             ToolProgramRole::Workflow,
             ToolScheduling::ParallelSafe,
-            ToolTimeoutPolicy::Execution { timeout_ms: 1000 },
+            ToolRunPolicy::execution(std::time::Duration::from_secs(1)),
         ),
     ] {
         assert!(
@@ -1523,7 +1647,7 @@ async fn program_roles_reject_human_wait_recursion_and_parallel_coordinators() {
                         .unwrap()
                         .with_program_role(role)
                         .with_scheduling(scheduling),
-                    timeout,
+                    run_policy: timeout,
                     executor: Arc::new(EchoTool)
                 })
                 .is_err()
@@ -1659,41 +1783,58 @@ impl ToolExecutor for PreparingTool {
 }
 #[tokio::test(start_paused = true)]
 async fn preparation_timeout_waits_for_callback_settlement_without_holding_registry_lock() {
-    let (fiber, provider) = activated().await;
-    let body = Arc::new(PreparingTool::default());
-    let tools = seal(
-        &provider,
-        vec![ToolRegistration {
-            output: None,
-            definition: ToolDefinition::new("prepare", "", json!({})).unwrap(),
-            timeout: rsi_tools_protocol::ToolTimeoutPolicy::Execution { timeout_ms: 100 },
-            executor: body.clone(),
-        }],
-    );
-    let mut prepared = tools
-        .prepare(
-            "preparing",
-            ToolCall {
-                id: "preparing".into(),
-                name: "prepare".into(),
-                arguments: json!({}),
-            },
-        )
-        .unwrap();
-    let work = tokio::spawn(async move {
-        prepared
-            .prepare_execution(tool_start(CancellationToken::new()))
-            .await
-    });
-    body.entered.notified().await;
-    assert_eq!(tools.definitions().len(), 1);
-    tokio::time::advance(std::time::Duration::from_millis(100)).await;
-    body.cancelling.notified().await;
-    assert!(!work.is_finished());
-    body.release.notify_one();
-    assert_eq!(work.await.unwrap().unwrap_err(), ToolError::Timeout);
-    drop((body, tools, provider));
-    assert!(fiber.dispose().await.is_clean());
+    use futures_util::FutureExt as _;
+    use std::time::Duration;
+    for deadline in [
+        Some(Duration::from_millis(100)),
+        None,
+        Some(Duration::from_mins(15)),
+    ] {
+        let cap = deadline
+            .unwrap_or(Duration::from_secs(30))
+            .min(Duration::from_secs(30));
+        let (fiber, provider) = activated().await;
+        let body = Arc::new(PreparingTool::default());
+        let tools = seal(
+            &provider,
+            vec![ToolRegistration {
+                output: None,
+                definition: ToolDefinition::new("prepare", "", json!({})).unwrap(),
+                run_policy: rsi_tools_protocol::ToolRunPolicy {
+                    interaction: rsi_tools_protocol::ToolInteraction::Automatic,
+                    deadline,
+                },
+                executor: body.clone(),
+            }],
+        );
+        let mut prepared = tools
+            .prepare(
+                "preparing",
+                ToolCall {
+                    id: "preparing".into(),
+                    name: "prepare".into(),
+                    arguments: json!({}),
+                },
+            )
+            .unwrap();
+        let work = tokio::spawn(async move {
+            prepared
+                .prepare_execution(tool_start(CancellationToken::new()))
+                .await
+        });
+        body.entered.notified().await;
+        assert_eq!(tools.definitions().len(), 1);
+        tokio::time::advance(cap.checked_sub(Duration::from_millis(1)).unwrap()).await;
+        tokio::task::yield_now().await;
+        assert!(body.cancelling.notified().now_or_never().is_none());
+        tokio::time::advance(Duration::from_millis(1)).await;
+        body.cancelling.notified().await;
+        assert!(!work.is_finished());
+        body.release.notify_one();
+        assert_eq!(work.await.unwrap().unwrap_err(), ToolError::Timeout);
+        drop((body, tools, provider));
+        assert!(fiber.dispose().await.is_clean());
+    }
 }
 
 #[tokio::test]
@@ -1706,7 +1847,9 @@ async fn shutdown_waits_for_explicit_preparation_and_caller_drop_releases_it() {
             vec![ToolRegistration {
                 output: None,
                 definition: ToolDefinition::new("prepare", "", json!({})).unwrap(),
-                timeout: rsi_tools_protocol::ToolTimeoutPolicy::Execution { timeout_ms: 30_000 },
+                run_policy: rsi_tools_protocol::ToolRunPolicy::execution(
+                    std::time::Duration::from_secs(30),
+                ),
                 executor: body.clone(),
             }],
         );
@@ -1762,7 +1905,9 @@ async fn consumed_call_moves_its_large_argument_allocation_into_executor() {
         vec![ToolRegistration {
             output: None,
             definition: ToolDefinition::new("move", "", json!({})).unwrap(),
-            timeout: rsi_tools_protocol::ToolTimeoutPolicy::Execution { timeout_ms: 30_000 },
+            run_policy: rsi_tools_protocol::ToolRunPolicy::execution(
+                std::time::Duration::from_secs(30),
+            ),
             executor: Arc::new(ArgumentAllocation(AtomicUsize::new(pointer))),
         }],
     );

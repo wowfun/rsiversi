@@ -370,6 +370,8 @@ async fn driver_cancellation_never_overtakes_the_terminal_after_a_frame() {
     for (value, call) in (0..256_u16).zip(calls) {
         assert_eq!(call.await.unwrap().unwrap().as_bytes(), value.to_le_bytes());
     }
+    drop(service);
+    assert!(runtime.shutdown().await.is_complete());
     assert_eq!(runtime.resource_snapshot().service_calls.current, 0);
 }
 
@@ -1162,7 +1164,9 @@ async fn saturated_byte_handoffs_release_the_ledger_before_waking_senders() {
     let resources = runtime.resource_snapshot();
     assert_eq!(resources.buffered_message_bytes.current, 0);
     assert_eq!(resources.buffered_message_bytes.high_watermark, 1);
-    assert_eq!(resources.service_calls.current, 0);
+    drop(service);
+    assert!(runtime.shutdown().await.is_complete());
+    assert_eq!(runtime.resource_snapshot().service_calls.current, 0);
 }
 
 #[tokio::test]

@@ -33,6 +33,8 @@ tokio = { workspace = true, features = ["fs", "io-util", "macros", "net", "proce
 tokio-util.workspace = true
 
 [dev-dependencies]
+rsi-agent-prompt-assembly = { path = "../prompt-assembly" }
+rsi-meta-scope = { path = "../../rsi-meta/scope" }
 rsi-user-questions-protocol = { path = "../../rsi-user-questions/protocol" }
 rsi-extension = { path = "../../rsi-extension/core" }
 rsi-extension-agent = { path = "../../rsi-extension/agent" }

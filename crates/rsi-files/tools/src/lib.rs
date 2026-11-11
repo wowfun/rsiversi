@@ -13,7 +13,7 @@ use rsi_files_protocol::{
 use rsi_meta::{ActivationPlan, ConfigValue, MetaError, PluginFactory, PreparedActivation};
 use rsi_tools_protocol::{
     ToolContent, ToolDefinition, ToolError, ToolExecution, ToolExecutor, ToolRegistrarContract,
-    ToolRegistration, ToolResult, ToolScheduling, ToolTimeoutPolicy, safe_tool_text,
+    ToolRegistration, ToolResult, ToolRunPolicy, ToolScheduling, safe_tool_text,
 };
 use serde::Deserialize;
 use serde_json::{Value, json};
@@ -66,7 +66,7 @@ fn registrations(files: &Arc<dyn Files>) -> rsi_tools_protocol::Result<Vec<ToolR
             "maximum":{"type":"integer","minimum":1,"maximum":maximum}
         }, "not":{"required":["path","path_hex"]}, "additionalProperties":false});
         if kind == FileKind::File { schema["anyOf"] = json!([{"required":["path"]},{"required":["path_hex"]}]); }
-        Ok(ToolRegistration { output: None, definition: ToolDefinition::new(name, description, schema)?.with_scheduling(ToolScheduling::ParallelSafe).with_program_role(rsi_tools_protocol::ToolProgramRole::Callable), timeout: ToolTimeoutPolicy::Execution { timeout_ms: 30_000 }, executor: Arc::new(ReadTool { files: files.clone(), kind }) })
+        Ok(ToolRegistration { output: None, definition: ToolDefinition::new(name, description, schema)?.with_scheduling(ToolScheduling::ParallelSafe).with_program_role(rsi_tools_protocol::ToolProgramRole::Callable), run_policy: ToolRunPolicy::execution(std::time::Duration::from_secs(30)), executor: Arc::new(ReadTool { files: files.clone(), kind }) })
     }).collect::<rsi_tools_protocol::Result<Vec<_>>>()?;
     entries.push(present::registration(files.clone())?);
     Ok(entries)

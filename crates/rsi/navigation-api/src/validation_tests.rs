@@ -103,6 +103,10 @@ fn fixture() -> (NavigationPage, NavigationFilter, HostEpoch) {
 fn remote_page_rejects_wrong_scope_order_and_impossible_activity() {
     let (valid, filter, epoch) = fixture();
     validation::page(&valid, &filter, None, &epoch).unwrap();
+    // Registration identities are opaque; the server owns their coordinate mapping.
+    let mut registered = valid.clone();
+    registered.entries[0].workspace = Some(WorkspaceId::parse("a".repeat(64)).unwrap());
+    validation::page(&registered, &filter, None, &epoch).unwrap();
     for bad in 0..7 {
         let mut page = valid.clone();
         match bad {
@@ -110,7 +114,10 @@ fn remote_page_rejects_wrong_scope_order_and_impossible_activity() {
             1 => page.entries[0].last_activity_ms = "0".into(),
             2 => page.entries[0].created_at_ms = "01".into(),
             3 => page.entries[0].path = "relative".into(),
-            4 => page.entries[0].workspace = Some(WorkspaceId::parse("a".repeat(64)).unwrap()),
+            4 => {
+                page.entries[0].metadata.pinned = true;
+                page.entries[0].metadata.archived = true;
+            }
             5 => {
                 page.entries.push(page.entries[0].clone());
                 page.scanned = 2;

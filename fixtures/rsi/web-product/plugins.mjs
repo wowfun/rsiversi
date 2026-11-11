@@ -1,4 +1,4 @@
-import {openSettings} from './controls.mjs';
+import {browserOwner,openSettings} from './controls.mjs';
 import assert from 'node:assert/strict';
 import {join} from 'node:path';
 export async function verifyPluginSources(page,service,report,browser) {
@@ -23,9 +23,10 @@ export async function verifyPluginSources(page,service,report,browser) {
   await page.getByRole('button',{name:'Close settings',exact:true}).click();
   assert.equal(service.provider.requests.length,requests,'diagnostic read invoked a model');
 }
-export async function verifyPlugins(page,pane,service,receipt,report,browser) {
+export async function verifyPlugins(page,pane,service,report,browser) {
   const input=pane.getByRole('textbox',{name:'Main message',exact:true});
   await input.fill('Retained while inspecting plugins');
+  const owner=await browserOwner(page);
   await openSettings(page);
   await page.getByRole('button',{name:'Plugins',exact:true}).click();
   const panel=page.getByRole('region',{name:'Plugins',exact:true});
@@ -44,11 +45,11 @@ export async function verifyPlugins(page,pane,service,receipt,report,browser) {
   assert(await panel.evaluate(element=>element.scrollWidth<=element.clientWidth+1));
   await page.setViewportSize({width:1440,height:980});
   const grants=()=>JSON.parse(service.run(["run",'devices','configuration','list']).stdout);
-  service.run(["run",'devices','configuration','revoke',receipt.id,grants().revision]);
+  service.run(["run",'devices','configuration','revoke',owner,grants().revision]);
   await panel.getByRole('button',{name:'Refresh plugin status',exact:true}).click();
   await panel.getByRole('alert').filter({hasText:'Plugin status unavailable'}).waitFor();assert.equal(await panel.locator('.plugin-rows .plugin-row').count(),0);
   await page.screenshot({path:join(report,`${browser}-plugins-revoked.png`)});
-  service.run(["run",'devices','configuration','grant',receipt.id,grants().revision]);
+  service.run(["run",'devices','configuration','grant',owner,grants().revision]);
   await panel.getByRole('button',{name:'Refresh plugin status',exact:true}).click();await panel.locator('.plugin-rows .plugin-row').first().waitFor();
   await page.getByRole('button',{name:'Close settings',exact:true}).click();assert.equal(await input.inputValue(),'Retained while inspecting plugins');await input.fill('');
 }

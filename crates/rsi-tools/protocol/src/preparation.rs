@@ -185,7 +185,7 @@ impl ToolExecution {
         &self,
         selector: &str,
         native_program: PathBuf,
-        native_environment: Vec<(OsString, OsString)>,
+        mut native_environment: Vec<(OsString, OsString)>,
         arguments: Vec<String>,
     ) -> Result<ToolProcess> {
         if self.cancellation.is_cancelled() {
@@ -227,6 +227,9 @@ impl ToolExecution {
                 .confine(request)
                 .await
                 .map_err(ToolError::Sandbox)?;
+            if plan.prepare_environment(&mut native_environment) {
+                rsi_process::validate_environment(&native_environment).map_err(execution_error)?;
+            }
             Ok(ToolProcess {
                 plan: Plan::Native(plan),
                 environment: native_environment,

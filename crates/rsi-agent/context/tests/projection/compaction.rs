@@ -29,6 +29,90 @@ fn cursor() -> ModelContextState {
 }
 
 #[test]
+fn runtime_context_is_remapped_or_removed_by_summary_and_checkpoint_replay() {
+    for retained in [false, true] {
+        let mut state = cursor();
+        let mut history = Vec::new();
+        append(
+            &mut state,
+            &mut history,
+            vec![
+                accepted("old", &"old task ".repeat(10_000)),
+                SessionFactBody::InputMessageClaimed {
+                    turn_id: TurnId::new("old").unwrap(),
+                    step_id: StepId::new("step").unwrap(),
+                    source: InputMessageSource::RuntimeContext,
+                    content: vec![AgentMessageContent::Text {
+                        text: "runtime snapshot".into(),
+                    }],
+                },
+                SessionFactBody::TurnTerminal {
+                    turn_id: TurnId::new("old").unwrap(),
+                    outcome: TurnOutcome::Completed,
+                    result: None,
+                },
+                accepted("current", "current task"),
+            ],
+        );
+        append(
+            &mut state,
+            &mut history,
+            model_bodies(
+                "current",
+                "recent",
+                ModelPurpose::Conversation,
+                &"recent evidence ".repeat(if retained { 1 } else { 6000 }),
+                None,
+                FinishReason::Stop,
+            ),
+        );
+        assert_eq!(state.runtime_context(), Some("runtime snapshot"));
+        let frozen = plan(&state);
+        // A small recent tail retains the snapshot at index 1, which must move
+        // to 0. A large tail makes both old messages eligible for summary.
+        assert!(
+            frozen
+                .selections
+                .iter()
+                .all(|selection| selection.turn.as_str() == "old")
+        );
+        assert_eq!(frozen.selections[0].first, 0);
+        assert_eq!(
+            frozen
+                .selections
+                .iter()
+                .map(|selection| selection.count)
+                .sum::<u32>(),
+            if retained { 1 } else { 2 }
+        );
+        append(
+            &mut state,
+            &mut history,
+            model_bodies(
+                "current",
+                "summary",
+                ModelPurpose::ContextCompaction(Box::new(frozen)),
+                "Old task summarized.",
+                None,
+                FinishReason::Stop,
+            ),
+        );
+        assert!(state.summary_installed(&EffectId::new("summary").unwrap()));
+        let restored = state.restored(&state.checkpoint().unwrap()).unwrap();
+        let mut replay = cursor();
+        replay.ingest(ContextPage::Canonical(&history)).unwrap();
+        for view in [&state, &restored, &replay] {
+            assert_eq!(
+                view.runtime_context(),
+                retained.then_some("runtime snapshot")
+            );
+            assert_eq!(wire(view).contains("runtime snapshot"), retained);
+            assert_eq!(wire(view), wire(&state));
+        }
+    }
+}
+
+#[test]
 fn incomplete_usage_and_explicit_reserve_drive_pressure_across_checkpoint_and_replay() {
     let (mut state, mut facts, _) = history(None);
     append(

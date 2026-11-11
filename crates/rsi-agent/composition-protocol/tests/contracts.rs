@@ -6,6 +6,8 @@ mod execution_fixture;
 mod projection;
 #[path = "contracts/resource.rs"]
 mod resource;
+#[path = "contracts/tool_around.rs"]
+mod tool_around;
 use rsi_agent_composition_protocol::{
     AgentComposition, AgentCompositionError, AgentCompositionPin, AgentSessionDraft,
 };

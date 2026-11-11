@@ -10,10 +10,16 @@ use std::path::PathBuf;
 pub enum Operation {
     /// Get operation.
     Get,
+    /// Find the current registration by complete coordinate key.
+    Find,
     /// List operation.
     List,
     /// Workspace ordering seed.
     OrderSeed,
+    /// Shared Host display order.
+    DisplayOrder,
+    /// Move one registration within the Host display order.
+    InsertBefore,
     /// Register operation.
     Register,
     /// Replace the display name.
@@ -25,10 +31,13 @@ pub enum Operation {
 }
 impl Operation {
     /// All operation identities owned by this protocol.
-    pub const ALL: [Self; 7] = [
+    pub const ALL: [Self; 10] = [
         Self::Get,
+        Self::Find,
         Self::List,
         Self::OrderSeed,
+        Self::DisplayOrder,
+        Self::InsertBefore,
         Self::Register,
         Self::Rename,
         Self::Status,
@@ -41,8 +50,11 @@ impl Operation {
     pub fn spec(self) -> OperationSpec {
         let (name, effect) = match self {
             Self::Get => ("get", OperationEffect::Read),
+            Self::Find => ("find", OperationEffect::Read),
             Self::List => ("list", OperationEffect::Read),
             Self::OrderSeed => ("order_seed", OperationEffect::Read),
+            Self::DisplayOrder => ("display_order", OperationEffect::Read),
+            Self::InsertBefore => ("insert_before", OperationEffect::Mutation),
             Self::Register => ("register", OperationEffect::Mutation),
             Self::Rename => ("rename", OperationEffect::Mutation),
             Self::Status => ("status", OperationEffect::Read),
@@ -50,18 +62,22 @@ impl Operation {
         };
         OperationSpec {
             protocol: rsi_api_protocol::wire_contract!(),
-            id: OperationId::new("workspace", name, 4).expect("constant operation"),
+            id: OperationId::new("workspace", name, 5).expect("constant operation"),
             class: OperationClass::Data,
             effect,
             access: rsi_api_protocol::OperationAccess::Authenticated,
             encoding: RequestEncoding::Json,
             maximum_request_bytes: if matches!(self, Self::Register | Self::Rename) {
                 128 * 1024
+            } else if matches!(self, Self::InsertBefore) {
+                256
             } else {
                 128
             },
             maximum_response_bytes: if matches!(self, Self::List) {
                 32 * 1024 * 1024
+            } else if matches!(self, Self::DisplayOrder | Self::InsertBefore) {
+                2 * 1024 * 1024
             } else if matches!(self, Self::OrderSeed) {
                 128 * 1024 + 64
             } else {
@@ -69,6 +85,11 @@ impl Operation {
             },
         }
     }
+}
+#[derive(Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub(crate) struct FindRequest {
+    pub key: rsi_workspace_protocol::WorkspaceKey,
 }
 #[derive(Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
@@ -92,6 +113,13 @@ pub(crate) struct RegisterRequest {
 pub(crate) struct RenameRequest {
     pub id: WorkspaceId,
     pub name: rsi_workspace_protocol::WorkspaceName,
+}
+
+#[derive(Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub(crate) struct InsertBeforeRequest {
+    pub id: WorkspaceId,
+    pub before: Option<WorkspaceId>,
 }
 
 #[derive(Serialize, Deserialize)]

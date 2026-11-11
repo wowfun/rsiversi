@@ -45,7 +45,9 @@ It does not use a plain file open for a Windows directory or ignore flush errors
 Linux lifecycle checks require a matching process start token and exclude an
 exited, unreaped zombie. A foreground owner's caller may reap it only after
 `host stop` returns; retaining `/proc` metadata is not evidence that the service
-is still running. Signals still use a pidfd and recheck the exact start token.
+is still running. A process disappearing while `/proc` is being read is also
+an exited owner; other read failures remain errors. Signals still use a pidfd
+and recheck the exact start token.
 
 `ServiceOwnerFactory` publishes the actual lease and fresh HostGeneration before
 durable providers activate. Process startup can inject its preacquired lease

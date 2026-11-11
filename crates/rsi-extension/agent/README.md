@@ -4,6 +4,9 @@ The journal adapter stages bounded immutable event segments in the Agent Store
 and returns a typed domain proposal. It retains each prepared CAS object until
 the caller supplies the exact Kernel receipt or proves rejection. It does not
 publish Session state or decide retries.
+BeforeStep receipts verify guidance only in `StepPrompt::AppendToHeader`; a native
+complete assembly is a different preparation owner and cannot acknowledge the
+extension's staged guidance. Omitted same-Step updates retain their existing meaning.
 The owner commits its proposal together with the matching ToolResult or complete
 contribution stage. A receipt must contain the exact proposed snapshot and CAS
 predecessor; a matching public operation name alone is insufficient.
@@ -57,7 +60,7 @@ tentative mirror. Neither a diagnostic string nor a missing reply proves rejecti
 journal domain plus settlement/projection contributions, and retires registrations
 with the generation. The catalog is bounded to 64 Tools. Configuration pins the
 artifact cohort; a durable journal from another cohort cannot be executed.
-Packages require `rsi.extension.agent` version 7, so an older host rejects their
+Packages require `rsi.extension.agent` version 8, so an older host rejects their
 installation before selection; the generic process transport remains version 1.
 
 Human questions require an explicitly installed Agent question channel. Each
@@ -71,13 +74,16 @@ withdraws admission and cancels pending questions.
 
 BeforeStep uses the same retained journal and receipt protocol as Tool settlement.
 Its framework-assigned operation identity exists before the external call begins.
-The committed receipt identifies the producer's instruction sections, selected
-Step and a Tool subset within the proposed set. Recovery reconciles an unknown
+The committed receipt identifies the selected Step and a Tool subset within the
+proposed set. Explicit instruction updates contain the producer's staged text;
+an omitted update relies on the executor's equality check against that Step's
+canonical Context assembly. The adapter trusts this typed in-process publication
+contract instead of adding a second history lookup. Recovery reconciles an unknown
 receipt against canonical history.
 
 During preparation, `agent.history.read` borrows only that operation's captured
 claim-visible Fact reader and horizon. Session and operation identities must match
-an active scope. A history walk requests an inclusive end sequence and batches up to the native reader's page limit within the serialized Fact byte budget. An exact Fact or model-attempt lookup reads one position. The cursor includes skipped claim-invisible Facts. Ordered UTF-8 fragments (128 KiB each) carry one exact Fact page;
+an active scope. A history walk requests an inclusive end sequence and batches up to the native reader's page limit within the serialized Fact byte budget. An exact Fact lookup reads one position. The cursor includes skipped claim-invisible Facts. Ordered UTF-8 fragments (128 KiB each) carry one exact Fact page;
 at most two serialized pages are retained across the generation. Large Facts keep
 their owning 36 MiB bound without widening the process frame limit. Withdrawal
 cancels reads and releases retained pages. This read port has no mutation rights.
@@ -90,13 +96,19 @@ coordinates, original IDs, sources and ordered content blocks. The regular
 fragmented history reader also carries large batches across process replacement.
 Before loading the plugin, the adapter checks that the journal head still has the captured revision. Journal publication uses that revision for compare-and-swap.
 The request carries the native selection and any preceding preset decision. Its staged reply supplies an ordered input decision over captured claims. Downstream preparation may edit the entered list. The receipt must contain the final decision for the same Turn and Step alongside the journal commit. A staged rejection prevents later input preparation. Small decisions travel inline. Larger edits remain operation-scoped and cross the existing process frame boundary in UTF-8 fragments of up to 128 KiB. The host validates the reconstructed decision against the native preparation budget.
-`agent.history.attempt.read` uses the same operation identity, reader, horizon,
-page admission and UTF-8 fragmentation. Its `after_seq` identifies the predecessor
-of one exact visible ModelAttemptSettled Fact. RSI's canonical decoder projects
-that attempt to ordered `(elapsed_ms, LanguageEvent)` values plus its retained
-context flag and Fact sequence. The complete projection is bounded to the existing
-36 MiB Fact-page ceiling; exceeding it refuses projection without truncation.
-The extension does not implement or gain authority over the compact binary codec.
+History pages are transient read views, not another durable Fact format. A
+caller supplies the encoded page budget, from two bytes through the existing
+serialized Fact ceiling. Encoding stops before the first Fact that would exceed
+the budget; an individually oversized first Fact returns capacity. It never
+returns part of a Fact or allocates beyond the supplied encoding budget.
+Each `model_attempt_settled` row retains its sequence, timestamp, Turn, effect and
+purpose, but its `attempt` contains `retain_context` and ordered
+`(elapsed_ms, LanguageEvent)` values from the canonical decoder. Other rows
+retain their canonical representation. The encoded attempt chunks are not sent
+alongside that view, and there is no separate attempt-read callback. The complete
+page stays within the existing 36 MiB ceiling, cutting before a later row when
+needed; an individually oversized projection fails without truncation. The
+extension neither implements nor gains authority over the compact binary codec.
 
 The frozen catalog also admits at most 64 ordinary commands. Their canonical
 arguments are a JSON string containing the slash-command tail, matching the

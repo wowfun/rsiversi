@@ -61,7 +61,9 @@ async fn before_step_subset_is_durable_and_excludes_provider_hallucinated_tools(
                     store: stack.store.clone(),
                     calls: calls.clone(),
                 }),
-                timeout: rsi_tools_protocol::ToolTimeoutPolicy::Execution { timeout_ms: 1000 },
+                run_policy: rsi_tools_protocol::ToolRunPolicy::execution(
+                    std::time::Duration::from_secs(1),
+                ),
             })
             .unwrap();
         let language = Arc::new(LanguageFixture {
@@ -217,6 +219,139 @@ async fn provider_retry_reuses_the_committed_sample() {
     stack.dispose(language_fiber, executor).await;
 }
 
+#[derive(Debug, Default)]
+struct EnteredTime(Mutex<Vec<Option<u64>>>);
+#[async_trait]
+impl rsi_agent_composition_protocol::BeforeStepContributor for EnteredTime {
+    async fn prepare(
+        &self,
+        context: &rsi_agent_composition_protocol::BeforeStepContext<'_>,
+        _: CancellationToken,
+    ) -> ContributionResult<rsi_agent_composition_protocol::BeforeStepOutput> {
+        self.0.lock().unwrap().push(context.previous_input_at_ms);
+        Ok(rsi_agent_composition_protocol::BeforeStepOutput {
+            instructions: "One current instruction".into(),
+            contribution: ContributionOutput {
+                inputs: if context.previous_input_at_ms.is_none() {
+                    vec![ContributionInput::context("one committed time sample")]
+                } else {
+                    vec![]
+                },
+                domains: vec![],
+            },
+            ..Default::default()
+        })
+    }
+}
+
+#[tokio::test]
+#[allow(clippy::too_many_lines)] // One Tool round trip checks retained input time, instruction storage and both model requests.
+async fn before_step_receives_its_entered_input_time_after_tool_round_trip() {
+    let stack = BaseStack::activate().await;
+    let sample = Arc::new(EnteredTime::default());
+    let callbacks = install(
+        &stack,
+        vec![ContributionRegistration::new(
+            ContributionId::new("fixture.entered-time").unwrap(),
+            0,
+            ContributionKind::BeforeStep(sample.clone()),
+        )],
+    )
+    .await;
+    let calls = Arc::new(AtomicUsize::new(0));
+    let lease = stack
+        .tool_registrar
+        .register(ToolRegistration {
+            definition: ToolDefinition::new("echo", "echo", json!({"type":"object"})).unwrap(),
+            output: None,
+            executor: Arc::new(EchoTool {
+                store: stack.store.clone(),
+                calls: calls.clone(),
+            }),
+            run_policy: rsi_tools_protocol::ToolRunPolicy::execution(
+                std::time::Duration::from_secs(1),
+            ),
+        })
+        .unwrap();
+    let language = Arc::new(LanguageFixture {
+        outcomes: Mutex::new(VecDeque::from([
+            StartOutcome::Stream(tool_script()),
+            StartOutcome::Stream(answer_script()),
+        ])),
+        requests: Mutex::new(vec![]),
+        starts: Arc::new(AtomicUsize::new(0)),
+        store: stack.store.clone(),
+        retry_policy: RetryPolicy::default(),
+    });
+    let language_fiber = stack
+        .activate_language("test.entered-time", language.clone())
+        .await;
+    let executor = stack.activate_executor("entered-time-executor").await;
+    let (submitted, outcome) = stack.submit_and_wait("work").await;
+    assert_eq!(outcome, TurnOutcome::Completed);
+    assert_eq!(calls.load(Ordering::Acquire), 1);
+    let facts = stack
+        .store
+        .read_facts(
+            &submitted.session_id,
+            0,
+            64,
+            rsi_agent_store_protocol::MAXIMUM_STORE_FACT_PAGE_BYTES,
+        )
+        .await
+        .unwrap()
+        .facts;
+    let samples: Vec<_> = facts
+        .iter()
+        .filter(|fact| {
+            matches!(
+                fact.body(),
+                SessionFactBody::InputMessageClaimed {
+                    source: InputMessageSource::PluginContext { .. },
+                    ..
+                }
+            )
+        })
+        .collect();
+    assert_eq!(samples.len(), 1);
+    let instructions = facts
+        .iter()
+        .filter_map(|fact| match fact.body() {
+            SessionFactBody::StepPrepared {
+                prompt: instructions,
+                names,
+                ..
+            } => {
+                assert_eq!(names, &["echo"]);
+                Some(instructions)
+            }
+            _ => None,
+        })
+        .collect::<Vec<_>>();
+    assert_eq!(instructions.len(), 2);
+    assert_eq!(
+        instructions[0].as_ref().unwrap().sections()[0].text,
+        "One current instruction"
+    );
+    assert!(
+        instructions[1].is_none(),
+        "unchanged preparation must not store the same instruction again"
+    );
+    assert_eq!(
+        *sample.0.lock().unwrap(),
+        vec![None, Some(samples[0].timestamp_ms())]
+    );
+    for request in language.requests.lock().unwrap().iter() {
+        let encoded = serde_json::to_string(request).unwrap();
+        for marker in ["One current instruction", "one committed time sample"] {
+            assert_eq!(encoded.matches(marker).count(), 1);
+        }
+    }
+    drop(lease);
+    assert!(callbacks.dispose().await.is_clean());
+    stack.dispose(language_fiber, executor).await;
+}
+
 #[derive(Debug)]
 struct BrokenContext;
 #[async_trait]
@@ -349,7 +484,9 @@ async fn policy_constraints_accumulate_and_denial_never_starts_the_tool() {
                 output: None,
                 definition: ToolDefinition::new("echo", "echo JSON", json!({"type":"object"}))
                     .unwrap(),
-                timeout: rsi_tools_protocol::ToolTimeoutPolicy::Execution { timeout_ms: 2_000 },
+                run_policy: rsi_tools_protocol::ToolRunPolicy::execution(
+                    std::time::Duration::from_secs(2),
+                ),
                 executor: Arc::new(EchoTool {
                     store: stack.store.clone(),
                     calls: calls.clone(),
@@ -484,7 +621,9 @@ async fn user_stop_after_tool_refusal_does_not_issue_another_model_request() {
         .register(ToolRegistration {
             output: None,
             definition: ToolDefinition::new("echo", "echo", json!({"type":"object"})).unwrap(),
-            timeout: rsi_tools_protocol::ToolTimeoutPolicy::Execution { timeout_ms: 2_000 },
+            run_policy: rsi_tools_protocol::ToolRunPolicy::execution(
+                std::time::Duration::from_secs(2),
+            ),
             executor: Arc::new(EchoTool {
                 store: stack.store.clone(),
                 calls: calls.clone(),
@@ -624,7 +763,9 @@ async fn tool_refusals_settle_mixed_and_all_denied_batches_in_source_order() {
                     definition: ToolDefinition::new("echo", "echo", json!({"type":"object"}))
                         .unwrap()
                         .with_scheduling(scheduling),
-                    timeout: rsi_tools_protocol::ToolTimeoutPolicy::Execution { timeout_ms: 2_000 },
+                    run_policy: rsi_tools_protocol::ToolRunPolicy::execution(
+                        std::time::Duration::from_secs(2),
+                    ),
                     executor: Arc::new(EchoTool {
                         store: stack.store.clone(),
                         calls: calls.clone(),
@@ -828,7 +969,9 @@ async fn concurrent_command_drops_stale_post_tool_batch_without_failing_or_repla
         .register(ToolRegistration {
             output: None,
             definition: ToolDefinition::new("echo", "echo JSON", json!({"type":"object"})).unwrap(),
-            timeout: rsi_tools_protocol::ToolTimeoutPolicy::Execution { timeout_ms: 2000 },
+            run_policy: rsi_tools_protocol::ToolRunPolicy::execution(
+                std::time::Duration::from_secs(2),
+            ),
             executor: Arc::new(EchoTool {
                 store: stack.store.clone(),
                 calls: Arc::new(AtomicUsize::new(0)),
@@ -975,7 +1118,9 @@ async fn post_tool_contribution_observes_one_source_ordered_durable_batch() {
         .register(ToolRegistration {
             output: None,
             definition: ToolDefinition::new("echo", "echo JSON", json!({"type":"object"})).unwrap(),
-            timeout: rsi_tools_protocol::ToolTimeoutPolicy::Execution { timeout_ms: 2_000 },
+            run_policy: rsi_tools_protocol::ToolRunPolicy::execution(
+                std::time::Duration::from_secs(2),
+            ),
             executor: Arc::new(EchoTool {
                 store: stack.store.clone(),
                 calls: Arc::new(AtomicUsize::new(0)),
@@ -1470,4 +1615,183 @@ async fn actual_contribution_is_durable_before_the_first_provider_request() {
     assert!(wire.contains("sample 0"));
     assert!(callbacks.dispose().await.is_clean());
     stack.dispose(language_fiber, executor).await;
+}
+
+#[derive(Clone, Copy, Debug)]
+enum PreparationExit {
+    Start,
+    Fail,
+    Cancel,
+}
+
+#[derive(Debug)]
+struct PreparationCheckpoint {
+    language: Arc<LanguageFixture>,
+    exit: PreparationExit,
+    entered: Notify,
+    prepared_was_durable: Mutex<Vec<bool>>,
+}
+
+#[async_trait]
+impl LanguageCall for PreparationCheckpoint {
+    fn describe(
+        &self,
+        model: &ModelRef,
+    ) -> Result<rsi_ai_protocol::LanguageModelDescription, AiError> {
+        self.language.describe(model)
+    }
+
+    async fn prepare(
+        &self,
+        model: ModelRef,
+        request: LanguageRequest,
+    ) -> Result<Box<dyn PreparedLanguageCall>, AiError> {
+        // The request already includes the contribution even when its Fact is live-only.
+        assert!(
+            serde_json::to_string(&request)
+                .unwrap()
+                .contains("sample 0")
+        );
+        let session = self
+            .language
+            .store
+            .list_sessions(None, 1)
+            .await
+            .unwrap()
+            .sessions
+            .remove(0);
+        let facts = self
+            .language
+            .store
+            .read_facts(
+                &session,
+                0,
+                64,
+                rsi_agent_store_protocol::MAXIMUM_STORE_FACT_PAGE_BYTES,
+            )
+            .await
+            .unwrap()
+            .facts;
+        self.prepared_was_durable.lock().unwrap().push(
+            facts
+                .iter()
+                .any(|fact| matches!(fact.body(), SessionFactBody::StepInputsPrepared { .. })),
+        );
+        match self.exit {
+            PreparationExit::Start => self.language.prepare(model, request).await,
+            PreparationExit::Fail => Err(AiError::new(
+                ErrorKind::InvalidRequest,
+                ErrorPhase::Prepare,
+                DispatchStatus::NotDispatched,
+                "fixture preparation rejected",
+            )
+            .unwrap()),
+            PreparationExit::Cancel => {
+                self.entered.notify_one();
+                std::future::pending().await
+            }
+        }
+    }
+}
+
+#[tokio::test(start_paused = true)]
+async fn preparation_uses_the_next_effect_or_terminal_durability_barrier() {
+    for exit in [
+        PreparationExit::Start,
+        PreparationExit::Fail,
+        PreparationExit::Cancel,
+    ] {
+        let stack = BaseStack::activate().await;
+        let callbacks = install(
+            &stack,
+            vec![ContributionRegistration::new(
+                ContributionId::new("fixture.time").unwrap(),
+                0,
+                ContributionKind::Context(Arc::new(SampleTime::default())),
+            )],
+        )
+        .await;
+        let language = Arc::new(LanguageFixture {
+            outcomes: Mutex::new(VecDeque::from([StartOutcome::Stream(answer_script())])),
+            requests: Mutex::new(vec![]),
+            starts: Arc::new(AtomicUsize::new(0)),
+            store: stack.store.clone(),
+            retry_policy: RetryPolicy::default(),
+        });
+        let checkpoint = Arc::new(PreparationCheckpoint {
+            language: language.clone(),
+            exit,
+            entered: Notify::new(),
+            prepared_was_durable: Mutex::new(vec![]),
+        });
+        let language_fiber = activate_fixture(
+            &stack.runtime,
+            "test.preparation",
+            "1",
+            Arc::new(LanguageFixtureFactory {
+                fixture: checkpoint.clone(),
+            }),
+        )
+        .await;
+        let executor = stack.activate_executor("executor-preparation").await;
+        let turns = stack
+            .runtime
+            .root()
+            .lookup_local::<TurnServiceContract>()
+            .unwrap();
+        let submitted = stack
+            .submit_fresh(&turns, "preparation-prefix", "work")
+            .await;
+        if matches!(exit, PreparationExit::Cancel) {
+            checkpoint.entered.notified().await;
+            turns
+                .cancel(&submitted.session_id, &submitted.turn_id, None)
+                .await
+                .unwrap();
+        }
+        let outcome = wait_for_outcome(&turns, &submitted).await;
+        match exit {
+            PreparationExit::Start => assert_eq!(outcome, TurnOutcome::Completed),
+            PreparationExit::Fail => {
+                assert!(matches!(outcome, TurnOutcome::Failed { ref code, .. }
+                if code == "provider.invalid_request"));
+            }
+            PreparationExit::Cancel => assert_eq!(outcome, TurnOutcome::Cancelled),
+        }
+        let facts = stack
+            .store
+            .read_facts(
+                &submitted.session_id,
+                0,
+                64,
+                rsi_agent_store_protocol::MAXIMUM_STORE_FACT_PAGE_BYTES,
+            )
+            .await
+            .unwrap()
+            .facts;
+        assert!(
+            facts
+                .iter()
+                .any(|fact| matches!(fact.body(), SessionFactBody::StepInputsPrepared { .. }))
+        );
+        assert!(facts.iter().any(|fact| matches!(
+            fact.body(),
+            SessionFactBody::InputMessageClaimed {
+                source: InputMessageSource::PluginContext { .. },
+                ..
+            }
+        )));
+        // PreparedScript::start independently checks the durable intent/start prefix.
+        assert_eq!(
+            language.starts.load(Ordering::Acquire),
+            usize::from(matches!(exit, PreparationExit::Start))
+        );
+        assert!(callbacks.dispose().await.is_clean());
+        stack.dispose(language_fiber, executor).await;
+        assert_eq!(
+            *checkpoint.prepared_was_durable.lock().unwrap(),
+            [false],
+            "{exit:?}"
+        );
+    }
 }

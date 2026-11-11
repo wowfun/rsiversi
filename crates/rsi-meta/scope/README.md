@@ -21,6 +21,11 @@ either a plain Context for global storage or a `ScopedContext` for one exact
 scope; there is no ambient Context extension or event-target adapter.
 Failed lazy layer construction retains neither its uninitialized cell nor the
 scope key, preserving weak-key ownership under repeated factory failure.
+Passive registrars use `ScopedLayers::register`: one bounded synchronous table
+insertion joins the caller's existing Loading transaction or an Active dynamic
+registration. Its retained lease owns exact synchronous removal and empty-layer
+reclamation. This path does not call the asynchronous change callback; consumers
+read snapshots. Use `effect` when mutation requires asynchronous notification.
 Each store has an explicit exact-scope layer maximum, so a layer that cannot be
 proven empty may retain one slot but repeated distinct-key failures fail closed.
 The per-layer reclamation version saturates; exhaustion permits later bounded

@@ -65,13 +65,21 @@ impl Sessions {
                 return Err(Error::Protocol);
             }
             let source = sessions
-                .read_header(&fork.source_session_id)
+                .read_summary(&fork.source_session_id)
                 .await
                 .map_err(remote)?;
-            WorkspaceId::from_coordinates(source.coordinates())
+            self.workspaces
+                .scoped(origin.clone())
+                .find(&rsi_workspace_protocol::WorkspaceKey::from_coordinates(
+                    source.header.coordinates(),
+                ))
+                .await
+                .map_err(remote)?
+                .ok_or_else(|| Error::Remote("Workspace is not registered".into()))?
+                .id
         } else {
             input
-                .workspace(self.workspaces.scoped(origin).as_ref())
+                .workspace(self.workspaces.scoped(origin.clone()).as_ref())
                 .await?
         };
         let mut id = input.fresh;
@@ -79,8 +87,14 @@ impl Sessions {
             match sessions.attach(&requested).await {
                 Ok(handle) => {
                     let header = handle.header().await.map_err(remote)?;
+                    let selected = self
+                        .workspaces
+                        .scoped(origin.clone())
+                        .get(&workspace)
+                        .await
+                        .map_err(remote)?;
                     if header.fork_origin().is_some()
-                        || WorkspaceId::from_coordinates(header.coordinates()) != workspace
+                        || header.coordinates() != &selected.coordinates
                     {
                         return Err(Error::Remote(
                             "Session belongs to another Workspace or Agent".into(),

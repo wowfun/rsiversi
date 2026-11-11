@@ -8,8 +8,8 @@ use rsi_agent_session_protocol::{ExecutionLocation, SessionHeader};
 use rsi_agent_turn_protocol::AgentCallerAuthority;
 use rsi_credentials_protocol::SecretValue;
 use rsi_tools_protocol::{
-    ToolCatalogProvider, ToolDefinition, ToolError, ToolExecution, ToolExecutor, ToolOutput,
-    ToolRegistration, ToolResult, ToolTimeoutPolicy,
+    ToolCatalogProvider, ToolDefinition, ToolError, ToolExecution, ToolExecutor, ToolInteraction,
+    ToolOutput, ToolRegistration, ToolResult, ToolRunPolicy,
 };
 use serde::{Deserialize, Serialize, de::DeserializeOwned};
 use serde_json::{Value, json};
@@ -32,7 +32,7 @@ pub(super) struct Listener {
 }
 impl Listener {
     pub(super) fn validate(&self) -> rsi_meta::Result<()> {
-        if self.protocol != 14 || self.port == 0 {
+        if self.protocol != 15 || self.port == 0 {
             return Err(failure("invalid application tool listener"));
         }
         rsi_agent_session_protocol::validate_identifier("application generation", &self.generation)
@@ -190,6 +190,26 @@ struct Captured {
 struct Row {
     definition: ToolDefinition,
     registration: String,
+    #[serde(rename = "timeout_ms", deserialize_with = "tool_deadline")]
+    deadline: Option<Duration>,
+}
+
+fn tool_deadline<'de, D: serde::Deserializer<'de>>(
+    deserializer: D,
+) -> Result<Option<Duration>, D::Error> {
+    let milliseconds = Option::<f64>::deserialize(deserializer)?;
+    milliseconds
+        .map(|milliseconds| {
+            let duration = Duration::try_from_secs_f64(milliseconds / 1000.0)
+                .map_err(|_| serde::de::Error::custom("invalid application Tool timeout_ms"))?;
+            if duration.is_zero() || std::time::Instant::now().checked_add(duration).is_none() {
+                return Err(serde::de::Error::custom(
+                    "application Tool timeout_ms is not a positive representable deadline",
+                ));
+            }
+            Ok(duration)
+        })
+        .transpose()
 }
 #[derive(Debug)]
 struct View {
@@ -292,8 +312,9 @@ impl RequestToolSource for Source {
                 ToolRegistration {
                     definition: row.definition,
                     output: None,
-                    timeout: ToolTimeoutPolicy::Execution {
-                        timeout_ms: rsi_tools_protocol::MAXIMUM_TOOL_TIMEOUT_MS,
+                    run_policy: ToolRunPolicy {
+                        interaction: ToolInteraction::Automatic,
+                        deadline: row.deadline,
                     },
                     executor: Arc::new(Body {
                         view: view.clone(),

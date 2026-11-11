@@ -67,7 +67,8 @@ pub use compaction::{
     ContextCompactionPlan, MAXIMUM_COMPACTION_PLAN_BYTES, ModelEventPurpose, ModelPurpose,
 };
 pub use contribution::{
-    MAXIMUM_STEP_INSTRUCTION_BYTES, StepInstruction, ToolRejection, validate_step_instructions,
+    MAXIMUM_STEP_INSTRUCTION_BYTES, StepInstruction, StepPrompt, ToolRejection,
+    validate_step_instructions,
 };
 mod command;
 pub use command::{
@@ -112,7 +113,7 @@ pub use resource::{
 };
 
 /// Exact durable format accepted by this pre-release implementation.
-pub const SESSION_FORMAT_VERSION: u32 = 34;
+pub const SESSION_FORMAT_VERSION: u32 = 37;
 /// Maximum bytes in one session, turn, effect, profile, or error-code identity.
 pub const MAXIMUM_AGENT_IDENTIFIER_BYTES: usize = 256;
 /// Maximum bytes in one Agent preset directory-segment identity.
@@ -527,40 +528,49 @@ impl AgentMessage {
 
     /// Projects this message's identity and provenance into its model-visible input Fact.
     pub fn claimed_source(&self) -> InputMessageSource {
-        match &self.source {
-            AgentMessageSource::Command { source } => InputMessageSource::Command {
-                message_id: self.message_id.clone(),
-                source: source.clone(),
-            },
-            AgentMessageSource::Program { source } => InputMessageSource::Program {
-                message_id: self.message_id.clone(),
-                source: source.clone(),
-            },
-            AgentMessageSource::Continuation { source } => InputMessageSource::Continuation {
-                message_id: self.message_id.clone(),
-                source: source.clone(),
-            },
+        Self::claim_source(self.message_id.clone(), self.source.clone())
+    }
+
+    /// Moves the original provenance and content into a claimed input without cloning either.
+    pub fn into_claimed_parts(self) -> (InputMessageSource, Vec<AgentMessageContent>) {
+        (
+            Self::claim_source(self.message_id, self.source),
+            self.content,
+        )
+    }
+
+    fn claim_source(message_id: MessageId, source: AgentMessageSource) -> InputMessageSource {
+        match source {
+            AgentMessageSource::Command { source } => {
+                InputMessageSource::Command { message_id, source }
+            }
+            AgentMessageSource::Program { source } => {
+                InputMessageSource::Program { message_id, source }
+            }
+            AgentMessageSource::Continuation { source } => {
+                InputMessageSource::Continuation { message_id, source }
+            }
             AgentMessageSource::Human { attribution } => InputMessageSource::Human {
-                message_id: self.message_id.clone(),
-                attribution: attribution.clone(),
+                message_id,
+                attribution,
             },
             AgentMessageSource::Application { attribution } => InputMessageSource::Application {
-                message_id: self.message_id.clone(),
-                attribution: attribution.clone(),
+                message_id,
+                attribution,
             },
             AgentMessageSource::Agent { source_session_id } => InputMessageSource::Agent {
-                message_id: self.message_id.clone(),
-                source_session_id: source_session_id.clone(),
+                message_id,
+                source_session_id,
             },
             AgentMessageSource::Completion {
                 child_session_id,
                 activation_id,
                 outcome,
             } => InputMessageSource::Completion {
-                message_id: self.message_id.clone(),
-                child_session_id: child_session_id.clone(),
-                activation_id: activation_id.clone(),
-                outcome: outcome.clone(),
+                message_id,
+                child_session_id,
+                activation_id,
+                outcome,
             },
         }
     }
@@ -791,6 +801,8 @@ pub enum InputMessageSource {
     SkillCatalog { sha256: String },
     /// Direct user invocation of one selected skill.
     UserSkillInvocation { name: String, source: String },
+    /// Native request-time User snapshot, entered through ordinary input preparation.
+    RuntimeContext,
     /// Actual text entered by a pinned context contribution before external execution.
     PluginContext {
         /// Stable contribution provenance, not an authorization credential.
@@ -931,7 +943,8 @@ impl InputMessageSource {
             }
             | Self::Agent { .. }
             | Self::Completion { .. }
-            | Self::PluginContext { .. } => Ok(()),
+            | Self::PluginContext { .. }
+            | Self::RuntimeContext => Ok(()),
         }
     }
 }
@@ -1449,27 +1462,17 @@ impl FrozenAgentSettings {
 
     /// Revalidates decoded Agent settings.
     pub fn validate(&self) -> Result<()> {
-        Self::validate_policy(
-            &self.settings_id,
-            &self.system_prompt,
-            self.sandbox,
-            self.require_approval,
-        )?;
+        Self::validate_metadata(&self.settings_id, &self.system_prompt)?;
         self.pricing.validate()?;
         self.default_model
             .validate()
             .map_err(|error| SessionError::Invalid(error.to_string()))
     }
 
-    /// Validates the complete non-routing policy without inventing a model route.
+    /// Validates settings identity and prompt without inventing a model route.
     /// Configuration owners may use this before selection; durable settings still
     /// require an explicit model through the constructor or deserializer.
-    pub fn validate_policy(
-        settings_id: &str,
-        system_prompt: &str,
-        sandbox: SandboxMode,
-        require_approval: bool,
-    ) -> Result<()> {
+    pub fn validate_metadata(settings_id: &str, system_prompt: &str) -> Result<()> {
         validate_identifier("Agent settings", settings_id)?;
         validate_safe_text(
             "system prompt",
@@ -1477,11 +1480,6 @@ impl FrozenAgentSettings {
             MAXIMUM_SYSTEM_PROMPT_BYTES,
             true,
         )?;
-        if sandbox == SandboxMode::DangerFullAccess && !require_approval {
-            return Err(SessionError::Invalid(
-                "danger-full-access requires live approval".into(),
-            ));
-        }
         Ok(())
     }
 
@@ -2253,10 +2251,11 @@ pub enum SessionFactBody {
         step_id: StepId,
         /// Sorted unique subset; empty disables all Tools.
         names: Vec<String>,
-        /// Application declarations and registration identities for this request series.
+        /// Application names and registration identities for this request series.
         application: Option<ApplicationToolView>,
-        /// Current system instructions in contribution order, replaced at each preparation.
-        instructions: Vec<StepInstruction>,
+        /// Resolved ownership and sections; omission retains the current Step's prompt.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        prompt: Option<StepPrompt>,
     },
     /// One model Step ended before another Step or the Turn terminal.
     StepEnded {
@@ -2452,29 +2451,20 @@ impl SessionFactBody {
             Self::TurnAccepted {
                 text,
                 model,
-                turn_id: _,
-                sandbox,
-                require_approval,
-                reasoning_effort,
-            } => {
-                validate_effort_override(model.as_ref(), reasoning_effort.as_ref())?;
-                validate_turn_acceptance(text, model.as_ref(), *sandbox, *require_approval)
-            }
-            Self::MessageTurnAccepted {
-                message_ids,
-                model,
-                sandbox,
-                require_approval,
                 reasoning_effort,
                 ..
             } => {
                 validate_effort_override(model.as_ref(), reasoning_effort.as_ref())?;
-                validate_message_turn_acceptance(
-                    message_ids,
-                    model.as_ref(),
-                    *sandbox,
-                    *require_approval,
-                )
+                validate_turn_acceptance(text, model.as_ref())
+            }
+            Self::MessageTurnAccepted {
+                message_ids,
+                model,
+                reasoning_effort,
+                ..
+            } => {
+                validate_effort_override(model.as_ref(), reasoning_effort.as_ref())?;
+                validate_message_turn_acceptance(message_ids, model.as_ref())
             }
             Self::InputMessageClaimed {
                 source, content, ..
@@ -2499,10 +2489,12 @@ impl SessionFactBody {
             Self::StepPrepared {
                 names,
                 application,
-                instructions,
+                prompt,
                 ..
             } => {
-                validate_step_instructions(instructions)?;
+                if let Some(prompt) = prompt {
+                    prompt.validate()?;
+                }
                 if names.len() > rsi_tools_protocol::MAXIMUM_REGISTERED_TOOLS
                     || names.windows(2).any(|pair| pair[0] >= pair[1])
                 {
@@ -2694,21 +2686,14 @@ impl SessionFactBody {
     }
 }
 
-fn validate_turn_acceptance(
-    text: &str,
-    model: Option<&ModelRef>,
-    sandbox: SandboxMode,
-    require_approval: bool,
-) -> Result<()> {
+fn validate_turn_acceptance(text: &str, model: Option<&ModelRef>) -> Result<()> {
     validate_turn_text(text)?;
-    validate_resolved_turn_policy(model, sandbox, require_approval)
+    validate_turn_model(model)
 }
 
 fn validate_message_turn_acceptance(
     message_ids: &[MessageId],
     model: Option<&ModelRef>,
-    sandbox: SandboxMode,
-    require_approval: bool,
 ) -> Result<()> {
     if message_ids.is_empty()
         || message_ids.len() > MAXIMUM_PENDING_AGENT_MESSAGES
@@ -2722,23 +2707,14 @@ fn validate_message_turn_acceptance(
             "message Turn must claim 1..={MAXIMUM_PENDING_AGENT_MESSAGES} unique messages"
         )));
     }
-    validate_resolved_turn_policy(model, sandbox, require_approval)
+    validate_turn_model(model)
 }
 
-fn validate_resolved_turn_policy(
-    model: Option<&ModelRef>,
-    sandbox: SandboxMode,
-    require_approval: bool,
-) -> Result<()> {
+fn validate_turn_model(model: Option<&ModelRef>) -> Result<()> {
     if let Some(model) = model {
         model
             .validate()
             .map_err(|error| SessionError::Invalid(error.to_string()))?;
-    }
-    if sandbox == SandboxMode::DangerFullAccess && !require_approval {
-        return Err(SessionError::Invalid(
-            "danger-full-access turn requires live approval".into(),
-        ));
     }
     Ok(())
 }
@@ -2806,13 +2782,15 @@ fn validate_claimed_message(
         };
         source.validate_text(text)?;
     }
-    if matches!(source, InputMessageSource::PluginContext { .. })
-        && content
-            .iter()
-            .any(|item| !matches!(item, AgentMessageContent::Text { .. }))
+    if matches!(
+        source,
+        InputMessageSource::PluginContext { .. } | InputMessageSource::RuntimeContext
+    ) && content
+        .iter()
+        .any(|item| !matches!(item, AgentMessageContent::Text { .. }))
     {
         return Err(SessionError::Invalid(
-            "PluginContext must contain only text".into(),
+            "runtime and plugin context must contain only text".into(),
         ));
     }
     let text_limit = if matches!(

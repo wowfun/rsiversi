@@ -244,10 +244,12 @@ mod tests {
         let first = fingerprint(&root, &inputs).unwrap();
         assert_eq!(first, fingerprint(&root, &inputs).unwrap());
         std::fs::write(path.join("tree/input"), "other").unwrap();
-        assert_ne!(first_hint, metadata_fingerprint(&root, &inputs).unwrap());
+        // Same-size writes can share a filesystem timestamp; only content is identity.
+        let edited_hint = metadata_fingerprint(&root, &inputs).unwrap();
         let edited = fingerprint(&root, &inputs).unwrap();
         assert_ne!(first, edited);
         std::fs::write(path.join("missing"), "added").unwrap();
+        assert_ne!(edited_hint, metadata_fingerprint(&root, &inputs).unwrap());
         assert_ne!(edited, fingerprint(&root, &inputs).unwrap());
         assert!(fingerprint(&root, &[PathBuf::from("../outside")]).is_err());
         let file = std::fs::File::create(path.join("too-large")).unwrap();

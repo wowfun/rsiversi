@@ -128,10 +128,12 @@ impl PluginFactory for ProbeFactory {
         let mode = desired.get("mode").and_then(Value::as_str).unwrap_or("ok");
         let prepare_call = self.prepare_calls.fetch_add(1, Ordering::SeqCst);
         if mode == "prepare-fail" {
-            return Err(MetaError::InvalidConfig("secret candidate".to_owned()));
+            return Err(MetaError::InvalidConfig("candidate rejected".to_owned()));
         }
         if mode == "old-prepare-fails-on-reload" && prepare_call > 0 {
-            return Err(MetaError::InvalidConfig("secret rollback".to_owned()));
+            return Err(MetaError::InvalidConfig(
+                "rollback preparation rejected".to_owned(),
+            ));
         }
         let prepared = PreparedActivation::new(desired.clone());
         if mode == "bound" || mode == "bound-fail" {
@@ -181,7 +183,7 @@ impl PluginFactory for ProbeFactory {
                 && self.fail_once.fetch_add(1, Ordering::SeqCst) == 0)
             || (mode == Some("rollback-fail-after-first") && self.starts.load(Ordering::SeqCst) > 0)
         {
-            return Err(MetaError::Activation("secret activation".to_owned()));
+            return Err(MetaError::Activation("activation rejected".to_owned()));
         }
         if mode == Some("block-cleanup") {
             let gate = self.cleanup_gate.as_ref().ok_or_else(|| {
@@ -807,6 +809,8 @@ async fn just_in_time_preparation_and_failed_apply_replay_the_old_target() {
     write_profile(&path, "prepare-fail");
     let outcome = control.reload().await.unwrap();
     assert!(matches!(outcome, ReloadOutcome::RolledBack { .. }));
+    assert!(matches!(&outcome, ReloadOutcome::RolledBack { error, .. }
+        if error.contains("candidate rejected")));
     assert_eq!(starts.load(Ordering::SeqCst), 2);
     assert_eq!(control.snapshot().revision(), 2);
     assert_eq!(
@@ -817,6 +821,8 @@ async fn just_in_time_preparation_and_failed_apply_replay_the_old_target() {
     write_profile(&path, "activate-fail");
     let outcome = control.reload().await.unwrap();
     assert!(matches!(outcome, ReloadOutcome::RolledBack { .. }));
+    assert!(matches!(&outcome, ReloadOutcome::RolledBack { error, .. }
+        if error.contains("activation rejected")));
     assert_eq!(control.snapshot().revision(), 3);
     assert_eq!(
         outcome.status().last_attempt().unwrap().failure,
@@ -845,8 +851,11 @@ async fn rollback_preparation_failure_degrades_and_is_published_in_profile_statu
         status.diagnostic().is_some(),
         "a reload failure returned to the caller must also be observable"
     );
-    assert!(!status.diagnostic().unwrap().contains("secret"));
-    assert!(!format!("{status:?}").contains("secret activation"));
+    assert!(status.diagnostic().unwrap().contains("activation rejected"));
+    assert!(
+        matches!(outcome, ReloadOutcome::Degraded { rollback_error, .. }
+        if rollback_error.contains("rollback preparation rejected"))
+    );
     let _ = runtime.shutdown().await;
 }
 
@@ -1231,7 +1240,13 @@ async fn degraded_same_source_is_not_suppressed_and_can_converge_on_retry() {
     let first = control.reload().await.unwrap();
     assert!(matches!(first, ReloadOutcome::Degraded { .. }));
     assert_eq!(first.status().health(), ProfileHealth::Degraded);
-    assert!(!first.status().diagnostic().unwrap().contains("secret"));
+    assert!(
+        first
+            .status()
+            .diagnostic()
+            .unwrap()
+            .contains("activation rejected")
+    );
 
     let second = control.reload().await.unwrap();
     // A watcher already queued behind the failed manual reload may perform the

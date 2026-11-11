@@ -1,6 +1,6 @@
 use super::{
-    MAXIMUM_SESSION_FACT_BYTES, OptionalExtension, Result, SessionFact, SessionId, SqliteStore,
-    StoreError, TransactionBehavior, decode_u64, params, sql_error,
+    MAXIMUM_SESSION_FACT_BYTES, OptionalExtension, Result, SessionId, SqliteStore, StoreError,
+    TransactionBehavior, decode_u64, params, sql_error,
 };
 use rsi_agent_store_protocol::{StoreFactSuffix, validate_suffix_limits};
 
@@ -12,7 +12,6 @@ impl SqliteStore {
         maximum_bytes: usize,
     ) -> Result<StoreFactSuffix> {
         validate_suffix_limits(limit, maximum_bytes)?;
-        self.ensure_session_validated(session_id).await?;
         let session_id = session_id.clone();
         #[cfg(any(test, feature = "test-support"))]
         let materializations = self.inner.fact_materializations.clone();
@@ -28,10 +27,19 @@ impl SqliteStore {
             {
                 // This query projects lengths only. No body reaches SQLite's result
                 // column or Rust allocation until the remaining budget admits it.
-                let mut lengths = transaction.prepare("SELECT seq, length(CAST(fact_json AS BLOB)) FROM facts WHERE session_id = ?1 AND seq <= ?2 ORDER BY seq DESC LIMIT ?3").map_err(sql_error)?;
+                let mut lengths = transaction.prepare("SELECT seq, coalesce(logical_bytes, length(CAST(fact_json AS BLOB))) FROM facts WHERE session_id = ?1 AND seq <= ?2 ORDER BY seq DESC LIMIT ?3").map_err(sql_error)?;
                 let mut rows = lengths.query(params![session_id.as_str(), through, i64::try_from(limit).expect("bounded limit")]).map_err(sql_error)?;
-                while let Some(row) = rows.next().map_err(sql_error)? {
+                loop {
+                    let Some(row) = rows.next().map_err(sql_error)? else {
+                        if admitted.len() < limit && (admitted.len() as u64) < through_seq {
+                            return Err(StoreError::Corrupt("missing canonical suffix Fact".into()));
+                        }
+                        break;
+                    };
                     let seq = row.get::<_,i64>(0).map_err(sql_error)?;
+                    if Some(decode_u64("suffix Fact", seq)?) != through_seq.checked_sub(admitted.len() as u64) {
+                        return Err(StoreError::Corrupt("noncontiguous suffix Fact".into()));
+                    }
                     let length = usize::try_from(row.get::<_,i64>(1).map_err(sql_error)?).map_err(|_| StoreError::Corrupt("invalid Fact length".into()))?;
                     if length > MAXIMUM_SESSION_FACT_BYTES { return Err(StoreError::Corrupt("Fact exceeds durable byte bound".into())); }
                     if length > maximum_bytes - suffix.encoded_bytes { suffix.byte_limited = true; break; }
@@ -41,17 +49,13 @@ impl SqliteStore {
             }
             if let Some(&(first, _)) = admitted.last() {
                 // The read transaction keeps the admitted lengths and body range atomic.
-                let mut statement = transaction.prepare("SELECT seq, fact_json FROM facts WHERE session_id = ?1 AND seq >= ?2 AND seq <= ?3 ORDER BY seq ASC").map_err(sql_error)?;
-                let mut rows = statement.query(params![session_id.as_str(), first, through]).map_err(sql_error)?;
+                let mut statement = transaction.prepare(fact_rows!("?4", "WHERE f.session_id = ?1 AND f.seq >= ?2 AND f.seq <= ?3 ORDER BY f.seq ASC")).map_err(sql_error)?;
+                let mut rows = statement.query(params![session_id.as_str(), first, through, i64::try_from(MAXIMUM_SESSION_FACT_BYTES).expect("bounded Fact length")]).map_err(sql_error)?;
                 for (seq, length) in admitted.into_iter().rev() {
                     let row = rows.next().map_err(sql_error)?.ok_or_else(|| StoreError::Corrupt("missing admitted suffix Fact".into()))?;
-                    if row.get::<_, i64>(0).map_err(sql_error)? != seq {
-                        return Err(StoreError::Corrupt("suffix Fact sequence changed".into()));
-                    }
-                    let text: String = row.get(1).map_err(sql_error)?;
                     #[cfg(any(test, feature = "test-support"))]
                     materializations.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
-                    let fact: SessionFact = serde_json::from_str(&text).map_err(|error| StoreError::Corrupt(error.to_string()))?;
+                    let fact = super::fact_storage::decode(row)?.0;
                     if fact.encoded_len() != length || fact.seq() != decode_u64("suffix Fact", seq)? {
                         return Err(StoreError::Corrupt("noncanonical suffix Fact".into()));
                     }

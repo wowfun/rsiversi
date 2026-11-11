@@ -391,6 +391,9 @@ fn register_contracts(builder: &mut crate::StandardAddonBuilder) -> crate::Resul
         .register_local_contract_at::<rsi_api_http::HttpListenerContract>(scope)
         .map_err(boot)?;
     builder
+        .register_local_contract_at::<rsi_api_http::BrowserOwnerContract>(scope)
+        .map_err(boot)?;
+    builder
         .register_local_contract_at::<rsi_api_protocol::ApiDispatchContract>(scope)
         .map_err(boot)?;
     builder

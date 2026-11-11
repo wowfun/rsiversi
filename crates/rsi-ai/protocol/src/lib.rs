@@ -22,8 +22,9 @@ mod validation;
 pub use error::{AiError, DispatchStatus, ErrorKind, ErrorPhase, sanitize_error_summary};
 pub use language::{
     ContentBlock, ContentDelta, ContentStart, FinishReason, LanguageAssembler,
-    LanguageAssemblyError, LanguageEvent, LanguageOutput, LanguagePartialOutput, ProviderExtension,
-    Source, StreamError, TokenUsage, ToolCall, ToolCallKind, Warning,
+    LanguageAssemblyError, LanguageEvent, LanguageOutput, LanguagePartialOutput,
+    LanguageStreamValidator, ProviderExtension, Source, StreamError, TokenUsage, ToolCall,
+    ToolCallKind, Warning,
 };
 pub use media::{
     ImageAssembler, ImageEvent, ImageOutput, ImageRequest, MAX_IMAGE_OUTPUTS, MediaOutput,

@@ -52,9 +52,14 @@ $directory = Join-Path $temporary $taskName
 $null = New-Item -ItemType Directory -Path $directory
 $configurationPath = Join-Path $directory 'configuration.json'
 $environment = @{}
-foreach ($name in @('PATH', 'CARGO_HOME', 'RUSTUP_HOME', 'CARGO_TARGET_DIR', 'CARGO_BUILD_JOBS', 'RSI_TEST_NODE')) {
+foreach ($name in @('PATH', 'CARGO_HOME', 'RUSTUP_HOME', 'RUSTUP_TOOLCHAIN', 'CARGO_TARGET_DIR', 'CARGO_BUILD_JOBS', 'RSI_TEST_NODE')) {
     $value = [Environment]::GetEnvironmentVariable($name)
     if ($null -ne $value) { $environment[$name] = $value }
+}
+if (-not $environment['RUSTUP_TOOLCHAIN']) {
+    $activeToolchain = & rustup show active-toolchain
+    if ($LASTEXITCODE -ne 0) { throw 'Cannot resolve the selected native test toolchain' }
+    $environment['RUSTUP_TOOLCHAIN'] = ($activeToolchain -split ' ', 2)[0]
 }
 $configuration = @{
     workspace = (Get-Location).Path

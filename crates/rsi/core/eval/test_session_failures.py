@@ -93,8 +93,8 @@ class EvidenceFailures(unittest.TestCase):
                     session_api, "grade_before_deadline", return_value={"passed": True}
                 ),
                 patch.object(
-                    coding,
-                    "durable_trace",
+                    session_api,
+                    "canonical_trace",
                     side_effect=KeyError("missing durable column"),
                 ),
                 contextlib.redirect_stdout(io.StringIO()),
@@ -123,7 +123,7 @@ class EvidenceFailures(unittest.TestCase):
                     return_value=initial or {"passed": True},
                 ),
                 patch.object(
-                    coding, "durable_trace", return_value=trace, side_effect=trace_error
+                    session_api, "canonical_trace", return_value=trace, side_effect=trace_error
                 ),
                 patch.object(coding, "run_oracle_process") as agent,
             ):

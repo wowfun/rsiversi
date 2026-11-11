@@ -24,6 +24,7 @@ fn install(store: &PackageStore, directory: &Path, version: u8) -> String {
     let mut archive = b"RSITREE1".to_vec();
     archive.extend(u32::try_from(header.len()).unwrap().to_le_bytes());
     archive.extend(header);
+    let index_digest = hex::encode(Sha256::digest(&archive));
     archive.extend(data);
     std::fs::write(directory.join("payload"), &archive).unwrap();
     let manifest = Manifest {
@@ -44,6 +45,7 @@ fn install(store: &PackageStore, directory: &Path, version: u8) -> String {
             Export {
                 kind: ExportKind::PayloadTree,
                 path: "payload".into(),
+                index_digest: Some(index_digest),
             },
         )]),
     };
@@ -62,7 +64,10 @@ fn install(store: &PackageStore, directory: &Path, version: u8) -> String {
 
 #[tokio::test]
 async fn releasing_a_digest_returns_capacity_and_permits_collection() {
-    let root = tempfile::tempdir().unwrap();
+    let root = tempfile::tempdir_in(rsi_workspace_protocol::canonical_native_path(
+        std::env::temp_dir().canonicalize().unwrap(),
+    ))
+    .unwrap();
     let store = Arc::new(PackageStore::open(&root.path().join("store")).unwrap());
     let service = Imports {
         profile: "fixture".into(),

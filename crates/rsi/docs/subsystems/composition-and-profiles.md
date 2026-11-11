@@ -202,12 +202,11 @@ restricted sandbox backend a Host activation requirement. The Host does not
 begin serving and defer an unavailable enforcement backend until the first
 Tool call. On Linux, the binary resolves its own canonical executable and `/bin/bash`,
 freezes the scrubbed child environment before Host construction, and passes
-those values explicitly into the standard composition. The Bash Job producer
+those values explicitly into the standard composition. The native shell Job producer
 is global because Jobs identities outlive Agent generations. The model-facing
-`bash`, three Jobs controls, and `apply_patch` are separate Agent-only
+platform shell (`bash` on Linux, `pwsh` on Windows), three Jobs controls, and `apply_patch` are separate Agent-only
 contributions activated inside an unpublished Tool catalog and atomically
-sealed with one preset generation. Windows exposes native Files and Git for
-Windows Bash through managed Job Object processes. Its catalog omits the Linux
+sealed with one preset generation. Windows exposes native Files and PowerShell through managed Job Object processes. Its catalog omits the Linux
 apply-patch contribution. Manual PowerShell terminals use ConPTY with explicitly
 unconfined user authority, separate from Agent tools; restricted process sandbox policies continue
 to refuse when their native enforcement backend is unavailable.
@@ -220,6 +219,12 @@ cleanup after host `SIGKILL` or containment of a descendant that calls
 `setsid(2)`. Web, TCP, cloud identity, marketplaces, arbitrary executable
 profile bundles, Media export, and native package management are outside this
 Host contract.
+
+The standard `danger-full-access` permission preset selects unconfined execution
+without requiring an approval for every Tool. It is an explicit caller choice,
+not the default permission mode. Custom presets can require approval with any
+Sandbox mode; the [Agent security contract](../../../rsi-agent/docs/security.md)
+owns policy inheritance and the distinction from Tool-requested escalation.
 
 On Unix, `rsi addon list [--root ABSOLUTE] [--output text|json]` reads installed
 and separately enabled artifact identities. `rsi addon install MANIFEST`,

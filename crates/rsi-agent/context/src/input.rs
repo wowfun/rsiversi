@@ -2,12 +2,38 @@
 
 use crate::{ContextError, ContextFold, Result, input_content, input_message};
 use rsi_agent_session_protocol::{
-    InputClaimRef, PreparedInput, PreparedInputMessage, PreparedInputRole, SessionFact,
-    SessionFactBody, StepInputDecision, TurnId,
+    ContributionId, InputClaimRef, InputMessageSource, PreparedInput, PreparedInputMessage,
+    PreparedInputRole, SessionFact, SessionFactBody, StepInputDecision, TurnId,
 };
 use rsi_ai_protocol::{Message, MessageContent};
 
 impl ContextFold {
+    /// Last retained, entered native runtime snapshot, borrowed without copying text.
+    pub fn runtime_context(&self) -> Option<&str> {
+        self.turns.iter().rev().find_map(|turn| {
+            let index = turn.runtime_context?;
+            match turn.messages[index].content() {
+                [MessageContent::Text { text }] => Some(text.as_str()),
+                _ => Some(""),
+            }
+        })
+    }
+    /// Current canonical Step guidance, cleared at Step boundaries.
+    pub fn step_prompt(&self) -> &rsi_agent_session_protocol::StepPrompt {
+        &self.step_prompt
+    }
+
+    /// Last entered non-Tool context input from this producer in retained Turns.
+    /// Claims or omitted inputs do not advance it. Replay and checkpoints retain
+    /// the original Fact timestamp; removing its Turn forgets this derived value.
+    pub fn previous_context_input_at_ms(&self, producer: &ContributionId) -> Option<u64> {
+        self.turns.iter().rev().find_map(|turn| {
+            turn.context_input_times
+                .get(producer)
+                .map(|time| time.get())
+        })
+    }
+
     pub(super) fn claim_input(&mut self, turn: &TurnId, fact: &SessionFact) -> Result<()> {
         let turn = self.turn_mut(turn)?;
         turn.claimed_bytes = turn
@@ -64,6 +90,31 @@ impl ContextFold {
             if let Some(message) = message {
                 self.push_turn_message(turn, message)?;
                 if let Some(fact) = origin {
+                    if matches!(
+                        fact.body(),
+                        SessionFactBody::InputMessageClaimed {
+                            source: InputMessageSource::RuntimeContext,
+                            ..
+                        }
+                    ) {
+                        let turn = self.turn_mut(turn)?;
+                        turn.runtime_context = Some(turn.messages.len() - 1);
+                    }
+                    if let SessionFactBody::InputMessageClaimed {
+                        source:
+                            InputMessageSource::PluginContext {
+                                contribution_id,
+                                tool: None,
+                            },
+                        ..
+                    } = fact.body()
+                    {
+                        self.turn_mut(turn)?.context_input_times.insert(
+                            contribution_id.clone(),
+                            std::num::NonZeroU64::new(fact.timestamp_ms())
+                                .expect("validated Fact timestamp"),
+                        );
+                    }
                     let key = self.turn_key(turn);
                     let index = self.turn_mut(turn)?.messages.len() - 1;
                     let changed = self.semantic.as_mut().map_or_else(Vec::new, |semantic| {

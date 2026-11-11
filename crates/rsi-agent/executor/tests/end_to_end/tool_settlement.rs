@@ -131,7 +131,9 @@ async fn serial_and_parallel_results_invoke_settlement_once_per_effect() {
                     } else {
                         rsi_tools_protocol::ToolScheduling::Exclusive
                     }),
-                timeout: rsi_tools_protocol::ToolTimeoutPolicy::Execution { timeout_ms: 2000 },
+                run_policy: rsi_tools_protocol::ToolRunPolicy::execution(
+                    std::time::Duration::from_secs(2),
+                ),
                 executor: Arc::new(EchoTool {
                     store: stack.store.clone(),
                     calls: calls.clone(),
@@ -255,7 +257,9 @@ async fn retained_settlement(uncertain: bool) {
         .register(ToolRegistration {
             output: None,
             definition: ToolDefinition::new("echo", "echo JSON", json!({"type":"object"})).unwrap(),
-            timeout: rsi_tools_protocol::ToolTimeoutPolicy::Execution { timeout_ms: 2000 },
+            run_policy: rsi_tools_protocol::ToolRunPolicy::execution(
+                std::time::Duration::from_secs(2),
+            ),
             executor: Arc::new(RecoveryTool {
                 echo: EchoTool {
                     store: stack.store.clone(),
@@ -532,7 +536,9 @@ async fn conclusion_and_domain_update_share_the_exact_result_commit() {
         .register(ToolRegistration {
             output: None,
             definition: ToolDefinition::new("echo", "echo", json!({"type":"object"})).unwrap(),
-            timeout: rsi_tools_protocol::ToolTimeoutPolicy::Execution { timeout_ms: 2000 },
+            run_policy: rsi_tools_protocol::ToolRunPolicy::execution(
+                std::time::Duration::from_secs(2),
+            ),
             executor: Arc::new(EchoTool {
                 store: stack.store.clone(),
                 calls: calls.clone(),
@@ -612,7 +618,9 @@ async fn failed_publication_notification_preserves_the_atomic_result_without_rep
                 store: stack.store.clone(),
                 calls: calls.clone(),
             }),
-            timeout: rsi_tools_protocol::ToolTimeoutPolicy::Execution { timeout_ms: 2000 },
+            run_policy: rsi_tools_protocol::ToolRunPolicy::execution(
+                std::time::Duration::from_secs(2),
+            ),
         })
         .unwrap();
     let provider = Arc::new(LanguageFixture {

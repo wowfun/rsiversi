@@ -1,8 +1,8 @@
 //! A single definition source for model discovery, human previews and named spawn.
 use super::*;
 use rsi_agent_composition_protocol::{
-    ContextContributor, ContributionContext, ContributionError, ContributionInput,
-    ContributionKind, ContributionOutput, ContributionRegistrarContract, ContributionRegistration,
+    BeforeStepContext, BeforeStepContributor, BeforeStepOutput, ContributionContext,
+    ContributionError, ContributionKind, ContributionRegistrarContract, ContributionRegistration,
     ContributionResult, SessionResourceReader,
 };
 use rsi_agent_session_protocol::{
@@ -51,7 +51,7 @@ impl Definitions {
                 ContributionRegistration::new(
                     ContributionId::new("rsi.available-agents").expect("static ID"),
                     10,
-                    ContributionKind::Context(source.clone()),
+                    ContributionKind::BeforeStep(source.clone()),
                 ),
             )
             .map_err(|e| MetaError::Activation(e.to_string()))?;
@@ -304,12 +304,13 @@ impl SessionResourceReader for Definitions {
     }
 }
 #[async_trait]
-impl ContextContributor for Definitions {
-    async fn contribute(
+impl BeforeStepContributor for Definitions {
+    async fn prepare(
         &self,
-        context: &ContributionContext,
+        context: &BeforeStepContext<'_>,
         cancellation: CancellationToken,
-    ) -> ContributionResult<ContributionOutput> {
+    ) -> ContributionResult<BeforeStepOutput> {
+        let context = context.captured;
         let entries = match self
             .load(
                 &context.header,
@@ -324,19 +325,44 @@ impl ContextContributor for Definitions {
                 return Err(error);
             }
             Err(error) => {
-                return Ok(ContributionOutput {
-                    inputs: vec![ContributionInput::context(format!(
+                return Ok(BeforeStepOutput {
+                    instructions: format!(
                         "Agent catalog unavailable: {error}. Fresh spawn must validate its selected definition."
-                    ))],
-                    domains: vec![],
+                    ),
+                    ..BeforeStepOutput::default()
                 });
             }
         };
-        let catalog: Vec<_> = entries.iter().map(|entry| json!({"name":entry.name,"description":entry.description,"available":entry.seed.is_some(),"model":entry.seed.as_ref().and_then(|seed|seed.model.as_ref())})).collect();
-        let mut text = format!(
-            "Available subagents (bounded listing replaces earlier entries; exact names outside the listing can also resolve):\n{}\nUse spawn_agent(role=exact name) to delegate. The definition is resolved when a new child is admitted. Human @name requests should be delegated by you; orchestrate and summarize the child's result.\n",
-            serde_json::to_string(&catalog).map_err(error)?
+        let mut text = String::from(
+            "Available subagents (bounded listing; exact names outside the listing can also resolve):\n",
         );
+        if entries.is_empty() {
+            text.push_str("No definitions listed.\n");
+        }
+        for entry in &entries {
+            let available = if entry.seed.is_some() {
+                "available"
+            } else {
+                "unavailable"
+            };
+            let _ = writeln!(
+                text,
+                "- {} ({available}): {}",
+                entry.name, entry.description
+            );
+            if let Some(model) = entry.seed.as_ref().and_then(|seed| seed.model.as_ref()) {
+                let _ = writeln!(
+                    text,
+                    "  deployment: {}\n  model: {}",
+                    model.model.deployment(),
+                    model.model.model()
+                );
+                if let Some(effort) = &model.reasoning_effort {
+                    let _ = writeln!(text, "  reasoning effort: {}", effort.as_str());
+                }
+            }
+        }
+        text.push_str("\nUse spawn_agent(role=exact name) to delegate. The definition is resolved when a new child is admitted. Human @name requests should be delegated by you; orchestrate and summarize the child's result.\n");
         let available: BTreeSet<_> = entries
             .iter()
             .filter(|entry| entry.seed.is_some())
@@ -354,18 +380,9 @@ impl ContextContributor for Definitions {
                 serde_json::to_string(&mentions).map_err(error)?
             );
         }
-        let sha256 = format!("{:x}", Sha256::digest(text.as_bytes()));
-        Ok(ContributionOutput {
-            inputs: vec![ContributionInput::sourced(
-                InputMessageSource::AgentInstructions {
-                    source: "available-agents".into(),
-                    sha256,
-                    replacement: true,
-                    tombstone: entries.is_empty(),
-                },
-                text,
-            )],
-            domains: vec![],
+        Ok(BeforeStepOutput {
+            instructions: text,
+            ..BeforeStepOutput::default()
         })
     }
 }
@@ -373,6 +390,46 @@ impl ContextContributor for Definitions {
 #[cfg(test)]
 mod tests {
     use super::*;
+    async fn prepare(
+        definitions: &Definitions,
+        context: &ContributionContext,
+    ) -> ContributionResult<BeforeStepOutput> {
+        let selection = ModelSelection {
+            model: context.header.settings().default_model().clone(),
+            reasoning_effort: None,
+        };
+        let output = definitions
+            .prepare(
+                &BeforeStepContext {
+                    selection: &selection,
+                    producer: &ContributionId::new("rsi.available-agents").unwrap(),
+                    previous_input_at_ms: None,
+                    captured: context,
+                    previous: None,
+                    request_id: &rsi_agent_session_protocol::DomainRequestId::new("catalog")
+                        .unwrap(),
+                    tools: &[],
+                },
+                CancellationToken::new(),
+            )
+            .await?;
+        assert!(
+            output.contribution.inputs.is_empty(),
+            "current catalog must not append history"
+        );
+        assert!(output.contribution.domains.is_empty());
+        assert!(output.publications.is_empty());
+        assert!(output.decision.is_none());
+        assert!(output.tools.is_none());
+        rsi_agent_session_protocol::validate_step_instructions(&[
+            rsi_agent_session_protocol::StepInstruction {
+                producer: ContributionId::new("rsi.available-agents").unwrap(),
+                text: output.instructions.clone(),
+            },
+        ])
+        .expect("the full supported catalog fits the current instruction budget");
+        Ok(output)
+    }
     #[derive(Debug)]
     struct CountedSource {
         inner: rsi_agent_workspace_context::LocalWorkspaceContext,
@@ -448,7 +505,8 @@ mod tests {
         }
     }
     #[tokio::test]
-    async fn mention_history_only_reads_the_suffix_and_resets_on_rewind() {
+    #[allow(clippy::too_many_lines)] // One ordered history proves cursor reuse across catalog edits and retirement.
+    async fn mention_history_only_reads_the_suffix_and_rechecks_current_catalog() {
         use rsi_agent_session_protocol::{AgentPresetId, FrozenAgentSettings, StepId, TurnId};
         let temporary = tempfile::tempdir().unwrap();
         let header = SessionHeader::new_local(
@@ -506,12 +564,20 @@ mod tests {
             domains: Arc::new([]),
             facts: facts.clone(),
         };
+        let root = temporary.path().join(".agents/agents");
+        std::fs::create_dir_all(&root).unwrap();
+        let review = root.join("review.md");
+        let later = root.join("later.md");
+        std::fs::write(
+            &review,
+            "---\ndescription: first review description\n---\nPersona",
+        )
+        .unwrap();
         for horizon in [2, 2, 3, 1] {
             context.horizon.fact_seq = horizon;
-            definitions
-                .contribute(&context, CancellationToken::new())
-                .await
-                .unwrap();
+            let output = prepare(&definitions, &context).await.unwrap();
+            assert!(output.instructions.contains("first review description"));
+            assert!(output.instructions.contains("Human input: [\"review\"]"));
             assert_eq!(
                 *definitions.mentions.0.lock().unwrap().back().unwrap().names,
                 BTreeSet::from(["later".into(), "review".into()])
@@ -533,12 +599,35 @@ mod tests {
             assert!(Arc::ptr_eq(&cached, &repeated));
         }
         assert_eq!(*facts.0.lock().unwrap(), [0, 1, 2, 0]);
+        std::fs::write(
+            &review,
+            "---\ndescription: changed review description\n---\nPersona",
+        )
+        .unwrap();
+        std::fs::write(
+            &later,
+            "---\ndescription: newly available role\n---\nPersona",
+        )
+        .unwrap();
+        let output = prepare(&definitions, &context).await.unwrap();
+        assert!(output.instructions.contains("changed review description"));
+        assert!(!output.instructions.contains("first review description"));
+        assert!(
+            output
+                .instructions
+                .contains("Human input: [\"later\",\"review\"]")
+        );
+        std::fs::remove_file(&review).unwrap();
+        let output = prepare(&definitions, &context).await.unwrap();
+        assert!(!output.instructions.contains("review description"));
+        assert!(output.instructions.contains("Human input: [\"later\"]"));
+        std::fs::remove_file(&later).unwrap();
+        let output = prepare(&definitions, &context).await.unwrap();
+        assert!(output.instructions.contains("No definitions listed."));
+        assert!(!output.instructions.contains("Explicit Agent mentions"));
         for index in 0..40 {
             context.turn_id = TurnId::new(format!("turn-{index}")).unwrap();
-            definitions
-                .contribute(&context, CancellationToken::new())
-                .await
-                .unwrap();
+            prepare(&definitions, &context).await.unwrap();
         }
         assert_eq!(definitions.mentions.0.lock().unwrap().len(), 32);
     }
@@ -550,10 +639,22 @@ mod tests {
         let temporary = tempfile::tempdir().unwrap();
         let root = temporary.path().join(".agents/agents");
         std::fs::create_dir_all(&root).unwrap();
+        let maximum_description = "\"".repeat(1024);
+        let maximum_model = json!({
+            "deployment": "\\".repeat(rsi_ai_protocol::MAX_ID_BYTES),
+            "model": "\"".repeat(rsi_ai_protocol::MAX_ID_BYTES),
+        });
         for index in 0..33 {
             std::fs::write(
                 root.join(format!("role-{index:02}.md")),
-                "---\ndescription: review code\n---\nPersona",
+                format!(
+                    "---\n{}\n---\nPersona",
+                    json!({
+                        "description": maximum_description,
+                        "model": maximum_model,
+                        "reasoning_effort": "r".repeat(rsi_ai_protocol::MAX_REASONING_EFFORT_BYTES),
+                    })
+                ),
             )
             .unwrap();
         }
@@ -623,11 +724,13 @@ mod tests {
         for fault in [
             rsi_agent_workspace_context::WorkspaceContextError::Capacity,
             rsi_agent_workspace_context::WorkspaceContextError::Closed,
+            rsi_agent_workspace_context::WorkspaceContextError::Invalid(
+                "invalid observation".into(),
+            ),
+            rsi_agent_workspace_context::WorkspaceContextError::Failed("source unavailable".into()),
         ] {
             *source.fault.lock().unwrap() = Some(fault.clone());
-            let result = definitions
-                .contribute(&context, CancellationToken::new())
-                .await;
+            let result = prepare(&definitions, &context).await;
             let spawn = definitions
                 .resolve(
                     &header,
@@ -642,12 +745,28 @@ mod tests {
             if fault == WorkspaceContextError::Capacity {
                 assert_eq!(result.unwrap_err(), ContributionError::Capacity);
                 assert!(matches!(spawn, Err(TurnError::Capacity)));
-            } else {
+            } else if fault == WorkspaceContextError::Closed {
                 assert_eq!(result.unwrap_err(), ContributionError::Closed);
                 assert!(matches!(spawn, Err(TurnError::ShuttingDown)));
+            } else {
+                let output = result.unwrap();
+                assert!(
+                    output
+                        .instructions
+                        .starts_with("Agent catalog unavailable:")
+                );
+                assert!(!output.instructions.contains("Available subagents"));
+                assert!(matches!(spawn, Err(TurnError::Invalid(_))));
             }
         }
         *source.fault.lock().unwrap() = None;
+        let output = prepare(&definitions, &context).await.unwrap();
+        assert!(output.instructions.contains("Available subagents"));
+        assert!(!output.instructions.contains("Agent catalog unavailable:"));
+        assert_eq!(
+            output.instructions.matches(&maximum_description).count(),
+            32
+        );
         std::fs::write(root.join("role-32.md"), "not YAML frontmatter").unwrap();
         let collision = Definitions {
             mentions: MentionHistory::default(),

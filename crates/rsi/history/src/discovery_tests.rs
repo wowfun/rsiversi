@@ -18,12 +18,15 @@ struct Fixture {
 }
 mod sessions {
     use super::Fixture;
-    use rsi_agent_session_protocol::{SessionHeader, SessionId};
+    use rsi_agent_session_protocol::SessionId;
     use rsi_session_protocol::*;
     use std::sync::Arc;
     #[async_trait::async_trait]
     impl SessionService for Fixture {
-        async fn read_header(&self, session_id: &SessionId) -> Result<SessionHeader> {
+        async fn read_summary(
+            &self,
+            session_id: &SessionId,
+        ) -> Result<rsi_session_protocol::SessionSummary> {
             panic!("unused history fixture facet")
         }
         async fn create(&self, request: CreateSession) -> Result<Arc<dyn SessionHandle>> {
@@ -126,6 +129,31 @@ mod workspaces {
     use std::sync::atomic::Ordering;
     #[async_trait::async_trait]
     impl WorkspaceRegistry for Fixture {
+        async fn find(
+            &self,
+            key: &rsi_workspace_protocol::WorkspaceKey,
+        ) -> rsi_workspace_protocol::Result<Option<rsi_workspace_protocol::WorkspaceRecord>>
+        {
+            assert_eq!(
+                *key,
+                rsi_workspace_protocol::WorkspaceKey::from_coordinates(&self.workspace.coordinates)
+            );
+            self.get(&self.workspace.id).await.map(Some)
+        }
+
+        async fn display_order(
+            &self,
+        ) -> rsi_workspace_protocol::Result<rsi_workspace_protocol::WorkspaceDisplayOrder> {
+            unreachable!("display ordering is not used by this fixture")
+        }
+        async fn insert_before(
+            &self,
+            _: &rsi_workspace_protocol::WorkspaceId,
+            _: Option<&rsi_workspace_protocol::WorkspaceId>,
+        ) -> rsi_workspace_protocol::Result<rsi_workspace_protocol::WorkspaceDisplayOrder> {
+            unreachable!("display ordering is not used by this fixture")
+        }
+
         async fn get(&self, id: &WorkspaceId) -> Result<WorkspaceRecord> {
             let n = self.gets.fetch_add(1, Ordering::SeqCst) + 1;
             if n == self.revoke_at.load(Ordering::SeqCst) {
@@ -230,7 +258,10 @@ async fn catalog_case(case: CatalogCase) {
     )
     .unwrap();
     let fixture = Arc::new(Fixture {
-        workspace: rsi_workspace_protocol::WorkspaceRecord::new(coordinates.clone()),
+        workspace: rsi_workspace_protocol::WorkspaceRecord::new(
+            rsi_workspace_protocol::WorkspaceId::parse("a".repeat(64)).unwrap(),
+            coordinates.clone(),
+        ),
         gets: AtomicUsize::new(0),
         revoke_at: AtomicUsize::new(0),
         revoked: CancellationToken::new(),
@@ -302,7 +333,9 @@ async fn catalog_case(case: CatalogCase) {
             .cache
             .remember(
                 Scope {
-                    workspace: fixture.workspace.id.clone(),
+                    workspace: rsi_workspace_protocol::WorkspaceKey::from_coordinates(
+                        &fixture.workspace.coordinates,
+                    ),
                     conversation: ConversationIdentity::Native(header.session_id().clone()),
                 },
                 stop.clone(),
@@ -314,7 +347,9 @@ async fn catalog_case(case: CatalogCase) {
         QueryScope::AccessibleHost
     } else {
         QueryScope::Workspace {
-            workspace: fixture.workspace.id.clone(),
+            workspace: rsi_workspace_protocol::WorkspaceKey::from_coordinates(
+                &fixture.workspace.coordinates,
+            ),
         }
     };
     let authority = HistoryAuthority::Caller(CallOrigin::Local);

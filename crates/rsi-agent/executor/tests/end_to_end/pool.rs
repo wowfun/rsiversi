@@ -339,10 +339,10 @@ async fn parked_tool_releases_a_single_lane_and_reacquires_it_before_returning()
                 definition: ToolDefinition::new("park", "park", json!({"type":"object"}))
                     .unwrap()
                     .with_scheduling(ToolScheduling::ExclusiveFinal),
-                timeout: if human {
-                    rsi_tools_protocol::ToolTimeoutPolicy::HumanInteraction
+                run_policy: if human {
+                    rsi_tools_protocol::ToolRunPolicy::human_interaction()
                 } else {
-                    rsi_tools_protocol::ToolTimeoutPolicy::Execution { timeout_ms: 5_000 }
+                    rsi_tools_protocol::ToolRunPolicy::execution(std::time::Duration::from_secs(5))
                 },
                 executor: Arc::new(ParkingTool {
                     turns: human.then(|| {
@@ -888,7 +888,9 @@ async fn lane_panic_releases_tracking_pins_after_all_lanes_stop() {
         .register(ToolRegistration {
             output: None,
             definition: ToolDefinition::new("echo", "echo", json!({"type":"object"})).unwrap(),
-            timeout: rsi_tools_protocol::ToolTimeoutPolicy::Execution { timeout_ms: 1000 },
+            run_policy: rsi_tools_protocol::ToolRunPolicy::execution(
+                std::time::Duration::from_secs(1),
+            ),
             executor: Arc::new(EchoTool {
                 store: stack.store.clone(),
                 calls: Arc::new(AtomicUsize::new(0)),

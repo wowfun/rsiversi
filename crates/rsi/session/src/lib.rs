@@ -155,8 +155,15 @@ impl LocalSessionService {
         header
             .validate()
             .map_err(|e| SessionError::Invalid(e.to_string()))?;
-        let workspace_id =
-            rsi_workspace_protocol::WorkspaceId::from_coordinates(header.coordinates());
+        let workspace_id = self
+            .workspace
+            .find(&rsi_workspace_protocol::WorkspaceKey::from_coordinates(
+                header.coordinates(),
+            ))
+            .await
+            .map_err(|error| map_workspace_error(&error))?
+            .ok_or_else(|| SessionError::Invalid("Workspace is not registered".into()))?
+            .id;
         let service = Self {
             frozen: Some((header.clone(), pin)),
             ..self.clone()
@@ -527,7 +534,7 @@ impl LocalSessionService {
             ));
         }
         let source_lifetime = self.lifecycles.attach(&fork.source_session_id)?.hard()?;
-        let source = self.read_header(&fork.source_session_id).await?;
+        let source = self.read_summary(&fork.source_session_id).await?.header;
         let protection = self.protect_header(&source)?;
         if source.protection().is_some() {
             return Err(SessionError::Api(rsi_api_protocol::ApiError::Unauthorized));
@@ -652,16 +659,19 @@ impl SessionService for LocalSessionService {
         self.maintenance_status(operation_id).await
     }
 
-    async fn read_header(&self, session_id: &SessionId) -> Result<SessionHeader> {
+    async fn read_summary(
+        &self,
+        session_id: &SessionId,
+    ) -> Result<rsi_session_protocol::SessionSummary> {
         self.check_origin()?;
-        let header = self
+        let summary = self
             .store
-            .header(session_id)
+            .session_summary(session_id)
             .await
             .map_err(map_store_error)?;
-        let _protection = self.protect_header(&header)?;
-        let _admission = self.admit(header.coordinates().location())?;
-        Ok(header)
+        let _protection = self.protect_header(&summary.header)?;
+        let _admission = self.admit(summary.header.coordinates().location())?;
+        Ok(summary)
     }
     async fn activity(&self) -> Result<rsi_session_protocol::SessionActivityPage> {
         self.collect_activity().await
@@ -1090,12 +1100,18 @@ impl LocalSessionHandle {
                         .map_err(|error| map_media_error(&error))?;
                     AgentMessageContent::File { file }
                 }
-                SessionInput::Image { media, presentation } => {
+                SessionInput::Image {
+                    media,
+                    presentation,
+                } => {
                     self.media
                         .read(&media)
                         .await
                         .map_err(|error| map_media_error(&error))?;
-                    AgentMessageContent::Image { media, presentation }
+                    AgentMessageContent::Image {
+                        media,
+                        presentation,
+                    }
                 }
                 SessionInput::Reference { reference } => {
                     publications.push(
@@ -1465,24 +1481,23 @@ impl SessionHandle for LocalSessionHandle {
                 self.session_id(),
                 after,
                 1,
-                rsi_agent_store_protocol::MAXIMUM_STORE_FACT_PAGE_BYTES,
+                rsi_agent_store_protocol::MAXIMUM_STORE_CONTROL_PAGE_BYTES,
             )
             .await
             .map_err(map_store_error)?;
-        let record = page
-            .records
-            .first()
-            .filter(|record| record.seq() == accepted_control_seq)
-            .ok_or_else(|| SessionError::NotFound("exact message acceptance".into()))?;
-        if let rsi_agent_session_protocol::AgentControlRecordBody::MessageAccepted {
-            message, ..
-        } = record.body()
+        if let Some(record) = page.records.into_iter().next()
+            && record.seq() == accepted_control_seq
+            && let rsi_agent_session_protocol::AgentControlRecordBody::MessageAccepted {
+                message,
+                ..
+            } = record.into_body()
             && message.message_id == *message_id
         {
-            return Ok(message.clone());
+            return Ok(message);
         }
         Err(SessionError::NotFound("exact message acceptance".into()))
     }
+
     async fn header(&self) -> Result<SessionHeader> {
         let _admission = self.admit()?;
         let _activity = self.begin_read()?;
@@ -1502,9 +1517,13 @@ impl SessionHandle for LocalSessionHandle {
             })
             .collect();
         let delivery = request.delivery;
-        if delivery == rsi_agent_session_protocol::MessageDelivery::NextStep {
+        if delivery == rsi_agent_session_protocol::MessageDelivery::NextStep
+            && (request.model.is_some()
+                || request.reasoning_effort.is_some()
+                || request.sandbox.is_some())
+        {
             return Err(SessionError::Invalid(
-                "human Session input requires NextTurn or Steer intent".into(),
+                "non-waking input cannot select new-Turn options".into(),
             ));
         }
         let header = self.header_snapshot().await?;
@@ -1513,15 +1532,17 @@ impl SessionHandle for LocalSessionHandle {
                 "effort override requires an explicit model".into(),
             ));
         }
-        let selected = if let Some(model) = &request.model {
-            rsi_agent_session_protocol::ModelSelection {
-                model: model.clone(),
-                reasoning_effort: request.reasoning_effort.clone(),
-            }
-        } else {
-            self.current_model_selection(&header).await?
-        };
-        self.validate_model_selection(&selected)?;
+        if delivery != rsi_agent_session_protocol::MessageDelivery::NextStep {
+            let selected = if let Some(model) = &request.model {
+                rsi_agent_session_protocol::ModelSelection {
+                    model: model.clone(),
+                    reasoning_effort: request.reasoning_effort.clone(),
+                }
+            } else {
+                self.current_model_selection(&header).await?
+            };
+            self.validate_model_selection(&selected)?;
+        }
         let mut state = self.state.lock().await;
         if let HandleState::Attached(attached_header) = &*state {
             workflow::require_preset(self.workflow.as_deref(), attached_header.agent_preset_id())?;
@@ -1616,7 +1637,13 @@ impl SessionHandle for LocalSessionHandle {
                         .map(|block| match block {
                             AgentMessageContent::Text { text } => SessionInput::Text { text },
                             AgentMessageContent::File { file } => SessionInput::File { file },
-                            AgentMessageContent::Image { media, presentation } => SessionInput::Image { media, presentation },
+                            AgentMessageContent::Image {
+                                media,
+                                presentation,
+                            } => SessionInput::Image {
+                                media,
+                                presentation,
+                            },
                             AgentMessageContent::Reference { reference } => {
                                 SessionInput::Reference { reference }
                             }

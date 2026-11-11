@@ -300,22 +300,39 @@ pub(super) async fn observe_agent_wait_change(
         .await
         .map_err(turn_store_error)?;
     summary.validate().map_err(turn_store_error)?;
-    if summary.pending_count == 0 {
-        drop(execution);
-        let _execution = kernel.admit_agent_read(caller)?;
-        return Ok(None);
-    }
-    let mailbox =
-        scan_durable_messages(&kernel.inner, caller.session_id(), MailboxRead::NextStep).await?;
     drop(execution);
     let _execution = kernel.admit_agent_read(caller)?;
-    Ok(mailbox.pending.first().map(|entry| {
-        if matches!(entry.message.source, AgentMessageSource::Completion { .. }) {
+    Ok(summary.first_pending_step_source.map(|source| {
+        if source == rsi_agent_session_protocol::AgentMessageSourceKind::Completion {
             WaitResumeCause::Completion
         } else {
             WaitResumeCause::Message
         }
     }))
+}
+
+pub(super) async fn read_mailbox_claim(
+    inner: &Arc<KernelInner>,
+    session_id: &SessionId,
+    waking: Option<MessageId>,
+) -> TurnResult<rsi_agent_store_protocol::StoreMailboxClaim> {
+    // A Step selection carries at most 64 short identities and no bodies.
+    // Only a waking selection can decode a full accepted message.
+    let bytes = if waking.is_some() {
+        MAXIMUM_SESSION_FACT_BYTES
+    } else {
+        store_reads::INITIAL_PAGE_BYTES
+    };
+    let (selection, _permit, _lease) = store_reads::read(
+        inner,
+        session_id,
+        bytes,
+        true,
+        move |store, id| async move { store.read_mailbox_claim(&id, waking).await },
+    )
+    .await
+    .map_err(turn_store_error)?;
+    Ok(selection)
 }
 
 pub(super) async fn scan_durable_messages(

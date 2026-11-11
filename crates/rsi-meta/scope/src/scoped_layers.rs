@@ -2,7 +2,7 @@ use crate::store::ScopeUndoCapture;
 use crate::{NamedEntries, ScopeError, ScopeKey, ScopeRoot, ScopeUndo, ScopedContext};
 use futures_util::FutureExt as _;
 use futures_util::future::BoxFuture;
-use rsi_meta::{Context, EffectHandle};
+use rsi_meta::{Context, EffectHandle, MetaError, RegistrationLease};
 use std::collections::HashMap;
 use std::fmt;
 use std::future::Future;
@@ -377,6 +377,80 @@ impl<L: ScopeLayer> ScopedLayers<L> {
             }
         }
         Ok(NamedEntries::into_owned_snapshot(merged))
+    }
+
+    /// Registers one passive entry through the caller's Loading or Active ownership.
+    ///
+    /// The bounded synchronous action must return the exact undo of one table
+    /// insertion. It must not invoke callbacks, reenter Meta, or wait. Retain the
+    /// returned lease until removal is desired. This snapshot-only path does not
+    /// invoke the asynchronous change callback used by [`Self::effect`].
+    pub async fn register<C, A, E>(
+        &self,
+        context: &C,
+        label: impl Into<String>,
+        action: A,
+    ) -> Result<RegistrationLease, MutationError>
+    where
+        C: LayerContext + ?Sized,
+        A: FnOnce(&L) -> Result<ScopeUndo, E>,
+        E: fmt::Display,
+    {
+        let maximum = context
+            .meta_context()
+            .runtime()
+            .limits()
+            .payloads
+            .maximum_diagnostic_bytes;
+        let credential = context
+            .meta_context()
+            .registration_context()
+            .map_err(|error| MutationError::from_primary(error, maximum))?;
+        let scope = context.selected_scope().cloned();
+        if let Some(scope) = &scope {
+            self.inner
+                .root
+                .ensure_local(scope)
+                .map_err(|error| MutationError::from_primary(error, maximum))?;
+        }
+        let (cell, slot, mutation) = self
+            .begin_mutation(scope.as_ref())
+            .await
+            .map_err(|error| MutationError::from_primary(error.message(), maximum))?;
+        let undo = Arc::new(Mutex::new(None::<ScopeUndo>));
+        let removal = undo.clone();
+        let inner = self.inner.clone();
+        let cleanup_scope = scope.clone();
+        let cleanup_cell = cell.clone();
+        let cleanup_slot = slot.clone();
+        let result = credential.register(
+            label,
+            move || {
+                let mutation = cleanup_slot.begin();
+                let undo = removal.lock().expect("scope registration poisoned").take();
+                if let Some(undo) = undo {
+                    undo.run();
+                }
+                drop(mutation);
+                if let (Some(scope), Some(cell)) = (&cleanup_scope, &cleanup_cell) {
+                    inner.try_reclaim(scope, cell, &cleanup_slot);
+                }
+                Ok(())
+            },
+            |_| {
+                let inserted = action(&slot.layer)
+                    .map_err(|error| MetaError::InvalidInput(error.to_string()))?;
+                *undo.lock().expect("scope registration poisoned") = Some(inserted);
+                Ok(())
+            },
+        );
+        drop(mutation);
+        if result.is_err() {
+            self.reclaim_after_setup(scope.as_ref(), cell.as_ref(), &slot);
+        }
+        result
+            .map(|((), lease)| lease)
+            .map_err(|error| MutationError::from_primary(error, maximum))
     }
 
     /// Makes one layer mutation visible and attaches its exact undo to `context`.

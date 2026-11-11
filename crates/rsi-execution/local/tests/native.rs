@@ -82,6 +82,13 @@ impl Fixture {
         };
         let programs = BTreeMap::from([
             (
+                "dispatch-alias".into(),
+                ResolvedProgram {
+                    program: root.path().join("dispatch-alias"),
+                    environment: vec![],
+                },
+            ),
+            (
                 "shell".into(),
                 ResolvedProgram {
                     program: "/bin/sh".into(),
@@ -108,7 +115,6 @@ impl Fixture {
             capabilities,
             programs,
         )
-        .await
         .unwrap();
         let gate = Arc::new(Gate::default());
         let lease = provider.lease(gate.clone()).unwrap();
@@ -201,6 +207,81 @@ async fn source_reader_lease_keeps_tmp_ancestors_visible_and_read_only() {
         b"ancestor-proof"
     );
     drop(child);
+    fixture.close().await;
+}
+
+#[tokio::test]
+async fn program_capture_preserves_alias_dispatch_and_admits_files_only_at_preparation() {
+    use std::os::unix::fs::PermissionsExt;
+    let fixture = Fixture::new(false).await;
+    let alias = fixture.root.path().join("dispatch-alias");
+    // Neither catalog creation nor program capture needs the file to exist.
+    let captured = fixture
+        .lease
+        .resolve_program("dispatch-alias")
+        .await
+        .unwrap();
+    std::os::unix::fs::symlink("/bin/sh", &alias).unwrap();
+    let request = |program| ProcessRequest {
+        program,
+        arguments: vec!["-c".into(), "printf '%s' \"$0\"".into()],
+        stdio: ProcessStdio::Pipes,
+        mode: SandboxMode::DangerFullAccess,
+        cwd: fixture.root.path().to_owned(),
+        workspace: fixture.root.path().to_owned(),
+    };
+    let process = fixture.lease.prepare(request(captured)).await.unwrap();
+    let environment = process.environment().to_vec();
+    let child = fixture
+        .lease
+        .spawn(ProcessSpec {
+            process,
+            environment,
+            stdin: vec![],
+            stdout_max_bytes: 4096,
+            stderr_max_bytes: 1024,
+            termination_grace_ms: 50,
+        })
+        .await
+        .unwrap();
+    assert_eq!(
+        tokio::time::timeout(Duration::from_secs(5), child.wait())
+            .await
+            .unwrap()
+            .unwrap()
+            .exit_code,
+        Some(0)
+    );
+    assert_eq!(
+        child.stdout().read_from(0).unwrap().bytes,
+        alias.as_os_str().as_encoded_bytes()
+    );
+    std::fs::remove_file(&alias).unwrap();
+    for invalid in ["missing", "directory", "nonexecutable"] {
+        match invalid {
+            "directory" => std::fs::create_dir(&alias).unwrap(),
+            "nonexecutable" => {
+                std::fs::remove_dir(&alias).unwrap();
+                std::fs::write(&alias, b"not executable").unwrap();
+                std::fs::set_permissions(&alias, std::fs::Permissions::from_mode(0o600)).unwrap();
+            }
+            _ => {}
+        }
+        let program = fixture
+            .lease
+            .resolve_program("dispatch-alias")
+            .await
+            .unwrap();
+        assert!(
+            matches!(
+                fixture.lease.prepare(request(program)).await,
+                Err(ProcessError::Sandbox(
+                    rsi_sandbox::SandboxError::InvalidInput(_)
+                ))
+            ),
+            "{invalid}"
+        );
+    }
     fixture.close().await;
 }
 

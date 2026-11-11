@@ -3,7 +3,8 @@
 The optional `ui: true` port implements Portable UI models, refresh and raw source
 windows. Every bound model performs an actual Session attach through its sole
 explicit Portable API grant and checks the returned Header before displaying its
-Session identity. Describe receives no grant; an absent or extra business grant
+Session identity. The attach operation key comes from the Session API owner's
+public descriptor. Describe receives no grant; an absent or extra business grant
 fails. The Web renderer fixture consumes this native model over authenticated UI
 API and renders it in Rust/WASM, without a Worker factory for the native source.
 

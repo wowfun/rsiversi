@@ -5,12 +5,28 @@ FOCUS_INPUT = (Path(__file__).with_name('focus-input.js')).read_text()
 COMPOSER_FOCUS = (Path(__file__).with_name('composer-focus.js')).read_text()
 ASSET_PRESSURE = (Path(__file__).with_name('asset-pressure.js')).read_text()
 BUTTON_TARGET = (Path(__file__).with_name('button-target.js')).read_text()
+SAVED_INPUT = (Path(__file__).with_name('saved-input.js')).read_text()
 
 
 def stale_target(error):
     reply = error.args[0] if error.args else None
     failure = reply.get('value') if isinstance(reply, dict) else None
     return isinstance(failure, dict) and failure.get('error') == 'stale element reference'
+
+
+def click(resolve, dispatch, until):
+    def attempt():
+        item = resolve()
+        if not item:
+            return False
+        try:
+            dispatch(item)
+        except RuntimeError as error:
+            if not stale_target(error):
+                raise
+            return False
+        return True
+    until(attempt)
 
 
 def fill(script, keys, until, css, value):

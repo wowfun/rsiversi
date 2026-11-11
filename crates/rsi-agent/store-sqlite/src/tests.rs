@@ -24,45 +24,117 @@ mod activity_cuts;
 #[path = "tests/admission.rs"]
 mod admission;
 #[cfg(any(unix, windows))]
+#[path = "tests/canonical_reads.rs"]
+mod canonical_reads;
+#[cfg(any(unix, windows))]
+#[path = "tests/claim_admission.rs"]
+mod claim_admission;
+#[cfg(any(unix, windows))]
+#[path = "tests/claim_storage.rs"]
+mod claim_storage;
+#[cfg(any(unix, windows))]
+#[path = "tests/claim_storage_bench.rs"]
+mod claim_storage_bench;
+#[cfg(any(unix, windows))]
+#[path = "tests/mailbox_summary.rs"]
+mod mailbox_summary;
+#[cfg(any(unix, windows))]
 #[path = "tests/maintenance.rs"]
 mod maintenance;
 
 #[tokio::test]
 async fn control_fact_cuts_survive_reopen_and_reject_corrupt_anchors() {
-    for anchor in [None, Some(0), Some(3)] {
+    for mutation in [
+        None,
+        Some("UPDATE agent_controls SET fact_seq = 0 WHERE seq = 2"),
+        Some("UPDATE agent_controls SET fact_seq = 3 WHERE seq = 2"),
+        Some("DELETE FROM agent_controls WHERE seq = 1"),
+        Some("DELETE FROM agent_controls WHERE seq = 2"),
+        Some("DELETE FROM agent_controls WHERE seq = 3"),
+        Some("UPDATE sessions SET control_seq = 2"),
+        Some("UPDATE sessions SET control_seq = 4"),
+        Some(
+            "UPDATE agent_controls SET control_json = json_set(control_json, '$.seq', 4) WHERE seq = 3",
+        ),
+    ] {
         let root = private_tempdir();
         let header = test_header("control-cuts");
         let store = SqliteStore::open(root.path()).unwrap();
         rsi_agent_testkit::assert_control_fact_order(&store, header.clone()).await;
         drop(store);
-        if let Some(anchor) = anchor {
+        if let Some(sql) = mutation {
             let connection = Connection::open(root.path().join("sessions.sqlite3")).unwrap();
             connection
-                .execute(
-                    "UPDATE agent_controls SET fact_seq=?1 WHERE seq=2",
-                    [anchor],
-                )
+                .pragma_update(None, "foreign_keys", false)
                 .unwrap();
+            connection.execute_batch(sql).unwrap();
         }
         let store = SqliteStore::open(root.path()).unwrap();
         let page = store
             .read_controls(
                 header.session_id(),
                 0,
-                3,
+                4,
                 rsi_agent_store_protocol::MAXIMUM_STORE_CONTROL_PAGE_BYTES,
             )
             .await;
-        if anchor.is_some() {
+        if let Some(sql) = mutation {
+            if sql == "UPDATE sessions SET control_seq = 2" {
+                assert_eq!(page.unwrap().fact_cursors, [1, 1]);
+            } else {
+                assert!(
+                    matches!(page, Err(StoreError::Corrupt(_))),
+                    "accepted {sql}"
+                );
+            }
             assert!(
-                matches!(page, Err(StoreError::Corrupt(message)) if message.contains("anchors"))
+                matches!(
+                    store.prepare_session(header.session_id()).await,
+                    Err(StoreError::Corrupt(_))
+                ),
+                "prepared {sql}"
             );
         } else {
             assert_eq!(page.unwrap().fact_cursors, [1, 1, 2]);
         }
         drop(store);
-        assert_eq!(SqliteStore::verify(root.path()).is_ok(), anchor.is_none());
+        assert_eq!(SqliteStore::verify(root.path()).is_ok(), mutation.is_none());
     }
+}
+
+#[tokio::test]
+async fn cold_control_replay_scans_canonical_rows_once() {
+    use rusqlite::trace::{TraceEvent, TraceEventCodes};
+    static SCANS: AtomicU64 = AtomicU64::new(0);
+    fn trace(event: TraceEvent<'_>) {
+        if let TraceEvent::Profile(statement, _) = event
+            && statement.sql().contains("FROM agent_controls")
+        {
+            SCANS.fetch_add(1, Ordering::Relaxed);
+        }
+    }
+    let root = private_tempdir();
+    let header = test_header("single-control-scan");
+    let store = SqliteStore::open(root.path()).unwrap();
+    rsi_agent_testkit::assert_control_fact_order(&store, header.clone()).await;
+    drop(store);
+    let store = SqliteStore::open(root.path()).unwrap();
+    store
+        .inner
+        .connections
+        .validation_reader
+        .lock()
+        .unwrap()
+        .as_mut()
+        .unwrap()
+        .trace_v2(TraceEventCodes::SQLITE_TRACE_PROFILE, Some(trace))
+        .unwrap();
+    store.validate_session(header.session_id()).await.unwrap();
+    assert_eq!(
+        SCANS.load(Ordering::Relaxed),
+        1,
+        "cold proof must check control continuity and anchors in its canonical replay"
+    );
 }
 
 #[cfg(windows)]
@@ -229,7 +301,8 @@ async fn previous_session_format_is_rejected_without_rewriting_database_bytes() 
         )
         .unwrap();
     let mut header: serde_json::Value = serde_json::from_str(&header).unwrap();
-    header["format_version"] = 16.into();
+    let previous = rsi_agent_session_protocol::SESSION_FORMAT_VERSION - 1;
+    header["format_version"] = previous.into();
     connection
         .execute(
             "UPDATE sessions SET header_json=?1 WHERE session_id=?2",
@@ -243,7 +316,7 @@ async fn previous_session_format_is_rejected_without_rewriting_database_bytes() 
     let before = std::fs::read(&path).unwrap();
     let store = SqliteStore::open(root.path()).unwrap();
     assert!(
-        matches!(store.header(&id).await, Err(StoreError::Corrupt(message)) if message.contains("unsupported session format version 16"))
+        matches!(store.header(&id).await, Err(StoreError::Corrupt(message)) if message.contains(&format!("unsupported session format version {previous}")))
     );
     drop(store);
     assert_eq!(std::fs::read(&path).unwrap(), before);
@@ -271,10 +344,6 @@ mod selection_work;
 #[path = "tests/ready_metadata.rs"]
 #[cfg(any(unix, windows))]
 mod ready_metadata;
-
-#[path = "tests/mailbox_migration_live.rs"]
-#[cfg(any(unix, windows))]
-mod mailbox_migration_live;
 
 #[tokio::test]
 #[cfg(unix)]
@@ -448,7 +517,8 @@ async fn online_validation_sql_work() {
                 .unwrap()
                 .as_mut()
                 .expect("idle validation reader")
-                .trace_v2(TraceEventCodes::SQLITE_TRACE_PROFILE, Some(count));
+                .trace_v2(TraceEventCodes::SQLITE_TRACE_PROFILE, Some(count))
+                .unwrap();
             for cycle in 0..3 {
                 VM.store(0, Ordering::Relaxed);
                 SCANS.store(0, Ordering::Relaxed);
@@ -457,6 +527,7 @@ async fn online_validation_sql_work() {
                 let previous_runs = store.inner.validation_runs.load(Ordering::Relaxed);
                 let start = std::time::Instant::now();
                 for id in &sessions {
+                    let _proof = store.prepare_session(id).await.unwrap();
                     assert_eq!(
                         store
                             .read_facts(id, 0, 1, MAXIMUM_STORE_FACT_PAGE_BYTES)
@@ -480,14 +551,11 @@ async fn online_validation_sql_work() {
             VM.store(0, Ordering::Relaxed);
             SCANS.store(0, Ordering::Relaxed);
             let validated = store.inner.validation_runs.load(Ordering::Relaxed);
+            let last = sessions.last().unwrap();
             for _ in 0..100 {
+                let _proof = store.prepare_session(last).await.unwrap();
                 store
-                    .read_facts(
-                        sessions.last().unwrap(),
-                        0,
-                        1,
-                        MAXIMUM_STORE_FACT_PAGE_BYTES,
-                    )
+                    .read_facts(last, 0, 1, MAXIMUM_STORE_FACT_PAGE_BYTES)
                     .await
                     .unwrap();
             }
@@ -672,7 +740,10 @@ async fn control_projection_replay_enforces_the_individual_control_bound() {
     .unwrap();
     writer.execute("INSERT INTO agent_controls (session_id,seq,control_json,fact_seq) VALUES (?1,1,?2 || printf('%*s',?3,''),0)",
         params![header.session_id().as_str(), serde_json::to_string(&record).unwrap(), i64::try_from(MAXIMUM_SESSION_FACT_BYTES).unwrap()]).unwrap();
-    let result = crate::validation::validate_agent_indexes(writer, &header);
+    writer
+        .execute("UPDATE sessions SET control_seq = 1", [])
+        .unwrap();
+    let result = crate::validation::validate_session(writer, header.session_id());
     assert!(
         matches!(result, Err(StoreError::Corrupt(message)) if message.contains("encoded bytes")),
         "activation projection admitted an individually oversized control"
@@ -1806,27 +1877,10 @@ async fn paused_cold_validation_does_not_block_foreground_reads_or_writes() {
     let warm = seed_session(&store, "warm").await;
     drop(store);
     let store = SqliteStore::open(root.path()).unwrap();
-    store
-        .read_facts(
-            &warm,
-            0,
-            1,
-            rsi_agent_store_protocol::MAXIMUM_STORE_FACT_PAGE_BYTES,
-        )
-        .await
-        .unwrap();
+    store.prepare_session(&warm).await.unwrap();
     let (entered, release) = pause_next_validation(&store);
     let worker = store.clone();
-    let validation = tokio::spawn(async move {
-        worker
-            .read_facts(
-                &cold,
-                0,
-                1,
-                rsi_agent_store_protocol::MAXIMUM_STORE_FACT_PAGE_BYTES,
-            )
-            .await
-    });
+    let validation = tokio::spawn(async move { worker.prepare_session(&cold).await });
     entered.await.unwrap();
     let foreground = tokio::time::timeout(Duration::from_secs(2), async {
         store.header(&warm).await.unwrap();
@@ -1907,6 +1961,7 @@ async fn last_waiter_cancellation_preserves_reusable_validation_proof() {
         .unwrap();
     drain_cold_validation(&store).await;
     assert!(store.touch_validated_session(&id));
+    let _proof = store.prepare_session(&id).await.unwrap();
     store
         .read_facts(
             &id,
@@ -2009,6 +2064,7 @@ async fn operational_reads_reuse_proofs_under_bounded_scan_pressure() {
         for misses in expected {
             let previous = store.inner.validation_runs.load(Ordering::Relaxed);
             for id in &sessions {
+                let _proof = store.prepare_session(id).await.unwrap();
                 let page = store
                     .read_facts(
                         id,
@@ -2095,15 +2151,7 @@ async fn cold_control_replay_decodes_each_record_once() {
         .unwrap();
     drop(store);
     let store = SqliteStore::open(root.path()).unwrap();
-    store
-        .read_facts(
-            &id,
-            0,
-            1,
-            rsi_agent_store_protocol::MAXIMUM_STORE_FACT_PAGE_BYTES,
-        )
-        .await
-        .unwrap();
+    store.prepare_session(&id).await.unwrap();
     store
         .read_agent_mailbox(&id, rsi_agent_store_protocol::MailboxRead::All)
         .await
@@ -2135,14 +2183,7 @@ async fn cold_control_replay_decodes_each_record_once() {
         drop(database);
         let store = SqliteStore::open(root.path()).unwrap();
         assert!(matches!(
-            store
-                .read_facts(
-                    &id,
-                    0,
-                    1,
-                    rsi_agent_store_protocol::MAXIMUM_STORE_FACT_PAGE_BYTES
-                )
-                .await,
+            store.prepare_session(&id).await,
             Err(StoreError::Corrupt(_))
         ));
         assert_eq!(store.inner.ready_rows_decoded.load(Ordering::Relaxed), 1);
@@ -2512,42 +2553,18 @@ async fn mixed_archive_scans_preserve_hot_validation_proofs_and_allow_writes() {
     drop(store);
     let store = SqliteStore::open(root.path()).unwrap();
     for id in &hot {
-        store
-            .read_facts(
-                id,
-                0,
-                1,
-                rsi_agent_store_protocol::MAXIMUM_STORE_FACT_PAGE_BYTES,
-            )
-            .await
-            .unwrap();
+        store.prepare_session(id).await.unwrap();
     }
     let mut fact_seq = 1;
     for cycle in 0..3 {
         let mut hot_misses = 0;
         for chunk in archive.chunks(16) {
             for id in chunk {
-                store
-                    .read_facts(
-                        id,
-                        0,
-                        1,
-                        rsi_agent_store_protocol::MAXIMUM_STORE_FACT_PAGE_BYTES,
-                    )
-                    .await
-                    .unwrap();
+                store.prepare_session(id).await.unwrap();
             }
             let before = store.inner.validation_runs.load(Ordering::Relaxed);
             for id in &hot {
-                store
-                    .read_facts(
-                        id,
-                        0,
-                        1,
-                        rsi_agent_store_protocol::MAXIMUM_STORE_FACT_PAGE_BYTES,
-                    )
-                    .await
-                    .unwrap();
+                store.prepare_session(id).await.unwrap();
             }
             hot_misses += store.inner.validation_runs.load(Ordering::Relaxed) - before;
             store
@@ -2588,6 +2605,7 @@ async fn prepared_proofs_survive_churn_and_share_saturated_pin_capacity() {
     for index in 0..512 {
         seed_session(&store, &format!("churn-{index}")).await;
     }
+    store.validate_session(&ids[0]).await.unwrap();
     store
         .read_facts(
             &ids[0],
@@ -2673,7 +2691,7 @@ async fn watermarks_are_one_cold_metadata_read_without_payload_replay() {
 
 #[tokio::test]
 #[cfg(unix)]
-async fn prepared_reads_examine_one_pin_regardless_of_unrelated_leases() {
+async fn prepared_proof_reuse_examines_one_pin_regardless_of_unrelated_leases() {
     let root = private_tempdir();
     let store = SqliteStore::open(root.path()).unwrap();
     let mut leases = Vec::new();
@@ -2684,6 +2702,7 @@ async fn prepared_reads_examine_one_pin_regardless_of_unrelated_leases() {
     let id = SessionId::new("pin-work-0").unwrap();
     store.inner.pin_entries_examined.store(0, Ordering::Relaxed);
     for _ in 0..16 {
+        store.validate_session(&id).await.unwrap();
         assert_eq!(
             store
                 .read_facts(
@@ -2755,7 +2774,7 @@ async fn cold_control_proof_rejects_a_changed_final_prefix_before_read_or_commit
     drop(db);
     let store = SqliteStore::open(root.path()).unwrap();
     assert!(matches!(
-        store.read_facts(&id, 0, 1, rsi_agent_store_protocol::MAXIMUM_STORE_FACT_PAGE_BYTES).await,
+        store.prepare_session(&id).await,
         Err(StoreError::Corrupt(message)) if message.contains("control-prefix digest")
     ));
     assert!(!store.touch_validated_session(&id));
@@ -3596,8 +3615,10 @@ async fn domain_reads_query_only_the_selected_keys_and_reuse_their_common_contro
     )
     .unwrap();
     rsi_agent_testkit::assert_domain_store_contract(&store, header, accepted, event).await;
-    let connection = Connection::open(root.path().join("sessions.sqlite3")).unwrap();
-    connection.trace_v2(TraceEventCodes::SQLITE_TRACE_STMT, Some(trace));
+    let mut connection = Connection::open(root.path().join("sessions.sqlite3")).unwrap();
+    connection
+        .trace_v2(TraceEventCodes::SQLITE_TRACE_STMT, Some(trace))
+        .unwrap();
     for (domain_id, horizon, expected) in [
         (Some("missing"), None, [0, 1, 0]),
         (Some("b"), Some(1), [0, 1, 1]),
@@ -3641,10 +3662,12 @@ async fn recent_page_uses_one_bounded_header_query() {
     }
     store
         .with_reader(|connection| {
-            connection.trace_v2(
-                rusqlite::trace::TraceEventCodes::SQLITE_TRACE_STMT,
-                Some(trace),
-            );
+            connection
+                .trace_v2(
+                    rusqlite::trace::TraceEventCodes::SQLITE_TRACE_STMT,
+                    Some(trace),
+                )
+                .unwrap();
             Ok(())
         })
         .await
@@ -3659,7 +3682,12 @@ async fn recent_page_uses_one_bounded_header_query() {
         .unwrap();
     store
         .with_reader(|connection| {
-            connection.trace_v2(rusqlite::trace::TraceEventCodes::empty(), None);
+            connection
+                .trace_v2(
+                    rusqlite::trace::TraceEventCodes::empty(),
+                    None::<fn(rusqlite::trace::TraceEvent<'_>)>,
+                )
+                .unwrap();
             Ok(())
         })
         .await
@@ -3670,5 +3698,11 @@ async fn recent_page_uses_one_bounded_header_query() {
     assert_eq!(
         page.sessions[0].header.session_id().as_str(),
         "recent-query-11"
+    );
+    assert_eq!(page.sessions[0].durable_fact_seq, 1);
+    assert_eq!(page.sessions[0].durable_control_seq, 0);
+    assert_eq!(
+        page.sessions[0].last_activity_ms,
+        test_fact(1).timestamp_ms()
     );
 }

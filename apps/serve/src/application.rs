@@ -13,10 +13,12 @@ use std::{path::PathBuf, sync::Arc};
 #[cfg(test)]
 mod lease_tests;
 mod model_catalog;
+mod session_capture;
 mod session_command;
 mod session_commands;
 mod session_controls;
 mod session_create;
+mod session_fragments;
 mod session_history;
 mod session_inbox;
 mod session_inherited;
@@ -205,6 +207,7 @@ fn package_error(error: &rsi_packages::Error) -> rsi_extension::Error {
 }
 #[derive(Clone, Debug)]
 struct Sessions {
+    history_pages: session_fragments::Pages,
     owner: Arc<dyn rsi_api_http::BrowserOwner>,
     models: Option<Arc<dyn rsi_ai_protocol::LanguageModels>>,
     defaults: Option<Arc<dyn rsi_session_protocol::AgentSettingsSource>>,
@@ -308,11 +311,11 @@ impl rsi_extension::Handler for Sessions {
             .map_err(|_| rsi_extension::Error::Remote("request has retired".into()))?;
         let service = self.ingress.scoped(origin);
         let read = async {
-            match service.read_header(&input.session_id).await {
+            match service.read_summary(&input.session_id).await {
                 Err(rsi_session_protocol::SessionError::NotFound(_)) => {
                     service.attach(&input.session_id).await?.header().await
                 }
-                result => result,
+                result => result.map(|summary| summary.header),
             }
         };
         let header = tokio::select! {biased;()=stop.cancelled()=>return Err(rsi_extension::Error::Cancelled),
@@ -438,7 +441,7 @@ async fn open_application(
     tools: Option<&tools::Publisher>,
     owner: &rsi_api_http::ApplicationCallback,
 ) -> rsi_meta::Result<Ready> {
-    const PROTOCOL: u32 = 6;
+    const PROTOCOL: u32 = 12;
     let mut payload = serde_json::json!({"protocol":PROTOCOL,"profile":profile,"key":key.expose_secret(),"importer":importer,"owner":owner.id()});
     if let Some(source) = tools {
         payload["tools"] = serde_json::json!({"outcomeDirectory":source.receipt_directory});
@@ -535,6 +538,7 @@ impl PluginFactory for Factory {
             None
         };
         let mut sessions = Sessions {
+            history_pages: session_fragments::Pages::default(),
             owner: plan.local::<rsi_api_http::BrowserOwnerContract>()?,
             models: plan
                 .context()

@@ -348,7 +348,8 @@
       "exports": {
         "main": {
           "kind": "payload_tree",
-          "path": "asset"
+          "path": "asset",
+          "index_digest": "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb"
         }
       }
     }
@@ -426,11 +427,281 @@
       "exports": {
         "main": {
           "kind": "payload_tree",
-          "path": "asset"
+          "path": "asset",
+          "index_digest": "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb"
         },
         "second": {
           "kind": "payload_tree",
+          "path": "asset",
+          "index_digest": "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb"
+        }
+      }
+    }
+  },
+  {
+    "name": "payload export requires its index commitment",
+    "valid": false,
+    "manifest": {
+      "format": 2,
+      "name": "fixture",
+      "version": "1",
+      "target": "portable",
+      "dependencies": [],
+      "requires": [],
+      "files": [
+        {
+          "path": "asset",
+          "bytes": 4,
+          "digest": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+          "executable": false
+        }
+      ],
+      "exports": {
+        "main": {
+          "kind": "payload_tree",
           "path": "asset"
+        }
+      }
+    }
+  },
+  {
+    "name": "payload index commitment is a digest",
+    "valid": false,
+    "manifest": {
+      "format": 2,
+      "name": "fixture",
+      "version": "1",
+      "target": "portable",
+      "dependencies": [],
+      "requires": [],
+      "files": [
+        {
+          "path": "asset",
+          "bytes": 4,
+          "digest": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+          "executable": false
+        }
+      ],
+      "exports": {
+        "main": {
+          "kind": "payload_tree",
+          "path": "asset",
+          "index_digest": "wrong"
+        }
+      }
+    }
+  },
+  {
+    "name": "ordinary export has no index commitment",
+    "valid": false,
+    "manifest": {
+      "format": 2,
+      "name": "fixture",
+      "version": "1",
+      "target": "portable",
+      "dependencies": [],
+      "requires": [],
+      "files": [
+        {
+          "path": "asset",
+          "bytes": 4,
+          "digest": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+          "executable": false
+        }
+      ],
+      "exports": {
+        "main": {
+          "kind": "application_profile",
+          "path": "asset",
+          "index_digest": "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb"
+        }
+      }
+    }
+  },
+  {
+    "name": "payload transport is not an ordinary file export",
+    "valid": false,
+    "manifest": {
+      "format": 2,
+      "name": "fixture",
+      "version": "1",
+      "target": "portable",
+      "dependencies": [],
+      "requires": [],
+      "files": [
+        {
+          "path": "asset",
+          "bytes": 4,
+          "digest": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+          "executable": false
+        }
+      ],
+      "exports": {
+        "main": {
+          "kind": "payload_tree",
+          "path": "asset",
+          "index_digest": "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb"
+        },
+        "alias": {
+          "kind": "application_profile",
+          "path": "asset"
+        }
+      }
+    }
+  },
+  {
+    "name": "payload transport is not a web asset",
+    "valid": false,
+    "manifest": {
+      "format": 2,
+      "name": "fixture",
+      "version": "1",
+      "target": "portable",
+      "dependencies": [],
+      "requires": [],
+      "files": [
+        {
+          "path": "lib/asset",
+          "bytes": 4,
+          "digest": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+          "executable": false
+        }
+      ],
+      "exports": {
+        "main": {
+          "kind": "payload_tree",
+          "path": "lib/asset",
+          "index_digest": "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb"
+        },
+        "web": {
+          "kind": "web_assets",
+          "path": "lib"
+        }
+      }
+    }
+  },
+  {
+    "name": "payload source bytes reserve one installed copy",
+    "valid": true,
+    "manifest": {
+      "format": 2,
+      "name": "fixture",
+      "version": "1",
+      "target": "portable",
+      "dependencies": [],
+      "requires": [],
+      "files": [
+        {
+          "path": "tree-0",
+          "bytes": 4294967296,
+          "digest": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+          "executable": false
+        },
+        {
+          "path": "tree-1",
+          "bytes": 4294967296,
+          "digest": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+          "executable": false
+        },
+        {
+          "path": "tree-2",
+          "bytes": 4294967296,
+          "digest": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+          "executable": false
+        },
+        {
+          "path": "tree-3",
+          "bytes": 4294967296,
+          "digest": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+          "executable": false
+        }
+      ],
+      "exports": {
+        "tree-0": {
+          "kind": "payload_tree",
+          "path": "tree-0",
+          "index_digest": "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb"
+        },
+        "tree-1": {
+          "kind": "payload_tree",
+          "path": "tree-1",
+          "index_digest": "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb"
+        },
+        "tree-2": {
+          "kind": "payload_tree",
+          "path": "tree-2",
+          "index_digest": "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb"
+        },
+        "tree-3": {
+          "kind": "payload_tree",
+          "path": "tree-3",
+          "index_digest": "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb"
+        }
+      }
+    }
+  },
+  {
+    "name": "single-copy payloads still obey the total budget",
+    "valid": false,
+    "manifest": {
+      "format": 2,
+      "name": "fixture",
+      "version": "1",
+      "target": "portable",
+      "dependencies": [],
+      "requires": [],
+      "files": [
+        {
+          "path": "tree-0",
+          "bytes": 4294967296,
+          "digest": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+          "executable": false
+        },
+        {
+          "path": "tree-1",
+          "bytes": 4294967296,
+          "digest": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+          "executable": false
+        },
+        {
+          "path": "tree-2",
+          "bytes": 4294967296,
+          "digest": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+          "executable": false
+        },
+        {
+          "path": "tree-3",
+          "bytes": 4294967296,
+          "digest": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+          "executable": false
+        },
+        {
+          "path": "extra",
+          "bytes": 1,
+          "digest": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+          "executable": false
+        }
+      ],
+      "exports": {
+        "tree-0": {
+          "kind": "payload_tree",
+          "path": "tree-0",
+          "index_digest": "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb"
+        },
+        "tree-1": {
+          "kind": "payload_tree",
+          "path": "tree-1",
+          "index_digest": "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb"
+        },
+        "tree-2": {
+          "kind": "payload_tree",
+          "path": "tree-2",
+          "index_digest": "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb"
+        },
+        "tree-3": {
+          "kind": "payload_tree",
+          "path": "tree-3",
+          "index_digest": "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb"
         }
       }
     }

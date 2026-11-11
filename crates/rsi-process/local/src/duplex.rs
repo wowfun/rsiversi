@@ -6,6 +6,8 @@ use super::*;
 #[cfg(not(unix))]
 use super::{Result, Service};
 use rsi_process::{DuplexProcess, DuplexProcessSpec, ManagedDuplexProcess};
+#[cfg(any(unix, windows))]
+pub(crate) mod input;
 #[async_trait::async_trait]
 impl DuplexProcess for Service {
     async fn spawn(&self, spec: DuplexProcessSpec) -> Result<ManagedDuplexProcess> {
@@ -29,93 +31,12 @@ impl DuplexProcess for Service {
 }
 #[cfg(unix)]
 mod native {
+    use super::input::{Input, write_input};
     use super::*;
     use rsi_process::{
         DuplexControl, DuplexInput, DuplexOutput, DuplexRead, MAXIMUM_DUPLEX_CHUNK_BYTES,
     };
-    use tokio::sync::{OwnedSemaphorePermit, Semaphore, mpsc, oneshot};
     use tokio_util::sync::CancellationToken;
-    #[derive(Debug)]
-    struct InputCommand {
-        bytes: Option<Vec<u8>>,
-        reply: oneshot::Sender<Result<usize>>,
-        _permit: OwnedSemaphorePermit,
-    }
-    #[derive(Debug)]
-    struct Input {
-        sender: mpsc::Sender<InputCommand>,
-        slot: Arc<Semaphore>,
-        _reservation: Arc<CaptureReservation>,
-    }
-    impl Input {
-        async fn command(&self, bytes: Option<&[u8]>) -> Result<usize> {
-            let permit = self
-                .slot
-                .clone()
-                .try_acquire_owned()
-                .map_err(|_| ProcessError::Capacity)?;
-            let (reply, wait) = oneshot::channel();
-            self.sender
-                .try_send(InputCommand {
-                    bytes: bytes.map(<[u8]>::to_vec),
-                    reply,
-                    _permit: permit,
-                })
-                .map_err(|_| ProcessError::ShuttingDown)?;
-            wait.await.map_err(|_| {
-                ProcessError::Io("duplex write interrupted; accepted prefix is unknown".into())
-            })?
-        }
-    }
-    #[async_trait]
-    impl DuplexInput for Input {
-        async fn write(&self, bytes: &[u8]) -> Result<usize> {
-            if bytes.is_empty() || bytes.len() > MAXIMUM_DUPLEX_CHUNK_BYTES {
-                return Err(ProcessError::InvalidInput(
-                    "duplex writes require 1..=64 KiB".into(),
-                ));
-            }
-            self.command(Some(bytes)).await
-        }
-        async fn close(&self) -> Result<()> {
-            self.command(None).await.map(|_| ())
-        }
-    }
-    async fn write_input(
-        mut stdin: tokio::process::ChildStdin,
-        mut receiver: mpsc::Receiver<InputCommand>,
-        stop: CancellationToken,
-    ) {
-        loop {
-            let command = tokio::select! {biased;()=stop.cancelled()=>break,command=receiver.recv()=>match command {Some(command)=>command,None=>break}};
-            let InputCommand {
-                bytes,
-                reply,
-                _permit: permit,
-            } = command;
-            let Some(bytes) = bytes else {
-                drop(stdin);
-                drop(permit);
-                let _ = reply.send(Ok(0));
-                return;
-            };
-            let result = tokio::select! {biased;
-                ()=stop.cancelled()=>Err(ProcessError::Io("duplex write interrupted; accepted prefix is unknown".into())),
-                // Tokio's single write is cancellation-safe: Pending has accepted no bytes.
-                // Never replace it with write_all, which may hide an accepted prefix.
-                result=tokio::time::timeout(std::time::Duration::from_millis(500), stdin.write(&bytes))=>result.map_err(|_|ProcessError::Capacity).and_then(|result|result.map_err(|error|ProcessError::Io(error.to_string())).and_then(|size|if size==0 {Err(ProcessError::Io("duplex input closed during write".into()))} else {Ok(size)})),
-            };
-            let failed = result
-                .as_ref()
-                .is_err_and(|error| !matches!(error, ProcessError::Capacity));
-            drop(permit);
-            let _ = reply.send(result);
-            if failed {
-                break;
-            }
-        }
-        // Receiver and its sole admitted command drop here; no caller future owns the pipe.
-    }
     #[derive(Debug)]
     struct QueueState {
         bytes: VecDeque<u8>,
@@ -240,7 +161,7 @@ mod native {
     #[derive(Debug)]
     struct Control {
         child: Arc<ChildState>,
-        input: Arc<Input>,
+        input: Arc<Input<CaptureReservation>>,
         output: Arc<Output>,
         stderr: Arc<Tail>,
     }
@@ -357,12 +278,7 @@ mod native {
                 service: Arc::downgrade(&self.state),
                 bytes: capture_bytes,
             });
-            let (sender, receiver) = mpsc::channel(1);
-            let input = Arc::new(Input {
-                sender,
-                slot: Arc::new(Semaphore::new(1)),
-                _reservation: reservation.clone(),
-            });
+            let (input, receiver) = Input::new(reservation.clone());
             let output = Arc::new(Output {
                 capacity: spec.stdout_max_bytes,
                 state: Mutex::new(QueueState {

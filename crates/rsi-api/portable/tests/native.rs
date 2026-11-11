@@ -15,7 +15,9 @@ fn artifact() -> PathBuf {
         .join("../../..")
         .canonicalize()
         .unwrap();
-    let target = root.join("target/native-api-fixture-test");
+    let target = std::env::var_os("CARGO_TARGET_DIR")
+        .map_or_else(|| root.join("target"), PathBuf::from)
+        .join("native-api-fixture-test");
     let output = std::process::Command::new(env!("CARGO"))
         .args(["build", "--locked", "--manifest-path"])
         .arg(root.join("fixtures/rsi/native-addon/Cargo.toml"))

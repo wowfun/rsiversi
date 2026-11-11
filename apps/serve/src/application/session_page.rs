@@ -1,6 +1,6 @@
 use super::Sessions;
 use rsi_extension::{Error, Result};
-use rsi_session_protocol::RecentSessionCursor;
+use rsi_session_protocol::{RecentSessionCursor, SessionSummary};
 use serde::Deserialize;
 use serde_json::{Value, json};
 
@@ -25,54 +25,45 @@ impl Sessions {
             .list_recent(request.after.as_ref(), 64)
             .await
             .map_err(|_| Error::Remote("Session catalog unavailable".into()))?;
-        let ids: Vec<_> = page
-            .sessions
-            .iter()
-            .map(|row| row.header.session_id().clone())
-            .collect();
-        let mut items = Vec::with_capacity(ids.len());
-        if !ids.is_empty() {
-            let unavailable = || Error::Remote("Session catalog changed during read".into());
-            let summaries = self
-                .store
-                .session_activity_summaries(&ids)
-                .await
-                .map_err(|_| unavailable())?;
-            if summaries.len() != ids.len() {
-                return Err(unavailable());
-            }
-            let running = if request.history {
-                std::collections::BTreeSet::new()
+        let running = if request.history || page.sessions.is_empty() {
+            std::collections::BTreeSet::new()
+        } else {
+            let ids: Vec<_> = page
+                .sessions
+                .iter()
+                .map(|row| row.header.session_id().clone())
+                .collect();
+            self.projections
+                .running_sessions(&ids)
+                .map_err(|_| Error::Remote("Session activity unavailable".into()))?
+        };
+        let mut items = Vec::with_capacity(page.sessions.len());
+        for row in &page.sessions {
+            items.push(if request.history {
+                super::session_history::stored_snapshot(
+                    &row.header,
+                    row.durable_fact_seq,
+                    row.durable_control_seq,
+                )
             } else {
-                self.projections
-                    .running_sessions(&ids)
-                    .map_err(|_| Error::Remote("Session activity unavailable".into()))?
-            };
-            for (row, summary) in page.sessions.iter().zip(summaries) {
-                let header = &row.header;
-                let summary = summary.ok_or_else(unavailable)?;
-                if &summary.session_id != header.session_id()
-                    || summary.created_at_ms != header.created_at_ms()
-                {
-                    return Err(unavailable());
-                }
-                if request.history {
-                    items.push(super::session_history::stored_snapshot(header, &summary));
-                    continue;
-                }
-                let mut item = json!({"id":header.session_id(),"cwd":header.canonical_cwd(),"createdAt":header.created_at_ms(),"updatedAt":summary.last_activity_ms,
-                    "blank":summary.durable_fact_seq==0,"running":running.contains(header.session_id())});
-                if let Some(origin) = header.fork_origin() {
-                    item["parent"] = json!(origin.history.parent_session_id);
-                }
-                items.push(item);
-            }
+                catalog_item(row, running.contains(row.header.session_id()))
+            });
         }
         self.routes
             .caller(&request.request)
             .map_err(|_| Error::Cancelled)?;
         Ok(json!({"items":items,"next":page.next}))
     }
+}
+
+fn catalog_item(summary: &SessionSummary, running: bool) -> Value {
+    let header = &summary.header;
+    let mut item = json!({"id":header.session_id(),"cwd":header.canonical_cwd(),"createdAt":header.created_at_ms(),"updatedAt":summary.last_activity_ms,
+        "blank":summary.durable_fact_seq==0 && summary.durable_control_seq==0,"running":running});
+    if let Some(origin) = header.fork_origin() {
+        item["parent"] = json!(origin.history.parent_session_id);
+    }
+    item
 }
 
 /// One application generation owns the cursor across its baseline and subsequent reads.
@@ -192,5 +183,50 @@ impl rsi_extension::Handler for Directory {
             changes.take();
         }
         result
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use rsi_agent_session_protocol::{
+        AgentPresetId, FrozenAgentSettings, SessionHeader, SessionId,
+    };
+
+    #[test]
+    fn catalog_keeps_accepted_context_visible_before_the_first_turn() {
+        let header = SessionHeader::new_local(
+            SessionId::new("held-context").unwrap(),
+            1,
+            "/workspace",
+            AgentPresetId::new("test").unwrap(),
+            FrozenAgentSettings::new(
+                "default",
+                "system",
+                rsi_ai_protocol::ModelRef::new("test", "test").unwrap(),
+                rsi_sandbox::SandboxMode::WorkspaceWrite,
+                false,
+            )
+            .unwrap(),
+        )
+        .unwrap();
+        let mut summary = SessionSummary {
+            header,
+            last_activity_ms: 2,
+            durable_fact_seq: 0,
+            durable_control_seq: 2,
+        };
+        assert_eq!(
+            catalog_item(&summary, false),
+            json!({
+                "id":"held-context","cwd":"/workspace","createdAt":1,"updatedAt":2,"blank":false,"running":false,
+            })
+        );
+        summary.durable_control_seq = 0;
+        assert_eq!(catalog_item(&summary, false)["blank"], true);
+        summary.durable_fact_seq = 1;
+        let started = catalog_item(&summary, true);
+        assert_eq!(started["blank"], false);
+        assert_eq!(started["running"], true);
     }
 }

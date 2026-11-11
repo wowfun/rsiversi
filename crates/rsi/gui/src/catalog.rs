@@ -88,3 +88,41 @@ impl GuiApplication {
         }
     }
 }
+
+// Add coordinate keys at the presentation boundary without retaining another map.
+pub(crate) fn serialize_workspaces<S: serde::Serializer>(
+    records: &[rsi_workspace_protocol::WorkspaceRecord],
+    serializer: S,
+) -> std::result::Result<S::Ok, S::Error> {
+    #[derive(serde::Serialize)]
+    struct Workspace<'a> {
+        #[serde(flatten)]
+        record: &'a rsi_workspace_protocol::WorkspaceRecord,
+        key: rsi_workspace_protocol::WorkspaceKey,
+    }
+    serializer.collect_seq(records.iter().map(|record| Workspace {
+        record,
+        key: rsi_workspace_protocol::WorkspaceKey::from_coordinates(&record.coordinates),
+    }))
+}
+
+#[cfg(test)]
+mod tests {
+    #[test]
+    fn workspace_choices_expose_distinct_registration_and_history_identities() {
+        use rsi_workspace_protocol::{
+            ExecutionCoordinates, ExecutionLocation, WorkspaceId, WorkspaceKey, WorkspaceRecord,
+        };
+        let coordinates = ExecutionCoordinates::new(ExecutionLocation::Local, "/project").unwrap();
+        let key = WorkspaceKey::from_coordinates(&coordinates);
+        let id = WorkspaceId::from_bytes([0xaa; 32]);
+        let catalog = crate::application::Catalog {
+            workspaces: vec![WorkspaceRecord::new(id.clone(), coordinates)],
+            ..Default::default()
+        };
+        let value = serde_json::to_value(catalog).unwrap();
+        assert_eq!(value["workspaces"][0]["id"], id.as_str());
+        assert_eq!(value["workspaces"][0]["key"], key.as_str());
+        assert_ne!(value["workspaces"][0]["id"], value["workspaces"][0]["key"]);
+    }
+}

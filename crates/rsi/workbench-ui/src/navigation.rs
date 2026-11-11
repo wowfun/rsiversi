@@ -312,9 +312,11 @@ impl NavigationFeature {
         let page = self.client.summaries(request).await.map_err(error)?;
         for (row, member) in page.entries.iter().zip(selected) {
             if let Some(row) = row {
-                let coordinates = &groups[usize::from(member.group)];
+                let group = &groups[usize::from(member.group)];
+                let coordinates = &group.coordinates;
                 if row.location != *coordinates.location()
                     || row.path != coordinates.path()
+                    || row.workspace != group.workspace
                     || row.metadata.pinned != member.pinned
                     || row.metadata.archived != member.archived
                 {
@@ -786,6 +788,7 @@ mod group_tests {
         catalog_reads: std::sync::atomic::AtomicUsize,
         attention_reads: std::sync::atomic::AtomicUsize,
         attention_error: Mutex<Option<ApiError>>,
+        summary_workspace: Mutex<Option<String>>,
         block_next_read: std::sync::atomic::AtomicBool,
         read_entered: tokio::sync::Notify,
         release_read: tokio::sync::Notify,
@@ -852,14 +855,14 @@ mod group_tests {
                 json!({"revision":revision.to_string(),"session":request["session"],"metadata":request["metadata"]})
             } else if operation == &NavigationOperation::OrderSeed.spec() {
                 json!({"scope":request,"host_epoch":self.description.host_epoch,"metadata_revision":revision,"membership":{
-                    "kind":"available","groups":[{"location":{"kind":"local"},"path":"/project"}],
-                    "members":[{"session":"one","group":0,"last_activity_ms":"1","pinned":false,"archived":false},{"session":"two","group":0,"last_activity_ms":"2","pinned":false,"archived":false}]
+                    "kind":"available","groups":[{"coordinates":{"location":{"kind":"local"},"path":"/project"},"workspace":null}],
+                    "members":[{"session":"one","group":0,"account_position":1,"last_activity_ms":"1","pinned":false,"archived":false},{"session":"two","group":0,"account_position":0,"last_activity_ms":"2","pinned":false,"archived":false}]
                 }})
             } else if operation == &NavigationOperation::Summaries.spec() {
                 if request["metadata_revision"] != revision {
                     return Err(ApiError::Invalid("metadata changed".into()));
                 }
-                let entries = request["sessions"].as_array().unwrap().iter().map(|id|json!({"session":id,"created_at_ms":"1","last_activity_ms":"2","location":{"kind":"local"},"path":"/project","workspace":null,"metadata":{"pinned":false,"archived":false,"title":null}})).collect::<Vec<_>>();
+                let entries = request["sessions"].as_array().unwrap().iter().map(|id|json!({"session":id,"created_at_ms":"1","last_activity_ms":"2","location":{"kind":"local"},"path":"/project","workspace":self.summary_workspace.lock().unwrap().clone(),"metadata":{"pinned":false,"archived":false,"title":null}})).collect::<Vec<_>>();
                 json!({"metadata_revision":revision,"entries":entries})
             } else if operation == &NavigationOperation::Pinned.spec() {
                 let revision = if self.race_pins.load(std::sync::atomic::Ordering::SeqCst) {
@@ -900,6 +903,7 @@ mod group_tests {
             catalog_reads: 0.into(),
             attention_reads: 0.into(),
             attention_error: Mutex::new(None),
+            summary_workspace: Mutex::new(None),
             block_next_read: false.into(),
             read_entered: tokio::sync::Notify::new(),
             release_read: tokio::sync::Notify::new(),
@@ -979,6 +983,32 @@ mod group_tests {
         assert_eq!(api.queries.load(std::sync::atomic::Ordering::SeqCst), 2);
     }
 
+    #[tokio::test]
+    async fn manual_summary_rejects_changed_registration_at_the_same_coordinates() {
+        let (api, owner) = fixture();
+        owner
+            .command(NavigationCommand::Query {
+                filter: NavigationFilter::default(),
+            })
+            .await
+            .unwrap();
+        owner
+            .command(NavigationCommand::OrderSeed {
+                scope: OrderScope::All,
+            })
+            .await
+            .unwrap();
+        let ticket = owner.view()["order"]["ticket"].as_str().unwrap().to_owned();
+        *api.summary_workspace.lock().unwrap() = Some("a".repeat(64));
+        let error = owner
+            .command(NavigationCommand::OrderSummaries {
+                ticket,
+                sessions: vec![SessionId::new("one").unwrap()],
+            })
+            .await
+            .unwrap_err();
+        assert_eq!(error, "Summary changed order group or partition");
+    }
     #[tokio::test]
     async fn manual_summary_commands_keep_seed_identity_order_and_metadata_revision() {
         let (api, owner) = fixture();

@@ -245,19 +245,27 @@ pub(super) fn verify_facts(
         if let SessionFactBody::StepPrepared {
             step_id,
             names,
-            instructions: sections,
+            prompt,
             ..
         } = fact.body()
         {
             if step_id != step || names.iter().any(|name| tools.binary_search(name).is_err()) {
                 return Err(invalid("Step selection differs from staged authority"));
             }
-            let texts = sections
-                .iter()
-                .filter(|section| &section.producer == producer)
-                .map(|section| section.text.as_str());
-            if !texts.eq((!instructions.is_empty()).then_some(instructions)) {
-                return Err(invalid("Step instructions differ from staged text"));
+            if let Some(prompt) = prompt {
+                let rsi_agent_session_protocol::StepPrompt::AppendToHeader { sections } = prompt
+                else {
+                    return Err(invalid(
+                        "native prompt cannot acknowledge extension guidance",
+                    ));
+                };
+                let texts = sections
+                    .iter()
+                    .filter(|section| &section.producer == producer)
+                    .map(|section| section.text.as_str());
+                if !texts.eq((!instructions.is_empty()).then_some(instructions)) {
+                    return Err(invalid("Step instructions differ from staged text"));
+                }
             }
             prepared += 1;
         }
@@ -268,4 +276,79 @@ pub(super) fn verify_facts(
         ));
     }
     Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use rsi_agent_session_protocol::{
+        ContributionId, SessionFact, SessionFactBody, StepId, StepInstruction, TurnId,
+    };
+
+    #[test]
+    fn unchanged_instructions_confirm_without_relaxing_step_or_tool_binding() {
+        let producer = ContributionId::new("fixture.instructions").unwrap();
+        let step = StepId::new("step").unwrap();
+        let tools = vec!["echo".to_owned()];
+        let make = |step_id, names, instructions: Option<Vec<StepInstruction>>| {
+            vec![Arc::new(
+                SessionFact::new(
+                    3,
+                    42,
+                    SessionFactBody::StepPrepared {
+                        turn_id: TurnId::new("turn").unwrap(),
+                        step_id,
+                        names,
+                        application: None,
+                        prompt: instructions.map(|sections| {
+                            rsi_agent_session_protocol::StepPrompt::AppendToHeader { sections }
+                        }),
+                    },
+                )
+                .unwrap(),
+            )]
+        };
+        let facts = make(step.clone(), tools.clone(), None);
+        assert!(verify_facts(&producer, &step, "current guidance", &tools, &facts).is_ok());
+        let facts = make(StepId::new("other-step").unwrap(), tools.clone(), None);
+        assert!(verify_facts(&producer, &step, "current guidance", &tools, &facts).is_err());
+        let facts = make(step.clone(), vec!["other-tool".into()], None);
+        assert!(verify_facts(&producer, &step, "current guidance", &tools, &facts).is_err());
+        let facts = make(
+            step.clone(),
+            tools.clone(),
+            Some(vec![StepInstruction {
+                producer: producer.clone(),
+                text: "changed guidance".into(),
+            }]),
+        );
+        assert!(verify_facts(&producer, &step, "current guidance", &tools, &facts).is_err());
+        assert!(verify_facts(&producer, &step, "changed guidance", &tools, &facts).is_ok());
+        let assembled = [Arc::new(
+            SessionFact::new(
+                3,
+                42,
+                SessionFactBody::StepPrepared {
+                    turn_id: TurnId::new("turn").unwrap(),
+                    step_id: step.clone(),
+                    names: tools.clone(),
+                    application: None,
+                    prompt: Some(rsi_agent_session_protocol::StepPrompt::Assembled {
+                        sections: vec![StepInstruction {
+                            producer: producer.clone(),
+                            text: "changed guidance".into(),
+                        }],
+                    }),
+                },
+            )
+            .unwrap(),
+        )];
+        assert!(
+            verify_facts(&producer, &step, "changed guidance", &tools, &assembled).is_err(),
+            "an extension receipt cannot certify native complete-prompt ownership"
+        );
+        let facts = make(step.clone(), tools.clone(), Some(vec![]));
+        assert!(verify_facts(&producer, &step, "", &tools, &facts).is_ok());
+        assert!(verify_facts(&producer, &step, "current guidance", &tools, &facts).is_err());
+    }
 }

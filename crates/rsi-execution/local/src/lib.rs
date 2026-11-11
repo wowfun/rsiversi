@@ -41,28 +41,24 @@ struct NativeBackend {
 }
 
 /// Freezes native providers and a finite explicit program catalog into a Local provider.
-/// Program paths must already be absolute; canonicalization happens only on this machine.
+/// Program paths are absolute invocation spellings; Sandbox owns filesystem admission.
 /// At most 128 selectors and 1 MiB of aggregate child environment are retained.
-pub async fn provider(
+pub fn provider(
     host_epoch: rsi_execution::HostEpoch,
     capabilities: NativeCapabilities,
-    mut programs: BTreeMap<String, ResolvedProgram>,
+    programs: BTreeMap<String, ResolvedProgram>,
 ) -> Result<ExecutionProvider> {
     if programs.len() > 128 {
         return Err(ProcessError::Capacity);
     }
     let mut environment_bytes = 0usize;
-    for (selector, program) in &mut programs {
-        if selector.is_empty()
-            || selector.len() > 128
-            || selector.chars().any(char::is_control)
-            || !program.program.is_absolute()
-        {
+    for (selector, program) in &programs {
+        if selector.is_empty() || selector.len() > 128 || selector.chars().any(char::is_control) {
             return Err(ProcessError::InvalidInput(
                 "invalid native program selector or path".into(),
             ));
         }
-        rsi_process::validate_environment(&program.environment)?;
+        validate_program(program)?;
         for (name, value) in &program.environment {
             environment_bytes = environment_bytes
                 .saturating_add(name.len())
@@ -71,7 +67,6 @@ pub async fn provider(
         if environment_bytes > rsi_process::MAXIMUM_PROCESS_ENVIRONMENT_BYTES {
             return Err(ProcessError::Capacity);
         }
-        *program = resolve_local_program(program.clone()).await?;
     }
     ExecutionProvider::new(
         host_epoch,
@@ -85,45 +80,22 @@ pub async fn provider(
     )
 }
 
-async fn resolve_local_program(mut program: ResolvedProgram) -> Result<ResolvedProgram> {
-    if !program.program.is_absolute() {
-        return Err(ProcessError::InvalidInput(
-            "native program path must be absolute".into(),
-        ));
-    }
-    rsi_process::validate_environment(&program.environment)?;
-    program.program = tokio::fs::canonicalize(&program.program)
-        .await
-        .map_err(|_| {
-            ProcessError::InvalidInput("configured native program is unavailable".into())
-        })?;
-    let metadata = tokio::fs::metadata(&program.program).await.map_err(|_| {
-        ProcessError::InvalidInput("configured native program is unavailable".into())
-    })?;
-    if !metadata.is_file() {
-        return Err(ProcessError::InvalidInput(
-            "configured native program is not a file".into(),
-        ));
-    }
-    #[cfg(unix)]
+fn validate_program(program: &ResolvedProgram) -> Result<()> {
+    if !program.program.is_absolute()
+        || program.program.as_os_str().len() > rsi_sandbox::MAXIMUM_SANDBOX_PLAN_BYTES
+        || program.program.as_os_str().as_encoded_bytes().contains(&0)
     {
-        use std::os::unix::fs::PermissionsExt;
-        if metadata.permissions().mode() & 0o111 == 0 {
-            return Err(ProcessError::InvalidInput(
-                "configured native program is not executable".into(),
-            ));
-        }
+        return Err(ProcessError::InvalidInput(
+            "native program path must be bounded, absolute and NUL-free".into(),
+        ));
     }
-    Ok(program)
+    rsi_process::validate_environment(&program.environment)
 }
 
 fn sandbox_error(error: SandboxError) -> ProcessError {
     match error {
         SandboxError::Capacity => ProcessError::Capacity,
-        SandboxError::Preparation => ProcessError::Io("sandbox preparation worker failed".into()),
-        SandboxError::Unsupported(_) => ProcessError::Unsupported,
-        SandboxError::InvalidInput(message) => ProcessError::InvalidInput(message),
-        SandboxError::Probe(message) => ProcessError::Io(message),
+        other => ProcessError::Sandbox(other),
     }
 }
 
@@ -160,12 +132,13 @@ impl ExecutionBackend for NativeBackend {
             .ok_or(ProcessError::Unsupported)
     }
     async fn resolve_local_program(&self, program: ResolvedProgram) -> Result<ResolvedProgram> {
-        resolve_local_program(program).await
+        validate_program(&program)?;
+        Ok(program)
     }
     async fn prepare(
         &self,
         request: ProcessRequest,
-        environment: Vec<(std::ffi::OsString, std::ffi::OsString)>,
+        mut environment: Vec<(std::ffi::OsString, std::ffi::OsString)>,
     ) -> Result<BackendPlan> {
         let process = self
             .capabilities
@@ -174,12 +147,15 @@ impl ExecutionBackend for NativeBackend {
             .await
             .map_err(sandbox_error)?;
         let stamp = process.stamp.clone();
+        if process.prepare_environment(&mut environment) {
+            rsi_process::validate_environment(&environment)?;
+        }
         Ok(BackendPlan::new(process, stamp, environment))
     }
     async fn prepare_source_reader(
         &self,
         request: ProcessRequest,
-        environment: Vec<(std::ffi::OsString, std::ffi::OsString)>,
+        mut environment: Vec<(std::ffi::OsString, std::ffi::OsString)>,
     ) -> Result<BackendPlan> {
         let process = self
             .capabilities
@@ -188,6 +164,9 @@ impl ExecutionBackend for NativeBackend {
             .await
             .map_err(sandbox_error)?;
         let stamp = process.stamp.clone();
+        if process.prepare_environment(&mut environment) {
+            rsi_process::validate_environment(&environment)?;
+        }
         Ok(BackendPlan::new(process, stamp, environment))
     }
     async fn spawn(
@@ -233,14 +212,48 @@ impl ExecutionBackend for NativeBackend {
 mod preparation_errors {
     use super::*;
     #[test]
-    fn sandbox_preparation_preserves_capacity_and_worker_failure() {
+    fn program_capture_bounds_paths_and_environment_without_accessing_the_file() {
+        let mut program = ResolvedProgram {
+            program: if cfg!(windows) {
+                r"C:\not-created\command.exe".into()
+            } else {
+                "/not-created/command".into()
+            },
+            environment: vec![("KEPT".into(), "value".into())],
+        };
+        validate_program(&program).unwrap();
+        let original = program.program.clone();
+        for invalid in [
+            "relative".into(),
+            format!("{}\0suffix", original.display()).into(),
+            format!(
+                "{}{}",
+                original.display(),
+                "x".repeat(rsi_sandbox::MAXIMUM_SANDBOX_PLAN_BYTES)
+            )
+            .into(),
+        ] {
+            program.program = invalid;
+            assert!(validate_program(&program).is_err());
+        }
+        program.program = original;
+        program
+            .environment
+            .push(("BAD=NAME".into(), "value".into()));
+        assert!(validate_program(&program).is_err());
+    }
+
+    #[test]
+    fn sandbox_preparation_preserves_capacity_and_typed_causes() {
         assert!(matches!(
             sandbox_error(SandboxError::Capacity),
             ProcessError::Capacity
         ));
         assert!(matches!(
             sandbox_error(SandboxError::Preparation),
-            ProcessError::Io(_)
+            ProcessError::Sandbox(SandboxError::Preparation)
         ));
+        let cause = SandboxError::Probe("SetNamedSecurityInfoW: access denied (5)".into());
+        assert_eq!(sandbox_error(cause.clone()), ProcessError::Sandbox(cause));
     }
 }

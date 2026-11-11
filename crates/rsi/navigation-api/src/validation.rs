@@ -1,7 +1,6 @@
 use super::{
     ActivityCursor, ApiError, HostEpoch, NavigationCursor, NavigationEntry, NavigationFilter,
-    NavigationPage, PinnedEntry, PinnedPage, Result, WorkspaceFilter, WorkspaceId, matches_query,
-    revision,
+    NavigationPage, PinnedEntry, PinnedPage, Result, WorkspaceFilter, matches_query, revision,
 };
 use rsi_agent_session_protocol::ExecutionCoordinates;
 use std::collections::BTreeSet;
@@ -10,16 +9,12 @@ pub(super) fn entry(value: &NavigationEntry, filter: &NavigationFilter) -> Resul
     value.metadata.validate()?;
     let created = revision(&value.created_at_ms)?;
     let activity = revision(&value.last_activity_ms)?;
-    let coordinates = ExecutionCoordinates::new(value.location.clone(), &value.path)
+    ExecutionCoordinates::new(value.location.clone(), &value.path)
         .map_err(|_| ApiError::Invalid("invalid navigation coordinates".into()))?;
     if created == 0
         || activity < created
         || !filter.matches_archive(value.metadata.archived)
         || !filter.workspace.matches(value.workspace.as_ref())
-        || value
-            .workspace
-            .as_ref()
-            .is_some_and(|id| id != &WorkspaceId::from_coordinates(&coordinates))
         || !matches_query(
             &filter.query.to_lowercase(),
             &value.session,

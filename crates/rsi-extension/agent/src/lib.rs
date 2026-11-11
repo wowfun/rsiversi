@@ -4,7 +4,7 @@
 
 mod adapter;
 mod history;
-pub use history::project_model_attempt;
+pub use history::project_history_page;
 mod questions;
 pub use adapter::AgentAdapter;
 mod factory;

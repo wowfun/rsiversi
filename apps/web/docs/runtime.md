@@ -184,6 +184,11 @@ conversations, resource details and registered settings use the same React root.
 Resource detail models retain identity across unchanged connection, entry and
 media inputs. Renderer slots are still collected on every frame; replacing any
 of those inputs rebuilds the model and its bound authority.
+Failed resource cleanup retains its notice and identity while an explicit retry
+is pending. Its retry control stays focusable and ARIA-disabled until settlement;
+the owner ignores repeated activation. A failed retry retains keyboard focus.
+Successful cleanup clears the error while frame reconciliation retains the
+original responsibility.
 Registered settings retain exact JSON text and their opened version while edited;
 publication keeps controls locked until a fresh settings presentation arrives.
 Focus is captured before disabling or replacing a settings control and restored
@@ -338,3 +343,9 @@ A document contribution may wrap its Session occurrence in one provider. The
 provider shares that occurrence's action fence and is disposed with its generation;
 it cannot retain a replacement pane's authority. Finite document resource reads
 also recheck the connection and attachment after completion.
+
+## Workspace identities
+
+History pickers use pane `workspace_key` and catalog Workspace `key`, both
+coordinate-scoped. Creation and draft reuse use the registration ID in the
+creation receipt. The document does not derive or interchange these identities.

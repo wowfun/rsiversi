@@ -1726,8 +1726,11 @@ async fn idle_child_admits_human_input_but_rejects_expired_agent_callers() {
 
 #[tokio::test]
 async fn agent_wait_resumes_for_a_message_to_its_own_mailbox() {
-    let store = Arc::new(MemoryStore::new());
-    let kernel = kernel(store.clone()).await;
+    let store = Arc::new(FactReadRaceStore::new(Arc::new(MemoryStore::new())));
+    let kernel =
+        AgentKernel::recover_with_clock(store.clone(), composition(), Arc::new(FixedClock))
+            .await
+            .unwrap();
     let worker = kernel.start_workers();
     let (parent, child, _lease) = active_parent_and_child(&kernel).await;
     let waiter = tokio::spawn({
@@ -1757,6 +1760,7 @@ async fn agent_wait_resumes_for_a_message_to_its_own_mailbox() {
     })
     .await
     .expect("parent must durably park");
+    store.mailbox.claim_selections.store(0, Ordering::Relaxed);
     kernel
         .send_agent_message(SendAgentMessage {
             cancellation: CancellationToken::new(),
@@ -1769,6 +1773,11 @@ async fn agent_wait_resumes_for_a_message_to_its_own_mailbox() {
         .await
         .unwrap();
     assert_eq!(waiter.await.unwrap().unwrap(), AgentWaitResult::Changed);
+    assert_eq!(
+        store.mailbox.claim_selections.load(Ordering::Relaxed),
+        0,
+        "wait observation must not select the claim queue"
+    );
     assert!(
         store
             .read_controls(
@@ -2294,7 +2303,7 @@ async fn agent_wait_ignores_unrelated_claims_and_skips_empty_mailbox_payloads() 
         .await
         .unwrap()
         .unwrap();
-    store.mailbox_reads.lock().unwrap().clear();
+    store.mailbox.reads.lock().unwrap().clear();
     store.mailbox_summary_reads.lock().unwrap().clear();
     let cancellation = CancellationToken::new();
     let wait = tokio::spawn({
@@ -2329,7 +2338,8 @@ async fn agent_wait_ignores_unrelated_claims_and_skips_empty_mailbox_payloads() 
     );
     assert_eq!(
         store
-            .mailbox_reads
+            .mailbox
+            .reads
             .lock()
             .unwrap()
             .get(parent.session_id())

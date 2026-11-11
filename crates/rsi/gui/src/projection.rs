@@ -468,7 +468,10 @@ impl Transcript {
                 block.clipped |= window.more;
             }
         }
-        if tool.result != old_result
+        if let SessionFactBody::ToolRejected { rejection, .. } = fact.body() {
+            block.text.truncate(block.tool_argument_bytes);
+            block.text.push_str(&rejection.message());
+        } else if tool.result != old_result
             && let SessionFactBody::ToolResult { result, .. } = fact.body()
         {
             block.text.truncate(block.tool_argument_bytes);
@@ -572,6 +575,19 @@ impl Transcript {
                 purpose,
                 attempt,
             } => {
+                if self
+                    .live_model
+                    .view()
+                    .is_some_and(|(turn, effect, _, _)| turn == turn_id && effect == effect_id)
+                {
+                    // Promote the whole response before per-source sorting; otherwise
+                    // its first settled block moves behind its still-transient siblings.
+                    for block in &mut self.blocks {
+                        if self.live_keys.contains(&block.key) {
+                            block.first_seq = fact.seq();
+                        }
+                    }
+                }
                 self.live_model.settle(fact.seq(), effect_id);
                 let preview =
                     rsi_conversation::model_previews(attempt, MAX_BLOCK_BYTES, MAX_BLOCK_BYTES * 2);
@@ -704,6 +720,112 @@ impl Transcript {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    #[allow(clippy::too_many_lines)] // One fixture compares a complete live and durable lifecycle.
+    fn settlement_keeps_streamed_reasoning_before_its_answer() {
+        use rsi_agent_session_protocol::{
+            EffectId, ModelAttemptBuilder, ModelEventPurpose, SessionId,
+        };
+        use rsi_ai_protocol::{ContentDelta, ContentStart, FinishReason, LanguageEvent};
+        let mut builder = ModelAttemptBuilder::new();
+        for event in [
+            LanguageEvent::ContentStarted {
+                index: 0,
+                content: ContentStart::Reasoning,
+            },
+            LanguageEvent::ContentDelta {
+                index: 0,
+                delta: ContentDelta::Reasoning("think first".into()),
+            },
+            LanguageEvent::ContentFinished { index: 0 },
+            LanguageEvent::ContentStarted {
+                index: 1,
+                content: ContentStart::Text,
+            },
+            LanguageEvent::ContentDelta {
+                index: 1,
+                delta: ContentDelta::Text("answer second".into()),
+            },
+            LanguageEvent::ContentFinished { index: 1 },
+        ] {
+            builder.push(0, &event).unwrap();
+        }
+        let snapshot = rsi_agent_turn_protocol::ModelLiveSnapshot {
+            session_id: SessionId::new("session").unwrap(),
+            turn_id: TurnId::new("turn").unwrap(),
+            effect_id: EffectId::new("effect").unwrap(),
+            purpose: ModelEventPurpose::Conversation,
+            revision: 1,
+            prefix: builder.prefix(),
+            status: rsi_agent_turn_protocol::ModelLiveStatus::Streaming,
+        };
+        let started = SessionFact::new(
+            1,
+            1,
+            SessionFactBody::ModelStarted {
+                turn_id: snapshot.turn_id.clone(),
+                effect_id: snapshot.effect_id.clone(),
+            },
+        )
+        .unwrap();
+        builder
+            .push(
+                1,
+                &LanguageEvent::Finished {
+                    reason: FinishReason::Stop,
+                    replay: None,
+                },
+            )
+            .unwrap();
+        let settled = SessionFact::new(
+            2,
+            2,
+            SessionFactBody::ModelAttemptSettled {
+                turn_id: snapshot.turn_id.clone(),
+                effect_id: snapshot.effect_id.clone(),
+                purpose: snapshot.purpose,
+                attempt: builder.finish(true).unwrap(),
+            },
+        )
+        .unwrap();
+        let mut live = Transcript::default();
+        live.fact(&started);
+        live.model(&snapshot);
+        live.fact(&settled);
+        let mut cold = Transcript::default();
+        cold.fact(&started);
+        cold.fact(&settled);
+        let content = |transcript: &Transcript| {
+            transcript
+                .blocks
+                .iter()
+                .filter(|block| matches!(block.role, "reasoning" | "assistant"))
+                .map(|block| (block.key.clone(), block.text.clone()))
+                .collect::<Vec<_>>()
+        };
+        assert_eq!(content(&live), content(&cold));
+        assert_eq!(
+            content(&live)
+                .iter()
+                .map(|(_, text)| text.as_str())
+                .collect::<Vec<_>>(),
+            ["think first", "answer second"]
+        );
+        let revisions: Vec<_> = live
+            .blocks
+            .iter()
+            .map(|block| block.revision.clone())
+            .collect();
+        live.fact(&settled);
+        assert_eq!(content(&live), content(&cold));
+        assert!(
+            live.blocks
+                .iter()
+                .zip(revisions)
+                .all(|(block, revision)| std::sync::Arc::ptr_eq(&block.revision, &revision))
+        );
+    }
 
     #[test]
     fn started_fact_reveals_a_preview_that_arrived_first() {
@@ -983,6 +1105,81 @@ mod tests {
             assert_eq!(recovered.blocks[0].title, block.title);
             assert_eq!(recovered.blocks[0].text, block.text);
             assert_eq!(recovered.blocks[0].first_seq, 10);
+        }
+    }
+
+    #[test]
+    fn rejected_tool_displays_durable_reason_once_with_bounded_arguments() {
+        use rsi_agent_session_protocol::{ContributionId, EffectId, ToolOrigin, ToolRejection};
+        use rsi_approval_protocol::{ApprovalDecision, ApprovalOutcome};
+        use rsi_tools_protocol::{ToolProgramRole, ToolResultIdentity};
+
+        for (rejection, expected) in [
+            (
+                ToolRejection::PolicyDenied {
+                    contribution_id: ContributionId::new("fixture.policy").unwrap(),
+                    reason: "Mods refused this command: 拒绝执行".into(),
+                },
+                "Mods refused this command: 拒绝执行",
+            ),
+            (
+                ToolRejection::ApprovalDenied {
+                    outcome: ApprovalOutcome {
+                        decision: ApprovalDecision::Deny,
+                        answerer: "fixture.user".into(),
+                        reason: None,
+                    },
+                },
+                "Live approval denied the Tool call; it was not executed.",
+            ),
+            (
+                ToolRejection::ApprovalDenied {
+                    outcome: ApprovalOutcome {
+                        decision: ApprovalDecision::Deny,
+                        answerer: "fixture.user".into(),
+                        reason: Some("Keep this file unchanged".into()),
+                    },
+                },
+                "Live approval denied the Tool call: Keep this file unchanged",
+            ),
+        ] {
+            let fact = SessionFact::new(
+                12,
+                1,
+                SessionFactBody::ToolRejected {
+                    additional_contexts: Vec::new(),
+                    origin: ToolOrigin::Model {
+                        effect_id: EffectId::new("source-model").unwrap(),
+                    },
+                    program_role: ToolProgramRole::Unavailable,
+                    turn_id: TurnId::new("turn").unwrap(),
+                    effect_id: EffectId::new("effect").unwrap(),
+                    identity: ToolResultIdentity::new("owner", "invoke", "call", "a".repeat(64))
+                        .unwrap(),
+                    name: "pwsh".into(),
+                    arguments: serde_json::json!({"command": "界".repeat(MAX_BLOCK_BYTES / 3)}),
+                    rejection,
+                },
+            )
+            .unwrap();
+            let mut transcript = Transcript::default();
+            transcript.fact(&fact);
+            let block = &transcript.blocks[0];
+            assert!(block.text.ends_with(expected));
+            assert_eq!(block.text.matches(expected).count(), 1);
+            assert!(block.clipped);
+            assert!(block.text.len() <= MAX_BLOCK_BYTES);
+            let view = serde_json::to_value(block).unwrap();
+            assert_eq!(view["tool"]["phase"], "rejected");
+            assert_eq!(view["tool"]["rejection"]["seq"], "12");
+            assert!(view["tool"]["result"].is_null());
+            let revision = block.revision.clone();
+            transcript.fact(&fact);
+            assert!(std::sync::Arc::ptr_eq(
+                &revision,
+                &transcript.blocks[0].revision
+            ));
+            assert_eq!(serde_json::to_value(&transcript.blocks[0]).unwrap(), view);
         }
     }
 

@@ -26,7 +26,7 @@ pub use default_provider::{DefaultContextBuilder, DefaultContextBuilderFactory};
 
 use rsi_agent_session_protocol::{
     AgentMessageContent, EMPTY_FACT_PREFIX_DIGEST, EffectId, InputMessageSource, SessionFact,
-    SessionFactBody, SessionHeader, TurnId, advance_fact_prefix_digest,
+    SessionFactBody, SessionHeader, StepPrompt, TurnId, advance_fact_prefix_digest,
 };
 use rsi_ai_protocol::{
     ContentBlock, LanguageAssembler, LanguageAssemblyError, LanguageRequest,
@@ -52,9 +52,9 @@ pub const MAXIMUM_CONTEXT_BYTES: usize = 32 * 1024 * 1024;
 /// Maximum encoded Context-owned checkpoint bytes.
 pub const MAXIMUM_CONTEXT_CHECKPOINT_BYTES: usize =
     rsi_agent_session_protocol::MAXIMUM_CONTEXT_CHECKPOINT_BYTES;
-const CONTEXT_CHECKPOINT_VERSION: u32 = 18;
-const CHECKPOINT_BINDING_DOMAIN: &[u8] = b"rsi-agent-context-checkpoint-v18\0";
-const CHECKPOINT_MAGIC: &[u8] = b"rsi-agent-context-checkpoint-v18\0";
+const CONTEXT_CHECKPOINT_VERSION: u32 = 20;
+const CHECKPOINT_BINDING_DOMAIN: &[u8] = b"rsi-agent-context-checkpoint-v20\0";
+const CHECKPOINT_MAGIC: &[u8] = b"rsi-agent-context-checkpoint-v20\0";
 
 /// Explicit compaction limits.
 #[derive(Clone, Copy, Debug, Eq, PartialEq, Serialize, Deserialize)]
@@ -149,8 +149,8 @@ pub struct ContextFold {
     semantic: Option<compaction::SemanticState>,
     system_message: Option<Message>,
     system_message_bytes: usize,
-    step_instructions: Vec<rsi_agent_session_protocol::StepInstruction>,
-    step_instruction_bytes: usize,
+    step_prompt: rsi_agent_session_protocol::StepPrompt,
+    step_prompt_bytes: usize,
     through_seq: u64,
     seed_through_seq: u64,
     seed_source: Option<(SessionHeader, ContextCredit)>,
@@ -174,6 +174,9 @@ pub struct ContextFold {
 #[derive(Debug, Serialize)]
 struct ProjectedTurn {
     id: TurnKey,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    runtime_context: Option<usize>,
+    context_input_times: BTreeMap<rsi_agent_session_protocol::ContributionId, std::num::NonZeroU64>,
     claimed: Vec<SessionFact>,
     #[serde(skip)]
     claimed_bytes: usize,
@@ -196,7 +199,7 @@ struct ActiveAssembler {
 #[derive(Debug, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 struct ContextCheckpointPayload {
-    step_instructions: Vec<rsi_agent_session_protocol::StepInstruction>,
+    step_prompt: rsi_agent_session_protocol::StepPrompt,
     version: u32,
     header_fingerprint: String,
     through_seq: u64,
@@ -211,6 +214,10 @@ struct ContextCheckpointPayload {
 #[serde(deny_unknown_fields)]
 struct CheckpointTurn {
     id: TurnKey,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    runtime_context: Option<usize>,
+    #[serde(default)]
+    context_input_times: BTreeMap<rsi_agent_session_protocol::ContributionId, std::num::NonZeroU64>,
     claimed: Vec<SessionFact>,
     messages: Vec<Message>,
     terminal: bool,
@@ -220,7 +227,7 @@ struct CheckpointTurn {
 #[derive(Debug, Serialize)]
 #[serde(deny_unknown_fields)]
 struct ContextCheckpointPayloadRef<'a> {
-    step_instructions: &'a [rsi_agent_session_protocol::StepInstruction],
+    step_prompt: &'a rsi_agent_session_protocol::StepPrompt,
     version: u32,
     header_fingerprint: &'a str,
     through_seq: u64,
@@ -235,6 +242,11 @@ struct ContextCheckpointPayloadRef<'a> {
 #[serde(deny_unknown_fields)]
 struct CheckpointTurnRef<'a> {
     id: &'a TurnKey,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    runtime_context: Option<usize>,
+    #[serde(skip_serializing_if = "BTreeMap::is_empty")]
+    context_input_times:
+        &'a BTreeMap<rsi_agent_session_protocol::ContributionId, std::num::NonZeroU64>,
     claimed: &'a [SessionFact],
     messages: &'a [Message],
     terminal: bool,
@@ -243,19 +255,25 @@ struct CheckpointTurnRef<'a> {
 
 fn assembled_system(
     header: &SessionHeader,
-    sections: &[rsi_agent_session_protocol::StepInstruction],
+    prompt: &rsi_agent_session_protocol::StepPrompt,
 ) -> Result<(Option<Message>, usize)> {
-    let mut instructions = header.settings().system_prompt().to_owned();
-    if let Some(persona) = header
-        .delegation_policy()
-        .and_then(|policy| policy.persona())
-    {
-        if !instructions.is_empty() {
-            instructions.push_str("\n\n");
+    let mut instructions = String::new();
+    if matches!(
+        prompt,
+        rsi_agent_session_protocol::StepPrompt::AppendToHeader { .. }
+    ) {
+        instructions.push_str(header.settings().system_prompt());
+        if let Some(persona) = header
+            .delegation_policy()
+            .and_then(|policy| policy.persona())
+        {
+            if !instructions.is_empty() {
+                instructions.push_str("\n\n");
+            }
+            instructions.push_str(persona);
         }
-        instructions.push_str(persona);
     }
-    for section in sections {
+    for section in prompt.sections() {
         if !instructions.is_empty() {
             instructions.push_str("\n\n");
         }
@@ -294,7 +312,8 @@ impl ContextFold {
         header
             .validate()
             .map_err(|error| ContextError::Invalid(error.to_string()))?;
-        let (system_message, system_message_bytes) = assembled_system(&header, &[])?;
+        let (system_message, system_message_bytes) =
+            assembled_system(&header, &StepPrompt::default())?;
         let seed_through_seq = header
             .history_origin()
             .map_or(0, |origin| origin.resolved_after_seq);
@@ -311,8 +330,8 @@ impl ContextFold {
             semantic: None,
             system_message,
             system_message_bytes,
-            step_instructions: vec![],
-            step_instruction_bytes: 0,
+            step_prompt: StepPrompt::default(),
+            step_prompt_bytes: 0,
             through_seq: 0,
             seed_through_seq,
             seed_source: None,
@@ -357,7 +376,7 @@ impl ContextFold {
             .and_then(|n| n.checked_add(self.global_metadata_bytes))
             .ok_or(ContextError::Capacity)?
             .checked_add(self.system_message_bytes)
-            .and_then(|n| n.checked_add(self.step_instruction_bytes))
+            .and_then(|n| n.checked_add(self.step_prompt_bytes))
             .and_then(|n| n.checked_add(self.retained_message_bytes))
             .ok_or(ContextError::Capacity)?;
         for assembler in self.assemblers.values() {
@@ -412,7 +431,7 @@ impl ContextFold {
             .semantic
             .as_ref()
             .map_or(Ok(0), |state| state.turn_weight(&turn.id))?;
-        budget::weight(&(turn.terminal, usize::MAX))?
+        budget::weight(&(turn.terminal, usize::MAX, &turn.context_input_times))?
             .checked_add(turn.batches.weight()?)
             .and_then(|bytes| bytes.checked_add(turn.claimed_bytes))
             .and_then(|bytes| bytes.checked_add(1))
@@ -515,8 +534,8 @@ impl ContextFold {
             self.seed_source = None;
             self.system_message = None;
             self.system_message_bytes = 0;
-            self.step_instructions.clear();
-            self.step_instruction_bytes = 0;
+            self.step_prompt = StepPrompt::default();
+            self.step_prompt_bytes = 0;
             self.metadata_weights.clear();
             self.metadata_bytes = 0;
             self.global_metadata_bytes = 0;
@@ -571,7 +590,7 @@ impl ContextFold {
             .map_err(|error| ContextError::Invalid(error.to_string()))?;
         let fact_prefix_sha256 = self.fact_prefix_sha256();
         let payload = ContextCheckpointPayloadRef {
-            step_instructions: &self.step_instructions,
+            step_prompt: &self.step_prompt,
             version: CONTEXT_CHECKPOINT_VERSION,
             semantic: self.semantic.as_ref(),
             header_fingerprint: &header_fingerprint,
@@ -583,7 +602,9 @@ impl ContextFold {
                 .turns
                 .iter()
                 .map(|turn| CheckpointTurnRef {
+                    runtime_context: turn.runtime_context,
                     id: &turn.id,
+                    context_input_times: &turn.context_input_times,
                     claimed: &turn.claimed,
                     messages: &turn.messages,
                     terminal: turn.terminal,
@@ -670,7 +691,11 @@ impl ContextFold {
             ));
         }
         let mut fold = Self::with_limits(header, limits, budget)?;
-        fold.set_step_instructions(&checkpoint.step_instructions)?;
+        checkpoint
+            .step_prompt
+            .validate()
+            .map_err(|error| ContextError::Invalid(error.to_string()))?;
+        fold.set_step_prompt(&checkpoint.step_prompt)?;
         fold.semantic = checkpoint.semantic;
         fold.through_seq = checkpoint.through_seq;
         fold.fact_prefix_digest = fact_prefix_digest;
@@ -694,6 +719,9 @@ impl ContextFold {
     fn restore_checkpoint_turns(&mut self, turns: Vec<CheckpointTurn>) -> Result<()> {
         for turn in turns {
             if self.turn_index.contains_key(&turn.id)
+                || turn
+                    .runtime_context
+                    .is_some_and(|index| index >= turn.messages.len())
                 || turn.terminal && !turn.claimed.is_empty()
                 || turn
                     .claimed
@@ -736,7 +764,9 @@ impl ContextFold {
                 .ok_or_else(|| ContextError::Invalid("message bytes overflowed".into()))?;
             self.turn_index.insert(turn.id.clone(), absolute);
             self.turns.push_back(ProjectedTurn {
+                runtime_context: turn.runtime_context,
                 id: turn.id,
+                context_input_times: turn.context_input_times,
                 claimed_bytes: turn.claimed.iter().try_fold(0usize, |sum, fact| {
                     sum.checked_add(fact.encoded_len())
                         .ok_or(ContextError::Capacity)
@@ -1237,11 +1267,14 @@ impl ContextFold {
         let body = fact.body();
         let seq = fact.seq();
         match body {
-            SessionFactBody::StepPrepared { instructions, .. } => {
-                self.set_step_instructions(instructions)?;
+            SessionFactBody::StepPrepared {
+                prompt: Some(prompt),
+                ..
+            } => {
+                self.set_step_prompt(prompt)?;
             }
             SessionFactBody::StepStarted { .. } | SessionFactBody::StepEnded { .. } => {
-                self.set_step_instructions(&[])?;
+                self.set_step_prompt(&StepPrompt::default())?;
             }
             SessionFactBody::TurnAccepted { turn_id, .. } => {
                 self.insert_empty_turn(turn_id)?;
@@ -1322,7 +1355,8 @@ impl ContextFold {
                 self.assemblers
                     .retain(|_, active| &active.turn_id != turn_id);
             }
-            SessionFactBody::CancelRequested { .. }
+            SessionFactBody::StepPrepared { prompt: None, .. }
+            | SessionFactBody::CancelRequested { .. }
             | SessionFactBody::WorkspaceTouched { .. }
             | SessionFactBody::ModelStarted { .. }
             | SessionFactBody::ImageIntent { .. }
@@ -1331,22 +1365,13 @@ impl ContextFold {
         Ok(())
     }
 
-    fn set_step_instructions(
-        &mut self,
-        sections: &[rsi_agent_session_protocol::StepInstruction],
-    ) -> Result<()> {
-        rsi_agent_session_protocol::validate_step_instructions(sections)
-            .map_err(|error| ContextError::Invalid(error.to_string()))?;
-        if self.step_instructions == sections {
+    fn set_step_prompt(&mut self, prompt: &rsi_agent_session_protocol::StepPrompt) -> Result<()> {
+        if &self.step_prompt == prompt {
             return Ok(());
         }
-        let (message, bytes) = assembled_system(&self.header, sections)?;
-        self.step_instruction_bytes = if sections.is_empty() {
-            0
-        } else {
-            budget::weight(&sections)?
-        };
-        self.step_instructions = sections.to_vec();
+        let (message, bytes) = assembled_system(&self.header, prompt)?;
+        self.step_prompt_bytes = budget::weight(prompt)?;
+        self.step_prompt = prompt.clone();
         self.system_message = message;
         self.system_message_bytes = bytes;
         Ok(())
@@ -1560,6 +1585,8 @@ impl ContextFold {
             .ok_or_else(|| ContextError::Invalid("turn ordinal overflowed".into()))?;
         self.turns.push_back(ProjectedTurn {
             id: self.turn_key(turn_id),
+            context_input_times: BTreeMap::new(),
+            runtime_context: None,
             claimed: Vec::new(),
             claimed_bytes: 0,
             messages: vec![message],
@@ -1585,6 +1612,8 @@ impl ContextFold {
             .ok_or_else(|| ContextError::Invalid("turn ordinal overflowed".into()))?;
         self.turns.push_back(ProjectedTurn {
             id: self.turn_key(turn_id),
+            context_input_times: BTreeMap::new(),
+            runtime_context: None,
             claimed: Vec::new(),
             claimed_bytes: 0,
             messages: Vec::new(),

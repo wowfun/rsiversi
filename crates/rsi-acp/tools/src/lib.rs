@@ -11,7 +11,7 @@ use rsi_agent_turn_protocol::AgentCallerAuthority;
 use rsi_meta::{ActivationPlan, ConfigValue, MetaError, PluginFactory, PreparedActivation};
 use rsi_tools_protocol::{
     ToolContent, ToolDefinition, ToolError, ToolExecution, ToolExecutor, ToolOutputDeclaration,
-    ToolRegistrarContract, ToolRegistration, ToolResult, ToolTimeoutPolicy, TypedToolOutput,
+    ToolRegistrarContract, ToolRegistration, ToolResult, ToolRunPolicy, TypedToolOutput,
 };
 use serde::{Deserialize, Serialize};
 use serde_json::{Value, json};
@@ -42,7 +42,7 @@ impl PluginFactory for Factory {
             .register_batch(vec![ToolRegistration {
                 definition,
                 output: Some(output.declaration().clone()),
-                timeout: ToolTimeoutPolicy::Execution { timeout_ms: 60_000 },
+                run_policy: ToolRunPolicy::execution(std::time::Duration::from_mins(1)),
                 executor: Arc::new(Executor {
                     service: plan.local::<ExternalConversationsContract>()?,
                     output,

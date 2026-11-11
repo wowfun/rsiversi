@@ -35,6 +35,11 @@ unavailable model in that Service rather than depend on a different launcher def
 
 The native RSI launcher owns command parsing, process control and Tokio setup. It
 uses the explicit application catalog for native clients and daemon startup.
+Its async runtime uses at most two worker threads by default, or one when only
+one CPU is available or CPU availability cannot be determined. Set
+`TOKIO_WORKER_THREADS` before launching the process to override this default;
+Tokio owns parsing and validation of that value. The blocking pool remains
+independent. Restart an existing resident Host to apply a different worker count.
 An immutable managed publication starts its resident Host from the original
 executable and holds its generation lease through readiness; the child then
 retains its own lease through shutdown. Ordinary build outputs are first copied
@@ -84,6 +89,12 @@ captured output on failure and reap the child. The
 Workspace-review PTY acceptance observes Pending while the provider is held,
 then waits for the interval's completed-state field before opening files.
 Explanatory prose can mention completion while capture remains pending.
+A menu choice establishes action admission. PTY fixtures wait for the requested
+readback before issuing its next control; closing a menu does not establish that
+an asynchronous reference or workspace read has finished.
+Native presentation fixtures build beneath the selected `CARGO_TARGET_DIR` (or
+the workspace target directory), reuse dependency artifacts across feature
+revisions, and retain a private copy of each built library before rebuilding.
 
 Debug and release use the same launch parser, final home selection and resident
 Host path. `--watch` adds connection-owned configuration/source leases; Vite and

@@ -86,9 +86,22 @@ target is idle. `followup_task` always queues a waking next Turn, including
 behind an already-running Turn. Completion delivery is Kernel-owned and selects
 next Step versus next Turn while holding the relevant atomic Store guards.
 
-Every external effect follows prepare, durable intent, durable start, invoke,
-and durable outcome order. The Kernel accepts a start marker only after its
-matching intent is durable. Cancellation first appends and durably commits its
+Every external effect follows the
+[complete-prefix ordering contract](../../../../crates/rsi-agent/docs/subsystems/turns-and-agent-trees.md).
+DSH's checkpoint policy waits for the full event prefix before invoking a model
+or Tool. The same boundary suffices here: the staged state machine validates
+intent/start identity and order, and a single wait through start makes both
+durable. An intermediate intent-only acknowledgement adds a Store round trip
+without changing recovery's prohibition on replaying uncertain effects.
+Pure contribution output also joins that live suffix. Flushing preparation-only
+Facts before the side-effect-free Language preparation would add an earlier
+Store round trip without protecting another external effect. Model start,
+terminal settlement, and the existing bounded write-behind drain persist those
+Facts through their complete prefix. Domain commits and their publication
+receipts retain their atomic boundary; Tool-result retirement retains its own
+durability acknowledgement. A crash may lose unflushed preparation that has not
+authorized an external effect, just as it can lose other live-only observations.
+Cancellation first appends and durably commits its
 `CancelRequested` Fact, then fires the live cancellation token independently
 of whether the requesting future remains attached. A following
 terminal outcome is classified by the already-recorded cancellation and
@@ -108,10 +121,16 @@ Turn, Step, and model-visible input. Recovery does not materialize every mailbox
 or historical Agent tree into resident scheduler state. The open-turn index and
 repair preconditions share a Store snapshot. Asking for a control record just
 to learn its sequence would add a read and decode payload unrelated to repair.
-Mailbox reads return the
-complete pending count but only an ordered 32 MiB payload prefix and one selected
-status from a single Store snapshot; Kernel holds its process-wide Store-read
-reservation through decode and validation. Capacity and completion decisions use
+Mailbox inspection returns the complete pending count but only an ordered
+32 MiB payload prefix and one selected status. Claims instead capture all selected
+identities and only the waking message body in one snapshot. The Kernel supplies
+the exact claim coordinates through its controls; Store reconstructs each input
+Fact from canonical acceptance inside the atomic commit. This follows DSH's full
+next-Step drain before a waking input without loading the complete queue into
+Kernel memory or duplicating its durable bodies. SQLite processes those bodies
+one at a time; the in-memory test Store retains expanded logical Facts.
+Kernel holds its process-wide Store-read reservation through decode and
+validation. Capacity and completion decisions use
 a separate metadata-only Store snapshot containing the exact pending count and
 Fact/control tails, so those paths do not decode the payload prefix. Scheduler,
 cancellation, and settlement paths that need only descendant identities reuse
@@ -153,6 +172,13 @@ mutation semantics belong to the [Turn contract](../../../../crates/rsi-agent/tu
 and [Store contract](../../../../crates/rsi-agent/store-protocol/README.md).
 
 ## Alternatives considered
+
+Increasing mailbox and atomic payload buffers would make claim-time memory grow
+with every queued body. Splitting a claim across commits would expose an
+incomplete Turn or require another recovery state. Canonical input references
+keep the full selection atomic while SQLite processes one body at a time.
+The existing claim control already carries the required coordinates, so a
+second claim-request list would duplicate identities and sequencing authority.
 
 Returning a live-only admission from submit was rejected for the product
 Session service because reconnectable idempotency requires an unambiguous

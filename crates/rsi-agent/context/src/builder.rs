@@ -176,6 +176,17 @@ impl RawContextPressure {
 
 /// Exclusive incremental context state for one immutable Session Header.
 pub trait ModelContextCursor: fmt::Debug + Send + 'static {
+    /// Current ordered guidance from canonical Step instruction updates.
+    /// Step start/end clears it; an omitted update retains it across request series.
+    fn step_prompt(&self) -> &rsi_agent_session_protocol::StepPrompt;
+    /// Last retained, entered native runtime snapshot.
+    fn runtime_context(&self) -> Option<&str>;
+    /// Last entered non-Tool context input from this producer in retained Turns,
+    /// reconstructed from canonical Facts and the selected fork history.
+    fn previous_context_input_at_ms(
+        &self,
+        producer: &rsi_agent_session_protocol::ContributionId,
+    ) -> Option<u64>;
     /// Original input Facts awaiting the owning Turn's final preparation decision.
     fn claimed_inputs(&self, turn: &rsi_agent_session_protocol::TurnId) -> Result<&[SessionFact]>;
     /// Raw retention pressure, when this builder owns semantic compaction.
@@ -248,6 +259,21 @@ struct Metadata {
 }
 
 impl ModelContextState {
+    /// Borrows the canonical assembly for unchanged-instruction suppression.
+    pub fn step_prompt(&self) -> &rsi_agent_session_protocol::StepPrompt {
+        self.cursor.step_prompt()
+    }
+    /// Borrows the last entered native runtime snapshot from the selected cursor.
+    pub fn runtime_context(&self) -> Option<&str> {
+        self.cursor.runtime_context()
+    }
+    /// Borrows derived input timing without another history read or payload copy.
+    pub fn previous_context_input_at_ms(
+        &self,
+        producer: &rsi_agent_session_protocol::ContributionId,
+    ) -> Option<u64> {
+        self.cursor.previous_context_input_at_ms(producer)
+    }
     /// Borrows original claimed inputs without another history read or payload copy.
     pub fn claimed_inputs(
         &self,

@@ -10,6 +10,11 @@ location projection and never makes file bytes part of the prompt.
 driver quiescence to Kernel. It is a read owned by the handle lifetime, with no
 mutation, publication or reservation of future idle state.
 
+The [exact acceptance read](../session-protocol/README.md) moves the Store's
+owned control-record body directly into the reply. It avoids both a body clone
+and an additional queue-index lookup; handle admission and read lifetime still
+apply.
+
 Session-wide cancellation delegates one atomic durable inbox/Turn stop to Kernel.
 For an unpublished draft, clearing input drops all held command inputs in one
 revision while retaining command receipts and domain state; keeping input is a
@@ -308,11 +313,8 @@ are always sampled separately. A closed durable cut is Idle even when the earlie
 resident sample reports running work; Idle does not establish effect settlement.
 Running requires both an open durable Turn and a sampled current owner.
 
-`SessionService::read_header` reads one durable Store Header by SessionId without
-attaching, creating a handle, touching activity or loading transcript. Unpublished
-drafts are absent. The authenticated `session/read-header` v1 operation exposes
-the same read and validates the echoed identity; narrowed Session contribution
-clients do not gain this deployment-wide operation.
+The [summary read](../session-protocol/README.md) authorizes the Header returned
+by the Store's single metadata snapshot before returning its activity and cuts.
 
 A new queue replacement transfers its owned content through normal input admission
 and back into the unchanged request before Kernel submission. Validation does not
@@ -365,6 +367,9 @@ Recent listing scans at most 128
 source pages per request and returns an opaque continuation for the last scanned
 row, including an empty visible page. Cursor ownership and bounds belong to the
 [Session protocol](../session-protocol/README.md).
+The service moves Store-validated Header/activity rows through visibility filtering
+without reconstructing summaries, revalidating Store ordering or querying their
+metadata again. Caller and protection leases remain live through publication.
 The optional protection policy
 checks actual callers and cancels reading leases on revocation; absent policy
 rejects protected reads without affecting ordinary Sessions. A Local frozen

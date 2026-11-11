@@ -116,7 +116,7 @@ struct Attachment {
     generation: u64,
     id: SessionId,
     path: String,
-    workspace: rsi_workspace_protocol::WorkspaceId,
+    workspace_key: rsi_workspace_protocol::WorkspaceKey,
     header: String,
     agent_preset: String,
     sandbox: rsi_sandbox::SandboxMode,
@@ -339,7 +339,7 @@ impl Pane {
         let metadata = serde_json::json!({
             "kind":"native",
             "inline": inline::frames(&current, &state, ui),
-            "generation": current.generation.to_string(), "selection": self.selection.load(std::sync::atomic::Ordering::Acquire).to_string(), "session":current.id, "path":current.path,"workspace":current.workspace,
+            "generation": current.generation.to_string(), "selection": self.selection.load(std::sync::atomic::Ordering::Acquire).to_string(), "session":current.id, "path":current.path,"workspace_key":current.workspace_key,
             "ui_surfaces": ui.surfaces(&current.ui_target).unwrap_or_default(),
             "ui_cards": ui.has_block_renderers(&current.ui_target),
             "ui_revision": ui.membership_changes().borrow().to_string(),
@@ -534,7 +534,13 @@ impl GuiApplication {
         let id = SessionId::new(rsi_ui::fresh_identity("fork")?).map_err(error)?;
         let request = rsi_session_protocol::CreateSession {
             session_id: id.clone(),
-            workspace_id: attached.workspace.clone(),
+            workspace_id: self
+                .workspace
+                .find(&attached.workspace_key)
+                .await
+                .map_err(error)?
+                .ok_or("Workspace is not registered")?
+                .id,
             agent_preset_id: Some(header.agent_preset_id().clone()),
             fork: Some(rsi_session_protocol::ForkDraft {
                 source_session_id: attached.id.clone(),
@@ -983,7 +989,9 @@ impl GuiApplication {
             generation,
             id,
             path: header.canonical_cwd().into(),
-            workspace: rsi_workspace_protocol::WorkspaceId::from_coordinates(header.coordinates()),
+            workspace_key: rsi_workspace_protocol::WorkspaceKey::from_coordinates(
+                header.coordinates(),
+            ),
             header: header.fingerprint().map_err(error)?,
             agent_preset: header.agent_preset_id().to_string(),
             sandbox: header.settings().sandbox(),

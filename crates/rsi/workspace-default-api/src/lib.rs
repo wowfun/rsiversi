@@ -29,7 +29,7 @@ pub struct Initialize {}
 pub fn operation() -> OperationSpec {
     OperationSpec {
         protocol: rsi_api_protocol::wire_contract!(),
-        id: OperationId::new("workspace-default", "initialize", 1).expect("static operation"),
+        id: OperationId::new("workspace-default", "initialize", 2).expect("static operation"),
         access: OperationAccess::Authenticated,
         class: OperationClass::Data,
         effect: OperationEffect::Mutation,

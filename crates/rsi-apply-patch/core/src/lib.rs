@@ -316,9 +316,9 @@ mod linux {
                     "additionalProperties":false
                 }),
             )?,
-            timeout: rsi_tools_protocol::ToolTimeoutPolicy::Execution {
-                timeout_ms: APPLY_PATCH_TOOL_TIMEOUT_MS,
-            },
+            run_policy: rsi_tools_protocol::ToolRunPolicy::execution(
+                std::time::Duration::from_millis(APPLY_PATCH_TOOL_TIMEOUT_MS),
+            ),
             executor: Arc::new(ApplyPatchTool { helper, process }),
         })
     }
@@ -503,6 +503,7 @@ mod linux {
             ProcessError::SettlementTimeout => "process_settlement_timeout",
             ProcessError::ShutdownTimeout => "process_shutdown_timeout",
             ProcessError::InvalidInput(_)
+            | ProcessError::Sandbox(_)
             | ProcessError::Spawn(_)
             | ProcessError::Io(_)
             | ProcessError::Api(_) => "process_error",

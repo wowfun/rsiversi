@@ -576,11 +576,11 @@ jobs:
           workspaces: . -> target
       - name: Lint Base services
         if: ${{ !cancelled() && steps.base_setup.outcome == 'success' }}
-        run: cargo clippy --locked -p rsi-host -p 'rsi-api*' -p 'rsi-storage*' -p 'rsi-settings*' -p 'rsi-credentials*' -p 'rsi-media*' -p 'rsi-approval*' -p 'rsi-user-questions*' -p 'rsi-permission*' -p 'rsi-sandbox*' -p 'rsi-process*' -p 'rsi-pty*' -p 'rsi-commands*' -p 'rsi-jobs*' -p rsi-projection -p 'rsi-tools*' -p rsi-shell-bash -p rsi-apply-patch -p 'rsi-workspace*' -p 'rsi-files*' -p 'rsi-mcp*' -p 'rsi-retrieval*' -p rsi-acp -p rsi-acp-protocol -p rsi-acp-journal -p rsi-acp-client -p rsi-acp-host -p rsi-acp-api -p rsi-acp-tools --all-targets -- -D warnings
+        run: cargo clippy --locked -p rsi-host -p 'rsi-api*' -p 'rsi-storage*' -p 'rsi-settings*' -p 'rsi-credentials*' -p 'rsi-media*' -p 'rsi-approval*' -p 'rsi-user-questions*' -p 'rsi-permission*' -p 'rsi-sandbox*' -p 'rsi-process*' -p 'rsi-pty*' -p 'rsi-commands*' -p 'rsi-jobs*' -p rsi-projection -p 'rsi-tools*' -p rsi-shell-native -p rsi-apply-patch -p 'rsi-workspace*' -p 'rsi-files*' -p 'rsi-mcp*' -p 'rsi-retrieval*' -p rsi-acp -p rsi-acp-protocol -p rsi-acp-journal -p rsi-acp-client -p rsi-acp-host -p rsi-acp-api -p rsi-acp-tools --all-targets -- -D warnings
         timeout-minutes: 30
       - name: Exercise Base services
         if: ${{ !cancelled() && steps.base_setup.outcome == 'success' }}
-        run: cargo test --locked -p rsi-host -p 'rsi-api*' -p 'rsi-storage*' -p 'rsi-settings*' -p 'rsi-credentials*' -p 'rsi-media*' -p 'rsi-approval*' -p 'rsi-user-questions*' -p 'rsi-permission*' -p 'rsi-sandbox*' -p 'rsi-process*' -p 'rsi-pty*' -p 'rsi-commands*' -p 'rsi-jobs*' -p rsi-projection -p 'rsi-tools*' -p rsi-shell-bash -p rsi-apply-patch -p 'rsi-workspace*' -p 'rsi-files*' -p 'rsi-mcp*' -p 'rsi-retrieval*' -p rsi-acp -p rsi-acp-protocol -p rsi-acp-journal -p rsi-acp-client -p rsi-acp-host -p rsi-acp-api -p rsi-acp-tools --all-targets --no-fail-fast
+        run: cargo test --locked -p rsi-host -p 'rsi-api*' -p 'rsi-storage*' -p 'rsi-settings*' -p 'rsi-credentials*' -p 'rsi-media*' -p 'rsi-approval*' -p 'rsi-user-questions*' -p 'rsi-permission*' -p 'rsi-sandbox*' -p 'rsi-process*' -p 'rsi-pty*' -p 'rsi-commands*' -p 'rsi-jobs*' -p rsi-projection -p 'rsi-tools*' -p rsi-shell-native -p rsi-apply-patch -p 'rsi-workspace*' -p 'rsi-files*' -p 'rsi-mcp*' -p 'rsi-retrieval*' -p rsi-acp -p rsi-acp-protocol -p rsi-acp-journal -p rsi-acp-client -p rsi-acp-host -p rsi-acp-api -p rsi-acp-tools --all-targets --no-fail-fast
         timeout-minutes: 30
       - name: Exercise ACP client phase budgets
         if: ${{ !cancelled() && steps.base_setup.outcome == 'success' && runner.os == 'Linux' }}
@@ -688,10 +688,10 @@ jobs:
         with:
           node-version: 22.23.2
       - name: Lint rsi-agent
-        run: cargo clippy --locked -p 'rsi-agent*' --all-targets -- -D warnings
+        run: cargo clippy --locked -p 'rsi-agent*' -p 'rsi-extension*' --all-targets -- -D warnings
         timeout-minutes: 20
       - name: Exercise rsi-agent
-        run: cargo test --locked -p 'rsi-agent*' --all-targets --no-fail-fast
+        run: cargo test --locked -p 'rsi-agent*' -p 'rsi-extension*' --all-targets --no-fail-fast
         timeout-minutes: 20
 
       - name: Check SQLite test-support contracts
@@ -1074,7 +1074,7 @@ jobs:
       - name: Test private owners and their unsupported platform boundaries
         if: ${{ !cancelled() && steps.native_toolchain.outcome == 'success' }}
         timeout-minutes: 20
-        run: cargo test --locked -p rsi-storage-json -p rsi-storage-sqlite -p rsi-settings-local -p rsi-media-local --all-targets --no-fail-fast
+        run: cargo test --locked -p rsi-storage-json -p rsi-storage-sqlite -p rsi-settings-local -p rsi-media-local -p rsi-installation --all-targets --no-fail-fast
       - name: Test Agent Store pure invariants and native admission boundaries
         if: ${{ !cancelled() && steps.native_toolchain.outcome == 'success' }}
         timeout-minutes: 20
@@ -1418,8 +1418,8 @@ jobs:
           for surface in web desktop tui; do
             RSI_TEST_AUTOMATION_VISUAL_ROOT="$RUNNER_TEMP/rsi-automation-$surface-seed" RSI_TEST_AUTOMATION_VISUAL_PNG="$RSI_TEST_BROWSER_SCREENSHOT" cargo test --locked -p rsi --test session_service -- --ignored --exact automation::prepare_visual_fixture
           done
-          RSI_WEB_BINARY="$RUNNER_TEMP/rsi-desktop-dist/bundle/rsi" RSI_WEB_ASSETS="$RUNNER_TEMP/rsi-desktop-dist/bundle/assets" RSI_AUTOMATION_WEB_SEED="$RUNNER_TEMP/rsi-automation-web-seed" RSI_AUTOMATION_WEB_REPORT="$RUNNER_TEMP/rsi-auto-evidence/web" node fixtures/rsi/web-product/automation-verify.mjs
           cargo build --locked -p rsi-cli --example desktop-automation-grant
+          RSI_WEB_BINARY="$RUNNER_TEMP/rsi-desktop-dist/bundle/rsi" RSI_WEB_ASSETS="$RUNNER_TEMP/rsi-desktop-dist/bundle/assets" RSI_AUTOMATION_GRANT_PROBE="$GITHUB_WORKSPACE/target/debug/examples/desktop-automation-grant" RSI_AUTOMATION_WEB_SEED="$RUNNER_TEMP/rsi-automation-web-seed" RSI_AUTOMATION_WEB_REPORT="$RUNNER_TEMP/rsi-auto-evidence/web" node fixtures/rsi/web-product/automation-verify.mjs
           dbus-run-session -- xvfb-run -a -s "-screen 0 1440x1000x24" python3 fixtures/rsi/desktop-product/verify.py --binary "$RUNNER_TEMP/rsi-desktop-dist/bundle/rsi-desktop" --driver /usr/bin/WebKitWebDriver --assets "$RUNNER_TEMP/rsi-desktop-dist/bundle/assets" --report "$RUNNER_TEMP/rsi-auto-evidence/desktop" --automation-fixture "$RUNNER_TEMP/rsi-automation-desktop-seed" --automation-grant-probe "$GITHUB_WORKSPACE/target/debug/examples/desktop-automation-grant"
           cargo test --locked -p rsi-cli --test service_host_cli -- --ignored --exact tui::automation::model_free_home_reads_automation_and_current_readiness --list | rg --fixed-strings --line-regexp 'tui::automation::model_free_home_reads_automation_and_current_readiness: test'
           RSI_TEST_AUTOMATION_BINARY="$RUNNER_TEMP/rsi-desktop-dist/bundle/rsi" RSI_TEST_AUTOMATION_SEED="$RUNNER_TEMP/rsi-automation-tui-seed" RSI_TUI_PTY_REPORT="$RUNNER_TEMP/rsi-auto-evidence/tui.json" cargo test --locked -p rsi-cli --test service_host_cli -- --ignored --exact tui::automation::model_free_home_reads_automation_and_current_readiness

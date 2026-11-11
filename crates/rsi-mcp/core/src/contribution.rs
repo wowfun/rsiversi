@@ -14,7 +14,7 @@ use rsi_media_protocol::{Media, MediaContract};
 use rsi_meta::{ActivationPlan, ConfigValue, MetaError, PluginFactory, PreparedActivation};
 use rsi_tools_protocol::{
     ToolContent, ToolDefinition, ToolExecution, ToolExecutor, ToolRegistrarContract,
-    ToolRegistration, ToolResult, ToolTimeoutPolicy,
+    ToolRegistration, ToolResult, ToolRunPolicy,
 };
 use serde_json::{Value, json};
 use std::sync::Arc;
@@ -106,7 +106,7 @@ fn activate_tools(plan: &ActivationPlan, service: &Arc<McpService>) -> rsi_meta:
                     tool.definition.input_schema.clone(),
                 )
                 .map_err(meta)?,
-                timeout: ToolTimeoutPolicy::Execution { timeout_ms: 30_000 },
+                run_policy: ToolRunPolicy::execution(std::time::Duration::from_secs(30)),
                 executor: Arc::new(McpToolExecutor {
                     media: media.clone(),
                     service: service.clone(),
@@ -145,7 +145,7 @@ fn activate_tools(plan: &ActivationPlan, service: &Arc<McpService>) -> rsi_meta:
         tools.push(ToolRegistration {
             output: None,
             definition: resource_tool_definition(&readers).map_err(meta)?,
-            timeout: ToolTimeoutPolicy::Execution { timeout_ms: 30_000 },
+            run_policy: ToolRunPolicy::execution(std::time::Duration::from_secs(30)),
             executor: Arc::new(ResourceTool(readers)),
         });
     }

@@ -1562,7 +1562,7 @@ async fn cold_audit_queues_a_concurrent_writer_and_publishes_before_releasing_it
         .writer
         .lock()
         .unwrap()
-        .as_ref()
+        .as_mut()
         .unwrap()
         .progress_handler(
             1,
@@ -1607,7 +1607,7 @@ async fn cold_audit_queues_a_concurrent_writer_and_publishes_before_releasing_it
         .writer
         .lock()
         .unwrap()
-        .as_ref()
+        .as_mut()
         .unwrap()
         .progress_handler(0, None::<fn() -> bool>)
         .unwrap();
@@ -1629,7 +1629,7 @@ async fn first_purge_admission_does_not_release_the_writer_after_cold_audit() {
         .writer
         .lock()
         .unwrap()
-        .as_ref()
+        .as_mut()
         .unwrap()
         .progress_handler(
             1,
@@ -1674,7 +1674,7 @@ async fn first_purge_admission_does_not_release_the_writer_after_cold_audit() {
         .writer
         .lock()
         .unwrap()
-        .as_ref()
+        .as_mut()
         .unwrap()
         .progress_handler(0, None::<fn() -> bool>)
         .unwrap();

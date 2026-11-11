@@ -221,7 +221,6 @@ impl AgentKernel {
             let session = &state.sessions[claim.session_id()];
             for fact in &facts {
                 execution::validate_intent_price(&session.header, fact.body())?;
-                validate_durable_intent_fence(session, fact.body())?;
             }
             clone_turn_control(turn)
         };

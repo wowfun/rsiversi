@@ -101,6 +101,7 @@ rsi-agent-turn-protocol = { path = "../../rsi-agent/turn-protocol" }
 rsi-agent-tools = { path = "../../rsi-agent/tools" }
 rsi-agent-workspace-context = { path = "../../rsi-agent/workspace-context" }
 rsi-agent-time-context = { path = "../../rsi-agent/time-context" }
+rsi-agent-prompt-assembly = { path = "../../rsi-agent/prompt-assembly" }
 rsi-agent-todo = { path = "../../rsi-agent/todo" }
 rsi-agent-model-selection = { path = "../../rsi-agent/model-selection" }
 rsi-agent-context-input = { path = "../../rsi-agent/context-input" }
@@ -144,7 +145,7 @@ rsi-service-host = { path = "../service-host" }
 rsi-settings = { path = "../../rsi-settings/core" }
 rsi-settings-local = { path = "../../rsi-settings/local" }
 rsi-settings-protocol = { path = "../../rsi-settings/protocol" }
-rsi-shell-bash = { path = "../../rsi-shell/bash" }
+rsi-shell-native = { path = "../../rsi-shell/native" }
 rsi-storage = { path = "../../rsi-storage/core" }
 rsi-storage-domain = { path = "../../rsi-storage/domain" }
 rsi-storage-sqlite = { path = "../../rsi-storage/sqlite" }

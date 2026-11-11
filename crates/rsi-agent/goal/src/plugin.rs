@@ -309,7 +309,9 @@ impl PluginFactory for GoalFactory {
                 output: None,
                 definition,
                 executor: Arc::new(ReportTool),
-                timeout: rsi_tools_protocol::ToolTimeoutPolicy::Execution { timeout_ms: 1000 },
+                run_policy: rsi_tools_protocol::ToolRunPolicy::execution(
+                    std::time::Duration::from_secs(1),
+                ),
             }])
             .map_err(activation)?;
         plan.defer(

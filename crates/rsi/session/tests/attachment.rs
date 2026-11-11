@@ -332,6 +332,26 @@ struct UnavailableWorkspace;
 
 #[async_trait]
 impl WorkspaceRegistry for UnavailableWorkspace {
+    async fn find(
+        &self,
+        _: &rsi_workspace_protocol::WorkspaceKey,
+    ) -> rsi_workspace_protocol::Result<Option<rsi_workspace_protocol::WorkspaceRecord>> {
+        panic!("coordinate lookup is not used by this fixture")
+    }
+
+    async fn display_order(
+        &self,
+    ) -> rsi_workspace_protocol::Result<rsi_workspace_protocol::WorkspaceDisplayOrder> {
+        unreachable!("display ordering is not used by this fixture")
+    }
+    async fn insert_before(
+        &self,
+        _: &rsi_workspace_protocol::WorkspaceId,
+        _: Option<&rsi_workspace_protocol::WorkspaceId>,
+    ) -> rsi_workspace_protocol::Result<rsi_workspace_protocol::WorkspaceDisplayOrder> {
+        unreachable!("display ordering is not used by this fixture")
+    }
+
     async fn rename(
         &self,
         _id: &rsi_workspace_protocol::WorkspaceId,
@@ -380,6 +400,26 @@ struct RejectingWorkspace {
 
 #[async_trait]
 impl WorkspaceRegistry for RejectingWorkspace {
+    async fn find(
+        &self,
+        _: &rsi_workspace_protocol::WorkspaceKey,
+    ) -> rsi_workspace_protocol::Result<Option<rsi_workspace_protocol::WorkspaceRecord>> {
+        panic!("coordinate lookup is not used by this fixture")
+    }
+
+    async fn display_order(
+        &self,
+    ) -> rsi_workspace_protocol::Result<rsi_workspace_protocol::WorkspaceDisplayOrder> {
+        unreachable!("display ordering is not used by this fixture")
+    }
+    async fn insert_before(
+        &self,
+        _: &rsi_workspace_protocol::WorkspaceId,
+        _: Option<&rsi_workspace_protocol::WorkspaceId>,
+    ) -> rsi_workspace_protocol::Result<rsi_workspace_protocol::WorkspaceDisplayOrder> {
+        unreachable!("display ordering is not used by this fixture")
+    }
+
     async fn rename(
         &self,
         _id: &rsi_workspace_protocol::WorkspaceId,
@@ -801,6 +841,26 @@ fn workspace_id() -> WorkspaceId {
 
 #[async_trait]
 impl WorkspaceRegistry for AvailableWorkspace {
+    async fn find(
+        &self,
+        _: &rsi_workspace_protocol::WorkspaceKey,
+    ) -> rsi_workspace_protocol::Result<Option<rsi_workspace_protocol::WorkspaceRecord>> {
+        panic!("coordinate lookup is not used by this fixture")
+    }
+
+    async fn display_order(
+        &self,
+    ) -> rsi_workspace_protocol::Result<rsi_workspace_protocol::WorkspaceDisplayOrder> {
+        unreachable!("display ordering is not used by this fixture")
+    }
+    async fn insert_before(
+        &self,
+        _: &rsi_workspace_protocol::WorkspaceId,
+        _: Option<&rsi_workspace_protocol::WorkspaceId>,
+    ) -> rsi_workspace_protocol::Result<rsi_workspace_protocol::WorkspaceDisplayOrder> {
+        unreachable!("display ordering is not used by this fixture")
+    }
+
     async fn rename(
         &self,
         _id: &rsi_workspace_protocol::WorkspaceId,
@@ -1755,10 +1815,19 @@ async fn cold_resume_preset_failure_precedes_workspace_registration() {
     assert_eq!(workspace.registrations.load(Ordering::Acquire), 0);
 }
 
-#[tokio::test]
-async fn attach_and_history_need_only_the_durable_store() {
-    let store = Arc::new(MemoryStore::new());
-    let session_id = SessionId::new("session-store-only-attach").unwrap();
+async fn seed_attachment_history(
+    store: &MemoryStore,
+    session_id: &SessionId,
+) -> (
+    SessionHeader,
+    SessionFact,
+    rsi_agent_session_protocol::AgentMessage,
+) {
+    use rsi_agent_session_protocol::{
+        AgentControlRecord, AgentControlRecordBody as Body, AgentMessage, AgentMessageContent,
+        AgentMessageSource, MessageDelivery, MessageOptions, MessageTarget,
+    };
+    use rsi_agent_store_protocol::{AtomicAgentCommit, AtomicSessionAppend};
     let turn_id = TurnId::new("turn-existing").unwrap();
     let cwd = rsi_workspace_protocol::canonical_native_path(
         std::env::current_dir().unwrap().canonicalize().unwrap(),
@@ -1803,7 +1872,56 @@ async fn attach_and_history_need_only_the_durable_store() {
         })
         .await
         .unwrap();
-    let store_service: Arc<dyn SessionStore> = store;
+    let message = AgentMessage {
+        message_id: MessageId::new("stored-message").unwrap(),
+        source: AgentMessageSource::Human { attribution: None },
+        content: vec![AgentMessageContent::Text {
+            text: "历史正文".into(),
+        }],
+        options: MessageOptions::default(),
+    };
+    store
+        .commit_agent(AtomicAgentCommit {
+            sessions: vec![AtomicSessionAppend {
+                session_id: session_id.clone(),
+                expected_fact_seq: 1,
+                expected_control_seq: 0,
+                header: None,
+                facts: vec![],
+                controls: vec![
+                    AgentControlRecord::new(
+                        1,
+                        2,
+                        Body::MessageAccepted {
+                            message: message.clone(),
+                            delivery: MessageDelivery::NextTurn,
+                            bound_turn_id: None,
+                            root_session_id: session_id.clone(),
+                            target: MessageTarget::NextTurn,
+                            wake_required: true,
+                        },
+                    )
+                    .unwrap(),
+                ],
+            }],
+            required_active_activations: vec![],
+            quiescent_descendants_of: None,
+        })
+        .await
+        .unwrap();
+    (header, accepted, message)
+}
+
+#[tokio::test]
+async fn attach_and_history_need_only_the_durable_store() {
+    use rsi_agent_session_protocol::{
+        AgentControlRecord, AgentControlRecordBody as Body, MessageDiscardReason,
+    };
+    use rsi_agent_store_protocol::{AtomicAgentCommit, AtomicSessionAppend};
+    let store = Arc::new(MemoryStore::new());
+    let session_id = SessionId::new("session-store-only-attach").unwrap();
+    let (header, accepted, message) = seed_attachment_history(&store, &session_id).await;
+    let store_service: Arc<dyn SessionStore> = store.clone();
     let application = LocalSessionService::new(
         rsi_meta::Execution::native(tokio::runtime::Handle::current()),
         Arc::new(UnavailableCommands),
@@ -1837,6 +1955,53 @@ async fn attach_and_history_need_only_the_durable_store() {
     assert_eq!(
         handle.history_before(None, 8).await.unwrap().facts,
         [accepted]
+    );
+    assert_eq!(
+        handle.read_message(&message.message_id, 1).await.unwrap(),
+        message
+    );
+    assert!(matches!(
+        handle.read_message(&message.message_id, 0).await,
+        Err(SessionError::Invalid(_))
+    ));
+    assert!(matches!(
+        handle.read_message(&message.message_id, 2).await,
+        Err(SessionError::NotFound(_))
+    ));
+    assert!(matches!(
+        handle
+            .read_message(&MessageId::new("absent").unwrap(), 1)
+            .await,
+        Err(SessionError::NotFound(_))
+    ));
+    store
+        .commit_agent(AtomicAgentCommit {
+            sessions: vec![AtomicSessionAppend {
+                session_id: session_id.clone(),
+                expected_fact_seq: 1,
+                expected_control_seq: 1,
+                header: None,
+                facts: vec![],
+                controls: vec![
+                    AgentControlRecord::new(
+                        2,
+                        3,
+                        Body::MessageDiscarded {
+                            message_id: message.message_id.clone(),
+                            reason: MessageDiscardReason::Cancelled,
+                        },
+                    )
+                    .unwrap(),
+                ],
+            }],
+            required_active_activations: vec![],
+            quiescent_descendants_of: None,
+        })
+        .await
+        .unwrap();
+    assert_eq!(
+        handle.read_message(&message.message_id, 1).await.unwrap(),
+        message
     );
     assert!(handle.pending_approvals().await.unwrap().is_empty());
     assert!(

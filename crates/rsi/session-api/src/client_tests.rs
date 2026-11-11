@@ -170,6 +170,39 @@ async fn fixture() -> (Arc<Remote>, SessionClient, Arc<dyn SessionHandle>) {
     let handle = client.attach(header().session_id()).await.unwrap();
     (remote, client, handle)
 }
+
+#[tokio::test]
+async fn summary_reads_keep_one_cut_and_reject_foreign_or_inconsistent_metadata() {
+    let remote = Remote::new();
+    let client = SessionClient::new(remote.clone());
+    let expected = SessionSummary {
+        header: header(),
+        last_activity_ms: 2,
+        durable_fact_seq: 7,
+        durable_control_seq: 9,
+    };
+    let id = expected.header.session_id();
+    remote.reply(&expected);
+    assert_eq!(client.read_summary(id).await.unwrap(), expected);
+    assert_eq!(remote.calls.load(Ordering::SeqCst), 1);
+    assert_eq!(
+        remote.requests.lock().unwrap()[0].0,
+        Operation::ReadSummary.spec()
+    );
+    let mut stale = expected.clone();
+    stale.last_activity_ms = 0;
+    remote.reply(&stale);
+    assert!(client.read_summary(id).await.is_err());
+    remote.reply(&expected);
+    assert!(
+        client
+            .read_summary(&SessionId::new("foreign").unwrap())
+            .await
+            .is_err()
+    );
+    assert_eq!(remote.calls.load(Ordering::SeqCst), 3);
+    assert_eq!(remote.output.used(), 0);
+}
 fn envelope(body: Value) -> Value {
     let mut reply =
         json!({"target":{"session_id":"session","header_key":header().fingerprint().unwrap()}});
@@ -598,15 +631,15 @@ fn session_proxy_keeps_local_call_versions_without_constructor_admission() {
     let versions = [
         (Operation::Create, 12),
         (Operation::Attach, 9),
-        (Operation::Recent, 10),
+        (Operation::Recent, 11),
         (Operation::DraftSnapshot, 10),
         (Operation::SelectPreset, 10),
         (Operation::Inspect, 10),
-        (Operation::Submit, 6),
+        (Operation::Submit, 7),
         (Operation::Observe, 9),
         (Operation::History, 7),
         (Operation::ReadMessage, 7),
-        (Operation::ReadHeader, 3),
+        (Operation::ReadSummary, 1),
         (Operation::DiscardDraftInputs, 2),
         (Operation::MutateQueue, 3),
         (Operation::ModelObserve, 2),
@@ -617,12 +650,12 @@ fn session_proxy_keeps_local_call_versions_without_constructor_admission() {
         assert_eq!(current.id.version(), version);
         let mut remote = Remote::new();
         let operations = &mut Arc::get_mut(&mut remote).unwrap().operations;
-        let old = operations
+        let advertised = operations
             .iter_mut()
             .find(|spec| spec.id == current.id)
             .unwrap();
-        old.id =
-            rsi_api_protocol::OperationId::new("session", current.id.name(), version - 1).unwrap();
+        advertised.id =
+            rsi_api_protocol::OperationId::new("session", current.id.name(), version + 1).unwrap();
         let proxy = SessionClient::new(remote.clone());
         assert!(Arc::ptr_eq(
             &proxy.state.api,
@@ -813,7 +846,12 @@ async fn recent_continuation_accepts_empty_scans_and_rejects_stale_or_foreign_vi
         });
         assert!(client.list_recent(Some(&cursor), 1).await.is_err());
     }
-    let row = SessionSummary { header: header() };
+    let row = SessionSummary {
+        header: header(),
+        last_activity_ms: 1,
+        durable_fact_seq: 0,
+        durable_control_seq: 0,
+    };
     remote.reply(&RecentSessionPage {
         sessions: vec![row],
         has_more: false,
@@ -842,6 +880,9 @@ async fn recent_pages_reject_wrong_order_request_bounds_and_visible_successor() 
                 header().settings().clone(),
             )
             .unwrap(),
+            last_activity_ms: time,
+            durable_fact_seq: 0,
+            durable_control_seq: 0,
         }
     }
     let newer = row("newer", 2);
@@ -850,14 +891,14 @@ async fn recent_pages_reject_wrong_order_request_bounds_and_visible_successor() 
     let client = SessionClient::new(remote.clone());
     let after = RecentSessionCursor {
         token: "1".repeat(32),
-        after: Some(newer.position()),
+        after: Some(newer.cursor()),
     };
     let valid = RecentSessionPage {
         sessions: vec![older.clone()],
         has_more: true,
         next: Some(RecentSessionCursor {
             token: "2".repeat(32),
-            after: Some(older.position()),
+            after: Some(older.cursor()),
         }),
     };
     remote.reply(&valid);
@@ -867,7 +908,7 @@ async fn recent_pages_reject_wrong_order_request_bounds_and_visible_successor() 
     let mut duplicate = valid.clone();
     duplicate.sessions = vec![older.clone(), older.clone()];
     let mut foreign = valid.clone();
-    foreign.next.as_mut().unwrap().after = Some(newer.position());
+    foreign.next.as_mut().unwrap().after = Some(newer.cursor());
     let mut malformed = valid.clone();
     malformed.next.as_mut().unwrap().token = "Z".repeat(32);
     let mut missing = valid.clone();
@@ -888,6 +929,40 @@ async fn recent_pages_reject_wrong_order_request_bounds_and_visible_successor() 
     ] {
         remote.reply(&page);
         assert!(client.list_recent(cursor, limit).await.is_err());
+    }
+}
+
+#[tokio::test]
+async fn recent_reads_preserve_listing_watermarks_and_reject_regressing_activity() {
+    let remote = Remote::new();
+    let client = SessionClient::new(remote.clone());
+    let reply = json!({
+        "sessions": [{
+            "header": header(),
+            "last_activity_ms": 5,
+            "durable_fact_seq": 7,
+            "durable_control_seq": 11,
+        }],
+        "has_more": false,
+        "next": null,
+    });
+    remote.reply(&reply);
+    let page = client.list_recent(None, 1).await.unwrap();
+    assert_eq!(serde_json::to_value(page).unwrap(), reply);
+
+    let mut regressing = reply.clone();
+    regressing["sessions"][0]["last_activity_ms"] = json!(0);
+    remote.reply(&regressing);
+    assert!(client.list_recent(None, 1).await.is_err());
+    for key in [
+        "last_activity_ms",
+        "durable_fact_seq",
+        "durable_control_seq",
+    ] {
+        let mut missing = reply.clone();
+        missing["sessions"][0].as_object_mut().unwrap().remove(key);
+        remote.reply(&missing);
+        assert!(client.list_recent(None, 1).await.is_err(), "{key}");
     }
 }
 

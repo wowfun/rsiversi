@@ -641,12 +641,9 @@ async fn file_input_becomes_an_explicit_handle_without_upload_or_media_admission
 }
 
 fn freeform_patch_tool() -> ToolDefinition {
-    function_patch_tool()
-        .with_freeform(
-            FreeformToolDefinition::new(FreeformFormat::Lark, "start: /.+/")
-                .expect("freeform grammar"),
-        )
-        .expect("freeform tool")
+    function_patch_tool().with_freeform(
+        FreeformToolDefinition::new(FreeformFormat::Lark, "start: /.+/").expect("freeform grammar"),
+    )
 }
 
 fn function_patch_tool() -> ToolDefinition {

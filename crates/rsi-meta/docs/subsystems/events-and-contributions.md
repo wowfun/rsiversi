@@ -56,7 +56,13 @@ Fibers. Rank publication does not introduce another lifecycle graph.
 Local callbacks execute directly. Runtime does not add a common deadline,
 spawn, cancellation token, call identity, or dispatch resource tracker. Errors,
 panics, and typed breaks follow ordinary safe-Rust semantics and the marker's
-mode. Parallel constructs one caller-owned all-settled Future from the exact
+mode. Emit, Bail, Parallel and Serial handlers borrow the same immutable input;
+the dispatch owns it until the callbacks finish or its Future is dropped.
+Neither the input type nor dispatch requires `Clone`. An asynchronous handler
+may retain its borrow across `await`; retaining data beyond the callback requires
+explicit ownership chosen by that handler. Serial returns an owned optional
+answer, while Waterfall moves its input through the continuation chain.
+Parallel constructs one caller-owned all-settled Future from the exact
 snapshot, preserves listener order in its aggregate errors, and polls at most
 64 callback futures concurrently. A Parallel once binding is claimed only when
 that dispatch admits its callback into the polling window; dropping the Future

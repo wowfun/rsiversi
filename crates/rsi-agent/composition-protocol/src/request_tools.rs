@@ -187,7 +187,7 @@ impl AgentCompositionPin {
         };
         let mut bindings = Vec::new();
         let mut owners = BTreeSet::new();
-        for definition in catalog.runtime.definitions() {
+        let mut bind = |definition: &ToolDefinition| -> Result<()> {
             let name = definition.name();
             if self.tools.scheduling(name).is_some()
                 || header
@@ -210,19 +210,24 @@ impl AgentCompositionPin {
             bindings.push(ApplicationToolBinding {
                 registration: registration.clone(),
                 owner: owner.to_owned(),
-                definition,
+                name: name.to_owned(),
             });
-        }
+            Ok(())
+        };
+        let mut admission = Ok(());
+        catalog.runtime.visit_definitions(&mut |definition| {
+            if admission.is_ok() {
+                admission = bind(definition);
+            }
+        });
+        admission?;
         if bindings.len() != catalog.registrations.len() {
             return Err(AgentCompositionError::InvalidInput(
                 "unbound application registration".into(),
             ));
         }
-        bindings.sort_by(|a, b| a.definition.name().cmp(b.definition.name()));
-        let names: Vec<_> = bindings
-            .iter()
-            .map(|b| b.definition.name().to_owned())
-            .collect();
+        bindings.sort_by(|a, b| a.name.cmp(&b.name));
+        let names: Vec<_> = bindings.iter().map(|b| b.name.clone()).collect();
         let view = ApplicationToolView::Ready {
             generation: catalog.generation,
             receipt_source: catalog.receipt_source,
@@ -294,7 +299,7 @@ impl AgentCompositionPin {
             if application
                 .view
                 .bindings()
-                .binary_search_by(|binding| binding.definition.name().cmp(name))
+                .binary_search_by(|binding| binding.name.as_str().cmp(name))
                 .is_ok()
             {
                 return RequestToolRoute::Application;

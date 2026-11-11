@@ -1,6 +1,15 @@
 use super::*;
 use rsi_agent_store_protocol::MAXIMUM_STORE_FACT_PAGE_BYTES as FACT_PAGE_BYTES;
 
+#[path = "tool_execution/around.rs"]
+mod around;
+
+fn approval_header() -> SessionHeader {
+    let mut wire = serde_json::to_value(header()).unwrap();
+    wire["settings"]["require_approval"] = true.into();
+    serde_json::from_value(wire).unwrap()
+}
+
 #[derive(Debug)]
 struct AuthenticatedEcho(EchoTool);
 
@@ -66,9 +75,9 @@ impl rsi_agent_composition_protocol::RequestToolSource for RequestEcho {
                             json!({"type":"object"}),
                         )
                         .unwrap(),
-                        timeout: rsi_tools_protocol::ToolTimeoutPolicy::Execution {
-                            timeout_ms: 2000,
-                        },
+                        run_policy: rsi_tools_protocol::ToolRunPolicy::execution(
+                            std::time::Duration::from_secs(2),
+                        ),
                         executor: self.echo.clone(),
                     })
                     .unwrap(),
@@ -330,7 +339,9 @@ fn register_native_echo(
                 store: stack.store.clone(),
                 calls,
             }),
-            timeout: rsi_tools_protocol::ToolTimeoutPolicy::Execution { timeout_ms: 2_000 },
+            run_policy: rsi_tools_protocol::ToolRunPolicy::execution(
+                std::time::Duration::from_secs(2),
+            ),
         })
         .unwrap()
 }
@@ -470,7 +481,9 @@ async fn model_retry_reuses_application_registration_and_next_round_drops_it() {
     assert_eq!(views.len(), 2);
     assert!(views[1].is_empty());
     let binding = &views[0][0];
+    assert_eq!(binding.name, "echo");
     assert_eq!(binding.registration, "first-registration");
+    assert_request_tool_evidence(&page.facts, &provider.requests.lock().unwrap());
     assert!(page.facts.iter().any(|f|matches!(f.body(),
         SessionFactBody::ToolIntent{identity,approval:None,..} if identity.owner_id()==binding.owner)));
     assert!(page.facts.iter().any(|f|matches!(f.body(),
@@ -478,6 +491,43 @@ async fn model_retry_reuses_application_registration_and_next_round_drops_it() {
     assert_entered_tool_contexts(&page.facts, &submitted.session_id);
     assert!(worker.dispose().await.is_clean());
     stack.dispose(language, executor).await;
+}
+
+fn assert_request_tool_evidence(facts: &[SessionFact], requests: &[LanguageRequest]) {
+    // The model request owns schema inspection; preparation retains only routing identities.
+    let mut intents = 0;
+    for fact in facts {
+        let SessionFactBody::ModelIntent { evidence, .. } = fact.body() else {
+            continue;
+        };
+        let rsi_agent_session_protocol::RequestEvidence::Available { tools, .. } = evidence else {
+            panic!("request evidence missing");
+        };
+        let original = match tools {
+            rsi_agent_session_protocol::EvidencePart::Inline { .. } => tools,
+            rsi_agent_session_protocol::EvidencePart::Reference { seq, .. } => {
+                let original = facts.iter().find(|f| f.seq() == *seq).unwrap();
+                let SessionFactBody::ModelIntent {
+                    evidence: rsi_agent_session_protocol::RequestEvidence::Available { tools, .. },
+                    ..
+                } = original.body()
+                else {
+                    panic!("reference must target original request evidence");
+                };
+                tools
+            }
+        };
+        let rsi_agent_session_protocol::EvidencePart::Inline { text, .. } = original else {
+            panic!("evidence reference must be direct");
+        };
+        let schema: serde_json::Value = serde_json::from_str(text).unwrap();
+        assert_eq!(
+            schema["definitions"],
+            serde_json::to_value(requests[intents].tools()).unwrap()
+        );
+        intents += 1;
+    }
+    assert_eq!(intents, requests.len());
 }
 
 fn assert_retry_tools_and_inputs(requests: &[LanguageRequest]) {
@@ -752,7 +802,9 @@ async fn frozen_role_hides_tools_before_any_intent_and_does_not_mutate_other_cla
         .register(ToolRegistration {
             output: None,
             definition: ToolDefinition::new("echo", "echo JSON", json!({"type":"object"})).unwrap(),
-            timeout: rsi_tools_protocol::ToolTimeoutPolicy::Execution { timeout_ms: 2_000 },
+            run_policy: rsi_tools_protocol::ToolRunPolicy::execution(
+                std::time::Duration::from_secs(2),
+            ),
             executor: Arc::new(EchoTool {
                 store: stack.store.clone(),
                 calls: calls.clone(),
@@ -824,6 +876,107 @@ async fn frozen_role_hides_tools_before_any_intent_and_does_not_mutate_other_cla
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn standing_sandbox_does_not_override_explicit_approval_policy() {
+    #[derive(Debug, Default)]
+    struct CountApproval(AtomicUsize);
+    #[async_trait]
+    impl Approval for CountApproval {
+        async fn ask(
+            &self,
+            _request: ApprovalRequest,
+            _stop: CancellationToken,
+        ) -> rsi_approval_protocol::Result<ApprovalOutcome> {
+            self.0.fetch_add(1, Ordering::SeqCst);
+            Ok(ApprovalOutcome {
+                decision: ApprovalDecision::Deny,
+                answerer: "test".into(),
+                reason: None,
+            })
+        }
+    }
+    for mode in [SandboxMode::WorkspaceWrite, SandboxMode::DangerFullAccess] {
+        for require_approval in [false, true] {
+            let approval = Arc::new(CountApproval::default());
+            let stack = BaseStack::activate_with_answerer(approval.clone()).await;
+            let calls = Arc::new(AtomicUsize::new(0));
+            let lease = stack
+                .tool_registrar
+                .register(ToolRegistration {
+                    output: None,
+                    definition: ToolDefinition::new("echo", "echo JSON", json!({"type":"object"}))
+                        .unwrap(),
+                    run_policy: rsi_tools_protocol::ToolRunPolicy::execution(
+                        std::time::Duration::from_secs(2),
+                    ),
+                    executor: Arc::new(EchoTool {
+                        store: stack.store.clone(),
+                        calls: calls.clone(),
+                    }),
+                })
+                .unwrap();
+            let language = stack
+                .activate_language(
+                    "test.language",
+                    Arc::new(LanguageFixture {
+                        outcomes: Mutex::new(VecDeque::from([
+                            StartOutcome::Stream(tool_calls_script(&[
+                                ("first", "echo", r#"{"value":1}"#),
+                                ("second", "echo", r#"{"value":2}"#),
+                            ])),
+                            StartOutcome::Stream(answer_script()),
+                        ])),
+                        requests: Mutex::default(),
+                        starts: Arc::new(AtomicUsize::new(0)),
+                        store: stack.store.clone(),
+                        retry_policy: RetryPolicy::default(),
+                    }),
+                )
+                .await;
+            let executor = stack.activate_executor("standing-permission").await;
+            let mut wire = serde_json::to_value(header()).unwrap();
+            wire["settings"]["sandbox"] = serde_json::to_value(mode).unwrap();
+            wire["settings"]["require_approval"] = require_approval.into();
+            let override_mode =
+                (mode == SandboxMode::WorkspaceWrite).then_some(SandboxMode::DangerFullAccess);
+            let (submitted, outcome) = stack
+                .submit_and_wait_with_header(
+                    "call echo twice",
+                    override_mode,
+                    serde_json::from_value(wire).unwrap(),
+                )
+                .await;
+            assert_eq!(outcome, TurnOutcome::Completed);
+            assert_eq!(
+                approval.0.load(Ordering::SeqCst),
+                if require_approval { 2 } else { 0 }
+            );
+            assert_eq!(
+                calls.load(Ordering::SeqCst),
+                if require_approval { 0 } else { 2 }
+            );
+            let facts = stack
+                .store
+                .read_facts(&submitted.session_id, 0, 64, FACT_PAGE_BYTES)
+                .await
+                .unwrap()
+                .facts;
+            assert!(matches!(facts[0].body(), SessionFactBody::TurnAccepted {
+                sandbox: SandboxMode::DangerFullAccess, require_approval: actual, ..
+            } if *actual == require_approval));
+            assert_eq!(
+                facts
+                    .iter()
+                    .filter(|fact| matches!(fact.body(), SessionFactBody::ToolRejected { .. }))
+                    .count(),
+                if require_approval { 2 } else { 0 }
+            );
+            drop(lease);
+            stack.dispose(language, executor).await;
+        }
+    }
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn denied_approval_persists_the_prepared_call_without_starting_the_tool() {
     let stack = BaseStack::activate_with_approval(ApprovalDecision::Deny).await;
     let calls = Arc::new(AtomicUsize::new(0));
@@ -832,7 +985,9 @@ async fn denied_approval_persists_the_prepared_call_without_starting_the_tool() 
         .register(ToolRegistration {
             output: None,
             definition: ToolDefinition::new("echo", "echo JSON", json!({"type":"object"})).unwrap(),
-            timeout: rsi_tools_protocol::ToolTimeoutPolicy::Execution { timeout_ms: 2_000 },
+            run_policy: rsi_tools_protocol::ToolRunPolicy::execution(
+                std::time::Duration::from_secs(2),
+            ),
             executor: Arc::new(EchoTool {
                 store: stack.store.clone(),
                 calls: calls.clone(),
@@ -854,7 +1009,11 @@ async fn denied_approval_persists_the_prepared_call_without_starting_the_tool() 
         .await;
     let executor = stack.activate_executor("executor-deny").await;
     let (submitted, outcome) = stack
-        .submit_and_wait_with_sandbox("call echo", Some(SandboxMode::DangerFullAccess))
+        .submit_and_wait_with_header(
+            "call echo",
+            Some(SandboxMode::DangerFullAccess),
+            approval_header(),
+        )
         .await;
     assert_eq!(outcome, TurnOutcome::Completed);
     assert_eq!(calls.load(Ordering::Acquire), 0);
@@ -906,7 +1065,9 @@ async fn executor_persists_intent_and_start_before_model_and_tool_io() {
         .register(ToolRegistration {
             output: None,
             definition: ToolDefinition::new("echo", "echo JSON", json!({"type":"object"})).unwrap(),
-            timeout: rsi_tools_protocol::ToolTimeoutPolicy::Execution { timeout_ms: 2_000 },
+            run_policy: rsi_tools_protocol::ToolRunPolicy::execution(
+                std::time::Duration::from_secs(2),
+            ),
             executor: Arc::new(AuthenticatedEcho(EchoTool {
                 store: stack.store.clone(),
                 calls: tool_calls.clone(),
@@ -928,7 +1089,11 @@ async fn executor_persists_intent_and_start_before_model_and_tool_io() {
         .await;
     let executor_fiber = stack.activate_executor("executor-1").await;
     let (submitted, outcome) = stack
-        .submit_and_wait_with_sandbox("call echo", Some(SandboxMode::DangerFullAccess))
+        .submit_and_wait_with_header(
+            "call echo",
+            Some(SandboxMode::DangerFullAccess),
+            approval_header(),
+        )
         .await;
     assert_eq!(outcome, TurnOutcome::Completed);
     assert_eq!(fixture.starts.load(Ordering::Acquire), 2);
@@ -986,6 +1151,7 @@ async fn executor_persists_intent_and_start_before_model_and_tool_io() {
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+#[allow(clippy::too_many_lines)] // Keep both concurrent bodies and their ordered publication assertions in one scenario.
 async fn adjacent_parallel_safe_tools_overlap_but_publish_results_in_source_order() {
     let stack = BaseStack::activate().await;
     let tools = Arc::clone(&stack.tool_registrar);
@@ -1002,8 +1168,11 @@ async fn adjacent_parallel_safe_tools_overlap_but_publish_results_in_source_orde
             )
             .unwrap()
             .with_scheduling(ToolScheduling::ParallelSafe),
-            timeout: rsi_tools_protocol::ToolTimeoutPolicy::Execution { timeout_ms: 1_000 },
+            run_policy: rsi_tools_protocol::ToolRunPolicy::execution(
+                std::time::Duration::from_secs(1),
+            ),
             executor: Arc::new(ParallelTool {
+                store: stack.store.clone(),
                 rendezvous,
                 release_first,
                 observed_lane_parking_authority: Arc::clone(&observed_lane_parking_authority),
@@ -1100,7 +1269,9 @@ async fn parallel_batch_publishes_successful_siblings_before_propagating_a_failu
             definition: ToolDefinition::new("fail", "fail", json!({"type":"object"}))
                 .unwrap()
                 .with_scheduling(ToolScheduling::ParallelSafe),
-            timeout: rsi_tools_protocol::ToolTimeoutPolicy::Execution { timeout_ms: 1_000 },
+            run_policy: rsi_tools_protocol::ToolRunPolicy::execution(
+                std::time::Duration::from_secs(1),
+            ),
             executor: Arc::new(FailingTool {
                 store: stack.store.clone(),
             }),
@@ -1112,7 +1283,9 @@ async fn parallel_batch_publishes_successful_siblings_before_propagating_a_failu
             definition: ToolDefinition::new("echo", "echo", json!({"type":"object"}))
                 .unwrap()
                 .with_scheduling(ToolScheduling::ParallelSafe),
-            timeout: rsi_tools_protocol::ToolTimeoutPolicy::Execution { timeout_ms: 1_000 },
+            run_policy: rsi_tools_protocol::ToolRunPolicy::execution(
+                std::time::Duration::from_secs(1),
+            ),
             executor: Arc::new(EchoTool {
                 store: stack.store.clone(),
                 calls: Arc::new(AtomicUsize::new(0)),
@@ -1177,7 +1350,9 @@ async fn parallel_results_above_the_old_cumulative_byte_budget_both_publish() {
             definition: ToolDefinition::new("uneven", "uneven", json!({"type":"object"}))
                 .unwrap()
                 .with_scheduling(ToolScheduling::ParallelSafe),
-            timeout: rsi_tools_protocol::ToolTimeoutPolicy::Execution { timeout_ms: 1_000 },
+            run_policy: rsi_tools_protocol::ToolRunPolicy::execution(
+                std::time::Duration::from_secs(1),
+            ),
             executor: Arc::new(UnevenParallelResultTool),
         })
         .unwrap();
@@ -1235,7 +1410,9 @@ async fn exclusive_tool_is_a_durable_barrier_between_parallel_safe_runs() {
             definition: ToolDefinition::new("read", "read", json!({"type":"object"}))
                 .unwrap()
                 .with_scheduling(ToolScheduling::ParallelSafe),
-            timeout: rsi_tools_protocol::ToolTimeoutPolicy::Execution { timeout_ms: 1_000 },
+            run_policy: rsi_tools_protocol::ToolRunPolicy::execution(
+                std::time::Duration::from_secs(1),
+            ),
             executor: Arc::new(EchoTool {
                 store: stack.store.clone(),
                 calls: Arc::clone(&calls),
@@ -1246,7 +1423,9 @@ async fn exclusive_tool_is_a_durable_barrier_between_parallel_safe_runs() {
         .register(ToolRegistration {
             output: None,
             definition: ToolDefinition::new("write", "write", json!({"type":"object"})).unwrap(),
-            timeout: rsi_tools_protocol::ToolTimeoutPolicy::Execution { timeout_ms: 1_000 },
+            run_policy: rsi_tools_protocol::ToolRunPolicy::execution(
+                std::time::Duration::from_secs(1),
+            ),
             executor: Arc::new(EchoTool {
                 store: stack.store.clone(),
                 calls: Arc::clone(&calls),
@@ -1321,7 +1500,9 @@ async fn exclusive_final_tool_is_rejected_before_effects_when_not_last_in_source
             definition: ToolDefinition::new("wait_agent", "wait", json!({"type":"object"}))
                 .unwrap()
                 .with_scheduling(ToolScheduling::ExclusiveFinal),
-            timeout: rsi_tools_protocol::ToolTimeoutPolicy::Execution { timeout_ms: 1_000 },
+            run_policy: rsi_tools_protocol::ToolRunPolicy::execution(
+                std::time::Duration::from_secs(1),
+            ),
             executor: Arc::new(EchoTool {
                 store: stack.store.clone(),
                 calls: Arc::clone(&calls),
@@ -1332,7 +1513,9 @@ async fn exclusive_final_tool_is_rejected_before_effects_when_not_last_in_source
         .register(ToolRegistration {
             output: None,
             definition: ToolDefinition::new("echo", "echo", json!({"type":"object"})).unwrap(),
-            timeout: rsi_tools_protocol::ToolTimeoutPolicy::Execution { timeout_ms: 1_000 },
+            run_policy: rsi_tools_protocol::ToolRunPolicy::execution(
+                std::time::Duration::from_secs(1),
+            ),
             executor: Arc::new(EchoTool {
                 store: stack.store.clone(),
                 calls: Arc::clone(&calls),
@@ -1425,7 +1608,9 @@ async fn model_tool_loop_keeps_independent_attempt_settlements() {
         .register(ToolRegistration {
             output: None,
             definition: ToolDefinition::new("echo", "echo JSON", json!({"type":"object"})).unwrap(),
-            timeout: rsi_tools_protocol::ToolTimeoutPolicy::Execution { timeout_ms: 2_000 },
+            run_policy: rsi_tools_protocol::ToolRunPolicy::execution(
+                std::time::Duration::from_secs(2),
+            ),
             executor: Arc::new(EchoTool {
                 store: stack.store.clone(),
                 calls: Arc::clone(&tool_calls),
@@ -1487,7 +1672,9 @@ async fn finalizer_failure_replaces_success_with_one_durable_terminal() {
         .register(ToolRegistration {
             output: None,
             definition: ToolDefinition::new("echo", "echo JSON", json!({"type":"object"})).unwrap(),
-            timeout: rsi_tools_protocol::ToolTimeoutPolicy::Execution { timeout_ms: 2_000 },
+            run_policy: rsi_tools_protocol::ToolRunPolicy::execution(
+                std::time::Duration::from_secs(2),
+            ),
             executor: Arc::new(EchoTool {
                 store: stack.store.clone(),
                 calls: Arc::new(AtomicUsize::new(0)),
@@ -1611,7 +1798,9 @@ async fn successful_tool_result_retires_the_retained_identity_after_terminal_dur
         .register(ToolRegistration {
             output: None,
             definition: ToolDefinition::new("echo", "echo JSON", json!({"type":"object"})).unwrap(),
-            timeout: rsi_tools_protocol::ToolTimeoutPolicy::Execution { timeout_ms: 2_000 },
+            run_policy: rsi_tools_protocol::ToolRunPolicy::execution(
+                std::time::Duration::from_secs(2),
+            ),
             executor: Arc::new(EchoTool {
                 store: stack.store.clone(),
                 calls: Arc::new(AtomicUsize::new(0)),
@@ -1702,7 +1891,9 @@ async fn failed_tool_result_is_retired_after_the_terminal_fact_is_durable() {
         .register(ToolRegistration {
             output: None,
             definition: ToolDefinition::new("echo", "fail", json!({"type":"object"})).unwrap(),
-            timeout: rsi_tools_protocol::ToolTimeoutPolicy::Execution { timeout_ms: 2_000 },
+            run_policy: rsi_tools_protocol::ToolRunPolicy::execution(
+                std::time::Duration::from_secs(2),
+            ),
             executor: Arc::new(FailingTool {
                 store: stack.store.clone(),
             }),
@@ -1766,7 +1957,9 @@ async fn next_step_supersedes_two_unadmitted_calls_before_the_next_provider_requ
         .register(ToolRegistration {
             output: None,
             definition: ToolDefinition::new("echo", "echo JSON", json!({"type":"object"})).unwrap(),
-            timeout: rsi_tools_protocol::ToolTimeoutPolicy::Execution { timeout_ms: 2_000 },
+            run_policy: rsi_tools_protocol::ToolRunPolicy::execution(
+                std::time::Duration::from_secs(2),
+            ),
             executor: Arc::new(EchoTool {
                 store: stack.store.clone(),
                 calls: calls.clone(),
@@ -1983,7 +2176,9 @@ async fn uncertain_tool_interrupts_without_model_result_or_replay_and_retires_af
         .register(ToolRegistration {
             output: None,
             definition: ToolDefinition::new("echo", "uncertain", json!({"type":"object"})).unwrap(),
-            timeout: rsi_tools_protocol::ToolTimeoutPolicy::Execution { timeout_ms: 2_000 },
+            run_policy: rsi_tools_protocol::ToolRunPolicy::execution(
+                std::time::Duration::from_secs(2),
+            ),
             executor: Arc::new(UncertainTool(calls.clone())),
         })
         .unwrap();

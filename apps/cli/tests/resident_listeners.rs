@@ -153,7 +153,7 @@ fn install_web(fixture: &CliFixture) {
     std::fs::write(
         assets.join("rsi-build.json"),
         serde_json::to_vec(&serde_json::json!({
-            "format":2, "desktop_bridge":{"name":"rsi.desktop.bridge","version":5}, "family_sha256":"b".repeat(64), "bootstrap":bootstrap,
+            "format":3, "desktop_bridge":{"name":"rsi.desktop.bridge","version":5}, "family_sha256":"b".repeat(64), "bootstrap":bootstrap,
         }))
         .unwrap(),
     )

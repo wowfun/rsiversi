@@ -119,8 +119,8 @@ export class ResourceOwner {
   }
   run(record) {
     if (!record.committed || record.running || record.confirmed || this.retired) return;
-    record.error=undefined;
     record.running=Promise.resolve().then(record.operation).then(() => {
+      record.error=undefined;
       record.confirmed=true;
       // Panel suppression lasts until a complete frame confirms absence. A
       // successful close reply may overtake a frame captured before the close.

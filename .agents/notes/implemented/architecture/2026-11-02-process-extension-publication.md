@@ -20,6 +20,12 @@ optional [Agent adapter](../../../../crates/rsi-extension/agent/README.md) owns
 retained Tool settlement over the Agent's existing atomic domain commit.
 Meta has no knowledge of extension event types or DSH services.
 
+Installed process closures use PackageStore's bounded metadata admission and
+lifetime leases. Launch authenticates the descriptor and resolves the paths it
+uses. Full content verification belongs to installation and ordinary acquisition,
+as specified by the
+[package contract](../../../../crates/rsi/packages/README.md).
+
 The published Better Sidebar resolves explicit filesystem paths with the
 host user's permissions, including paths outside the Session's default
 directory. A marketplace can also install executable code. Applying a path
@@ -64,11 +70,64 @@ cannot represent current Plan instructions: they would keep an exited policy in
 later requests. This refines the execution-contribution representation without
 sampling unrecorded guidance inside the Context builder.
 
+The native Plan Policy uses that same instruction slot. DSH's `plan:policy`
+section supplies the selected policy to each current prompt; repeated unchanged
+preparations do not create additional policy messages. Appending native policy
+text as PluginContext would also change the aggregate system evidence every
+request, multiplying old copies in durable request inspection. Reusing the slot
+requires neither another state cache nor another durable policy owner. The typed
+plan domain and Tool policy retain their existing authority.
+
+Time context follows DSH's committed-event refresh model: the default ten-minute
+interval is measured against entered input, so failed callbacks cannot suppress
+the next sample. The existing Context fold supplies per-producer timestamps
+without rereading history. DSH retains its last injection time across Session
+history; native markers share retained Turn lifetime, so dropping that Turn
+permits a fresh clock sample.
+Adding a business domain just for a refresh timer would add commits and change
+complete Session domain baselines; a callback-local cache would lose recovery
+and fork semantics. Neither is needed for derived input metadata.
+The fold cache format changes independently of the builder's message semantics.
+Keeping the semantic identity avoids rejecting existing, still-valid summaries
+just to rebuild timing metadata from their source Facts.
+
+The available-agent catalog also uses current Step instructions. DSH assembles
+registered system-prompt sections for the current request; a native catalog
+formerly appended the same replacement-marked instruction on every retry series,
+but replacement affected compaction protection rather than immediate projection.
+The existing BeforeStep instruction slot preserves current discovery, Human
+mentions and source diagnostics without retaining every earlier catalog in model
+history. Another registry or a last-good catalog cache would duplicate ownership
+and could hide changed or removed definitions. The existing Step preparation
+remains the durable retry/recovery receipt; this does not change spawn authority.
+
+Unchanged Step instruction assemblies are omitted from subsequent preparations,
+following DSH's `SystemPromptProjection.project` no-update decision. The current
+Context cursor already retains the assembly for projection and checkpointing;
+comparing that canonical value avoids a separate cache, digest table or storage
+reference reader. Empty replacement is distinct from omission, and Step closure
+clears the assembly. Each preparation still publishes its fresh application Tool
+capture: those registration identities are not interchangeable merely because
+the visible tool names and instruction text agree. The process adapter trusts
+the executor's unchanged decision at this typed in-process boundary. Adding
+another history walk to re-prove it would duplicate the owner's work.
+
+Format 36 and Store schema 47 reject older durable encodings. The Context cache
+payload remains v19 because its complete retained assembly and interpretation
+are unchanged; its immutable Header binding separates the new Session format.
+This pre-release choice avoids migration and fallback paths, not a claim that
+migration is technically impossible.
+
 Operation-scoped history reads borrow the captured claim-visible reader. Their
 consumed cursor is extension checkpoint data and advances with the journal's
 atomic publication. UTF-8 fragment transfer preserves the existing maximum Fact
 size while keeping process frames small. It does not grant another Store reader
 or permit access beyond the captured horizon.
+
+Workbench history borrows a prepared page for the complete fragment transfer.
+The [Serve contract](../../../../apps/serve/README.md) owns reader lifetimes and
+bounds. Queueing before the first RPC leaves native request slots available to
+finish or close existing transfers.
 
 A draft's validated snapshot may reference unpublished CAS data. A proposal can
 therefore retain a process-local owner for the complete snapshot. Baseline clones
@@ -94,6 +153,23 @@ Using Tool runtime `commit` as acknowledgement would confuse cleanup with durabl
 publication. Inferring rejection from an absent receipt before terminal admission
 could race an already owned Kernel commit.
 
+Rehashing every installed process dependency at startup makes activation cost
+proportional to all shipped assets, including files that execution never reads.
+The DSH boot profile resolves installed package manifests and module locations
+instead. In the Windows fixture, restoring Better Sidebar spent about 64 seconds
+acquiring a payload containing 13,079 files before the workbench could open.
+Reusing only live leases cannot remove that cost after Host restart. More hashing
+threads shift the same work onto scarce CPU and storage; timestamp caches add
+state and invalidation rules. Metadata admission removes that work without an
+additional cache or durable copy.
+
+Stateless byte offsets for workbench history re-read and reserialize a complete
+page for every fragment. This makes large-record work proportional to the number
+of transport fragments. DSH's history controller borrows one Session observation
+for each page computation; RSI's operation history and model streams likewise
+already retain prepared data until consumed. A bounded active reader follows
+that lifetime without retaining a second history cache or widening process frames.
+
 ## Consequences
 
 The process can overlap requests and reverse callbacks, but it is not a sandbox:
@@ -101,6 +177,14 @@ heap and CPU are not confined by the protocol's I/O bounds. A failed watchdog
 terminates the generation, preserving effect uncertainty. Payload trees are
 expanded under PackageStore's immutable object, lease and GC authority; large npm
 closures do not use an independent mutable cache.
+Process startup consequently does not proactively detect manual changes or
+corruption in unused installed files. Installation still verifies every byte,
+and ordinary acquisition remains the complete integrity check. This is an
+intentional local execution trade-off: installed plugins already have the
+operator's native authority, while bounded metadata, descriptor authentication,
+no-follow path admission and GC leases remain enforced.
+Workbench page transfer trades short-lived bounded memory for eliminating repeated
+body reads, decode and serialization. Retention lasts only for the active transfer.
 The standard package factory resolves a versioned descriptor from an exact
 PackageStore digest. Descriptor paths can name the declaring package or its
 exact direct dependencies; installation validates them before selection. The

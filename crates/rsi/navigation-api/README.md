@@ -1,5 +1,14 @@
 # rsi-navigation-api
 
+Complete groups carry their execution coordinates and optional current registration
+ID together. An unregistered coordinate has no registration ID. Clients consume
+this mapping instead of deriving registration identities from paths.
+
+Wire version 9 exposes each complete member's `account_position`: its zero-based
+position in the caller-visible shared Workspace account. Positions are contiguous
+within each group and independent of pin/archive state and later activity. Device
+manual views may retain their own order; Workspace clients use this Host position.
+
 The separate `attention` operations expose at most 136 current-owner conversation
 candidates, each with at most 32 exact interaction targets. Pending interactions
 sort before running work, unknown ownership and unread idle activity. Reading
@@ -21,8 +30,8 @@ page carries only the previous visible key. A protected newest key is omitted. E
 cursor appear after refresh; a query is not a Store-wide snapshot. Each page
 returns the newest activity key from the same read snapshot.
 
-Grouping uses a WorkspaceId derived from the complete execution coordinates and
-an exact registry lookup; equal paths on different machines remain distinct. Missing registrations remain unregistered; reads never create
+Grouping resolves the current WorkspaceId through an exact coordinate-key registry
+lookup; equal paths on different machines remain distinct. Missing registrations remain unregistered; reads never create
 workspaces. Metadata replacement uses an exact global revision and one complete
 title/archive record. Clients do not replay writes after unknown outcomes.
 
@@ -30,7 +39,7 @@ The archive filter is tri-state: false selects active conversations, true select
 archived conversations, and null selects both. Default queries remain active-only;
 pins, workspace groups and continuation identity use the same exact filter.
 
-Navigation wire version 5 exposes immutable execution location and activity time.
+Navigation exposes immutable execution location and activity time.
 Query, pinned and metadata replacement requests have a 4 KiB envelope bound;
 summary batches have 32 KiB and coordinate-bearing order-seed requests 128 KiB.
 The version-1 durable metadata document accepts a missing `pinned` field as false;

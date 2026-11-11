@@ -47,7 +47,7 @@ windows. It preserves the prepared model/effort, reported usage, elapsed time an
 failure independently of event arrival order. It never contributes usage totals.
 Typed Tool argument summaries retain at most 512 UTF-8 bytes; raw arguments and
 results remain exact paged sources. Renderers own labels, color and terminal safety.
-`FactField::ToolCommand` selects the raw UTF-8 `command` string of a `bash`
+`FactField::ToolCommand` selects the raw UTF-8 `command` string of a `bash` or `pwsh`
 intent or rejection, independently of the bounded argument summary. Other tools,
 missing/non-string commands and mismatched Fact sequences are unavailable. Its
 byte offsets and windows refer to that string, without JSON quoting or escaping.

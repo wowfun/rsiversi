@@ -8,7 +8,7 @@ use rsi_agent_session_protocol::{SessionResourceDescriptor, SessionResourceValue
 use rsi_agent_turn_protocol::AgentCallerAuthority;
 use rsi_tools_protocol::{
     ToolContent, ToolDefinition, ToolError, ToolExecution, ToolExecutor, ToolRegistrarContract,
-    ToolRegistration, ToolResult, ToolScheduling, ToolTimeoutPolicy,
+    ToolRegistration, ToolResult, ToolRunPolicy, ToolScheduling,
 };
 use serde_json::{Value, json};
 
@@ -180,7 +180,7 @@ impl PluginFactory for WorkspaceSkillToolsFactory {
             .register(ToolRegistration {
                 output: None,
                 definition,
-                timeout: ToolTimeoutPolicy::Execution { timeout_ms: 30_000 },
+                run_policy: ToolRunPolicy::execution(std::time::Duration::from_secs(30)),
                 executor: Arc::new(SkillTool(plan.local::<WorkspaceContextContract>()?)),
             })
             .map_err(meta)?;
