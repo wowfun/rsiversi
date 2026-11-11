@@ -69,4 +69,6 @@ existing Meta channel contract, independent of HTTP subscription lifetime.
 
 Run the adapter tests through real Meta channels, including cancellation,
 fragmentation, malformed terminal results and retained-byte admission. Native
-SDK and product/browser integration are separate evidence.
+SDK and product/browser integration are separate evidence. The native SDK test
+builds its fixture in an isolated subdirectory of `CARGO_TARGET_DIR`, or the
+repository's `target` directory when unset.
