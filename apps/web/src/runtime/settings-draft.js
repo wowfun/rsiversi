@@ -53,6 +53,11 @@ export function createSettingsDraft(initial, command) {
         draw(editor);
       else changed();
     },
+    readFailure(message) {
+      if (retired || draft.message === message) return;
+      draft.message = message;
+      changed();
+    },
     async reload() {
       if (retired || draft.saving) return;
       const ticket = draft.current.ticket;

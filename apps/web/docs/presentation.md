@@ -381,6 +381,8 @@ Late frames cannot replace a different section. Switching editor modes preserves
 draft. Save requires valid, bounded JSON. After save or explicit discard, the
 editor waits visibly for a fresh read ticket; a Reload settings action can request
 that read again without replaying a write or unlocking an old ticket.
+Its own reload retains the mounted editor and keyboard focus while its controls
+are disabled. Read failures remain in that draft's recovery surface.
 Switching sections or editor modes never saves. Returning to a form requires lossless numeric values.
 The editor enforces its 1 MiB UTF-8 limit on every mode switch and submission.
 Form admission and editing share the same byte-limit predicate and message.

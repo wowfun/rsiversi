@@ -16,6 +16,7 @@ export function createSettingsRuntime(context) {
   let selecting = false,
     read;
   const clear = () => {
+    read = undefined;
     retireBindings();
     for (const draft of drafts.values()) draft.retire();
     drafts.clear();
@@ -43,7 +44,12 @@ export function createSettingsRuntime(context) {
     const reading =
         value.action === "settings_read" || value.action === "settings_list",
       owner = context.connection,
-      request = reading ? {} : undefined;
+      draft = registeredSettings.getSnapshot()?.draft,
+      retained =
+        reading && draft?.saving && draft.current.namespace === value.namespace
+          ? draft
+          : undefined,
+      request = reading ? {draft: retained} : undefined;
     if (reading) {
       read = request;
       if (value.action === "settings_list" || value.window == null)
@@ -58,13 +64,14 @@ export function createSettingsRuntime(context) {
       } finally {
         selecting = false;
       }
-      registeredSettings.set(undefined);
+      if (!retained) registeredSettings.set(undefined);
     }
     return context
       .boundCall(owner)("command", JSON.stringify(value))
       .catch((error) => {
         if (
           reading &&
+          !retained &&
           read === request &&
           context.connection === owner &&
           settingsPanel.getSnapshot() ===
@@ -99,6 +106,7 @@ export function createSettingsRuntime(context) {
         draft = createSettingsDraft(editor, command);
         drafts.set(section, draft);
       } else if (draft.current !== editor) draft.update(editor);
+      if (read?.draft === draft) read.draft = undefined;
       if (registeredSettings.getSnapshot()?.draft !== draft)
         registeredSettings.set({ draft });
     } else if (catalog) {
@@ -108,6 +116,11 @@ export function createSettingsRuntime(context) {
       )
         return;
       if (!catalog.namespace) advancedSettings.set(undefined);
+      const retained = read?.draft;
+      if (retained && catalog.namespace === retained.current.namespace) {
+        if (catalog.error) retained.readFailure(catalog.error);
+        return;
+      }
       registeredSettings.set({
         catalog,
         revision: next.settings_revision,

@@ -22,4 +22,5 @@ test('saving coalesces calls and waits for a fresh presentation',async()=>{
 test('presentation mode changes alone do not freeze a clean editor; retirement fences updates',()=>{
  const draft=createSettingsDraft(view(),async()=>{});draft.fields.toggle();draft.update(view('2','2','{"limit":8}'));assert.equal(draft.fields.json(),'{"limit":8}');
  draft.retire();draft.update(view('3','3','{"limit":9}'));assert.equal(draft.fields.json(),'{"limit":8}');
+ const revision=draft.getSnapshot();draft.readFailure('late read failure');assert.equal(draft.getSnapshot(),revision);assert.equal(draft.error,'');
 });
