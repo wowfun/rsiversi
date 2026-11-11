@@ -1,6 +1,8 @@
 use crate::{
     Error, ExportKind, Interface, Manifest, Provenance, Result, SignedRepository, TrustReceipt,
-    VerifiedRepository, filesystem::Dir, invalid,
+    VerifiedRepository,
+    filesystem::{Dir, Lock},
+    invalid,
 };
 use rsi_files_native_fs::EntryKind;
 use serde::{Deserialize, Serialize};
@@ -106,7 +108,7 @@ pub struct PackageLease {
     manifest: Manifest,
     root: PathBuf,
     dependency_payloads: BTreeMap<(String, String), PathBuf>,
-    _files: Vec<File>,
+    _files: Vec<Lock>,
     directories: Vec<Dir>,
 }
 /// Fully resolved immutable arguments, retaining the complete selected closure.
@@ -985,7 +987,7 @@ impl PackageStore {
 #[derive(Debug)]
 pub struct PackagePurge {
     store: PackageStore,
-    _locks: Vec<File>,
+    _locks: Vec<Lock>,
 }
 impl PackagePurge {
     fn visit_objects(&self, remove: bool) -> Result<()> {
