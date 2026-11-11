@@ -71,6 +71,85 @@ impl AgentComposition for ClaimFixture {
 }
 
 #[tokio::test]
+async fn claim_fact_page_keeps_captured_suffix_across_flush() {
+    use rsi_agent_session_protocol::{AgentPresetId, FrozenAgentSettings};
+
+    let kernel = AgentKernel::recover(
+        Arc::new(rsi_agent_testkit::MemoryStore::new()),
+        Arc::new(ClaimFixture),
+    )
+    .await
+    .unwrap();
+    let executor = TurnExecution::register(&kernel, "captured-reader".into()).unwrap();
+    let header = SessionHeader::new_local(
+        SessionId::new("captured-session").unwrap(),
+        1,
+        "/workspace",
+        AgentPresetId::new("test").unwrap(),
+        FrozenAgentSettings::new(
+            "test",
+            "system",
+            rsi_ai_protocol::ModelRef::new("test", "test").unwrap(),
+            rsi_sandbox::SandboxMode::ReadOnly,
+            false,
+        )
+        .unwrap(),
+    )
+    .unwrap();
+    let session_id = header.session_id().clone();
+    let turn_id = TurnId::new("captured-turn").unwrap();
+    let pin = ClaimFixture
+        .pin(header.agent_preset_id(), None)
+        .await
+        .unwrap();
+    let mut session = SessionRuntime::new(header, pin, 0, true);
+    let fact = Arc::new(
+        SessionFact::new(
+            1,
+            1,
+            SessionFactBody::TurnAccepted {
+                reasoning_effort: None,
+                turn_id: turn_id.clone(),
+                text: "retained input".into(),
+                model: None,
+                sandbox: rsi_sandbox::SandboxMode::ReadOnly,
+                require_approval: false,
+            },
+        )
+        .unwrap(),
+    );
+    session
+        .turns
+        .insert(turn_id.clone(), TurnControl::accepted(&fact));
+    session.turn_order.push(turn_id.clone());
+    push_pending(&kernel.inner, &mut session, Arc::clone(&fact)).unwrap();
+    {
+        let mut state = lock_state(&kernel.inner);
+        state.sessions.insert(session_id.clone(), session);
+        enqueue(&mut state, session_id.clone(), turn_id);
+    }
+    let claim = kernel
+        .claim("captured-reader", CancellationToken::new())
+        .await
+        .unwrap()
+        .unwrap();
+    let read = execution::ClaimFactRead::capture(&kernel, &claim, 0, 1).unwrap();
+    let workers = kernel.start_workers();
+    kernel.flush_resident_admitted(&session_id).await.unwrap();
+    let page = read.read(&kernel, &claim).await.unwrap();
+    kernel
+        .finish_turn(&claim, &TurnOutcome::Completed)
+        .await
+        .unwrap();
+    drop((claim, executor));
+    kernel.shutdown(workers).await.unwrap();
+
+    assert_eq!(page.through_seq, 1);
+    assert_eq!(page.facts.len(), 1);
+    assert!(Arc::ptr_eq(&page.facts[0], &fact));
+}
+
+#[tokio::test]
 #[expect(
     clippy::too_many_lines,
     reason = "one poisoned and one healthy Session share the same claim queue"

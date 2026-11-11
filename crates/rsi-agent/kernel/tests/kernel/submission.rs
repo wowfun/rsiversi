@@ -1510,21 +1510,31 @@ async fn claim_fact_read_never_skips_a_prefix_committed_during_store_io() {
     store.release_captured_read();
 
     let page = read.await.unwrap().unwrap();
-    assert_eq!(page.through_seq, 3);
+    assert_eq!(page.facts.first().map(|fact| fact.seq()), Some(1));
     assert!(
         page.facts
             .windows(2)
             .all(|pair| pair[1].seq() == pair[0].seq() + 1),
-        "a Store prefix committed during the read must be returned on a later page, not skipped: {:?}",
+        "promotion during a read must not skip the captured prefix: {:?}",
         page.facts.iter().map(|fact| fact.seq()).collect::<Vec<_>>()
     );
-    let committed = kernel
-        .read_facts(&claim, page.through_seq, MAXIMUM_FACTS_PER_READ)
-        .await
-        .unwrap();
-    assert_eq!(committed.facts.first().map(|fact| fact.seq()), Some(4));
-    assert_eq!(committed.facts.last().map(|fact| fact.seq()), Some(515));
-    assert_eq!(committed.through_seq, 515);
+    let live_end = u64::try_from(MAXIMUM_FACTS_PER_READ).unwrap() + 4;
+    let mut through_seq = page.through_seq;
+    let mut sequences = page.facts.iter().map(|fact| fact.seq()).collect::<Vec<_>>();
+    while through_seq < live_end {
+        let page = kernel
+            .read_facts(&claim, through_seq, MAXIMUM_FACTS_PER_READ)
+            .await
+            .unwrap();
+        assert!(
+            page.through_seq > through_seq,
+            "an unexhausted captured suffix must advance"
+        );
+        assert!(page.facts.len() <= MAXIMUM_FACTS_PER_READ);
+        through_seq = page.through_seq;
+        sequences.extend(page.facts.iter().map(|fact| fact.seq()));
+    }
+    assert_eq!(sequences, (1..=live_end).collect::<Vec<_>>());
 
     store.release_blocked_append();
     kernel.shutdown(worker).await.unwrap();

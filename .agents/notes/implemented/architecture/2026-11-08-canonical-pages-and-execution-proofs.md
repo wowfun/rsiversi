@@ -37,6 +37,11 @@ retains fresh authority and cut acquisition. Only continuation fragments share
 the first capture. A retained projector supplies its positions, so unchanged
 captures return metadata without reloading bodies.
 
+Execution readers likewise pin the page's required pending Fact references at
+their initial durable/live cut. Write-behind can promote that suffix while a
+durable read is in flight. Retaining the bounded immutable references prevents
+false end-of-history without retrying Store reads or copying the resident tail.
+
 ## Alternatives considered
 
 A DSH-only fast-read API would duplicate Store semantics and leave native history

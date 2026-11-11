@@ -1,5 +1,116 @@
 use super::*;
 
+pub(super) struct ClaimFactRead {
+    after_seq: u64,
+    limit: usize,
+    durable_seq: u64,
+    live_seq: u64,
+    hidden_turns: BTreeSet<TurnId>,
+    pending: Vec<Arc<SessionFact>>,
+}
+
+impl ClaimFactRead {
+    pub(super) fn capture(
+        kernel: &AgentKernel,
+        claim: &TurnClaim,
+        after_seq: u64,
+        limit: usize,
+    ) -> TurnResult<Self> {
+        if limit == 0 || limit > MAXIMUM_FACTS_PER_READ {
+            return Err(TurnError::Invalid(
+                "Fact read limit is out of bounds".into(),
+            ));
+        }
+        let state = lock_state(&kernel.inner);
+        kernel.validate_claim(&state, claim)?;
+        let session = state
+            .sessions
+            .get(claim.session_id())
+            .expect("validated claim session exists");
+        let claimed_index = session
+            .turn_order
+            .iter()
+            .position(|turn_id| turn_id == claim.turn_id())
+            .ok_or_else(|| TurnError::Invariant("claimed turn is missing from order".into()))?;
+        let live_seq = session.live_seq().map_err(turn_kernel_error)?;
+        if after_seq > live_seq {
+            return Err(TurnError::Invalid("Fact cursor exceeds live tail".into()));
+        }
+        let durable_count =
+            usize::try_from(session.durable_seq.saturating_sub(after_seq)).unwrap_or(limit);
+        let pending_limit = limit.saturating_sub(durable_count);
+        let pending_offset = usize::try_from(after_seq.saturating_sub(session.durable_seq))
+            .expect("a live pending cursor fits the resident suffix");
+        Ok(Self {
+            after_seq,
+            limit,
+            durable_seq: session.durable_seq,
+            live_seq,
+            hidden_turns: session.turn_order[claimed_index + 1..]
+                .iter()
+                .cloned()
+                .collect(),
+            pending: session
+                .pending
+                .iter()
+                .skip(pending_offset)
+                .take(pending_limit)
+                .cloned()
+                .collect(),
+        })
+    }
+
+    pub(super) async fn read(
+        self,
+        kernel: &AgentKernel,
+        claim: &TurnClaim,
+    ) -> TurnResult<ClaimFactPage> {
+        let Self {
+            after_seq,
+            mut limit,
+            durable_seq,
+            live_seq,
+            hidden_turns,
+            pending,
+        } = self;
+        let mut facts = Vec::new();
+        let mut through_seq = after_seq;
+        let mut scanned = 0_usize;
+        if after_seq < durable_seq {
+            let (page, effective_limit) =
+                read_facts_bounded(&kernel.inner, claim.session_id(), after_seq, limit)
+                    .await
+                    .map_err(turn_store_error)?;
+            limit = effective_limit;
+            scanned = page.facts.len();
+            through_seq = page
+                .facts
+                .last()
+                .map_or(after_seq, SessionFact::seq)
+                .min(live_seq);
+            facts.extend(page.facts.into_iter().filter_map(|fact| {
+                (fact.seq() <= live_seq && !hidden_turns.contains(fact.body().turn_id()))
+                    .then(|| Arc::new(fact))
+            }));
+        }
+        kernel.validate_claim(&lock_state(&kernel.inner), claim)?;
+        if scanned < limit && through_seq < live_seq {
+            let pending_after = through_seq;
+            for fact in pending
+                .into_iter()
+                .filter(|fact| fact.seq() > pending_after)
+                .take(limit - scanned)
+            {
+                through_seq = fact.seq();
+                if !hidden_turns.contains(fact.body().turn_id()) {
+                    facts.push(fact);
+                }
+            }
+        }
+        Ok(ClaimFactPage { facts, through_seq })
+    }
+}
+
 #[async_trait]
 impl TurnExecution for AgentKernel {
     async fn reserve_model_attempt(
@@ -623,80 +734,9 @@ impl TurnExecution for AgentKernel {
         after_seq: u64,
         limit: usize,
     ) -> TurnResult<ClaimFactPage> {
-        if limit == 0 || limit > MAXIMUM_FACTS_PER_READ {
-            return Err(TurnError::Invalid(
-                "Fact read limit is out of bounds".into(),
-            ));
-        }
-        let (durable_seq, live_seq, hidden_turns) = {
-            let state = lock_state(&self.inner);
-            self.validate_claim(&state, claim)?;
-            let session = state
-                .sessions
-                .get(claim.session_id())
-                .expect("validated claim session exists");
-            let claimed_index = session
-                .turn_order
-                .iter()
-                .position(|turn_id| turn_id == claim.turn_id())
-                .ok_or_else(|| TurnError::Invariant("claimed turn is missing from order".into()))?;
-            (
-                session.durable_seq,
-                session.live_seq().map_err(turn_kernel_error)?,
-                session.turn_order[claimed_index + 1..]
-                    .iter()
-                    .cloned()
-                    .collect::<BTreeSet<_>>(),
-            )
-        };
-        if after_seq > live_seq {
-            return Err(TurnError::Invalid("Fact cursor exceeds live tail".into()));
-        }
-        let mut facts = Vec::new();
-        let mut through_seq = after_seq;
-        let mut scanned = 0_usize;
-        let mut limit = limit;
-        if after_seq < durable_seq {
-            let (page, effective_limit) =
-                read_facts_bounded(&self.inner, claim.session_id(), after_seq, limit)
-                    .await
-                    .map_err(turn_store_error)?;
-            limit = effective_limit;
-            scanned = page.facts.len();
-            through_seq = page
-                .facts
-                .last()
-                .map_or(after_seq, SessionFact::seq)
-                .min(live_seq);
-            facts.extend(page.facts.into_iter().filter_map(|fact| {
-                (fact.seq() <= live_seq && !hidden_turns.contains(fact.body().turn_id()))
-                    .then(|| Arc::new(fact))
-            }));
-        }
-        let state = lock_state(&self.inner);
-        self.validate_claim(&state, claim)?;
-        let session = state
-            .sessions
-            .get(claim.session_id())
-            .expect("validated claim session exists");
-        if through_seq < session.durable_seq || through_seq == live_seq || scanned == limit {
-            return Ok(ClaimFactPage { facts, through_seq });
-        }
-        if scanned < limit && through_seq < live_seq {
-            let pending_after = through_seq;
-            for fact in session
-                .pending
-                .iter()
-                .filter(|fact| fact.seq() > pending_after && fact.seq() <= live_seq)
-                .take(limit - scanned)
-            {
-                through_seq = fact.seq();
-                if !hidden_turns.contains(fact.body().turn_id()) {
-                    facts.push(fact.clone());
-                }
-            }
-        }
-        Ok(ClaimFactPage { facts, through_seq })
+        ClaimFactRead::capture(self, claim, after_seq, limit)?
+            .read(self, claim)
+            .await
     }
 
     async fn read_checkpoint_facts(
