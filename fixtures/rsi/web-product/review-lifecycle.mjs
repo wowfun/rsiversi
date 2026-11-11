@@ -86,7 +86,9 @@ window.mountCleanup=async()=>{
 window.mountCleanupFlood=async()=>{
  await import('./styles.css');const shell=(await import('./src/shell.module.css')).default;
  window.cleanupCalls=0;
- const owner=new ResourceOwner(async()=>{window.cleanupCalls++;throw Error('Input is busy. '+ '原始资源仍等待清理。'.repeat(8))});
+ let pendingRetry;
+ window.holdCleanupRetry=()=>{pendingRetry=new Promise(resolve=>{window.settleCleanupRetry=()=>{pendingRetry=undefined;resolve()}})};
+ const owner=new ResourceOwner(async()=>{window.cleanupCalls++;if(pendingRetry)await pendingRetry;throw Error('Input is busy. '+ '原始资源仍等待清理。'.repeat(8))});
  for(let i=0;i<64;i++)owner.reservePanel('session-'+Math.floor(i/16),{view:String(i+1),open_revision:'2'},'Workspace files '+(i+1)).commit();
  await new Promise(resolve=>setTimeout(resolve,0));
  installActions({resources:()=>owner});source.set({surfaces:{},application_surfaces:[]});
@@ -440,6 +442,7 @@ try{
  for(const width of [1440,390]){
   await page.setViewportSize({width,height:844});
   await flood.focus();await page.keyboard.press('Home');
+  await page.waitForFunction(()=>document.querySelector('.resource-cleanup-notice').scrollTop===0);
   const geometry=await page.evaluate(()=>{const alert=document.querySelector('.resource-cleanup-notice'),main=document.querySelector('#workbench'),composer=document.querySelector('textarea');return {height:alert.clientHeight,scroll:alert.scrollHeight,main:main.clientHeight,bottom:composer.getBoundingClientRect().bottom,width:document.documentElement.scrollWidth}});
   assert(geometry.height<=844*.3+1&&geometry.scroll>geometry.height&&geometry.main>300&&geometry.bottom<=844&&geometry.width<=width,JSON.stringify(geometry));
   await page.screenshot({path:join(report,`cleanup-${width}.png`)});
@@ -452,10 +455,18 @@ try{
    return button.top>=viewport.top&&button.bottom<=viewport.bottom;
   });
   await page.screenshot({path:join(report,`cleanup-last-${width}.png`)});
+  await page.evaluate(()=>window.holdCleanupRetry());
   const calls=await page.evaluate(()=>window.cleanupCalls);
   await page.keyboard.press('Enter');
-  await page.waitForFunction(before=>window.cleanupCalls===before+1&&[...document.querySelectorAll('.resource-cleanup-notice button')].every(button=>!button.disabled),calls);
+  await page.waitForFunction(before=>window.cleanupCalls===before+1&&document.querySelector('.resource-cleanup-notice button[aria-disabled="true"]'),calls);
+  assert(await last.evaluate(node=>node===document.activeElement),'pending cleanup retains keyboard focus');
+  await page.keyboard.press('Enter');
+  assert.equal(await page.evaluate(()=>window.cleanupCalls),calls+1,'pending cleanup activation does not dispatch twice');
+  await page.screenshot({path:join(report,`cleanup-pending-${width}.png`)});
+  await page.evaluate(()=>window.settleCleanupRetry());
+  await page.waitForFunction(()=>[...document.querySelectorAll('.resource-cleanup-notice button')].every(button=>button.getAttribute('aria-disabled')!=='true'));
   assert(await last.evaluate(node=>node===document.activeElement),'retry settlement retains the focused resource control');
+  await page.screenshot({path:join(report,`cleanup-settled-${width}.png`)});
   checks.push({boundedCleanup:{width,...geometry}});
  }
  await page.evaluate(()=>window.unmountCleanupFlood());

@@ -185,8 +185,10 @@ Resource detail models retain identity across unchanged connection, entry and
 media inputs. Renderer slots are still collected on every frame; replacing any
 of those inputs rebuilds the model and its bound authority.
 Failed resource cleanup retains its notice and identity while an explicit retry
-is pending. Its retry control stays disabled until settlement; successful cleanup
-clears the error while frame reconciliation retains the original responsibility.
+is pending. Its retry control stays focusable and ARIA-disabled until settlement;
+the owner ignores repeated activation. A failed retry retains keyboard focus.
+Successful cleanup clears the error while frame reconciliation retains the
+original responsibility.
 Registered settings retain exact JSON text and their opened version while edited;
 publication keeps controls locked until a fresh settings presentation arrives.
 Focus is captured before disabling or replacing a settings control and restored

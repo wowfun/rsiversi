@@ -892,12 +892,14 @@ both browser and Service cleanup and retains the original error if either fails.
 
 `review-lifecycle.mjs` renders 64 cleanup failures with the owning component and
 stylesheet at 1440 px and 390 px, checks the last Retry control by keyboard, and
-retains screenshots. Set `RSI_REVIEW_PREVIEW=1` with `RSI_REPORT_DIR` to keep that
+retains screenshots before, during and after a deferred retry. Repeated activation
+while pending cannot dispatch twice, and keyboard focus survives its failure.
+Set `RSI_REVIEW_PREVIEW=1` with `RSI_REPORT_DIR` to keep that
 isolated component scene available at the printed local URL for manual inspection.
 This scene verifies cleanup layout; it is not a full connected-workbench capture.
-Keyboard focus checks wait for an enabled Retry control and for it to enter the cleanup
-scroll viewport before reading geometry; native keyboard scrolling can settle
-asynchronously. Resource close helpers pin the selected Dock identity for both
+Keyboard focus checks wait for Home to reach the top before moving focus, then
+wait for the Retry control to enter the cleanup viewport. Native keyboard
+scrolling can settle asynchronously. Resource close helpers pin the selected Dock identity for both
 click and completion within the active resource dock; separate session docks may
 reuse tab IDs. A retained DOM node does not identify a resource.
 Workflow navigation settles its latest view before closing that resource.
