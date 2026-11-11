@@ -29,7 +29,7 @@ mod tests {
 
     #[test]
     fn finished_lease_does_not_remain_locked_through_an_inherited_descriptor() {
-        let temporary = tempfile::tempdir().unwrap();
+        let temporary = tempfile::tempdir_in(std::env::temp_dir().canonicalize().unwrap()).unwrap();
         let directory = Dir::open(&temporary.path().join("store"), true).unwrap();
         for shared in [false, true] {
             let lease = directory.lock("lease", shared).unwrap();
