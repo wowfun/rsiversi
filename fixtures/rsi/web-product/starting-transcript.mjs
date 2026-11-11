@@ -8,8 +8,9 @@ const source=await readFile(new URL('./document-scene.tsx',import.meta.url),'utf
 fixture.view.surfaces.main=null;
 fixture.view.setup.agent.default_model=null;
 fixture.view.catalog.models=[];
+fixture.view.catalog.workspaces[0].id='f'.repeat(64);
 fixture.view.catalog.workspaces[0].coordinates.path='/Documents/RSIversi/default-workspace';
-fixture.setReply('command', async text=>{const command=JSON.parse(text);if(command.action==='create')await fixture.surface('created',{workspace:command.workspace,transcript:{blocks:[],status:'Ready'}});return '{}';});
+fixture.setReply('command', async text=>{const command=JSON.parse(text);if(command.action==='create')await fixture.surface('created',{workspace:command.workspace,creation:{workspace_id:command.workspace,session_id:'created',agent_preset_id:null},transcript:{blocks:[],status:'Ready'}});return '{}';});
 fixture.setReply('prepare_submission',text=>JSON.stringify({kind:'message',id:'first-message',opaque:text,text_bytes:new TextEncoder().encode(JSON.parse(text).text).length,images:0,references:0}));
 fixture.setReply('dispatch_submission',()=>JSON.stringify({status:'complete',receipt:'{}'}));
 `;
@@ -177,6 +178,13 @@ try {
    });
    assert.deepEqual(storage,{conflict:true,saved:'first',newer:'newer',other:''});
    assert.deepEqual(errors,[]);results.push({browser:name,modelFreeDraft:true,reload:true,firstSend:true,tabKeyboard:true,messageAlignment:true,conflict:true,narrow:true,metricsGeometry});
+  } catch(error) {
+   await Promise.allSettled([
+    page.screenshot({path:join(report,name+'-failure.png')}),
+    page.content().then(html=>writeFile(join(report,name+'-failure.html'),html)),
+    page.evaluate(()=>{const pane=fixture.runtime.panes.get('main');return {calls:fixture.calls,pane:{generation:pane.generation,submitting:pane.submitting,switching:pane.switching,openingComposer:!!pane.openingComposer,starting:pane.starting?.text,editor:pane.editor?.record,composer:pane.composerView,actions:pane.composerActions,creation:pane.staged?.data?.creation},notices:[...document.querySelectorAll('[role=alert],[role=status]')].map(node=>node.textContent)}}).then(state=>writeFile(join(report,name+'-failure-state.json'),JSON.stringify({error:String(error),errors,state},null,2))),
+   ]);
+   throw error;
   } finally {await browser.close()}
  }
  await writeFile(join(report,'result.json'),JSON.stringify(results,null,2));

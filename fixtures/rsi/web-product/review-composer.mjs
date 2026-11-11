@@ -8,12 +8,14 @@ await mkdir(report,{recursive:true});
 const source=await readFile(new URL('./document-scene.tsx',import.meta.url),'utf8')+`
 fixture.base=structuredClone(fixture.view.surfaces.main);
 fixture.view.surfaces.main=null;fixture.view.setup.agent.sandbox='workspace-write';
+fixture.view.catalog.workspaces[0].id='f'.repeat(64);
+fixture.view.catalog.workspaces[0].coordinates.path='C:/projects/review-workspace/';
 fixture.createEntered=false;fixture.releaseCreate=()=>{};
 fixture.setReply('command',async payload=>{
  const command=JSON.parse(payload);
  if(command.action==='create') {
   fixture.createEntered=true;await new Promise(resolve=>fixture.releaseCreate=resolve);
-  fixture.view.surfaces.main={...structuredClone(fixture.base),generation:'2',selection:'2',sandbox:'workspace-write',path:'C:/projects/review-workspace/',transcript:{blocks:[],status:'Ready'}};
+  fixture.view.surfaces.main={...structuredClone(fixture.base),generation:'2',selection:'2',workspace:command.workspace,creation:{workspace_id:command.workspace,session_id:fixture.base.session,agent_preset_id:null},sandbox:'workspace-write',path:'C:/projects/review-workspace/',transcript:{blocks:[],status:'Ready'}};
  }
  await fixture.frame();return '{}';
 });
@@ -33,7 +35,7 @@ try {for(const [name,engine] of Object.entries({chromium,firefox})) {
   await page.getByRole('menuitemradio',{name:'Read Only',exact:true}).click();
   await page.getByRole('button',{name:'Access mode, current: Read Only',exact:true}).waitFor();
   assert.equal(await page.getByRole('textbox',{name:'Main message',exact:true}).inputValue(),'Keep the starting draft');
-  await page.getByRole('button',{name:'review-workspace',exact:true}).waitFor();
+  await page.getByRole('region',{name:'Conversations',exact:true}).getByRole('button',{name:'review-workspace',exact:true}).waitFor();
   await page.evaluate(async()=>{fixture.view.catalog.workspaces[0].name='Named workspace';await fixture.frame();});
   await page.getByRole('region',{name:'Conversations',exact:true}).getByRole('button',{name:'Named workspace',exact:true}).waitFor();
   await page.screenshot({path:join(report,name+'-ready.png')});
