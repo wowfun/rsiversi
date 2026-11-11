@@ -67,6 +67,24 @@ test('explicit retries deduplicate in-flight cleanup and retain the original con
   waiting.reject(new Error('refused'));await tick();assert.equal(owner.cleanup.size,1);
   owner.retire();owner.retry('panel:1:2');assert.equal(calls,1);
 });
+test('cleanup keeps its failure visible while retrying and clears it only on success',async()=>{
+  for(const succeeds of [false,true]){
+    const waiting=deferred();let calls=0;
+    const owner=new ResourceOwner(()=>++calls===1?Promise.reject(new Error('first refusal')):waiting.promise);
+    owner.reservePanel('session',entry(),'Workspace files').commit();await tick();
+    const failure=owner.getSnapshot()[0];
+    owner.retry(failure.key);owner.retry(failure.key);
+    assert.deepEqual(owner.getSnapshot(),[{...failure,busy:true}]);
+    await tick();assert.equal(calls,2);
+    if(succeeds)waiting.resolve();else waiting.reject(new Error('second refusal'));
+    await tick();
+    if(succeeds){
+      assert.deepEqual(owner.getSnapshot(),[]);
+      assert.equal(owner.cleanup.size,1,'the close receipt still awaits frame reconciliation');
+      owner.observe([]);assert.equal(owner.cleanup.size,0);
+    }else assert.deepEqual(owner.getSnapshot(),[{...failure,error:'second refusal'}]);
+  }
+});
 test('pending close consumes the exact late receipt without requiring a frame',async()=>{
   const waiting=deferred(),calls=[];
   const owner=new ResourceOwner((method,text)=>{calls.push([method,JSON.parse(text)]);return method==='resource_open'?waiting.promise:Promise.resolve()},()=> 'request-a');

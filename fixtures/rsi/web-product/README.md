@@ -38,7 +38,8 @@ canonical URLs across tickets, explicit retry and URL disposal on retirement.
 The cache's capacity, byte accounting and LRU invariants have adjacent Node tests.
 
 The review lifecycle fixture exercises current React resource owners against real
-IndexedDB, including delayed opens and window replacement. It also covers
+IndexedDB, including delayed opens and window replacement. Failures retain
+screenshots, DOM and state reports. It also checks
 Settings editor mode switches, exact JSON retention, UTF-8 byte limits
 and read-only controls after rebuilding the form. Device-storage tests
 verify that failure to reserve cleanup aborts the layout transaction. UI alignment
