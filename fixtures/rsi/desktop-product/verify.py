@@ -521,8 +521,9 @@ try:
         click('#workspaces [data-testid="conversation-open"]')
     if args.reload:
         reload_session = script('return document.querySelector(".pane.selected").dataset.sessionId')
+        assert script(SAVED_INPUT, [reload_session]) is True
         fill('textarea[aria-label="Main message"]', 'saved across document reload')
-        until(lambda: script(SAVED_INPUT, [daemon_metadata['endpoint_id'], reload_session, 'saved across document reload']) is True)
+        until(lambda: script(SAVED_INPUT, [reload_session, 'saved across document reload']) is True)
         call('POST',root+'/refresh',{})
         until(lambda: script('return document.querySelector("#workbench")?.hidden===false'),45)
         observe_document()

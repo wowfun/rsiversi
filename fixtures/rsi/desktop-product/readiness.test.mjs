@@ -21,16 +21,24 @@ for (const [name, engine] of Object.entries({chromium, firefox})) {
       browser = await engine.launch({headless: true});
       const page = await browser.newPage();
       await page.goto(`http://127.0.0.1:${server.address().port}`);
+      assert.equal(await page.evaluate(source => new Function(source)('captured-session'), savedInput), true);
       await page.evaluate(async () => {
         const {DraftStore} = await import('/drafts.js');
-        const store = await DraftStore.open('a'.repeat(32), {kind: 'local'});
+        const store = await DraftStore.open('a'.repeat(32), {kind: 'device', device_id: 'b'.repeat(32)});
         let record = await store.ensure('main', 'captured-session', 'c'.repeat(64), null);
         record = await store.edit(record, 'sa', [], []);
         window.fixtureDraft = {store, record};
       });
-      const check = (session = 'captured-session') => page.evaluate(({source, session}) => new Function(source)('a'.repeat(32), session, 'saved across document reload'), {source: savedInput, session});
+      const check = (session = 'captured-session') => page.evaluate(({source, session}) => new Function(source)(session, 'saved across document reload'), {source: savedInput, session});
       assert.equal(await page.locator('textarea').inputValue(), 'saved across document reload');
       assert.equal(await check(), false, 'visible text and partial durable text do not establish a saved draft');
+      await page.evaluate(async () => {
+        const {DraftStore} = await import('/drafts.js');
+        const other = await DraftStore.open('a'.repeat(32), {kind: 'local'});
+        const record = await other.ensure('main', 'captured-session', 'c'.repeat(64), null);
+        await other.edit(record, 'saved across document reload', [], []);
+      });
+      assert.equal(await check(), false, 'a full draft in the Host local namespace cannot satisfy the Device writer');
       await page.evaluate(async () => {const {store, record} = fixtureDraft;fixtureDraft.record = await store.edit(record, 'saved across document reload', [], []);});
       assert.equal(await check(), true);
       assert.equal(await check('another-session'), false, 'another Session cannot satisfy the captured draft');
