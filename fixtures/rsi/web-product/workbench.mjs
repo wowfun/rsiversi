@@ -67,7 +67,7 @@ for(const [name,engine] of Object.entries({chromium,firefox})) {
     const group=page.getByTestId('workspace-group').filter({has:page.getByRole('button',{name:'workspace',exact:true})});
     const toggle=group.getByRole('button',{name:'workspace',exact:true});
     if(await toggle.getAttribute('aria-expanded')!=='true')await toggle.click();
-    const row=group.locator(`[data-testid="conversation-row"][data-session-id="${emptyIdentity}"]`);
+    const row=page.locator(`#sessions [data-testid="conversation-row"][data-session-id="${emptyIdentity}"]`);
     const queries=await page.evaluate(()=>window.navigationQueries);
     await navigationOptions(page);
     await page.getByRole('menuitem',{name:'Refresh',exact:true}).click();
