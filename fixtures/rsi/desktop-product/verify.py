@@ -528,7 +528,7 @@ try:
         until(lambda: script('return document.querySelector("#workbench")?.hidden===false'),45)
         observe_document()
         select_retained_session()
-        assert script('return document.querySelector(".pane.selected").dataset.sessionId') == reload_session
+        until(lambda: script('return document.querySelector(".pane.selected")?.dataset.sessionId') == reload_session)
         until(lambda: script(r'''return document.querySelector('textarea[aria-label="Main message"]')?.value==='saved across document reload';'''))
         screenshot('reloaded.png')
         (args.report/'reload.json').write_text(json.dumps({'reload':True,'draftRetained':True,'session':reload_session,'savedBeforeReload':True}))

@@ -296,7 +296,7 @@ manual comparison evidence, not screenshot baselines. `--reload` performs an
 actual WebDriver document refresh after the owning DraftStore confirms the exact
 text for the captured Session. A passive edit observer retains the actual writer,
 including its authenticated Device namespace; Host metadata does not select it.
-It reselects that Session and verifies
+It waits for the reselected Session's identity after native click delivery, then verifies
 its saved draft survives observer replacement. Like restart, it does not assume
 the new Pane retains its previous in-memory selection. Document-local transport
 and trusted-input probes are reattached before later native gestures. This is distinct from
