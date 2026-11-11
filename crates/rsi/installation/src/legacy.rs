@@ -481,8 +481,10 @@ mod tests {
     }
     impl Fixture {
         fn new() -> Self {
-            let temporary =
-                tempfile::tempdir_in(std::env::temp_dir().canonicalize().unwrap()).unwrap();
+            let temporary = tempfile::tempdir_in(rsi_workspace_path::canonical_native_path(
+                std::env::temp_dir().canonicalize().unwrap(),
+            ))
+            .unwrap();
             let root = temporary.path();
             let paths = HostPaths::new(root.join("config"), root.join("state"), root.join("cache"))
                 .unwrap();
@@ -648,6 +650,58 @@ mod tests {
             fixture.preserved();
         }
     }
+    #[cfg(windows)]
+    #[test]
+    fn recovery_waits_for_a_transient_windows_sharing_violation() {
+        use std::os::windows::fs::OpenOptionsExt as _;
+
+        let fixture = Fixture::new();
+        let transaction = fixture.begin();
+        transaction.promote().unwrap();
+        let blocker = std::fs::OpenOptions::new()
+            .read(true)
+            .share_mode(1)
+            .open(&fixture.executable)
+            .unwrap();
+        let release = std::thread::spawn(move || {
+            std::thread::sleep(std::time::Duration::from_millis(200));
+            drop(blocker);
+        });
+        let result = transaction.rollback();
+        release.join().unwrap();
+        result.unwrap();
+        assert_eq!(std::fs::read(&fixture.executable).unwrap(), b"previous");
+        transaction.finish(false).unwrap();
+        fixture.preserved();
+    }
+
+    #[cfg(windows)]
+    #[test]
+    fn persistent_windows_sharing_keeps_recovery_intent_and_previous_bytes() {
+        use std::os::windows::fs::OpenOptionsExt as _;
+
+        let fixture = Fixture::new();
+        let transaction = fixture.begin();
+        transaction.promote().unwrap();
+        let blocker = std::fs::OpenOptions::new()
+            .read(true)
+            .share_mode(1)
+            .open(&fixture.executable)
+            .unwrap();
+        assert_eq!(transaction.rollback().unwrap_err().raw_os_error(), Some(32));
+        assert!(CoreUpgrade::has_pending(fixture.executable.parent().unwrap()).unwrap());
+        assert_eq!(std::fs::read(&fixture.executable).unwrap(), b"candidate");
+        assert_eq!(
+            std::fs::read(transaction.home.path.join(&transaction.journal.previous)).unwrap(),
+            b"previous"
+        );
+        drop(blocker);
+        transaction.rollback().unwrap();
+        transaction.finish(false).unwrap();
+        assert_eq!(std::fs::read(&fixture.executable).unwrap(), b"previous");
+        fixture.preserved();
+    }
+
     #[test]
     fn foreign_homes_and_changed_participants_are_refused_before_recovery() {
         let fixture = Fixture::new();

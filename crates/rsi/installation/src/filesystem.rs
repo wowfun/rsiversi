@@ -180,7 +180,19 @@ pub fn rename(dir: &Directory, from: &str, to: &str, replace: bool) -> Result<()
     #[cfg(windows)]
     {
         native::set_relative_private_file_permissions_no_follow(dir, Path::new(from))?;
-        dir.publish_child(Path::new(from), Path::new(to), EntryKind::File, replace)?;
+        let mut retries = 0;
+        let mut delay = std::time::Duration::from_millis(20);
+        loop {
+            match dir.publish_child(Path::new(from), Path::new(to), EntryKind::File, replace) {
+                Ok(()) => break,
+                Err(failure) if failure.raw_os_error() == Some(32) && retries < 8 => {
+                    std::thread::sleep(delay);
+                    retries += 1;
+                    delay = (delay * 2).min(std::time::Duration::from_millis(200));
+                }
+                Err(failure) => return Err(failure),
+            }
+        }
     }
     #[cfg(unix)]
     rustix::fs::renameat_with(

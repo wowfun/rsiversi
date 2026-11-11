@@ -401,6 +401,7 @@ fn windows_clippy_checks_the_workspace_once_and_keeps_native_behavior_checks() {
         "rsi-settings-api",
         "rsi-storage-domain",
         "rsi-automation",
+        "rsi-installation",
         "rsi-terminal",
         "rsi-serve",
         "rsi-session",

@@ -1074,7 +1074,7 @@ jobs:
       - name: Test private owners and their unsupported platform boundaries
         if: ${{ !cancelled() && steps.native_toolchain.outcome == 'success' }}
         timeout-minutes: 20
-        run: cargo test --locked -p rsi-storage-json -p rsi-storage-sqlite -p rsi-settings-local -p rsi-media-local --all-targets --no-fail-fast
+        run: cargo test --locked -p rsi-storage-json -p rsi-storage-sqlite -p rsi-settings-local -p rsi-media-local -p rsi-installation --all-targets --no-fail-fast
       - name: Test Agent Store pure invariants and native admission boundaries
         if: ${{ !cancelled() && steps.native_toolchain.outcome == 'success' }}
         timeout-minutes: 20

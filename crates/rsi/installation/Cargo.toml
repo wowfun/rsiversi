@@ -27,6 +27,7 @@ winreg = "0.55"
 windows-sys = { version = "0.61.2", features = ["Win32_UI_WindowsAndMessaging"] }
 
 [dev-dependencies]
+rsi-workspace-path = { path = "../../rsi-workspace/path" }
 tempfile.workspace = true
 
 [lints]

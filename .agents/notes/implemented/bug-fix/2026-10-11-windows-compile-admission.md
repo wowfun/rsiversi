@@ -81,6 +81,9 @@ the source authority it requires. None supplies the missing protection.
 The Windows gate executes unfiltered native Process, Files, Credentials and ACP
 application tests alongside the private-store and client targets. Compilation
 and lint checks cannot substitute for their Windows-only behavior tests.
+The [installation owner](../../../../crates/rsi/installation/README.md) also runs
+its own Windows invariant suite: a consuming application's smoke test does not
+execute library unit tests or establish journal recovery under file sharing.
 
 Windows builds can expose subsequent compiler errors without granting unsupported
 authority. Native refusal tests assert zero new entries for absent and existing
