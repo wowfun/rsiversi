@@ -56,6 +56,11 @@ foreach ($name in @('PATH', 'CARGO_HOME', 'RUSTUP_HOME', 'RUSTUP_TOOLCHAIN', 'CA
     $value = [Environment]::GetEnvironmentVariable($name)
     if ($null -ne $value) { $environment[$name] = $value }
 }
+if (-not $environment['RUSTUP_TOOLCHAIN']) {
+    $activeToolchain = & rustup show active-toolchain
+    if ($LASTEXITCODE -ne 0) { throw 'Cannot resolve the selected native test toolchain' }
+    $environment['RUSTUP_TOOLCHAIN'] = ($activeToolchain -split ' ', 2)[0]
+}
 $configuration = @{
     workspace = (Get-Location).Path
     manifest = (Resolve-Path -LiteralPath $Manifest).Path

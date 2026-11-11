@@ -488,14 +488,15 @@ mod tests {
             let root = temporary.path();
             let paths = HostPaths::new(root.join("config"), root.join("state"), root.join("cache"))
                 .unwrap();
-            for path in [paths.config(), paths.state(), &root.join("bin")] {
+            for path in [paths.config(), paths.state()] {
                 rsi_files_native_fs::create_absolute_directory_no_follow(path).unwrap();
             }
-            let executable = root
-                .join("bin")
-                .join(if cfg!(windows) { "rsi.exe" } else { "rsi" });
+            let bin = root.join("bin");
+            let directory = rsi_files_native_fs::create_absolute_directory_no_follow(&bin).unwrap();
+            let name = if cfg!(windows) { "rsi.exe" } else { "rsi" };
+            let executable = bin.join(name);
             let candidate = root.join("update");
-            std::fs::write(&executable, b"previous").unwrap();
+            fs::write(&directory, name, b"previous", false).unwrap();
             std::fs::write(&candidate, b"candidate").unwrap();
             std::fs::write(root.join("bin/unrelated"), b"keep").unwrap();
             Self {
