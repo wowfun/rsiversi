@@ -681,6 +681,44 @@ mod tests {
         }
     }
 
+    #[tokio::test]
+    #[ignore = "report-only active-capture scan and output pipeline measurement"]
+    async fn active_capture_write_cost() {
+        for count in [1, 64, 256] {
+            let root = tempfile::tempdir().unwrap();
+            let cache = Cache::open(OutputCacheConfig {
+                directory: root.path().join("output"),
+                maximum_stream_bytes: 2 * 1024 * 1024,
+                maximum_total_bytes: 512 * 1024 * 1024,
+                maximum_files: 256,
+            })
+            .unwrap();
+            let mut captures = Vec::new();
+            for _ in 0..count {
+                captures.push(cache.capture().unwrap());
+                // A read is a worker barrier; its absent identity performs no file read.
+                assert!(cache.read(&"f".repeat(32), 0, 1).await.is_err());
+            }
+            let chunk = [b'x'; 1024];
+            let started = std::time::Instant::now();
+            for _ in 0..16 {
+                for _ in 0..64 {
+                    captures[0].push(&chunk);
+                }
+                assert!(cache.read(&"f".repeat(32), 0, 1).await.is_err());
+            }
+            captures[0].finish().await;
+            assert!(captures[0].reference().is_some());
+            eprintln!(
+                "output-cache active={count} writes=1024 bytes=1048576 barriers=16 elapsed={:?} estimated_scan_visits_before_finish={}",
+                started.elapsed(),
+                count * (1024 + 16)
+            );
+            drop(captures);
+            cache.shutdown().await.unwrap();
+        }
+    }
+
     #[test]
     fn failed_unlink_keeps_reservations_and_closes_capture_admission() {
         for finish in [false, true] {

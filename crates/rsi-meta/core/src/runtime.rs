@@ -93,12 +93,34 @@ pub struct Runtime {
     inner: Arc<RuntimeInner>,
 }
 
+/// Coalesced Runtime invalidation notifications without borrowed publication locks.
+#[derive(Debug)]
+pub struct RuntimeChanges(watch::Receiver<u64>);
+
+impl RuntimeChanges {
+    /// Copies the latest revision and marks it observed.
+    pub fn revision(&mut self) -> u64 {
+        *self.0.borrow_and_update()
+    }
+
+    /// Reports whether a newer publication is waiting, or whether the Runtime closed.
+    pub fn has_changed(&self) -> std::result::Result<bool, watch::error::RecvError> {
+        self.0.has_changed()
+    }
+
+    /// Waits for a publication, then copies its revision and marks it observed.
+    pub async fn changed(&mut self) -> std::result::Result<u64, watch::error::RecvError> {
+        self.0.changed().await?;
+        Ok(self.revision())
+    }
+}
+
 impl fmt::Debug for Runtime {
     fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
         let state = self.inner.state.lock().expect("runtime state poisoned");
         formatter
             .debug_struct("Runtime")
-            .field("revision", &state.revision)
+            .field("revision", &*state.revision.borrow())
             .field("fibers", &state.fibers.len())
             .field(
                 "shutting_down",
@@ -109,6 +131,7 @@ impl fmt::Debug for Runtime {
 }
 
 struct RuntimeInner {
+    revision: watch::Sender<u64>,
     composition_order: Arc<CompositionOrder>,
     empty_local_event_bindings: std::sync::OnceLock<Arc<crate::local_events::LocalEventBindings>>,
     execution: crate::Execution,
@@ -140,7 +163,7 @@ struct RuntimeInner {
 }
 
 struct RuntimeState {
-    revision: u64,
+    revision: watch::Sender<u64>,
     fibers: BTreeMap<FiberId, Arc<Fiber>>,
     dependents: HashMap<ServiceSlot, BTreeSet<FiberId>>,
     providers: HashMap<ServiceSlot, SupplyEntry>,
@@ -164,7 +187,8 @@ struct ReconciliationFrontier {
 
 impl RuntimeState {
     fn advance_revision(&mut self) {
-        self.revision = self.revision.saturating_add(1);
+        self.revision
+            .send_modify(|revision| *revision = revision.saturating_add(1));
     }
 }
 
@@ -472,8 +496,10 @@ impl Runtime {
             limits.topology.maximum_queued_capability_references,
             Arc::clone(&resources.pending_message_sends),
         ));
+        let (revision, _) = watch::channel(0);
         Ok(Self {
             inner: Arc::new(RuntimeInner {
+                revision: revision.clone(),
                 empty_local_event_bindings: std::sync::OnceLock::new(),
                 composition_order: CompositionOrder::new(
                     limits.topology.maximum_composition_positions,
@@ -483,7 +509,7 @@ impl Runtime {
                 limits,
                 resources,
                 state: Mutex::new(RuntimeState {
-                    revision: 0,
+                    revision,
                     fibers: BTreeMap::new(),
                     dependents: HashMap::new(),
                     providers: HashMap::new(),
@@ -552,12 +578,18 @@ impl Runtime {
         self.inner.resources.snapshot()
     }
 
+    /// Watches coalesced registry, lifecycle, terminal, and shutdown revisions.
+    /// Pull an inspection page after a change; this stream retains no snapshots.
+    pub fn subscribe(&self) -> RuntimeChanges {
+        RuntimeChanges(self.inner.revision.subscribe())
+    }
+
     /// Captures bounded membership, then reads each Fiber outside the registry lock.
     pub fn snapshot(&self) -> RuntimeSnapshot {
         let (revision, terminal, fibers) = {
             let state = self.inner.state.lock().expect("runtime state poisoned");
             (
-                state.revision,
+                *state.revision.borrow(),
                 state.terminal.clone(),
                 state.fibers.values().cloned().collect::<Vec<_>>(),
             )
@@ -591,7 +623,10 @@ impl Runtime {
             if self.inner.shutdown.is_complete() {
                 return;
             }
-            state.terminal.get_or_insert(reason);
+            if state.terminal.is_none() {
+                state.terminal = Some(reason);
+                state.advance_revision();
+            }
         }
         self.inner.runtime_admission.close();
         self.inner.terminal_cancellation.cancel();
@@ -803,20 +838,6 @@ impl Runtime {
             fiber: owner.fiber,
             generation: owner.generation,
         })
-    }
-
-    fn validate_owner_data(owner: Owner, data: &FiberData) -> Result<()> {
-        let valid_state = matches!(
-            data.state,
-            FiberState::Loading | FiberState::Active | FiberState::Unloading
-        );
-        if data.generation != owner.generation || !valid_state {
-            return Err(MetaError::StaleContext {
-                fiber: owner.fiber,
-                generation: owner.generation,
-            });
-        }
-        Ok(())
     }
 
     fn validate_live_owner_data(owner: Owner, data: &FiberData) -> Result<()> {

@@ -455,6 +455,7 @@ impl Runtime {
                 if matches!(data.state, FiberState::Failed(_)) {
                     data.state = FiberState::Pending(PendingReport::default());
                 }
+                fiber.publish_snapshot(&data);
                 (true, Some(previous))
             }
         };

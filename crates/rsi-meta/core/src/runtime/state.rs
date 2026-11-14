@@ -90,7 +90,7 @@ pub struct FiberSnapshot {
 /// Point-in-time observation of Runtime lifecycle and registered Fibers.
 #[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
 pub struct RuntimeSnapshot {
-    /// Monotonic registry revision.
+    /// Monotonic registry and lifecycle revision; coalesced by `Runtime::subscribe`.
     pub revision: u64,
     /// Whether shutdown admission has closed.
     pub shutting_down: bool,

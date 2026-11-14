@@ -133,8 +133,11 @@ mod tests {
         let _entered = executor.enter();
         let runtime = Runtime::default();
         let mut state = runtime.inner.state.lock().expect("runtime state poisoned");
-        state.revision = u64::MAX;
+        state.revision.send_replace(u64::MAX);
+        let mut changes = state.revision.subscribe();
         state.advance_revision();
-        assert_eq!(state.revision, u64::MAX);
+        assert_eq!(*changes.borrow_and_update(), u64::MAX);
+        state.advance_revision();
+        assert!(changes.has_changed().unwrap());
     }
 }

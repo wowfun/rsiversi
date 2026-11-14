@@ -193,7 +193,7 @@ pub struct InspectedFiber {
 /// Bounded observation across registry, Fiber, order and effect boundaries.
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct RuntimeInspection {
-    /// Registry revision at membership capture.
+    /// Registry and lifecycle revision at membership capture.
     pub revision: u64,
     /// Shutdown admission has closed.
     pub shutting_down: bool,
@@ -232,7 +232,11 @@ impl Runtime {
             let state = self.inner.state.lock().expect("runtime state poisoned");
             let belongs =
                 |fiber: &Fiber| scope.is_none_or(|owner| belongs_to(fiber, owner, &state));
-            let total = state.fibers.values().filter(|fiber| belongs(fiber)).count();
+            let total = if scope.is_none() {
+                state.fibers.len()
+            } else {
+                state.fibers.values().filter(|fiber| belongs(fiber)).count()
+            };
             let lower = request.after.map_or(Unbounded, Excluded);
             let mut selected = state
                 .fibers
@@ -245,7 +249,7 @@ impl Runtime {
                 .cloned()
                 .collect::<Vec<_>>();
             (
-                state.revision,
+                *state.revision.borrow(),
                 state.terminal.is_some(),
                 total,
                 selected.next().is_some(),

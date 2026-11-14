@@ -54,8 +54,8 @@ pub use runtime::{
     MAXIMUM_JSON_DEPTH, MAXIMUM_OPERATION_DEADLINE, MAXIMUM_WATERFALL_LISTENERS_PER_SLOT,
     PayloadLimits, PendingReason, PendingReport, PreparedPlugin, RegistrationContext,
     RegistrationLease, RegistrationOrderSnapshot, RegistrationPosition, RegistrationRank,
-    ResourceUsageSnapshot, Runtime, RuntimeIdentity, RuntimeInspection, RuntimeLimits,
-    RuntimeResourceSnapshot, RuntimeSnapshot, SupplyHandle, TopologyLimits,
+    ResourceUsageSnapshot, Runtime, RuntimeChanges, RuntimeIdentity, RuntimeInspection,
+    RuntimeLimits, RuntimeResourceSnapshot, RuntimeSnapshot, SupplyHandle, TopologyLimits,
 };
 
 pub use service::{

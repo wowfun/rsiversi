@@ -85,8 +85,7 @@ impl Runtime {
                         target_revision,
                     });
                     data.last_attempt = Some((target_revision, attempt));
-                    let snapshot = data.snapshot(fiber.id);
-                    fiber.watch.send_replace(snapshot);
+                    fiber.publish_snapshot(&data);
                     let capabilities = Arc::clone(
                         &data
                             .active
@@ -360,9 +359,7 @@ impl Runtime {
             .published = true;
         data.last_attempt = None;
         data.state = FiberState::Active;
-        let snapshot = data.snapshot(fiber.id);
-        fiber.watch.send_replace(snapshot);
-        state.advance_revision();
+        fiber.publish_snapshot(&data);
         let changed = services
             .into_iter()
             .map(|(slot, _binding)| slot)

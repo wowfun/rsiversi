@@ -85,7 +85,7 @@ impl Context {
         catalog_key: &str,
         isolation: LocalIsolationId,
     ) -> Result<Self> {
-        let _runtime_admission = self.runtime.begin_admission(false)?;
+        let _runtime_admission = self.runtime.begin_admission()?;
         if catalog_key.len() > self.runtime.inner.limits.payloads.maximum_identifier_bytes {
             return Err(MetaError::InvalidInput(
                 "Local contract identifier exceeds the configured byte limit".to_owned(),
@@ -143,7 +143,7 @@ impl Context {
         catalog_key: &str,
         isolation: LocalIsolationId,
     ) -> Result<Self> {
-        let _runtime_admission = self.runtime.begin_admission(false)?;
+        let _runtime_admission = self.runtime.begin_admission()?;
         if catalog_key.len() > self.runtime.inner.limits.payloads.maximum_identifier_bytes {
             return Err(MetaError::InvalidInput(
                 "Local event identifier exceeds the configured byte limit".to_owned(),
@@ -286,7 +286,7 @@ impl Context {
     /// Unbranched scope chains mutate their uniquely owned map in place; a
     /// cloned sibling causes copy-on-write and remains unchanged.
     pub fn isolate(self, service: impl AsRef<str>, isolation: IsolationId) -> Result<Self> {
-        let _runtime_admission = self.runtime.begin_admission(false)?;
+        let _runtime_admission = self.runtime.begin_admission()?;
         self.isolate_admitted(service.as_ref(), isolation)
     }
 
@@ -311,7 +311,7 @@ impl Context {
 
     /// Consumes this value and selects a newly allocated isolation identity.
     pub fn isolate_fresh(self, service: impl AsRef<str>) -> Result<(Self, IsolationId)> {
-        let _runtime_admission = self.runtime.begin_admission(false)?;
+        let _runtime_admission = self.runtime.begin_admission()?;
         let isolation = self.runtime.next_isolation_id()?;
         Ok((
             self.isolate_admitted(service.as_ref(), isolation)?,
@@ -721,6 +721,7 @@ impl FiberHandle {
                         data.state = FiberState::Pending(PendingReport::default());
                     }
                     data.last_attempt = None;
+                    fiber.publish_snapshot(&data);
                     (retired_desired, retired_attempts)
                 };
                 drop(retired_desired);
@@ -796,9 +797,20 @@ impl Fiber {
 
     pub(super) fn set_state(&self, state: FiberState) {
         let mut data = self.data.lock().expect("fiber state poisoned");
+        if data.state == state {
+            return;
+        }
         data.state = state;
-        let snapshot = data.snapshot(self.id);
-        self.watch.send_replace(snapshot);
+        self.publish_snapshot(&data);
+    }
+
+    pub(super) fn publish_snapshot(&self, data: &FiberData) {
+        self.watch.send_replace(data.snapshot(self.id));
+        if let Some(runtime) = self.runtime.upgrade() {
+            runtime
+                .revision
+                .send_modify(|revision| *revision = revision.saturating_add(1));
+        }
     }
 }
 

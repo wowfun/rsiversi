@@ -6,6 +6,66 @@ use rsi_meta::{
 use serde_json::{Value, json};
 use std::sync::Arc;
 
+#[tokio::test]
+async fn revision_watch_observes_lifecycle_without_registry_changes_and_coalesces() {
+    #[derive(Debug, Default)]
+    struct GatedFailure {
+        entered: tokio::sync::Notify,
+        release: tokio::sync::Notify,
+    }
+    #[async_trait]
+    impl PluginFactory for GatedFailure {
+        fn prepare(&self, desired: &Value) -> rsi_meta::Result<PreparedActivation> {
+            Ok(PreparedActivation::new(desired.clone()))
+        }
+        async fn activate(&self, _: ActivationPlan) -> rsi_meta::Result<()> {
+            self.entered.notify_one();
+            self.release.notified().await;
+            Err(rsi_meta::MetaError::Service("failure after gate".into()))
+        }
+    }
+    let runtime = Runtime::default();
+    let mut changes = runtime.subscribe();
+    let factory = Arc::new(GatedFailure::default());
+    let apply = tokio::spawn({
+        let runtime = runtime.clone();
+        let factory = factory.clone();
+        async move {
+            runtime
+                .root()
+                .apply(
+                    ResolvedFactory::linked("gated", "1", UpdateMode::Replayable, factory),
+                    Value::Null,
+                )
+                .await
+                .unwrap()
+        }
+    });
+    factory.entered.notified().await;
+    let loading = changes.revision();
+    factory.release.notify_one();
+    let fiber = apply.await.unwrap();
+    assert!(changes.has_changed().unwrap());
+    assert!(changes.revision() > loading);
+    assert_eq!(
+        runtime
+            .inspect(InspectionRequest::default())
+            .unwrap()
+            .fibers[0]
+            .state,
+        InspectedFiberState::Failed
+    );
+    assert!(fiber.dispose().await.is_clean());
+    runtime.mark_terminal("test terminal");
+    assert!(runtime.shutdown().await.is_clean());
+    changes.changed().await.unwrap();
+    assert_eq!(changes.revision(), runtime.snapshot().revision);
+    assert!(!changes.has_changed().unwrap());
+    drop(fiber);
+    drop(runtime);
+    assert!(changes.changed().await.is_err());
+}
+
 #[derive(Debug)]
 struct Failed;
 #[async_trait]
@@ -83,6 +143,55 @@ async fn inspection_is_bounded_redacted_and_pages_live_membership() {
     assert!(terminal.terminal);
     assert!(!format!("{terminal:?}").contains("secret"));
     assert!(runtime.shutdown().await.is_complete());
+}
+
+#[tokio::test]
+#[ignore = "report-only bounded scoped and unscoped inspection measurement"]
+async fn inspection_scope_cost() {
+    for depth in [1, 128] {
+        let runtime = Runtime::default();
+        let contexts = Arc::new(std::sync::Mutex::new(Vec::new()));
+        runtime
+            .root()
+            .apply(node(Role::Parent, &contexts), Value::Null)
+            .await
+            .unwrap();
+        let scope = contexts.lock().unwrap()[0].clone();
+        let mut parent = scope.clone();
+        for index in 1..256 {
+            parent
+                .apply(node(Role::Parent, &contexts), Value::Null)
+                .await
+                .unwrap();
+            if index < depth {
+                parent = contexts.lock().unwrap().last().unwrap().clone();
+            }
+        }
+        for scoped in [false, true] {
+            let started = std::time::Instant::now();
+            for _ in 0..100 {
+                let page = if scoped {
+                    scope.inspect(InspectionRequest {
+                        maximum_fibers: 64,
+                        ..InspectionRequest::default()
+                    })
+                } else {
+                    runtime.inspect(InspectionRequest {
+                        maximum_fibers: 64,
+                        ..InspectionRequest::default()
+                    })
+                }
+                .unwrap();
+                assert_eq!(page.total_fibers, 256);
+                assert_eq!(page.fibers.len(), 64);
+            }
+            eprintln!(
+                "inspection scoped={scoped} fibers=256 depth={depth} pages=100 elapsed={:?}",
+                started.elapsed()
+            );
+        }
+        assert!(runtime.shutdown().await.is_complete());
+    }
 }
 
 struct Number;
