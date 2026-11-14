@@ -53,6 +53,37 @@ fn check(events: impl IntoIterator<Item = LanguageEvent>, expected: Result<(), &
 }
 
 #[test]
+fn invalid_terminal_is_rejected_before_it_can_be_retained_as_evidence() {
+    for (tool, reason, code) in [
+        (
+            Some(false),
+            FinishReason::ToolCalls,
+            "stream.finish_reason_mismatch",
+        ),
+        (
+            Some(true),
+            FinishReason::Stop,
+            "stream.finish_reason_mismatch",
+        ),
+        (None, FinishReason::Stop, "stream.empty_output"),
+    ] {
+        let mut validator = LanguageStreamValidator::new();
+        if let Some(tool) = tool {
+            validator.push(&start(0, tool)).unwrap();
+            validator
+                .push(&LanguageEvent::ContentFinished { index: 0 })
+                .unwrap();
+        }
+        validator
+            .push(&LanguageEvent::Usage {
+                usage: TokenUsage::default(),
+            })
+            .unwrap();
+        assert_eq!(validator.push(&end(reason)).unwrap_err().code(), code);
+    }
+}
+
+#[test]
 fn evidence_validation_preserves_terminal_and_block_grammar() {
     check([], Err("stream.missing_finish"));
     check([end(FinishReason::Stop)], Err("stream.empty_output"));

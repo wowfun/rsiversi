@@ -139,6 +139,20 @@ impl LanguageStreamValidator {
                         "language stream finished while a content block remained open",
                     ));
                 }
+                if !matches!(reason, FinishReason::MaxTokens | FinishReason::Cancelled) {
+                    if self.blocks.is_empty() {
+                        return Err(StreamError::invalid(
+                            "stream.empty_output",
+                            "successful language output must contain at least one content block",
+                        ));
+                    }
+                    if matches!(reason, FinishReason::ToolCalls) != self.has_tool_call {
+                        return Err(StreamError::invalid(
+                            "stream.finish_reason_mismatch",
+                            "tool-call finish reason must match the assembled content",
+                        ));
+                    }
+                }
                 self.finish_reason = Some(reason.clone());
             }
             LanguageEvent::Failed { .. } => self.failed = true,
@@ -151,27 +165,12 @@ impl LanguageStreamValidator {
         if self.failed {
             return Ok(());
         }
-        let reason = self.finish_reason.as_ref().ok_or_else(|| {
+        self.finish_reason.as_ref().ok_or_else(|| {
             StreamError::invalid(
                 "stream.missing_finish",
                 "language stream ended without a terminal event",
             )
         })?;
-        if matches!(reason, FinishReason::MaxTokens | FinishReason::Cancelled) {
-            return Ok(());
-        }
-        if self.blocks.is_empty() {
-            return Err(StreamError::invalid(
-                "stream.empty_output",
-                "successful language output must contain at least one content block",
-            ));
-        }
-        if matches!(reason, FinishReason::ToolCalls) != self.has_tool_call {
-            return Err(StreamError::invalid(
-                "stream.finish_reason_mismatch",
-                "tool-call finish reason must match the assembled content",
-            ));
-        }
         Ok(())
     }
 

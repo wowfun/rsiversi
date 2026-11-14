@@ -225,6 +225,19 @@ fn language_stream_rejects_out_of_order_or_post_terminal_events() {
     assert_eq!(error.code(), "stream.content_not_started");
 
     let mut post_terminal = LanguageAssembler::new();
+    for event in [
+        LanguageEvent::ContentStarted {
+            index: 0,
+            content: ContentStart::Text,
+        },
+        LanguageEvent::ContentDelta {
+            index: 0,
+            delta: ContentDelta::Text("done".into()),
+        },
+        LanguageEvent::ContentFinished { index: 0 },
+    ] {
+        post_terminal.push(&event).unwrap();
+    }
     post_terminal
         .push(&LanguageEvent::Finished {
             reason: FinishReason::Stop,

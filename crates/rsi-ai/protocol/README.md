@@ -64,7 +64,9 @@ for durable envelopes. `LanguageStreamValidator` owns ordering, aggregate bounds
 and terminal grammar across the stream. It retains block states and counters,
 not content, sources, warnings, replay payloads, or provider errors. A valid
 Failed, MaxTokens, or Cancelled stream is admissible evidence; validation alone
-never authorizes Tool execution. Discard a validator after an error.
+never authorizes Tool execution. `push(Finished)` checks terminal relationships
+before accepting the terminal event; `finish()` verifies terminal presence.
+Discard a validator after an error.
 `LanguageAssembler` uses that same validator before retaining content in index
 order. It adds output collection and encoded retention accounting only for
 consumers that need assembled output. Its serialized state is diagnostic, not
