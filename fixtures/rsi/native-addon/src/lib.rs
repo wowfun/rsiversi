@@ -152,6 +152,7 @@ impl NativeInstance for Instance {
                             .map_err(|error| error.to_string())?,
                             timeout_ms: 5_000,
                             scheduling: Scheduling::Exclusive,
+                            requires_full_access: false,
                         })
                     })
                     .collect::<Result<Vec<_>, String>>()?;

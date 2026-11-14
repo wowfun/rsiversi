@@ -15,21 +15,25 @@ struct AuthenticatedEcho(EchoTool);
 
 #[derive(Debug)]
 struct RequestEcho {
+    requires_full_access: bool,
     replaced: Option<Arc<std::collections::BTreeSet<String>>>,
     middleware: Option<Arc<dyn rsi_tools_protocol::ToolMiddleware>>,
     catalogs: Arc<dyn rsi_tools_protocol::ToolCatalogProvider>,
     echo: Arc<AuthenticatedEcho>,
     captures: AtomicUsize,
     selections: Mutex<Vec<rsi_agent_session_protocol::ModelSelection>>,
+    previous: Mutex<Option<std::sync::Weak<dyn rsi_tools_protocol::ToolRuntime>>>,
 }
 
 impl RequestEcho {
     fn new(stack: &BaseStack, calls: Arc<AtomicUsize>) -> Self {
         Self {
+            requires_full_access: false,
             replaced: None,
             middleware: None,
             captures: AtomicUsize::new(0),
             selections: Mutex::new(vec![]),
+            previous: Mutex::new(None),
             catalogs: stack
                 .runtime
                 .root()
@@ -58,6 +62,14 @@ impl rsi_agent_composition_protocol::RequestToolSource for RequestEcho {
     ) -> rsi_agent_composition_protocol::Result<rsi_agent_composition_protocol::RequestToolCatalog>
     {
         assert_eq!(reserved.contains("echo"), self.middleware.is_some());
+        assert!(
+            self.previous
+                .lock()
+                .unwrap()
+                .as_ref()
+                .is_none_or(|previous| previous.upgrade().is_none()),
+            "the settled request must release its view before the next capture"
+        );
         self.selections.lock().unwrap().push(selection.clone());
         let stage = self.catalogs.begin_stage().unwrap();
         let mut registrations = std::collections::BTreeMap::new();
@@ -69,12 +81,19 @@ impl rsi_agent_composition_protocol::RequestToolSource for RequestEcho {
                     .registrar()
                     .register(ToolRegistration {
                         output: None,
-                        definition: ToolDefinition::new(
-                            "echo",
-                            "Only for this request",
-                            json!({"type":"object"}),
-                        )
-                        .unwrap(),
+                        definition: {
+                            let definition = ToolDefinition::new(
+                                "echo",
+                                "Only for this request",
+                                json!({"type":"object"}),
+                            )
+                            .unwrap();
+                            if self.requires_full_access {
+                                definition.requiring_full_access()
+                            } else {
+                                definition
+                            }
+                        },
                         run_policy: rsi_tools_protocol::ToolRunPolicy::execution(
                             std::time::Duration::from_secs(2),
                         ),
@@ -85,6 +104,8 @@ impl rsi_agent_composition_protocol::RequestToolSource for RequestEcho {
         } else {
             None
         };
+        let runtime = stage.seal().unwrap();
+        *self.previous.lock().unwrap() = Some(Arc::downgrade(&runtime));
         Ok(rsi_agent_composition_protocol::RequestToolCatalog {
             middleware: self.middleware.clone(),
             inputs: None,
@@ -92,7 +113,7 @@ impl rsi_agent_composition_protocol::RequestToolSource for RequestEcho {
             generation: "process-generation".into(),
             receipt_source: None,
             registrations,
-            runtime: stage.seal().unwrap(),
+            runtime,
         })
     }
 }
@@ -1054,6 +1075,96 @@ async fn denied_approval_persists_the_prepared_call_without_starting_the_tool() 
     ));
     drop(tool_lease);
     stack.dispose(language, executor).await;
+}
+
+#[tokio::test]
+async fn privileged_application_uses_actual_turn_mode_and_keeps_independent_approval() {
+    for (mode, override_mode, require_approval, decision) in [
+        (SandboxMode::ReadOnly, None, false, ApprovalDecision::Deny),
+        (
+            SandboxMode::WorkspaceWrite,
+            None,
+            false,
+            ApprovalDecision::Deny,
+        ),
+        (
+            SandboxMode::WorkspaceWrite,
+            None,
+            false,
+            ApprovalDecision::AllowOnce,
+        ),
+        (
+            SandboxMode::DangerFullAccess,
+            None,
+            false,
+            ApprovalDecision::Deny,
+        ),
+        (
+            SandboxMode::DangerFullAccess,
+            None,
+            true,
+            ApprovalDecision::Deny,
+        ),
+        (
+            SandboxMode::WorkspaceWrite,
+            Some(SandboxMode::DangerFullAccess),
+            false,
+            ApprovalDecision::Deny,
+        ),
+    ] {
+        let stack = BaseStack::activate_with_approval(decision).await;
+        let calls = Arc::new(AtomicUsize::new(0));
+        let mut source = RequestEcho::new(&stack, calls.clone());
+        source.requires_full_access = true;
+        let worker = activate_fixture(
+            &stack.runtime,
+            "test.request-tools",
+            "app",
+            Arc::new(RequestSourceFactory(Arc::new(source))),
+        )
+        .await;
+        let model = echo_then_answer(&stack);
+        let language = stack.activate_language("test.language", model).await;
+        let executor = stack.activate_executor("privileged-application").await;
+        let (submitted, outcome) = stack
+            .submit_and_wait_with_header(
+                "call echo",
+                override_mode,
+                header()
+                    .with_execution_policy(mode, require_approval)
+                    .unwrap(),
+            )
+            .await;
+        assert_eq!(outcome, TurnOutcome::Completed);
+        let asks =
+            require_approval || override_mode.unwrap_or(mode) != SandboxMode::DangerFullAccess;
+        let denied = asks && decision == ApprovalDecision::Deny;
+        assert_eq!(calls.load(Ordering::SeqCst), usize::from(!denied));
+        let facts = stack
+            .store
+            .read_facts(&submitted.session_id, 0, 64, FACT_PAGE_BYTES)
+            .await
+            .unwrap()
+            .facts;
+        let reviewed = facts
+            .iter()
+            .filter(|fact| {
+                matches!(
+                    fact.body(),
+                    SessionFactBody::ToolIntent {
+                        approval: Some(_),
+                        ..
+                    } | SessionFactBody::ToolRejected {
+                        rejection: rsi_agent_session_protocol::ToolRejection::ApprovalDenied { .. },
+                        ..
+                    }
+                )
+            })
+            .count();
+        assert_eq!(reviewed, usize::from(asks));
+        assert!(worker.dispose().await.is_clean());
+        stack.dispose(language, executor).await;
+    }
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]

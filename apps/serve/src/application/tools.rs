@@ -190,6 +190,7 @@ struct Captured {
 struct Row {
     definition: ToolDefinition,
     registration: String,
+    requires_full_access: bool,
     #[serde(rename = "timeout_ms", deserialize_with = "tool_deadline")]
     deadline: Option<Duration>,
 }
@@ -310,7 +311,11 @@ impl RequestToolSource for Source {
                 let name = row.definition.name().to_owned();
                 registrations.insert(name.clone(), row.registration.clone());
                 ToolRegistration {
-                    definition: row.definition,
+                    definition: if row.requires_full_access {
+                        row.definition.requiring_full_access()
+                    } else {
+                        row.definition
+                    },
                     output: None,
                     run_policy: ToolRunPolicy {
                         interaction: ToolInteraction::Automatic,

@@ -7550,6 +7550,7 @@ dependencies = [
  "rsi-sandbox-local",
  "rsi-service-host",
  "rsi-session-protocol",
+ "rsi-tools",
  "rsi-tools-protocol",
  "rsi-user-questions-protocol",
  "rsi-web-assets",

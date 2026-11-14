@@ -64,6 +64,7 @@ impl Endpoint {
                 1_000
             },
             scheduling: Scheduling::ParallelSafe,
+            requires_full_access: true,
         };
         if matches!(self.behavior, Behavior::EmptyDescription) {
             Vec::new()
@@ -296,6 +297,7 @@ async fn portable_registration_and_execution_use_the_existing_atomic_stage() {
             ToolScheduling::ParallelSafe
         );
         let prepared = tools.prepare("invocation-1", call()).unwrap();
+        assert!(prepared.requires_full_access());
         let identity = prepared.identity().clone();
         prepared
             .start(tool_start(CancellationToken::new()))

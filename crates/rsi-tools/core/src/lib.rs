@@ -659,6 +659,9 @@ struct Prepared {
 
 #[async_trait]
 impl PreparedToolCall for Prepared {
+    fn requires_full_access(&self) -> bool {
+        self.entry.definition.definition.requires_full_access()
+    }
     fn native_plan(&mut self) -> Option<rsi_tools_protocol::NativeToolPlan<'_>> {
         Some(rsi_tools_protocol::NativeToolPlan {
             call: &self.call,

@@ -17,7 +17,7 @@ catalog. Legacy sessions without that baseline remain readable as raw history;
 they cannot silently acquire a new typed execution contract.
 
 The [Tools protocol](../../../../crates/rsi-tools/protocol/README.md) owns
-declaration limits and the Portable version 2 boundary. `ToolDefinition` and
+declaration limits and the current Portable boundary. `ToolDefinition` and
 `ToolResult` retain their wire shapes; declarations do not add per-result durable
 fields or change Native ABI 3. The Session and Store owners independently version
 their formats, including the selected-reference change. Typed author rendering consumes one canonical Rust
@@ -41,6 +41,6 @@ Real Linux PTY, Chromium, Firefox and Linux desktop fixtures render persisted
 typed results. The declaration supplies interpretation, not authorization to
 execute a Tool or trust arbitrary presentation content.
 
-Portable version 2 requires rebuilding contributors. A deliberately limited
+Changes to the Portable version require rebuilding contributors. A deliberately limited
 schema dialect cannot directly import arbitrary external schemas; undeclared
 tools remain opaque until their adapter provides a supported declaration.

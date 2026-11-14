@@ -16,6 +16,8 @@ decision, rather than the Tool's package origin, determine the interaction.
 
 ## Decision
 
+The protocol and management-approval clauses below are extended by [management Turn authority](../architecture/2026-11-12-management-turn-authority.md). Ordinary application Tool policy remains applicable.
+
 Use the Turn's existing approval requirement and ordinary Tool policy contributors
 for application Tools. Report the application's actual unconfined execution mode
 to policy and approval review. Keep its captured owner, model origin and exact
@@ -37,4 +39,6 @@ approval requirements and policy refusals still apply. A policy requiring native
 approval and an application policy also returning ask may still cause two prompts;
 combining those decisions needs the unfinished cross-process preparation seam.
 This change does not grant sandbox enforcement to application code or introduce
-a trusted-name allowlist. Durable formats and application protocols are unchanged.
+a trusted-name allowlist. Durable formats and application protocols were unchanged
+by this decision; the later management-authority decision adds the trusted
+full-access field to application and Portable declarations.

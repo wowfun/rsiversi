@@ -82,9 +82,15 @@ impl PluginFactory for PortableToolsFactory {
                 Scheduling::ParallelSafe => ToolScheduling::ParallelSafe,
             };
             let name = tool.definition.name().to_owned();
+            let definition = tool.definition.with_scheduling(scheduling);
+            let definition = if tool.requires_full_access {
+                definition.requiring_full_access()
+            } else {
+                definition
+            };
             registrations.push(ToolRegistration {
                 output: tool.output.clone(),
-                definition: tool.definition.with_scheduling(scheduling),
+                definition,
                 run_policy: ToolRunPolicy::execution(std::time::Duration::from_millis(
                     tool.timeout_ms,
                 )),

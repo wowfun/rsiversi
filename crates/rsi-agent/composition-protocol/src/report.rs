@@ -58,6 +58,9 @@ struct PreparedReport {
 }
 #[async_trait]
 impl PreparedToolCall for PreparedReport {
+    fn requires_full_access(&self) -> bool {
+        false
+    }
     fn identity(&self) -> &ToolResultIdentity {
         &self.identity
     }

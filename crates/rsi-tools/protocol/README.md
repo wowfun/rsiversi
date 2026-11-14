@@ -1,5 +1,10 @@
 # rsi-tools-protocol
 
+Every `PreparedToolCall` explicitly declares its full-access requirement; wrappers
+must delegate it to the wrapped registration. There is no implicit `false` default.
+Registration metadata is trusted operator-selected code, not a sandbox against
+a malicious native tool provider.
+
 Local registrations separate `ToolInteraction` from an optional cooperative
 execution deadline in `ToolRunPolicy`. An automatic Tool may have no
 deadline; it still observes caller cancellation, catalog retirement and provider
@@ -7,6 +12,13 @@ shutdown. Human interaction retains exclusive-final scheduling and is unavailabl
 to Program calls. An execution deadline is a positive `Duration` representable by
 the runtime clock; the Local contract has no 600-second cap. The separately
 bounded Portable wire contract retains its own declared millisecond limit.
+
+A trusted registration can require full access. This process-local declaration
+travels with its prepared call, never with model arguments or provider schemas.
+Agent compares it with the actual Turn mode: any other mode requires approval
+for that call. Full access does not waive an independent approval requirement.
+This authorizes the requested operation without changing the Turn's mode or
+creating a standing management grant.
 
 `ToolBody` is a consuming continuation over immutable admitted arguments and
 execution authority. It checks the current cancellation token immediately before
@@ -121,11 +133,12 @@ has no migration reader.
 
 ## Portable contributions
 
-`portable` owns the version-2 `rsi.tools.portable` duplex byte protocol. The linked
+`portable` owns the version-3 `rsi.tools.portable` duplex byte protocol. The linked
 bridge requires one explicitly named Portable supply and the exact Local
 ToolRegistrar. Describe returns a nonempty atomic batch of at most 64 bounded
 definitions with owner-declared finite timeout of 1..=600,000 milliseconds
-and scheduling. Describe contains
+and scheduling. The required sibling `requires_full_access` field preserves
+trusted approval metadata independently of the model-visible definition. Describe contains
 no registration callback or authority; the bridge registers the entire validated
 batch through the ordinary unpublished stage. Sealing and generation ownership
 retain their existing meaning.

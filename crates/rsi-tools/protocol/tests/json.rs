@@ -7,6 +7,18 @@ use rsi_tools_protocol::{
 use serde_json::json;
 
 #[test]
+fn full_access_requirement_is_trusted_registration_data_not_model_wire() {
+    let definition = ToolDefinition::new("manage", "manage", true.into())
+        .unwrap()
+        .requiring_full_access();
+    assert!(definition.requires_full_access());
+    let wire = serde_json::to_value(&definition).unwrap();
+    assert!(wire.get("requires_full_access").is_none());
+    let decoded: ToolDefinition = serde_json::from_value(wire).unwrap();
+    assert!(!decoded.requires_full_access());
+}
+
+#[test]
 fn tool_scheduling_is_process_local_and_defaults_exclusive_on_decode() {
     for scheduling in [ToolScheduling::ParallelSafe, ToolScheduling::ExclusiveFinal] {
         let definition = ToolDefinition::new("read", "read", true.into())

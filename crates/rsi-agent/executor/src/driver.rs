@@ -1399,7 +1399,9 @@ impl Driver {
                     name: &name,
                     arguments: &arguments,
                     sandbox: execution_mode,
-                    require_approval: turn_policy.require_approval,
+                    require_approval: turn_policy.require_approval
+                        || (prepared.requires_full_access()
+                            && turn_policy.sandbox != SandboxMode::DangerFullAccess),
                 },
                 origin,
                 cancellation,

@@ -74,6 +74,7 @@ impl NativeInstance for Instance {
                         .map_err(|e| e.to_string())?,
                         timeout_ms: 5_000,
                         scheduling: Scheduling::Exclusive,
+                        requires_full_access: false,
                     }],
                 }
             }

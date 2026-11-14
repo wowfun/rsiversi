@@ -10,7 +10,7 @@ fn capture_deadlines_preserve_absence_fractional_and_long_values() {
     let row = |value: Value| {
         serde_json::from_value::<Row>(json!({
             "definition": {"name":"probe", "description":"probe", "input_schema":{}},
-            "registration":"registration", "timeout_ms":value
+            "registration":"registration", "timeout_ms":value, "requires_full_access":false
         }))
     };
     assert_eq!(row(Value::Null).unwrap().deadline, None);
@@ -33,6 +33,131 @@ fn capture_deadlines_preserve_absence_fractional_and_long_values() {
         assert!(row(value).is_err());
     }
     assert!(serde_json::from_value::<Row>(json!({"definition":{"name":"probe", "description":"probe", "input_schema":{}}, "registration":"registration"})).is_err());
+}
+
+#[tokio::test]
+#[expect(
+    clippy::too_many_lines,
+    reason = "Keep captured HTTP metadata and both prepared-call policy assertions in one end-to-end adapter test."
+)]
+async fn captured_full_access_policy_reaches_prepared_calls() {
+    use rsi_agent_session_protocol::{
+        AgentPresetId, FrozenAgentSettings, ModelSelection, SessionId,
+    };
+    use rsi_ai_protocol::ModelRef;
+    use rsi_meta::{ResolvedFactory, Runtime, UpdateMode};
+    use rsi_sandbox::SandboxMode;
+    use rsi_tools_protocol::{ToolCall, ToolCatalogProviderContract};
+    let runtime = Runtime::default();
+    let tools = runtime
+        .root()
+        .apply(
+            ResolvedFactory::linked(
+                "tools",
+                "test",
+                UpdateMode::Replayable,
+                Arc::new(rsi_tools::ToolsFactory),
+            ),
+            Value::Null,
+        )
+        .await
+        .unwrap();
+    let (socket, endpoint) = endpoint().await;
+    let (_sender, current) = watch::channel(Some(endpoint));
+    let source = Source {
+        profile: "fixture".into(),
+        replaced_preset_tools: None,
+        catalogs: runtime
+            .root()
+            .lookup_local::<ToolCatalogProviderContract>()
+            .unwrap(),
+        endpoint: current,
+        lifetime: CancellationToken::new(),
+        executions: Arc::new(Semaphore::new(8)),
+    };
+    let header = SessionHeader::new_local(
+        SessionId::new("session").unwrap(),
+        1,
+        "/workspace",
+        AgentPresetId::new("agent").unwrap(),
+        FrozenAgentSettings::new(
+            "default",
+            "system",
+            ModelRef::new("deployment", "model").unwrap(),
+            SandboxMode::WorkspaceWrite,
+            false,
+        )
+        .unwrap(),
+    )
+    .unwrap();
+    let selection = ModelSelection {
+        model: ModelRef::new("deployment", "model").unwrap(),
+        reasoning_effort: None,
+    };
+    let peer = async {
+        let mut input = BufReader::new(socket.accept().await.unwrap().0);
+        let mut line = String::new();
+        input.read_line(&mut line).await.unwrap();
+        assert_eq!(line, "POST /v1/capture HTTP/1.1\r\n");
+        let mut length = None;
+        loop {
+            line.clear();
+            input.read_line(&mut line).await.unwrap();
+            if line == "\r\n" {
+                break;
+            }
+            if let Some(value) = line.to_ascii_lowercase().strip_prefix("content-length: ") {
+                length = Some(value.trim().parse::<usize>().unwrap());
+            }
+        }
+        let mut bytes = vec![0; length.unwrap()];
+        input.read_exact(&mut bytes).await.unwrap();
+        let request: Value = serde_json::from_slice(&bytes).unwrap();
+        let rows: Vec<_> = [("ordinary", false), ("privileged", true)].into_iter().map(|(name, full)|
+            json!({"definition":{"name":name,"description":"fixture","input_schema":{}},"registration":name,"requires_full_access":full,"timeout_ms":null})).collect();
+        let body =
+            json!({"generation":"worker","view":request["view"],"tools":rows,"instructions":""})
+                .to_string();
+        input
+            .into_inner()
+            .write_all(
+                format!(
+                    "HTTP/1.1 200 OK\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{body}",
+                    body.len()
+                )
+                .as_bytes(),
+            )
+            .await
+            .unwrap();
+    };
+    let reserved = BTreeSet::new();
+    let (captured, ()) = tokio::time::timeout(Duration::from_secs(5), async {
+        tokio::join!(
+            source.capture(&header, &selection, &reserved, CancellationToken::new()),
+            peer
+        )
+    })
+    .await
+    .unwrap();
+    let catalog = captured.unwrap();
+    for (name, full) in [("ordinary", false), ("privileged", true)] {
+        let call = catalog
+            .runtime
+            .prepare(
+                "request",
+                ToolCall {
+                    id: name.into(),
+                    name: name.into(),
+                    arguments: json!({}),
+                },
+            )
+            .unwrap();
+        assert_eq!(call.requires_full_access(), full, "{name}");
+    }
+    drop(catalog);
+    drop(source);
+    assert!(tools.dispose().await.is_clean());
+    assert!(runtime.shutdown().await.is_clean());
 }
 
 pub(super) async fn endpoint() -> (TcpListener, Arc<Endpoint>) {

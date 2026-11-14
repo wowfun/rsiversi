@@ -87,6 +87,8 @@ pub struct ToolDefinition {
     scheduling: ToolScheduling,
     #[serde(skip)]
     program_role: ToolProgramRole,
+    #[serde(skip)]
+    requires_full_access: bool,
 }
 
 impl<'de> Deserialize<'de> for ToolDefinition {
@@ -141,6 +143,7 @@ impl ToolDefinition {
             freeform: None,
             scheduling: ToolScheduling::Exclusive,
             program_role: ToolProgramRole::Unavailable,
+            requires_full_access: false,
         })
     }
 
@@ -193,6 +196,18 @@ impl ToolDefinition {
     /// Returns the trusted owner declaration, never taken from model arguments.
     pub const fn program_role(&self) -> ToolProgramRole {
         self.program_role
+    }
+
+    /// Requires the orchestrator's full-access mode or approval for this call.
+    #[must_use]
+    pub const fn requiring_full_access(mut self) -> Self {
+        self.requires_full_access = true;
+        self
+    }
+
+    /// Trusted owner declaration, excluded from model-facing serialization.
+    pub const fn requires_full_access(&self) -> bool {
+        self.requires_full_access
     }
 }
 
@@ -1221,6 +1236,9 @@ pub enum RetainedToolResult {
 /// One Tool call pinned to the registration generation resolved at prepare.
 #[async_trait]
 pub trait PreparedToolCall: fmt::Debug + Send + 'static {
+    /// Requires full access or per-call approval in the owning orchestrator.
+    /// Wrappers must preserve the wrapped registration's requirement.
+    fn requires_full_access(&self) -> bool;
     /// Exposes the native continuation when this registration supports wrapping its body.
     fn native_plan(&mut self) -> Option<NativeToolPlan<'_>> {
         None

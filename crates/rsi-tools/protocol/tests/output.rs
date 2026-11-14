@@ -118,7 +118,7 @@ fn author_helper_uses_one_value_and_rejects_mismatches_without_leaking_it() {
 }
 
 #[test]
-fn portable_v2_roundtrips_declarations_and_preserves_result_shape() {
+fn portable_v3_roundtrips_declarations_and_preserves_result_shape() {
     use rsi_tools_protocol::{
         ToolDefinition,
         portable::{self, Definition, Response, Scheduling},
@@ -130,6 +130,7 @@ fn portable_v2_roundtrips_declarations_and_preserves_result_shape() {
             output: Some(output.clone()),
             timeout_ms: 1000,
             scheduling: Scheduling::Exclusive,
+            requires_full_access: true,
         }],
     };
     let Response::Description { tools } =
@@ -138,7 +139,9 @@ fn portable_v2_roundtrips_declarations_and_preserves_result_shape() {
         panic!()
     };
     assert_eq!(tools[0].output.as_ref(), Some(&output));
-    assert_eq!(portable::VERSION, 2);
+    assert_eq!(portable::VERSION, 3);
+    assert!(tools[0].requires_full_access);
+    assert!(!tools[0].definition.requires_full_access());
     assert!(
         serde_json::to_value(&tools[0].definition)
             .unwrap()

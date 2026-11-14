@@ -10,7 +10,7 @@ use std::path::PathBuf;
 /// Exact Portable contract name; service keys are selected by composition.
 pub const CONTRACT: &str = "rsi.tools.portable";
 /// Contract version.
-pub const VERSION: u32 = 2;
+pub const VERSION: u32 = 3;
 /// Maximum encoded bytes of one request or response frame.
 pub const MAXIMUM_FRAME_BYTES: usize = 256 * 1024;
 /// Maximum process-plan requests during one Tool execution.
@@ -40,6 +40,8 @@ pub struct Definition {
     pub timeout_ms: u64,
     /// Owner-declared overlap policy.
     pub scheduling: Scheduling,
+    /// Trusted owner metadata; never decoded from model-visible Tool arguments.
+    pub requires_full_access: bool,
 }
 
 /// Host-to-provider messages, in the exact phase order described by the contract.
