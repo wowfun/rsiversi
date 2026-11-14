@@ -15,6 +15,14 @@ so developers can rebuild the original binary while clients remain connected.
 Starting, embedded or unresponsive owners are never bypassed by another Host.
 Explicit SDK embedding remains available under the same exclusive leases.
 
+Before staging, Service preflight prepares the Session factory and the explicit
+required startup owners; ordinary leaf configuration is prepared during ordered
+Profile convergence. Application preflight prepares its declared linked application
+catalog, including argument validators, while extra plugin failures remain local.
+Source/identity errors still reject the complete program. Agent admission still
+requires the Session capability and every selected required startup owner to be
+Active; those typed dependencies also gate security and persistence providers.
+
 Closing an ordinary application releases its attachment. It does not stop the
 Host or other attachments. Reset and import require stopped home owners; core
 upgrade coordinates an explicit stop, verified replacement and start. Their

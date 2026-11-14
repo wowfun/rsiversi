@@ -1297,7 +1297,10 @@ impl StandardComposition {
             .map_err(|error| crate::RsiError::Boot(error.to_string()))?
             .profile_input(program)
             .map_err(|error| crate::RsiError::Boot(error.to_string()))?
-            .preflight_linked(&deferred)
+            .preflight_linked(&deferred, |instance, plugin| {
+                plugin.as_str() == SESSION_FACTORY
+                    || crate::STARTUP_OWNERS.contains(&instance.as_str())
+            })
             .map_err(|error| crate::RsiError::Boot(error.to_string()))
     }
 
@@ -2172,9 +2175,7 @@ fn register_contracts(builder: &mut StandardAddonBuilder) -> rsi_host::Result<()
     builder.register_local_contract::<ImageRegistrarContract>()?;
     builder.register_local_contract::<SessionStoreContract>()?;
     builder.register_local_contract::<rsi_session_protocol::SessionPurgeCleanupContract>()?;
-    builder
-        .register_local_contract::<rsi_agent_session_protocol::ReferenceCodecRegistrationContract>(
-        )?;
+
     builder.register_local_contract::<rsi_agent_context::ContextBudgetContract>()?;
     builder.register_local_contract::<rsi_agent_references::ReferencesContract>()?;
     builder.register_local_contract::<rsi_history::HistoryContract>()?;

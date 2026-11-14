@@ -42,7 +42,12 @@ async fn windows_application_bounds_discovery_of_an_owner_without_an_endpoint() 
         )
         .await
         .expect("owner discovery must finish within its bounded startup deadline");
-        assert!(result.is_err());
+        let running = result.expect("raw SDK Hosts retain the degraded Profile for inspection");
+        assert!(
+            running
+                .lookup_local::<rsi_session_protocol::SessionContract>()
+                .is_none()
+        );
         let diagnostic = format!("{:?}", diagnostics.take());
         let expected = if plugin == "rsi.application.connection" {
             "owner is active but did not publish a usable endpoint"
@@ -51,10 +56,11 @@ async fn windows_application_bounds_discovery_of_an_owner_without_an_endpoint() 
         };
         assert!(
             diagnostic.contains(expected),
-            "{plugin}: result={result:?}; diagnostic={diagnostic}"
+            "{plugin}: diagnostic={diagnostic}"
         );
         assert!(owner_paths.read_metadata().unwrap().is_none());
         assert!(rsi_service_host::HostOwnerLease::try_acquire(owner_paths.clone()).is_err());
+        assert!(running.shutdown().await.is_clean());
     }
     drop(lease);
     drop(rsi_service_host::HostOwnerLease::try_acquire(owner_paths).unwrap());
@@ -142,7 +148,12 @@ async fn invalid_remote_policy_and_device_arguments_prepare_before_any_backend()
             }),
         ),
     ]));
-    assert!(host.start_program(program).await.is_err());
+    assert!(
+        host.profile_input(program)
+            .unwrap()
+            .preflight_linked(&std::collections::BTreeSet::new(), |_, _| true)
+            .is_err()
+    );
     assert!(diagnostics.take().is_some());
     for arguments in [
         vec![],
@@ -177,7 +188,12 @@ async fn invalid_remote_policy_and_device_arguments_prepare_before_any_backend()
                 serde_json::Value::Null,
             ),
         ]));
-        assert!(host.start_program(program).await.is_err());
+        assert!(
+            host.profile_input(program)
+                .unwrap()
+                .preflight_linked(&std::collections::BTreeSet::new(), |_, _| true)
+                .is_err()
+        );
         assert!(diagnostics.take().is_some());
     }
     for path in [paths.config(), paths.state(), paths.cache()] {
@@ -234,8 +250,9 @@ async fn invalid_serve_transport_policy_is_rejected_before_service_activation() 
         )
         .unwrap();
         assert!(
-            host.start_program(profile.program().unwrap())
-                .await
+            host.profile_input(profile.program().unwrap())
+                .unwrap()
+                .preflight_linked(&std::collections::BTreeSet::new(), |_, _| true)
                 .is_err()
         );
         assert!(diagnostics.take().is_some());
@@ -391,29 +408,21 @@ async fn invalid_application_arguments_fail_before_any_standard_backend_or_asset
     let profile = ProfileCatalog::new(paths.clone(), rsi_app_catalog::metadata())
         .application(&ApplicationProfileId::new("headless").unwrap())
         .unwrap();
-    let (host, diagnostics) = standard_application_host(
-        rsi_app_catalog::compose(rsi::StandardComposition::new(
-            paths.clone(),
-            BTreeMap::new(),
-            None,
-            rsi_app_catalog::metadata(),
-        ))
-        .unwrap(),
-        vec!["--unknown".into()],
-    )
+    let composition = rsi_app_catalog::compose(rsi::StandardComposition::new(
+        paths.clone(),
+        BTreeMap::new(),
+        None,
+        rsi_app_catalog::metadata(),
+    ))
     .unwrap();
-    assert!(
-        host.start_program(profile.program().unwrap())
-            .await
-            .is_err()
-    );
-    assert!(
-        diagnostics
-            .take()
-            .unwrap()
-            .to_string()
-            .contains("unknown option")
-    );
+    let error = rsi::start_application(
+        composition,
+        vec!["--unknown".into()],
+        profile.program().unwrap(),
+    )
+    .await
+    .unwrap_err();
+    assert!(error.to_string().contains("unknown option"), "{error}");
     for path in [paths.config(), paths.state(), paths.cache()] {
         assert!(
             !path.exists(),
@@ -460,6 +469,29 @@ async fn ordinary_application_source_errors_are_rejected_by_the_shared_compiler_
         assert!(!paths.cache().exists());
         assert_eq!(std::fs::read_to_string(&path).unwrap(), source);
     }
+}
+
+#[tokio::test]
+async fn product_start_requires_a_published_application_entry_point() {
+    let temporary = tempfile::tempdir().unwrap();
+    let paths = HostPaths::new(
+        temporary.path().join("config"),
+        temporary.path().join("state"),
+        temporary.path().join("cache"),
+    )
+    .unwrap();
+    let composition = rsi_app_catalog::compose(rsi::StandardComposition::new(
+        paths,
+        BTreeMap::new(),
+        None,
+        rsi_app_catalog::metadata(),
+    ))
+    .unwrap();
+    let program = rsi_host::ProfileProgram::from_profile(rsi_host::Profile::new(vec![]));
+    let error = rsi::start_application(composition, vec![], program)
+        .await
+        .unwrap_err();
+    assert!(error.to_string().contains("entry point"), "{error}");
 }
 #[cfg(any(target_os = "linux", windows))]
 #[tokio::test]
@@ -590,10 +622,14 @@ async fn catalog_admits_independent_web_bundle_and_rejects_bootstrap_tampering()
             )]))
             .await;
         if corrupt {
+            let running = result.expect("raw SDK Hosts retain failed leaves for inspection");
             assert!(
-                result.is_err(),
-                "catalog must reject changed bootstrap bytes"
+                running
+                    .lookup_local::<rsi_api_http::HttpAssetsContract>()
+                    .is_none(),
+                "changed bootstrap bytes must never publish an assets service"
             );
+            assert!(running.shutdown().await.is_clean());
         } else {
             let running = result.expect("catalog must accept an independent bundle family");
             assert!(

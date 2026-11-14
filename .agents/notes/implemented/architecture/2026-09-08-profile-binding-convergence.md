@@ -10,6 +10,8 @@ Suffix rebuilding also retires unrelated members.
 
 ## Decision
 
+The ordinary-reload compensation rule below is superseded by [partial Profile convergence](2026-11-12-profile-partial-convergence.md). Exact binding and executable input-replacement rules remain applicable.
+
 Profile preserves exact group allocations and converges by InstanceId using
 stable composition positions. The
 opaque namespace is Runtime identity plus owning wrapper Fiber identity and

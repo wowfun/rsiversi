@@ -232,6 +232,31 @@ async fn invalid_linked_service_preflight_creates_no_product_directories() {
     assert!(!paths.cache().exists());
 }
 
+#[tokio::test]
+async fn optional_linked_service_configuration_does_not_block_the_session() {
+    let temp = tempfile::tempdir().unwrap();
+    fs::create_dir_all(temp.path().join("config")).unwrap();
+    fs::write(
+        temp.path().join("config/settings.json"),
+        r#"{"rsi.agent":{"default_model":{"deployment":"fixture","model":"unused"}}}"#,
+    )
+    .unwrap();
+    let profile = temp.path().join("optional.profile.toml");
+    fs::write(&profile, "format = 1\n[[steps]]\nkind = 'plugin'\nid = 'optional-model'\nplugin = 'rsi.ai.provider.deepseek'\nconfig = { invalid = true }\n").unwrap();
+    let running = rsi::RunningRsi::boot(composition(temp.path()), &profile)
+        .await
+        .unwrap();
+    assert_eq!(
+        running
+            .inspect(rsi_meta::InspectionRequest::default())
+            .unwrap()
+            .profile_status
+            .health(),
+        rsi_host::ProfileHealth::Degraded
+    );
+    assert!(running.shutdown().await.is_clean());
+}
+
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 async fn standalone_service_stages_before_resolving_and_follows_native_replacement() {
     let temp = tempfile::tempdir().unwrap();

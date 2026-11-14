@@ -328,6 +328,7 @@ fn update_attempt(
         },
         outcome: match value.outcome {
             ProfileAttemptOutcome::Applied => PluginUpdateOutcome::Applied,
+            ProfileAttemptOutcome::Partial => PluginUpdateOutcome::Partial,
             ProfileAttemptOutcome::Unchanged => PluginUpdateOutcome::Unchanged,
             ProfileAttemptOutcome::RestartRequired => PluginUpdateOutcome::RestartRequired,
             ProfileAttemptOutcome::RolledBack => PluginUpdateOutcome::RolledBack,

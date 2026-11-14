@@ -159,6 +159,11 @@ impl PluginFactory for ProbeFactory {
             )?;
         }
         let mode = plan.config().get("mode").and_then(Value::as_str);
+        if mode == Some("block-activation") {
+            let gate = self.cleanup_gate.as_ref().unwrap();
+            gate.started.notify_one();
+            gate.release.notified().await;
+        }
         if matches!(mode, Some("bound" | "bound-fail")) {
             let counter = plan.local::<ProbeContract>()?;
             let before = counter.load(Ordering::SeqCst);
@@ -201,6 +206,12 @@ impl PluginFactory for ProbeFactory {
                 }),
             )?;
         }
+        if mode == Some("cleanup-fail") {
+            plan.defer(
+                "reject fixture cleanup",
+                Box::new(|| Box::pin(async { Err("cleanup rejected".into()) })),
+            )?;
+        }
         self.starts.fetch_add(1, Ordering::SeqCst);
         Ok(())
     }
@@ -216,6 +227,17 @@ struct Resolver {
 }
 
 impl ProfileResolver for Resolver {
+    fn validate_successor(&self, successor: &dyn ProfileResolver) -> rsi_meta_profile::Result<()> {
+        assert_eq!(
+            self.local_contract_type("test.local")?,
+            successor.local_contract_type("test.local")?
+        );
+        assert_eq!(
+            self.local_event_type("test.event")?,
+            successor.local_event_type("test.event")?
+        );
+        Ok(())
+    }
     fn resolve(&self, plugin: &rsi_meta::PluginId) -> rsi_meta_profile::Result<ResolvedFactory> {
         if plugin.as_str() == "supply" {
             return Ok(ResolvedFactory::linked(
@@ -284,6 +306,230 @@ fn write_profile(path: &std::path::Path, mode: &str) {
     .unwrap();
 }
 
+#[tokio::test]
+async fn closing_control_joins_initial_activation_without_resurrecting_admission() {
+    let temp = tempfile::tempdir().unwrap();
+    write_profile(&temp.path().join("profile.toml"), "block-activation");
+    let runtime = Runtime::new(RuntimeLimits::default()).unwrap();
+    let gate = Arc::new(CleanupGate::default());
+    let input = rsi_meta_profile::ProfileInput::new(
+        Arc::new(Resolver {
+            starts: Arc::new(AtomicUsize::new(0)),
+            fail_once: Arc::new(AtomicUsize::new(0)),
+            prepare_calls: Arc::new(AtomicUsize::new(0)),
+            mode: UpdateMode::Replayable,
+            cleanup_gate: Some(gate.clone()),
+        }),
+        ProfileProgram::from_file(temp.path().join("profile.toml")),
+        environment(temp.path()),
+        ProfileLimits::default(),
+    );
+    let bootstrap = ProfileBootstrap::prepare_input(&runtime, input.clone()).unwrap();
+    let updater = bootstrap.updater();
+    let control = bootstrap.control();
+    let root = runtime.root();
+    let activation = tokio::spawn(async move {
+        root.apply(
+            ResolvedFactory::linked(
+                "rsi.meta.profile",
+                "test",
+                UpdateMode::RestartRequired,
+                bootstrap.factory(),
+            ),
+            Value::Null,
+        )
+        .await
+        .unwrap()
+    });
+    gate.started.notified().await;
+    let closing = updater.close();
+    tokio::pin!(closing);
+    let closed_early = std::future::poll_fn(|cx| {
+        std::task::Poll::Ready(std::future::Future::poll(closing.as_mut(), cx).is_ready())
+    })
+    .await;
+    gate.release.notify_one();
+    let handle = activation.await.unwrap();
+    if !closed_early {
+        closing.await;
+    }
+    assert!(matches!(control.status().health(), ProfileHealth::Stopped));
+    assert!(matches!(
+        updater.submit(0, input),
+        Err(rsi_meta_profile::ProfileError::Stopped)
+    ));
+    assert!(runtime.shutdown().await.is_clean());
+    assert!(
+        !closed_early,
+        "close returned while initial activation was still running"
+    );
+    assert!(matches!(handle.snapshot().state, FiberState::Disposed));
+}
+
+#[tokio::test]
+async fn ordinary_reload_keeps_successful_siblings_and_retries_only_failed_leaves() {
+    fn write(path: &std::path::Path, middle: &str, revision: u8) {
+        std::fs::write(
+            path,
+            format!(
+                r#"format = 1
+[[steps]]
+kind = "plugin"
+id = "first"
+plugin = "probe"
+config = {{ revision = {revision} }}
+[[steps]]
+kind = "plugin"
+id = "middle"
+plugin = "probe"
+config = {{ mode = "{middle}" }}
+[[steps]]
+kind = "plugin"
+id = "last"
+plugin = "probe"
+config = {{ revision = {revision} }}
+"#
+            ),
+        )
+        .unwrap();
+    }
+    let temp = tempfile::tempdir().unwrap();
+    let path = temp.path().join("profile.toml");
+    write(&path, "ok", 1);
+    let (runtime, handle, control, starts) = start(temp.path(), UpdateMode::Replayable).await;
+    assert_eq!(starts.load(Ordering::SeqCst), 3);
+    write(&path, "prepare-fail", 2);
+    let outcome = control.reload().await.unwrap();
+    assert!(
+        matches!(outcome, ReloadOutcome::Partial { .. }),
+        "{outcome:?}"
+    );
+    assert_eq!(outcome.status().health(), ProfileHealth::Degraded);
+    assert_eq!(outcome.status().target().len(), 3);
+    assert_eq!(outcome.status().observed().len(), 2);
+    assert_eq!(starts.load(Ordering::SeqCst), 5);
+    assert!(matches!(
+        control.reload().await.unwrap(),
+        ReloadOutcome::Partial { .. }
+    ));
+    assert_eq!(starts.load(Ordering::SeqCst), 5);
+    write(&path, "activate-fail", 2);
+    assert!(matches!(
+        control.reload().await.unwrap(),
+        ReloadOutcome::Partial { .. }
+    ));
+    assert_eq!(starts.load(Ordering::SeqCst), 5);
+    write(&path, "ok", 2);
+    assert!(matches!(
+        control.reload().await.unwrap(),
+        ReloadOutcome::Applied(_)
+    ));
+    assert_eq!(starts.load(Ordering::SeqCst), 6);
+    assert!(handle.dispose().await.is_clean());
+    assert!(runtime.shutdown().await.is_clean());
+}
+
+#[tokio::test(flavor = "current_thread")]
+async fn live_and_rollback_preparation_leave_the_executor_available() {
+    #[derive(Debug)]
+    struct Gate {
+        armed: std::sync::atomic::AtomicBool,
+        entered: Notify,
+        release: Mutex<std::sync::mpsc::Receiver<()>>,
+    }
+    #[async_trait]
+    impl PluginFactory for Gate {
+        fn prepare(&self, desired: &ConfigValue) -> rsi_meta::Result<PreparedActivation> {
+            if self.armed.load(Ordering::SeqCst) {
+                self.entered.notify_one();
+                self.release
+                    .lock()
+                    .unwrap()
+                    .recv_timeout(Duration::from_secs(5))
+                    .map_err(|_| {
+                        MetaError::InvalidConfig(
+                            "async executor could not release preparation".into(),
+                        )
+                    })?;
+            }
+            Ok(PreparedActivation::new(desired.clone()))
+        }
+        async fn activate(&self, plan: ActivationPlan) -> rsi_meta::Result<()> {
+            if plan.config()["mode"] == "fail" {
+                Err(MetaError::InvalidConfig("reject candidate".into()))
+            } else {
+                Ok(())
+            }
+        }
+    }
+    #[derive(Debug)]
+    struct GatedResolver(Arc<Gate>);
+    impl ProfileResolver for GatedResolver {
+        fn validate_successor(&self, _: &dyn ProfileResolver) -> rsi_meta_profile::Result<()> {
+            Ok(()) // This fixture has no nominal Local or event markers.
+        }
+        fn resolve(
+            &self,
+            plugin: &rsi_meta::PluginId,
+        ) -> rsi_meta_profile::Result<ResolvedFactory> {
+            Ok(ResolvedFactory::linked(
+                plugin.clone(),
+                "gate",
+                UpdateMode::Replayable,
+                self.0.clone(),
+            ))
+        }
+    }
+    let temp = tempfile::tempdir().unwrap();
+    let path = temp.path().join("profile.toml");
+    write_profile(&path, "ok");
+    let (release, receiver) = std::sync::mpsc::channel();
+    let gate = Arc::new(Gate {
+        armed: false.into(),
+        entered: Notify::new(),
+        release: Mutex::new(receiver),
+    });
+    let runtime = Runtime::default();
+    let input = rsi_meta_profile::ProfileInput::new(
+        Arc::new(GatedResolver(gate.clone())),
+        ProfileProgram::from_file(&path).with_watch_policy(false.into()),
+        environment(temp.path()),
+        ProfileLimits::default(),
+    );
+    let bootstrap = ProfileBootstrap::prepare_input(&runtime, input.clone()).unwrap();
+    let updater = bootstrap.updater();
+    let _control = bootstrap.control();
+    let handle = runtime
+        .root()
+        .apply(
+            ResolvedFactory::linked(
+                "rsi.meta.profile",
+                "test",
+                UpdateMode::RestartRequired,
+                bootstrap.factory(),
+            ),
+            Value::Null,
+        )
+        .await
+        .unwrap();
+    gate.armed.store(true, Ordering::SeqCst);
+    write_profile(&path, "fail");
+    let reload = tokio::spawn(async move { replace(&updater, &input).await });
+    for _ in 0..2 {
+        tokio::time::timeout(Duration::from_secs(2), gate.entered.notified())
+            .await
+            .expect("preparation did not enter");
+        // This continuation runs on the sole async worker while prepare is blocked.
+        release.send(()).unwrap();
+    }
+    assert!(matches!(
+        reload.await.unwrap(),
+        ReloadOutcome::RolledBack { .. }
+    ));
+    assert!(handle.dispose().await.is_clean());
+    assert!(runtime.shutdown().await.is_clean());
+}
+
 fn write_isolated_pair(path: &std::path::Path, revision: usize, mode: &str) {
     std::fs::write(
         path,
@@ -318,7 +564,15 @@ async fn isolated_suffix_replacement_and_rollback_keep_the_retained_provider_bin
     let temp = tempfile::tempdir().unwrap();
     let path = temp.path().join("profile.toml");
     write_isolated_pair(&path, 0, "bound");
-    let (runtime, handle, control, starts) = start(temp.path(), UpdateMode::Replayable).await;
+    let (runtime, handle, control, starts, updater, input) = start_input_in_runtime(
+        Runtime::default(),
+        temp.path(),
+        UpdateMode::Replayable,
+        ProfileLimits::default(),
+        None,
+        false,
+    )
+    .await;
     assert_eq!(starts.load(Ordering::SeqCst), 1);
     let original = control.status().observed()[0].clone();
     let provider = || {
@@ -328,11 +582,11 @@ async fn isolated_suffix_replacement_and_rollback_keep_the_retained_provider_bin
     };
     let original_fiber = provider();
     assert!(matches!(
-        control.reload().await.unwrap(),
+        replace(&updater, &input).await,
         ReloadOutcome::Unchanged(_)
     ));
     write_isolated_pair(&path, 1, "bound");
-    let outcome = control.reload().await.unwrap();
+    let outcome = replace(&updater, &input).await;
     assert!(matches!(outcome, ReloadOutcome::Applied(_)));
     assert!(
         matches!(
@@ -345,7 +599,7 @@ async fn isolated_suffix_replacement_and_rollback_keep_the_retained_provider_bin
     assert_eq!(outcome.status().observed()[0], original);
     assert_eq!(provider(), original_fiber);
     write_isolated_pair(&path, 2, "bound-fail");
-    let outcome = control.reload().await.unwrap();
+    let outcome = replace(&updater, &input).await;
     assert!(
         matches!(outcome, ReloadOutcome::RolledBack { .. }),
         "{outcome:?}"
@@ -370,6 +624,100 @@ fn write_ordered(path: &std::path::Path, ids: &[(&str, usize)]) {
             ).unwrap();
     }
     std::fs::write(path, source).unwrap();
+}
+
+#[tokio::test]
+async fn recovery_after_failed_compensation_retains_actual_positions_and_new_bindings() {
+    #[derive(Debug)]
+    struct AddedMarker(Resolver);
+    enum NewMarker {}
+    impl ProfileResolver for AddedMarker {
+        fn resolve(
+            &self,
+            plugin: &rsi_meta::PluginId,
+        ) -> rsi_meta_profile::Result<ResolvedFactory> {
+            self.0.resolve(plugin)
+        }
+        fn local_contract_type(&self, key: &str) -> rsi_meta_profile::Result<std::any::TypeId> {
+            if key == "new.marker" {
+                Ok(std::any::TypeId::of::<NewMarker>())
+            } else {
+                self.0.local_contract_type(key)
+            }
+        }
+        fn local_event_type(&self, key: &str) -> rsi_meta_profile::Result<std::any::TypeId> {
+            self.0.local_event_type(key)
+        }
+    }
+    let group = |source: String| {
+        source.replace("[[steps]]", "[[steps.nodes]]").replacen("format = 1\n", "format = 1\n[[steps]]\nkind = \"group\"\nid = \"new-group\"\n[steps.isolation]\nlocal = [{key = \"new.marker\", label = \"new\"}]\n", 1)
+    };
+    let temp = tempfile::tempdir().unwrap();
+    let path = temp.path().join("profile.toml");
+    write_ordered(&path, &[]);
+    let (runtime, handle, control, starts, updater, _original) = start_input_in_runtime(
+        Runtime::default(),
+        temp.path(),
+        UpdateMode::Replayable,
+        ProfileLimits::default(),
+        None,
+        false,
+    )
+    .await;
+    let input = rsi_meta_profile::ProfileInput::new(
+        Arc::new(AddedMarker(Resolver {
+            starts: starts.clone(),
+            fail_once: Arc::new(AtomicUsize::new(0)),
+            prepare_calls: Arc::new(AtomicUsize::new(0)),
+            mode: UpdateMode::Replayable,
+            cleanup_gate: None,
+        })),
+        ProfileProgram::from_file(path.clone()).with_watch_policy(false.into()),
+        environment(temp.path()),
+        ProfileLimits::default(),
+    );
+    write_ordered(&path, &[("a", 0), ("b", 1), ("c", 2)]);
+    let source = std::fs::read_to_string(&path)
+        .unwrap()
+        .replace("revision = 1", "revision = 1, mode = \"cleanup-fail\"")
+        .replace("revision = 2", "revision = 2, mode = \"activate-fail\"");
+    std::fs::write(&path, group(source)).unwrap();
+    assert!(matches!(
+        replace(&updater, &input).await,
+        ReloadOutcome::Degraded { .. }
+    ));
+    assert_eq!(
+        control
+            .status()
+            .observed()
+            .iter()
+            .map(|row| row.id().as_str())
+            .collect::<Vec<_>>(),
+        ["a"]
+    );
+    write_ordered(&path, &[("a", 0), ("d", 0)]);
+    std::fs::write(&path, group(std::fs::read_to_string(&path).unwrap())).unwrap();
+    assert!(matches!(
+        replace(&updater, &input).await,
+        ReloadOutcome::Applied(_)
+    ));
+    let order = Arc::new(Mutex::new(Vec::new()));
+    runtime
+        .root()
+        .dispatch_local::<OrderEvent>(order.clone())
+        .unwrap();
+    assert_eq!(*order.lock().unwrap(), ["a", "d"]);
+    assert_eq!(
+        starts.load(Ordering::SeqCst),
+        3,
+        "the retained a fiber must not restart"
+    );
+    let report = handle.dispose().await;
+    assert!(
+        !report.is_clean(),
+        "the injected cleanup failure remains evidence"
+    );
+    assert!(runtime.shutdown().await.is_complete());
 }
 
 #[tokio::test]
@@ -443,11 +791,11 @@ async fn exact_reload_reorders_and_replaces_only_the_changed_middle_leaf() {
     std::fs::write(&path, failed).unwrap();
     let outcome = control.reload().await.unwrap();
     assert!(
-        matches!(outcome, ReloadOutcome::RolledBack { .. }),
+        matches!(outcome, ReloadOutcome::Partial { .. }),
         "{outcome:?}"
     );
-    assert_eq!(starts.load(Ordering::SeqCst), 5);
-    assert_eq!(dispatch(), ["c", "b", "a"]);
+    assert_eq!(starts.load(Ordering::SeqCst), 4);
+    assert_eq!(dispatch(), ["c", "a"]);
     for revision in 0..32 {
         let middle = format!("new-{revision}");
         write(&[("c", 0), (&middle, 0), ("a", 0)]);
@@ -458,7 +806,7 @@ async fn exact_reload_reorders_and_replaces_only_the_changed_middle_leaf() {
         assert_eq!(dispatch(), ["c", &middle, "a"]);
         assert_eq!(runtime.snapshot().fibers.len(), 4);
     }
-    assert_eq!(starts.load(Ordering::SeqCst), 37);
+    assert_eq!(starts.load(Ordering::SeqCst), 36);
     assert!(handle.dispose().await.is_clean());
     assert!(runtime.shutdown().await.is_complete());
     clock.finish().await;
@@ -535,16 +883,24 @@ async fn named_groups_share_all_lanes_and_compensation_restores_exact_allocation
     let temp = tempfile::tempdir().unwrap();
     let path = temp.path().join("profile.toml");
     std::fs::write(&path, named_pair_source("shared", "bound")).unwrap();
-    let (runtime, handle, control, starts) = start(temp.path(), UpdateMode::Replayable).await;
+    let (runtime, handle, _control, starts, updater, input) = start_input_in_runtime(
+        Runtime::default(),
+        temp.path(),
+        UpdateMode::Replayable,
+        ProfileLimits::default(),
+        None,
+        false,
+    )
+    .await;
     assert_eq!(starts.load(Ordering::SeqCst), 1);
     std::fs::write(&path, named_pair_source("other", "bound")).unwrap();
     assert!(matches!(
-        control.reload().await.unwrap(),
+        replace(&updater, &input).await,
         ReloadOutcome::Applied(_)
     ));
     assert_eq!(starts.load(Ordering::SeqCst), 2);
     std::fs::write(&path, named_pair_source("failed", "bound-fail")).unwrap();
-    let outcome = control.reload().await.unwrap();
+    let outcome = replace(&updater, &input).await;
     assert!(
         matches!(outcome, ReloadOutcome::RolledBack { .. }),
         "{outcome:?}"
@@ -669,6 +1025,38 @@ async fn start_program_in_runtime(
     Arc<dyn rsi_meta_profile::ProfileControl>,
     Arc<AtomicUsize>,
 ) {
+    let (runtime, handle, control, starts, _, _) =
+        start_input_in_runtime(runtime, root, mode, limits, cleanup_gate, source_watch).await;
+    (runtime, handle, control, starts)
+}
+
+async fn replace(
+    updater: &rsi_meta_profile::ProfileUpdateHandle,
+    input: &rsi_meta_profile::ProfileInput,
+) -> ReloadOutcome {
+    updater
+        .submit(updater.input_revision(), input.clone())
+        .unwrap()
+        .wait()
+        .await
+        .unwrap()
+}
+
+async fn start_input_in_runtime(
+    runtime: Runtime,
+    root: &std::path::Path,
+    mode: UpdateMode,
+    limits: ProfileLimits,
+    cleanup_gate: Option<Arc<CleanupGate>>,
+    source_watch: impl Into<rsi_meta_profile::SourceWatchPolicy>,
+) -> (
+    Runtime,
+    rsi_meta::FiberHandle,
+    Arc<dyn rsi_meta_profile::ProfileControl>,
+    Arc<AtomicUsize>,
+    rsi_meta_profile::ProfileUpdateHandle,
+    rsi_meta_profile::ProfileInput,
+) {
     let starts = Arc::new(AtomicUsize::new(0));
     let resolver = Arc::new(Resolver {
         starts: Arc::clone(&starts),
@@ -677,14 +1065,14 @@ async fn start_program_in_runtime(
         mode,
         cleanup_gate,
     });
-    let bootstrap = ProfileBootstrap::prepare(
-        &runtime,
+    let input = rsi_meta_profile::ProfileInput::new(
         resolver,
         ProfileProgram::from_file(root.join("profile.toml")).with_watch_policy(source_watch.into()),
         environment(root),
         limits,
-    )
-    .unwrap();
+    );
+    let bootstrap = ProfileBootstrap::prepare_input(&runtime, input.clone()).unwrap();
+    let updater = bootstrap.updater();
     let control = bootstrap.control();
     let handle = runtime
         .root()
@@ -700,7 +1088,7 @@ async fn start_program_in_runtime(
         .await
         .unwrap();
     assert!(matches!(handle.snapshot().state, FiberState::Active));
-    (runtime, handle, control, starts)
+    (runtime, handle, control, starts, updater, input)
 }
 
 #[tokio::test]
@@ -745,6 +1133,9 @@ async fn late_child_failure_is_observed_and_its_diagnostic_is_bounded() {
     .expect("the Profile observer must not miss a child transition");
 
     assert!(status.diagnostic().unwrap().len() <= 8);
+    assert_eq!(status.observed()[0].state(), &ProfileInstanceState::Failed);
+    assert_eq!(control.status().health(), ProfileHealth::Degraded);
+    assert_eq!(control.status().diagnostic(), status.diagnostic());
     let _ = runtime.shutdown().await;
 }
 
@@ -804,10 +1195,18 @@ async fn just_in_time_preparation_and_failed_apply_replay_the_old_target() {
     let temp = tempfile::tempdir().unwrap();
     let path = temp.path().join("profile.toml");
     write_profile(&path, "ok");
-    let (runtime, _handle, control, starts) = start(temp.path(), UpdateMode::Replayable).await;
+    let (runtime, _handle, control, starts, updater, input) = start_input_in_runtime(
+        Runtime::default(),
+        temp.path(),
+        UpdateMode::Replayable,
+        ProfileLimits::default(),
+        None,
+        false,
+    )
+    .await;
 
     write_profile(&path, "prepare-fail");
-    let outcome = control.reload().await.unwrap();
+    let outcome = replace(&updater, &input).await;
     assert!(matches!(outcome, ReloadOutcome::RolledBack { .. }));
     assert!(matches!(&outcome, ReloadOutcome::RolledBack { error, .. }
         if error.contains("candidate rejected")));
@@ -819,7 +1218,7 @@ async fn just_in_time_preparation_and_failed_apply_replay_the_old_target() {
     );
 
     write_profile(&path, "activate-fail");
-    let outcome = control.reload().await.unwrap();
+    let outcome = replace(&updater, &input).await;
     assert!(matches!(outcome, ReloadOutcome::RolledBack { .. }));
     assert!(matches!(&outcome, ReloadOutcome::RolledBack { error, .. }
         if error.contains("activation rejected")));
@@ -839,11 +1238,19 @@ async fn rollback_preparation_failure_degrades_and_is_published_in_profile_statu
     let temp = tempfile::tempdir().unwrap();
     let path = temp.path().join("profile.toml");
     write_profile(&path, "old-prepare-fails-on-reload");
-    let (runtime, _handle, control, starts) = start(temp.path(), UpdateMode::Replayable).await;
+    let (runtime, _handle, control, starts, updater, input) = start_input_in_runtime(
+        Runtime::default(),
+        temp.path(),
+        UpdateMode::Replayable,
+        ProfileLimits::default(),
+        None,
+        false,
+    )
+    .await;
     assert_eq!(starts.load(Ordering::SeqCst), 1);
 
     write_profile(&path, "activate-fail");
-    let outcome = control.reload().await.unwrap();
+    let outcome = replace(&updater, &input).await;
     assert!(matches!(outcome, ReloadOutcome::Degraded { .. }));
     let status = control.status();
     assert_eq!(status.health(), ProfileHealth::Degraded);
@@ -856,6 +1263,69 @@ async fn rollback_preparation_failure_degrades_and_is_published_in_profile_statu
         matches!(outcome, ReloadOutcome::Degraded { rollback_error, .. }
         if rollback_error.contains("rollback preparation rejected"))
     );
+    let _ = runtime.shutdown().await;
+}
+
+#[tokio::test]
+async fn failed_restart_required_leaves_retry_unchanged_source() {
+    for mode in ["prepare-fail", "activate-fail-once"] {
+        let temp = tempfile::tempdir().unwrap();
+        write_profile(&temp.path().join("profile.toml"), mode);
+        let (runtime, _handle, control, starts) =
+            start(temp.path(), UpdateMode::RestartRequired).await;
+        assert_eq!(control.status().health(), ProfileHealth::Degraded);
+        let outcome = control.reload().await.unwrap();
+        if mode == "prepare-fail" {
+            assert!(
+                matches!(outcome, ReloadOutcome::Partial { .. }),
+                "{outcome:?}"
+            );
+            assert!(outcome.status().diagnostic().is_some());
+        } else {
+            assert!(matches!(outcome, ReloadOutcome::Applied(_)), "{outcome:?}");
+            assert_eq!(starts.load(Ordering::SeqCst), 1);
+        }
+        let _ = runtime.shutdown().await;
+    }
+}
+
+#[tokio::test]
+async fn replacement_after_partial_reload_restores_only_prior_usable_membership() {
+    let temp = tempfile::tempdir().unwrap();
+    let path = temp.path().join("profile.toml");
+    write_profile(&path, "ok");
+    let (runtime, _handle, control, starts, updater, input) = start_input_in_runtime(
+        Runtime::default(),
+        temp.path(),
+        UpdateMode::Replayable,
+        ProfileLimits::default(),
+        None,
+        false,
+    )
+    .await;
+    write_profile(&path, "prepare-fail");
+    assert!(matches!(
+        control.reload().await.unwrap(),
+        ReloadOutcome::Partial { .. }
+    ));
+    let before = control.status();
+    assert!(control.status().observed().is_empty());
+    write_profile(&path, "activate-fail");
+    let outcome = replace(&updater, &input).await;
+    assert!(
+        matches!(outcome, ReloadOutcome::RolledBack { .. }),
+        "{outcome:?}"
+    );
+    assert!(control.status().observed().is_empty());
+    assert_eq!(outcome.status().health(), ProfileHealth::Degraded);
+    assert_eq!(outcome.status().diagnostic(), before.diagnostic());
+    assert_eq!(starts.load(Ordering::SeqCst), 1);
+    write_profile(&path, "ok");
+    assert!(matches!(
+        control.reload().await.unwrap(),
+        ReloadOutcome::Applied(_)
+    ));
+    assert_eq!(starts.load(Ordering::SeqCst), 2);
     let _ = runtime.shutdown().await;
 }
 
@@ -1119,18 +1589,16 @@ async fn watcher_fault_during_convergence_never_publishes_a_partial_graph() {
             result.unwrap();
             changes.borrow_and_update().clone()
         });
+    let status = publication.unwrap_or_else(|| changes.borrow().clone());
+    assert_eq!(status.health(), ProfileHealth::Converging);
+    assert_eq!(
+        status.observed(),
+        converging.observed(),
+        "a queued watcher fault cannot expose a partial observed graph"
+    );
     write_profile(&path, "changed");
     gate.release.notify_one();
     let outcome = reload.await.unwrap().unwrap();
-
-    if let Some(status) = publication {
-        assert_eq!(status.watcher(), WatcherHealth::Faulted);
-        assert_eq!(
-            status.observed().len(),
-            1,
-            "watcher diagnostics must retain the last complete observed graph"
-        );
-    }
     assert!(matches!(outcome, ReloadOutcome::Applied(_)));
     let _ = runtime.shutdown().await;
 }
@@ -1165,27 +1633,30 @@ async fn watcher_backs_off_before_retrying_the_same_invalid_source() {
 }
 
 #[tokio::test]
-async fn watcher_does_not_reapply_the_same_candidate_after_successful_rollback() {
+async fn watcher_does_not_reapply_the_same_candidate_after_partial_success() {
     let temp = tempfile::tempdir().unwrap();
     let path = temp.path().join("profile.toml");
     write_profile(&path, "ok");
-    let (runtime, _handle, _control, starts) = start(temp.path(), UpdateMode::Replayable).await;
+    let (runtime, _handle, control, starts) = start(temp.path(), UpdateMode::Replayable).await;
     write_profile(&path, "activate-fail");
 
     tokio::time::timeout(Duration::from_secs(5), async {
-        while starts.load(Ordering::SeqCst) < 2 {
+        while control.status().last_attempt().is_none_or(|attempt| {
+            attempt.outcome != rsi_meta_profile::ProfileAttemptOutcome::Partial
+        }) {
             tokio::time::sleep(Duration::from_millis(20)).await;
         }
     })
     .await
-    .expect("the first failed candidate is rolled back");
-    let after_rollback = starts.load(Ordering::SeqCst);
+    .expect("the first failed candidate reports partial success");
+    let attempt = control.status().last_attempt().unwrap().sequence;
     tokio::time::sleep(Duration::from_millis(400)).await;
     assert_eq!(
-        starts.load(Ordering::SeqCst),
-        after_rollback,
+        control.status().last_attempt().unwrap().sequence,
+        attempt,
         "the same source candidate must wait for another source change or manual reload"
     );
+    assert_eq!(starts.load(Ordering::SeqCst), 1);
     let _ = runtime.shutdown().await;
 }
 
@@ -1238,7 +1709,7 @@ async fn degraded_same_source_is_not_suppressed_and_can_converge_on_retry() {
 
     write_profile(&path, "activate-fail-once");
     let first = control.reload().await.unwrap();
-    assert!(matches!(first, ReloadOutcome::Degraded { .. }));
+    assert!(matches!(first, ReloadOutcome::Partial { .. }));
     assert_eq!(first.status().health(), ProfileHealth::Degraded);
     assert!(
         first

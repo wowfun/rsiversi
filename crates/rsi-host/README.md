@@ -47,6 +47,10 @@ the returned bootstrap through Meta in its owned Context and retains its control
 handle. Scope creation, Local isolation and child disposal belong to that caller;
 preparation neither creates nor shuts down a Runtime. This supports embedded
 compositions under the same Runtime/Context/Fiber authority as their application.
+Bootstrap compilation and resolution precede activation; leaf preparation and
+activation then run in source order. Ordinary leaf failures remain visible in
+Profile status while healthy siblings stay active. The embedding product owns
+the explicit set of required services that gates its work admission.
 
 `Host::profile_input` captures the same complete frozen composition for submission
 through a running Profile's owner-only updater. Building a second Host never

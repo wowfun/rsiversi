@@ -41,9 +41,9 @@ fn test_compiler() -> AgentPresetProfileCompiler {
     AgentPresetProfileCompiler::new(
         ProfileCompiler::new(
             ProfileEnvironment::new(
-                "/test-config",
-                "/test-state",
-                "/test-cache",
+                std::env::temp_dir().join("test-config"),
+                std::env::temp_dir().join("test-state"),
+                std::env::temp_dir().join("test-cache"),
                 "test-platform",
                 BTreeMap::from([("feature".to_owned(), Value::Bool(true))]),
             )
@@ -75,8 +75,14 @@ async fn replacing_a_compiler_keeps_root_and_default_authority_without_changing_
     .unwrap();
     let replacement = AgentPresetProfileCompiler::new(
         ProfileCompiler::new(
-            ProfileEnvironment::new("/config", "/state", "/cache", "test", BTreeMap::new())
-                .unwrap(),
+            ProfileEnvironment::new(
+                std::env::temp_dir().join("config"),
+                std::env::temp_dir().join("state"),
+                std::env::temp_dir().join("cache"),
+                "test",
+                BTreeMap::new(),
+            )
+            .unwrap(),
             ProfileLimits::default(),
         ),
         ["test.replacement"],
@@ -1158,13 +1164,18 @@ async fn independent_catalogs_publish_the_same_id_without_clobbering() {
     let first = tokio::spawn(copy(first));
     let second = tokio::spawn(copy(second));
     let results = [first.await.unwrap(), second.await.unwrap()];
-    assert_eq!(results.iter().filter(|result| result.is_ok()).count(), 1);
+    assert_eq!(
+        results.iter().filter(|result| result.is_ok()).count(),
+        1,
+        "{results:?}"
+    );
     assert_eq!(
         results
             .iter()
             .filter(|result| matches!(result, Err(PresetError::PresetExists { .. })))
             .count(),
-        1
+        1,
+        "{results:?}"
     );
     assert_eq!(
         fs::read_to_string(user.join("mine").join(COMPOSITION_FILE)).unwrap(),

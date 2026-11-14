@@ -77,7 +77,7 @@ pub use import::{
     ImportReceipt, import_product_homes, recover_product_import, reject_pending_import,
 };
 pub use package_import::{
-    PackageAdmission, PackageImport, import_packages, import_profile_packages, local_package_source,
+    PackageAdmission, PackageImport, import_packages, local_package_source, stage_packages,
 };
 pub use process_extension::{PackageProcess, package_extension_factory, resolve_package_process};
 mod runtime_policy;
@@ -163,6 +163,7 @@ const STARTUP_OWNERS: &[&str] = &[
     "rsi.service.acp",
     "rsi.service.management",
     "rsi.managed-providers",
+    "rsi.profile-leaves",
     "rsi-history",
     "rsi.history.api",
     "rsi.attention",
@@ -198,16 +199,46 @@ fn startup_diagnostic(status: &rsi_host::ProfileStatus) -> String {
             ));
         }
     }
+    for target in status.target() {
+        if !STARTUP_OWNERS.contains(&target.id().as_str())
+            && !status.observed().iter().any(|row| row.id() == target.id())
+        {
+            total += 1;
+            if rows.len() < 16 {
+                rows.push(format!("{}=not observed", target.id()));
+            }
+        }
+    }
     if total > rows.len() {
         rows.push(format!("{} more non-active instances", total - rows.len()));
     }
     for &id in STARTUP_OWNERS {
         if !status.observed().iter().any(|row| row.id().as_str() == id)
-            && (status.health() != rsi_host::ProfileHealth::Converged
-                || status.target().iter().any(|row| row.id().as_str() == id))
+            && status.target().iter().any(|row| row.id().as_str() == id)
         {
             rows.push(format!("{id}=not observed"));
         }
+    }
+    #[cfg(unix)]
+    if status
+        .target()
+        .iter()
+        .any(|row| row.id().as_str() == "rsi.profile-leaves")
+        && !status.observed().iter().any(|row| {
+            row.id().as_str() == "rsi.profile-leaves"
+                && matches!(row.state(), rsi_host::ProfileInstanceState::Active)
+        })
+    {
+        // Project only the owner's fixed safe hint, never raw plugin diagnostics.
+        let hint = if status
+            .diagnostic()
+            .is_some_and(|message| message.ends_with(profile_management::STORAGE_REQUIREMENT))
+        {
+            profile_management::STORAGE_REQUIREMENT
+        } else {
+            profile_management::STORAGE_UNAVAILABLE
+        };
+        rows.push(hint.into());
     }
     format!("Profile {:?}; {}", status.health(), rows.join("; "))
 }
@@ -359,8 +390,7 @@ impl RunningRsi {
                             .iter()
                             .find(|instance| instance.id().as_str() == id);
                         match instance.map(rsi_host::ProfileInstanceStatus::state) {
-                            None if !desired
-                                && status.health() == rsi_host::ProfileHealth::Converged => {}
+                            None if !desired => {}
                             Some(rsi_host::ProfileInstanceState::Active) => {}
                             Some(
                                 rsi_host::ProfileInstanceState::Failed
@@ -407,6 +437,13 @@ impl RunningRsi {
             return Err(RsiError::Boot(
                 "Session service did not become active".into(),
             ));
+        }
+        let status = changes.borrow();
+        if status.health() == rsi_host::ProfileHealth::Degraded {
+            eprintln!(
+                "warning: optional Host plugins are unavailable; {}",
+                startup_diagnostic(&status)
+            );
         }
         Ok(Self { host, paths })
     }
@@ -604,6 +641,25 @@ mod tests {
 
     #[derive(Debug)]
     struct PendingApi(bool);
+
+    #[derive(Debug)]
+    struct SupplyStartupGate(std::sync::Arc<tokio::sync::Notify>);
+    #[async_trait::async_trait]
+    impl rsi_meta::PluginFactory for SupplyStartupGate {
+        fn prepare(
+            &self,
+            config: &rsi_meta::ConfigValue,
+        ) -> rsi_meta::Result<rsi_meta::PreparedActivation> {
+            Ok(rsi_meta::PreparedActivation::new(config.clone())
+                .requiring_local::<rsi_host::ProfileControlContract>())
+        }
+        async fn activate(&self, plan: rsi_meta::ActivationPlan) -> rsi_meta::Result<()> {
+            self.0.notified().await;
+            plan.context()
+                .provide_local::<StartupGate>(std::sync::Arc::new(()))?;
+            Ok(())
+        }
+    }
     #[async_trait::async_trait]
     impl rsi_meta::PluginFactory for PendingApi {
         fn prepare(
@@ -618,7 +674,6 @@ mod tests {
             })
         }
         async fn activate(&self, _: rsi_meta::ActivationPlan) -> rsi_meta::Result<()> {
-            assert!(!self.0, "the fixture keeps API activation pending");
             Ok(())
         }
     }
@@ -785,6 +840,196 @@ mod tests {
             assert!(!error.contains("startup-diagnostic-secret"), "{error}");
             assert!(runtime.shutdown().await.is_clean());
         }
+    }
+
+    #[tokio::test(start_paused = true)]
+    #[expect(
+        clippy::too_many_lines,
+        reason = "One startup matrix covers preparation, activation and required dependency failures."
+    )]
+    async fn degraded_profile_allows_optional_failures_and_rejects_required_owners() {
+        use rsi_host::{HostBuilder, Profile, ProfileEntry, ProfileProgram};
+        use std::sync::Arc;
+        #[derive(Debug)]
+        struct Failure {
+            preparation: bool,
+        }
+        #[async_trait::async_trait]
+        impl rsi_meta::PluginFactory for Failure {
+            fn prepare(
+                &self,
+                config: &rsi_meta::ConfigValue,
+            ) -> rsi_meta::Result<rsi_meta::PreparedActivation> {
+                if self.preparation {
+                    return Err(rsi_meta::MetaError::InvalidConfig(
+                        "private preparation diagnostic".into(),
+                    ));
+                }
+                Ok(rsi_meta::PreparedActivation::new(config.clone()))
+            }
+            async fn activate(&self, _: rsi_meta::ActivationPlan) -> rsi_meta::Result<()> {
+                Err(rsi_meta::MetaError::Activation(
+                    "private activation diagnostic".into(),
+                ))
+            }
+        }
+        for (id, required, pending) in [
+            ("optional-extension", false, false),
+            ("rsi.navigation", true, false),
+            ("optional-extension", true, true),
+        ] {
+            for preparation in [true, false] {
+                let temporary = tempfile::tempdir().unwrap();
+                let paths = HostPaths::new(
+                    temporary.path().join("config"),
+                    temporary.path().join("state"),
+                    temporary.path().join("cache"),
+                )
+                .unwrap();
+                let mut builder = HostBuilder::new(paths.clone());
+                let release_gate = Arc::new(tokio::sync::Notify::new());
+                builder.register_local_contract::<StartupGate>().unwrap();
+                builder
+                    .register_linked(
+                        "fixture.gate",
+                        "1",
+                        rsi_meta::UpdateMode::Replayable,
+                        Arc::new(SupplyStartupGate(release_gate.clone())),
+                    )
+                    .unwrap();
+                builder
+                    .register_linked(
+                        "fixture.pending",
+                        "1",
+                        rsi_meta::UpdateMode::Replayable,
+                        Arc::new(PendingApi(true)),
+                    )
+                    .unwrap();
+                builder
+                    .register_local_contract::<rsi_session_protocol::SessionContract>()
+                    .unwrap();
+                builder
+                    .register_linked(
+                        "fixture.failure",
+                        "1",
+                        rsi_meta::UpdateMode::Replayable,
+                        Arc::new(Failure { preparation }),
+                    )
+                    .unwrap();
+                builder
+                    .register_linked(
+                        "fixture.session",
+                        "1",
+                        rsi_meta::UpdateMode::Replayable,
+                        Arc::new(StartupSession),
+                    )
+                    .unwrap();
+                let runtime = rsi_meta::Runtime::default();
+                let mut entries = vec![
+                    ProfileEntry::new(id, "fixture.failure", serde_json::Value::Null),
+                    ProfileEntry::new(
+                        "fixture.session",
+                        "fixture.session",
+                        serde_json::Value::Null,
+                    ),
+                ];
+                if pending {
+                    entries.push(ProfileEntry::new(
+                        "fixture.gate",
+                        "fixture.gate",
+                        serde_json::Value::Null,
+                    ));
+                    entries.push(ProfileEntry::new(
+                        "rsi.navigation",
+                        "fixture.pending",
+                        serde_json::Value::Null,
+                    ));
+                }
+                let profile = rsi_application::ScopedProfile::start(
+                    &builder.build().unwrap(),
+                    &runtime.root(),
+                    ProfileProgram::from_profile(Profile::new(entries)),
+                )
+                .await
+                .unwrap();
+                if !required {
+                    let warning = startup_diagnostic(&profile.profile_status());
+                    assert!(warning.contains(id), "{warning}");
+                    assert!(!warning.contains("private"), "{warning}");
+                    assert!(warning.len() < 2048, "{warning}");
+                }
+                let mut boot = Box::pin(RunningRsi::from_started_host(ProfileOwner::Scoped {
+                    paths,
+                    profile: Arc::new(profile),
+                }));
+                if pending {
+                    assert!(
+                        futures_util::poll!(boot.as_mut()).is_pending(),
+                        "optional failure must not reject a required owner waiting for its supply"
+                    );
+                    release_gate.notify_one();
+                }
+                let boot = tokio::time::timeout(
+                    std::time::Duration::from_secs(if required && preparation { 35 } else { 5 }),
+                    boot,
+                )
+                .await
+                .expect("completed failures must not wait for the startup deadline");
+                if required && !pending {
+                    let error = boot.unwrap_err().to_string();
+                    let owner = if pending { "rsi.navigation" } else { id };
+                    assert!(error.contains(owner), "{error}");
+                    if pending {
+                        assert!(error.contains("Pending"), "{error}");
+                    }
+                    assert!(!error.contains("private"), "{error}");
+                    assert!(
+                        !error.contains("rsi.attention"),
+                        "absent owners are not failed owners: {error}"
+                    );
+                } else {
+                    assert!(boot.unwrap().shutdown().await.is_clean());
+                }
+                assert!(runtime.shutdown().await.is_clean());
+            }
+        }
+    }
+
+    #[test]
+    fn service_preflight_defers_optional_configuration_and_keeps_required_owners() {
+        use rsi_host::{Profile, ProfileEntry, ProfileProgram};
+        let temporary = tempfile::tempdir().unwrap();
+        let paths = HostPaths::new(
+            temporary.path().join("config"),
+            temporary.path().join("state"),
+            temporary.path().join("cache"),
+        )
+        .unwrap();
+        let composition = StandardComposition::new(
+            paths.clone(),
+            std::collections::BTreeMap::new(),
+            None,
+            ApplicationCatalogMetadata::default(),
+        );
+        for (id, plugin, optional) in [
+            ("optional-model", "rsi.ai.provider.deepseek", true),
+            ("rsi.navigation", "rsi.ai.provider.deepseek", false),
+            ("session-alias", "rsi.session", false),
+            ("unknown", "fixture.unknown", false),
+        ] {
+            let result = composition.preflight_service(
+                ProfileProgram::from_profile(Profile::new([ProfileEntry::new(
+                    id,
+                    plugin,
+                    serde_json::json!({"invalid": true}),
+                )])),
+                None,
+            );
+            assert_eq!(result.is_ok(), optional, "{id}: {result:?}");
+        }
+        assert!(!paths.config().exists());
+        assert!(!paths.state().exists());
+        assert!(!paths.cache().exists());
     }
 
     #[test]

@@ -140,6 +140,7 @@ impl PluginFactory for Factory {
                                     revision: status.revision(), source_revision: status.source_digest().to_owned(),
                                     outcome: match &outcome {
                                         ReloadOutcome::Applied(_) => ReloadResult::Applied,
+                                        ReloadOutcome::Partial {..} => ReloadResult::Partial,
                                         ReloadOutcome::Unchanged(_) => ReloadResult::Unchanged,
                                         ReloadOutcome::RestartRequired(_) => ReloadResult::RestartRequired,
                                         ReloadOutcome::RolledBack {..} => ReloadResult::RolledBack,

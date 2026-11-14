@@ -197,7 +197,7 @@ async fn independent_child_profiles_share_parent_runtime_and_dispose_only_their_
 }
 
 #[tokio::test]
-async fn rejected_child_preparation_preserves_existing_parent_runtime_and_services() {
+async fn failed_child_preparation_is_local_and_preserves_parent_services() {
     let runtime = Runtime::default();
     let count = Arc::new(AtomicUsize::new(0));
     runtime
@@ -214,7 +214,28 @@ async fn rejected_child_preparation_preserves_existing_parent_runtime_and_servic
         .await
         .unwrap();
     let before = runtime.snapshot().fibers.len();
-    assert!(host("fail").prepare_in(&runtime, program()).await.is_err());
+    let bootstrap = host("fail").prepare_in(&runtime, program()).await.unwrap();
+    let control = bootstrap.control();
+    let child = runtime
+        .root()
+        .apply(
+            ResolvedFactory::linked(
+                "failed-child",
+                "test",
+                UpdateMode::RestartRequired,
+                bootstrap.factory(),
+            ),
+            ConfigValue::Null,
+        )
+        .await
+        .unwrap();
+    assert!(matches!(child.snapshot().state, FiberState::Active));
+    assert_eq!(
+        control.status().health(),
+        rsi_meta_profile::ProfileHealth::Degraded
+    );
+    assert!(control.status().observed().is_empty());
+    assert!(child.dispose().await.is_clean());
     assert_eq!(runtime.snapshot().fibers.len(), before);
     assert_eq!(
         runtime.root().lookup_local::<Label>().unwrap().as_str(),

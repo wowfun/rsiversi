@@ -1,5 +1,22 @@
 # rsi-meta-profile
 
+Frozen source fingerprinting encodes the environment, fragments and launch
+patches without evaluating expressions or resolving patch targets. Compilation
+of the complete selected program owns those semantic checks.
+
+Child lifecycle observation drains the currently ready subscription batch before
+publishing one aggregate snapshot. It rearms each child once after publication and
+yields between batches, with stop and membership changes taking precedence.
+Each publication samples each active child once; immutable target metadata is
+shared for the resolved target's lifetime. Resolved targets and active leaves
+share immutable evaluated configuration; observation and compensation clones
+do not copy the JSON payload. Group binding deltas are a binding-pass cache;
+only effective bindings and stable positions survive that pass.
+Compensation reconstructs surviving leaves from their retained effective bindings,
+including leaves from a failed replacement whose markers the accepted resolver
+does not know. Shutdown releases controller locks before destroying retained
+inputs, factories or leaf state; their destructors may inspect the stopped control.
+
 An application may attach an opaque source lease to a `ProfileProgram`.
 The program retains it across clones and reloads until its owner is disposed.
 This keeps externally published source files available without giving the
@@ -117,24 +134,49 @@ any factory preparation; this lookup allocates no isolation and executes no plug
 Position preflight
 reserves only bounded composition metadata, without execution admission. Equality and restart checks
 therefore reserve no duplicate Fibers. Replayable convergence prepares and
+joins each leaf through the Runtime's Execution preparation facility, including
+rollback. Synchronous factories do not occupy async executor workers. It
 applies only the next changed or new leaf after prior capacity has been released;
 rollback does the same for the retired members. This keeps reload possible at the exact
 Runtime Fiber ceiling instead of requiring a shadow copy of either graph. A
 prepared leaf may commit as Pending when its declared dependencies are absent.
+Controlled startup uses the same ordered per-leaf preparation path as reload;
+it does not reserve preparation proofs for a second complete graph. Static
+generation plans retain their separately documented all-required admission.
 
 Equal healthy trees return `Unchanged` without advancing graph revision. Degraded
 state never suppresses a same-content retry. A changed `RestartRequired` leaf in the committed source program
 publishes the candidate source digest and `RestartRequired` status without
 changing the observed graph. Replayable changes converge in the existing Meta
-graph. Failure retires candidate generations and reconstructs the prior target;
-failed compensation publishes `Degraded` with the observed graph and remains
-retryable. During convergence the controller mirrors each membership delta
+graph. Ordinary source/configuration reload retains successful leaves and
+continues in source order after a leaf preparation or activation failure. It
+accepts the candidate target and returns `Partial` with degraded observation;
+reloading the same content retries failed or absent leaves, including
+`RestartRequired` leaves. Restart decisions compare the accepted source target;
+the usable observed subset is only the compensation target. Product bootstraps
+decide which explicit security, control and persistence owners must be Active
+before admitting Agent work. Profile itself does not turn an optional leaf
+failure into whole-tree rollback.
+
+Composition-owner input replacement retains exact compensation: failure retires
+candidate generations and reconstructs the prior usable membership using the old
+resolver, bindings and configuration. After a partial reload, absent or failed
+leaves are not compensation targets; successful compensation preserves the prior
+desired target and diagnostic, deriving degraded health from current membership
+even if lifecycle observation has not yet caught up. A same-content reload
+checks current member health before taking the unchanged shortcut.
+Reconstruction creates new Fibers for retired members; their private in-memory
+state is not restored. Plugins own any required durable state. Retiring first
+keeps replacement possible at the existing Fiber and supply capacity.
+Failed compensation publishes `Degraded` with the
+observed graph and remains retryable. During convergence the controller mirrors each membership delta
 internally but publishes the complete observed graph only at attempt
 boundaries, avoiding a full graph clone after every leaf. This is bounded
 convergence, not atomic shadow-Runtime replacement.
 
-Each group stores only its own binding delta. Effective bindings overlay that
-delta on inherited bindings. Fresh allocation keys contain the namespace, group
+Each group's effective binding map is computed once per rebuild by overlaying
+its delta on its parent's map. Descendant leaves and target snapshots share that
+immutable map; empty deltas reuse the parent map. Fresh allocation keys contain the namespace, group
 InstanceId, lane and contract key; named keys contain the namespace, lane,
 contract key and label. The resolver maps nominal Local/event keys through its
 frozen catalog, while Profile owns allocation and inheritance. Current,
@@ -143,7 +185,8 @@ lookup entries are pruned during binding, with no historical allocation owner.
 
 Leaf retention compares InstanceId, FactoryIdentity, UpdateMode, evaluated
 configuration and effective bindings. Group moves alone do not require a new
-generation. A leaf's stable ChildPosition survives rebuild; pure reorder only
+generation. A leaf's actual stable ChildPosition survives rebuild, including
+members left by failed compensation; pure reorder only
 publishes the new position ranks. Convergence retires changed/removed leaves in
 reverse old order, publishes the candidate order, then prepares and applies new
 members in new order. Compensation removes failed candidate members, restores
@@ -163,7 +206,10 @@ nominal marker; resolvers that cannot establish this reject replacement.
 
 `ProfileInput::preflight_linked` lets product bootstraps reject linked argument
 and configuration errors before opening their native staging owner. It compiles
-the program and prepares selected known linked factories, containing preparation
+the program, resolves every non-deferred identity, and prepares only linked leaves
+selected by the caller's instance/plugin predicate. Ordinary optional leaf
+preparation belongs to Profile convergence, where its failure remains local.
+Preflight contains preparation
 and prepared-state destruction panics on unwind targets. With `panic=abort`
 (including the browser WASM build), a panic terminates the process or Worker.
 It leaves unresolved/native factories to
@@ -192,7 +238,8 @@ Restart refusals and no-op reloads do not advance graph revision. Reverting a
 file-based restart candidate to the converged tree clears its indication without
 reapplying Fibers.
 Scoped owners call `ProfileUpdateHandle::close` before disposing their child tree.
-This closes input and reload admission and waits for the executing command.
+This closes input and reload admission and joins initial activation and worker
+installation as well as any executing command. Startup cannot reopen closed admission.
 Whole-Runtime owners call synchronous `close_admission` before Runtime shutdown;
 Meta's waiter deadline then includes any executing command, and the Profile effect
 owns its final joins. The command worker releases executable inputs after its

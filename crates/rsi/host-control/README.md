@@ -12,6 +12,8 @@ authorizes source compilation. Multiple clients share the existing Profile and
 native-addon observation policy; only the last lease disables automatic work.
 Reload returns the actual bounded convergence outcome. Disconnecting a reload
 waiter does not cancel an already admitted update.
+`partial` reports retained successful leaves and an incomplete desired graph;
+clients must not present it as fully applied or rolled back.
 
 Source-build requests carry an explicitly trusted, frozen recipe and the caller's
 scrubbed environment. They own a connection lease, separate from configuration

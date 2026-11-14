@@ -11,6 +11,9 @@ dropped waiter to abandon the controller between membership changes.
 
 ## Decision
 
+The distinction between this executable replacement transaction and ordinary
+startup/configuration reload follows [partial Profile convergence](2026-11-12-profile-partial-convergence.md).
+
 Keep each Host and resolver immutable. Give the composition owner a separate
 input updater backed by one bounded Profile-owned command worker. Preserve the
 Runtime, Context namespace, limits and nominal Local/event mappings. Retain the

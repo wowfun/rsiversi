@@ -35,12 +35,12 @@ pub(super) enum Allocation {
     Portable(IsolationId),
 }
 
-pub(super) type EffectiveBindings = BTreeMap<ContractKey, Arc<Allocation>>;
+type BindingMap = BTreeMap<ContractKey, Arc<Allocation>>;
+pub(super) type EffectiveBindings = Arc<BindingMap>;
 
 #[derive(Clone, Debug, Default)]
 pub(super) struct BindingSnapshot {
     pub(super) namespace: Option<Arc<Namespace>>,
-    pub(super) groups: BTreeMap<String, EffectiveBindings>,
     pub(super) effective: BTreeMap<InstanceId, EffectiveBindings>,
     pub(super) positions: BTreeMap<InstanceId, ChildPosition>,
 }
@@ -76,8 +76,8 @@ impl Namespace {
         resolver: &dyn ProfileResolver,
         group: &str,
         spec: &IsolationSpec,
-    ) -> Result<EffectiveBindings> {
-        let mut delta = EffectiveBindings::new();
+    ) -> Result<BindingMap> {
+        let mut delta = BindingMap::new();
         for (lane, keys) in [
             (IsolationLane::Local, spec.local()),
             (IsolationLane::Event, spec.events()),
@@ -149,7 +149,7 @@ pub(super) fn resolve_contract(
 }
 
 pub(super) fn apply(mut base: Context, effective: &EffectiveBindings) -> Result<Context> {
-    for (contract, allocation) in effective {
+    for (contract, allocation) in effective.iter() {
         base = match (contract, allocation.as_ref()) {
             (ContractKey::Local(key, nominal), Allocation::Local(id)) => {
                 base.isolate_local_type(*nominal, key, *id)?

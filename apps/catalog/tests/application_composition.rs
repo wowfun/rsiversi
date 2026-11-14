@@ -17,6 +17,11 @@ struct Entry {
 #[async_trait]
 impl PluginFactory for Entry {
     fn prepare(&self, config: &ConfigValue) -> rsi_meta::Result<PreparedActivation> {
+        if config["fail"] == true {
+            return Err(rsi_meta::MetaError::InvalidConfig(
+                "optional fixture".into(),
+            ));
+        }
         Ok(PreparedActivation::new(config.clone()))
     }
     async fn activate(&self, plan: ActivationPlan) -> rsi_meta::Result<()> {
@@ -91,11 +96,14 @@ async fn application_extra_runs_without_changing_host_identity() {
         before,
         app.service().preview_host(&profile).unwrap().launch_key
     );
-    let program = ProfileProgram::from_profile(Profile::new(vec![ProfileEntry::new(
-        "entry",
-        "fixture.desktop.entry",
-        ConfigValue::Null,
-    )]));
+    let program = ProfileProgram::from_profile(Profile::new(vec![
+        ProfileEntry::new(
+            "optional",
+            "fixture.desktop.entry",
+            serde_json::json!({"fail":true}),
+        ),
+        ProfileEntry::new("entry", "fixture.desktop.entry", ConfigValue::Null),
+    ]));
     let running = rsi::start_application(app, vec![], program.clone())
         .await
         .unwrap();
@@ -116,7 +124,9 @@ async fn application_extra_runs_without_changing_host_identity() {
         .unwrap()
         .profile_input(program)
         .unwrap()
-        .preflight_linked(&std::collections::BTreeSet::default())
+        .preflight_linked(&std::collections::BTreeSet::default(), |id, _| {
+            id.as_str() == "entry"
+        })
         .unwrap();
     #[cfg(not(unix))]
     assert!(

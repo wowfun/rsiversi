@@ -15,13 +15,45 @@ pub async fn start_application(
     }
     #[cfg(not(unix))]
     {
-        let (host, diagnostics) = crate::standard_application_host(composition, arguments)?;
-        host.start_program(program).await.map_err(|error| {
+        let (host, diagnostics) = crate::standard_application_host(composition.clone(), arguments)?;
+        host.profile_input(program.clone())
+            .map_err(|error| RsiError::Boot(error.to_string()))?
+            .preflight_linked(&Default::default(), |_, plugin| {
+                composition
+                    .catalog
+                    .metadata()
+                    .plugins()
+                    .contains(plugin.as_str())
+            })
+            .map_err(|error| {
+                diagnostics
+                    .take()
+                    .unwrap_or_else(|| RsiError::Boot(error.to_string()))
+            })?;
+        let running = host.start_program(program).await.map_err(|error| {
             diagnostics
                 .take()
                 .unwrap_or_else(|| RsiError::Boot(error.to_string()))
-        })
+        })?;
+        require_entry_point(running, diagnostics.take()).await
     }
+}
+
+async fn require_entry_point(
+    running: RunningHost,
+    diagnostic: Option<RsiError>,
+) -> Result<RunningHost> {
+    if running
+        .lookup_local::<rsi_application::ApplicationRunContract>()
+        .is_some()
+    {
+        return Ok(running);
+    }
+    let error = diagnostic.unwrap_or_else(|| {
+        RsiError::Boot("Application Profile did not publish an entry point".into())
+    });
+    let _ = running.shutdown().await;
+    Err(error)
 }
 
 #[cfg(unix)]
@@ -56,10 +88,19 @@ mod native {
         preflight
             .profile_input(program.clone())
             .map_err(boot)?
-            .preflight_linked(&crate::native_addons::bootstrap::deferred(
-                &composition.service,
-                crate::AddonScope::Application,
-            )?)
+            .preflight_linked(
+                &crate::native_addons::bootstrap::deferred(
+                    &composition.service,
+                    crate::AddonScope::Application,
+                )?,
+                |_, plugin| {
+                    composition
+                        .catalog
+                        .metadata()
+                        .plugins()
+                        .contains(plugin.as_str())
+                },
+            )
             .map_err(|error| diagnostics.take().unwrap_or_else(|| boot(error)))?;
         let diagnostic = Arc::new(std::sync::Mutex::new(None));
         let mut builder = HostBuilder::new(composition.service.paths().clone())
@@ -83,7 +124,7 @@ mod native {
                 }),
             )
             .map_err(boot)?;
-        builder
+        let running = builder
             .build()
             .map_err(boot)?
             .start(Profile::new(vec![ProfileEntry::new(
@@ -98,7 +139,12 @@ mod native {
                     .expect("bootstrap diagnostic poisoned")
                     .take()
                     .unwrap_or_else(|| boot(error))
-            })
+            })?;
+        let failure = diagnostic
+            .lock()
+            .expect("bootstrap diagnostic poisoned")
+            .take();
+        super::require_entry_point(running, failure).await
     }
 
     #[async_trait]

@@ -156,9 +156,11 @@ impl ManagedProviders {
                 let input = host
                     .profile_input(program)
                     .map_err(|_| ApiError::Invalid("invalid managed provider profile".into()))?;
-                input.preflight_linked(&BTreeSet::new()).map_err(|_| {
-                    ApiError::Invalid("provider configuration rejected by its factory".into())
-                })?;
+                input
+                    .preflight_linked(&BTreeSet::new(), |_, _| true)
+                    .map_err(|_| {
+                        ApiError::Invalid("provider configuration rejected by its factory".into())
+                    })?;
                 Ok(input)
             })
             .await
@@ -179,6 +181,12 @@ impl ManagedProviders {
             }
             Ok(ReloadOutcome::RestartRequired(_)) => {
                 state.diagnostic = Some("Managed provider requires restart".into());
+            }
+            Ok(ReloadOutcome::Partial { .. }) => {
+                state.diagnostic = Some(
+                    "Provider changes applied partially; inspect current Models before retrying."
+                        .into(),
+                );
             }
             Ok(ReloadOutcome::RolledBack { .. }) => state.diagnostic = Some(
                 "Provider activation failed; previous routes restored. Check deployment conflicts."
@@ -371,7 +379,7 @@ impl PluginFactory for ManagedProvidersFactory {
         let prepared = execution
             .prepare(move || {
                 let input = capture.profile_input(desired)?;
-                input.preflight_linked(&BTreeSet::new())?;
+                input.preflight_linked(&BTreeSet::new(), |_, _| true)?;
                 Ok::<_, rsi_host::HostError>(input)
             })
             .await

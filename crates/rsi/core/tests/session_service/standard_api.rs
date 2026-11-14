@@ -826,12 +826,24 @@ async fn host_profile_patch_configures_the_shared_context_budget() {
     assert!(host.shutdown().await.is_clean());
     drop(host);
     std::fs::write(&fixture.profile, patched.replace("1048576", "0")).unwrap();
-    assert!(
-        composition(fixture.paths.clone())
-            .build()
-            .unwrap()
-            .start_file(&fixture.profile)
-            .await
-            .is_err()
+    let rejected = composition(fixture.paths.clone())
+        .build()
+        .unwrap()
+        .start_file(&fixture.profile)
+        .await
+        .unwrap();
+    assert_eq!(
+        rejected.profile_status().health(),
+        rsi_host::ProfileHealth::Degraded
     );
+    assert!(rejected.profile_status().diagnostic().is_some());
+    assert!(
+        !rejected
+            .profile_status()
+            .observed()
+            .iter()
+            .any(|instance| instance.id().as_str() == "rsi-context-budget"
+                && matches!(instance.state(), rsi_host::ProfileInstanceState::Active))
+    );
+    assert!(rejected.shutdown().await.is_clean());
 }

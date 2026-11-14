@@ -24,12 +24,14 @@ impl fmt::Debug for ProfileInput {
 }
 
 impl ProfileInput {
-    /// Checks selected linked factory preparation without Runtime activation or native loading.
+    /// Checks caller-selected linked preparation without Runtime activation or native loading.
     /// Only explicitly deferred plugin identities may be absent from this catalog.
+    /// All other identities resolve, even when their preparation is left to convergence.
     /// This is a preliminary argument/configuration check, not an activation proof.
     pub fn preflight_linked(
         &self,
         deferred: &std::collections::BTreeSet<crate::PluginId>,
+        prepare: impl Fn(&rsi_meta::InstanceId, &rsi_meta::PluginId) -> bool,
     ) -> Result<()> {
         let candidate = self.compiler.compile(&self.program)?;
         for leaf in candidate.leaves() {
@@ -42,10 +44,12 @@ impl ProfileInput {
                 }
                 Err(error) => return Err(error),
             };
-            if !matches!(
-                resolved.identity(),
-                rsi_meta::FactoryIdentity::Linked { .. }
-            ) {
+            if !prepare(leaf.id(), leaf.plugin())
+                || !matches!(
+                    resolved.identity(),
+                    rsi_meta::FactoryIdentity::Linked { .. }
+                )
+            {
                 continue;
             }
             let (_, _, factory) = resolved.into_parts();
@@ -172,7 +176,7 @@ impl Controller {
         replacement: Option<(u64, ProfileInput)>,
         origin: ProfileAttemptOrigin,
     ) -> Result<ProfileUpdateTicket> {
-        if !self.accepting.load(Ordering::Acquire) {
+        if !self.accepting.load(Ordering::Acquire) || self.command_stop.is_cancelled() {
             return Err(ProfileError::Stopped);
         }
         let (completion, receiver) = oneshot::channel();
@@ -239,7 +243,7 @@ impl Controller {
         let (revision, previous) = self.input.lock().expect("Profile input poisoned").clone();
         let previous = previous.ok_or(ProfileError::Stopped)?;
         let Some((expected, candidate)) = replacement else {
-            return self.reload_serialized(&previous, &previous, false).await;
+            return self.reload_serialized(&previous, false).await;
         };
         if expected != revision {
             return Err(ProfileError::InputConflict {
@@ -251,7 +255,7 @@ impl Controller {
             ProfileError::InvalidProgram("Profile input revision exhausted".to_owned())
         })?;
         previous.validate_successor(&candidate)?;
-        let outcome = self.reload_serialized(&candidate, &previous, true).await?;
+        let outcome = self.reload_serialized(&candidate, true).await?;
         if matches!(
             outcome,
             ReloadOutcome::Applied(_) | ReloadOutcome::Unchanged(_)

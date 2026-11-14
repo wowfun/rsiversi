@@ -44,6 +44,8 @@ pub enum Command {
 pub enum ReloadResult {
     /// New graph was accepted.
     Applied,
+    /// Desired graph accepted with failed leaves; successful leaves remain.
+    Partial,
     /// Source produced the current graph.
     Unchanged,
     /// Static code or another retained prefix requires a Host restart.

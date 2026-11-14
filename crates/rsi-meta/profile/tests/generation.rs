@@ -462,7 +462,12 @@ fn linked_preflight_retains_bounded_unicode_errors_without_configuration_or_pani
                 ..ProfileLimits::default()
             },
         );
-        let error = input.preflight_linked(&BTreeSet::new()).unwrap_err();
+        input
+            .preflight_linked(&BTreeSet::new(), |_, _| false)
+            .unwrap();
+        let error = input
+            .preflight_linked(&BTreeSet::new(), |_, _| true)
+            .unwrap_err();
         assert!(!error.to_string().contains("configuration-secret"));
         let rsi_meta_profile::ProfileError::Preparation { instance, reason } = error else {
             panic!("expected a preparation error");

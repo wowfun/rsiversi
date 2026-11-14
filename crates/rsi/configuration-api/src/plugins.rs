@@ -238,6 +238,8 @@ pub enum PluginUpdateOrigin {
 pub enum PluginUpdateOutcome {
     /// Candidate applied.
     Applied,
+    /// Candidate accepted with failed leaves; successful leaves remain.
+    Partial,
     /// Equal healthy target.
     Unchanged,
     /// Restart required.
@@ -301,7 +303,7 @@ impl PluginUpdateAttempt {
             O::Applied | O::Unchanged | O::RestartRequired => {
                 self.failure.is_none() && self.rollback_failure.is_none()
             }
-            O::RolledBack | O::Rejected | O::Failed => {
+            O::Partial | O::RolledBack | O::Rejected | O::Failed => {
                 self.failure.is_some() && self.rollback_failure.is_none()
             }
             O::Degraded => self.failure.is_some() && self.rollback_failure.is_some(),
@@ -318,6 +320,7 @@ impl PluginUpdateAttempt {
         use PluginUpdateOutcome as O;
         let result = match self.outcome {
             O::Applied => "applied",
+            O::Partial => "partially applied; successful plugins remain active",
             O::Unchanged => "unchanged",
             O::RestartRequired => "requires a restart",
             O::RolledBack => "failed; the previous configuration was restored",
@@ -437,6 +440,23 @@ impl ConfigurationClient {
 #[cfg(test)]
 mod tests {
     use super::*;
+    #[test]
+    fn partial_update_has_a_primary_failure_without_claiming_compensation() {
+        let mut attempt = PluginUpdateAttempt {
+            sequence: "1".into(),
+            origin: PluginUpdateOrigin::Manual,
+            outcome: PluginUpdateOutcome::Partial,
+            failure: Some(PluginUpdateFailure::Apply),
+            rollback_failure: None,
+        };
+        attempt.validate().unwrap();
+        assert!(attempt.guidance().contains("partially applied"));
+        let wire = serde_json::to_value(&attempt).unwrap();
+        assert_eq!(wire["outcome"], "partial");
+        assert!(wire["rollback_failure"].is_null());
+        attempt.rollback_failure = Some(PluginUpdateFailure::Prepare);
+        assert!(attempt.validate().is_err());
+    }
     fn page() -> PluginStatusPage {
         PluginStatusPage {
             context: PluginStatusContext::default(),

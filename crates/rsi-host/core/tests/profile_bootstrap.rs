@@ -237,7 +237,7 @@ async fn duplicate_or_missing_identity_fails_before_any_factory_prepare() {
 }
 
 #[tokio::test]
-async fn startup_failure_rolls_back_already_applied_children() {
+async fn startup_failure_retains_healthy_children_and_reports_degraded_status() {
     let temp = tempfile::tempdir().unwrap();
     let live = Arc::new(AtomicUsize::new(0));
     let mut builder = HostBuilder::new(paths(temp.path()));
@@ -254,7 +254,7 @@ async fn startup_failure_rolls_back_already_applied_children() {
             )
             .unwrap();
     }
-    let error = builder
+    let host = builder
         .build()
         .unwrap()
         .start(Profile::new([
@@ -264,18 +264,19 @@ async fn startup_failure_rolls_back_already_applied_children() {
                 "failing",
                 json!({"private": "configuration-secret"}),
             ),
+            ProfileEntry::new("later", "owned", Value::Null),
         ]))
         .await
-        .unwrap_err();
-    assert!(matches!(error, HostError::Bootstrap(_)));
-    assert!(
-        error
-            .to_string()
-            .contains("applying Profile instance `failing` failed")
-    );
-    assert!(error.to_string().contains("expected"));
-    assert!(!error.to_string().contains("Failed("));
-    assert!(!error.to_string().contains("configuration-secret"));
+        .unwrap();
+    let status = host.profile_status();
+    assert_eq!(status.health(), rsi_host::ProfileHealth::Degraded);
+    let diagnostic = status.diagnostic().unwrap();
+    assert!(diagnostic.contains("applying Profile instance `failing` failed"));
+    assert!(diagnostic.contains("expected"));
+    assert!(!diagnostic.contains("Failed("));
+    assert!(!diagnostic.contains("configuration-secret"));
+    assert_eq!(live.load(Ordering::SeqCst), 2);
+    assert!(host.shutdown().await.is_clean());
     assert_eq!(live.load(Ordering::SeqCst), 0);
     let _ = FiberState::Disposed;
 }

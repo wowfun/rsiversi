@@ -17,6 +17,8 @@ pub enum ProfileAttemptOrigin {
 pub enum ProfileAttemptOutcome {
     /// Candidate applied.
     Applied,
+    /// Candidate accepted with failed leaves and healthy siblings retained.
+    Partial,
     /// Candidate was semantically equal.
     Unchanged,
     /// Candidate requires a restart.
@@ -59,6 +61,17 @@ pub enum ProfileFailureKind {
 }
 
 impl ProfileFailureKind {
+    pub(super) fn with_diagnostic(
+        error: rsi_meta::MetaError,
+        diagnostic: impl FnOnce(String) -> ProfileError,
+    ) -> ProfileError {
+        let error = ProfileError::Meta(error);
+        match Self::from_error(&error) {
+            Self::Capacity | Self::Stopped => error,
+            _ => diagnostic(error.to_string()),
+        }
+    }
+
     pub(super) fn from_error(error: &ProfileError) -> Self {
         match error {
             ProfileError::InputConflict { .. } => Self::InputConflict,
@@ -127,6 +140,7 @@ impl Controller {
         use ProfileAttemptOutcome as O;
         let (outcome, failure, rollback_failure) = match result.as_ref() {
             Ok(ReloadOutcome::Applied(_)) => (O::Applied, None, None),
+            Ok(ReloadOutcome::Partial { error_kind, .. }) => (O::Partial, Some(*error_kind), None),
             Ok(ReloadOutcome::Unchanged(_)) => (O::Unchanged, None, None),
             Ok(ReloadOutcome::RestartRequired(_)) => (O::RestartRequired, None, None),
             Ok(ReloadOutcome::RolledBack { error_kind, .. }) => {
@@ -169,6 +183,7 @@ impl Controller {
         if let Ok(outcome) = result {
             match outcome {
                 ReloadOutcome::Applied(value)
+                | ReloadOutcome::Partial { status: value, .. }
                 | ReloadOutcome::Unchanged(value)
                 | ReloadOutcome::RestartRequired(value)
                 | ReloadOutcome::RolledBack { status: value, .. }
@@ -207,6 +222,34 @@ mod tests {
                 ProfileFailureKind::Bind,
             ),
         ] {
+            for application in [false, true] {
+                let wrapped = ProfileFailureKind::with_diagnostic(error.clone(), |reason| {
+                    if application {
+                        ProfileError::Application {
+                            instance: "leaf".into(),
+                            reason,
+                        }
+                    } else {
+                        ProfileError::Preparation {
+                            instance: "leaf".into(),
+                            reason,
+                        }
+                    }
+                });
+                let kind = ProfileFailureKind::from_error(&wrapped);
+                assert_eq!(
+                    kind,
+                    if expected == ProfileFailureKind::Bind {
+                        if application {
+                            ProfileFailureKind::Apply
+                        } else {
+                            ProfileFailureKind::Prepare
+                        }
+                    } else {
+                        expected
+                    }
+                );
+            }
             assert_eq!(
                 ProfileFailureKind::from_error(&ProfileError::Meta(error)),
                 expected
