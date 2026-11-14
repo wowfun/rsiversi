@@ -515,6 +515,18 @@ pub(super) const fn fact_index_kind(body: &SessionFactBody) -> &'static str {
     }
 }
 
+#[test]
+fn stored_unsigned_integer_overflow_is_corruption_not_transient_io() {
+    let connection = rusqlite::Connection::open_in_memory().unwrap();
+    for value in [-1, i64::from(u32::MAX) + 1] {
+        let error = connection
+            .query_row("SELECT ?1", [value], |row| row.get::<_, u32>(0))
+            .unwrap_err();
+        let error = sql_error(error);
+        assert!(matches!(error, StoreError::Corrupt(_)), "{error:?}");
+    }
+}
+
 pub(super) fn sql_error(error: rusqlite::Error) -> StoreError {
     if super::cold_validation::in_read_scope()
         && matches!(&error, rusqlite::Error::SqliteFailure(code, _) if matches!(code.code, rusqlite::ErrorCode::DatabaseBusy | rusqlite::ErrorCode::OperationInterrupted))
@@ -523,7 +535,9 @@ pub(super) fn sql_error(error: rusqlite::Error) -> StoreError {
     }
     let message = error.to_string();
     let mapped = match &error {
-        rusqlite::Error::InvalidColumnType(..) | rusqlite::Error::FromSqlConversionFailure(..) => {
+        rusqlite::Error::InvalidColumnType(..)
+        | rusqlite::Error::FromSqlConversionFailure(..)
+        | rusqlite::Error::IntegralValueOutOfRange(..) => {
             StoreError::Corrupt(format!("SQLite row: {message}"))
         }
         rusqlite::Error::SqliteFailure(code, _)
