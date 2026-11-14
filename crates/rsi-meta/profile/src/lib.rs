@@ -21,6 +21,7 @@ use std::sync::atomic::{AtomicU64, Ordering};
 
 mod bundle;
 mod control;
+mod identity;
 mod preview;
 mod watch_policy;
 pub use preview::{NodeChange, NodeChangeAspect, NodeChangeKind};
@@ -525,7 +526,8 @@ pub struct IsolationSpec {
 }
 
 /// Independent namespace lane for Profile isolation.
-#[derive(Clone, Copy, Debug, Eq, Ord, PartialEq, PartialOrd)]
+#[derive(Clone, Copy, Debug, Eq, Ord, PartialEq, PartialOrd, serde::Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
 pub enum IsolationLane {
     /// Nominal safe-Rust Local services.
     Local,
@@ -536,7 +538,8 @@ pub enum IsolationLane {
 }
 
 /// One named allocation shared within one Profile activation namespace.
-#[derive(Clone, Debug, Eq, PartialEq)]
+#[derive(Clone, Debug, Eq, PartialEq, serde::Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
 pub struct NamedIsolation {
     lane: IsolationLane,
     key: String,
@@ -661,6 +664,7 @@ pub struct ProfileCandidate {
     tree: Vec<TreeNode>,
     watch_paths: Vec<PathBuf>,
     source_fingerprints: BTreeMap<PathBuf, [u8; 32]>,
+    source_paths: BTreeMap<PathBuf, PathBuf>,
     source_digest: String,
 }
 
@@ -689,6 +693,52 @@ pub struct ProfileCompiler {
 }
 
 impl ProfileCompiler {
+    /// Fingerprints frozen declarations without requiring a selected root.
+    pub fn frozen_source_digest(
+        &self,
+        fragments: &[ProfileFragment],
+        patches: &[ProfilePatch],
+    ) -> String {
+        let mut digest = source_hasher(&self.environment);
+        for fragment in fragments {
+            hash_fragment(&mut digest, fragment);
+        }
+        for patch in patches {
+            hash_patch(&mut digest, patch);
+        }
+        hex_lower(digest.finalize().as_slice())
+    }
+
+    /// Checks the exact bounded source bytes and paths of a compiled candidate.
+    /// The caller must retain the same immutable compiler and program authority.
+    /// Saved programs and browser inputs do not provide native source cache evidence.
+    pub fn sources_unchanged(&self, candidate: &ProfileCandidate) -> Result<bool> {
+        #[cfg(target_family = "wasm")]
+        {
+            let _ = candidate;
+            Ok(false)
+        }
+        #[cfg(not(target_family = "wasm"))]
+        {
+            if candidate.source_paths.is_empty() {
+                return Ok(false);
+            }
+            for (path, expected_path) in &candidate.source_paths {
+                let Ok((canonical, bytes)) =
+                    read_profile_source(path, self.limits.maximum_document_bytes)
+                else {
+                    return Ok(false);
+                };
+                let digest: [u8; 32] = Sha256::digest(bytes).into();
+                if &canonical != expected_path
+                    || candidate.source_fingerprints.get(&canonical) != Some(&digest)
+                {
+                    return Ok(false);
+                }
+            }
+            Ok(true)
+        }
+    }
     /// Creates a compiler without touching sources.
     pub fn new(environment: ProfileEnvironment, limits: ProfileLimits) -> Self {
         Self {
@@ -730,7 +780,7 @@ impl ProfileCompiler {
     ) -> Result<ProfileCandidate> {
         validate_limits(&self.limits)?;
         self.validate_environment()?;
-        let mut state = CompileState::new(self);
+        let mut state = CompileState::new(self, source_hasher(&self.environment));
         state.root_source = root_source;
         if let ProgramRoot::Bundle(bundle) = &program.root {
             bundle.validate(&self.limits)?;
@@ -985,9 +1035,10 @@ struct CompileState<'a> {
     instance_ids: HashSet<String>,
     node_count: usize,
     live_config_bytes: std::cell::Cell<usize>,
-    expression_engine: Engine,
+    expression_engine: std::cell::OnceCell<Engine>,
     watch_paths: BTreeSet<PathBuf>,
     source_fingerprints: BTreeMap<PathBuf, [u8; 32]>,
+    source_paths: BTreeMap<PathBuf, PathBuf>,
     include_stack: Vec<PathBuf>,
     source_bytes: usize,
     source_files: usize,
@@ -1148,8 +1199,7 @@ fn hash_isolation(digest: &mut Sha256, isolation: &IsolationSpec) {
 }
 
 impl<'a> CompileState<'a> {
-    fn new(compiler: &'a ProfileCompiler) -> Self {
-        let digest = source_hasher(&compiler.environment);
+    fn new(compiler: &'a ProfileCompiler, digest: Sha256) -> Self {
         Self {
             compiler,
             bundle: None,
@@ -1159,9 +1209,10 @@ impl<'a> CompileState<'a> {
             instance_ids: HashSet::new(),
             node_count: 0,
             live_config_bytes: std::cell::Cell::new(0),
-            expression_engine: expression_engine(&compiler.limits),
+            expression_engine: std::cell::OnceCell::new(),
             watch_paths: BTreeSet::new(),
             source_fingerprints: BTreeMap::new(),
+            source_paths: BTreeMap::new(),
             include_stack: Vec::new(),
             source_bytes: 0,
             source_files: 0,
@@ -1267,6 +1318,8 @@ impl<'a> CompileState<'a> {
         );
         digest_component(&mut self.digest, b"source-bytes", &bytes);
         if self.bundle.is_none() {
+            self.source_paths
+                .insert(requested.to_owned(), canonical.clone());
             let fingerprint: [u8; 32] = Sha256::digest(&bytes).into();
             if let Some(previous) = self
                 .source_fingerprints
@@ -1642,8 +1695,24 @@ impl<'a> CompileState<'a> {
         self.validate_identifier("patch target", target)?;
         if let CompiledPatch::Append(nodes) = &operation {
             match find_node(&self.tree, target) {
-                Some(TreeNode::Group(_)) => self.register_nodes(nodes)?,
-                Some(TreeNode::Plugin(_)) => {
+                Some((TreeNode::Group(_), depth)) => {
+                    let mut pending = vec![(nodes.as_slice(), depth + 1)];
+                    while let Some((children, depth)) = pending.pop() {
+                        for child in children {
+                            if let TreeNode::Group(group) = child {
+                                if depth > self.compiler.limits.maximum_group_depth {
+                                    return Err(ProfileError::CapacityExceeded {
+                                        resource: "group depth",
+                                        maximum: self.compiler.limits.maximum_group_depth,
+                                    });
+                                }
+                                pending.push((&group.children, depth + 1));
+                            }
+                        }
+                    }
+                    self.register_nodes(nodes)?;
+                }
+                Some((TreeNode::Plugin(_), _)) => {
                     return Err(ProfileError::InvalidProgram(format!(
                         "plugin patch `{target}` has a group-only operation"
                     )));
@@ -1798,6 +1867,7 @@ impl<'a> CompileState<'a> {
             json_object_to_map(&self.compiler.environment.defines)?,
         );
         self.expression_engine
+            .get_or_init(|| expression_engine(&self.compiler.limits))
             .eval_expression_with_scope::<T>(&mut scope, source)
             .map_err(|_| ProfileError::Expression {
                 node: id.to_owned(),
@@ -1911,6 +1981,7 @@ impl<'a> CompileState<'a> {
             tree: self.tree,
             watch_paths: self.watch_paths.into_iter().collect(),
             source_fingerprints: self.source_fingerprints,
+            source_paths: self.source_paths,
             source_digest,
         })
     }
@@ -2120,15 +2191,15 @@ fn find_node_mut<'a>(nodes: &'a mut [TreeNode], target: &str) -> Option<&'a mut 
     None
 }
 
-fn find_node<'a>(nodes: &'a [TreeNode], target: &str) -> Option<&'a TreeNode> {
+fn find_node<'a>(nodes: &'a [TreeNode], target: &str) -> Option<(&'a TreeNode, usize)> {
     for node in nodes {
         if node.id() == target {
-            return Some(node);
+            return Some((node, 1));
         }
         if let TreeNode::Group(group) = node
-            && let Some(found) = find_node(&group.children, target)
+            && let Some((found, depth)) = find_node(&group.children, target)
         {
-            return Some(found);
+            return Some((found, depth + 1));
         }
     }
     None

@@ -243,6 +243,39 @@ fn composition_digest_tracks_frozen_host_inputs_but_not_top_level_profile_source
     assert_eq!(first.composition_digest().unwrap(), before);
 }
 
+#[test]
+fn root_dependent_patch_has_a_root_independent_fingerprint() {
+    let make = |enabled| {
+        let mut builder = HostBuilder::new(paths());
+        builder
+            .register_linked("test.noop", "1", UpdateMode::Replayable, Arc::new(Noop))
+            .unwrap();
+        builder
+            .register_launch_patch(rsi_host::ProfilePatch::SetEnabled {
+                target: "root-leaf".into(),
+                enabled,
+            })
+            .unwrap();
+        builder.build().unwrap()
+    };
+    let host = make(false);
+    let digest = host.composition_digest().unwrap();
+    assert_eq!(digest, make(false).composition_digest().unwrap());
+    assert_ne!(digest, make(true).composition_digest().unwrap());
+    assert!(host.preview(rsi_host::Profile::default()).is_err());
+    assert!(
+        host.preview(rsi_host::Profile::new([ProfileEntry::new(
+            "root-leaf",
+            "test.noop",
+            Value::Null
+        )]))
+        .unwrap()
+        .leaves
+        .is_empty()
+    );
+    assert_eq!(digest, host.composition_digest().unwrap());
+}
+
 #[tokio::test]
 async fn resolved_native_identity_survives_preview_and_runtime_and_changes_digest() {
     use rsi_meta::{FactoryIdentity, ResolvedFactory};

@@ -12,6 +12,16 @@ embedders may use Meta without it.
 
 ## Program and sources
 
+`ProfileCandidate::evaluated_digest` hashes the validated evaluated tree directly.
+Its identity includes order, disabled nodes, literal configuration, tree depth and
+exact isolation declarations, excluding source paths, includes, expression text
+and watchers. Hashing neither reevaluates expressions nor retains encoded private
+configuration. There is no executable-recipe serialization or restoration API.
+Append patches count group depth from the final tree root, including the target's
+ancestors. Identity hashing traverses that already-validated tree iteratively.
+Source-cache probes treat unreadable retained paths as changed; compilation then
+reads the current root and validates only its current include set.
+
 A Profile starts from an empty tree and executes one ordered program:
 immutable linked fragments, the selected root file and its includes, then
 immutable launch patches. Every document has `format = 1` and an ordered

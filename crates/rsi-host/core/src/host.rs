@@ -173,13 +173,14 @@ impl Host {
     /// source, current Profile digest, application argument, session identity, or
     /// credential-store value.
     pub fn composition_digest(&self) -> Result<String> {
-        let preview = self.preview(Profile::default())?;
+        let frozen = ProfileCompiler::new(self.environment.clone(), self.limits.profile.clone())
+            .frozen_source_digest(&self.catalog.fragments, &self.catalog.launch_patches);
         let mut digest = Sha256::new();
-        hash_component(&mut digest, b"domain", b"rsi.host.composition.v2");
+        hash_component(&mut digest, b"domain", b"rsi.host.composition.v3");
         hash_component(
             &mut digest,
-            b"compiled-empty-program",
-            preview.source_digest.as_bytes(),
+            b"frozen-source-declarations",
+            frozen.as_bytes(),
         );
         hash_host_limits(&mut digest, &self.limits);
         hash_runtime_limits(&mut digest, &self.runtime_limits);

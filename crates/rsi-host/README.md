@@ -94,6 +94,10 @@ under one fragment ID. Host also freezes an explicit platform name and JSON
 compatible Rhai defines. There is no ambient inventory, dynamic library search,
 package resolver, environment lookup, or post-build catalog mutation.
 
+The root-independent composition digest hashes frozen fragment and launch-patch
+declarations without evaluating them. Targets supplied by the selected root are
+validated when that root is compiled, not by compiling an empty substitute.
+
 The complete Profile language, source, preflight, replay, watcher, and control
 contracts live at [`rsi-meta-profile`](../rsi-meta/profile/README.md). Profile
 bootstrap is an ordinary plugin Fiber, but only Host may construct it directly.
