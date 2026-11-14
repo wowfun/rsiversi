@@ -225,16 +225,15 @@ async fn shutdown_linearizes_with_apply_after_arbitrary_preparation() {
     assert!(runtime.snapshot().fibers.is_empty());
 }
 
-#[tokio::test(start_paused = true)]
+#[tokio::test]
 async fn application_waiter_timeout_does_not_release_a_running_blocking_preparation() {
-    let runtime = Runtime::new(RuntimeLimits {
+    let (runtime, clock) = support::clock::ManualClock::runtime(RuntimeLimits {
         deadlines: DeadlineLimits {
             transition: std::time::Duration::from_millis(10),
             ..DeadlineLimits::default()
         },
         ..RuntimeLimits::default()
-    })
-    .unwrap();
+    });
     let entered = Arc::new(Barrier::new(2));
     let release = Arc::new(Barrier::new(2));
     let application = tokio::spawn({
@@ -256,7 +255,7 @@ async fn application_waiter_timeout_does_not_release_a_running_blocking_preparat
     .await
     .unwrap();
 
-    tokio::time::advance(std::time::Duration::from_millis(11)).await;
+    clock.advance(std::time::Duration::from_millis(11));
     assert_eq!(
         application.await.unwrap().unwrap_err(),
         MetaError::Timeout("plugin transition"),
@@ -685,17 +684,16 @@ impl PluginFactory for BlockingCleanupFactory {
     }
 }
 
-#[tokio::test(start_paused = true)]
+#[tokio::test]
 async fn shutdown_wait_reports_unresolved_work_and_later_joins_completion() {
-    let runtime = Runtime::new(RuntimeLimits {
+    let (runtime, clock) = support::clock::ManualClock::runtime(RuntimeLimits {
         deadlines: DeadlineLimits {
             transition: std::time::Duration::from_millis(10),
             service_call: std::time::Duration::from_millis(10),
             shutdown_wait: std::time::Duration::from_millis(20),
         },
         ..RuntimeLimits::default()
-    })
-    .unwrap();
+    });
     let entered = Arc::new(Notify::new());
     let release = Arc::new(Notify::new());
     let fiber = runtime
@@ -715,7 +713,7 @@ async fn shutdown_wait_reports_unresolved_work_and_later_joins_completion() {
         async move { runtime.shutdown().await }
     });
     entered.notified().await;
-    tokio::time::advance(std::time::Duration::from_millis(21)).await;
+    clock.advance(std::time::Duration::from_millis(21));
     let outcome = shutdown.await.unwrap();
     let rsi_meta::ShutdownOutcome::TimedOut { report, unresolved } = outcome else {
         panic!("blocked cleanup must outlive the first waiter")

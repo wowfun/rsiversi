@@ -75,17 +75,16 @@ impl PluginFactory for HangingActivationFactory {
     }
 }
 
-#[tokio::test(start_paused = true)]
+#[tokio::test]
 async fn activation_waiter_timeout_keeps_runtime_owned_rollback_exactly_once() {
-    let runtime = Runtime::new(RuntimeLimits {
+    let (runtime, clock) = support::clock::ManualClock::runtime(RuntimeLimits {
         deadlines: DeadlineLimits {
             transition: std::time::Duration::from_millis(10),
             service_call: std::time::Duration::from_millis(10),
             shutdown_wait: std::time::Duration::from_millis(20),
         },
         ..RuntimeLimits::default()
-    })
-    .unwrap();
+    });
     let entered = Arc::new(Notify::new());
     let cleanups = Arc::new(AtomicUsize::new(0));
     let applying = tokio::spawn({
@@ -108,7 +107,7 @@ async fn activation_waiter_timeout_keeps_runtime_owned_rollback_exactly_once() {
     let loading = runtime.resource_snapshot();
     assert_eq!(loading.effect_transactions.current, 1);
     assert_eq!(loading.effects.current, 1);
-    tokio::time::advance(std::time::Duration::from_millis(11)).await;
+    clock.advance(std::time::Duration::from_millis(11));
     assert_eq!(
         applying.await.unwrap().unwrap_err(),
         MetaError::Timeout("plugin transition"),
@@ -131,16 +130,15 @@ async fn activation_waiter_timeout_keeps_runtime_owned_rollback_exactly_once() {
     assert_eq!(cleanups.load(Ordering::Acquire), 1);
 }
 
-#[tokio::test(start_paused = true)]
+#[tokio::test]
 async fn reconfiguration_waiter_timeout_leaves_one_busy_runtime_owned_transaction() {
-    let runtime = Runtime::new(RuntimeLimits {
+    let (runtime, clock) = support::clock::ManualClock::runtime(RuntimeLimits {
         deadlines: DeadlineLimits {
             transition: std::time::Duration::from_millis(10),
             ..DeadlineLimits::default()
         },
         ..RuntimeLimits::default()
-    })
-    .unwrap();
+    });
     let entered = Arc::new(Barrier::new(2));
     let release = Arc::new(Barrier::new(2));
     let activated = Arc::new(Notify::new());
@@ -170,7 +168,7 @@ async fn reconfiguration_waiter_timeout_leaves_one_busy_runtime_owned_transactio
     })
     .await
     .unwrap();
-    tokio::time::advance(std::time::Duration::from_millis(11)).await;
+    clock.advance(std::time::Duration::from_millis(11));
     assert_eq!(
         reconfiguration.await.unwrap().unwrap_err(),
         MetaError::Timeout("plugin transition"),

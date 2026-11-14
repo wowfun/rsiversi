@@ -1,5 +1,7 @@
 #![allow(dead_code)]
 
+pub(crate) mod clock;
+
 use async_trait::async_trait;
 use rsi_meta::{
     ActivationPlan, ConfigValue, Context, ContractId, ContractVersion, Emit, EmitEventHandler,

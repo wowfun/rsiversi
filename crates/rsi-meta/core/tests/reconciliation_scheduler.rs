@@ -841,9 +841,9 @@ impl PluginFactory for AwaitingHangingChild {
     }
 }
 
-#[tokio::test(start_paused = true)]
+#[tokio::test]
 async fn timed_out_parent_requeues_its_cancelled_nested_apply_claim() {
-    let runtime = Runtime::new(RuntimeLimits {
+    let (runtime, clock) = support::clock::ManualClock::runtime(RuntimeLimits {
         execution: ExecutionLimits {
             maximum_concurrent_reconciliations: 1,
             ..ExecutionLimits::default()
@@ -853,8 +853,7 @@ async fn timed_out_parent_requeues_its_cancelled_nested_apply_claim() {
             ..DeadlineLimits::default()
         },
         ..RuntimeLimits::default()
-    })
-    .unwrap();
+    });
     let child_entered = Arc::new(Notify::new());
     let applying = tokio::spawn({
         let root = runtime.root();
@@ -872,7 +871,7 @@ async fn timed_out_parent_requeues_its_cancelled_nested_apply_claim() {
     });
     child_entered.notified().await;
 
-    tokio::time::advance(std::time::Duration::from_millis(11)).await;
+    clock.advance(std::time::Duration::from_millis(11));
     assert_eq!(
         applying.await.unwrap().unwrap_err(),
         MetaError::Timeout("plugin transition"),
@@ -929,9 +928,9 @@ impl PluginFactory for BlockingCleanupTarget {
     }
 }
 
-#[tokio::test(start_paused = true)]
+#[tokio::test]
 async fn timed_out_parent_requeues_its_cancelled_nested_disposal_claim() {
-    let runtime = Runtime::new(RuntimeLimits {
+    let (runtime, clock) = support::clock::ManualClock::runtime(RuntimeLimits {
         execution: ExecutionLimits {
             maximum_concurrent_reconciliations: 1,
             ..ExecutionLimits::default()
@@ -941,8 +940,7 @@ async fn timed_out_parent_requeues_its_cancelled_nested_disposal_claim() {
             ..DeadlineLimits::default()
         },
         ..RuntimeLimits::default()
-    })
-    .unwrap();
+    });
     let cleanup_entered = Arc::new(Notify::new());
     let cleanup_release = Arc::new(Notify::new());
     let cleanups = Arc::new(AtomicUsize::new(0));
@@ -978,7 +976,7 @@ async fn timed_out_parent_requeues_its_cancelled_nested_disposal_claim() {
     });
     cleanup_entered.notified().await;
 
-    tokio::time::advance(std::time::Duration::from_millis(11)).await;
+    clock.advance(std::time::Duration::from_millis(11));
     assert_eq!(
         applying.await.unwrap().unwrap_err(),
         MetaError::Timeout("plugin transition"),
