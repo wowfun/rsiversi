@@ -875,7 +875,10 @@ fn copy_preset_platform(
     }
     let target_path = user_root.join(target.as_str());
     fs::rename(temporary.path(), &target_path).map_err(|error| {
-        if error.kind() == std::io::ErrorKind::AlreadyExists {
+        if matches!(
+            error.kind(),
+            std::io::ErrorKind::AlreadyExists | std::io::ErrorKind::DirectoryNotEmpty
+        ) {
             PresetError::PresetExists {
                 id: target.as_str().to_owned(),
             }
