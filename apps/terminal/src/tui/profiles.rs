@@ -13,7 +13,7 @@ enum After {
     Browse,
     Leaf(Target),
     Review,
-    Receipt,
+    Result,
     Grant(Target),
     Grants(usize),
 }
@@ -25,15 +25,15 @@ enum Choice {
     Configuration(Target),
     GrantKind(Target),
     GrantPrincipal(Target, ChangeKind),
-    GrantInput(Target, ChangeKind, bool),
+    GrantInput(Target, ChangeKind),
     Grants(usize),
-    Receipts(usize),
+    Result,
     Browse,
     Close,
 }
 enum Form {
     Configuration(Target),
-    Grant(Target, ChangeKind, bool),
+    Grant(Target, ChangeKind),
 }
 pub(super) struct Ui {
     pub active: bool,
@@ -136,17 +136,17 @@ impl Ui {
             }
             Choice::GrantKind(target) => self.grant_kind(&target),
             Choice::GrantPrincipal(target, kind) => self.grant_principal(&target, kind),
-            Choice::GrantInput(target, kind, agent) => {
+            Choice::GrantInput(target, kind) => {
                 self.menu(
                     "Grant an exact change",
                     "Enter the exact principal ID to receive this leaf operation.",
                     vec![],
                 );
                 self.editor.limit = 256;
-                self.form = Some(Form::Grant(target, kind, agent));
+                self.form = Some(Form::Grant(target, kind));
             }
             Choice::Grants(offset) => self.grants(offset),
-            Choice::Receipts(offset) => self.receipts(offset),
+            Choice::Result => self.result(),
             Choice::Browse => self.browse(),
             Choice::Close => self.active = false,
         }
@@ -215,9 +215,9 @@ impl Ui {
                 },
                 After::Review,
             ),
-            Form::Grant(target, kind, agent) => {
+            Form::Grant(target, kind) => {
                 let principal = serde_json::from_value::<Principal>(
-                    serde_json::json!({"kind":if *agent {"agent"} else {"device"},"id":self.editor.text()}),
+                    serde_json::json!({"kind":"device","id":self.editor.text()}),
                 );
                 let Ok(principal) = principal else {
                     self.status = "Enter a valid exact principal ID".into();
@@ -280,13 +280,13 @@ impl Ui {
             After::Browse => self.browse(),
             After::Leaf(target) => self.leaf(&target),
             After::Review => {
-                if let Some(preview) = self.view.previews.last().cloned() {
+                if let Some(preview) = self.view.preview.clone() {
                     self.review(&preview);
                 } else {
                     self.browse();
                 }
             }
-            After::Receipt => self.receipt(),
+            After::Result => self.result(),
             After::Grant(target) => self.grant_kind(&target),
             After::Grants(offset) => self.grants(offset),
         }
@@ -308,8 +308,7 @@ impl Ui {
             field: self.form.as_ref().map(|form| {
                 match form {
                     Form::Configuration(_) => "Complete JSON configuration",
-                    Form::Grant(_, _, true) => "Agent Session ID",
-                    Form::Grant(_, _, false) => "Device ID",
+                    Form::Grant(_, _) => "Device ID",
                 }
                 .into()
             }),
@@ -332,5 +331,85 @@ impl Ui {
         while self.work.is_some() {
             self.next().await;
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    fn preview() -> wire::Preview {
+        wire::Preview {
+            host_epoch: rsi_api_protocol::HostEpoch::from_bytes([1; 16]),
+            target: Target {
+                root: "a".repeat(64),
+                profile: "editable".into(),
+                leaf: "sample".into(),
+            },
+            operation: ChangeKind::Disable,
+            digest: "b".repeat(64),
+            source_digest: "c".repeat(64),
+            plugin: "sample".into(),
+            previous_enabled: true,
+            enabled: false,
+            effective_enabled: false,
+        }
+    }
+    #[tokio::test]
+    async fn profile_review_uses_one_digest_and_local_dismissal() {
+        let runtime = rsi_meta::Runtime::default();
+        let mut ui = Ui::new(&runtime.root());
+        let preview = preview();
+        ui.view.preview = Some(preview.clone());
+        ui.review(&preview);
+        assert!(ui.items.iter().any(|(_, choice)| matches!(choice, Choice::Run(LeafCommand::Commit { digest }, After::Result) if digest == &preview.digest)));
+        assert!(
+            ui.items.iter().any(|(_, choice)| matches!(
+                choice,
+                Choice::Run(LeafCommand::Discard, After::Browse)
+            ))
+        );
+        assert!(!ui.detail.as_ref().unwrap().contains("Ticket"));
+        ui.view.grants = Some(wire::Grants {
+            revision: "0".into(),
+            scopes: vec![],
+        });
+        ui.grant_principal(&preview.target, ChangeKind::Disable);
+        assert!(
+            ui.items
+                .iter()
+                .any(|(label, _)| label == "Grant to a registered Device ID")
+        );
+        assert!(!ui.items.iter().any(|(label, _)| label.contains("Agent")));
+    }
+    #[tokio::test]
+    async fn unknown_profile_result_offers_current_state_without_replay() {
+        let runtime = rsi_meta::Runtime::default();
+        let mut ui = Ui::new(&runtime.root());
+        ui.view.result = Some(wire::ChangeResult {
+            preview: preview(),
+            outcome: wire::Outcome::Unknown,
+        });
+        ui.result();
+        assert!(
+            ui.detail
+                .as_ref()
+                .unwrap()
+                .contains("Current state cannot prove")
+        );
+        assert!(ui.items.iter().all(|(_, choice)| matches!(
+            choice,
+            Choice::Run(LeafCommand::Read { .. }, After::Browse) | Choice::Browse
+        )));
+        ui.view.result.as_mut().unwrap().outcome = wire::Outcome::Saved {
+            directory_synced: true,
+            application: wire::Application::Applied,
+        };
+        ui.result();
+        assert!(
+            ui.detail
+                .as_ref()
+                .unwrap()
+                .contains("Runtime at completion")
+        );
     }
 }

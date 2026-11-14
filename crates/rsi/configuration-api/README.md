@@ -1,5 +1,7 @@
 # rsi-configuration-api
 
+Interface version 6 uses stateless Host Profile previews and direct commit results.
+
 `agent-presets` version 1 exposes read-only `list` and `document` operations under
 the caller's retained configuration grant. Each read captures the current Agent
 composition source, using its existing preset catalog and compiler; it neither
@@ -18,6 +20,9 @@ namespace. Session selection continues through the revision-checked Draft
 command; these reads confer neither mutation nor Session authority.
 
 Host pages also carry an optional last completed update with decimal command identity, closed origin, outcome and failure categories. This is not an action receipt or an authorization to retry. Non-Host pages omit it.
+`partial` means the ordinary reload accepted its desired target and retained
+successful leaves while reporting a primary failure without compensation.
+`rolled_back` and `degraded` retain their executable-input restoration meanings.
 
 The typed configuration-grant API carries redacted authority status and a
 Local-only grant snapshot and CAS mutation. Revisions are exact canonical
@@ -118,11 +123,15 @@ The Plugins wire contract is v3. It includes an explicit target, asynchronous
 resident-generation lookup, health/watcher evidence and the typed last update
 attempt. Earlier versions are unsupported; in-tree clients use v3 together.
 
-Host Profile leaf management uses separate `profile-leaves` version 2 operations.
+Host Profile leaf management uses separate `profile-leaves` version 3 operations.
 Its exact root identity, user Profile, leaf and enable/disable/configuration
-operation require an explicit Local-issued scope grant, including for a Local
-caller. Device callers also retain their existing configuration admission;
-Agent tools have a distinct Session principal and cannot inherit human authority.
+operation require an explicit Local-issued scope grant for human clients, including
+a Local caller. Device callers also retain their existing configuration admission.
+Native Agent tools use actual Turn authorization: Full access or per-call approval,
+with independent `require_approval` preserved. Their distinct Session principal authenticates
+management calls; Agent principals cannot be stored in the grant document.
+The Tool reports a source owner's explicit ownership refusal as Unauthorized,
+not as an unknown write outcome. Unavailable outcomes retain reconciliation guidance.
 Local grant changes are unavailable through remote authentication.
 
 The same grant document owns a closed scope union: Profile leaf change, exact SSH
@@ -130,35 +139,33 @@ target use, exact SSH target management, or exact target/server stdio management
 The latter binds a sorted unique list of at most 32 `rsi.mcp` credential references.
 No scope implies another scope, and ordinary configuration grants imply none of
 these SSH scopes. Local host-key and authentication-identity trust remains a
-separate Local-only operation. Grant storage uses domain version 2 and retains
+separate Local-only operation. Grant storage uses domain version 3 and retains
 the existing CAS, gate-close, Storage-fence and admitted-operation drain contract.
+Earlier grant stores, including stored Agent grants, are unsupported. They must
+be explicitly reset or replaced with fresh state before startup; boot does not
+silently discard grants or migrate their authority.
 
-The source owner returns bounded redacted catalog metadata and prepared previews.
-A preview binds its proposal, original source, dependencies and frozen catalog to
-one Host epoch and ticket. It returns no configuration, source text or diagnostic
-payload from plugin code. Each caller may list and discard its own unused previews,
-including after losing a preparation reply. Commits retain
-one request identity and can be reconciled after reply loss; clients never retry
-an unknown write as a fresh operation. A caller may recover its at most 256 receipt
-ticket identities after reconnecting, then query the exact receipt. Source publication, directory durability
-and observed application are separate fields. A replaced Host reports old
-runtime tickets unavailable, never silently submits their writes again.
-Commit replies must echo the complete redacted preview. Malformed or conflicting
-mutation metadata remains unknown even when the JSON itself decoded successfully.
+The source owner returns bounded redacted catalog metadata and stateless previews.
+A preview binds original source, dependencies, the proposed change and the frozen
+catalog to one Host epoch and review digest. It retains no source, Host, permit or
+server ticket after the call. Commit supplies the target, literal change and review
+digest again; the owner rechecks authority and prepares the exact change under its
+serialized writer before publication. Changed inputs return Conflict.
+
+The completed result is returned directly and is not retained. There is no receipt
+lookup, preview inventory or discard operation. Source publication, directory
+durability and observed runtime application remain separate fields. A lost response
+is unknown; clients refresh current desired/applied state before choosing further
+work and must not describe that observation as proof of the original operation.
+Commit replies echo the redacted preview. Malformed mutation replies remain unknown.
 
 Requests are at most 128 KiB, configuration 64 KiB / depth 32 / 4,096 values,
-catalog pages 64 leaves, responses 64 KiB, and grants 256 exact scopes. The owner
-retains at most four previews and 256 receipts, with two nonqueued read/prepare
-slots, four retained grant-change slots, and one source/grant writer. Admitted preparation and writes survive response
-loss; revocation validates and encodes the replacement grants before closing
-scope admission immediately before durable publication. Preflight rejection leaves
-the existing grant open. Revocation then waits for already admitted work.
-A known pre-commit storage failure leaves that scope closed. A later explicit
-grant reopens admission while retaining every previously admitted task, so a
-subsequent revocation still drains all of them.
-The revoked grant is published before that drain; unrelated mutations can proceed
-while old admitted work settles. Revocation acknowledgement still waits for the
-drain, and it never overwrites a subsequently issued grant revision.
+catalog pages 64 leaves, responses 64 KiB, and grants 256 exact scopes. Local,
+Device and Agent each have two short-lived operation slots; writer waiters hold
+those slots. Grant changes have four separate slots. Source/grant publication is
+serialized. There is no per-principal fairness guarantee. Admitted writes survive
+response loss; revocation closes authority before publication and drains work
+already admitted under the revoked grant. Preview completion retains no capacity.
 
 ## SSH targets
 

@@ -23,7 +23,7 @@ where
             async move {
                 let (principal, lease) = owner.human(&context.origin)?;
                 owner
-                    .run(move |owner| {
+                    .run(&principal.clone(), move |owner| {
                         Box::pin(async move {
                             let _lease = lease;
                             work(owner, principal, input).await
@@ -63,34 +63,6 @@ pub(super) fn register(
             O::Commit,
             |owner, principal, input| Box::pin(async move { owner.commit(principal, input).await }),
         )?,
-        human(
-            registrar,
-            owner.clone(),
-            O::Receipt,
-            |owner, principal, input| Box::pin(async move { owner.receipt(&principal, &input) }),
-        )?,
-        human(
-            registrar,
-            owner.clone(),
-            O::Discard,
-            |owner, principal, input| Box::pin(async move { owner.discard(&principal, &input) }),
-        )?,
-        human(
-            registrar,
-            owner.clone(),
-            O::Previews,
-            |owner, principal, _: Empty| {
-                Box::pin(async move { Ok(Ok(owner.previews(&principal))) })
-            },
-        )?,
-        human(
-            registrar,
-            owner.clone(),
-            O::Receipts,
-            |owner, principal, _: Empty| {
-                Box::pin(async move { Ok(Ok(owner.receipts(&principal))) })
-            },
-        )?,
     ];
     let service = owner.clone();
     registrations.push(registrar.register(
@@ -98,8 +70,11 @@ pub(super) fn register(
         json_handler(move |context, _: Empty| {
             let owner = service.clone();
             async move {
+                require_local(&context.origin)?;
                 owner
-                    .run(move |owner| Box::pin(async move { owner.grants(&context.origin) }))?
+                    .run(&Principal::Local, move |owner| {
+                        Box::pin(async move { owner.grants() })
+                    })?
                     .await
             }
         }),
@@ -109,13 +84,19 @@ pub(super) fn register(
         json_handler(move |context, input: wire::SetGrant| {
             let owner = owner.clone();
             async move {
+                require_local(&context.origin)?;
                 owner
-                    .run_grant(move |owner| {
-                        Box::pin(async move { owner.set_grant(context.origin, input).await })
-                    })?
+                    .run_grant(move |owner| Box::pin(async move { owner.set_grant(input).await }))?
                     .await
             }
         }),
     )?);
     Ok(registrations)
+}
+
+fn require_local(origin: &rsi_api_protocol::CallOrigin) -> Result<()> {
+    match origin {
+        rsi_api_protocol::CallOrigin::Local => Ok(()),
+        rsi_api_protocol::CallOrigin::Device(_) => Err(rsi_api_protocol::ApiError::Unauthorized),
+    }
 }

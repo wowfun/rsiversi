@@ -110,7 +110,9 @@ diagnostic precision, streaming and file replacement behavior.
 `/profiles` opens reviewed Host leaf management from Home or a Native conversation.
 It uses the same Rust workbench as Settings → Plugins, preserving the conversation
 draft while editing. Source selection, exact Local-issued grants, configuration
-preparation, review acceptance and original receipt queries are explicit actions.
+preparation, review acceptance and local dismissal are explicit actions. The panel
+retains one review and the latest direct result. Unknown completion offers current
+source refresh without replay; runtime labels describe the state at completion.
 The bounded JSON editor passes text to Rust; leaving the panel does not cancel an
 admitted source operation. Saved source and runtime application have separate labels.
 

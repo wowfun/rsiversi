@@ -52,7 +52,17 @@ pub enum StorageError {
     /// No active backend has the requested exact name.
     #[error("storage backend `{0}` is unavailable")]
     BackendUnavailable(String),
-    /// Durable state is corrupt or has an incompatible schema version.
+    /// A loaded domain has a different consumer-owned schema version.
+    #[error("domain `{domain}` has version {stored}, expected {requested}")]
+    DomainVersionMismatch {
+        /// Exact domain identity.
+        domain: String,
+        /// Version found in durable state.
+        stored: u32,
+        /// Version required by the consumer.
+        requested: u32,
+    },
+    /// Durable state or its backend schema is corrupt.
     #[error("storage corruption: {0}")]
     Corrupt(String),
     /// Commit may have become visible; its owning generation is now fenced.
@@ -75,6 +85,7 @@ impl StorageError {
             | Self::Unsupported(_)
             | Self::DuplicateBackend(_)
             | Self::BackendUnavailable(_)
+            | Self::DomainVersionMismatch { .. }
             | Self::Corrupt(_)
             | Self::Io(_) => false,
         }

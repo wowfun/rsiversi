@@ -96,15 +96,19 @@ commands. Desired and observed revision changes invalidate pagination; failed re
 clear the old page. Both TUI `/plugins` and GUI Settings → Plugins consume this
 owner, whose admitted reads drain before feature retirement.
 
-Host leaf management is a distinct panel in this feature, using the reviewed
-`profile-leaves` API. It retains one bounded source page, four redacted proposals,
-256 receipt identities and one selected receipt. Local grant editing is explicit;
-Device and Agent scopes remain separate. Configuration text is parsed as exact
-bounded JSON in Rust and never enters a retained view. A commit accepts the
-displayed ticket/digest, records unknown replies without replay, and offers a
-query of that original ticket. Reconnection may recover owned proposals and
-receipt identities. Source save, directory durability and runtime application
-are displayed separately; old resident Sessions are not edited.
+Host leaf management is a distinct panel using the reviewed
+[`profile-leaves` API](../configuration-api/README.md). Local grant editing is
+explicit and permits Local or Device principals; Agent tools use their own
+per-call authority. Configuration text is parsed as exact bounded JSON in Rust.
+Host Profile review retains one private client-side change until it is committed,
+dismissed or refreshed; the document receives only redacted metadata. Refresh
+makes one catalog call, without recovering server previews or receipts. Commit
+consumes the review before sending and displays the direct result. An unknown
+reply is not retried automatically; current state is observation, not proof of
+that original write. The configuration API owns server admission and publication.
+Source save, directory durability and runtime at completion are displayed
+separately. Reconnection reads current source choices without recovering old
+results.
 
 Navigation only acknowledges coalesced invalidations when it will query the
 current filter; an attention-only timer tick cannot consume a later publication.

@@ -1,7 +1,7 @@
 use super::{PluginsFeature, Result};
 use rsi_configuration_api::leaf::{
-    self as wire, Catalog, CatalogRequest, Change, Grant, Grants, Outcome, Preview, PreviewRequest,
-    Receipt, Target,
+    self as wire, Catalog, CatalogRequest, Change, ChangeResult, Grant, Grants, Outcome, Preview,
+    PreviewRequest, Target,
 };
 use serde::{Deserialize, Serialize};
 
@@ -9,7 +9,7 @@ use serde::{Deserialize, Serialize};
 #[derive(Clone, Deserialize)]
 #[serde(tag = "kind", rename_all = "snake_case", deny_unknown_fields)]
 pub enum LeafCommand {
-    /// Reads an exact bounded page and recovers owned proposal/receipt identities.
+    /// Reads current source choices without retaining server resources.
     Read {
         /// Profile selection and lexical continuation.
         query: CatalogRequest,
@@ -25,26 +25,16 @@ pub enum LeafCommand {
     Configuration {
         /// Exact source choice.
         target: Target,
-        /// Ephemeral user input; never retained by a view.
+        /// Exact user input; retained privately only until review is consumed.
         document: String,
     },
     /// Accepts exactly the displayed prepared proposal.
     Commit {
-        /// Existing prepared ticket.
-        ticket: String,
         /// Displayed review digest.
         digest: String,
     },
-    /// Reads an original receipt, including after an unknown mutation reply.
-    Receipt {
-        /// Exact owned ticket.
-        ticket: String,
-    },
-    /// Frees an unused prepared proposal.
-    Discard {
-        /// Exact owned ticket.
-        ticket: String,
-    },
+    /// Clears the local review without making an API call.
+    Discard,
     /// Refreshes the Local grant snapshot without granting anything.
     Grants,
     /// Explicit Local expected-revision grant mutation.
@@ -75,12 +65,13 @@ pub struct LeafView {
     pub catalog: Option<Catalog>,
     /// Explicit Local grant observation.
     pub grants: Option<Grants>,
-    /// At most four recoverable, owned prepared proposals.
-    pub previews: Vec<Preview>,
-    /// At most 256 exact owned receipt identities, recoverable after reconnect.
-    pub receipts: Vec<String>,
-    /// One selected source result, separate from application status.
-    pub receipt: Option<Receipt>,
+    /// One redacted, client-local review.
+    pub preview: Option<Preview>,
+    /// Complete change is never serialized to the document or persisted.
+    #[serde(skip)]
+    pending: Option<PreviewRequest>,
+    /// Most recent direct result; not recovery evidence after reconnect.
+    pub result: Option<ChangeResult>,
     /// Closed safe outcome or rejection guidance.
     pub notice: Option<String>,
 }
@@ -105,12 +96,10 @@ impl PluginsFeature {
                     state.leaves.catalog = None;
                 }
                 let catalog = response(client.catalog(query).await)?;
-                let previews = response(client.previews().await)?;
-                let receipts = response(client.receipts().await)?;
                 let mut state = self.state.lock().expect("Profile source page");
                 state.leaves.catalog = Some(catalog);
-                state.leaves.previews = previews;
-                state.leaves.receipts = receipts;
+                state.leaves.preview = None;
+                state.leaves.pending = None;
                 state.leaves.notice = None;
             }
             LeafCommand::Enabled { target, enabled } => {
@@ -140,21 +129,14 @@ impl PluginsFeature {
                 )
                 .await?;
             }
-            LeafCommand::Commit { ticket, digest } => {
-                self.leaf_commit(client, &ticket, &digest).await?;
+            LeafCommand::Commit { digest } => {
+                self.leaf_commit(client, &digest).await?;
             }
-            LeafCommand::Receipt { ticket } => {
-                let receipt = response(client.receipt(&ticket).await)?;
-                self.leaf_receipt(receipt);
-            }
-            LeafCommand::Discard { ticket } => {
-                response(client.discard(&ticket).await)?;
-                let mut state = self.state.lock().expect("Profile proposal discard");
-                state
-                    .leaves
-                    .previews
-                    .retain(|preview| preview.ticket != ticket);
-                state.leaves.notice = Some("Unused proposal discarded".into());
+            LeafCommand::Discard => {
+                let mut state = self.state.lock().expect("Profile review discard");
+                state.leaves.preview = None;
+                state.leaves.pending = None;
+                state.leaves.notice = None;
             }
             LeafCommand::Grants => {
                 let grants = response(client.grants().await)?;
@@ -191,94 +173,64 @@ impl PluginsFeature {
         Ok(())
     }
     async fn leaf_prepare(&self, client: &wire::Client, request: PreviewRequest) -> Result<()> {
-        let preview = response(client.preview(request).await)?;
-        let mut state = self.state.lock().expect("Profile prepared proposal");
-        if state.leaves.previews.len() == 4 {
-            state.leaves.previews.remove(0);
-        }
-        state.leaves.previews.push(preview);
-        state.leaves.notice = Some("Prepared. Review this exact proposal before saving.".into());
+        let preview = response(client.preview(request.clone()).await)?;
+        let mut state = self.state.lock().expect("Profile review");
+        state.leaves.preview = Some(preview);
+        state.leaves.pending = Some(request);
+        state.leaves.result = None;
+        state.leaves.notice = Some("Review this change before saving.".into());
         Ok(())
     }
-    async fn leaf_commit(&self, client: &wire::Client, ticket: &str, digest: &str) -> Result<()> {
-        let preview = {
+    async fn leaf_commit(&self, client: &wire::Client, digest: &str) -> Result<()> {
+        let (preview, request) = {
             let mut state = self.state.lock().expect("Profile review acceptance");
-            if state.leaves.receipt.as_ref().is_some_and(|receipt| {
-                receipt.preview.ticket == ticket
-                    && matches!(receipt.outcome, Outcome::Pending | Outcome::Unknown)
-            }) {
-                return Err("Query the original receipt before any further write".into());
-            }
-            let preview = state
+            if state
                 .leaves
-                .previews
-                .iter()
-                .find(|preview| preview.ticket == ticket && preview.digest == digest)
-                .cloned()
-                .ok_or("Prepared proposal changed; refresh Host Profiles")?;
-            state.leaves.receipt = Some(Receipt {
+                .preview
+                .as_ref()
+                .is_none_or(|value| value.digest != digest)
+            {
+                return Err("Review changed; prepare the change again".into());
+            }
+            let preview = state.leaves.preview.take().expect("checked review");
+            let request = state.leaves.pending.take().expect("review owns its change");
+            state.leaves.result = Some(ChangeResult {
                 preview: preview.clone(),
                 outcome: Outcome::Pending,
             });
-            preview
+            (preview, request)
         };
-        let result = client.commit(&preview).await;
-        match result {
-            Ok(Ok(receipt)) => {
+        let result = match client.commit(&preview, request).await {
+            Ok(Ok(result)) => result,
+            Ok(Err(failure)) => ChangeResult {
+                preview,
+                outcome: Outcome::Failed { failure },
+            },
+            Err(rsi_api_protocol::ApiError::OutcomeUnknown) => ChangeResult {
+                preview,
+                outcome: Outcome::Unknown,
+            },
+            Err(error) => {
                 self.state
                     .lock()
-                    .expect("Committed Profile proposal")
+                    .expect("Profile refused call")
                     .leaves
-                    .previews
-                    .retain(|item| item.ticket != ticket);
-                self.leaf_receipt(receipt);
-                Ok(())
+                    .result = None;
+                return response::<()>(Err(error));
             }
-            Ok(Err(failure)) => {
-                // The owner proved rejection before write admission; the proposal remains reusable.
-                self.state
-                    .lock()
-                    .expect("Rejected Profile proposal")
-                    .leaves
-                    .receipt = None;
-                Err(failure_message(&failure))
-            }
-            Err(_) => {
-                self.leaf_receipt(Receipt {
-                    preview,
-                    outcome: Outcome::Unknown,
-                });
-                Err("Source write outcome unknown. Query this original receipt; do not submit a new write.".into())
-            }
-        }
-    }
-    fn leaf_receipt(&self, receipt: Receipt) {
-        let mut state = self.state.lock().expect("Profile receipt");
-        if matches!(
-            receipt.outcome,
-            Outcome::Saved { .. } | Outcome::Failed { .. }
-        ) {
-            state
-                .leaves
-                .previews
-                .retain(|preview| preview.ticket != receipt.preview.ticket);
-        }
-        if !state.leaves.receipts.contains(&receipt.preview.ticket)
-            && state.leaves.receipts.len() < 256
-        {
-            state.leaves.receipts.push(receipt.preview.ticket.clone());
-        }
-        state.leaves.notice = Some(match &receipt.outcome {
-            Outcome::Pending => "Applying the original change. Admitted work may still be draining; refresh this receipt to check progress.".into(),
-            Outcome::Unknown => "Source outcome unknown. Query the original receipt.".into(),
+        };
+        let mut state = self.state.lock().expect("Profile result");
+        state.leaves.notice = Some(match &result.outcome {
+            Outcome::Pending => "Applying the change.".into(),
+            Outcome::Unknown => "Write outcome unknown. Refresh current source and runtime state before further work; it does not prove the original result.".into(),
             Outcome::Failed { failure } => failure_message(failure),
-            Outcome::Saved { .. } => {
-                "Source saved. Runtime application is reported separately.".into()
-            }
+            Outcome::Saved { .. } => "Source saved. Runtime application is reported separately.".into(),
         });
-        state.leaves.receipt = Some(receipt);
+        state.leaves.result = Some(result);
+        Ok(())
     }
 }
+
 #[cfg(test)]
 mod tests;
 fn response<T>(value: wire::Reply<T>) -> Result<T> {
@@ -292,7 +244,7 @@ fn response<T>(value: wire::Reply<T>) -> Result<T> {
             Err("Profile management is busy; refresh after the current operation completes".into())
         }
         Err(rsi_api_protocol::ApiError::OutcomeUnknown) => Err(
-            "Operation outcome unknown. Refresh its original grant or receipt; do not replay it."
+            "Operation outcome unknown. Read current state before further work; do not blindly replay it."
                 .into(),
         ),
         Err(_) => Err("Host Profile observation unavailable; reconnect and refresh".into()),

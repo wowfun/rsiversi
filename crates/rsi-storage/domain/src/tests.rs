@@ -84,6 +84,19 @@ impl KvBackend for Backend {
 }
 
 #[tokio::test]
+async fn schema_mismatch_is_distinct_from_storage_corruption() {
+    let (_runtime, _lease, facility) = facility(Arc::new(Backend::default())).await;
+    let mut changed = spec();
+    changed.version = 2;
+    assert!(matches!(facility.open(changed.clone()).await,
+        Err(StorageError::DomainVersionMismatch { domain, stored: 1, requested: 2 }) if domain == changed.id));
+    assert!(
+        facility.open(spec()).await.is_ok(),
+        "refusal must not rewrite durable state"
+    );
+}
+
+#[tokio::test]
 async fn lost_commit_completion_is_unknown_and_fences_the_domain_snapshot() {
     for delete in [false, true] {
         let backend = Arc::new(Backend::default());

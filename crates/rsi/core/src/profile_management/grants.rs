@@ -97,13 +97,10 @@ impl Manager {
             ExecutionOperation::new(permits),
         ))
     }
-    pub(super) fn grants(&self, origin: &CallOrigin) -> Reply<wire::Grants> {
+    pub(super) fn grants(&self) -> Reply<wire::Grants> {
         self.domain
             .ensure_available()
             .map_err(rsi_storage_domain::storage_error)?;
-        if !matches!(origin, CallOrigin::Local) {
-            return Err(ApiError::Unauthorized);
-        }
         Ok(Ok(self
             .state
             .lock()
@@ -111,19 +108,16 @@ impl Manager {
             .document
             .clone()))
     }
-    pub(super) async fn set_grant(
-        &self,
-        origin: CallOrigin,
-        change: wire::SetGrant,
-    ) -> Reply<wire::Grants> {
+    pub(super) async fn set_grant(&self, change: wire::SetGrant) -> Reply<wire::Grants> {
         self.domain
             .ensure_available()
             .map_err(rsi_storage_domain::storage_error)?;
-        if !matches!(origin, CallOrigin::Local) {
-            return Err(ApiError::Unauthorized);
-        }
         change.validate()?;
-        let writer = self.writer.try_acquire().map_err(|_| ApiError::Capacity)?;
+        let writer = self
+            .writer
+            .acquire()
+            .await
+            .map_err(|_| ApiError::ShuttingDown)?;
         let mut document = self.state.lock().expect("Profile grants").document.clone();
         if document.revision != change.expected {
             return Ok(Err(Failure::Conflict));
@@ -218,16 +212,17 @@ impl Manager {
         ]
         .into_iter()
         .filter(|operation| {
-            state
-                .gates
-                .get(&Grant {
-                    principal: principal.clone(),
-                    scope: wire::GrantScope::Profile {
-                        target: target.clone(),
-                        operation: *operation,
-                    },
-                })
-                .is_some_and(|gate| gate.open)
+            matches!(principal, Principal::Agent(_))
+                || state
+                    .gates
+                    .get(&Grant {
+                        principal: principal.clone(),
+                        scope: wire::GrantScope::Profile {
+                            target: target.clone(),
+                            operation: *operation,
+                        },
+                    })
+                    .is_some_and(|gate| gate.open)
         })
         .collect())
     }

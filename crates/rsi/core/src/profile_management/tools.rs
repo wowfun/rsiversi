@@ -22,25 +22,23 @@ impl PluginFactory for Factory {
             .requiring_local::<ToolRegistrarContract>())
     }
     async fn activate(&self, plan: ActivationPlan) -> rsi_meta::Result<()> {
-        let definition = ToolDefinition::new("host_profile", "Review single-leaf changes in an existing writable Host Profile. Each change needs the operator's explicit grant for this Session, exact Profile, leaf and operation. catalog is redacted. preview returns a review digest and ticket; commit saves that exact proposal; receipt reconciles it after reply loss. Never repeat an unknown write as a fresh proposal. No operation grants permission or edits a resident Session.", json!({
+        let target = json!({"type":"object","required":["root","profile","leaf"],"additionalProperties":false,"properties":{"root":{"type":"string"},"profile":{"type":"string"},"leaf":{"type":"string"}}});
+        let change = json!({"anyOf":[
+            {"type":"object","required":["kind","enabled"],"additionalProperties":false,"properties":{"kind":{"const":"enabled"},"enabled":{"type":"boolean"}}},
+            {"type":"object","required":["kind","value"],"additionalProperties":false,"properties":{"kind":{"const":"configuration"},"value":{"description":"Complete literal JSON replacement, at most 64 KiB."}}}
+        ]});
+        let definition = ToolDefinition::new("host_profile", "Review single-leaf changes in an existing writable Host Profile. Every call requires Full access or approval. catalog is redacted. preview computes a review digest without retaining resources; commit supplies that digest, target and complete change again. Results are not retained. After reply loss inspect current source and runtime state before further work; this does not prove the original outcome. Saving source is separate from runtime application. No operation grants permission.", json!({
             "type":"object", "required":["operation"], "additionalProperties":false,
             "properties":{
-                "operation":{"type":"string","enum":["catalog","preview","previews","commit","receipt","receipts","discard"]},
+                "operation":{"type":"string","enum":["catalog","preview","commit"]},
                 "query":{"type":"object","properties":{"profile":{"type":["string","null"]},"after":{"type":["string","null"]}},"additionalProperties":false},
-                "request":{"description":"For preview: target from catalog and change; for commit: host_epoch, ticket and digest copied from the exact prepared preview.","anyOf":[
-                    {"type":"object","required":["target","change"],"additionalProperties":false,"properties":{
-                        "target":{"type":"object","required":["root","profile","leaf"],"additionalProperties":false,"properties":{"root":{"type":"string"},"profile":{"type":"string"},"leaf":{"type":"string"}}},
-                        "change":{"anyOf":[
-                            {"type":"object","required":["kind","enabled"],"additionalProperties":false,"properties":{"kind":{"const":"enabled"},"enabled":{"type":"boolean"}}},
-                            {"type":"object","required":["kind","value"],"additionalProperties":false,"properties":{"kind":{"const":"configuration"},"value":{"description":"Complete literal JSON replacement, at most 64 KiB; never a partial merge."}}}
-                        ]}
-                    }},
-                    {"type":"object","required":["host_epoch","ticket","digest"],"additionalProperties":false,"properties":{"host_epoch":{"type":"string"},"ticket":{"type":"string"},"digest":{"type":"string"}}}
-                ]},
-                "ticket":{"description":"For receipt or discard: exact host_epoch and ticket returned by preview.","type":"object","required":["host_epoch","ticket"],"additionalProperties":false,"properties":{"host_epoch":{"type":"string"},"ticket":{"type":"string"}}}
+                "request":{"anyOf":[
+                    {"type":"object","required":["target","change"],"additionalProperties":false,"properties":{"target":target,"change":change}},
+                    {"type":"object","required":["host_epoch","target","change","digest"],"additionalProperties":false,"properties":{"host_epoch":{"type":"string"},"target":target,"change":change,"digest":{"type":"string"}}}
+                ]}
             }
-        })).map_err(meta)?;
-        let output = TypedToolOutput::new(ToolOutputDeclaration::new("rsi.profile-leaves", 1, json!({
+        })).map_err(meta)?.requiring_full_access();
+        let output = TypedToolOutput::new(ToolOutputDeclaration::new("rsi.profile-leaves", 2, json!({
             "type":"object","required":["operation","data"],"properties":{"operation":{"type":"string"},"data":{}},"additionalProperties":false
         })).map_err(meta)?, |value: &Output| vec![ToolContent::Text { text: serde_json::to_string(value).expect("bounded Profile metadata") }]);
         let lease = plan
@@ -76,16 +74,8 @@ enum Input {
     Preview {
         request: wire::PreviewRequest,
     },
-    Previews,
     Commit {
         request: wire::Commit,
-    },
-    Receipt {
-        ticket: wire::Ticket,
-    },
-    Receipts,
-    Discard {
-        ticket: wire::Ticket,
     },
 }
 #[derive(Serialize)]
@@ -97,6 +87,13 @@ struct Executor {
     owner: Arc<Manager>,
     output: TypedToolOutput<Output>,
 }
+fn admission_error(error: rsi_api_protocol::ApiError) -> ToolError {
+    match error {
+        rsi_api_protocol::ApiError::Capacity => ToolError::Capacity,
+        rsi_api_protocol::ApiError::ShuttingDown => ToolError::ShuttingDown,
+        error => ToolError::Execution(format!("Host Profile operation was not admitted: {error}")),
+    }
+}
 impl std::fmt::Debug for Executor {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         f.debug_struct("HostProfileExecutor")
@@ -104,11 +101,13 @@ impl std::fmt::Debug for Executor {
     }
 }
 fn encode<T: Serialize>(result: Reply<T>) -> Reply<Value> {
-    match result? {
-        Ok(value) => Ok(Ok(
+    match result {
+        Ok(Ok(value)) => Ok(Ok(
             serde_json::to_value(value).map_err(|_| rsi_api_protocol::ApiError::Unavailable)?
         )),
-        Err(error) => Ok(Err(error)),
+        Ok(Err(error)) => Ok(Err(error)),
+        Err(rsi_api_protocol::ApiError::Unauthorized) => Ok(Err(wire::Failure::Unauthorized)),
+        Err(error) => Err(error),
     }
 }
 impl Manager {
@@ -118,11 +117,7 @@ impl Manager {
             Input::Preview { request } => {
                 ("preview", encode(self.preview(principal, request).await))
             }
-            Input::Previews => ("previews", encode(Ok(Ok(self.previews(&principal))))),
             Input::Commit { request } => ("commit", encode(self.commit(principal, request).await)),
-            Input::Receipt { ticket } => ("receipt", encode(self.receipt(&principal, &ticket))),
-            Input::Receipts => ("receipts", encode(Ok(Ok(self.receipts(&principal))))),
-            Input::Discard { ticket } => ("discard", encode(self.discard(&principal, &ticket))),
         };
         Ok(data?.map(|data| Output { operation, data }))
     }
@@ -147,17 +142,35 @@ impl ToolExecutor for Executor {
         let principal = Principal::Agent(caller.session_id().clone());
         let input = serde_json::from_value(arguments)
             .map_err(|_| ToolError::InvalidInput("Invalid Host Profile request".into()))?;
-        let result = match self
-            .owner
-            .run(move |owner| Box::pin(async move { owner.tool(principal, input).await }))
-        {
+        let result = match self.owner.run(&principal.clone(), move |owner| {
+            Box::pin(async move { owner.tool(principal, input).await })
+        }) {
             Ok(work) => work.await,
-            Err(error) => Err(error),
+            Err(error) => return Err(admission_error(error)),
         };
         match result {
             Ok(Ok(output)) => self.output.result(&output),
             Ok(Err(error)) => ToolResult::new(json!({"failure":error}), vec![ToolContent::Text { text: format!("Host Profile operation rejected: {error:?}") }], true),
-            Err(_) => ToolResult::new(json!({"outcome":"unknown"}), vec![ToolContent::Text { text: "Host Profile outcome unavailable. Query the original ticket; do not create a replacement write.".into() }], true),
+            Err(rsi_api_protocol::ApiError::OutcomeUnknown) => ToolResult::new(json!({"outcome":"unknown"}), vec![ToolContent::Text { text: "Host Profile outcome unknown. Inspect current source and runtime state before further work; do not blindly repeat the write.".into() }], true),
+            Err(error) => Err(admission_error(error)),
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn definite_admission_refusals_do_not_claim_an_unknown_write() {
+        use rsi_api_protocol::ApiError;
+        assert_eq!(admission_error(ApiError::Capacity), ToolError::Capacity);
+        assert_eq!(
+            admission_error(ApiError::ShuttingDown),
+            ToolError::ShuttingDown
+        );
+        let error = admission_error(ApiError::Unavailable).to_string();
+        assert!(error.contains("not admitted"));
+        assert!(!error.contains("ticket"));
     }
 }

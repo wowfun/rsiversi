@@ -43,12 +43,13 @@ impl ApiClient for Remote {
                 self.release.notified().await;
                 return Err(ApiError::OutcomeUnknown);
             }
-            "receipt" => serde_json::to_value(Receipt {
-                preview: self.preview.clone(),
-                outcome: Outcome::Saved {
-                    directory_synced: false,
-                    application: wire::Application::NotSelected,
-                },
+            "catalog" => serde_json::to_value(Catalog {
+                host_epoch: self.preview.host_epoch.clone(),
+                principal: wire::Principal::Local,
+                root: Some(self.preview.target.root.clone()),
+                profiles: vec![],
+                leaves: vec![],
+                next: None,
             })
             .unwrap(),
             _ => panic!("unexpected wire operation {name}"),
@@ -72,11 +73,7 @@ fn fixture() -> (Arc<PluginsFeature>, Arc<Remote>) {
         operations: [
             wire::Operation::Catalog,
             wire::Operation::Preview,
-            wire::Operation::Previews,
             wire::Operation::Commit,
-            wire::Operation::Receipt,
-            wire::Operation::Receipts,
-            wire::Operation::Discard,
         ]
         .into_iter()
         .map(wire::Operation::spec)
@@ -87,7 +84,6 @@ fn fixture() -> (Arc<PluginsFeature>, Arc<Remote>) {
         .collect(),
         preview: Preview {
             host_epoch: epoch,
-            ticket: "a".repeat(32),
             target: Target {
                 root: "b".repeat(64),
                 profile: "editable".into(),
@@ -127,7 +123,7 @@ fn command(value: LeafCommand) -> PluginsCommand {
     PluginsCommand::Leaves { command: value }
 }
 #[tokio::test]
-async fn exact_config_is_ephemeral_and_unknown_commit_keeps_original_receipt_without_replay() {
+async fn exact_config_is_ephemeral_and_unknown_commit_consumes_private_review_without_replay() {
     let (owner, remote) = fixture();
     let preview = &remote.preview;
     owner
@@ -155,7 +151,6 @@ async fn exact_config_is_ephemeral_and_unknown_commit_keeps_original_receipt_wit
     );
     let mut changes = owner.changes();
     let waiter = owner.command(command(LeafCommand::Commit {
-        ticket: preview.ticket.clone(),
         digest: preview.digest.clone(),
     }));
     remote.entered.notified().await;
@@ -163,36 +158,41 @@ async fn exact_config_is_ephemeral_and_unknown_commit_keeps_original_receipt_wit
     remote.release.notify_one();
     changes.changed().await.unwrap();
     assert!(matches!(
-        owner.snapshot().leaves.receipt.unwrap().outcome,
+        owner.snapshot().leaves.result.unwrap().outcome,
         Outcome::Unknown
     ));
     assert!(
         owner
             .command(command(LeafCommand::Commit {
-                ticket: preview.ticket.clone(),
                 digest: preview.digest.clone()
             }))
             .await
             .is_err()
     );
     assert_eq!(remote.calls.lock().unwrap().len(), 2);
+    let result = owner.snapshot().leaves;
+    assert!(result.preview.is_none());
+    assert!(
+        result.pending.is_none(),
+        "exact configuration is dropped after submission"
+    );
     owner
-        .command(command(LeafCommand::Receipt {
-            ticket: preview.ticket.clone(),
+        .command(command(LeafCommand::Read {
+            query: CatalogRequest {
+                profile: Some("editable".into()),
+                after: None,
+            },
         }))
         .await
         .unwrap();
-    let view = owner.snapshot().leaves;
     assert!(matches!(
-        view.receipt.unwrap().outcome,
-        Outcome::Saved {
-            directory_synced: false,
-            application: wire::Application::NotSelected
-        }
+        owner.snapshot().leaves.result.unwrap().outcome,
+        Outcome::Unknown
     ));
-    assert!(
-        view.previews.is_empty(),
-        "settled source operation cannot be saved from an old prepared card"
+    assert_eq!(
+        remote.calls.lock().unwrap().len(),
+        3,
+        "refresh only reads current source"
     );
     assert_eq!(
         remote

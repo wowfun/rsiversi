@@ -1,4 +1,4 @@
-use super::{Arc, Failure, Manager, Principal, Proposal, Reply, Saved, wire};
+use super::{Arc, Failure, Manager, Principal, Proposal, Reply, wire};
 use crate::{HostLeafEdit, HostProfileId, ProfileCatalog, ProfileEditError, StandardComposition};
 use rsi_api_protocol::ApiError;
 use rsi_meta_profile::{ProfileControlContract, ProfileHealth, ProfileInstanceState, SnapshotNode};
@@ -128,11 +128,9 @@ impl Source {
     }
     fn prepare(
         &self,
-        principal: Principal,
         epoch: rsi_api_protocol::HostEpoch,
         runtime: &rsi_meta::Runtime,
         request: &wire::PreviewRequest,
-        permit: tokio::sync::OwnedSemaphorePermit,
     ) -> Result<Proposal, Failure> {
         self.require_root(&request.target.root)?;
         let host = self.host()?;
@@ -174,11 +172,8 @@ impl Source {
             .iter()
             .find(|leaf| leaf.target == request.target)
             .ok_or(Failure::NotLeaf)?;
-        let mut random = [0u8; 16];
-        getrandom::fill(&mut random).map_err(|_| Failure::Source)?;
         let preview = wire::Preview {
             host_epoch: epoch,
-            ticket: hex::encode(random),
             target: request.target.clone(),
             operation: request.change.kind(),
             digest: edit.review_digest().into(),
@@ -193,12 +188,10 @@ impl Source {
         let bytes = edit.proposed_source().to_vec();
         drop(edit);
         Ok(Proposal {
-            principal,
             preview,
             previous_digest,
-            bytes,
             host,
-            _permit: permit,
+            bytes,
         })
     }
     fn publish(&self, proposal: Proposal) -> Result<crate::ProfileEditReceipt, Failure> {
@@ -264,26 +257,6 @@ fn failure(error: ProfileEditError) -> Failure {
 }
 
 impl Manager {
-    pub(super) fn receipts(&self, principal: &Principal) -> Vec<String> {
-        self.state
-            .lock()
-            .expect("Profile receipts")
-            .receipts
-            .iter()
-            .filter(|(_, saved)| &saved.principal == principal)
-            .map(|(ticket, _)| ticket.clone())
-            .collect()
-    }
-    pub(super) fn previews(&self, principal: &Principal) -> Vec<wire::Preview> {
-        self.state
-            .lock()
-            .expect("Profile previews")
-            .previews
-            .values()
-            .filter(|proposal| &proposal.principal == principal)
-            .map(|proposal| proposal.preview.clone())
-            .collect()
-    }
     pub(super) async fn catalog(
         &self,
         principal: Principal,
@@ -322,142 +295,72 @@ impl Manager {
             Ok(token) => token,
             Err(error) => return Ok(Err(error)),
         };
-        let permit = self
-            .previews
-            .clone()
-            .try_acquire_owned()
-            .map_err(|_| ApiError::Capacity)?;
         let source = self.source.clone();
         let epoch = self.epoch.clone();
         let runtime = self.context.runtime().clone();
-        let result = self
-            .context
+        self.context
             .runtime()
             .execution()
-            .prepare(move || source.prepare(principal, epoch, &runtime, &request, permit))
+            .prepare(move || {
+                source
+                    .prepare(epoch, &runtime, &request)
+                    .map(|proposal| proposal.preview)
+            })
             .await
-            .map_err(|_| ApiError::Unavailable)?;
-        let proposal = match result {
-            Ok(value) => value,
-            Err(error) => return Ok(Err(error)),
-        };
-        proposal.preview.validate(&self.epoch)?;
-        let preview = proposal.preview.clone();
-        self.state
-            .lock()
-            .expect("Profile preview publication")
-            .previews
-            .insert(preview.ticket.clone(), proposal);
-        Ok(Ok(preview))
+            .map_err(|_| ApiError::Unavailable)
     }
     pub(super) async fn commit(
         &self,
         principal: Principal,
         request: wire::Commit,
-    ) -> Reply<wire::Receipt> {
+    ) -> Reply<wire::ChangeResult> {
         request.validate(&self.epoch)?;
-        let _writer = self.writer.try_acquire().map_err(|_| ApiError::Capacity)?;
-        // First inspect ownership without consuming the only proposal.
-        let preview = {
-            let state = self.state.lock().expect("Profile commit");
-            if let Some(saved) = state.receipts.get(&request.ticket) {
-                if saved.principal != principal || saved.receipt.preview.digest != request.digest {
-                    return Err(ApiError::Unauthorized);
-                }
-                return Ok(Ok(self.observe(saved)));
-            }
-            let proposal = state
-                .previews
-                .get(&request.ticket)
-                .ok_or(ApiError::Unavailable)?;
-            if proposal.principal != principal || proposal.preview.digest != request.digest {
-                return Err(ApiError::Unauthorized);
-            }
-            if state.receipts.len() == 256 {
-                return Ok(Err(Failure::Busy));
-            }
-            proposal.preview.clone()
-        };
-        let _scope = match self.scope(&principal, &preview.target, preview.operation)? {
+        let _writer = self
+            .writer
+            .acquire()
+            .await
+            .map_err(|_| ApiError::ShuttingDown)?;
+        let _scope = match self.scope(&principal, &request.target, request.change.kind())? {
             Ok(token) => token,
             Err(error) => return Ok(Err(error)),
         };
-        let proposal = {
-            let mut state = self.state.lock().expect("Profile write admission");
-            let proposal = state
-                .previews
-                .remove(&request.ticket)
-                .ok_or(ApiError::Unavailable)?;
-            state.receipts.insert(
-                request.ticket.clone(),
-                Saved {
-                    principal,
-                    previous_digest: proposal.previous_digest.clone(),
-                    receipt: wire::Receipt {
-                        preview,
-                        outcome: wire::Outcome::Pending,
-                    },
-                },
-            );
-            proposal
-        };
         let source = self.source.clone();
-        let result = self
+        let epoch = self.epoch.clone();
+        let runtime = self.context.runtime().clone();
+        let (preview, previous, result) = match self
             .context
             .runtime()
             .execution()
-            .prepare(move || source.publish(proposal))
-            .await;
+            .prepare(move || {
+                let proposal = source.prepare(
+                    epoch,
+                    &runtime,
+                    &wire::PreviewRequest {
+                        target: request.target,
+                        change: request.change,
+                    },
+                )?;
+                if proposal.preview.digest != request.digest {
+                    return Err(Failure::Conflict);
+                }
+                let preview = proposal.preview.clone();
+                let previous = proposal.previous_digest.clone();
+                Ok((preview, previous, source.publish(proposal)))
+            })
+            .await
+            .map_err(|_| ApiError::OutcomeUnknown)?
+        {
+            Ok(value) => value,
+            Err(error) => return Ok(Err(error)),
+        };
         let outcome = match result {
-            Ok(Ok(receipt)) => wire::Outcome::Saved {
-                directory_synced: receipt.directory_synced,
-                application: wire::Application::Pending,
+            Ok(result) => wire::Outcome::Saved {
+                directory_synced: result.directory_synced,
+                application: self.application(&preview.source_digest, &previous),
             },
-            Ok(Err(failure)) => wire::Outcome::Failed { failure },
-            Err(_) => wire::Outcome::Unknown,
+            Err(failure) => wire::Outcome::Failed { failure },
         };
-        let mut state = self.state.lock().expect("Profile receipt publication");
-        let saved = state
-            .receipts
-            .get_mut(&request.ticket)
-            .expect("admitted receipt remains retained");
-        saved.receipt.outcome = outcome;
-        Ok(Ok(self.observe(saved)))
-    }
-    pub(super) fn receipt(
-        &self,
-        principal: &Principal,
-        request: &wire::Ticket,
-    ) -> Reply<wire::Receipt> {
-        request.validate(&self.epoch)?;
-        let state = self.state.lock().expect("Profile receipt observation");
-        let saved = state
-            .receipts
-            .get(&request.ticket)
-            .ok_or(ApiError::Unavailable)?;
-        if &saved.principal != principal {
-            return Err(ApiError::Unauthorized);
-        }
-        Ok(Ok(self.observe(saved)))
-    }
-    pub(super) fn discard(&self, principal: &Principal, request: &wire::Ticket) -> Reply<()> {
-        request.validate(&self.epoch)?;
-        let mut state = self.state.lock().expect("Profile preview discard");
-        let Some(proposal) = state.previews.get(&request.ticket) else {
-            return Err(ApiError::Unavailable);
-        };
-        if &proposal.principal != principal {
-            return Err(ApiError::Unauthorized);
-        }
-        state.previews.remove(&request.ticket);
-        Ok(Ok(()))
-    }
-    fn observe(&self, saved: &Saved) -> wire::Receipt {
-        let mut receipt = saved.receipt.clone();
-        if let wire::Outcome::Saved { application, .. } = &mut receipt.outcome {
-            *application = self.application(&receipt.preview.source_digest, &saved.previous_digest);
-        }
-        receipt
+        Ok(Ok(wire::ChangeResult { preview, outcome }))
     }
     fn application(&self, proposed: &str, previous: &str) -> wire::Application {
         use wire::Application as A;

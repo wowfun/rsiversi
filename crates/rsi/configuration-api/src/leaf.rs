@@ -1,4 +1,4 @@
-//! Explicitly granted, reviewed single-leaf Host Profile operations.
+//! Reviewed single-leaf Host Profile operations with stateless previews and direct results.
 use super::{
     ApiClient, ApiError, DeviceId, OperationAccess, OperationClass, OperationEffect, OperationId,
     OperationSpec, RequestEncoding, Result, call_json,
@@ -11,7 +11,7 @@ mod validate;
 use rsi_api_protocol::HostEpoch;
 pub use validate::validate_leaf;
 
-/// Authenticated human identity or an independently granted native Agent Session.
+/// Authenticated human identity or a native Tool's Session identity.
 #[derive(Clone, Debug, Eq, PartialEq, Ord, PartialOrd, Serialize, Deserialize)]
 #[serde(
     tag = "kind",
@@ -24,7 +24,7 @@ pub enum Principal {
     Local,
     /// Exact authenticated device.
     Device(DeviceId),
-    /// Exact native Session; never inherited from its human submitter.
+    /// Native caller that passed actual Turn admission; not a durable grant principal.
     Agent(rsi_agent_session_protocol::SessionId),
 }
 /// Closed source mutation classes; enable authority does not imply configuration writes.
@@ -84,7 +84,7 @@ pub enum GrantScope {
 #[derive(Clone, Debug, Eq, PartialEq, Ord, PartialOrd, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct Grant {
-    /// Actual caller identity selected by a Local administrator.
+    /// Human caller identity selected by a Local administrator; Agent is invalid.
     pub principal: Principal,
     /// Only this exact authority is granted.
     pub scope: GrantScope,
@@ -141,7 +141,7 @@ impl Change {
             Self::Configuration { .. } => ChangeKind::Configuration,
         }
     }
-    /// Bounds input before retaining a preview or invoking trusted plugin preparation.
+    /// Bounds input before invoking trusted plugin preparation.
     pub fn validate(&self) -> Result<()> {
         if let Self::Configuration { value } = self {
             validate_configuration(value)?;
@@ -149,7 +149,7 @@ impl Change {
         Ok(())
     }
 }
-/// Bounds exact JSON before any source transform, preparation or retained preview.
+/// Bounds exact JSON before any source transform, preparation or review.
 pub fn validate_configuration(value: &Value) -> Result<()> {
     let mut pending = vec![(value, 0)];
     let mut nodes = 0;
@@ -215,10 +215,8 @@ pub struct PreviewRequest {
 #[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct Preview {
-    /// Host that retains the proposal.
+    /// Host that prepared this review.
     pub host_epoch: HostEpoch,
-    /// Exact retained proposal identity.
-    pub ticket: String,
     /// Exact source target.
     pub target: Target,
     /// Granted operation class.
@@ -236,25 +234,18 @@ pub struct Preview {
     /// Proposed visibility after parent-group disabling.
     pub effective_enabled: bool,
 }
-/// Exact review accepted by the caller; the ticket is also its retained receipt identity.
+/// Stateless reviewed mutation, revalidated by the publication owner.
 #[derive(Clone, Debug, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct Commit {
     /// Same Host as preview.
     pub host_epoch: HostEpoch,
-    /// Exact reviewed proposal.
-    pub ticket: String,
+    /// Exact reviewed source target.
+    pub target: Target,
+    /// Complete reviewed mutation, never retained by the server.
+    pub change: Change,
     /// Exact digest displayed during review.
     pub digest: String,
-}
-/// One ticket read or discarded only by its original principal.
-#[derive(Clone, Debug, Serialize, Deserialize)]
-#[serde(deny_unknown_fields)]
-pub struct Ticket {
-    /// Same Host as preview.
-    pub host_epoch: HostEpoch,
-    /// Proposal/receipt identity.
-    pub ticket: String,
 }
 /// Redacted failure category; never includes source or plugin diagnostic payloads.
 #[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
@@ -318,10 +309,10 @@ pub enum Outcome {
     /// Owner cannot prove source write outcome.
     Unknown,
 }
-/// Exact ticket's bounded receipt.
+/// Direct operation result, not retained for later lookup.
 #[derive(Clone, Debug, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
-pub struct Receipt {
+pub struct ChangeResult {
     /// Reviewed source and configuration identity, always redacted.
     pub preview: Preview,
     /// Source result and separate runtime observation.
@@ -375,16 +366,8 @@ pub enum Operation {
     Catalog,
     /// Prepare one explicitly granted proposal.
     Preview,
-    /// Recover this principal's at most four uncommitted proposals after reply loss.
-    Previews,
     /// Publish one reviewed proposal.
     Commit,
-    /// Reconcile its original receipt.
-    Receipt,
-    /// Recover this principal's retained receipt ticket identities.
-    Receipts,
-    /// Release an unused proposal.
-    Discard,
     /// Local grant snapshot.
     Grants,
     /// Local expected-revision grant mutation.
@@ -403,15 +386,11 @@ impl Operation {
                 match self {
                     Self::Catalog => "catalog",
                     Self::Preview => "preview",
-                    Self::Previews => "previews",
                     Self::Commit => "commit",
-                    Self::Receipt => "receipt",
-                    Self::Receipts => "receipts",
-                    Self::Discard => "discard",
                     Self::Grants => "grants",
                     Self::SetGrant => "set-grant",
                 },
-                2,
+                3,
             )
             .expect("static profile operation"),
             access: if matches!(self, Self::Grants | Self::SetGrant) {
@@ -420,7 +399,7 @@ impl Operation {
                 OperationAccess::Authenticated
             },
             class: OperationClass::Data,
-            effect: if matches!(self, Self::Commit | Self::Discard | Self::SetGrant) {
+            effect: if matches!(self, Self::Commit | Self::SetGrant) {
                 OperationEffect::Mutation
             } else {
                 OperationEffect::Read
@@ -464,7 +443,7 @@ impl Client {
         }
         Ok(result)
     }
-    /// Runs a granted preparation and retains its exact redacted proposal.
+    /// Computes a granted preview without retaining server resources.
     pub async fn preview(&self, request: PreviewRequest) -> Reply<Preview> {
         request.target.validate()?;
         request.change.validate()?;
@@ -477,84 +456,33 @@ impl Client {
         }
         Ok(result)
     }
-    /// Recovers only this principal's bounded retained proposals; never prepares again.
-    pub async fn previews(&self) -> Reply<Vec<Preview>> {
-        let result = self
-            .call::<_, Vec<Preview>>(Operation::Previews, &serde_json::json!({}))
-            .await?;
-        if let Ok(previews) = &result {
-            validate::previews(previews, &self.api.description().host_epoch)?;
-        }
-        Ok(result)
-    }
-    /// Admits at most one source publication for this retained ticket.
-    pub async fn commit(&self, preview: &Preview) -> Reply<Receipt> {
+    /// Revalidates a reviewed change and returns its direct publication result.
+    pub async fn commit(&self, preview: &Preview, request: PreviewRequest) -> Reply<ChangeResult> {
         preview.validate(&self.api.description().host_epoch)?;
+        request.target.validate()?;
+        request.change.validate()?;
+        if request.target != preview.target || request.change.kind() != preview.operation {
+            return Err(ApiError::Invalid("Change differs from its review".into()));
+        }
         let result = self
             .call(
                 Operation::Commit,
                 &Commit {
                     host_epoch: preview.host_epoch.clone(),
-                    ticket: preview.ticket.clone(),
+                    target: request.target,
+                    change: request.change,
                     digest: preview.digest.clone(),
                 },
             )
             .await?;
-        if let Ok(receipt) = &result {
-            Receipt::validate(receipt, &self.api.description().host_epoch)
+        if let Ok(value) = &result {
+            ChangeResult::validate(value, &self.api.description().host_epoch)
                 .map_err(|_| ApiError::OutcomeUnknown)?;
-            if receipt.preview != *preview {
+            if value.preview != *preview {
                 return Err(ApiError::OutcomeUnknown);
             }
         }
         Ok(result)
-    }
-    /// Queries the same ticket after reply loss without repeating its write.
-    pub async fn receipt(&self, ticket: &str) -> Reply<Receipt> {
-        validate::hex(ticket, 32)?;
-        let result = self
-            .call(
-                Operation::Receipt,
-                &Ticket {
-                    host_epoch: self.api.description().host_epoch.clone(),
-                    ticket: ticket.into(),
-                },
-            )
-            .await?;
-        if let Ok(receipt) = &result {
-            Receipt::validate(receipt, &self.api.description().host_epoch)?;
-            if receipt.preview.ticket != ticket {
-                return Err(ApiError::Unavailable);
-            }
-        }
-        Ok(result)
-    }
-    /// Lists only this principal's bounded exact receipt identities after reconnect.
-    pub async fn receipts(&self) -> Reply<Vec<String>> {
-        let result = self
-            .call::<_, Vec<String>>(Operation::Receipts, &serde_json::json!({}))
-            .await?;
-        if let Ok(tickets) = &result {
-            if tickets.len() > 256 || tickets.windows(2).any(|pair| pair[0] >= pair[1]) {
-                return Err(ApiError::Unavailable);
-            }
-            for ticket in tickets {
-                validate::hex(ticket, 32)?;
-            }
-        }
-        Ok(result)
-    }
-    /// Releases an uncommitted proposal belonging to this caller.
-    pub async fn discard(&self, ticket: &str) -> Reply<()> {
-        validate::hex(ticket, 32)?;
-        self.call(
-            Operation::Discard,
-            &Ticket {
-                host_epoch: self.api.description().host_epoch.clone(),
-                ticket: ticket.into(),
-            },
-        )
-        .await
     }
     /// Reads the Local administrator's complete bounded grant document.
     pub async fn grants(&self) -> Reply<Grants> {

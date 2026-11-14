@@ -11,6 +11,8 @@ editor would disclose source secrets and permit unrelated tree mutations.
 
 ## Decision
 
+The Agent-grant and permanently pinned resident-generation clauses below are superseded by [management Turn authority](2026-11-12-management-turn-authority.md) and [durable Agent generation selection](2026-11-12-durable-agent-generation-selection.md). Retained previews and receipts are superseded by [current-plugin recovery](2026-11-14-current-plugin-recovery.md). Human grant and reviewed source-transaction rules remain applicable.
+
 Own reviewed single-leaf edits in the product. Select an existing writable user
 Host root and leaf, append a strict root override, prepare the proposed enabled
 graph and return only redacted effective changes and a review digest. Keep the
@@ -32,7 +34,8 @@ The [SSH decision](../feature/2026-09-29-ssh-execution-and-helper-lifecycle.md)
 owns their separate Use, target-management and exact stdio authority. Reusing
 gate closure and draining does not turn a leaf grant into any of these scopes.
 
-Retain admitted work and exact receipts independently of response waiters.
+Retain admitted work independently of response waiters. Preview is stateless;
+commit prepares the supplied change again and compares its review digest.
 The review digest includes the native source directory identity, so rebuilding
 the in-memory proposal cannot accept an identically populated replacement directory.
 Saving is separate from observed application, restart requirements and failed
@@ -49,15 +52,17 @@ would violate the existing immutable Agent generation contract.
 
 ## Consequences
 
-Source preparation, grants and receipt ownership are shared by human clients and
+Source preparation and publication are shared by human clients and
 Agent tools. Deterministic owner tests cover imported overrides, disabled parents,
 source/directory conflicts, Device and Agent isolation, dropped waiters, scope
 revocation and restart observations without replacing resident generations.
-Real PTY, Chromium, Firefox and Linux WebKitGTK paths exercise grant admission,
-reviewed publication and exact receipt recovery. Raw source and configurations
+Real PTY, Chromium, Firefox and Linux WebKitGTK paths exercise grant admission
+and reviewed publication. Raw source and configurations
 remain hidden from previews.
 
 Preparation executes trusted plugin code and can fail or block. Admission is
 bounded and owned work is retained through completion. A saved source may require
-restart or fail convergence; publication never claims runtime success. Source
-receipts last for the Host epoch, while grants persist in their own Storage domain.
+restart or fail convergence; publication never claims runtime success. Completed
+results are not retained. After a lost reply, catalog refresh supports review of
+current state, not proof of the original outcome. Grants persist in their own
+Storage domain.

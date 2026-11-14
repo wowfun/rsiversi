@@ -58,7 +58,7 @@ export function ComposerAccess({owner}:{owner:ComposerOwner}) {
   return <ComposerMenu name={`Access mode, current: ${label}`} disabled={state?.accessDisabled} label={<><Shield/>{label}<Down/></>}
     onOpen={async()=>{setConfirm(false);setReady(false);await run(async()=>{setReady(await owner.prepareComposer());});}}>
     {close=>confirm?<div className={css.confirm}>
-      <strong>Allow full access?</strong><p>Tools may operate outside the workspace. RSI still asks for tool approval. This applies to your next messages.</p>
+      <strong>Allow full access?</strong><p>Tools may operate outside the workspace. Session and tool approval requirements still apply. This applies to your next messages.</p>
       <button type="button" role="menuitem" onClick={()=>setConfirm(false)}>Cancel</button>
       <button type="button" role="menuitem" className={css.danger} disabled={disabled} onClick={()=>{if(mode)void run(()=>{owner.setAccess('danger-full-access');close();});}}>Allow full access</button>
     </div>:<>{modes.map(([value,title])=><button key={value} type="button" role="menuitemradio" aria-checked={value===mode} disabled={disabled} onClick={()=>{if(value==='danger-full-access'&&value!==mode)setConfirm(true);else void run(()=>{owner.setAccess(value);close();});}}>{title}{value===mode&&<Check className={css.trailing}/>}</button>)}<hr/><p>Applies to new turns; steering keeps the active turn’s access.</p></>}

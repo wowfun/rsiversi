@@ -12,6 +12,9 @@ checked against both bounds before publication.
 
 The facility has no fallback route and performs no schema migration. Opening
 the same domain with a different specification fails loud.
+An existing domain with a different consumer schema returns typed
+`StorageError::DomainVersionMismatch`; it is distinct from corrupt data or I/O
+failure so consumers can offer version-specific recovery without guessing.
 
 Opening reserves domain authority before loading. Concurrent opens share one
 initialization; cancelled or failed initialization can be retried. The complete

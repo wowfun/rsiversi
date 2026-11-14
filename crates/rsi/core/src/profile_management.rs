@@ -19,8 +19,12 @@ use std::{
     collections::BTreeMap,
     sync::{Arc, Mutex},
 };
-use tokio::sync::{OwnedSemaphorePermit, Semaphore};
+use tokio::sync::Semaphore;
 use tokio_util::task::{TaskTracker, task_tracker::TaskTrackerToken};
+
+pub(crate) const STORAGE_REQUIREMENT: &str = "Profile grant storage version 3 is required; older rsi.profile-leaves stores require an explicit reset or fresh state";
+pub(crate) const STORAGE_UNAVAILABLE: &str =
+    "Profile grant storage could not be opened; inspect storage availability and integrity";
 
 pub(crate) fn register(
     builder: &mut crate::StandardAddonBuilder,
@@ -83,12 +87,22 @@ impl PluginFactory for Factory {
             .open(DomainSpec {
                 id: "rsi.profile-leaves".into(),
                 backend: "base".into(),
-                version: 2,
+                version: 3,
                 maximum_records: 1,
                 maximum_bytes: 256 * 1024,
             })
             .await
-            .map_err(|_| activation())?;
+            .map_err(|error| {
+                MetaError::Activation(
+                    match error {
+                        rsi_storage_domain::StorageError::DomainVersionMismatch { .. } => {
+                            STORAGE_REQUIREMENT
+                        }
+                        _ => STORAGE_UNAVAILABLE,
+                    }
+                    .into(),
+                )
+            })?;
         let mut records = domain.snapshot().await.map_err(|_| activation())?;
         let document = match records.remove("grants") {
             Some(value) => {
@@ -124,13 +138,10 @@ impl PluginFactory for Factory {
                 visibility_revision: 0,
                 document,
                 gates,
-                previews: BTreeMap::new(),
-                receipts: BTreeMap::new(),
             }),
-            slots: Arc::new(Semaphore::new(2)),
+            slots: std::array::from_fn(|_| Arc::new(Semaphore::new(2))),
             writer: Arc::new(Semaphore::new(1)),
             grant_changes: Arc::new(Semaphore::new(4)),
-            previews: Arc::new(Semaphore::new(4)),
             tasks: TaskTracker::new(),
         });
         let registrations = api::register(
@@ -186,21 +197,12 @@ struct State {
     closed: bool,
     document: wire::Grants,
     gates: BTreeMap<Grant, Gate>,
-    previews: BTreeMap<String, Proposal>,
-    receipts: BTreeMap<String, Saved>,
 }
 struct Proposal {
-    principal: Principal,
     preview: wire::Preview,
     previous_digest: String,
     host: Arc<rsi_host::Host>,
     bytes: Vec<u8>,
-    _permit: OwnedSemaphorePermit,
-}
-struct Saved {
-    principal: Principal,
-    receipt: wire::Receipt,
-    previous_digest: String,
 }
 
 pub(crate) struct Manager {
@@ -211,10 +213,9 @@ pub(crate) struct Manager {
     epoch: HostEpoch,
     domain: Arc<dyn Domain>,
     state: Mutex<State>,
-    slots: Arc<Semaphore>,
+    slots: [Arc<Semaphore>; 3],
     writer: Arc<Semaphore>,
     grant_changes: Arc<Semaphore>,
-    previews: Arc<Semaphore>,
     tasks: TaskTracker,
 }
 impl std::fmt::Debug for Manager {
@@ -225,11 +226,19 @@ impl std::fmt::Debug for Manager {
     }
 }
 impl Manager {
+    fn capacity_class(principal: &Principal) -> usize {
+        match principal {
+            Principal::Local => 0,
+            Principal::Device(_) => 1,
+            Principal::Agent(_) => 2,
+        }
+    }
     fn run<T: Send + 'static>(
         self: &Arc<Self>,
+        principal: &Principal,
         work: impl FnOnce(Arc<Self>) -> BoxFuture<'static, Reply<T>>,
     ) -> rsi_api_protocol::Result<BoxFuture<'static, Reply<T>>> {
-        self.run_with(&self.slots, work)
+        self.run_with(&self.slots[Self::capacity_class(principal)], work)
     }
     fn run_grant<T: Send + 'static>(
         self: &Arc<Self>,
@@ -283,7 +292,12 @@ impl Manager {
         principal: &Principal,
         target: &wire::Target,
         operation: wire::ChangeKind,
-    ) -> Reply<TaskTrackerToken> {
+    ) -> Reply<Option<TaskTrackerToken>> {
+        // Only the admitted native Tool creates an Agent principal. Its owned
+        // work is already tracked by run(); durable gates belong to human clients.
+        if matches!(principal, Principal::Agent(_)) {
+            return Ok(Ok(None));
+        }
         self.admit_scope(
             principal,
             wire::GrantScope::Profile {
@@ -291,6 +305,7 @@ impl Manager {
                 operation,
             },
         )
+        .map(|result| result.map(Some))
     }
     pub(crate) fn admit_scope(
         &self,

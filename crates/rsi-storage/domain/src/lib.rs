@@ -265,10 +265,11 @@ impl DomainFacility for Facility {
                 let loaded = backend.load(&spec.id).await?;
                 let records = if let Some(loaded) = loaded {
                     if loaded.version != spec.version {
-                        return Err(StorageError::Corrupt(format!(
-                            "domain `{}` has version {}, expected {}",
-                            spec.id, loaded.version, spec.version
-                        )));
+                        return Err(StorageError::DomainVersionMismatch {
+                            domain: spec.id.clone(),
+                            stored: loaded.version,
+                            requested: spec.version,
+                        });
                     }
                     if loaded.records.len() > spec.maximum_records {
                         return Err(StorageError::Corrupt(format!(
@@ -451,8 +452,8 @@ pub fn storage_error(error: StorageError) -> rsi_api_protocol::ApiError {
         | StorageError::Unsupported(_)
         | StorageError::BackendUnavailable(_) => ApiError::Unavailable,
         StorageError::InvalidInput(message) => ApiError::Invalid(message),
-        error @ (StorageError::DuplicateBackend(_) | StorageError::Corrupt(_)) => {
-            ApiError::Backend(error.to_string())
-        }
+        error @ (StorageError::DuplicateBackend(_)
+        | StorageError::Corrupt(_)
+        | StorageError::DomainVersionMismatch { .. }) => ApiError::Backend(error.to_string()),
     }
 }

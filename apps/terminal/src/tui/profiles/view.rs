@@ -10,7 +10,7 @@ impl Ui {
                 After::Browse,
             ),
         )];
-        let mut explanation = "Single leaf changes require explicit grants. Existing conversation generations remain pinned.".to_owned();
+        let mut explanation = "Single leaf changes require explicit grants. Admitted work retains its plugin generation.".to_owned();
         if let Some(catalog) = &self.view.catalog {
             explanation = format!(
                 "Caller {:?} · {}",
@@ -60,7 +60,7 @@ impl Ui {
                 ));
             }
         }
-        for preview in &self.view.previews {
+        if let Some(preview) = &self.view.preview {
             items.push((
                 format!(
                     "Review {:?} · {} / {}",
@@ -69,11 +69,8 @@ impl Ui {
                 Choice::Review(preview.clone()),
             ));
         }
-        if !self.view.receipts.is_empty() {
-            items.push((
-                "Recover original source receipts".into(),
-                Choice::Receipts(0),
-            ));
+        if self.view.result.is_some() {
+            items.push(("Last change result".into(), Choice::Result));
         }
         if self.view.can_grant {
             items.push((
@@ -142,86 +139,60 @@ impl Ui {
         );
     }
     pub(super) fn review(&mut self, preview: &wire::Preview) {
-        let uncertain = self.view.receipt.as_ref().is_some_and(|receipt| {
-            receipt.preview.ticket == preview.ticket
-                && matches!(
-                    receipt.outcome,
-                    wire::Outcome::Pending | wire::Outcome::Unknown
-                )
-        });
-        let mut items = vec![];
-        if uncertain {
-            items.push((
-                "Query original receipt".into(),
-                Choice::Run(
-                    LeafCommand::Receipt {
-                        ticket: preview.ticket.clone(),
-                    },
-                    After::Receipt,
-                ),
-            ));
-        } else {
-            items.push((
+        let items = vec![
+            (
                 "Save reviewed change".into(),
                 Choice::Run(
                     LeafCommand::Commit {
-                        ticket: preview.ticket.clone(),
                         digest: preview.digest.clone(),
                     },
-                    After::Receipt,
+                    After::Result,
                 ),
-            ));
-            items.push((
-                "Discard proposal".into(),
-                Choice::Run(
-                    LeafCommand::Discard {
-                        ticket: preview.ticket.clone(),
-                    },
-                    After::Browse,
-                ),
-            ));
-        }
-        items.push(("Back to source choices".into(), Choice::Browse));
-        self.menu("Prepared Host Profile change", format!("{} / {} · {}\n{:?} · own enabled {} → {} · with ancestors {}\nReview: {}\nTicket: {}\nConfiguration values remain hidden. Saving and runtime application are separate.", preview.target.profile, preview.target.leaf, preview.plugin, preview.operation, preview.previous_enabled, preview.enabled, preview.effective_enabled, preview.digest, preview.ticket), items);
+            ),
+            (
+                "Dismiss review".into(),
+                Choice::Run(LeafCommand::Discard, After::Browse),
+            ),
+            ("Back to source choices".into(), Choice::Browse),
+        ];
+        self.menu("Prepared Host Profile change", format!("{} / {} · {}\n{:?} · own enabled {} → {} · with ancestors {}\nReview: {}\nConfiguration values remain hidden. Saving and runtime application are separate.", preview.target.profile, preview.target.leaf, preview.plugin, preview.operation, preview.previous_enabled, preview.enabled, preview.effective_enabled, preview.digest), items);
         self.details();
     }
-    pub(super) fn receipt(&mut self) {
-        let Some(receipt) = self.view.receipt.clone() else {
+    pub(super) fn result(&mut self) {
+        let Some(result) = self.view.result.clone() else {
             self.browse();
             return;
         };
-        let result = match &receipt.outcome {
+        let outcome = match &result.outcome {
             wire::Outcome::Saved {
                 directory_synced,
                 application,
             } => format!(
-                "Source: saved\nDirectory synced: {directory_synced}\nCurrent runtime: {application:?}"
+                "Source: saved\nDirectory synced: {directory_synced}\nRuntime at completion: {application:?}"
             ),
             wire::Outcome::Pending => "Source: pending".into(),
             wire::Outcome::Unknown => {
-                "Source: unknown; query the original receipt, never replay".into()
+                "Source: unknown\nCurrent state cannot prove the result of the interrupted call."
+                    .into()
             }
             wire::Outcome::Failed { failure } => {
                 format!("Source: rejected before publication · {failure:?}")
             }
         };
         self.menu(
-            "Profile source receipt",
+            "Last Profile change result",
             format!(
-                "{} / {}\n{}\nTicket: {}",
-                receipt.preview.target.profile,
-                receipt.preview.target.leaf,
-                result,
-                receipt.preview.ticket
+                "{} / {}\n{}",
+                result.preview.target.profile, result.preview.target.leaf, outcome
             ),
             vec![
                 (
-                    "Query original receipt".into(),
+                    "Refresh current source".into(),
                     Choice::Run(
-                        LeafCommand::Receipt {
-                            ticket: receipt.preview.ticket,
+                        LeafCommand::Read {
+                            query: self.view.query.clone(),
                         },
-                        After::Receipt,
+                        After::Browse,
                     ),
                 ),
                 ("Back to source choices".into(), Choice::Browse),
@@ -277,12 +248,8 @@ impl Ui {
                 ),
             ),
             (
-                "Grant to an Agent Session ID".into(),
-                Choice::GrantInput(target.clone(), operation, true),
-            ),
-            (
                 "Grant to a registered Device ID".into(),
-                Choice::GrantInput(target.clone(), operation, false),
+                Choice::GrantInput(target.clone(), operation),
             ),
             (
                 "Back to operation choices".into(),
@@ -326,35 +293,6 @@ impl Ui {
         self.menu(
             "Explicit Profile grants",
             "Select an exact grant to revoke it and drain previously admitted work.",
-            items,
-        );
-    }
-    pub(super) fn receipts(&mut self, offset: usize) {
-        let mut items = self
-            .view
-            .receipts
-            .iter()
-            .skip(offset)
-            .take(64)
-            .map(|ticket| {
-                (
-                    format!("Read receipt {ticket}"),
-                    Choice::Run(
-                        LeafCommand::Receipt {
-                            ticket: ticket.clone(),
-                        },
-                        After::Receipt,
-                    ),
-                )
-            })
-            .collect::<Vec<_>>();
-        if offset + 64 < self.view.receipts.len() {
-            items.push(("Next receipts page".into(), Choice::Receipts(offset + 64)));
-        }
-        items.push(("Back to source choices".into(), Choice::Browse));
-        self.menu(
-            "Original Profile receipts",
-            "Reading an original ticket never submits its write again.",
             items,
         );
     }

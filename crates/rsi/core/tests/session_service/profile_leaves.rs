@@ -76,16 +76,96 @@ async fn grant(running: &RunningRsi, scope: Grant, granted: bool) {
     assert_eq!(changed.scopes.contains(&scope), granted);
 }
 fn commit(preview: &Preview) -> Commit {
+    assert_ne!(preview.operation, ChangeKind::Configuration);
     Commit {
         host_epoch: preview.host_epoch.clone(),
-        ticket: preview.ticket.clone(),
+        target: preview.target.clone(),
+        change: Change::Enabled {
+            enabled: preview.enabled,
+        },
         digest: preview.digest.clone(),
     }
 }
-fn ticket(preview: &Preview) -> Ticket {
-    Ticket {
-        host_epoch: preview.host_epoch.clone(),
-        ticket: preview.ticket.clone(),
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn earlier_grant_storage_is_rejected_without_rewriting_it() {
+    for version in [2, 3] {
+        let fixture = fixture("http://127.0.0.1:1");
+        let running = RunningRsi::boot_host_profile(
+            composition(fixture.paths.clone()),
+            &host_profile(&fixture),
+        )
+        .await
+        .unwrap();
+        let target = catalog(&running, CallOrigin::Local, "fixture")
+            .await
+            .leaves
+            .into_iter()
+            .find(|leaf| leaf.target.leaf == "fixture-provider")
+            .unwrap()
+            .target;
+        grant(
+            &running,
+            Grant {
+                principal: Principal::Local,
+                scope: rsi_configuration_api::leaf::GrantScope::Profile {
+                    target,
+                    operation: ChangeKind::Disable,
+                },
+            },
+            true,
+        )
+        .await;
+        assert!(running.shutdown().await.is_clean());
+        let database =
+            rusqlite::Connection::open(fixture.paths.state().join("base.sqlite3")).unwrap();
+        database
+            .execute(
+                "UPDATE rsi_storage_domains SET version=?1 WHERE domain='rsi.profile-leaves'",
+                [version],
+            )
+            .unwrap();
+        if version == 3 {
+            // Invalid stored accounting is a load failure, not a schema mismatch.
+            database.execute("UPDATE rsi_storage_domains SET record_bytes=record_bytes+1 WHERE domain='rsi.profile-leaves'", []).unwrap();
+        }
+        let original: (u32, i64) = database.query_row(
+        "SELECT version,record_bytes FROM rsi_storage_domains WHERE domain='rsi.profile-leaves'", [],
+        |row| Ok((row.get(0)?, row.get(1)?)),
+    ).unwrap();
+        drop(database);
+        let result = RunningRsi::boot_host_profile(
+            composition(fixture.paths.clone()),
+            &host_profile(&fixture),
+        )
+        .await;
+        let Err(error) = result else {
+            panic!("old grant storage must not activate")
+        };
+        if version == 2 {
+            assert!(
+                error.to_string().contains("grant storage version 3"),
+                "{error}"
+            );
+            assert!(error.to_string().contains("explicit reset"), "{error}");
+        } else {
+            assert!(!error.to_string().contains("explicit reset"), "{error}");
+            assert!(
+                !error.to_string().contains("grant storage version 3"),
+                "{error}"
+            );
+        }
+        assert!(!error.to_string().contains("timed out"), "{error}");
+        let database =
+            rusqlite::Connection::open(fixture.paths.state().join("base.sqlite3")).unwrap();
+        let after: (u32, i64) = database
+        .query_row(
+            "SELECT version,record_bytes FROM rsi_storage_domains WHERE domain='rsi.profile-leaves'",
+            [],
+            |row| Ok((row.get(0)?, row.get(1)?)),
+        )
+        .unwrap();
+        assert_eq!(after, original);
     }
 }
 
@@ -170,8 +250,7 @@ async fn exhausted_grant_revision_rejects_revocation_without_closing_its_scope()
     clippy::too_many_lines,
     reason = "One public owner lifecycle preserves the causal grant, source, and receipt sequence"
 )]
-async fn profile_leaf_owner_requires_distinct_grants_and_retains_exact_conflict_and_save_receipts()
-{
+async fn profile_leaf_owner_revalidates_grants_and_review_before_publication() {
     let fixture = fixture("http://127.0.0.1:1");
     let source = std::fs::read(&fixture.profile).unwrap();
     let sources = ProfileCatalog::new(
@@ -229,43 +308,24 @@ async fn profile_leaf_owner_requires_distinct_grants_and_retains_exact_conflict_
         [source.as_slice(), b"\n# another writer\n"].concat(),
     )
     .unwrap();
-    let receipt: Receipt = call(
-        &running,
-        CallOrigin::Local,
-        Operation::Commit,
-        &commit(&preview),
-    )
-    .await
-    .unwrap()
-    .unwrap();
-    assert!(matches!(
-        receipt.outcome,
-        Outcome::Failed {
-            failure: Failure::Conflict
-        }
-    ));
-    let again: Receipt = call(
-        &running,
-        CallOrigin::Local,
-        Operation::Receipt,
-        &ticket(&preview),
-    )
-    .await
-    .unwrap()
-    .unwrap();
-    assert_eq!(again.preview.digest, preview.digest);
-    assert!(matches!(
-        again.outcome,
-        Outcome::Failed {
-            failure: Failure::Conflict
-        }
-    ));
+    assert_eq!(
+        call::<ChangeResult>(
+            &running,
+            CallOrigin::Local,
+            Operation::Commit,
+            &commit(&preview)
+        )
+        .await
+        .unwrap()
+        .unwrap_err(),
+        Failure::Conflict
+    );
     let preview: Preview = call(&running, CallOrigin::Local, Operation::Preview, &request)
         .await
         .unwrap()
         .unwrap();
     grant(&running, scope.clone(), false).await;
-    let denied: Reply<Receipt> = call(
+    let denied: Reply<ChangeResult> = call(
         &running,
         CallOrigin::Local,
         Operation::Commit,
@@ -274,7 +334,7 @@ async fn profile_leaf_owner_requires_distinct_grants_and_retains_exact_conflict_
     .await;
     assert_eq!(denied.unwrap().unwrap_err(), Failure::Unauthorized);
     grant(&running, scope, true).await;
-    let receipt: Receipt = call(
+    let receipt: ChangeResult = call(
         &running,
         CallOrigin::Local,
         Operation::Commit,
@@ -291,28 +351,58 @@ async fn profile_leaf_owner_requires_distinct_grants_and_retains_exact_conflict_
         }
     ));
     let bytes = std::fs::read(&editable).unwrap();
-    let repeated: Receipt = call(
-        &running,
-        CallOrigin::Local,
-        Operation::Commit,
-        &commit(&preview),
-    )
-    .await
-    .unwrap()
-    .unwrap();
-    assert_eq!(repeated.preview.digest, preview.digest);
+    assert_eq!(
+        call::<ChangeResult>(
+            &running,
+            CallOrigin::Local,
+            Operation::Commit,
+            &commit(&preview)
+        )
+        .await
+        .unwrap()
+        .unwrap_err(),
+        Failure::Conflict
+    );
     assert_eq!(
         std::fs::read(&editable).unwrap(),
         bytes,
-        "same ticket must never append a second override"
+        "stale review cannot append another override"
     );
-    assert_eq!(std::fs::read(&fixture.profile).unwrap(), source);
-    let receipts: Vec<String> = call(&running, CallOrigin::Local, Operation::Receipts, &json!({}))
+    let enable = Grant {
+        principal: Principal::Local,
+        scope: GrantScope::Profile {
+            target: request.target.clone(),
+            operation: ChangeKind::Enable,
+        },
+    };
+    grant(&running, enable.clone(), true).await;
+    for index in 0..260 {
+        let request = PreviewRequest {
+            target: request.target.clone(),
+            change: Change::Enabled {
+                enabled: index % 2 == 0,
+            },
+        };
+        let preview: Preview = call(&running, CallOrigin::Local, Operation::Preview, &request)
+            .await
+            .unwrap()
+            .unwrap();
+        let result: ChangeResult = call(
+            &running,
+            CallOrigin::Local,
+            Operation::Commit,
+            &commit(&preview),
+        )
         .await
         .unwrap()
         .unwrap();
-    assert_eq!(receipts.len(), 2);
-    assert!(receipts.contains(&preview.ticket));
+        assert!(
+            matches!(result.outcome, Outcome::Saved { .. }),
+            "change {index}: {result:?}"
+        );
+    }
+    grant(&running, enable, false).await;
+    assert_eq!(std::fs::read(&fixture.profile).unwrap(), source);
     assert!(running.shutdown().await.is_clean());
     let running =
         RunningRsi::boot_host_profile(composition(fixture.paths.clone()), &host_profile(&fixture))
@@ -327,11 +417,11 @@ async fn profile_leaf_owner_requires_distinct_grants_and_retains_exact_conflict_
     assert!(!leaf.enabled);
     assert_eq!(leaf.allowed, vec![ChangeKind::Disable]);
     assert!(matches!(
-        call::<Receipt>(
+        call::<ChangeResult>(
             &running,
             CallOrigin::Local,
-            Operation::Receipt,
-            &ticket(&preview)
+            Operation::Commit,
+            &commit(&preview)
         )
         .await,
         Err(ApiError::Unavailable)
@@ -344,7 +434,7 @@ async fn profile_leaf_owner_requires_distinct_grants_and_retains_exact_conflict_
     clippy::too_many_lines,
     reason = "One public owner lifecycle preserves the causal grant, source, and receipt sequence"
 )]
-async fn profile_leaf_device_needs_both_grants_and_never_inherits_local_proposals() {
+async fn profile_leaf_device_needs_both_grants_without_retained_proposals() {
     let fixture = fixture("http://127.0.0.1:1");
     let running =
         RunningRsi::boot_host_profile(composition(fixture.paths.clone()), &host_profile(&fixture))
@@ -416,10 +506,13 @@ async fn profile_leaf_device_needs_both_grants_and_never_inherits_local_proposal
         .await
         .unwrap()
         .unwrap();
-    assert!(matches!(
-        call::<Receipt>(&running, origin.clone(), Operation::Commit, &commit(&local)).await,
-        Err(ApiError::OutcomeUnknown | ApiError::Unauthorized)
-    ));
+    assert_eq!(
+        call::<ChangeResult>(&running, origin.clone(), Operation::Commit, &commit(&local))
+            .await
+            .unwrap()
+            .unwrap_err(),
+        Failure::Unauthorized
+    );
     let scope = Grant {
         principal: Principal::Device(device.record.id.clone()),
         scope: rsi_configuration_api::leaf::GrantScope::Profile {
@@ -432,13 +525,23 @@ async fn profile_leaf_device_needs_both_grants_and_never_inherits_local_proposal
         .await
         .unwrap()
         .unwrap();
+    for _ in 0..8 {
+        call::<Preview>(&running, origin.clone(), Operation::Preview, &request)
+            .await
+            .unwrap()
+            .unwrap();
+    }
+    call::<Preview>(&running, CallOrigin::Local, Operation::Preview, &request)
+        .await
+        .unwrap()
+        .unwrap();
     assert!(matches!(
         call::<Grants>(&running, origin.clone(), Operation::Grants, &json!({})).await,
         Err(ApiError::Unauthorized)
     ));
     grant(&running, scope, false).await;
     assert_eq!(
-        call::<Receipt>(
+        call::<ChangeResult>(
             &running,
             origin.clone(),
             Operation::Commit,
@@ -449,19 +552,6 @@ async fn profile_leaf_device_needs_both_grants_and_never_inherits_local_proposal
         .unwrap_err(),
         Failure::Unauthorized
     );
-    call::<()>(&running, origin, Operation::Discard, &ticket(&preview))
-        .await
-        .unwrap()
-        .unwrap();
-    call::<()>(
-        &running,
-        CallOrigin::Local,
-        Operation::Discard,
-        &ticket(&local),
-    )
-    .await
-    .unwrap()
-    .unwrap();
     assert!(running.shutdown().await.is_clean());
 }
 
@@ -707,36 +797,13 @@ async fn profile_revocation_publishes_before_drain_without_blocking_unrelated_gr
         .unwrap()
         .unwrap();
     assert!(!revoked.scopes.contains(&scope));
-    let retained: Vec<Preview> = call(&running, CallOrigin::Local, Operation::Previews, &json!({}))
-        .await
-        .unwrap()
-        .unwrap();
     assert_eq!(
-        retained.len(),
-        1,
-        "lost preview reply remains recoverable without preparing twice"
-    );
-    assert_eq!(
-        call::<Receipt>(
-            &running,
-            CallOrigin::Local,
-            Operation::Commit,
-            &commit(&retained[0])
-        )
-        .await
-        .unwrap()
-        .unwrap_err(),
+        call::<Preview>(&running, CallOrigin::Local, Operation::Preview, &bad)
+            .await
+            .unwrap()
+            .unwrap_err(),
         Failure::Unauthorized
     );
-    call::<()>(
-        &running,
-        CallOrigin::Local,
-        Operation::Discard,
-        &ticket(&retained[0]),
-    )
-    .await
-    .unwrap()
-    .unwrap();
     assert_eq!(std::fs::read_to_string(&fixture.profile).unwrap(), source);
     assert!(running.shutdown().await.is_clean());
 }
@@ -746,8 +813,7 @@ async fn profile_revocation_publishes_before_drain_without_blocking_unrelated_gr
     clippy::too_many_lines,
     reason = "One public owner lifecycle preserves the causal grant, source, and receipt sequence"
 )]
-async fn profile_commit_reply_loss_reconciles_the_original_ticket_and_directory_replacement_conflicts()
- {
+async fn profile_commit_survives_reply_loss_and_directory_replacement_conflicts() {
     let fixture = fixture("http://127.0.0.1:1");
     let sources = ProfileCatalog::new(
         fixture.paths.clone(),
@@ -797,28 +863,25 @@ async fn profile_commit_reply_loss_reconciles_the_original_ticket_and_directory_
     std::fs::create_dir(parent).unwrap();
     let original = std::fs::read(old.join("host.profile.toml")).unwrap();
     std::fs::write(&editable, &original).unwrap();
-    let receipt: Receipt = call(
-        &running,
-        CallOrigin::Local,
-        Operation::Commit,
-        &commit(&preview),
-    )
-    .await
-    .unwrap()
-    .unwrap();
-    assert!(matches!(
-        receipt.outcome,
-        Outcome::Failed {
-            failure: Failure::Conflict
-        }
-    ));
+    assert_eq!(
+        call::<ChangeResult>(
+            &running,
+            CallOrigin::Local,
+            Operation::Commit,
+            &commit(&preview)
+        )
+        .await
+        .unwrap()
+        .unwrap_err(),
+        Failure::Conflict
+    );
     assert_eq!(std::fs::read(&editable).unwrap(), original);
     let preview: Preview = call(&running, CallOrigin::Local, Operation::Preview, &input)
         .await
         .unwrap()
         .unwrap();
     let commit = commit(&preview);
-    let mut write = Box::pin(call::<Receipt>(
+    let mut write = Box::pin(call::<ChangeResult>(
         &running,
         CallOrigin::Local,
         Operation::Commit,
@@ -826,43 +889,45 @@ async fn profile_commit_reply_loss_reconciles_the_original_ticket_and_directory_
     ));
     assert!(futures_util::poll!(write.as_mut()).is_pending());
     drop(write);
-    let receipt = tokio::time::timeout(std::time::Duration::from_secs(10), async {
+    tokio::time::timeout(std::time::Duration::from_secs(10), async {
         loop {
-            match call::<Receipt>(
+            let page = match call::<Catalog>(
                 &running,
                 CallOrigin::Local,
-                Operation::Receipt,
-                &ticket(&preview),
+                Operation::Catalog,
+                &CatalogRequest {
+                    profile: Some("editable".into()),
+                    after: None,
+                },
             )
             .await
+            .unwrap()
             {
-                Ok(Ok(receipt)) if !matches!(receipt.outcome, Outcome::Pending) => break receipt,
-                Ok(Ok(_)) | Err(ApiError::Unavailable | ApiError::Capacity) => {
+                Ok(page) => page,
+                Err(Failure::Conflict) => {
                     tokio::task::yield_now().await;
+                    continue;
                 }
-                other => panic!("unexpected receipt: {other:?}"),
+                Err(error) => panic!("unexpected catalog failure: {error:?}"),
+            };
+            if page
+                .leaves
+                .iter()
+                .any(|leaf| leaf.target == input.target && !leaf.enabled)
+            {
+                break;
             }
+            tokio::task::yield_now().await;
         }
     })
     .await
     .unwrap();
-    assert!(matches!(
-        receipt.outcome,
-        Outcome::Saved {
-            application: Application::NotSelected,
-            ..
-        }
-    ));
     assert_ne!(std::fs::read(&editable).unwrap(), original);
     assert!(running.shutdown().await.is_clean());
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
-#[expect(
-    clippy::too_many_lines,
-    reason = "The same resident must survive the complete preview-capacity and restart-required lifecycle"
-)]
-async fn profile_leaf_preview_capacity_and_restart_observation_preserve_resident_session() {
+async fn profile_leaf_stateless_previews_and_restart_observation_preserve_resident_session() {
     let (endpoint, provider) = super::provider().await;
     let fixture = fixture(&endpoint);
     let running =
@@ -922,33 +987,17 @@ async fn profile_leaf_preview_capacity_and_restart_observation_preserve_resident
         target,
         change: Change::Enabled { enabled: false },
     };
-    let mut previews = vec![];
-    for _ in 0..4 {
-        previews.push(
-            call::<Preview>(&running, CallOrigin::Local, Operation::Preview, &request)
-                .await
-                .unwrap()
-                .unwrap(),
-        );
+    for _ in 0..260 {
+        call::<Preview>(&running, CallOrigin::Local, Operation::Preview, &request)
+            .await
+            .unwrap()
+            .unwrap();
     }
-    assert!(matches!(
-        call::<Preview>(&running, CallOrigin::Local, Operation::Preview, &request).await,
-        Err(ApiError::Capacity)
-    ));
-    call::<()>(
-        &running,
-        CallOrigin::Local,
-        Operation::Discard,
-        &ticket(&previews.remove(0)),
-    )
-    .await
-    .unwrap()
-    .unwrap();
     let preview: Preview = call(&running, CallOrigin::Local, Operation::Preview, &request)
         .await
         .unwrap()
         .unwrap();
-    let receipt: Receipt = call(
+    let receipt: ChangeResult = call(
         &running,
         CallOrigin::Local,
         Operation::Commit,
@@ -961,22 +1010,6 @@ async fn profile_leaf_preview_capacity_and_restart_observation_preserve_resident
     assert!(matches!(
         running.reload().await.unwrap(),
         rsi_host::ReloadOutcome::RestartRequired(_)
-    ));
-    let receipt: Receipt = call(
-        &running,
-        CallOrigin::Local,
-        Operation::Receipt,
-        &ticket(&preview),
-    )
-    .await
-    .unwrap()
-    .unwrap();
-    assert!(matches!(
-        receipt.outcome,
-        Outcome::Saved {
-            application: Application::RestartRequired,
-            ..
-        }
     ));
     assert_eq!(session.inspect().await.unwrap(), before);
     assert!(running.shutdown().await.is_clean());
@@ -1068,3 +1101,162 @@ mod ssh_targets;
 
 #[path = "mcp_ssh.rs"]
 mod mcp_ssh;
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+#[expect(
+    clippy::too_many_lines,
+    reason = "One owner proves Device saturation, Local admission and slot release through actual prepared work"
+)]
+async fn saturated_device_preparation_preserves_local_admission_and_releases_slots() {
+    let fixture = fixture("http://127.0.0.1:1");
+    let mut source = std::fs::read_to_string(&fixture.profile).unwrap();
+    source.push_str(
+        "\n[[steps]]\nkind='plugin'\nid='slow'\nplugin='fixture.slow'\nconfig={pause=false}\n",
+    );
+    std::fs::write(&fixture.profile, source).unwrap();
+    let evidence = Arc::new(Preparation::default());
+    let _release = Release(evidence.clone());
+    let mut builder = rsi::StandardAddonBuilder::new("fixture.capacity");
+    builder
+        .register_linked(
+            "fixture.slow",
+            "1",
+            rsi_meta::UpdateMode::Replayable,
+            Arc::new(SlowFactory(evidence.clone())),
+        )
+        .unwrap();
+    let running = Arc::new(
+        RunningRsi::boot_host_profile(
+            composition(fixture.paths.clone())
+                .with_addons(rsi::StandardAddonSet::new([builder.build().unwrap()]).unwrap()),
+            &host_profile(&fixture),
+        )
+        .await
+        .unwrap(),
+    );
+    let device = running
+        .device_administration()
+        .unwrap()
+        .register("saturation")
+        .await
+        .unwrap();
+    let origin = CallOrigin::Device(
+        running
+            .device_authentication()
+            .unwrap()
+            .authenticate(&device.token)
+            .unwrap(),
+    );
+    raw(
+        &running,
+        CallOrigin::Local,
+        rsi_configuration_api::ConfigurationOperation::SetGrant.spec(),
+        &json!({"device":device.record.id,"expected_revision":"0","granted":true}),
+    )
+    .await
+    .unwrap();
+    let mut query = CatalogRequest {
+        profile: Some("fixture".into()),
+        after: None,
+    };
+    let target = loop {
+        let page: Catalog = call(&running, CallOrigin::Local, Operation::Catalog, &query)
+            .await
+            .unwrap()
+            .unwrap();
+        if let Some(leaf) = page.leaves.iter().find(|leaf| leaf.target.leaf == "slow") {
+            break leaf.target.clone();
+        }
+        query.after = Some(page.next.unwrap());
+    };
+    for principal in [
+        Principal::Local,
+        Principal::Device(device.record.id.clone()),
+    ] {
+        grant(
+            &running,
+            Grant {
+                principal,
+                scope: GrantScope::Profile {
+                    target: target.clone(),
+                    operation: ChangeKind::Configuration,
+                },
+            },
+            true,
+        )
+        .await;
+    }
+    let request = PreviewRequest {
+        target: target.clone(),
+        change: Change::Configuration {
+            value: json!({"pause":true}),
+        },
+    };
+    let mut tasks = Vec::new();
+    for _ in 0..2 {
+        let running = running.clone();
+        let origin = origin.clone();
+        let request = request.clone();
+        tasks.push(tokio::spawn(async move {
+            call::<Preview>(&running, origin, Operation::Preview, &request).await
+        }));
+        tokio::time::timeout(
+            std::time::Duration::from_secs(10),
+            evidence.entered.notified(),
+        )
+        .await
+        .unwrap();
+    }
+    assert!(matches!(
+        call::<Preview>(&running, origin.clone(), Operation::Preview, &request).await,
+        Err(ApiError::Capacity)
+    ));
+    let local = PreviewRequest {
+        target,
+        change: Change::Configuration {
+            value: json!({"pause":false}),
+        },
+    };
+    tokio::time::timeout(
+        std::time::Duration::from_secs(10),
+        call::<Preview>(&running, CallOrigin::Local, Operation::Preview, &local),
+    )
+    .await
+    .unwrap()
+    .unwrap()
+    .unwrap();
+    evidence.release();
+    for task in tasks {
+        task.await.unwrap().unwrap().unwrap();
+    }
+    call::<Preview>(&running, origin.clone(), Operation::Preview, &local)
+        .await
+        .unwrap()
+        .unwrap();
+    *evidence.released.lock().unwrap() = false;
+    let mut local_tasks = Vec::new();
+    for _ in 0..2 {
+        let running = running.clone();
+        let request = request.clone();
+        local_tasks.push(tokio::spawn(async move {
+            call::<Preview>(&running, CallOrigin::Local, Operation::Preview, &request).await
+        }));
+        tokio::time::timeout(
+            std::time::Duration::from_secs(10),
+            evidence.entered.notified(),
+        )
+        .await
+        .unwrap();
+    }
+    // Authentication precedes Local quota admission, even when operators occupy both slots.
+    assert!(matches!(
+        call::<Grants>(&running, origin, Operation::Grants, &json!({})).await,
+        Err(ApiError::Unauthorized)
+    ));
+    evidence.release();
+    for task in local_tasks {
+        task.await.unwrap().unwrap().unwrap();
+    }
+    let running = Arc::try_unwrap(running).expect("all Device waiters joined");
+    assert!(running.shutdown().await.is_clean());
+}

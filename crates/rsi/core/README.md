@@ -129,15 +129,27 @@ existing registrars; it never rewrites source-owned Host Profiles. Configuration
 mutations share the durable configuration grant authority used by Settings.
 Before exposing a ready connection catalog, standard bootstrap waits for an
 enabled managed-provider owner to finish its post-Profile publication, for at
-most 30 seconds. An enabled target without an observed instance is still pending;
-only a target that is absent from a completed Profile may skip the wait. A failed
+most 30 seconds. An enabled target without an observed instance is pending while
+convergence runs; in a degraded Profile with no leaf still loading, an absent or dependency-pending
+required owner failed before becoming active and is refused immediately.
+A target absent from the completed Profile skips the wait even when an unrelated
+optional leaf failed. A failed
 or timed-out owner activation closes that Host and reports a boot failure; failed
 provider convergence remains a repairable management diagnostic.
 Startup failures retain a bounded, redacted Profile observation before shutdown:
 the Profile health, non-active instance identities and dependency states, and
-required owners that have not been observed. They do not print plugin configuration
+required owners that have not been observed. The Profile grant owner is a required
+startup authority; its failure is reported without waiting for downstream dependency
+timeouts. Only a confirmed domain-version mismatch carries the fixed version recovery
+hint; other failures do not recommend resetting grants. They do not print plugin configuration
 or raw activation errors. Shutdown must not replace this evidence with disposed
 states.
+Successful startup with unavailable optional plugins emits the same bounded,
+redacted observation as a warning on stderr. After startup, ordinary Host reload
+can remain partially applied; Profile health is operator observation, not a global
+Agent-work gate. Each service's capability admission and retirement fence its own
+calls, and a repaired source can retry failed or absent members. Immutable Agent
+generation replacement retains its separate validation-before-publication contract.
 The ordinary [navigation owner](../navigation/README.md) stores title/archive
 metadata in backend `base` and serves authenticated bounded Session queries.
 
@@ -795,6 +807,11 @@ They provide locations, not permission or confinement proofs.
 Windows ACP uses the shared Host with native private stores and byte-verified
 shipped presets. Application and provider platform limits still apply;
 successful pure preview establishes catalog resolution only.
+`start_application` additionally requires an active `ApplicationRunContract` before
+returning a runnable Host. Generic `standard_application_host` returns the lower-level
+Profile builder, whose successful start may be degraded; SDK callers must check
+their required contracts. Optional failed leaves do not reject an otherwise usable
+application. A missing entry point closes the Host and retains available diagnostics.
 
 On Unix, personal skill discovery skips missing, empty or relative HOME values.
 Standard path resolution still requires an absolute HOME when an XDG fallback
@@ -815,9 +832,16 @@ standard composition inputs, refreshes the immutable staged native catalog for
 new previews, and uses the existing Profile observation for apply status.
 Grant publication and source publication remain separate owned operations.
 The `host_profile` Agent tool uses the same owner with its live Session identity.
-It can list redacted choices, prepare, commit and query its own tickets; it cannot
-issue grants or inherit Local/Device authority. The shipped preset enables it
-only where the protected native source editor is available.
+It can list redacted choices, preview and commit changes; it cannot issue grants
+or inherit Local/Device authority. The shipped preset enables it only where the
+protected native source editor is available. Definite refusals, including capacity
+and shutdown inside admitted work, return ordinary Tool errors. Unknown outcomes
+require observing current configuration and application state before further work.
+Previews are stateless and completed results are not retained. Local, Device and
+Agent each have two short-lived operation slots, including serialized-writer
+waiters. Class members share capacity without a per-principal fairness guarantee.
+Grant administration rejects non-Local origins before acquiring operator capacity.
+The [configuration wire](../configuration-api/README.md) owns the lifecycle contract.
 
 History text search is a separate product owner from Session metadata navigation.
 The standard Host stores its rebuildable cache at `HostPaths.cache()/history/v1`,
@@ -837,6 +861,11 @@ requirements; readiness checks each enabled API owner's actual Active state.
 A reconstructible cache may need asynchronous rebuilding; publishing a client
 operation snapshot before that work settles would permanently omit history from
 that connection. The existing 30-second startup deadline covers this readiness.
+Pending required owners retain the same readiness deadline even when optional
+leaves fail; a degraded status is not proof that their dependencies cannot arrive.
+An optional leaf failure may still allow startup. Standard boot emits one bounded
+warning on stderr with redacted member identities/states, including absent leaves
+whose preparation failed; it never prints raw plugin diagnostics or configuration.
 
 Workspace interval review is composed through the ordinary
 [review owner](../workspace-review/README.md). Standard native Session execution

@@ -1,19 +1,9 @@
 use super::{
-    ApiError, Catalog, CatalogRequest, ChangeKind, Commit, Failure, Grant, GrantScope, Grants,
-    HostEpoch, Outcome, Preview, Receipt, Result, SetGrant, Target, Ticket,
+    ApiError, Catalog, CatalogRequest, ChangeKind, ChangeResult, Commit, Failure, Grant,
+    GrantScope, Grants, HostEpoch, Outcome, Preview, Result, SetGrant, Target,
 };
 fn invalid() -> ApiError {
     ApiError::Invalid("Invalid Profile leaf metadata".into())
-}
-pub(super) fn previews(values: &[Preview], epoch: &HostEpoch) -> Result<()> {
-    if values.len() > 4
-        || values
-            .windows(2)
-            .any(|pair| pair[0].ticket >= pair[1].ticket)
-    {
-        return Err(invalid());
-    }
-    values.iter().try_for_each(|value| value.validate(epoch))
 }
 pub(super) fn hex(value: &str, size: usize) -> Result<()> {
     if value.len() != size
@@ -59,6 +49,9 @@ impl Target {
 impl Grant {
     /// Validates a scope before persistence or presentation.
     pub fn validate(&self) -> Result<()> {
+        if matches!(self.principal, super::Principal::Agent(_)) {
+            return Err(invalid());
+        }
         self.scope.validate()
     }
 }
@@ -96,23 +89,14 @@ impl SetGrant {
     }
 }
 impl Commit {
-    /// Checks the exact Host, ticket and review digest before source access.
-    pub fn validate(&self, epoch: &HostEpoch) -> Result<()> {
-        Ticket {
-            host_epoch: self.host_epoch.clone(),
-            ticket: self.ticket.clone(),
-        }
-        .validate(epoch)?;
-        hex(&self.digest, 64)
-    }
-}
-impl Ticket {
-    /// Checks a finite ticket against its owning Host.
+    /// Checks the Host and bounded reviewed change before source access.
     pub fn validate(&self, epoch: &HostEpoch) -> Result<()> {
         if &self.host_epoch != epoch {
             return Err(ApiError::Unavailable);
         }
-        hex(&self.ticket, 32)
+        self.target.validate()?;
+        self.change.validate()?;
+        hex(&self.digest, 64)
     }
 }
 impl Grants {
@@ -144,7 +128,6 @@ impl Preview {
         if &self.host_epoch != epoch || (self.effective_enabled && !self.enabled) {
             return Err(invalid());
         }
-        hex(&self.ticket, 32)?;
         hex(&self.digest, 64)?;
         hex(&self.source_digest, 64)?;
         validate_leaf(&self.plugin)?;
@@ -158,7 +141,7 @@ impl Preview {
         Ok(())
     }
 }
-impl Receipt {
+impl ChangeResult {
     /// Validates identity and separate source/runtime outcome.
     pub fn validate(&self, epoch: &HostEpoch) -> Result<()> {
         self.preview.validate(epoch)?;

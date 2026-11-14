@@ -1,5 +1,7 @@
 use rsi_api_protocol::*;
-use rsi_configuration_api::leaf::{Application, Client, Operation, Outcome, Receipt, SetGrant};
+use rsi_configuration_api::leaf::{
+    Application, ChangeResult, Client, Operation, Outcome, SetGrant,
+};
 use std::sync::{Arc, Mutex};
 #[derive(Debug)]
 struct Remote {
@@ -42,6 +44,35 @@ fn target() -> Target {
 }
 
 #[test]
+fn agent_identity_cannot_be_persisted_as_a_grant() {
+    let grant = Grant {
+        principal: Principal::Agent(rsi_agent_session_protocol::SessionId::new("caller").unwrap()),
+        scope: rsi_configuration_api::leaf::GrantScope::Profile {
+            target: target(),
+            operation: ChangeKind::Disable,
+        },
+    };
+    assert!(grant.validate().is_err());
+    assert!(
+        SetGrant {
+            expected: "0".into(),
+            scope: grant.clone(),
+            granted: true
+        }
+        .validate()
+        .is_err()
+    );
+    assert!(
+        Grants {
+            revision: "1".into(),
+            scopes: vec![grant]
+        }
+        .validate()
+        .is_err()
+    );
+}
+
+#[test]
 fn grant_byte_bound_is_independent_of_the_scope_count() {
     let scopes = (0..128)
         .map(|i| Grant {
@@ -77,11 +108,7 @@ async fn decoded_mutation_metadata_cannot_claim_another_review_or_known_failure(
         operations: [
             Operation::Catalog,
             Operation::Preview,
-            Operation::Previews,
             Operation::Commit,
-            Operation::Receipt,
-            Operation::Receipts,
-            Operation::Discard,
             Operation::Grants,
             Operation::SetGrant,
         ]
@@ -93,7 +120,6 @@ async fn decoded_mutation_metadata_cannot_claim_another_review_or_known_failure(
     let client = Client::new(remote.clone());
     let preview = Preview {
         host_epoch: epoch,
-        ticket: "b".repeat(32),
         target: target(),
         operation: ChangeKind::Disable,
         digest: "c".repeat(64),
@@ -111,7 +137,7 @@ async fn decoded_mutation_metadata_cannot_claim_another_review_or_known_failure(
             other.previous_enabled = false;
         }
         *remote.reply.lock().unwrap() = Some(
-            serde_json::to_value(Receipt {
+            serde_json::to_value(ChangeResult {
                 preview: other,
                 outcome: Outcome::Saved {
                     directory_synced: true,
@@ -121,7 +147,15 @@ async fn decoded_mutation_metadata_cannot_claim_another_review_or_known_failure(
             .unwrap(),
         );
         assert!(matches!(
-            client.commit(&preview).await,
+            client
+                .commit(
+                    &preview,
+                    rsi_configuration_api::leaf::PreviewRequest {
+                        target: preview.target.clone(),
+                        change: Change::Enabled { enabled: false }
+                    }
+                )
+                .await,
             Err(ApiError::OutcomeUnknown)
         ));
     }
@@ -195,7 +229,6 @@ fn prepared_preview_and_catalog_reject_identity_confusion_without_rejecting_byte
     let epoch = HostEpoch::generate().unwrap();
     let mut preview = Preview {
         host_epoch: epoch.clone(),
-        ticket: "b".repeat(32),
         target: target(),
         operation: ChangeKind::Disable,
         digest: "c".repeat(64),
@@ -214,7 +247,8 @@ fn prepared_preview_and_catalog_reject_identity_confusion_without_rejecting_byte
     assert!(
         Commit {
             host_epoch: HostEpoch::generate().unwrap(),
-            ticket: "b".repeat(32),
+            target: target(),
+            change: Change::Enabled { enabled: false },
             digest: "c".repeat(64)
         }
         .validate(&epoch)
