@@ -11,14 +11,13 @@ pub(crate) struct AdmissionLease {
 }
 
 impl AdmissionLease {
-    const SEALED: usize = 1 << (usize::BITS - 1);
-    const CLOSED: usize = 1 << (usize::BITS - 2);
+    const CLOSED: usize = 1 << (usize::BITS - 1);
     const ACTIVE: usize = Self::CLOSED - 1;
 
-    pub(crate) fn acquire(self: &Arc<Self>, retiring_consumer: bool) -> Option<LeaseGuard> {
+    pub(crate) fn acquire(self: &Arc<Self>) -> Option<LeaseGuard> {
         let mut current = self.state.load(Ordering::Acquire);
         loop {
-            if current & Self::SEALED != 0 || (!retiring_consumer && current & Self::CLOSED != 0) {
+            if current & Self::CLOSED != 0 {
                 return None;
             }
             if current & Self::ACTIVE == Self::ACTIVE {
@@ -41,20 +40,14 @@ impl AdmissionLease {
 
     pub(crate) fn close(&self) {
         let previous = self.state.fetch_or(Self::CLOSED, Ordering::AcqRel);
-        self.closed.cancel();
+        self.retire();
         if previous & Self::ACTIVE == 0 {
             self.drained.notify_waiters();
         }
     }
 
-    pub(crate) fn seal(&self) {
-        let previous = self
-            .state
-            .fetch_or(Self::CLOSED | Self::SEALED, Ordering::AcqRel);
+    pub(crate) fn retire(&self) {
         self.closed.cancel();
-        if previous & Self::ACTIVE == 0 {
-            self.drained.notify_waiters();
-        }
     }
 
     pub(crate) async fn wait_drained(&self) {
@@ -98,18 +91,17 @@ mod tests {
     use super::*;
 
     #[test]
-    fn hard_seal_rejects_a_stale_retiring_acquisition() {
+    fn retirement_notifies_before_closure_fences_all_new_acquisitions() {
         let lease = Arc::new(AdmissionLease::default());
-        let retiring_consumer = true;
-
-        lease.close();
+        let observer = lease.retirement_observer();
+        lease.retire();
+        assert!(observer.is_cancelled());
         let admitted_before_seal = lease
-            .acquire(retiring_consumer)
-            .expect("retiring work may join tracked cleanup before the final fence");
-        lease.seal();
+            .acquire()
+            .expect("existing holders can call until closure");
+        lease.close();
 
-        assert!(lease.acquire(retiring_consumer).is_none());
-        assert!(lease.acquire(false).is_none());
+        assert!(lease.acquire().is_none());
         drop(admitted_before_seal);
     }
 }

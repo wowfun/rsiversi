@@ -29,7 +29,7 @@ pub(crate) struct ProviderBinding {
     pub version: ContractVersion,
     pub provider: FiberId,
     pub generation: FiberGeneration,
-    // Withdrawal takes the endpoint only after `lease` is closed, sealed, and
+    // Withdrawal takes the endpoint only after `lease` is closed and
     // drained. Each cloned endpoint is therefore protected by the CallDriver's
     // corresponding provider LeaseGuard after this mutex is released.
     pub endpoint: Mutex<Option<Arc<dyn ServiceEndpoint>>>,

@@ -721,7 +721,7 @@ impl Runtime {
     }
 
     pub(super) fn begin_effect(&self, owner: Owner, label: String) -> Result<EffectTxn> {
-        let _runtime_admission = self.begin_admission(false)?;
+        let _runtime_admission = self.begin_admission()?;
         let fiber = self.owner_fiber(owner)?;
         let mut data = fiber.data.lock().expect("fiber state poisoned");
         self.begin_effect_locked(owner, label, &fiber, &mut data)
@@ -734,13 +734,7 @@ impl Runtime {
         fiber: &Arc<Fiber>,
         data: &mut FiberData,
     ) -> Result<EffectTxn> {
-        Self::validate_owner_data(owner, data)?;
-        if !matches!(data.state, FiberState::Loading | FiberState::Active) {
-            return Err(MetaError::StaleContext {
-                fiber: owner.fiber,
-                generation: owner.generation,
-            });
-        }
+        Self::validate_live_owner_data(owner, data)?;
         let active = data.active.as_mut().ok_or(MetaError::StaleContext {
             fiber: owner.fiber,
             generation: owner.generation,
@@ -968,7 +962,7 @@ impl Context {
             if cancellation.is_cancelled() {
                 return Err(stale());
             }
-            let _runtime_admission = self.runtime.begin_admission(false)?;
+            let _runtime_admission = self.runtime.begin_admission()?;
             self.runtime.validate_effect_label(&label)?;
             let fiber = self.runtime.owner_fiber(owner).map_err(|_| stale())?;
             let mut data = fiber.data.lock().expect("fiber state poisoned");

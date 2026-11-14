@@ -25,6 +25,9 @@ A Loading supply occupies its slot immediately and is available to its own
 providing generation, but it cannot satisfy external lookup, injection, or
 call opening until the provider is Active. This exception prevents a dependent
 activation from becoming part of an uncommitted provider transaction.
+Transferring a captured capability does not bypass this publication fence.
+Previously published providers remain callable through their existing retirement
+lease window; a never-published provider is available only to its own generation.
 
 Listeners, transferable capabilities, and product contributions are visible
 while their owner is Loading because their exact undo is already installed.
@@ -72,8 +75,8 @@ exposes no raw token, reconstruction, import operation, kind, or rights
 metadata. Native ABI capability IDs belong to independent Loader-owned adapter
 tables. A core capability is not an implementation pointer or a product schema.
 Its safe diagnostic form shows only bounded logical service and provider facts.
-Generation retirement revokes use and removes the entry from its generation's
-revocation set, but a live safe handle continues to own its unique entry
+Retirement follows the [holder and cleanup ordering](runtime-lifecycle.md#retirement-and-shutdown).
+After revocation, a live safe handle continues to own its unique entry
 reservation until its final clone or containing Message drops. This prevents
 repeated mint-retire-retain cycles from bypassing the Runtime memory bound. A
 clean shutdown therefore requires callers to release every capability they

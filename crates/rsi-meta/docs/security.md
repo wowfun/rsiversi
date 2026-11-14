@@ -144,9 +144,11 @@ External lookup and injection require the provider to be Active and retain the
 exact `SupplyId`. Call opening acquires provider admission, then revalidates
 caller generation, provider generation, supply identity, and binding before it
 allocates channels or starts a driver. Withdrawal removes external visibility
-and closes admission while the same Runtime-state transaction cancels every
+while the same Runtime-state transaction cancels every
 affected Loading generation and queues its exact reconciliation. User-owned
-destruction begins only after that invalidation fence. Closure and the
+destruction begins only after that invalidation fence. Existing holders follow
+the [retirement and shutdown ordering](subsystems/runtime-lifecycle.md#retirement-and-shutdown).
+Closure and the
 admitted-callback count share one atomic state, so a racing callback either
 commits before closure or observes it.
 
@@ -161,10 +163,8 @@ reconstruction, kind, or rights state. Stale and foreign owned handles fail
 before dispatch. Hostile raw-ID validation belongs to the independent native
 ABI and Loader tables at that unsafe adapter boundary. `Capability`
 diagnostics expose only bounded logical service/provider facts.
-Generation retirement closes every capability entry before draining any
-admitted use and yields its reconciliation slot while those deadline-bounded
-call drivers finish, so stale authority is fenced without blocking unrelated
-Fiber convergence.
+The retirement holder window grants no new structural mutation authority to an
+Unloading generation.
 
 Mixed-size byte admission is work-conserving with bounded bypass: a fitting
 message may use otherwise idle capacity, but an older request becomes the

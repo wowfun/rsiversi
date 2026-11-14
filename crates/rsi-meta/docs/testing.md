@@ -66,6 +66,15 @@ Evidence covers:
   an admitted call remains in flight.
 
 Dense-graph and lifecycle probes use deterministic gates rather than sleeps.
+Deadline probes use the explicit manual Execution clock in test support. They
+advance Runtime time only after the relevant activation, preparation or cleanup
+gate is reached; real Tokio time bounds watchdogs. A paused Tokio clock can
+auto-advance while native blocking preparation is still queued and must not turn
+a short deadline into a scheduler-speed test.
+Revision-watch tests cover lifecycle changes without a registry mutation,
+coalescing for slow readers, terminal/shutdown invalidation, and receiver
+closure without retaining Runtime ownership. Failed activation is retried when
+an exact dependency binding changes, not on unrelated supply activity.
 Their elapsed times, scaling ratios, and snapshot latency are report-only;
 conformance does not turn host scheduling noise into a correctness failure.
 Every terminal disposal path settles already registered reconciliation tickets,
@@ -94,8 +103,8 @@ Dynamic supply tests cover:
 - Local withdrawal removing lookup visibility, converging exact hard
   dependents, and dropping Runtime ownership without waiting for an escaped
   `Arc`;
-- Portable withdrawal additionally closing admission and draining admitted
-  calls before endpoint drop;
+- Portable withdrawal keeping existing holders callable through dependent
+  cleanup, then closing admission and draining calls before endpoint drop;
 - same-generation withdraw/re-provide minting a new lane-specific supply ID,
   rejecting the old handle, and replaying hard consumers;
 - optional Local lookup creating no watcher or replay edge and Portable
@@ -217,7 +226,8 @@ remain in product tests; the scope crate does not invent generic policy tests.
 JSON-compatible TOML, pure frozen Rhai environment, global identities, patch
 operation whitelist, source depth/count/byte bounds, one rebuild-wide Rhai
 operation budget, and redacted diagnostics.
-Control tests cross real Runtime Fibers for all-before-mutation preparation,
+Control tests cross real Runtime Fibers for preflight before mutation and
+[ordered per-leaf preparation](../profile/README.md),
 Pending acceptance, healthy equality, restart-required publication,
 apply/rollback/degraded recovery, same-source degraded retry, exact required
 source watching, watcher fault/recovery, subscriptions, and bounded shutdown.

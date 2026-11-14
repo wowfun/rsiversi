@@ -261,7 +261,7 @@ impl Runtime {
         endpoint: Arc<dyn ServiceEndpoint>,
         capture: bool,
     ) -> Result<(SupplyHandle, Option<Capability>)> {
-        let _runtime_admission = self.begin_admission(false)?;
+        let _runtime_admission = self.begin_admission()?;
         let owner = context.owner.ok_or_else(|| {
             MetaError::InvalidInput("the root context cannot provide a service".to_owned())
         })?;
@@ -506,7 +506,6 @@ impl Runtime {
     ) -> std::result::Result<(), String> {
         let (tickets, should_spawn) = {
             let mut state = self.inner.state.lock().expect("runtime state poisoned");
-            binding.lease.close();
             let fiber = state.fibers.get(&owner.fiber).cloned();
             if let Some(fiber) = fiber {
                 let mut data = fiber.data.lock().expect("fiber state poisoned");
@@ -541,7 +540,7 @@ impl Runtime {
         };
         self.start_reconciliation_requests(should_spawn);
         self.join_reconciliation_requests(tickets).await;
-        binding.lease.seal();
+        binding.lease.close();
         binding.lease.wait_drained().await;
         let endpoint = binding
             .endpoint

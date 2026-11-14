@@ -110,9 +110,9 @@ Minting accounts one unique capability entry. Cloning or transferring a Rust
 handle shares that entry; it neither mints another authority nor registers
 another generation-owned entry. Safe Rust exposes no raw token,
 reconstruction, import operation, capability kind, or rights metadata; native
-capability IDs belong to the independent ABI/Loader adapter. Retirement
-immediately revokes use and removes the entry from its generation's revocation
-set, while the unique entry reservation remains charged until the final safe
+capability IDs belong to the independent ABI/Loader adapter. Retirement follows
+the [holder and teardown ordering](../docs/subsystems/runtime-lifecycle.md#retirement-and-shutdown).
+After revocation, the unique entry reservation remains charged until the final safe
 handle or containing Message drops. This keeps retained stale handles inside
 the same memory bound and means callers release their own capabilities before
 expecting a clean Runtime shutdown.
@@ -141,8 +141,8 @@ request cancellation or expose the underlying token.
 One absolute call deadline covers admission, request and response backpressure,
 provider execution, and terminal observation. Caller and provider generations
 are revalidated after admission and before driver creation. Provider panic is
-call-local; retiring a provider closes new admission and waits for calls already
-admitted.
+call-local; retiring a provider converges its dependents before closing existing
+holder admission and waiting for calls already admitted.
 
 Each Portable `InvocationContext` distinguishes its own `call_id`, the immediate
 `parent_call_id`, and the activation seed `lineage_call_id` for the nested

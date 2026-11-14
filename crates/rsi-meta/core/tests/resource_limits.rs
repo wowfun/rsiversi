@@ -407,6 +407,7 @@ fn deep_owned_config_boundaries_reject_or_drop_without_recursing() {
 
     for scenario in [
         "prepare-input",
+        "prepare-stopped",
         "validate-output",
         "drop-apply",
         "drop-reconfigure",
@@ -441,6 +442,16 @@ fn run_deep_config_scenario(scenario: &str) {
     .unwrap();
     let spec = || FactorySpec::new(FactoryIdentity::linked("deep-config", "1"));
     match scenario {
+        "prepare-stopped" => {
+            assert!(executor.block_on(runtime.shutdown()).is_clean());
+            assert!(matches!(
+                runtime.prepare(
+                    crate::resolved(Arc::new(PassiveFactory(spec()))),
+                    deep_json_value()
+                ),
+                Err(MetaError::RuntimeShuttingDown)
+            ));
+        }
         "prepare-input" => assert!(matches!(
             runtime.prepare(crate::resolved(Arc::new(PassiveFactory(spec()))), deep_json_value()),
             Err(MetaError::InvalidConfig(message)) if message.contains("nesting")

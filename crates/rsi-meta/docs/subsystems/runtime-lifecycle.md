@@ -28,7 +28,7 @@ Contexts can apply root plugins but cannot impersonate a plugin generation.
 
 `Context::retirement_observer` captures an observation-only signal for the exact
 live generation, or Runtime admission for a root Context. It fires when that
-owner closes admission, before draining calls, children, or deferred cleanup.
+owner starts retirement, before draining calls, children, or deferred cleanup.
 It retains neither execution admission nor the Runtime. Local adapters use it
 to release suspended outbound calls that their later deferred cleanup must join;
 the signal grants no cleanup authority and does not replace owned cleanup.
@@ -205,21 +205,37 @@ the generation's existing effect budgets and cleanup phase report that retained
 work separately. A supply records whether its generation reached publication,
 not a guarantee that an observed supply remains callable.
 
+`Runtime::subscribe` exposes one coalescing revision watch for registry,
+lifecycle, terminal and shutdown changes. A slow reader retains only the latest
+revision and then pulls a bounded inspection page; it does not retain historical
+snapshots, create a polling task, or invoke plugins. The revision is an
+invalidation signal, not a transactional snapshot or an event count. It
+saturates without wrapping and continues notifying at saturation. Dropping the
+Runtime closes the watch; receivers do not retain Runtime ownership.
+`RuntimeChanges` exposes copied revisions and asynchronous change notification;
+it never exposes a borrowed watch guard that could invert Runtime lock order.
+
 
 
 ## Retirement and shutdown
 
-Retirement closes external admission, withdraws Active supplies, converges
-dependents, drains admitted calls and dispatches, disposes children, and then
-runs effects in reverse order. Cleanup is idempotent and joinable; dropping a
+Retirement withdraws Active supplies and fences new structural operations. It
+converges exact dependents and disposes children while existing Portable
+capability holders can still call the retiring provider. This is an ordinary
+holder window, not a privileged cleanup context. It then closes provider call
+admission, drains those calls, and runs effects serially in reverse order.
+The generation retains its own captured capabilities through its effects, then
+revokes them and drains remaining outbound calls before releasing ownership.
+No old holder can enter after that final fence. Cleanup is idempotent and joinable; dropping a
 waiter does not drop the work. User cleanup panic is contained as a bounded
 failure. A panic escaping ownership machinery terminalizes the Runtime because
 registry withdrawal is no longer provable.
 
 Shutdown first closes Runtime-wide external admission, captures strong root
 Fiber ownership, cancels call and dispatch drivers, and starts every root
-disposal. It hard-seals retiring admission only after convergence, then drains
-pre-close leases. `Complete` requires an empty Fiber registry, idle scheduler,
-zero logical resources, and a sealed and drained gate. A deadline bounds one
+disposal. Runtime shutdown closes all calls, including calls from existing
+holders; the ordinary provider-retirement window does not reopen shutdown
+admission. It drains pre-close leases. `Complete` requires an empty Fiber registry, idle scheduler,
+zero logical resources, and a closed and drained gate. A deadline bounds one
 wait and returns tracked unresolved evidence; it never authorizes abandoning
 cleanup.

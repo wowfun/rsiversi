@@ -108,10 +108,12 @@ impl PluginFactory for ConsumerFactory {
             "consumer",
             Box::new(move || {
                 async move {
-                    if !matches!(service.open(), Err(rsi_meta::MetaError::StaleCapability)) {
-                        return Err(
-                            "ordinary capability admission remained open during cleanup".to_owned()
-                        );
+                    let response = service
+                        .invoke(Message::new(b"cleanup".to_vec()))
+                        .await
+                        .map_err(|error| error.to_string())?;
+                    if response.into_parts().0 != b"cleanup" {
+                        return Err("provider changed during consumer cleanup".to_owned());
                     }
                     cleanup
                         .lock()

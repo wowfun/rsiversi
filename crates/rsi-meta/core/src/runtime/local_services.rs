@@ -235,7 +235,7 @@ impl Runtime {
         context: &Context,
         service: Arc<C::Service>,
     ) -> Result<LocalSupplyHandle> {
-        let _runtime_admission = self.begin_admission(false)?;
+        let _runtime_admission = self.begin_admission()?;
         let owner = context.owner.ok_or_else(|| {
             MetaError::InvalidInput("the root context cannot provide a Local service".to_owned())
         })?;

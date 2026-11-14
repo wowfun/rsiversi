@@ -194,10 +194,7 @@ impl CapabilityEntry {
     }
 
     pub(super) fn acquire_use(self: &Arc<Self>) -> Result<CapabilityUse> {
-        let lease = self
-            .admission
-            .acquire(false)
-            .ok_or(MetaError::StaleCapability)?;
+        let lease = self.admission.acquire().ok_or(MetaError::StaleCapability)?;
         if self.revoked.load(Ordering::Acquire) {
             return Err(MetaError::StaleCapability);
         }
@@ -282,9 +279,6 @@ impl Runtime {
         let entries = set.close_and_take();
         for entry in &entries {
             entry.begin_revoke();
-        }
-        for entry in &entries {
-            entry.admission.seal();
         }
         // Every admitted use is owned by a CallDriver. Closing every entry first
         // prevents new uses; existing drivers follow their validated absolute

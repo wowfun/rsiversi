@@ -197,15 +197,15 @@ impl Runtime {
     /// The returned proof belongs to this Runtime and can be consumed by
     /// [`Context::apply_prepared`] without invoking preparation again.
     pub fn prepare(&self, factory: ResolvedFactory, config: ConfigValue) -> Result<PreparedPlugin> {
+        let config = configuration::OwnedJsonValue::new(config);
         let preparation = self.begin_plugin_preparation()?;
         let (identity, update_mode, implementation) = factory.into_parts();
         let factory = RetainedFactory::new(implementation);
-        let config = configuration::OwnedJsonValue::new(config);
         self.prepare_admitted(identity, update_mode, factory, config, preparation)
     }
 
     pub(super) fn begin_preparation(&self) -> Result<PreparationAdmission> {
-        let runtime = self.begin_admission(false)?;
+        let runtime = self.begin_admission()?;
         let admission = Arc::clone(&self.inner.preparation_admission)
             .try_acquire_owned()
             .map_err(|_| {
@@ -230,7 +230,7 @@ impl Runtime {
     }
 
     async fn wait_for_preparation(&self) -> Result<PreparationAdmission> {
-        let runtime = self.begin_admission(false)?;
+        let runtime = self.begin_admission()?;
         let admission = Arc::clone(&self.inner.preparation_admission)
             .acquire_owned()
             .await

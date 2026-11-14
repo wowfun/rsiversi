@@ -66,7 +66,7 @@ impl Context {
     }
 
     fn registration_position(&self) -> Result<ChildPosition> {
-        let _admission = self.runtime.begin_admission(false)?;
+        let _admission = self.runtime.begin_admission()?;
         self.with_live_position(|position| {
             position.ok_or_else(|| {
                 MetaError::InvalidInput("the root context cannot own a registration".into())
@@ -122,7 +122,7 @@ impl RegistrationContext {
     ) -> Result<(T, RegistrationLease)> {
         let position = self.context.registration_position()?;
         let runtime = &self.context.runtime;
-        let _admission = runtime.begin_admission(false)?;
+        let _admission = runtime.begin_admission()?;
         let owner = self
             .context
             .owner

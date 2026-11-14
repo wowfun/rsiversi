@@ -434,15 +434,7 @@ impl PluginFactory for DrainFactory {
 
 #[tokio::test]
 async fn retirement_waits_for_callback_exit_and_caller_terminal_observation() {
-    let runtime = Runtime::new(RuntimeLimits {
-        deadlines: DeadlineLimits {
-            transition: std::time::Duration::from_millis(5),
-            service_call: std::time::Duration::from_secs(1),
-            ..DeadlineLimits::default()
-        },
-        ..RuntimeLimits::default()
-    })
-    .unwrap();
+    let runtime = Runtime::default();
     let entered = Arc::new(Notify::new());
     let release = Arc::new(Notify::new());
     let cleaned = Arc::new(AtomicUsize::new(0));

@@ -172,7 +172,7 @@ impl Runtime {
         E: LocalEvent,
         H: ?Sized + Send + Sync + 'static,
     {
-        let _runtime_admission = self.begin_admission(false)?;
+        let _runtime_admission = self.begin_admission()?;
         let owner = context.owner.ok_or_else(|| {
             MetaError::InvalidInput("the root context cannot own a Local listener".to_owned())
         })?;
@@ -308,7 +308,7 @@ impl Runtime {
         &self,
         context: &Context,
     ) -> Result<LocalEventSnapshot> {
-        let _runtime_admission = self.begin_admission(false)?;
+        let _runtime_admission = self.begin_admission()?;
         let slot = LocalEventSlot {
             event: TypeId::of::<E>(),
             isolation: context

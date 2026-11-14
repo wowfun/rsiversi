@@ -144,8 +144,7 @@ impl Runtime {
                 });
                 if claimed.is_some() {
                     data.state = FiberState::Unloading;
-                    let snapshot = data.snapshot(fiber.id);
-                    fiber.watch.send_replace(snapshot);
+                    fiber.publish_snapshot(&data);
                 }
                 (run, claimed)
             };
@@ -227,9 +226,7 @@ impl Runtime {
         let maximum_bytes = self.inner.limits.payloads.maximum_diagnostic_bytes;
         let mut report = retired_owned_report;
         *fiber.cleanup_phase.lock().expect("cleanup phase poisoned") = CleanupPhase::Withdrawing;
-        lease.close();
-        self.yield_reconciliation_slot(self.revoke_capability_set(capabilities))
-            .await;
+        lease.retire();
         let mut reconciliation = self.withdraw_generation_services(&services, Some(fiber.id));
         reconciliation
             .extend(self.withdraw_generation_local_services(&local_services, Some(fiber.id)));
@@ -249,20 +246,7 @@ impl Runtime {
         *fiber.cleanup_phase.lock().expect("cleanup phase poisoned") =
             CleanupPhase::WaitingForDependents;
         self.join_reconciliation_requests(reconciliation).await;
-        *fiber.cleanup_phase.lock().expect("cleanup phase poisoned") =
-            CleanupPhase::DrainingAdmissions;
-        // Ordinary holder admission is already fenced before dependent
-        // convergence. Seal before the drain so no stale internal claimant can
-        // reopen this generation after cleanup has observed zero callbacks.
-        lease.seal();
-        for (_, binding) in &services {
-            binding.lease.seal();
-        }
         self.yield_reconciliation_slot(async {
-            lease.wait_drained().await;
-            for (_, binding) in &services {
-                binding.lease.wait_drained().await;
-            }
             *fiber.cleanup_phase.lock().expect("cleanup phase poisoned") =
                 CleanupPhase::DisposingChildren;
             for child in children.into_iter().rev() {
@@ -273,6 +257,14 @@ impl Runtime {
                 );
             }
             *fiber.cleanup_phase.lock().expect("cleanup phase poisoned") =
+                CleanupPhase::DrainingAdmissions;
+            for (_, binding) in &services {
+                binding.lease.close();
+            }
+            for (_, binding) in &services {
+                binding.lease.wait_drained().await;
+            }
+            *fiber.cleanup_phase.lock().expect("cleanup phase poisoned") =
                 CleanupPhase::RunningEffects;
             while let Some(effect) = effects.pop() {
                 report.extend_bounded(
@@ -281,6 +273,9 @@ impl Runtime {
                     maximum_bytes,
                 );
             }
+            lease.close();
+            self.revoke_capability_set(capabilities).await;
+            lease.wait_drained().await;
             let mut data = fiber.data.lock().expect("fiber state poisoned");
             if data
                 .active
@@ -304,7 +299,6 @@ impl Runtime {
             let mut changed = Vec::new();
             let mut removed_any = false;
             for (slot, binding) in services {
-                binding.lease.close();
                 let visibility = state
                     .providers
                     .get(slot)
@@ -526,6 +520,9 @@ impl Runtime {
     /// [`ShutdownOutcome::Complete`] after actual quiescence.
     pub async fn shutdown(&self) -> ShutdownOutcome {
         if !self.inner.shutting_down.swap(true, Ordering::AcqRel) {
+            self.inner
+                .revision
+                .send_modify(|revision| *revision = revision.saturating_add(1));
             self.inner.runtime_admission.close();
             // The Runtime is terminal for new calls and dispatches. Cancelling
             // their shared drivers ensures shutdown can wait for actual
@@ -678,11 +675,8 @@ impl Runtime {
         let unresolved = self.unresolved_cleanup_report();
         if quiescent && unresolved.total == 0 {
             self.wait_scheduler_idle().await;
-            // No registered cleanup can legitimately originate another call.
-            // Seal and acquire share AdmissionLease's atomic state, so a stale
-            // retiring caller either precedes this fence and joins the drain,
-            // or fails without touching a resource ledger.
-            self.inner.runtime_admission.seal();
+            // Shutdown closed admission before starting cleanup. All pre-close
+            // operations must release their leases before completion.
             self.inner.runtime_admission.wait_drained().await;
             self.inner.resources.wait_zero().await;
             let unresolved = self.unresolved_cleanup_report();
@@ -804,37 +798,29 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn provider_cleanup_hard_seals_stale_retiring_admission_before_draining() {
+    async fn provider_cleanup_closes_admission_before_draining() {
         let (_runtime, provider, consumer, service) = service_fixture().await;
         let generation_admission = Arc::clone(&service.entry.binding.lease);
         let admitted_before_retirement = generation_admission
-            .acquire(false)
+            .acquire()
             .expect("active provider admits an existing callback");
-        let stale_retiring_consumer = true;
 
         let disposal = tokio::spawn(async move { provider.dispose().await });
         tokio::time::timeout(Duration::from_secs(1), async {
-            while generation_admission
-                .acquire(stale_retiring_consumer)
-                .is_some()
-            {
+            while generation_admission.acquire().is_some() {
                 tokio::task::yield_now().await;
             }
         })
         .await
-        .expect("provider cleanup never hard-sealed retiring admission");
+        .expect("provider cleanup retains retiring admission until quiescence");
         assert!(
             !disposal.is_finished(),
-            "cleanup bypassed an admission acquired before the seal"
+            "cleanup bypassed an admission acquired before gate closure"
         );
 
         drop(admitted_before_retirement);
         assert!(disposal.await.unwrap().is_clean());
-        assert!(
-            generation_admission
-                .acquire(stale_retiring_consumer)
-                .is_none()
-        );
+        assert!(generation_admission.acquire().is_none());
         assert!(consumer.dispose().await.is_clean());
     }
 
@@ -851,7 +837,7 @@ mod tests {
             .entry
             .binding
             .lease
-            .acquire(false)
+            .acquire()
             .expect("active provider admits a provisional call");
 
         consumer.reconfigure(Value::Null).await.unwrap();

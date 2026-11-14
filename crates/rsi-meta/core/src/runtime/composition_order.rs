@@ -259,7 +259,7 @@ impl Drop for PositionOccupancy {
 impl Context {
     /// Reserves a stable direct-child position in this exact parent generation.
     pub fn child_position(&self) -> Result<ChildPosition> {
-        let _admission = self.runtime.begin_admission(false)?;
+        let _admission = self.runtime.begin_admission()?;
         self.with_live_position(|parent| {
             self.runtime
                 .inner
@@ -271,7 +271,7 @@ impl Context {
     /// Selects a reserved direct-child position for subsequent apply operations.
     /// At most one admitted live Fiber may occupy the selected position.
     pub fn with_child_position(&self, position: &ChildPosition) -> Result<Self> {
-        let _admission = self.runtime.begin_admission(false)?;
+        let _admission = self.runtime.begin_admission()?;
         self.with_live_position(|_| position.validate(&self.runtime, self.owner))?;
         let mut context = self.clone();
         context.child_position = Some(position.clone());
@@ -282,7 +282,7 @@ impl Context {
     /// Listed positions come first; omitted positions keep their relative order.
     /// No Fiber, effect, or registration generation changes.
     pub fn reorder_children(&self, positions: &[ChildPosition]) -> Result<()> {
-        let _admission = self.runtime.begin_admission(false)?;
+        let _admission = self.runtime.begin_admission()?;
         if positions.len()
             > self
                 .runtime

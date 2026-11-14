@@ -129,6 +129,10 @@ binding. Minting creates one accounted entry; cloning and message transfer
 share that entry rather than minting authority. Safe Rust exposes no raw token,
 reconstruction, arbitrary import API, kind, or rights metadata.
 
+The immediate-revocation clause below is superseded by the
+[cleanup holder window](2026-11-13-cleanup-capability-holder-window.md).
+Entry accounting remains unchanged.
+
 Generation retirement immediately revokes use and removes the entry from its
 generation's revocation set. A retained safe handle continues to own its unique
 entry reservation until its final clone or containing Message drops, preventing

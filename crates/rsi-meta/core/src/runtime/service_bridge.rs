@@ -51,10 +51,10 @@ impl Runtime {
         let caller_admission =
             Self::validate_capability_holder(handle, caller_owner, &caller_fiber)?;
         let caller_lease = caller_admission
-            .acquire(false)
+            .acquire()
             .ok_or(MetaError::StaleCapability)?;
         Self::validate_capability_holder(handle, caller_owner, &caller_fiber)?;
-        let runtime_admission = self.begin_admission(false)?;
+        let runtime_admission = self.begin_admission()?;
         let deadline = self
             .inner
             .execution
@@ -76,7 +76,7 @@ impl Runtime {
             .entry
             .binding
             .lease
-            .acquire(false)
+            .acquire()
             .ok_or(MetaError::StaleCapability)?;
         Self::validate_capability_holder(handle, caller_owner, &caller_fiber)?;
         let call_id = self.next_call_id()?;
@@ -187,7 +187,19 @@ impl Runtime {
         caller_fiber: &Arc<Fiber>,
     ) -> Result<Arc<AdmissionLease>> {
         let data = caller_fiber.data.lock().expect("fiber state poisoned");
-        Self::validate_live_owner_data(caller_owner, &data)?;
+        // Existing holders retain call authority through their own cleanup.
+        // Structural mutations still require Loading or Active ownership.
+        if data.generation != caller_owner.generation
+            || !matches!(
+                data.state,
+                FiberState::Loading | FiberState::Active | FiberState::Unloading
+            )
+        {
+            return Err(MetaError::StaleContext {
+                fiber: caller_owner.fiber,
+                generation: caller_owner.generation,
+            });
+        }
         let active = data.active.as_ref().ok_or(MetaError::StaleCapability)?;
         if handle.holder.owner != Some(caller_owner) {
             return Err(MetaError::StaleCapability);
@@ -208,6 +220,23 @@ impl Runtime {
         .ok_or_else(|| MetaError::StaleService {
             service: binding.key.clone(),
         })?;
+        {
+            let data = provider.data.lock().expect("fiber state poisoned");
+            let owner = Owner {
+                fiber: binding.provider,
+                generation: binding.generation,
+            };
+            if data.generation != binding.generation
+                || !data
+                    .active
+                    .as_ref()
+                    .is_some_and(|active| active.published || caller.owner == Some(owner))
+            {
+                return Err(MetaError::StaleService {
+                    service: binding.key.clone(),
+                });
+            }
+        }
         let mut context = provider.context(binding.generation);
         context.trace = Some(CallTrace {
             origin: caller.trace.as_ref().map_or_else(

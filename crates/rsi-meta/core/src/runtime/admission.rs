@@ -4,34 +4,32 @@ use super::*;
 use crate::service::LeaseGuard;
 
 impl Runtime {
-    /// Linearizes one external operation against Runtime shutdown. A retiring
-    /// service consumer may join after shutdown closure because its enclosing
-    /// Fiber cleanup remains separately tracked.
-    pub(super) fn begin_admission(&self, allow_shutdown: bool) -> Result<LeaseGuard> {
+    /// Linearizes one operation against Runtime shutdown.
+    pub(super) fn begin_admission(&self) -> Result<LeaseGuard> {
         let admission = self
             .inner
             .runtime_admission
-            .acquire(allow_shutdown)
+            .acquire()
             .ok_or_else(|| self.closed_admission_error())?;
-        if let Some(error) = self.admission_error(allow_shutdown) {
+        if let Some(error) = self.admission_error() {
             return Err(error);
         }
         Ok(admission)
     }
 
-    fn admission_error(&self, allow_shutdown: bool) -> Option<MetaError> {
+    fn admission_error(&self) -> Option<MetaError> {
         let state = self.inner.state.lock().expect("runtime state poisoned");
         if let Some(reason) = state.terminal.clone() {
             return Some(MetaError::RuntimeTerminal(reason));
         }
-        if !allow_shutdown && self.inner.shutting_down.load(Ordering::Acquire) {
+        if self.inner.shutting_down.load(Ordering::Acquire) {
             return Some(MetaError::RuntimeShuttingDown);
         }
         None
     }
 
     fn closed_admission_error(&self) -> MetaError {
-        self.admission_error(false)
+        self.admission_error()
             .unwrap_or(MetaError::RuntimeShuttingDown)
     }
 }
@@ -51,7 +49,7 @@ mod tests {
             ..RuntimeLimits::default()
         })
         .unwrap();
-        let admission = runtime.begin_admission(false).unwrap();
+        let admission = runtime.begin_admission().unwrap();
         let before = runtime.resource_snapshot();
         assert_eq!(before.preparations.current, 0);
         assert_eq!(before.fibers.current, 0);
@@ -65,7 +63,7 @@ mod tests {
             tokio::task::yield_now().await;
         }
         assert!(matches!(
-            runtime.begin_admission(false),
+            runtime.begin_admission(),
             Err(MetaError::RuntimeShuttingDown)
         ));
         tokio::time::advance(Duration::from_millis(11)).await;
@@ -83,14 +81,14 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn cached_complete_rejects_a_stale_retiring_admission() {
+    async fn cached_complete_rejects_admission() {
         let runtime = Runtime::default();
         assert!(runtime.shutdown().await.is_complete());
         let resources = runtime.resource_snapshot();
         let revision = runtime.snapshot().revision;
 
         assert!(matches!(
-            runtime.begin_admission(true),
+            runtime.begin_admission(),
             Err(MetaError::RuntimeShuttingDown)
         ));
         assert_eq!(runtime.resource_snapshot(), resources);
