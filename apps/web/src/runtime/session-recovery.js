@@ -2,14 +2,23 @@ export async function restoreDrafts(pane, context) {
   const current = context.connection,
     store = current?.drafts;
   if (!store) throw new Error("Connect to your service first");
-  const records = await store.list(pane.index);
+  const records = new Map((await store.list(pane.index)).map(record => [JSON.stringify(record.key), record]));
   if (context.connection !== current || current.closing) return;
+  for (const [key, local] of pane.editors) {
+    if (local.record.key[2] === pane.index &&
+        JSON.stringify(local.record.key.slice(0, 2)) === JSON.stringify(store.namespace) &&
+        (local.dirty || local.failure) && !records.has(key)) records.set(key, local.record);
+  }
   const panel = {
     rows: [],
     busy: false,
     close: () => {
-      if (pane.recoveryView === panel) pane.recoveryView = undefined;
+      if (pane.recoveryView !== panel) return;
+      pane.recoveryView = undefined;
       pane.invalidate();
+      requestAnimationFrame(() => {
+        if (context.connection === current && !pane.recoveryView) pane.focusInput();
+      });
     },
   };
   const active = () =>
@@ -20,15 +29,20 @@ export async function restoreDrafts(pane, context) {
     panel.rows = panel.rows.filter((value) => value !== row);
     pane.invalidate();
   };
-  for (const record of records) {
+  for (const record of records.values()) {
     const local = pane.editors.get(JSON.stringify(record.key));
     const row = {
       id: JSON.stringify(record.key),
-      summary: `${record.key[3]} · ${record.pending ? "awaiting confirmation" : `${record.text.slice(0, 80)}${record.images.length ? ` · ${record.images.length} images` : ""}`}`,
+      text: local?.text ?? record.text,
+      summary: [record.key[3], record.pending ? "awaiting confirmation" :
+        Array.from(record.text.slice(0, 160)).slice(0, 80).join("").replace(/\s+/g, " ").trim(),
+        record.images.length ? `${record.images.length} images` : "",
+        record.releases.length ? "pending reference cleanup" : ""].filter(Boolean).join(" · "),
       empty:
         !record.text &&
         !record.images.length &&
         !record.references.length &&
+        !record.releases.length &&
         !record.pending,
       unsaved:
         local?.dirty || local?.failure
@@ -67,7 +81,23 @@ export async function restoreDrafts(pane, context) {
           if (result.status === "expired") {
             row.expired = true;
             row.canRecreate =
-              !!record.creation && !record.everDispatched && !record.pending;
+              !!record.creation && !record.everDispatched && !record.pending &&
+              !record.references.length && !record.releases.length;
+            if (record.references.length && !record.pending) row.retireReferences = async () => {
+              if (!active() || panel.busy) return;
+              panel.busy = true; pane.invalidate();
+              try {
+                const editor = local ?? new context.DraftEditor(store, record);
+                await editor.flush();
+                if (!active()) return;
+                if (editor.record.pending) throw new Error("Resolve the original submission before removing its references");
+                editor.edit(editor.text, editor.images, []);
+                await editor.flush();
+                if (!active()) return;
+                await pane.drainReferenceReleases(editor, pane.generation, true);
+                if (active()) await pane.restoreDrafts();
+              } finally { panel.busy = false; pane.invalidate(); }
+            };
           } else panel.close();
         } finally {
           panel.busy = false;
@@ -77,6 +107,21 @@ export async function restoreDrafts(pane, context) {
           } else pane.invalidate();
         }
       },
+      cleanup: record.releases.length ? async () => {
+        if (!active() || panel.busy) return;
+        panel.busy = true;
+        pane.invalidate();
+        try {
+          const editor = local ?? new context.DraftEditor(store, record);
+          await editor.flush();
+          if (!active()) return;
+          await pane.drainReferenceReleases(editor, pane.generation, true);
+          if (active()) await pane.restoreDrafts();
+        } finally {
+          panel.busy = false;
+          pane.invalidate();
+        }
+      } : undefined,
       recreate: async () => {
         if (!active() || panel.busy) return;
         panel.busy = true;
@@ -91,8 +136,15 @@ export async function restoreDrafts(pane, context) {
       },
       remove: async () => {
         if (!active() || panel.busy) return;
-        await store.removeEmpty(record);
-        if (active()) remove(row);
+        panel.busy = true;
+        pane.invalidate();
+        try {
+          await store.removeEmpty(record);
+          if (active()) remove(row);
+        } finally {
+          panel.busy = false;
+          pane.invalidate();
+        }
       },
     };
     panel.rows.push(row);

@@ -11,7 +11,7 @@ fixture.view.catalog.models=[];
 fixture.view.catalog.workspaces[0].id='f'.repeat(64);
 fixture.view.catalog.workspaces[0].coordinates.path='/Documents/RSIversi/default-workspace';
 fixture.setReply('command', async text=>{const command=JSON.parse(text);if(command.action==='create')await fixture.surface('created',{workspace:command.workspace,creation:{workspace_id:command.workspace,session_id:'created',agent_preset_id:null},transcript:{blocks:[],status:'Ready'}});return '{}';});
-fixture.setReply('prepare_submission',text=>JSON.stringify({kind:'message',id:'first-message',opaque:text,text_bytes:new TextEncoder().encode(JSON.parse(text).text).length,images:0,references:0}));
+fixture.setReply('prepare_submission',text=>JSON.stringify({kind:'message',id:'first-message',opaque:text,text_bytes:new TextEncoder().encode(JSON.parse(text).text).length,images:0,captures: []}));
 fixture.setReply('dispatch_submission',()=>JSON.stringify({status:'complete',receipt:'{}'}));
 `;
 const server=await sourceFixture({name:'starting-transcript',source}),results=[];

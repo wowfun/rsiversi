@@ -979,3 +979,13 @@ fixtures/rsi/web-product/service-host-stop.mjs` starts an isolated foreground
 Serve, waits for readiness, stops its Host independently and requires runtime
 exit 1 without a termination signal. It exercises actual processes and listener
 lifetime without provider calls or real user state.
+
+The `dom.mjs` ownership scenario runs `draft-ownership-scene.js` against the
+production Pane, DraftEditor and real IndexedDB. It covers failed persistence,
+frozen and unknown requests, durable release retry after reopening, conflicting
+preparation and stale replacement, removal before the first coalesced save,
+text editing at cleanup capacity, bounded cleanup, and one large-text encoding
+per edit with stable attachment identity. Its release endpoint is fault injected; native CAS retention and
+collection are verified separately by `rsi-agent-references --test references`.
+The schema-refusal fixture includes version 6 and checks that rejection preserves
+its version and records before the user explicitly discards them.

@@ -83,7 +83,7 @@ export async function verifyComposer(page) {
               opaque: "{}",
               text_bytes: 15,
               images: 0,
-              references: 0,
+              captures: [],
             }),
           );
           await editor.update((record) => editor.store.begin(record));
@@ -112,7 +112,7 @@ export async function verifyComposer(page) {
             opaque: "{}",
             text_bytes: 15,
             images: 0,
-            references: 0,
+            captures: [],
           });
         });
         fixture.setReply("dispatch_submission", async () => {
@@ -187,7 +187,7 @@ export async function verifyComposer(page) {
         opaque: "{}",
         text_bytes: 0,
         images: 0,
-        references: 0,
+        captures: [],
       });
       await store.begin(record);
       DraftEditor.prototype.flush = async function () {

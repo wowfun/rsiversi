@@ -45,6 +45,13 @@ unknown result precedes an explicit identical retry, which remains safe because
 queue receipts have no eviction window. TUI keeps the same frozen envelope and
 original handle for its application lifetime; Web additionally survives reload.
 
+Frozen reference descriptors are not CAS owners. The pending request therefore
+retains the exact capture identities alongside its opaque envelope, independently
+of later editor changes. Last-owner removal commits a bounded release obligation
+in the same IndexedDB transaction. The document acknowledges it only after remote
+cleanup succeeds. This follows the DSH input facade's retain-until-admission
+ordering while accounting for RSI's separate editable and frozen owners.
+
 ## Alternatives considered
 
 Persisting only editor strings loses image references and unresolved invocations.
@@ -53,6 +60,12 @@ exact range. A cross-tab execution lease cannot establish whether a vanished tab
 already sent a mutation. Automatic command replay after an absent receipt would
 repeat callbacks whose receipts are no longer available. A global cleanup flag
 reset on reconnect cannot establish disposal of arbitrary renderer resources.
+
+Waiting for editor persistence alone cannot protect an already frozen request.
+A volatile cleanup queue cannot recover from tab loss after the removal commits.
+Schema 6 stores only a pending reference count, so its missing identities cannot
+be inferred safely from a later editor or decoded opaque request. Keeping those
+records unchanged and requiring explicit discard follows the pre-release policy.
 
 ## Consequences
 

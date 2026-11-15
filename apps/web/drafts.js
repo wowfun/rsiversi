@@ -7,6 +7,7 @@ const identity = value => typeof value === "string" && bytes(value) > 0 && bytes
 const equal = (left, right) => JSON.stringify(left) === JSON.stringify(right);
 const bump = value => { if (!integer(value) || value === Number.MAX_SAFE_INTEGER) throw new Error("Draft revision exhausted"); return value + 1; };
 const clone = value => structuredClone(value);
+const empty = record => !record.text && !record.images.length && !record.references.length && !record.pending && !record.releases.length;
 function require(condition, message = "Saved draft is invalid; it was left unchanged") { if (!condition) throw new Error(message); }
 
 export function validateEditor(text, images, references = []) {
@@ -54,13 +55,41 @@ export function validateEditor(text, images, references = []) {
   return textBytes + referenceBytes(references);
 }
 function validatePending(pending) {
-  require(pending && ["editRevision,id,images,kind,opaque,phase,references,text_bytes", "editRevision,id,images,kind,opaque,phase,preserve_editor,references,text_bytes"].includes(Object.keys(pending).sort().join()));
+  require(pending && ["captures,editRevision,id,images,kind,opaque,phase,text_bytes", "captures,editRevision,id,images,kind,opaque,phase,preserve_editor,text_bytes"].includes(Object.keys(pending).sort().join()));
   require(!("preserve_editor" in pending) || pending.preserve_editor === true && pending.kind === "command");
   require(pending && ["message", "command", "queue"].includes(pending.kind) && identity(pending.id));
   require(typeof pending.opaque === "string" && bytes(pending.opaque) <= (pending.kind !== "command" ? 8 * MiB : 32 * 1024));
   require(integer(pending.text_bytes, MiB) && integer(pending.images, 8));
-  require(integer(pending.references, 4));
+  validateCaptures(pending.captures, 4);
   require(["prepared", "dispatching", "unknown"].includes(pending.phase) && integer(pending.editRevision));
+}
+export const captureOf = reference => ({target: reference.metadata.target, snapshot: reference.snapshot});
+export const captureKey = capture => JSON.stringify([capture.target.session_id, capture.target.header_sha256, capture.snapshot.capture_id, capture.snapshot.sha256, capture.snapshot.byte_len]);
+const sameCapture = (left, right) => captureKey(left) === captureKey(right);
+function validateCaptures(captures, maximum) {
+  require(Array.isArray(captures) && captures.length <= maximum);
+  for (const capture of captures) {
+    require(capture && Object.keys(capture).sort().join() === "snapshot,target" &&
+      capture.target && Object.keys(capture.target).sort().join() === "header_sha256,session_id" &&
+      identity(capture.target.session_id) && hex(capture.target.header_sha256) &&
+      capture.snapshot && Object.keys(capture.snapshot).sort().join() === "byte_len,capture_id,sha256" &&
+      identity(capture.snapshot.capture_id) && bytes(capture.snapshot.capture_id) <= 64 &&
+      hex(capture.snapshot.sha256) && integer(capture.snapshot.byte_len, 8 * MiB) && capture.snapshot.byte_len > 0);
+  }
+  require(new Set(captures.map(captureKey)).size === captures.length);
+}
+const owners = record => [...record.references.map(captureOf), ...record.pending?.captures ?? []];
+function captureCount(record, references) {
+  return new Set([...owners(record), ...record.releases, ...references.map(captureOf)].map(captureKey)).size;
+}
+export function canCaptureReference(record, references) {
+  return references.length < 4 && captureCount(record, references) < 16;
+}
+function retireCaptures(before, after) {
+  const retained = new Set(owners(after).map(captureKey));
+  const retired = new Map(after.releases.map(capture => [captureKey(capture), capture]));
+  for (const capture of owners(before)) if (!retained.has(captureKey(capture))) retired.set(captureKey(capture), capture);
+  after.releases = [...retired.values()];
 }
 const surface = value => typeof value === "string" && /^[a-z0-9_-]{1,32}$/.test(value);
 const principalKey = value => value === "local" || (typeof value === "string" && /^device:[0-9a-f]{32}$/.test(value));
@@ -84,19 +113,25 @@ function validateCreation(creation, session) {
     && Object.keys(selection).join() === "last" && integer(selection.last) && selection.last > 0));
 }
 function validateRecord(record) {
-  require(record?.version === 6 && Array.isArray(record.key) && record.key.length === 4 &&
+  require(record?.version === 7 && Array.isArray(record.key) && record.key.length === 4 &&
     hex(record.key[0], 32) && (principalKey(record.key[1]) && surface(record.key[2])) && identity(record.key[3]));
   require(equal(record.scope, record.key.slice(0, 3)) && hex(record.header) && hex(record.incarnation, 32));
   require(integer(record.editRevision) && integer(record.pendingRevision) && typeof record.everDispatched === "boolean");
   validateEditor(record.text, record.images, record.references);
+  validateCaptures(record.releases, 16);
   require(record.references.every(reference => reference.metadata.target.session_id === record.key[3] && reference.metadata.target.header_sha256 === record.header), "Reference belongs to another draft Header");
   if (record.pending !== null) {
     validatePending(record.pending);
     require(record.pending.editRevision <= record.editRevision && (record.pending.phase === "prepared" || record.everDispatched));
   }
+  const owned = new Set(owners(record).map(captureKey));
+  require(new Set([...owned, ...record.releases.map(captureKey)]).size <= 16,
+    "Reference cleanup is pending. Reconnect and retry cleanup before adding more references.");
+  require([...record.releases, ...record.pending?.captures ?? []].every(capture => capture.target.session_id === record.key[3] && capture.target.header_sha256 === record.header));
+  require(record.releases.every(capture => !owned.has(captureKey(capture))), "A retired capture cannot be restored; capture it again");
   if (record.receipt !== null) require(typeof record.receipt === "string" && bytes(record.receipt) <= 4096);
   if (record.creation !== null) validateCreation(record.creation, record.key[3]);
-  require(Object.keys(record).sort().join() === "creation,editRevision,everDispatched,header,images,incarnation,key,pending,pendingRevision,receipt,references,scope,text,version");
+  require(Object.keys(record).sort().join() === "creation,editRevision,everDispatched,header,images,incarnation,key,pending,pendingRevision,receipt,references,releases,scope,text,version");
   return record;
 }
 const referenceBytes = references => references?.length ? bytes(JSON.stringify(references)) : 0;
@@ -107,7 +142,7 @@ function validateCounters(value) {
   return value;
 }
 function conflict(saved) {
-  return Object.assign(new Error("This draft changed in another tab. Choose the saved input or replace its text, images and references."), { code: "conflict", saved });
+  return Object.assign(new Error("This draft changed in another editor. Choose the saved input or replace its text, images and references."), { code: "conflict", saved });
 }
 function sameIncarnation(expected, saved) {
   if (!saved || saved.incarnation !== expected.incarnation) throw conflict(saved);
@@ -121,7 +156,7 @@ let database;
 async function openDatabase() {
   if (!database) database = new Promise((resolve, reject) => {
     let failure;
-    const request = indexedDB.open("rsi.composer", 6);
+    const request = indexedDB.open("rsi.composer", 7);
     request.onupgradeneeded = event => {
       const fail = error => { failure = error; request.transaction.abort(); };
       if (failure) { request.transaction.abort(); return; }
@@ -129,7 +164,7 @@ async function openDatabase() {
         const records = request.result.createObjectStore("drafts", { keyPath: "key" });
         records.createIndex("scope", "scope"); request.result.createObjectStore("usage");
       }
-      else fail(new Error("Unsupported saved draft schema"));
+      else fail(new Error("Unsupported saved draft schema. Your saved drafts remain on this device. Discarding saved drafts permanently deletes them."));
     };
     request.onerror = () => reject(failure ?? request.error);
     request.onblocked = () => { failure = new Error("Draft storage is waiting for another tab to close"); reject(failure); };
@@ -144,6 +179,7 @@ async function openDatabase() {
 }
 
 export class DraftStore {
+  ephemeral = new WeakSet();
   static async discardAllSaved() {
     if (database) { try { (await database).close(); } catch { /* Refused schema has no open connection. */ } }
     database = undefined;
@@ -202,12 +238,29 @@ export class DraftStore {
           counts = validateCounters(counts ?? [0, 0, 0, 0]);
           const next = change(saved.map(record => record && clone(record)));
           require(next.length === keys.length);
+          next.forEach((record, index) => { if (record && saved[index]) retireCaptures(saved[index], record); });
           next.forEach((record, index) => { if (record) { validateRecord(record); require(equal(record.key, keys[index])); } });
-          const total = counts.map((count, dimension) => saved.reduce((sum, record, index) => sum - usage(record)[dimension] + usage(next[index])[dimension], count));
-          require(total.every((count, index) => integer(count, limits[index])), "Saved drafts exceed the origin storage limit; clear an unused draft");
-          next.forEach((record, index) => { if (record) records.put(record); else records.delete(keys[index]); });
-          counters.put(total, "aggregate");
-          result = next;
+          const before = saved.map(usage), after = next.map(usage);
+          const total = counts.map((count, dimension) => saved.reduce((sum, _, index) => sum - before[index][dimension] + after[index][dimension], count));
+          const finish = () => {
+            require(total.every((count, index) => integer(count, limits[index])), "Saved drafts exceed the origin storage limit; open Saved drafts and clear an unused draft");
+            next.forEach((record, index) => { if (record) records.put(record); else records.delete(keys[index]); });
+            counters.put(total, "aggregate");
+            result = next;
+          };
+          if (total[0] <= limits[0] || total.slice(1).some((count, index) => !integer(count, limits[index + 1]))) return finish();
+          const scan = records.openCursor();
+          scan.onsuccess = () => {
+            try {
+              const cursor = scan.result;
+              if (!cursor || total[0] <= limits[0]) return finish();
+              const record = validateRecord(cursor.value);
+              if (equal(record.key.slice(0, 2), this.namespace) && !keys.some(key => equal(key, record.key)) && record.everDispatched && empty(record)) {
+                cursor.delete(); total[0]--;
+              }
+              cursor.continue();
+            } catch (error) { failure = error; tx.abort(); }
+          };
         } catch (error) { failure = error; tx.abort(); }
       };
       keys.forEach((key, index) => { const request = records.get(key); request.onsuccess = () => { saved[index] = request.result; apply(); }; });
@@ -250,21 +303,32 @@ export class DraftStore {
       tx.onabort = () => reject(tx.error);
     });
   }
-  ensure(pane, session, header, creation) {
-    const key = this.key(pane, session);
-    return this.mutate(key, saved => saved ?? this.blank(pane, session, header, creation));
+  async ensure(pane, session, header, creation) {
+    const saved = await this.get(pane, session);
+    if (saved) return saved;
+    return this.blank(pane, session, header, creation);
+  }
+  materialize(expected, saved) {
+    return saved ?? (this.ephemeral.has(expected) ? clone(expected) : undefined);
+  }
+  async mutateInitial(expected, change) {
+    const result = await this.mutate(expected.key, saved => change(this.materialize(expected, saved)));
+    this.ephemeral.delete(expected);
+    return result;
   }
   blank(pane, session, header, creation) {
     const key = this.key(pane, session);
-    return validateRecord({
-      version: 6, key, scope: key.slice(0, 3), incarnation: [...crypto.getRandomValues(new Uint8Array(16))].map(value => value.toString(16).padStart(2, "0")).join(""),
-      editRevision: 0, pendingRevision: 0, text: "", images: [], references: [], header,
+    const blank = validateRecord({
+      version: 7, key, scope: key.slice(0, 3), incarnation: [...crypto.getRandomValues(new Uint8Array(16))].map(value => value.toString(16).padStart(2, "0")).join(""),
+      editRevision: 0, pendingRevision: 0, text: "", images: [], references: [], releases: [], header,
       creation: creation ?? null, everDispatched: !creation, pending: null, receipt: null,
     });
+    this.ephemeral.add(blank);
+    return blank;
   }
   edit(expected, text, images, references = expected.references) {
     validateEditor(text, images, references);
-    return this.mutate(expected.key, saved => {
+    return this.mutateInitial(expected, saved => {
       sameIncarnation(expected, saved);
       if (saved.editRevision !== expected.editRevision) throw conflict(saved);
       saved.text = text; saved.images = clone(images); saved.references = clone(references); saved.editRevision = bump(saved.editRevision);
@@ -273,12 +337,14 @@ export class DraftStore {
   }
   freeze(expected, prepared, preserveEditor = false) {
     require(!preserveEditor || prepared.kind === "command", "Only a command control can retain its editor");
-    return this.mutate(expected.key, saved => {
+    return this.mutateInitial(expected, saved => {
       samePending(expected, saved);
       if (saved.pending) throw conflict(saved);
+      validateCaptures(prepared.captures, 4);
+      if (prepared.kind !== "queue" && prepared.captures.some(capture => !saved.references.some(reference => sameCapture(captureOf(reference), capture)))) throw conflict(saved);
       saved.pending = { kind: prepared.kind, id: prepared.id, opaque: prepared.opaque,
         ...(preserveEditor ? {preserve_editor: true} : {}),
-        text_bytes: prepared.text_bytes, images: prepared.images, references: prepared.references, phase: "prepared", editRevision: expected.editRevision };
+        text_bytes: prepared.text_bytes, images: prepared.images, captures: clone(prepared.captures), phase: "prepared", editRevision: expected.editRevision };
       saved.pendingRevision = bump(saved.pendingRevision);
       return saved;
     });
@@ -319,13 +385,35 @@ export class DraftStore {
       return saved;
     });
   }
+  acknowledgeRelease(expected, capture) {
+    return this.mutate(expected.key, saved => {
+      sameIncarnation(expected, saved);
+      saved.releases = saved.releases.filter(item => !sameCapture(item, capture));
+      return saved;
+    });
+  }
+  retireUnowned(expected, captures) {
+    validateCaptures(captures, 4);
+    // Saved owners retire atomically; only a capture removed before its first save needs this write.
+    const retained = [...owners(expected), ...expected.releases];
+    if (captures.every(capture => retained.some(item => sameCapture(item, capture)))) return Promise.resolve(expected);
+    return this.mutateInitial(expected, saved => {
+      sameIncarnation(expected, saved);
+      const owned = owners(saved);
+      for (const capture of captures) {
+        if (!owned.some(item => sameCapture(item, capture)) && !saved.releases.some(item => sameCapture(item, capture))) saved.releases.push(clone(capture));
+      }
+      return saved;
+    });
+  }
   async moveFresh(expected, replacement) {
     const [, moved] = await this.mutateMany([expected.key, replacement.key], ([old, next]) => {
+      next = this.materialize(replacement, next);
       samePending(expected, old); samePending(replacement, next);
       if (old.editRevision !== expected.editRevision || next.editRevision !== replacement.editRevision) throw conflict(old);
       require(old.creation && !old.everDispatched && !old.pending, "Only a never-dispatched Fresh draft can start a replacement conversation");
-      require(!old.references.length, "References belong to the original conversation. Remove them before moving this draft, then capture them again.");
-      require(!next.text && !next.images.length && !next.references.length && !next.pending && next.creation && !next.everDispatched);
+      require(!old.references.length && !old.releases.length, "References belong to the original conversation. Remove and release them before moving this draft, then capture them again.");
+      require(!next.text && !next.images.length && !next.references.length && !next.releases.length && !next.pending && next.creation && !next.everDispatched);
       const from = old.creation, to = next.creation;
       require(from.workspace_id === to.workspace_id && from.agent_preset_id === to.agent_preset_id
         && from.fork?.source_session_id === to.fork?.source_session_id
@@ -334,13 +422,15 @@ export class DraftStore {
       next.text = old.text; next.images = old.images; next.editRevision = bump(next.editRevision);
       return [undefined, next];
     });
+    this.ephemeral.delete(replacement);
     return moved;
   }
   removeEmpty(expected) {
     return this.mutate(expected.key, saved => {
+      if (!saved) return undefined;
       samePending(expected, saved);
       if (saved.editRevision !== expected.editRevision) throw conflict(saved);
-      require(!saved.text && !saved.images.length && !saved.references.length && !saved.pending, "Clear this draft before removing its record");
+      require(empty(saved), "Clear and release this draft before removing its record");
       return undefined;
     });
   }
@@ -356,12 +446,26 @@ export class DraftEditor {
   get text() { return this.localText; }
   set text(value) { this.localText = value; this.localTextBytes = bytes(value); }
   get references() { return this.localReferences; }
-  set references(value) { this.referencesRevision = bump(this.referencesRevision ?? 0); this.localReferences = value; this.localReferenceBytes = referenceBytes(value); }
+  set references(value) { this.localReferences = value; this.localReferenceBytes = referenceBytes(value); this.localPreviewBytes = value.reduce((total, reference) => total + bytes(reference.preview), 0); }
   get textBytes() { return this.localTextBytes + this.localReferenceBytes; }
-  edit(text, images = this.images, references = this.references) {
+  edit(text, images = this.images, references = this.references, checkBudget = () => {}) {
     require(!this.transferring, "This draft is moving to another conversation; wait for recovery to finish");
-    validateEditor(text, images, references);
-    this.text = text; this.images = clone(images); this.references = clone(references); this.revision = bump(this.revision); this.dirty = true;
+    require(!this.resolving, "Wait for this draft's current conflict resolution");
+    let size;
+    if (images === this.images && references === this.references) {
+      require(typeof text === "string", "Draft text must be a string");
+      const textBytes = bytes(text);
+      require(textBytes + this.localPreviewBytes <= MiB, "Draft text and reference previews exceed 1 MiB");
+      size = textBytes + this.localReferenceBytes;
+    } else {
+      size = validateEditor(text, images, references);
+      require(captureCount(this.record, references) <= 16, "Clean up references before capturing more");
+    }
+    checkBudget(size);
+    if (references !== this.references) this.references = clone(references);
+    if (images !== this.images) this.images = clone(images);
+    this.localText = text; this.localTextBytes = size - this.localReferenceBytes;
+    this.revision = bump(this.revision); this.dirty = true;
     this.pump(); this.changed();
   }
   enqueue(operation) {
@@ -388,6 +492,7 @@ export class DraftEditor {
   }
   update(operation) {
     if (this.transferring) return Promise.reject(new Error("This draft is moving to another conversation"));
+    if (this.resolving) return Promise.reject(new Error("Wait for this draft's current conflict resolution"));
     return this.enqueue(async () => {
       const revision = this.revision;
       try {
@@ -402,19 +507,26 @@ export class DraftEditor {
   async resolve(useSaved) {
     require(!this.transferring, "This draft is moving to another conversation");
     require(!this.resolving, "Wait for this draft's current conflict resolution");
-    this.resolving = true;
+    this.resolving = true; this.changed();
     try {
       await this.work;
       let saved = await this.store.get(this.record.key[2], this.record.key[3]);
       if (this.record.pending && (!saved || saved.incarnation !== this.record.incarnation)) throw conflict(saved);
       saved ??= await this.store.ensure(this.record.key[2], this.record.key[3], this.record.header,
         this.record.everDispatched ? null : this.record.creation);
+      if (!useSaved) {
+        const previous = new Set(owners(this.record).map(captureKey));
+        const current = new Set(owners(saved).map(captureKey));
+        require(this.references.every(reference => !previous.has(captureKey(captureOf(reference))) || current.has(captureKey(captureOf(reference)))), "A reference was removed in another tab; use the saved input and capture it again");
+      } else {
+        saved = await this.store.retireUnowned(saved, this.references.map(captureOf));
+      }
       this.record = saved;
       if (useSaved) { this.text = saved.text; this.images = clone(saved.images); this.references = clone(saved.references); this.dirty = false; }
       else { this.dirty = true; }
       this.failure = undefined; this.pump(); this.changed();
       await this.flush();
-    } finally { this.resolving = false; }
+    } finally { this.resolving = false; this.changed(); }
   }
   async transfer(operation) {
     require(!this.transferring, "This draft is already moving to another conversation");

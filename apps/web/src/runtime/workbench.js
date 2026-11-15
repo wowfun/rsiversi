@@ -21,7 +21,7 @@ import { settingsPanel, publish, installActions, selectSurface,connectionStatus,
 import { createDocumentTransport } from "../native.ts";
 import { isDesktop, desktopCall } from "../../desktop-bridge.js";
 import { MountTable, writeClipboard, setClipboardWriter } from "/mounts.js";
-import { DraftStore, DraftEditor, validateEditor } from "/drafts.js";
+import { DraftStore, DraftEditor } from "/drafts.js";
 import { externalPaneClass } from "./external-controller.js";
 import { ImagePreviews } from "../../image-previews.js";
 function referenceOrigin(meta) {
@@ -200,7 +200,7 @@ const disconnectDocument=closer.disconnectDocument;
 listen(window, "rsi-native-close", event => { if (!nativeDocument || !Number.isSafeInteger(event.detail)) return; closer.attempt = event.detail; perform(disconnectDocument); });
 if(nativeDocument)setClipboardWriter(text=>nativeCall({kind:"clipboard",text}));
 
-const Pane = createPaneClass({openModels:()=>settingsPanel.set("models"), DraftEditor, DraftStore, TranscriptVisibility, boundCall, call, command, completionToken, get connection() {return connection}, downloadSession, keyboardAction, location, notify, perform, referenceInterval, referenceOrigin, get rendererSlots() {return rendererSlots}, select, validateEditor, get view() {return view}});
+const Pane = createPaneClass({openModels:()=>settingsPanel.set("models"), DraftEditor, DraftStore, TranscriptVisibility, boundCall, call, command, completionToken, get connection() {return connection}, downloadSession, keyboardAction, location, notify, perform, referenceInterval, referenceOrigin, get rendererSlots() {return rendererSlots}, select, get view() {return view}});
 const panes = new Map();
 listen(window, "rsi:detail-mode",()=>{for(const pane of panes.values())if(pane.lastTranscript)pane.renderTranscript(pane.lastTranscript,false);});
 const ExternalPane = externalPaneClass({command,perform});

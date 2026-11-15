@@ -1,6 +1,19 @@
 import assert from 'node:assert/strict';
 import {test} from 'node:test';
 import {DraftStore,validateEditor} from '../drafts.js';
+
+test('fallback blank saves after a transient read failure without overwriting a concurrent draft', async () => {
+  const store = new DraftStore(undefined, 'a'.repeat(32), 'local');
+  await assert.rejects(store.ensure('main','session','b'.repeat(64)), /unavailable/);
+  const blank = store.blank('main','session','b'.repeat(64));
+  let persisted;
+  store.mutate = async (_key, change) => persisted = change(persisted && structuredClone(persisted));
+  const saved = await store.edit(blank,'Recovered input',[]);
+  assert.equal(saved.text,'Recovered input');
+  const concurrent = store.blank('main','session','b'.repeat(64));
+  await assert.rejects(store.edit(concurrent,'Overwrite',[]), /another editor/);
+  assert.equal(persisted.text,'Recovered input');
+});
 test('unavailable storage preserves a usable blank editor and explains failed operations', async () => {
   const store = new DraftStore(undefined, 'a'.repeat(32), 'local');
   const blank = store.blank('main', 'session', 'b'.repeat(64));
@@ -43,7 +56,7 @@ test('command controls retain editor content through unknown-result recovery and
   let saved = store.blank('main','session','b'.repeat(64));
   saved.text = 'Unsubmitted work';
   store.mutate = async (_key, change) => saved = change(structuredClone(saved));
-  saved = await store.freeze(saved, {kind:'command', id:'command-1',opaque:'frozen',text_bytes:0,images:0,references:0}, true);
+  saved = await store.freeze(saved, {kind:'command', id:'command-1',opaque:'frozen',text_bytes:0,images:0,captures:[]}, true);
   saved = await store.begin(saved);
   saved = await store.settle(saved, {status:'unknown'});
   assert.equal(saved.pending.opaque, 'frozen');
@@ -81,4 +94,41 @@ test('independent fork drafts retain their exact creation intent through storage
   await assert.rejects(store.moveFresh(before,through),/selected history/);
   for(const invalid of [{kind:'through_turn',turn_id:''},{kind:'inside_turn',turn_id:'turn'},
     {kind:'before_turn',turn_id:'turn',other:true}])assert.throws(()=>blank('invalid','all',invalid));
+});
+
+test('capture identity is independent of JSON object member ordering', async()=>{
+  const store=new DraftStore(undefined,'a'.repeat(32),'local');
+  let saved=store.blank('main','session','b'.repeat(64));
+  const snapshot={capture_id:'identity',sha256:'c'.repeat(64),byte_len:1},target={session_id:'session',header_sha256:saved.header};
+  saved.references=[{metadata:{target},snapshot}];
+  store.mutate=async(_key,change)=>saved=change(structuredClone(saved));
+  const capture={snapshot:{byte_len:1,sha256:snapshot.sha256,capture_id:'identity'},target:{header_sha256:saved.header,session_id:'session'}};
+  saved=await store.freeze(saved,{kind:'message',id:'request',opaque:'opaque',text_bytes:0,images:0,captures:[capture]});
+  assert.equal(saved.pending.captures[0].snapshot.capture_id,'identity');
+  saved.references=[];saved.pending=null;saved.releases=[capture];
+  saved=await store.acknowledgeRelease(saved,{target,snapshot});
+  assert.deepEqual(saved.releases,[]);
+});
+
+test('retiring an owned or queued capture needs no transaction, while an unseen capture rechecks durable ownership', async()=>{
+  const store=new DraftStore(undefined,'a'.repeat(32),'local');
+  const record=store.blank('main','session','b'.repeat(64));
+  const capture={target:{session_id:'session',header_sha256:record.header},snapshot:{capture_id:'capture',sha256:'c'.repeat(64),byte_len:1}};
+  let writes=0, saved=structuredClone(record);
+  store.mutate=async(_key,change)=>{writes++;return saved=change(structuredClone(saved));};
+  for (const owner of ['references','pending','releases']) {
+    const expected=structuredClone(record);
+    if(owner==='references')expected.references=[{metadata:{target:capture.target},snapshot:capture.snapshot}];
+    else if(owner==='pending')expected.pending={captures:[capture]};
+    else expected.releases=[capture];
+    saved=structuredClone(expected);
+    assert.deepEqual(await store.retireUnowned(expected,[capture]),expected);
+    assert.equal(writes,0);
+  }
+  saved=structuredClone(record);saved.pending={captures:[capture]};
+  assert.deepEqual((await store.retireUnowned(record,[capture])).releases,[]);
+  assert.equal(writes,1);
+  saved.pending=null;
+  assert.deepEqual((await store.retireUnowned(record,[capture])).releases,[capture]);
+  assert.equal(writes,2);
 });

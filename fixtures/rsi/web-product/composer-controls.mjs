@@ -18,7 +18,7 @@ fixture.setReply('command',async payload=>{
  if(command.action==='model'){data.model=command.model;data.reasoning_effort=command.reasoning_effort;}
  await fixture.frame();return '{}';
 });
-fixture.setReply('prepare_submission',payload=>{const input=JSON.parse(payload);fixture.prepared.push(input);return JSON.stringify({kind:'message',id:'request-'+fixture.prepared.length,opaque:'opaque',text_bytes:input.text.length,images:0,references:0});});
+fixture.setReply('prepare_submission',payload=>{const input=JSON.parse(payload);fixture.prepared.push(input);return JSON.stringify({kind:'message',id:'request-'+fixture.prepared.length,opaque:'opaque',text_bytes:input.text.length,images:0,captures: []});});
 fixture.setReply('dispatch_submission',()=>JSON.stringify({status:'not_admitted',error:'fixture retained request'}));
 `;
 const scene=await sourceFixture({name:'composer-controls',source});const results=[];

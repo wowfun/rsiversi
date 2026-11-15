@@ -8,7 +8,7 @@ const progress={visible_sources:1,pending_sources:0,discovery_complete:true};
 function setup(override={}) {
  const released=[],added=[],requests=[];
  const picker=createHistoryPicker({context:{workspace:'workspace',session:'target'},workspaces:[],sources:[],active:()=>true,changed(){},closed(){},
-  release:async value=>released.push(value),add:value=>added.push(value),
+  release:async value=>released.push(value),add:value=>added.push(value),canAdd:()=>true,
   request:async request=>{requests.push(request);return request.operation==='query'?{progress,matches:[{scope,hit,reference_allowed:true}]}:request.operation==='read'?{offset:2,next_offset:8,text:'中abc',has_more:false}:{reference};},...override});
  return {picker,released,added,requests};
 }
@@ -29,4 +29,14 @@ test('a freeze completing after retirement is released and cannot reopen the dia
 test('protected originals and empty selections cannot freeze',async()=>{
  const {picker,requests}=setup();await picker.read(scope,hit,0,false);await picker.freeze(0,1);assert.equal(requests.length,1);
  await picker.read(scope,hit);await picker.freeze(1,1);assert.equal(requests.length,2);assert.match(picker.status,/nonempty/);
+});
+
+test('capacity changes fence adding without losing the owned preview',async()=>{
+ let available=true;
+ const {picker,added,released}=setup({canAdd:()=>available});
+ await picker.read(scope,hit);await picker.freeze(0,1);
+ available=false;assert.equal(picker.addDisabled,true);picker.add();
+ assert.deepEqual(added,[]);assert.deepEqual(released,[]);
+ available=true;assert.equal(picker.addDisabled,false);picker.add();
+ assert.deepEqual(added,[reference]);assert.deepEqual(released,[]);
 });

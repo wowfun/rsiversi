@@ -31,7 +31,7 @@ export async function verifyDrafts(browser, root) {
       // A u64 larger than JS's safe integer stays an opaque Rust string.
       const opaque = '{"revision":18446744073709551615,"arguments":{"z":1,"a":2}}';
       record = await store.edit(record, "typed during preparation", []);
-      record = await store.freeze(captured, { kind: "command", id: "original-id", opaque, text_bytes: 0, images: 0, references: 0 });
+      record = await store.freeze(captured, { kind: "command", id: "original-id", opaque, text_bytes: 0, images: 0, captures: [] });
       window.prepared = record;
       return { text: record.text, captured: record.pending.editRevision, current: record.editRevision };
     });
@@ -58,7 +58,7 @@ export async function verifyDrafts(browser, root) {
     const queued = await page.evaluate(async () => {
       const original = await store.get("main", "first");
       const opaque = '{"session":"first","header":"frozen-header","request":{"kind":"queue","input":{"operation_id":"queue-original","slot_id":"slot","expected_message_id":"old","mutation":{"action":"replace","new_message_id":"successor","content":[{"type":"text","text":"complete queued text"}]}}}}';
-      const prepared = await store.freeze(original, {kind:"queue",id:"queue-original",opaque,text_bytes:20,images:0,references:0});
+      const prepared = await store.freeze(original, {kind:"queue",id:"queue-original",opaque,text_bytes:20,images:0,captures: []});
       const unknown = await store.settle(await store.begin(prepared), {status:"unknown"});
       const reopened = await DraftStore.open("a".repeat(32), {kind:"device",device_id:"b".repeat(32)});
       const restored = await reopened.get("main","first");
@@ -70,14 +70,16 @@ export async function verifyDrafts(browser, root) {
     assert.deepEqual(queued,{cancelled:true,kind:"queue",phase:"unknown",text:"typed during execution",images:[],pending:null});
     assert.deepEqual(await page.evaluate(async()=>{
       const original=await store.get("main","first");
-      const prepared=await store.freeze(original,{kind:"queue",id:"conflict",opaque:'{"operation":"conflict"}',text_bytes:0,images:0,references:0});
+      const prepared=await store.freeze(original,{kind:"queue",id:"conflict",opaque:'{"operation":"conflict"}',text_bytes:0,images:0,captures: []});
       const finished=await store.settle(await store.begin(prepared),{status:"rejected",error:"identity conflict"});
       return {text:finished.text,pending:finished.pending,receipt:finished.receipt};
     }),{text:"typed during execution",pending:null,receipt:'{"operation_id":"queue-original"}'});
     const boundaries = await page.evaluate(async () => {
       let record = await store.ensure("compare", "aba", "c".repeat(64));
+      record = await store.edit(record, "", []);
       await store.removeEmpty(record);
-      const replacement = await store.ensure("compare", "aba", "c".repeat(64));
+      const replacement = await store.edit(await store.ensure("compare", "aba", "c".repeat(64)), "", []);
+      if ((await store.get("compare", "aba")).incarnation !== replacement.incarnation) throw Error("replacement was not durable");
       let aba = false;
       try { await store.edit(record, "late upload", []); } catch (error) { aba = error.code === "conflict"; }
       let a = await store.ensure("compare", "full-a", "c".repeat(64));
@@ -134,7 +136,7 @@ export async function verifyDrafts(browser, root) {
       const replacement = await store.ensure("main", "fresh-new", "c".repeat(64), creation("fresh-new"));
       const moved = await store.moveFresh(original, replacement);
       const freshMove = !await store.get("main", "fresh-old") && moved.text === original.text && moved.images[0].id === original.images[0].id;
-      const prepared = await store.freeze(moved, {kind:"command",id:"same-command",opaque:"{}",text_bytes:0,images: 0, references: 0});
+      const prepared = await store.freeze(moved, {kind:"command",id:"same-command",opaque:"{}",text_bytes:0,images: 0, captures: []});
       const pending = await store.begin(prepared);
       const next = await store.ensure("main", "fresh-forbidden", "c".repeat(64), creation("fresh-forbidden"));
       const noReplay = await rejects(() => store.moveFresh(pending, next)) && await rejects(() => store.cancelPrepared(pending));
@@ -143,7 +145,7 @@ export async function verifyDrafts(browser, root) {
       const receiptFailure = await rejects(() => store.settle(pending, {status:"complete",receipt:'{"request_id":"same-command"}'}));
       store.db.transaction = transaction;
       const stillPending = (await store.get("main","fresh-new")).pending;
-      const receiptBlocked = receiptFailure && stillPending.phase === "dispatching" && stillPending.id === "same-command" && await rejects(() => store.freeze(pending,{kind:"message",id:"new-id",opaque:"{}",text_bytes:0,images: 0, references: 0}));
+      const receiptBlocked = receiptFailure && stillPending.phase === "dispatching" && stillPending.id === "same-command" && await rejects(() => store.freeze(pending,{kind:"message",id:"new-id",opaque:"{}",text_bytes:0,images: 0, captures: []}));
       const invalidReceipt = await rejects(() => store.settle(pending, {status:"complete",receipt:{}})) &&
         await rejects(() => store.settle(pending, {status:"complete",receipt:"x".repeat(4097)})) &&
         (await store.get("main","fresh-new")).pendingRevision === pending.pendingRevision;
@@ -174,11 +176,11 @@ export async function verifyDrafts(browser, root) {
       finishRead(); await resolving; store.get=get;
       await editor.transfer(async record=>{if(record.text!=="after transfer") throw new Error("resolved input changed");});
       await clear();
-      for (let index=0; index<128; index++) await store.ensure("main", `record-${index}`, "c".repeat(64));
-      const recordBound = await rejects(() => store.ensure("main","record-129","c".repeat(64))) && (await store.list("main")).length === 128;
+      for (let index=0; index<128; index++) await store.edit(await store.ensure("main", `record-${index}`, "c".repeat(64)), "retained input", []);
+      const recordBound = await rejects(async () => store.edit(await store.ensure("main","record-129","c".repeat(64)), "overflow", [])) && (await store.list("main")).length === 128;
       await clear();
       let a=await store.ensure("main","frozen-a","c".repeat(64)), b=await store.ensure("main","frozen-b","c".repeat(64)), c=await store.ensure("main","frozen-c","c".repeat(64));
-      const freeze = (record, length, text_bytes=0) => store.freeze(record,{kind:"message",id:record.key[3],opaque:"x".repeat(length),text_bytes,images: 0, references: 0});
+      const freeze = (record, length, text_bytes=0) => store.freeze(record,{kind:"message",id:record.key[3],opaque:"x".repeat(length),text_bytes,images: 0, captures: []});
       a=await freeze(a,8*1024*1024,1024*1024); b=await freeze(b,8*1024*1024,1024*1024);
       a=await store.settle(await store.begin(a),{status:"unknown"}); b=await store.settle(await store.begin(b),{status:"unknown"});
       let extra = await store.ensure("dynamic", "frozen-extra", "c".repeat(64));

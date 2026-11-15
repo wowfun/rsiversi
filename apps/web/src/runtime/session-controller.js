@@ -1,5 +1,6 @@
 import {bindStarting, startingWorkspace, startConversation, prepareComposer} from './starting-conversation.js';
 import {accessKey, readAccess, saveAccess} from '../../composer-access.js';
+import {captureOf, captureKey, canCaptureReference} from '../../drafts.js';
 import {
   exportSession,
   submit,
@@ -234,15 +235,14 @@ export function createPaneClass(context) {
     ) {
       if (!this.generation && this.starting) { this.starting.edit(text); return; }
       if (!this.editor) throw new Error("The saved draft is still loading");
-      const textBytes = context.validateEditor(text, images, references);
-      const total = [...this.editors.values()].reduce(
-        (sum, editor) =>
-          sum + (editor === this.editor ? textBytes : editor.textBytes),
-        0,
-      );
-      if (total > 2 * 1024 * 1024)
-        throw new Error("Local drafts exceed this pane's 2 MiB limit");
-      this.editor.edit(text, images, references);
+      this.editor.edit(text, images, references, textBytes => {
+        const total = [...this.editors.values()].reduce(
+          (sum, editor) => sum + (editor === this.editor ? textBytes : editor.textBytes),
+          0,
+        );
+        if (total > 2 * 1024 * 1024)
+          throw new Error("Local drafts exceed this pane's 2 MiB limit");
+      });
     }
     async bindDraft(data) {
       const generation = this.generation,
@@ -293,7 +293,9 @@ export function createPaneClass(context) {
           : undefined;
       editor.changed = () => {
         if (this.editor === editor) this.renderComposer();
+        void this.drainReferenceReleases(editor, generation).catch(() => {});
       };
+      void this.drainReferenceReleases(editor, generation, true).catch(() => {});
       this.renderComposer();
       if (
         editor.record.pending &&
@@ -334,43 +336,84 @@ export function createPaneClass(context) {
       const failure = results.find((result) => result.status === "rejected");
       if (failure) throw failure.reason;
     }
-    releaseReference(reference, editor, generation, invoke) {
-      const id = reference?.snapshot.capture_id;
+    referenceState(editor) {
+      const states = (this.referenceStates ??= new WeakMap());
+      if (!states.has(editor)) states.set(editor, {releasing:false, holdCleanup:0});
+      return states.get(editor);
+    }
+    ownsReference(editor, capture) {
+      const key = captureKey(capture), owns = item => captureKey(item) === key;
+      return editor.references.some(item => owns(captureOf(item))) ||
+        editor.record?.references?.some(item => owns(captureOf(item))) ||
+        editor.record?.pending?.captures.some(owns) ||
+        this.referenceState(editor).preparing?.some(owns);
+    }
+    cleanupKey(editor, capture) {
+      return JSON.stringify([editor.record?.key?.slice(0, 2), captureKey(capture)]);
+    }
+    releaseReference(reference, editor, generation) {
+      const capture = reference && captureOf(reference);
       if (
-        !id ||
-        editor.references.some((item) => item.snapshot.capture_id === id)
+        !capture ||
+        this.ownsReference(editor, capture)
       )
-        return Promise.resolve();
+        return Promise.resolve(false);
+      return this.referenceCleanupOwner(reference, editor, generation).retry();
+    }
+    referenceCleanupOwner(reference, editor, generation) {
+      const capture = captureOf(reference);
       const cleanups = (this.referenceCleanup ??= new Map());
-      if (cleanups.has(id)) return cleanups.get(id).retry();
+      const id = this.cleanupKey(editor, capture);
+      if (cleanups.has(id)) {
+        const cleanup = cleanups.get(id);
+        cleanup.editor = new WeakRef(editor);
+        cleanup.generation = generation;
+        return cleanup;
+      }
       const namespace = editor.record?.key
         ? JSON.stringify(editor.record.key.slice(0, 2))
         : undefined;
+      const store = editor.store, key = editor.record?.key;
       let pending;
       const cleanup = {
         message: "",
         namespace,
+        editor: new WeakRef(editor),
+        generation,
+        resolveEditor: async () => {
+          const retained = cleanup.editor.deref();
+          if (retained || !store || !key) return retained;
+          const record = await store.get(key[2], key[3]);
+          if (!record) return;
+          const recovered = new context.DraftEditor(store, record);
+          cleanup.editor = new WeakRef(recovered);
+          return recovered;
+        },
         retry: () => {
           if (pending) return pending;
           pending = Promise.resolve()
-            .then(() => {
+            .then(async () => {
+              const connection = context.connection;
               if (
                 namespace &&
-                (context.connection?.closing ||
-                  JSON.stringify(context.connection?.drafts?.namespace) !==
+                (connection?.closing ||
+                  JSON.stringify(connection?.drafts?.namespace) !==
                     namespace)
               )
                 throw new Error(
                   "Reconnect to the original endpoint and device to release this capture",
                 );
-              const release = namespace
-                ? context.boundCall(context.connection)
-                : invoke;
+              const owner = cleanup.editor.deref() ?? await cleanup.resolveEditor();
+              if (context.connection !== connection || connection?.closing)
+                throw new Error("Reconnect to the original endpoint and device to release this capture");
+              if (owner && this.ownsReference(owner, capture))
+                throw new Error("This reference is still owned by a draft or request");
+              const release = context.boundCall(connection);
               return release(
                 "reference_input",
                 JSON.stringify({
                   pane: this.index,
-                  generation,
+                  generation: cleanup.generation ?? "",
                   operation: {
                     kind: "release",
                     target: reference.metadata.target,
@@ -381,6 +424,7 @@ export function createPaneClass(context) {
             })
             .then(() => {
               cleanups.delete(id);
+              return true;
             })
             .catch((error) => {
               cleanup.message = `Reference cleanup failed: ${error.message}`;
@@ -394,7 +438,50 @@ export function createPaneClass(context) {
         },
       };
       cleanups.set(id, cleanup);
-      return cleanup.retry();
+      return cleanup;
+    }
+    async drainReferenceReleases(editor, generation, retryFailed = false) {
+      const state = this.referenceState(editor);
+      if (retryFailed) await editor.flush();
+      if (state.releasing) {
+        if (retryFailed) state.retryRequested = true;
+        return state.releasing;
+      }
+      if (editor.failure || editor.dirty || editor.saving || state.preparing || state.holdCleanup) {
+        if (retryFailed) throw editor.failure ?? new Error("Wait for draft saving or reference preparation to finish, then retry cleanup");
+        return;
+      }
+      const attempted = new Set();
+      const next = () => editor.record.releases.find(capture =>
+        !attempted.has(captureKey(capture)) &&
+        !this.ownsReference(editor, capture) &&
+        (retryFailed || !this.referenceCleanup?.get(this.cleanupKey(editor, capture))?.message));
+      let capture = next();
+      if (!capture) return;
+      state.releasing = Promise.resolve().then(async () => {
+        let failure;
+        for (;;) {
+          if (!capture && state.retryRequested) {
+            state.retryRequested = false;
+            retryFailed = true;
+            attempted.clear();
+            failure = undefined;
+            capture = next();
+          }
+          if (!capture) break;
+          attempted.add(captureKey(capture));
+          try {
+            const released = await this.releaseReference({metadata: {target: capture.target}, snapshot: capture.snapshot}, editor, generation);
+            if (released) await editor.update(record => editor.store.acknowledgeRelease(record, capture));
+          } catch (error) {
+            failure ??= error;
+            if (editor.failure) break;
+          }
+          capture = next();
+        }
+        if (failure) throw failure;
+      }).finally(() => { state.releasing = undefined; state.retryRequested = false; });
+      return state.releasing;
     }
     renderComposer() {
       const starting = !this.generation ? this.starting : undefined;
@@ -413,13 +500,14 @@ export function createPaneClass(context) {
         !editor ||
         !!editor.failure ||
         editor.transferring ||
+        editor.resolving ||
         !!this.bindingError ||
         this.submitting ||
         this.uploading ||
         this.switching ||
         (!pending && (!this.composerActions || (!editor.text.trim() && !editor.images.length && !editor.references.length)));
       const fileDisabled =
-        !editor || !!this.bindingError || editor.transferring || this.switching;
+        !editor || !!this.bindingError || editor.transferring || editor.resolving || this.switching;
       this.images = editor?.images ?? [];
       this.composerView = {
         completionsAvailable: !!this.generation && !this.switching,
@@ -428,7 +516,7 @@ export function createPaneClass(context) {
         text: starting?.text ?? editor?.text ?? "",
         workspace: startingWorkspace(this, context)?.id,
         disabled:
-          !!(this.switching || (!this.generation ? !starting || this.submitting : !editor || editor.transferring)),
+          !!(this.switching || (!this.generation ? !starting || this.submitting : !editor || editor.transferring || editor.resolving)),
         sendDisabled: starting ? !!starting.failure || this.submitting || this.switching || !starting.text.trim() : !!sendDisabled,
         alternativeDisabled:
           !!sendDisabled || !!pending || !this.composerActions?.alternative,
@@ -465,21 +553,28 @@ export function createPaneClass(context) {
           .map(([id, cleanup]) => ({
             id,
             message: cleanup.message,
-            retry: cleanup.retry,
+            retry: async () => {
+              const owner = await cleanup.resolveEditor();
+              return owner?.record?.releases?.some(capture => this.cleanupKey(owner, capture) === id)
+                ? this.drainReferenceReleases(owner, cleanup.generation, true)
+                : cleanup.retry();
+            },
           })),
         images: this.images,
         references: (editor?.references ?? []).map((reference) => {
           const interval = context.referenceInterval(reference.metadata);
           return {
-            id: reference.snapshot.capture_id,
+            id: captureKey(captureOf(reference)),
             label: `${context.referenceOrigin(reference.metadata)} · through record ${interval.through_seq}${interval.omissions.length ? " · shortened" : ""}`,
           };
         }),
         fileDisabled: !!fileDisabled,
-        referenceDisabled: !!fileDisabled || editor.references.length >= 4,
+        referenceDisabled: !!fileDisabled || !canCaptureReference(editor.record, editor.references),
+        referenceRemovalDisabled: !!this.submitting || !!this.switching || !!editor?.resolving || !!(editor && this.referenceState(editor).preparing),
         imageDisabled:
           !this.staged?.data ||
           !editor ||
+          editor.resolving ||
           this.uploading ||
           this.submitting ||
           this.switching,
@@ -513,30 +608,36 @@ export function createPaneClass(context) {
     }
     previewReference(id) {
       const reference = this.editor?.references.find(
-        (item) => item.snapshot.capture_id === id,
+        (item) => captureKey(captureOf(item)) === id,
       );
       if (reference) this.showReferencePicker(reference);
     }
     async removeReference(id) {
       const editor = this.editor,
         reference = editor?.references.find(
-          (item) => item.snapshot.capture_id === id,
+          (item) => captureKey(captureOf(item)) === id,
         );
       if (!reference) return;
-      const owner = context.connection,
-        generation = this.generation;
+      const state = this.referenceState(editor);
+      if (this.submitting || this.switching || state.preparing)
+        throw new Error("Wait for this conversation’s current operation");
+      state.holdCleanup++;
+      const cleanup = this.referenceCleanupOwner(reference, editor, this.generation);
+      try {
       this.edit(
         editor.text,
         editor.images,
-        editor.references.filter((item) => item.snapshot.capture_id !== id),
+        editor.references.filter((item) => captureKey(captureOf(item)) !== id),
       );
       this.input.focus();
-      await this.releaseReference(
-        reference,
-        editor,
-        generation,
-        context.boundCall(owner),
-      ).catch(() => {});
+      await editor.flush();
+      await editor.update(record => editor.store.retireUnowned(record, [{target: reference.metadata.target, snapshot: reference.snapshot}]));
+      } catch (error) {
+        cleanup.message = `Reference cleanup requires retry: ${error.message}`;
+        this.renderComposer();
+        throw error;
+      } finally { state.holdCleanup--; }
+      await this.drainReferenceReleases(editor, this.generation).catch(() => {});
     }
     moveImage(index, to) {
       const editor = this.editor;

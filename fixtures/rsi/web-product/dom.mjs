@@ -43,10 +43,9 @@ export async function verifyDom(browser, root, report, name) {
   const server = await sourceFixture({
     root: join(root, "apps/web"),
     name: "document-fixture",
-    source: await readFile(
-      new URL("./document-scene.tsx", import.meta.url),
-      "utf8",
-    ),
+    source: (await readFile(new URL("./document-scene.tsx", import.meta.url), "utf8")) + "\n" +
+      (await readFile(new URL("./draft-ownership-scene.js", import.meta.url), "utf8")) +
+      "\nwindow.verifyReferenceOwnership = async () => ({...await verifyReferenceOwnership(), ...await verifySettlementCapacity()});",
     configure(server) {
       server.middlewares.use(
         `/rsi-renderers/${offer.revision}/standard.js`,
@@ -64,6 +63,7 @@ export async function verifyDom(browser, root, report, name) {
       JSON.stringify(frames, null, 2),
     );
     for (const [scenario, verify] of Object.entries({
+      ownership: page => page.evaluate(() => window.verifyReferenceOwnership()),
       composer: verifyComposer,
       bindings: (page) => verifyComposerBindings(page, report, name),
       images: verifyImageDom,

@@ -56,15 +56,18 @@ export async function submit(pane, context, choice = "primary") {
           "Wait for the sending options to refresh. Your draft is retained.",
         );
       const captured = editor.record;
+      const references = pane.referenceState(editor);
+      references.preparing = captured.references.map(reference => ({target: reference.metadata.target, snapshot: reference.snapshot}));
+      try {
       const prepared = JSON.parse(
         await context.call(
           "prepare_submission",
           JSON.stringify({
             pane: pane.index,
             generation,
-            text: editor.text,
-            images: editor.images,
-            references: editor.references,
+            text: captured.text,
+            images: captured.images,
+            references: captured.references,
             sandbox: action.id === 'steer' ? null : pane.composerView.access ?? null,
             action_revision: displayed.revision,
             action: action.id,
@@ -80,6 +83,10 @@ export async function submit(pane, context, choice = "primary") {
           "Conversation changed before request preparation completed",
         );
       await editor.update(() => editor.store.freeze(captured, prepared));
+      } finally {
+        references.preparing = undefined;
+        void pane.drainReferenceReleases(editor, generation).catch(() => {});
+      }
     }
     const mode =
       editor.record.pending.phase === "prepared"

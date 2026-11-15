@@ -22,6 +22,7 @@ export function DraftReferences({ owner, state }: Props) {
             <button
               type="button"
               className="quiet"
+              disabled={state.referenceRemovalDisabled}
               onClick={() =>
                 void run(() => owner.removeReference(reference.id))
               }

@@ -8,23 +8,77 @@ the opaque request before its existing durable freeze; retry never rereads the
 current preference. These preferences grant no capability or exemption from
 tool approval, and do not change terminal policy or another client's messages.
 
-IndexedDB schema 6 namespaces composer records by endpoint, real principal
+IndexedDB schema 7 namespaces composer records by endpoint, real principal
 (`local` or authenticated DeviceId), stable surface key and SessionId. Only this
 schema is accepted; older schemas are refused without rewriting their records,
-ledgers or version. Explicit discard is the separate recovery action. Rust still
+ledgers or version. Refusal explains that the saved drafts remain on this device;
+explicit discard permanently deletes them. A blank editor created after a failed
+read has the same first-save ownership as one created after an empty read, and
+still refuses to overwrite a concurrently persisted record. Rust still
 checks every pending operation and immutable Header binding before reconciliation.
 The origin-wide allowance is: 128 records, 4 MiB
 editable text, 4 MiB pending text and 32 MiB opaque pending requests. Creating
 another surface or connecting another principal does not increase that allowance.
+Opening a Session reads its record without creating an empty durable draft. A
+blank editor is materialized atomically on its first edit, freeze or cleanup
+obligation. Concurrent first writes use the same incarnation conflict rules as
+existing drafts. When admitting a record at the count limit, the same transaction
+reclaims empty dispatched records in the current endpoint/principal namespace.
+It never removes unsent Fresh intent, pending requests, references or cleanup
+obligations. A stale editor still fails its incarnation check and keeps local
+input. Saved empty records also remain removable from the recovery list.
 The current editor record also retains at most four frozen conversation
 references, charged to editable-text quota by their encoded descriptor size.
 Captured descriptors keep their original target Header binding;
 moving a Fresh draft to a different Header requires removing its references and
 explicitly capturing them again. Capture failure, preview and removal preserve
 the text editor and focus. Submission freezes text, images and references together;
-retry uses the same opaque request and never captures again. Removing a reference
-updates the local draft before best-effort remote release. A cleanup failure is
-shown without restoring the removed reference or changing the draft's text.
+retry uses the same opaque request and never captures again. Attachment rows use
+the complete target/snapshot capture identity, including its digest. Removal is
+unavailable during submission preparation in the same pane. Removing a reference
+updates the local draft immediately. Remote release follows a committed removal
+and waits for every persisted editor and frozen-request owner in that record.
+Explicit cleanup retry first saves local edits and reports unresolved conflicts or
+in-flight ownership instead of silently succeeding. A failed release does not
+prevent independent captures in the same outbox from being released.
+An explicit retry during an automatic drain queues one coalesced retry pass;
+an owned capture is never acknowledged as released.
+If the original target no longer exists or its immutable Header has changed,
+release is complete without contacting the replacement Session's capture owner.
+Frozen requests expose exact target/snapshot capture identities separately from
+their opaque envelope. Preparation temporarily retains those identities; freeze
+checks that the saved editor still owns them. A conflicting removal cannot be
+resurrected by replacing a stale editor.
+Each record reserves at most sixteen distinct capture identities across editor,
+frozen request and release obligations. Admission of new identities reserves their
+eventual cleanup capacity; settlement and cancellation transfer ownership into
+the outbox without increasing this total. Text edits remain available at capacity.
+Both conversation and history reference pickers recheck this capacity before
+transferring a temporary capture to the draft; a blocked preview retains its
+capture until added or closed.
+These bounded descriptors are metadata, separate from the text/envelope counters.
+A capture added and removed before its first save is
+retired separately after the coalesced edit commits; already-owned or queued
+identities require no additional write. Cleanup is idempotent and acknowledged durably after
+the remote response. Failed automatic cleanup waits for explicit retry or a new
+binding/reconnection; text edits and subsequent saves do not retry that failure.
+Release targets its original Session/Header/capture through the original endpoint
+and principal, independently of the currently attached pane generation.
+Runtime cleanup routing uses the same complete capture identity and authenticated
+namespace as persistence. Cleanup retains an editor weakly; if the editor has
+been evicted, retry reloads its saved record and checks ownership before release.
+The connection is captured before that reload and must still be current before
+release. Choosing saved input first retires all unsaved captures in one transaction
+in the same record's durable outbox; a failed retirement preserves the local input
+and queues none of those captures for release. Conflict
+resolution briefly freezes that editor until ownership transfer and persistence
+finish, so concurrent edits cannot reintroduce a capture already queued for release.
+It does not retain the full text of every previously visited draft. Reload retries
+cleanup. Failed cleanup leaves the obligation
+visible without restoring removed input. Empty removal and Fresh transfer require
+an empty outbox. Recovery lists offer cleanup without opening the original Session,
+including an expired Fresh Session; recreation is offered only after its references
+and release obligations are empty. Preview-only captures remain owned by their preview lifetime.
 
 Composer records live in IndexedDB under endpoint, authenticated principal, surface and
 Session identity. Each record has a random incarnation, independent editable and
@@ -40,8 +94,10 @@ No image bytes, object URLs or credentials are persisted. Counters and records
 change in one transaction. Nonempty or pending records are never evicted.
 Unresolved requests continue consuming these limits even if their Session becomes
 unavailable. Enough retained requests can exhaust the pane's quota and block new
-submissions across every namespace in that origin. There is no in-product discard
-of uncertain requests: absence of a Session is not proof of non-execution.
+submissions across every namespace in that origin. Individual uncertain requests
+cannot be discarded as unexecuted: absence of a Session is not proof of
+non-execution. The explicit whole-database reset discards reconciliation identities,
+warns that pending requests may already have run, and does not undo execution.
 Opening storage verifies records and aggregate counters in one bounded read
 transaction; malformed or inconsistent storage fails closed without rewriting it.
 
@@ -98,7 +154,7 @@ saving and restores input admission on failure. Ordinary submission saves only
 its selected editor. Unavailable draft storage reports that diagnosis consistently.
 
 Reference descriptors use the exact envelope-2 source/capture contract. Only
-draft schema 6 is admitted; opening an older journal fails without modifying its
+draft schema 7 is admitted; opening an older journal fails without modifying its
 rows or database version. Unsupported reference metadata
 is never translated into a new selection or silently removed from an uncertain
 submission.

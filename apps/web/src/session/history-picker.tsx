@@ -58,6 +58,7 @@ export interface HistoryPickerState {
   restoreFocus(): void;
   close(): void;
   busy: boolean;
+  addDisabled: boolean;
   status: string;
   body?: Body;
   workspaces: { id: string; path: string }[];
@@ -90,11 +91,11 @@ export function HistoryPicker({ state }: { state: HistoryPickerState }) {
   const dialog = useOwnedDialog(state, 'input[type="search"]'),
     original = useRef<HTMLTextAreaElement>(null),
     body = state.body;
-  const action = (text: string, run: () => unknown, primary = false) => (
+  const action = (text: string, run: () => unknown, primary = false, disabled = false) => (
     <button
       type="button"
       className={primary ? "primary" : "quiet"}
-      disabled={state.busy}
+      disabled={state.busy || disabled}
       onClick={() => void run()}
     >
       {text}
@@ -278,7 +279,7 @@ export function HistoryPicker({ state }: { state: HistoryPickerState }) {
         {body?.kind === "frozen" && (
           <>
             <pre>{body.reference.preview}</pre>
-            {action("Add selected reference to draft", () => state.add(), true)}
+            {action("Add selected reference to draft", () => state.add(), true, state.addDisabled)}
           </>
         )}
         {body?.kind === "coverage" && (

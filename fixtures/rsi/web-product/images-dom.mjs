@@ -160,7 +160,7 @@ export async function verifyImageDom(page) {
           opaque: "{}",
           text_bytes: 9,
           images: 1,
-          references: 0,
+          captures: [],
         }),
       );
       await editor.update((record) => editor.store.begin(record));
@@ -178,7 +178,7 @@ export async function verifyImageDom(page) {
           opaque: payload,
           text_bytes: 9,
           images: 1,
-          references: 0,
+          captures: [],
         }),
       );
       fixture.setReply("dispatch_submission", async () => {

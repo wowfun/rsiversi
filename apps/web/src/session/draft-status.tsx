@@ -18,7 +18,8 @@ export function DraftStatus({
           {state.discardConfirmed && (
             <p className="draft-error">
               This deletes all saved text, images, references and pending
-              request identities for this site. It cannot be undone.
+              request identities for this site. A pending request may already
+              have run; discarding its identity does not undo it. This cannot be undone.
             </p>
           )}
           <button
@@ -45,11 +46,11 @@ export function DraftStatus({
           </button>
         </div>
       ))}
+      <p className="draft-error" role="status" aria-live="polite" aria-atomic="true">
+        {state?.failure && `Input is not saved. ${state.failure.message}`}
+      </p>
       {state?.failure && (
         <>
-          <p className="draft-error">
-            Input is not saved. {state.failure.message}
-          </p>
           <button
             type="button"
             className="quiet"
@@ -79,10 +80,10 @@ export function DraftStatus({
               ? "Saved before execution"
               : "Awaiting confirmation"}
           </p>
-          {!!pending.references && (
+          {!!pending.captures.length && (
             <p className="hint">
-              Saved request includes {pending.references} frozen conversation
-              reference{pending.references === 1 ? "" : "s"}. Later draft edits
+              Saved request includes {pending.captures.length} frozen conversation
+              reference{pending.captures.length === 1 ? "" : "s"}. Later draft edits
               apply to the next request.
             </p>
           )}

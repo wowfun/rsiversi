@@ -23,7 +23,7 @@ export async function verifyComposerBindings(page, report, name) {
           opaque: payload,
           text_bytes: submitted.length,
           images: 0,
-          references: 0,
+          captures: [],
         });
       });
       fixture.setReply("dispatch_submission", async () =>
@@ -215,7 +215,7 @@ export async function verifyComposerBindings(page, report, name) {
             opaque: "{}",
             text_bytes: 8,
             images: 0,
-            references: 0,
+            captures: [],
           }),
         );
         await editor.update((record) => editor.store.begin(record));

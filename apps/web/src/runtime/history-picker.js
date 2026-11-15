@@ -6,6 +6,7 @@ export function createHistoryPicker({
   request,
   release,
   add,
+  canAdd,
   active,
   changed,
   closed,
@@ -48,6 +49,9 @@ export function createHistoryPicker({
   };
   const picker = {
     busy: false,
+    get addDisabled() {
+      return !pendingReference || !canAdd(pendingReference);
+    },
     status: "",
     body: undefined,
     workspaces,
@@ -163,7 +167,7 @@ export function createHistoryPicker({
       );
     },
     add() {
-      if (!alive() || picker.busy || !pendingReference) return;
+      if (!alive() || picker.busy || picker.addDisabled) return;
       add(pendingReference);
       pendingReference = undefined;
       picker.close();

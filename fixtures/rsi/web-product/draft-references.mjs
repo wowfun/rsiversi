@@ -16,9 +16,9 @@ export async function verifyDraftReferences(browser, root) {
       const creation = id => ({session_id:id,workspace_id:'f'.repeat(64),agent_preset_id:null});
       let record = await store.ensure('main','target','d'.repeat(64),creation('target'));
       const editor = new DraftEditor(store,record);
-      const beforeReferences = editor.referencesRevision;
+      const beforeReferences = editor.references;
       editor.edit('Draft',[],[reference]); await editor.flush();
-      if (editor.referencesRevision <= beforeReferences) throw new Error('Reference edits must advance presentation identity');
+      if (editor.references === beforeReferences || editor.references[0].snapshot.capture_id !== reference.snapshot.capture_id) throw new Error('Reference edits must replace presentation identity');
       const restored = new DraftEditor(store,await store.get('main','target'));
       const persistent = JSON.stringify(restored.references) === JSON.stringify([reference]);
       const replacement = await store.ensure('main','replacement','c'.repeat(64),creation('replacement'));
@@ -27,10 +27,10 @@ export async function verifyDraftReferences(browser, root) {
       try {await store.edit(replacement,'bad',[],[reference])} catch(error) {refusedBinding = error.message.includes('another draft Header')}
       record = await store.get('main','target');
       const original = JSON.stringify({large:'18446744073709551615',references:[reference]});
-      record = await store.freeze(record,{kind:'message',id:'stable-input',opaque:original,text_bytes:17,images:0,references:1});
+      record = await store.freeze(record,{kind:'message',id:'stable-input',opaque:original,text_bytes:17,images:0,captures:[{target:reference.metadata.target,snapshot:reference.snapshot}]});
       record = await store.begin(record);
       record = await store.edit(record,'Next draft',[],[]);
-      const frozen = record.pending.opaque === original && record.pending.references === 1;
+      const frozen = record.pending.opaque === original && record.pending.captures.length === 1;
       record = await store.settle(record,{status:'unknown'});
       const retry = record.pending.opaque === original && record.pending.phase === 'unknown';
       record = await store.settle(record,{status:'complete',receipt:'{"fact_seq":"18446744073709551615"}'});

@@ -529,6 +529,15 @@ conversation references, history and the Session's actual command catalog.
 Picker lifetimes are distinct from the metrics and other dialog lifetimes;
 closing a picker removes its modal and returns focus to the original editor.
 
+Saved-input recovery previews use at most 80 Unicode code points with whitespace
+collapsed to spaces; preview truncation never splits a surrogate pair.
+Recovery includes retained unsaved editors in the current endpoint/device namespace,
+even when their first write failed. Expired inputs expose their complete text and
+an explicit remove-and-release action for references before recreation; captures
+never move to another Session.
+Resolving a starting-draft conflict preserves edits made while storage is read.
+Reference removal retains local ownership until durable cleanup reservation succeeds.
+
 
 Optional trusted document plugins compose through `src/document-plugins.tsx`.
 An inspected closed question can mount a read-only review accessory in the

@@ -1,6 +1,7 @@
 import { createFilePicker } from "./file-picker.js";
 import { createHistoryPicker } from "./history-picker.js";
 import { createReferencePicker } from "./reference-picker.js";
+import { canCaptureReference } from "../../drafts.js";
 export function showFilePicker(pane, context) {
   const editor = pane.editor,
     generation = pane.generation,
@@ -115,9 +116,10 @@ export function showHistoryPicker(pane, context) {
         ),
       ),
     release: (reference) =>
-      pane.releaseReference(reference, editor, generation, call),
+      pane.releaseReference(reference, editor, generation),
     add: (reference) =>
       pane.edit(editor.text, editor.images, [...editor.references, reference]),
+    canAdd: () => canCaptureReference(editor.record, editor.references),
     active,
     changed: () => pane.invalidate(),
     closed: () => {
@@ -160,13 +162,13 @@ export function showReferencePicker(pane, context, existing) {
         ),
       ),
     release: (reference) =>
-      pane.releaseReference(reference, editor, generation, call),
+      pane.releaseReference(reference, editor, generation),
     add: (reference) =>
       pane.edit(editor.text, editor.images, [...editor.references, reference]),
     canAdd: (reference) =>
       !editor.references.some(
         (item) => item.snapshot.sha256 === reference.snapshot.sha256,
-      ) && editor.references.length < 4,
+      ) && canCaptureReference(editor.record, editor.references),
     describe: (meta) => {
       const interval = context.referenceInterval(meta);
       return {

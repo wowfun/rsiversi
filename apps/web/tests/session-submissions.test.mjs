@@ -1,9 +1,11 @@
+import 'fake-indexeddb/auto';
+import {DraftStore,DraftEditor} from '../drafts.js';
 import test from 'node:test';
 import assert from 'node:assert/strict';
 import {submit,executePending,executeDocumentCommand} from '../src/runtime/session-submissions.js';
 
 function fixture() {
-  const events=[], connection={closing:false}, saved={revision:1};
+  const events=[], connection={closing:false}, saved={revision:1,text:"input",images:[],references:[]}, referenceState={};
   const editor={record:saved,text:'input',images:[],references:[],
     async update(change){this.record=await change(this.record)},
     store:{
@@ -12,7 +14,7 @@ function fixture() {
       async settle(record,result){assert.equal(record,editor.record);events.push(result.status);return {...record,result}},
     }};
   const context={connection,notify:assert.fail,async call(method){events.push(method);return JSON.stringify(method==='prepare_submission'?{opaque:'prepared',kind:'message',phase:'prepared'}:{status:'complete'})}};
-  const pane={index:'main',generation:'1',editor,composerView:{access:'workspace-write'},composerActions:{revision:'7',primary:{id:'send'}},renderComposer(){},async flush(){events.push('flush')},executePending:(...args)=>executePending(pane,context,...args)};
+  const pane={index:'main',generation:'1',editor,referenceState:()=>referenceState,composerView:{access:'workspace-write'},composerActions:{revision:'7',primary:{id:'send'}},renderComposer(){},async drainReferenceReleases(){},async flush(){events.push('flush')},executePending:(...args)=>executePending(pane,context,...args)};
   return {pane,context,editor,events,connection};
 }
 
@@ -63,4 +65,29 @@ for (const mode of ['complete','unknown','missing','replaced']) test(`document c
   assert.equal(editor.text, 'input');
   assert.equal(pane.submitting, false);
   assert.equal(events.includes('dispatch_submission'), ['complete','unknown'].includes(mode));
+});
+
+
+test('typing while preparation is pending survives completed submission in the real draft store',async()=>{
+  await DraftStore.discardAllSaved();
+  const store=await DraftStore.open('a'.repeat(32),{kind:'local'});
+  const editor=new DraftEditor(store,await store.ensure('main','session','b'.repeat(64)));
+  editor.edit('submitted text');await editor.flush();
+  const {pane,context}=fixture();pane.editor=editor;pane.flush=()=>editor.flush();
+  let entered,release;
+  const preparing=new Promise(resolve=>entered=resolve),gate=new Promise(resolve=>release=resolve);
+  context.call=async(method,payload)=>{
+    if(method==='prepare_submission'){
+      assert.equal(JSON.parse(payload).text,'submitted text');entered();await gate;
+      return JSON.stringify({kind:'message',id:'saved-request',opaque:'prepared',text_bytes:14,images:0,captures:[]});
+    }
+    return JSON.stringify({status:'complete',receipt:'acknowledged'});
+  };
+  const sending=submit(pane,context);
+  await preparing;editor.edit('typed during preparation');await editor.flush();
+  release();await sending;
+  assert.equal(editor.text,'typed during preparation');
+  assert.equal((await store.get('main','session')).text,'typed during preparation');
+  assert.equal(editor.record.pending,null);
+  await store.verify();
 });

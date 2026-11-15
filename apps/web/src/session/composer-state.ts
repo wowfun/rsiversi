@@ -12,7 +12,7 @@ interface Pending {
   kind: string;
   id: string;
   phase: string;
-  references?: number;
+  captures: {target: {session_id: string; header_sha256: string}; snapshot: {capture_id: string; sha256: string; byte_len: number}}[];
   images?: number;
 }
 export interface ComposerView {
@@ -38,6 +38,7 @@ export interface ComposerView {
   images: Media[];
   references: { id: string; label: string }[];
   referenceDisabled: boolean;
+  referenceRemovalDisabled: boolean;
   fileDisabled: boolean;
   imageDisabled: boolean;
   mediaEnabled: boolean;

@@ -51,6 +51,7 @@ export class StartingDraft {
   }
   save() {
     if (this.saving) return this.saving;
+    if (this.resolving) return Promise.resolve();
     this.saving = (async () => {
       while (this.dirty && !this.failure) {
         const serial = this.serial, text = this.text, workspace = this.workspace, revision = this.record.revision;
@@ -65,9 +66,16 @@ export class StartingDraft {
   }
   async flush() { await this.save(); if (this.failure) throw this.failure; }
   async resolve(useSaved) {
-    this.record = await transaction(this.key);
-    if (useSaved) { this.text = this.record.text; this.workspace = this.record.workspace; this.serial++; this.dirty = false; }
-    this.failure = undefined; this.changed?.(); await this.flush();
+    if (this.resolving) throw new Error('Wait for the current draft resolution');
+    const serial = this.serial;
+    this.resolving = true;
+    try {
+      await this.saving?.catch(() => {});
+      this.record = await transaction(this.key);
+      if (useSaved && serial === this.serial) { this.text = this.record.text; this.workspace = this.record.workspace; this.serial++; this.dirty = false; }
+      this.failure = undefined;
+    } finally { this.resolving = false; this.changed?.(); }
+    await this.flush();
   }
   async clearCaptured(serial) {
     if (serial !== this.serial) return;
