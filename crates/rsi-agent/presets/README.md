@@ -1,5 +1,9 @@
 # rsi-agent-presets
 
+Fresh and cold Session selection compile the current preset source through the
+Agent-only contribution and isolation allowlist. Composition owns recovery and
+retained pins; see the [generation contract](../docs/subsystems/composition-generations.md).
+
 A product may bind a cloned catalog to its own `AgentPresetDefaultStore` with
 `with_selection_store`. This changes only future default selection; frozen roots,
 compiler identity and already pinned Session compositions remain catalog-owned.
@@ -28,6 +32,12 @@ explicit replacement root authority. It inherits neither the selection store
 nor authoring lock, and does not alter the original catalog.
 The caller must pair the replacement with the executable contribution snapshot
 used for the same Agent build. Existing catalog values keep their own compiler.
+The frozen compiler indexes at most 256 weak compiled-tree references, shared by its
+clones. `compile_shared` rechecks the winning preset and every retained source's
+exact bounded bytes and resolved path before reuse. Changed or unreadable sources
+cannot fall back to the cached tree. Compiler or marker-policy replacement has an
+independent cache. Composition owns reused trees; roster health reads do not retain
+unused configurations. Eviction only loses an optimization; existing pins are unaffected.
 A roster row is healthy only when the complete Profile source,
 including required includes and pure expressions, compiles semantically and
 every enabled leaf belongs to that allowlist. Fresh and named Local/event isolation
@@ -64,7 +74,9 @@ relative symlinks are resolved from a captured source-root descriptor and
 materialized as owned content; absolute, escaping, or cyclic links and special
 files are rejected. Copy enforces depth/entry/aggregate-byte bounds before
 publication, writes owner-only modes, and atomically publishes without replacing
-an occupied id. A failed copy leaves no roster row. Fallback platforms currently
+an occupied id. A concurrent directory publication reports `PresetExists`, including
+platform errors that describe the destination as nonempty. A failed copy leaves no
+roster row. Fallback platforms currently
 reject symlinks instead of materializing them; native Windows handle-relative
 materialization remains an integration requirement. `delete` accepts only a
 real preset directory owned by

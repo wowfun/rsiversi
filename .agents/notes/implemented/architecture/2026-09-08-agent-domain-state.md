@@ -10,6 +10,8 @@ be reconstructed by replaying arbitrary plugin callbacks after a restart.
 
 ## Decision
 
+The resident and cold recovery clauses below are superseded by [durable Agent generation selection](2026-11-12-durable-agent-generation-selection.md). The Domain ownership rationale remains applicable.
+
 The [typed domain substrate](2026-09-08-typed-domain-commits.md) supplies bounded
 complete values and canonical receipts. Ordinary generation-owned registrars
 connect those values to context, monotone Tool policy, commands and projections.

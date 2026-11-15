@@ -4,6 +4,8 @@ use rsi_agent_composition_protocol::AgentCompositionContract;
 use rsi_agent_presets::AgentPresetId;
 use rsi_meta::{FactoryIdentity, PluginFactory, ResolvedFactory, Runtime, UpdateMode};
 use rsi_meta_scope::ScopeRoot;
+#[path = "session.rs"]
+mod session;
 
 pub(super) fn artifacts(destination: &Path) -> [std::path::PathBuf; 2] {
     static BUILD: std::sync::Mutex<()> = std::sync::Mutex::new(());
@@ -98,6 +100,7 @@ async fn two_real_artifacts_update_new_generations_while_old_pins_keep_their_cod
         old.tools().definitions()[0].description(),
         "Native fixture tool"
     );
+    let session = session::Session::start(service.clone(), old.clone(), &root).await;
     fs::copy(&b, root.join("source/artifact.bin")).unwrap();
     let b_record = store.install(&manifest).unwrap().record.unwrap();
     assert_ne!(a_record.artifact_sha256(), b_record.artifact_sha256());
@@ -115,6 +118,7 @@ async fn two_real_artifacts_update_new_generations_while_old_pins_keep_their_cod
         new.tools().definitions()[0].description(),
         "Native fixture tool revision B"
     );
+    session.replace(&old, &new).await;
     assert_eq!(
         old.tools().definitions()[0].description(),
         "Native fixture tool"
@@ -134,6 +138,7 @@ async fn two_real_artifacts_update_new_generations_while_old_pins_keep_their_cod
         assert!(fibers.iter().any(|fiber| fiber.factory
             == FactoryIdentity::native(record.plugin(), record.artifact_sha256())));
     }
+    session.restore(&new).await;
     store.disable("fixture.addon").unwrap();
     assert!(service.pin(&id, None).await.is_err());
     manager.refresh().unwrap();

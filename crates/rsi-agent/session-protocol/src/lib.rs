@@ -78,20 +78,22 @@ pub use command::{
     SessionCommandReceipt, SessionCommandsView,
 };
 mod domain;
+mod generation;
+pub use generation::GenerationSelection;
 mod extension;
-pub use extension::{EXTENSION_JOURNAL_DOMAIN, ExtensionJournal, ExtensionSegment};
+pub use extension::{
+    EXTENSION_JOURNAL_DOMAIN, EXTENSION_JOURNAL_VERSION, ExtensionJournal, ExtensionSegment,
+};
 mod projection;
 mod reference;
 mod references;
-pub use references::{
-    DomainReferenceCodec, DurableReference, MAXIMUM_RECORD_REFERENCES, ReferenceCodecRegistration,
-    ReferenceCodecRegistrationContract, ReferenceCollector,
-};
+pub use references::{DurableReference, MAXIMUM_RECORD_REFERENCES, ReferenceCollector};
 mod resource;
 pub use domain::{
     DomainFactSpan, DomainFactSpanBuilder, DomainIdentity, DomainMutationSource, DomainRevision,
     DomainSnapshot, DomainStateCommit, DomainStateUpdate, DomainStateValue, DomainStateView,
-    MAXIMUM_DOMAIN_BASELINE_BYTES, MAXIMUM_DOMAIN_STATE_BYTES, MAXIMUM_SESSION_DOMAINS,
+    MAXIMUM_DOMAIN_BASELINE_BYTES, MAXIMUM_DOMAIN_CONTROL_BYTES, MAXIMUM_DOMAIN_STATE_BYTES,
+    MAXIMUM_SESSION_DOMAINS,
 };
 pub use projection::{
     MAXIMUM_PROJECTION_VALUE_BYTES, MAXIMUM_SESSION_PROJECTION_BYTES, MAXIMUM_SESSION_PROJECTIONS,
@@ -113,7 +115,7 @@ pub use resource::{
 };
 
 /// Exact durable format accepted by this pre-release implementation.
-pub const SESSION_FORMAT_VERSION: u32 = 37;
+pub const SESSION_FORMAT_VERSION: u32 = 38;
 /// Maximum bytes in one session, turn, effect, profile, or error-code identity.
 pub const MAXIMUM_AGENT_IDENTIFIER_BYTES: usize = 256;
 /// Maximum bytes in one Agent preset directory-segment identity.
@@ -1290,10 +1292,18 @@ impl AgentControlRecord {
             encoded_len: 0,
         };
         record.encoded_len = compact_json_len(&record)?;
-        if record.encoded_len > MAXIMUM_SESSION_FACT_BYTES {
+        let maximum = if matches!(
+            record.body,
+            AgentControlRecordBody::DomainStateCommitted { .. }
+        ) {
+            MAXIMUM_DOMAIN_CONTROL_BYTES
+        } else {
+            MAXIMUM_SESSION_FACT_BYTES
+        };
+        if record.encoded_len > maximum {
             return Err(SessionError::TooLarge {
                 kind: "Agent control record",
-                maximum: MAXIMUM_SESSION_FACT_BYTES,
+                maximum,
                 actual: record.encoded_len,
             });
         }

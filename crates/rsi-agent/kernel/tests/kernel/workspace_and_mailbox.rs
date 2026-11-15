@@ -87,8 +87,8 @@ async fn mailbox_admission_creates_a_zero_fact_session_and_survives_restart() {
         )
         .await
         .unwrap();
-    assert_eq!(controls.durable_seq, 1);
-    assert_eq!(controls.records.len(), 1);
+    assert_eq!(controls.durable_seq, 2);
+    assert_eq!(controls.records.len(), 2);
     let recent = store
         .list_recent_sessions(
             &rsi_agent_store_protocol::ExecutionLocations::all(),
@@ -235,13 +235,13 @@ async fn message_claim_atomically_enters_activation_turn_step_and_input() {
         )
         .await
         .unwrap();
-    assert_eq!(controls.durable_seq, 3);
+    assert_eq!(controls.durable_seq, 4);
 
     let mut resumed = restarted
         .observe_session(
             &session_id,
             ObservationCursor {
-                control_seq: 1,
+                control_seq: 2,
                 fact_seq: 2,
             },
         )

@@ -437,12 +437,13 @@ pub(super) fn turn_failure(error: TurnError) -> DriveFailure {
     match error {
         TurnError::ShuttingDown => DriveFailure::Stopped,
         TurnError::Cancelled => DriveFailure::Turn(TurnOutcome::Cancelled),
-        TurnError::ExecutionUnavailable | TurnError::ExecutionOutcomeUnknown => {
-            DriveFailure::Turn(TurnOutcome::Interrupted {
-                effect: None,
-                reason: bounded(&error.to_string()),
-            })
-        }
+        TurnError::ExecutionUnavailable
+        | TurnError::ExecutionOutcomeUnknown
+        | TurnError::Store(_)
+        | TurnError::Capacity => DriveFailure::Turn(TurnOutcome::Interrupted {
+            effect: None,
+            reason: bounded(&error.to_string()),
+        }),
         other => fatal(other),
     }
 }
@@ -530,6 +531,30 @@ pub(super) fn tool_start_extensions(
 #[cfg(test)]
 mod execution_error_tests {
     use super::*;
+    #[test]
+    fn composition_boundary_races_preserve_recoverable_outcome_classes() {
+        assert!(matches!(
+            turn_failure(TurnError::ShuttingDown),
+            DriveFailure::Stopped
+        ));
+        assert!(matches!(
+            turn_failure(TurnError::Cancelled),
+            DriveFailure::Turn(TurnOutcome::Cancelled)
+        ));
+        for error in [
+            TurnError::Store("temporarily unavailable".into()),
+            TurnError::Capacity,
+        ] {
+            assert!(matches!(
+                turn_failure(error),
+                DriveFailure::Turn(TurnOutcome::Interrupted { .. })
+            ));
+        }
+        assert!(matches!(
+            turn_failure(TurnError::Invariant("corrupt".into())),
+            DriveFailure::Fatal(_)
+        ));
+    }
     #[test]
     fn lost_execution_authority_interrupts_without_claiming_definite_failure() {
         for error in [

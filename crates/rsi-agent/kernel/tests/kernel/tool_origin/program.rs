@@ -134,7 +134,7 @@ fn started(turn_id: &TurnId, id: &str) -> SessionFactBody {
         identity: identity(id),
     }
 }
-fn result(turn_id: &TurnId, id: &str, text: &str) -> SessionFactBody {
+pub(crate) fn result(turn_id: &TurnId, id: &str, text: &str) -> SessionFactBody {
     SessionFactBody::ToolResult {
         turn_id: turn_id.clone(),
         effect_id: EffectId::new(id).unwrap(),

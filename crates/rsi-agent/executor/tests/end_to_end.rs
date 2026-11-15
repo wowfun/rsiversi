@@ -1291,6 +1291,7 @@ struct CompositionFixture {
     pin: Mutex<Option<AgentCompositionPin>>,
     owner_drops: Arc<AtomicUsize>,
     panic_on_commit: Mutex<Option<Arc<Notify>>>,
+    candidate_gate: Mutex<Option<(Arc<Notify>, Arc<Notify>)>>,
     context_builder: Mutex<Arc<dyn rsi_agent_context::ModelContextBuilder>>,
     contributions: Mutex<rsi_agent_composition_protocol::ContributionCatalog>,
     domains: Mutex<rsi_agent_composition_protocol::DomainCatalog>,
@@ -1298,6 +1299,28 @@ struct CompositionFixture {
 
 #[async_trait]
 impl AgentComposition for CompositionFixture {
+    async fn prepare_update(
+        &self,
+        _: &SessionHeader,
+        current: &AgentCompositionPin,
+    ) -> Result<
+        Option<Box<dyn rsi_agent_composition_protocol::AgentGenerationCandidate>>,
+        AgentCompositionError,
+    > {
+        Ok(self
+            .pin
+            .lock()
+            .unwrap()
+            .as_ref()
+            .filter(|pin| pin.selection() != current.selection())
+            .map(|pin| {
+                Box::new(generations::Candidate {
+                    pin: pin.clone(),
+                    gate: self.candidate_gate.lock().unwrap().take(),
+                })
+                    as Box<dyn rsi_agent_composition_protocol::AgentGenerationCandidate>
+            }))
+    }
     async fn default_preset_id(&self) -> Result<AgentPresetId, AgentCompositionError> {
         Ok(AgentPresetId::new("test-agent").unwrap())
     }
@@ -1378,6 +1401,7 @@ impl PluginFactory for CompositionFixtureFactory {
             pin: Mutex::new(None),
             owner_drops: Arc::new(AtomicUsize::new(0)),
             panic_on_commit: Mutex::new(None),
+            candidate_gate: Mutex::new(None),
             context_builder: Mutex::new(Arc::new(
                 rsi_agent_context::DefaultContextBuilder::default(),
             )),
@@ -1817,6 +1841,8 @@ mod extension;
 #[cfg(unix)]
 #[path = "end_to_end/files.rs"]
 mod files;
+#[path = "end_to_end/generations.rs"]
+mod generations;
 #[path = "end_to_end/image_and_shutdown.rs"]
 mod image_and_shutdown;
 #[path = "end_to_end/output_recovery.rs"]

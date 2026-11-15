@@ -5,6 +5,7 @@ use std::sync::{Arc, Mutex};
 
 /// Immutable evidence owned by the command's publication authority.
 #[derive(Clone, Debug)]
+#[allow(clippy::large_enum_variant)] // Published evidence already has one Arc allocation; boxing its draft payload would add another.
 pub enum CommandOutcomeEvidence {
     /// No publication can occur after this definite refusal.
     Rejected,
@@ -19,6 +20,8 @@ pub enum CommandOutcomeEvidence {
     },
     /// Exact applied initial-state swap, recorded before notification.
     Draft {
+        /// Diagnostic executable selection bound to the initial publication.
+        selection: rsi_agent_session_protocol::GenerationSelection,
         /// Owning unpublished Session.
         session_id: SessionId,
         /// Applied invocation and successor identity.
@@ -99,6 +102,7 @@ impl CommandOutcomeOwner {
     /// Records the exact applied draft state before notifying observers.
     pub fn draft_committed(&self, receipt: &DraftPublicationReceipt<'_>) {
         self.record(CommandOutcomeEvidence::Draft {
+            selection: receipt.selection.clone(),
             session_id: receipt.session_id.clone(),
             receipt: receipt.receipt.clone(),
             baseline: receipt.baseline.clone(),

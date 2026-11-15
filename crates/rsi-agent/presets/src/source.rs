@@ -1,10 +1,62 @@
 use rsi_meta_profile::{ProfileCandidate, ProfileCompiler, ProfileError, ProfileProgram};
-use std::collections::BTreeSet;
-use std::path::Path;
+use std::collections::{BTreeMap, BTreeSet};
+use std::path::{Path, PathBuf};
+use std::sync::{Arc, Mutex, Weak};
 
 #[cfg(test)]
 mod tests {
     use super::*;
+    #[test]
+    fn compiled_source_reuses_exact_tree_and_rechecks_included_bytes_and_admission() {
+        let root = tempfile::tempdir().unwrap();
+        let path = root.path().join("agent.profile.toml");
+        let child = root.path().join("child.toml");
+        std::fs::write(
+            &path,
+            "format=1\n[[steps]]\nkind='include'\npath='child.toml'\n",
+        )
+        .unwrap();
+        let source = |id: &str| {
+            format!("format=1\n[[steps]]\nkind='plugin'\nid='{id}'\nplugin='test.child'\n")
+        };
+        std::fs::write(&child, source("old")).unwrap();
+        let compiler = AgentPresetProfileCompiler::new(
+            ProfileCompiler::new(
+                rsi_meta_profile::ProfileEnvironment::without_paths("test", BTreeMap::default())
+                    .unwrap(),
+                rsi_meta_profile::ProfileLimits::default(),
+            ),
+            ["test.child"],
+        );
+        let first = compiler.compile_shared(&path).unwrap();
+        assert!(Arc::ptr_eq(
+            &first,
+            &compiler.clone().compile_shared(&path).unwrap()
+        ));
+        let modified = std::fs::metadata(&child).unwrap().modified().unwrap();
+        std::fs::write(&child, source("new")).unwrap();
+        std::fs::File::options()
+            .write(true)
+            .open(&child)
+            .unwrap()
+            .set_modified(modified)
+            .unwrap();
+        let next = compiler.compile_shared(&path).unwrap();
+        assert!(!Arc::ptr_eq(&first, &next));
+        assert_eq!(next.leaves()[0].id().as_str(), "new");
+        std::fs::write(&child, "invalid").unwrap();
+        assert!(compiler.compile_shared(&path).is_err());
+        std::fs::remove_file(&child).unwrap();
+        assert!(compiler.compile_shared(&path).is_err());
+        assert_eq!(first.leaves()[0].id().as_str(), "old");
+        let weak = Arc::downgrade(&next);
+        drop(next);
+        assert!(
+            weak.upgrade().is_none(),
+            "the compiler must not own retired configurations"
+        );
+    }
+
     #[test]
     fn fresh_and_named_isolation_use_the_registered_agent_markers() {
         let root = tempfile::tempdir().unwrap();
@@ -52,6 +104,7 @@ pub struct AgentPresetProfileCompiler {
     allowed_plugins: BTreeSet<String>,
     local_markers: BTreeSet<String>,
     event_markers: BTreeSet<String>,
+    compiled: Arc<Mutex<BTreeMap<PathBuf, Weak<ProfileCandidate>>>>,
 }
 
 impl AgentPresetProfileCompiler {
@@ -66,6 +119,7 @@ impl AgentPresetProfileCompiler {
             allowed_plugins: allowed_plugins.into_iter().map(Into::into).collect(),
             local_markers: BTreeSet::new(),
             event_markers: BTreeSet::new(),
+            compiled: Arc::default(),
         }
     }
 
@@ -78,6 +132,7 @@ impl AgentPresetProfileCompiler {
     ) -> Self {
         self.local_markers = local.into_iter().collect();
         self.event_markers = events.into_iter().collect();
+        self.compiled = Arc::default();
         self
     }
 
@@ -85,10 +140,48 @@ impl AgentPresetProfileCompiler {
         &self,
         path: impl AsRef<Path>,
     ) -> std::result::Result<ProfileCandidate, String> {
+        self.compile_shared(path.as_ref())
+            .map(|candidate| (*candidate).clone())
+    }
+
+    pub(crate) fn compile_shared(
+        &self,
+        path: &Path,
+    ) -> std::result::Result<Arc<ProfileCandidate>, String> {
+        let cached = self
+            .compiled
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .get(path)
+            .and_then(Weak::upgrade);
+        if let Some(cached) = cached
+            && self
+                .compiler
+                .sources_unchanged(&cached)
+                .map_err(|error| profile_health_reason(&error))?
+        {
+            return Ok(cached);
+        }
         let candidate = self
             .compiler
-            .compile(&ProfileProgram::from_file(path.as_ref()))
+            .compile(&ProfileProgram::from_file(path))
             .map_err(|error| profile_health_reason(&error))?;
+        let candidate = Arc::new(self.validate(candidate)?);
+        let mut compiled = self
+            .compiled
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        if compiled.len() >= crate::MAX_ROSTER_ROWS {
+            compiled.pop_first();
+        }
+        compiled.insert(path.to_owned(), Arc::downgrade(&candidate));
+        Ok(candidate)
+    }
+
+    fn validate(
+        &self,
+        candidate: ProfileCandidate,
+    ) -> std::result::Result<ProfileCandidate, String> {
         for leaf in candidate.leaves() {
             if !self.allowed_plugins.contains(leaf.plugin().as_str()) {
                 return Err(bound_reason(

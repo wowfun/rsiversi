@@ -60,6 +60,15 @@ committed domain checkpoint without I/O. This is extension state, not a framewor
 projection cache; [pure projection ownership](2026-09-09-session-extension-projections.md)
 is unchanged.
 
+Code selection belongs to the immutable generation recipe, not to a second hash
+inside the extension's journal. A replacement validates and loads the committed
+journal through its generation validator before Kernel can publish selection.
+The existing paged load accepts an explicit reload request for speculative
+candidate preparation, so a repeated proposed revision cannot reuse different
+abandoned state. Publication makes that prepared revision usable by ordinary
+callbacks without a second full history transfer. Failed candidates retain no
+authority over the previous executable pin or durable state.
+
 BeforeStep retains the existing atomic Step acceptance. One RSI durable Step may
 contain several provider retry series, so preparation may replace current system
 guidance and narrow Tool declarations after outstanding effects and calls settle.
@@ -112,9 +121,9 @@ the visible tool names and instruction text agree. The process adapter trusts
 the executor's unchanged decision at this typed in-process boundary. Adding
 another history walk to re-prove it would duplicate the owner's work.
 
-Format 36 and Store schema 47 reject older durable encodings. The Context cache
-payload remains v19 because its complete retained assembly and interpretation
-are unchanged; its immutable Header binding separates the new Session format.
+The current Header format and Store schema reject older durable encodings. The
+[Context contract](../../../../crates/rsi-agent/context/README.md) owns cache
+versioning, including builder/catalog identity and immutable Header binding.
 This pre-release choice avoids migration and fallback paths, not a claim that
 migration is technically impossible.
 
@@ -143,6 +152,12 @@ outcome permits positive canonical receipt lookup, never rollback from absence.
 Command-produced text has explicit invocation provenance and is bound into the
 same domain receipt. Draft text stays unpublished until the first mailbox submit.
 
+Protocol 2 reserves admission for ping and close in both directions while keeping
+one FIFO. Request identity remains monotonic across business and control traffic.
+A slot retains its queued writes after a fast peer reply, so response speed cannot
+bypass the bounded output queue. One deadline driver owns outstanding cancellation
+acknowledgements; completed requests do not retain per-call timeout tasks.
+
 ## Alternatives considered
 
 Native ABI polling would need another Rust queue, wake mechanism and cancellation
@@ -169,6 +184,12 @@ of transport fragments. DSH's history controller borrows one Session observation
 for each page computation; RSI's operation history and model streams likewise
 already retain prepared data until consumed. A bounded active reader follows
 that lifetime without retaining a second history cache or widening process frames.
+
+Adding only an outbound heartbeat slot leaves the peer's inbound business limit
+unchanged. Priority queues would reorder monotonic request identities. Reserving
+both endpoints and accounting for queued writes preserves one framing path.
+The old peer cannot uphold that contract, so the host, package requirement and
+independent DSH peer use the new protocol together without a fallback handshake.
 
 ## Consequences
 

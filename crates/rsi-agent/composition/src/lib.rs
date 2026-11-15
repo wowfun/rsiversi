@@ -4,6 +4,7 @@
 #![warn(missing_docs)]
 
 mod catalog;
+mod selection;
 mod snapshot;
 pub use catalog::AgentContributionCatalog;
 pub use snapshot::{
@@ -15,6 +16,7 @@ mod root;
 pub use root::{AgentGenerationRootContract, AgentGenerationRootFactory};
 
 use async_trait::async_trait;
+use futures_util::FutureExt;
 use rsi_agent_composition_protocol::{
     AgentComposition, AgentCompositionContract, AgentCompositionError, AgentCompositionPin,
     AgentGenerationInputs, AgentGenerationInputsContract, AgentPromptScope,
@@ -34,9 +36,9 @@ use rsi_tools_protocol::{
     ToolCatalogProvider, ToolCatalogProviderContract, ToolCatalogStage, ToolRegistrar,
     ToolRegistrarContract, ToolRuntime,
 };
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, VecDeque};
 use std::fmt;
-use std::sync::{Arc, Mutex, OnceLock, Weak};
+use std::sync::{Arc, Mutex, Weak};
 use tokio::sync::{Mutex as AsyncMutex, Notify, OwnedMutexGuard, OwnedSemaphorePermit, Semaphore};
 use tokio_util::sync::CancellationToken;
 
@@ -134,6 +136,7 @@ impl PluginFactory for AgentCompositionFactory {
                 .clone(),
             tools,
             build_slots: Arc::new(Semaphore::new(MAXIMUM_CONCURRENT_BUILDS)),
+            prepare_slots: Arc::new(Semaphore::new(MAXIMUM_CONCURRENT_BUILDS)),
             shutdown: CancellationToken::new(),
             executor: tokio::runtime::Handle::current(),
             scope_changed: Notify::new(),
@@ -141,6 +144,7 @@ impl PluginFactory for AgentCompositionFactory {
                 accepting: true,
                 next_scope: 0,
                 rows: BTreeMap::new(),
+                recent: VecDeque::new(),
                 scopes: BTreeMap::new(),
                 cleanup_failed: false,
             }),
@@ -171,6 +175,44 @@ struct CompositionService {
 
 #[async_trait]
 impl AgentComposition for CompositionService {
+    async fn prepare_update(
+        &self,
+        header: &rsi_agent_session_protocol::SessionHeader,
+        current: &AgentCompositionPin,
+    ) -> rsi_agent_composition_protocol::Result<
+        Option<Box<dyn rsi_agent_composition_protocol::AgentGenerationCandidate>>,
+    > {
+        if self.state.shutdown.is_cancelled() {
+            return Err(AgentCompositionError::ShuttingDown);
+        }
+        // Explicit Session-bound sources own their private input publication.
+        if self.state.source.session_pin(header, None)?.is_some() {
+            return Ok(None);
+        }
+        let prepared = self.state.prepare(header.agent_preset_id()).await?;
+        let unchanged = prepared
+            .row
+            .current
+            .lock()
+            .expect("composition row poisoned")
+            .iter()
+            .flatten()
+            .any(|generation| {
+                generation.pin.same_generation(current)
+                    && generation.identity.matches_source(
+                        &prepared.program_digest,
+                        &prepared.snapshot.contributions,
+                        &prepared.selection,
+                    )
+            });
+        if unchanged {
+            return Ok(None);
+        }
+        Ok(Some(Box::new(GenerationCandidate {
+            state: Arc::clone(&self.state),
+            prepared,
+        })))
+    }
     async fn pin_session(
         &self,
         header: &rsi_agent_session_protocol::SessionHeader,
@@ -208,6 +250,7 @@ struct CompositionState {
     parent: Context,
     tools: Arc<dyn ToolCatalogProvider>,
     build_slots: Arc<Semaphore>,
+    prepare_slots: Arc<Semaphore>,
     shutdown: CancellationToken,
     executor: tokio::runtime::Handle,
     scope_changed: Notify,
@@ -230,79 +273,132 @@ struct CompositionInner {
     accepting: bool,
     next_scope: u64,
     rows: BTreeMap<AgentPresetId, Arc<PresetRow>>,
+    recent: VecDeque<AgentPresetId>,
     scopes: BTreeMap<u64, Weak<ScopeRecord>>,
     cleanup_failed: bool,
 }
 
 #[derive(Debug, Default)]
 struct PresetRow {
+    preparing: Mutex<Weak<PrepareFlight>>,
     build: Arc<AsyncMutex<()>>,
     current: Mutex<[Option<Arc<Generation>>; 2]>,
+    selection: Mutex<Option<Arc<CompiledSelection>>>,
+}
+
+#[derive(Debug)]
+struct CompiledSelection {
+    candidate: Arc<rsi_meta_profile::ProfileCandidate>,
+    catalog: Arc<AgentContributionCatalog>,
+    code: Arc<[u8]>,
+    program_digest: String,
+    selection: rsi_agent_session_protocol::GenerationSelection,
+}
+
+type PrepareFlight = futures_util::future::Shared<
+    futures_util::future::BoxFuture<
+        'static,
+        rsi_agent_composition_protocol::Result<PreparedGeneration>,
+    >,
+>;
+
+#[derive(Clone)]
+struct PreparedGeneration {
+    preset_id: AgentPresetId,
+    row: Arc<PresetRow>,
+    snapshot: Arc<AgentCompositionSnapshot>,
+    candidate: Arc<rsi_meta_profile::ProfileCandidate>,
+    program_digest: String,
+    selection: rsi_agent_session_protocol::GenerationSelection,
+}
+
+struct GenerationCandidate {
+    state: Arc<CompositionState>,
+    prepared: PreparedGeneration,
+}
+impl fmt::Debug for GenerationCandidate {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.debug_tuple("GenerationCandidate")
+            .field(&self.prepared.selection)
+            .finish()
+    }
+}
+#[async_trait]
+impl rsi_agent_composition_protocol::AgentGenerationCandidate for GenerationCandidate {
+    fn selection(&self) -> &rsi_agent_session_protocol::GenerationSelection {
+        &self.prepared.selection
+    }
+
+    async fn build(
+        self: Box<Self>,
+        seed: &rsi_agent_composition_protocol::AgentGenerationSeed,
+    ) -> rsi_agent_composition_protocol::Result<AgentCompositionPin> {
+        let Self { state, prepared } = *self;
+        // Newly installed contributions may use application inputs that were absent
+        // from the old catalog. Existing state remains authoritative for old owners.
+        let mut states: BTreeMap<_, _> = prepared
+            .snapshot
+            .generation_seed()
+            .map_or(
+                &[][..],
+                rsi_agent_composition_protocol::AgentGenerationSeed::states,
+            )
+            .iter()
+            .map(|value| (value.identity().id().to_owned(), value.clone()))
+            .collect();
+        for value in seed.states() {
+            states.insert(value.identity().id().to_owned(), value.clone());
+        }
+        let seed = rsi_agent_composition_protocol::AgentGenerationSeed::new(
+            states.into_values().collect(),
+        )?;
+        state.build_prepared(prepared, Some(&seed)).await
+    }
 }
 
 impl PresetRow {
+    fn selection(
+        &self,
+        snapshot: &AgentCompositionSnapshot,
+        candidate: Arc<rsi_meta_profile::ProfileCandidate>,
+    ) -> rsi_agent_composition_protocol::Result<Arc<CompiledSelection>> {
+        if let Some(cached) = self
+            .selection
+            .lock()
+            .expect("composition selection cache poisoned")
+            .as_ref()
+            && Arc::ptr_eq(&cached.candidate, &candidate)
+            && cached.catalog.same_identity(&snapshot.contributions)
+            && cached.code == snapshot.code
+        {
+            return Ok(cached.clone());
+        }
+        let program_digest = candidate
+            .evaluated_digest()
+            .map_err(|error| AgentCompositionError::InvalidInput(error.to_string()))?;
+        let compiled = Arc::new(CompiledSelection {
+            selection: selection::identify(snapshot, &program_digest)?,
+            program_digest,
+            candidate,
+            catalog: snapshot.contributions.clone(),
+            code: snapshot.code.clone(),
+        });
+        *self
+            .selection
+            .lock()
+            .expect("composition selection cache poisoned") = Some(compiled.clone());
+        Ok(compiled)
+    }
+
     fn is_evictable(&self) -> bool {
         Arc::strong_count(&self.build) == 1
-            && self
-                .current
-                .lock()
-                .expect("composition row poisoned")
-                .iter()
-                .all(Option::is_none)
     }
 }
 
+#[derive(Debug)]
 struct Generation {
-    pin: OnceLock<rsi_agent_composition_protocol::Result<AgentCompositionPin>>,
-    preset_id: AgentPresetId,
+    pin: AgentCompositionPin,
     identity: snapshot::GenerationIdentity,
-    tools: Arc<dyn ToolRuntime>,
-    context_builder: Arc<dyn ModelContextBuilder>,
-    prompt: Option<Arc<dyn PromptAssembler>>,
-    domains: DomainCatalog,
-    contributions: ContributionCatalog,
-    owner: Arc<GenerationOwner>,
-}
-
-impl fmt::Debug for Generation {
-    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
-        formatter
-            .debug_struct("Generation")
-            .field("preset_id", &self.preset_id)
-            .field("source_digest", &self.identity.effective_digest)
-            .finish_non_exhaustive()
-    }
-}
-
-impl Generation {
-    fn pin(&self) -> rsi_agent_composition_protocol::Result<AgentCompositionPin> {
-        self.pin
-            .get_or_init(|| {
-                AgentCompositionPin::new(
-                    self.preset_id.clone(),
-                    self.identity.effective_digest.clone(),
-                    Arc::clone(&self.tools),
-                    Arc::clone(&self.context_builder),
-                    self.domains.clone(),
-                    self.contributions.clone(),
-                    self.owner.clone(),
-                )
-                .map(|pin| {
-                    pin.with_manifest(self.identity.manifest.clone())
-                        .with_prompt_assembler(
-                            self.prompt.clone(),
-                            self.owner
-                                .record
-                                .as_ref()
-                                .expect("published generation scope")
-                                .scope
-                                .key()
-                                .clone(),
-                        )
-                })
-            })
-            .clone()
-    }
 }
 
 struct ScopeRecord {
@@ -419,25 +515,10 @@ impl UnpublishedGeneration {
         let inputs = context
             .lookup_local::<AgentGenerationInputsContract>()
             .ok_or_else(|| unavailable(preset_id, "Agent generation inputs unavailable"))?;
-        let legacy = if inputs.restoring {
-            match rsi_agent_composition_protocol::ToolOutputCatalog::from_baseline(
-                inputs.seed.states(),
-            )? {
-                Some(saved) if saved != outputs => {
-                    return Err(AgentCompositionError::OutputCatalogMismatch);
-                }
-                None if !outputs.is_empty() => {
-                    return Err(AgentCompositionError::MissingOutputCatalog);
-                }
-                None => true,
-                Some(_) => false,
-            }
-        } else {
-            false
-        };
-        let _output_lease = if legacy {
-            None
-        } else {
+        // Historical declarations remain interpretable, but do not constrain today's Tools.
+        let _saved_outputs =
+            rsi_agent_composition_protocol::ToolOutputCatalog::from_baseline(inputs.seed.states())?;
+        let _output_lease = {
             let definition = rsi_agent_composition_protocol::DomainDefinition::new(
                 rsi_agent_composition_protocol::ToolOutputCatalog::identity(),
                 &outputs,
@@ -449,27 +530,13 @@ impl UnpublishedGeneration {
             })?;
             let (_, lease) =
                 definition.register(self.domain_stage.registrar().as_ref(), &credential)?;
-            Some(lease)
+            lease
         };
         self.domains = Some(
             self.domain_stage
                 .seal()
                 .map_err(|_| unavailable(preset_id, "Agent domain catalog sealing failed"))?,
         );
-        if let Some(registration) =
-            context.lookup_local::<rsi_agent_session_protocol::ReferenceCodecRegistrationContract>()
-        {
-            registration
-                .install(
-                    self.domains
-                        .as_ref()
-                        .expect("sealed domains")
-                        .reference_codecs(),
-                )
-                .map_err(|_| {
-                    unavailable(preset_id, "Domain reference codec registration failed")
-                })?;
-        }
         self.contributions = Some(
             self.contribution_stage
                 .seal()
@@ -662,47 +729,127 @@ impl CompositionState {
         preset_id: &AgentPresetId,
         seed: Option<&rsi_agent_composition_protocol::AgentGenerationSeed>,
     ) -> rsi_agent_composition_protocol::Result<AgentCompositionPin> {
+        let prepared = self.prepare(preset_id).await?;
+        match seed {
+            Some(seed) => {
+                rsi_agent_composition_protocol::AgentGenerationCandidate::build(
+                    Box::new(GenerationCandidate {
+                        state: Arc::clone(self),
+                        prepared,
+                    }),
+                    seed,
+                )
+                .await
+            }
+            None => self.build_prepared(prepared, None).await,
+        }
+    }
+
+    async fn prepare(
+        self: &Arc<Self>,
+        preset_id: &AgentPresetId,
+    ) -> rsi_agent_composition_protocol::Result<PreparedGeneration> {
         let row = self.row(preset_id)?;
+        let flight = {
+            let mut preparing = row.preparing.lock().expect("preparation flight poisoned");
+            if let Some(flight) = preparing.upgrade() {
+                flight
+            } else {
+                let state = self.clone();
+                let row = row.clone();
+                let preset_id = preset_id.clone();
+                let flight = Arc::new(
+                    async move { state.prepare_source(preset_id, row).await }
+                        .boxed()
+                        .shared(),
+                );
+                *preparing = Arc::downgrade(&flight);
+                flight
+            }
+        };
+        flight.as_ref().clone().await
+    }
+
+    async fn prepare_source(
+        self: &Arc<Self>,
+        preset_id: AgentPresetId,
+        row: Arc<PresetRow>,
+    ) -> rsi_agent_composition_protocol::Result<PreparedGeneration> {
+        let prepare_slot = tokio::select! {
+            () = self.shutdown.cancelled() => return Err(AgentCompositionError::ShuttingDown),
+            permit = Arc::clone(&self.prepare_slots).acquire_owned() => {
+                permit.map_err(|_| AgentCompositionError::ShuttingDown)?
+            },
+        };
+
+        let source = Arc::clone(&self.source);
+        let compile_row = row.clone();
+        let compile_preset_id = preset_id.clone();
+        let compilation = blocking_with_admission(
+            self.executor.clone(),
+            prepare_slot,
+            move || -> rsi_agent_composition_protocol::Result<_> {
+                let snapshot = source.snapshot().map_err(|_| {
+                    unavailable(&compile_preset_id, "Agent catalog snapshot unavailable")
+                })?;
+                let candidate = snapshot
+                    .presets
+                    .compile_shared(&compile_preset_id)
+                    .map_err(|error| preset_unavailable(&compile_preset_id, &error))?;
+                let compiled = compile_row.selection(&snapshot, candidate.clone())?;
+                let program_digest = compiled.program_digest.clone();
+                let selection = compiled.selection.clone();
+                Ok((snapshot, candidate, program_digest, selection))
+            },
+        );
+        let candidate = compilation
+            .await
+            .map_err(|_| unavailable(&preset_id, "Agent Profile compilation task failed"))?;
+        let (snapshot, candidate, program_digest, selection) = candidate?;
+        Ok(PreparedGeneration {
+            preset_id,
+            row,
+            snapshot,
+            candidate,
+            program_digest,
+            selection,
+        })
+    }
+
+    async fn build_prepared(
+        self: &Arc<Self>,
+        prepared: PreparedGeneration,
+        seed: Option<&rsi_agent_composition_protocol::AgentGenerationSeed>,
+    ) -> rsi_agent_composition_protocol::Result<AgentCompositionPin> {
+        let PreparedGeneration {
+            preset_id,
+            row,
+            snapshot,
+            candidate,
+            program_digest,
+            selection,
+        } = prepared;
         let singleflight = tokio::select! {
+            biased;
             () = self.shutdown.cancelled() => return Err(AgentCompositionError::ShuttingDown),
             guard = Arc::clone(&row.build).lock_owned() => guard,
         };
-        if self.shutdown.is_cancelled() {
-            return Err(AgentCompositionError::ShuttingDown);
-        }
         let build_slot = tokio::select! {
+            biased;
             () = self.shutdown.cancelled() => return Err(AgentCompositionError::ShuttingDown),
             permit = Arc::clone(&self.build_slots).acquire_owned() => {
                 permit.map_err(|_| AgentCompositionError::ShuttingDown)?
             },
         };
-
-        let snapshot = self
-            .source
-            .snapshot()
-            .map_err(|_| unavailable(preset_id, "Agent catalog snapshot unavailable"))?;
-        let inputs = Arc::new(AgentGenerationInputs::new(
-            match seed {
-                Some(seed) => seed.clone(),
-                None => snapshot
-                    .seeds
-                    .clone()
-                    .map_err(|reason| unavailable(preset_id, reason))?,
-            },
-            seed.is_some(),
-        ));
-        let presets = snapshot.presets.clone();
-        let compile_preset_id = preset_id.clone();
-        let compilation = blocking_with_build_admission(
-            self.executor.clone(),
-            singleflight,
-            build_slot,
-            move || presets.compile(&compile_preset_id),
-        );
-        let (candidate, singleflight, build_slot) = compilation
-            .await
-            .map_err(|_| unavailable(preset_id, "Agent Profile compilation task failed"))?;
-        let candidate = candidate.map_err(|error| preset_unavailable(preset_id, &error))?;
+        let preset_id = &preset_id;
+        let seed_value = match seed {
+            Some(seed) => seed.clone(),
+            None => snapshot
+                .seeds
+                .clone()
+                .map_err(|reason| unavailable(preset_id, reason))?,
+        };
+        let inputs = Arc::new(AgentGenerationInputs::new(seed_value, seed.is_some()));
         if self.shutdown.is_cancelled() {
             return Err(AgentCompositionError::ShuttingDown);
         }
@@ -719,26 +866,28 @@ impl CompositionState {
                 .flatten()
                 .find(|generation| {
                     generation.identity.matches(
-                        candidate.source_digest(),
+                        &program_digest,
                         &snapshot.contributions,
                         &inputs,
+                        &selection,
                     )
                 })
                 .cloned()
         };
         if let Some(generation) = current {
-            return generation.pin();
+            return Ok(generation.pin.clone());
         }
 
         let manifest = Arc::new(snapshot.manifest(&candidate.snapshot())?);
         let resolver: Arc<dyn ProfileResolver> = snapshot.contributions.clone();
-        let generation_plan = ProfileGenerationPlan::resolve(candidate, resolver)
+        let generation_plan = ProfileGenerationPlan::resolve((*candidate).clone(), resolver)
             .map_err(|error| profile_unavailable(preset_id, &error))?;
         let identity = snapshot::GenerationIdentity::new(
-            generation_plan.source_digest(),
+            &program_digest,
             Arc::clone(&snapshot.contributions),
             &inputs,
             manifest,
+            selection,
         );
         let cancellation = self.shutdown.child_token();
         let mut cancel_on_drop = CancelBuildOnDrop::new(cancellation.clone());
@@ -911,21 +1060,29 @@ impl CompositionState {
         if !inner.accepting {
             return Err(AgentCompositionError::ShuttingDown);
         }
-        if let Some(row) = inner.rows.get(preset_id) {
-            return Ok(Arc::clone(row));
+        if let Some(row) = inner.rows.get(preset_id).cloned() {
+            inner.recent.retain(|id| id != preset_id);
+            inner.recent.push_back(preset_id.clone());
+            return Ok(row);
         }
+        let mut retired = None;
         if inner.rows.len() >= MAXIMUM_CURRENT_PRESETS {
-            let evictable = inner.rows.iter().find_map(|(id, row)| {
+            let evictable = inner.recent.iter().find_map(|id| {
+                let row = &inner.rows[id];
                 (Arc::strong_count(row) == 1 && row.is_evictable()).then(|| id.clone())
             });
             if let Some(evictable) = evictable {
-                inner.rows.remove(&evictable);
+                retired = inner.rows.remove(&evictable);
+                inner.recent.retain(|id| id != &evictable);
             } else {
                 return Err(AgentCompositionError::Capacity);
             }
         }
         let row = Arc::new(PresetRow::default());
         inner.rows.insert(preset_id.clone(), Arc::clone(&row));
+        inner.recent.push_back(preset_id.clone());
+        drop(inner);
+        drop(retired);
         Ok(row)
     }
 
@@ -962,17 +1119,27 @@ impl CompositionState {
                     state: Arc::downgrade(self),
                     executor: self.executor.clone(),
                 });
-                let generation = Arc::new(Generation {
-                    pin: OnceLock::new(),
+                let scope_key = owner
+                    .record
+                    .as_ref()
+                    .expect("published generation scope")
+                    .scope
+                    .key()
+                    .clone();
+                let pin = AgentCompositionPin::new(
                     preset_id,
-                    identity,
+                    identity.effective_digest.clone(),
                     tools,
                     context_builder,
-                    prompt,
                     domains,
                     contributions,
                     owner,
-                });
+                )
+                .expect("internally hashed generation identity is valid SHA-256")
+                .with_manifest(identity.manifest.clone())
+                .with_selection(identity.selection.clone())
+                .with_prompt_assembler(prompt, scope_key);
+                let generation = Arc::new(Generation { pin, identity });
                 let mut current = row.current.lock().expect("composition row poisoned");
                 let mut previous = Vec::new();
                 for slot in current.iter_mut() {
@@ -992,7 +1159,7 @@ impl CompositionState {
         match published {
             Ok((generation, previous)) => {
                 drop(previous);
-                generation.pin()
+                Ok(generation.pin.clone())
             }
             Err((error, unpublished)) => {
                 let _clean = unpublished.rollback().await;
@@ -1019,6 +1186,10 @@ impl CompositionState {
             inner.accepting = false;
         }
         self.shutdown.cancel();
+        let _preparations = Arc::clone(&self.prepare_slots)
+            .acquire_many_owned(u32::try_from(MAXIMUM_CONCURRENT_BUILDS).unwrap())
+            .await
+            .map_err(|_| "Agent composition preparation admission closed".to_owned())?;
         let all_build_slots = Arc::clone(&self.build_slots)
             .acquire_many_owned(
                 u32::try_from(MAXIMUM_CONCURRENT_BUILDS)
@@ -1038,6 +1209,7 @@ impl CompositionState {
                 .flatten()
                 .collect::<Vec<_>>();
             inner.rows.clear();
+            inner.recent.clear();
             current
         };
         drop(current);
@@ -1068,18 +1240,20 @@ impl CompositionState {
     }
 }
 
-async fn blocking_with_build_admission<T, F>(
+async fn blocking_with_admission<T, F>(
     executor: tokio::runtime::Handle,
-    singleflight: OwnedMutexGuard<()>,
-    build_slot: OwnedSemaphorePermit,
+    permit: OwnedSemaphorePermit,
     operation: F,
-) -> std::result::Result<(T, OwnedMutexGuard<()>, OwnedSemaphorePermit), tokio::task::JoinError>
+) -> std::result::Result<T, tokio::task::JoinError>
 where
     T: Send + 'static,
     F: FnOnce() -> T + Send + 'static,
 {
     executor
-        .spawn_blocking(move || (operation(), singleflight, build_slot))
+        .spawn_blocking(move || {
+            let _permit = permit;
+            operation()
+        })
         .await
 }
 
@@ -1188,6 +1362,42 @@ mod tests {
     use std::sync::atomic::{AtomicBool, Ordering};
     use std::time::Duration;
 
+    #[test]
+    fn unchanged_compiled_tree_reuses_identity_but_changed_code_changes_selection() {
+        let compiler = rsi_meta_profile::ProfileCompiler::new(
+            rsi_meta_profile::ProfileEnvironment::without_paths("test", BTreeMap::new()).unwrap(),
+            rsi_meta_profile::ProfileLimits::default(),
+        );
+        let candidate = Arc::new(
+            compiler
+                .compile(&rsi_meta_profile::ProfileProgram::from_profile(
+                    rsi_meta_profile::Profile::new([]),
+                ))
+                .unwrap(),
+        );
+        let presets = AgentPresetCatalog::new(
+            rsi_agent_presets::AgentPresetCatalogConfig::new(AgentPresetId::new("test").unwrap()),
+            rsi_agent_presets::AgentPresetProfileCompiler::new(
+                compiler,
+                std::iter::empty::<String>(),
+            ),
+        )
+        .unwrap();
+        let snapshot =
+            AgentCompositionSnapshot::new(presets, AgentContributionCatalog::new([]).unwrap());
+        let row = PresetRow::default();
+        let first = row.selection(&snapshot, candidate.clone()).unwrap();
+        assert!(Arc::ptr_eq(
+            &first,
+            &row.selection(&snapshot, candidate.clone()).unwrap()
+        ));
+        let changed = snapshot
+            .with_code_selection(Arc::from(b"new".as_slice()))
+            .unwrap();
+        let next = row.selection(&changed, candidate).unwrap();
+        assert_ne!(first.selection, next.selection);
+    }
+
     #[tokio::test]
     async fn preset_row_is_not_evictable_while_its_singleflight_guard_is_held() {
         let row = PresetRow::default();
@@ -1201,9 +1411,7 @@ mod tests {
     }
 
     #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
-    async fn cancelled_blocking_work_retains_singleflight_and_global_admission_until_exit() {
-        let singleflight = Arc::new(AsyncMutex::new(()));
-        let singleflight_guard = Arc::clone(&singleflight).lock_owned().await;
+    async fn cancelled_blocking_work_retains_preparation_admission_until_exit() {
         let build_slots = Arc::new(Semaphore::new(1));
         let build_slot = Arc::clone(&build_slots).acquire_owned().await.unwrap();
         let entered = Arc::new(AtomicBool::new(false));
@@ -1211,9 +1419,8 @@ mod tests {
         let operation_entered = Arc::clone(&entered);
         let operation_release = Arc::clone(&release);
 
-        let work = tokio::spawn(blocking_with_build_admission(
+        let work = tokio::spawn(blocking_with_admission(
             tokio::runtime::Handle::current(),
-            singleflight_guard,
             build_slot,
             move || {
                 operation_entered.store(true, Ordering::Release);
@@ -1232,15 +1439,12 @@ mod tests {
 
         work.abort();
         assert!(work.await.unwrap_err().is_cancelled());
-        assert!(Arc::clone(&singleflight).try_lock_owned().is_err());
         assert_eq!(build_slots.available_permits(), 0);
 
         release.store(true, Ordering::Release);
         tokio::time::timeout(Duration::from_secs(2), async {
             loop {
-                if build_slots.available_permits() == 1
-                    && Arc::clone(&singleflight).try_lock_owned().is_ok()
-                {
+                if build_slots.available_permits() == 1 {
                     break;
                 }
                 tokio::task::yield_now().await;

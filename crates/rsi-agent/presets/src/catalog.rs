@@ -479,9 +479,18 @@ impl AgentPresetCatalog {
     /// Returns a bounded redacted [`PresetError::BrokenPreset`] when the
     /// selected source or one of its transitive includes no longer compiles.
     pub fn compile(&self, id: &AgentPresetId) -> Result<ProfileCandidate> {
+        self.compile_shared(id)
+            .map(|candidate| (*candidate).clone())
+    }
+
+    /// Reuses an immutable compiled tree only after checking its exact source bytes.
+    ///
+    /// # Errors
+    /// Rejects absent, unreadable or invalid current sources, including on cache hits.
+    pub fn compile_shared(&self, id: &AgentPresetId) -> Result<Arc<ProfileCandidate>> {
         let preset = self.resolve_selected(id)?;
         self.compiler
-            .compile(preset.path.join(COMPOSITION_FILE))
+            .compile_shared(&preset.path.join(COMPOSITION_FILE))
             .map_err(|reason| PresetError::BrokenPreset {
                 id: id.as_str().to_owned(),
                 reason,

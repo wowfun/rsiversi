@@ -53,11 +53,8 @@ impl SessionResourceReader for AgentAdapter {
             .next()
             .ok_or_else(|| invalid("Session journal is unavailable"))?;
         let journal = self.handle.decode(&view.snapshot).map_err(invalid)?;
-        if journal.artifact_sha256 != self.artifact_sha256 {
-            return Err(invalid("journal artifact cohort mismatch"));
-        }
         let text = if id == "head" {
-            serde_json::to_string(&serde_json::json!({"revision":view.head.revision,"artifact_sha256":journal.artifact_sha256,"segments":journal.segments,"checkpoint":journal.checkpoint})).map_err(invalid)?
+            serde_json::to_string(&serde_json::json!({"revision":view.head.revision,"segments":journal.segments,"checkpoint":journal.checkpoint})).map_err(invalid)?
         } else {
             let segment = journal
                 .segments

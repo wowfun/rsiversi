@@ -26,8 +26,12 @@ publication. Small operations therefore do not consume one permanent segment eac
 The optional `AgentAdapter` executes an admitted external Tool under the
 Kernel-issued caller authority. The generic `agent.load` / `agent.tool` wire
 carries bounded journal bytes and an opaque extension checkpoint; interpretation
-belongs to the external plugin. Its retained result, effect identity, arguments
-and prepared journal form one settlement candidate. The pure settlement callback
+belongs to the external plugin.
+Loading precedes business execution: a disconnect during `agent.load.*` is an
+execution-preparation failure, not an uncertain Tool effect. Generation validation
+still reports a closed connection as unavailable rather than incompatible state.
+Its retained result, effect identity, arguments and prepared journal form one
+settlement candidate. The pure settlement callback
 only returns that candidate. Executor's publication observer verifies the exact
 Session, effect, result and domain replacement before acknowledging the process.
 Unconfirmed operations remain fenced; runtime result retirement does not clear
@@ -35,12 +39,17 @@ them. Projection reads the committed checkpoint and performs no process I/O.
 Before a later Tool, an exact canonical receipt can confirm a lost notification.
 An absent receipt permits rollback only after the original Turn has a durable
 terminal boundary and a second lookup still proves absence. Neither path replays
-plugin execution. The journal's cohort digest must equal the adapter's pinned
-artifact identity before any event restoration or external callback.
+plugin execution. The journal records extension data independently of code selection;
+the generation recipe owns the exact executable artifact. A replacement's generation
+validator loads its complete committed journal before Kernel publishes selection.
+Failure leaves the previous generation and durable journal unchanged.
 Before transferring history, `agent.load.begin` identifies the Session, creation
 time, local working directory, domain revision and event count. A resident,
 quiescent mirror of this positive revision replies `current` and is retained
-for the callback. On `transfer`, the host restores each authenticated CAS
+for the callback. The required `reload` flag forces transfer during candidate
+validation, even for a revision already loaded by an abandoned candidate. This
+preloads the proposed revision without claiming publication; after proven commit,
+ordinary calls use `reload: false` and reuse that mirror. On `transfer`, the host restores each authenticated CAS
 segment, sends ordered `agent.load.events` pages, then sends the checkpoint in
 `agent.load.finish`. Draft revisions stay zero across edits and are transferred
 in full. A remote execution
@@ -49,7 +58,14 @@ refuse that operation when the path is absent. The process publishes the
 replacement mirror only after complete count and event validation. A page
 does not acknowledge a durable mutation. Incomplete loads remain invisible and
 consume the process mirror budget until explicit load cancellation or generation disposal.
-A failed transfer sends `agent.load.abort`; this releases only its unpublished pages.
+A failed or dropped transfer owns `agent.load.abort` through a two-second
+best-effort deadline, including cancellation during CAS reads. A bounded per-Session
+load lane stays held through that cleanup so the next load cannot be aborted by
+its predecessor. It covers only mirror transfer, not business callbacks or questions;
+this releases only its unpublished pages. Cancellation or a disconnected peer
+closes generation validation without labeling the journal invalid. Transport
+capacity and Store CAS read pressure remain capacity failures, allowing a later
+attempt after resources recover. Rejected content retains its diagnostic.
 The Tool reply distinguishes a staged candidate from a definite rejection. A lost
 reply retains the exact originating effect before the RPC starts. After its Turn
 ends, canonical absence permits `operation.abandon` to discard only that effect's
@@ -58,10 +74,11 @@ tentative mirror. Neither a diagnostic string nor a missing reply proves rejecti
 `AgentAdapterFactory` is an ordinary Agent-scoped plugin. It freezes the external
 `agent.catalog` version-five Tool definitions and commands during activation, registers one
 journal domain plus settlement/projection contributions, and retires registrations
-with the generation. The catalog is bounded to 64 Tools. Configuration pins the
-artifact cohort; a durable journal from another cohort cannot be executed.
-Packages require `rsi.extension.agent` version 8, so an older host rejects their
-installation before selection; the generic process transport remains version 1.
+with the generation. The catalog is bounded to 64 Tools. Adapter configuration is
+null; its process connection already belongs to the selected executable generation.
+The journal uses the version-2 built-in envelope, with no artifact field.
+Packages require `rsi.extension.agent` version 9, so an older host rejects their
+installation before selection; the generic process transport uses version 2.
 
 Human questions require an explicitly installed Agent question channel. Each
 outbound Tool call temporarily binds its exact caller and exclusive-final parking
@@ -134,6 +151,10 @@ unreleased transfer expires after 35 seconds, beyond Kernel's 30-second deadline
 
 Idle staging locks and confirmed Rust publication entries are reclaimed before
 capacity admission. Unconfirmed and unobserved outcomes remain retained.
+One generation-wide budget admits at most 256 unresolved Tool, Step and Command
+operations combined. A permit is reserved before dispatch, moves from unobserved
+to prepared ownership, and is released only after definite rejection or confirmed
+publication. Resource exhaustion never evicts an uncertain operation.
 A process may evict a settled mirror after its receipt, but must retain a newly
 loaded mirror until its operation settles, plus active, queued, reviewing and
 staged operations. A receipt for an evicted mirror returns `{"state":"unloaded"}`;
@@ -143,7 +164,7 @@ callback replay and does not discard an unresolved tentative suffix.
 
 The generic `rsi.extension.journal` Session resource exposes a read-only head and
 individual authenticated event segments. `head` returns the captured domain
-revision, artifact digest and segment descriptors. A digest request is admitted
+revision, checkpoint and segment descriptors. A digest request is admitted
 only while that segment belongs to this Session's canonical journal; it cannot
 read arbitrary CAS data. A rewritten tail can invalidate an old head; clients
 must reload the head instead of mixing histories. Reads use the Session resource

@@ -1,5 +1,16 @@
 # rsi-agent-session-protocol
 
+Domain control records have a 2 MiB complete encoded bound, including command
+inputs, invocation arguments, removals and the control envelope. SQLite Domain
+reads use that same protocol bound. A Domain commit admits at most 1,024 distinct
+durable references across all its snapshots, before it can become a publication.
+
+`DomainStateUpdate` encodes both expected and successor revisions. Ordinary
+mutations advance once. Generation commits may retain a nonzero revision or
+introduce an absent Domain at a nonzero revision; Store admission checks the
+canonical state and control sequence under the
+[generation contract](../docs/subsystems/composition-generations.md).
+
 Runtime context claims contain text only, like plugin context claims. Their
 distinct provenance selects the User role and the entered-snapshot projection.
 
@@ -35,7 +46,7 @@ these are not execution authority. Empty blocks and empty message content are
 valid preparation results even though fresh ingress requires meaningful input.
 The serialized entered list has a 32 MiB prepared-input envelope. Typed
 construction and deserialization validate it; safe-Rust consumers borrow it
-without repeating serialization. Session format 37 retains verbatim files as
+without repeating serialization. Session format 38 retains verbatim files as
 typed `FileRef` content, independently of image and conversation references.
 Image blocks may include optional display metadata independent of the raster identity. File bytes and provider-local paths do not enter Facts. It separates `InputMessageClaimed`
 and `ToolContextsClaimed` from `StepInputsPrepared`. Direct `TurnAccepted` text is
@@ -103,19 +114,21 @@ bounded like other non-human Agent messages and cannot carry execution overrides
 Command inputs retain one or more typed text, image or file blocks in their original
 order. Their external admission owner verifies referenced objects; the protocol
 validates descriptors, provenance and aggregate bounds without filesystem I/O.
-Session format 37 admits this content under both pending and claimed command
+Session format 38 admits this content under both pending and claimed command
 provenance. Command input grants no execution overrides or frozen-reference authority.
 
-`ExtensionJournal` is the built-in version-1 envelope for a trusted process
+`ExtensionJournal` is the built-in version-2 envelope for a trusted process
 extension's event journal. It is one typed domain (`rsi.extension-journal`),
 not a second Session store. Immutable Agent-CAS segments hold extension data;
 the bounded domain records their contiguous event ranges, exact content hashes,
-artifact identity, and an optional recovery checkpoint. Checkpoint JSON cannot
+and an optional recovery checkpoint. Checkpoint JSON cannot
 carry implicit Agent references: every retained CAS or Session edge must occur
 in the envelope's typed reference fields. Up to 256 segments and 64 MiB of
 segment bytes are admitted; a consumer must reject capacity before effects.
 The Store understands these reference semantics without an installed extension.
-Execution still requires the original artifact and its semantic adapter.
+The current composition owns code selection; journal data can be adopted by a
+replacement only after its semantic adapter validates it. Old envelope versions
+and artifact-binding fields are unsupported.
 
 `MAXIMUM_LIVE_TURNS` bounds concurrent nonterminal Turns in one Session. Kernel
 admission and durable timing projections share this cardinality limit.
@@ -160,6 +173,9 @@ settlement. Intermediate retry attempts have `retain_context: false`; final
 partial text/reasoning is retained with an interruption marker and no tool
 authority. Request, source, usage and replay evidence are projected from this
 single canonical stream.
+Invalid model terminal grammar becomes a typed Protocol failure before that
+terminal enters the evidence. The accepted prefix and usage settle normally;
+invalid terminal data grants neither Tool authority nor additional retry policy.
 
 Format 23 gives every frozen reference snapshot a bounded `capture_id`, independent
 of its content address, so pending captures can be released independently.
@@ -250,6 +266,9 @@ are at most 64 unique producers, each value fits 64 KiB of canonical JSON, each
 failure fits 4 KiB of diagnostic text, and the complete envelope fits 5 MiB.
 Decode validates all of those bounds and identities. Consumers advance both
 durable cursors monotonically; a durable view never regresses to a draft.
+The optional bounded `generation_rejection` is current resident replacement
+status, not durable history or a producer value at that cut. It can change without
+advancing either cursor and clears after adoption or return to the selected source.
 
 ## Session commands
 
@@ -274,7 +293,7 @@ request identity, and a draft revision cannot appear in a durable command.
 Command controls contain no execution Facts and cannot claim a Turn's free
 mutation lane. Their consumers obtain Session authority through the owning
 Kernel service; serialized identities alone confer no authority. Only Header
-format 37 is accepted; all other formats are unsupported. Header protection is
+format 38 is accepted; all other formats are unsupported. Header protection is
 part of this format's immutable shape. The
 [SQLite contract](../store-sqlite/README.md) owns the exact database version;
 earlier authoritative formats are rejected without rewriting their files.

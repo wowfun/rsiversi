@@ -493,7 +493,8 @@ impl Driver {
                                     .contribute(context, settled, run.token.clone())
                                     .await
                             }
-                            ContributionKind::ToolPolicy(_)
+                            ContributionKind::GenerationValidation(_)
+                            | ContributionKind::ToolPolicy(_)
                             | ContributionKind::ToolAround(_)
                             | ContributionKind::ForkTransform(_)
                             | ContributionKind::ToolSettlement(_)

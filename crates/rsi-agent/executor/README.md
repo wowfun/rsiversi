@@ -1,5 +1,20 @@
 # rsi-agent-executor
 
+At each new Conversation request series, the executor asks Kernel for a prepared
+generation update. It reconstructs Context from framework history with the new
+builder before committing selection. An unchanged source adds no history or Domain
+read. Candidate reconstruction failure preserves the old Context and pin. Retries
+and every Tool call from one model response retain the same captured generation.
+After the response batch and stopping callbacks settle, the executor releases its
+request catalog before capturing the next one. A source can therefore drain old
+views to replace plugins without waiting on the request that is acquiring its
+replacement.
+
+Generation refresh preserves cancellation and shutdown outcomes. Store availability
+and capacity failures interrupt the Turn; invalid durable state remains fatal.
+Only candidate content or Context reconstruction errors reject the candidate while
+continuing with the previous pin.
+
 Native prompt assembly follows ordinary BeforeStep callbacks and their Tool
 intersection, but precedes final input preparation. It includes Header/persona once,
 records `StepPrompt::Assembled`, and contributes runtime context to the same complete
@@ -44,6 +59,10 @@ contributors. Their policy/review reports `DangerFullAccess` because the trusted
 application process runs with local operator authority, independently of native
 process confinement. Application origin alone does not require approval; the
 application's own pipeline may additionally ask or refuse before its body.
+A registration requiring full access compares against the actual Turn mode,
+independently of that process's execution evidence. Other modes require native
+per-call approval before any Tool body starts; this combines with ordinary
+policy requirements into one review and never grants a persistent permission.
 
 A policy denial or declined approval settles only that Tool call. Executor
 stages its exact `ToolRejected` Fact without Tool intent, start or body, then

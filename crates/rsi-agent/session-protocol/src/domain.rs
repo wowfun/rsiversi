@@ -19,6 +19,8 @@ pub const MAXIMUM_DOMAIN_STATE_BYTES: usize = 256 * 1024;
 pub const MAXIMUM_SESSION_DOMAINS: usize = 64;
 /// Maximum encoded bytes in one frozen initial domain set.
 pub const MAXIMUM_DOMAIN_BASELINE_BYTES: usize = 1024 * 1024;
+/// Maximum complete Domain control record, including command input and provenance.
+pub const MAXIMUM_DOMAIN_CONTROL_BYTES: usize = 2 * 1024 * 1024;
 
 /// Exact domain name and semantic state codec version.
 #[derive(Clone, Debug, Eq, Hash, Ord, PartialEq, PartialOrd, Serialize)]
@@ -67,7 +69,7 @@ impl<'de> Deserialize<'de> for DomainIdentity {
     }
 }
 
-/// Checked per-domain revision. Zero denotes absence; the first commit has revision one.
+/// Checked per-domain revision. Zero denotes absence; initial generation uses one.
 #[derive(Clone, Copy, Debug, Default, Deserialize, Eq, Ord, PartialEq, PartialOrd, Serialize)]
 #[serde(transparent)]
 pub struct DomainRevision(u64);
@@ -174,13 +176,30 @@ impl<'de> Deserialize<'de> for DomainStateValue {
 pub struct DomainSnapshot {
     identity: DomainIdentity,
     state: DomainStateValue,
+    references: crate::ReferenceCollector,
 }
 
 impl DomainSnapshot {
     /// Pairs already bounded values without asserting codec availability or semantic validity.
-    pub const fn new(identity: DomainIdentity, state: DomainStateValue) -> Self {
-        Self { identity, state }
+    pub fn new(identity: DomainIdentity, state: DomainStateValue) -> Self {
+        Self {
+            identity,
+            state,
+            references: crate::ReferenceCollector::default(),
+        }
     }
+    /// Attaches canonical references derived by the current owning Domain definition.
+    /// This constructor grants no execution or mutation authority.
+    #[must_use]
+    pub fn with_references(mut self, references: crate::ReferenceCollector) -> Self {
+        self.references = references;
+        self
+    }
+    /// Canonical references usable without loading the Domain plugin.
+    pub const fn references(&self) -> &crate::ReferenceCollector {
+        &self.references
+    }
+
     /// Returns the required codec identity.
     pub const fn identity(&self) -> &DomainIdentity {
         &self.identity
@@ -189,13 +208,16 @@ impl DomainSnapshot {
     pub const fn state(&self) -> &DomainStateValue {
         &self.state
     }
-    /// Returns the canonical snapshot size, including its identity and state wrapper.
+    /// Returns the canonical snapshot size using the state's admitted byte count.
     pub fn encoded_len(&self) -> Result<usize> {
-        compact_json_len(self)
+        Ok(br#"{"identity":,"state":,"references":}"#.len()
+            + compact_json_len(&self.identity)?
+            + self.state.encoded_len()
+            + compact_json_len(&self.references)?)
     }
     /// Canonical complete snapshot identity, including the codec name and version.
     pub fn sha256(&self) -> Result<String> {
-        payload_digest(b"rsi-domain-snapshot-v1\0", self)
+        payload_digest(b"rsi-domain-snapshot-v2\0", self)
     }
 }
 
@@ -205,6 +227,18 @@ impl DomainSnapshot {
 pub enum DomainMutationSource {
     /// Frozen complete initial domain set in the fresh Session commit.
     Baseline,
+    /// Kernel commits one executable selection with changed states and explicit removals.
+    Generation {
+        /// Diagnostic executable identity retained by this canonical commit.
+        selection: crate::GenerationSelection,
+        /// Absent for fresh admission; otherwise the settled boundary's owning Turn.
+        turn_id: Option<crate::TurnId>,
+    },
+    /// Current-plugin recovery of an existing Session without replaying a Turn.
+    Recovery {
+        /// Diagnostic current executable identity.
+        selection: crate::GenerationSelection,
+    },
     /// Authenticated application command routed by its owning Session service.
     Command {
         /// Exact logical request selected by Kernel dispatch, including CAS and arguments.
@@ -229,9 +263,45 @@ pub enum DomainMutationSource {
 }
 
 impl DomainMutationSource {
+    /// Fresh admission, before any Domain state exists.
+    pub const fn is_initial(&self) -> bool {
+        matches!(
+            self,
+            Self::Baseline | Self::Generation { turn_id: None, .. }
+        )
+    }
+
+    /// A generation selection with changed states and explicit removals.
+    pub const fn is_generation(&self) -> bool {
+        matches!(self, Self::Generation { .. } | Self::Recovery { .. })
+    }
+
+    /// Diagnostic digest selected by a generation commit.
+    pub const fn generation_selection(&self) -> Option<&crate::GenerationSelection> {
+        match self {
+            Self::Generation { selection, .. } | Self::Recovery { selection } => Some(selection),
+            _ => None,
+        }
+    }
+
+    /// Turn attributed by Kernel admission, if this mutation occurs during execution.
+    pub const fn turn_id(&self) -> Option<&crate::TurnId> {
+        match self {
+            Self::Turn { turn_id }
+            | Self::Generation {
+                turn_id: Some(turn_id),
+                ..
+            } => Some(turn_id),
+            _ => None,
+        }
+    }
+
     fn validate(&self) -> Result<()> {
         match self {
-            Self::Baseline | Self::Turn { .. } => Ok(()),
+            Self::Baseline
+            | Self::Turn { .. }
+            | Self::Generation { .. }
+            | Self::Recovery { .. } => Ok(()),
             Self::Command { invocation } | Self::Continuation { invocation, .. } => {
                 if let Self::Continuation {
                     owner,
@@ -265,15 +335,39 @@ impl DomainMutationSource {
 #[serde(deny_unknown_fields)]
 pub struct DomainStateUpdate {
     expected_revision: DomainRevision,
+    revision: DomainRevision,
     snapshot: DomainSnapshot,
 }
 
 impl DomainStateUpdate {
     /// Creates a replacement whose successor revision is representable.
     pub fn new(expected_revision: DomainRevision, snapshot: DomainSnapshot) -> Result<Self> {
-        expected_revision.next()?;
+        Self::with_revision(expected_revision, expected_revision.next()?, snapshot)
+    }
+    /// Introduces an absent Domain at its generation's canonical control sequence.
+    pub fn introduced(control_seq: u64, snapshot: DomainSnapshot) -> Result<Self> {
+        Self::with_revision(
+            DomainRevision::new(0),
+            DomainRevision::new(control_seq),
+            snapshot,
+        )
+    }
+    fn with_revision(
+        expected_revision: DomainRevision,
+        revision: DomainRevision,
+        snapshot: DomainSnapshot,
+    ) -> Result<Self> {
+        if revision.get() == 0
+            || (expected_revision.get() != 0
+                && expected_revision.get().checked_add(1) != Some(revision.get()))
+        {
+            return Err(SessionError::Invalid(
+                "invalid domain successor revision".into(),
+            ));
+        }
         Ok(Self {
             expected_revision,
+            revision,
             snapshot,
         })
     }
@@ -282,8 +376,8 @@ impl DomainStateUpdate {
         self.expected_revision
     }
     /// Returns the committed successor, checked at construction and decode.
-    pub fn revision(&self) -> DomainRevision {
-        DomainRevision::new(self.expected_revision.get() + 1)
+    pub const fn revision(&self) -> DomainRevision {
+        self.revision
     }
     /// Returns the full state and its exact codec identity.
     pub const fn snapshot(&self) -> &DomainSnapshot {
@@ -299,10 +393,12 @@ impl<'de> Deserialize<'de> for DomainStateUpdate {
         #[serde(deny_unknown_fields)]
         struct Wire {
             expected_revision: DomainRevision,
+            revision: DomainRevision,
             snapshot: DomainSnapshot,
         }
         let wire = Wire::deserialize(deserializer)?;
-        Self::new(wire.expected_revision, wire.snapshot).map_err(serde::de::Error::custom)
+        Self::with_revision(wire.expected_revision, wire.revision, wire.snapshot)
+            .map_err(serde::de::Error::custom)
     }
 }
 
@@ -433,6 +529,7 @@ pub struct DomainStateCommit {
     request_id: Option<crate::DomainRequestId>,
     source: DomainMutationSource,
     updates: Vec<DomainStateUpdate>,
+    removed: Vec<DomainIdentity>,
     fact_span: Option<DomainFactSpan>,
     command_inputs: Vec<crate::CommandMessage>,
     request_sha256: String,
@@ -457,10 +554,10 @@ impl DomainStateCommit {
         inputs: Vec<crate::CommandMessage>,
     ) -> Result<Self> {
         source.validate()?;
-        let baseline = matches!(source, DomainMutationSource::Baseline);
-        if baseline != request_id.is_none() {
+        let baseline = source.is_initial();
+        if (baseline || source.is_generation()) != request_id.is_none() {
             return Err(SessionError::Invalid(
-                "only a domain baseline omits a request identity".into(),
+                "only a baseline or Kernel generation commit omits a request identity".into(),
             ));
         }
         if let DomainMutationSource::Command { invocation }
@@ -492,10 +589,21 @@ impl DomainStateCommit {
             ));
         }
         let mut bytes = 0_usize;
+        let mut references = crate::ReferenceCollector::default();
         for update in &updates {
-            if baseline != (update.expected_revision.get() == 0) {
+            references
+                .extend(update.snapshot.references())
+                .map_err(SessionError::Invalid)?;
+            if !source.is_generation() && update.revision != update.expected_revision.next()? {
                 return Err(SessionError::Invalid(
-                    "only a baseline can create domain revision one".into(),
+                    "ordinary domain mutation must advance its revision once".into(),
+                ));
+            }
+            if (baseline && update.expected_revision.get() != 0)
+                || (!baseline && !source.is_generation() && update.expected_revision.get() == 0)
+            {
+                return Err(SessionError::Invalid(
+                    "only a baseline or generation may introduce an absent domain".into(),
                 ));
             }
             bytes = bytes
@@ -513,11 +621,42 @@ impl DomainStateCommit {
             request_id,
             source,
             updates,
+            removed: vec![],
             fact_span: None,
             command_inputs: vec![],
             request_sha256: String::new(),
         }
         .with_command_inputs(inputs)
+    }
+    /// Declares exact removed owners at a generation cut; state remains in history.
+    pub fn with_removed(mut self, removed: Vec<DomainIdentity>) -> Result<Self> {
+        if (!removed.is_empty() && (!self.source.is_generation() || self.source.is_initial()))
+            || removed.len() > MAXIMUM_SESSION_DOMAINS
+            || removed.windows(2).any(|pair| pair[0].id() >= pair[1].id())
+            || removed.iter().any(|id| {
+                self.updates
+                    .iter()
+                    .any(|update| update.snapshot().identity().id() == id.id())
+            })
+        {
+            return Err(SessionError::Invalid(
+                "generation removals must be bounded, sorted, distinct and disjoint from updates"
+                    .into(),
+            ));
+        }
+        self.removed = removed;
+        self.request_sha256 = request_digest(
+            &self.source,
+            &self.updates,
+            &self.removed,
+            self.fact_span.as_ref(),
+            &self.command_inputs,
+        )?;
+        Ok(self)
+    }
+    /// Exact owners removed from the active set by this generation.
+    pub fn removed(&self) -> &[DomainIdentity] {
+        &self.removed
     }
     /// Binds all accompanying Facts of a Turn-origin request to its durable receipt.
     pub fn with_facts<'a>(
@@ -546,6 +685,7 @@ impl DomainStateCommit {
         self.request_sha256 = request_digest(
             &self.source,
             &self.updates,
+            &self.removed,
             self.fact_span.as_ref(),
             &self.command_inputs,
         )?;
@@ -553,34 +693,29 @@ impl DomainStateCommit {
     }
     /// Binds exact command-produced messages to the same atomic control publication.
     pub fn with_command_inputs(mut self, inputs: Vec<crate::CommandMessage>) -> Result<Self> {
-        if self.updates.is_empty() && inputs.is_empty() {
+        if self.updates.is_empty() && inputs.is_empty() && !self.source.is_generation() {
             return Err(SessionError::Invalid(
                 "commit requires a domain replacement or command input".into(),
             ));
         }
-        if !inputs.is_empty()
-            && !matches!(
-                self.source,
-                DomainMutationSource::Baseline | DomainMutationSource::Command { .. }
-            )
+        if !(inputs.is_empty()
+            || self.source.is_initial()
+            || matches!(self.source, DomainMutationSource::Command { .. }))
         {
             return Err(SessionError::Invalid(
-                "only baseline and command commits bind command input".into(),
+                "only initial-state and command commits bind command input".into(),
             ));
         }
         let invocation = match &self.source {
             DomainMutationSource::Command { invocation } => Some(invocation),
             _ => None,
         };
-        crate::CommandMessage::validate_batch(
-            &inputs,
-            invocation,
-            matches!(self.source, DomainMutationSource::Baseline),
-        )?;
+        crate::CommandMessage::validate_batch(&inputs, invocation, self.source.is_initial())?;
         self.command_inputs = inputs;
         self.request_sha256 = request_digest(
             &self.source,
             &self.updates,
+            &self.removed,
             self.fact_span.as_ref(),
             &self.command_inputs,
         )?;
@@ -622,6 +757,7 @@ impl<'de> Deserialize<'de> for DomainStateCommit {
             request_id: Option<crate::DomainRequestId>,
             source: DomainMutationSource,
             updates: Vec<DomainStateUpdate>,
+            removed: Vec<DomainIdentity>,
             fact_span: Option<DomainFactSpan>,
             command_inputs: Vec<crate::CommandMessage>,
             request_sha256: String,
@@ -634,6 +770,9 @@ impl<'de> Deserialize<'de> for DomainStateCommit {
             wire.command_inputs,
         )
         .map_err(serde::de::Error::custom)?;
+        commit = commit
+            .with_removed(wire.removed)
+            .map_err(serde::de::Error::custom)?;
         if wire.fact_span.is_some() && !matches!(commit.source, DomainMutationSource::Turn { .. }) {
             return Err(serde::de::Error::custom(
                 "only a Turn domain request binds Facts",
@@ -643,6 +782,7 @@ impl<'de> Deserialize<'de> for DomainStateCommit {
         commit.request_sha256 = request_digest(
             &commit.source,
             &commit.updates,
+            &commit.removed,
             commit.fact_span.as_ref(),
             &commit.command_inputs,
         )
@@ -659,6 +799,7 @@ impl<'de> Deserialize<'de> for DomainStateCommit {
 fn request_digest(
     source: &DomainMutationSource,
     updates: &[DomainStateUpdate],
+    removed: &[DomainIdentity],
     fact_span: Option<&DomainFactSpan>,
     command_inputs: &[crate::CommandMessage],
 ) -> Result<String> {
@@ -666,14 +807,16 @@ fn request_digest(
     struct Payload<'a> {
         source: &'a DomainMutationSource,
         updates: &'a [DomainStateUpdate],
+        removed: &'a [DomainIdentity],
         facts_sha256: Option<&'a str>,
         command_inputs: &'a [crate::CommandMessage],
     }
     payload_digest(
-        b"rsi-agent-domain-request-v2\0",
+        b"rsi-agent-domain-request-v3\0",
         &Payload {
             source,
             updates,
+            removed,
             facts_sha256: fact_span.map(DomainFactSpan::bodies_sha256),
             command_inputs,
         },

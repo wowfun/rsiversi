@@ -2,6 +2,9 @@
 mod api;
 pub(crate) mod bootstrap;
 mod plugin;
+mod selection;
+#[cfg(test)]
+mod tests;
 use crate::{NativeAddonRecord, NativeAddonStore, StandardAddonBuilder, StandardAddonSet};
 pub(crate) use api::NativeAddonApiFactory;
 pub(crate) use plugin::NativeAddonFactory;
@@ -152,7 +155,11 @@ impl NativeAddonManager {
         base: StandardAddonSet,
         reserved: BTreeSet<String>,
     ) -> rsi_host::Result<Self> {
-        let snapshot = AgentCompositionSnapshot::new(presets.clone(), base.agent_catalog()?);
+        let code = selection::encode(&[])
+            .map_err(|error| rsi_host::HostError::Bootstrap(error.to_string()))?;
+        let snapshot = AgentCompositionSnapshot::new(presets.clone(), base.agent_catalog()?)
+            .with_code_selection(code)
+            .map_err(|error| rsi_host::HostError::Bootstrap(error.to_string()))?;
         Ok(Self {
             store,
             loader,
@@ -232,62 +239,8 @@ impl NativeAddonManager {
                 });
             }
         }
-        validate_selection(&self.base, &before.enabled)?;
-        if before
-            .enabled
-            .iter()
-            .any(|record| self.reserved.contains(record.plugin()))
-        {
-            return Err(NativeAddonUpdateError::Selection(
-                "duplicate linked plugin identity",
-            ));
-        }
-        let mut builder = StandardAddonBuilder::new("rsi.native.local");
-        for record in &before.enabled {
-            self.check_admission()?;
-            let factory = self
-                .loader
-                .load_exact(self.store.artifact_path(record)?, record.artifact_sha256())?;
-            if factory.identity()
-                != &FactoryIdentity::native(record.plugin(), record.artifact_sha256())
-            {
-                return Err(NativeAddonUpdateError::Selection(
-                    "ABI plugin identity differs from manifest",
-                ));
-            }
-            builder
-                .register_resolved(record.scope(), factory)
-                .map_err(|_| NativeAddonUpdateError::Selection("native factory declaration"))?;
-            for key in record.portable_services() {
-                builder
-                    .isolate_agent_portable(key.clone())
-                    .map_err(|_| NativeAddonUpdateError::Selection("Portable isolation"))?;
-            }
-        }
-        let addons = if before.enabled.is_empty() {
-            self.base.clone()
-        } else {
-            let addon = builder
-                .build()
-                .map_err(|_| NativeAddonUpdateError::Selection("native addon declaration"))?;
-            self.base
-                .merged(addon)
-                .map_err(|_| NativeAddonUpdateError::Selection("combined addon catalog"))?
-        };
-        let compiler = crate::agent_preset::native_agent_profile_compiler(
-            &self.paths,
-            self.linux_tools,
-            &self.base,
-            &before.enabled,
-        )
-        .map_err(|_| NativeAddonUpdateError::Selection("Agent compiler declaration"))?;
-        let contributions = addons
-            .agent_catalog()
-            .map_err(|_| NativeAddonUpdateError::Selection("Agent contribution catalog"))?;
-        let snapshot = Arc::new(AgentCompositionSnapshot::new(
-            self.presets.clone().with_compiler(compiler),
-            contributions,
-        ));
+        let addons = self.load_catalog(&before.enabled)?;
+        let snapshot = self.make_snapshot(&self.presets, &before.enabled, &addons)?;
         let after = self.store.snapshot()?;
         if after.enabled != before.enabled {
             return Err(NativeAddonUpdateError::Selection(
@@ -312,6 +265,74 @@ impl NativeAddonManager {
             changed: true,
             selected: before.enabled.len(),
         })
+    }
+
+    fn load_catalog(&self, selected: &[NativeAddonRecord]) -> Result<StandardAddonSet> {
+        validate_selection(&self.base, selected)?;
+        if selected
+            .iter()
+            .any(|record| self.reserved.contains(record.plugin()))
+        {
+            return Err(NativeAddonUpdateError::Selection(
+                "duplicate linked plugin identity",
+            ));
+        }
+        let mut builder = StandardAddonBuilder::new("rsi.native.local");
+        for record in selected {
+            self.check_admission()?;
+            let factory = self
+                .loader
+                .load_exact(self.store.artifact_path(record)?, record.artifact_sha256())?;
+            if factory.identity()
+                != &FactoryIdentity::native(record.plugin(), record.artifact_sha256())
+            {
+                return Err(NativeAddonUpdateError::Selection(
+                    "ABI plugin identity differs from manifest",
+                ));
+            }
+            builder
+                .register_resolved(record.scope(), factory)
+                .map_err(|_| NativeAddonUpdateError::Selection("native factory declaration"))?;
+            for key in record.portable_services() {
+                builder
+                    .isolate_agent_portable(key.clone())
+                    .map_err(|_| NativeAddonUpdateError::Selection("Portable isolation"))?;
+            }
+        }
+        let addons = if selected.is_empty() {
+            self.base.clone()
+        } else {
+            let addon = builder
+                .build()
+                .map_err(|_| NativeAddonUpdateError::Selection("native addon declaration"))?;
+            self.base
+                .merged(addon)
+                .map_err(|_| NativeAddonUpdateError::Selection("combined addon catalog"))?
+        };
+        Ok(addons)
+    }
+
+    fn make_snapshot(
+        &self,
+        presets: &AgentPresetCatalog,
+        selected: &[NativeAddonRecord],
+        addons: &StandardAddonSet,
+    ) -> Result<Arc<AgentCompositionSnapshot>> {
+        let compiler = crate::agent_preset::native_agent_profile_compiler(
+            &self.paths,
+            self.linux_tools,
+            &self.base,
+            selected,
+        )
+        .map_err(|_| NativeAddonUpdateError::Selection("Agent compiler declaration"))?;
+        let contributions = addons
+            .agent_catalog()
+            .map_err(|_| NativeAddonUpdateError::Selection("Agent contribution catalog"))?;
+        let snapshot =
+            AgentCompositionSnapshot::new(presets.clone().with_compiler(compiler), contributions)
+                .with_code_selection(selection::encode(selected)?)
+                .map_err(|_| NativeAddonUpdateError::Selection("code selection capacity"))?;
+        Ok(Arc::new(snapshot))
     }
 
     /// Closes new selection without revoking existing pins or claiming finalization.
@@ -494,22 +515,7 @@ impl NativeAddonManager {
             self.check_admission()?;
             match presets {
                 None => Ok(Arc::clone(&current.snapshot)),
-                Some(presets) => {
-                    let compiler = crate::agent_preset::native_agent_profile_compiler(
-                        &self.paths,
-                        self.linux_tools,
-                        &self.base,
-                        &current.selected,
-                    )
-                    .map_err(|_| NativeAddonUpdateError::Selection("Agent compiler declaration"))?;
-                    let contributions = current.catalog.agent_catalog().map_err(|_| {
-                        NativeAddonUpdateError::Selection("Agent contribution catalog")
-                    })?;
-                    Ok(Arc::new(AgentCompositionSnapshot::new(
-                        presets.clone().with_compiler(compiler),
-                        contributions,
-                    )))
-                }
+                Some(presets) => self.make_snapshot(presets, &current.selected, &current.catalog),
             }
         };
         capture().map_err(|_| rsi_meta_profile::ProfileError::Source {

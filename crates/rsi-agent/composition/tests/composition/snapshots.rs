@@ -173,6 +173,65 @@ struct Source {
     reads: AtomicUsize,
 }
 
+#[derive(Debug)]
+struct SlowSource {
+    snapshot: Arc<AgentCompositionSnapshot>,
+    reads: AtomicUsize,
+    entered: Notify,
+    release: (Mutex<bool>, std::sync::Condvar),
+}
+impl AgentCompositionSource for SlowSource {
+    fn snapshot(&self) -> rsi_meta_profile::Result<Arc<AgentCompositionSnapshot>> {
+        self.reads.fetch_add(1, Ordering::SeqCst);
+        self.entered.notify_one();
+        let (released, changed) = &self.release;
+        drop(
+            changed
+                .wait_while(released.lock().unwrap(), |released| !*released)
+                .unwrap(),
+        );
+        Ok(self.snapshot.clone())
+    }
+}
+
+#[tokio::test]
+async fn concurrent_source_probes_share_one_flight_but_later_boundaries_recheck() {
+    let temp = tempfile::tempdir().unwrap();
+    let presets = presets(&temp, &profile("shared"));
+    let source = Arc::new(SlowSource {
+        snapshot: snapshot(&presets, "shared", &Arc::new(Probe::default())),
+        reads: AtomicUsize::new(0),
+        entered: Notify::new(),
+        release: (Mutex::new(false), std::sync::Condvar::new()),
+    });
+    let (runtime, tools, composition, service) = activate_composition_factory(
+        AgentCompositionFactory::with_source(source.clone(), ScopeRoot::new(128).unwrap()),
+    )
+    .await;
+    let id = AgentPresetId::new("default").unwrap();
+    let requests = tokio::spawn({
+        let service = service.clone();
+        let id = id.clone();
+        async move { futures_util::future::join_all((0..8).map(|_| service.pin(&id, None))).await }
+    });
+    source.entered.notified().await;
+    *source.release.0.lock().unwrap() = true;
+    source.release.1.notify_all();
+    let pins = tokio::time::timeout(Duration::from_secs(5), requests)
+        .await
+        .unwrap()
+        .unwrap();
+    assert!(pins.iter().all(Result::is_ok));
+    assert_eq!(source.reads.load(Ordering::SeqCst), 1);
+    drop(pins);
+    drop(service.pin(&id, None).await.unwrap());
+    assert_eq!(source.reads.load(Ordering::SeqCst), 2);
+    assert!(composition.dispose().await.is_clean());
+    drop(service);
+    assert!(tools.dispose().await.is_clean());
+    assert!(runtime.shutdown().await.is_clean());
+}
+
 impl AgentCompositionSource for Source {
     fn snapshot(&self) -> rsi_meta_profile::Result<Arc<AgentCompositionSnapshot>> {
         self.reads.fetch_add(1, Ordering::AcqRel);
@@ -216,6 +275,47 @@ fn snapshot(
         ])
         .unwrap(),
     ))
+}
+
+#[tokio::test]
+async fn cold_recovery_selects_current_executable_without_retargeting_old_pins() {
+    use rsi_agent_composition_protocol::AgentGenerationSeed;
+    let temp = tempfile::tempdir().unwrap();
+    let presets = presets(&temp, &profile("stable"));
+    let probe = Arc::new(Probe::default());
+    let source = Arc::new(Source {
+        current: Mutex::new(Some(snapshot(&presets, "old-code", &probe))),
+        reads: AtomicUsize::new(0),
+    });
+    let (runtime, tools, composition, service) = activate_composition_factory(
+        AgentCompositionFactory::with_source(source.clone(), ScopeRoot::new(128).unwrap()),
+    )
+    .await;
+    let id = AgentPresetId::new("default").unwrap();
+    let first = service.pin(&id, None).await.unwrap();
+    let seed = AgentGenerationSeed::new(first.domains().baseline().to_vec()).unwrap();
+    *source.current.lock().unwrap() = Some(snapshot(&presets, "new-code", &probe));
+    let current = service.pin(&id, None).await.unwrap();
+    assert_ne!(first.selection(), current.selection());
+    assert!(
+        service
+            .pin_session(&recipes::header(temp.path()), Some(&seed))
+            .await
+            .is_ok()
+    );
+    assert_eq!(first.tools().definitions()[0].name(), "probe-stable");
+    assert!(
+        service
+            .pin(&id, None)
+            .await
+            .unwrap()
+            .same_generation(&current)
+    );
+    drop((first, current));
+    assert!(composition.dispose().await.is_clean());
+    drop(service);
+    assert!(tools.dispose().await.is_clean());
+    assert!(runtime.shutdown().await.is_clean());
 }
 
 #[tokio::test]
@@ -614,11 +714,23 @@ async fn cache_identity_includes_nominal_bindings_portable_keys_and_update_mode(
     .await;
     let id = AgentPresetId::new("default").unwrap();
     let mut pins = Vec::new();
+    let mut previous = None;
+    let header = super::recipes::header(temp.path());
     for step in 0..6 {
         *source.current.lock().unwrap() = Some(Arc::new(AgentCompositionSnapshot::new(
             presets.clone(),
             changed_catalog(&probe, step),
         )));
+        if let Some(previous) = &previous {
+            assert!(
+                service
+                    .prepare_update(&header, previous)
+                    .await
+                    .unwrap()
+                    .is_some(),
+                "changed nominal catalog must admit a successor at step {step}"
+            );
+        }
         let pin = service.pin(&id, None).await.unwrap();
         for old in &pins {
             assert_ne!(pin.source_digest(), old);
@@ -627,7 +739,16 @@ async fn cache_identity_includes_nominal_bindings_portable_keys_and_update_mode(
         let again = service.pin(&id, None).await.unwrap();
         assert_eq!(again.source_digest(), pin.source_digest());
         assert_eq!(probe.activations.load(Ordering::Acquire), step + 1);
+        assert!(
+            service
+                .prepare_update(&header, &pin)
+                .await
+                .unwrap()
+                .is_none()
+        );
+        previous = Some(pin);
     }
+    drop(previous);
     assert!(composition.dispose().await.is_clean());
     drop(service);
     assert!(tools.dispose().await.is_clean());

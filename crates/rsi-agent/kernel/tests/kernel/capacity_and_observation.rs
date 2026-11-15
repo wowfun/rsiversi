@@ -1227,45 +1227,7 @@ async fn invalid_resumes_of_idle_durable_sessions_do_not_consume_live_capacity()
     let mut terminal_sessions = Vec::new();
     for index in 0..MAXIMUM_ACTIVE_SESSIONS {
         let session_id = SessionId::new(format!("invalid-resume-session-{index}")).unwrap();
-        let turn_id = TurnId::new(format!("invalid-resume-turn-{index}")).unwrap();
-        rsi_agent_testkit::append_history_fixture(
-            store.as_ref(),
-            AppendBatch {
-                session_id: session_id.clone(),
-                expected_seq: 0,
-                header: Some(header(session_id.as_str())),
-                facts: (vec![
-                    SessionFact::new(
-                        1,
-                        1,
-                        SessionFactBody::TurnAccepted {
-                            reasoning_effort: None,
-                            turn_id: turn_id.clone(),
-                            text: "done".into(),
-                            model: None,
-                            sandbox: SandboxMode::WorkspaceWrite,
-                            require_approval: false,
-                        },
-                    )
-                    .unwrap(),
-                    SessionFact::new(
-                        2,
-                        2,
-                        SessionFactBody::TurnTerminal {
-                            turn_id,
-                            outcome: TurnOutcome::Completed,
-                            result: None,
-                        },
-                    )
-                    .unwrap(),
-                ])
-                .into_iter()
-                .map(Into::into)
-                .collect(),
-            },
-        )
-        .await
-        .unwrap();
+        append_terminal_history(&store, session_id.as_str(), 1).await;
         terminal_sessions.push(session_id);
     }
     let kernel = kernel(store).await;
@@ -1964,7 +1926,7 @@ async fn unrelated_executor_changes_do_not_reread_idle_durable_observers() {
                 .observe_session(
                     &session,
                     ObservationCursor {
-                        control_seq: 1,
+                        control_seq: 2,
                         fact_seq: 2,
                     },
                 )
@@ -2039,7 +2001,7 @@ async fn durable_observation_alternates_pages_without_prefetching_the_second_pay
     let memory = Arc::new(MemoryStore::new());
     let session = SessionId::new("alternating-pages").unwrap();
     append_terminal_history(&memory, session.as_str(), 300).await;
-    for start in [300_u64, 600] {
+    for start in [301_u64, 601] {
         let controls = (0..150)
             .flat_map(|offset| {
                 let seq = start + offset * 2 + 1;
@@ -2094,7 +2056,7 @@ async fn durable_observation_alternates_pages_without_prefetching_the_second_pay
         .observe_session(
             &session,
             ObservationCursor {
-                control_seq: 300,
+                control_seq: 301,
                 fact_seq: 0,
             },
         )
@@ -2106,9 +2068,9 @@ async fn durable_observation_alternates_pages_without_prefetching_the_second_pay
         "the initial control page must not retain a Fact page too"
     );
     for (controls, first, last) in [
-        (true, 301, 812),
+        (true, 302, 813),
         (false, 1, 512),
-        (true, 813, 900),
+        (true, 814, 901),
         (false, 513, 600),
     ] {
         for expected in first..=last {

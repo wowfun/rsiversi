@@ -6,6 +6,7 @@ use std::{fmt, sync::Arc};
 /// Immutable compiler/allowlist and executable catalog selected for one build.
 #[derive(Clone)]
 pub struct AgentCompositionSnapshot {
+    pub(crate) code: Arc<[u8]>,
     pub(crate) seeds: Result<rsi_agent_composition_protocol::AgentGenerationSeed, &'static str>,
     pub(crate) presets: AgentPresetCatalog,
     pub(crate) contributions: Arc<AgentContributionCatalog>,
@@ -33,6 +34,7 @@ impl AgentCompositionSnapshot {
         seed: rsi_agent_composition_protocol::AgentGenerationSeed,
     ) -> rsi_meta_profile::Result<Self> {
         Ok(Self {
+            code: Arc::clone(&self.code),
             presets,
             contributions: Arc::new(self.contributions.replacing(replacements)?),
             seeds: Ok(seed),
@@ -89,10 +91,25 @@ impl AgentCompositionSnapshot {
     /// Freezes application-selected preset and contribution authority together.
     pub fn new(presets: AgentPresetCatalog, contributions: AgentContributionCatalog) -> Self {
         Self {
+            code: Arc::from([]),
             seeds: Ok(rsi_agent_composition_protocol::AgentGenerationSeed::default()),
             presets,
             contributions: Arc::new(contributions),
         }
+    }
+
+    /// Captures application-owned artifact/build selection, independent of mutable discovery.
+    ///
+    /// # Errors
+    /// Rejects code metadata beyond the existing selection byte ceiling.
+    pub fn with_code_selection(mut self, code: Arc<[u8]>) -> rsi_meta_profile::Result<Self> {
+        if code.len() > 64 * 1024 * 1024 {
+            return Err(rsi_meta_profile::ProfileError::InvalidProgram(
+                "code selection exceeds selection capacity".into(),
+            ));
+        }
+        self.code = code;
+        Ok(self)
     }
     /// Borrows current opaque inputs so product source decorators can preserve other owners.
     ///
@@ -166,8 +183,10 @@ impl AgentCompositionSource for AgentCompositionSnapshot {
     }
 }
 
+#[derive(Debug)]
 pub(crate) struct GenerationIdentity {
     pub(crate) manifest: Arc<rsi_agent_composition_protocol::CompositionManifest>,
+    pub(crate) selection: rsi_agent_session_protocol::GenerationSelection,
     program_digest: String,
     seed_sha256: [u8; 32],
     restoring: bool,
@@ -181,7 +200,18 @@ impl GenerationIdentity {
     }
 
     pub(crate) fn same_source(&self, other: &Self) -> bool {
-        self.program_digest == other.program_digest && self.catalog.same_identity(&other.catalog)
+        self.matches_source(&other.program_digest, &other.catalog, &other.selection)
+    }
+
+    pub(crate) fn matches_source(
+        &self,
+        program_digest: &str,
+        catalog: &AgentContributionCatalog,
+        selection: &rsi_agent_session_protocol::GenerationSelection,
+    ) -> bool {
+        self.program_digest == program_digest
+            && self.catalog.same_identity(catalog)
+            && &self.selection == selection
     }
 
     pub(crate) fn new(
@@ -189,15 +219,18 @@ impl GenerationIdentity {
         catalog: Arc<AgentContributionCatalog>,
         inputs: &rsi_agent_composition_protocol::AgentGenerationInputs,
         manifest: Arc<rsi_agent_composition_protocol::CompositionManifest>,
+        selection: rsi_agent_session_protocol::GenerationSelection,
     ) -> Self {
         let mut digest = Sha256::new();
         digest.update(b"rsi.agent.generation.v3");
         crate::catalog::hash_field(&mut digest, program_digest.as_bytes());
         crate::catalog::hash_field(&mut digest, catalog.digest().as_bytes());
+        crate::catalog::hash_field(&mut digest, selection.sha256().as_bytes());
         digest.update([u8::from(inputs.restoring)]);
         crate::catalog::hash_field(&mut digest, inputs.seed.sha256());
         Self {
             manifest,
+            selection,
             seed_sha256: *inputs.seed.sha256(),
             restoring: inputs.restoring,
             program_digest: program_digest.to_owned(),
@@ -211,10 +244,12 @@ impl GenerationIdentity {
         program_digest: &str,
         catalog: &AgentContributionCatalog,
         inputs: &rsi_agent_composition_protocol::AgentGenerationInputs,
+        selection: &rsi_agent_session_protocol::GenerationSelection,
     ) -> bool {
         self.program_digest == program_digest
             && self.catalog.same_identity(catalog)
             && self.seed_sha256 == *inputs.seed.sha256()
             && self.restoring == inputs.restoring
+            && &self.selection == selection
     }
 }

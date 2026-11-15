@@ -38,9 +38,6 @@ impl ForkTransform for AgentAdapter {
             return Ok(vec![]);
         };
         let current = self.handle.decode(snapshot).map_err(invalid)?;
-        if current.artifact_sha256 != self.artifact_sha256 {
-            return Err(invalid("fork source artifact cohort mismatch"));
-        }
         let serial = NEXT_OPERATION
             .fetch_update(Ordering::Relaxed, Ordering::Relaxed, |value| {
                 value.checked_add(1)
@@ -126,7 +123,6 @@ impl AgentAdapter {
             roots.push(context.source.session_id().clone());
         }
         let mut journal = ExtensionJournal {
-            artifact_sha256: self.artifact_sha256.clone(),
             segments: vec![],
             sessions: roots,
             checkpoint: reply.checkpoint.clone(),

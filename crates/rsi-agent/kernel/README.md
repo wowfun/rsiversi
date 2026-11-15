@@ -1,5 +1,12 @@
 # rsi-agent-kernel
 
+The [composition generation contract](../docs/subsystems/composition-generations.md)
+owns candidate preparation, rejection, replacement and cold recovery. Kernel owns
+the atomic selection/Domain commit. Fact and control writers share submission admission with
+publication, keeping the checked predecessor stable through commit and resident
+pin installation. An indeterminate publication stops admission until recovery;
+a proved commit wakes observers even when its original acknowledgement was lost.
+
 Input claiming and model entry are separate. Kernel retains only the Fact
 coordinates and message counts of unprepared claims, including direct Turn text.
 `StepInputsPrepared` resolves every referenced coordinate against that set, clears
@@ -103,12 +110,16 @@ authority even if it occurs in a provider response or the full sealed catalog.
 
 Projection captures admit at most 16 callers, each with a 30-second deadline
 including generation selection. Pending captures share a domain read and pure
-producer execution only for the same Session, Header, exact generation pin and
-requested durable watermarks. Those watermarks are a lower bound; the returned
+producer execution only for the same Session, Header, resident generation pin
+(or the same cold selection) and requested durable watermarks. Cold captures
+restore their committed generation from that shared Domain read. Resident captures
+also compare its selection identity: if a newer generation committed before resident
+installation was acknowledged, the read uses the code belonging to its durable cut.
+Those watermarks are a lower bound; the returned
 cursor is the actual captured current cut. Completed captures are never cached.
 Each flight expires by its creator's deadline. Cancelling one waiter preserves
 other waiters; dropping the final waiter cancels producer work. Shutdown cancels
-all captures. Generation selection remains per caller and drafts keep their own
+all captures. Resident selection remains per caller and drafts keep their own
 retained generation. Sharing adds no detached work or uncharged result cache.
 
 Retirement excludes admitted command preparation as well as submitted work.
@@ -267,11 +278,12 @@ transaction may settle during the overlapping control operation. Pause waits
 for pending-only discard under the same Session submission admission, so a
 concurrently committed claim is observed as claimed before Pause returns.
 A fresh draft continuation lease retains its exact Header and composition through
-first mailbox publication and cold selection until released. Publishing that
-first entry must not replace the generation that authorized it. A lease armed
-from an already durable Session does not override current cold selection; changed
-generations still reject its old authority. Neither case waives complete Domain
-validation for execution.
+first mailbox publication. Publishing that first entry must not replace the
+generation that authorized it. A retained draft or Program pin can be reused only
+when its selection matches the committed digest and its codecs validate retained
+states. Otherwise cold recovery prepares the current composition.
+A later generation cannot be overridden by an older retained owner. Changed
+generations still reject the old continuation's authority.
 
 Durable turn scheduler and write-behind ordinary plugin. The Kernel is the sole
 owner of live session state, Fact sequencing, cancellation classification,
@@ -285,11 +297,12 @@ It hard-requires the mechanical `rsi.agent.store` and standing
 executor Turn contracts atomically. Every resident session owns one immutable
 composition pin. Fresh admission consumes the draft's exact pin. Resume
 preparation issues a move-only, Kernel-bound token containing the authoritative
-Header and either the existing resident pin or the current cold generation;
+Header and either the existing resident pin or a validated current cold generation;
 only submission of that token can hydrate the session. Resolution therefore
 precedes application Workspace mutation, resident capacity, and Fact-log
-reads. A resident session keeps its old generation while new or cold sessions
-use the current healthy source generation. The executor-facing claim seam
+reads. Fresh and cold sessions use the current healthy source. Cold hydration
+publishes changed Domain states and explicit removals before installing the pin. Resident replacement is published at a settled request boundary.
+The executor-facing claim seam
 returns that resident pin only after validating the issuer seal, live claim
 identity, and pointer identity of the one resident Header allocation.
 
@@ -297,9 +310,9 @@ The independent Session projection read service reports `ProjectionCapacity`
 when concurrent capture admission is exhausted.
 Its change subscriptions use the shared observer pool and report `ObserverCapacity`.
 The read service retains an existing resident pin without acquiring a claim.
-A cold view may resolve the current generation without
-hydrating the Session or validating unrelated codecs; each projection unit owns
-its semantic decode. Capture uses the Store's simultaneous durable Fact/control
+A cold view selects current plugins without hydrating the Session.
+Its declared Domains must accept the durable states; each projection unit owns
+its view decode. Capture uses the Store's simultaneous durable Fact/control
 watermarks and verifies the requested selected horizon before presenting state.
 Bounded capture admission and cancellation are independent of mutation admission;
 projection callbacks never run under the Kernel state or Session mutation lock.
@@ -310,27 +323,22 @@ the preceding speculative suffix, validates the entire candidate state and
 budget, and commits both streams atomically under retained source and Session
 admission. Read-only domain revision guards are checked under that same admission
 without writing the guarded domains. An existing canonical receipt precedes those
-checks and remains authoritative. Generated-record limits charge generated Facts and Turn domain
-controls using their complete canonical envelope bytes. A receipt binds the
+checks and remains authoritative. Per-request record/byte limits and retained
+memory reservations bound admission; there is no cumulative Turn allowance.
+A receipt binds the
 source, replacements and accompanying Fact bodies; same-ID changes conflict.
 An exact single ToolResult may accompany settlement proposals after cancellation
 while the claim's mutation gate remains open. Kernel still validates the active
 started Tool identity and every proposal; this exception cannot start effects,
-reopen ending admission or bypass generated-record budgets. Its bounded domain
+reopen ending admission or bypass per-request bounds. Its bounded domain
 capture does not open a Step or acquire execution authority.
 Result-unknown reconciliation queries that canonical request before releasing
-ownership or permitting a new mutation. Domain-only work is still charged and
-elapsed-limited. Protocol-constrained budget and terminal records retain their
-ending channel after business work is exhausted. `finish_turn` owns a bounded
-atomic ending batch: at most one current-Step closure, one required budget
-marker and the terminal Fact. Only the adjacent closure in that ending batch
-is exempt from generated-record and elapsed limits. Ordinary Step closure
-remains charged. Domain mutations cannot append ending records, Kernel-owned
+ownership or permitting a new mutation. `finish_turn` owns the bounded atomic
+ending transition. Domain mutations cannot append ending records, Kernel-owned
 Tool supersession markers or executor-owned model attempt settlements.
 Only atomic message entry may supersede outstanding
-model calls. This prevents
-an exhausted open Step from blocking finalization without creating a reusable
-free business-work lane.
+model calls. Generation history follows the retention rules in the
+[generation contract](../docs/subsystems/composition-generations.md).
 
 Submission admission bounds active operations and pending operations separately,
 to 256 each. Excess pending work returns `Capacity` before registering Session
@@ -652,11 +660,10 @@ one per resident Session and 256 overall. Completions and later ready batches
 continue while another Session waits. Shutdown drains accepted suffixes as well
 as already selected batches; the ordinary timeout leaves its owned drain alive.
 
-Cold composition reads the immutable first Domain baseline before selecting an
-Agent generation and passes its bounded opaque seed into composition. This order
-also applies to cold resource/projection reads. Execution admission validates the resulting
-catalog against durable Domain state; read-only projections retain their existing
-ability to ignore unrelated unavailable codecs. The Kernel never decodes an integration's manifest
+Cold composition reads the current Domain cut and its committed generation
+selection, prepares current plugins, and passes the bounded opaque state seed
+into composition. This order also applies to cold resource/projection reads.
+The resulting catalog validates retained states for its declared Domains. The Kernel never decodes an integration's manifest
 or installs Tools after the catalog is sealed. A new fork selects the current
 composition and applies the existing per-Domain fork policy; integrations whose
 catalog must stay with their selected generation reset to their initial state.

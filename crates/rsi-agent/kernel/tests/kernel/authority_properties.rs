@@ -9,7 +9,7 @@ fn generated_resume_issuers_preserve_exact_header_and_reject_foreign_authority()
         let other = ResumeAdmissionIssuer::new();
         let header = header(&format!("resume-{index}"));
         let pin = test_pin(header.agent_preset_id());
-        let token = issuer.issue(header.clone(), pin.clone()).unwrap();
+        let token = issuer.issue(header.clone(), pin.clone(), None).unwrap();
         assert!(matches!(other.inspect(&token), Err(TurnError::Invalid(_))));
         let same = issuer.clone();
         let (actual, generation) = same.inspect(&token).unwrap();

@@ -437,6 +437,23 @@ impl FactReadRaceStore {
         self.pause_append_at.store(attempt, Ordering::Release);
     }
 
+    async fn before_fact_append(
+        &self,
+        session: &SessionId,
+    ) -> rsi_agent_store_protocol::Result<()> {
+        let attempt = self.append_attempts.fetch_add(1, Ordering::AcqRel) + 1;
+        if self.pause_append_at.load(Ordering::Acquire) == attempt {
+            self.append_blocked.notify_one();
+            self.release_append.notified().await;
+        }
+        if self.permanent_append_failure_for.lock().unwrap().as_ref() == Some(session) {
+            return Err(StoreError::Invalid(
+                "injected permanent append failure".into(),
+            ));
+        }
+        Ok(())
+    }
+
     async fn wait_until_append_is_blocked(&self) {
         self.append_blocked.notified().await;
     }
@@ -670,6 +687,12 @@ impl SessionStore for FactReadRaceStore {
         self.validate_session(id).await?;
         self.inner.prepare_session(id).await
     }
+    async fn read_domain_watermarks(
+        &self,
+        id: &SessionId,
+    ) -> rsi_agent_store_protocol::Result<rsi_agent_store_protocol::StoreDomainWatermarks> {
+        self.inner.read_domain_watermarks(id).await
+    }
     async fn read_watermarks(
         &self,
         id: &SessionId,
@@ -731,22 +754,7 @@ impl SessionStore for FactReadRaceStore {
         self.inner.read_turn_domain_usage(session_id, turn_id).await
     }
     async fn append(&self, batch: AppendBatch) -> rsi_agent_store_protocol::Result<AppendCommit> {
-        let attempt = self.append_attempts.fetch_add(1, Ordering::AcqRel) + 1;
-        if self.pause_append_at.load(Ordering::Acquire) == attempt {
-            self.append_blocked.notify_one();
-            self.release_append.notified().await;
-        }
-        if self
-            .permanent_append_failure_for
-            .lock()
-            .unwrap_or_else(std::sync::PoisonError::into_inner)
-            .as_ref()
-            == Some(&batch.session_id)
-        {
-            return Err(StoreError::Invalid(
-                "injected permanent append failure".into(),
-            ));
-        }
+        self.before_fact_append(&batch.session_id).await?;
         let creates_session = batch.header.is_some();
         let result = self.inner.append(batch).await;
         if creates_session
@@ -788,6 +796,15 @@ impl SessionStore for FactReadRaceStore {
             return Err(error);
         }
         let creates_session = commit.sessions.iter().any(|append| append.header.is_some());
+        let creates_turn = commit
+            .sessions
+            .iter()
+            .any(|append| append.header.is_some() && !append.facts.is_empty());
+        for append in &commit.sessions {
+            if append.header.is_some() && !append.facts.is_empty() {
+                self.before_fact_append(&append.session_id).await?;
+            }
+        }
         let program = commit
             .sessions
             .iter()
@@ -819,7 +836,7 @@ impl SessionStore for FactReadRaceStore {
             .flat_map(|append| &append.facts)
             .any(|fact| matches!(fact.body(), SessionFactBody::TurnTerminal { .. }));
         let domain_request = commit.sessions.iter().flat_map(|append| &append.controls).any(|control|
-            matches!(control.body(), AgentControlRecordBody::DomainStateCommitted { commit } if commit.request_id().is_some()));
+            matches!(control.body(), AgentControlRecordBody::DomainStateCommitted { commit } if commit.request_id().is_some() || commit.source().turn_id().is_some()));
         let parks_wait = commit
             .sessions
             .iter()
@@ -918,6 +935,16 @@ impl SessionStore for FactReadRaceStore {
         {
             return Err(StoreError::Io(
                 "injected lost creation acknowledgement".into(),
+            ));
+        }
+        if result.is_ok()
+            && creates_turn
+            && self
+                .fail_append_creation_after_apply
+                .swap(false, Ordering::AcqRel)
+        {
+            return Err(StoreError::Io(
+                "injected lost initial Fact acknowledgement".into(),
             ));
         }
         if result.is_ok()
@@ -1939,14 +1966,18 @@ async fn append_terminal_history(store: &MemoryStore, session_id: &str, turns: u
             .unwrap(),
         );
     }
-    let mut expected_seq = 0;
-    for (batch_index, batch_facts) in facts.chunks(512).enumerate() {
+    let Some(first) = facts.first() else {
+        return;
+    };
+    append_creation(store, header(session_id.as_str()), first.clone()).await;
+    let mut expected_seq = 1;
+    for batch_facts in facts[1..].chunks(512) {
         rsi_agent_testkit::append_history_fixture(
             store,
             AppendBatch {
                 session_id: session_id.clone(),
                 expected_seq,
-                header: (batch_index == 0).then(|| header(session_id.as_str())),
+                header: None,
                 facts: batch_facts.iter().cloned().map(Into::into).collect(),
             },
         )
@@ -1954,6 +1985,35 @@ async fn append_terminal_history(store: &MemoryStore, session_id: &str, turns: u
         .unwrap();
         expected_seq = batch_facts.last().unwrap().seq();
     }
+}
+
+async fn append_creation(store: &dyn SessionStore, header: SessionHeader, first: SessionFact) {
+    let pin = test_pin(header.agent_preset_id());
+    let initial = PreparedFreshSession::new(header, pin).unwrap();
+    store
+        .commit_agent(rsi_agent_store_protocol::AtomicAgentCommit {
+            sessions: vec![rsi_agent_store_protocol::AtomicSessionAppend {
+                session_id: initial.header().session_id().clone(),
+                expected_fact_seq: 0,
+                expected_control_seq: 0,
+                header: Some(initial.header().clone()),
+                facts: vec![Arc::new(first)],
+                controls: vec![
+                    rsi_agent_session_protocol::AgentControlRecord::new(
+                        1,
+                        initial.header().created_at_ms(),
+                        AgentControlRecordBody::DomainStateCommitted {
+                            commit: initial.initial_commit().unwrap(),
+                        },
+                    )
+                    .unwrap(),
+                ],
+            }],
+            required_active_activations: vec![],
+            quiescent_descendants_of: None,
+        })
+        .await
+        .unwrap();
 }
 
 async fn submit(
@@ -2005,6 +2065,8 @@ mod contributions;
 mod domains;
 #[path = "kernel/fork_and_scheduler.rs"]
 mod fork_and_scheduler;
+#[path = "kernel/generations.rs"]
+mod generations;
 #[path = "kernel/jobs.rs"]
 mod jobs;
 #[path = "kernel/mailbox_claim.rs"]

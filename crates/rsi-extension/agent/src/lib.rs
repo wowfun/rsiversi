@@ -23,21 +23,30 @@ use std::sync::Arc;
 
 /// Adapter failure before or after the separate canonical publication boundary.
 #[derive(Debug, thiserror::Error)]
-#[error("extension journal: {0}")]
-pub struct Error(String);
+pub enum Error {
+    /// Temporary Store read admission pressure.
+    #[error("extension journal read capacity exhausted")]
+    Capacity,
+    /// Invalid journal content or an unavailable dependency.
+    #[error("extension journal: {0}")]
+    Invalid(String),
+}
 fn error(value: impl std::fmt::Display) -> Error {
-    Error(value.to_string())
+    Error::Invalid(value.to_string())
 }
 
 /// Defines the same built-in envelope understood by offline reference maintenance.
 ///
 /// # Errors
-/// Rejects an invalid artifact digest or initial journal envelope.
-pub fn definition(artifact_sha256: String) -> Result<DomainDefinition<ExtensionJournal>, Error> {
+/// Rejects an invalid initial journal envelope.
+pub fn definition() -> Result<DomainDefinition<ExtensionJournal>, Error> {
     DomainDefinition::new(
-        DomainIdentity::new(EXTENSION_JOURNAL_DOMAIN, 1).map_err(error)?,
+        DomainIdentity::new(
+            EXTENSION_JOURNAL_DOMAIN,
+            rsi_agent_session_protocol::EXTENSION_JOURNAL_VERSION,
+        )
+        .map_err(error)?,
         &ExtensionJournal {
-            artifact_sha256,
             segments: vec![],
             sessions: vec![],
             checkpoint: DomainStateValue::new(serde_json::Value::Null).map_err(error)?,
@@ -185,7 +194,13 @@ async fn restore_segment(
         sha256: segment.sha256.clone(),
         byte_len: segment.byte_len,
     };
-    let bytes = store.read_cas(&object, admission).await.map_err(error)?;
+    let bytes = store
+        .read_cas(&object, admission)
+        .await
+        .map_err(|failure| match failure {
+            rsi_agent_store_protocol::StoreError::ReadCapacity => Error::Capacity,
+            other => error(other),
+        })?;
     let part: Vec<serde_json::Value> = serde_json::from_slice(bytes.as_ref()).map_err(error)?;
     if part.len() as u64 != segment.count {
         return Err(error("segment event count mismatch"));

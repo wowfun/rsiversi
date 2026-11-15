@@ -1,5 +1,19 @@
 # rsi-agent-composition
 
+Concurrent preparation callers for the same preset share one in-flight source
+snapshot and exact-byte probe. The shared result expires with its waiters; later
+request boundaries recheck source bytes. File timestamps alone are not source
+identity. The global blocking-work bound remains held until each admitted task
+finishes, even if all its callers cancel.
+
+Published pins retain current executable owners and a diagnostic selection digest.
+Cold preparation resolves current preset sources and code, validates retained state
+for current Domains, and initializes new Domains. It never loads historical
+executable recipes. See the [generation contract](../docs/subsystems/composition-generations.md).
+
+Every generation declares its current Tool output catalog, including an empty catalog.
+Historical typed outputs retain their saved declaration in Domain history.
+
 The generation also captures its optional native prompt assembler and exact ScopeKey.
 Its Local marker is isolated with the Context builder: an ancestor cannot substitute
 for the selected generation. A pin retains the assembler through awaited preparation
@@ -75,15 +89,21 @@ query fails selection before Runtime mutation, including a cache hit.
 Pins from one published generation share its immutable base catalog measurement.
 Claim-specific membership changes retain their own measurements.
 
-An unchanged Profile program, catalog and seed identity reuse the published
-generation. Each preset retains separate current slots for fresh and restoring
+An unchanged evaluated Profile, catalog, code selection and seed identity reuse the published
+generation. Each preset retains its last compiled tree and selection digest;
+unchanged source bytes skip parsing, evaluation, freezing and selection hashing.
+The source probe uses a separate eight-operation blocking lane to verify current
+admission and exact included-file bytes. Prepared candidates retain no build
+permits or preset lock; consuming them acquires the preset's build lock and one
+of eight build permits. An unchanged source probe cannot queue behind a retained
+candidate or plugin activation. Each preset retains separate current slots for fresh, restoring and replacing
 inputs, so alternating draft creation and cold resume does not reactivate both
-generations. A new program or executable catalog retires both cached slots;
+generations. A new program or executable catalog retires the cached slots;
 changing a seed replaces only its fresh/restoring slot. External pins retain
 their existing independent lifetime.
 Catalog identity includes every linked revision/native artifact digest and update
 mode, exact nominal Local/event bindings, and declared fresh Portable service
-keys. The pin digest combines the compiled program with this catalog identity;
+keys. The process-local pin digest combines the evaluated program and selection with this catalog identity;
 nominal Rust identities are process-local and have no cross-build encoding
 guarantee. Cache equality also compares the complete typed catalog signature.
 Replacing a factory object without changing its declared executable identity is
@@ -91,8 +111,11 @@ not a code update. Applications must publish a new linked revision or native
 artifact identity when its implementation changes.
 
 At most eight builds run across presets and at most 256 live preset rows exist.
-A row with no current generation and no in-flight waiter is evictable under admission pressure, so
-failed identities cannot permanently consume the row budget. Recompiling a
+A row with no in-flight waiter or build is evictable in least-recently-used order
+under admission pressure, including successful current generations. External
+pins independently retain their exact generation; eviction only releases cache
+ownership. A later lookup of an evicted identity can build a new generation.
+Recompiling a
 changed source publishes a new generation without disturbing existing pins.
 The superseded Scope is disposed asynchronously after its final pin is
 released. That Scope owner retains the complete selected catalog through cleanup,
@@ -127,8 +150,9 @@ not expose preset locations, the Tool registrar, a mutable Host catalog, or a
 resolver to Agent consumers.
 
 Before cache lookup, each build captures the selected generation seed together
-with the source catalog. Restored selection explicitly supplies the durable
-baseline in place of the current seed. The generation digest includes the exact
+with the source catalog. Cold selection overlays the durable baseline on current
+seed defaults: retained state wins, while newly declared owners receive current
+initial inputs. The generation digest includes the exact
 seed SHA-256 and fresh/restoring mode; a saved external manifest therefore cannot reuse a
 catalog built for another manifest. The immutable seed is supplied inside the
 same fresh Local isolation as the registrars, before any Profile leaf activates.
@@ -144,12 +168,11 @@ After Tools seal, composition freezes their exact-name output declarations in
 the `rsi.tools.outputs` Domain baseline (codec 1), then seals Domains. That
 registration uses the hidden Scope's ordinary Meta credential and is withdrawn
 with a failed candidate. Historical consumers read this baseline; current Tool
-registries never reinterpret a saved result. Cold reconstruction requires equal
-declarations, including contract version and verified schema digest. Unknown
-codecs and changed declarations reject continuation before publication. A legacy
-baseline without this domain can rebuild only an entirely untyped catalog;
-typed tools require a new conversation. History attachment remains independent
-of executable providers. Session and Store formats are unchanged.
+registries never reinterpret a saved result. Cold recovery validates an existing
+catalog encoding and publishes the current declarations for future Tool results.
+Unknown codecs reject recovery; changed declarations or a newly introduced catalog
+do not require a new conversation. History attachment remains independent of
+executable providers.
 
 A valid executable source snapshot may explicitly mark only its current generation
 inputs unavailable with a static, redacted reason supplied by the source owner.

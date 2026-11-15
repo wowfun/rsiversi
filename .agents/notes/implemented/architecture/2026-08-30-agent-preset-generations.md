@@ -13,6 +13,8 @@ makes a future shell implementation inherit Linux-specific ownership.
 
 ## Decision
 
+The resident and cold generation-selection clauses below are superseded by [durable Agent generation selection](2026-11-12-durable-agent-generation-selection.md). Other ownership decisions remain applicable.
+
 Agent presets are bounded directories whose required `agent.profile.toml` is
 preflighted for roster health with the same application-supplied frozen Profile
 compiler used to build generations. This catches source, include, expression,

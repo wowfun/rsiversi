@@ -11,6 +11,10 @@ weakening native failure retention or existing Session generation pins.
 
 ## Decision
 
+The resident-code pinning and linked-code recovery clauses below are superseded
+by [durable Agent generation selection](2026-11-12-durable-agent-generation-selection.md).
+Artifact installation, Loader admission and source ownership remain applicable.
+
 The standard [RSI product](../../../../crates/rsi/core/README.md) owns local
 manifests, content-addressed source objects, explicit build/watch and immutable
 Agent catalog selection. Installation and enablement are separate source

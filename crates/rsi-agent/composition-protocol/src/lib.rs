@@ -26,8 +26,10 @@ pub use request_tools::{
     RequestToolSource, RequestToolSourceContract,
 };
 pub use tool_around::{ToolAroundContributor, ToolContinuation};
+mod candidate;
 mod scoped_tools;
 mod seed;
+pub use candidate::{AgentGenerationCandidate, GenerationValidator};
 mod tool_outputs;
 pub use manifest::{CompositionInstance, CompositionManifest, CompositionOrigin};
 pub use seed::{AgentGenerationInputs, AgentGenerationInputsContract, AgentGenerationSeed};
@@ -73,6 +75,7 @@ impl<T> AgentGenerationOwner for T where T: fmt::Debug + Send + Sync + 'static {
 pub struct AgentCompositionPin {
     preset_id: AgentPresetId,
     source_digest: String,
+    selection: rsi_agent_session_protocol::GenerationSelection,
     tools: Arc<dyn ToolRuntime>,
     application: Option<Arc<request_tools::RequestPreparation>>,
     tool_weight: Arc<OnceLock<Result<usize>>>,
@@ -115,6 +118,8 @@ impl AgentCompositionPin {
         }
         Ok(Self {
             preset_id,
+            selection: rsi_agent_session_protocol::GenerationSelection::new(source_digest.clone())
+                .map_err(|error| AgentCompositionError::InvalidInput(error.to_string()))?,
             source_digest,
             tools,
             application: None,
@@ -134,6 +139,21 @@ impl AgentCompositionPin {
     /// Returns the durable logical preset identity.
     pub const fn preset_id(&self) -> &AgentPresetId {
         &self.preset_id
+    }
+
+    /// Captures the composition owner's current executable identity.
+    #[must_use]
+    pub fn with_selection(
+        mut self,
+        selection: rsi_agent_session_protocol::GenerationSelection,
+    ) -> Self {
+        self.selection = selection;
+        self
+    }
+
+    /// Diagnostic selection committed alongside Domain changes.
+    pub const fn selection(&self) -> &rsi_agent_session_protocol::GenerationSelection {
+        &self.selection
     }
 
     /// Captures the immutable redacted evidence built with this pin.
@@ -355,6 +375,19 @@ impl fmt::Debug for AgentCompositionPin {
 /// Standing Agent-generation resolver.
 #[async_trait]
 pub trait AgentComposition: fmt::Debug + Send + Sync + 'static {
+    /// Captures changed executable inputs before Kernel reads current Domain state.
+    /// Immutable custom providers need no update preparation.
+    ///
+    /// # Errors
+    /// Source/preflight failures preserve the caller's currently committed pin.
+    async fn prepare_update(
+        &self,
+        header: &SessionHeader,
+        current: &AgentCompositionPin,
+    ) -> Result<Option<Box<dyn AgentGenerationCandidate>>> {
+        let _ = (header, current);
+        Ok(None)
+    }
     /// Resolves explicit Session-bound inputs before ordinary preset selection.
     /// Owners must reject missing private inputs rather than use unrelated defaults.
     ///
@@ -483,8 +516,12 @@ impl PreparedFreshSession {
     /// Rejects an input batch inconsistent with this candidate's baseline.
     pub fn initial_commit(
         &self,
-    ) -> ContributionResult<Option<rsi_agent_session_protocol::DomainStateCommit>> {
-        command::initial_commit(&self.inner.baseline, &self.inner.command_inputs)
+    ) -> ContributionResult<rsi_agent_session_protocol::DomainStateCommit> {
+        command::initial_commit(
+            &self.inner.baseline,
+            &self.inner.command_inputs,
+            self.inner.composition.selection(),
+        )
     }
 
     /// Selects already prepared initial state from the exact same generation.
@@ -776,14 +813,6 @@ impl AgentSessionDraft {
 /// Closed composition failure taxonomy.
 #[derive(Clone, Debug, Error, Eq, PartialEq)]
 pub enum AgentCompositionError {
-    /// Restored executable declarations differ from their saved baseline.
-    #[error("tool output declarations differ from the saved baseline; start a new conversation")]
-    OutputCatalogMismatch,
-    /// Legacy history cannot silently acquire newly declared output semantics.
-    #[error(
-        "saved baseline has no tool output declarations; start a new conversation to use typed tools"
-    )]
-    MissingOutputCatalog,
     /// A saved Domain requires a codec its owner no longer accepts.
     #[error(
         "unsupported saved Domain codec {stored:?}; expected {expected:?}; start a new conversation using the current preset"

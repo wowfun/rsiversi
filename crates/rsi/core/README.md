@@ -24,7 +24,8 @@ Agent presets can select the ordinary
 `rsi.extension.process` and `rsi.extension.agent` factories.
 The process configuration supplies an absolute
 installed executable, arguments, working directory, complete environment and
-generation identity; the Agent adapter pins the artifact digest. Activation
+generation identity; the generation selection pins the executable artifact and the
+Agent adapter accepts only null configuration. Activation
 freezes the external catalog before publishing Tools or contributions. These
 factories are opt-in and add no DSH policy to the standard preset or Meta.
 The [extension contract](../../rsi-extension/README.md) owns transport, trust and
@@ -633,6 +634,16 @@ root. It requires the Service Owner before acquiring these roots and retains tha
 dependency through worker retirement. Pure Host preview never opens the store or creates a Loader. Mutable enabled
 records do not enter the Host launch key. Agent composition requires the Local
 source supply, so activation and recovery cannot precede initial staging.
+
+Agent selection digests identify the current native records and linked executable.
+Already admitted work retains its immutable pin. Cold recovery uses the current
+catalog and validates retained Domain state; old native artifacts and executable
+recipes are not a recovery dependency. History remains until explicit Session
+purge; see the [generation contract](../../rsi-agent/docs/subsystems/composition-generations.md).
+The process hashes its executable once, using the running image on Linux.
+The Service source retains one compiler/catalog snapshot per successful staging
+publication. Unchanged per-request capture reuses that snapshot; source health
+checks still run before fresh admission.
 
 The manager Fiber owns one worker and one Loader for its activation. With an
 explicit source-watch lifetime, the worker polls desired metadata once per second

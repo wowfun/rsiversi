@@ -3,9 +3,7 @@ use async_trait::async_trait;
 use rsi_acp::server::{AgentBackend, Failure};
 use rsi_acp_protocol::schema;
 use rsi_agent_composition_protocol::AgentGenerationSeed;
-use rsi_agent_session_protocol::{
-    AgentControlRecordBody, AgentPresetId, DomainMutationSource, SessionId,
-};
+use rsi_agent_session_protocol::{AgentControlRecordBody, AgentPresetId, SessionId};
 use rsi_agent_store_protocol::SessionStore;
 use rsi_session_protocol::{
     CreateSession, DraftRelease, RecentSessionCursor, SessionDraftControl, SessionHandle,
@@ -152,22 +150,7 @@ impl rsi_acp_agent::SessionOwner for Owner {
                 let Some(record) = page.records.first() else {
                     return Err(Failure::Backend);
                 };
-                let AgentControlRecordBody::DomainStateCommitted { commit } = record.body() else {
-                    return Err(Failure::Backend);
-                };
-                if !matches!(commit.source(), DomainMutationSource::Baseline) {
-                    return Err(Failure::Backend);
-                }
-                Some(
-                    AgentGenerationSeed::new(
-                        commit
-                            .updates()
-                            .iter()
-                            .map(|update| update.snapshot().clone())
-                            .collect(),
-                    )
-                    .map_err(|_| Failure::Backend)?,
-                )
+                Some(restore_seed(record)?)
             }
             Err(rsi_agent_store_protocol::StoreError::NotFound(_))
                 if self
@@ -301,6 +284,25 @@ impl rsi_acp_agent::SessionOwner for Owner {
     }
 }
 
+fn restore_seed(
+    record: &rsi_agent_session_protocol::AgentControlRecord,
+) -> Result<AgentGenerationSeed, Failure> {
+    let AgentControlRecordBody::DomainStateCommitted { commit } = record.body() else {
+        return Err(Failure::Backend);
+    };
+    if !commit.source().is_initial() {
+        return Err(Failure::Backend);
+    }
+    AgentGenerationSeed::new(
+        commit
+            .updates()
+            .iter()
+            .map(|update| update.snapshot().clone())
+            .collect(),
+    )
+    .map_err(|_| Failure::Backend)
+}
+
 async fn close_all(
     operations: impl IntoIterator<Item = impl std::future::Future<Output = Result<(), Failure>>>,
 ) -> Result<(), Failure> {
@@ -315,6 +317,32 @@ async fn close_all(
 #[cfg(test)]
 mod shutdown_tests {
     use super::*;
+    #[test]
+    fn restore_accepts_initial_generation_and_rejects_later_replacement() {
+        use rsi_agent_session_protocol::{
+            AgentControlRecord, DomainMutationSource, DomainStateCommit, GenerationSelection,
+            TurnId,
+        };
+        for initial in [true, false] {
+            let record = AgentControlRecord::new(
+                if initial { 1 } else { 2 },
+                1,
+                AgentControlRecordBody::DomainStateCommitted {
+                    commit: DomainStateCommit::new(
+                        None,
+                        DomainMutationSource::Generation {
+                            selection: GenerationSelection::new("a".repeat(64)).unwrap(),
+                            turn_id: (!initial).then(|| TurnId::new("running").unwrap()),
+                        },
+                        vec![],
+                    )
+                    .unwrap(),
+                },
+            )
+            .unwrap();
+            assert_eq!(restore_seed(&record).is_ok(), initial);
+        }
+    }
     #[tokio::test]
     async fn failure_does_not_skip_later_session_cleanup() {
         let completed = Mutex::new(Vec::new());

@@ -580,6 +580,10 @@ impl SessionLoad {
 struct SessionRuntime {
     header: Arc<SessionHeader>,
     composition: AgentCompositionPin,
+    generation_rejection: Option<String>,
+    generation_rebuilding: bool,
+    generation_attempt: Option<generations::Attempt>,
+    generation_deferred_turn: Option<TurnId>,
     durable_seq: u64,
     pending: VecDeque<Arc<SessionFact>>,
     pending_bytes: usize,
@@ -812,6 +816,10 @@ impl SessionRuntime {
         Self {
             header: Arc::new(header),
             composition,
+            generation_rejection: None,
+            generation_rebuilding: false,
+            generation_attempt: None,
+            generation_deferred_turn: None,
             durable_seq,
             pending: VecDeque::new(),
             pending_bytes: 0,
@@ -927,6 +935,7 @@ mod execution;
 mod execution_admission;
 mod finalization;
 mod fork_domains;
+mod generations;
 mod human_wait;
 mod inbox;
 mod jobs;

@@ -1,5 +1,28 @@
 # rsi-agent-composition-protocol
 
+`PreparedFreshSession::initial_commit` includes the selection digest and complete
+initial Domain set, even when empty, together with held command inputs. Kernel
+owns atomic publication. Pins retain immutable executable owners, not durable
+reconstruction bytes. `pin_session` resolves current plugins and validates saved
+state through their typed boundaries; no exact historical code is promised.
+
+Hot replacement first asks the composition owner for a prepared candidate. An
+unchanged source returns none, so Kernel need not read or copy durable Domain
+state. A candidate retains one frozen source. Consuming it acquires bounded build
+admission and builds with the current state from a settled boundary;
+dropping it abandons that preparation. Construction does not commit a Session
+selection or authorize replay of prior effects.
+
+A `GenerationValidator` contribution receives the Session Header and the complete
+candidate Domain updates, including their proposed revisions. Kernel invokes these
+callbacks in captured order after typed validation and before returning a prepared
+replacement. They may rebuild private plugin memory and reject unsupported state;
+they must not execute business effects or publish durable state. Cancellation or
+failure preserves the old selection. A proposed revision is not a commit receipt:
+each validation must load its supplied state even if private memory already has
+that revision from an abandoned candidate. Following successful publication,
+ordinary execution may reuse the loaded state at the now-committed revision.
+
 ## Native prompt preparation
 
 An optional `PromptAssembler` is captured with the immutable composition generation
@@ -98,16 +121,14 @@ tool count and byte limits. Application registrations are exclusive and have
 no Program role. Delegated Sessions retain their frozen name restrictions.
 
 Every Domain definition declares an immutable reference policy alongside its
-semantic validator: either explicitly no Session/Agent-CAS references, or a pure
-bounded visitor over the decoded state type. The exact Domain identity/version
-owns this policy. `None` unconditionally promises that the version contains no
-references, so extraction does not decode or semantically validate the state.
-Typed state admission still runs its validator; `Visit` decodes and validates
-before visiting durable state. Changing reference semantics requires a version change.
-Visitors inspect typed fields, never arbitrary JSON strings or schema examples.
-The erased codec retains no execution/composition authority and can be retained
-by Store reference validation after the originating generation is released.
-An unavailable exact codec cannot be interpreted as an empty reference set.
+semantic validator: either no Session/Agent-CAS references, or a pure bounded
+visitor over the decoded state type. Typed admission validates the encoded state
+and records the visitor's references in the canonical snapshot. Restoring current
+state checks that snapshot against the current exact Domain definition. Visitors
+inspect typed fields, never arbitrary JSON strings or schema examples.
+The codec belongs to its catalog and is not registered with or retained by Store.
+Historical maintenance reads canonical references without interpreting opaque
+business state. Unavailable code prevents typed execution, not reference scanning.
 
 Context contributions receive the executing claim's non-durable execution lease.
 Finite resource readers receive the current caller's lease independently of the
@@ -125,8 +146,8 @@ replace the execution owner's live admission check at use time.
 An optional immutable `CompositionManifest` describes the flat, redacted plugin
 instances captured when a generation is built. It contains identities, effective
 enablement and implementation origin, without configuration or filesystem paths.
-The manifest is process-local and retained with the pin; it is never a durable
-Session artifact or a promise that a cold resume uses the same executable bytes.
+The manifest is process-local and retained with the pin. The separate executable
+selection digest identifies a composition; it contains no executable reconstruction payload.
 
 A claim-scoped Tool view filters both definitions and preparation against frozen
 delegation names. Query, wait and retirement retain exact invocation identities.
@@ -213,8 +234,9 @@ may freeze an admission while retaining the draft for failed-submission retries;
 it serializes freezing, initial-state changes and first publication under one
 draft mutation admission. Freezing preserves the complete baseline and exact
 generation. An initial-state batch is validated as a whole and either replaces
-all requested domains or leaves the draft intact. Empty initial state has no
-baseline control and uses the documented zero digest.
+all requested domains or leaves the draft intact. The initial publication includes
+the selected digest even for an empty Domain set. A draft command receipt hashes
+that same complete publication, including its selection and held inputs.
 
 This package contains no preset filesystem discovery, generation construction,
 Store access, Profile catalog, executor loop, or CLI behavior.
@@ -391,7 +413,7 @@ derived and never written back as domain state or used as mutation authority.
 A bounded `AgentGenerationSeed` carries structurally validated opaque Domain
 snapshots into composition before private registrars and plugin activation. Fresh
 builds use the source snapshot's current seed; restoring builds receive the stored
-Session baseline explicitly. The seed is at most 64 sorted domains and 1 MiB in
+current Session state explicitly. The combined seed is at most 128 sorted domains and 2 MiB in
 aggregate, with the existing 256 KiB per-state limit. Construction computes one
 SHA-256 over its canonical JSON, including exact number text and object order.
 Clones and equality reuse that immutable identity without serializing payloads. `AgentGenerationInputsContract`
@@ -464,3 +486,9 @@ reason to the existing exact Tool review. A refusal precedes the durable intent.
 Successful preparations belong to their individual calls until start or drop.
 
 Command preparation consumes callback-owned input blocks. It measures each held publication once using its compact wire encoding. Draft capacity checks sum those immutable lengths, including JSON array punctuation; a durable owner can move the prepared message directly into its publication.
+
+Generation input seeds may contain the union of the previous and current Domain
+inputs (at most 128 states and 2 MiB). The sealed active Domain catalog remains
+limited to 64 states and 1 MiB. Retained inputs override current defaults. Missing
+fresh integration inputs do not block owners that can restore their complete saved
+state; owners requiring a new input reject its absence at their own boundary.

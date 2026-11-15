@@ -88,6 +88,7 @@ impl ResumeAdmissionIssuer {
         &self,
         header: SessionHeader,
         composition: AgentCompositionPin,
+        domain_control_seq: Option<u64>,
     ) -> Result<PreparedResumeSession> {
         header
             .validate()
@@ -102,6 +103,7 @@ impl ResumeAdmissionIssuer {
                 execution: None,
                 header,
                 composition,
+                domain_control_seq,
                 issuer_seal: Arc::clone(&self.seal),
             }),
         })
@@ -153,6 +155,7 @@ pub struct PreparedResumeSession {
 }
 
 struct PreparedResumeSessionInner {
+    domain_control_seq: Option<u64>,
     execution: Option<rsi_execution::ExecutionLease>,
     header: SessionHeader,
     composition: AgentCompositionPin,
@@ -160,6 +163,11 @@ struct PreparedResumeSessionInner {
 }
 
 impl PreparedResumeSession {
+    /// Domain cut validated during cold preparation; resident admissions need no cut.
+    pub fn domain_control_seq(&self) -> Option<u64> {
+        self.inner.domain_control_seq
+    }
+
     /// Binds this invocation to an exact live target owner; coordinates confer no authority.
     pub fn with_execution(mut self, execution: rsi_execution::ExecutionLease) -> Result<Self> {
         if execution.binding().location() != self.inner.header.coordinates().location() {
@@ -613,6 +621,8 @@ pub enum SessionObservation {
     Control {
         /// Exact record.
         record: ObservedControl,
+        /// Final Fact cursor of the append that committed this control.
+        fact_cursor: u64,
         /// Durable control watermark.
         durable_control_seq: u64,
     },
@@ -696,6 +706,14 @@ pub trait SessionRetirement: fmt::Debug + Send + Sync {
 /// Application-facing process-local Turn service.
 #[async_trait]
 pub trait TurnService: fmt::Debug + Send + Sync + 'static {
+    /// Resident generation status; absent for a Session that is not loaded.
+    async fn generation_status(
+        &self,
+        session: &SessionId,
+    ) -> Result<Option<SessionGenerationStatus>> {
+        let _ = session;
+        Ok(None)
+    }
     /// Waits for this Session's driver to have no Turn, activation or waking input.
     /// An idle observation does not reserve the next admission.
     async fn wait_idle(&self, session_id: &SessionId) -> Result<()> {
@@ -1369,6 +1387,26 @@ pub trait HumanWait: fmt::Debug + Send + 'static {
 /// Executor-facing Kernel port.
 #[async_trait]
 pub trait TurnExecution: fmt::Debug + Send + Sync + 'static {
+    /// Reports transient Context replay activity without durable history or per-page events.
+    fn set_composition_rebuilding(&self, claim: &TurnClaim, rebuilding: bool) -> Result<()> {
+        let _ = (claim, rebuilding);
+        Ok(())
+    }
+    /// Records a bounded Context reconstruction rejection without changing selection.
+    fn reject_composition(&self, claim: &TurnClaim, reason: &str) -> Result<()> {
+        let _ = (claim, reason);
+        Ok(())
+    }
+    /// Captures a successor at a settled request boundary, retaining mutation admission.
+    /// The caller validates its Context reconstruction before consuming `commit`.
+    /// No candidate means the recipe is unchanged or the source owns a fixed pin.
+    async fn prepare_composition(
+        &self,
+        claim: &TurnClaim,
+    ) -> Result<Option<Box<dyn PreparedCompositionUpdate>>> {
+        let _ = claim;
+        Ok(None)
+    }
     /// Reserves one bounded attempt before its dispatch, cancelled with this stage.
     async fn reserve_model_attempt(
         &self,
@@ -1621,6 +1659,26 @@ pub trait TurnExecution: fmt::Debug + Send + Sync + 'static {
     fn cancellation(&self, claim: &TurnClaim) -> Result<CancellationToken>;
     /// Retires one exact claim, requeuing only nonterminal work after admitted mutations drain.
     fn release(&self, claim: &TurnClaim) -> Result<()>;
+}
+
+/// An unpublished successor with its exact Session state and admission retained.
+#[async_trait]
+pub trait PreparedCompositionUpdate: fmt::Debug + Send {
+    /// Candidate executable pin, already narrowed for the exact claim.
+    fn composition(&self) -> AgentCompositionPin;
+    /// Atomically selects the candidate and returns its claim pin after durable proof.
+    async fn commit(self: Box<Self>) -> Result<AgentCompositionPin>;
+}
+
+/// Current resident executable selection and transient preparation diagnostic.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct SessionGenerationStatus {
+    /// Last committed recipe selected by this resident Session.
+    pub selection: rsi_agent_session_protocol::GenerationSelection,
+    /// Latest rejected candidate, cleared by successful adoption.
+    pub rejection: Option<String>,
+    /// A candidate is reconstructing Context before publication.
+    pub rebuilding: bool,
 }
 
 /// Nominal executor-facing Kernel contract.

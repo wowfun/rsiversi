@@ -4919,6 +4919,7 @@ name = "rsi-agent-composition"
 version = "0.0.1"
 dependencies = [
  "async-trait",
+ "futures-util",
  "rsi-agent-composition-protocol",
  "rsi-agent-context",
  "rsi-agent-presets",
@@ -5948,9 +5949,11 @@ dependencies = [
  "rsi-acp-application",
  "rsi-agent-composition",
  "rsi-agent-composition-protocol",
+ "rsi-agent-kernel",
  "rsi-agent-presets",
  "rsi-agent-session-protocol",
  "rsi-agent-store-protocol",
+ "rsi-agent-testkit",
  "rsi-agent-turn-protocol",
  "rsi-ai-protocol",
  "rsi-api-http",

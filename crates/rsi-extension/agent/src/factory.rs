@@ -15,11 +15,6 @@ use tokio_util::sync::CancellationToken;
 fn meta(error: impl std::fmt::Display) -> MetaError {
     MetaError::Activation(error.to_string())
 }
-#[derive(Debug, Deserialize)]
-#[serde(deny_unknown_fields)]
-struct Config {
-    artifact_sha256: String,
-}
 #[derive(Deserialize)]
 #[serde(deny_unknown_fields)]
 struct Catalog {
@@ -91,10 +86,10 @@ pub struct AgentAdapterFactory;
 #[async_trait]
 impl PluginFactory for AgentAdapterFactory {
     fn prepare(&self, config: &ConfigValue) -> rsi_meta::Result<PreparedActivation> {
-        let effective = config.clone();
-        let config: Config = serde_json::from_value(config.clone()).map_err(meta)?;
-        crate::definition(config.artifact_sha256.clone()).map_err(meta)?;
-        Ok(PreparedActivation::with_state(effective, config, 0)
+        if !config.is_null() {
+            return Err(meta("Agent adapter requires null configuration"));
+        }
+        Ok(PreparedActivation::new(config.clone())
             .requiring_local::<ExtensionContract>()
             .requiring_local::<SessionStoreContract>()
             .requiring_local::<rsi_agent_turn_protocol::TurnExecutionContract>()
@@ -103,12 +98,11 @@ impl PluginFactory for AgentAdapterFactory {
             .requiring_local::<ContributionRegistrarContract>()
             .requiring_local::<ToolRegistrarContract>())
     }
-    async fn activate(&self, mut plan: ActivationPlan) -> rsi_meta::Result<()> {
-        let config: Config = plan.take_state()?;
+    async fn activate(&self, plan: ActivationPlan) -> rsi_meta::Result<()> {
         let connection = plan.local::<ExtensionContract>()?;
         let catalog = catalog(&connection).await?;
         let registration = plan.context().registration_context()?;
-        let (handle, domain) = crate::definition(config.artifact_sha256.clone())
+        let (handle, domain) = crate::definition()
             .map_err(meta)?
             .register(
                 plan.local::<DomainRegistrarContract>()?.as_ref(),
@@ -120,7 +114,6 @@ impl PluginFactory for AgentAdapterFactory {
             plan.local::<SessionStoreContract>()?,
             plan.local::<rsi_agent_turn_protocol::TurnExecutionContract>()?,
             handle,
-            config.artifact_sha256,
         )
         .map_err(meta)?;
         adapter
@@ -187,8 +180,12 @@ impl PluginFactory for AgentAdapterFactory {
 
 fn session_contributions(
     adapter: std::sync::Arc<AgentAdapter>,
-) -> [(&'static str, ContributionKind); 5] {
+) -> [(&'static str, ContributionKind); 6] {
     [
+        (
+            "rsi.extension.generation",
+            ContributionKind::GenerationValidation(adapter.clone()),
+        ),
         (
             "rsi.extension.before-step",
             ContributionKind::BeforeStep(adapter.clone()),

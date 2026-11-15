@@ -37,6 +37,8 @@ mod contributions;
 mod domains;
 #[path = "composition/prompt.rs"]
 mod prompt;
+#[path = "composition/recipes.rs"]
+mod recipes;
 #[path = "composition/seeds.rs"]
 mod seeds;
 #[path = "composition/snapshots.rs"]
@@ -320,7 +322,7 @@ impl PluginFactory for ProbeFactory {
 }
 
 struct Fixture {
-    _temp: TempDir,
+    temporary: TempDir,
     source: std::path::PathBuf,
     id: AgentPresetId,
     probe: Arc<Probe>,
@@ -528,6 +530,9 @@ impl BuildFixture {
 
 impl Fixture {
     async fn new(source: &str) -> Self {
+        Self::with_scope_capacity(source, 128).await
+    }
+    async fn with_scope_capacity(source: &str, capacity: usize) -> Self {
         let temp = tempfile::tempdir().unwrap();
         let preset_root = temp.path().join("presets");
         let id = AgentPresetId::new("default").unwrap();
@@ -555,10 +560,12 @@ impl Fixture {
             context_factory(),
         ])
         .unwrap();
-        let (runtime, tools_fiber, composition_fiber, service) =
-            activate_composition(presets, contributions).await;
+        let (runtime, tools_fiber, composition_fiber, service) = activate_composition_factory(
+            AgentCompositionFactory::new(presets, contributions, ScopeRoot::new(capacity).unwrap()),
+        )
+        .await;
         Self {
-            _temp: temp,
+            temporary: temp,
             source: source_path,
             id,
             probe,
@@ -837,6 +844,29 @@ async fn failed_idle_preset_rows_cannot_exhaust_healthy_preset_admission() {
     assert_eq!(healthy.tools().definitions()[0].name(), "probe-a");
     drop(healthy);
 
+    fixture.stop().await;
+}
+
+#[tokio::test]
+async fn successful_preset_churn_evicts_idle_rows_without_revoking_external_pins() {
+    let fixture = Fixture::with_scope_capacity(&profile("held"), 1024).await;
+    let held = fixture.service.pin(&fixture.id, None).await.unwrap();
+    let root = fixture.temporary.path().join("presets");
+    for index in 0..MAXIMUM_CURRENT_PRESETS + 8 {
+        let id = AgentPresetId::new(format!("healthy-{index}")).unwrap();
+        let directory = root.join(id.as_str());
+        fs::create_dir(&directory).unwrap();
+        fs::write(directory.join(COMPOSITION_FILE), profile("churn")).unwrap();
+        let pin = fixture.service.pin(&id, None).await.unwrap();
+        assert_eq!(pin.tools().definitions()[0].name(), "probe-churn");
+    }
+    assert_eq!(held.tools().definitions()[0].name(), "probe-held");
+    assert_eq!(fixture.probe.active("held"), 1);
+    let rebuilt = fixture.service.pin(&fixture.id, None).await.unwrap();
+    assert!(!held.same_generation(&rebuilt));
+    drop(held);
+    fixture.probe.wait_active("held", 1).await;
+    drop(rebuilt);
     fixture.stop().await;
 }
 

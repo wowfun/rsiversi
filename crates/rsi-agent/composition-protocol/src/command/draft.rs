@@ -127,6 +127,7 @@ pub struct DraftCommandMutation {
 /// Completed local admission with deferred notification outside the draft mutation lock.
 #[derive(Debug)]
 pub struct AppliedDraftCommand {
+    selection: rsi_agent_session_protocol::GenerationSelection,
     result: DraftCommandResult<SessionCommandReceipt>,
     session: rsi_agent_session_protocol::SessionId,
     baseline: DomainBaseline,
@@ -146,6 +147,7 @@ impl AppliedDraftCommand {
                     Ok(receipt) => {
                         publication
                             .draft_committed(&DraftPublicationReceipt {
+                                selection: &self.selection,
                                 session_id: &self.session,
                                 receipt,
                                 baseline: &self.baseline,
@@ -268,6 +270,7 @@ impl AgentSessionDraft {
         let result = self.apply_command_state(&mut mutation);
         match &result {
             Ok(receipt) => mutation.outcome.draft_committed(&DraftPublicationReceipt {
+                selection: self.composition.selection(),
                 session_id: self.header.session_id(),
                 receipt,
                 baseline: &self.baseline,
@@ -276,6 +279,7 @@ impl AgentSessionDraft {
             Err(_) => mutation.outcome.rejected(),
         }
         AppliedDraftCommand {
+            selection: self.composition.selection().clone(),
             result,
             session: self.header.session_id().clone(),
             baseline: self.baseline.clone(),
@@ -306,10 +310,9 @@ impl AgentSessionDraft {
             std::mem::take(&mut mutation.output.inputs),
         )?);
         super::PreparedCommandInput::validate_batch(&inputs)?;
-        let state_sha256 = super::initial_commit(&baseline, &inputs)?.map_or_else(
-            || baseline.digest().to_owned(),
-            |commit| commit.request_sha256().to_owned(),
-        );
+        let state_sha256 = super::initial_commit(&baseline, &inputs, self.composition.selection())?
+            .request_sha256()
+            .to_owned();
         let receipt = SessionCommandReceipt::draft_changed(&mutation.invocation, state_sha256)?;
         let CommandRevision::Draft { revision } = receipt.revision() else {
             unreachable!("draft receipt")

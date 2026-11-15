@@ -302,7 +302,6 @@ async fn input_only_draft_and_durable_receipts_recover_without_domain_state() {
                 .freeze()
                 .initial_commit()
                 .unwrap()
-                .unwrap()
                 .updates()
                 .is_empty()
         );
@@ -608,7 +607,7 @@ async fn draft_inputs_remain_local_until_first_submit_and_enter_first_step() {
     let frozen = draft.freeze();
     assert_eq!(
         draft_receipt.state_sha256(),
-        frozen.initial_commit().unwrap().unwrap().request_sha256()
+        frozen.initial_commit().unwrap().request_sha256()
     );
     assert_eq!(frozen.command_inputs().len(), 2);
     assert!(matches!(

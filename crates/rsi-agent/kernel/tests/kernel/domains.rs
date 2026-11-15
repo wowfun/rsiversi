@@ -154,7 +154,7 @@ async fn tool_result_and_domain_settle_together_across_faults_and_cancellation()
             guarded.require_uncancelled_turn = true;
             assert!(matches!(
                 run.kernel.commit_domains(&run.claim, guarded).await,
-                Err(TurnError::StaleClaim)
+                Err(TurnError::Cancelled)
             ));
             assert!(
                 run.kernel
@@ -1377,7 +1377,8 @@ async fn first_turn_and_message_atomically_commit_the_actual_draft_baseline() {
         let store = Arc::new(MemoryStore::new());
         let (composition, handle) = domain_composition();
         let initial = prepared_session("domain-fresh", composition.clone(), &handle).await;
-        let expected_digest = initial.baseline().digest().to_owned();
+        let expected_updates = initial.baseline().commit().unwrap().updates().to_vec();
+        let expected_recipe = initial.composition().selection().clone();
         let kernel =
             AgentKernel::recover_with_clock(store.clone(), composition, Arc::new(FixedClock))
                 .await
@@ -1430,7 +1431,25 @@ async fn first_turn_and_message_atomically_commit_the_actual_draft_baseline() {
         else {
             panic!("first control lost its actual domain baseline");
         };
-        assert_eq!(commit.request_sha256(), expected_digest);
+        assert_eq!(commit.updates(), expected_updates);
+        assert_eq!(
+            commit.source(),
+            &rsi_agent_session_protocol::DomainMutationSource::Generation {
+                selection: expected_recipe.clone(),
+                turn_id: None,
+            }
+        );
+        assert_eq!(
+            states.generation.as_ref().map(|entry| entry.control_seq),
+            Some(1)
+        );
+        assert!(
+            rsi_agent_store_protocol::control_references(&controls.records[0])
+                .unwrap()
+                .iter()
+                .next()
+                .is_none()
+        );
         assert_eq!(
             store.header(&session).await.unwrap(),
             header("domain-fresh")
@@ -1517,7 +1536,7 @@ async fn first_publication_retains_baseline_resources_after_the_submit_waiter_is
 }
 
 #[tokio::test]
-async fn cold_execution_rejects_missing_domain_codecs_while_history_remains_readable() {
+async fn cold_preparation_allows_removed_domain_owners_and_keeps_history() {
     let store = Arc::new(MemoryStore::new());
     let (domains, handle) = domain_composition();
     let initial = prepared_session("domain-cold", domains.clone(), &handle).await;
@@ -1539,10 +1558,7 @@ async fn cold_execution_rejects_missing_domain_codecs_while_history_remains_read
             .await
             .unwrap();
     let session = SessionId::new("domain-cold").unwrap();
-    assert!(matches!(
-        reopened.prepare_resume(&session).await,
-        Err(TurnError::Composition(_))
-    ));
+    assert!(reopened.prepare_resume(&session).await.is_ok());
     assert_eq!(
         store
             .read_domain_states(&session, None, None)
@@ -1906,14 +1922,14 @@ impl AgentComposition for RecordingRestore {
     ) -> rsi_agent_composition_protocol::Result<AgentCompositionPin> {
         assert_eq!(preset, self.pin.preset_id());
         self.seeds.lock().unwrap().push(
-            seed.expect("cold selection must supply its saved baseline before pin")
+            seed.expect("cold selection must supply current committed state before pin")
                 .clone(),
         );
         Ok(self.pin.clone())
     }
 }
 #[tokio::test]
-async fn cold_projection_and_resume_supply_original_baseline_before_composition_not_latest_state() {
+async fn cold_projection_and_resume_supply_current_committed_state_to_the_selected_code() {
     let store = Arc::new(MemoryStore::new());
     let run = DomainRun::start(store.clone()).await;
     let session = run.claim.session_id().clone();
@@ -1957,7 +1973,12 @@ async fn cold_projection_and_resume_supply_original_baseline_before_composition_
     let captures = recording.seeds.lock().unwrap();
     assert!(captures.len() >= 2);
     for seed in captures.iter() {
-        assert_eq!(seed.states(), std::slice::from_ref(&baseline));
+        assert_eq!(seed.states().len(), 1);
+        assert_eq!(seed.states()[0].identity(), baseline.identity());
+        assert_eq!(
+            seed.states()[0].state().value(),
+            &serde_json::json!(replacement)
+        );
     }
     drop(captures);
 }

@@ -34,6 +34,8 @@ rsi-api-http = { path = "../../crates/rsi-api/http" }
 rsi-meta = { path = "../../crates/rsi-meta/core" }
 
 [dev-dependencies]
+rsi-agent-kernel = { path = "../../crates/rsi-agent/kernel" }
+rsi-agent-testkit = { path = "../../crates/rsi-agent/testkit" }
 rsi-agent-session-protocol = { path = "../../crates/rsi-agent/session-protocol" }
 rsi-agent-store-protocol = { path = "../../crates/rsi-agent/store-protocol" }
 rsi-agent-turn-protocol = { path = "../../crates/rsi-agent/turn-protocol" }

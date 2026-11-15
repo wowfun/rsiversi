@@ -15,6 +15,8 @@ repeat effects or continue from stale resident state.
 
 ## Decision
 
+The fresh-only Domain declaration rule below is superseded by [durable Agent generation selection](2026-11-12-durable-agent-generation-selection.md). Ordinary proposal and canonical-state rules remain applicable.
+
 Typed definitions and pure validators enter the same unpublished generation as
 Tools and the context builder. Frozen handles retain exact registration
 identity; matching public names do not authorize a replacement generation.

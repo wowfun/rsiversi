@@ -733,7 +733,7 @@ async fn first_draft_input_publishes_header_baseline_and_acceptance_together() {
         .unwrap();
     assert_eq!(controls.records.len(), 2);
     assert!(
-        matches!(controls.records[0].body(), AgentControlRecordBody::DomainStateCommitted { commit } if matches!(commit.source(), DomainMutationSource::Baseline))
+        matches!(controls.records[0].body(), AgentControlRecordBody::DomainStateCommitted { commit } if matches!(commit.source(), DomainMutationSource::Generation { turn_id: None, .. }))
     );
     assert!(
         matches!(controls.records[1].body(), AgentControlRecordBody::MessageAccepted { message, .. } if matches!(message.source, AgentMessageSource::Continuation { .. }))

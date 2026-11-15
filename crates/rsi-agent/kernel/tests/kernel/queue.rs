@@ -74,11 +74,11 @@ async fn inbox_pause_rejects_claims_and_only_new_waking_input_resumes_atomically
                 sessions: vec![AtomicSessionAppend {
                     session_id: session.clone(),
                     expected_fact_seq: 0,
-                    expected_control_seq: 1,
+                    expected_control_seq: 2,
                     header: None,
                     facts: vec![],
                     controls: vec![
-                        AgentControlRecord::new(2, 42, AgentControlRecordBody::InboxPaused)
+                        AgentControlRecord::new(3, 42, AgentControlRecordBody::InboxPaused)
                             .unwrap(),
                     ],
                 }],
@@ -265,7 +265,7 @@ async fn queue_concurrent_operation_ids_serialize_through_cancelled_commit_waite
                     .await
                     .unwrap()
                     .durable_control_seq,
-                4
+                5
             );
             let ready = store.list_ready_messages(&session, None, 64).await.unwrap();
             assert_eq!(ready.messages.len(), 1);
@@ -421,7 +421,7 @@ async fn queue_replace_preserves_position_old_identity_and_receipts_across_resta
         let ready = store.list_ready_messages(&session, None, 64).await.unwrap();
         assert_eq!(ready.messages.len(), 64);
         assert_eq!(ready.messages[0].message_id.as_str(), "successor");
-        assert_eq!(ready.messages[0].control_seq, 1);
+        assert_eq!(ready.messages[0].control_seq, 2);
         assert_eq!(
             store
                 .read_controls(

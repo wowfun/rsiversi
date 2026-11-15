@@ -12,6 +12,8 @@ use std::{collections::BTreeSet, fmt, sync::Arc};
 /// Closed framework execution stages.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub enum ContributionStage {
+    /// Before a replacement's executable selection is durably published.
+    GenerationValidation,
     /// Before a new provider retry series.
     BeforeStep,
     /// After source-ordered Tool settlement.
@@ -35,6 +37,8 @@ pub enum ContributionStage {
 /// One narrow callback registered in an Agent-only composition.
 #[derive(Clone, Debug)]
 pub enum ContributionKind {
+    /// Loads and validates candidate private state without business effects.
+    GenerationValidation(Arc<dyn crate::GenerationValidator>),
     /// Staged context, domain and Tool-subset preparation.
     BeforeStep(Arc<dyn super::BeforeStepContributor>),
     /// Model context input producer.
@@ -85,6 +89,7 @@ impl ContributionRegistration {
     /// Returns its framework stage.
     pub const fn stage(&self) -> ContributionStage {
         match self.kind {
+            ContributionKind::GenerationValidation(_) => ContributionStage::GenerationValidation,
             ContributionKind::Context(_) | ContributionKind::BeforeStep(_) => {
                 ContributionStage::BeforeStep
             }

@@ -11,6 +11,11 @@ Executable package admission opens and verifies the retained package closure on
 a blocking worker. Store contention remains an activation failure with its Busy
 diagnostic; it does not run hashing on the async executor.
 
+Native generation acceptance uses two actual compiled libraries with one Kernel
+Session. It checks an in-flight retained invocation, subsequent execution and
+cold recovery with the current catalog, plus retention of already admitted code
+after its factory leaves that catalog.
+
 `rsi.web.assets` admits an internally verified independent Web bundle. Custom
 Profiles use the same admission contract as resident Web listeners; native
 executable build identity does not select the Web bundle family.

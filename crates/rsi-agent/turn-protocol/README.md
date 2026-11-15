@@ -1,5 +1,18 @@
 # rsi-agent-turn-protocol
 
+`prepare_composition` is admitted only between settled request series. An unchanged
+selection returns no candidate without reading Domain payloads. A candidate retains
+a validated mutation lease and current-state cut until dropped or committed.
+Session submission admission is released during build and Context replay.
+The executor first opens its Context with the candidate builder and reconstructs
+framework history; only then may it consume `commit`. Dropping or rejecting a
+candidate leaves the old generation selected. Commit survives caller detachment
+and publishes the selected code only after its exact durable receipt is proved.
+`generation_status` exposes the resident selection and latest bounded candidate
+rejection. Rejections are transient diagnostics, not Session history or a second
+durable selection. Their clearing and retry rules belong to the
+[generation contract](../docs/subsystems/composition-generations.md).
+
 `request_step` opens or reuses the claim's charged Step at a safe, flushed
 boundary. Pending Tool context is claimed before the Fact cut of either request
 capture, including the complete callback snapshot. It can read one current domain by name at that Fact cut. Omitting

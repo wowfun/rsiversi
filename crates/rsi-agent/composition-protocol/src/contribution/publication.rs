@@ -17,6 +17,8 @@ pub struct PublicationReceipt<'a> {
 /// Exact lease-local evidence after a draft command's atomic initial-state swap.
 #[derive(Debug)]
 pub struct DraftPublicationReceipt<'a> {
+    /// Diagnostic executable selection included in the initial publication.
+    pub selection: &'a rsi_agent_session_protocol::GenerationSelection,
     /// Owning unpublished Session identity.
     pub session_id: &'a SessionId,
     /// Exact invocation and successor digest retained by the draft owner.
@@ -27,17 +29,9 @@ pub struct DraftPublicationReceipt<'a> {
     pub inputs: &'a [crate::PreparedCommandInput],
 }
 impl DraftPublicationReceipt<'_> {
-    /// Digest of the complete candidate that first submission will publish.
-    ///
-    /// # Errors
-    /// Rejects an input batch inconsistent with the candidate baseline.
-    pub fn state_sha256(&self) -> ContributionResult<String> {
-        Ok(
-            crate::command::initial_commit(self.baseline, self.inputs)?.map_or_else(
-                || self.baseline.digest().to_owned(),
-                |commit| commit.request_sha256().to_owned(),
-            ),
-        )
+    /// Borrows the verified candidate digest retained by the draft owner.
+    pub fn state_sha256(&self) -> &str {
+        self.receipt.state_sha256()
     }
 }
 

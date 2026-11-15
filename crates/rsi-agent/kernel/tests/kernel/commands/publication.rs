@@ -65,10 +65,7 @@ impl PublicationObserver for Observer {
         &self,
         receipt: &DraftPublicationReceipt<'_>,
     ) -> ContributionResult<()> {
-        assert_eq!(
-            receipt.receipt.state_sha256(),
-            receipt.state_sha256().unwrap()
-        );
+        assert_eq!(receipt.receipt.state_sha256(), receipt.state_sha256());
         assert!(matches!(
             self.store.header(receipt.session_id).await,
             Err(StoreError::NotFound(_))
@@ -190,7 +187,10 @@ async fn draft_publication_cancellation_preserves_swap_and_cross_draft_rejects()
     let applied = draft.apply_command(prepared.execute(CancellationToken::new()).await.unwrap());
     // The atomic swap is already visible before any notification I/O.
     let receipt = draft.command_receipt(&input.request_id).unwrap();
-    assert_eq!(receipt.state_sha256(), draft.baseline().digest());
+    assert_eq!(
+        receipt.state_sha256(),
+        draft.freeze().initial_commit().unwrap().request_sha256()
+    );
     let task = tokio::spawn(applied.finish());
     observer.entered.acquire().await.unwrap().forget();
     task.abort();

@@ -84,7 +84,7 @@ fn write_preset(
         .filter_map(|name| std::env::var(name).ok().map(|value| (name, value)))
         .collect();
     let mut installed = None;
-    let (process_factory, process_config, digest) = if let Some(packages) = packages {
+    let (process_factory, process_config) = if let Some(packages) = packages {
         let store = rsi_packages::PackageStore::open(&paths.state().join("packages")).unwrap();
         let names = ["rsi-dsh-cordis", "rsi-dsh-plugin-bridge"];
         let sources: Vec<_> = names
@@ -118,7 +118,7 @@ fn write_preset(
         let digest = resolution.packages["rsi-dsh-plugin-bridge"].digest.clone();
         let config = json!({"package":"rsi-dsh-plugin-bridge", "digest":digest, "export":"process", "program":node,"environment":environment});
         installed = Some((store, resolution));
-        ("rsi.extension.package", config, digest)
+        ("rsi.extension.package", config)
     } else {
         let cohort = PathBuf::from(
             std::env::var("RSI_DSH_INSTALLED_COHORT").expect("independent installed cohort"),
@@ -128,7 +128,6 @@ fn write_preset(
             json!({"program":node,"cwd":cohort,"generation":"standard-original-plugins","environment":environment,
             "arguments":[cohort.join("node_modules/rsi-dsh-cordis/src/host.mjs"),PathBuf::from("standard-original-plugins"),
                 cohort.join("node_modules/rsi-dsh-plugin-bridge/src/index.mjs"),cohort.clone()]}),
-            "a".repeat(64),
         )
     };
     let document = Document {
@@ -137,7 +136,7 @@ fn write_preset(
             {"kind":"plugin","id":"context","plugin":"rsi.agent.context.default"},
             {"kind":"group","id":"runtime","isolation":{"local":["rsi.extension.connection"]},"nodes":[
                 {"kind":"plugin","id":"process","plugin":process_factory,"config":process_config},
-                {"kind":"plugin","id":"adapter","plugin":"rsi.extension.agent","config":{"artifact_sha256":digest}}
+                {"kind":"plugin","id":"adapter","plugin":"rsi.extension.agent"}
             ]}
         ]),
     };

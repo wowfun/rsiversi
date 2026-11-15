@@ -191,23 +191,20 @@ impl PreparedCommandInput {
 pub(crate) fn initial_commit(
     baseline: &crate::DomainBaseline,
     inputs: &[PreparedCommandInput],
-) -> ContributionResult<Option<rsi_agent_session_protocol::DomainStateCommit>> {
-    match baseline.commit() {
-        Some(commit) => commit
-            .clone()
-            .with_command_inputs(inputs.iter().map(|input| input.publication(true)).collect())
-            .map(Some)
-            .map_err(|error| crate::ContributionError::Invalid(error.to_string())),
-        None if inputs.is_empty() => Ok(None),
-        None => rsi_agent_session_protocol::DomainStateCommit::new_with_command_inputs(
-            None,
-            rsi_agent_session_protocol::DomainMutationSource::Baseline,
-            vec![],
-            inputs.iter().map(|input| input.publication(true)).collect(),
-        )
-        .map(Some)
-        .map_err(|error| crate::ContributionError::Invalid(error.to_string())),
-    }
+    selection: &rsi_agent_session_protocol::GenerationSelection,
+) -> ContributionResult<rsi_agent_session_protocol::DomainStateCommit> {
+    rsi_agent_session_protocol::DomainStateCommit::new_with_command_inputs(
+        None,
+        rsi_agent_session_protocol::DomainMutationSource::Generation {
+            selection: selection.clone(),
+            turn_id: None,
+        },
+        baseline
+            .commit()
+            .map_or_else(Vec::new, |commit| commit.updates().to_vec()),
+        inputs.iter().map(|input| input.publication(true)).collect(),
+    )
+    .map_err(|error| crate::ContributionError::Invalid(error.to_string()))
 }
 
 /// A command stages typed replacements; the Session owner performs the commit.

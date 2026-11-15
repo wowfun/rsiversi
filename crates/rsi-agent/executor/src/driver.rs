@@ -149,7 +149,7 @@ impl Driver {
             return;
         };
         let job_scope = Some(job_scope);
-        let composition = match self.turns.composition(claim) {
+        let mut composition = match self.turns.composition(claim) {
             Ok(composition) => composition,
             Err(error) => {
                 self.finish_context_error(claim, job_scope.as_ref(), error.to_string())
@@ -187,7 +187,7 @@ impl Driver {
         let drive = {
             let driving = self.drive(
                 claim,
-                &composition,
+                &mut composition,
                 job_scope.as_ref(),
                 &claim_stop,
                 &mut fold,
@@ -266,7 +266,7 @@ impl Driver {
     pub(super) async fn drive(
         &self,
         claim: &TurnClaim,
-        composition: &AgentCompositionPin,
+        composition: &mut AgentCompositionPin,
         job_scope: Option<&JobScopeAuthority>,
         stop: &CancellationToken,
         fold: &mut ModelContextState,
@@ -346,7 +346,7 @@ impl Driver {
     async fn run_language(
         &self,
         claim: &TurnClaim,
-        composition: &AgentCompositionPin,
+        composition: &mut AgentCompositionPin,
         job_scope: Option<&JobScopeAuthority>,
         fold: &mut ModelContextState,
         explicit_selection: Option<rsi_agent_session_protocol::ModelSelection>,
@@ -401,6 +401,17 @@ impl Driver {
                             TurnOutcome::Completed
                         }));
                     }
+                }
+                // The batch and stopping callbacks have settled. Release their
+                // application view before the source admits a replacement capture.
+                drop(std::mem::replace(
+                    &mut request_composition,
+                    composition.clone(),
+                ));
+                tokio::select! {
+                    () = stop.cancelled() => return Err(DriveFailure::Stopped),
+                    () = cancellation.cancelled() => return Err(DriveFailure::Turn(TurnOutcome::Cancelled)),
+                    result = self.refresh_composition(claim, composition, fold) => result?,
                 }
                 (request_composition, selection, selected_tools) = self
                     .before_step(
@@ -2330,6 +2341,65 @@ impl Driver {
         }
     }
 
+    async fn refresh_composition(
+        &self,
+        claim: &TurnClaim,
+        composition: &mut AgentCompositionPin,
+        fold: &mut ModelContextState,
+    ) -> std::result::Result<(), DriveFailure> {
+        let candidate = match self.turns.prepare_composition(claim).await {
+            Ok(Some(candidate)) => candidate,
+            Ok(None) | Err(TurnError::Composition(_) | TurnError::Capacity) => return Ok(()),
+            Err(error) => return Err(execution_support::turn_failure(error)),
+        };
+        let _replay = CompositionReplay::new(self.turns.as_ref(), claim);
+        let next = candidate.composition();
+        let mut rebuilt = match ModelContextState::open(
+            next.context_builder(),
+            claim.header().clone(),
+            self.context_limits(),
+            self.context_budget.clone(),
+        ) {
+            Ok(fold) => fold,
+            Err(rsi_agent_context::ContextError::Capacity) => return Ok(()),
+            Err(error) => {
+                self.turns
+                    .reject_composition(claim, &error.to_string())
+                    .map_err(execution_support::turn_failure)?;
+                return Ok(());
+            }
+        };
+        let loaded = self.load_claim(claim, &mut rebuilt).await;
+        if let Err(error) = loaded {
+            return match error {
+                DriveFailure::Turn(TurnOutcome::Failed { ref code, .. })
+                    if code == "context.capacity" =>
+                {
+                    Ok(())
+                }
+                DriveFailure::Turn(TurnOutcome::Failed {
+                    ref code,
+                    ref message,
+                }) if code.starts_with("context.") => {
+                    self.turns
+                        .reject_composition(claim, message)
+                        .map_err(execution_support::turn_failure)?;
+                    Ok(())
+                }
+                other => Err(other),
+            };
+        }
+        *composition = match candidate.commit().await {
+            Ok(composition) => composition,
+            // A concurrent writer changed the captured cut during preparation.
+            // Keep the current context and retry at the next settled boundary.
+            Err(TurnError::Composition(_)) => return Ok(()),
+            Err(error) => return Err(execution_support::turn_failure(error)),
+        };
+        *fold = rebuilt;
+        Ok(())
+    }
+
     pub(super) async fn load_claim(
         &self,
         claim: &TurnClaim,
@@ -2405,7 +2475,7 @@ impl Driver {
                     rsi_agent_session_protocol::MAXIMUM_FACTS_PER_READ,
                 )
                 .await
-                .map_err(fatal)?;
+                .map_err(execution_support::turn_failure)?;
             scan.page(false, &page.facts);
             if page.through_seq == cursor {
                 return Ok(state);
@@ -2439,7 +2509,11 @@ impl Driver {
         if claim.header().history_origin().is_none() {
             return Ok(());
         }
-        let sources = self.turns.read_fork_sources(claim).await.map_err(fatal)?;
+        let sources = self
+            .turns
+            .read_fork_sources(claim)
+            .await
+            .map_err(execution_support::turn_failure)?;
         for source in &sources {
             fold.ingest(ContextPage::ForkSource(source))
                 .map_err(|error| context_failure("context.invalid_fork", &error))?;
@@ -2457,7 +2531,7 @@ impl Driver {
                         rsi_agent_session_protocol::MAXIMUM_FACTS_PER_READ,
                     )
                     .await
-                    .map_err(fatal)?
+                    .map_err(execution_support::turn_failure)?
                     .ok_or_else(|| {
                         failed(
                             "context.fork_unsupported",

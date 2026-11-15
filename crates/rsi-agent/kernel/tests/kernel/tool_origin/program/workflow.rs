@@ -372,6 +372,7 @@ async fn workflow_detaches_and_routes_128_initial_completions_without_parent_mai
     f.run.detach().await.unwrap();
     assert!(!f.run.cancel_from_creator().await.unwrap());
     for ordinal in 1..=128 {
+        let cas_writes = f.faults.cas_writes.load(Ordering::SeqCst);
         let owner = f.run.clone();
         let wait = tokio::spawn(async move {
             owner
@@ -383,6 +384,11 @@ async fn workflow_detaches_and_routes_128_initial_completions_without_parent_mai
                 .await
         });
         let claim = child_claim(&f).await;
+        assert_eq!(
+            f.faults.cas_writes.load(Ordering::SeqCst),
+            cas_writes,
+            "child must retain the run's published recipe without rewriting it"
+        );
         if ordinal == 1 {
             end_creator(&f).await;
         }

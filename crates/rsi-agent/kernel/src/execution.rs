@@ -375,6 +375,73 @@ impl TurnExecution for AgentKernel {
         }
     }
 
+    async fn prepare_composition(
+        &self,
+        claim: &TurnClaim,
+    ) -> TurnResult<Option<Box<dyn rsi_agent_turn_protocol::PreparedCompositionUpdate>>> {
+        let cancellation = self.cancellation(claim)?.child_token();
+        let _cancel = cancellation.clone().drop_guard();
+        let result = tokio::select! {
+            biased;
+            () = cancellation.cancelled() => Err(TurnError::Cancelled),
+            result = tokio::time::timeout(generations::PREPARATION_BUDGET, self.prepare_generation(claim, &cancellation)) => {
+                if let Ok(result) = result {
+                    result
+                } else {
+                    let mut state = lock_state(&self.inner);
+                    self.validate_claim(&state, claim)?;
+                    state.sessions.get_mut(claim.session_id()).expect("validated Session")
+                        .generation_deferred_turn = Some(claim.turn_id().clone());
+                    Err(TurnError::Composition("plugin preparation exceeded 30 seconds; retrying next Turn".into()))
+                }
+            }
+        };
+        if let Err(TurnError::Composition(reason)) = &result {
+            // Retirement can invalidate diagnostic publication after preparation
+            // settles. Preserve the original candidate rejection.
+            let _ = self.reject_composition(claim, reason);
+        }
+        result
+    }
+
+    fn set_composition_rebuilding(&self, claim: &TurnClaim, rebuilding: bool) -> TurnResult<()> {
+        let mut state = lock_state(&self.inner);
+        self.validate_claim(&state, claim)?;
+        let session = state
+            .sessions
+            .get_mut(claim.session_id())
+            .expect("validated Session");
+        if session.generation_rebuilding == rebuilding {
+            return Ok(());
+        }
+        session.generation_rebuilding = rebuilding;
+        drop(state);
+        self.inner.session_changes.committed(claim.session_id());
+        Ok(())
+    }
+    fn reject_composition(&self, claim: &TurnClaim, reason: &str) -> TurnResult<()> {
+        let mut state = lock_state(&self.inner);
+        self.validate_claim(&state, claim)?;
+        let session = state
+            .sessions
+            .get_mut(claim.session_id())
+            .expect("validated Session");
+        if let Some(attempt) = &mut session.generation_attempt
+            && attempt.turn_id == *claim.turn_id()
+        {
+            attempt.rejected = true;
+        }
+        let rejection = &mut session.generation_rejection;
+        let reason = bounded_diagnostic(reason);
+        if rejection.as_ref() == Some(&reason) {
+            return Ok(());
+        }
+        *rejection = Some(reason);
+        drop(state);
+        self.inner.session_changes.committed(claim.session_id());
+        Ok(())
+    }
+
     fn composition(&self, claim: &TurnClaim) -> TurnResult<AgentCompositionPin> {
         let (composition, output) = {
             let state = lock_state(&self.inner);
@@ -396,15 +463,7 @@ impl TurnExecution for AgentKernel {
             )
         };
         // Provider catalog callbacks and schema construction must not hold the global lock.
-        let mut composition = composition.for_delegation(claim.header().delegation_policy());
-        if let Some(contract) = output {
-            composition = composition
-                .with_output_contract(
-                    &format!("{}:{}", claim.session_id(), claim.turn_id()),
-                    contract,
-                )
-                .map_err(turn_composition_error)?;
-        }
+        let composition = super::generations::narrow(claim, composition, output)?;
         let program_roles = composition.tools().program_roles();
         let mut state = lock_state(&self.inner);
         self.validate_claim(&state, claim)?;
