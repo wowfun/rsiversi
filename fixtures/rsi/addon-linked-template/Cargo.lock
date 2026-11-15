@@ -2412,7 +2412,6 @@ dependencies = [
 [[package]]
 name = "rsi"
 version = "0.0.1"
-source = "git+https://github.com/wowfun/rsiversi.git?rev=3545705d4b3f0763d636f873fc2f0c7629f1212c#3545705d4b3f0763d636f873fc2f0c7629f1212c"
 dependencies = [
  "async-trait",
  "bytes",
@@ -2574,7 +2573,6 @@ dependencies = [
 [[package]]
 name = "rsi-acp"
 version = "0.0.1"
-source = "git+https://github.com/wowfun/rsiversi.git?rev=3545705d4b3f0763d636f873fc2f0c7629f1212c#3545705d4b3f0763d636f873fc2f0c7629f1212c"
 dependencies = [
  "async-trait",
  "rsi-acp-protocol",
@@ -2589,7 +2587,6 @@ dependencies = [
 [[package]]
 name = "rsi-acp-agent"
 version = "0.0.1"
-source = "git+https://github.com/wowfun/rsiversi.git?rev=3545705d4b3f0763d636f873fc2f0c7629f1212c#3545705d4b3f0763d636f873fc2f0c7629f1212c"
 dependencies = [
  "async-trait",
  "futures-util",
@@ -2614,7 +2611,6 @@ dependencies = [
 [[package]]
 name = "rsi-acp-api"
 version = "0.0.1"
-source = "git+https://github.com/wowfun/rsiversi.git?rev=3545705d4b3f0763d636f873fc2f0c7629f1212c#3545705d4b3f0763d636f873fc2f0c7629f1212c"
 dependencies = [
  "async-trait",
  "hex",
@@ -2629,7 +2625,6 @@ dependencies = [
 [[package]]
 name = "rsi-acp-client"
 version = "0.0.1"
-source = "git+https://github.com/wowfun/rsiversi.git?rev=3545705d4b3f0763d636f873fc2f0c7629f1212c#3545705d4b3f0763d636f873fc2f0c7629f1212c"
 dependencies = [
  "rsi-acp",
  "rsi-acp-journal",
@@ -2644,7 +2639,6 @@ dependencies = [
 [[package]]
 name = "rsi-acp-host"
 version = "0.0.1"
-source = "git+https://github.com/wowfun/rsiversi.git?rev=3545705d4b3f0763d636f873fc2f0c7629f1212c#3545705d4b3f0763d636f873fc2f0c7629f1212c"
 dependencies = [
  "async-trait",
  "rsi-acp",
@@ -2664,7 +2658,6 @@ dependencies = [
 [[package]]
 name = "rsi-acp-journal"
 version = "0.0.1"
-source = "git+https://github.com/wowfun/rsiversi.git?rev=3545705d4b3f0763d636f873fc2f0c7629f1212c#3545705d4b3f0763d636f873fc2f0c7629f1212c"
 dependencies = [
  "rsi-acp-protocol",
  "rusqlite",
@@ -2677,7 +2670,6 @@ dependencies = [
 [[package]]
 name = "rsi-acp-protocol"
 version = "0.0.1"
-source = "git+https://github.com/wowfun/rsiversi.git?rev=3545705d4b3f0763d636f873fc2f0c7629f1212c#3545705d4b3f0763d636f873fc2f0c7629f1212c"
 dependencies = [
  "agent-client-protocol-schema",
  "async-trait",
@@ -2692,7 +2684,6 @@ dependencies = [
 [[package]]
 name = "rsi-acp-tools"
 version = "0.0.1"
-source = "git+https://github.com/wowfun/rsiversi.git?rev=3545705d4b3f0763d636f873fc2f0c7629f1212c#3545705d4b3f0763d636f873fc2f0c7629f1212c"
 dependencies = [
  "async-trait",
  "hex",
@@ -2721,9 +2712,9 @@ dependencies = [
 [[package]]
 name = "rsi-agent-composition"
 version = "0.0.1"
-source = "git+https://github.com/wowfun/rsiversi.git?rev=3545705d4b3f0763d636f873fc2f0c7629f1212c#3545705d4b3f0763d636f873fc2f0c7629f1212c"
 dependencies = [
  "async-trait",
+ "futures-util",
  "rsi-agent-composition-protocol",
  "rsi-agent-context",
  "rsi-agent-presets",
@@ -2741,7 +2732,6 @@ dependencies = [
 [[package]]
 name = "rsi-agent-composition-protocol"
 version = "0.0.1"
-source = "git+https://github.com/wowfun/rsiversi.git?rev=3545705d4b3f0763d636f873fc2f0c7629f1212c#3545705d4b3f0763d636f873fc2f0c7629f1212c"
 dependencies = [
  "async-trait",
  "futures-util",
@@ -2766,7 +2756,6 @@ dependencies = [
 [[package]]
 name = "rsi-agent-context"
 version = "0.0.1"
-source = "git+https://github.com/wowfun/rsiversi.git?rev=3545705d4b3f0763d636f873fc2f0c7629f1212c#3545705d4b3f0763d636f873fc2f0c7629f1212c"
 dependencies = [
  "async-trait",
  "hex",
@@ -2785,7 +2774,6 @@ dependencies = [
 [[package]]
 name = "rsi-agent-context-input"
 version = "0.0.1"
-source = "git+https://github.com/wowfun/rsiversi.git?rev=3545705d4b3f0763d636f873fc2f0c7629f1212c#3545705d4b3f0763d636f873fc2f0c7629f1212c"
 dependencies = [
  "async-trait",
  "rsi-agent-composition-protocol",
@@ -2800,7 +2788,6 @@ dependencies = [
 [[package]]
 name = "rsi-agent-executor"
 version = "0.0.1"
-source = "git+https://github.com/wowfun/rsiversi.git?rev=3545705d4b3f0763d636f873fc2f0c7629f1212c#3545705d4b3f0763d636f873fc2f0c7629f1212c"
 dependencies = [
  "async-trait",
  "bytes",
@@ -2831,7 +2818,6 @@ dependencies = [
 [[package]]
 name = "rsi-agent-goal"
 version = "0.0.1"
-source = "git+https://github.com/wowfun/rsiversi.git?rev=3545705d4b3f0763d636f873fc2f0c7629f1212c#3545705d4b3f0763d636f873fc2f0c7629f1212c"
 dependencies = [
  "async-trait",
  "rsi-agent-composition-protocol",
@@ -2847,7 +2833,6 @@ dependencies = [
 [[package]]
 name = "rsi-agent-kernel"
 version = "0.0.1"
-source = "git+https://github.com/wowfun/rsiversi.git?rev=3545705d4b3f0763d636f873fc2f0c7629f1212c#3545705d4b3f0763d636f873fc2f0c7629f1212c"
 dependencies = [
  "async-trait",
  "futures-util",
@@ -2875,7 +2860,6 @@ dependencies = [
 [[package]]
 name = "rsi-agent-model-selection"
 version = "0.0.1"
-source = "git+https://github.com/wowfun/rsiversi.git?rev=3545705d4b3f0763d636f873fc2f0c7629f1212c#3545705d4b3f0763d636f873fc2f0c7629f1212c"
 dependencies = [
  "async-trait",
  "rsi-agent-composition-protocol",
@@ -2890,7 +2874,6 @@ dependencies = [
 [[package]]
 name = "rsi-agent-plan-policy"
 version = "0.0.1"
-source = "git+https://github.com/wowfun/rsiversi.git?rev=3545705d4b3f0763d636f873fc2f0c7629f1212c#3545705d4b3f0763d636f873fc2f0c7629f1212c"
 dependencies = [
  "async-trait",
  "getrandom 0.3.4",
@@ -2909,7 +2892,6 @@ dependencies = [
 [[package]]
 name = "rsi-agent-presets"
 version = "0.0.1"
-source = "git+https://github.com/wowfun/rsiversi.git?rev=3545705d4b3f0763d636f873fc2f0c7629f1212c#3545705d4b3f0763d636f873fc2f0c7629f1212c"
 dependencies = [
  "async-trait",
  "rsi-agent-session-protocol",
@@ -2928,7 +2910,6 @@ dependencies = [
 [[package]]
 name = "rsi-agent-program"
 version = "0.0.1"
-source = "git+https://github.com/wowfun/rsiversi.git?rev=3545705d4b3f0763d636f873fc2f0c7629f1212c#3545705d4b3f0763d636f873fc2f0c7629f1212c"
 dependencies = [
  "async-trait",
  "futures-util",
@@ -2951,7 +2932,6 @@ dependencies = [
 [[package]]
 name = "rsi-agent-prompt-assembly"
 version = "0.0.1"
-source = "git+https://github.com/wowfun/rsiversi.git?rev=3545705d4b3f0763d636f873fc2f0c7629f1212c#3545705d4b3f0763d636f873fc2f0c7629f1212c"
 dependencies = [
  "async-trait",
  "rsi-agent-composition-protocol",
@@ -2966,7 +2946,6 @@ dependencies = [
 [[package]]
 name = "rsi-agent-references"
 version = "0.0.1"
-source = "git+https://github.com/wowfun/rsiversi.git?rev=3545705d4b3f0763d636f873fc2f0c7629f1212c#3545705d4b3f0763d636f873fc2f0c7629f1212c"
 dependencies = [
  "async-trait",
  "futures-util",
@@ -2990,7 +2969,6 @@ dependencies = [
 [[package]]
 name = "rsi-agent-repeat-tool-reminder"
 version = "0.0.1"
-source = "git+https://github.com/wowfun/rsiversi.git?rev=3545705d4b3f0763d636f873fc2f0c7629f1212c#3545705d4b3f0763d636f873fc2f0c7629f1212c"
 dependencies = [
  "async-trait",
  "hex",
@@ -3008,7 +2986,6 @@ dependencies = [
 [[package]]
 name = "rsi-agent-schedule"
 version = "0.0.1"
-source = "git+https://github.com/wowfun/rsiversi.git?rev=3545705d4b3f0763d636f873fc2f0c7629f1212c#3545705d4b3f0763d636f873fc2f0c7629f1212c"
 dependencies = [
  "async-trait",
  "rsi-agent-composition-protocol",
@@ -3025,7 +3002,6 @@ dependencies = [
 [[package]]
 name = "rsi-agent-session-protocol"
 version = "0.0.1"
-source = "git+https://github.com/wowfun/rsiversi.git?rev=3545705d4b3f0763d636f873fc2f0c7629f1212c#3545705d4b3f0763d636f873fc2f0c7629f1212c"
 dependencies = [
  "base64 0.22.1",
  "hex",
@@ -3047,7 +3023,6 @@ dependencies = [
 [[package]]
 name = "rsi-agent-store-protocol"
 version = "0.0.1"
-source = "git+https://github.com/wowfun/rsiversi.git?rev=3545705d4b3f0763d636f873fc2f0c7629f1212c#3545705d4b3f0763d636f873fc2f0c7629f1212c"
 dependencies = [
  "async-trait",
  "rsi-agent-session-protocol",
@@ -3063,7 +3038,6 @@ dependencies = [
 [[package]]
 name = "rsi-agent-store-sqlite"
 version = "0.0.1"
-source = "git+https://github.com/wowfun/rsiversi.git?rev=3545705d4b3f0763d636f873fc2f0c7629f1212c#3545705d4b3f0763d636f873fc2f0c7629f1212c"
 dependencies = [
  "async-trait",
  "hex",
@@ -3085,7 +3059,6 @@ dependencies = [
 [[package]]
 name = "rsi-agent-time-context"
 version = "0.0.1"
-source = "git+https://github.com/wowfun/rsiversi.git?rev=3545705d4b3f0763d636f873fc2f0c7629f1212c#3545705d4b3f0763d636f873fc2f0c7629f1212c"
 dependencies = [
  "async-trait",
  "rsi-agent-composition-protocol",
@@ -3100,7 +3073,6 @@ dependencies = [
 [[package]]
 name = "rsi-agent-todo"
 version = "0.0.1"
-source = "git+https://github.com/wowfun/rsiversi.git?rev=3545705d4b3f0763d636f873fc2f0c7629f1212c#3545705d4b3f0763d636f873fc2f0c7629f1212c"
 dependencies = [
  "async-trait",
  "rsi-agent-composition-protocol",
@@ -3115,7 +3087,6 @@ dependencies = [
 [[package]]
 name = "rsi-agent-tools"
 version = "0.0.1"
-source = "git+https://github.com/wowfun/rsiversi.git?rev=3545705d4b3f0763d636f873fc2f0c7629f1212c#3545705d4b3f0763d636f873fc2f0c7629f1212c"
 dependencies = [
  "async-trait",
  "getrandom 0.3.4",
@@ -3137,7 +3108,6 @@ dependencies = [
 [[package]]
 name = "rsi-agent-turn-protocol"
 version = "0.0.1"
-source = "git+https://github.com/wowfun/rsiversi.git?rev=3545705d4b3f0763d636f873fc2f0c7629f1212c#3545705d4b3f0763d636f873fc2f0c7629f1212c"
 dependencies = [
  "async-trait",
  "base64 0.22.1",
@@ -3161,7 +3131,6 @@ dependencies = [
 [[package]]
 name = "rsi-agent-workspace-context"
 version = "0.0.1"
-source = "git+https://github.com/wowfun/rsiversi.git?rev=3545705d4b3f0763d636f873fc2f0c7629f1212c#3545705d4b3f0763d636f873fc2f0c7629f1212c"
 dependencies = [
  "async-trait",
  "cap-std",
@@ -3191,7 +3160,6 @@ dependencies = [
 [[package]]
 name = "rsi-ai"
 version = "0.0.1"
-source = "git+https://github.com/wowfun/rsiversi.git?rev=3545705d4b3f0763d636f873fc2f0c7629f1212c#3545705d4b3f0763d636f873fc2f0c7629f1212c"
 dependencies = [
  "async-trait",
  "futures-util",
@@ -3210,7 +3178,6 @@ dependencies = [
 [[package]]
 name = "rsi-ai-deepseek"
 version = "0.0.1"
-source = "git+https://github.com/wowfun/rsiversi.git?rev=3545705d4b3f0763d636f873fc2f0c7629f1212c#3545705d4b3f0763d636f873fc2f0c7629f1212c"
 dependencies = [
  "async-stream",
  "async-trait",
@@ -3231,7 +3198,6 @@ dependencies = [
 [[package]]
 name = "rsi-ai-image"
 version = "0.0.1"
-source = "git+https://github.com/wowfun/rsiversi.git?rev=3545705d4b3f0763d636f873fc2f0c7629f1212c#3545705d4b3f0763d636f873fc2f0c7629f1212c"
 dependencies = [
  "async-trait",
  "hex",
@@ -3248,7 +3214,6 @@ dependencies = [
 [[package]]
 name = "rsi-ai-models-api"
 version = "0.0.1"
-source = "git+https://github.com/wowfun/rsiversi.git?rev=3545705d4b3f0763d636f873fc2f0c7629f1212c#3545705d4b3f0763d636f873fc2f0c7629f1212c"
 dependencies = [
  "async-trait",
  "rsi-ai-protocol",
@@ -3262,7 +3227,6 @@ dependencies = [
 [[package]]
 name = "rsi-ai-openai"
 version = "0.0.1"
-source = "git+https://github.com/wowfun/rsiversi.git?rev=3545705d4b3f0763d636f873fc2f0c7629f1212c#3545705d4b3f0763d636f873fc2f0c7629f1212c"
 dependencies = [
  "async-stream",
  "async-trait",
@@ -3287,7 +3251,6 @@ dependencies = [
 [[package]]
 name = "rsi-ai-openai-compatible"
 version = "0.0.1"
-source = "git+https://github.com/wowfun/rsiversi.git?rev=3545705d4b3f0763d636f873fc2f0c7629f1212c#3545705d4b3f0763d636f873fc2f0c7629f1212c"
 dependencies = [
  "async-stream",
  "async-trait",
@@ -3308,7 +3271,6 @@ dependencies = [
 [[package]]
 name = "rsi-ai-portable"
 version = "0.0.1"
-source = "git+https://github.com/wowfun/rsiversi.git?rev=3545705d4b3f0763d636f873fc2f0c7629f1212c#3545705d4b3f0763d636f873fc2f0c7629f1212c"
 dependencies = [
  "async-stream",
  "async-trait",
@@ -3326,7 +3288,6 @@ dependencies = [
 [[package]]
 name = "rsi-ai-protocol"
 version = "0.0.1"
-source = "git+https://github.com/wowfun/rsiversi.git?rev=3545705d4b3f0763d636f873fc2f0c7629f1212c#3545705d4b3f0763d636f873fc2f0c7629f1212c"
 dependencies = [
  "async-trait",
  "futures-util",
@@ -3346,7 +3307,6 @@ dependencies = [
 [[package]]
 name = "rsi-ai-provider"
 version = "0.0.1"
-source = "git+https://github.com/wowfun/rsiversi.git?rev=3545705d4b3f0763d636f873fc2f0c7629f1212c#3545705d4b3f0763d636f873fc2f0c7629f1212c"
 dependencies = [
  "async-trait",
  "bytes",
@@ -3367,7 +3327,6 @@ dependencies = [
 [[package]]
 name = "rsi-ai-transport"
 version = "0.0.1"
-source = "git+https://github.com/wowfun/rsiversi.git?rev=3545705d4b3f0763d636f873fc2f0c7629f1212c#3545705d4b3f0763d636f873fc2f0c7629f1212c"
 dependencies = [
  "async-stream",
  "async-trait",
@@ -3391,7 +3350,6 @@ dependencies = [
 [[package]]
 name = "rsi-api"
 version = "0.0.1"
-source = "git+https://github.com/wowfun/rsiversi.git?rev=3545705d4b3f0763d636f873fc2f0c7629f1212c#3545705d4b3f0763d636f873fc2f0c7629f1212c"
 dependencies = [
  "async-trait",
  "futures-util",
@@ -3406,7 +3364,6 @@ dependencies = [
 [[package]]
 name = "rsi-api-auth"
 version = "0.0.1"
-source = "git+https://github.com/wowfun/rsiversi.git?rev=3545705d4b3f0763d636f873fc2f0c7629f1212c#3545705d4b3f0763d636f873fc2f0c7629f1212c"
 dependencies = [
  "async-trait",
  "getrandom 0.3.4",
@@ -3427,7 +3384,6 @@ dependencies = [
 [[package]]
 name = "rsi-api-client"
 version = "0.0.1"
-source = "git+https://github.com/wowfun/rsiversi.git?rev=3545705d4b3f0763d636f873fc2f0c7629f1212c#3545705d4b3f0763d636f873fc2f0c7629f1212c"
 dependencies = [
  "async-stream",
  "async-trait",
@@ -3445,7 +3401,6 @@ dependencies = [
 [[package]]
 name = "rsi-api-contract-build"
 version = "0.0.1"
-source = "git+https://github.com/wowfun/rsiversi.git?rev=3545705d4b3f0763d636f873fc2f0c7629f1212c#3545705d4b3f0763d636f873fc2f0c7629f1212c"
 dependencies = [
  "serde",
  "serde_json",
@@ -3454,7 +3409,6 @@ dependencies = [
 [[package]]
 name = "rsi-api-device-api"
 version = "0.0.1"
-source = "git+https://github.com/wowfun/rsiversi.git?rev=3545705d4b3f0763d636f873fc2f0c7629f1212c#3545705d4b3f0763d636f873fc2f0c7629f1212c"
 dependencies = [
  "async-trait",
  "rsi-api-contract-build",
@@ -3468,7 +3422,6 @@ dependencies = [
 [[package]]
 name = "rsi-api-http"
 version = "0.0.1"
-source = "git+https://github.com/wowfun/rsiversi.git?rev=3545705d4b3f0763d636f873fc2f0c7629f1212c#3545705d4b3f0763d636f873fc2f0c7629f1212c"
 dependencies = [
  "async-stream",
  "async-trait",
@@ -3500,7 +3453,6 @@ dependencies = [
 [[package]]
 name = "rsi-api-http-client"
 version = "0.0.1"
-source = "git+https://github.com/wowfun/rsiversi.git?rev=3545705d4b3f0763d636f873fc2f0c7629f1212c#3545705d4b3f0763d636f873fc2f0c7629f1212c"
 dependencies = [
  "async-trait",
  "futures-util",
@@ -3521,7 +3473,6 @@ dependencies = [
 [[package]]
 name = "rsi-api-local-transport"
 version = "0.0.1"
-source = "git+https://github.com/wowfun/rsiversi.git?rev=3545705d4b3f0763d636f873fc2f0c7629f1212c#3545705d4b3f0763d636f873fc2f0c7629f1212c"
 dependencies = [
  "rsi-process-native",
  "tokio",
@@ -3531,7 +3482,6 @@ dependencies = [
 [[package]]
 name = "rsi-api-portable"
 version = "0.0.1"
-source = "git+https://github.com/wowfun/rsiversi.git?rev=3545705d4b3f0763d636f873fc2f0c7629f1212c#3545705d4b3f0763d636f873fc2f0c7629f1212c"
 dependencies = [
  "async-stream",
  "async-trait",
@@ -3548,7 +3498,6 @@ dependencies = [
 [[package]]
 name = "rsi-api-protocol"
 version = "0.0.1"
-source = "git+https://github.com/wowfun/rsiversi.git?rev=3545705d4b3f0763d636f873fc2f0c7629f1212c#3545705d4b3f0763d636f873fc2f0c7629f1212c"
 dependencies = [
  "async-trait",
  "bytes",
@@ -3568,7 +3517,6 @@ dependencies = [
 [[package]]
 name = "rsi-api-uds-client"
 version = "0.0.1"
-source = "git+https://github.com/wowfun/rsiversi.git?rev=3545705d4b3f0763d636f873fc2f0c7629f1212c#3545705d4b3f0763d636f873fc2f0c7629f1212c"
 dependencies = [
  "async-stream",
  "async-trait",
@@ -3593,7 +3541,6 @@ dependencies = [
 [[package]]
 name = "rsi-application"
 version = "0.0.1"
-source = "git+https://github.com/wowfun/rsiversi.git?rev=3545705d4b3f0763d636f873fc2f0c7629f1212c#3545705d4b3f0763d636f873fc2f0c7629f1212c"
 dependencies = [
  "async-trait",
  "futures-util",
@@ -3610,7 +3557,6 @@ dependencies = [
 [[package]]
 name = "rsi-apply-patch"
 version = "0.0.1"
-source = "git+https://github.com/wowfun/rsiversi.git?rev=3545705d4b3f0763d636f873fc2f0c7629f1212c#3545705d4b3f0763d636f873fc2f0c7629f1212c"
 dependencies = [
  "async-trait",
  "rsi-meta",
@@ -3625,7 +3571,6 @@ dependencies = [
 [[package]]
 name = "rsi-approval"
 version = "0.0.1"
-source = "git+https://github.com/wowfun/rsiversi.git?rev=3545705d4b3f0763d636f873fc2f0c7629f1212c#3545705d4b3f0763d636f873fc2f0c7629f1212c"
 dependencies = [
  "async-trait",
  "rsi-approval-protocol",
@@ -3637,7 +3582,6 @@ dependencies = [
 [[package]]
 name = "rsi-approval-protocol"
 version = "0.0.1"
-source = "git+https://github.com/wowfun/rsiversi.git?rev=3545705d4b3f0763d636f873fc2f0c7629f1212c#3545705d4b3f0763d636f873fc2f0c7629f1212c"
 dependencies = [
  "async-trait",
  "rsi-execution-protocol",
@@ -3653,7 +3597,6 @@ dependencies = [
 [[package]]
 name = "rsi-automation"
 version = "0.0.1"
-source = "git+https://github.com/wowfun/rsiversi.git?rev=3545705d4b3f0763d636f873fc2f0c7629f1212c#3545705d4b3f0763d636f873fc2f0c7629f1212c"
 dependencies = [
  "async-trait",
  "base64 0.22.1",
@@ -3695,7 +3638,6 @@ dependencies = [
 [[package]]
 name = "rsi-automation-api"
 version = "0.0.1"
-source = "git+https://github.com/wowfun/rsiversi.git?rev=3545705d4b3f0763d636f873fc2f0c7629f1212c#3545705d4b3f0763d636f873fc2f0c7629f1212c"
 dependencies = [
  "base64 0.22.1",
  "rsi-agent-session-protocol",
@@ -3709,7 +3651,6 @@ dependencies = [
 [[package]]
 name = "rsi-browser"
 version = "0.0.1"
-source = "git+https://github.com/wowfun/rsiversi.git?rev=3545705d4b3f0763d636f873fc2f0c7629f1212c#3545705d4b3f0763d636f873fc2f0c7629f1212c"
 dependencies = [
  "async-trait",
  "base64 0.22.1",
@@ -3744,7 +3685,6 @@ dependencies = [
 [[package]]
 name = "rsi-client"
 version = "0.0.1"
-source = "git+https://github.com/wowfun/rsiversi.git?rev=3545705d4b3f0763d636f873fc2f0c7629f1212c#3545705d4b3f0763d636f873fc2f0c7629f1212c"
 dependencies = [
  "async-trait",
  "futures-util",
@@ -3768,7 +3708,6 @@ dependencies = [
 [[package]]
 name = "rsi-client-composition"
 version = "0.0.1"
-source = "git+https://github.com/wowfun/rsiversi.git?rev=3545705d4b3f0763d636f873fc2f0c7629f1212c#3545705d4b3f0763d636f873fc2f0c7629f1212c"
 dependencies = [
  "rsi-acp-api",
  "rsi-acp-protocol",
@@ -3796,7 +3735,6 @@ dependencies = [
 [[package]]
 name = "rsi-client-preferences"
 version = "0.0.1"
-source = "git+https://github.com/wowfun/rsiversi.git?rev=3545705d4b3f0763d636f873fc2f0c7629f1212c#3545705d4b3f0763d636f873fc2f0c7629f1212c"
 dependencies = [
  "async-trait",
  "rsi-meta",
@@ -3808,7 +3746,6 @@ dependencies = [
 [[package]]
 name = "rsi-commands"
 version = "0.0.1"
-source = "git+https://github.com/wowfun/rsiversi.git?rev=3545705d4b3f0763d636f873fc2f0c7629f1212c#3545705d4b3f0763d636f873fc2f0c7629f1212c"
 dependencies = [
  "async-trait",
  "rsi-commands-protocol",
@@ -3820,7 +3757,6 @@ dependencies = [
 [[package]]
 name = "rsi-commands-protocol"
 version = "0.0.1"
-source = "git+https://github.com/wowfun/rsiversi.git?rev=3545705d4b3f0763d636f873fc2f0c7629f1212c#3545705d4b3f0763d636f873fc2f0c7629f1212c"
 dependencies = [
  "async-trait",
  "rsi-media-protocol",
@@ -3833,7 +3769,6 @@ dependencies = [
 [[package]]
 name = "rsi-configuration-access"
 version = "0.0.1"
-source = "git+https://github.com/wowfun/rsiversi.git?rev=3545705d4b3f0763d636f873fc2f0c7629f1212c#3545705d4b3f0763d636f873fc2f0c7629f1212c"
 dependencies = [
  "async-trait",
  "futures-util",
@@ -3853,7 +3788,6 @@ dependencies = [
 [[package]]
 name = "rsi-configuration-api"
 version = "0.0.1"
-source = "git+https://github.com/wowfun/rsiversi.git?rev=3545705d4b3f0763d636f873fc2f0c7629f1212c#3545705d4b3f0763d636f873fc2f0c7629f1212c"
 dependencies = [
  "async-trait",
  "rsi-agent-session-protocol",
@@ -3873,7 +3807,6 @@ dependencies = [
 [[package]]
 name = "rsi-conversation"
 version = "0.0.1"
-source = "git+https://github.com/wowfun/rsiversi.git?rev=3545705d4b3f0763d636f873fc2f0c7629f1212c#3545705d4b3f0763d636f873fc2f0c7629f1212c"
 dependencies = [
  "rsi-acp-protocol",
  "rsi-agent-session-protocol",
@@ -3890,7 +3823,6 @@ dependencies = [
 [[package]]
 name = "rsi-credentials-local"
 version = "0.0.1"
-source = "git+https://github.com/wowfun/rsiversi.git?rev=3545705d4b3f0763d636f873fc2f0c7629f1212c#3545705d4b3f0763d636f873fc2f0c7629f1212c"
 dependencies = [
  "async-trait",
  "rsi-credentials-protocol",
@@ -3906,7 +3838,6 @@ dependencies = [
 [[package]]
 name = "rsi-credentials-protocol"
 version = "0.0.1"
-source = "git+https://github.com/wowfun/rsiversi.git?rev=3545705d4b3f0763d636f873fc2f0c7629f1212c#3545705d4b3f0763d636f873fc2f0c7629f1212c"
 dependencies = [
  "async-trait",
  "rsi-meta-contract",
@@ -3918,7 +3849,6 @@ dependencies = [
 [[package]]
 name = "rsi-directory-picker"
 version = "0.0.1"
-source = "git+https://github.com/wowfun/rsiversi.git?rev=3545705d4b3f0763d636f873fc2f0c7629f1212c#3545705d4b3f0763d636f873fc2f0c7629f1212c"
 dependencies = [
  "async-trait",
  "rsi-api-protocol",
@@ -3938,7 +3868,6 @@ dependencies = [
 [[package]]
 name = "rsi-directory-picker-api"
 version = "0.0.1"
-source = "git+https://github.com/wowfun/rsiversi.git?rev=3545705d4b3f0763d636f873fc2f0c7629f1212c#3545705d4b3f0763d636f873fc2f0c7629f1212c"
 dependencies = [
  "async-trait",
  "rsi-api-contract-build",
@@ -3952,7 +3881,6 @@ dependencies = [
 [[package]]
 name = "rsi-execution"
 version = "0.0.1"
-source = "git+https://github.com/wowfun/rsiversi.git?rev=3545705d4b3f0763d636f873fc2f0c7629f1212c#3545705d4b3f0763d636f873fc2f0c7629f1212c"
 dependencies = [
  "async-trait",
  "rsi-api-protocol",
@@ -3969,7 +3897,6 @@ dependencies = [
 [[package]]
 name = "rsi-execution-local"
 version = "0.0.1"
-source = "git+https://github.com/wowfun/rsiversi.git?rev=3545705d4b3f0763d636f873fc2f0c7629f1212c#3545705d4b3f0763d636f873fc2f0c7629f1212c"
 dependencies = [
  "async-trait",
  "rsi-execution",
@@ -3983,7 +3910,6 @@ dependencies = [
 [[package]]
 name = "rsi-execution-protocol"
 version = "0.0.1"
-source = "git+https://github.com/wowfun/rsiversi.git?rev=3545705d4b3f0763d636f873fc2f0c7629f1212c#3545705d4b3f0763d636f873fc2f0c7629f1212c"
 dependencies = [
  "rsi-api-protocol",
  "rsi-workspace-path",
@@ -3994,7 +3920,6 @@ dependencies = [
 [[package]]
 name = "rsi-extension"
 version = "0.0.1"
-source = "git+https://github.com/wowfun/rsiversi.git?rev=3545705d4b3f0763d636f873fc2f0c7629f1212c#3545705d4b3f0763d636f873fc2f0c7629f1212c"
 dependencies = [
  "async-trait",
  "rsi-meta",
@@ -4010,7 +3935,6 @@ dependencies = [
 [[package]]
 name = "rsi-extension-agent"
 version = "0.0.1"
-source = "git+https://github.com/wowfun/rsiversi.git?rev=3545705d4b3f0763d636f873fc2f0c7629f1212c#3545705d4b3f0763d636f873fc2f0c7629f1212c"
 dependencies = [
  "async-trait",
  "rsi-agent-composition-protocol",
@@ -4034,7 +3958,6 @@ dependencies = [
 [[package]]
 name = "rsi-files"
 version = "0.0.1"
-source = "git+https://github.com/wowfun/rsiversi.git?rev=3545705d4b3f0763d636f873fc2f0c7629f1212c#3545705d4b3f0763d636f873fc2f0c7629f1212c"
 dependencies = [
  "async-trait",
  "hex",
@@ -4049,7 +3972,6 @@ dependencies = [
 [[package]]
 name = "rsi-files-native-fs"
 version = "0.0.1"
-source = "git+https://github.com/wowfun/rsiversi.git?rev=3545705d4b3f0763d636f873fc2f0c7629f1212c#3545705d4b3f0763d636f873fc2f0c7629f1212c"
 dependencies = [
  "cap-std",
  "libc",
@@ -4059,7 +3981,6 @@ dependencies = [
 [[package]]
 name = "rsi-files-protocol"
 version = "0.0.1"
-source = "git+https://github.com/wowfun/rsiversi.git?rev=3545705d4b3f0763d636f873fc2f0c7629f1212c#3545705d4b3f0763d636f873fc2f0c7629f1212c"
 dependencies = [
  "async-trait",
  "hex",
@@ -4074,7 +3995,6 @@ dependencies = [
 [[package]]
 name = "rsi-files-tools"
 version = "0.0.1"
-source = "git+https://github.com/wowfun/rsiversi.git?rev=3545705d4b3f0763d636f873fc2f0c7629f1212c#3545705d4b3f0763d636f873fc2f0c7629f1212c"
 dependencies = [
  "async-trait",
  "hex",
@@ -4088,7 +4008,6 @@ dependencies = [
 [[package]]
 name = "rsi-goal"
 version = "0.0.1"
-source = "git+https://github.com/wowfun/rsiversi.git?rev=3545705d4b3f0763d636f873fc2f0c7629f1212c#3545705d4b3f0763d636f873fc2f0c7629f1212c"
 dependencies = [
  "async-stream",
  "async-trait",
@@ -4107,7 +4026,6 @@ dependencies = [
 [[package]]
 name = "rsi-history"
 version = "0.0.1"
-source = "git+https://github.com/wowfun/rsiversi.git?rev=3545705d4b3f0763d636f873fc2f0c7629f1212c#3545705d4b3f0763d636f873fc2f0c7629f1212c"
 dependencies = [
  "async-trait",
  "futures-util",
@@ -4140,7 +4058,6 @@ dependencies = [
 [[package]]
 name = "rsi-history-api"
 version = "0.0.1"
-source = "git+https://github.com/wowfun/rsiversi.git?rev=3545705d4b3f0763d636f873fc2f0c7629f1212c#3545705d4b3f0763d636f873fc2f0c7629f1212c"
 dependencies = [
  "rsi-acp-protocol",
  "rsi-agent-session-protocol",
@@ -4155,7 +4072,6 @@ dependencies = [
 [[package]]
 name = "rsi-host"
 version = "0.0.1"
-source = "git+https://github.com/wowfun/rsiversi.git?rev=3545705d4b3f0763d636f873fc2f0c7629f1212c#3545705d4b3f0763d636f873fc2f0c7629f1212c"
 dependencies = [
  "async-trait",
  "hex",
@@ -4169,7 +4085,6 @@ dependencies = [
 [[package]]
 name = "rsi-host-control"
 version = "0.0.1"
-source = "git+https://github.com/wowfun/rsiversi.git?rev=3545705d4b3f0763d636f873fc2f0c7629f1212c#3545705d4b3f0763d636f873fc2f0c7629f1212c"
 dependencies = [
  "rsi-api-contract-build",
  "rsi-api-protocol",
@@ -4181,7 +4096,6 @@ dependencies = [
 [[package]]
 name = "rsi-inspector"
 version = "0.0.1"
-source = "git+https://github.com/wowfun/rsiversi.git?rev=3545705d4b3f0763d636f873fc2f0c7629f1212c#3545705d4b3f0763d636f873fc2f0c7629f1212c"
 dependencies = [
  "rsi-api-contract-build",
  "rsi-api-protocol",
@@ -4194,7 +4108,6 @@ dependencies = [
 [[package]]
 name = "rsi-installation"
 version = "0.0.1"
-source = "git+https://github.com/wowfun/rsiversi.git?rev=3545705d4b3f0763d636f873fc2f0c7629f1212c#3545705d4b3f0763d636f873fc2f0c7629f1212c"
 dependencies = [
  "dirs",
  "getrandom 0.3.4",
@@ -4215,7 +4128,6 @@ dependencies = [
 [[package]]
 name = "rsi-jobs"
 version = "0.0.1"
-source = "git+https://github.com/wowfun/rsiversi.git?rev=3545705d4b3f0763d636f873fc2f0c7629f1212c#3545705d4b3f0763d636f873fc2f0c7629f1212c"
 dependencies = [
  "async-trait",
  "rsi-meta-contract",
@@ -4228,7 +4140,6 @@ dependencies = [
 [[package]]
 name = "rsi-jobs-local"
 version = "0.0.1"
-source = "git+https://github.com/wowfun/rsiversi.git?rev=3545705d4b3f0763d636f873fc2f0c7629f1212c#3545705d4b3f0763d636f873fc2f0c7629f1212c"
 dependencies = [
  "async-trait",
  "futures-util",
@@ -4243,7 +4154,6 @@ dependencies = [
 [[package]]
 name = "rsi-jobs-tools"
 version = "0.0.1"
-source = "git+https://github.com/wowfun/rsiversi.git?rev=3545705d4b3f0763d636f873fc2f0c7629f1212c#3545705d4b3f0763d636f873fc2f0c7629f1212c"
 dependencies = [
  "async-trait",
  "rsi-jobs",
@@ -4257,7 +4167,6 @@ dependencies = [
 [[package]]
 name = "rsi-lsp"
 version = "0.0.1"
-source = "git+https://github.com/wowfun/rsiversi.git?rev=3545705d4b3f0763d636f873fc2f0c7629f1212c#3545705d4b3f0763d636f873fc2f0c7629f1212c"
 dependencies = [
  "async-trait",
  "futures-util",
@@ -4281,7 +4190,6 @@ dependencies = [
 [[package]]
 name = "rsi-lsp-ui"
 version = "0.0.1"
-source = "git+https://github.com/wowfun/rsiversi.git?rev=3545705d4b3f0763d636f873fc2f0c7629f1212c#3545705d4b3f0763d636f873fc2f0c7629f1212c"
 dependencies = [
  "async-trait",
  "futures-util",
@@ -4299,7 +4207,6 @@ dependencies = [
 [[package]]
 name = "rsi-managed-providers"
 version = "0.0.1"
-source = "git+https://github.com/wowfun/rsiversi.git?rev=3545705d4b3f0763d636f873fc2f0c7629f1212c#3545705d4b3f0763d636f873fc2f0c7629f1212c"
 dependencies = [
  "async-trait",
  "futures-util",
@@ -4326,7 +4233,6 @@ dependencies = [
 [[package]]
 name = "rsi-mcp"
 version = "0.0.1"
-source = "git+https://github.com/wowfun/rsiversi.git?rev=3545705d4b3f0763d636f873fc2f0c7629f1212c#3545705d4b3f0763d636f873fc2f0c7629f1212c"
 dependencies = [
  "async-trait",
  "base64 0.22.1",
@@ -4355,7 +4261,6 @@ dependencies = [
 [[package]]
 name = "rsi-mcp-protocol"
 version = "0.0.1"
-source = "git+https://github.com/wowfun/rsiversi.git?rev=3545705d4b3f0763d636f873fc2f0c7629f1212c#3545705d4b3f0763d636f873fc2f0c7629f1212c"
 dependencies = [
  "base64 0.22.1",
  "iri-string",
@@ -4372,7 +4277,6 @@ dependencies = [
 [[package]]
 name = "rsi-media"
 version = "0.0.1"
-source = "git+https://github.com/wowfun/rsiversi.git?rev=3545705d4b3f0763d636f873fc2f0c7629f1212c#3545705d4b3f0763d636f873fc2f0c7629f1212c"
 dependencies = [
  "async-trait",
  "bytes",
@@ -4389,7 +4293,6 @@ dependencies = [
 [[package]]
 name = "rsi-media-api"
 version = "0.0.1"
-source = "git+https://github.com/wowfun/rsiversi.git?rev=3545705d4b3f0763d636f873fc2f0c7629f1212c#3545705d4b3f0763d636f873fc2f0c7629f1212c"
 dependencies = [
  "async-trait",
  "bytes",
@@ -4407,7 +4310,6 @@ dependencies = [
 [[package]]
 name = "rsi-media-local"
 version = "0.0.1"
-source = "git+https://github.com/wowfun/rsiversi.git?rev=3545705d4b3f0763d636f873fc2f0c7629f1212c#3545705d4b3f0763d636f873fc2f0c7629f1212c"
 dependencies = [
  "async-trait",
  "bytes",
@@ -4426,7 +4328,6 @@ dependencies = [
 [[package]]
 name = "rsi-media-protocol"
 version = "0.0.1"
-source = "git+https://github.com/wowfun/rsiversi.git?rev=3545705d4b3f0763d636f873fc2f0c7629f1212c#3545705d4b3f0763d636f873fc2f0c7629f1212c"
 dependencies = [
  "async-trait",
  "bytes",
@@ -4439,7 +4340,6 @@ dependencies = [
 [[package]]
 name = "rsi-meta"
 version = "0.0.1"
-source = "git+https://github.com/wowfun/rsiversi.git?rev=3545705d4b3f0763d636f873fc2f0c7629f1212c#3545705d4b3f0763d636f873fc2f0c7629f1212c"
 dependencies = [
  "async-trait",
  "futures-util",
@@ -4455,7 +4355,6 @@ dependencies = [
 [[package]]
 name = "rsi-meta-contract"
 version = "0.0.1"
-source = "git+https://github.com/wowfun/rsiversi.git?rev=3545705d4b3f0763d636f873fc2f0c7629f1212c#3545705d4b3f0763d636f873fc2f0c7629f1212c"
 dependencies = [
  "serde",
  "serde_json",
@@ -4464,7 +4363,6 @@ dependencies = [
 [[package]]
 name = "rsi-meta-execution"
 version = "0.0.1"
-source = "git+https://github.com/wowfun/rsiversi.git?rev=3545705d4b3f0763d636f873fc2f0c7629f1212c#3545705d4b3f0763d636f873fc2f0c7629f1212c"
 dependencies = [
  "futures-util",
  "js-sys",
@@ -4477,7 +4375,6 @@ dependencies = [
 [[package]]
 name = "rsi-meta-native"
 version = "0.0.1"
-source = "git+https://github.com/wowfun/rsiversi.git?rev=3545705d4b3f0763d636f873fc2f0c7629f1212c#3545705d4b3f0763d636f873fc2f0c7629f1212c"
 dependencies = [
  "serde_json",
 ]
@@ -4485,7 +4382,6 @@ dependencies = [
 [[package]]
 name = "rsi-meta-native-loader"
 version = "0.0.1"
-source = "git+https://github.com/wowfun/rsiversi.git?rev=3545705d4b3f0763d636f873fc2f0c7629f1212c#3545705d4b3f0763d636f873fc2f0c7629f1212c"
 dependencies = [
  "async-trait",
  "hex",
@@ -4504,7 +4400,6 @@ dependencies = [
 [[package]]
 name = "rsi-meta-profile"
 version = "0.0.1"
-source = "git+https://github.com/wowfun/rsiversi.git?rev=3545705d4b3f0763d636f873fc2f0c7629f1212c#3545705d4b3f0763d636f873fc2f0c7629f1212c"
 dependencies = [
  "async-trait",
  "futures-util",
@@ -4524,7 +4419,6 @@ dependencies = [
 [[package]]
 name = "rsi-meta-scope"
 version = "0.0.1"
-source = "git+https://github.com/wowfun/rsiversi.git?rev=3545705d4b3f0763d636f873fc2f0c7629f1212c#3545705d4b3f0763d636f873fc2f0c7629f1212c"
 dependencies = [
  "async-trait",
  "futures-util",
@@ -4538,7 +4432,6 @@ dependencies = [
 [[package]]
 name = "rsi-native-addons-api"
 version = "0.0.1"
-source = "git+https://github.com/wowfun/rsiversi.git?rev=3545705d4b3f0763d636f873fc2f0c7629f1212c#3545705d4b3f0763d636f873fc2f0c7629f1212c"
 dependencies = [
  "async-trait",
  "rsi-api-contract-build",
@@ -4550,7 +4443,6 @@ dependencies = [
 [[package]]
 name = "rsi-navigation"
 version = "0.0.1"
-source = "git+https://github.com/wowfun/rsiversi.git?rev=3545705d4b3f0763d636f873fc2f0c7629f1212c#3545705d4b3f0763d636f873fc2f0c7629f1212c"
 dependencies = [
  "async-trait",
  "futures-util",
@@ -4578,7 +4470,6 @@ dependencies = [
 [[package]]
 name = "rsi-navigation-api"
 version = "0.0.1"
-source = "git+https://github.com/wowfun/rsiversi.git?rev=3545705d4b3f0763d636f873fc2f0c7629f1212c#3545705d4b3f0763d636f873fc2f0c7629f1212c"
 dependencies = [
  "rsi-agent-session-protocol",
  "rsi-agent-store-protocol",
@@ -4594,7 +4485,6 @@ dependencies = [
 [[package]]
 name = "rsi-packages"
 version = "0.0.1"
-source = "git+https://github.com/wowfun/rsiversi.git?rev=3545705d4b3f0763d636f873fc2f0c7629f1212c#3545705d4b3f0763d636f873fc2f0c7629f1212c"
 dependencies = [
  "getrandom 0.3.4",
  "hex",
@@ -4611,7 +4501,6 @@ dependencies = [
 [[package]]
 name = "rsi-permission-presets"
 version = "0.0.1"
-source = "git+https://github.com/wowfun/rsiversi.git?rev=3545705d4b3f0763d636f873fc2f0c7629f1212c#3545705d4b3f0763d636f873fc2f0c7629f1212c"
 dependencies = [
  "async-trait",
  "rsi-meta",
@@ -4624,7 +4513,6 @@ dependencies = [
 [[package]]
 name = "rsi-process"
 version = "0.0.1"
-source = "git+https://github.com/wowfun/rsiversi.git?rev=3545705d4b3f0763d636f873fc2f0c7629f1212c#3545705d4b3f0763d636f873fc2f0c7629f1212c"
 dependencies = [
  "async-trait",
  "bytes",
@@ -4638,7 +4526,6 @@ dependencies = [
 [[package]]
 name = "rsi-process-local"
 version = "0.0.1"
-source = "git+https://github.com/wowfun/rsiversi.git?rev=3545705d4b3f0763d636f873fc2f0c7629f1212c#3545705d4b3f0763d636f873fc2f0c7629f1212c"
 dependencies = [
  "async-trait",
  "getrandom 0.3.4",
@@ -4658,7 +4545,6 @@ dependencies = [
 [[package]]
 name = "rsi-process-native"
 version = "0.0.1"
-source = "git+https://github.com/wowfun/rsiversi.git?rev=3545705d4b3f0763d636f873fc2f0c7629f1212c#3545705d4b3f0763d636f873fc2f0c7629f1212c"
 dependencies = [
  "getrandom 0.3.4",
  "hex",
@@ -4669,7 +4555,6 @@ dependencies = [
 [[package]]
 name = "rsi-process-output-api"
 version = "0.0.1"
-source = "git+https://github.com/wowfun/rsiversi.git?rev=3545705d4b3f0763d636f873fc2f0c7629f1212c#3545705d4b3f0763d636f873fc2f0c7629f1212c"
 dependencies = [
  "async-trait",
  "rsi-api-contract-build",
@@ -4683,7 +4568,6 @@ dependencies = [
 [[package]]
 name = "rsi-projection"
 version = "0.0.1"
-source = "git+https://github.com/wowfun/rsiversi.git?rev=3545705d4b3f0763d636f873fc2f0c7629f1212c#3545705d4b3f0763d636f873fc2f0c7629f1212c"
 dependencies = [
  "async-trait",
  "rsi-meta",
@@ -4694,7 +4578,6 @@ dependencies = [
 [[package]]
 name = "rsi-pty"
 version = "0.0.1"
-source = "git+https://github.com/wowfun/rsiversi.git?rev=3545705d4b3f0763d636f873fc2f0c7629f1212c#3545705d4b3f0763d636f873fc2f0c7629f1212c"
 dependencies = [
  "async-trait",
  "futures-util",
@@ -4713,7 +4596,6 @@ dependencies = [
 [[package]]
 name = "rsi-pty-protocol"
 version = "0.0.1"
-source = "git+https://github.com/wowfun/rsiversi.git?rev=3545705d4b3f0763d636f873fc2f0c7629f1212c#3545705d4b3f0763d636f873fc2f0c7629f1212c"
 dependencies = [
  "async-trait",
  "rsi-execution",
@@ -4727,7 +4609,6 @@ dependencies = [
 [[package]]
 name = "rsi-retrieval"
 version = "0.0.1"
-source = "git+https://github.com/wowfun/rsiversi.git?rev=3545705d4b3f0763d636f873fc2f0c7629f1212c#3545705d4b3f0763d636f873fc2f0c7629f1212c"
 dependencies = [
  "async-trait",
  "brotli",
@@ -4754,7 +4635,6 @@ dependencies = [
 [[package]]
 name = "rsi-retrieval-protocol"
 version = "0.0.1"
-source = "git+https://github.com/wowfun/rsiversi.git?rev=3545705d4b3f0763d636f873fc2f0c7629f1212c#3545705d4b3f0763d636f873fc2f0c7629f1212c"
 dependencies = [
  "rsi-agent-session-protocol",
  "rsi-credentials-protocol",
@@ -4767,7 +4647,6 @@ dependencies = [
 [[package]]
 name = "rsi-sandbox"
 version = "0.0.1"
-source = "git+https://github.com/wowfun/rsiversi.git?rev=3545705d4b3f0763d636f873fc2f0c7629f1212c#3545705d4b3f0763d636f873fc2f0c7629f1212c"
 dependencies = [
  "async-trait",
  "rsi-meta-contract",
@@ -4779,7 +4658,6 @@ dependencies = [
 [[package]]
 name = "rsi-sandbox-local"
 version = "0.0.1"
-source = "git+https://github.com/wowfun/rsiversi.git?rev=3545705d4b3f0763d636f873fc2f0c7629f1212c#3545705d4b3f0763d636f873fc2f0c7629f1212c"
 dependencies = [
  "async-trait",
  "hex",
@@ -4799,7 +4677,6 @@ dependencies = [
 [[package]]
 name = "rsi-schedule"
 version = "0.0.1"
-source = "git+https://github.com/wowfun/rsiversi.git?rev=3545705d4b3f0763d636f873fc2f0c7629f1212c#3545705d4b3f0763d636f873fc2f0c7629f1212c"
 dependencies = [
  "async-trait",
  "futures-util",
@@ -4815,7 +4692,6 @@ dependencies = [
 [[package]]
 name = "rsi-service-host"
 version = "0.0.1"
-source = "git+https://github.com/wowfun/rsiversi.git?rev=3545705d4b3f0763d636f873fc2f0c7629f1212c#3545705d4b3f0763d636f873fc2f0c7629f1212c"
 dependencies = [
  "async-trait",
  "futures-util",
@@ -4847,7 +4723,6 @@ dependencies = [
 [[package]]
 name = "rsi-session"
 version = "0.0.1"
-source = "git+https://github.com/wowfun/rsiversi.git?rev=3545705d4b3f0763d636f873fc2f0c7629f1212c#3545705d4b3f0763d636f873fc2f0c7629f1212c"
 dependencies = [
  "async-stream",
  "async-trait",
@@ -4890,7 +4765,6 @@ dependencies = [
 [[package]]
 name = "rsi-session-api"
 version = "0.0.1"
-source = "git+https://github.com/wowfun/rsiversi.git?rev=3545705d4b3f0763d636f873fc2f0c7629f1212c#3545705d4b3f0763d636f873fc2f0c7629f1212c"
 dependencies = [
  "async-stream",
  "async-trait",
@@ -4915,7 +4789,6 @@ dependencies = [
 [[package]]
 name = "rsi-session-export"
 version = "0.0.1"
-source = "git+https://github.com/wowfun/rsiversi.git?rev=3545705d4b3f0763d636f873fc2f0c7629f1212c#3545705d4b3f0763d636f873fc2f0c7629f1212c"
 dependencies = [
  "async-stream",
  "futures-util",
@@ -4936,7 +4809,6 @@ dependencies = [
 [[package]]
 name = "rsi-session-files"
 version = "0.0.1"
-source = "git+https://github.com/wowfun/rsiversi.git?rev=3545705d4b3f0763d636f873fc2f0c7629f1212c#3545705d4b3f0763d636f873fc2f0c7629f1212c"
 dependencies = [
  "async-trait",
  "futures-util",
@@ -4959,7 +4831,6 @@ dependencies = [
 [[package]]
 name = "rsi-session-protocol"
 version = "0.0.1"
-source = "git+https://github.com/wowfun/rsiversi.git?rev=3545705d4b3f0763d636f873fc2f0c7629f1212c#3545705d4b3f0763d636f873fc2f0c7629f1212c"
 dependencies = [
  "async-trait",
  "futures-util",
@@ -4991,7 +4862,6 @@ dependencies = [
 [[package]]
 name = "rsi-session-tree-ui"
 version = "0.0.1"
-source = "git+https://github.com/wowfun/rsiversi.git?rev=3545705d4b3f0763d636f873fc2f0c7629f1212c#3545705d4b3f0763d636f873fc2f0c7629f1212c"
 dependencies = [
  "async-trait",
  "futures-util",
@@ -5013,7 +4883,6 @@ dependencies = [
 [[package]]
 name = "rsi-session-ui"
 version = "0.0.1"
-source = "git+https://github.com/wowfun/rsiversi.git?rev=3545705d4b3f0763d636f873fc2f0c7629f1212c#3545705d4b3f0763d636f873fc2f0c7629f1212c"
 dependencies = [
  "async-trait",
  "futures-util",
@@ -5046,7 +4915,6 @@ dependencies = [
 [[package]]
 name = "rsi-settings"
 version = "0.0.1"
-source = "git+https://github.com/wowfun/rsiversi.git?rev=3545705d4b3f0763d636f873fc2f0c7629f1212c#3545705d4b3f0763d636f873fc2f0c7629f1212c"
 dependencies = [
  "async-trait",
  "getrandom 0.3.4",
@@ -5060,7 +4928,6 @@ dependencies = [
 [[package]]
 name = "rsi-settings-api"
 version = "0.0.1"
-source = "git+https://github.com/wowfun/rsiversi.git?rev=3545705d4b3f0763d636f873fc2f0c7629f1212c#3545705d4b3f0763d636f873fc2f0c7629f1212c"
 dependencies = [
  "async-trait",
  "futures-util",
@@ -5075,7 +4942,6 @@ dependencies = [
 [[package]]
 name = "rsi-settings-local"
 version = "0.0.1"
-source = "git+https://github.com/wowfun/rsiversi.git?rev=3545705d4b3f0763d636f873fc2f0c7629f1212c#3545705d4b3f0763d636f873fc2f0c7629f1212c"
 dependencies = [
  "async-trait",
  "libc",
@@ -5090,7 +4956,6 @@ dependencies = [
 [[package]]
 name = "rsi-settings-protocol"
 version = "0.0.1"
-source = "git+https://github.com/wowfun/rsiversi.git?rev=3545705d4b3f0763d636f873fc2f0c7629f1212c#3545705d4b3f0763d636f873fc2f0c7629f1212c"
 dependencies = [
  "async-trait",
  "rsi-api-protocol",
@@ -5103,7 +4968,6 @@ dependencies = [
 [[package]]
 name = "rsi-shell-native"
 version = "0.0.1"
-source = "git+https://github.com/wowfun/rsiversi.git?rev=3545705d4b3f0763d636f873fc2f0c7629f1212c#3545705d4b3f0763d636f873fc2f0c7629f1212c"
 dependencies = [
  "async-trait",
  "rsi-jobs",
@@ -5118,7 +4982,6 @@ dependencies = [
 [[package]]
 name = "rsi-ssh-client"
 version = "0.0.1"
-source = "git+https://github.com/wowfun/rsiversi.git?rev=3545705d4b3f0763d636f873fc2f0c7629f1212c#3545705d4b3f0763d636f873fc2f0c7629f1212c"
 dependencies = [
  "async-trait",
  "hex",
@@ -5139,7 +5002,6 @@ dependencies = [
 [[package]]
 name = "rsi-ssh-protocol"
 version = "0.0.1"
-source = "git+https://github.com/wowfun/rsiversi.git?rev=3545705d4b3f0763d636f873fc2f0c7629f1212c#3545705d4b3f0763d636f873fc2f0c7629f1212c"
 dependencies = [
  "base64 0.22.1",
  "rsi-api-contract-build",
@@ -5157,7 +5019,6 @@ dependencies = [
 [[package]]
 name = "rsi-ssh-transport"
 version = "0.0.1"
-source = "git+https://github.com/wowfun/rsiversi.git?rev=3545705d4b3f0763d636f873fc2f0c7629f1212c#3545705d4b3f0763d636f873fc2f0c7629f1212c"
 dependencies = [
  "rsi-ssh-protocol",
  "serde",
@@ -5170,7 +5031,6 @@ dependencies = [
 [[package]]
 name = "rsi-storage"
 version = "0.0.1"
-source = "git+https://github.com/wowfun/rsiversi.git?rev=3545705d4b3f0763d636f873fc2f0c7629f1212c#3545705d4b3f0763d636f873fc2f0c7629f1212c"
 dependencies = [
  "async-trait",
  "rsi-files-native-fs",
@@ -5184,7 +5044,6 @@ dependencies = [
 [[package]]
 name = "rsi-storage-domain"
 version = "0.0.1"
-source = "git+https://github.com/wowfun/rsiversi.git?rev=3545705d4b3f0763d636f873fc2f0c7629f1212c#3545705d4b3f0763d636f873fc2f0c7629f1212c"
 dependencies = [
  "async-trait",
  "rsi-api-protocol",
@@ -5198,7 +5057,6 @@ dependencies = [
 [[package]]
 name = "rsi-storage-sqlite"
 version = "0.0.1"
-source = "git+https://github.com/wowfun/rsiversi.git?rev=3545705d4b3f0763d636f873fc2f0c7629f1212c#3545705d4b3f0763d636f873fc2f0c7629f1212c"
 dependencies = [
  "async-trait",
  "libc",
@@ -5214,7 +5072,6 @@ dependencies = [
 [[package]]
 name = "rsi-tools"
 version = "0.0.1"
-source = "git+https://github.com/wowfun/rsiversi.git?rev=3545705d4b3f0763d636f873fc2f0c7629f1212c#3545705d4b3f0763d636f873fc2f0c7629f1212c"
 dependencies = [
  "async-trait",
  "futures-util",
@@ -5232,7 +5089,6 @@ dependencies = [
 [[package]]
 name = "rsi-tools-protocol"
 version = "0.0.1"
-source = "git+https://github.com/wowfun/rsiversi.git?rev=3545705d4b3f0763d636f873fc2f0c7629f1212c#3545705d4b3f0763d636f873fc2f0c7629f1212c"
 dependencies = [
  "async-trait",
  "jsonschema",
@@ -5254,7 +5110,6 @@ dependencies = [
 [[package]]
 name = "rsi-ui"
 version = "0.0.1"
-source = "git+https://github.com/wowfun/rsiversi.git?rev=3545705d4b3f0763d636f873fc2f0c7629f1212c#3545705d4b3f0763d636f873fc2f0c7629f1212c"
 dependencies = [
  "async-trait",
  "futures-util",
@@ -5277,7 +5132,6 @@ dependencies = [
 [[package]]
 name = "rsi-ui-api"
 version = "0.0.1"
-source = "git+https://github.com/wowfun/rsiversi.git?rev=3545705d4b3f0763d636f873fc2f0c7629f1212c#3545705d4b3f0763d636f873fc2f0c7629f1212c"
 dependencies = [
  "async-trait",
  "futures-util",
@@ -5294,7 +5148,6 @@ dependencies = [
 [[package]]
 name = "rsi-ui-portable"
 version = "0.0.1"
-source = "git+https://github.com/wowfun/rsiversi.git?rev=3545705d4b3f0763d636f873fc2f0c7629f1212c#3545705d4b3f0763d636f873fc2f0c7629f1212c"
 dependencies = [
  "async-trait",
  "futures-util",
@@ -5313,7 +5166,6 @@ dependencies = [
 [[package]]
 name = "rsi-ui-protocol"
 version = "0.0.1"
-source = "git+https://github.com/wowfun/rsiversi.git?rev=3545705d4b3f0763d636f873fc2f0c7629f1212c#3545705d4b3f0763d636f873fc2f0c7629f1212c"
 dependencies = [
  "serde",
  "serde_json",
@@ -5323,7 +5175,6 @@ dependencies = [
 [[package]]
 name = "rsi-user-questions-protocol"
 version = "0.0.1"
-source = "git+https://github.com/wowfun/rsiversi.git?rev=3545705d4b3f0763d636f873fc2f0c7629f1212c#3545705d4b3f0763d636f873fc2f0c7629f1212c"
 dependencies = [
  "async-trait",
  "futures-util",
@@ -5337,7 +5188,6 @@ dependencies = [
 [[package]]
 name = "rsi-workspace"
 version = "0.0.1"
-source = "git+https://github.com/wowfun/rsiversi.git?rev=3545705d4b3f0763d636f873fc2f0c7629f1212c#3545705d4b3f0763d636f873fc2f0c7629f1212c"
 dependencies = [
  "async-trait",
  "getrandom 0.3.4",
@@ -5356,7 +5206,6 @@ dependencies = [
 [[package]]
 name = "rsi-workspace-api"
 version = "0.0.1"
-source = "git+https://github.com/wowfun/rsiversi.git?rev=3545705d4b3f0763d636f873fc2f0c7629f1212c#3545705d4b3f0763d636f873fc2f0c7629f1212c"
 dependencies = [
  "async-trait",
  "futures-util",
@@ -5371,7 +5220,6 @@ dependencies = [
 [[package]]
 name = "rsi-workspace-default-api"
 version = "0.0.1"
-source = "git+https://github.com/wowfun/rsiversi.git?rev=3545705d4b3f0763d636f873fc2f0c7629f1212c#3545705d4b3f0763d636f873fc2f0c7629f1212c"
 dependencies = [
  "async-trait",
  "rsi-api-contract-build",
@@ -5384,12 +5232,10 @@ dependencies = [
 [[package]]
 name = "rsi-workspace-path"
 version = "0.0.1"
-source = "git+https://github.com/wowfun/rsiversi.git?rev=3545705d4b3f0763d636f873fc2f0c7629f1212c#3545705d4b3f0763d636f873fc2f0c7629f1212c"
 
 [[package]]
 name = "rsi-workspace-protocol"
 version = "0.0.1"
-source = "git+https://github.com/wowfun/rsiversi.git?rev=3545705d4b3f0763d636f873fc2f0c7629f1212c#3545705d4b3f0763d636f873fc2f0c7629f1212c"
 dependencies = [
  "async-trait",
  "hex",
@@ -5406,7 +5252,6 @@ dependencies = [
 [[package]]
 name = "rsi-workspace-review"
 version = "0.0.1"
-source = "git+https://github.com/wowfun/rsiversi.git?rev=3545705d4b3f0763d636f873fc2f0c7629f1212c#3545705d4b3f0763d636f873fc2f0c7629f1212c"
 dependencies = [
  "async-trait",
  "futures-util",
@@ -5438,7 +5283,6 @@ dependencies = [
 [[package]]
 name = "rsi-workspace-review-api"
 version = "0.0.1"
-source = "git+https://github.com/wowfun/rsiversi.git?rev=3545705d4b3f0763d636f873fc2f0c7629f1212c#3545705d4b3f0763d636f873fc2f0c7629f1212c"
 dependencies = [
  "rsi-agent-session-protocol",
  "rsi-api-contract-build",

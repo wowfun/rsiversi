@@ -10,16 +10,33 @@ explicit build and installation steps and the Portable Tool bridge.
 
 The template is maintained in [addon-template](../../../fixtures/rsi/addon-template/README.md).
 Generation copies its lockfile and rewrites only the root package name. SDK
-dependencies share the linked template's immutable published Git revision. The
-project remains relocatable after the generator checkout is moved or removed. With dependencies cached, the generated
-workspace builds with `cargo build --locked --offline` without changing its lock.
+dependencies are absolute paths into the checkout where the command runs. Both
+templates are local development scaffolds; SDK publication and distribution
+acceptance are suspended. The checkout must remain at that path. Moving the
+generated project alone is supported. With dependencies cached, the generated
+workspace builds with `cargo build --locked --offline` without changing its lock;
+later SDK dependency changes may require updating the project's lockfile.
+After changing SDK dependencies, refresh the maintained template locks from the
+repository root, then run the read-only lockfile check:
+
+```sh
+cargo metadata --offline --format-version 1 --manifest-path fixtures/rsi/addon-template/Cargo.toml > /dev/null
+cargo metadata --offline --format-version 1 --manifest-path fixtures/rsi/addon-linked-template/Cargo.toml > /dev/null
+cargo xtask verify-lockfiles
+```
+
+These Bash commands resolve the changed graph while retaining existing registry
+versions; omit `--locked` only for this deliberate refresh. Offline resolution
+requires a populated Cargo cache. Review the resulting
+dependency changes before using the templates; a lock refresh alone does not
+replace their generated-project acceptance tests.
 The format-2 addon manifest targets the launcher's native OS/architecture and watches its
 explicit source files. Native Windows/macOS scaffolding is currently unavailable.
 
 `cargo xtask addon new NAME --directory ABSOLUTE_NEW_DIRECTORY --kind linked`
 creates an independent source addon library and its own composition executable.
-Its RSI dependencies use one repository URL and one full Git revision, with an
-independent lockfile. It uses public Local contracts and existing addon role
+Its RSI dependencies use the same local checkout, with an independent lockfile.
+It uses public Local contracts and existing addon role
 catalogs. Source changes take effect when the executable is rebuilt. The project
 does not include private modules or fixture source files from this checkout.
 The native template remains the default. Delivering dynamic libraries still

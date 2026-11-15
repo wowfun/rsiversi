@@ -11,21 +11,14 @@ its locked dependency graph, and exercise destination publication and argument
 validation. The standard product's native addon scenario loads the generated
 library through the real Loader and calls the tool through an Agent pin.
 
+The [generator contract](../../../crates/tools/rsi-xtask/README.md) defines the local
+SDK binding and checkout lifetime. This fixture uses relative workspace paths;
+generation resolves them into absolute paths to the invoking checkout and copies
+the fixture lockfile, changing only its root package name.
 
-RSI dependencies share the linked template's immutable published Git revision;
-generated manifests never point into the generator checkout. The generated
-workspace owns its lockfile. Distribution acceptance builds against that published
-SDK, relocates the project and rebuilds offline with the populated cache before
-loading Describe/Execute in the current Host. Current-tree SDK acceptance uses
-explicit temporary dependency overrides and is reported separately; it does not
-claim the uncommitted SDK is remotely available.
-
-The product scaffold test defaults to explicit temporary current-tree SDK
-overrides, regenerated offline. Set `RSI_SCAFFOLD_PUBLISHED_SDK=1` only for the
-opt-in distribution proof after fetching the pinned dependencies. That branch
-preserves the original generated manifest and lock and uses a separate target.
-The Linux standard-product CI job fetches the committed template dependencies with
-`cargo fetch --locked --manifest-path fixtures/rsi/addon-template/Cargo.toml`, then
-runs `RSI_SCAFFOLD_PUBLISHED_SDK=1 cargo test --locked -p rsi-app-catalog --test addons
+The Linux standard-product CI job runs
+`cargo test --locked -p rsi-app-catalog --test addons
 scaffold::generated_external_locked_workspace_loads_describes_and_executes -- --exact`.
-Both branches relocate and perform a second locked offline build before loading.
+The test builds the generated manifest and lock without alteration, relocates the
+project, rebuilds offline with cached dependencies, then loads Describe/Execute in
+the current Host. This proves local SDK integration, not public distribution.

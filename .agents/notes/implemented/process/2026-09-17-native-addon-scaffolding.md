@@ -27,8 +27,8 @@ Copying the entire fixture would retain unrelated probes. Resolving dependencies
 at generation time would make file creation depend on Cargo configuration and
 network state. Embedding a second SDK copy would obscure which ABI is exercised.
 
-The [relocatable SDK decision](2026-09-24-relocatable-native-addon-sdk.md)
-replaces only the absolute-path distribution choice.
+The [SDK development decision](2026-11-13-local-addon-sdk-development.md)
+owns the shared SDK selection and publication boundary for both templates.
 
 ## Consequences
 

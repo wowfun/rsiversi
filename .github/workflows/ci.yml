@@ -740,15 +740,13 @@ jobs:
       - name: Fetch native addon build fixture dependencies
         if: ${{ !cancelled() && steps.native_setup.outcome == 'success' }}
         run: cargo fetch --locked --manifest-path fixtures/rsi/native-addon/Cargo.toml
-      - name: Check generated linked addon with its pinned lockfile
+      - name: Check generated linked addon with the local SDK
         timeout-minutes: 25
         if: ${{ !cancelled() && steps.native_setup.outcome == 'success' && runner.os == 'Linux' }}
         run: python3 fixtures/rsi/addon-linked-template/verify.py --report "$RUNNER_TEMP/rsi-linked-template-evidence"
-      - name: Check generated native addon with its pinned lockfile
+      - name: Check generated native addon with the local SDK
         timeout-minutes: 25
         if: ${{ !cancelled() && steps.native_setup.outcome == 'success' && runner.os == 'Linux' }}
-        env:
-          RSI_SCAFFOLD_PUBLISHED_SDK: '1'
         run: |
           cargo fetch --locked --manifest-path fixtures/rsi/addon-template/Cargo.toml
           cargo test --locked -p rsi-app-catalog --test addons scaffold::generated_external_locked_workspace_loads_describes_and_executes -- --exact

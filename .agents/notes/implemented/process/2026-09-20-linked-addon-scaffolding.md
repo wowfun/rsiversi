@@ -11,8 +11,7 @@ would not be buildable.
 
 ## Decision
 
-The existing generator includes a linked template. RSI dependencies share one
-public Git URL, a full immutable revision and an independent lockfile. The
+The existing generator includes a linked template with an independent lockfile. The
 template owns its library, launcher and public lifecycle tests. Generation into a
 new directory is atomic and does not change the source repository or user settings.
 The [generated-project fixture](../../../../fixtures/rsi/addon-linked-template/README.md)
@@ -21,10 +20,9 @@ Linux CI checks the resulting lockfile remains unchanged.
 
 ## Alternatives considered
 
-Absolute path dependencies are useful for the existing native development
-template, but would leave a distributed source example tied to this checkout.
-Copying repository implementation or including private source defeats independent
-SDK acceptance. Publishing all crates is a separate release decision.
+Absolute path dependencies tie the generated development project to its SDK
+checkout. Copying repository implementation or including private source would
+obscure the public SDK boundary. Publishing crates is a separate release decision.
 
 ## Consequences
 
@@ -34,10 +32,7 @@ the exact Local service and verifies cleanup. The native generator retains its
 own acceptance. The independent language addon additionally exercises the current
 public SDK and testkit with development path dependencies and a real server.
 
-The initial immutable revision predates uncommitted work. Its tests prove the
-public distribution path only; current-tree protocol and product tests remain
-separate evidence. SDK upgrades require an explicit revision and lockfile update.
-
-The [shared relocatable SDK decision](2026-09-24-relocatable-native-addon-sdk.md)
-updates both templates to a published Portable-compatible revision and preserves
-the separation between distribution and current-tree evidence.
+The [shared SDK development decision](2026-11-13-local-addon-sdk-development.md)
+owns checkout lifetime and the suspension of public SDK distribution. Tests
+exercise current source, including uncommitted changes, without proving a public
+release is available.

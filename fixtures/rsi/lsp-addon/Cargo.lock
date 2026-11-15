@@ -2711,6 +2711,7 @@ name = "rsi-agent-composition"
 version = "0.0.1"
 dependencies = [
  "async-trait",
+ "futures-util",
  "rsi-agent-composition-protocol",
  "rsi-agent-context",
  "rsi-agent-presets",
