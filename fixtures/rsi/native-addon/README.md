@@ -36,7 +36,8 @@ body tests normalized framing and descriptor assembly; it is not a raster codec
 fixture. `rsi-ai-portable` tests load this same dynamic library through ordinary
 Language and Image routers and verify normal withdrawal and resource release.
 
-The optional `revision-b` feature changes the actual compiled Tool description.
+The optional `revision-b` feature changes the actual compiled Tool description
+and its returned `implementation` field.
 The product native-manager test builds both variants into its own target directory
 and retains immutable copies. An unchanged Agent Profile can then demonstrate new
 artifact admission, new-generation behavior and the old pin's unchanged behavior.

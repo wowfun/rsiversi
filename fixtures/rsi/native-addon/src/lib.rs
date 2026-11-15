@@ -159,7 +159,7 @@ impl NativeInstance for Instance {
                 send(channel, &Response::Description { tools })
             }
             Request::Execute { call, policy } => {
-                let value = match call.name.as_str() {
+                let mut value = match call.name.as_str() {
                     "native_echo" => {
                         json!({"label":self.0.label,"arguments":call.arguments,"policy":policy})
                     }
@@ -178,6 +178,7 @@ impl NativeInstance for Instance {
                     }
                     _ => return Err("unknown tool".into()),
                 };
+                value["implementation"] = json!(DESCRIPTION);
                 let result =
                     ToolResult::new(value, Vec::new(), false).map_err(|error| error.to_string())?;
                 send(channel, &Response::Result { result })
