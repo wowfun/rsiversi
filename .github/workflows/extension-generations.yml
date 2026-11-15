@@ -1,0 +1,92 @@
+name: extension-generations
+
+on:
+  workflow_dispatch:
+    inputs:
+      bridge_revision:
+        description: Published rsiversi-dsh commit containing the matching extension protocol (full SHA)
+        type: string
+        required: true
+
+permissions:
+  contents: read
+
+defaults:
+  run:
+    shell: bash
+
+jobs:
+  generation-contract:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 60
+    env:
+      CARGO_INCREMENTAL: '0'
+      CARGO_PROFILE_DEV_DEBUG: line-tables-only
+      CARGO_PROFILE_TEST_DEBUG: line-tables-only
+      BRIDGE_REVISION: ${{ inputs.bridge_revision }}
+    steps:
+      - name: Require an immutable bridge revision
+        run: '[[ "$BRIDGE_REVISION" =~ ^[0-9a-f]{40}$ ]]'
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          repository: wowfun/rsiversi-dsh
+          ref: ${{ inputs.bridge_revision }}
+          path: .local/extension-ci/bridge
+          persist-credentials: false
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          repository: deepseek-ai/deepseek-harness
+          ref: e8f7b93a344964de3dca1ace9e72b6e4d6de87cb
+          path: .local/extension-ci/upstream
+          persist-credentials: false
+      - uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020 # v7.0.0
+        with:
+          node-version: 26.5.0
+      - uses: dtolnay/rust-toolchain@6c977a6ca4077a0ceb28ffbe03f59d46e9ac8772
+        with:
+          toolchain: 1.97.0
+      - uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6
+      - name: Build and install the exact source cohort
+        timeout-minutes: 25
+        run: |
+          test "$(git -C .local/extension-ci/bridge rev-parse HEAD)" = "$BRIDGE_REVISION"
+          npm install --global --ignore-scripts pnpm@11.28.5
+          pnpm --dir .local/extension-ci/upstream install --frozen-lockfile --ignore-scripts
+          cd .local/extension-ci/bridge
+          npm ci --ignore-scripts
+          npm install --no-save --package-lock=false --ignore-scripts npm@11.17.0
+          node scripts/build-upstream.mjs ../upstream ../archives
+          node scripts/pack-plugins.mjs
+          node scripts/install-cohort.mjs ../archives ../cohort .local/plugins
+      - name: Verify process generation replacement and abort
+        timeout-minutes: 25
+        run: |
+          export RSI_EXTENSION_NODE="$(command -v node)"
+          export RSI_DSH_INSTALLED_COHORT="$GITHUB_WORKSPACE/.local/extension-ci/cohort"
+          cargo test --locked -p rsi-agent-executor --test end_to_end extension::generations -- --ignored --list | tee .local/extension-ci/selected.txt
+          grep -q 'extension::generations::generation_load_failure_bounds_abort_and_preserves_transport_errors: test' .local/extension-ci/selected.txt
+          grep -q 'extension::generations::real_process_replacement_loads_committed_state_before_selection_and_keeps_old_on_rejection: test' .local/extension-ci/selected.txt
+          cargo test --locked -p rsi-agent-executor --test end_to_end extension::generations -- --ignored --nocapture 2>&1 | tee .local/extension-ci/generations.log
+      - name: Verify the installed independent peer at business capacity
+        timeout-minutes: 10
+        run: |
+          export RSI_EXTENSION_NODE="$(command -v node)"
+          export RSI_EXTENSION_DSH_TRANSPORT="$GITHUB_WORKSPACE/.local/extension-ci/cohort/node_modules/rsi-dsh-cordis/src/runtime/transport.mjs"
+          test -f "$RSI_EXTENSION_DSH_TRANSPORT"
+          cargo test --locked -p rsi-extension --test native actual_dsh_peer_preserves_control_progress_at_capacity -- --ignored --exact --list | tee .local/extension-ci/peer-selected.txt
+          grep -qx 'actual_dsh_peer_preserves_control_progress_at_capacity: test' .local/extension-ci/peer-selected.txt
+          cargo test --locked -p rsi-extension --test native actual_dsh_peer_preserves_control_progress_at_capacity -- --ignored --exact --nocapture 2>&1 | tee .local/extension-ci/peer.log
+      - uses: actions/upload-artifact@bbbca2ddaa5d8feaa63e36b76fdaad77386f024f
+        if: always()
+        with:
+          name: extension-generation-evidence
+          path: |
+            .local/extension-ci/selected.txt
+            .local/extension-ci/generations.log
+            .local/extension-ci/peer.log
+            .local/extension-ci/peer-selected.txt
+            .local/extension-ci/archives/receipt.json
+            .local/extension-ci/bridge/.local/plugins/receipt.json
