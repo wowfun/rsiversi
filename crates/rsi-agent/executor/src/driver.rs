@@ -2615,3 +2615,20 @@ fn model_stream_error(message: &str) -> rsi_ai_protocol::AiError {
     )
     .expect("bounded model error")
 }
+
+// Transient observation ends even when the outer cancellation select drops replay.
+struct CompositionReplay<'a> {
+    turns: &'a dyn rsi_agent_turn_protocol::TurnExecution,
+    claim: &'a TurnClaim,
+}
+impl<'a> CompositionReplay<'a> {
+    fn new(turns: &'a dyn rsi_agent_turn_protocol::TurnExecution, claim: &'a TurnClaim) -> Self {
+        let _ = turns.set_composition_rebuilding(claim, true);
+        Self { turns, claim }
+    }
+}
+impl Drop for CompositionReplay<'_> {
+    fn drop(&mut self) {
+        let _ = self.turns.set_composition_rebuilding(self.claim, false);
+    }
+}

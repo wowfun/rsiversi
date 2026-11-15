@@ -164,8 +164,12 @@ pub struct SessionProjectionSnapshot {
     header_sha256: String,
     generation_sha256: String,
     cursor: ProjectionCursor,
+    generation_rejection: Option<String>,
+    generation_rebuilding: bool,
     #[serde(serialize_with = "serialize_entries")]
     entries: Arc<[ProjectionEntry]>,
+    #[serde(skip)]
+    body_bytes: usize,
 }
 impl SessionProjectionSnapshot {
     /// Validates unique producer identity and the complete encoded envelope.
@@ -190,14 +194,18 @@ impl SessionProjectionSnapshot {
                 "projection producers exceed their count or identity bound".into(),
             ));
         }
-        let snapshot = Self {
+        let mut snapshot = Self {
             session_id,
             header_sha256,
             generation_sha256,
             cursor,
+            generation_rejection: None,
+            generation_rebuilding: false,
             entries: entries.into(),
+            body_bytes: 0,
         };
-        let bytes = snapshot.encoded_len()?;
+        let bytes = crate::compact_json_len(&snapshot)?;
+        snapshot.body_bytes = bytes - 9; // Excludes null rejection and false rebuild status.
         if bytes > MAXIMUM_SESSION_PROJECTION_BYTES {
             return Err(SessionError::TooLarge {
                 kind: "projection snapshot",
@@ -227,9 +235,44 @@ impl SessionProjectionSnapshot {
     pub fn entries(&self) -> &[ProjectionEntry] {
         &self.entries
     }
+    /// Attaches bounded transient resident status, independent of the durable cut.
+    pub fn with_generation_rejection(mut self, rejection: Option<String>) -> Result<Self> {
+        if self.generation_rejection == rejection {
+            return Ok(self);
+        }
+        if let Some(reason) = &rejection {
+            crate::validate_safe_diagnostic("generation rejection", reason)?;
+        }
+        self.generation_rejection = rejection;
+        let bytes = self.encoded_len()?;
+        if bytes > MAXIMUM_SESSION_PROJECTION_BYTES {
+            return Err(SessionError::TooLarge {
+                kind: "projection snapshot",
+                maximum: MAXIMUM_SESSION_PROJECTION_BYTES,
+                actual: bytes,
+            });
+        }
+        Ok(self)
+    }
+    /// Attaches transient replay activity without re-encoding projection entries.
+    #[must_use]
+    pub fn with_generation_rebuilding(mut self, rebuilding: bool) -> Self {
+        self.generation_rebuilding = rebuilding;
+        self
+    }
+    /// Whether current candidate preparation is rebuilding Context.
+    pub const fn generation_rebuilding(&self) -> bool {
+        self.generation_rebuilding
+    }
+    /// Latest replacement failure; it is not a persisted producer failure.
+    pub fn generation_rejection(&self) -> Option<&str> {
+        self.generation_rejection.as_deref()
+    }
     /// Counts canonical bytes for retained snapshot admission without encoding a second copy.
     pub fn encoded_len(&self) -> Result<usize> {
-        crate::compact_json_len(self)
+        Ok(self.body_bytes
+            + crate::compact_json_len(&self.generation_rejection)?
+            + if self.generation_rebuilding { 4 } else { 5 })
     }
 }
 fn serialize_entries<S: serde::Serializer>(
@@ -249,6 +292,8 @@ impl<'de> Deserialize<'de> for SessionProjectionSnapshot {
             header_sha256: String,
             generation_sha256: String,
             cursor: ProjectionCursor,
+            generation_rejection: Option<String>,
+            generation_rebuilding: bool,
             entries: Vec<ProjectionEntry>,
         }
         let wire = Wire::deserialize(deserializer)?;
@@ -259,6 +304,11 @@ impl<'de> Deserialize<'de> for SessionProjectionSnapshot {
             wire.cursor,
             wire.entries,
         )
+        .and_then(|snapshot| {
+            snapshot
+                .with_generation_rebuilding(wire.generation_rebuilding)
+                .with_generation_rejection(wire.generation_rejection)
+        })
         .map_err(serde::de::Error::custom)
     }
 }

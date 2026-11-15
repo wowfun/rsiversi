@@ -26,6 +26,32 @@ fn projection_values_are_complete_bounded_and_failures_are_isolated_entries() {
         vec![entry.clone(), failed],
     )
     .unwrap();
+    let snapshot = snapshot
+        .with_generation_rejection(Some("candidate rejected".into()))
+        .unwrap();
+    assert_eq!(snapshot.generation_rejection(), Some("candidate rejected"));
+    assert!(
+        snapshot
+            .clone()
+            .with_generation_rejection(Some("x".repeat(4097)))
+            .is_err()
+    );
+    let snapshot = snapshot.with_generation_rebuilding(true);
+    assert!(snapshot.generation_rebuilding());
+    for rebuilding in [false, true] {
+        for reason in [None, Some("escaped \" Unicode 文".to_owned())] {
+            let changed = snapshot
+                .clone()
+                .with_generation_rebuilding(rebuilding)
+                .with_generation_rejection(reason)
+                .unwrap();
+            assert!(std::ptr::eq(snapshot.entries(), changed.entries()));
+            assert_eq!(
+                changed.encoded_len().unwrap(),
+                serde_json::to_vec(&changed).unwrap().len()
+            );
+        }
+    }
     let wire = serde_json::to_value(&snapshot).unwrap();
     let shared = snapshot.clone();
     assert!(std::ptr::eq(snapshot.entries(), shared.entries()));

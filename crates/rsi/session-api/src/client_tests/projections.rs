@@ -26,6 +26,7 @@ async fn projections_validate_both_bindings_and_each_cursor_before_exposure() {
         ("session_id", json!("foreign")),
         ("header_sha256", json!("b".repeat(64))),
         ("generation_sha256", json!("bad-hash")),
+        ("generation_rejection", json!("x".repeat(4097))),
     ] {
         let mut bad = good.clone();
         bad[key] = value;
@@ -63,6 +64,27 @@ async fn projections_validate_both_bindings_and_each_cursor_before_exposure() {
         source.next().await.unwrap().unwrap();
     }
     assert!(source.next().await.is_none());
+    let mut rebuilding = good.clone();
+    rebuilding["generation_rebuilding"] = json!(true);
+    remote.stream(&[envelope(rebuilding), envelope(good.clone())]);
+    let mut source = handle.observe_projections().await.unwrap();
+    let rebuilding = source.next().await.unwrap().unwrap();
+    let ready = source.next().await.unwrap().unwrap();
+    assert!(rebuilding.snapshot().generation_rebuilding());
+    assert!(!ready.snapshot().generation_rebuilding());
+    assert_eq!(rebuilding.snapshot().cursor(), ready.snapshot().cursor());
+    let mut rejected = good.clone();
+    rejected["generation_rejection"] = json!("candidate state rejected");
+    remote.stream(&[envelope(rejected), envelope(good)]);
+    let mut source = handle.observe_projections().await.unwrap();
+    let rejected = source.next().await.unwrap().unwrap();
+    let cleared = source.next().await.unwrap().unwrap();
+    assert_eq!(rejected.snapshot().cursor(), cleared.snapshot().cursor());
+    assert_eq!(
+        rejected.snapshot().generation_rejection(),
+        Some("candidate state rejected")
+    );
+    assert!(cleared.snapshot().generation_rejection().is_none());
 }
 
 #[tokio::test]
