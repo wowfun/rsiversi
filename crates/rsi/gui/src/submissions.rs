@@ -13,6 +13,10 @@ use std::sync::Arc;
 const MAXIMUM_MESSAGE: usize = 8 * 1024 * 1024;
 const MAXIMUM_COMMAND: usize = 32 * 1024;
 
+fn capture_identity(reference: &rsi_agent_session_protocol::FrozenReference) -> serde_json::Value {
+    serde_json::json!({"target": reference.metadata.target, "snapshot": reference.snapshot})
+}
+
 #[derive(Deserialize)]
 #[serde(deny_unknown_fields)]
 struct Prepare {
@@ -299,7 +303,7 @@ impl GuiApplication {
             let opaque = serde_json::to_string(&frozen).map_err(error)?;
             if opaque.len() > maximum { return Err("Frozen submission exceeds its encoded limit".into()); }
             serde_json::to_string(&serde_json::json!({ "kind":kind, "id":id, "opaque":opaque,
-                "text_bytes":if kind == "message" { input.text.len() + input.references.iter().map(|reference| reference.preview.len()).sum::<usize>() } else { 0 }, "images":input.images.len(), "references":input.references.len() })).map_err(error)
+                "text_bytes":if kind == "message" { input.text.len() + input.references.iter().map(|reference| reference.preview.len()).sum::<usize>() } else { 0 }, "images":input.images.len(), "captures":input.references.iter().map(capture_identity).collect::<Vec<_>>() })).map_err(error)
         })
     }
 
@@ -480,7 +484,7 @@ impl GuiApplication {
         };
         input.validate().map_err(error)?;
         let id = input.operation_id.to_string();
-        let (mut text_bytes, mut images, mut references) = (0, 0, 0);
+        let (mut text_bytes, mut images, mut captures) = (0, 0, Vec::new());
         if let QueueMutation::Replace { content, .. } = &input.mutation {
             for block in content {
                 match block {
@@ -488,7 +492,7 @@ impl GuiApplication {
                     AgentMessageContent::Image { .. } => images += 1,
                     AgentMessageContent::File { .. } => {}
                     AgentMessageContent::Reference { reference } => {
-                        references += 1;
+                        captures.push(capture_identity(reference));
                         text_bytes += reference.preview.len();
                     }
                 }
@@ -503,7 +507,7 @@ impl GuiApplication {
         if opaque.len() > MAXIMUM_MESSAGE {
             return Err("Frozen queue mutation exceeds 8 MiB".into());
         }
-        serde_json::to_string(&serde_json::json!({"kind":"queue","id":id,"opaque":opaque,"text_bytes":text_bytes,"images":images,"references":references})).map_err(error)
+        serde_json::to_string(&serde_json::json!({"kind":"queue","id":id,"opaque":opaque,"text_bytes":text_bytes,"images":images,"captures":captures})).map_err(error)
     }
 
     async fn settle_queue(

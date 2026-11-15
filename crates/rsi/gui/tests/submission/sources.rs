@@ -157,15 +157,15 @@ async fn reference_cleanup_uses_original_target_after_pane_replacement() {
     app.reference_input(&input.to_string()).await.unwrap();
     assert_eq!(*backend.released_references.lock().unwrap(), vec![snapshot]);
     input["operation"]["target"]["header_sha256"] = json!("c".repeat(64));
-    assert!(
-        app.reference_input(&input.to_string())
-            .await
-            .unwrap_err()
-            .contains("Header changed")
+    app.reference_input(&input.to_string()).await.unwrap();
+    assert_eq!(
+        backend.released_references.lock().unwrap().len(),
+        2,
+        "mutable Header changes do not retire the capture owner"
     );
     input["operation"]["target"]["session_id"] = json!("already-removed");
     app.reference_input(&input.to_string()).await.unwrap();
-    assert_eq!(backend.released_references.lock().unwrap().len(), 1);
+    assert_eq!(backend.released_references.lock().unwrap().len(), 2);
     assert!(runtime.shutdown().await.is_clean());
 }
 

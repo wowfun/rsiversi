@@ -30,9 +30,11 @@ Read failures preserve the panel and report the failed observation.
 Interaction refresh uses the same pane, generation, owner and request binding
 whether opened from attention or directly.
 
-Reference release binds the original target Header and capture ID independently
-of the displayed pane. It reacquires authorized Session access; an already absent
-target is an idempotent release.
+Reference release reacquires authorized access to the original Session independently
+of the displayed pane. Its exact, non-reused capture ID identifies the pending
+owner; a draft preset change may alter the Header without retiring its captures.
+Absent Sessions and captures are idempotent releases. An old capture ID cannot
+release a replacement owner's new capture, even when the Session ID is reused.
 
 An initial discovery failure leaves the application open with a diagnostic and
 an empty remote catalog; Refresh retries discovery. A composition without an API
@@ -168,6 +170,10 @@ typed input and returns a descriptor or page; the document owns its insertion
 into the persistent draft. Generation changes discard late UI delivery. Human
 reference data is never interpreted as a slash command. Preparation includes
 frozen references in the opaque request and admission rechecks CAS binding.
+Preparation also returns exact target/snapshot identities for document ownership;
+the document never decodes the opaque request to reconstruct them. The
+[Web presentation contract](../../../apps/web/docs/presentation.md) owns confirmation
+copy, announcements and document focus behavior.
 
 Passive model refresh updates descriptions on successful reads, including
 changed capabilities for the same model. A transient read failure keeps the

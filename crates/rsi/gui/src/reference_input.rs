@@ -54,16 +54,8 @@ impl GuiApplication {
                     }
                     Err(failure) => return Err(error(failure)),
                 };
-                if handle
-                    .header()
-                    .await
-                    .map_err(error)?
-                    .fingerprint()
-                    .map_err(error)?
-                    != target.header_sha256
-                {
-                    return Err("Reference target Header changed".into());
-                }
+                // Capture ownership survives a draft Header's preset changes.
+                // The pending owner fences release by Session and exact capture ID.
                 handle.release_reference(snapshot).await.map_err(error)?;
                 Ok("null".into())
             });
