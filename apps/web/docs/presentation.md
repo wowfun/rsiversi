@@ -173,10 +173,11 @@ the card attaches the existing Host conversation and never submits another promp
 Settings → Plugins also presents reviewed Host leaf management through the shared
 Rust workbench. Configuration input crosses the bridge as text so exact JSON
 numbers are parsed in Rust. The document retains only an ephemeral input draft;
-source selection, grants, preparation, commits and receipt reconciliation stay
-with their Rust owners. Saved source, directory durability and current runtime
-application have distinct labels. Unknown writes expose the original receipt
-query and do not offer a repeated save for that ticket.
+source selection, grants, preparation and commits stay with their Rust owners.
+Saved source, directory durability and runtime application at completion have
+distinct labels. Unknown writes remain unknown; refreshing current source cannot
+prove the interrupted operation's result. Results name the affected leaf and
+operation. Closing a focused review returns focus to its result or source choice.
 
 External panes keep their switch guard through same-generation frames; only a
 confirmed new binding clears it. Both buttons and keyboard submission respect it.
@@ -539,7 +540,7 @@ control. Scroll, transcript updates and viewport resize recalculate visibility.
 Access selection applies to subsequent queued messages from this browser, never
 to an active Turn or a frozen retry. Read Only, Workspace Write and Full access
 map to the typed sandbox request modes. Full access requires explicit confirmation
-and still retains RSI's mandatory tool approval. Steering keeps the active Turn's
+and preserves configured Session and Tool approval requirements. Steering keeps the active Turn's
 policy. The add menu exposes supported image import, workspace file references,
 conversation references, history and the Session's actual command catalog.
 Picker lifetimes are distinct from the metrics and other dialog lifetimes;

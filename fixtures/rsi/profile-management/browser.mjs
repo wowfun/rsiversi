@@ -42,21 +42,24 @@ for(const [name,engine] of [['chromium',chromium],['firefox',firefox]]) {
     await page.screenshot({path:join(report,'review.png')});
     await appendFile(source,'# concurrent source edit\n');
     await prepared.getByRole('button',{name:'Save reviewed change',exact:true}).click();
-    const receipt=panel.getByRole('article',{name:'Profile source receipt',exact:true});await receipt.getByText('conflict',{exact:true}).waitFor();
+    const result=panel.getByRole('article',{name:'Source change result',exact:true});await result.getByText('conflict',{exact:true}).waitFor();
     assert.equal(await readFile(source,'utf8'),'format = 1\nsteps = []\n# concurrent source edit\n');
     await panel.getByRole('button',{name:'Refresh source choices',exact:true}).click();await preview();await prepared.waitFor();
-    const ticket=await prepared.locator('dd code').last().innerText();
-    await prepared.getByRole('button',{name:'Save reviewed change',exact:true}).click();await receipt.getByText('saved',{exact:true}).waitFor();await receipt.getByText('not selected',{exact:true}).waitFor();
+    await prepared.getByRole('button',{name:'Dismiss review',exact:true}).click();await prepared.waitFor({state:'hidden'});
+    assert.equal(await readFile(source,'utf8'),'format = 1\nsteps = []\n# concurrent source edit\n');await preview();await prepared.waitFor();
+    await prepared.getByRole('button',{name:'Save reviewed change',exact:true}).click();await result.getByText('saved',{exact:true}).waitFor();await result.getByText('not selected',{exact:true}).waitFor();
     const saved=await readFile(source,'utf8');assert.match(saved,/kind = "patch"/);await page.screenshot({path:join(report,'saved.png')});
-    await receipt.getByRole('button',{name:'Query original receipt',exact:true}).click();await receipt.getByText('saved',{exact:true}).waitFor();assert.equal(await readFile(source,'utf8'),saved);
+    assert.equal(await prepared.count(),0,'a completed review is consumed');
+    await result.getByRole('button',{name:'Refresh current source',exact:true}).click();await panel.getByLabel('Plugin leaf',{exact:true}).waitFor();assert.equal(await readFile(source,'utf8'),saved);
     await page.getByRole('button',{name:'Close settings',exact:true}).click();await disconnect(page);await page.locator('#login').waitFor({state:'visible'});await login();await open();
-    await panel.getByText(/Recover a source receipt/).click();await panel.getByLabel('Original receipt ticket',{exact:true}).selectOption(ticket);await panel.getByRole('button',{name:'Read selected receipt',exact:true}).click();await receipt.getByText('saved',{exact:true}).waitFor();
+    assert.equal(await result.count(),0,'reconnect has no retained completion receipt');
+    assert.equal(await panel.getByRole('button',{name:/query original|read selected receipt/i}).count(),0);
     await page.setViewportSize({width:430,height:900});await page.screenshot({path:join(report,'narrow.png')});assert(await panel.evaluate(element=>element.scrollWidth<=element.clientWidth+1));
     await page.setViewportSize({width:1440,height:980});await panel.getByRole('button',{name:'Open Profile editable',exact:true}).click();await panel.getByLabel('Plugin leaf',{exact:true}).selectOption(target.leaf);
     grant(false);await panel.getByRole('button',{name:'Refresh source choices',exact:true}).click();assert(await panel.getByRole('button',{name:'Preview disable',exact:true}).isDisabled());
-    await receipt.getByRole('button',{name:'Query original receipt',exact:true}).click();await receipt.getByText('saved',{exact:true}).waitFor();assert.equal(await readFile(source,'utf8'),saved);
+    assert.equal(await readFile(source,'utf8'),saved);
     assert.equal(service.provider.requests.length,0);assert.deepEqual(errors,[]);
-    results.push({engine:name,version:browser.version(),stale_source_rejected:true,source_saved_once:true,original_receipt_after_reconnect:true,revocation:true,model_requests:0,ok:true});
+    results.push({engine:name,version:browser.version(),stale_source_rejected:true,source_saved_once:true,local_dismiss:true,review_consumed:true,current_source_after_reconnect:true,revocation:true,model_requests:0,ok:true});
   } catch(error) {if(page)await page.screenshot({path:join(report,'failure.png')}).catch(()=>{});results.push({engine:name,ok:false,error:String(error),page_errors:errors});throw error;}
   finally {await browser.close();await service.close();await writeFile(join(output,'result.json'),JSON.stringify(results,null,2)+'\n');}
 }

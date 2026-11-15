@@ -18,8 +18,9 @@ with the [shared paired-publication supervisor](../web-product/README.md).
 Set `RSI_PROFILE_PROBE` to reuse an explicit paired fixture-build probe; otherwise
 it uses the ordinary debug example. Supply
 `RSI_PAIRED_BUNDLE` pointing to a complete product publication and an explicit
-report directory. It exercises Chromium and Firefox, reviewed publication, original
-receipt recovery, stale source, grant revocation, and a narrow viewport.
+report directory. It exercises Chromium and Firefox, reviewed publication, local review dismissal, consumed reviews, current-source
+refresh after reconnect, stale source, grant revocation, and a narrow viewport.
+Completed results are client-local observations, not reconnect recovery evidence.
 The browser fixture enters Profile management through the shared Settings window
 and reconnects through the document's Disconnect command.
 The Linux desktop fixture uses the same Local probe to grant its managed Device
